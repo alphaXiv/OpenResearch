@@ -6,7 +6,7 @@ mod digest;
 mod reply;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 use serde_json::{json, Map, Value};
@@ -329,7 +329,12 @@ struct State {
     /// Each run's signals far worse than the parent: the step last compared, and at how many
     /// steps in a row.
     worse: HashMap<(String, String), (f64, u32)>,
-    looking: BTreeSet<String>,
+}
+
+/// The chats whose looks are being taken now, one task a chat.
+fn looking() -> &'static Mutex<BTreeSet<String>> {
+    static LOOKING: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
+    LOOKING.get_or_init(Default::default)
 }
 
 /// When each run's next look is due at the latest, for the page.
@@ -359,7 +364,7 @@ pub(crate) async fn keep_watching() {
             prepared.len()
         );
     }
-    let state = Arc::new(tokio::sync::Mutex::new(State::default()));
+    let mut state = State::default();
     let mut tick = tokio::time::interval(crate::config::paced(Duration::from_secs(5)));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -367,14 +372,14 @@ pub(crate) async fn keep_watching() {
             _ = tick.tick() => {}
             () = wake().notified() => {}
         }
-        if let Err(error) = pass(&state).await {
+        if let Err(error) = pass(&mut state).await {
             eprintln!("orx up: watcher: {error:#}");
         }
     }
 }
 
 /// Takes a chat's prepared looks one after another, oldest first.
-fn spawn_looks(state: Arc<tokio::sync::Mutex<State>>, chat: String) {
+fn spawn_looks(chat: String) {
     tokio::spawn(async move {
         loop {
             let next = Store::open().and_then(|store| store.prepared_watch_looks(&chat));
@@ -410,7 +415,10 @@ fn spawn_looks(state: Arc<tokio::sync::Mutex<State>>, chat: String) {
             }
             published(id);
         }
-        state.lock().await.looking.remove(&chat);
+        looking()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&chat);
         wake().notify_one();
     });
 }
@@ -420,7 +428,9 @@ fn published(id: i64) {
     let Ok(store) = Store::open() else { return };
     for run in store.watch_look_runs(id).unwrap_or_default() {
         if let Ok(Some(row)) = store.get_run(&run.run_id) {
-            let _ = super::monitor::advance(&store, &row, crate::store::now_ms());
+            if let Err(error) = super::monitor::advance(&store, &row, crate::store::now_ms()) {
+                eprintln!("orx up: watcher: publishing run {}: {error:#}", row.id);
+            }
         }
     }
 }
@@ -452,7 +462,7 @@ fn owner(
 }
 
 /// One pass: reads each watched run's log since its last look, and starts every look that is due.
-async fn pass(state: &Arc<tokio::sync::Mutex<State>>) -> Result<()> {
+async fn pass(state: &mut State) -> Result<()> {
     let now = crate::store::now_ms();
     let (owned, unwatched, codex) = {
         let store = Store::open()?;
@@ -508,7 +518,16 @@ async fn pass(state: &Arc<tokio::sync::Mutex<State>>) -> Result<()> {
         (chats, unwatched, codex)
     };
     refresh_catalogs(codex).await;
-    let mut guard = state.lock().await;
+    // What a pass remembers of a run lasts while the run is still read: live, or its last look due.
+    let read: HashSet<String> = owned
+        .values()
+        .flat_map(|owned| owned.runs.iter().map(|(run, _)| run.run.id.clone()))
+        .chain(unwatched.iter().map(|run| run.run.id.clone()))
+        .collect();
+    state.scans.retain(|run, _| read.contains(run));
+    state.tripped.retain(|(run, _)| read.contains(run));
+    state.stages.retain(|run, _| read.contains(run));
+    state.worse.retain(|(run, _), _| read.contains(run));
     let mut next = HashMap::new();
     let mut start = Vec::new();
     let waiting: BTreeSet<String> = Store::open()?
@@ -516,23 +535,27 @@ async fn pass(state: &Arc<tokio::sync::Mutex<State>>) -> Result<()> {
         .into_iter()
         .collect();
     for run in &unwatched {
-        scan(&mut guard, run).await;
-        trip::check(&mut guard, run, now).await;
+        scan(state, run).await;
+        trip::check(state, run, now).await;
     }
     for (chat_id, mut owned) in owned {
         for (run, why) in &mut owned.runs {
             if run.live() {
-                scan(&mut guard, run).await;
-                trip::check(&mut guard, run, now).await;
-                *why = changes(&mut guard, run, now);
+                scan(state, run).await;
+                trip::check(state, run, now).await;
+                *why = changes(state, run, now);
             }
         }
-        if guard.looking.contains(&chat_id) {
+        if looking()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(&chat_id)
+        {
             continue;
         }
         if !waiting.contains(&chat_id) {
             let store = Store::open()?;
-            for planned in due(&guard, &owned, now, &mut next)? {
+            for planned in due(state, &owned, now, &mut next)? {
                 let rows: Vec<(&str, &str, &str)> = planned
                     .runs
                     .iter()
@@ -555,8 +578,13 @@ async fn pass(state: &Arc<tokio::sync::Mutex<State>>) -> Result<()> {
     *next_due().lock().unwrap_or_else(PoisonError::into_inner) = next;
     for chat in start {
         let has = Store::open()?.prepared_watch_looks(&chat)?;
-        if !has.is_empty() && guard.looking.insert(chat.clone()) {
-            spawn_looks(state.clone(), chat);
+        let fresh = !has.is_empty()
+            && looking()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(chat.clone());
+        if fresh {
+            spawn_looks(chat);
         }
     }
     Ok(())
@@ -848,7 +876,12 @@ async fn evidence_of(run: &str, ident: Option<&str>, lines: &[&digest::Line]) ->
     let shown: Vec<String> = lines
         .iter()
         .zip(kinds)
-        .map(|(line, kind)| kind.map_or_else(|| line.text.clone(), digest::withheld_text))
+        .map(|(line, kind)| {
+            kind.map_or_else(
+                || digest::clip(&line.text, digest::MAX_LINE),
+                digest::withheld_text,
+            )
+        })
         .collect();
     json!({
         "lines": shown,

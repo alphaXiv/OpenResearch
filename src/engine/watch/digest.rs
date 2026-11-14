@@ -31,7 +31,7 @@ const TRIMS: [Trim; 3] = [
 /// One run's share of log lines, whatever is left over.
 const MAX_LOG_BYTES: usize = 6 * 1024;
 const MAX_LOG_LINES: usize = 60;
-const MAX_LINE: usize = 240;
+pub(super) const MAX_LINE: usize = 240;
 const HEAD_LINES: usize = 8;
 pub(super) const BOUND_SIGNALS: usize = 3;
 
@@ -272,7 +272,7 @@ pub(super) fn family(line: &str) -> Option<String> {
     (!kind.is_empty()).then_some(kind)
 }
 
-fn clip(text: &str, max: usize) -> String {
+pub(super) fn clip(text: &str, max: usize) -> String {
     match text.char_indices().nth(max) {
         Some((end, _)) => format!("{}…", &text[..end]),
         None => text.to_owned(),

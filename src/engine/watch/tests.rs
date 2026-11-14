@@ -321,12 +321,14 @@ async fn an_error_is_flagged_on_a_run_no_model_watches() {
     }
     let store = Store::open().unwrap();
     chat(&store, "chat", "opencode");
-    let log =
-        "step 1 loss 2.0\ntorch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.00 GiB\n";
-    let row = run(&store, "a", "Depth 6", "chat", log);
-    let state = Arc::new(tokio::sync::Mutex::new(State::default()));
-    pass(&state).await.unwrap();
-    pass(&state).await.unwrap();
+    let log = format!(
+        "step 1 loss 2.0\ntorch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.00 GiB {}\n",
+        "x".repeat(100_000)
+    );
+    let row = run(&store, "a", "Depth 6", "chat", &log);
+    let mut state = State::default();
+    pass(&mut state).await.unwrap();
+    pass(&mut state).await.unwrap();
     let flags = super::super::flags::read(&store, &row).unwrap();
     assert_eq!(flags.len(), 1, "{flags:?}");
     assert_eq!(
@@ -334,6 +336,12 @@ async fn an_error_is_flagged_on_a_run_no_model_watches() {
         (Some("tripwire"), Some("error"))
     );
     assert_eq!(flags[0]["evidence"]["from"], 2);
+    for said in [&flags[0]["evidence"]["lines"][0], &flags[0]["text"]] {
+        assert!(
+            said.as_str().unwrap().chars().count() < 400,
+            "a line is kept clipped: {said}"
+        );
+    }
     assert!(
         flags[0]["detail"]
             .as_str()
@@ -623,8 +631,8 @@ async fn an_error_seen_while_a_flag_was_open_is_raised_once_that_flag_settles() 
     let flag = super::super::flags::new_flag(&store, &row, open, true).unwrap();
     store.raise_flags(&[flag], 1).unwrap();
     super::super::monitor::advance(&store, &row, crate::store::now_ms()).unwrap();
-    let state = Arc::new(tokio::sync::Mutex::new(State::default()));
-    pass(&state).await.unwrap();
+    let mut state = State::default();
+    pass(&mut state).await.unwrap();
     assert_eq!(
         super::super::flags::read(&store, &row).unwrap().len(),
         1,
@@ -638,7 +646,7 @@ async fn an_error_seen_while_a_flag_was_open_is_raised_once_that_flag_settles() 
     };
     store.record_flag_choices(&[keep], None, 2).unwrap();
     super::super::monitor::advance(&store, &row, crate::store::now_ms()).unwrap();
-    pass(&state).await.unwrap();
+    pass(&mut state).await.unwrap();
     let flags = super::super::flags::read(&store, &row).unwrap();
     assert_eq!(flags.len(), 2, "{flags:?}");
     assert_eq!(

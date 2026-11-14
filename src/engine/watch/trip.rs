@@ -168,7 +168,7 @@ fn conditions(
         // The kind the line names, "torch.OutOfMemoryError", else its start; the evidence shows it whole.
         let text = match crate::local::share::find_secret(&line.text) {
             Some(kind) => digest::withheld_text(kind),
-            None => line.text.trim().to_owned(),
+            None => digest::clip(line.text.trim(), digest::MAX_LINE),
         };
         let text = text.as_str();
         let shown: String = match text.split_once(": ") {
