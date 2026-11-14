@@ -431,6 +431,359 @@ pub(crate) fn frozen(run: &str, config: Option<&str>) -> crate::error::Result<Ve
         .map_err(|why| crate::error::anyhow!("Run {run}'s rules: {why}. Update orx to check them."))
 }
 
+/// What a rule has counted on one run, kept in the run's monitor state so a restart neither
+/// counts a report twice nor acts twice.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Count {
+    /// Where on the signal's axis the last report this rule counted was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    after: Option<f64>,
+    /// The checkpoint revision a rule on the estimate last counted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rev: Option<u64>,
+    /// Reports, or revisions, in a row that met the condition, from `since`.
+    #[serde(default)]
+    held: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    since: Option<f64>,
+    /// No improvement: the reports in its window, and the best before them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    window: Vec<(f64, Option<f64>)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    best: Option<f64>,
+    /// The rule acted; it never acts again on this run.
+    #[serde(default)]
+    tripped: bool,
+    #[serde(flatten)]
+    extra: Map<String, Value>,
+}
+
+/// What a live run's rules read: its checkpoint and its parent's, and the monitor projected
+/// from them.
+pub(crate) struct Facts<'a> {
+    pub snapshot: &'a orx_signals::Snapshot,
+    pub parent: Option<&'a orx_signals::Snapshot>,
+    /// The monitor's body: its axis, progress, estimate and cost.
+    pub body: &'a Value,
+    /// Slices of progress the estimate has timed.
+    pub slices: usize,
+    pub started_at: i64,
+    pub now: i64,
+}
+
+/// A rule that met its condition, with what orx saw.
+pub(crate) struct Trip {
+    pub rule: Rule,
+    pub evidence: String,
+}
+
+/// What checking a run's rules changed: every rule's count, and the rules that tripped now.
+pub(crate) struct Checked {
+    pub counts: Value,
+    pub trips: Vec<Trip>,
+}
+
+/// An estimate rule acts only on a pace measured over this many slices, seen on two revisions.
+const SLICES_BEFORE_PROJECTING: usize = 4;
+const REVISIONS_BEFORE_PROJECTING: u64 = 2;
+
+/// Counts the reports the run made since the rules last looked, and trips each rule whose
+/// condition holds once they are counted, so a value that has already recovered stops nothing.
+/// `counts` is what the run's monitor state kept. `None` when nothing changed.
+pub(crate) fn check(rules: &[Rule], counts: Option<&Value>, facts: &Facts) -> Option<Checked> {
+    let mut kept: Map<String, Value> = counts
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let mut trips = Vec::new();
+    let mut changed = false;
+    for rule in rules {
+        let was: Count = kept
+            .get(&rule.name)
+            .and_then(|count| serde_json::from_value(count.clone()).ok())
+            .unwrap_or_default();
+        if was.tripped {
+            continue;
+        }
+        let mut count = was.clone();
+        if let Some(evidence) = step(rule, &mut count, facts) {
+            count.tripped = true;
+            trips.push(Trip {
+                rule: rule.clone(),
+                evidence,
+            });
+        }
+        if count != was {
+            changed = true;
+            kept.insert(
+                rule.name.clone(),
+                serde_json::to_value(&count).unwrap_or_default(),
+            );
+        }
+    }
+    changed.then(|| Checked {
+        counts: Value::Object(kept),
+        trips,
+    })
+}
+
+/// Counts what is new for `rule`; what orx saw when its condition holds now.
+fn step(rule: &Rule, count: &mut Count, facts: &Facts) -> Option<String> {
+    let body = facts.body;
+    let at = |x: f64| match body["x"]["name"].as_str() {
+        Some("step") => format!("step {}", super::monitor::number(x)),
+        _ => format!("{} in", super::monitor::short((x * 1000.0) as i64)),
+    };
+    let span = |count: &Count, last: f64| match count.since {
+        Some(since) if count.held > 1 => format!(
+            "on {} reports in a row, {} to {}",
+            count.held,
+            at(since),
+            at(last).trim_start_matches("step ")
+        ),
+        _ => format!("at {}", at(last)),
+    };
+    let value = |value: f64| super::monitor::measure(value, &Value::Null);
+    match &rule.when {
+        When::NonFinite { signal, reports } => {
+            let fresh = fresh(facts, signal, count);
+            let last = fresh.last()?.0;
+            for (x, y) in fresh {
+                held(count, x, y.is_none());
+            }
+            let word = facts.snapshot.latest[signal.as_str()]
+                .as_str()
+                .unwrap_or("not a finite number");
+            (count.held >= *reports).then(|| format!("{signal} was {word} {}", span(count, last)))
+        }
+        When::Compare {
+            signal,
+            op,
+            value: bound,
+            reports,
+        } => {
+            let fresh = fresh(facts, signal, count);
+            let (last, newest) = *fresh.last()?;
+            for (x, y) in fresh {
+                let holds = y.is_some_and(|y| match op {
+                    Op::Lt => y < *bound,
+                    Op::Le => y <= *bound,
+                    Op::Gt => y > *bound,
+                    Op::Ge => y >= *bound,
+                });
+                held(count, x, holds);
+            }
+            let word = match op {
+                Op::Lt => "below",
+                Op::Le => "at or below",
+                Op::Gt => "above",
+                Op::Ge => "at or above",
+            };
+            (count.held >= *reports).then(|| {
+                format!(
+                    "{signal} was {} ({word} {}) {}",
+                    newest.map_or("not a number".into(), value),
+                    value(*bound),
+                    span(count, last)
+                )
+            })
+        }
+        When::WorseThanParent {
+            signal,
+            by,
+            better,
+            reports,
+        } => {
+            let theirs = facts.parent.and_then(|parent| parent.series.get(signal));
+            let fresh = fresh(facts, signal, count);
+            let last = fresh.last()?.0;
+            let mut seen = None;
+            for (x, y) in fresh {
+                // Where the parent has no value at this step, the report counts neither way.
+                let Some((mine, parent)) =
+                    y.zip(theirs.and_then(|theirs| super::monitor::parent_at(theirs, x)))
+                else {
+                    continue;
+                };
+                let worse = match better {
+                    Better::Lower => mine - parent,
+                    Better::Higher => parent - mine,
+                };
+                held(count, x, worse > *by);
+                seen = Some((mine, parent, worse));
+            }
+            let (mine, parent, worse) = seen?;
+            (count.held >= *reports).then(|| {
+                format!(
+                    "{signal} was {} worse than the parent's at the same step ({} against {}) {}",
+                    value(worse),
+                    value(mine),
+                    value(parent),
+                    span(count, last)
+                )
+            })
+        }
+        When::NoImprovement {
+            signal,
+            min,
+            reports,
+            better,
+        } => {
+            let fresh = fresh(facts, signal, count);
+            let last = fresh.last()?.0;
+            let best = |values: &mut dyn Iterator<Item = f64>| match better {
+                Better::Lower => values.filter(|v| v.is_finite()).min_by(f64::total_cmp),
+                Better::Higher => values.filter(|v| v.is_finite()).max_by(f64::total_cmp),
+            };
+            for point in fresh {
+                count.window.push(point);
+                if count.window.len() as u64 > *reports {
+                    let (_, left) = count.window.remove(0);
+                    count.best = best(&mut count.best.into_iter().chain(left));
+                }
+            }
+            let before = count.best?;
+            if (count.window.len() as u64) < *reports {
+                return None;
+            }
+            let since = best(&mut count.window.iter().filter_map(|point| point.1));
+            let gained = since.map_or(0.0, |since| match better {
+                Better::Lower => before - since,
+                Better::Higher => since - before,
+            });
+            (gained < *min).then(|| {
+                format!(
+                    "{signal} improved by {} over its last {reports} reports, {} to {}, on its best of {} before them; the rule needs {}",
+                    value(gained.max(0.0)),
+                    at(count.window[0].0),
+                    at(last).trim_start_matches("step "),
+                    value(before),
+                    value(*min)
+                )
+            })
+        }
+        When::NoProgress { seconds } => {
+            let progress = &body["progress"];
+            let since = if progress.is_null() {
+                facts.started_at
+            } else {
+                progress["lastAt"].as_i64()?
+            };
+            let silent = facts.now - since;
+            (silent >= *seconds as i64 * 1000).then(|| {
+                let from = match progress["done"].as_f64() {
+                    Some(done) if !progress.is_null() => format!("since {}", at(done)),
+                    _ => "since it started".into(),
+                };
+                format!(
+                    "no progress was reported for {} {from}",
+                    super::monitor::short(silent)
+                )
+            })
+        }
+        When::CostAbove { usd } => {
+            let cost = &body["cost"];
+            let spent = cost["soFar"].as_f64().or(cost["spend"].as_f64());
+            if let Some(spent) = spent.filter(|spent| spent >= usd) {
+                return Some(format!(
+                    "it has cost ${spent:.2}, past its ${usd:.2} budget"
+                ));
+            }
+            let projected = cost["projectedRange"][1]
+                .as_f64()
+                .or(cost["projected"].as_f64());
+            projecting(count, facts, projected.is_some_and(|p| p > *usd)).then(|| {
+                format!(
+                    "it would cost up to ${:.2} by its end, past its ${usd:.2} budget",
+                    projected.unwrap_or_default()
+                )
+            })
+        }
+        When::FinishPastLimit => {
+            let past = body["estimate"]["pastLimitMs"]
+                .as_i64()
+                .filter(|ms| *ms > 0);
+            projecting(count, facts, past.is_some()).then(|| {
+                format!(
+                    "it would finish up to {} past its time limit",
+                    super::monitor::short(past.unwrap_or_default())
+                )
+            })
+        }
+    }
+}
+
+/// Counts one report toward a run of reports in a row, or ends the run when it does not hold.
+fn held(count: &mut Count, x: f64, holds: bool) {
+    if !holds {
+        count.held = 0;
+        count.since = None;
+        return;
+    }
+    if count.held == 0 {
+        count.since = Some(x);
+    }
+    count.held += 1;
+}
+
+/// The run's reports of `signal` that `count` has not counted, which it now has. A run that
+/// went back to an earlier step, as a relaunch from a checkpoint does, counts its newest report.
+fn fresh(facts: &Facts, signal: &str, count: &mut Count) -> Vec<(f64, Option<f64>)> {
+    let Some(points) = facts.snapshot.series.get(signal) else {
+        return Vec::new();
+    };
+    let Some(&last) = points.last() else {
+        return Vec::new();
+    };
+    let fresh: Vec<_> = match count.after {
+        Some(after) if last.0 < after => vec![last],
+        Some(after) => points.iter().copied().filter(|p| p.0 > after).collect(),
+        None => points.clone(),
+    };
+    if !fresh.is_empty() {
+        count.after = Some(last.0);
+    }
+    fresh
+}
+
+/// Whether an estimate rule acts: `holds` on this revision and the one before it, over a pace
+/// measured on enough slices that one slow first step cannot stop a run.
+fn projecting(count: &mut Count, facts: &Facts, holds: bool) -> bool {
+    let rev = facts.snapshot.rev;
+    if count.rev.is_some_and(|seen| seen >= rev) {
+        return false;
+    }
+    count.rev = Some(rev);
+    let measured = facts.slices >= SLICES_BEFORE_PROJECTING;
+    count.held = if holds && measured { count.held + 1 } else { 0 };
+    count.held >= REVISIONS_BEFORE_PROJECTING
+}
+
+/// The text a rule that tripped wakes the run's chats with, or stops it with.
+pub(crate) fn words(run: &str, experiment: &str, trip: &Trip) -> (String, String) {
+    let name = &trip.rule.name;
+    let text = trip
+        .rule
+        .text
+        .as_deref()
+        .unwrap_or("Stop the run at its budget.");
+    let asked = format!(
+        "[orx] Run {run} (experiment {experiment}) met rule {name}; it keeps going.\n\
+         Rule {name}: {text}\n\
+         What orx saw: {}.\n\
+         OpenResearch checked this rule itself, with no model. Look at the run before acting on it:\n\
+         orx exp status {experiment} --run {run}; orx logs {run}\n\
+         To stop it: orx exp cancel --run {run} --reason '…'",
+        trip.evidence
+    );
+    let stopped = format!(
+        "Stopped by rule {name}: {}. No model was involved.",
+        trip.evidence
+    );
+    (asked, stopped)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

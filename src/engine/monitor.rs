@@ -515,19 +515,15 @@ fn versus(
                 current || point.1.is_some() && finite(snapshot.latest.get(name)) == point.1
             });
         let pair = match stepwise {
-            Some(&(x, value)) => value.filter(|v| v.is_finite()).and_then(|value| {
-                let theirs = parent.series.get(name)?;
-                let after = theirs.iter().position(|point| point.0 >= x)?;
-                let (x1, y1) = theirs[after];
-                let at = if x1 == x {
-                    y1?
-                } else {
-                    let (x0, y0) = theirs[after.checked_sub(1)?];
-                    let (y0, y1) = (y0?, y1?);
-                    y0 + (y1 - y0) * (x - x0) / (x1 - x0)
-                };
-                Some((value, at, Some(x)))
-            }),
+            Some(&(x, value)) => value
+                .filter(|v| v.is_finite())
+                .zip(
+                    parent
+                        .series
+                        .get(name)
+                        .and_then(|theirs| parent_at(theirs, x)),
+                )
+                .map(|(value, at)| (value, at, Some(x))),
             None => finite(snapshot.latest.get(name))
                 .zip(finite(parent.latest.get(name)).filter(|_| ended))
                 .map(|(value, theirs)| (value, theirs, None)),
@@ -553,6 +549,19 @@ fn versus(
         versus.insert(name.clone(), compared);
     }
     versus
+}
+
+/// The parent's value at step `x` of its `points`, interpolated only between two steps it
+/// reported; never extrapolated.
+pub(super) fn parent_at(points: &[orx_signals::Point], x: f64) -> Option<f64> {
+    let after = points.iter().position(|point| point.0 >= x)?;
+    let (x1, y1) = points[after];
+    if x1 == x {
+        return y1;
+    }
+    let (x0, y0) = points[after.checked_sub(1)?];
+    let (y0, y1) = (y0?, y1?);
+    Some(y0 + (y1 - y0) * (x - x0) / (x1 - x0))
 }
 
 /// The signal a run leads with. A value that went wrong is never hidden by the view's order: the
@@ -663,6 +672,8 @@ fn estimate_input(
 struct Evaluated {
     summary: Value,
     body: Value,
+    /// Slices of progress the estimate timed.
+    slices: usize,
 }
 
 /// `parent` and `earlier` are the checkpoints of the runs `life` names so.
@@ -1167,7 +1178,11 @@ fn evaluate(
     if !best.is_empty() {
         body["best"] = json!(best);
     }
-    Evaluated { summary, body }
+    Evaluated {
+        summary,
+        body,
+        slices: output.as_ref().map_or(0, |o| o.completed_slices),
+    }
 }
 
 /// `rev` and `seriesRev` as last published, the fold revision they came from, and the summary
@@ -1217,6 +1232,7 @@ pub(crate) struct Projection {
     body: Value,
     snapshot: Option<Arc<Snapshot>>,
     published: Published,
+    slices: usize,
 }
 
 impl Projection {
@@ -1545,6 +1561,7 @@ pub(crate) fn current(store: &Store, run: &StoredRun) -> Result<Option<Arc<Proje
             body: Value::Null,
             snapshot: None,
             published,
+            slices: 0,
         })
     }))
 }
@@ -1579,7 +1596,11 @@ pub(crate) async fn keep_current(engine: Arc<super::Engine>) {
         };
         // A pass that fails keeps watching what it held.
         let held = watched.clone();
-        let pass = tokio::task::spawn_blocking(move || watch(&Store::open()?, changed, held)).await;
+        let engine = engine.clone();
+        let pass = tokio::task::spawn_blocking(move || {
+            watch(&Store::open()?, changed, held, Some(&engine))
+        })
+        .await;
         match pass {
             Ok(Ok(next)) => watched = next,
             Ok(Err(error)) => eprintln!("orx up: run monitors: {error:#}"),
@@ -1589,11 +1610,14 @@ pub(crate) async fn keep_current(engine: Arc<super::Engine>) {
 }
 
 /// One pass of [`keep_current`]: projects the run that `changed`, or else every run `held`, live or
-/// awaiting collection, and returns the runs to watch next. A run whose projection failed stays.
+/// awaiting collection, checks each live run's rules, and returns the runs to watch next. A run
+/// whose projection failed stays. Without an `engine`, a rule's stop is recorded in the store
+/// alone.
 fn watch(
     store: &Store,
     changed: Option<String>,
     held: BTreeSet<String>,
+    engine: Option<&super::Engine>,
 ) -> Result<BTreeSet<String>> {
     let ids = match changed {
         Some(id) => std::iter::once(id).collect(),
@@ -1612,7 +1636,25 @@ fn watch(
             continue;
         };
         // A failure is logged where it happens, once.
-        let failed = advance(store, &run, crate::store::now_ms()).is_err();
+        let now = crate::store::now_ms();
+        let advanced = advance(store, &run, now);
+        if let Ok(projection) = &advanced {
+            let checked = check_rules(store, engine, &run, projection, now);
+            let mut failing = rule_errors().lock().unwrap_or_else(PoisonError::into_inner);
+            match checked {
+                Ok(()) => {
+                    failing.remove(&run.id);
+                }
+                Err(error) => {
+                    let cause = format!("{error:#}");
+                    if failing.get(&run.id) != Some(&cause) {
+                        log(format_args!("run {} rules: {cause}", run.id));
+                        failing.insert(run.id.clone(), cause);
+                    }
+                }
+            }
+        }
+        let failed = advanced.is_err();
         let ended = Phase::parse(&run.status).is_some_and(Phase::is_terminal);
         if ended && !failed && store.signal_collection_retry_at(&id)?.is_none() {
             next.remove(&id);
@@ -1621,6 +1663,124 @@ fn watch(
         }
     }
     Ok(next)
+}
+
+/// Why each run's rules last failed to be checked, so a lasting failure is logged once.
+fn rule_errors() -> &'static Mutex<HashMap<String, String>> {
+    static ERRORS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    ERRORS.get_or_init(Mutex::default)
+}
+
+/// Checks a live run's rules against what it reported since they last looked, and acts on any
+/// that tripped: an `ask` wakes the run's chats, a `stop` cancels the run through the engine and
+/// keeps who stopped it. Nothing is checked on data that is not live, or while a stop is pending.
+fn check_rules(
+    store: &Store,
+    engine: Option<&super::Engine>,
+    run: &StoredRun,
+    projection: &Projection,
+    now: i64,
+) -> Result<()> {
+    use super::rules::{Does, Facts};
+    let body = &projection.body;
+    let Some(snapshot) = projection.snapshot.as_deref() else {
+        return Ok(());
+    };
+    if Phase::parse(&run.status) != Some(Phase::Running)
+        || run.cancel_requested
+        || body["availability"]["state"] != "live"
+    {
+        return Ok(());
+    }
+    let rules = super::rules::frozen(&run.id, store.run_monitor_config(&run.id)?.as_deref())?;
+    if rules.is_empty() {
+        return Ok(());
+    }
+    let Some(state) = store
+        .engine_run_state(&run.id)?
+        .filter(|state| state.contact == Contact::Live && state.cancel_accepted_at.is_none())
+    else {
+        return Ok(());
+    };
+    let parent = match body["parent"]["runId"].as_str() {
+        Some(parent) => checkpoint(store, parent)?,
+        None => None,
+    };
+    let facts = Facts {
+        snapshot,
+        parent: parent.as_deref(),
+        body,
+        slices: projection.slices,
+        started_at: state.started_at.unwrap_or(run.created_at),
+        now,
+    };
+    let counts = store
+        .run_monitor_state(&run.id)?
+        .and_then(|state| state.get("ruleState").cloned());
+    let Some(checked) = super::rules::check(&rules, counts.as_ref(), &facts) else {
+        return Ok(());
+    };
+    let stop = checked
+        .trips
+        .iter()
+        .find(|trip| trip.rule.does == Does::Stop);
+    let chats = if stop.is_none() {
+        store.run_subscribers(&run.id)?
+    } else {
+        Vec::new()
+    };
+    let mut events = Vec::new();
+    let mut notices = Vec::new();
+    for trip in &checked.trips {
+        let does = match trip.rule.does {
+            Does::Stop => "stop",
+            Does::Ask => "ask",
+        };
+        events.push(
+            json!({"rule": trip.rule.name, "does": does, "evidence": trip.evidence, "at": now}),
+        );
+        if trip.rule.does == Does::Ask {
+            let (asked, _) = super::rules::words(&run.id, &run.experiment_id, trip);
+            for chat in &chats {
+                notices.push((
+                    chat.clone(),
+                    format!("rule:{}", trip.rule.name),
+                    asked.clone(),
+                ));
+            }
+        }
+    }
+    let stop = stop.map(|trip| {
+        let (_, stopped) = super::rules::words(&run.id, &run.experiment_id, trip);
+        let context = crate::store::StopContext {
+            by: crate::store::StopBy::Rule,
+            at: 0,
+            reason: Some(trip.evidence.clone()),
+            chat_session_id: None,
+            rule: Some(trip.rule.json()),
+            extra: Default::default(),
+        };
+        (stopped, context)
+    });
+    let record = |store: &Store| {
+        store.record_rules(
+            &run.id,
+            &checked.counts,
+            &events,
+            &notices,
+            stop.as_ref()
+                .map(|(reason, context)| (reason.as_str(), context)),
+        )
+    };
+    match engine {
+        Some(engine) if stop.is_some() => {
+            engine.accept_stop(&run.id, record)?;
+        }
+        _ => {
+            record(store)?;
+        }
+    }
+    Ok(())
 }
 
 /// Re-projects the run when anything it reads changed, at most once a second, and publishes a
@@ -1719,6 +1879,7 @@ fn publish(
             .as_ref()
             .and_then(|held| held.projection.snapshot.clone()),
         published: published.clone(),
+        slices: 0,
     };
     let entry = match held.as_deref() {
         Some(held) => Entry {
@@ -1818,6 +1979,7 @@ fn project(
     let lengths = Lengths::of(snapshot);
     let fold_series_rev = snapshot.map_or(0, |s| s.series_rev);
 
+    let slices = evaluated.slices;
     let mut summary = evaluated.summary;
     let mut body = evaluated.body;
     // A recovery is published, so readers told of the failure hear it ended.
@@ -1939,6 +2101,7 @@ fn project(
         // An ended run's series are read again when asked for, never held for every past run.
         snapshot: fold.snapshot.clone().filter(|_| live),
         published,
+        slices,
     });
     *slot.held.lock().map_err(|_| poisoned())? = Some(Arc::new(Entry {
         projection: projection.clone(),
@@ -2442,7 +2605,7 @@ fn with_cost(text: String, cost: Option<&Value>, last_seen: bool) -> String {
 }
 
 /// A duration as the page writes it (`fmtDuration`), rounded down: "45s", "12m", "1h 0m", "2d 3h".
-fn short(ms: i64) -> String {
+pub(super) fn short(ms: i64) -> String {
     let seconds = ms.max(0) / 1000;
     let (minutes, hours) = (seconds / 60, seconds / 3600);
     match (hours, minutes) {
@@ -2674,7 +2837,7 @@ fn signal_notes(
 /// A number no view gave digits, as the page writes it (`fmtMeasure`): to three significant
 /// figures and never fewer than its whole part, and one too small or too large for that as
 /// `3e-4`, with the sign and the `%` its view declares. A nonzero value never reads as zero.
-fn measure(value: f64, spec: &Value) -> String {
+pub(super) fn measure(value: f64, spec: &Value) -> String {
     let size = value.abs();
     let text = if size == 0.0 {
         "0".to_owned()
@@ -2729,7 +2892,7 @@ fn significant(size: f64, count: impl Fn(i32) -> usize) -> (String, i32) {
     (kept.trim_end_matches('0').to_owned(), power)
 }
 
-fn number(value: impl std::fmt::Display) -> String {
+pub(super) fn number(value: impl std::fmt::Display) -> String {
     let raw = value.to_string();
     if raw.contains(['e', 'E']) {
         return raw;
@@ -3597,20 +3760,20 @@ mod tests {
         f.run("running", local());
         f.collect(&folded(&declared(0..=20, 400)));
         f.collected(T0 + 20_000);
-        let watched = watch(&f.store, None, BTreeSet::new()).unwrap();
+        let watched = watch(&f.store, None, BTreeSet::new(), None).unwrap();
         assert!(watched.contains("r1"), "a live run is watched");
 
         f.failing("r1", true);
         f.collect(&folded(&declared(0..=30, 400)));
-        let watched = watch(&f.store, None, watched).unwrap();
+        let watched = watch(&f.store, None, watched, None).unwrap();
         assert!(watched.contains("r1"));
         let run = f.run("done", local());
-        let watched = watch(&f.store, Some(run.id.clone()), watched).unwrap();
+        let watched = watch(&f.store, Some(run.id.clone()), watched, None).unwrap();
         assert!(
             watched.contains("r1"),
             "an ended run whose settle failed stays watched"
         );
-        let watched = watch(&f.store, None, watched).unwrap();
+        let watched = watch(&f.store, None, watched, None).unwrap();
         assert!(
             watched.contains("r1"),
             "and is projected again on the next tick"
@@ -3621,7 +3784,7 @@ mod tests {
         );
 
         f.failing("r1", false);
-        let watched = watch(&f.store, None, watched).unwrap();
+        let watched = watch(&f.store, None, watched, None).unwrap();
         assert!(
             !watched.contains("r1"),
             "a settle that succeeds ends the watch"
@@ -5475,6 +5638,343 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("rules    Run r3's rules: rules[0] (r): unknown condition \"lossAbove\""));
+    }
+
+    /// A running run in `experiment` launched with `rules`.
+    fn ruled(f: &Fixture, id: &str, experiment: &str, backend: Value, rules: Value) -> StoredRun {
+        let run = f.run_in(id, experiment, "running", backend);
+        let config = json!({"rules": rules}).to_string();
+        crate::engine::rules::frozen(id, Some(&config)).unwrap();
+        f.store.set_run_monitor_config(id, Some(&config));
+        run
+    }
+
+    /// The run's checkpoint once it has reported `values` of `signal`, one report a second from
+    /// `T0`, steps by tens, out of `of` steps.
+    fn reported(f: &Fixture, id: &str, signal: &str, values: &[&str], of: i64) {
+        let lines: Vec<(i64, String)> = values
+            .iter()
+            .enumerate()
+            .map(|(i, value)| {
+                let i = i as i64;
+                let step = i * 10;
+                let line = format!(
+                    "::orx:: {{\"step\":{step},\"of\":{of},\"t\":{i},\"m\":{{\"{signal}\":{value}}}}}"
+                );
+                (T0 + i * 1000, line)
+            })
+            .collect();
+        f.collect(&Snapshot {
+            run_id: id.into(),
+            ..folded(&lines)
+        });
+    }
+
+    /// One pass of the rules over the run at `now`, as `orx up` makes each second.
+    fn rules_at(f: &Fixture, id: &str, now: i64) {
+        let run = f.store.get_run(id).unwrap().unwrap();
+        let (projection, _) = publish(&f.store, &run, now, None).unwrap();
+        check_rules(&f.store, None, &run, &projection, now).unwrap();
+    }
+
+    fn rule_events(f: &Fixture, id: &str) -> Vec<Value> {
+        f.store
+            .run_monitor_events_for_tests(id)
+            .into_iter()
+            .map(|(kind, body)| {
+                assert_eq!(kind, "rule");
+                body
+            })
+            .collect()
+    }
+
+    fn stopped_by(f: &Fixture, id: &str) -> Option<crate::store::StopContext> {
+        f.store.run_stop(id).unwrap()
+    }
+
+    #[test]
+    fn a_rule_stops_a_run_at_the_report_that_meets_it_and_never_twice() {
+        let f = Fixture::new("orx-rules-stop");
+        ruled(
+            &f,
+            "r1",
+            "exp",
+            local(),
+            json!([{"name": "nan-loss", "text": "Stop when the loss is NaN on 3 reports in a row.",
+                "does": "stop", "when": {"nonFinite": "loss", "reports": 3}}]),
+        );
+        let mut losses = vec!["2.5", "2.4", "NaN", "2.3", "NaN", "NaN"];
+        reported(&f, "r1", "loss", &losses, 600);
+        rules_at(&f, "r1", T0 + 6_000);
+        assert_eq!(stopped_by(&f, "r1"), None, "two in a row is not three");
+        losses.push("NaN");
+        reported(&f, "r1", "loss", &losses, 600);
+        rules_at(&f, "r1", T0 + 7_000);
+        let stop = stopped_by(&f, "r1").expect("the third NaN in a row stops it");
+        assert_eq!(stop.by, crate::store::StopBy::Rule);
+        assert_eq!(stop.rule.as_ref().unwrap()["name"], "nan-loss");
+        assert_eq!(
+            stop.reason.as_deref(),
+            Some("loss was NaN on 3 reports in a row, step 40 to 60")
+        );
+        let run = f.store.get_run("r1").unwrap().unwrap();
+        assert_eq!(
+            run.cancel_reason.as_deref(),
+            Some("Stopped by rule nan-loss: loss was NaN on 3 reports in a row, step 40 to 60. No model was involved.")
+        );
+        let events = rule_events(&f, "r1");
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            (
+                &events[0]["rule"],
+                &events[0]["does"],
+                &events[0]["stopped"]
+            ),
+            (&json!("nan-loss"), &json!("stop"), &json!(true))
+        );
+
+        // A restart forgets nothing it counted: the same reports never stop it again.
+        f.restart();
+        f.store
+            .conn_execute_for_tests("UPDATE runs SET cancel_accepted_at = NULL WHERE id = 'r1'");
+        rules_at(&f, "r1", T0 + 8_000);
+        assert_eq!(rule_events(&f, "r1").len(), 1);
+    }
+
+    #[test]
+    fn a_value_that_recovered_stops_nothing() {
+        let f = Fixture::new("orx-rules-recovered");
+        ruled(
+            &f,
+            "r1",
+            "exp",
+            local(),
+            json!([{"name": "nan-loss", "text": "t", "does": "stop", "when": {"nonFinite": "loss", "reports": 3}},
+                   {"name": "low-eval", "text": "t", "does": "stop",
+                    "when": {"compare": {"signal": "loss", "op": "gt", "value": 9}, "reports": 2}}]),
+        );
+        // Read at once, as after a sleep: the NaNs and the spike are history the run left behind.
+        reported(
+            &f,
+            "r1",
+            "loss",
+            &["2.5", "NaN", "NaN", "NaN", "12", "13", "2.1"],
+            600,
+        );
+        rules_at(&f, "r1", T0 + 7_000);
+        assert_eq!(stopped_by(&f, "r1"), None);
+        assert!(rule_events(&f, "r1").is_empty());
+        assert_eq!(
+            f.store.run_monitor_state("r1").unwrap().unwrap()["ruleState"]["nan-loss"]["after"],
+            60.0,
+            "the reports are counted"
+        );
+    }
+
+    #[test]
+    fn an_ask_wakes_the_runs_chats_once_and_the_run_keeps_going() {
+        let f = Fixture::new("orx-rules-ask");
+        ruled(
+            &f,
+            "r1",
+            "exp",
+            local(),
+            json!([{"name": "eval-zero", "text": "Ask when the eval score falls below 0.1.", "does": "ask",
+                "when": {"compare": {"signal": "eval_score", "op": "lt", "value": 0.1}}}]),
+        );
+        f.store.subscribe_run("r1", "chat-1", T0).unwrap();
+        reported(&f, "r1", "eval_score", &["0.5", "0.05"], 600);
+        rules_at(&f, "r1", T0 + 2_000);
+        reported(&f, "r1", "eval_score", &["0.5", "0.05", "0.0"], 600);
+        rules_at(&f, "r1", T0 + 3_000);
+        assert_eq!(stopped_by(&f, "r1"), None);
+        assert!(f
+            .store
+            .engine_run_state("r1")
+            .unwrap()
+            .unwrap()
+            .cancel_accepted_at
+            .is_none());
+        let notices = f.store.run_notices_for_tests("r1");
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        let (chat, kind, body) = &notices[0];
+        assert_eq!((chat.as_str(), kind.as_str()), ("chat-1", "attention"));
+        assert!(body.starts_with("[orx] Run r1 (experiment exp) met rule eval-zero; it keeps going.\nRule eval-zero: Ask when the eval score falls below 0.1.\nWhat orx saw: eval_score was 0.05 (below 0.1) at step 10.\n"), "{body}");
+        assert!(body.contains("orx exp cancel --run r1 --reason"), "{body}");
+        assert_eq!(rule_events(&f, "r1")[0]["does"], "ask");
+    }
+
+    #[test]
+    fn a_run_worse_than_its_parent_at_the_same_step_is_stopped_where_the_parent_reported() {
+        let f = Fixture::new("orx-rules-parent");
+        loss_run(&f, "parent", "exp", "done", 60, 1.0);
+        rules_at(&f, "parent", T0 + 61_000);
+        f.child("child", "exp");
+        ruled(
+            &f,
+            "r1",
+            "child",
+            local(),
+            json!([{"name": "diverging", "text": "Stop when the loss is 1 worse than the parent's.",
+                "does": "stop", "when": {"worseThanParent": {"signal": "loss", "by": 1, "better": "lower"}, "reports": 3}}]),
+        );
+        // The parent's loss at step 10i is 3/(i+1): 3, 1.5, 1, 0.75, 0.6.
+        reported(&f, "r1", "loss", &["3", "2.4", "2.0"], 400);
+        rules_at(&f, "r1", T0 + 3_000);
+        assert_eq!(
+            stopped_by(&f, "r1"),
+            None,
+            "0.9 and 1 worse is within the rule"
+        );
+        reported(
+            &f,
+            "r1",
+            "loss",
+            &["3", "2.4", "2.0", "1.9", "1.8", "1.7"],
+            400,
+        );
+        rules_at(&f, "r1", T0 + 6_000);
+        let stop = stopped_by(&f, "r1").expect("worse by more than 1 on three reports");
+        assert_eq!(
+            stop.reason.as_deref(),
+            Some("loss was 1.2 worse than the parent's at the same step (1.7 against 0.5) on 3 reports in a row, step 30 to 50")
+        );
+    }
+
+    #[test]
+    fn a_run_that_stopped_improving_is_stopped_once_its_window_is_full() {
+        let f = Fixture::new("orx-rules-plateau");
+        ruled(
+            &f,
+            "r1",
+            "exp",
+            local(),
+            json!([{"name": "plateau", "text": "t", "does": "stop",
+                "when": {"noImprovement": {"signal": "val_loss", "min": 0.05, "reports": 3, "better": "lower"}}}]),
+        );
+        let mut losses = vec!["3.0", "2.0", "1.5", "1.49", "1.48"];
+        reported(&f, "r1", "val_loss", &losses, 600);
+        rules_at(&f, "r1", T0 + 5_000);
+        assert_eq!(stopped_by(&f, "r1"), None, "1.5 beat 2.0 within the window");
+        losses.push("1.47");
+        reported(&f, "r1", "val_loss", &losses, 600);
+        rules_at(&f, "r1", T0 + 6_000);
+        assert_eq!(
+            stopped_by(&f, "r1").unwrap().reason.as_deref(),
+            Some("val_loss improved by 0.03 over its last 3 reports, step 30 to 50, on its best of 1.5 before them; the rule needs 0.05")
+        );
+    }
+
+    #[test]
+    fn a_silent_run_spend_and_a_projection_each_stop_when_they_should() {
+        let f = Fixture::new("orx-rules-time");
+        ruled(
+            &f,
+            "r1",
+            "exp",
+            local(),
+            json!([{"name": "stuck", "text": "t", "does": "stop", "when": {"noProgress": {"seconds": 600}}}]),
+        );
+        reported(&f, "r1", "loss", &["2.0", "1.9"], 600);
+        f.collected(T0 + 500_000);
+        rules_at(&f, "r1", T0 + 500_000);
+        assert_eq!(stopped_by(&f, "r1"), None);
+        f.collected(T0 + 602_000);
+        rules_at(&f, "r1", T0 + 602_000);
+        assert_eq!(
+            stopped_by(&f, "r1").unwrap().reason.as_deref(),
+            Some("no progress was reported for 10m since step 10")
+        );
+
+        ruled(
+            &f,
+            "spent",
+            "exp",
+            local(),
+            json!([{"name": "budget", "does": "stop", "when": {"costAbove": {"usd": 5}}}]),
+        );
+        let lines = [(T0, r#"::orx:: {"step":1,"of":100,"spend":5.25}"#.to_owned())];
+        f.collect(&Snapshot {
+            run_id: "spent".into(),
+            ..folded(&lines)
+        });
+        rules_at(&f, "spent", T0 + 1_000);
+        assert_eq!(
+            stopped_by(&f, "spent").unwrap().reason.as_deref(),
+            Some("it has cost $5.25, past its $5.00 budget")
+        );
+
+        let limited = json!({"kind": "local_job", "timeoutSecs": 120});
+        ruled(
+            &f,
+            "slow",
+            "exp",
+            limited,
+            json!([{"name": "too-slow", "text": "t", "does": "stop", "when": {"projectedFinishPastLimit": true}}]),
+        );
+        let values = |n: usize| vec!["1.0"; n];
+        // Ten steps a second of 6,000 end long after the 2m limit, but a slice or two is no pace.
+        reported(&f, "slow", "loss", &values(30), 6000);
+        rules_at(&f, "slow", T0 + 30_000);
+        reported(&f, "slow", "loss", &values(31), 6000);
+        rules_at(&f, "slow", T0 + 31_000);
+        assert_eq!(stopped_by(&f, "slow"), None);
+        reported(&f, "slow", "loss", &values(80), 6000);
+        rules_at(&f, "slow", T0 + 80_000);
+        assert_eq!(stopped_by(&f, "slow"), None, "one revision is not two");
+        rules_at(&f, "slow", T0 + 81_000);
+        assert_eq!(
+            stopped_by(&f, "slow"),
+            None,
+            "the same revision counts once"
+        );
+        reported(&f, "slow", "loss", &values(81), 6000);
+        rules_at(&f, "slow", T0 + 81_500);
+        let reason = stopped_by(&f, "slow").unwrap().reason.unwrap();
+        assert!(reason.starts_with("it would finish up to "), "{reason}");
+        assert!(reason.ends_with(" past its time limit"), "{reason}");
+    }
+
+    #[test]
+    fn rules_act_only_on_a_live_run_seen_live() {
+        let f = Fixture::new("orx-rules-live");
+        let nan =
+            json!([{"name": "nan", "text": "t", "does": "stop", "when": {"nonFinite": "loss"}}]);
+        ruled(&f, "r1", "exp", local(), nan.clone());
+        reported(&f, "r1", "loss", &["NaN"], 600);
+        // Collection stopped two minutes ago: what the run is doing now is unknown.
+        f.collected(T0);
+        rules_at(&f, "r1", T0 + 120_000);
+        assert_eq!(stopped_by(&f, "r1"), None);
+        assert!(f
+            .store
+            .run_monitor_state("r1")
+            .unwrap()
+            .unwrap()
+            .get("ruleState")
+            .is_none());
+        f.collected(T0 + 120_000);
+        f.store
+            .set_run_contact(
+                "r1",
+                &Contact::Unreachable {
+                    since: T0,
+                    cause: "offline".into(),
+                },
+            )
+            .unwrap();
+        rules_at(&f, "r1", T0 + 121_000);
+        assert_eq!(stopped_by(&f, "r1"), None, "lost contact acts on nothing");
+
+        ruled(&f, "done", "exp", local(), nan);
+        reported(&f, "done", "loss", &["NaN"], 600);
+        f.store.set_run_status("done", "done");
+        rules_at(&f, "done", T0 + 2_000);
+        assert_eq!(
+            stopped_by(&f, "done"),
+            None,
+            "a run that ended is never stopped"
+        );
     }
 
     /// `orx exp status` says who stopped a run and why, in the lead the page gives it.

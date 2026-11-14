@@ -103,6 +103,13 @@ The engine delivers the stop once per connection, whenever the machine is reacha
 
 `ui/src/runDisplay.ts` builds the dashboard's labels from these fields.
 
+The first accepted cancel keeps who asked for it beside its reason, in the same
+statement: the user (the dashboard, or `orx exp cancel` outside a chat), the
+chat's agent (`orx exp cancel` from its chat, with its `--reason`), or a rule.
+A later stop, of any kind, never replaces it, and a cancel from before this was
+kept has no one recorded, never one guessed from its words. A cancelled run's
+`outcome` says who.
+
 **Abandon** ends an unfinished run with no live contact, or whose stop its backend keeps refusing, as lost and sends the terminal notice. The kill stays pending: a terminal run without live contact is a **tombstone**, still watched, whose stop is delivered whenever the job or host returns, and which settles on the next proof that nothing is left.
 
 ### Logs
@@ -307,3 +314,24 @@ its time left, takes its tone from the lifecycle and carries why, the run stays
 watched whether or not it has ended, and a read tries again. A `run.monitor`
 reset and a `run.updated` go out when it starts failing and when it recovers.
 The log says the cause when it starts, when it changes and when it ends.
+
+### Rules
+
+An agent declares rules beside an experiment's stage plan (`orx exp view set
+--config`, `src/engine/rules.rs`): each names one bounded condition on what a run
+reports, never an expression, and stops the run or wakes its chats. A child
+experiment starts with a copy, and a run freezes the rules it was launched with,
+so editing them changes only later runs; `--budget` adds one. Only `orx up`
+checks them, in the projection's pass, and only on a running run whose contact
+and data are live and whose stop is not already under way: what it cannot see
+stops nothing. Each pass counts the reports a run made since the last, by where
+they fall on the signal's axis, and a rule acts only if its condition holds once
+they are counted, so a value that already recovered, as in history read after a
+sleep, stops nothing. What each rule counted, and that it acted, is kept with
+the run's monitor state in the transaction that records the event, the notices
+an `ask` sends and a `stop`'s cancel, so a restart neither counts a report twice
+nor acts twice. A rule on the estimate (cost or the time limit) acts only on a
+pace measured over four slices and seen on two revisions; spend already past a
+budget stops at once. A stop goes through the engine's cancel, the first stop
+wins, and the run is Auto-stopped by that rule, with no model involved.
+

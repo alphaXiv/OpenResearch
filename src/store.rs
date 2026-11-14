@@ -1372,6 +1372,14 @@ impl Store {
                 run_id TEXT PRIMARY KEY,
                 state_json TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS run_monitor_events (
+                run_id TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                body_json TEXT NOT NULL,
+                PRIMARY KEY (run_id, seq)
+            );
             CREATE TABLE IF NOT EXISTS signal_collections (
                 run_id TEXT PRIMARY KEY,
                 done INTEGER NOT NULL DEFAULT 0,
@@ -1528,6 +1536,7 @@ impl Store {
         ))?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_signal_collection AFTER DELETE ON runs BEGIN DELETE FROM signal_collections WHERE run_id = OLD.id; END;")?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_run_monitor_state AFTER DELETE ON runs BEGIN DELETE FROM run_monitor_state WHERE run_id = OLD.id; END;")?;
+        schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_run_monitor_events AFTER DELETE ON runs BEGIN DELETE FROM run_monitor_events WHERE run_id = OLD.id; END;")?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_log_collection AFTER DELETE ON runs BEGIN DELETE FROM log_collections WHERE run_id = OLD.id; END;")?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_steer_receipts AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_steer_receipts WHERE session_id = OLD.id; END;")?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_invocation_identities AFTER DELETE ON chat_sessions BEGIN DELETE FROM native_invocation_identities WHERE session_id = OLD.id; END;")?;
@@ -6365,6 +6374,58 @@ impl Store {
         ).optional()?)
     }
 
+    /// Keeps what the run's rules counted and what they did, in one transaction: an event for
+    /// each rule that tripped, the notices an `ask` wakes chats with, and a `stop`'s cancel with
+    /// who asked for it, under the run's cancel lock. Returns when the run's cancel was accepted.
+    pub(crate) fn record_rules(
+        &self,
+        run_id: &str,
+        counts: &serde_json::Value,
+        events: &[serde_json::Value],
+        notices: &[(String, String, String)],
+        stop: Option<(&str, &StopContext)>,
+    ) -> Result<Option<i64>> {
+        let mut lock = stop
+            .map(|_| open_lifecycle_lock_at(&self.run_lock_path(CANCEL_LOCK, run_id)?))
+            .transpose()?;
+        let _guard = lock.as_mut().map(|lock| lock.write()).transpose()?;
+        let tx = self.begin_immediate()?;
+        let now = now_ms();
+        let accepted = match stop {
+            Some((reason, stop)) => {
+                self.accept_run_stop_locked(run_id, Some(reason), Some(stop))?
+            }
+            None => None,
+        };
+        let mut state = match self.run_monitor_state(run_id)? {
+            Some(serde_json::Value::Object(state)) => state,
+            _ => serde_json::Map::new(),
+        };
+        state.insert("ruleState".into(), counts.clone());
+        tx.execute(
+            "INSERT INTO run_monitor_state (run_id, state_json) VALUES (?1, ?2)
+             ON CONFLICT(run_id) DO UPDATE SET state_json = excluded.state_json",
+            params![run_id, serde_json::Value::Object(state).to_string()],
+        )?;
+        for event in events {
+            let mut event = event.clone();
+            if event["does"] == "stop" {
+                event["stopped"] = serde_json::json!(accepted.is_some());
+            }
+            tx.execute(
+                "INSERT INTO run_monitor_events (run_id, seq, kind, created_at, body_json)
+                 VALUES (?1, (SELECT COALESCE(MAX(seq), 0) + 1 FROM run_monitor_events WHERE run_id = ?1),
+                         'rule', ?2, ?3)",
+                params![run_id, now, event.to_string()],
+            )?;
+        }
+        for (chat, dedupe, body) in notices {
+            self.insert_run_notice(run_id, chat, ATTENTION, dedupe, body, now)?;
+        }
+        tx.commit()?;
+        Ok(accepted)
+    }
+
     /// Who stopped the run, when the cancel that stopped it said; `None` for a run no one
     /// stopped, or one stopped before orx kept this.
     pub(crate) fn run_stop(&self, run_id: &str) -> Result<Option<StopContext>> {
@@ -11190,6 +11251,44 @@ mod tests {
     }
 
     impl Store {
+        pub(crate) fn run_monitor_events_for_tests(
+            &self,
+            run_id: &str,
+        ) -> Vec<(String, serde_json::Value)> {
+            let mut statement = self
+                .conn
+                .prepare(
+                    "SELECT kind, body_json FROM run_monitor_events WHERE run_id = ?1 ORDER BY seq",
+                )
+                .unwrap();
+            statement
+                .query_map([run_id], |row| {
+                    Ok((
+                        row.get(0)?,
+                        serde_json::from_str(&row.get::<_, String>(1)?).unwrap(),
+                    ))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        }
+
+        pub(crate) fn run_notices_for_tests(&self, run_id: &str) -> Vec<(String, String, String)> {
+            let mut statement = self
+                .conn
+                .prepare("SELECT chat_session_id, kind, body FROM run_notices WHERE run_id = ?1 ORDER BY id")
+                .unwrap();
+            statement
+                .query_map([run_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        }
+
+        pub(crate) fn conn_execute_for_tests(&self, sql: &str) {
+            self.conn.execute(sql, []).unwrap();
+        }
+
         /// Moves a run to `status` as its lifecycle would, without the rest of a commit.
         pub(crate) fn set_run_status(&self, run_id: &str, status: &str) {
             self.conn
