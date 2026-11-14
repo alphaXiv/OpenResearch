@@ -271,8 +271,8 @@ export interface Quote {
 }
 
 export interface Watch {
-  /** `unknown` when the server could not read what the watcher said. */
-  state: "on" | "off" | "no_model" | "needs_pick" | "unknown";
+  /** `none` when no chat follows the run; `unknown` when the server could not read what the watcher said. */
+  state: "on" | "off" | "no_model" | "needs_pick" | "none" | "unknown";
   model: string | null;
   /** Why the run is not watched, in the server's words, when it is not. */
   why?: string | null;

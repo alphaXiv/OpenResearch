@@ -61,6 +61,8 @@ pub(super) struct LogRead {
     pub families: BTreeSet<String>,
     /// The log's identity, which a cursor carries.
     pub ident: Option<String>,
+    /// Why the log could not be read, when it could not.
+    pub unavailable: Option<String>,
 }
 
 /// Everything a digest says of one run.
@@ -508,6 +510,9 @@ pub(super) fn build(shared: &Shared, runs: &[Run]) -> Digest {
         );
         excerpts.insert(run.key.to_owned(), shown);
         let mut log = json!({"from": run.log.from, "to": run.log.to});
+        if let Some(why) = &run.log.unavailable {
+            log = json!({"unavailable": why});
+        }
         if !head.is_empty() {
             log["firstLines"] = json!(head);
         }

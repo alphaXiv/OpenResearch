@@ -6770,6 +6770,75 @@ requires_openai_auth = false
         assert_eq!(codex_sandbox(None), Some("workspace-write"));
     }
 
+    /// A `codex exec` that prints `lines`, keeping the switches it was given in `args`.
+    #[cfg(unix)]
+    fn fake_exec(dir: &Path, lines: &[&str]) -> std::path::PathBuf {
+        let bin = dir.join("codex");
+        let printed: String = lines
+            .iter()
+            .map(|line| format!("printf '%s\\n' '{line}'\n"))
+            .collect();
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n{printed}",
+            dir.join("args").display()
+        );
+        orx_test_support::write_executable(&bin, script, 0o755).unwrap();
+        bin
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_request_without_tools_switches_them_off_and_refuses_a_turn_that_uses_one() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-codex-no-tools").unwrap();
+        let request = OneShot {
+            profile: None,
+            system: "Look.",
+            prompt: "{}",
+            quality: OneShotQuality::Cheap,
+            model: Some("gpt-6-luna"),
+            timeout: Duration::from_secs(10),
+        };
+        let answer =
+            r#"{"type":"item.completed","item":{"type":"agent_message","text":"{\"runs\":{}}"}}"#;
+        let usage = r#"{"type":"turn.completed","usage":{"input_tokens":4000,"cached_input_tokens":0,"output_tokens":90}}"#;
+        let bin = fake_exec(dir.path(), &[answer, usage]);
+        let reply = codex_exec_one_shot(&bin, request, true).await.unwrap();
+        assert_eq!(reply.text, r#"{"runs":{}}"#);
+        assert_eq!(
+            reply
+                .usage
+                .map(|u| (u.input_tokens, u.output_tokens, u.cost_usd)),
+            Some((4000, 90, None))
+        );
+        let args = std::fs::read_to_string(dir.path().join("args")).unwrap();
+        for switch in NO_TOOLS {
+            assert!(args.contains(switch), "{switch} in {args}");
+        }
+
+        let acted = r#"{"type":"item.started","item":{"type":"command_execution","command":"cat ~/.ssh/id_ed25519"}}"#;
+        let bin = fake_exec(dir.path(), &[acted, answer]);
+        let error = codex_exec_one_shot(&bin, request, true).await.unwrap_err();
+        assert!(
+            format!("{error}").contains("started a command_execution"),
+            "{error}"
+        );
+
+        let ignored = r#"{"type":"item.completed","item":{"type":"error","message":"Codex is ignoring 1 unrecognized configuration setting.\n  session-flags: `features.shell_tool` is ignored."}}"#;
+        let bin = fake_exec(dir.path(), &[ignored, answer]);
+        let error = codex_exec_one_shot(&bin, request, true).await.unwrap_err();
+        assert!(
+            format!("{error}").contains("does not know `features.shell_tool`"),
+            "{error}"
+        );
+
+        // A request that may use tools never hears of the switches.
+        let bin = fake_exec(dir.path(), &[answer]);
+        codex_exec_one_shot(&bin, request, false).await.unwrap();
+        assert!(!std::fs::read_to_string(dir.path().join("args"))
+            .unwrap()
+            .contains("shell_tool"));
+    }
+
     #[test]
     fn exec_line_agent_message_reads_both_jsonl_shapes() {
         // Legacy shape: the message nests under "msg".

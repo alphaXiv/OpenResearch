@@ -92,7 +92,8 @@ export function RunPage({ run, name, now }: { run: Run; name: string; now: numbe
 export function WatchSection({ run, name, now, className }: { run: Run; name: string; now: number; className: string }) {
   const { getRunMonitorQuery } = useWorkspace().queries;
   const data = useQuery({ ...getRunMonitorQuery(run.id), enabled: false }).data;
-  if (!data) return null;
+  // A run no chat follows has nothing to watch it from: no section, rather than one that says so.
+  if (!data || data.watch.state === "none") return null;
   const model = runModel({ item: { sessionId: "", run, experimentName: name }, monitor: data, monitorFailed: false, shown: false, agent: m.chat_the_agent(), now, nextRetryMs: null });
   return (
     <section className={className}>

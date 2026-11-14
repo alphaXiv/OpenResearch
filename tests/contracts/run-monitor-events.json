@@ -39,6 +39,18 @@
     },
     "cost": null,
     "sentence": null,
+    "watch": {
+      "state": "none",
+      "model": null,
+      "why": null,
+      "looks": [],
+      "spentUsd": null,
+      "tokens": 0,
+      "nextAt": null,
+      "floorUntil": null,
+      "error": null,
+      "with": null
+    },
     "patch": {
       "availability": {
         "state": "live",
@@ -126,6 +138,18 @@
     },
     "cost": null,
     "sentence": null,
+    "watch": {
+      "state": "none",
+      "model": null,
+      "why": null,
+      "looks": [],
+      "spentUsd": null,
+      "tokens": 0,
+      "nextAt": null,
+      "floorUntil": null,
+      "error": null,
+      "with": null
+    },
     "patch": {
       "availability": {
         "state": "live",

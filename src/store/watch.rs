@@ -47,15 +47,15 @@ pub(crate) struct WatchLookRun {
 }
 
 /// What a finished look wrote for one run.
-pub(crate) struct LookResult<'a> {
-    pub run_id: &'a str,
-    pub result: &'a str,
-    pub template: Option<&'a str>,
-    pub text: Option<&'a str>,
+pub(crate) struct LookResult {
+    pub run_id: String,
+    pub result: String,
+    pub template: Option<String>,
+    pub text: Option<String>,
     pub whole: Option<f64>,
-    pub basis: &'a Value,
-    pub cursor: &'a Value,
-    pub evidence: &'a Value,
+    pub basis: Value,
+    pub cursor: Value,
+    pub evidence: Value,
 }
 
 const SELECT_LOOK: &str =
@@ -182,9 +182,9 @@ impl Store {
                     result.template,
                     result.text,
                     result.whole,
-                    serde_json::to_string(result.basis)?,
-                    serde_json::to_string(result.cursor)?,
-                    serde_json::to_string(result.evidence)?,
+                    serde_json::to_string(&result.basis)?,
+                    serde_json::to_string(&result.cursor)?,
+                    serde_json::to_string(&result.evidence)?,
                 ],
             )?;
         }

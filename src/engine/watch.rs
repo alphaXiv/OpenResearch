@@ -58,6 +58,8 @@ pub(crate) enum Watching {
     Unavailable(String),
     /// Run watching is turned off in Settings.
     Off,
+    /// No chat follows the run, so there is no chat to watch it from.
+    Unfollowed,
 }
 
 impl Watching {
@@ -67,6 +69,7 @@ impl Watching {
             Self::NeedsPick => "needs_pick",
             Self::Unavailable(_) => "no_model",
             Self::Off => "off",
+            Self::Unfollowed => "none",
         }
     }
 }
@@ -267,7 +270,8 @@ struct Scan {
 /// One chat's runs at one pass, and why each might need a look.
 struct Owned {
     chat: StoredChatSession,
-    watcher: (String, Option<String>, Option<String>, String),
+    /// The watching model's name.
+    model: String,
     runs: Vec<(Now, Vec<(String, String)>)>,
 }
 
@@ -339,8 +343,6 @@ fn spawn_looks(state: Arc<tokio::sync::Mutex<State>>, chat: String) {
                 eprintln!("orx up: watcher: look {id}: {error:#}");
                 let failed = Store::open().and_then(|store| {
                     let results = unanswered(&store.watch_look_runs(id)?, "error");
-                    let results: Vec<LookResult> =
-                        results.iter().map(LookResultOwned::as_ref).collect();
                     store.finish_watch_look(
                         id,
                         "error",
@@ -396,7 +398,7 @@ fn owner(
         }
         first.get_or_insert(watching);
     }
-    Ok(Err(first.unwrap_or(Watching::NeedsPick)))
+    Ok(Err(first.unwrap_or(Watching::Unfollowed)))
 }
 
 /// One pass: reads each watched run's log since its last look, and starts every look that is due.
@@ -416,13 +418,7 @@ async fn pass(state: &Arc<tokio::sync::Mutex<State>>) -> Result<()> {
             if chat.harness == "codex" {
                 codex.insert(chat.profile_id.clone());
             }
-            let Watching::Selected {
-                harness,
-                profile,
-                model,
-                label,
-            } = watching
-            else {
+            let Watching::Selected { label, .. } = watching else {
                 continue;
             };
             let live = !Phase::parse(&run.status).is_some_and(Phase::is_terminal);
@@ -440,7 +436,7 @@ async fn pass(state: &Arc<tokio::sync::Mutex<State>>) -> Result<()> {
                 .entry(chat.id.clone())
                 .or_insert_with(|| Owned {
                     chat,
-                    watcher: (harness, profile, model, label),
+                    model: label,
                     runs: Vec::new(),
                 })
                 .runs
@@ -477,7 +473,7 @@ async fn pass(state: &Arc<tokio::sync::Mutex<State>>) -> Result<()> {
                 store.prepare_watch_look(
                     &chat_id,
                     planned.kind,
-                    &owned.watcher.3,
+                    &owned.model,
                     &planned.reason,
                     &rows,
                     now,
@@ -1183,13 +1179,27 @@ fn not_watched(watching: &Watching) -> String {
             "This chat's agent has no watching model, so its runs are not watched.".into()
         }
         Watching::Unavailable(why) => format!("This run is not watched: {why}."),
+        Watching::Unfollowed => "No chat follows this run, so nothing watches it.".into(),
         Watching::Selected { .. } => String::new(),
     }
 }
 
 /// The run's sentence filled now, for words that do not redraw: the journal, a status, a digest.
 fn fill(template: &str, runs: &BTreeMap<String, &Now>, own: Option<&Now>) -> String {
-    let summary = own.is_none();
+    filled(template, own.is_none(), |token| {
+        let run = match token {
+            reply::Token::Label(key)
+            | reply::Token::Signal(Some(key), _)
+            | reply::Token::Versus(Some(key), _)
+            | reply::Token::Count(Some(key), _) => runs.get(key).copied(),
+            _ => own,
+        };
+        run.map_or_else(|| "—".to_owned(), |run| render(run, token))
+    })
+}
+
+/// `template` with each token as `text_of` says it reads; one that cannot be read stays as written.
+fn filled(template: &str, summary: bool, text_of: impl Fn(&reply::Token) -> String) -> String {
     let Ok(found) = reply::tokens(template, summary) else {
         return template.to_owned();
     };
@@ -1197,14 +1207,7 @@ fn fill(template: &str, runs: &BTreeMap<String, &Now>, own: Option<&Now>) -> Str
     let mut at = 0;
     for (range, token) in found {
         text.push_str(&template[at..range.start]);
-        let run = match &token {
-            reply::Token::Label(key)
-            | reply::Token::Signal(Some(key), _)
-            | reply::Token::Versus(Some(key), _)
-            | reply::Token::Count(Some(key), _) => runs.get(key).copied(),
-            _ => own,
-        };
-        text.push_str(&run.map_or_else(|| "—".to_owned(), |run| render(run, &token)));
+        text.push_str(&text_of(&token));
         at = range.end;
     }
     text.push_str(&template[at..]);
@@ -1290,11 +1293,22 @@ async fn take(id: i64) -> Result<()> {
         let cursor = run
             .answered()
             .map_or(Value::Null, |(_, row)| row.cursor.clone());
-        logs.insert(
-            run.run.id.clone(),
-            (log_since(&run.run.id, &cursor).await, cursor),
-        );
+        logs.insert(run.run.id.clone(), log_since(&run.run.id, &cursor).await);
     }
+    // A log that can't be read is said to be so, never shown as one that printed nothing.
+    let unread: BTreeMap<String, digest::LogRead> = logs
+        .iter()
+        .filter_map(|(id, read)| {
+            let error = read.as_ref().err()?;
+            Some((
+                id.clone(),
+                digest::LogRead {
+                    unavailable: Some(format!("{error:#}")),
+                    ..digest::LogRead::default()
+                },
+            ))
+        })
+        .collect();
     let keyed: BTreeMap<String, &Now> = rows
         .iter()
         .filter_map(|row| {
@@ -1380,7 +1394,6 @@ async fn take(id: i64) -> Result<()> {
             (run.run.id.clone(), why)
         })
         .collect();
-    let empty = digest::LogRead::default();
     let digest_runs: Vec<digest::Run> = rows
         .iter()
         .filter_map(|row| {
@@ -1399,10 +1412,10 @@ async fn take(id: i64) -> Result<()> {
                 brief: briefs.get(&run.run.id),
                 parent: parents.get(&run.run.id),
                 why: &whys[&run.run.id],
-                log: logs
-                    .get(&run.run.id)
-                    .and_then(|(read, _)| read.as_ref().ok())
-                    .unwrap_or(&empty),
+                log: match &logs[&run.run.id] {
+                    Ok(read) => read,
+                    Err(_) => &unread[&run.run.id],
+                },
                 counts: &counts[&run.run.id],
             })
         })
@@ -1436,7 +1449,7 @@ async fn take(id: i64) -> Result<()> {
     } else {
         Vec::new()
     };
-    let notes = notes()
+    let kept_notes = notes()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .get(&chat.id)
@@ -1444,7 +1457,7 @@ async fn take(id: i64) -> Result<()> {
     let digest = digest::build(
         &digest::Shared {
             locale: &locale,
-            notes: notes.as_deref(),
+            notes: kept_notes.as_deref(),
             summary: summary_wanted.then_some(&summary_previous[..]),
         },
         &digest_runs,
@@ -1557,10 +1570,7 @@ async fn take(id: i64) -> Result<()> {
                 None,
                 Some(&error),
                 None,
-                &results
-                    .iter()
-                    .map(LookResultOwned::as_ref)
-                    .collect::<Vec<_>>(),
+                &results,
             )?;
             return Ok(());
         }
@@ -1610,7 +1620,7 @@ async fn take(id: i64) -> Result<()> {
         let Some(run) = keyed.get(&row.key) else {
             continue;
         };
-        let (read_log, _) = &logs[&run.run.id];
+        let read_log = &logs[&run.run.id];
         let last = run.answered();
         let last_template = last.and_then(|(_, row)| row.template.clone());
         let kept_mult = last.map_or_else(Map::new, |(_, row)| {
@@ -1695,7 +1705,7 @@ async fn take(id: i64) -> Result<()> {
         } else {
             basis_of(run, template.as_deref(), &mult)
         };
-        results.push(LookResultOwned {
+        results.push(LookResult {
             basis,
             run_id: run.run.id.clone(),
             result: result.to_owned(),
@@ -1753,13 +1763,13 @@ async fn take(id: i64) -> Result<()> {
         usage.as_ref(),
         error.as_deref(),
         summary.as_ref().map(|(t, x)| (t.as_str(), x.as_str())),
-        &results
-            .iter()
-            .map(LookResultOwned::as_ref)
-            .collect::<Vec<_>>(),
+        &results,
     )?;
-    if let Some(notes) = &read.notes {
-        set_notes(&chat.id, notes);
+    if let Some(said) = read.notes {
+        notes()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(chat.id.clone(), said);
     }
     Ok(())
 }
@@ -1779,35 +1789,9 @@ fn reason_check(reason: &str, label: &str, check: &str) -> bool {
         .any(|part| words.iter().any(|word| part.contains(word)))
 }
 
-struct LookResultOwned {
-    run_id: String,
-    result: String,
-    template: Option<String>,
-    text: Option<String>,
-    whole: Option<f64>,
-    basis: Value,
-    cursor: Value,
-    evidence: Value,
-}
-
-impl LookResultOwned {
-    fn as_ref(&self) -> LookResult<'_> {
-        LookResult {
-            run_id: &self.run_id,
-            result: &self.result,
-            template: self.template.as_deref(),
-            text: self.text.as_deref(),
-            whole: self.whole,
-            basis: &self.basis,
-            cursor: &self.cursor,
-            evidence: &self.evidence,
-        }
-    }
-}
-
-fn unanswered(rows: &[WatchLookRun], result: &str) -> Vec<LookResultOwned> {
+fn unanswered(rows: &[WatchLookRun], result: &str) -> Vec<LookResult> {
     rows.iter()
-        .map(|row| LookResultOwned {
+        .map(|row| LookResult {
             run_id: row.run_id.clone(),
             result: result.to_owned(),
             template: None,
@@ -1824,13 +1808,6 @@ fn unanswered(rows: &[WatchLookRun], result: &str) -> Vec<LookResultOwned> {
 fn notes() -> &'static Mutex<HashMap<String, String>> {
     static NOTES: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
     NOTES.get_or_init(Default::default)
-}
-
-fn set_notes(chat: &str, text: &str) {
-    notes()
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .insert(chat.to_owned(), text.to_owned());
 }
 
 /// Where in a digest the scan found a credential, in words the user can act on.
@@ -1916,6 +1893,7 @@ async fn log_since(run: &str, cursor: &Value) -> Result<digest::LogRead> {
         records,
         families,
         ident: Some(head_ident),
+        unavailable: None,
     })
 }
 
@@ -1992,6 +1970,7 @@ pub(crate) fn run_facts(store: &Store, run: &StoredRun) -> Result<Value> {
     };
     let (model, state, why) = match &watching {
         Watching::Selected { label, .. } => (Some(label.clone()), "on", None),
+        Watching::Unfollowed => (None, "none", None),
         other => (None, other.state(), Some(not_watched(other))),
     };
     let next_at = next_due()
@@ -2091,27 +2070,16 @@ fn fill_values(
     signals: &Value,
     versus: &Map<String, Value>,
 ) -> String {
-    let Ok(found) = reply::tokens(template, false) else {
-        return template.to_owned();
-    };
-    let mut text = String::new();
-    let mut at = 0;
-    for (range, token) in found {
-        text.push_str(&template[at..range.start]);
-        text.push_str(&match &token {
-            reply::Token::Signal(_, name) => {
-                super::monitor::value_text(&bindings[name], &signals[name])
-            }
-            reply::Token::Versus(_, name) => versus_text(versus.get(name), &signals[name]),
-            reply::Token::Count(..) => bindings[token.binding()]
-                .as_u64()
-                .map_or_else(|| "—".into(), |n| n.to_string()),
-            reply::Token::Label(_) => String::new(),
-        });
-        at = range.end;
-    }
-    text.push_str(&template[at..]);
-    text
+    filled(template, false, |token| match token {
+        reply::Token::Signal(_, name) => {
+            super::monitor::value_text(&bindings[name], &signals[name])
+        }
+        reply::Token::Versus(_, name) => versus_text(versus.get(name), &signals[name]),
+        reply::Token::Count(..) => bindings[token.binding()]
+            .as_u64()
+            .map_or_else(|| "—".into(), |n| n.to_string()),
+        reply::Token::Label(_) => String::new(),
+    })
 }
 
 /// A comparison with the parent as a `{signal.vs}` token reads.

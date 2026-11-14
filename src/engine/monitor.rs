@@ -5605,6 +5605,41 @@ mod tests {
             invalid(raw(json!({"rules": [{"name": "nan", "text": "Stop at NaN.", "does": "halt", "when": {"nonFinite": "loss"}}]}))),
             "Config config.json: rules[0] (nan): \"does\" must be \"stop\" or \"ask\". Run `orx exp view set exp --config config.json`."
         );
+        for (config, said) in [
+            (json!({"brief": {"goal": "x"}}), "the brief has no label \"goal\"; it takes question, healthy, noise, worth_a_flag, from_parent, decided"),
+            (json!({"brief": {"question": 3}}), "the brief's \"question\" is text"),
+            (json!({"brief": {"question": "x".repeat(3300)}}), "the brief is 3300 bytes; keep it to 3200, about 800 tokens"),
+            (json!({"watch": {"minGapS": 5}}), "watch's minGapS is a whole number of seconds from 30 to 3600"),
+            (json!({"watch": {"everyS": 60}}), "watch has no \"everyS\"; it takes minGapS and maxGapS"),
+            (json!({"watch": {"minGapS": 600, "maxGapS": 300}}), "watch's minGapS is longer than its maxGapS"),
+        ] {
+            assert_eq!(
+                invalid(raw(config)),
+                format!("Config config.json: {said}. Run `orx exp view set exp --config config.json`.")
+            );
+        }
+        let save = |config: Value| {
+            let source = crate::engine::view::Source {
+                file: None,
+                patterns: None,
+                config: Some("config.json"),
+            };
+            let current = f.store.run_monitor_json("exp").unwrap();
+            let etag = crate::engine::view::etag(current.as_deref());
+            crate::engine::view::set(&f.store, "exp", &etag, None, None, Some(&config), &source)
+        };
+        let briefed = save(
+            json!({"brief": {"question": "Does depth 8 beat depth 4?"}, "watch": {"maxGapS": 600}}),
+        )
+        .unwrap();
+        assert_eq!(briefed["brief"]["question"], "Does depth 8 beat depth 4?");
+        assert_eq!(briefed["watch"], json!({"maxGapS": 600}));
+        let cleared = save(json!({"brief": {}})).unwrap();
+        assert!(
+            cleared.get("brief").is_none(),
+            "an empty brief clears it, and keeps the gaps"
+        );
+        assert_eq!(cleared["watch"], json!({"maxGapS": 600}));
         assert_eq!(
             invalid(plan(&f, "exp", json!([{"phase": "train"}, {"phase": "train"}]))),
             "Config config.json: stages 1 and 2 are both \"train\"; list a stage again only after another stage, since a log cannot tell two in a row apart. Run `orx exp view set exp --config config.json`."
@@ -6213,6 +6248,38 @@ mod tests {
             serde_json::from_str(&f.store.run_monitor_json("exp").unwrap().unwrap()).unwrap();
         let stored: Value = serde_json::from_str(ruled).unwrap();
         assert_eq!(saved["rules"], stored["rules"], "a plan keeps the rules");
+        assert_eq!(saved["later"], json!({"kept": true}));
+
+        let watched = fixture["watched"].as_str().unwrap();
+        let configure = |config: Value| {
+            let source = crate::engine::view::Source {
+                file: None,
+                patterns: None,
+                config: Some("config.json"),
+            };
+            let raw = f.store.run_monitor_json("exp").unwrap();
+            let etag = crate::engine::view::etag(raw.as_deref());
+            crate::engine::view::set(&f.store, "exp", &etag, None, None, Some(&config), &source)
+                .unwrap()
+        };
+        let stored: Value = serde_json::from_str(watched).unwrap();
+        keep(watched);
+        let described = configure(
+            json!({"rules": [{"name": "stuck", "text": "Stop after 10 minutes without progress.",
+            "does": "stop", "when": {"noProgress": {"seconds": 600}}}]}),
+        );
+        assert_eq!(described["brief"], stored["brief"], "rules keep the brief");
+        assert_eq!(described["watch"], stored["watch"], "rules keep the gaps");
+        keep(watched);
+        let described = configure(json!({"brief": {"noise": "Eval loss jumps at each shard."}}));
+        assert_eq!(
+            described["rules"], stored["rules"],
+            "a brief keeps the rules"
+        );
+        assert_eq!(described["plan"], stored["plan"], "a brief keeps the plan");
+        let saved: Value =
+            serde_json::from_str(&f.store.run_monitor_json("exp").unwrap().unwrap()).unwrap();
+        assert_eq!(saved["watch"], stored["watch"]);
         assert_eq!(saved["later"], json!({"kept": true}));
 
         keep(before);

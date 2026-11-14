@@ -104,12 +104,16 @@
         "quote": null,
         "before": null,
         "watch": {
-          "state": "off",
+          "state": "none",
           "model": null,
+          "why": null,
           "looks": [],
           "spentUsd": null,
+          "tokens": 0,
           "nextAt": null,
-          "error": null
+          "floorUntil": null,
+          "error": null,
+          "with": null
         },
         "sentence": null,
         "flag": null,
@@ -359,12 +363,16 @@
         "quote": null,
         "before": null,
         "watch": {
-          "state": "off",
+          "state": "none",
           "model": null,
+          "why": null,
           "looks": [],
           "spentUsd": null,
+          "tokens": 0,
           "nextAt": null,
-          "error": null
+          "floorUntil": null,
+          "error": null,
+          "with": null
         },
         "sentence": null,
         "flag": null,
@@ -554,12 +562,16 @@
         "quote": null,
         "before": null,
         "watch": {
-          "state": "off",
+          "state": "none",
           "model": null,
+          "why": null,
           "looks": [],
           "spentUsd": null,
+          "tokens": 0,
           "nextAt": null,
-          "error": null
+          "floorUntil": null,
+          "error": null,
+          "with": null
         },
         "sentence": null,
         "flag": null,
@@ -764,12 +776,16 @@
         "quote": null,
         "before": null,
         "watch": {
-          "state": "off",
+          "state": "none",
           "model": null,
+          "why": null,
           "looks": [],
           "spentUsd": null,
+          "tokens": 0,
           "nextAt": null,
-          "error": null
+          "floorUntil": null,
+          "error": null,
+          "with": null
         },
         "sentence": null,
         "flag": null,
@@ -925,12 +941,16 @@
         "quote": null,
         "before": null,
         "watch": {
-          "state": "off",
+          "state": "none",
           "model": null,
+          "why": null,
           "looks": [],
           "spentUsd": null,
+          "tokens": 0,
           "nextAt": null,
-          "error": null
+          "floorUntil": null,
+          "error": null,
+          "with": null
         },
         "sentence": null,
         "flag": null,
@@ -1090,12 +1110,16 @@
         "quote": null,
         "before": null,
         "watch": {
-          "state": "off",
+          "state": "none",
           "model": null,
+          "why": null,
           "looks": [],
           "spentUsd": null,
+          "tokens": 0,
           "nextAt": null,
-          "error": null
+          "floorUntil": null,
+          "error": null,
+          "with": null
         },
         "sentence": null,
         "flag": null,
@@ -1229,12 +1253,16 @@
         "quote": null,
         "before": null,
         "watch": {
-          "state": "off",
+          "state": "none",
           "model": null,
+          "why": null,
           "looks": [],
           "spentUsd": null,
+          "tokens": 0,
           "nextAt": null,
-          "error": null
+          "floorUntil": null,
+          "error": null,
+          "with": null
         },
         "sentence": null,
         "flag": null,
@@ -1381,12 +1409,16 @@
         "quote": null,
         "before": null,
         "watch": {
-          "state": "off",
+          "state": "none",
           "model": null,
+          "why": null,
           "looks": [],
           "spentUsd": null,
+          "tokens": 0,
           "nextAt": null,
-          "error": null
+          "floorUntil": null,
+          "error": null,
+          "with": null
         },
         "sentence": null,
         "flag": null,
@@ -1596,12 +1628,16 @@
         "quote": null,
         "before": null,
         "watch": {
-          "state": "off",
+          "state": "none",
           "model": null,
+          "why": null,
           "looks": [],
           "spentUsd": null,
+          "tokens": 0,
           "nextAt": null,
-          "error": null
+          "floorUntil": null,
+          "error": null,
+          "with": null
         },
         "sentence": null,
         "flag": null,
@@ -1717,12 +1753,16 @@
         "quote": null,
         "before": null,
         "watch": {
-          "state": "off",
+          "state": "none",
           "model": null,
+          "why": null,
           "looks": [],
           "spentUsd": null,
+          "tokens": 0,
           "nextAt": null,
-          "error": null
+          "floorUntil": null,
+          "error": null,
+          "with": null
         },
         "sentence": null,
         "flag": null,
@@ -1950,12 +1990,16 @@
         "quote": null,
         "before": null,
         "watch": {
-          "state": "off",
+          "state": "none",
           "model": null,
+          "why": null,
           "looks": [],
           "spentUsd": null,
+          "tokens": 0,
           "nextAt": null,
-          "error": null
+          "floorUntil": null,
+          "error": null,
+          "with": null
         },
         "sentence": null,
         "flag": null,
@@ -2361,12 +2405,16 @@
         "quote": null,
         "before": null,
         "watch": {
-          "state": "off",
+          "state": "none",
           "model": null,
+          "why": null,
           "looks": [],
           "spentUsd": null,
+          "tokens": 0,
           "nextAt": null,
-          "error": null
+          "floorUntil": null,
+          "error": null,
+          "with": null
         },
         "sentence": null,
         "flag": null,
@@ -2470,12 +2518,16 @@
         "quote": null,
         "before": null,
         "watch": {
-          "state": "off",
+          "state": "none",
           "model": null,
+          "why": null,
           "looks": [],
           "spentUsd": null,
+          "tokens": 0,
           "nextAt": null,
-          "error": null
+          "floorUntil": null,
+          "error": null,
+          "with": null
         },
         "sentence": null,
         "flag": null,
@@ -2610,12 +2662,16 @@
         "quote": null,
         "before": null,
         "watch": {
-          "state": "off",
+          "state": "none",
           "model": null,
+          "why": null,
           "looks": [],
           "spentUsd": null,
+          "tokens": 0,
           "nextAt": null,
-          "error": null
+          "floorUntil": null,
+          "error": null,
+          "with": null
         },
         "sentence": null,
         "flag": null,
@@ -2800,12 +2856,16 @@
         "quote": null,
         "before": null,
         "watch": {
-          "state": "off",
+          "state": "none",
           "model": null,
+          "why": null,
           "looks": [],
           "spentUsd": null,
+          "tokens": 0,
           "nextAt": null,
-          "error": null
+          "floorUntil": null,
+          "error": null,
+          "with": null
         },
         "sentence": null,
         "flag": null,
@@ -2998,12 +3058,16 @@
         "quote": null,
         "before": null,
         "watch": {
-          "state": "off",
+          "state": "none",
           "model": null,
+          "why": null,
           "looks": [],
           "spentUsd": null,
+          "tokens": 0,
           "nextAt": null,
-          "error": null
+          "floorUntil": null,
+          "error": null,
+          "with": null
         },
         "sentence": null,
         "flag": null,
@@ -3151,12 +3215,16 @@
         "quote": null,
         "before": null,
         "watch": {
-          "state": "off",
+          "state": "none",
           "model": null,
+          "why": null,
           "looks": [],
           "spentUsd": null,
+          "tokens": 0,
           "nextAt": null,
-          "error": null
+          "floorUntil": null,
+          "error": null,
+          "with": null
         },
         "sentence": null,
         "flag": null,
@@ -3356,12 +3424,16 @@
         "quote": null,
         "before": null,
         "watch": {
-          "state": "off",
+          "state": "none",
           "model": null,
+          "why": null,
           "looks": [],
           "spentUsd": null,
+          "tokens": 0,
           "nextAt": null,
-          "error": null
+          "floorUntil": null,
+          "error": null,
+          "with": null
         },
         "sentence": null,
         "flag": null,
@@ -3504,12 +3576,16 @@
         "quote": null,
         "before": null,
         "watch": {
-          "state": "off",
+          "state": "none",
           "model": null,
+          "why": null,
           "looks": [],
           "spentUsd": null,
+          "tokens": 0,
           "nextAt": null,
-          "error": null
+          "floorUntil": null,
+          "error": null,
+          "with": null
         },
         "sentence": null,
         "flag": null,
@@ -3876,12 +3952,16 @@
         "quote": null,
         "before": null,
         "watch": {
-          "state": "off",
+          "state": "none",
           "model": null,
+          "why": null,
           "looks": [],
           "spentUsd": null,
+          "tokens": 0,
           "nextAt": null,
-          "error": null
+          "floorUntil": null,
+          "error": null,
+          "with": null
         },
         "sentence": null,
         "flag": null,
