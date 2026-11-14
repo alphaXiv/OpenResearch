@@ -2102,6 +2102,8 @@
   "run_stop_reason": "Powód ({agent}): {reason}",
   "run_failed_log_error": "Ostatni błąd w logu: {line}",
   "run_pace_slower_parent": "{times}× wolniej niż rodzic na tym etapie",
+  "run_plan_disagrees": "Plan liczy {of} {unit} w {stage}, ale przebieg zgłosił {rows} wierszy i żadnego kroku, więc pasek nie może się przesunąć.",
+  "run_plan_steps": "kroków",
   "run_pace_slower_earlier": "{times}× wolniej niż ostatnie uruchomienie tego eksperymentu na tym etapie",
   "run_chart_parent": "Nadrzędne",
   "run_block_no_points": "Brak punktów",

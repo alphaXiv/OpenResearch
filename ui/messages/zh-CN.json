@@ -2102,6 +2102,8 @@
   "run_stop_reason": "{agent} 的理由：{reason}",
   "run_failed_log_error": "日志中的最后一个错误：{line}",
   "run_pace_slower_parent": "此阶段比父实验慢 {times} 倍",
+  "run_plan_disagrees": "计划在 {stage} 中计 {of} 个{unit}，但运行只报告了 {rows} 行、没有报告步数，所以进度条无法前进。",
+  "run_plan_steps": "步",
   "run_pace_slower_earlier": "此阶段比本实验上次运行慢 {times} 倍",
   "run_chart_parent": "父运行",
   "run_block_no_points": "暂无数据点",

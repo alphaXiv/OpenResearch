@@ -752,6 +752,17 @@ fn evaluate(
         .and_then(|s| s.plan.as_deref())
         .unwrap_or(&configured);
     let planned = !plan.is_empty();
+    // A plan that counts work the run reports only as rows: its bar has no step to move by.
+    let disagrees = snapshot
+        .filter(|s| planned && !s.phases.iter().any(|phase| phase.done.is_some()))
+        .and_then(|s| {
+            let (table, rows) = s.rows.iter().max_by_key(|(_, rows)| rows.len())?;
+            let stage = plan.iter().find(|stage| stage.of.is_some())?;
+            Some(json!({
+                "stage": stage.phase, "of": stage.of, "unit": stage.unit,
+                "table": table, "rows": rows.len(),
+            }))
+        });
     let parent_done = life
         .parent
         .as_ref()
@@ -1176,6 +1187,7 @@ fn evaluate(
             at,
             versus: &versus,
             view_problem: view_problem.as_deref().or(plan_problem.as_deref()),
+            disagrees: disagrees.as_ref(),
             stages: planned.then(|| (&phases[..], current)),
             pace: pace.as_ref(),
             setup: setup.as_ref(),
@@ -1218,6 +1230,7 @@ fn evaluate(
         "flag": open.or(life.flags.last()),
         "flags": life.flags,
         "setup": setup,
+        "disagrees": disagrees,
         "revising": life.revising,
         "brief": brief(life.settings.as_deref()),
         "rules": rules.iter().map(super::rules::Rule::shown).collect::<Vec<_>>(),
@@ -2312,6 +2325,8 @@ struct StatusFacts<'a> {
     versus: &'a serde_json::Map<String, Value>,
     /// Why the experiment's saved view could not be read.
     view_problem: Option<&'a str>,
+    /// Where the plan counts work the run reports only as rows.
+    disagrees: Option<&'a Value>,
     setup: Option<&'a Value>,
     /// A plan's stages as the monitor lists them, and the one the run is in.
     stages: Option<(&'a [Value], Option<usize>)>,
@@ -2426,6 +2441,9 @@ fn status_text(life: &Lifecycle, fold: &Fold, facts: &StatusFacts) -> String {
     if let Some(problem) = facts.view_problem {
         lines.push(format!("view     {problem}"));
     }
+    if let Some(disagrees) = facts.disagrees {
+        lines.push(format!("plan     {}", disagreement(disagrees)));
+    }
     let reading = life.retry_at.is_some() || life.live();
     let mut status = fold.status.clone();
     if let Some(at) = life.retry_at {
@@ -2479,6 +2497,18 @@ fn stop_text(life: &Lifecycle) -> Option<String> {
             )
         }
     })
+}
+
+/// Where the plan and the run disagree, and how to make them agree, as `orx` says it.
+pub(crate) fn disagreement(disagrees: &Value) -> String {
+    let unit = disagrees["unit"].as_str().unwrap_or("steps");
+    format!(
+        "the plan counts {} {unit} in {}, but the run reported {} rows in {} and no step, so its bar cannot move: report each finished one as a step (`\"step\": n`, or `p.step(n)` after `p.row(…)`), or declare the stage the run has",
+        disagrees["of"],
+        disagrees["stage"].as_str().unwrap_or_default(),
+        disagrees["rows"],
+        disagrees["table"].as_str().unwrap_or_default(),
+    )
 }
 
 /// A plan's stages on one line: `✓ download 2m · ● train · ○ eval about 11m · – export skipped`.
@@ -5689,6 +5719,45 @@ mod tests {
         assert!(
             text.contains("\u{2713} eval 9s \u{b7} \u{2013} sft skipped"),
             "{text}"
+        );
+    }
+
+    #[test]
+    fn a_plan_the_run_reports_only_as_rows_is_said_to_disagree() {
+        let f = Fixture::new("orx-monitor-plan-rows");
+        plan(
+            &f,
+            "exp",
+            json!([{"phase": "bench", "of": 16, "unit": "cases"}]),
+        )
+        .unwrap();
+        let run = f.run_in("r1", "exp", "done", local());
+        let lines: Vec<(i64, String)> = (0..20)
+            .map(|case| {
+                let line =
+                    format!("::orx:: {{\"row\":\"cases\",\"m\":{{\"n\":{case},\"correct\":1}}}}");
+                (T0 + case * 1000, line)
+            })
+            .collect();
+        f.collect(&Snapshot {
+            run_id: "r1".into(),
+            ..folded(&lines)
+        });
+        let (monitor, _) = monitor_at(&f, &run, T0 + 60_000);
+        assert_eq!(
+            monitor["disagrees"],
+            json!({"stage": "bench", "of": 16, "unit": "cases", "table": "cases", "rows": 20})
+        );
+        let text = monitor["statusText"].as_str().unwrap();
+        assert!(
+            text.contains("plan     the plan counts 16 cases in bench, but the run reported 20 rows in cases and no step"),
+            "{text}"
+        );
+
+        let counted = staged(&f, "r2", "exp", "done", &[("bench", 16, Some(16))], 60);
+        assert_eq!(
+            monitor_at(&f, &counted, T0 + 60_000).0["disagrees"],
+            Value::Null
         );
     }
 

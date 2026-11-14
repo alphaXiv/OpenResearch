@@ -2102,6 +2102,8 @@
   "run_stop_reason": "سبب {agent}: {reason}",
   "run_failed_log_error": "آخر خطأ في السجل: {line}",
   "run_pace_slower_parent": "أبطأ {times} مرات من الأصل في هذه المرحلة",
+  "run_plan_disagrees": "تحسب الخطة {of} {unit} في {stage}، لكن التشغيل أبلغ عن {rows} صفوف دون خطوات، فلا يمكن للشريط أن يتقدم.",
+  "run_plan_steps": "خطوات",
   "run_pace_slower_earlier": "أبطأ {times} مرات من آخر تشغيل لهذه التجربة في هذه المرحلة",
   "run_chart_parent": "الأصل",
   "run_block_no_points": "لا نقاط بعد",

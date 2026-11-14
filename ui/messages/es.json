@@ -2102,6 +2102,8 @@
   "run_stop_reason": "Motivo de {agent}: {reason}",
   "run_failed_log_error": "Último error en el registro: {line}",
   "run_pace_slower_parent": "{times}× más lento que el padre en esta etapa",
+  "run_plan_disagrees": "El plan cuenta {of} {unit} en {stage}, pero la ejecución informó {rows} filas y ningún paso, así que la barra no puede avanzar.",
+  "run_plan_steps": "pasos",
   "run_pace_slower_earlier": "{times}× más lento que la última ejecución de este experimento en esta etapa",
   "run_chart_parent": "Padre",
   "run_block_no_points": "Aún sin puntos",

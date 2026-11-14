@@ -2102,6 +2102,8 @@
   "run_stop_reason": "{agent}'s reason: {reason}",
   "run_failed_log_error": "Last error in the log: {line}",
   "run_pace_slower_parent": "{times}× slower than the parent at this stage",
+  "run_plan_disagrees": "The plan counts {of} {unit} in {stage}, but the run reported {rows} rows and no steps, so the bar can’t move.",
+  "run_plan_steps": "steps",
   "run_pace_slower_earlier": "{times}× slower than this experiment’s last run at this stage",
   "run_chart_parent": "Parent",
   "run_block_no_points": "No points yet",

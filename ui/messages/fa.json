@@ -2102,6 +2102,8 @@
   "run_stop_reason": "دلیل {agent}: {reason}",
   "run_failed_log_error": "آخرین خطا در گزارش: {line}",
   "run_pace_slower_parent": "{times} برابر کندتر از والد در این مرحله",
+  "run_plan_disagrees": "برنامه {of} {unit} در {stage} می‌شمارد، اما اجرا {rows} ردیف و هیچ گامی گزارش کرد، پس نوار نمی‌تواند پیش برود.",
+  "run_plan_steps": "گام",
   "run_pace_slower_earlier": "{times} برابر کندتر از آخرین اجرای این آزمایش در این مرحله",
   "run_chart_parent": "والد",
   "run_block_no_points": "هنوز نقطه‌ای نیست",

@@ -185,9 +185,11 @@ orx exp view check <runId>
 ```
 
 It folds the run's real log: the stages it read, the measures and tables
-reported, what each pattern matched with its first line, and what the view
-still waits for. If the run has printed nothing yet, run it once more after
-its setup should be over, and stop there.
+reported, what each pattern matched with its first line, what the view still
+waits for, and where the plan and the run disagree, such as a stage the plan
+counts that the run reports only as rows: rows move no bar, so report each
+finished one as a step too. If the run has printed nothing yet, run it once
+more after its setup should be over, and stop there.
 
 Repair the view, plan or patterns with `view set`: they apply to the run in
 flight. A report missing from the code means cancelling, fixing and

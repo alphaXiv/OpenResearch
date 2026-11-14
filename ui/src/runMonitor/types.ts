@@ -362,6 +362,8 @@ export interface RunMonitor {
   logError?: string | null;
   /** A stage whose steps take at least twice as long as those of the run that timed it: how many times, against which run. */
   pace?: { times: number; than: "parent" | "earlier" } | null;
+  /** A plan that counts work the run reports only as rows, with no step for its bar to move by. */
+  disagrees?: { stage: string; of: number; unit: string | null; table: string; rows: number } | null;
   /** The signal the run leads with: one that went wrong (non-finite, or zero where the parent's isn't), else the view's first headline with a number. */
   headline: string | null;
   /** Each signal compared both ways; `versusOf` picks the way a block or the signal asks for. */

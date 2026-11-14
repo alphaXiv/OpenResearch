@@ -2102,6 +2102,8 @@
   "run_stop_reason": "{agent} का कारण: {reason}",
   "run_failed_log_error": "लॉग में आख़िरी त्रुटि: {line}",
   "run_pace_slower_parent": "इस चरण में पैरेंट से {times}× धीमा",
+  "run_plan_disagrees": "योजना {stage} में {of} {unit} गिनती है, पर रन ने {rows} पंक्तियाँ और कोई चरण नहीं बताया, इसलिए बार आगे नहीं बढ़ सकता।",
+  "run_plan_steps": "चरण",
   "run_pace_slower_earlier": "इस चरण में इस प्रयोग के पिछले रन से {times}× धीमा",
   "run_chart_parent": "पैरेंट",
   "run_block_no_points": "अभी कोई बिंदु नहीं",

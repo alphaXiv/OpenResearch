@@ -1543,6 +1543,7 @@ pub(crate) fn check(
             .map(|p| json!({"name": p.name, "done": p.done, "of": p.of, "unit": p.unit, "source": p.source}))
             .collect();
     }
+    report["disagrees"] = super::monitor::monitor(store, &row)?.1["disagrees"].take();
     if let Some(markup) = report["markup"].as_str().map(str::to_owned) {
         let compiled =
             compile(&markup).map_err(|problem| Refusal::Invalid(problem.text(&name, &fix)))?;

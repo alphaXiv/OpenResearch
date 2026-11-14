@@ -267,3 +267,11 @@ test("a run is named by its title, and a flag's sentence kept going after says s
   const rewritten = { ...kept, sentence: { template: "Loss **{loss}**, falling.", t: now } };
   assert.equal(model(run({ monitor: summary({ sentence: rewritten.sentence }) }), { monitor: rewritten }).note, null, "a new look's words need no note");
 });
+
+test("a plan the run reports only as rows says the plan and the run disagree, live and once ended", () => {
+  const disagrees = { stage: "bench", of: 16, unit: "cases", table: "cases", rows: 20 };
+  const said = m.run_plan_disagrees({ of: "16", unit: "cases", stage: "bench", rows: "20" });
+  assert.equal(bare(model(run(), { monitor: { ...running, disagrees } }).note), said);
+  assert.equal(bare(model(run({ status: "done", endedAt: now }), { monitor: { ...running, disagrees } }).note), said);
+  assert.equal(model(run(), { monitor: running }).note, null);
+});

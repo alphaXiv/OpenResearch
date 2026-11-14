@@ -392,6 +392,10 @@ fn checked(report: &serde_json::Value) -> String {
     if !stages.is_empty() {
         lines.push(format!("Stages read from the log: {}.", stages.join(", ")));
     }
+    if !report["disagrees"].is_null() {
+        let text = crate::engine::monitor::disagreement(&report["disagrees"]);
+        lines.push(format!("The plan and the run disagree: {text}."));
+    }
     let signals = names(&report["seen"]["signals"]);
     let tables: Vec<String> = report["seen"]["tables"]
         .as_object()

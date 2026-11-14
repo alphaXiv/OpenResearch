@@ -2102,6 +2102,8 @@
   "run_stop_reason": "Причина ({agent}): {reason}",
   "run_failed_log_error": "Последняя ошибка в журнале: {line}",
   "run_pace_slower_parent": "в {times} раза медленнее родителя на этом этапе",
+  "run_plan_disagrees": "План насчитывает {of} {unit} в {stage}, но запуск сообщил {rows} строк и ни одного шага, поэтому полоса не может двигаться.",
+  "run_plan_steps": "шагов",
   "run_pace_slower_earlier": "в {times} раза медленнее прошлого запуска этого эксперимента на этом этапе",
   "run_chart_parent": "Родитель",
   "run_block_no_points": "Точек пока нет",
