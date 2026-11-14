@@ -587,3 +587,17 @@ test("a shown active run without a summary ignores cached monitor data and draws
   assert.equal(container.querySelector('[role="img"][aria-label*="Loss"]'), null);
   assert.equal(requests.filter((r) => r.request.includes("/monitor")).length, 0);
 });
+
+test("a flag the run's last look raised after it ended opens the strip with what can still be chosen", async () => {
+  const ended = { ...flagged, flag: { ...flagged.flag, state: "waiting", mode: "copilot" } };
+  const requests = backend({ monitors: { r1: ended } });
+  const done = run("r1", { status: "done", endedAt: now, monitor: summary({ tone: "flag", sentence: flagged.sentence, flag: { id: "f1", state: "waiting", mode: "copilot" }, rev: flagged.rev }) });
+  const { container } = await banner([done]);
+  await settle();
+  const text = container.textContent.replace(/[⁦-⁩]/g, "");
+  assert.ok(text.includes(m.run_flag_ended_choose({ agent: "Claude" })), text);
+  assert.ok(![...container.querySelectorAll("button")].some((b) => b.textContent.includes(m.experiments_stop_run())), "an ended run has nothing to stop");
+  assert.ok(text.includes(m.run_flag_ask({ agent: "Claude" })), text);
+  await click(find("button", m.run_flag_keep_result()));
+  assert.equal(requests.find((r) => r.request === "POST /api/runs/r1/flag").body.choice, "keep");
+});

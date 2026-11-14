@@ -194,8 +194,10 @@ export function runTone(run: Run, monitor: RunMonitor | null = null): Tone {
   const live = runActive(run.status);
   if (run.status === "lost" || (live && run.contact !== null && run.contact.type !== "stopping")) return "lost";
   if (monitor) {
-    if (!live) return monitor.revising && run.status === "cancelled" ? "revising" : STATUS_TONE[run.status];
-    return monitor.flag && unsettled(monitor.flag.state) ? "flag" : STATUS_TONE[run.status];
+    if (!live && monitor.revising && run.status === "cancelled") return "revising";
+    // A flag no one settled outlasts the run, and colours one that finished.
+    const flagged = monitor.flag && unsettled(monitor.flag.state) && (live || run.status === "done");
+    return flagged ? "flag" : STATUS_TONE[run.status];
   }
   // The server reprojects an ended run whose summary still says it is going before it lists it.
   return run.monitor?.tone ?? STATUS_TONE[run.status];
@@ -265,8 +267,8 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   const stated = statedFlag(run, fetched);
   // A flag's words and evidence never change, so a lagging monitor still supplies them for the same flag.
   const flag = stated && { id: stated.id, state: stated.state, mode: stated.mode, record: fetched?.flag?.id === stated.id ? fetched.flag : null };
-  const needsChoice = live && flag?.state === "waiting" && flag.mode === "copilot";
-  const looking = live && (flag?.state === "waking" || flag?.state === "agent_looking" || flag?.state === "asking");
+  const needsChoice = flag?.state === "waiting" && flag.mode === "copilot";
+  const looking = flag?.state === "waking" || flag?.state === "agent_looking" || flag?.state === "asking";
 
   const watched = monitor ? monitor.sentence : summary?.sentence ?? null;
   let sentence: RunModel["sentence"];
@@ -416,7 +418,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     bar: { segments, whole, frozen: tone === "lost" || degraded, label: barLabel([sentence.text, caption, timeLabel, etaElapsed ? etaDetail : ""]) },
     ticks,
     flag,
-    flagDetail: live && flag?.record?.detail ? fillSentence(flag.record.detail, bindings, signals) : null,
+    flagDetail: flag?.record?.detail ? fillSentence(flag.record.detail, bindings, signals) : null,
     needsChoice,
     looking,
     note,

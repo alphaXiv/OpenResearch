@@ -30,7 +30,7 @@ export function Issue({ model, flag, agent, onOpenRun }: {
     : m.run_flag_log_lines_other({ from: ltr(fmtNumber(evidence.from)), to: ltr(fmtNumber(evidence.to)) }));
   const status = model.looking || state === "asking"
     ? (evidence ? m.run_flag_reading({ agent: name }) : m.run_flag_reading_what({ agent: name }))
-    : state === "raised" || state === "waking" ? m.run_flag_waking({ agent: name }) : null;
+    : state === "raised" || state === "waking" ? (model.live ? m.run_flag_waking : m.run_flag_waking_ended)({ agent: name }) : null;
 
   const locked = Boolean(choice?.sending);
   const pick = (value: FlagAnswer) => ({
@@ -63,10 +63,10 @@ export function Issue({ model, flag, agent, onOpenRun }: {
       ))}
       {model.needsChoice ? (
         <div className="mt-2.5 flex flex-wrap items-center gap-2" aria-describedby={evidence ? evidenceId : undefined}>
-          <Button size="small" variant="danger" {...pick("stop")}><CircleStop size={14} />{m.experiments_stop_run()}</Button>
-          <Button size="small" {...pick("keep")}>{m.run_flag_keep_going()}</Button>
+          {model.live && <Button size="small" variant="danger" {...pick("stop")}><CircleStop size={14} />{m.experiments_stop_run()}</Button>}
+          <Button size="small" {...pick("keep")}>{model.live ? m.run_flag_keep_going() : m.run_flag_keep_result()}</Button>
           <Button size="small" {...pick("ask")}>{m.run_flag_ask({ agent: name })}</Button>
-          <span className="ms-auto text-xs text-ink-subtext">{m.run_flag_until_you_choose()}</span>
+          <span className="ms-auto text-xs text-ink-subtext">{model.live ? m.run_flag_until_you_choose() : m.run_flag_ended_choose({ agent: name })}</span>
           {!locked && choice?.error && <p role="alert" className="m-0 w-full text-xs text-ink-red">{choice.error}</p>}
         </div>
       ) : status && (

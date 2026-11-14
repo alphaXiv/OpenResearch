@@ -84,7 +84,7 @@ export function RunBanner({ sessionId, agent, onOpenExperiment, onOpenRun }: {
   const waiting = runs.filter((item) => {
     const cached = shown && item.run.monitor ? workspace.queryClient.getQueryData(getRunMonitorQuery(item.run.id).queryKey) ?? null : null;
     const flag = statedFlag(item.run, cached);
-    return runActive(item.run.status) && flag?.state === "waiting" && flag.mode === "copilot";
+    return flag?.state === "waiting" && flag.mode === "copilot";
   }).map((item) => item.run.id);
   const openId = opened ? opened.id : waiting[0] ?? null;
   const singleLevel = level ?? (waiting.length > 0 ? "strip" : remembered);

@@ -855,8 +855,17 @@ fn plan_choice(
     if repeated {
         return Ok(None);
     }
-    if flags::settled(flag) || Phase::parse(&run.status).is_some_and(Phase::is_terminal) {
+    if flags::settled(flag) {
         return Err((StatusCode::CONFLICT, settled(run, flag)));
+    }
+    if choice == "stop" && Phase::parse(&run.status).is_some_and(Phase::is_terminal) {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "Run {id} already ended ({}), so there is nothing to stop. Settle flag {flag_id} with `orx exp flag {id} --flag {flag_id} --keep --reason '…'` when its result stands, or fix experiment {exp} and run it again.",
+                run.status
+            ),
+        ));
     }
     let body = |flag: &str| {
         json!({
@@ -892,9 +901,6 @@ fn plan_choice(
                 let Some(other) = store.get_run(&row.run_id).map_err(failed)? else {
                     continue;
                 };
-                if Phase::parse(&other.status).is_some_and(Phase::is_terminal) {
-                    continue;
-                }
                 let theirs = flags::read(store, &other).map_err(failed)?;
                 if let Some(open) = theirs
                     .iter()

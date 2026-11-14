@@ -64,7 +64,7 @@ export function RunPage({ run, name, now }: { run: Run; name: string; now: numbe
       )}
       {model.stale && !failed && <p className="m-0 mt-1.5 text-xs text-ink-subtext">{model.stale.why} · {model.stale.age}</p>}
       {model.note && <p className="m-0 mt-1.5 text-sm text-ink-subtext">{model.note}</p>}
-      {model.live && model.flag?.record && <Issue model={model} flag={model.flag.record} agent={m.chat_the_agent()} />}
+      {model.flag?.record && <Issue model={model} flag={model.flag.record} agent={m.chat_the_agent()} />}
       {failed && (
         <div className="mt-2 flex items-center gap-2 text-xs text-ink-subtext">
           {model.stale ? `${model.stale.why} · ${model.stale.age}` : m.run_monitor_load_failed()}

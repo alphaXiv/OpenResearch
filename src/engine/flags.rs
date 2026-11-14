@@ -296,7 +296,11 @@ pub(crate) fn wake(run: &StoredRun, flag: &Value, asked: bool) -> String {
     };
     let next = if Phase::parse(&run.status).is_some_and(Phase::is_terminal) {
         format!(
-            "Run {id} has ended ({}), so there is nothing to stop or settle; check its result\nbefore relying on it.",
+            "Run {id} has ended ({}), so there is nothing to stop; check its result before relying\n\
+             on it, and say what you found. If the result stands:\n\
+             orx exp flag {id} --flag {flag_id} --keep --reason '…'\n\
+             To leave it to the user: orx exp flag {id} --flag {flag_id} --ask --reason '…'\n\
+             If it does not, fix experiment {exp} and run it again.",
             run.status
         )
     } else {

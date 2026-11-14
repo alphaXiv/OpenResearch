@@ -3186,8 +3186,8 @@ async fn the_monitor_route_serves_one_rev_and_says_what_it_cannot() {
 }
 
 /// A flag's choice: the user keeps it going or stops the run, the agent hands it to the user, a
-/// repeated request answers as the first did, and a settled flag or an ended run's is refused in
-/// the words `orx exp flag` prints.
+/// repeated request answers as the first did, a settled flag or a stop of an ended run is refused
+/// in the words `orx exp flag` prints.
 #[tokio::test]
 async fn a_flag_is_settled_once_by_whoever_chooses_first() {
     let f = Fixture::new().await;
@@ -3318,10 +3318,19 @@ async fn a_flag_is_settled_once_by_whoever_chooses_first() {
         crate::store::StopBy::Agent
     );
 
-    assert_eq!(
-        refused(choose("done", json!({"flagId": "f4", "choice": "keep"})).await),
-        "Run done: flag f4 is already settled; run `orx exp status exp --run done`."
+    // An ended run has nothing to stop; its result can still be kept, or asked about.
+    assert_eq!(flag_of("done")["state"], "waiting");
+    assert!(
+        refused(choose("done", json!({"flagId": "f4", "choice": "stop"})).await)
+            .contains("Run done already ended (done), so there is nothing to stop.")
     );
+    let kept = choose(
+        "done",
+        json!({"flagId": "f4", "choice": "keep", "reason": "Expected."}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(kept["flag"]["state"], "kept");
     assert!(
         refused(choose("live", json!({"flagId": "nope", "choice": "keep"})).await).contains(
             "Run live has no flag nope; run `orx exp status exp --run live` to see its flags."

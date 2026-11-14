@@ -1134,12 +1134,14 @@ fn evaluate(
             .as_ref()
             .is_some_and(|estimate| estimate["floor"] == true);
     let pending = estimate.as_ref().is_some_and(|e| e["pending"] == true);
-    let open = super::flags::open(&life.flags).filter(|_| life.live());
+    // A flag no one settled waits after the run ends too; it colours a run that finished.
+    let open = super::flags::open(&life.flags);
+    let flagged = open.is_some() && (life.live() || life.phase == Some(Phase::Done));
     let mut summary = json!({
-        "tone": match (life.revising, open) {
+        "tone": match (life.revising, flagged) {
             (true, _) => "revising",
-            (false, Some(_)) => "flag",
-            (false, None) => tone(life.phase),
+            (false, true) => "flag",
+            (false, false) => tone(life.phase),
         },
         "whole": whole,
         "stage": snapshot.and_then(Snapshot::progress).map(|phase| {
@@ -5759,6 +5761,31 @@ mod tests {
             monitor_at(&f, &counted, T0 + 60_000).0["disagrees"],
             Value::Null
         );
+    }
+
+    #[test]
+    fn a_flag_raised_once_the_run_is_done_colours_it_and_waits_for_the_user() {
+        let f = Fixture::new("orx-monitor-flag-after-end");
+        let run = f.run("done", local());
+        f.store
+            .put_chat_session("chat-1", "claude-code", Some("copilot"));
+        f.store.conn_execute_for_tests(
+            "UPDATE runs SET chat_session_id = 'chat-1', ended_at = 1 WHERE id = 'r1'",
+        );
+        f.collect(&folded(&declared(0..=20, 20)));
+        let row = f.store.get_run("r1").unwrap().unwrap();
+        let body = json!({"id": "f1", "source": "look", "at": T0 + 30_000, "template": "**12** of 20 cases report correct 0.",
+            "detail": "**12** of 20 cases report correct 0.", "text": "**12** of 20 cases report correct 0.", "evidence": null});
+        let flag = super::super::flags::new_flag(&f.store, &row, body, true).unwrap();
+        f.store.raise_flags(&[flag], T0 + 30_000).unwrap();
+        let (monitor, _) = monitor_at(&f, &run, T0 + 31_000);
+        let summary = current(&f.store, &row).unwrap().unwrap().summary().clone();
+        assert_eq!(summary["tone"], "flag");
+        assert_eq!(
+            summary["flag"],
+            json!({"id": "f1", "state": "waiting", "mode": "copilot"})
+        );
+        assert_eq!(monitor["flag"]["state"], "waiting");
     }
 
     #[test]

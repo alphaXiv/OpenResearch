@@ -73,7 +73,7 @@ export function RunStrip({ model, monitor, runNo, runCount, agent, label, onTogg
   onOpenRun?: OpenRun;
 }) {
   const data = monitor && monitor.status !== "loading" ? monitor.data : null;
-  const flag = model.live ? model.flag?.record ?? null : null;
+  const flag = model.flag?.record ?? null;
   const age = model.live && model.sentence.at !== null ? model.sentence.at : null;
   const failed = monitor?.status === "error";
   const { text, title } = label ?? { text: model.name, title: model.name };

@@ -1591,7 +1591,8 @@ impl Store {
              CREATE INDEX IF NOT EXISTS idx_runs_experiment ON runs(experiment_id, created_at);
              CREATE INDEX IF NOT EXISTS idx_runs_chat ON runs(chat_session_id, created_at);
              CREATE INDEX IF NOT EXISTS idx_run_notices_terminal ON run_notices(chat_session_id, delivered_at) WHERE kind = 'terminal' AND delivered_at IS NOT NULL;
-             CREATE INDEX IF NOT EXISTS idx_chat_turns_completed ON chat_turns(session_id, updated_at) WHERE state = 'completed';"
+             CREATE INDEX IF NOT EXISTS idx_chat_turns_completed ON chat_turns(session_id, updated_at) WHERE state = 'completed';
+             CREATE INDEX IF NOT EXISTS idx_run_monitor_flags ON run_monitor_events(run_id) WHERE kind = 'flag';"
         ))?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_signal_collection AFTER DELETE ON runs BEGIN DELETE FROM signal_collections WHERE run_id = OLD.id; END;")?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_run_monitor_state AFTER DELETE ON runs BEGIN DELETE FROM run_monitor_state WHERE run_id = OLD.id; END;")?;
@@ -2281,8 +2282,8 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    /// The runs each chat shows above its composer: live ones, and ended ones until a turn completes
-    /// after the one that carried their terminal notice (the notice is marked delivered only after
+    /// The runs each chat shows above its composer: live ones, ones with a flag no one settled, and
+    /// ended ones until a turn completes after the one that carried their terminal notice (the notice is marked delivered only after
     /// that turn is accepted, so its time is no anchor). Costs what is live and unanswered, not history.
     pub fn chat_shown_runs(&self) -> Result<Vec<StoredChatShownRun>> {
         let mut stmt = self.conn.prepare(&shown_runs_sql())?;
@@ -7018,6 +7019,12 @@ const UNSETTLED_RUN: &str = "(status NOT IN ('done', 'failed', 'cancelled', 'los
      OR cancel_unconfirmed IS NOT NULL
      OR CASE WHEN json_valid(contact) THEN json_extract(contact, '$.type') END = 'stopping')";
 
+/// Run `r`'s flag `f` that no one has kept going or stopped on: it waits for someone, ended or not.
+const OPEN_FLAG: &str = "(f.kind = 'flag' AND r.cancel_requested = 0
+     AND NOT EXISTS (SELECT 1 FROM run_monitor_events c WHERE c.run_id = r.id AND c.kind = 'choice'
+                     AND json_extract(c.body_json, '$.flagId') = json_extract(f.body_json, '$.id')
+                     AND json_extract(c.body_json, '$.c') IN ('keep', 'stop')))";
+
 fn shown_runs_sql() -> String {
     format!(
         "WITH notices(chat, run, delivered_at, client_turn_id) AS (
@@ -7033,6 +7040,12 @@ fn shown_runs_sql() -> String {
              WHERE chat_session_id IS NOT NULL AND {UNSETTLED_RUN}
              UNION SELECT s.chat_session_id, s.run_id FROM run_subscriptions s
                    WHERE s.run_id IN (SELECT id FROM runs WHERE {UNSETTLED_RUN})
+             UNION SELECT r.chat_session_id, r.id FROM run_monitor_events f
+                   JOIN runs r ON r.id = f.run_id
+                   WHERE r.chat_session_id IS NOT NULL AND {OPEN_FLAG}
+             UNION SELECT s.chat_session_id, s.run_id FROM run_monitor_events f
+                   JOIN runs r ON r.id = f.run_id
+                   JOIN run_subscriptions s ON s.run_id = r.id WHERE {OPEN_FLAG}
              UNION SELECT chat, run FROM notices n
                    WHERE NOT EXISTS (
                        SELECT 1 FROM chat_turns own
@@ -10809,6 +10822,44 @@ mod tests {
     }
 
     #[test]
+    fn a_flag_raised_after_the_reply_brings_an_ended_run_back_until_someone_settles_it() {
+        let dir = std::env::temp_dir().join(format!("orx-store-shown-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat"))
+            .unwrap();
+        ended_run_with_notice(&store, "chat", "r1", Some("result"), Some(20));
+        chat_turn(&store, "chat", "result", "completed", 15, 30);
+        assert!(
+            shown_ids(&store, "chat").is_empty(),
+            "the reply answered it"
+        );
+
+        let flag = NewFlag {
+            run_id: "r1".into(),
+            body: serde_json::json!({"id": "f1", "source": "look", "text": "correct 0"}),
+            wakes: Vec::new(),
+            noted: Vec::new(),
+            only_if_clear: true,
+        };
+        store.raise_flags(&[flag], 40).unwrap();
+        assert_eq!(shown_ids(&store, "chat"), ["r1"]);
+
+        let keep = FlagChoice {
+            run_id: "r1".into(),
+            body: serde_json::json!({"flagId": "f1", "c": "keep", "by": "user"}),
+            wakes: Vec::new(),
+        };
+        store.record_flag_choices(&[keep], None, 50).unwrap();
+        assert!(
+            shown_ids(&store, "chat").is_empty(),
+            "a kept flag lets it go"
+        );
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn an_ended_run_leaves_once_a_reply_completes_after_its_notice() {
         let dir = std::env::temp_dir().join(format!("orx-store-shown-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
@@ -11391,6 +11442,8 @@ mod tests {
                 "chat_sessions",
                 "idx_runs_unsettled",
                 "idx_run_notices_pending",
+                // A flag is raised only on trouble, and once per cause a run.
+                "idx_run_monitor_flags",
             ]
             .iter()
             .any(|name| step.contains(name));
