@@ -1,6 +1,7 @@
 //! Stop rules: conditions an agent declares on an experiment, frozen on each run at launch and
 //! checked by `orx up` on each report the run makes, with no model involved.
 
+use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 const MAX_RULES: usize = 32;
@@ -433,7 +434,7 @@ pub(crate) fn frozen(run: &str, config: Option<&str>) -> crate::error::Result<Ve
 
 /// What a rule has counted on one run, kept in the run's monitor state so a restart neither
 /// counts a report twice nor acts twice.
-#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Count {
     /// Where on the signal's axis the last report this rule counted was.
@@ -499,10 +500,12 @@ pub(crate) fn check(rules: &[Rule], counts: Option<&Value>, facts: &Facts) -> Op
     let mut trips = Vec::new();
     let mut changed = false;
     for rule in rules {
-        let was: Count = kept
-            .get(&rule.name)
-            .and_then(|count| serde_json::from_value(count.clone()).ok())
-            .unwrap_or_default();
+        // A count this orx cannot read is left as it is: acting on it could stop a run twice.
+        let was: Count = match kept.get(&rule.name).map(Count::deserialize) {
+            None => Count::default(),
+            Some(Ok(count)) => count,
+            Some(Err(_)) => continue,
+        };
         if was.tripped {
             continue;
         }
@@ -516,10 +519,7 @@ pub(crate) fn check(rules: &[Rule], counts: Option<&Value>, facts: &Facts) -> Op
         }
         if count != was {
             changed = true;
-            kept.insert(
-                rule.name.clone(),
-                serde_json::to_value(&count).unwrap_or_default(),
-            );
+            kept.insert(rule.name.clone(), json!(count));
         }
     }
     changed.then(|| Checked {

@@ -5745,6 +5745,22 @@ mod tests {
             (&json!("nan-loss"), &json!("stop"), &json!(true))
         );
 
+        // A count this orx cannot read is never taken for none.
+        ruled(
+            &f,
+            "unread",
+            "exp",
+            local(),
+            json!([{"name": "nan-loss", "text": "t", "does": "stop", "when": {"nonFinite": "loss"}}]),
+        );
+        f.store.put_run_monitor_state(
+            "unread",
+            &json!({"ruleState": {"nan-loss": {"held": "three"}}}),
+        );
+        reported(&f, "unread", "loss", &["NaN"], 600);
+        rules_at(&f, "unread", T0 + 2_000);
+        assert_eq!(stopped_by(&f, "unread"), None);
+
         // A restart forgets nothing it counted: the same reports never stop it again.
         f.restart();
         f.store
