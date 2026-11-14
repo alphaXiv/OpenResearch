@@ -89,6 +89,9 @@ export function Watch({ monitor, runId, tone, live, now }: { monitor: Pick<RunMo
                       {outcome}{raised?.choice?.reason ? ` ${autoDir(raised.choice.reason)}` : ""}
                     </span>
                   )}
+                  {row.look.notedUnder && (
+                    <span className="block text-xs text-ink-subtext">{m.run_watch_noted({ clock: clockText(row.look.notedUnder) })}</span>
+                  )}
                   {row.look.withheld?.map((note) => (
                     <span key={note} className={cn("block text-xs", TONE_INK.flag)}>{autoDir(note)}</span>
                   ))}

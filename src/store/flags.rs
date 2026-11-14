@@ -66,6 +66,21 @@ fn settles(event: &FlagEvent) -> bool {
     event.kind == "choice" && matches!(event.body["c"].as_str(), Some("keep" | "stop"))
 }
 
+/// The id of the run's newest flag no choice settled.
+pub(super) fn open_flag(events: &[FlagEvent]) -> Option<&str> {
+    let settled: BTreeSet<&str> = events
+        .iter()
+        .filter(|event| settles(event))
+        .filter_map(|event| event.body["flagId"].as_str())
+        .collect();
+    events
+        .iter()
+        .rev()
+        .filter(|event| event.kind == "flag")
+        .filter_map(|event| event.body["id"].as_str())
+        .find(|id| !settled.contains(id))
+}
+
 impl Store {
     /// Withdraws each flag's wake not yet claimed whose run ended after it was raised: the run's
     /// end reaches the chat as its own notice, and the wake would ask to stop what has stopped.
@@ -81,11 +96,12 @@ impl Store {
         Ok(())
     }
 
-    /// The run's flags and the choices made on them, oldest first.
+    /// The run's flags, the choices made on them and what looks noted while one was open,
+    /// oldest first.
     pub(crate) fn run_flag_events(&self, run_id: &str) -> Result<Vec<FlagEvent>> {
         let mut stmt = self.conn.prepare(
             "SELECT seq, kind, created_at, body_json FROM run_monitor_events
-             WHERE run_id = ?1 AND kind IN ('flag', 'choice') ORDER BY seq",
+             WHERE run_id = ?1 AND kind IN ('flag', 'choice', 'noted') ORDER BY seq",
         )?;
         let rows = stmt.query_map([run_id], |row| {
             Ok((
@@ -164,17 +180,7 @@ impl Store {
         let mut raised = Vec::new();
         for flag in flags {
             let events = self.run_flag_events(&flag.run_id)?;
-            let settled: BTreeSet<&str> = events
-                .iter()
-                .filter(|event| settles(event))
-                .filter_map(|event| event.body["flagId"].as_str())
-                .collect();
-            let open = events.iter().any(|event| {
-                event.kind == "flag"
-                    && !event.body["id"]
-                        .as_str()
-                        .is_some_and(|id| settled.contains(id))
-            });
+            let open = open_flag(&events).is_some();
             let fingerprint = flag.body["fingerprint"].as_str();
             let repeated = match fingerprint {
                 Some(fingerprint) => {

@@ -111,3 +111,10 @@ test("a look that left out a credential says where, once, on its own row", async
   const { container } = await watched({ looks });
   assert.equal(text(container).split("line 12 of the log").length, 2, text(container));
 });
+
+test("a look that flagged while a flag was open says it was noted under that flag", async () => {
+  const looks = [look("1", now - 20_000, "Checkpoint write failed at step **450**.", { notedUnder: now - 60_000 })];
+  const { container } = await watched({ looks });
+  assert.match(text(container), /Noted while the flag from .+ was open\./);
+  assert.doesNotMatch(text(container), new RegExp(m.run_watch_flagged()));
+});

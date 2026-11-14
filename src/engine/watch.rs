@@ -2204,6 +2204,18 @@ fn read_facts(store: &Store, run: &StoredRun) -> Result<Value> {
     let mut error = None;
     let mut sentence = None;
     let company = store.watch_look_company(&run.id)?;
+    // A look whose flag met one still open is noted under that one.
+    let events = store.run_flag_events(&run.id)?;
+    let noted_under = |look: i64| {
+        let look = look.to_string();
+        let noted = events
+            .iter()
+            .find(|event| event.kind == "noted" && event.body["lookId"].as_str() == Some(&look))?;
+        events
+            .iter()
+            .find(|event| event.kind == "flag" && event.body["id"] == noted.body["flagId"])
+            .map(|flag| flag.at)
+    };
     for (look, row) in &looks {
         let others: Vec<String> = company
             .iter()
@@ -2252,6 +2264,7 @@ fn read_facts(store: &Store, run: &StoredRun) -> Result<Value> {
             "why": look.reason,
             "stage": row.basis["stage"],
             "withheld": row.cursor["withheld"].as_array().cloned().unwrap_or_default(),
+            "notedUnder": noted_under(look.id),
         }));
     }
     let floor_until = {

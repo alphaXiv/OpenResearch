@@ -695,3 +695,48 @@ fn a_last_look_that_failed_is_taken_once_more_and_then_its_failure_stands() {
         .unwrap();
     assert!(store.run_watch_terminal_done("b").unwrap());
 }
+
+#[tokio::test]
+async fn a_look_that_flags_while_a_flag_is_open_is_noted_under_it() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let calls_dir = crate::config::home_dir().unwrap().join("claude-calls");
+    fake_claude(
+        &calls_dir,
+        &[
+            r#"{"runs": {"r1": {"status": "flag", "line": "Checkpoint write failed at step **450**.", "evidence": [{"from": 26, "to": 69}]}}}"#,
+        ],
+    );
+    let store = Store::open().unwrap();
+    chat(&store, "chat", "claude-code");
+    let a = run(&store, "a", "Depth 6", "chat", LOG);
+    let open = json!({"id": "f1", "source": "tripwire", "fingerprint": "error:x", "at": 5, "template": "t",
+        "detail": "t", "text": "Skipped samples.", "evidence": null, "whole": 0.2});
+    store
+        .raise_flags(
+            &[super::super::flags::new_flag(&store, &a, open, true).unwrap()],
+            5,
+        )
+        .unwrap();
+    let id = look(&store, "chat", "change", &[("a", "r1")]);
+
+    take(id).await.unwrap();
+
+    let results = store.watch_look_runs(id).unwrap();
+    assert_eq!(
+        results[0].result.as_deref(),
+        Some("line"),
+        "never Flagged for a flag that does not exist"
+    );
+    let flags = super::super::flags::read(&store, &a).unwrap();
+    assert_eq!(flags.len(), 1, "{flags:?}");
+    assert_eq!(
+        flags[0]["noted"][0]["text"],
+        "Checkpoint write failed at step **450**."
+    );
+    assert_eq!(flags[0]["noted"][0]["lookId"], id.to_string());
+    let facts = run_facts(&store, &a).unwrap();
+    assert_eq!(facts["looks"][0]["notedUnder"], 5);
+    assert_eq!(facts["looks"][0]["said"], "new");
+}

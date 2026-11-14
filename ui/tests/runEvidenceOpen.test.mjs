@@ -77,3 +77,15 @@ test("evidence on the log already open moves it to the cited bytes", async () =>
   await openEvidence();
   assert.ok(starts.slice(seen).includes(evidence.byteFrom), JSON.stringify(starts));
 });
+
+test("what a look flagged while the flag was open is shown with the flag's evidence", async () => {
+  flagged.flag.noted = [{ at: flagged.flag.at + 60_000, text: "Checkpoint write failed at step **450**.", lookId: "7" }];
+  try {
+    await page(() => [experiment]);
+    await settle();
+    const said = document.body.textContent.replace(/[⁦-⁩]/g, "");
+    assert.match(said, /Also noted at .+: Checkpoint write failed at step 450\./, said.slice(0, 2000));
+  } finally {
+    delete flagged.flag.noted;
+  }
+});

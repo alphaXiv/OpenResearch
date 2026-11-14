@@ -7,6 +7,7 @@ import { m } from "../../paraglide/messages.js";
 import { chooseFlag, type FlagAnswer } from "../../queries/projects";
 import type { RunModel } from "../../runMonitor/model";
 import type { Flag } from "../../runMonitor/types";
+import { clockText } from "../../runMonitor/words";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../../tabPreview";
 import { useWorkspace } from "../../workspace";
 import { Button } from "../ui";
@@ -55,6 +56,11 @@ export function Issue({ model, flag, agent, onOpenRun }: {
           </div>
         </div>
       )}
+      {flag.noted?.map((noted) => (
+        <p key={noted.lookId} className="m-0 mt-1.5 text-xs text-ink-subtext">
+          {m.run_flag_also_noted({ clock: clockText(noted.at), text: autoDir(noted.text.replaceAll("**", "")) })}
+        </p>
+      ))}
       {model.needsChoice ? (
         <div className="mt-2.5 flex flex-wrap items-center gap-2" aria-describedby={evidence ? evidenceId : undefined}>
           <Button size="small" variant="danger" {...pick("stop")}><CircleStop size={14} />{m.experiments_stop_run()}</Button>

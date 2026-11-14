@@ -1,5 +1,6 @@
 use super::*;
 use serde_json::Value;
+use std::collections::BTreeSet;
 
 /// One look the watcher took, or is about to take, at a chat's runs.
 #[derive(Debug, Clone, PartialEq)]
@@ -160,6 +161,25 @@ impl Store {
         flags: &[NewFlag],
     ) -> Result<()> {
         let tx = self.begin_immediate()?;
+        // A look's flag on a run with one still open joins that one, as what the look noted.
+        let raised = self.append_flags(flags, now)?;
+        let mut noted = BTreeSet::new();
+        for (flag, raise) in flags.iter().zip(raised) {
+            if raise != Raise::Waits {
+                continue;
+            }
+            let events = self.run_flag_events(&flag.run_id)?;
+            let open = super::flags::open_flag(&events);
+            let mut body = flag.body.clone();
+            body["flagId"] = serde_json::json!(open);
+            tx.execute(
+                "INSERT INTO run_monitor_events (run_id, seq, kind, created_at, body_json)
+                 VALUES (?1, (SELECT COALESCE(MAX(seq), 0) + 1 FROM run_monitor_events WHERE run_id = ?1),
+                         'noted', ?2, ?3)",
+                params![flag.run_id, now, body.to_string()],
+            )?;
+            noted.insert(flag.run_id.as_str());
+        }
         tx.execute(
             "UPDATE watch_looks SET state = ?2, done_at = ?3, usage_json = ?4, error = ?5,
                     summary_template = ?6, summary_text = ?7
@@ -182,7 +202,10 @@ impl Store {
                 params![
                     id,
                     result.run_id,
-                    result.result,
+                    match result.result.as_str() {
+                        "flag" if noted.contains(result.run_id.as_str()) => "line",
+                        said => said,
+                    },
                     result.template,
                     result.text,
                     result.whole,
@@ -192,7 +215,6 @@ impl Store {
                 ],
             )?;
         }
-        self.append_flags(flags, now)?;
         tx.commit()?;
         Ok(())
     }

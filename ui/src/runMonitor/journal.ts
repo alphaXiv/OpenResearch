@@ -29,6 +29,9 @@ export interface JournalRow {
   count: number;
 }
 
+/** A look that says something beyond its words: where it left a credential out, or the flag it was noted under. */
+const ownRow = (look: Look) => Boolean(look.withheld?.length || look.notedUnder);
+
 /**
  * The journal lists changes, not looks, newest first: looks that kept the words before them fold into that row,
  * which says how many looks have said them since when. Flags and failures stand on their own.
@@ -38,7 +41,7 @@ export function journalRows(looks: Look[]): JournalRow[] {
   for (const look of looks) {
     const last = rows.at(-1);
     const keeps = last && look.said !== "flag" && last.look.said !== "error" && last.look.said !== "interrupted"
-      && !look.withheld?.length && !last.look.withheld?.length && look.template !== null && look.template === last.look.template;
+      && !ownRow(look) && !ownRow(last.look) && look.template !== null && look.template === last.look.template;
     if (keeps) {
       last.since ??= last.look;
       last.count += 1;

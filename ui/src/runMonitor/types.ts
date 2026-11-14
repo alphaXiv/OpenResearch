@@ -128,6 +128,8 @@ export interface Look {
   stage?: string | null;
   /** Where this look first left out what looks like a credential, in English; absent from an older server. */
   withheld?: string[];
+  /** When the flag was raised that was open as this look flagged, which noted it instead; absent when none was. */
+  notedUnder?: number | null;
 }
 
 interface Evidence {
@@ -155,6 +157,8 @@ export interface Flag {
   source?: "look" | "tripwire" | "rule";
   /** The look that raised it, which the journal shows it under. */
   lookId?: string;
+  /** What later looks flagged while this one was open, oldest first; absent when none did. */
+  noted?: { at: number; text: string; lookId: string }[];
 }
 
 /** What a run is doing before it reports a step: the newest thing its log said since its stage began. */

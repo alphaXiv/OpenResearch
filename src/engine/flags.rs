@@ -131,6 +131,14 @@ pub(crate) fn read(store: &Store, run: &StoredRun) -> Result<Vec<Value>> {
             },
         };
         let mut flag = event.body.clone();
+        let noted: Vec<Value> = events
+            .iter()
+            .filter(|e| e.kind == "noted" && e.body["flagId"] == id)
+            .map(|e| json!({"at": e.at, "text": e.body["text"], "lookId": e.body["lookId"]}))
+            .collect();
+        if !noted.is_empty() {
+            flag["noted"] = json!(noted);
+        }
         flag["state"] = json!(state);
         // A flag that waits for the user is the user's to settle, whatever the chat's autonomy.
         flag["mode"] = json!(if state == "waiting" { "copilot" } else { mode });

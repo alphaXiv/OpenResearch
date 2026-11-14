@@ -380,7 +380,9 @@ One retry carries what was wrong; a run whose answer stays wrong keeps its last
 sentence. Each look is a row written before it is sent and settled in one
 transaction; a look `orx up` stopped after sending is recorded as interrupted and
 never sent again, so evidence is never lost and a model is never billed twice
-for one look. A look that flags raises a flag in the transaction that settles it.
+for one look. A look that flags raises a flag in the transaction that settles it;
+on a run with a flag still open it is noted under that flag instead, its row a
+sentence that says so and its words a line beside the open flag's evidence.
 
 ### Flags
 
