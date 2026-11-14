@@ -126,3 +126,15 @@ test("otherwise the summary counts the runs in each state and, in the same sente
   const failed = model("f", summary({ tone: "failed" }), { status: "failed", endedAt: now });
   assert.equal(said([model("a", eta(29 * 60_000)), failed]).firstDone, bare(m.run_summary_first_done({ duration: "29m" })));
 });
+
+test("the watcher's summary stands for the runs its look covered, with names and numbers bound to each run", () => {
+  const models = [model("a", scored(1.31, { bindings: { val_bpb: 1.31 } })), model("b", scored(1.207, { bindings: { val_bpb: 1.207 } }))];
+  const watch = { lookId: "7", at: now, runIds: ["b", "a"], keys: { r1: "a", r2: "b" }, summary: { template: "{r2} leads at val bpb **{r2:val_bpb}**; {r1} is close behind." } };
+  const { parts } = summarize(models, shortLabels(depths(4, 6)), watch);
+  assert.equal(bare(parts.map((part) => part.text).join("")), "Depth 6 leads at val bpb **1.21**; Depth 4 is close behind.");
+  // A look that missed a run now live, or a run that needs attention, gives the words back to orx.
+  const third = [...models, model("c", summary())];
+  assert.doesNotMatch(bare(summarize(third, shortLabels(depths(4, 6, 8)), watch).parts.map((part) => part.text).join("")), /close behind/);
+  const failed = [models[0], model("b", scored(1.2, { tone: "failed" }), { status: "failed", endedAt: now })];
+  assert.match(bare(summarize(failed, shortLabels(depths(4, 6)), watch).parts[0].who ?? ""), /Depth 6/);
+});

@@ -107,7 +107,10 @@
         "said": "new",
         "text": "Loss **2.60**, falling steadily.",
         "template": "Loss **{loss}**, falling steadily.",
-        "locale": "en"
+        "kind": "ceiling",
+        "bindings": { "loss": 2.6 },
+        "with": [],
+        "why": "Loss: new output since the last look"
       }
     ],
     "spentUsd": null,

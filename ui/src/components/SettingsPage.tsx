@@ -402,6 +402,7 @@ function AgentsTab({ remote }: { remote: boolean }) {
       <h2>{m.settings_page_harnesses()}</h2>
       <AgentList remote={remote} />
       <NestedDelegationRow />
+      <RunWatchingRow />
       <ModelSettings heading={<h3 className={cn(SECTION_CLASS_NAME, "mt-8")}>{m.settings_models()}</h3>} />
     </>
   );
@@ -1132,6 +1133,27 @@ function NestedDelegationRow() {
         checked={uiState.nestedDelegation}
         aria-label={m.settings_nested_subagents()}
         onClick={() => mutUpdateUiState.run(workspace, { nestedDelegation: !uiState.nestedDelegation })}
+      />
+    </div>
+  );
+}
+
+/** Whether a cheap model watches runs; an older server has no watcher, and no row. */
+function RunWatchingRow() {
+  const workspace = useWorkspace();
+  const { data: uiState } = useQuery(workspace.queries.getUiStateQuery());
+  if (uiState?.runWatching === undefined) return null;
+  return (
+    <div className={cn(PROJECT_DEFAULT_ROW_CLASS_NAME, "mt-4")}>
+      <div>
+        <div className="project-default-title text-base font-medium">{m.settings_run_watching()}</div>
+        <p>{m.settings_run_watching_description()}</p>
+      </div>
+      <Switch
+        type="button"
+        checked={uiState.runWatching}
+        aria-label={m.settings_run_watching()}
+        onClick={() => mutUpdateUiState.run(workspace, { runWatching: !uiState.runWatching })}
       />
     </div>
   );

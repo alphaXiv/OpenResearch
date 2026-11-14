@@ -112,6 +112,12 @@ export function QueryEvents() {
     },
     onRunMonitor(event) {
       if (!isCurrentScope(scope)) return;
+      // A look newer than its chat's summary may have written a new one, which rides on the shown runs.
+      const looked = event.watch?.looks.filter((look) => look.said !== "error" && look.said !== "interrupted").at(-1)?.id;
+      const shown = queryClient.getQueryData(listChatShownRunsQuery().queryKey)?.runs.find((item) => item.run.id === event.runId);
+      if (looked !== undefined && shown && Number(looked) > Number(shown.watch?.lookId ?? 0)) {
+        void queryClient.invalidateQueries({ queryKey: listChatShownRunsQuery().queryKey, exact: true });
+      }
       const { queryKey } = getRunMonitorQuery(event.runId);
       markLiveUpdate(queryClient, queryKey);
       const cached = queryClient.getQueryData(queryKey);

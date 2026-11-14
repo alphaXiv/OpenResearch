@@ -7,6 +7,7 @@ import { m } from "../paraglide/messages.js";
 import { runActive, runApiProvider, runConnectHost, runDisplay, runNotice, runStoppable, type RunNotice } from "../runDisplay";
 import { fillSentence, fmtMagnitude, fmtSignal, fmtUsd, plainSentence, tokensOf } from "./format";
 import type { Flag, FlagMode, FlagState, RunMonitor, RunMonitorSummary, RunRule, ShownRun, SignalSpec, SignalValue, Signals, Versus, VersusBy } from "./types";
+import { tickText } from "./journal";
 import { capitalized, captionProgress, clockText, costWords, durationText, estimateWords, progressWords, quoteWords, stageWords } from "./words";
 
 /** How the headline compares with the parent: the arrow follows the number, the colour whether that is better. */
@@ -361,11 +362,13 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     : progress ? captionProgress(progress, phases, open && limit ? limit.ms : null, elapsed, said)
     : "";
 
-  const ticks = (monitor?.watch.looks ?? []).flatMap((look) => look.whole === null ? [] : [{
+  // Without a share of the whole run the bar is the stage's own, so only its looks stand on it.
+  const onBar = (look: { stage?: string | null }) => whole !== null || (look.stage ?? null) === (stagePhase?.name ?? null);
+  const ticks = (monitor?.watch.looks ?? []).flatMap((look) => look.whole === null || !onBar(look) ? [] : [{
     id: look.id,
     at: look.whole,
     flag: look.said === "flag",
-    text: `${clockText(look.at)} · ${plainSentence(look.text)}`,
+    text: tickText(look, signals, clockText(look.at)),
   }]);
 
   const logError = (monitor ?? summary)?.logError ?? null;

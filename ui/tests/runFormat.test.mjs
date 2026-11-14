@@ -9,11 +9,12 @@ const signals = { val_loss: { label: "Val loss", digits: 2, better: "lower" }, a
 test("a sentence fills its signals, comparisons and counts and keeps its bold figure", () => {
   const bindings = { val_loss: 2.3147, "val_loss.vs": -0.112, 'count:"ERR 429"': 1234, elo: 832 };
   assert.equal(
-    bare(fillSentence('Val loss **{val_loss}**, {val_loss.vs} than the parent; {count:"ERR 429"} rate limits; Elo {elo}.', bindings, signals)),
+    bare(fillSentence('Val loss **{val_loss}**, {val_loss.vs}; {count:"ERR 429"} rate limits; Elo {elo}.', bindings, signals)),
     "Val loss **2.31**, 0.11 better than the parent; 1,234 rate limits; Elo +832.",
   );
-  assert.equal(bare(fillSentence("{val_loss.vs}", { "val_loss.vs": 0.2 }, signals)), "0.20 worse");
-  assert.equal(bare(fillSentence("{val_loss.vs}", { "val_loss.vs": 0.001 }, signals)), "level with");
+  // A comparison reads whole, so a sentence in any language need not finish it.
+  assert.equal(bare(fillSentence("{val_loss.vs}", { "val_loss.vs": 0.2 }, signals)), "0.20 worse than the parent");
+  assert.equal(bare(fillSentence("{val_loss.vs}", { "val_loss.vs": 0.001 }, signals)), "level with the parent");
 });
 
 test("a value the server can't give as a number reads as it is, and an unknown one as a dash", () => {

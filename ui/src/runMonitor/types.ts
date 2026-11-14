@@ -104,16 +104,28 @@ export interface ViewTree {
 }
 
 
-interface Look {
+export type BriefLabel = "question" | "healthy" | "noise" | "worth_a_flag" | "from_parent" | "decided";
+
+export interface Look {
   id: string;
   at: number;
-  /** The bar's fraction at the look; null when the run has no total and no limit. */
+  /** What brought it: a change, the longest silence, a person, the run's end. */
+  kind: "change" | "ceiling" | "manual" | "terminal";
+  /** The bar's fraction at the look; null when the run has no total and no limit, or the look said nothing. */
   whole: number | null;
-  said: "same" | "new" | "flag";
-  /** Filled with the numbers of its moment. */
+  /** `error` and `interrupted` looks said nothing; `text` is why. */
+  said: "same" | "new" | "flag" | "error" | "interrupted";
+  /** Filled with the numbers of its moment, in English. */
   text: string;
-  template: string;
-  locale: string;
+  template: string | null;
+  /** What the template's tokens read at the look, so a row says the numbers of its moment. */
+  bindings: Record<string, SignalValue> | null;
+  /** The other runs this look covered, by name. */
+  with: string[];
+  /** What made it due, in English, for the record. */
+  why: string;
+  /** The stage the run was in, whose bar `whole` is a share of when the run has no plan. */
+  stage?: string | null;
 }
 
 interface Evidence {
@@ -258,12 +270,20 @@ export interface Quote {
   from: QuoteSource;
 }
 
-interface Watch {
-  state: "on" | "off" | "no_model" | "needs_pick";
+export interface Watch {
+  /** `unknown` when the server could not read what the watcher said. */
+  state: "on" | "off" | "no_model" | "needs_pick" | "unknown";
   model: string | null;
+  /** Why the run is not watched, in the server's words, when it is not. */
+  why?: string | null;
   looks: Look[];
+  /** What the looks cost, each split over the runs it covered; null when no look reported a price. */
   spentUsd: number | null;
+  tokens?: number;
+  /** When the next look is due at the latest, while the run keeps printing. */
   nextAt: number | null;
+  /** Look now starts no look before this. */
+  floorUntil?: number | null;
   error: { code: string; message: string } | null;
 }
 
@@ -335,6 +355,8 @@ export interface RunMonitor {
   setup?: Setup | null;
   /** The chat's agent is repairing the experiment after this stopped run. */
   revising: boolean;
+  /** What the watcher is told of the experiment, label by label. */
+  brief?: { label: BriefLabel; text: string }[];
   rules: RunRule[];
   /** Exactly what `orx exp status` prints for the run. */
   statusText: string;
@@ -370,7 +392,18 @@ export interface ChatShownRun extends ChatActiveRun {
   experimentSlug: string;
   runNo: number;
   runCount: number;
+  /** The chat's newest look: the runs it covered under their keys, and its summary sentence. */
+  watch?: ChatWatch | null;
+}
+
+export interface ChatWatch {
+  lookId: string;
+  at: number;
+  runIds: string[];
+  /** `r1` → run id: what `{r1}` and `{r1:signal}` in the summary name. */
+  keys: Record<string, string>;
+  summary: { template: string } | null;
 }
 
 /** An older server has no shown runs, so the page falls back to its active runs, which don't say these. */
-export type ShownRun = ChatActiveRun & Partial<Pick<ChatShownRun, "experimentSlug" | "runNo" | "runCount">>;
+export type ShownRun = ChatActiveRun & Partial<Pick<ChatShownRun, "experimentSlug" | "runNo" | "runCount" | "watch">>;

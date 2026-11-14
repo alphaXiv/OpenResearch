@@ -25,7 +25,7 @@ import { BackendBadge } from "./BackendLogos";
 import { BranchPill } from "./BranchPill";
 import { Md } from "./Md";
 import { RunContactNotice } from "./RunContactNotice";
-import { RunPage } from "./run/RunPage";
+import { RunPage, WatchSection } from "./run/RunPage";
 import { historySentence } from "../runMonitor/model";
 import { StatusBadge } from "./StatusBadge";
 import { Button, Tooltip } from "./ui";
@@ -225,6 +225,8 @@ export function ExperimentOverview({
             </div>
           </section>
         )}
+
+        {latestRun?.monitor && <WatchSection run={latestRun} name={experiment.slug} now={now} className={EXPERIMENT_OVERVIEW_SECTION_CLASS_NAME} />}
 
         {lineageNode && (
           <div className="mt-5.5 border-t border-border-variant pt-4.5">

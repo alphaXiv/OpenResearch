@@ -22,8 +22,8 @@ You cannot stop a run. Write in the language whose code is the digest's "locale"
  "summary": {"status": "ok", "line": "…"} or {"same": true},
  "notes": "…"}
 Each line is one sentence of at most 90 displayed characters, without "running" or "the run".
-Write every number that can still change as a token: {signal}, {signal.vs} (it reads "0.12 better",
-"0.12 worse" or "level with"; follow it with "the parent"), or {count:"regex"}, the number of log
+Write every number that can still change as a token: {signal}, {signal.vs} (it reads "0.12 better
+than the parent", "0.12 worse than the parent" or "level with the parent"), or {count:"regex"}, the number of log
 lines from the start of the run that match the regex, which orx keeps counting. A token names
 one of the run's "signals"; values under "alsoLogged" have none. A number that
 cannot change again, such as the step where something happened, may be written.

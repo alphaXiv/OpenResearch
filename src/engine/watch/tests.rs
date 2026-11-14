@@ -195,9 +195,16 @@ async fn one_look_writes_each_runs_sentence_and_the_summary_through_the_agent_cl
     );
     assert_eq!(results[1].evidence, json!([{"from": 26, "to": 69}]));
     assert_eq!(
-        store.watch_counts("a").unwrap()[0].0,
-        "timed out",
-        "a counted pattern starts counting from the log's start"
+        (
+            store.watch_counts("a").unwrap()[0].0.as_str(),
+            store.watch_counts("a").unwrap()[0].1
+        ),
+        ("timed out", 2),
+        "a new count is counted from the log's start before its sentence is kept"
+    );
+    assert_eq!(
+        results[0].text.as_deref(),
+        Some("Retried **2** shards since the start.")
     );
     let summary = chat_summary(&store, "chat").unwrap();
     assert_eq!(
@@ -383,25 +390,35 @@ fn the_ladder_restarts_with_each_stage_and_never_waits_past_the_longest_gap() {
 }
 
 #[test]
-fn a_number_leaves_its_trend_only_past_three_spreads() {
-    let falling: Vec<(f64, f64)> = (0..10)
-        .map(|i| {
-            (
-                i as f64 * 10.0,
-                3.0 - i as f64 * 0.1 + if i % 2 == 0 { 0.01 } else { -0.01 },
-            )
-        })
+fn a_number_leaves_its_trend_when_it_turns_but_not_as_a_healthy_curve_bends() {
+    // The fault bed's healthy loss, noise and all (e2e/faults/payload.mjs).
+    let noise = |step: f64| {
+        let x = (step * 12.9898).sin() * 43758.5453;
+        x - x.floor() - 0.5
+    };
+    let healthy = |step: f64| 0.9 + 3.1 * (-step / 110.0).exp() + 0.03 * noise(step);
+    let curve: Vec<(f64, f64)> = (0..120)
+        .map(|i| (i as f64 * 5.0, healthy(i as f64 * 5.0)))
         .collect();
-    let line = fit(&falling).unwrap();
-    assert!((line.slope + 0.01).abs() < 1e-3, "{line:?}");
-    let expected = line.intercept + line.slope * 110.0;
-    assert!(
-        (1.91 - expected).abs() < 3.0 * line.spread,
-        "a point on the trend stays"
+    let off = |index: usize| departure(&curve[..index], curve[index]).is_some_and(|d| d > 3.0);
+    let twice: Vec<f64> = (9..curve.len())
+        .filter(|i| off(*i) && off(*i - 1))
+        .map(|i| curve[i].0)
+        .collect();
+    assert_eq!(
+        twice,
+        Vec::<f64>::new(),
+        "a healthy loss curve never leaves its trend two points running"
     );
+    let mut turned = curve[..41].to_vec();
+    turned.push((curve[40].0 + 5.0, curve[40].1 + 0.4));
     assert!(
-        (2.6 - expected).abs() > 3.0 * line.spread,
-        "a turn upward leaves it"
+        departure(&turned[..41], turned[41]).unwrap() > 3.0,
+        "a turn upward does"
     );
-    assert_eq!(fit(&falling[..4]), None, "no trend before the fifth point");
+    assert_eq!(
+        departure(&curve[..7], curve[7]),
+        None,
+        "no trend before the eighth point"
+    );
 }

@@ -16,6 +16,8 @@ export type Scenario = {
   stopAt: number
   /** The chat's agent, woken by the run's end, marks it as being repaired before it answers. */
   revise?: boolean
+  /** What the watcher is told of the child, as its agent writes it with `orx exp view set --config`. */
+  brief?: Record<string, string>
 }
 
 const STEADY = [4, 10, 20, 30, 40, 48, 56, 64, 72, 80]
@@ -84,6 +86,11 @@ export const scenarios: Scenario[] = [
     fault: 'The title says depth 8 and the command passes --depth 8, but the script uses 4 (a warning at the top, then "depth=4 ... 29.4 M parameters"). Its loss, throughput and eval are the parent’s to the digit: only the brief says it is wrong.',
     points: STEADY,
     stopAt: 100,
+    brief: {
+      question: 'Does depth 8 beat depth 4 at equal FLOPs?',
+      healthy: "Val loss below the parent's from step 200 on.",
+      worth_a_flag: 'Anything that suggests the model is not depth 8.',
+    },
   },
   {
     id: 'eval-zeros',

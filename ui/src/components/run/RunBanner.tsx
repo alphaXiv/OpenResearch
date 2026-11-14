@@ -198,7 +198,7 @@ export function RunBanner({ sessionId, agent, onOpenExperiment, onOpenRun }: {
         isOpen(models[0].run.id) ? strip(models[0], 0) : <RunLine model={models[0]} agent={agent} onOpenExperiment={onOpenExperiment} onToggle={() => toggle(models[0].run.id)} />
       ) : (
         <div className="@container relative mb-2.5 overflow-hidden rounded-lg border border-border bg-surface text-sm text-text">
-          <RunSummary models={models} context={context} {...summarize(models, named)} open={rows} onToggle={toggleRows} />
+          <RunSummary models={models} context={context} {...summarize(models, named, runs[0].watch)} open={rows} onToggle={toggleRows} />
           {rows && (
             <ul role="list" className="m-0 list-none p-0">
               {models.map((model, index) => {

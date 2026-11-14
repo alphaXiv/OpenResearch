@@ -1,6 +1,8 @@
 import { autoDir, fmtNumber, ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
+import { fillSentence } from "./format";
 import type { RunModel, Tone } from "./model";
+import type { ChatWatch } from "./types";
 import { durationText } from "./words";
 
 /** A title's words: runs of non-space, each with where it sits in the title. */
@@ -110,12 +112,35 @@ function leader(models: RunModel[]): RunModel | null {
 }
 
 /**
+ * The watcher's summary sentence, its `{r1}` and `{r1:signal}` filled from the runs its look named, when that look
+ * covered exactly the runs live now; else null, and orx words the summary itself. Its bold takes the tone of the run the
+ * bold's first token reads.
+ */
+function watcherSummary(models: RunModel[], labels: string[], watch: ChatWatch | null | undefined): SummaryPart | null {
+  const live = models.filter((model) => model.live).map((model) => model.run.id).sort();
+  if (!watch?.summary || live.length < 2 || [...watch.runIds].sort().join(" ") !== live.join(" ")) return null;
+  const runOf = (key: string) => models.find((model) => model.run.id === watch.keys[key]);
+  const { template } = watch.summary;
+  const bold = /\*\*[^*]*?\{(r\d+)[:}]/u.exec(template)?.[1];
+  const tone = (bold && runOf(bold)?.tone) || "running";
+  const text = template.replace(/\{(r\d+)(?::([^{}]+))?\}/gu, (_token, key: string, rest?: string) => {
+    const model = runOf(key);
+    if (!model) return "—";
+    if (rest === undefined) return autoDir(labels[models.indexOf(model)]);
+    const summary = model.run.monitor;
+    return summary ? fillSentence(`{${rest}}`, summary.bindings, summary.signals) : "—";
+  });
+  return { tone, text };
+}
+
+/**
  * The one line that stands for several runs, worded by orx from their views: who needs attention first; else, when the
  * runs of exactly one label group share a headline that says which way is better, who leads them; else how many are in
  * each state and when the first should finish. Runs only lead where they differ by what their labels say, as a sweep
- * does. `firstDone` is when the soonest live run should finish, for the line to say beside a sentence that doesn't.
+ * does. The watcher's summary, when there is one, says the last two. `firstDone` is when the soonest live run should
+ * finish, for the line to say beside a sentence that doesn't.
  */
-export function summarize(models: RunModel[], { labels, groups }: { labels: string[]; groups: (number | null)[] }): { parts: SummaryPart[]; firstDone: string | null } {
+export function summarize(models: RunModel[], { labels, groups }: { labels: string[]; groups: (number | null)[] }, watch?: ChatWatch | null): { parts: SummaryPart[]; firstDone: string | null } {
   const name = (model: RunModel) => autoDir(labels[models.indexOf(model)]);
   const urgent = models.reduce<RunModel | null>((most, model) => urgency(model) < (most ? urgency(most) : Infinity) ? model : most, null);
   const leaders = [...new Set(groups)].flatMap((group) => {
@@ -125,7 +150,8 @@ export function summarize(models: RunModel[], { labels, groups }: { labels: stri
   const leading = urgent || leaders.length !== 1 ? null : leaders[0];
   // A run that ended with nothing to say, not even why, says how long it took.
   const why = urgent && (urgent.sentence.text || urgent.note);
-  const parts: SummaryPart[] | null = urgent ? [why
+  const watched = urgent ? null : watcherSummary(models, labels, watch);
+  const parts: SummaryPart[] | null = watched ? [watched] : urgent ? [why
     ? { tone: urgent.tone, who: m.run_summary_attention({ name: name(urgent), state: urgent.status }), text: why }
     : { tone: urgent.tone, who: m.run_summary_attention_ended({ name: name(urgent), ended: urgent.eta }), text: "" }]
     : leading?.found.headline ? [{

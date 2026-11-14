@@ -1,0 +1,79 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import test from "node:test";
+import { act, createElement } from "react";
+import { Watch } from "../src/components/run/Watch.tsx";
+import { m } from "../src/paraglide/messages.js";
+import { journalRows } from "../src/runMonitor/journal.ts";
+import { createWorkspace } from "../src/workspace.tsx";
+import { render, serveApp, settle } from "./render.mjs";
+
+const running = JSON.parse(readFileSync(new URL("./fixtures/runMonitor/running.json", import.meta.url), "utf8"));
+const now = running.asOf;
+const text = (element) => element.textContent.replace(/[⁦-⁩]/g, "");
+const look = (id, at, template, extra = {}) => ({ id, at, kind: "ceiling", whole: 0.1, said: "new", text: template, template, bindings: { loss: 2.6 }, with: [], why: "", ...extra });
+const monitor = (watch) => ({ ...running, watch: { state: "on", model: "Claude Haiku", looks: [], spentUsd: null, nextAt: null, floorUntil: null, error: null, ...watch } });
+
+test("the journal lists changes, not looks: words that held fold into one row that says since when", () => {
+  const looks = [
+    look("1", now - 50_000, "Loss **{loss}**, falling."),
+    look("2", now - 40_000, "Loss **{loss}**, falling.", { said: "same" }),
+    look("3", now - 30_000, "Loss **{loss}**, falling.", { said: "same" }),
+    look("4", now - 20_000, "Loss went to **{loss}**.", { said: "flag" }),
+    look("5", now - 10_000, null, { said: "error", text: "Claude Code is signed out", whole: null }),
+  ];
+  const rows = journalRows(looks);
+  assert.deepEqual(rows.map((row) => [row.look.id, row.count]), [["5", 1], ["4", 1], ["3", 3]]);
+  assert.equal(rows[2].since.id, "1");
+});
+
+async function watched(watch, routes = {}) {
+  serveApp(routes);
+  const view = await render(createElement(Watch, { monitor: monitor(watch), runId: running.runId, tone: "running", live: true, now }), createWorkspace("test"));
+  await settle();
+  return view;
+}
+
+test("the Watch section says what was said and when, what the looks cost, and Look now asks for one", async () => {
+  const looks = [
+    look("1", now - 50_000, "Loss **{loss}**, falling."),
+    look("2", now - 40_000, "Loss **{loss}**, falling.", { said: "same", with: ["Depth 6"] }),
+  ];
+  let asked = 0;
+  const { container } = await watched({ looks, spentUsd: 0.0021 }, { [`POST /api/runs/${running.runId}/look`]: () => { asked += 1; return { lookId: "3", state: "prepared" }; } });
+  assert.match(text(container), /Loss 2\.60, falling\./);
+  assert.match(text(container), /The same on 2 looks since/);
+  assert.match(text(container), /Looked at with Depth 6/);
+  assert.match(text(container), /2 looks · Claude Haiku · \$0\.0021/);
+  const button = [...container.querySelectorAll("button")].find((node) => text(node) === m.run_watch_look_now());
+  await act(async () => button.click());
+  await settle();
+  assert.equal(asked, 1);
+});
+
+test("Look now waits out the least gap between looks, and a refusal says why where it was pressed", async () => {
+  const soon = await watched({ looks: [look("1", now - 5_000, "Loss **{loss}**.")], floorUntil: now + 60_000 });
+  const waiting = [...soon.container.querySelectorAll("button")].find((node) => text(node) === m.run_watch_look_now());
+  assert.equal(waiting.getAttribute("aria-disabled"), "true");
+  await soon.unmount();
+  const { container } = await watched({ looks: [] }, {
+    [`POST /api/runs/${running.runId}/look`]: () => Response.json({ error: "This chat's agent has no watching model, so its runs are not watched." }, { status: 409 }),
+  });
+  const button = [...container.querySelectorAll("button")].find((node) => text(node) === m.run_watch_look_now());
+  await act(async () => button.click());
+  await settle();
+  assert.match(text(container.querySelector('[role="status"]')), /no watching model/);
+});
+
+test("a run nobody watches says why in place of a journal", async () => {
+  for (const [watch, said] of [
+    [{ state: "needs_pick", model: null }, m.run_watch_needs_pick()],
+    [{ state: "off", model: null }, m.run_watch_off()],
+    [{ state: "no_model", model: null, why: "Codex offers no GPT Luna to watch with" }, "Not watched: Codex offers no GPT Luna to watch with."],
+  ]) {
+    const { container, unmount } = await watched(watch);
+    assert.equal(text(container.querySelector("p")), said);
+    assert.equal([...container.querySelectorAll("button")].length, 0, "nothing to look with");
+    await unmount();
+  }
+});

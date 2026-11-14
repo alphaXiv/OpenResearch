@@ -313,7 +313,7 @@ test("media shows the newest files under their names, each at its version, and s
 
 test("a text block fills the agent's sentence from the run's numbers, on a page only", async () => {
   const monitor = fixture("finetune");
-  const block = { text: "Val loss is **{val_loss}**, {val_loss.vs} than the parent." };
+  const block = { text: "Val loss is **{val_loss}**, {val_loss.vs}." };
   const page = await draw(monitor, block, "page");
   assert.match(text(page), /^Val loss is [\d.]+, [\d.]+ better than the parent\.$/);
   assert.ok(page.querySelector("strong"));

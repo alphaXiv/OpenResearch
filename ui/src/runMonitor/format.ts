@@ -75,9 +75,9 @@ export function fillSentence(template: string, bindings: Record<string, SignalVa
       const d = bindings[key];
       const vs = typeof d === "number" ? versusOf(signals[name], d) : null;
       if (!vs) return "—";
-      if (vs.flat) return m.run_vs_level();
+      if (vs.flat) return m.run_vs_token_level();
       const delta = ltr(fmtMagnitude(signals[name], vs.mag));
-      return vs.good ? m.run_vs_better({ delta }) : m.run_vs_worse({ delta });
+      return vs.good ? m.run_vs_token_better({ delta }) : m.run_vs_token_worse({ delta });
     }
     return ltr(fmtSignal(signals[key], bindings[key]));
   });

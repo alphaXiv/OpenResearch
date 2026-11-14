@@ -194,6 +194,8 @@ export interface UiState {
   nestedDelegation: boolean;
   /** Whether OpenCode's free models are offered beside the user's own. */
   opencodeFreeModels: boolean;
+  /** Whether a cheap model looks at runs; absent from an older server, which has no watcher. */
+  runWatching?: boolean;
   /** The model families the picker lists first. */
   favoriteModels: string[];
   /** Models turned off in Settings, by {@link ModelName.key}: the picker hides them and agents can't delegate to them. */
@@ -2122,6 +2124,7 @@ export function createApi(
     collapsedModelSections?: string[];
     modelSightings?: ModelSightings;
     runBanner?: RunBannerLevel;
+    runWatching?: boolean;
   }) => post<UiState>("/api/settings/ui-state", body);
 
   const completeOnboarding = (selection: OnboardingSelection) =>
@@ -3142,6 +3145,9 @@ export function createApi(
   const chooseRunFlag = (runId: string, choice: { flagId: string; choice: "stop" | "keep" | "ask"; requestId: string }) =>
     post<{ flag: Flag; run: Run }>(`/api/runs/${encodeURIComponent(runId)}/flag`, choice);
 
+  const lookNow = (runId: string) =>
+    post<{ lookId: string; state: string }>(`/api/runs/${encodeURIComponent(runId)}/look`);
+
   const dismissShownRun = (sessionId: string, runId: string) =>
     post<{ dismissed: true }>(`/api/chat/sessions/${encodeURIComponent(sessionId)}/shown-runs/${encodeURIComponent(runId)}/dismiss`);
 
@@ -3375,6 +3381,7 @@ export function createApi(
     listChatShownRuns,
     getRunMonitor,
     dismissShownRun,
+    lookNow,
     chooseRunFlag,
     getSubagentTranscript,
   };

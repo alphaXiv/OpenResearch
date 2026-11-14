@@ -181,6 +181,7 @@ fn gaps(settings: &Value) -> (i64, i64) {
 }
 
 /// One owned run as a pass or a look reads it now.
+#[derive(Clone)]
 struct Now {
     run: StoredRun,
     summary: Value,
@@ -585,6 +586,39 @@ async fn count(run: &Now) {
     }
 }
 
+/// How many lines of the run's log match `pattern`, counted from its start and kept counting
+/// from there on; None when the log is longer than one look reads, and passes finish the count.
+async fn backfill(run: &str, pattern: &str) -> Result<Option<u64>> {
+    let regex = reply::pattern(pattern).map_err(|error| anyhow!("{error}"))?;
+    let (mut ident, mut offset, mut count) = (None::<String>, 0, 0);
+    for _ in 0..16 {
+        let (read_ident, lines, to, len) = read_lines(run, ident.as_deref(), offset, SCAN).await?;
+        if ident.as_deref().is_some_and(|ident| ident != read_ident) {
+            return Ok(None);
+        }
+        count += lines
+            .iter()
+            .filter(|line| regex.is_match(&line.text))
+            .count() as u64;
+        let done = lines.is_empty() || len.is_some_and(|len| to >= len);
+        ident = Some(read_ident);
+        offset = to;
+        if done {
+            let ident = ident.unwrap_or_default();
+            Store::open()?.set_watch_count(run, pattern, count, offset, &ident)?;
+            return Ok(Some(count));
+        }
+    }
+    Store::open()?.set_watch_count(
+        run,
+        pattern,
+        count,
+        offset,
+        ident.as_deref().unwrap_or_default(),
+    )?;
+    Ok(None)
+}
+
 /// The run's log from `from`, at most `max` bytes, as whole lines: its identity, the lines,
 /// where the last whole line ends and the log's length where known. A changed log reads from 0.
 async fn read_lines(
@@ -647,15 +681,6 @@ async fn read_lines(
     Ok((String::from(ident), lines, at, len))
 }
 
-/// A robust straight line through a signal's last points and how far they scatter from it.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct Fit {
-    slope: f64,
-    intercept: f64,
-    spread: f64,
-    x: f64,
-}
-
 fn median(values: &mut [f64]) -> f64 {
     values.sort_by(f64::total_cmp);
     let mid = values.len() / 2;
@@ -666,47 +691,65 @@ fn median(values: &mut [f64]) -> f64 {
     }
 }
 
-/// Theil–Sen through the last 14 finite points, from the fifth point on.
-fn fit(points: &[(f64, f64)]) -> Option<Fit> {
-    let points: Vec<(f64, f64)> = points
+/// How far `next` lands from where the last 14 points before it were heading, in spreads: a
+/// parabola through them follows a curve that bends as a loss does, so only a turn or a jump
+/// leaves it, against how much those points scatter about it. None before the eighth finite point.
+fn departure(before: &[(f64, f64)], next: (f64, f64)) -> Option<f64> {
+    let finite: Vec<(f64, f64)> = before
         .iter()
         .copied()
         .filter(|(x, y)| x.is_finite() && y.is_finite())
         .collect();
-    let points = &points[points.len().saturating_sub(14)..];
-    if points.len() < 5 {
+    let window = &finite[finite.len().saturating_sub(14)..];
+    let (last_x, _) = *window.last()?;
+    if window.len() < 8 || next.0 <= last_x {
         return None;
     }
-    let mut slopes: Vec<f64> = points
-        .iter()
-        .enumerate()
-        .flat_map(|(i, a)| {
-            points[i + 1..]
-                .iter()
-                .filter(move |b| b.0 != a.0)
-                .map(move |b| (b.1 - a.1) / (b.0 - a.0))
-        })
-        .collect();
-    if slopes.is_empty() {
+    let width = (last_x - window[0].0).max(f64::EPSILON);
+    let u = |x: f64| (x - last_x) / width;
+    // Least squares for y = a + b·u + c·u², by Cramer's rule on the normal equations.
+    let mut sums = [0.0f64; 5];
+    let mut moments = [0.0f64; 3];
+    for &(x, y) in window {
+        let t = u(x);
+        for (power, sum) in sums.iter_mut().enumerate() {
+            *sum += t.powi(power as i32);
+        }
+        for (power, moment) in moments.iter_mut().enumerate() {
+            *moment += y * t.powi(power as i32);
+        }
+    }
+    let det3 = |m: [[f64; 3]; 3]| {
+        m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+            - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+            + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+    };
+    let normal = [
+        [sums[0], sums[1], sums[2]],
+        [sums[1], sums[2], sums[3]],
+        [sums[2], sums[3], sums[4]],
+    ];
+    let det = det3(normal);
+    if det.abs() < 1e-12 {
         return None;
     }
-    let slope = median(&mut slopes);
-    let mut intercepts: Vec<f64> = points.iter().map(|(x, y)| y - slope * x).collect();
-    let intercept = median(&mut intercepts);
-    let mut residuals: Vec<f64> = points
-        .iter()
-        .map(|(x, y)| (y - (intercept + slope * x)).abs())
-        .collect();
-    let level = points.iter().map(|(_, y)| y.abs()).fold(0.0, f64::max);
-    let spread = (1.4826 * median(&mut residuals))
-        .max(level * 1e-3)
+    let solve = |column: usize| {
+        let mut m = normal;
+        for (row, moment) in moments.iter().enumerate() {
+            m[row][column] = *moment;
+        }
+        det3(m) / det
+    };
+    let (a, b, c) = (solve(0), solve(1), solve(2));
+    let at = |x: f64| a + b * u(x) + c * u(x).powi(2);
+    let mut residuals: Vec<f64> = window.iter().map(|&(x, y)| (y - at(x)).abs()).collect();
+    let n = window.len() as f64;
+    let level = window.iter().map(|(_, y)| y.abs()).fold(0.0, f64::max);
+    // A step past the points is less sure than the points: half again their scatter.
+    let spread = (1.5 * 1.4826 * median(&mut residuals) * (n / (n - 3.0)).sqrt())
+        .max(level * 1e-4)
         .max(1e-12);
-    Some(Fit {
-        slope,
-        intercept,
-        spread,
-        x: points[points.len() - 1].0,
-    })
+    Some((next.1 - at(next.0)).abs() / spread)
 }
 
 fn series(body: &Value, name: &str) -> Vec<(f64, f64)> {
@@ -729,8 +772,8 @@ fn basis_of(run: &Now, template: Option<&str>, mult: &Map<String, Value>) -> Val
     {
         match token {
             reply::Token::Signal(_, name) => {
-                if let Some(fit) = fit(&series(&run.body, &name)) {
-                    signals.insert(name, json!({"slope": fit.slope, "intercept": fit.intercept, "spread": fit.spread, "x": fit.x}));
+                if let Some((x, _)) = series(&run.body, &name).last() {
+                    signals.insert(name, json!({"x": x}));
                 }
             }
             reply::Token::Versus(_, name) => {
@@ -799,22 +842,26 @@ fn changes(state: &mut State, run: &Now, now: i64) -> Vec<(String, String)> {
     let mut why = Vec::new();
     let signals = &run.body["view"]["signals"];
     let label = |name: &str| signals[name]["label"].as_str().unwrap_or(name).to_owned();
+    // Each point since the look against the points just before it.
     for (name, kept) in basis["signals"].as_object().into_iter().flatten() {
-        let (Some(slope), Some(intercept), Some(spread), Some(x0)) = (
-            kept["slope"].as_f64(),
-            kept["intercept"].as_f64(),
-            kept["spread"].as_f64(),
-            kept["x"].as_f64(),
-        ) else {
+        let Some(x0) = kept["x"].as_f64() else {
             continue;
         };
-        let off = series(&run.body, name)
-            .into_iter()
-            .filter(|(x, _)| *x > x0)
-            .find(|(x, y)| {
-                !y.is_finite()
-                    || (y - (intercept + slope * x)).abs() > 3.0 * spread * mult(basis, "trend")
-            });
+        let points = series(&run.body, name);
+        let first = points
+            .iter()
+            .position(|(x, _)| *x > x0)
+            .unwrap_or(points.len());
+        // A point off its trend trips it once the next point is off it too; one noisy point does not.
+        let off_trend = |index: usize| {
+            departure(&points[..index], points[index])
+                .is_some_and(|d| d > 3.0 * mult(basis, "trend"))
+        };
+        let off = (first..points.len()).rev().take(20).find_map(|index| {
+            let (x, y) = points[index];
+            let turned = index > 0 && off_trend(index) && off_trend(index - 1);
+            (!y.is_finite() || turned).then_some((x, y))
+        });
         if let Some((x, y)) = off {
             let what = if y.is_finite() {
                 "left its trend"
@@ -1590,7 +1637,6 @@ async fn take(id: i64) -> Result<()> {
                 .collect::<Vec<_>>()),
             _ => json!([]),
         };
-        let text = template.as_deref().map(|t| fill(t, &keyed, Some(run)));
         let cursor = match (result, read_log) {
             ("error", _) | (_, Err(_)) => last.map_or(Value::Null, |(_, row)| row.cursor.clone()),
             (_, Ok(read)) => {
@@ -1605,21 +1651,40 @@ async fn take(id: i64) -> Result<()> {
                 json!({"ident": read.ident, "to": read.to, "families": families})
             }
         };
+        // A new count is counted from the log's start before its sentence is kept, so the
+        // sentence never reads a count that is not there yet.
+        let mut counted_run;
+        let mut run: &Now = run;
         if let Some(template) = &template {
-            let store = Store::open()?;
-            let known: BTreeSet<String> = store
+            let known: BTreeSet<String> = Store::open()?
                 .watch_counts(&run.run.id)?
                 .into_iter()
                 .map(|(p, ..)| p)
                 .collect();
+            let mut fresh = Map::new();
             for (_, token) in reply::tokens(template, false).unwrap_or_default() {
                 if let reply::Token::Count(_, pattern) = token {
-                    if !known.contains(&pattern) {
-                        store.set_watch_count(&run.run.id, &pattern, 0, 0, "")?;
+                    if !known.contains(&pattern) && !fresh.contains_key(&pattern) {
+                        if let Some(count) = backfill(&run.run.id, &pattern).await? {
+                            fresh.insert(pattern, json!(count));
+                        }
                     }
                 }
             }
+            if !fresh.is_empty() {
+                counted_run = run.clone();
+                let counts = &mut counted_run.body["counts"];
+                if !counts.is_object() {
+                    *counts = json!({});
+                }
+                counts
+                    .as_object_mut()
+                    .into_iter()
+                    .for_each(|counts| counts.extend(fresh.clone()));
+                run = &counted_run;
+            }
         }
+        let text = template.as_deref().map(|t| fill(t, &keyed, Some(run)));
         let basis = if result == "error" {
             last.map_or(Value::Null, |(_, row)| row.basis.clone())
         } else {
@@ -1631,10 +1696,29 @@ async fn take(id: i64) -> Result<()> {
             result: result.to_owned(),
             template,
             text,
-            whole: run.summary["whole"].as_f64(),
+            // Without a plan the bar is the stage's own, and a tick stands where the stage was.
+            whole: run.summary["whole"].as_f64().or_else(|| {
+                let stage = &run.summary["stage"];
+                Some(
+                    (stage["done"].as_f64()? / stage["of"].as_f64().filter(|of| *of > 0.0)?)
+                        .clamp(0.0, 1.0),
+                )
+            }),
             cursor,
             evidence,
         });
+    }
+    if let Some(reply::Answer::Line { template, .. }) = &read.summary {
+        for (_, token) in reply::tokens(template, true).unwrap_or_default() {
+            let reply::Token::Count(Some(key), pattern) = token else {
+                continue;
+            };
+            let Some(run) = keyed.get(&key) else { continue };
+            let counted = Store::open()?.watch_counts(&run.run.id)?;
+            if !counted.iter().any(|(known, ..)| *known == pattern) {
+                backfill(&run.run.id, &pattern).await?;
+            }
+        }
     }
     let summary = match &read.summary {
         Some(reply::Answer::Line { template, .. }) => {
@@ -1890,6 +1974,7 @@ pub(crate) fn run_facts(store: &Store, run: &StoredRun) -> Result<Value> {
             "bindings": row.basis["bindings"],
             "with": others,
             "why": look.reason,
+            "stage": row.basis["stage"],
         }));
     }
     let floor_until = {

@@ -1197,7 +1197,7 @@ fn evaluate(
         "flag": null,
         "setup": setup,
         "revising": life.revising,
-        "brief": [],
+        "brief": brief(life.settings.as_deref()),
         "rules": rules.iter().map(super::rules::Rule::shown).collect::<Vec<_>>(),
         "statusText": text,
     });
@@ -1209,6 +1209,20 @@ fn evaluate(
         body,
         slices: output.as_ref().map_or(0, |o| o.completed_slices),
     }
+}
+
+/// What the experiment's config tells the watcher, label by label in the brief's own order.
+fn brief(settings: Option<&str>) -> Value {
+    let settings: Value = settings
+        .and_then(|raw| serde_json::from_str(raw).ok())
+        .unwrap_or(Value::Null);
+    super::view::BRIEF_LABELS
+        .iter()
+        .filter_map(|label| {
+            let text = settings["brief"][label].as_str()?.trim();
+            (!text.is_empty()).then(|| json!({"label": label, "text": text}))
+        })
+        .collect()
 }
 
 /// The watch as the page reads it: everything but the sentence and the counts, which it reads

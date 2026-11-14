@@ -7,6 +7,10 @@
  *   node e2e/faults/run.ts --list
  *   node e2e/faults/run.ts hang --keep       # leave the server up on a port printed at the end
  *   node e2e/faults/run.ts nan-400 --shots=.shots/w9-rules   # also screenshot the end, both themes
+ *   node e2e/faults/run.ts crash --watcher real   # watched by the real Claude Haiku (costs money)
+ *
+ * The chat's runs are watched through `claude` on the sandbox's PATH: `watcher.mjs`, a fixed policy
+ * that needs no model, unless `--watcher real` (the machine's own Claude Code) or `--watcher none`.
  *
  * Needs a built `orx` (cargo build) and dashboard (pnpm exec vite build in ui/); ORX_E2E_BINARY names
  * another binary. The timeline goes to stdout and to `.shots/faults/<id>.txt` in the checkout. @module
@@ -36,7 +40,10 @@ if (args.includes('--list')) {
 }
 const keep = args.includes('--keep')
 const shots = args.find((arg) => arg.startsWith('--shots='))?.slice('--shots='.length)
-const wanted = args.filter((arg) => !arg.startsWith('--'))
+const watcherAt = args.indexOf('--watcher')
+const watcher = watcherAt < 0 ? 'fake' : args[watcherAt + 1]
+if (!['fake', 'real', 'none'].includes(watcher)) throw new Error('--watcher is fake, real or none')
+const wanted = args.filter((arg, index) => !arg.startsWith('--') && (watcherAt < 0 || index !== watcherAt + 1))
 const unknown = wanted.filter((id) => !scenarios.some((scenario) => scenario.id === id))
 if (unknown.length) throw new Error(`No scenario ${unknown.join(', ')}; node e2e/faults/run.ts --list names them`)
 if (!existsSync(BINARY)) throw new Error(`No orx at ${BINARY}; run cargo build first, or set ORX_E2E_BINARY`)
@@ -66,7 +73,18 @@ async function runScenario(scenario: Scenario) {
 
   const agent = await startAgentScripts()
   const outside = await startOutside()
-  const orx = await startOrx({ agent, outside })
+  const realClaude = spawnSync('/bin/sh', ['-c', 'command -v claude'], { encoding: 'utf8' }).stdout.trim()
+  const watchLog = path.join(OUT, `${scenario.id}.looks.jsonl`)
+  writeFileSync(watchLog, '')
+  const claude = watcher === 'fake'
+    ? `#!/bin/sh\nexec ${process.execPath} ${path.join(import.meta.dirname, 'watcher.mjs')} "$@"\n`
+    : watcher === 'real' ? `#!/bin/sh\nexec ${realClaude} "$@"\n` : undefined
+  const orx = await startOrx({
+    agent,
+    outside,
+    claude,
+    env: watcher === 'none' ? {} : { ORX_WATCH_WITH: 'claude-code', ORX_FAULTS_WATCH_LOG: watchLog },
+  })
   const browser = await chromium.launch()
   try {
     await orx.onboard()
@@ -86,13 +104,16 @@ async function runScenario(scenario: Scenario) {
     const get = async <T>(route: string) => (await (await fetch(`${orx.url}${route}`)).json()) as T
     const shown = async () => (await get<Shown[]>('/api/chat/shown-runs')).find((item) => item.run.projectId === project.id)
 
-    const launch = async (title: string, variant: string, parent?: string) => {
+    const launch = async (title: string, variant: string, parent?: string, brief?: Record<string, string>) => {
       const command = `${process.execPath} ${PAYLOAD} ${variant}`
+      const config = path.join(orx.root, 'tmp', `${variant}.config.json`)
+      if (brief) writeFileSync(config, JSON.stringify({ brief }))
       agent.script(`Launch ${title}.`, [
         { run: [
           'set -e',
           `id=$(orx create-experiment ${project.id} --title '${title}' ${parent ? `--parent ${parent} ` : ''}--run-command '${command}' | sed -n 's/^ *id: *//p')`,
           ...(parent ? [] : [`orx exp view set "$id" --file ${VIEW} --config ${RULES}`]),
+          ...(brief ? [`orx exp view set "$id" --config ${config}`] : []),
           'orx exp run "$id" --backend local',
           'orx exp wake "$id"',
         ].join('\n') },
@@ -124,7 +145,7 @@ async function runScenario(scenario: Scenario) {
     say()
 
     const launched = Date.now()
-    const hold = await launch(scenario.title, scenario.id, parent.run.experimentId)
+    const hold = await launch(scenario.title, scenario.id, parent.run.experimentId, scenario.brief)
     let child = (await shown())!
     // A busy machine can take a while to submit the run; the points count from when it started.
     while (!child.run.startedAt) {
@@ -183,6 +204,12 @@ async function runScenario(scenario: Scenario) {
     }
     await agent.reached(hold)
     await sample('ended')
+    // The run's last look, which waits for its log to be kept.
+    for (let tries = 0; watcher !== 'none' && tries < 60; tries++) {
+      const { watch } = await get<{ watch: { looks: { kind: string }[] } }>(`/api/runs/${child.run.id}/monitor`)
+      if (watch.looks.at(-1)?.kind === 'terminal') break
+      await wait(500)
+    }
     const ask = wakeText(orx.agentLog, 'met rule')
     if (ask) say(`ask    ${plain(ask)}`)
     const shoot = async (target: typeof banner, name: string) => {
@@ -207,9 +234,11 @@ async function runScenario(scenario: Scenario) {
     const rules = section.locator('details', { has: page.locator('summary', { hasText: /checked with no model/ }) })
     if (await rules.count()) await rules.locator('summary').click()
     say(`page   ${plain(await section.innerText())}`)
-    // The page is taller than its pane: its lead and its rules, each where it scrolls to.
+    // The page is taller than its pane: its lead, its rules and its journal, each where it scrolls to.
     await shoot(section.getByRole('group').first().locator('p').first(), 'page-lead')
     if (await rules.count()) await shoot(rules, 'page-rules')
+    const watch = page.locator('section', { has: page.getByRole('heading', { name: 'Watch', exact: true }) })
+    if (await watch.count()) await shoot(watch, 'page-watch')
     say(`log    ${plain(cli('logs', child.run.id).stdout)}`)
     const wake = wakeText(orx.agentLog)
     if (wake) {
@@ -219,6 +248,11 @@ async function runScenario(scenario: Scenario) {
     const status = cli('exp', 'status', child.run.experimentId)
     say(`orx exp status:`)
     for (const line of (status.stdout + status.stderr).trimEnd().split('\n')) say(`  ${line}`)
+    const watched = await get<{ watch: { model: string | null; spentUsd: number | null; tokens: number; looks: { at: number; kind: string; said: string; text: string; why: string }[] } }>(`/api/runs/${child.run.id}/monitor`)
+    say(`looks  ${watched.watch.looks.length} by ${watched.watch.model ?? 'nothing'}, ${watched.watch.tokens} tokens, $${(watched.watch.spentUsd ?? 0).toFixed(4)}`)
+    for (const look of watched.watch.looks) {
+      say(`  +${((look.at - origin) / 1000).toFixed(1)}s ${look.kind.padEnd(8)} ${look.said.padEnd(5)} ${plain(look.text)}  [${look.why}]`)
+    }
     agent.release(hold)
 
     if (keep) {

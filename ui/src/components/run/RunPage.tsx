@@ -1,3 +1,4 @@
+import { useQuery } from "@tanstack/react-query";
 import { RefreshCw } from "lucide-react";
 import { timeAgo, type Run } from "../../api";
 import { hostForRun } from "../../engineHosts";
@@ -18,6 +19,7 @@ import { Rules } from "./Rules";
 import { Sentence } from "./Sentence";
 import { useRunMonitors } from "./useRunMonitor";
 import { ViewSource } from "./ViewSource";
+import { Watch } from "./Watch";
 
 /**
  * A run in full, in its experiment's Latest run: the sentence, the stages, the bar and its captions, then every block
@@ -80,5 +82,22 @@ export function RunPage({ run, name, now }: { run: Run; name: string; now: numbe
       {data && <Rules rules={data.rules} outcome={run.outcome ?? null} />}
       {data && <ViewSource monitor={data} projectId={run.projectId} live={model.live} />}
     </div>
+  );
+}
+
+/**
+ * The experiment page's Watch section for its latest run, from the monitor its `RunPage` keeps current, once that has
+ * said how the run is watched.
+ */
+export function WatchSection({ run, name, now, className }: { run: Run; name: string; now: number; className: string }) {
+  const { getRunMonitorQuery } = useWorkspace().queries;
+  const data = useQuery({ ...getRunMonitorQuery(run.id), enabled: false }).data;
+  if (!data) return null;
+  const model = runModel({ item: { sessionId: "", run, experimentName: name }, monitor: data, monitorFailed: false, shown: false, agent: m.chat_the_agent(), now, nextRetryMs: null });
+  return (
+    <section className={className}>
+      <h2>{m.run_watch_heading()}</h2>
+      <Watch monitor={data} runId={run.id} tone={model.tone} live={model.live} now={now} />
+    </section>
   );
 }

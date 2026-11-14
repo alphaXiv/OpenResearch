@@ -283,6 +283,17 @@ export const mutDismissShownRun = mutations.define({
   refetchOnSuccess: false,
 });
 
+/** A look at the run's chat now; what it says arrives as the run's own event. */
+export const mutLookNow = mutations.define({
+  id: "runs/look-now",
+  mutate: (ws: Workspace, runId: string) => ws.api.lookNow(runId),
+  optimistic: () => {},
+  key: ({ args: [ws, runId] }) => [ws.identity, runId, "look"],
+  describe: "look at the run now",
+  describeResult: null,
+  refetchOnSuccess: false,
+});
+
 export type FlagAnswer = "stop" | "keep" | "ask";
 
 /** A flag's answer on its way: one at a time per flag, one request id per choice, and why the server refused the last. */
