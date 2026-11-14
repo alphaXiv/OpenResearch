@@ -596,3 +596,68 @@ for (let step = 1; step <= ${total}; step++) {
     }
   })
 })
+
+test('a rule stops a run on its third NaN, and the agent repairing it reads Revising until its turn ends', async ({ page, project, agent, orx }, info) => {
+  // Three theme passes and the run itself outlast the default budget on a busy machine.
+  test.slow()
+  const run = payload(orx, `ruled-${project.id}`, ['nan'], `
+process.stdout.write('::orx:: {"step":0,"of":400,"unit":"steps","t":0}\\n')
+for (let step = 1; step <= 400; step++) {
+  await tick()
+  if (step === 10) gate('nan')
+  process.stdout.write('::orx:: {"step":' + step + ',"m":{"loss":' + (step >= 10 ? 'NaN' : (2 / step).toFixed(4)) + '}}\\n')
+}`)
+  const rules = path.join(orx.root, `rules-${project.id}.json`)
+  writeFileSync(rules, JSON.stringify({ rules: [{ name: 'nan-loss', text: 'Stop when the loss is NaN on 3 reports in a row.', does: 'stop', when: { nonFinite: 'loss', reports: 3 } }] }))
+  agent.script('Launch Ruled.', [
+    { run: [
+      'set -e',
+      `id=$(orx create-experiment ${project.id} --title Ruled --run-command '${run.command}' | sed -n 's/^ *id: *//p')`,
+      `orx exp view set "$id" --config ${rules}`,
+      'orx exp run "$id" --backend local',
+      'orx exp wake "$id"',
+    ].join('\n') },
+    { say: 'Launched Ruled.' },
+  ])
+  await project.open(page)
+  await send(page, 'Launch Ruled.')
+  const banner = page.getByRole('region', { name: 'Runs in this chat' })
+  await expect(banner.getByRole('button', { name: 'Stop the run', exact: true })).toBeVisible()
+  await expect(banner).toContainText(said('Step 9 of 400'))
+  const shown = (await (await page.request.get(`${orx.url}/api/chat/shown-runs`)).json()).find((item: { run: { projectId: string } }) => item.run.projectId === project.id)
+  const { id: runId, experimentId } = shown.run
+
+  const [seen, repairing] = [`seen-${project.id}`, `repairing-${project.id}`]
+  agent.script('finished with status', [
+    { hold: seen },
+    { run: `orx exp revise ${experimentId} --run ${runId}` },
+    { hold: repairing },
+    { say: 'Added warm-up; relaunching next.' },
+  ])
+  await run.open('nan')
+
+  await test.step('the third NaN stops the run, named by its rule, with no model involved', async () => {
+    await agent.reached(seen)
+    await expect(banner).toContainText('Auto-stopped')
+    await expect.poll(async () => (await banner.innerText()).replace(/[⁦-⁩]/g, ''))
+      .toContain('Stop when the loss is NaN on 3 reports in a row. Rule: nan-loss. No model was involved.')
+    const { statusText } = await (await page.request.get(`${orx.url}/api/runs/${runId}/monitor`)).json()
+    // A pass counts every report since the last, so a fast run is stopped a few reports past the third.
+    expect(statusText).toMatch(/\nstop {5}Auto-stopped by rule nan-loss: loss was NaN on \d+ reports in a row, step 10 to \d+\. No model was involved\.\n/)
+    await themes(page, banner, info, 'strip-auto-stopped')
+  })
+
+  await test.step('the agent marks the run it is repairing, which reads Revising until its turn ends', async () => {
+    agent.release(seen)
+    await agent.reached(repairing)
+    await expect(banner).toContainText('Revising')
+    await expect(banner.getByRole('button', { name: 'Dismiss', exact: true })).toHaveCount(0)
+    await themes(page, banner, info, 'strip-revising')
+    agent.release(repairing)
+    await expect(page.getByText('Added warm-up; relaunching next.', { exact: true })).toBeVisible()
+    await expect.poll(async () => {
+      const { run: stopped } = await (await page.request.get(`${orx.url}/api/runs/${runId}`)).json()
+      return [stopped.outcome?.by, stopped.outcome?.rule?.name, stopped.monitor?.tone]
+    }).toEqual(['rule', 'nan-loss', 'stopped'])
+  })
+})

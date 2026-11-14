@@ -97,7 +97,7 @@ export function RunStrip({ model, monitor, runNo, runCount, agent, label, onTogg
           </p>
         )}
         {model.stale && !failed && <p className="m-0 mt-1.5 text-xs text-ink-subtext">{model.stale.why} · {model.stale.age}</p>}
-        {model.note && <p className={cn("m-0 mt-1.5", model.tone === "revising" ? "text-sm" : "text-xs text-ink-subtext")}><span className={model.tone === "revising" ? "tool-running-shimmer" : undefined}>{model.note}</span></p>}
+        {model.note && <p className={cn("m-0 mt-1.5", model.tone === "revising" ? "text-sm" : "text-xs text-ink-subtext")}>{model.note}</p>}
         {flag && <Issue model={model} flag={flag} agent={agent} onOpenRun={onOpenRun} />}
         {!model.pre && !flag && monitor?.status === "loading" && <div className="mt-3 h-16" />}
         {failed && (
