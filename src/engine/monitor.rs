@@ -611,9 +611,17 @@ fn evaluate(fold: &Fold, life: &Lifecycle, parent: Option<&Snapshot>, now: i64) 
     let started = life.started();
 
     // A run that finished did all it had to, however much that was.
-    let finished =
-        life.phase == Some(Phase::Done) && snapshot.and_then(Snapshot::progress).is_some();
-    let finished = |fill: Option<f64>| fill.or(finished.then_some(1.0));
+    let done = life.phase == Some(Phase::Done);
+    let finished = done && snapshot.and_then(Snapshot::progress).is_some();
+    // Every stage of a plan that finished is done; the ones it skipped are not segments.
+    let planned_done = done && !stages.is_empty();
+    let finished = |fill: Option<f64>| {
+        if planned_done {
+            Some(1.0)
+        } else {
+            fill.or(finished.then_some(1.0))
+        }
+    };
     let last_phase = snapshot.and_then(|s| s.phases.len().checked_sub(1));
     // With a plan, the stage the run is in, or its first before any began.
     let current = stages
@@ -4759,6 +4767,14 @@ mod tests {
             ]
         );
         assert_eq!(monitor["progress"]["phase"], 4);
+        assert_eq!(
+            monitor["progress"]["whole"], 1.0,
+            "a run that finished did all it had to"
+        );
+        assert!(monitor["statusText"]
+            .as_str()
+            .unwrap()
+            .starts_with("baseline  done  100%"));
         let text = monitor["statusText"].as_str().unwrap();
         assert!(text.contains("\u{2013} download skipped"), "{text}");
         assert!(text.contains("\u{2713} export 10s (unplanned)"), "{text}");
