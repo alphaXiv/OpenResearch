@@ -243,6 +243,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     ));
     runtime.start();
     tokio::spawn(crate::engine::monitor::keep_current(engine.clone()));
+    tokio::spawn(crate::engine::watch::keep_watching());
     tokio::spawn(reclaim_orphaned_run_artifacts(
         state.data_dir_move_in_progress.clone(),
         state.data_dir_gate.clone(),
@@ -6828,6 +6829,7 @@ struct SetUiStateReq {
     model_sightings: Option<Value>,
     run_banner: Option<String>,
     experiments_grid: Option<bool>,
+    run_watching: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -6990,6 +6992,9 @@ async fn set_ui_state(
         }
         if let Some(grid) = req.experiments_grid {
             store.set_experiments_grid(grid)?;
+        }
+        if let Some(on) = req.run_watching {
+            store.set_run_watching(on)?;
         }
         Ok(Json(json!(store.ui_state()?)))
     })
@@ -9438,6 +9443,22 @@ fn chat_shown_runs_json(store: &Store) -> Result<Value> {
             }))
         })
         .collect::<Vec<_>>();
+    // The chat's newest look rides on each of its rows: one watcher writes the summary for them all.
+    let mut watched = std::collections::HashMap::new();
+    let mut rows = rows;
+    for row in &mut rows {
+        let Some(chat) = row["sessionId"].as_str().map(str::to_owned) else {
+            continue;
+        };
+        if !watched.contains_key(&chat) {
+            let watch = crate::engine::watch::chat_summary(store, &chat).unwrap_or_else(|error| {
+                eprintln!("orx up: could not read chat {chat}'s watcher summary: {error:#}");
+                Value::Null
+            });
+            watched.insert(chat.clone(), watch);
+        }
+        row["watch"] = watched[&chat].clone();
+    }
     Ok(json!(rows))
 }
 
@@ -11556,6 +11577,7 @@ mod tests {
             model_sightings: None,
             run_banner: crate::store::RunBannerLevel::Strip,
             experiments_grid: false,
+            run_watching: true,
             preferred_agent: Some(StoredAgentSelection {
                 profile: None,
                 harness: "codex".into(),
@@ -11597,6 +11619,7 @@ mod tests {
             model_sightings: None,
             run_banner: crate::store::RunBannerLevel::Strip,
             experiments_grid: false,
+            run_watching: true,
         };
         let catalog = json!({"harnesses": [{"id":"claude-code", "agentReady":true,"defaultModel":"opus",
             "models":[{"id":"opus"}], "options":{"defaultPermissionMode":"plan", "reasoningLevels":[{"id":"default"}]}}]});
@@ -11654,6 +11677,7 @@ mod tests {
             model_sightings: None,
             run_banner: crate::store::RunBannerLevel::Strip,
             experiments_grid: false,
+            run_watching: true,
         };
         let catalog = json!({"harnesses":[
             {"id":"codex", "agentReady":true, "models":[], "options":{}},
@@ -11922,6 +11946,7 @@ mod tests {
                 model_sightings: None,
                 run_banner: None,
                 experiments_grid: None,
+                run_watching: None,
             }),
         )
         .await;

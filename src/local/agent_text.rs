@@ -192,7 +192,11 @@ fn every_view_pattern_and_plan_in_agent_text_compiles() {
                     Ok(given) if body.contains("\"regex\"") => {
                         view::patterns(&given, &source, "").err().map(refused)
                     }
-                    Ok(given) if body.contains("\"plan\"") || body.contains("\"rules\"") => {
+                    Ok(given)
+                        if ["\"plan\"", "\"rules\"", "\"brief\"", "\"watch\""]
+                            .iter()
+                            .any(|key| body.contains(key)) =>
+                    {
                         view::config_of(&given, &source, "").err().map(refused)
                     }
                     Ok(_) => continue,

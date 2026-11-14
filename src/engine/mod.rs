@@ -15,6 +15,7 @@ pub mod ssh_config_cleanup;
 pub mod submit;
 pub mod transport;
 pub(crate) mod view;
+pub(crate) mod watch;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};

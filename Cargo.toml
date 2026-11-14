@@ -55,6 +55,10 @@ semver = "1"
 fd-lock = "4"
 # Splits a pasted `ssh …` command (src/jobs/ssh/hosts.rs); already in the tree via portable-pty.
 shell-words = "1"
+# The watcher's count tokens and its sentence length (src/engine/watch); both already in the tree,
+# regex through orx-signals and unicode-segmentation through the desktop window (tao).
+regex = { version = "1", default-features = false, features = ["std", "unicode-perl", "perf"] }
+unicode-segmentation = "1"
 base64 = "0.22"
 once_cell = "1"
 # Uploaded skills (.zip of a SKILL.md folder) and shared projects (.orx). Lean:

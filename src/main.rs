@@ -615,10 +615,12 @@ pub enum ViewCommand {
         /// `[{"regex": "…", "phase": "…", "unit": "…", "row": "…"}]`. Its runs' logs are read again.
         #[arg(long)]
         pattern: Option<std::path::PathBuf>,
-        /// Read the stages every run goes through, in order, and the rules orx stops or asks by,
-        /// from this JSON file: `{"plan": [{"phase": "…", "of": N, "unit": "…"}], "rules":
-        /// [{"name": "…", "text": "…", "does": "stop|ask", "when": {…}}]}`. An empty list clears
-        /// it; a key left out keeps what is saved.
+        /// Read the experiment's config from this JSON file: the stages every run goes through,
+        /// `"plan": [{"phase": "…", "of": N, "unit": "…"}]`; the rules orx stops or asks by,
+        /// `"rules": [{"name": "…", "text": "…", "does": "stop|ask", "when": {…}}]`; what the
+        /// watcher is told, `"brief": {"question": "…", "healthy": "…", "noise": "…",
+        /// "worth_a_flag": "…"}`; and its gaps, `"watch": {"minGapS": 120, "maxGapS": 1800}`. An
+        /// empty value clears that key; a key left out keeps what is saved.
         #[arg(long)]
         config: Option<std::path::PathBuf>,
     },

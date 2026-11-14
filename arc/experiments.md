@@ -335,7 +335,6 @@ pace measured over four slices and seen on two revisions; spend already past a
 budget stops at once. A stop goes through the engine's cancel, the first stop
 wins, and the run is Auto-stopped by that rule, with no model involved.
 
-
 A stopped run reads **Revising** while the chat's agent repairs its experiment:
 `orx exp revise EXP --run RUN`, from that agent's chat during its turn, records
 the turn against the experiment's newest run, if that run was stopped. The
@@ -343,3 +342,39 @@ server derives the state, never stores it: it holds while that turn is going
 and no run of the experiment has started since, and ends by itself when either
 changes. The monitor task keeps such a run watched, so its line hears at once.
 Nothing claims the repair happened; the next run is the proof.
+
+### The watcher
+
+One cheap model per chat watches the chat's runs and writes each run's sentence
+(`src/engine/watch.rs`). Which model is one function's answer: Claude Code's
+Haiku one-shot on Claude Code, the GPT Luna Codex's own catalog offers on Codex,
+and on any other agent none until the user picks one. A look is a one-shot with
+no tools: Claude Code's are switched off by flag, Codex's by its feature switches
+with a turn that starts one anyway stopped and its answer refused. A harness that
+cannot promise that is not used.
+
+A run's owner is the chat that last looked at it, else the first chat following
+it that has a watching model. One look covers every live run the chat owns, at
+most six a call and four calls a slot. It is due when something changes: a
+number the sentence binds leaves its trend, a comparison with the parent changes
+sign, a counted pattern moves, a stage starts or ends, the stage runs at least
+twice the parent's pace, or the log prints a kind of warning it has not printed
+before. Between changes, a ladder from each stage's start (1, 2, 5, 10, 20
+minutes, then the experiment's `maxGapS`) bounds the silence while the run keeps
+printing; with nothing new there is no look. Looks a change brings keep the
+chat's `minGapS` between them and never outnumber the ladder's points since the
+oldest run started. A look answered `same` doubles the threshold of the check
+that brought it. A run gets one last look when it ends, shared with siblings
+ending within a minute.
+
+The digest is bounded at 16 KiB: the brief, each run's progress, signals and
+last three sentences, the log's head and its new lines, new kinds of warning
+first, repeats said once with their count. The whole request passes sharing's
+credential scan before it is sent. A reply is strict JSON: each number that can
+move is a token orx fills, exactly one figure is bold, a sentence reads at most
+90 characters filled, and a number written as the value it reads now is refused.
+One retry carries what was wrong; a run whose answer stays wrong keeps its last
+sentence. Each look is a row written before it is sent and settled in one
+transaction; a look `orx up` stopped after sending is recorded as interrupted and
+never sent again, so evidence is never lost and a model is never billed twice
+for one look. A look that flags is recorded as a flag in the journal.

@@ -12,8 +12,10 @@ mod acp;
 mod costs;
 pub(crate) mod search;
 mod telemetry;
+mod watch;
 pub(crate) use costs::{BilledRun, Per, Quote};
 pub(crate) use telemetry::{Cost, InvocationIdentity, SampleCost, TokenUsage};
+pub(crate) use watch::{LookResult, WatchLook, WatchLookRun};
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -1394,6 +1396,45 @@ impl Store {
                 body_json TEXT NOT NULL,
                 PRIMARY KEY (run_id, seq)
             );
+            CREATE TABLE IF NOT EXISTS watch_looks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_session_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                state TEXT NOT NULL,
+                model TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                sent_at INTEGER,
+                done_at INTEGER,
+                summary_template TEXT,
+                summary_text TEXT,
+                usage_json TEXT,
+                error TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_watch_looks_chat ON watch_looks(chat_session_id, created_at);
+            CREATE TABLE IF NOT EXISTS watch_look_runs (
+                look_id INTEGER NOT NULL,
+                run_id TEXT NOT NULL,
+                key TEXT NOT NULL,
+                role TEXT NOT NULL,
+                result TEXT,
+                template TEXT,
+                text TEXT,
+                whole REAL,
+                basis_json TEXT,
+                cursor_json TEXT,
+                evidence_json TEXT,
+                PRIMARY KEY(look_id, run_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_watch_look_runs_run ON watch_look_runs(run_id, look_id);
+            CREATE TABLE IF NOT EXISTS watch_counts (
+                run_id TEXT NOT NULL,
+                pattern TEXT NOT NULL,
+                lines INTEGER NOT NULL,
+                offset INTEGER NOT NULL,
+                ident TEXT NOT NULL,
+                PRIMARY KEY(run_id, pattern)
+            );
             CREATE TABLE IF NOT EXISTS signal_collections (
                 run_id TEXT PRIMARY KEY,
                 done INTEGER NOT NULL DEFAULT 0,
@@ -1484,6 +1525,7 @@ impl Store {
             "ALTER TABLE ui_state ADD COLUMN nested_delegation INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE ui_state ADD COLUMN run_banner TEXT NOT NULL DEFAULT 'strip'",
             "ALTER TABLE ui_state ADD COLUMN experiments_grid INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE ui_state ADD COLUMN run_watching INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE chat_messages ADD COLUMN completed_at INTEGER",
             "ALTER TABLE runs ADD COLUMN cancel_reason TEXT",
             "ALTER TABLE runs ADD COLUMN cancel_unconfirmed TEXT",
@@ -1793,7 +1835,7 @@ impl Store {
                     preferred_autonomy, nested_delegation, opencode_free_models, preferred_profile,
                     favorite_models, hidden_models, model_section_order,
                     collapsed_model_sections, model_sightings, hidden_agents,
-                    run_banner, experiments_grid
+                    run_banner, experiments_grid, run_watching
              FROM ui_state WHERE id = 1",
             [],
             |row| {
@@ -1841,6 +1883,7 @@ impl Store {
                     run_banner: RunBannerLevel::parse(&row.get::<_, String>(18)?)
                         .unwrap_or(RunBannerLevel::Strip),
                     experiments_grid: row.get(19)?,
+                    run_watching: row.get(20)?,
                 })
             },
         )?)
@@ -1851,6 +1894,12 @@ impl Store {
             "UPDATE ui_state SET run_banner = ?1 WHERE id = 1",
             [level.as_str()],
         )?;
+        Ok(())
+    }
+
+    pub fn set_run_watching(&self, on: bool) -> Result<()> {
+        self.conn
+            .execute("UPDATE ui_state SET run_watching = ?1 WHERE id = 1", [on])?;
         Ok(())
     }
 
@@ -5713,6 +5762,8 @@ pub struct StoredUiState {
     pub model_sightings: Option<serde_json::Value>,
     pub run_banner: RunBannerLevel,
     pub experiments_grid: bool,
+    /// Whether the watcher looks at runs; off, nothing is sent to a model.
+    pub run_watching: bool,
 }
 
 /// Normalized transcript entry; `parts_json` is the wire-format parts array
@@ -11538,6 +11589,7 @@ mod tests {
                 model_sightings: None,
                 run_banner: RunBannerLevel::Strip,
                 experiments_grid: false,
+                run_watching: true,
             }
         );
 
@@ -11592,6 +11644,7 @@ mod tests {
                 model_sightings: Some(serde_json::json!({"seen": ["gpt-6"]})),
                 run_banner: RunBannerLevel::Strip,
                 experiments_grid: false,
+                run_watching: true,
             }
         );
         let _ = std::fs::remove_dir_all(&dir);

@@ -37,8 +37,8 @@ use super::options::{
     HarnessOptions, OptionChoice, PermissionMode, PlanActivation, REASONING_DEFAULT_ID,
 };
 use super::{
-    CompactCtx, CompactOutcome, Harness, OneShot, OneShotQuality, ResumeAction, TurnFailure,
-    TurnOutcome, TurnResult, Waited, ORX_MAX_ATTEMPTS,
+    CompactCtx, CompactOutcome, Harness, OneShot, OneShotQuality, OneShotReply, OneShotUsage,
+    ResumeAction, TurnFailure, TurnOutcome, TurnResult, Waited, ORX_MAX_ATTEMPTS,
 };
 use crate::error::{anyhow, Result};
 use crate::local::chat::{
@@ -1023,6 +1023,49 @@ fn billing_label(
 /// through from the catalog; a CLI too old to know them exits non-zero, and
 /// the error carries what it printed.
 async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
+    let out = claude_one_shot_output(bin, request, &[]).await?;
+    Ok(String::from_utf8_lossy(&out).into_owned())
+}
+
+/// A one-shot's reply and usage from `-p --output-format json`: one result object.
+async fn claude_one_shot_reply(bin: &Path, request: OneShot<'_>) -> Result<OneShotReply> {
+    let out = claude_one_shot_output(bin, request, &["--output-format", "json"]).await?;
+    claude_result_reply(&out)
+}
+
+fn claude_result_reply(out: &[u8]) -> Result<OneShotReply> {
+    let result: Value = serde_json::from_slice(out).map_err(|error| {
+        anyhow!(
+            "Claude Code answered something other than its JSON result ({error}): {}",
+            super::one_line(&String::from_utf8_lossy(out), 200)
+        )
+    })?;
+    let text = result["result"].as_str().unwrap_or_default().to_owned();
+    if result["is_error"] == true {
+        return Err(anyhow!("{}", super::one_line(&text, 300)));
+    }
+    let usage = &result["usage"];
+    let input = [
+        "input_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+    ]
+    .iter()
+    .filter_map(|key| usage[key].as_u64())
+    .sum();
+    let usage = usage.is_object().then(|| OneShotUsage {
+        input_tokens: input,
+        output_tokens: usage["output_tokens"].as_u64().unwrap_or_default(),
+        cost_usd: result["total_cost_usd"].as_f64(),
+    });
+    Ok(OneShotReply { text, usage })
+}
+
+async fn claude_one_shot_output(
+    bin: &Path,
+    request: OneShot<'_>,
+    extra: &[&str],
+) -> Result<Vec<u8>> {
     let model = match request.quality {
         OneShotQuality::Cheap => "haiku",
         OneShotQuality::Standard => "sonnet",
@@ -1051,6 +1094,7 @@ async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
         "--system-prompt",
         request.system,
     ])
+    .args(extra)
     .stdin(Stdio::null())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())
@@ -1087,7 +1131,7 @@ async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
             &[&out.stdout, &out.stderr],
         ));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    Ok(out.stdout)
 }
 
 /// Every `claude` install, in preference order.
@@ -1357,6 +1401,16 @@ impl Harness for ClaudeCode {
 
     fn one_shot_honours_model(&self) -> bool {
         false
+    }
+
+    /// `--tools ""` leaves the child no tool to call, and `--strict-mcp-config` no server.
+    fn runs_without_tools(&self) -> bool {
+        true
+    }
+
+    async fn one_shot_without_tools(&self, request: OneShot<'_>) -> Result<OneShotReply> {
+        let bin = find_claude().ok_or_else(|| anyhow!("{} is not installed", self.name()))?;
+        claude_one_shot_reply(&bin, request).await
     }
 
     fn options(&self) -> HarnessOptions {

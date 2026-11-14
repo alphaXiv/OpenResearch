@@ -181,6 +181,8 @@ async fn view(command: ViewCommand) -> Result<()> {
                 (list.is_some(), "patterns"),
                 (given("plan"), "plan"),
                 (given("rules"), "rules"),
+                (given("brief"), "brief"),
+                (given("watch"), "watch"),
             ]
             .into_iter()
             .filter_map(|(given, name)| given.then_some(name))
@@ -246,15 +248,15 @@ async fn view(command: ViewCommand) -> Result<()> {
                     serde_json::to_string_pretty(&described["patterns"])?
                 );
             }
-            let mut config = serde_json::Map::new();
-            for key in ["plan", "rules"] {
-                if described[key]
-                    .as_array()
-                    .is_some_and(|list| !list.is_empty())
-                {
-                    config.insert(key.into(), described[key].clone());
-                }
-            }
+            let config: serde_json::Map<String, serde_json::Value> =
+                ["plan", "rules", "brief", "watch"]
+                    .into_iter()
+                    .filter(|key| {
+                        described[*key].as_array().is_some_and(|p| !p.is_empty())
+                            || described[*key].is_object()
+                    })
+                    .map(|key| (key.to_owned(), described[key].clone()))
+                    .collect();
             if !config.is_empty() {
                 println!("\nConfig:\n{}", serde_json::to_string_pretty(&config)?);
             }

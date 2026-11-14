@@ -182,6 +182,8 @@ struct Lifecycle {
     stop: std::result::Result<Option<crate::store::StopContext>, String>,
     /// The chat's agent is repairing the experiment after this run stopped.
     revising: bool,
+    /// What the watcher said of the run, and whether and by what it is watched.
+    watch: Value,
 }
 
 impl Lifecycle {
@@ -229,6 +231,13 @@ impl Lifecycle {
                 .run_stop(&row.id)
                 .map_err(|error| format!("{error:#}")),
             revising: store.run_revising(row)?,
+            watch: super::watch::run_facts(store, row).unwrap_or_else(|error| {
+                json!({
+                    "state": "unknown", "model": null, "looks": [], "spentUsd": null, "nextAt": null,
+                    "error": {"code": "unread", "message": format!("Couldn't read what the watcher said: {error:#}")},
+                    "sentence": null, "counts": {},
+                })
+            }),
             run: row.clone(),
         })
     }
@@ -265,7 +274,7 @@ impl Lifecycle {
     /// Changes whenever anything the projection reads from the store does.
     fn key(&self) -> String {
         format!(
-            "{}|{}|{:?}|{:?}|{}|{:?}|{}|{:?}|{:?}|{:?}|{:?}|{}",
+            "{}|{}|{:?}|{:?}|{}|{:?}|{}|{:?}|{:?}|{:?}|{:?}|{}|{}",
             self.run.updated_at,
             self.state,
             self.contact,
@@ -278,6 +287,7 @@ impl Lifecycle {
             self.log_error,
             self.stop,
             self.revising,
+            self.watch,
         )
     }
 }
@@ -1077,6 +1087,17 @@ fn evaluate(
             referenced.insert(format!("{name}.vs"), d);
         }
     }
+    let counts = life.watch["counts"]
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    for (pattern, count) in &counts {
+        referenced.insert(
+            format!("count:{}", Value::from(pattern.as_str())),
+            count.clone(),
+        );
+    }
+    let sentence = life.watch["sentence"].clone();
     let eta_ms = estimate
         .as_ref()
         .filter(|e| e["pending"] == false)
@@ -1095,7 +1116,7 @@ fn evaluate(
         }),
         "headline": headline,
         "logError": life.log_error,
-        "sentence": null,
+        "sentence": sentence,
         "bindings": referenced,
         "signals": view["signals"],
         "etaMs": eta_ms,
@@ -1137,6 +1158,7 @@ fn evaluate(
             stages: planned.then(|| (&phases[..], current)),
             pace: pace.as_ref(),
             setup: setup.as_ref(),
+            bindings: &summary["bindings"],
         },
     );
     let mut body = json!({
@@ -1164,14 +1186,14 @@ fn evaluate(
         "groups": {},
         "cells": {},
         "media": {},
-        "counts": {},
+        "counts": counts,
         "estimate": estimate,
         "limit": limit,
         "cost": cost,
         "quote": null,
         "before": before,
-        "watch": {"state": "off", "model": null, "looks": [], "spentUsd": null, "nextAt": null, "error": null},
-        "sentence": null,
+        "watch": watch_body(&life.watch),
+        "sentence": sentence,
         "flag": null,
         "setup": setup,
         "revising": life.revising,
@@ -1187,6 +1209,17 @@ fn evaluate(
         body,
         slices: output.as_ref().map_or(0, |o| o.completed_slices),
     }
+}
+
+/// The watch as the page reads it: everything but the sentence and the counts, which it reads
+/// beside it.
+fn watch_body(watch: &Value) -> Value {
+    let mut body = watch.clone();
+    if let Some(body) = body.as_object_mut() {
+        body.remove("sentence");
+        body.remove("counts");
+    }
+    body
 }
 
 /// `rev` and `seriesRev` as last published, the fold revision they came from, and the summary
@@ -2071,6 +2104,7 @@ fn project(
                 "estimate": body["estimate"],
                 "cost": body["cost"],
                 "sentence": body["sentence"],
+                "watch": body["watch"],
                 "patch": {
                     "availability": body["availability"],
                     "phases": body["phases"],
@@ -2245,6 +2279,8 @@ struct StatusFacts<'a> {
     stages: Option<(&'a [Value], Option<usize>)>,
     /// How much slower than the run that timed it the stage is going, when it is.
     pace: Option<&'a Value>,
+    /// What the run's sentence reads now.
+    bindings: &'a Value,
 }
 
 fn status_text(life: &Lifecycle, fold: &Fold, facts: &StatusFacts) -> String {
@@ -2264,6 +2300,18 @@ fn status_text(life: &Lifecycle, fold: &Fold, facts: &StatusFacts) -> String {
     }
     first.push_str(&format!("  [run {}]", life.run.id));
     lines.push(first);
+    if let Some(stop) = stop_text(life) {
+        lines.push(format!("stop     {stop}"));
+    }
+    if life.revising {
+        lines.push("revising The agent is repairing this experiment and will run it again.".into());
+    }
+    lines.extend(super::watch::status_lines(
+        &life.watch,
+        facts.bindings,
+        facts.signals,
+        facts.versus,
+    ));
     if let Some(eta) = eta_text(life, snapshot, facts) {
         lines.push(format!("eta      {eta}"));
     }
@@ -2292,12 +2340,6 @@ fn status_text(life: &Lifecycle, fold: &Fold, facts: &StatusFacts) -> String {
                 .join(" \u{b7} ")
         )),
         Err(error) => lines.push(format!("rules    {error}")),
-    }
-    if let Some(stop) = stop_text(life) {
-        lines.push(format!("stop     {stop}"));
-    }
-    if life.revising {
-        lines.push("revising The agent is repairing this experiment and will run it again.".into());
     }
     if let Some(snapshot) = snapshot.filter(|s| !s.latest.is_empty()) {
         let values = snapshot
@@ -2614,7 +2656,7 @@ fn with_cost(text: String, cost: Option<&Value>, last_seen: bool) -> String {
 }
 
 /// A duration as the page writes it (`fmtDuration`), rounded down: "45s", "12m", "1h 0m", "2d 3h".
-pub(super) fn short(ms: i64) -> String {
+pub(crate) fn short(ms: i64) -> String {
     let seconds = ms.max(0) / 1000;
     let (minutes, hours) = (seconds / 60, seconds / 3600);
     match (hours, minutes) {
@@ -2626,14 +2668,14 @@ pub(super) fn short(ms: i64) -> String {
 }
 
 /// `HH:MM UTC`: status prints for agents and logs, which carry no time zone.
-fn clock_text(ms: i64) -> String {
+pub(crate) fn clock_text(ms: i64) -> String {
     let iso = crate::telemetry::iso8601_utc(ms);
     format!("{} UTC", &iso[11..16])
 }
 
 /// One measurement the way its view declared it, as the page's `fmtSignal` writes it: the word
 /// `labels` gives its raw value, else as a duration, compactly, or scaled and rounded to `digits`.
-fn value_text(value: &Value, spec: &Value) -> String {
+pub(crate) fn value_text(value: &Value, spec: &Value) -> String {
     let raw = match value {
         Value::Number(n) => n.as_f64().map(|n| n.to_string()),
         Value::String(text) => Some(text.clone()),
@@ -2666,7 +2708,7 @@ fn value_text(value: &Value, spec: &Value) -> String {
 
 /// `value` to exactly `digits` places, rounded half away from zero on its shortest decimal, with
 /// grouping and the sign and `%` its view declares, as `Intl.NumberFormat` writes it.
-fn fixed(value: f64, digits: usize, spec: &Value) -> String {
+pub(crate) fn fixed(value: f64, digits: usize, spec: &Value) -> String {
     let shortest = value.abs().to_string();
     let (whole, fraction) = shortest.split_once('.').unwrap_or((&shortest, ""));
     let mut kept: Vec<u8> = whole
@@ -2846,7 +2888,7 @@ fn signal_notes(
 /// A number no view gave digits, as the page writes it (`fmtMeasure`): to three significant
 /// figures and never fewer than its whole part, and one too small or too large for that as
 /// `3e-4`, with the sign and the `%` its view declares. A nonzero value never reads as zero.
-pub(super) fn measure(value: f64, spec: &Value) -> String {
+pub(crate) fn measure(value: f64, spec: &Value) -> String {
     let size = value.abs();
     let text = if size == 0.0 {
         "0".to_owned()
@@ -5538,12 +5580,12 @@ mod tests {
             )
         };
         assert_eq!(
-            invalid(raw(json!({"plan": [], "brief": []}))),
-            "Config config.json: \"brief\" is not something this orx reads; a config takes plan and rules. Run `orx exp view set exp --config config.json`."
+            invalid(raw(json!({"plan": [], "notes": []}))),
+            "Config config.json: \"notes\" is not something this orx reads; a config takes plan, rules, brief and watch. Run `orx exp view set exp --config config.json`."
         );
         assert_eq!(
             invalid(raw(json!({}))),
-            "Config config.json: give a JSON object with plan and rules. Run `orx exp view set exp --config config.json`."
+            "Config config.json: give a JSON object with plan, rules, brief and watch. Run `orx exp view set exp --config config.json`."
         );
         assert_eq!(
             invalid(raw(json!({"rules": [{"name": "nan", "text": "Stop at NaN.", "does": "halt", "when": {"nonFinite": "loss"}}]}))),

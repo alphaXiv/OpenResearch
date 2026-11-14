@@ -46,8 +46,8 @@ use super::options::{
 };
 use super::{
     should_synthesize_plan, synthesize_resume, CompactCtx, CompactOutcome, Harness, OneShot,
-    OneShotQuality, ResumeAction, TurnFailure, TurnOutcome, TurnResult, Waited, ORX_MAX_ATTEMPTS,
-    TURN_WATCHDOG,
+    OneShotQuality, OneShotReply, OneShotUsage, ResumeAction, TurnFailure, TurnOutcome, TurnResult,
+    Waited, ORX_MAX_ATTEMPTS, TURN_WATCHDOG,
 };
 use crate::error::{anyhow, Result};
 use crate::local::chat::{
@@ -353,6 +353,34 @@ async fn codex_model_list(bin: &Path, home: Option<&Path>) -> Option<Value> {
         .ok()?
         .get("result")
         .cloned()
+}
+
+/// The GPT Luna this Codex sign-in's own catalog offers, newest first by its id, with the name the
+/// catalog gives it; None when it offers none.
+pub(crate) async fn codex_luna(profile: Option<&str>) -> Result<Option<(String, String)>> {
+    let bin = find_codex().ok_or_else(|| anyhow!("Codex is not installed"))?;
+    let home = profile
+        .map(|id| crate::local::agent_profiles::prepare(id, "codex"))
+        .transpose()?;
+    let catalog = codex_model_list(&bin, home.as_deref())
+        .await
+        .ok_or_else(|| anyhow!("Codex did not list its models"))?;
+    let mut lunas: Vec<_> = parse_model_list(&catalog, None)
+        .into_iter()
+        .filter(|model| {
+            crate::local::model_routes::canonical(&model.id)
+                .split('-')
+                .any(|part| part == "luna")
+        })
+        .collect();
+    lunas.sort_by(|a, b| b.id.cmp(&a.id));
+    Ok(lunas.into_iter().next().map(|model| {
+        let label = model
+            .display_name
+            .clone()
+            .unwrap_or_else(|| model.id.clone());
+        (model.id, label)
+    }))
 }
 
 /// One request on a throwaway `codex app-server`: `initialize` →
@@ -1285,6 +1313,42 @@ pub(crate) async fn profile_auth(bin: Option<&Path>, home: &Path, version: Optio
 ///
 /// A failed turn's error event becomes the error; stderr is only Codex's own logging.
 async fn codex_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
+    codex_exec_one_shot(bin, request, false)
+        .await
+        .map(|reply| reply.text)
+}
+
+/// Switches that take every tool away from a `codex exec` turn. Codex names a switch it does not
+/// know in an `error` item, so a CLI that would keep one of these tools is caught by name.
+const NO_TOOLS: &[&str] = &[
+    "features.shell_tool=false",
+    "features.unified_exec=false",
+    "features.apply_patch_freeform=false",
+    "features.image_generation=false",
+    "features.multi_agent=false",
+    "features.apps=false",
+    "features.browser_use=false",
+    "features.computer_use=false",
+    "features.in_app_browser=false",
+    "features.sleep_tool=false",
+    "features.goals=false",
+    "features.hooks=false",
+    "features.tool_suggest=false",
+    "features.skill_search=false",
+    "features.code_mode_host=false",
+    "web_search=\"disabled\"",
+];
+
+/// Items a `codex exec` turn writes that are words, never an action.
+const WORDS_ONLY: &[&str] = &["agent_message", "reasoning", "error"];
+
+/// `request` on a throwaway `codex exec`; with `tool_free`, every tool switched off and the
+/// stream watched so a turn that acts anyway is stopped and refused.
+async fn codex_exec_one_shot(
+    bin: &Path,
+    request: OneShot<'_>,
+    tool_free: bool,
+) -> Result<OneShotReply> {
     let effort = match request.quality {
         OneShotQuality::Cheap => "low",
         OneShotQuality::Standard => "medium",
@@ -1302,8 +1366,11 @@ async fn codex_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
             .args(["-c", "mcp_servers={}"])
             // Nor skills: the plugin catalog alone injected ~6k prompt tokens
             // (24.3k → 18k input measured) into a request that ignores it.
-            .args(["-c", "features.plugins=false"])
-            .arg(&message)
+            .args(["-c", "features.plugins=false"]);
+        if tool_free {
+            cmd.args(NO_TOOLS.iter().flat_map(|switch| ["-c", switch]));
+        }
+        cmd.arg(&message)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -1332,16 +1399,25 @@ async fn codex_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
         // answers, and the reply is what it settled on.
         let mut last = None;
         let mut error = None;
+        let mut usage = None;
         while let Ok(Some(line)) = lines.next_line().await {
+            if tool_free {
+                if let Some(refusal) = exec_line_tool(&line) {
+                    let _ = child.kill().await;
+                    return Err(anyhow!("{refusal}"));
+                }
+            }
             if let Some(text) = exec_line_agent_message(&line) {
                 last = Some(text);
             } else if let Some(message) = exec_line_error(&line) {
                 error = Some(message);
+            } else if let Some(used) = exec_line_usage(&line) {
+                usage = Some(used);
             }
         }
         let status = child.wait().await?;
         match (status.success(), last, error) {
-            (true, Some(text), _) => Ok(text),
+            (true, Some(text), _) => Ok(OneShotReply { text, usage }),
             (_, _, Some(message)) => Err(anyhow!("{message}")),
             (true, None, None) => Err(anyhow!("returned no reply")),
             (false, _, None) => Err(anyhow!("{status}")),
@@ -1350,6 +1426,50 @@ async fn codex_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
     tokio::time::timeout(request.timeout, fut)
         .await
         .map_err(|_| anyhow!("timed out after {}s", request.timeout.as_secs()))?
+}
+
+/// Why a tool-free turn must stop at this line: it started something other than words, or the
+/// CLI ignored one of the switches that keep tools away.
+fn exec_line_tool(line: &str) -> Option<String> {
+    let event = serde_json::from_str::<Value>(line).ok()?;
+    let item = event.get("item")?;
+    let kind = item
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    if !WORDS_ONLY.contains(&kind) {
+        return Some(format!(
+            "Codex started a {kind} in a request that allows no tools, so it was stopped"
+        ));
+    }
+    let message = item.get("message").and_then(Value::as_str)?;
+    let ignored = NO_TOOLS
+        .iter()
+        .map(|switch| switch.split('=').next().unwrap_or(switch))
+        .find(|key| message.contains(&format!("`{key}` is ignored")))?;
+    Some(format!(
+        "This Codex does not know `{ignored}`, so it cannot run a request without tools; update Codex"
+    ))
+}
+
+/// A `codex exec --json` line's token counts, from the turn's completion.
+fn exec_line_usage(line: &str) -> Option<OneShotUsage> {
+    let event = serde_json::from_str::<Value>(line).ok()?;
+    if event.get("type").and_then(Value::as_str) != Some("turn.completed") {
+        return None;
+    }
+    let usage = event.get("usage")?;
+    Some(OneShotUsage {
+        input_tokens: usage
+            .get("input_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        output_tokens: usage
+            .get("output_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        cost_usd: None,
+    })
 }
 
 /// A `codex exec --json` line's turn error, with the provider's message
@@ -1762,6 +1882,16 @@ impl Harness for Codex {
     async fn one_shot(&self, request: OneShot<'_>) -> Result<String> {
         let bin = find_codex().ok_or_else(|| anyhow!("{} is not installed", self.name()))?;
         codex_one_shot(&bin, request).await
+    }
+
+    /// Every tool switched off, and a turn that starts one anyway is stopped.
+    fn runs_without_tools(&self) -> bool {
+        true
+    }
+
+    async fn one_shot_without_tools(&self, request: OneShot<'_>) -> Result<OneShotReply> {
+        let bin = find_codex().ok_or_else(|| anyhow!("{} is not installed", self.name()))?;
+        codex_exec_one_shot(&bin, request, true).await
     }
 
     fn options(&self) -> HarnessOptions {

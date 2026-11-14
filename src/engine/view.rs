@@ -1055,42 +1055,122 @@ pub(crate) fn stored_plan(
 }
 
 /// The keys `--config` takes; this orx reads no other.
-const CONFIG_KEYS: &str = "plan and rules";
+const CONFIG_KEYS: [&str; 4] = ["plan", "rules", "brief", "watch"];
 
-/// What a configuration an agent gave sets: its stage plan, its rules, or both.
+/// What the watcher's brief may say, by label: each label's text at most a few sentences.
+pub(crate) const BRIEF_LABELS: [&str; 6] = [
+    "question",
+    "healthy",
+    "noise",
+    "worth_a_flag",
+    "from_parent",
+    "decided",
+];
+/// A brief's whole text, in UTF-8 bytes: about 800 tokens.
+const MAX_BRIEF: usize = 3200;
+/// The bounds of the watcher's gaps, in seconds: `minGapS` between looks a change brings,
+/// `maxGapS` the longest silence while a run keeps printing.
+const GAPS: [(&str, u64, u64); 2] = [("minGapS", 30, 3600), ("maxGapS", 60, 86_400)];
+
+/// What a configuration an agent gave sets, by key; a key left out is `None`.
 #[derive(Debug, Default)]
 pub(crate) struct Config {
     pub plan: Option<Vec<orx_signals::Stage>>,
     pub rules: Option<Vec<super::rules::Rule>>,
+    /// An empty brief clears it.
+    pub brief: Option<Map<String, Value>>,
+    /// An empty object clears it.
+    pub watch: Option<Map<String, Value>>,
 }
 
 /// A configuration as an agent gave it, or why it cannot be used.
 pub(crate) fn config_of(given: &Value, source: &Source, fix: &str) -> Result<Config, Refusal> {
     let file = source.config.unwrap_or("<config>");
     let refuse = |why: String| Refusal::Invalid(format!("Config {file}: {why}. {fix}"));
+    let keys = format!("{} and {}", CONFIG_KEYS[..3].join(", "), CONFIG_KEYS[3]);
     let fields = given
         .as_object()
         .filter(|fields| !fields.is_empty())
-        .ok_or_else(|| refuse(format!("give a JSON object with {CONFIG_KEYS}")))?;
+        .ok_or_else(|| refuse(format!("give a JSON object with {keys}")))?;
     if let Some(key) = fields
         .keys()
-        .find(|key| !["plan", "rules"].contains(&key.as_str()))
+        .find(|key| !CONFIG_KEYS.contains(&key.as_str()))
     {
         return Err(refuse(format!(
-            "\"{key}\" is not something this orx reads; a config takes {CONFIG_KEYS}"
+            "\"{key}\" is not something this orx reads; a config takes {keys}"
         )));
     }
+    let plan = fields
+        .get("plan")
+        .map(|plan| orx_signals::plan(plan, true).map_err(&refuse))
+        .transpose()?;
+    let rules = fields
+        .get("rules")
+        .map(super::rules::parse)
+        .transpose()
+        .map_err(&refuse)?;
+    let brief = fields
+        .get("brief")
+        .map(|brief| {
+            let lines = brief.as_object().ok_or_else(|| {
+                refuse(format!(
+                    "a brief is an object of text by label: {}",
+                    BRIEF_LABELS.join(", ")
+                ))
+            })?;
+            if let Some(label) = lines
+                .keys()
+                .find(|label| !BRIEF_LABELS.contains(&label.as_str()))
+            {
+                return Err(refuse(format!(
+                    "the brief has no label \"{label}\"; it takes {}",
+                    BRIEF_LABELS.join(", ")
+                )));
+            }
+            if let Some((label, _)) = lines.iter().find(|(_, text)| !text.is_string()) {
+                return Err(refuse(format!("the brief's \"{label}\" is text")));
+            }
+            let size: usize = lines.values().filter_map(Value::as_str).map(str::len).sum();
+            if size > MAX_BRIEF {
+                return Err(refuse(format!(
+                    "the brief is {size} bytes; keep it to {MAX_BRIEF}, about 800 tokens"
+                )));
+            }
+            Ok(lines.clone())
+        })
+        .transpose()?;
+    let watch = fields
+        .get("watch")
+        .map(|watch| {
+            let gaps = watch.as_object().ok_or_else(|| {
+                refuse("watch is an object: {\"minGapS\": N, \"maxGapS\": N}".into())
+            })?;
+            for (key, value) in gaps {
+                let (_, low, high) =
+                    GAPS.iter().find(|(name, ..)| name == key).ok_or_else(|| {
+                        refuse(format!(
+                            "watch has no \"{key}\"; it takes minGapS and maxGapS"
+                        ))
+                    })?;
+                if !value.as_u64().is_some_and(|n| (*low..=*high).contains(&n)) {
+                    return Err(refuse(format!(
+                        "watch's {key} is a whole number of seconds from {low} to {high}"
+                    )));
+                }
+            }
+            if let (Some(min), Some(max)) = (gaps.get("minGapS"), gaps.get("maxGapS")) {
+                if min.as_u64() > max.as_u64() {
+                    return Err(refuse("watch's minGapS is longer than its maxGapS".into()));
+                }
+            }
+            Ok(gaps.clone())
+        })
+        .transpose()?;
     Ok(Config {
-        plan: fields
-            .get("plan")
-            .map(|plan| orx_signals::plan(plan, true))
-            .transpose()
-            .map_err(refuse)?,
-        rules: fields
-            .get("rules")
-            .map(super::rules::parse)
-            .transpose()
-            .map_err(refuse)?,
+        plan,
+        rules,
+        brief,
+        watch,
     })
 }
 
@@ -1245,6 +1325,15 @@ pub(crate) fn described(store: &crate::store::Store, id: &str) -> Result<Value, 
         .iter()
         .map(super::rules::Rule::json)
         .collect::<Vec<_>>());
+    let settings: Value = raw
+        .as_deref()
+        .and_then(|raw| serde_json::from_str(raw).ok())
+        .unwrap_or(Value::Null);
+    for key in ["brief", "watch"] {
+        if settings[key].is_object() {
+            described[key] = settings[key].clone();
+        }
+    }
     Ok(described)
 }
 
@@ -1359,6 +1448,17 @@ pub(crate) fn set(
                 settings.insert("rules".into(), json!(rules));
             }
             None => {}
+        }
+        for (key, value) in [("brief", &configured.brief), ("watch", &configured.watch)] {
+            match value {
+                Some(value) if value.is_empty() => {
+                    settings.remove(key);
+                }
+                Some(value) => {
+                    settings.insert(key.into(), json!(value));
+                }
+                None => {}
+            }
         }
         Ok(Value::Object(settings).to_string())
     })?;

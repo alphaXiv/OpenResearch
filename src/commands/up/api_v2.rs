@@ -270,6 +270,7 @@ fn dashboard_routes(api: Arc<Api>) -> Router {
     Router::new()
         .route("/api/runs/{id}/log", get(log))
         .route("/api/runs/{id}/monitor", get(monitor))
+        .route("/api/runs/{id}/look", post(look_now))
         .route("/api/runs/{id}/view/check", post(check_view))
         .route("/api/experiments/{id}/view", get(view).put(set_view))
         .route("/api/runs/{id}/abandon", post(dashboard_abandon))
@@ -277,6 +278,79 @@ fn dashboard_routes(api: Arc<Api>) -> Router {
         .route("/api/compute/hosts", get(hosts))
         .route("/api/compute/hosts/{alias}/retry", post(retry_host))
         .with_state(api)
+}
+
+/// The run's log in `range`, read the way the page's log view reads it: the laptop's kept copy,
+/// else the run's backend; outside `orx up`, the kept copy alone. `expected` names the log a
+/// cursor was read from; another is a reset.
+pub(crate) async fn run_log(
+    id: &str,
+    range: ByteRange,
+    expected: Option<crate::engine::FileIdent>,
+) -> Result<LogPage> {
+    let Ok(api) = installed() else {
+        let data_dir = crate::store::data_dir();
+        return kept_page(&kept_log(&data_dir, id)?, &range, expected.as_ref())?
+            .ok_or_else(|| anyhow!("This computer keeps none of run {id}'s log"));
+    };
+    read_log(api, id, range, expected)
+        .await
+        .map_err(|failure| match failure {
+            Failure::Message(_, message) => anyhow!("{message}"),
+            Failure::Unavailable { host, .. } => anyhow!(
+                "The log is on {}, which is out of contact",
+                host.as_deref().unwrap_or("the run's machine")
+            ),
+        })
+}
+
+/// `POST /api/runs/:id/look`: a look at the run's chat now, under the chat's least gap between
+/// looks. 202 with the look; 409 when one ran too lately or the run is not watched.
+async fn look_now(State(api): State<Arc<Api>>, Path(id): Path<String>) -> Response {
+    let run = match api.store().get_run(&id) {
+        Ok(Some(run)) => run,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": format!("Run {id} not found.")})),
+            )
+                .into_response()
+        }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("Couldn't read run {id}: {error:#}")})),
+            )
+                .into_response()
+        }
+    };
+    let asked = tokio::task::spawn_blocking(move || {
+        let store = Store::open()?;
+        Ok::<_, crate::error::Error>(crate::engine::watch::look_now(&store, &run))
+    })
+    .await;
+    use crate::engine::watch::LookNow;
+    match asked {
+        Ok(Ok(Ok(look))) => (StatusCode::ACCEPTED, Json(look)).into_response(),
+        Ok(Ok(Err(LookNow::TooSoon(at)))) => (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "A look ran under two minutes ago. Try again after it.", "notBefore": at})),
+        )
+            .into_response(),
+        Ok(Ok(Err(LookNow::NotWatched(why)))) => {
+            (StatusCode::CONFLICT, Json(json!({"error": why}))).into_response()
+        }
+        Ok(Ok(Err(LookNow::Failed(error))) | Err(error)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("Couldn't ask for a look: {error:#}")})),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("Couldn't ask for a look: {error}")})),
+        )
+            .into_response(),
+    }
 }
 
 /// See [`Engine::cancel_error`]; none when the engine isn't running in this process.
