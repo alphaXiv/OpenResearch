@@ -412,39 +412,97 @@ async fn a_reply_still_wrong_after_its_retry_keeps_the_last_sentence_and_says_wh
 }
 
 #[tokio::test]
-async fn a_credential_in_the_digest_stops_the_look_before_anything_is_sent() {
+async fn a_credential_in_a_log_is_left_out_of_every_look_and_told_of_once() {
     if !crate::config::in_test_child(&[]) {
         return;
     }
     let calls_dir = crate::config::home_dir().unwrap().join("claude-calls");
-    fake_claude(&calls_dir, &[r#"{"runs": {}}"#]);
+    let ok = r#"{"runs": {"r1": {"status": "ok", "line": "Retried **{count:\"timed out\"}** shards."}}}"#;
+    fake_claude(&calls_dir, &[ok, ok]);
     let store = Store::open().unwrap();
     chat(&store, "chat", "claude-code");
-    let token = format!("ghp_{}", "a1B2c3D4".repeat(5));
-    run(
-        &store,
-        "a",
-        "Depth 6",
-        "chat",
-        &format!("{LOG}export GITHUB_TOKEN={token}\n"),
+    let hf = format!("hf_{}", "a1B2c3D4".repeat(5));
+    let gh = format!("ghp_{}", "e5F6g7H8".repeat(5));
+    // Past where a digest clips a line, so the clipped part alone is too short to match.
+    let cut = format!("sk-{}", "Q9r8S7t6".repeat(6));
+    let long = format!("{} {cut}", "x".repeat(225));
+    let log = format!(
+        "{LOG}HF_TOKEN\t{hf}\nenv:\n{gh}\n-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----\n{long}\nstep 200 loss 1.9\n"
     );
+    run(&store, "a", "Depth 6", "chat", &log);
+
+    let first = look(&store, "chat", "ceiling", &[("a", "r1")]);
+    take(first).await.unwrap();
+
+    let prompt = std::fs::read_to_string(calls_dir.join("prompt-1")).unwrap();
+    for secret in [
+        hf.as_str(),
+        &gh,
+        "b3BlbnNzaC1rZXktdjEAAAAA",
+        "PRIVATE KEY",
+        &cut[..20],
+    ] {
+        assert!(
+            !prompt.contains(secret),
+            "{secret} reached the model: {prompt}"
+        );
+    }
+    assert!(
+        prompt.contains("step 200 loss 1.9"),
+        "the rest of the log is still read: {prompt}"
+    );
+    assert!(
+        prompt.contains("6 lines that hold what looks like a credential"),
+        "{prompt}"
+    );
+    assert_eq!(store.watch_look(first).unwrap().unwrap().state, "done");
+    let facts = run_facts(&store, &store.get_run("a").unwrap().unwrap()).unwrap();
+    let told: Vec<String> = serde_json::from_value(facts["looks"][0]["withheld"].clone()).unwrap();
+    assert_eq!(told.len(), 6, "{told:?}");
+    assert!(
+        told[0].contains("line 6 of the log") && told[0].contains("a Hugging Face token"),
+        "{told:?}"
+    );
+    assert!(
+        told[5].contains("line 12 of the log") && told[5].contains("an API key"),
+        "{told:?}"
+    );
+    assert!(told
+        .iter()
+        .all(|note| !note.contains(&hf) && !note.contains(&gh)));
+
+    keep_log(&store, "a", &format!("{log}step 300 loss 1.7\n"));
+    let second = look(&store, "chat", "ceiling", &[("a", "r1")]);
+    take(second).await.unwrap();
+    let prompt = std::fs::read_to_string(calls_dir.join("prompt-2")).unwrap();
+    assert!(
+        prompt.contains("step 300 loss 1.7") && !prompt.contains(&hf),
+        "{prompt}"
+    );
+    let facts = run_facts(&store, &store.get_run("a").unwrap().unwrap()).unwrap();
+    assert_eq!(facts["looks"][1]["withheld"], json!([]), "told of once");
+}
+
+#[tokio::test]
+async fn a_reply_that_holds_a_credential_is_never_sent_back_in_a_retry() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let calls_dir = crate::config::home_dir().unwrap().join("claude-calls");
+    let echoed = format!(
+        r#"{{"runs": {{"r1": {{"status": "ok", "line": "No bold, and xoxb-{}"}}}}}}"#,
+        "a1B2c3D4".repeat(4)
+    );
+    fake_claude(&calls_dir, &[&echoed, &echoed]);
+    let store = Store::open().unwrap();
+    chat(&store, "chat", "claude-code");
+    run(&store, "a", "Depth 6", "chat", LOG);
     let id = look(&store, "chat", "ceiling", &[("a", "r1")]);
 
-    let error = take(id).await.unwrap_err();
+    take(id).await.unwrap();
 
-    assert_eq!(calls(&calls_dir), 0, "nothing reached the model");
-    let message = format!("{error:#}");
-    assert!(message.contains("the log of Depth 6"), "{message}");
-    assert!(message.contains("GitHub token"), "{message}");
-    assert!(
-        !message.contains(&token),
-        "the credential itself is never repeated"
-    );
-    assert_eq!(
-        store.watch_look(id).unwrap().unwrap().state,
-        "prepared",
-        "never marked sent"
-    );
+    assert_eq!(calls(&calls_dir), 1);
+    assert_eq!(store.watch_look(id).unwrap().unwrap().state, "error");
 }
 
 #[test]

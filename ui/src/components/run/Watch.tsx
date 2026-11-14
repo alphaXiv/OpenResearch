@@ -89,6 +89,9 @@ export function Watch({ monitor, runId, tone, live, now }: { monitor: Pick<RunMo
                       {outcome}{raised?.choice?.reason ? ` ${autoDir(raised.choice.reason)}` : ""}
                     </span>
                   )}
+                  {row.look.withheld?.map((note) => (
+                    <span key={note} className={cn("block text-xs", TONE_INK.flag)}>{autoDir(note)}</span>
+                  ))}
                   {row.since && (
                     <span className="block text-xs text-ink-subtext">{capitalized(m.run_watch_same_since({ count: ltr(fmtNumber(row.count)), clock: clockText(row.since.at) }))}</span>
                   )}

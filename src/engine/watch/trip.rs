@@ -128,7 +128,11 @@ fn conditions(state: &State, run: &Now, covered: &BTreeSet<String>, now: i64) ->
             continue;
         }
         // The kind the line names, "torch.OutOfMemoryError", else its start; the evidence shows it whole.
-        let text = line.text.trim();
+        let text = match crate::local::share::find_secret(&line.text) {
+            Some(kind) => digest::withheld_text(kind),
+            None => line.text.trim().to_owned(),
+        };
+        let text = text.as_str();
         let shown: String = match text.split_once(": ") {
             Some((kind, _)) if kind.chars().count() <= 40 => kind.to_owned(),
             _ => text.chars().take(60).collect(),
@@ -137,10 +141,7 @@ fn conditions(state: &State, run: &Now, covered: &BTreeSet<String>, now: i64) ->
             kind: "error",
             fingerprint: format!("error:{kind}"),
             template: format!("A new kind of error in the log: **{}**.", plain(&shown)),
-            text: format!(
-                "it printed a kind of error it had not before: {}",
-                line.text.trim()
-            ),
+            text: format!("it printed a kind of error it had not before: {text}"),
             evidence: Evidence::Line(line.clone()),
         });
     }

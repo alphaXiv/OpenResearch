@@ -38,7 +38,7 @@ export function journalRows(looks: Look[]): JournalRow[] {
   for (const look of looks) {
     const last = rows.at(-1);
     const keeps = last && look.said !== "flag" && last.look.said !== "error" && last.look.said !== "interrupted"
-      && look.template !== null && look.template === last.look.template;
+      && !look.withheld?.length && !last.look.withheld?.length && look.template !== null && look.template === last.look.template;
     if (keeps) {
       last.since ??= last.look;
       last.count += 1;

@@ -100,6 +100,81 @@ pub(super) struct Shared<'a> {
 pub(super) struct Digest {
     pub text: String,
     pub excerpts: BTreeMap<String, Vec<(u64, u64)>>,
+    /// What the digest left out for holding what looks like a credential, by run key; a place
+    /// with no key is in what the digest says of every run.
+    pub withheld: Vec<Withheld>,
+}
+
+pub(super) struct Withheld {
+    pub key: Option<String>,
+    pub place: Place,
+    pub kind: &'static str,
+}
+
+#[derive(Debug, PartialEq)]
+pub(super) enum Place {
+    /// A line of the run's log, by its bytes.
+    Line(u64, u64),
+    /// A field of the digest, in words.
+    Field(&'static str),
+}
+
+/// "a token", "an API key".
+pub(super) fn a(kind: &str) -> String {
+    let article = if kind.starts_with(['A', 'E', 'I', 'O', 'U', 'a', 'e', 'i', 'o', 'u']) {
+        "an"
+    } else {
+        "a"
+    };
+    format!("{article} {kind}")
+}
+
+/// What a line or field that holds what looks like a credential reads in its place.
+pub(super) fn withheld_text(kind: &str) -> String {
+    format!("[left out: it holds what looks like {}]", a(kind))
+}
+
+/// The kind of credential each of `lines` holds, scanned as written, before anything is clipped
+/// or encoded. A private key's lines hold one from its BEGIN line through its END line.
+pub(super) fn credentials<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<Option<&'static str>> {
+    let mut in_key = false;
+    lines
+        .map(|line| {
+            in_key |= line.contains("-----BEGIN") && line.contains("PRIVATE KEY-----");
+            let kind = if in_key {
+                Some("private key")
+            } else {
+                crate::local::share::find_secret(line)
+            };
+            in_key &= !line.contains("-----END");
+            kind
+        })
+        .collect()
+}
+
+/// Takes out of `value` every string, and every entry whose name, holds what looks like a
+/// credential, telling `found` the kind of each.
+fn scrub(value: &mut Value, found: &mut dyn FnMut(&'static str)) {
+    match value {
+        Value::String(text) => {
+            if let Some(kind) = crate::local::share::find_secret(text) {
+                *text = withheld_text(kind);
+                found(kind);
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(|item| scrub(item, found)),
+        Value::Object(map) => {
+            map.retain(|name, _| match crate::local::share::find_secret(name) {
+                Some(kind) => {
+                    found(kind);
+                    false
+                }
+                None => true,
+            });
+            map.values_mut().for_each(|item| scrub(item, found));
+        }
+        _ => {}
+    }
 }
 
 /// A warning or error line's kind: its words, with numbers, addresses and ids taken out.
@@ -490,11 +565,36 @@ pub(super) fn build(shared: &Shared, runs: &[Run]) -> Digest {
         .count()
         .max(1);
     let share = (room / waiting).min(MAX_LOG_BYTES);
+    let mut withheld = Vec::new();
     for index in order {
         let run = &runs[index];
+        let mut held = 0;
+        let mut keep = |lines: &[Line]| -> Vec<Line> {
+            let kinds = credentials(lines.iter().map(|line| line.text.as_str()));
+            lines
+                .iter()
+                .zip(kinds)
+                .filter_map(|(line, kind)| match kind {
+                    Some(kind) => {
+                        held += 1;
+                        withheld.push(Withheld {
+                            key: Some(run.key.to_owned()),
+                            place: Place::Line(line.from, line.to),
+                            kind,
+                        });
+                        None
+                    }
+                    None => Some(line.clone()),
+                })
+                .collect()
+        };
+        let clean = LogRead {
+            head: keep(&run.log.head),
+            lines: keep(&run.log.lines),
+            ..run.log.clone()
+        };
         let head_budget = 1024.min(room);
-        let head: Vec<Value> = run
-            .log
+        let head: Vec<Value> = clean
             .head
             .iter()
             .take(HEAD_LINES)
@@ -507,11 +607,11 @@ pub(super) fn build(shared: &Shared, runs: &[Run]) -> Digest {
             .collect();
         let head_used = serde_json::to_string(&head).map_or(0, |text| text.len());
         room = room.saturating_sub(head_used);
-        let (lines, mut shown, omitted) = log_excerpts(run.log, share.min(room));
+        let (lines, mut shown, omitted) = log_excerpts(&clean, share.min(room));
         let used = serde_json::to_string(&lines).map_or(0, |text| text.len());
         room = room.saturating_sub(used);
         shown.extend(
-            run.log
+            clean
                 .head
                 .iter()
                 .take(head.len())
@@ -530,6 +630,11 @@ pub(super) fn build(shared: &Shared, runs: &[Run]) -> Digest {
         if omitted > 0 {
             left_out.push(format!("{omitted} more lines"));
         }
+        if held > 0 {
+            left_out.push(format!(
+                "{held} lines that hold what looks like a credential, which orx never sends"
+            ));
+        }
         if run.log.unread > 0 {
             left_out.push(format!("{} bytes this look did not read", run.log.unread));
         }
@@ -544,10 +649,44 @@ pub(super) fn build(shared: &Shared, runs: &[Run]) -> Digest {
         }
         entries[index]["log"] = log;
     }
+    for (entry, run) in entries.iter_mut().zip(runs) {
+        for (field, value) in entry.as_object_mut().into_iter().flatten() {
+            let place = match field.as_str() {
+                "keptGoingAfter" => "a reason given for keeping going after a flag",
+                "previous" => "an earlier sentence of the watcher",
+                "lastError" => "the run's last error",
+                _ => "what orx reports of the run",
+            };
+            scrub(value, &mut |kind| {
+                withheld.push(Withheld {
+                    key: Some(run.key.to_owned()),
+                    place: Place::Field(place),
+                    kind,
+                });
+            });
+        }
+    }
     digest["runs"] = json!(entries);
+    for (field, value) in digest.as_object_mut().into_iter().flatten() {
+        let place = match field.as_str() {
+            "notes" => "the watcher's own notes",
+            "summary" => "an earlier summary of the chat's runs",
+            "briefs" => "the experiment's watch brief",
+            "parents" => "what the parent run reported",
+            _ => continue,
+        };
+        scrub(value, &mut |kind| {
+            withheld.push(Withheld {
+                key: None,
+                place: Place::Field(place),
+                kind,
+            });
+        });
+    }
     Digest {
         text: serde_json::to_string(&digest).unwrap_or_default(),
         excerpts,
+        withheld,
     }
 }
 
@@ -658,5 +797,53 @@ mod tests {
         );
         assert!(digest.text.len() <= MAX_BYTES, "{}", digest.text.len());
         assert!(digest.excerpts.values().all(|shown| !shown.is_empty()));
+    }
+
+    #[test]
+    fn a_credential_behind_a_tab_or_newline_in_any_field_never_reaches_the_digest() {
+        let token = format!("hf_{}", "a1B2c3D4".repeat(5));
+        let body = json!({"view": {"signals": {}, "headline": []}, "latest": {}, "series": {}});
+        let summary = json!({});
+        let brief: Map<String, Value> =
+            serde_json::from_value(json!({"noise": format!("ignore this\n{token}")})).unwrap();
+        let kept = [json!({"flagged": "x", "why": format!("token\t{token}")})];
+        let log = LogRead::default();
+        let counts = BTreeMap::new();
+        let notes = format!("remember\t{token}");
+        let digest = build(
+            &Shared {
+                locale: "en",
+                notes: Some(&notes),
+                summary: None,
+            },
+            &[Run {
+                key: "r1",
+                label: "Depth 4",
+                experiment: "depth-4",
+                state: "running",
+                elapsed: None,
+                summary: &summary,
+                body: &body,
+                previous: &[],
+                brief: Some(&brief),
+                parent: None,
+                why: &[],
+                log: &log,
+                counts: &counts,
+                kept: &kept,
+            }],
+        );
+        assert!(!digest.text.contains("hf_"), "{}", digest.text);
+        let places: Vec<&Place> = digest.withheld.iter().map(|w| &w.place).collect();
+        for place in [
+            "the experiment's watch brief",
+            "a reason given for keeping going after a flag",
+            "the watcher's own notes",
+        ] {
+            assert!(
+                places.contains(&&Place::Field(place)),
+                "{place}: {places:?}"
+            );
+        }
     }
 }

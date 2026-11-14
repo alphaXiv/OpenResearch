@@ -126,6 +126,8 @@ export interface Look {
   why: string;
   /** The stage the run was in, whose bar `whole` is a share of when the run has no plan. */
   stage?: string | null;
+  /** Where this look first left out what looks like a credential, in English; absent from an older server. */
+  withheld?: string[];
 }
 
 interface Evidence {

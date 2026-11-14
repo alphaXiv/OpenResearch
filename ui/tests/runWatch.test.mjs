@@ -100,3 +100,14 @@ test("the journal says who settled a flag and how, under the look that raised it
   assert.ok(rows[1].includes(`${m.run_watch_kept()} Warm-up noise.`), rows[1]);
   await view.unmount();
 });
+
+test("a look that left out a credential says where, once, on its own row", async () => {
+  const note = "The watcher was not shown line 12 of the log: it holds what looks like a Hugging Face token. Replace that credential, and stop the run printing it.";
+  const looks = [
+    look("1", now - 30_000, "Loss **{loss}**, falling.", { withheld: [note] }),
+    look("2", now - 20_000, "Loss **{loss}**, falling.", { said: "same", withheld: [] }),
+  ];
+  assert.deepEqual(journalRows(looks).map((row) => row.look.id), ["2", "1"], "the told row keeps its own place");
+  const { container } = await watched({ looks });
+  assert.equal(text(container).split("line 12 of the log").length, 2, text(container));
+});

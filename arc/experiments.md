@@ -369,8 +369,10 @@ ending within a minute.
 
 The digest is bounded at 16 KiB: the brief, each run's progress, signals and
 last three sentences, the log's head and its new lines, new kinds of warning
-first, repeats said once with their count. The whole request passes sharing's
-credential scan before it is sent. A reply is strict JSON: each number that can
+first, repeats said once with their count. Each field and log line passes
+sharing's credential scan as written, before it is clipped or encoded; one that
+matches is left out, saying so, and the journal tells the user once where it is.
+A retry's reply is scanned before it goes back. A reply is strict JSON: each number that can
 move is a token orx fills, exactly one figure is bold, a sentence reads at most
 90 characters filled, and a number written as the value it reads now is refused.
 One retry carries what was wrong; a run whose answer stays wrong keeps its last
