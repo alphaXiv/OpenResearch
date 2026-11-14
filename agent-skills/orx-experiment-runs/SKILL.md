@@ -1,6 +1,6 @@
 ---
 name: orx-experiment-runs
-description: "Make a run followable from launch to result: declare its stages, report progress and the measures that answer its question, write its view and how it compares with the parent, read a log you can't edit with patterns, check the first minutes, change any of it mid-run. Use before a baseline's first launch, when a run's progress or chart misleads, and when the user asks to change what a run shows."
+description: "Make a run followable from launch to result: declare its stages, report progress and the measures that answer its question, write its view against the parent, read a log you can't edit with patterns, brief the watcher and settle its flags. Use before a baseline's first launch, when a run's progress or chart misleads, when a flag wakes you, and when the user asks to change what a run shows."
 ---
 
 The user follows a run without asking you: a line and a strip above the chat
@@ -242,7 +242,7 @@ A rule checks one condition; `reports` counts reports in a row (1 when left out)
 | `{"projectedFinishPastLimit": true}` | the estimate says the run ends after its time limit |
 
 `"stop"` cancels the run, which shows as Auto-stopped by that rule, and you
-are woken with what orx saw; `"ask"` wakes you and the run goes on. `text` is
+are woken with what orx saw; `"ask"` raises a flag (§10) and the run goes on. `text` is
 what the user reads, so say the condition in your words. `orx exp run <expId>
 --budget 5` adds a `budget` rule to that run.
 
@@ -250,6 +250,52 @@ When you stop a run yourself, say why: `orx exp cancel --run <runId> --reason
 '…'`. If the stopped run answered nothing and you are about to repair the same
 experiment and run it again, first `orx exp revise <expId> --run <runId>`, so
 the user sees Revising until the next run starts.
+
+## 10. What the watcher is told, and its flags
+
+A cheap model looks at each run while it goes and writes the sentence on its
+line. It sees a digest: the run's numbers, its newest log lines and a brief
+you write; never the chat, the code or the whole log. Write the brief beside
+the plan in the config, in plain sentences, by label; children inherit it:
+
+```json
+{"brief": {
+  "question": "Does depth 8 beat depth 4 on val bpb at the same token budget?",
+  "healthy": "Loss falls fast in the first 200 steps, then slowly; val bpb below the parent's by step 2000.",
+  "noise": "A tokens/s dip at every eval is the eval itself. Warnings from torch.compile at start are expected.",
+  "worth_a_flag": "Any line that says depth=4: this run must use depth 8.",
+  "from_parent": "The parent's val bpb flattened at 1.21 after step 4000.",
+  "decided": "Warm-up is 200 steps; a loss spike before step 200 is not a problem."
+ },
+ "watch": {"minGapS": 120, "maxGapS": 1800}}
+```
+
+`worth_a_flag` is where you name what you would want to hear about; the more
+specific, the fewer false flags. A look comes when something changes (a
+number leaves its trend, a new kind of warning, a stage starts or ends) and,
+while output keeps coming, at least every `maxGapS` seconds; `minGapS` keeps
+looks apart. Leave `watch` out for the defaults (2 and 30 minutes); widen the
+gaps for a run of days, narrow `maxGapS` for one that may go wrong fast.
+
+A flag is the watcher, a rule that asks, or orx's own checks (a value that is
+not a number, no progress, a new kind of error) saying a run may be going
+wrong. It never stops the run. In Agentic mode it wakes you with the lines it
+saw and where they are: it saw a digest and none of the chat, so read the run
+yourself (`orx exp status <expId> --run <runId>`, `orx logs <runId>`) and
+confirm before acting. Then settle it, with a reason the user reads:
+
+```sh
+orx exp flag <runId> --flag <flagId> --keep --reason 'The spike is the eval, as the brief says.'
+orx exp flag <runId> --flag <flagId> --stop --reason 'Loss is NaN since step 410; lowering the learning rate.'
+orx exp flag <runId> --flag <flagId> --ask --reason 'It may be fine; the user knows the dataset.'
+```
+
+`--keep` lets it run, and the watcher's next looks read what you kept and why,
+so a warning you judged harmless is not raised again; add it to the brief's
+`noise` for the experiment's next runs. `--stop` stops it as `orx exp cancel`
+does. `--ask` leaves the choice to the user, who sees Stop run, Keep going and
+Ask in the chat. In Copilot mode the flag waits for the user, and you hear of it
+only when they ask you.
 
 ## Worked examples
 
