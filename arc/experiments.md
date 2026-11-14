@@ -396,7 +396,10 @@ transaction; a look `orx up` stopped after sending is recorded as interrupted an
 never sent again, so evidence is never lost and a model is never billed twice
 for one look. A look that flags raises a flag in the transaction that settles it;
 on a run with a flag still open it is noted under that flag instead, its row a
-sentence that says so and its words a line beside the open flag's evidence.
+sentence that says so and its words a line beside the open flag's evidence. A
+noted flag wakes an Agentic chat's agent as a flag does, naming none to settle,
+and once someone keeps going after the open flag, a look comes soon that is shown
+what was noted, with its evidence, to flag again on its own if it still holds.
 
 ### Flags
 

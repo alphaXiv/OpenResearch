@@ -752,10 +752,11 @@ async fn a_look_that_flags_while_a_flag_is_open_is_noted_under_it() {
         &calls_dir,
         &[
             r#"{"runs": {"r1": {"status": "flag", "line": "Checkpoint write failed at step **450**.", "evidence": [{"from": 26, "to": 69}]}}}"#,
+            r#"{"runs": {"r1": {"status": "flag", "line": "Checkpoint write still failing at step **450**.", "evidence": [{"from": 26, "to": 69}]}}}"#,
         ],
     );
     let store = Store::open().unwrap();
-    chat(&store, "chat", "claude-code");
+    store.put_chat_session("chat", "claude-code", Some("agentic"));
     let a = run(&store, "a", "Depth 6", "chat", LOG);
     let open = json!({"id": "f1", "source": "tripwire", "fingerprint": "error:x", "at": 5, "template": "t",
         "detail": "t", "text": "Skipped samples.", "evidence": null, "whole": 0.2});
@@ -785,6 +786,52 @@ async fn a_look_that_flags_while_a_flag_is_open_is_noted_under_it() {
     let facts = run_facts(&store, &a).unwrap();
     assert_eq!(facts["looks"][0]["notedUnder"], 5);
     assert_eq!(facts["looks"][0]["said"], "new");
+    let notices = store.run_notices_for_tests("a");
+    assert!(
+        notices.iter().any(|notice| notice
+            .2
+            .contains("was flagged again while its earlier flag is still open")
+            && notice.2.contains("Checkpoint write failed at step 450.")),
+        "the Agentic chat's agent hears of it before it settles the open flag: {notices:?}"
+    );
+
+    // Kept going after the open flag: the next look weighs what was noted, and flags it again.
+    store
+        .record_flag_choices(
+            &[crate::store::FlagChoice {
+                run_id: "a".into(),
+                body: json!({"flagId": "f1", "c": "keep", "by": "agent"}),
+                wakes: Vec::new(),
+            }],
+            None,
+            crate::store::now_ms(),
+        )
+        .unwrap();
+    let now = Now::read(&store, &a).unwrap();
+    assert_eq!(now.noted.len(), 1);
+    assert!(changes(&mut Seen::default(), &now, 0)
+        .iter()
+        .any(|(check, _)| check == "noted"));
+    let again = look(&store, "chat", "change", &[("a", "r1")]);
+    take(again).await.unwrap();
+    assert!(std::fs::read_to_string(calls_dir.join("prompt-2"))
+        .unwrap()
+        .contains("notedWhileFlagOpen"));
+    let flags = super::super::flags::read(&store, &a).unwrap();
+    assert_eq!(flags.len(), 2, "{flags:?}");
+    assert_eq!(
+        (flags[1]["source"].as_str(), flags[1]["state"].as_str()),
+        (Some("look"), Some("raised"))
+    );
+    assert_eq!(
+        flags[1]["evidence"]["lines"],
+        json!(["WARNING --depth 8 overrides DEPTH; using 4"]),
+        "it cites the line the noted flag did"
+    );
+    assert!(
+        Now::read(&store, &a).unwrap().noted.is_empty(),
+        "weighed once"
+    );
 }
 
 #[tokio::test]

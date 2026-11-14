@@ -116,7 +116,9 @@ numbers stop making sense, or it stalls. Give the byte ranges of the log lines t
 Matching its parent is what a healthy run does: numbers equal to the parent's are trouble only
 when the brief says this run should differ. A run that ended as its parent did is not a flag.
 "keptGoingAfter" lists flags someone looked at and chose to keep going after: do not flag the
-same thing again unless it got clearly worse.
+same thing again unless it got clearly worse. "notedWhileFlagOpen" lists what earlier looks
+flagged while another flag was open, which was since kept going after: flag each again, citing
+its bytes, if the digest does not show it was resolved.
 Write "summary" only when the digest has "summary": one sentence for all the runs, naming each
 by its key as {r1} and its numbers as {r1:signal}.
 "notes" is for you: what to remember for the next look, at most a few lines."#;
@@ -190,6 +192,9 @@ pub(super) struct Run<'a> {
     pub counts: &'a BTreeMap<String, u64>,
     /// Flags on the run someone chose to keep going after, and why.
     pub kept: &'a [Value],
+    /// What earlier looks flagged while another flag was open, since kept going after: each
+    /// one's sentence and evidence.
+    pub noted: &'a [Value],
 }
 
 pub(super) struct Shared<'a> {
@@ -602,6 +607,23 @@ fn run_json(
     if !run.kept.is_empty() {
         entry["keptGoingAfter"] = json!(run.kept);
     }
+    if !run.noted.is_empty() {
+        entry["notedWhileFlagOpen"] = run
+            .noted
+            .iter()
+            .map(|noted| {
+                let evidence = &noted["evidence"];
+                let lines: Vec<&Value> = evidence["lines"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .take(3)
+                    .collect();
+                json!({"said": noted["said"], "lines": lines,
+                       "from": evidence["byteFrom"], "to": evidence["byteTo"]})
+            })
+            .collect();
+    }
     entry
 }
 
@@ -770,6 +792,17 @@ pub(super) fn build(shared: &Shared, runs: &[Run], room: usize) -> Digest {
         room = room.saturating_sub(serde_json::to_string(&lines).map_or(0, |text| text.len()));
         excerpts.insert(runs[index].key.to_owned(), shown);
         since.insert(index, (lines, omitted));
+    }
+    // What earlier looks noted may be cited again by its bytes.
+    for run in runs {
+        let cited = run.noted.iter().filter_map(|noted| {
+            let evidence = &noted["evidence"];
+            Some((evidence["byteFrom"].as_u64()?, evidence["byteTo"].as_u64()?))
+        });
+        excerpts
+            .entry(run.key.to_owned())
+            .or_default()
+            .extend(cited);
     }
     let mut heads = BTreeSet::new();
     let mut firsts = BTreeMap::new();
@@ -1082,6 +1115,7 @@ mod tests {
                 log: &log,
                 counts: &counts,
                 kept: &[],
+                noted: &[],
             })
             .collect();
         let room = room(SYSTEM.len());
@@ -1233,6 +1267,7 @@ mod tests {
                 log,
                 counts: &counts,
                 kept: &kept,
+                noted: &[],
             })
             .collect();
         let notes = "記録: 損失は順調に下がっている。".repeat(64);
@@ -1347,6 +1382,7 @@ mod tests {
                 log: &LogRead::default(),
                 counts: &BTreeMap::new(),
                 kept: &[],
+                noted: &[],
             }],
             MAX_BYTES,
         );
@@ -1395,6 +1431,7 @@ mod tests {
                 log: &log,
                 counts: &counts,
                 kept: &kept,
+                noted: &[],
             }],
             MAX_BYTES,
         );

@@ -11,6 +11,8 @@ pub(crate) struct NewFlag {
     pub body: Value,
     /// Chat, then the frozen wake text.
     pub wakes: Vec<(String, String)>,
+    /// What wakes the same chats instead when a look's flag is noted under one still open.
+    pub noted: Vec<(String, String)>,
     /// Raised only while the run has no flag still open, so one trouble wakes once.
     pub only_if_clear: bool,
 }

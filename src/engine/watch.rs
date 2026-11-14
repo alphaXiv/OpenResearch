@@ -44,6 +44,8 @@ const SCAN: u64 = 256 * 1024;
 const PREVIOUS: usize = 3;
 /// Looks the page lists.
 const JOURNAL: usize = 200;
+/// What a look is shown of what earlier looks noted under a flag since kept going after.
+const NOTED: usize = 3;
 const FAMILIES: usize = 256;
 /// Only a look for one of these is due; a look answering `same` doubles its threshold.
 const CHECKS: [&str; 6] = ["trend", "parent", "count", "stage", "family", "pace"];
@@ -233,6 +235,9 @@ struct Now {
     looks: Vec<(WatchLook, WatchLookRun)>,
     /// How far the fold has read the run's log, by its identity, where it has a checkpoint.
     folded: Option<(String, u64)>,
+    /// What looks flagged while another flag was open, which someone has since kept going after
+    /// and no look has weighed again: its sentence and its evidence.
+    noted: Vec<Value>,
 }
 
 impl Now {
@@ -243,6 +248,27 @@ impl Now {
             .run_monitor_json(&run.experiment_id)?
             .and_then(|raw| serde_json::from_str(&raw).ok())
             .unwrap_or(Value::Null);
+        let looks = store.run_watch_looks(&run.id, JOURNAL)?;
+        let weighed = looks
+            .iter()
+            .rev()
+            .find(|(_, row)| matches!(row.result.as_deref(), Some("line" | "same" | "flag")))
+            .map_or(i64::MIN, |(look, _)| look.created_at);
+        let events = store.run_flag_events(&run.id)?;
+        let kept_at = |flag: &Value| {
+            events
+                .iter()
+                .find(|e| e.kind == "choice" && e.body["flagId"] == *flag && e.body["c"] == "keep")
+                .map(|e| e.at)
+        };
+        let mut noted: Vec<Value> = events
+            .iter()
+            .filter(|e| {
+                e.kind == "noted" && kept_at(&e.body["flagId"]).is_some_and(|at| at > weighed)
+            })
+            .map(|e| json!({"said": e.body["text"], "evidence": e.body["evidence"]}))
+            .collect();
+        noted.drain(..noted.len().saturating_sub(NOTED));
         Ok(Self {
             summary: projection.summary().clone(),
             body,
@@ -254,7 +280,8 @@ impl Now {
                 .as_ref()
                 .map_or_else(|| run.experiment_id.clone(), |e| e.slug.clone()),
             settings,
-            looks: store.run_watch_looks(&run.id, JOURNAL)?,
+            looks,
+            noted,
             folded: projection
                 .snapshot()
                 .map(|snapshot| (snapshot.cursor.ident.clone(), snapshot.cursor.offset)),
@@ -875,8 +902,14 @@ async fn read_lines(
 }
 
 /// The lines a flag cites, as its evidence: the shown lines its ranges overlap, where they are
-/// in bytes and lines. Null when it cites none the look showed.
-async fn flag_evidence(run: &str, log: &digest::LogRead, cited: &[(u64, u64)]) -> Value {
+/// in bytes and lines, else the evidence of what an earlier look noted that it cites again. Null
+/// when it cites none the look showed.
+async fn flag_evidence(
+    run: &str,
+    log: &digest::LogRead,
+    cited: &[(u64, u64)],
+    noted: &[Value],
+) -> Value {
     let lines: Vec<&digest::Line> = log
         .head
         .iter()
@@ -888,6 +921,20 @@ async fn flag_evidence(run: &str, log: &digest::LogRead, cited: &[(u64, u64)]) -
         })
         .take(super::flags::EVIDENCE_LINES)
         .collect();
+    if lines.is_empty() {
+        let again = noted
+            .iter()
+            .map(|noted| &noted["evidence"])
+            .find(|evidence| {
+                cited.iter().any(|(from, to)| {
+                    evidence["byteFrom"].as_u64().is_some_and(|at| at < *to)
+                        && evidence["byteTo"].as_u64().is_some_and(|end| *from < end)
+                })
+            });
+        if let Some(evidence) = again {
+            return evidence.clone();
+        }
+    }
     evidence_of(run, log.ident.as_deref(), &lines).await
 }
 
@@ -1170,6 +1217,12 @@ fn changes(seen: &mut Seen, run: &Now, now: i64) -> Vec<(String, String)> {
         }
     };
     let mut why = Vec::new();
+    if !run.noted.is_empty() {
+        why.push((
+            "noted".into(),
+            "what a look flagged under a flag since kept going is weighed again".into(),
+        ));
+    }
     let signals = &run.body["view"]["signals"];
     let label = |name: &str| signals[name]["label"].as_str().unwrap_or(name).to_owned();
     // Each point since the look against the points just before it.
@@ -1781,6 +1834,7 @@ async fn take(id: i64) -> Result<()> {
                 },
                 counts: &counts[&run.run.id],
                 kept: &kept[&run.run.id],
+                noted: &run.noted,
             })
         })
         .collect();
@@ -2112,7 +2166,7 @@ async fn take(id: i64) -> Result<()> {
             (read.runs.get(&row.key), result)
         {
             let cited = match read_log {
-                Ok(log) => flag_evidence(&run.run.id, log, evidence).await,
+                Ok(log) => flag_evidence(&run.run.id, log, evidence, &run.noted).await,
                 Err(_) => Value::Null,
             };
             let body = json!({
@@ -2185,7 +2239,8 @@ async fn take(id: i64) -> Result<()> {
     let store = Store::open()?;
     let woken: Vec<String> = flags
         .iter()
-        .flat_map(|flag| flag.wakes.iter().map(|(chat, _)| chat.clone()))
+        .flat_map(|flag| flag.wakes.iter().chain(&flag.noted))
+        .map(|(chat, _)| chat.clone())
         .collect();
     store.finish_watch_look(
         id,

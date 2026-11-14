@@ -430,6 +430,7 @@ mod tests {
             settings: Value::Null,
             looks: Vec::new(),
             folded: None,
+            noted: Vec::new(),
         }
     }
 

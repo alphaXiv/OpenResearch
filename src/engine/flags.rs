@@ -196,6 +196,22 @@ pub(crate) fn wakes(store: &Store, run: &StoredRun, flag: &Value) -> Result<Vec<
     Ok(wakes)
 }
 
+/// The frozen text that wakes a chat's agent with what a look flagged while the run's earlier
+/// flag was still open: there is no flag of its own to settle, so it names none.
+fn noted_wake(run: &StoredRun, flag: &Value) -> String {
+    let (id, exp) = (&run.id, &run.experiment_id);
+    let at = super::monitor::clock_text(flag["at"].as_i64().unwrap_or_default());
+    let text = flag["text"].as_str().unwrap_or_default().replace("**", "");
+    format!(
+        "[orx] Run {id} (experiment {exp}) was flagged again while its earlier flag is still open.\n\
+         Watcher sentence at {at}: {text}\n{}\n{UNTRUSTED}\n\
+         Read: orx exp status {exp} --run {id}; orx logs {id}\n\
+         Weigh this with the open flag `orx exp status` names before you settle that one. If you keep\n\
+         going, a later look flags this again on its own when it still holds.",
+        evidence_text(&flag["evidence"]),
+    )
+}
+
 /// A flag to raise, with the notices that wake the run's Agentic chats with it.
 pub(crate) fn new_flag(
     store: &Store,
@@ -203,9 +219,20 @@ pub(crate) fn new_flag(
     body: Value,
     only_if_clear: bool,
 ) -> Result<NewFlag> {
+    let wakes = wakes(store, run, &body)?;
+    // Only a look's flag is noted under an open one; others raise again on their own.
+    let noted = if body["source"] == "look" {
+        wakes
+            .iter()
+            .map(|(chat, _)| (chat.clone(), noted_wake(run, &body)))
+            .collect()
+    } else {
+        Vec::new()
+    };
     Ok(NewFlag {
         run_id: run.id.clone(),
-        wakes: wakes(store, run, &body)?,
+        wakes,
+        noted,
         body,
         only_if_clear,
     })

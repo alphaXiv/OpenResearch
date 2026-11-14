@@ -178,6 +178,10 @@ impl Store {
                          'noted', ?2, ?3)",
                 params![flag.run_id, now, body.to_string()],
             )?;
+            for (chat, wake) in &flag.noted {
+                let dedupe = format!("{WATCH_FLAG}:noted:{id}:{}", flag.run_id);
+                self.insert_run_notice(&flag.run_id, chat, WATCH_FLAG, &dedupe, wake, now)?;
+            }
             noted.insert(flag.run_id.as_str());
         }
         tx.execute(
