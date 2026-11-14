@@ -91,6 +91,23 @@ pub(crate) fn read(store: &Store, run: &StoredRun) -> Result<Vec<Value>> {
     let notices = store.run_flag_notices(&run.id)?;
     let home = home(store, run)?;
     let live = !Phase::parse(&run.status).is_some_and(Phase::is_terminal);
+    // Once the run is stopping, a flag no one settled has nothing left to choose.
+    let accepted = store
+        .engine_run_state(&run.id)?
+        .and_then(|state| state.cancel_accepted_at);
+    let stopped = if run.cancel_requested || accepted.is_some() {
+        let stop = store.run_stop(&run.id)?;
+        Some(json!({
+            "by": stop.as_ref().map(|stop| stop.by),
+            "c": "stop",
+            "at": stop.as_ref().map_or(accepted, |stop| Some(stop.at)),
+            "reason": stop.as_ref().and_then(|stop| stop.reason.clone()),
+            "rule": stop.as_ref().and_then(|stop| stop.rule.as_ref()?.get("name").cloned()),
+            "moot": true,
+        }))
+    } else {
+        None
+    };
     let mode = home
         .as_ref()
         .filter(|chat| agentic(chat))
@@ -118,6 +135,7 @@ pub(crate) fn read(store: &Store, run: &StoredRun) -> Result<Vec<Value>> {
         let state = match (settle, routed) {
             (Some(settle), _) if settle.body["c"] == "keep" => "kept",
             (Some(_), _) => "stopped",
+            (None, _) if stopped.is_some() => "stopped",
             (None, Some(ask)) if ask.body["by"] == "agent" => "waiting",
             (None, Some(ask)) => {
                 let request = ask.body["requestId"].as_str().unwrap_or("ask");
@@ -142,13 +160,17 @@ pub(crate) fn read(store: &Store, run: &StoredRun) -> Result<Vec<Value>> {
         flag["state"] = json!(state);
         // A flag that waits for the user is the user's to settle, whatever the chat's autonomy.
         flag["mode"] = json!(if state == "waiting" { "copilot" } else { mode });
-        if let Some(choice) = settle.or(routed) {
-            flag["choice"] = json!({
-                "by": choice.body["by"],
-                "c": choice.body["c"],
-                "at": choice.at,
-                "reason": choice.body["reason"],
-            });
+        match (settle.or(routed), &stopped) {
+            (Some(choice), _) if settle.is_some() || stopped.is_none() => {
+                flag["choice"] = json!({
+                    "by": choice.body["by"],
+                    "c": choice.body["c"],
+                    "at": choice.at,
+                    "reason": choice.body["reason"],
+                });
+            }
+            (_, Some(stop)) => flag["choice"] = stop.clone(),
+            _ => {}
         }
         flags.push(flag);
     }
@@ -299,8 +321,10 @@ pub(crate) fn status_line(flag: &Value, fill: impl Fn(&str) -> String) -> String
     };
     let id = flag["id"].as_str().unwrap_or_default();
     let by = |choice: &Value| match choice["by"].as_str() {
-        Some("agent") => "the agent",
-        _ => "the user",
+        Some("agent") => "the agent".to_owned(),
+        Some("user") => "the user".to_owned(),
+        Some("rule") => format!("rule {}", choice["rule"].as_str().unwrap_or("?")),
+        _ => "someone".to_owned(),
     };
     let state = match flag["state"].as_str() {
         Some("kept") => format!("kept going by {}", by(&flag["choice"])),

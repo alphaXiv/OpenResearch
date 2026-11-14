@@ -154,7 +154,17 @@ export interface Flag {
   state: FlagState | "kept" | "answered" | "stopped";
   mode: FlagMode;
   /** The choice that settled it, or the last that sent it to someone; absent from an older server. */
-  choice?: { by: "user" | "agent"; c: "stop" | "keep" | "ask"; at: number; reason?: string | null };
+  choice?: {
+    /** Null when a stop came from an orx that kept no record of who asked. */
+    by: "user" | "agent" | "rule" | null;
+    c: "stop" | "keep" | "ask";
+    at: number | null;
+    reason?: string | null;
+    /** The stopping rule's name. */
+    rule?: string | null;
+    /** The run was stopped some other way, so this flag had nothing left to choose. */
+    moot?: boolean;
+  };
   /** What raised it: a look of the watcher, a check orx makes itself, or a rule that asks; absent from an older server. */
   source?: "look" | "tripwire" | "rule";
   /** The look that raised it, which the journal shows it under. */

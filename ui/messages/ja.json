@@ -2006,6 +2006,8 @@
   "run_sentence_kept_by": "{agent} はこれを見たうえで続行しました。次の確認で現状を伝えます。",
   "run_watch_stopped_you": "実行を停止しました。",
   "run_watch_stopped_by": "{agent} が実行を停止しました。",
+  "run_watch_stopped_by_rule": "ルール {name} が実行を停止しました。",
+  "run_watch_stopped": "実行は停止されました。",
   "run_watch_left_to_you": "{agent} が判断をあなたに任せました。",
   "run_watch_asked": "{agent} に確認を頼みました。",
   "run_watch_same_since": "{clock} 以降 {count} 回の確認で変わらず",

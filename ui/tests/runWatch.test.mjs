@@ -88,6 +88,7 @@ test("the journal says who settled a flag and how, under the look that raised it
       flags: [
         flag({ id: "f1", source: "look", lookId: "2", state: "kept", choice: { by: "user", c: "keep", at: now - 20_000, reason: "Warm-up noise." } }),
         flag({ id: "f2", source: "tripwire", at: now - 10_000, detail: "No progress for **2m** since step 300.", state: "stopped", choice: { by: "agent", c: "stop", at: now - 5_000, reason: null } }),
+        flag({ id: "f3", source: "tripwire", at: now - 12_000, detail: "Loss became **NaN**.", state: "stopped", choice: { by: "rule", c: "stop", at: now - 11_000, reason: null, rule: "diverging", moot: true } }),
       ],
     },
     runId: running.runId, tone: "running", live: true, now,
@@ -96,8 +97,11 @@ test("the journal says who settled a flag and how, under the look that raised it
   const rows = [...view.container.querySelectorAll("li")].map(text);
   assert.match(rows[0], new RegExp(`${m.run_watch_flagged_orx()}.*No progress for 2m since step 300\\.`));
   assert.ok(rows[0].includes(m.run_watch_stopped_by({ agent: "The agent" })), rows[0]);
-  assert.match(rows[1], new RegExp(`${m.run_watch_flagged()}.*Loss jumped to 2\\.60\\.`));
-  assert.ok(rows[1].includes(`${m.run_watch_kept()} Warm-up noise.`), rows[1]);
+  assert.match(rows[1], /Loss became NaN\./);
+  assert.ok(rows[1].includes(m.run_watch_stopped_by_rule({ name: "diverging" })), "a rule's stop settles the flag it never chose on");
+  assert.equal([...view.container.querySelectorAll("button")].filter((button) => /stop|keep/i.test(text(button))).length, 0, "nothing left to choose");
+  assert.match(rows[2], new RegExp(`${m.run_watch_flagged()}.*Loss jumped to 2\\.60\\.`));
+  assert.ok(rows[2].includes(`${m.run_watch_kept()} Warm-up noise.`), rows[2]);
   await view.unmount();
 });
 

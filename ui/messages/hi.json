@@ -2006,6 +2006,8 @@
   "run_sentence_kept_by": "{agent} ने इसके बावजूद जारी रखना चुना। अगली जाँच बताएगी कि स्थिति क्या है।",
   "run_watch_stopped_you": "आपने रन रोक दिया।",
   "run_watch_stopped_by": "{agent} ने रन रोक दिया।",
+  "run_watch_stopped_by_rule": "नियम {name} ने रन रोक दिया।",
+  "run_watch_stopped": "रन रोक दिया गया।",
   "run_watch_left_to_you": "{agent} ने फ़ैसला आप पर छोड़ा।",
   "run_watch_asked": "आपने {agent} से देखने को कहा।",
   "run_watch_same_since": "{clock} से {count} नज़रों में वही",

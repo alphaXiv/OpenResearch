@@ -2006,6 +2006,8 @@
   "run_sentence_kept_by": "{agent} решил продолжить, несмотря на это. Следующая проверка скажет, как дела.",
   "run_watch_stopped_you": "Вы остановили запуск.",
   "run_watch_stopped_by": "{agent} остановил запуск.",
+  "run_watch_stopped_by_rule": "Правило {name} остановило запуск.",
+  "run_watch_stopped": "Запуск остановлен.",
   "run_watch_left_to_you": "{agent} оставил решение за вами.",
   "run_watch_asked": "Вы попросили {agent} посмотреть.",
   "run_watch_same_since": "то же за {count} взглядов с {clock}",

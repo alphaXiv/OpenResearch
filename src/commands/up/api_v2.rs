@@ -723,7 +723,6 @@ async fn choose(
         .get_run(id)
         .map_err(failed)?
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Run {id} not found.")))?;
-    let exp = &run.experiment_id;
     let flag_id = request.flag_id.trim();
     let choice = request.choice.as_str();
     if !matches!(choice, "keep" | "stop" | "ask") {
@@ -748,13 +747,10 @@ async fn choose(
                 .find(|flag| flag["id"] == flag_id)
                 .ok_or_else(|| failed(anyhow!("Run {id}'s flag {flag_id} is gone")))
         };
-    let settled = format!(
-        "Run {id}: flag {flag_id} is already settled; run `orx exp status {exp} --run {id}`."
-    );
     let now = crate::store::now_ms();
     let planned = {
         let store = api.store();
-        plan_choice(&store, &run, flag_id, choice, chat, &request, &settled)?
+        plan_choice(&store, &run, flag_id, choice, chat, &request)?
     };
     let Some((choices, touched)) = planned else {
         return Ok((reread(&api.store(), &run)?, run));
@@ -765,7 +761,10 @@ async fn choose(
         .record_flag_choices(&choices, stopping, now)
         .map_err(failed)?;
     match chosen {
-        crate::store::Chosen::Settled => return Err((StatusCode::CONFLICT, settled)),
+        crate::store::Chosen::Settled => {
+            let flag = reread(&api.store(), &run)?;
+            return Err((StatusCode::CONFLICT, settled(&run, &flag)));
+        }
         crate::store::Chosen::Repeated => {}
         // The stop is accepted with its words; the engine keeps delivering it if this fails.
         crate::store::Chosen::Recorded if choice == "stop" => {
@@ -805,6 +804,20 @@ async fn choose(
     Ok((reread(&store, &run)?, run))
 }
 
+/// Why a choice on `flag` is no longer taken.
+fn settled(run: &StoredRun, flag: &Value) -> String {
+    let (id, exp) = (&run.id, &run.experiment_id);
+    let flag_id = flag["id"].as_str().unwrap_or_default();
+    let status = format!("run `orx exp status {exp} --run {id}`");
+    if flag["choice"]["moot"] == true {
+        format!(
+            "Run {id} is already stopping, so flag {flag_id} has nothing left to choose; {status}."
+        )
+    } else {
+        format!("Run {id}: flag {flag_id} is already settled; {status}.")
+    }
+}
+
 /// What a flag choice records, and the runs it touches; None for a request already kept.
 #[allow(clippy::type_complexity)]
 fn plan_choice(
@@ -814,7 +827,6 @@ fn plan_choice(
     choice: &str,
     chat: Option<&str>,
     request: &FlagRequest,
-    settled: &str,
 ) -> std::result::Result<
     Option<(Vec<crate::store::FlagChoice>, Vec<StoredRun>)>,
     (StatusCode, String),
@@ -844,7 +856,7 @@ fn plan_choice(
         return Ok(None);
     }
     if flags::settled(flag) || Phase::parse(&run.status).is_some_and(Phase::is_terminal) {
-        return Err((StatusCode::CONFLICT, settled.to_owned()));
+        return Err((StatusCode::CONFLICT, settled(run, flag)));
     }
     let body = |flag: &str| {
         json!({

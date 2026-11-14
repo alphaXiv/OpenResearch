@@ -69,7 +69,12 @@ export function flagOutcome(flag: Flag, agent: string): string | null {
   const name = autoDir(agent);
   const byYou = choice.by === "user";
   if (flag.state === "kept") return byYou ? m.run_watch_kept() : m.run_watch_kept_by({ agent: name });
-  if (flag.state === "stopped") return byYou ? m.run_watch_stopped_you() : m.run_watch_stopped_by({ agent: name });
+  if (flag.state === "stopped") {
+    if (byYou) return m.run_watch_stopped_you();
+    if (choice.by === "agent") return m.run_watch_stopped_by({ agent: name });
+    if (choice.by === "rule") return m.run_watch_stopped_by_rule({ name: autoDir(choice.rule ?? "?") });
+    return m.run_watch_stopped();
+  }
   if (choice.c === "ask") return byYou ? m.run_watch_asked({ agent: name }) : m.run_watch_left_to_you({ agent: name });
   return null;
 }

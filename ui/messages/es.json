@@ -2006,6 +2006,8 @@
   "run_sentence_kept_by": "{agent} eligió seguir pese a esto. La próxima revisión dirá cómo está.",
   "run_watch_stopped_you": "Detuviste la ejecución.",
   "run_watch_stopped_by": "{agent} detuvo la ejecución.",
+  "run_watch_stopped_by_rule": "La regla {name} detuvo la ejecución.",
+  "run_watch_stopped": "Se detuvo la ejecución.",
   "run_watch_left_to_you": "{agent} dejó la decisión en tus manos.",
   "run_watch_asked": "Le pediste a {agent} que lo revisara.",
   "run_watch_same_since": "igual en {count} revisiones desde las {clock}",

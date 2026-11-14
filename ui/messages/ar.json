@@ -2006,6 +2006,8 @@
   "run_sentence_kept_by": "اختار {agent} المتابعة رغم هذا. ستقول النظرة التالية كيف يسير.",
   "run_watch_stopped_you": "أوقفت التشغيل.",
   "run_watch_stopped_by": "أوقف {agent} التشغيل.",
+  "run_watch_stopped_by_rule": "أوقفت القاعدة {name} التشغيل.",
+  "run_watch_stopped": "أُوقف التشغيل.",
   "run_watch_left_to_you": "ترك {agent} القرار لك.",
   "run_watch_asked": "طلبت من {agent} أن يلقي نظرة.",
   "run_watch_same_since": "كما هو في {count} نظرات منذ {clock}",

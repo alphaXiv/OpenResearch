@@ -2006,6 +2006,8 @@
   "run_sentence_kept_by": "{agent}이(가) 이를 보고도 계속하기로 했습니다. 다음 확인에서 상황을 알려 줍니다.",
   "run_watch_stopped_you": "실행을 중지했습니다.",
   "run_watch_stopped_by": "{agent}이(가) 실행을 중지했습니다.",
+  "run_watch_stopped_by_rule": "규칙 {name}이(가) 실행을 중지했습니다.",
+  "run_watch_stopped": "실행이 중지되었습니다.",
   "run_watch_left_to_you": "{agent}이(가) 결정을 맡겼습니다.",
   "run_watch_asked": "{agent}에게 살펴보라고 요청했습니다.",
   "run_watch_same_since": "{clock} 이후 {count}번 살펴보는 동안 그대로",

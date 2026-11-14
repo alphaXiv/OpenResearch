@@ -3401,11 +3401,28 @@ async fn a_stop_and_a_keep_that_race_leave_one_winner() {
         )
         .await
         .unwrap();
-    for choice in ["keep", "stop"] {
+    let cancelled = f.api.run("cancelled").unwrap();
+    let flag = &crate::engine::flags::read(&store(), &cancelled).unwrap()[0];
+    assert_eq!(
+        flag["state"], "stopped",
+        "a stop elsewhere leaves the flag nothing to choose"
+    );
+    assert_eq!(
+        (
+            flag["choice"]["by"].as_str(),
+            flag["choice"]["reason"].as_str()
+        ),
+        (Some("agent"), Some("Diverged."))
+    );
+    for choice in ["keep", "stop", "ask"] {
         let lost = choose("cancelled", json!({"flagId": "f2", "choice": choice}))
             .await
             .unwrap_err();
-        assert_eq!(lost.to_string(), settled("cancelled", "f2"), "{choice}");
+        assert_eq!(
+            lost.to_string(),
+            "Run cancelled is already stopping, so flag f2 has nothing left to choose; run `orx exp status exp --run cancelled`.",
+            "{choice}"
+        );
     }
     assert_eq!(
         store().run_stop("cancelled").unwrap().unwrap().by,

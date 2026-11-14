@@ -2006,6 +2006,8 @@
   "run_sentence_kept_by": "{agent} 选择了继续运行。下一次查看会说明现状。",
   "run_watch_stopped_you": "你停止了此次运行。",
   "run_watch_stopped_by": "{agent} 停止了此次运行。",
+  "run_watch_stopped_by_rule": "规则 {name} 停止了此次运行。",
+  "run_watch_stopped": "此次运行已停止。",
   "run_watch_left_to_you": "{agent} 把决定交给了你。",
   "run_watch_asked": "你请 {agent} 查看。",
   "run_watch_same_since": "自 {clock} 起 {count} 次查看都没有变化",

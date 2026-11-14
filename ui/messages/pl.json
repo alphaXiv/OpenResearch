@@ -2006,6 +2006,8 @@
   "run_sentence_kept_by": "{agent} mimo to postanowił kontynuować. Następne sprawdzenie powie, jak jest.",
   "run_watch_stopped_you": "Zatrzymano uruchomienie.",
   "run_watch_stopped_by": "{agent} zatrzymał uruchomienie.",
+  "run_watch_stopped_by_rule": "Reguła {name} zatrzymała uruchomienie.",
+  "run_watch_stopped": "Uruchomienie zostało zatrzymane.",
   "run_watch_left_to_you": "{agent} zostawił decyzję Tobie.",
   "run_watch_asked": "Poproszono {agent} o sprawdzenie.",
   "run_watch_same_since": "bez zmian przez {count} spojrzeń od {clock}",
