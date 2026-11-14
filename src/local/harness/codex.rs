@@ -1366,7 +1366,9 @@ async fn codex_exec_one_shot(
             .args(["-c", "mcp_servers={}"])
             // Nor skills: the plugin catalog alone injected ~6k prompt tokens
             // (24.3k → 18k input measured) into a request that ignores it.
-            .args(["-c", "features.plugins=false"]);
+            .args(["-c", "features.plugins=false"])
+            // Nor the user's hooks, which would run on every request.
+            .args(["-c", "features.hooks=false"]);
         if tool_free {
             cmd.args(NO_TOOLS.iter().flat_map(|switch| ["-c", switch]));
         }
@@ -1379,12 +1381,17 @@ async fn codex_exec_one_shot(
             // server cwd's AGENTS.md into a request that carries its own context.
             .current_dir(std::env::temp_dir());
         prepare_env(&mut cmd);
-        let home = match request.profile {
-            Some(id) => crate::local::agent_profiles::prepare(id, "codex")?,
-            None => native_store::prepare_codex(NativeStore::Isolated)?,
+        let (home, name) = match request.profile {
+            Some(id) => (crate::local::agent_profiles::prepare(id, "codex")?, id),
+            None => (native_store::prepare_codex(NativeStore::Isolated)?, "codex"),
         };
         let sqlite = native_store::codex_home(NativeStore::Isolated);
-        cmd.env("CODEX_HOME", home);
+        // A one-shot brings its own context: the user's AGENTS.md and skills would add
+        // thousands of tokens to every request.
+        cmd.env(
+            "CODEX_HOME",
+            native_store::prepare_codex_one_shot(&home, name)?,
+        );
         cmd.args([
             "-c",
             &format!("sqlite_home={}", native_store::toml_string(&sqlite)),

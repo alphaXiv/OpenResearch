@@ -157,6 +157,7 @@ async fn one_look_writes_each_runs_sentence_and_the_summary_through_the_agent_cl
         "--output-format\njson",
         "--model\nhaiku",
         "--setting-sources\nuser",
+        "--settings\n{\"disableAllHooks\":true}",
     ] {
         assert!(args.contains(flag), "{flag} in {args}");
     }

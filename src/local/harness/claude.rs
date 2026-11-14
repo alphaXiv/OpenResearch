@@ -1091,6 +1091,9 @@ async fn claude_one_shot_output(
         // directory (a `.claude` in the user's home among them), would bring its memory along.
         "--setting-sources",
         "user",
+        // Nor the user's hooks: a sound, a notification or a hook's output on every look.
+        "--settings",
+        r#"{"disableAllHooks":true}"#,
         // Replace the agent system prompt: the default hauls ~8.5k tokens of
         // Claude Code scaffolding into a request that ignores it (measured
         // 8.5k → 1.9k input for titles). Latency is unchanged — the ~3s is
