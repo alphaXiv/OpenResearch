@@ -617,6 +617,11 @@ async fn cancellation_labels_agree_in_runs_status_and_wait() {
                 "{args:?}: {}",
                 diagnostics(&output)
             );
+            assert!(
+                !stdout(&output).contains("(idle)"),
+                "a status never calls an experiment idle beside its run's state: {}",
+                diagnostics(&output)
+            );
             if unconfirmed {
                 assert!(
                     diagnostics(&output).contains(note.unwrap()),

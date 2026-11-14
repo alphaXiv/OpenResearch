@@ -179,7 +179,8 @@ impl LocalPlane {
             );
             return Ok(());
         }
-        println!("{}  ({})  [local]", exp.display_name(), exp.agent_status);
+        // The run's own line below says its state; an experiment's `agent_status` is never set.
+        println!("{}  [local]", exp.display_name());
         println!("  id:       {}", exp.id);
         println!("  branch:   {}", exp.branch_name);
         if exp.archived {
