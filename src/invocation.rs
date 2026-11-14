@@ -26,9 +26,18 @@ pub fn orx() -> &'static str {
 }
 
 /// The "what to run next" line every backend prints after launching a run.
-pub fn follow_up(experiment_id: &str, run_id: &str) -> String {
+/// What to do after a launch: an agent in a chat ends its turn, since the result comes to it.
+pub fn follow_up(experiment_id: &str, run_id: &str, in_chat: bool) -> String {
     let orx = orx();
-    format!("  Follow it with `{orx} exp wait {experiment_id}` or `{orx} logs {run_id}`.")
+    if in_chat {
+        format!(
+            "  Its result arrives in this chat as a message when it ends. Check its first minutes once \
+             with `{orx} exp view check {run_id}`, then end your turn: never wait or poll for it \
+             (no sleep loops over `{orx} runs`, no `{orx} exp wait`)."
+        )
+    } else {
+        format!("  Follow it with `{orx} exp wait {experiment_id}` or `{orx} logs {run_id}`.")
+    }
 }
 
 /// The error every backend raises when neither the experiment nor its project
@@ -77,11 +86,16 @@ mod tests {
 
     #[test]
     fn the_hint_uses_one_spelling_throughout() {
-        let hint = follow_up("exp_1", "run_1");
         let orx = orx();
         assert_eq!(
-            hint,
+            follow_up("exp_1", "run_1", false),
             format!("  Follow it with `{orx} exp wait exp_1` or `{orx} logs run_1`.")
         );
+        let agent = follow_up("exp_1", "run_1", true);
+        assert!(
+            agent.contains(&format!("`{orx} exp view check run_1`")),
+            "{agent}"
+        );
+        assert!(agent.contains("end your turn"), "{agent}");
     }
 }

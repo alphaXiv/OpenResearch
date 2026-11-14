@@ -724,6 +724,7 @@ impl ApiClient {
 
     pub async fn launch(&self, mut args: ExpRunArgs) -> Result<()> {
         args.chat_session_id = args.launching_chat_session();
+        let in_chat = args.chat_session_id.is_some();
         args.agent_origin = crate::agent_origin();
         args.caller_config_dir = Some(crate::commands::up::absolute_config_dir());
         args.caller_python_overrides = crate::jobs::caller_python_overrides();
@@ -757,7 +758,7 @@ impl ApiClient {
         println!("\u{2713} Run {} submitted ({}).", run.id, run.status);
         println!(
             "{}",
-            crate::invocation::follow_up(&run.experiment_id, &run.id)
+            crate::invocation::follow_up(&run.experiment_id, &run.id, in_chat)
         );
         Ok(())
     }

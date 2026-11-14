@@ -51,6 +51,12 @@ its first minutes checked. Children inherit these. Load it again whenever the
 user asks to change what a run shows. Use `orx exp status <expId>` for a run's
 live stage and numbers.
 
+After `orx exp run`, end your turn: each run's result arrives here as a message
+when it ends, and a watcher flags trouble while it runs. Never wait for a run
+inside a turn (no `sleep` loops over `orx runs` or `orx exp status`, no
+`orx exp wait`): a waiting turn holds back the user's next message and every
+other result.
+
 Use `orx` as the source of truth for the experiment tree, runs, and logs. Use
 normal repository tools for code and file inspection. Use this project id
 (`{id}`) for every `orx` command that takes one.

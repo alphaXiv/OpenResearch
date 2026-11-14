@@ -178,8 +178,7 @@ lines carry no `step` shows no progress.
 
 ## 7. Check the first minutes
 
-After the baseline's first launch, wait until its log shows the first stage
-and a measure (`orx exp status <expId>` every half minute), then:
+Right after the baseline's first launch:
 
 ```sh
 orx exp view check <runId>
@@ -187,12 +186,19 @@ orx exp view check <runId>
 
 It folds the run's real log: the stages it read, the measures and tables
 reported, what each pattern matched with its first line, and what the view
-still waits for. Repair the view, plan or patterns with `view set`: they apply
-to the run in flight. A report missing from the code means cancelling, fixing
-and relaunching, which is cheap now and costly an hour in. Once the run reads
-right, end your turn: results arrive as messages, and a user who asks mid-run
-to change what it shows reaches you only between turns. Never block on
-`orx exp wait`.
+still waits for. If the run has printed nothing yet, run it once more after
+its setup should be over, and stop there.
+
+Repair the view, plan or patterns with `view set`: they apply to the run in
+flight. A report missing from the code means cancelling, fixing and
+relaunching, which is cheap now and costly an hour in.
+
+Then end your turn, every time, whether or not the check settled anything.
+The result arrives as a message when the run ends, and the watcher flags
+trouble while it runs. Never wait inside a turn: no `sleep` loops over
+`orx runs` or `orx exp status`, no `orx exp wait`. A turn that waits holds
+back the user's next message (such as "chart it differently" while it runs)
+and every other run's result, and outlives a short run anyway.
 
 ## 8. Change it while it runs
 

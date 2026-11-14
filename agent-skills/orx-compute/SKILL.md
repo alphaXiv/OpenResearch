@@ -164,7 +164,8 @@ The cancel stays pending after Abandon.
 
 Use `orx exp wake <expId>` to subscribe this chat to a run launched elsewhere.
 `orx exp wait` remains available for humans; do not use it to keep an agent
-session waiting for results.
+session waiting for results, and never wait in a loop either (`sleep` over
+`orx runs`): a turn that waits holds back the user's next message.
 
 ## Sizing compute
 
