@@ -156,7 +156,7 @@ for (let step = 1; step <= 20; step++) {
       const marks: Record<string, () => boolean> = {
         strip: () => !!banner()?.textContent?.includes('Eval accuracy'),
         value: () => !!banner()?.textContent?.replace(/[⁦-⁩]/g, '').includes('0.58'),
-        page: () => [...document.querySelectorAll('h3')].some((heading) => heading.textContent?.replace(/[⁦-⁩]/g, '') === 'Eval accuracy' && !banner()?.contains(heading)),
+        page: () => Array.from(document.querySelectorAll('h3')).some((heading) => heading.textContent?.replace(/[⁦-⁩]/g, '') === 'Eval accuracy' && !banner()?.contains(heading)),
       }
       const look = setInterval(() => {
         for (const [name, shown] of Object.entries(marks)) if (!(name in seen) && shown()) seen[name] = Date.now()
