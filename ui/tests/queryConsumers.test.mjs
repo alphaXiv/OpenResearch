@@ -306,7 +306,7 @@ test("a late agent switch cannot replace a newer chat's selection or draft setti
   await press("Enter", composer().field());
   await composer(1).pick("Newer Model", "Claude Code");
   const newer = picker();
-  assert.deepEqual(newer, [m.a11y_chat_model({ label: "Newer Model" }), `${m.model_picker_permissions()}: Plan, ${m.model_picker_autonomy_agentic()}`]);
+  assert.deepEqual(newer, [m.a11y_chat_model({ label: "Newer Model" }), `${m.model_picker_permissions()}: Plan · ${m.model_picker_autonomy()}: ${m.model_picker_autonomy_agentic()}`]);
 
   await switched.resolve({ session: session("original", { harness: "claude-code", model: "target-model" }) });
   assert.deepEqual(picker(), newer);
