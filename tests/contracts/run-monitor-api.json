@@ -78,6 +78,7 @@
         },
         "parent": null,
         "headline": "loss",
+        "logError": null,
         "versus": {
           "step": {},
           "final": {}
@@ -222,6 +223,7 @@
           "value": 0.14285714285714285,
           "vs": null
         },
+        "logError": null,
         "sentence": null,
         "bindings": {
           "loss": 0.14285714285714285
@@ -330,6 +332,7 @@
         },
         "parent": null,
         "headline": "loss",
+        "logError": null,
         "versus": {
           "step": {},
           "final": {}
@@ -414,6 +417,7 @@
           "value": "NaN",
           "vs": null
         },
+        "logError": null,
         "sentence": null,
         "bindings": {
           "loss": "NaN"
@@ -522,6 +526,7 @@
         },
         "parent": null,
         "headline": "loss",
+        "logError": null,
         "versus": {
           "step": {},
           "final": {}
@@ -626,6 +631,7 @@
           "value": 0.2727272727272727,
           "vs": null
         },
+        "logError": null,
         "sentence": null,
         "bindings": {
           "loss": 0.2727272727272727
@@ -736,6 +742,7 @@
         },
         "parent": null,
         "headline": "loss",
+        "logError": null,
         "versus": {
           "step": {},
           "final": {}
@@ -793,6 +800,7 @@
           "value": 2,
           "vs": null
         },
+        "logError": null,
         "sentence": null,
         "bindings": {
           "loss": 2
@@ -896,6 +904,7 @@
         },
         "parent": null,
         "headline": "loss",
+        "logError": null,
         "versus": {
           "step": {},
           "final": {}
@@ -955,6 +964,7 @@
           "value": 1.9,
           "vs": null
         },
+        "logError": null,
         "sentence": null,
         "bindings": {
           "loss": 1.9
@@ -1058,6 +1068,7 @@
         },
         "parent": null,
         "headline": "loss",
+        "logError": null,
         "versus": {
           "step": {},
           "final": {}
@@ -1106,6 +1117,7 @@
           "value": 0.2727272727272727,
           "vs": null
         },
+        "logError": null,
         "sentence": null,
         "bindings": {
           "loss": 0.2727272727272727
@@ -1194,6 +1206,7 @@
         "latest": {},
         "parent": null,
         "headline": null,
+        "logError": null,
         "versus": {
           "step": {},
           "final": {}
@@ -1237,6 +1250,7 @@
           "unit": null
         },
         "headline": null,
+        "logError": null,
         "sentence": null,
         "bindings": {},
         "signals": {},
@@ -1334,6 +1348,7 @@
         },
         "parent": null,
         "headline": "loss",
+        "logError": null,
         "versus": {
           "step": {},
           "final": {}
@@ -1438,6 +1453,7 @@
           "value": 0.2727272727272727,
           "vs": null
         },
+        "logError": null,
         "sentence": null,
         "bindings": {
           "loss": 0.2727272727272727
@@ -1555,6 +1571,7 @@
         "latest": {},
         "parent": null,
         "headline": null,
+        "logError": null,
         "versus": {
           "step": {},
           "final": {}
@@ -1598,6 +1615,7 @@
           "unit": null
         },
         "headline": null,
+        "logError": null,
         "sentence": null,
         "bindings": {},
         "signals": {},
@@ -1673,6 +1691,7 @@
         },
         "parent": null,
         "headline": "loss",
+        "logError": null,
         "versus": {
           "step": {},
           "final": {}
@@ -1723,6 +1742,7 @@
           "value": 2.5,
           "vs": null
         },
+        "logError": null,
         "sentence": null,
         "bindings": {
           "loss": 2.5
@@ -1885,6 +1905,7 @@
         },
         "parent": null,
         "headline": "lr",
+        "logError": null,
         "versus": {
           "step": {},
           "final": {}
@@ -2018,6 +2039,7 @@
           "value": 0.0003,
           "vs": null
         },
+        "logError": null,
         "sentence": null,
         "bindings": {
           "round": 14,
@@ -2311,6 +2333,7 @@
         "latest": {},
         "parent": null,
         "headline": null,
+        "logError": null,
         "versus": {
           "step": {},
           "final": {}
@@ -2353,6 +2376,7 @@
         "whole": null,
         "stage": null,
         "headline": null,
+        "logError": null,
         "sentence": null,
         "bindings": {},
         "signals": {},
@@ -2417,6 +2441,7 @@
         "latest": {},
         "parent": null,
         "headline": null,
+        "logError": null,
         "versus": {
           "step": {},
           "final": {}
@@ -2459,6 +2484,7 @@
         "whole": null,
         "stage": null,
         "headline": null,
+        "logError": null,
         "sentence": null,
         "bindings": {},
         "signals": {},
@@ -2545,6 +2571,7 @@
         "latest": {},
         "parent": null,
         "headline": null,
+        "logError": null,
         "versus": {
           "step": {},
           "final": {}
@@ -2597,6 +2624,7 @@
           "unit": "chunks"
         },
         "headline": null,
+        "logError": null,
         "sentence": null,
         "bindings": {},
         "signals": {},
@@ -2729,6 +2757,7 @@
         },
         "parent": null,
         "headline": "loss",
+        "logError": null,
         "versus": {
           "step": {},
           "final": {}
@@ -2816,6 +2845,7 @@
           "value": 0.5,
           "vs": null
         },
+        "logError": null,
         "sentence": null,
         "bindings": {
           "loss": 0.5
@@ -2927,6 +2957,7 @@
         "latest": {},
         "parent": null,
         "headline": null,
+        "logError": null,
         "versus": {
           "step": {},
           "final": {}
@@ -2979,6 +3010,7 @@
           "unit": "steps"
         },
         "headline": null,
+        "logError": null,
         "sentence": null,
         "bindings": {},
         "signals": {},
@@ -3077,6 +3109,7 @@
         },
         "parent": null,
         "headline": "loss",
+        "logError": null,
         "versus": {
           "step": {},
           "final": {}
@@ -3221,6 +3254,7 @@
           "value": 0.14285714285714285,
           "vs": null
         },
+        "logError": null,
         "sentence": null,
         "bindings": {
           "loss": 0.14285714285714285
@@ -3288,6 +3322,7 @@
         "latest": {},
         "parent": null,
         "headline": null,
+        "logError": null,
         "versus": {
           "step": {},
           "final": {}
@@ -3326,6 +3361,7 @@
         "whole": null,
         "stage": null,
         "headline": null,
+        "logError": null,
         "sentence": null,
         "bindings": {},
         "signals": {},
@@ -3424,6 +3460,7 @@
         },
         "parent": null,
         "headline": "loss",
+        "logError": null,
         "versus": {
           "step": {},
           "final": {}
@@ -3568,6 +3605,7 @@
           "value": 0.14285714285714285,
           "vs": null
         },
+        "logError": null,
         "sentence": null,
         "bindings": {
           "loss": 0.14285714285714285
@@ -3776,6 +3814,7 @@
           "rows": {}
         },
         "headline": "loss",
+        "logError": null,
         "versus": {
           "step": {
             "loss": {
@@ -3904,6 +3943,7 @@
             "step": 100.0
           }
         },
+        "logError": null,
         "sentence": null,
         "bindings": {
           "loss": 0.2272727272727273,

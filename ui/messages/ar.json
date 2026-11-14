@@ -2044,6 +2044,7 @@
   "run_flag_log_lines_other": "أسطر السجل من {from} إلى {to}",
   "run_rule_detail": "{text} القاعدة: {name}. لم يشارك أي نموذج.",
   "run_rule_reason_in_chat": "السبب في المحادثة.",
+  "run_failed_log_error": "آخر خطأ في السجل: {line}",
   "run_chart_parent": "الأصل",
   "run_block_no_points": "لا نقاط بعد",
   "run_monitor_load_failed": "تعذّر تحميل عرض هذا التشغيل.",

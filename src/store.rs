@@ -298,6 +298,8 @@ pub const ATTENTION: &str = "attention";
 pub const RECOVERED: &str = "recovered";
 pub const NOTIFY: &str = "notify";
 const TERMINAL_LOG_BYTES: u64 = 4 * 1024;
+/// How much of a log's end is read to find its last human lines among progress records.
+const TERMINAL_LOG_SCAN: u64 = 64 * 1024;
 const TERMINAL_LOG_LINES: usize = 40;
 
 pub struct SubmittingRun<'a> {
@@ -6586,12 +6588,14 @@ impl Store {
         Ok(format!("{kind}:{generation}"))
     }
 
-    pub fn terminal_notice_body(&self, run: &StoredRun) -> Result<String> {
+    /// The last `bytes` of a run's log as this machine keeps it: the newest kept range, else
+    /// the tail collected after it ended, else the live log; empty before there is any.
+    pub fn recent_log(&self, run_id: &str, bytes: u64) -> Result<String> {
         use std::io::{Read, Seek, SeekFrom};
 
-        let mut bytes = Vec::new();
-        let ranges = crate::commands::up::api_v2::kept_ranges(&self.data_dir, &run.id)?;
-        let tail = self.run_artifact_path(TAIL_LOG, &run.id);
+        let mut read = Vec::new();
+        let ranges = crate::commands::up::api_v2::kept_ranges(&self.data_dir, run_id)?;
+        let tail = self.run_artifact_path(TAIL_LOG, run_id);
         let current = if let Some(range) = ranges.iter().max_by_key(|range| range.offset) {
             let file = std::fs::File::open(&range.file)?;
             Ok((file, range.file.clone(), range.len))
@@ -6601,15 +6605,15 @@ impl Store {
             Ok((file, tail, size))
         } else {
             crate::jobs::ssh::service::logs::open_current(
-                self.run_artifact_path(("run-logs", ".log"), &run.id),
+                self.run_artifact_path(("run-logs", ".log"), run_id),
             )
         };
         match current {
             Ok((mut file, _, size)) => {
-                let start = size.saturating_sub(TERMINAL_LOG_BYTES);
+                let start = size.saturating_sub(bytes);
                 file.seek(SeekFrom::Start(start))?;
-                bytes.resize(usize::try_from(size - start)?, 0);
-                file.read_exact(&mut bytes)?;
+                read.resize(usize::try_from(size - start)?, 0);
+                file.read_exact(&mut read)?;
             }
             Err(error)
                 if error
@@ -6617,24 +6621,25 @@ impl Store {
                     .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) => {}
             Err(error) => return Err(error),
         }
-        let first_character = bytes
+        let first_character = read
             .iter()
             .position(|byte| byte & 0xc0 != 0x80)
-            .unwrap_or(bytes.len());
-        let log = String::from_utf8_lossy(&bytes[first_character..]);
-        let mut start = log
+            .unwrap_or(read.len());
+        Ok(String::from_utf8_lossy(&read[first_character..]).into_owned())
+    }
+
+    pub fn terminal_notice_body(&self, run: &StoredRun) -> Result<String> {
+        let log = self.recent_log(&run.id, TERMINAL_LOG_SCAN)?;
+        let lines: Vec<&str> = log.lines().collect();
+        let lines = &lines[lines.len().saturating_sub(TERMINAL_LOG_LINES)..];
+        let mut tail = lines.join("\n");
+        let mut start = tail
             .len()
             .saturating_sub(usize::try_from(TERMINAL_LOG_BYTES)?);
-        while !log.is_char_boundary(start) {
+        while !tail.is_char_boundary(start) {
             start += 1;
         }
-        let mut lines: Vec<_> = log[start..]
-            .lines()
-            .rev()
-            .take(TERMINAL_LOG_LINES)
-            .collect();
-        lines.reverse();
-        let tail = lines.join("\n");
+        tail.drain(..start);
         let code = run
             .exit_code
             .map(|code| code.to_string())
@@ -6647,8 +6652,16 @@ impl Store {
             .cancel_reason
             .as_deref()
             .filter(|_| run.status == "cancelled");
-        let reason = match (cancel_reason, run.result_markdown.as_deref()) {
+        let result = run
+            .result_markdown
+            .as_deref()
+            .filter(|text| !text.trim().is_empty());
+        let reason = match (cancel_reason, result) {
             (Some(cancel), Some(result)) => format!("{cancel} {result}"),
+            (None, None) if run.status == "failed" => match last_error(&log) {
+                Some(line) => format!("Last error in the log: `{line}`"),
+                None => "unavailable".into(),
+            },
             (cancel, result) => cancel.or(result).unwrap_or("unavailable").into(),
         };
         let view = crate::plane::Run::from_store(self, run)?;
@@ -6658,6 +6671,39 @@ impl Store {
             run.id, status,
         ))
     }
+}
+
+/// The line that says why a run failed, as a person scanning its log's end finds it: a Python
+/// traceback's exception line, else the last line that names an error.
+pub fn last_error(log: &str) -> Option<&str> {
+    let lines: Vec<&str> = log
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim_start().starts_with("::orx::"))
+        .collect();
+    let traceback = lines
+        .iter()
+        .rposition(|line| line.starts_with("Traceback (most recent call last)"));
+    if let Some(at) = traceback {
+        let exception = lines[at + 1..]
+            .iter()
+            .find(|line| !line.is_empty() && !line.starts_with(char::is_whitespace));
+        if exception.is_some() {
+            return exception.copied();
+        }
+    }
+    const NAMES: [&str; 6] = [
+        "error",
+        "exception",
+        "fatal",
+        "panicked",
+        "killed",
+        "segmentation fault",
+    ];
+    lines.iter().rev().copied().find(|line| {
+        let lower = line.to_lowercase();
+        NAMES.iter().any(|name| lower.contains(name))
+    })
 }
 
 const SELECT_RUN: &str = "SELECT id, experiment_id, project_id, status, backend_json, command,
@@ -7167,6 +7213,52 @@ mod tests {
         assert!(body.contains("\nReason: Killed by signal 15.\n"));
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_failed_run_without_a_message_gives_its_logs_last_error_and_the_log_a_person_reads() {
+        let (dir, store) = engine_fixture();
+        let mut run = store.get_run("failed").unwrap().unwrap();
+        run.result_markdown = None;
+        let records: String = (0..200)
+            .map(|step| format!("::orx:: {{\"step\":{step}}}\n"))
+            .collect();
+        std::fs::write(
+            dir.join("run-logs/failed.log"),
+            format!(
+                "step 340 | loss 1.2\n{records}Traceback (most recent call last):\n  File \"train.py\", line 212, in <module>\n    loss = model(x, y)\ntorch.OutOfMemoryError: CUDA out of memory.\n"
+            ),
+        )
+        .unwrap();
+        let body = store.terminal_notice_body(&run).unwrap();
+        assert!(
+            body.contains(
+                "\nReason: Last error in the log: `torch.OutOfMemoryError: CUDA out of memory.`\n"
+            ),
+            "{body}"
+        );
+        assert_eq!(
+            crate::plane::Run::from_store(&store, &run).unwrap().failure_detail().as_deref(),
+            Some("reason: last error in the log: `torch.OutOfMemoryError: CUDA out of memory.` (`orx logs failed` has the rest)")
+        );
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_last_error_is_a_tracebacks_exception_else_the_last_line_naming_one() {
+        assert_eq!(
+            last_error("Traceback (most recent call last):\n  File \"a.py\"\n    x()\nValueError: bad\nexiting\n"),
+            Some("ValueError: bad")
+        );
+        assert_eq!(
+            last_error("ERROR one\nworking\nthread 'main' panicked at src/main.rs:3\nbye\n"),
+            Some("thread 'main' panicked at src/main.rs:3")
+        );
+        assert_eq!(
+            last_error("::orx:: {\"m\":{\"error\":1}}\nall good\n"),
+            None
+        );
     }
 
     #[test]

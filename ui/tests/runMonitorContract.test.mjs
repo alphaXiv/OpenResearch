@@ -399,6 +399,16 @@ test("a run compared with its parent says by how much, as `orx exp status` says 
   }
 });
 
+test("a failed run that recorded no message says the last error its log names, quoted on one line", () => {
+  const { summary, now } = states.running;
+  const line = "torch.OutOfMemoryError: CUDA out of memory.   Tried *2.00* GiB";
+  const run = { ...runOf("running"), status: "failed", endedAt: now, monitor: { ...summary, tone: "failed", logError: line } };
+  const view = runModel({ item: { sessionId: "s", run, experimentName: null, experimentSlug: "baseline" }, monitor: null, shown: true, agent: "Claude", now, nextRetryMs: null });
+  assert.equal(bare(view.note), bare(m.run_failed_log_error({ line: "torch.OutOfMemoryError: CUDA out of memory. Tried ∗2.00∗ GiB" })));
+  const silent = runModel({ item: { sessionId: "s", run: { ...run, monitor: { ...run.monitor, logError: null } }, experimentName: null, experimentSlug: "baseline" }, monitor: null, shown: true, agent: "Claude", now, nextRetryMs: null });
+  assert.equal(silent.note, null);
+});
+
 test("a floor counted down to nothing reads as no estimate, naming the stages no earlier run timed", () => {
   const { now, monitor } = states.planned;
   for (const full of [true, false]) {

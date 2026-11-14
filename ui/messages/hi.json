@@ -2044,6 +2044,7 @@
   "run_flag_log_lines_other": "लॉग की पंक्तियाँ {from} से {to}",
   "run_rule_detail": "{text} नियम: {name}। किसी मॉडल की भूमिका नहीं थी।",
   "run_rule_reason_in_chat": "कारण चैट में है।",
+  "run_failed_log_error": "लॉग में आख़िरी त्रुटि: {line}",
   "run_chart_parent": "पैरेंट",
   "run_block_no_points": "अभी कोई बिंदु नहीं",
   "run_monitor_load_failed": "इस रन का व्यू लोड नहीं हो सका।",

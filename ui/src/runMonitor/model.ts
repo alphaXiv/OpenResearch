@@ -368,9 +368,11 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     text: `${clockText(look.at)} · ${plainSentence(look.text)}`,
   }]);
 
+  const logError = (monitor ?? summary)?.logError ?? null;
   const note = tone === "revising" ? m.run_flag_revising({ agent: autoDir(agent) })
     : tone === "stopped" && outcome?.by === "rule" && outcome.rule ? m.run_rule_detail({ text: autoDir(outcome.rule.text), name: autoDir(outcome.rule.name) })
     : tone === "stopped" && outcome?.by === "agent" ? m.run_rule_reason_in_chat()
+    : tone === "failed" && logError ? m.run_failed_log_error({ line: quoted(logError) })
     : null;
 
   // A failed refresh is newer than the availability the last read reported.

@@ -2044,6 +2044,7 @@
   "run_flag_log_lines_other": "günlük satırları {from}–{to}",
   "run_rule_detail": "{text} Kural: {name}. Model devreye girmedi.",
   "run_rule_reason_in_chat": "Neden sohbette.",
+  "run_failed_log_error": "Günlükteki son hata: {line}",
   "run_chart_parent": "Üst",
   "run_block_no_points": "Henüz nokta yok",
   "run_monitor_load_failed": "Bu çalıştırmanın görünümü yüklenemedi.",

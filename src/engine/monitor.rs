@@ -172,6 +172,8 @@ struct Lifecycle {
     parent: Option<StoredRun>,
     /// The experiment's own last run that finished before this one, which times its stages first.
     earlier: Option<StoredRun>,
+    /// Why a failed run that recorded no message failed, as its log's last error says.
+    log_error: Option<String>,
 }
 
 impl Lifecycle {
@@ -212,6 +214,7 @@ impl Lifecycle {
             settings: store.run_monitor_json(&row.experiment_id)?,
             parent,
             earlier,
+            log_error: run.log_error,
             run: row.clone(),
         })
     }
@@ -248,7 +251,7 @@ impl Lifecycle {
     /// Changes whenever anything the projection reads from the store does.
     fn key(&self) -> String {
         format!(
-            "{}|{}|{:?}|{:?}|{}|{:?}|{}|{:?}|{:?}",
+            "{}|{}|{:?}|{:?}|{}|{:?}|{}|{:?}|{:?}|{:?}",
             self.run.updated_at,
             self.state,
             self.contact,
@@ -258,6 +261,7 @@ impl Lifecycle {
             super::view::etag(self.settings.as_deref()),
             self.parent.as_ref().map(|p| (&p.id, p.updated_at)),
             self.earlier.as_ref().map(|p| (&p.id, p.updated_at)),
+            self.log_error,
         )
     }
 }
@@ -1020,6 +1024,7 @@ fn evaluate(
             json!({"name": phase.name, "done": phase.done, "of": of, "unit": phase.unit})
         }),
         "headline": headline,
+        "logError": life.log_error,
         "sentence": null,
         "bindings": referenced,
         "signals": view["signals"],
@@ -1081,6 +1086,7 @@ fn evaluate(
         "latest": latest,
         "parent": parent_body,
         "headline": headline_name,
+        "logError": life.log_error,
         "versus": {"step": at_step, "final": at_end},
         "rows": rows,
         "groups": {},

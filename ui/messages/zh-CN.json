@@ -2044,6 +2044,7 @@
   "run_flag_log_lines_other": "日志第 {from} 至 {to} 行",
   "run_rule_detail": "{text} 规则：{name}。未使用模型。",
   "run_rule_reason_in_chat": "原因在对话中。",
+  "run_failed_log_error": "日志中的最后一个错误：{line}",
   "run_chart_parent": "父运行",
   "run_block_no_points": "暂无数据点",
   "run_monitor_load_failed": "无法加载此运行的视图。",
