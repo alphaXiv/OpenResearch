@@ -31,7 +31,7 @@ export interface ChartData {
 
 type Row = Record<string, SignalValue>;
 /** A line before its cells are read; `by` is the value of the `by` column its rows share. */
-type Shape = { name: string; label: string; x: string; y: string; by?: SignalValue };
+type Shape = { name: string; label: string; x: string; y: string; by?: SignalValue; ghost?: boolean };
 type Line = Omit<Series, "points"> & { pairs: [SignalValue, SignalValue][] };
 
 /** A cell as a number: a numeric string counts, a word or NaN does not. */
@@ -48,7 +48,7 @@ function shapesOf(monitor: RunMonitor, block: ChartBlock, rows: Row[], notes: st
   const { signals } = monitor.view;
   const label = (name: string) => signals[name]?.label ?? name;
   const x = block.x ?? "step";
-  if (block.series?.length) return block.series.map((one) => ({ name: `${one.x} ${one.y}`, label: one.label ?? label(one.y), x: one.x, y: one.y }));
+  if (block.series?.length) return block.series.map((one) => ({ name: `${one.x} ${one.y}`, label: one.label ?? label(one.y), x: one.x, y: one.y, ghost: one.ghost }));
   if (!block.by) return block.chart.map((y) => ({ name: y, label: label(y), x, y }));
 
   const by = block.by;
@@ -100,9 +100,11 @@ export function chartOf(monitor: RunMonitor, block: ChartBlock): ChartData {
       });
       return { name, label: signals[name]?.label ?? name, color: COLORS[index % COLORS.length], pairs, ghost: false, x: monitor.x.name, y: name };
     });
-    const first = block.chart[0];
-    const parent = block.ghost === "parent" ? monitor.parent?.series[first] : undefined;
-    if (parent) lines.unshift({ name: "parent", label: "", color: "var(--subtext)", pairs: parent, ghost: true, x: monitor.x.name, y: first });
+    const ghosts = block.ghost === "parent" ? lines.flatMap((line) => {
+      const parent = monitor.parent?.series[line.y];
+      return parent ? [{ ...line, name: `parent ${line.name}`, color: "var(--subtext)", pairs: parent, ghost: true }] : [];
+    }) : [];
+    lines.unshift(...ghosts);
   } else {
     const from = block.from;
     const rows = monitor.rows[from] ?? [];
@@ -111,7 +113,8 @@ export function chartOf(monitor: RunMonitor, block: ChartBlock): ChartData {
     lines = shapes.map((shape, index) => ({ name: shape.name, label: shape.label, x: shape.x, y: shape.y, color: COLORS[index % COLORS.length], ghost: false, pairs: pairsOf(shape, rows, block.by) }));
     const parentRows = block.ghost === "parent" ? monitor.parent?.rows?.[from] ?? [] : [];
     if (parentRows.length > 0) {
-      lines.unshift(...shapes.map((shape) => ({ name: `parent ${shape.name}`, label: "", x: shape.x, y: shape.y, color: "var(--subtext)", ghost: true, pairs: pairsOf(shape, parentRows, block.by) })));
+      const ghosted = shapes.filter((shape) => shape.ghost !== false);
+      lines.unshift(...ghosted.map((shape) => ({ name: `parent ${shape.name}`, label: shape.label, x: shape.x, y: shape.y, color: "var(--subtext)", ghost: true, pairs: pairsOf(shape, parentRows, block.by) })));
     }
     for (const column of new Set(shapes.flatMap((shape) => [shape.x, shape.y]))) {
       const cells = rows.filter((row) => column in row);
@@ -156,5 +159,5 @@ export function chartOf(monitor: RunMonitor, block: ChartBlock): ChartData {
   return { series, categories: categories?.words ?? null, notes, rows: count };
 }
 
-/** A chart block's lines, smoothed as the view asks, with the parent's dashed behind. */
+/** A chart block's lines, smoothed as the view asks, with the parent's dashed behind each one the view ghosts. */
 export const seriesOf = (monitor: RunMonitor, block: ChartBlock) => chartOf(monitor, block).series;

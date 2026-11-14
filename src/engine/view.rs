@@ -13,14 +13,18 @@ const MAX_SIGNALS: usize = 64;
 const MAX_SERIES: usize = 8;
 const MAX_DEPTH: usize = 4;
 
-const SIGNAL: [&str; 11] = [
+const SIGNAL: [&str; 12] = [
     "name", "label", "unit", "digits", "better", "smooth", "as", "scale", "sign", "pick", "values",
+    "vs",
 ];
 const LABELS: &str = "labels";
 const BLOCK: [&str; 2] = ["phase", "title"];
-const CHART: [&str; 8] = [
-    "y", "x", "from", "by", "x-scale", "y-scale", "mark", "ghost",
+const CHART: [&str; 9] = [
+    "y", "x", "from", "by", "x-scale", "y-scale", "x-range", "mark", "ghost",
 ];
+/// How a stats block or a signal compares with the parent's run: at the same stage and step, or
+/// with the value the parent ended with.
+const VS: [&str; 2] = ["step", "final"];
 
 /// Where in the markup something is wrong, and what.
 #[derive(Debug)]
@@ -418,6 +422,7 @@ impl Parser<'_> {
                 "scale" => json!(self.number(attribute)?),
                 "sign" => json!(self.choice(attribute, &["true", "false"])? == "true"),
                 "pick" => json!(self.choice(attribute, &["latest", "best"])?),
+                "vs" => json!(self.choice(attribute, &VS)?),
                 "values" => {
                     let values = self.object(attribute)?;
                     let outcomes = ["correct", "wrong", "error"];
@@ -452,7 +457,7 @@ impl Parser<'_> {
         let path = format!("blocks[{index}]");
         let allowed: Vec<&str> = match kind {
             "chart" => CHART.iter().chain(BLOCK.iter()).copied().collect(),
-            "stats" => ["of"].iter().chain(BLOCK.iter()).copied().collect(),
+            "stats" => ["of", "vs"].iter().chain(BLOCK.iter()).copied().collect(),
             "table" => ["name", "columns", "last", "vs"]
                 .iter()
                 .chain(BLOCK.iter())
@@ -490,6 +495,9 @@ impl Parser<'_> {
                     self.refer(node, format!("{path}.stats[{i}]"), Kind::Signal, name);
                 }
                 block.insert("stats".into(), json!(names));
+                if let Some(vs) = attributes.get("vs") {
+                    block.insert("vs".into(), json!(self.choice(vs, &VS)?));
+                }
             }
             _ => {
                 let Some(name) = attributes.get("name") else {
@@ -519,7 +527,10 @@ impl Parser<'_> {
                     block.insert("last".into(), json!(self.integer(last, 1..=2048)?));
                 }
                 if let Some(vs) = attributes.get("vs") {
-                    block.insert("vs".into(), json!(self.choice(vs, &["parent"])?));
+                    block.insert(
+                        "vs".into(),
+                        json!(self.choice(vs, &["parent", "step", "final"])?),
+                    );
                 }
             }
         }
@@ -541,6 +552,10 @@ impl Parser<'_> {
         block: &mut Map<String, Value>,
     ) -> Result<(), Problem> {
         let from = attributes.get("from").map(|a| self.name(a)).transpose()?;
+        let ghost = attributes
+            .get("ghost")
+            .map(|ghost| self.choice(ghost, &["parent"]))
+            .transpose()?;
         let column = |table: &Option<String>| match table {
             Some(table) => Kind::Column(table.clone()),
             None => Kind::Signal,
@@ -624,7 +639,7 @@ impl Parser<'_> {
                         self.problem(inner, "<series> holds nothing; write it as <series … />")
                     );
                 }
-                let attributes = self.attributes(*child, &["x", "y", "label"])?;
+                let attributes = self.attributes(*child, &["x", "y", "label", "ghost"])?;
                 let (Some(x), Some(y)) = (attributes.get("x"), attributes.get("y")) else {
                     return Err(
                         self.problem(*child, "<series> needs x=\"COLUMN\" and y=\"COLUMN\"")
@@ -636,6 +651,15 @@ impl Parser<'_> {
                 let mut one = json!({"x": x, "y": y});
                 if let Some(label) = attributes.get("label") {
                     one["label"] = json!(self.text(label, 80)?);
+                }
+                if let Some(drawn) = attributes.get("ghost") {
+                    if ghost.is_none() {
+                        return Err(self.attribute_problem(
+                            drawn,
+                            "ghost on a <series> says whether the parent's run is drawn under it: add ghost=\"parent\" to the chart".into(),
+                        ));
+                    }
+                    one["ghost"] = json!(self.choice(drawn, &["true", "false"])? == "true");
                 }
                 series.push(one);
             }
@@ -670,14 +694,25 @@ impl Parser<'_> {
                 }
             }
         }
+        if let Some(range) = attributes.get("x-range") {
+            if from.is_some() {
+                return Err(self.attribute_problem(
+                    range,
+                    "x-range sets how far a chart over the run's steps reaches; a chart from a table spans its points".into(),
+                ));
+            }
+            if self.choice(range, &["run", "parent"])? == "parent" {
+                block.insert("xRange".into(), json!("parent"));
+            }
+        }
         if let Some(mark) = attributes.get("mark") {
             block.insert(
                 "mark".into(),
                 json!(self.choice(mark, &["line", "points", "bars"])?),
             );
         }
-        if let Some(ghost) = attributes.get("ghost") {
-            block.insert("ghost".into(), json!(self.choice(ghost, &["parent"])?));
+        if let Some(ghost) = ghost {
+            block.insert("ghost".into(), json!(ghost));
         }
         Ok(())
     }
@@ -907,6 +942,7 @@ pub(crate) fn markup(tree: &Value) -> String {
                 ("by", "by"),
                 ("xScale", "x-scale"),
                 ("yScale", "y-scale"),
+                ("xRange", "x-range"),
                 ("mark", "mark"),
                 ("ghost", "ghost"),
             ] {
@@ -917,6 +953,9 @@ pub(crate) fn markup(tree: &Value) -> String {
         } else if let Some(stats) = block.get("stats") {
             line.push_str("  <stats");
             attribute(&mut line, "of", stats);
+            if let Some(vs) = block.get("vs") {
+                attribute(&mut line, "vs", vs);
+            }
         } else if let Some(table) = block.get("table") {
             line.push_str("  <table");
             attribute(&mut line, "name", table);
@@ -936,7 +975,7 @@ pub(crate) fn markup(tree: &Value) -> String {
                 lines.push(format!("{line}>"));
                 for one in series {
                     let mut child = "    <series".to_owned();
-                    for key in ["x", "y", "label"] {
+                    for key in ["x", "y", "label", "ghost"] {
                         if let Some(value) = one.get(key) {
                             attribute(&mut child, key, value);
                         }
@@ -1390,11 +1429,11 @@ mod tests {
 <signal name="cand_ms" label="Compress time" unit="ms" better="lower" />
 
 <view headline="front_gain">
-  <chart from="levels" x-scale="log" title="Size against compress time">
-    <series x="ref_ms" y="ref_kb" label="Reference build" />
+  <chart from="levels" x-scale="log" ghost="parent" title="Size against compress time">
+    <series x="ref_ms" y="ref_kb" label="Reference build" ghost="false" />
     <series x="cand_ms" y="cand_kb" label="Candidate" />
   </chart>
-  <stats of="front_gain speedup_mean size_gain_mean valid" />
+  <stats of="front_gain speedup_mean size_gain_mean valid" vs="final" />
   <table name="levels" columns="level speedup size_ratio cand_ms cand_kb" />
 </view>
 "#;
@@ -1424,10 +1463,10 @@ mod tests {
             json!({
                 "chart": [], "from": "levels",
                 "series": [
-                    {"x": "ref_ms", "y": "ref_kb", "label": "Reference build"},
+                    {"x": "ref_ms", "y": "ref_kb", "label": "Reference build", "ghost": false},
                     {"x": "cand_ms", "y": "cand_kb", "label": "Candidate"},
                 ],
-                "xScale": "log", "title": "Size against compress time",
+                "xScale": "log", "ghost": "parent", "title": "Size against compress time",
             })
         );
         assert_eq!(
@@ -1441,7 +1480,7 @@ mod tests {
     fn each_mistake_says_where_and_what() {
         let cases = [
             ("<view><html/></view>", 1, 7, "unknown element \"html\"; allowed: signal, view, chart, series, stats, table"),
-            ("<view>\n  <chart y=\"loss\" scale=\"log\"/>\n</view>", 2, 19, "unknown attribute \"scale\" on <chart>; allowed: y, x, from, by, x-scale, y-scale, mark, ghost, phase, title"),
+            ("<view>\n  <chart y=\"loss\" scale=\"log\"/>\n</view>", 2, 19, "unknown attribute \"scale\" on <chart>; allowed: y, x, from, by, x-scale, y-scale, x-range, mark, ghost, phase, title"),
             ("<signal name=\"loss\" digits=\"13\"/><view/>", 1, 21, "digits=\"13\" must be a whole number from 0 to 12"),
             ("<signal name=\"loss\" better=\"down\"/><view/>", 1, 21, "better=\"down\" is not one of lower, higher"),
             ("<signal name=\"a\"/><signal name=\"a\"/><view/>", 1, 19, "signal \"a\" is declared twice"),
@@ -1460,6 +1499,13 @@ mod tests {
             ("<signal name=\"v\" pick=\"best\"/><view/>", 1, 1, "signal \"v\" picks its best value but declares no better=\"lower|higher\""),
             ("<view><chart y=\"a\"><series x=\"b\" y=\"c\"/></chart></view>", 1, 7, "a chart takes y=\"…\" or <series> inside it, not both"),
             ("<view><chart><series x=\"b\" y=\"c\"/></chart></view>", 1, 14, "<series> draws columns of a table: add from=\"TABLE\" to the chart"),
+            ("<view><chart from=\"t\"><series x=\"b\" y=\"c\" ghost=\"false\"/></chart></view>", 1, 43, "ghost on a <series> says whether the parent's run is drawn under it: add ghost=\"parent\" to the chart"),
+            ("<view><chart from=\"t\" ghost=\"parent\"><series x=\"b\" y=\"c\" ghost=\"no\"/></chart></view>", 1, 58, "ghost=\"no\" is not one of true, false"),
+            ("<view><chart from=\"t\" x=\"a\" y=\"b\" x-range=\"run\"/></view>", 1, 35, "x-range sets how far a chart over the run's steps reaches; a chart from a table spans its points"),
+            ("<view><chart y=\"loss\" x-range=\"all\"/></view>", 1, 23, "x-range=\"all\" is not one of run, parent"),
+            ("<view><stats of=\"loss\" vs=\"parent\"/></view>", 1, 24, "vs=\"parent\" is not one of step, final"),
+            ("<signal name=\"loss\" vs=\"best\"/><view/>", 1, 21, "vs=\"best\" is not one of step, final"),
+            ("<view><table name=\"t\" columns=\"a b\" vs=\"here\"/></view>", 1, 37, "vs=\"here\" is not one of parent, step, final"),
         ];
         for (markup, line, column, message) in cases {
             let problem = problem(markup);
@@ -1523,6 +1569,9 @@ mod tests {
     fn a_derived_view_reads_back_as_itself() {
         let tree = compile(FRONTIER).unwrap().tree;
         assert_eq!(compile(&markup(&tree)).unwrap().tree, tree);
+        let over_steps = compile("<signal name=\"loss\" vs=\"step\" />\n<view><chart y=\"loss\" ghost=\"parent\" x-range=\"parent\" /><table name=\"eval\" columns=\"task score\" vs=\"final\" /></view>").unwrap().tree;
+        assert_eq!(over_steps["blocks"][0]["xRange"], "parent");
+        assert_eq!(compile(&markup(&over_steps)).unwrap().tree, over_steps);
         let default = json!({
             "signals": {"loss": {"label": "loss"}, "lr": {"label": "lr"}},
             "headline": ["loss"],

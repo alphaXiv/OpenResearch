@@ -54,6 +54,19 @@ function describeRows(monitor: RunMonitor, { series, categories, notes }: ChartD
   return [lines.join("; "), ...notes].filter(Boolean).join(". ");
 }
 
+/** The stretch of a line between `lo` and `hi`, ending where it crosses either edge. */
+function clip(points: Point[], lo: number, hi: number): Point[] {
+  const at = (a: Point, b: Point, edge: number): Point => [edge, a[1] === null || b[1] === null ? null : a[1] + ((b[1] - a[1]) * (edge - a[0])) / (b[0] - a[0])];
+  const out: Point[] = [];
+  points.forEach((point, index) => {
+    const before = points[index - 1];
+    if (before && before[0] < lo && point[0] > lo) out.push(at(before, point, lo));
+    if (point[0] >= lo && point[0] <= hi) out.push(point);
+    if (before && before[0] < hi && point[0] > hi) out.push(at(before, point, hi));
+  });
+  return out;
+}
+
 /** Round values for an axis between `lo` and `hi`, about `count` of them. */
 function ticks(lo: number, hi: number, count: number): number[] {
   const rough = (hi - lo || 1) / count;
@@ -129,7 +142,7 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
   const [ref, box] = useBoxSize<HTMLDivElement>();
   const [hover, setHover] = useState<number | null>(null);
   const data = chartOf(monitor, block);
-  const { series, categories, notes, rows } = data;
+  const { categories, notes, rows } = data;
   const table = rows !== null;
   const page = size === "page";
   const width = box.width;
@@ -139,7 +152,24 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
   const yLog = block.yScale === "log";
   const mark = categories ? "bars" : block.mark === "points" ? "points" : "line";
 
-  const drawn = series.flatMap((line) => line.points).filter((point): point is [number, number] => point[1] !== null && Number.isFinite(point[1]));
+  const known = (points: Point[]) => points.filter((point): point is [number, number] => point[1] !== null && Number.isFinite(point[1]));
+  const reported = known(data.series.flatMap((line) => line.points));
+
+  let x0: number;
+  let x1: number;
+  if (categories) [x0, x1] = [-0.5, categories.length - 0.5];
+  else if (table) [x0, x1] = reported.length > 0 ? span(reported.map((point) => point[0]), xLog) : [xLog ? 1 : 0, xLog ? 10 : 1];
+  else {
+    // Over steps the axis spans the run's own total, or what it has reached; the parent's line is cut at its edge.
+    const own = known(data.series.filter((line) => !line.ghost).flatMap((line) => line.points)).map((point) => point[0]);
+    const theirs = known(data.series.filter((line) => line.ghost).flatMap((line) => line.points)).map((point) => point[0]);
+    const reach = monitor.x.max !== null ? Math.max(monitor.x.max, ...own) : own.length > 0 ? Math.max(1, ...own) : null;
+    const spanned = block.xRange === "parent" || own.length === 0 ? [...own, ...theirs] : own;
+    if (xLog) [x0, x1] = spanned.length > 0 ? span(spanned, true) : [1, 10];
+    else [x0, x1] = [Math.min(0, ...spanned), block.xRange === "parent" || reach === null ? Math.max(reach ?? 1, ...theirs) : reach];
+  }
+  const series = table || categories ? data.series : data.series.map((line) => ({ ...line, points: clip(line.points, x0, x1) }));
+  const drawn = known(series.flatMap((line) => line.points));
   const nothing = rows === 0 ? (live ? m.run_block_no_rows() : m.run_block_no_rows_ended()) : live ? m.run_block_no_points() : m.run_block_no_points_ended();
   /** Nothing of this run's own to draw; a table's chart may still show the parent's under the words that say so. */
   const blank = table ? !series.some((line) => !line.ghost && line.points.some((point) => point[1] !== null)) : drawn.length === 0;
@@ -157,14 +187,7 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
   const margin = page ? { start: 38, end: 48, top: yCaption ? 22 : 8, bottom: 22 } : { start: 1, end: 5, top: 5, bottom: 3 };
   const innerWidth = Math.max(1, width - margin.start - margin.end);
   const innerHeight = Math.max(1, boxHeight - margin.top - margin.bottom);
-  const xs = drawn.map((point) => point[0]);
   const ys = drawn.map((point) => point[1]);
-
-  let x0: number;
-  let x1: number;
-  if (categories) [x0, x1] = [-0.5, categories.length - 0.5];
-  else if (table || xLog) [x0, x1] = drawn.length > 0 ? span(xs, xLog) : [xLog ? 1 : 0, xLog ? 10 : 1];
-  else [x0, x1] = [Math.min(0, ...xs), monitor.x.max ?? Math.max(1, ...xs)];
   let y0 = Math.min(...ys);
   let y1 = Math.max(...ys);
   if (yLog) [y0, y1] = drawn.length > 0 ? span(ys, true) : [1, 10];
@@ -358,7 +381,7 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
           {readout.hits.map(({ line, point }) => (
             <span key={line.name} className="flex items-center gap-1.5">
               <svg width="12" height="2" className="shrink-0"><line x1="0" x2="12" y1="1" y2="1" stroke={line.color} strokeWidth="2" strokeDasharray={line.ghost ? "3 2" : undefined} /></svg>
-              {line.ghost ? m.run_chart_parent() : line.label}
+              {!line.ghost ? line.label : series.filter((one) => one.ghost).length > 1 ? m.run_chart_parent_line({ label: line.label }) : m.run_chart_parent()}
               <b className="ms-auto ps-3 font-medium tabular-nums text-text">{readoutValue(line, point, readout.anchor.point)}</b>
             </span>
           ))}

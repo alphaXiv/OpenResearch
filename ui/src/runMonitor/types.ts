@@ -7,14 +7,19 @@ export type Point = [number, number | null];
 export type FlagState = "raised" | "waking" | "agent_looking" | "waiting" | "asking";
 export type FlagMode = "agentic" | "copilot";
 
-/** How a run's headline compares with its parent at the same point; `mag` is already rounded to the signal's digits. */
+/** How a run's signal compares with its parent's; `mag` is already rounded to the signal's digits. */
 export interface Versus {
   d: number;
   good: boolean;
   flat: boolean;
   mag: number;
   parent: number;
+  /** The step both were taken at; absent when compared with the value the parent ended with. */
+  step?: number;
 }
+
+/** At the same stage and step, or with the value the parent ended with. */
+export type VersusBy = "step" | "final";
 
 /** The watcher's words: tokens `{signal}`, `{signal.vs}` and `{count:"pattern"}`, with one `**bold**` figure. */
 export interface Sentence {
@@ -44,6 +49,8 @@ export interface SignalSpec {
   values?: Record<string, "correct" | "wrong" | "error">;
   /** The word shown for a raw value, in stats, tables and the headline: `{"1": "valid"}`. */
   labels?: Record<string, string>;
+  /** How it compares with the parent; at the same step while the run goes and with where the parent ended once it ended when absent. */
+  vs?: VersusBy;
 }
 
 /** One line of a chart drawn from a table, with its own x column. */
@@ -51,6 +58,8 @@ export interface ChartSeries {
   x: string;
   y: string;
   label?: string;
+  /** False keeps the parent's line from being drawn under this one, as for a reference the run measures itself. */
+  ghost?: boolean;
 }
 
 export type Signals = Record<string, SignalSpec>;
@@ -68,6 +77,8 @@ export interface ChartBlock {
   by?: string;
   xScale?: "log";
   yScale?: "log";
+  /** Over steps, the axis reaches the parent's end too; it spans the run's own total, the parent's line cut at the edge, when absent. */
+  xRange?: "parent";
   /** A line over steps, and a line with points from a table, when absent. */
   mark?: "line" | "points" | "bars";
   ghost?: "parent";
@@ -75,8 +86,8 @@ export interface ChartBlock {
 
 export type ViewBlock = { phase?: string; title?: string } & (
   | ChartBlock
-  | { stats: string[] }
-  | { table: string; columns: string[]; last?: number; vs?: "parent" }
+  | { stats: string[]; vs?: VersusBy }
+  | { table: string; columns: string[]; last?: number; vs?: "parent" | VersusBy }
   | { bars: string; by: string }
   | { cells: string }
   | { media: string; last?: number; columns?: number; size?: "s" | "m" | "l"; caption?: string }
@@ -295,9 +306,12 @@ export interface RunMonitor {
   groups: Record<string, { key: string; value: number | null; ok: number; n: number }[]>;
   cells: Record<string, Cells>;
   media: Record<string, MediaItem[]>;
-  /** `rows` holds the parent's tables a `vs: "parent"` table compares with, matched by their first column. */
+  /** `rows` holds the parent's tables a table with `vs` compares with, matched by their first column. */
   parent: { runId: string; phase: string | null; series: Record<string, Point[]>; rows?: Record<string, Record<string, SignalValue>[]> } | null;
+  /** Each signal compared its own way. */
   versus: Record<string, Versus>;
+  /** Each signal compared both ways, for a block that names its own; absent from an older server. */
+  versusBy?: Record<VersusBy, Record<string, Versus>>;
   counts: Record<string, number>;
   estimate: Estimate | null;
   limit: { endsAt: number } | null;

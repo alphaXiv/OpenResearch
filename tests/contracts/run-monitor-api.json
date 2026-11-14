@@ -78,6 +78,10 @@
         },
         "parent": null,
         "versus": {},
+        "versusBy": {
+          "step": {},
+          "final": {}
+        },
         "rows": {},
         "groups": {},
         "cells": {},
@@ -326,6 +330,10 @@
         },
         "parent": null,
         "versus": {},
+        "versusBy": {
+          "step": {},
+          "final": {}
+        },
         "rows": {},
         "groups": {},
         "cells": {},
@@ -514,6 +522,10 @@
         },
         "parent": null,
         "versus": {},
+        "versusBy": {
+          "step": {},
+          "final": {}
+        },
         "rows": {},
         "groups": {},
         "cells": {},
@@ -724,6 +736,10 @@
         },
         "parent": null,
         "versus": {},
+        "versusBy": {
+          "step": {},
+          "final": {}
+        },
         "rows": {},
         "groups": {},
         "cells": {},
@@ -880,6 +896,10 @@
         },
         "parent": null,
         "versus": {},
+        "versusBy": {
+          "step": {},
+          "final": {}
+        },
         "rows": {},
         "groups": {},
         "cells": {},
@@ -1038,6 +1058,10 @@
         },
         "parent": null,
         "versus": {},
+        "versusBy": {
+          "step": {},
+          "final": {}
+        },
         "rows": {},
         "groups": {},
         "cells": {},
@@ -1170,6 +1194,10 @@
         "latest": {},
         "parent": null,
         "versus": {},
+        "versusBy": {
+          "step": {},
+          "final": {}
+        },
         "rows": {},
         "groups": {},
         "cells": {},
@@ -1306,6 +1334,10 @@
         },
         "parent": null,
         "versus": {},
+        "versusBy": {
+          "step": {},
+          "final": {}
+        },
         "rows": {},
         "groups": {},
         "cells": {},
@@ -1523,6 +1555,10 @@
         "latest": {},
         "parent": null,
         "versus": {},
+        "versusBy": {
+          "step": {},
+          "final": {}
+        },
         "rows": {},
         "groups": {},
         "cells": {},
@@ -1637,6 +1673,10 @@
         },
         "parent": null,
         "versus": {},
+        "versusBy": {
+          "step": {},
+          "final": {}
+        },
         "rows": {},
         "groups": {},
         "cells": {},
@@ -1845,6 +1885,10 @@
         },
         "parent": null,
         "versus": {},
+        "versusBy": {
+          "step": {},
+          "final": {}
+        },
         "rows": {
           "rounds": [
             {
@@ -2267,6 +2311,10 @@
         "latest": {},
         "parent": null,
         "versus": {},
+        "versusBy": {
+          "step": {},
+          "final": {}
+        },
         "rows": {},
         "groups": {},
         "cells": {},
@@ -2369,6 +2417,10 @@
         "latest": {},
         "parent": null,
         "versus": {},
+        "versusBy": {
+          "step": {},
+          "final": {}
+        },
         "rows": {},
         "groups": {},
         "cells": {},
@@ -2493,6 +2545,10 @@
         "latest": {},
         "parent": null,
         "versus": {},
+        "versusBy": {
+          "step": {},
+          "final": {}
+        },
         "rows": {},
         "groups": {},
         "cells": {},
@@ -2867,6 +2923,10 @@
         "latest": {},
         "parent": null,
         "versus": {},
+        "versusBy": {
+          "step": {},
+          "final": {}
+        },
         "rows": {},
         "groups": {},
         "cells": {},
@@ -3013,6 +3073,10 @@
         },
         "parent": null,
         "versus": {},
+        "versusBy": {
+          "step": {},
+          "final": {}
+        },
         "rows": {},
         "groups": {},
         "cells": {},
@@ -3220,6 +3284,10 @@
         "latest": {},
         "parent": null,
         "versus": {},
+        "versusBy": {
+          "step": {},
+          "final": {}
+        },
         "rows": {},
         "groups": {},
         "cells": {},
@@ -3352,6 +3420,10 @@
         },
         "parent": null,
         "versus": {},
+        "versusBy": {
+          "step": {},
+          "final": {}
+        },
         "rows": {},
         "groups": {},
         "cells": {},
@@ -3705,7 +3777,29 @@
             "good": true,
             "flat": false,
             "mag": 0.045,
-            "parent": 0.2727272727272727
+            "parent": 0.2727272727272727,
+            "step": 100.0
+          }
+        },
+        "versusBy": {
+          "step": {
+            "loss": {
+              "d": -0.045454545454545414,
+              "good": true,
+              "flat": false,
+              "mag": 0.045,
+              "parent": 0.2727272727272727,
+              "step": 100.0
+            }
+          },
+          "final": {
+            "loss": {
+              "d": 0.08441558441558444,
+              "good": false,
+              "flat": false,
+              "mag": 0.084,
+              "parent": 0.14285714285714285
+            }
           }
         },
         "rows": {},
@@ -3741,7 +3835,7 @@
         "revising": false,
         "brief": [],
         "rules": [],
-        "statusText": "child  running  25%  step 100 of 400  [run c1]\neta      30s left (28s to 31s)\nsignals  Loss 0.227 (0.045 better than parent)\nsignals  Data as of 2026-11-12T00:45:10.000Z.",
+        "statusText": "child  running  25%  step 100 of 400  [run c1]\neta      30s left (28s to 31s)\nsignals  Loss 0.227 (0.045 better than parent at step 100)\nsignals  Data as of 2026-11-12T00:45:10.000Z.",
         "rev": 1,
         "seriesRev": 1,
         "series": {
@@ -3811,7 +3905,8 @@
             "good": true,
             "flat": false,
             "mag": 0.045,
-            "parent": 0.2727272727272727
+            "parent": 0.2727272727272727,
+            "step": 100.0
           }
         },
         "sentence": null,
@@ -3850,7 +3945,7 @@
         "eta": null,
         "range": null,
         "cli": null,
-        "said": "Loss 0.227 (0.045 better than parent)"
+        "said": "Loss 0.227 (0.045 better than parent at step 100)"
       }
     }
   }

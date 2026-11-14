@@ -35,7 +35,7 @@ function titleOf(block: ViewBlock, monitor: RunMonitor): string | null {
   }
   if ("table" in block) {
     const name = block.table.replaceAll("_", " ");
-    return block.vs === "parent" ? name.charAt(0).toLocaleUpperCase(getLocale()) + name.slice(1) : m.run_block_latest({ table: name });
+    return block.vs ? name.charAt(0).toLocaleUpperCase(getLocale()) + name.slice(1) : m.run_block_latest({ table: name });
   }
   if ("bars" in block) return m.run_block_by({ label: label(block.bars), key: block.by });
   if ("cells" in block) return m.run_block_cells();
@@ -75,7 +75,7 @@ function Body({ monitor, block, size, projectId, tone, live, title }: BlockProps
   if ("bars" in block) return <Bars monitor={monitor} block={block} size={size} live={live} />;
   if ("cells" in block) return <Cells cells={monitor.cells[block.cells]} size={size} live={live} />;
   if ("media" in block) return <Media items={monitor.media[block.media] ?? []} block={block} projectId={projectId} size={size} live={live} />;
-  if ("stats" in block) return <Stats monitor={monitor} names={block.stats} />;
+  if ("stats" in block) return <Stats monitor={monitor} names={block.stats} vs={block.vs} />;
   return <Text monitor={monitor} template={block.text} tone={tone} />;
 }
 

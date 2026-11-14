@@ -64,7 +64,11 @@
       "setup": null,
       "source": "declared",
       "statusText": "baseline  running  50%  step 200 of 400  [run r1]\neta      19s left (18s to 20s)\nsignals  loss 0.143\nsignals  Last collected at 2026-11-12T00:45:20.000Z.\nsignals  Data as of 2026-11-12T00:45:20.000Z.\nsignals  1 log diagnostics; inspect `orx logs r1`.",
-      "versus": {}
+      "versus": {},
+      "versusBy": {
+        "step": {},
+        "final": {}
+      }
     },
     "reset": true
   },
@@ -144,7 +148,11 @@
       "setup": null,
       "source": "declared",
       "statusText": "baseline  running  55%  step 220 of 400  [run r1]\neta      17s left (16s to 18s)\nsignals  loss 0.13\nsignals  Last collected at 2026-11-12T00:45:22.000Z.\nsignals  Data as of 2026-11-12T00:45:22.000Z.\nsignals  1 log diagnostics; inspect `orx logs r1`.",
-      "versus": {}
+      "versus": {},
+      "versusBy": {
+        "step": {},
+        "final": {}
+      }
     }
   }
 ]

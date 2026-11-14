@@ -95,14 +95,18 @@ test("stats show each latest value with its course, and say in words whether it 
   const compared = block.stats.filter((name) => monitor.versus[name]);
   assert.equal(page.querySelectorAll("dd").length, block.stats.length + compared.length, "a stat with no parent to compare with says nothing more");
   const elo = page.querySelector("dl > div");
-  assert.match(text(elo), /Elo gained\+\d+.*\d+ better than the parent here/);
+  assert.match(text(elo), /Elo gained\+\d+.*\d+ better than the parent at step 14/);
   assert.equal(pointsDown(elo), monitor.versus.elo.d < 0);
   assert.match(text(page), /Win vs previous[\d.]+%/);
 
   const worse = { ...monitor, versus: { ...monitor.versus, elo: { d: -40, good: false, flat: false, mag: 40, parent: 936 } } };
   const behind = (await draw(worse, block, "page")).querySelector("dl > div");
-  assert.match(text(behind), /40 worse than the parent here/);
+  assert.match(text(behind), /40 worse than where the parent ended/, "a comparison at no step is with the parent's final value");
   assert.ok(pointsDown(behind));
+
+  const versusBy = { step: monitor.versus, final: { elo: { d: -12, good: false, flat: false, mag: 12, parent: 908 } } };
+  const asked = (await draw({ ...monitor, versusBy }, { ...block, vs: "final" }, "page")).querySelector("dl > div");
+  assert.match(text(asked), /12 worse than where the parent ended/, "the block's own way wins over the signal's");
 
   assert.equal((await draw(monitor, block, "strip")).textContent, "");
 });

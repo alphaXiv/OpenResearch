@@ -92,7 +92,8 @@
       "good": true,
       "flat": false,
       "mag": 228,
-      "parent": 668.375115
+      "parent": 668.375115,
+      "step": 14
     }
   },
   "counts": {},

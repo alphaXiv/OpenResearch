@@ -429,25 +429,41 @@ fn view_of(life: &Lifecycle, snapshot: Option<&Snapshot>) -> (Value, Value, Opti
     (tree, from, problem)
 }
 
-/// How each signal with a declared `better` compares with the parent's run: at the same stage and
-/// step, interpolated only between steps the parent reported, or, while the run's stage has no
-/// steps, with what an ended parent reported last. Never extrapolated, never a guessed direction.
+/// How a signal is compared with its parent's run: at the same stage and step, or with the value
+/// the parent ended with.
+#[derive(Clone, Copy, PartialEq)]
+enum Compare {
+    Step,
+    Final,
+}
+
+/// How each signal with a declared `better` compares with the parent's run, `by` one way. At a
+/// step, both are taken at the same stage and step, interpolated only between steps the parent
+/// reported; a stage that has ended compares at its last step. A value reported outside a stage
+/// with steps, or `Final`, meets what an ended parent reported last. Never extrapolated, never a
+/// guessed direction.
 fn versus(
     view: &Value,
     snapshot: Option<&Snapshot>,
     parent: Option<(&Snapshot, bool)>,
+    by: Compare,
 ) -> serde_json::Map<String, Value> {
     let (Some(snapshot), Some((parent, ended))) = (snapshot, parent) else {
         return serde_json::Map::new();
     };
-    // A value counts steps only while its stage does; one reported after, in a stage with no
-    // steps, is the run's result.
-    let same_stage = snapshot.progress().is_some_and(|stage| {
-        parent
-            .phases
-            .iter()
-            .any(|p| p.name == stage.name && p.done.is_some())
-    });
+    let stage = snapshot
+        .phases
+        .iter()
+        .rposition(|p| p.done.is_some())
+        .filter(|&at| {
+            let name = &snapshot.phases[at].name;
+            parent
+                .phases
+                .iter()
+                .any(|p| p.name == *name && p.done.is_some())
+        });
+    let current = stage.is_some_and(|at| at + 1 == snapshot.phases.len());
+    let last_step = stage.and_then(|at| snapshot.phases[at].done);
     let finite = |value: Option<&Value>| value.and_then(Value::as_f64).filter(|v| v.is_finite());
     let mut versus = serde_json::Map::new();
     // A table's column holds its last row, which is no result to compare.
@@ -456,10 +472,24 @@ fn versus(
         let Some(better) = spec["better"].as_str().filter(|_| !columns.contains(name)) else {
             continue;
         };
-        let stepwise = snapshot.series.get(name).filter(|_| same_stage);
+        // Points carry no stage: after its stage, a value is compared at a step only when the
+        // latest is what it reported at the stage's last step.
+        let stepwise = snapshot
+            .series
+            .get(name)
+            .filter(|_| by == Compare::Step)
+            .and_then(|points| {
+                if current {
+                    points.last()
+                } else {
+                    points.iter().rev().find(|point| Some(point.0) == last_step)
+                }
+            })
+            .filter(|point| {
+                current || point.1.is_some() && finite(snapshot.latest.get(name)) == point.1
+            });
         let pair = match stepwise {
-            Some(points) => points.last().and_then(|&(x, value)| {
-                let value = value.filter(|v| v.is_finite())?;
+            Some(&(x, value)) => value.filter(|v| v.is_finite()).and_then(|value| {
                 let theirs = parent.series.get(name)?;
                 let after = theirs.iter().position(|point| point.0 >= x)?;
                 let (x1, y1) = theirs[after];
@@ -470,12 +500,13 @@ fn versus(
                     let (y0, y1) = (y0?, y1?);
                     y0 + (y1 - y0) * (x - x0) / (x1 - x0)
                 };
-                Some((value, at))
+                Some((value, at, Some(x)))
             }),
             None => finite(snapshot.latest.get(name))
-                .zip(finite(parent.latest.get(name)).filter(|_| ended)),
+                .zip(finite(parent.latest.get(name)).filter(|_| ended))
+                .map(|(value, theirs)| (value, theirs, None)),
         };
-        let Some((value, theirs)) = pair.filter(|(_, theirs)| theirs.is_finite()) else {
+        let Some((value, theirs, step)) = pair.filter(|(_, theirs, _)| theirs.is_finite()) else {
             continue;
         };
         let d = value - theirs;
@@ -488,10 +519,12 @@ fn versus(
             None => size,
         };
         let good = if better == "lower" { d < 0.0 } else { d > 0.0 };
-        versus.insert(
-            name.clone(),
-            json!({"d": d, "good": good, "flat": mag == 0.0, "mag": mag, "parent": theirs}),
-        );
+        let mut compared =
+            json!({"d": d, "good": good, "flat": mag == 0.0, "mag": mag, "parent": theirs});
+        if let Some(step) = step {
+            compared["step"] = json!(step);
+        }
+        versus.insert(name.clone(), compared);
     }
     versus
 }
@@ -777,7 +810,23 @@ fn evaluate(fold: &Fold, life: &Lifecycle, parent: Option<&Snapshot>, now: i64) 
         .as_ref()
         .is_some_and(|p| Phase::parse(&p.status).is_some_and(Phase::is_terminal));
     let compared = parent.map(|parent| (parent, parent_ended));
-    let versus = versus(&view, snapshot, compared);
+    let at_step = versus(&view, snapshot, compared, Compare::Step);
+    let at_end = versus(&view, snapshot, compared, Compare::Final);
+    // Each signal compares its own way, else at the same step while the run goes and with what the
+    // parent ended with once it ended.
+    let versus: serde_json::Map<String, Value> = view["signals"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(name, spec)| {
+            let step = match spec["vs"].as_str() {
+                Some(vs) => vs == "step",
+                None => life.live(),
+            };
+            let by = if step { &at_step } else { &at_end };
+            by.get(name).map(|vs| (name.clone(), vs.clone()))
+        })
+        .collect();
     let stepped = snapshot.is_some_and(|s| s.phases.iter().any(|p| p.done.is_some()));
     let x_name = if stepped { "step" } else { "elapsed" };
     let x_max = snapshot
@@ -814,7 +863,8 @@ fn evaluate(fold: &Fold, life: &Lifecycle, parent: Option<&Snapshot>, now: i64) 
             .map(|(name, points)| (name.clone(), json!(points)))
             .collect();
         let rows = tables(Some(parent), &|block| {
-            block["vs"] == "parent" || block["ghost"] == "parent" && block.get("from").is_some()
+            block.get("table").is_some() && block.get("vs").is_some()
+                || block["ghost"] == "parent" && block.get("from").is_some()
         });
         json!({"runId": run.id, "phase": phase, "series": series, "rows": rows})
     });
@@ -972,6 +1022,7 @@ fn evaluate(fold: &Fold, life: &Lifecycle, parent: Option<&Snapshot>, now: i64) 
         "latest": latest,
         "parent": parent_body,
         "versus": versus,
+        "versusBy": {"step": at_step, "final": at_end},
         "rows": rows,
         "groups": {},
         "cells": {},
@@ -1739,6 +1790,7 @@ fn project(
                     "source": body["source"],
                     "statusText": body["statusText"],
                     "versus": body["versus"],
+                    "versusBy": body["versusBy"],
                 },
             });
             if let Some(best) = body.get("best") {
@@ -1930,8 +1982,12 @@ fn status_text(life: &Lifecycle, fold: &Fold, facts: &StatusFacts) -> String {
                     text.push_str(&format!(" {unit}"));
                 }
                 if let Some(vs) = facts.versus.get(name) {
+                    let parent = match vs["step"].as_f64() {
+                        Some(step) => format!("parent at step {}", number(step)),
+                        None => "parent's final value".to_owned(),
+                    };
                     text.push_str(&if vs["flat"] == true {
-                        " (level with parent)".to_owned()
+                        format!(" (level with {parent})")
                     } else {
                         let mag = vs["mag"].as_f64().unwrap_or_default();
                         let mag = match spec["digits"].as_u64() {
@@ -1943,7 +1999,7 @@ fn status_text(life: &Lifecycle, fold: &Fold, facts: &StatusFacts) -> String {
                         } else {
                             "worse"
                         };
-                        format!(" ({mag} {word} than parent)")
+                        format!(" ({mag} {word} than {parent})")
                     });
                 }
                 Some(text)
@@ -4962,7 +5018,7 @@ mod tests {
         );
         let text = monitor["statusText"].as_str().unwrap();
         assert!(
-            text.contains("signals  Loss 0.227 (0.045 better than parent)"),
+            text.contains("signals  Loss 0.227 (0.045 better than parent at step 100)"),
             "{text}"
         );
         let summary = current(&f.store, &child)
@@ -4979,6 +5035,112 @@ mod tests {
         let (monitor, _) = monitor_at(&f, &child, T0 + 30_500);
         assert_eq!(monitor["versus"], json!({}));
         assert!(!monitor["statusText"].as_str().unwrap().contains("parent"));
+    }
+
+    /// A run that trains for `steps` of 10 at loss `scale * 3 / (i + 1)`, then evaluates without
+    /// steps, ending at loss `last` when it is given.
+    fn staged_run(
+        f: &Fixture,
+        id: &str,
+        experiment: &str,
+        status: &str,
+        steps: i64,
+        scale: f64,
+        last: Option<f64>,
+    ) -> StoredRun {
+        let run = f.run_in(id, experiment, status, local());
+        let mut lines: Vec<(i64, String)> = (0..=steps)
+            .map(|i| {
+                let loss = scale * 3.0 / (i + 1) as f64;
+                let line = format!("::orx:: {{\"phase\":\"train\",\"step\":{},\"of\":{},\"t\":{i},\"m\":{{\"loss\":{loss}}}}}", i * 10, steps * 10);
+                (T0 + i * 1000, line)
+            })
+            .collect();
+        let after = steps + 1;
+        lines.push((
+            T0 + after * 1000,
+            format!("::orx:: {{\"phase\":\"eval\",\"t\":{after}}}"),
+        ));
+        if let Some(loss) = last {
+            lines.push((
+                T0 + after * 1000 + 500,
+                format!("::orx:: {{\"t\":{after}.5,\"m\":{{\"loss\":{loss}}}}}"),
+            ));
+        }
+        f.collect(&Snapshot {
+            run_id: id.into(),
+            ..folded(&lines)
+        });
+        run
+    }
+
+    #[test]
+    fn a_stage_that_ended_compares_at_its_last_step_until_the_run_ends() {
+        let f = Fixture::new("orx-monitor-stage-ended");
+        f.view("exp", VIEW);
+        let parent = staged_run(&f, "p1", "exp", "done", 500, 1.0, None);
+        monitor_at(&f, &parent, T0 + 700_000);
+        f.child("child", "exp");
+        let child = staged_run(&f, "c1", "child", "running", 3, 0.9, None);
+        let (monitor, event) = monitor_at(&f, &child, T0 + 5_000);
+
+        // The child's last train step is 30, at 0.675 against the parent's 0.75 there; the parent
+        // ended its 5,000 steps at 0.006.
+        let vs = &monitor["versus"]["loss"];
+        assert_eq!(
+            (&vs["good"], &vs["step"], &vs["mag"]),
+            (&json!(true), &json!(30.0), &json!(0.075)),
+            "{vs}"
+        );
+        assert_eq!(monitor["versusBy"]["step"]["loss"], *vs);
+        let last = &monitor["versusBy"]["final"]["loss"];
+        assert_eq!(
+            (&last["good"], &last["mag"], last.get("step")),
+            (&json!(false), &json!(0.669), None),
+            "{last}"
+        );
+        assert_eq!(event.unwrap()["patch"]["versusBy"], monitor["versusBy"]);
+        let text = monitor["statusText"].as_str().unwrap();
+        assert!(
+            text.contains("Loss 0.675 (0.075 better than parent at step 30)"),
+            "{text}"
+        );
+
+        // A value reported after the stage's steps is the run's result, met with the parent's.
+        let child = staged_run(&f, "c2", "child", "running", 3, 0.9, Some(0.5));
+        let (monitor, _) = monitor_at(&f, &child, T0 + 5_000);
+        assert_eq!(
+            monitor["versus"]["loss"].get("step"),
+            None,
+            "{}",
+            monitor["versus"]
+        );
+
+        let ended = staged_run(&f, "c3", "child", "done", 3, 0.9, None);
+        let (monitor, _) = monitor_at(&f, &ended, T0 + 700_000);
+        assert_eq!(
+            monitor["versus"]["loss"], monitor["versusBy"]["final"]["loss"],
+            "an ended run meets where its parent ended"
+        );
+        let text = monitor["statusText"].as_str().unwrap();
+        assert!(
+            text.contains("Loss 0.675 (0.669 worse than parent's final value)"),
+            "{text}"
+        );
+
+        f.view(
+            "child",
+            &VIEW.replace(
+                "better=\"lower\" />\n<signal name=\"val_loss\"",
+                "better=\"lower\" vs=\"step\" />\n<signal name=\"val_loss\"",
+            ),
+        );
+        let (monitor, _) = monitor_at(&f, &ended, T0 + 701_000);
+        assert_eq!(
+            monitor["versus"]["loss"]["step"], 30.0,
+            "the signal's own way wins: {}",
+            monitor["versus"]
+        );
     }
 
     #[test]
@@ -5031,7 +5193,7 @@ mod tests {
         );
         let text = monitor["statusText"].as_str().unwrap();
         assert!(
-            text.contains("Frontier gain +0.412 (0.391 better than parent)"),
+            text.contains("Frontier gain +0.412 (0.391 better than parent's final value)"),
             "{text}"
         );
     }
@@ -5547,7 +5709,7 @@ mod tests {
             "status": "running", "createdAt": T0, "startedAt": T0, "updatedAt": T0,
             "endedAt": null, "backend": local(),
         });
-        let expect = json!({"eta": null, "range": null, "cli": null, "said": "Loss 0.227 (0.045 better than parent)"});
+        let expect = json!({"eta": null, "range": null, "cli": null, "said": "Loss 0.227 (0.045 better than parent at step 100)"});
         assert!(monitor["statusText"]
             .as_str()
             .unwrap()

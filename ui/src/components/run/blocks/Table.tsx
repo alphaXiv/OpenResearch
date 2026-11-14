@@ -5,12 +5,12 @@ import { autoDir, fmtNumber, ltr } from "../../../i18n";
 import { m } from "../../../paraglide/messages.js";
 import { getLocale } from "../../../paraglide/runtime.js";
 import { fmtMagnitude, fmtSignal, labelOf, versusOf } from "../../../runMonitor/format";
-import type { RunMonitor, SignalValue, Signals } from "../../../runMonitor/types";
+import type { RunMonitor, SignalValue, Signals, VersusBy } from "../../../runMonitor/types";
 import { cn } from "../../ui/cn";
 import { Delta } from "../Delta";
 
 type Row = Record<string, SignalValue>;
-type TableBlock = { table: string; columns: string[]; last?: number; vs?: string };
+type TableBlock = { table: string; columns: string[]; last?: number; vs?: "parent" | VersusBy };
 /**
  * A row as the table draws it: `parent` is the parent's value of the compared column, `pending` a row the run hasn't
  * reached, and `id` the object whose identity keys it.
@@ -37,15 +37,36 @@ function cellText(signals: Signals, column: string, value: SignalValue | undefin
 
 const count = (value: number) => ltr(fmtNumber(value));
 
-/** With `vs: "parent"`, every row the parent has, by its first column, with this run's value beside the parent's. */
-function compared(rows: Row[], parentRows: Row[], key: string, column: string): Line[] {
-  const own = new Map(rows.map((row) => [row[key], row]));
-  const lines: Line[] = parentRows.map((parent) => {
-    const row = own.get(parent[key]);
+/** The rows of each value of the first column, in order. */
+function byKey(rows: Row[], key: string): Map<SignalValue, Row[]> {
+  const keyed = new Map<SignalValue, Row[]>();
+  for (const row of rows) {
+    const group = keyed.get(row[key]);
+    if (group) group.push(row);
+    else keyed.set(row[key], [row]);
+  }
+  return keyed;
+}
+
+/**
+ * Against the parent, a line for every row the parent has, matched by the first column: at a step, the run's nth row of
+ * a key beside the parent's nth; at the end, the run's newest row of each key beside the parent's last. Rows the run
+ * hasn't reached are pending; rows the parent never had come after.
+ */
+function compared(rows: Row[], parentRows: Row[], key: string, column: string, by: VersusBy): Line[] {
+  const own = byKey(rows, key);
+  const seen = new Map<SignalValue, number>();
+  const theirs = by === "step" ? parentRows : [...byKey(parentRows, key).values()].map((group) => group[group.length - 1]);
+  const lines: Line[] = theirs.map((parent) => {
+    const group = own.get(parent[key]) ?? [];
+    const nth = seen.get(parent[key]) ?? 0;
+    seen.set(parent[key], nth + 1);
+    const row = by === "step" ? group[nth] : group.at(-1);
     return { id: row ?? parent, row: row ?? { [key]: parent[key] }, parent: parent[column] ?? null, pending: !row };
   });
-  const seen = new Set(parentRows.map((parent) => parent[key]));
-  return [...lines, ...rows.filter((row) => !seen.has(row[key])).map((row) => ({ id: row, row, parent: null, pending: false }))];
+  const matched = new Set(lines.map((line) => line.row));
+  const extra = by === "step" ? rows : [...own.values()].map((group) => group[group.length - 1]);
+  return [...lines, ...extra.filter((row) => !matched.has(row)).map((row) => ({ id: row, row, parent: null, pending: false }))];
 }
 
 /** How many of `rows` came after `newest`, matched by value, since a reread brings the same rows as new objects. */
@@ -179,9 +200,10 @@ export function Table({ monitor, block, size, live, title }: { monitor: RunMonit
   const [all, setAll] = useState(false);
   const { signals } = monitor.view;
   const rows = monitor.rows[block.table] ?? [];
-  const parentRows = block.vs === "parent" ? monitor.parent?.rows?.[block.table] ?? null : null;
+  const parentRows = block.vs ? monitor.parent?.rows?.[block.table] ?? null : null;
   const vs = parentRows !== null;
-  const lines: Line[] = vs ? compared(rows, parentRows, block.columns[0], block.columns[1])
+  const by: VersusBy = block.vs === "step" || block.vs === "final" ? block.vs : live ? "step" : "final";
+  const lines: Line[] = vs ? compared(rows, parentRows, block.columns[0], block.columns[1], by)
     : rows.map((row) => ({ id: row, row, parent: null, pending: false })).reverse();
 
   if (lines.length === 0) return <p className="m-0 text-xs text-ink-subtext">{live ? m.run_block_no_rows() : m.run_block_no_rows_ended()}</p>;
