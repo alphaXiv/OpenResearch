@@ -602,7 +602,10 @@ for bad in (["a", "a"], [{"of": 3}], [""]):
         let names: Vec<_> = plan.iter().map(|stage| stage.phase.as_str()).collect();
         assert_eq!(names, ["install", "train", "eval", "train"]);
         assert_eq!(
-            (plan[1].of, plan[1].unit.as_deref()),
+            (
+                plan[1].of.as_ref().and_then(serde_json::Number::as_f64),
+                plan[1].unit.as_deref()
+            ),
             (Some(5000.0), Some("steps"))
         );
         assert!(

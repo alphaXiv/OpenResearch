@@ -1038,7 +1038,11 @@ fn a_run_declares_its_plan_and_a_later_one_replaces_it() {
     let plan = s.plan.clone().unwrap();
     assert_eq!(plan.len(), 2);
     assert_eq!(
-        (plan[1].phase.as_str(), plan[1].of, plan[1].unit.as_deref()),
+        (
+            plan[1].phase.as_str(),
+            plan[1].of.as_ref().and_then(serde_json::Number::as_f64),
+            plan[1].unit.as_deref()
+        ),
         ("train", Some(5000.0), Some("steps"))
     );
     assert!(s.phases.is_empty(), "a plan begins no stage");

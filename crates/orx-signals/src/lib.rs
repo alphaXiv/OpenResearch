@@ -182,12 +182,12 @@ pub fn slice_boundary(total: f64, k: usize) -> f64 {
     k as f64 * (total / slice_count(total) as f64)
 }
 
-/// One stage of a declared plan: `{"phase", "of"?, "unit"?}`.
+/// One stage of a declared plan: `{"phase", "of"?, "unit"?}`, its total kept as written.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Stage {
     pub phase: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub of: Option<f64>,
+    pub of: Option<serde_json::Number>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
 }
@@ -231,8 +231,9 @@ pub fn plan(value: &Value, strict: bool) -> Result<Vec<Stage>, String> {
         let of = match fields.get("of") {
             None | Some(Value::Null) => None,
             Some(of) => Some(
-                of.as_f64()
-                    .filter(|of| of.is_finite() && *of > 0.0)
+                of.as_number()
+                    .filter(|of| of.as_f64().is_some_and(|of| of.is_finite() && of > 0.0))
+                    .cloned()
                     .ok_or_else(|| format!("stage {n}'s \"of\" must be a number above 0"))?,
             ),
         };

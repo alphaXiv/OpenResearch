@@ -1,4 +1,4 @@
 {
   "before": "{\"view\":\"<signal name=\\\"loss\\\" />\\n<view headline=\\\"loss\\\"><chart y=\\\"loss\\\" /></view>\\n\",\"patterns\":[{\"regex\":\"^step (?P<step>\\\\d+)\"}]}",
-  "planned": "{\"view\":\"<signal name=\\\"loss\\\" />\\n<view headline=\\\"loss\\\"><chart y=\\\"loss\\\" /></view>\\n\",\"patterns\":[],\"plan\":[{\"phase\":\"install\"},{\"phase\":\"train\",\"of\":5000.0,\"unit\":\"steps\"},{\"phase\":\"eval\"},{\"phase\":\"train\"}],\"later\":{\"kept\":true}}"
+  "planned": "{\"view\":\"<signal name=\\\"loss\\\" />\\n<view headline=\\\"loss\\\"><chart y=\\\"loss\\\" /></view>\\n\",\"patterns\":[],\"plan\":[{\"phase\":\"install\"},{\"phase\":\"train\",\"of\":5000,\"unit\":\"steps\"},{\"phase\":\"eval\"},{\"phase\":\"train\"}],\"later\":{\"kept\":true}}"
 }

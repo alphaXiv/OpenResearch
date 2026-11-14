@@ -953,7 +953,7 @@ pub(crate) fn stages(
 ) -> Vec<Stage> {
     let planned = |stage: &orx_signals::Stage, skipped: bool| Stage {
         name: stage.phase.clone(),
-        of: stage.of,
+        of: stage.of.as_ref().and_then(serde_json::Number::as_f64),
         unit: stage.unit.clone(),
         phase: None,
         planned: true,
@@ -973,7 +973,9 @@ pub(crate) fn stages(
         });
         shown.push(Stage {
             name: occurrence.name.clone(),
-            of: occurrence.of.or(stage.and_then(|s| s.of)),
+            of: occurrence
+                .of
+                .or(stage.and_then(|s| s.of.as_ref()?.as_f64())),
             unit: occurrence
                 .unit
                 .clone()

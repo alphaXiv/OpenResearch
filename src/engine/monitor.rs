@@ -4823,7 +4823,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             saved["plan"],
-            json!([{"phase": "train", "of": 10.0}, {"phase": "eval"}, {"phase": "train"}])
+            json!([{"phase": "train", "of": 10}, {"phase": "eval"}, {"phase": "train"}])
         );
         let cleared = plan(&f, "exp", json!([])).unwrap();
         assert_eq!(cleared["plan"], json!([]));
