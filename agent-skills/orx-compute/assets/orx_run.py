@@ -45,7 +45,7 @@ def plan(stages, rank=None):
 
 
 class progress:
-    def __init__(self, total=None, unit=None, rank=None, interval=1.0, start=0):
+    def __init__(self, total=None, unit=None, rank=None, interval=1.0, start=0, phase=None):
         if rank is None:
             rank = int(os.environ.get("RANK") or os.environ.get("SLURM_PROCID") or "0")
         self._enabled = rank == 0
@@ -56,7 +56,9 @@ class progress:
             global _origin
             if _origin is None:
                 _origin = time.monotonic()
-            self._write({"step": start, **_stage(total, unit)})
+            # Naming the phase here lets a script with no shell around it start in a named stage.
+            named = {} if phase is None else {"phase": phase}
+            self._write({**named, "step": start, **_stage(total, unit)})
         atexit.register(self.flush)
 
     @staticmethod

@@ -577,6 +577,7 @@ r.flush()
         std::fs::write(dir.path().join("orx_run.py"), resource.content).unwrap();
         let code = r#"import orx_run
 orx_run.plan(["install", {"phase": "train", "of": 5000, "unit": "steps"}, "eval", "train"])
+orx_run.progress(phase="install", total=3, unit="packages").step(1)
 for bad in (["a", "a"], [{"of": 3}], [""]):
     try:
         orx_run.plan(bad)
@@ -601,6 +602,12 @@ for bad in (["a", "a"], [{"of": 3}], [""]):
         let plan = folded.plan.expect("the fold keeps the plan");
         let names: Vec<_> = plan.iter().map(|stage| stage.phase.as_str()).collect();
         assert_eq!(names, ["install", "train", "eval", "train"]);
+        let first = &folded.phases[0];
+        assert_eq!(
+            (first.name.as_str(), first.of, first.unit.as_deref()),
+            ("install", Some(3.0), Some("packages")),
+            "progress() names the stage its first report starts"
+        );
         assert_eq!(
             (
                 plan[1].of.as_ref().and_then(serde_json::Number::as_f64),
