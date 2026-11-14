@@ -226,7 +226,7 @@ export function ExperimentOverview({
           </section>
         )}
 
-        {latestRun?.monitor && <WatchSection run={latestRun} name={experiment.slug} now={now} className={EXPERIMENT_OVERVIEW_SECTION_CLASS_NAME} />}
+        {latestRun?.monitor && <WatchSection run={latestRun} now={now} className={EXPERIMENT_OVERVIEW_SECTION_CLASS_NAME} />}
 
         {lineageNode && (
           <div className="mt-5.5 border-t border-border-variant pt-4.5">

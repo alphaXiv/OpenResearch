@@ -34,7 +34,7 @@ const usd = (value: number) => new Intl.NumberFormat(getLocale(), {
  * The page's Watch section: what the watcher said of this run, one row per change, how many looks it took and what
  * they cost, and Look now. A run nobody watches says why, in place of the journal.
  */
-export function Watch({ monitor, runId, tone, live, now }: { monitor: RunMonitor; runId: string; tone: Tone; live: boolean; now: number }) {
+export function Watch({ monitor, runId, tone, live, now }: { monitor: Pick<RunMonitor, "watch" | "view" | "brief">; runId: string; tone: Tone; live: boolean; now: number }) {
   const workspace = useWorkspace();
   const look = useMutate(mutLookNow);
   const [refused, setRefused] = useState<string | null>(null);

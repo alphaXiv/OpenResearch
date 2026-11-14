@@ -1900,6 +1900,48 @@ async fn log_since(run: &str, cursor: &Value) -> Result<digest::LogRead> {
 /// What a run's watch says on the page and in `orx exp status`: whether and by what it is
 /// watched, its looks, their cost, when the next one is due at the latest, and its sentence.
 pub(crate) fn run_facts(store: &Store, run: &StoredRun) -> Result<Value> {
+    // Every projection reads this, many a second for a run that prints fast: what was said is
+    // read again only when a look or a count moved, and who watches once every few seconds.
+    let key = store.run_watch_version(&run.id)?;
+    let fresh =
+        |at: std::time::Instant| at.elapsed() < crate::config::paced(Duration::from_secs(5));
+    let cached = facts()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&run.id)
+        .filter(|(version, at, _)| *version == key && fresh(*at))
+        .map(|(_, _, facts)| facts.clone());
+    let mut facts = match cached {
+        Some(facts) => facts,
+        None => {
+            let read = read_facts(store, run)?;
+            facts()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(
+                    run.id.clone(),
+                    (key, std::time::Instant::now(), read.clone()),
+                );
+            read
+        }
+    };
+    facts["nextAt"] = json!(next_due()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&run.id)
+        .copied());
+    Ok(facts)
+}
+
+/// What [`run_facts`] last read of each run, with the version of its looks and counts it read.
+#[allow(clippy::type_complexity)]
+fn facts() -> &'static Mutex<HashMap<String, (String, std::time::Instant, Value)>> {
+    static FACTS: OnceLock<Mutex<HashMap<String, (String, std::time::Instant, Value)>>> =
+        OnceLock::new();
+    FACTS.get_or_init(Default::default)
+}
+
+fn read_facts(store: &Store, run: &StoredRun) -> Result<Value> {
     let looks = store.run_watch_looks(&run.id, JOURNAL)?;
     let watching = match owner(store, run)? {
         Ok((_, watching)) | Err(watching) => watching,

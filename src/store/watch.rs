@@ -302,6 +302,16 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// Changes whenever a look settles for the run or one of its counts moves.
+    pub(crate) fn run_watch_version(&self, run_id: &str) -> Result<String> {
+        Ok(self.conn.query_row(
+            "SELECT (SELECT IFNULL(MAX(look_id), 0) || ':' || COUNT(result) FROM watch_look_runs WHERE run_id = ?1)
+                    || ':' || (SELECT IFNULL(SUM(lines), 0) || ':' || COUNT(*) FROM watch_counts WHERE run_id = ?1)",
+            [run_id],
+            |row| row.get(0),
+        )?)
+    }
+
     /// The chat's looks from `since` on, oldest first: what the per-chat bounds count.
     pub(crate) fn chat_watch_looks(
         &self,

@@ -3,8 +3,8 @@ import { RefreshCw } from "lucide-react";
 import { timeAgo, type Run } from "../../api";
 import { hostForRun } from "../../engineHosts";
 import { m } from "../../paraglide/messages.js";
-import { runNotice } from "../../runDisplay";
-import { namedStages, runModel } from "../../runMonitor/model";
+import { runActive, runNotice } from "../../runDisplay";
+import { namedStages, runModel, runTone } from "../../runMonitor/model";
 import { useWorkspace } from "../../workspace";
 import { RunContactNotice } from "../RunContactNotice";
 import { Button } from "../ui";
@@ -89,16 +89,16 @@ export function RunPage({ run, name, now }: { run: Run; name: string; now: numbe
  * The experiment page's Watch section for its latest run, from the monitor its `RunPage` keeps current, once that has
  * said how the run is watched.
  */
-export function WatchSection({ run, name, now, className }: { run: Run; name: string; now: number; className: string }) {
+export function WatchSection({ run, now, className }: { run: Run; now: number; className: string }) {
   const { getRunMonitorQuery } = useWorkspace().queries;
-  const data = useQuery({ ...getRunMonitorQuery(run.id), enabled: false }).data;
+  // Only what the watch says: the section redraws when a look lands, not with every new point.
+  const monitor = useQuery({ ...getRunMonitorQuery(run.id), enabled: false, select: (data) => ({ watch: data.watch, view: data.view, brief: data.brief }) }).data;
   // A run no chat follows has nothing to watch it from: no section, rather than one that says so.
-  if (!data || data.watch.state === "none") return null;
-  const model = runModel({ item: { sessionId: "", run, experimentName: name }, monitor: data, monitorFailed: false, shown: false, agent: m.chat_the_agent(), now, nextRetryMs: null });
+  if (!monitor || monitor.watch.state === "none") return null;
   return (
     <section className={className}>
       <h2>{m.run_watch_heading()}</h2>
-      <Watch monitor={data} runId={run.id} tone={model.tone} live={model.live} now={now} />
+      <Watch monitor={monitor} runId={run.id} tone={runTone(run)} live={runActive(run.status)} now={now} />
     </section>
   );
 }
