@@ -1664,19 +1664,14 @@ pub(crate) fn kill_shell_group(pid: Option<u32>) {
 }
 
 /// Kill an agent and every command it started. Agents such as `agy` start each
-/// command in its own session, out of reach of [`kill_shell_group`]; detached
-/// experiment supervisors (`orx supervise`) are spared so their runs continue.
+/// command in its own session, out of reach of [`kill_shell_group`].
 pub(crate) async fn kill_agent_tree(pid: Option<u32>) {
     let Some(pid) = pid else {
         return;
     };
+    stop_process_tree(pid);
     #[cfg(unix)]
-    {
-        stop_process_tree(pid);
-        kill_shell_group(Some(pid));
-    }
-    #[cfg(not(unix))]
-    stop_process_tree(pid).await;
+    kill_shell_group(Some(pid));
 }
 
 #[cfg(unix)]
@@ -1690,13 +1685,12 @@ fn stop_process_tree(pid: u32) {
         return;
     }
     let snapshot = crate::process::command("ps")
-        .args(["-ww", "-axo", "pid=,ppid=,args="])
+        .args(["-axo", "pid=,ppid="])
         .output();
-    let supervisor_exe = crate::paths::spawnable_exe().ok();
     match snapshot {
         Ok(output) if output.status.success() => {
             for line in String::from_utf8_lossy(&output.stdout).lines() {
-                if let Some(child) = tree_child(line, pid, supervisor_exe.as_deref()) {
+                if let Some(child) = tree_child(line, pid) {
                     stop_process_tree(child);
                 }
             }
@@ -1710,8 +1704,8 @@ fn stop_process_tree(pid: u32) {
 }
 
 /// Whether the agent `pid` still runs a command it started in a session of its
-/// own, as agy starts each of its commands; experiment supervisors don't count.
-/// A process tree it cannot read counts as busy.
+/// own, as agy starts each of its commands. A process tree it cannot read
+/// counts as busy.
 #[cfg(unix)]
 pub(crate) fn runs_a_detached_command(pid: u32) -> bool {
     let Ok(pid) = libc::pid_t::try_from(pid) else {
@@ -1723,7 +1717,7 @@ pub(crate) fn runs_a_detached_command(pid: u32) -> bool {
         return false;
     }
     let snapshot = match crate::process::command("ps")
-        .args(["-ww", "-axo", "pid=,ppid=,args="])
+        .args(["-axo", "pid=,ppid="])
         .output()
     {
         Ok(output) if output.status.success() => output.stdout,
@@ -1733,13 +1727,9 @@ pub(crate) fn runs_a_detached_command(pid: u32) -> bool {
         }
     };
     let snapshot = String::from_utf8_lossy(&snapshot);
-    let supervisor_exe = crate::paths::spawnable_exe().ok();
     let mut parents = vec![pid];
     while let Some(parent) = parents.pop() {
-        for child in snapshot
-            .lines()
-            .filter_map(|line| tree_child(line, parent, supervisor_exe.as_deref()))
-        {
+        for child in snapshot.lines().filter_map(|line| tree_child(line, parent)) {
             let Ok(child) = libc::pid_t::try_from(child) else {
                 continue;
             };
@@ -1760,90 +1750,124 @@ pub(crate) fn runs_a_detached_command(_pid: u32) -> bool {
     false
 }
 
-/// The child of `parent` on one `ps -o pid=,ppid=,args=` line, unless it is an
-/// experiment supervisor.
+/// The child of `parent` on one `ps -o pid=,ppid=` line.
 #[cfg(unix)]
-fn tree_child(
-    line: &str,
-    parent: libc::pid_t,
-    supervisor_exe: Option<&std::path::Path>,
-) -> Option<u32> {
-    let mut fields = line.trim().splitn(2, char::is_whitespace);
+fn tree_child(line: &str, parent: libc::pid_t) -> Option<u32> {
+    let mut fields = line.split_whitespace();
     let pid = fields.next()?.parse().ok()?;
-    let mut fields = fields.next()?.trim_start().splitn(2, char::is_whitespace);
-    if fields.next()?.parse::<libc::pid_t>().ok()? != parent {
-        return None;
-    }
-    let command = fields.next()?.trim_start();
-    (!is_experiment_supervisor(command, supervisor_exe)).then_some(pid)
+    (fields.next()?.parse::<libc::pid_t>().ok()? == parent).then_some(pid)
 }
 
-/// True for a process command line that is a detached experiment supervisor
-/// (`orx supervise`), which outlives the agent that started its run.
-#[cfg(unix)]
-fn is_experiment_supervisor(command: &str, supervisor_exe: Option<&std::path::Path>) -> bool {
-    use std::path::Path;
-    command.split_once(" supervise ").is_some_and(|(exe, _)| {
-        supervisor_exe.is_some_and(|expected| Path::new(exe) == expected)
-            || (Path::new(exe).file_name().is_some_and(|name| name == "orx")
-                && Path::new(exe).is_file())
-    })
-}
+/// Kills `pid` and its descendants from one process snapshot. A process counts
+/// as a child only if it started after its parent: Windows keeps a dead
+/// parent's PID on its orphans and may give that PID to a new process.
+#[cfg(windows)]
+fn stop_process_tree(pid: u32) {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::Foundation::{
+        ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES, FILETIME, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+    };
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, TerminateProcess, WaitForSingleObject,
+        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+    };
 
-#[cfg(not(unix))]
-async fn stop_process_tree(pid: u32) {
-    // PowerShell sometimes never exits; the caller still kills the agent itself.
-    const BOUND: std::time::Duration = std::time::Duration::from_secs(15);
-    let script = r#"
-$ErrorActionPreference = 'Stop'
-$processes = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name, CommandLine)
-function Stop-TurnProcess([uint32] $processId) {
-    $children = @($processes | Where-Object { $_.ParentProcessId -eq $processId })
-    Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
-    foreach ($child in $children) {
-        if ($child.Name -eq 'orx.exe' -and $child.CommandLine -match '^(?:"[^"\r\n]+"|\S+)\s+supervise\s') { continue }
-        Stop-TurnProcess $child.ProcessId
+    /// An open handle, which also keeps the PID from being reused, and its start time.
+    fn open(pid: u32) -> Option<(OwnedHandle, u64)> {
+        // SAFETY: a plain open; the handle is owned below.
+        let handle = unsafe {
+            OpenProcess(
+                PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+                0,
+                pid,
+            )
+        };
+        if handle.is_null() {
+            let error = std::io::Error::last_os_error();
+            // Invalid parameter is how Windows reports a process that already exited.
+            if error.raw_os_error() != Some(ERROR_INVALID_PARAMETER as i32) {
+                eprintln!("orx up: could not open process {pid} to stop it: {error}");
+            }
+            return None;
+        }
+        // SAFETY: the valid process handle is transferred exactly once.
+        let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
+        let mut times = [FILETIME::default(); 4];
+        let [created, exited, kernel, user] = &mut times;
+        // SAFETY: the handle has query access and each FILETIME is writable.
+        if unsafe { GetProcessTimes(handle.as_raw_handle(), created, exited, kernel, user) } == 0 {
+            eprintln!(
+                "orx up: could not read when process {pid} started, so not stopping it: {}",
+                std::io::Error::last_os_error()
+            );
+            return None;
+        }
+        let created = (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
+        Some((handle, created))
     }
-}
-Stop-TurnProcess ([uint32] $env:ORX_STOP_PID)
-"#;
-    let status = crate::process::tokio_command("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .env("ORX_STOP_PID", pid.to_string())
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .status();
-    match tokio::time::timeout(BOUND, status).await {
-        Ok(Ok(status)) if status.success() => {}
-        Ok(_) => eprintln!("orx up: could not inspect agent descendants of {pid} while stopping it"),
-        Err(_) => eprintln!(
-            "orx up: PowerShell did not list the agent descendants of {pid} within {}s; stopping only the agent",
-            BOUND.as_secs()
-        ),
+
+    let mut processes = Vec::new();
+    // SAFETY: the snapshot is read-only and its new handle is owned below.
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE || snapshot.is_null() {
+        eprintln!(
+            "orx up: could not inspect agent descendants of {pid} while stopping it: {}",
+            std::io::Error::last_os_error()
+        );
+    } else {
+        // SAFETY: the valid snapshot handle is transferred exactly once.
+        let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot) };
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: entry has the required size and stays writable during enumeration.
+        let mut found = unsafe { Process32FirstW(snapshot.as_raw_handle(), &mut entry) };
+        while found != 0 {
+            processes.push((entry.th32ProcessID, entry.th32ParentProcessID));
+            // SAFETY: the same initialized entry and live snapshot are reused.
+            found = unsafe { Process32NextW(snapshot.as_raw_handle(), &mut entry) };
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(ERROR_NO_MORE_FILES as i32) {
+            eprintln!(
+                "orx up: could not list every agent descendant of {pid} while stopping it: {error}"
+            );
+        }
+    }
+
+    let Some(root) = open(pid) else {
+        return;
+    };
+    let mut pending = vec![(pid, root)];
+    while let Some((pid, (handle, created))) = pending.pop() {
+        let children = processes
+            .iter()
+            .filter(|&&(child, parent)| parent == pid && child != pid)
+            .filter_map(|&(child, _)| open(child).map(|opened| (child, opened)))
+            .filter(|(_, (_, child_created))| *child_created >= created);
+        pending.extend(children);
+
+        // SAFETY: the handle has terminate access.
+        if unsafe { TerminateProcess(handle.as_raw_handle(), 1) } == 0 {
+            let error = std::io::Error::last_os_error();
+            // SAFETY: the handle has synchronize access; a zero wait only polls.
+            let exited = unsafe { WaitForSingleObject(handle.as_raw_handle(), 0) } == WAIT_OBJECT_0;
+            if !exited {
+                eprintln!("orx up: could not stop process {pid}: {error}");
+            }
+        }
     }
 }
 
 #[cfg(all(test, unix))]
 mod agent_tree_tests {
-    use std::path::Path;
     use std::time::Duration;
     use tokio::io::AsyncBufReadExt as _;
-
-    #[test]
-    fn stopping_an_agent_spares_detached_experiment_supervisors() {
-        let supervisor = Some(Path::new("/path with spaces/orx"));
-        let child = |line| super::tree_child(line, 10, supervisor);
-        assert_eq!(child(" 12 10 /bin/sh -c sleep 60"), Some(12));
-        assert_eq!(child(" 13 12 sleep 60"), None);
-        assert_eq!(child(" 14 10 /path with spaces/orx supervise run-id"), None);
-        assert_eq!(
-            child(" 17 10 /bin/sh -c /path with spaces/orx supervise run-id"),
-            Some(17)
-        );
-        assert_eq!(child(" 15 10 /path/orx exp run experiment-id"), Some(15));
-        assert_eq!(child(" 16 10 python -c print('supervise')"), Some(16));
-    }
 
     #[tokio::test]
     async fn stopping_an_agent_kills_commands_in_their_own_sessions() {
@@ -1874,6 +1898,51 @@ mod agent_tree_tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("command survived its agent: {pid}");
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_agent_tree_tests {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use tokio::io::AsyncBufReadExt as _;
+    use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+    };
+
+    #[tokio::test]
+    async fn stopping_an_agent_kills_the_commands_it_started() {
+        let mut agent = crate::process::tokio_command("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "$p = Start-Process ping -ArgumentList '-n','60','127.0.0.1' -PassThru -NoNewWindow -RedirectStandardOutput NUL; $p.Id; Wait-Process -Id $p.Id",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut lines = tokio::io::BufReader::new(agent.stdout.take().unwrap()).lines();
+        let command: u32 = lines
+            .next_line()
+            .await
+            .unwrap()
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        // SAFETY: a plain open of the command just started; the handle is owned below.
+        let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, command) };
+        assert!(!handle.is_null(), "command {command} is not running");
+        // SAFETY: the valid process handle is transferred exactly once.
+        let command = unsafe { OwnedHandle::from_raw_handle(handle) };
+
+        super::kill_agent_tree(agent.id()).await;
+        agent.wait().await.unwrap();
+
+        // SAFETY: the handle has synchronize access.
+        let waited = unsafe { WaitForSingleObject(command.as_raw_handle(), 5_000) };
+        assert_eq!(waited, WAIT_OBJECT_0, "command survived its agent");
     }
 }
 
