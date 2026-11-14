@@ -48,11 +48,15 @@ for (let step = 1; step <= 20; step++) {
       ].join('\n') },
       { say: 'Launched Base.' },
     ])
-    agent.script('finished with status **done**', [{ say: 'Base finished.' }])
+    // The line leaves once the agent says what came of the run, so it is read before that.
+    const hold = `base-result-${project.id}`
+    agent.script('finished with status **done**', [{ hold }, { say: 'Base finished.' }])
     await project.open(page)
     await send(page, 'Set the view and launch Base.')
-    await expect(page.getByText('Base finished.', { exact: true })).toBeVisible()
+    await agent.reached(hold)
     await expect(banner).toContainText('Training loss')
+    agent.release(hold)
+    await expect(page.getByText('Base finished.', { exact: true })).toBeVisible()
   })
 
   await test.step("the child's line says how far it is ahead of its parent", async () => {
