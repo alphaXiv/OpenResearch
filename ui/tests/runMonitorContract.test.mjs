@@ -399,6 +399,15 @@ test("a run compared with its parent says by how much, as `orx exp status` says 
   }
 });
 
+test("a stage going far slower than the run that timed it says by how much against which run, while it goes", () => {
+  const { monitor } = states.running;
+  for (const [than, words] of [["parent", m.run_pace_slower_parent({ times: "3" })], ["earlier", m.run_pace_slower_earlier({ times: "2.5" })]]) {
+    const times = than === "parent" ? 3 : 2.5;
+    assert.equal(bare(model("running", true, { ...monitor, pace: { times, than } }).note), bare(words));
+  }
+  assert.equal(model("running").note, null);
+});
+
 test("a failed run that recorded no message says the last error its log names, quoted on one line", () => {
   const { summary, now } = states.running;
   const line = "torch.OutOfMemoryError: CUDA out of memory.   Tried *2.00* GiB";

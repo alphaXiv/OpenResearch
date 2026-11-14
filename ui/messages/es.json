@@ -2045,6 +2045,8 @@
   "run_rule_detail": "{text} Regla: {name}. No intervino ningún modelo.",
   "run_rule_reason_in_chat": "El motivo está en el chat.",
   "run_failed_log_error": "Último error en el registro: {line}",
+  "run_pace_slower_parent": "{times}× más lento que el padre en esta etapa",
+  "run_pace_slower_earlier": "{times}× más lento que la última ejecución de este experimento en esta etapa",
   "run_chart_parent": "Padre",
   "run_block_no_points": "Aún sin puntos",
   "run_monitor_load_failed": "No se pudo cargar la vista de esta ejecución.",

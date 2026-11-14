@@ -2045,6 +2045,8 @@
   "run_rule_detail": "{text} ルール: {name}。モデルは関与していません。",
   "run_rule_reason_in_chat": "理由はチャットにあります。",
   "run_failed_log_error": "ログの最後のエラー: {line}",
+  "run_pace_slower_parent": "この段階で親より {times} 倍遅い",
+  "run_pace_slower_earlier": "この段階でこの実験の前回の実行より {times} 倍遅い",
   "run_chart_parent": "親",
   "run_block_no_points": "まだポイントがありません",
   "run_monitor_load_failed": "この実行のビューを読み込めませんでした。",

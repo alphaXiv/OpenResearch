@@ -79,6 +79,7 @@
         "parent": null,
         "headline": "loss",
         "logError": null,
+        "pace": null,
         "versus": {
           "step": {},
           "final": {}
@@ -333,6 +334,7 @@
         "parent": null,
         "headline": "loss",
         "logError": null,
+        "pace": null,
         "versus": {
           "step": {},
           "final": {}
@@ -527,6 +529,7 @@
         "parent": null,
         "headline": "loss",
         "logError": null,
+        "pace": null,
         "versus": {
           "step": {},
           "final": {}
@@ -743,6 +746,7 @@
         "parent": null,
         "headline": "loss",
         "logError": null,
+        "pace": null,
         "versus": {
           "step": {},
           "final": {}
@@ -905,6 +909,7 @@
         "parent": null,
         "headline": "loss",
         "logError": null,
+        "pace": null,
         "versus": {
           "step": {},
           "final": {}
@@ -1069,6 +1074,7 @@
         "parent": null,
         "headline": "loss",
         "logError": null,
+        "pace": null,
         "versus": {
           "step": {},
           "final": {}
@@ -1207,6 +1213,7 @@
         "parent": null,
         "headline": null,
         "logError": null,
+        "pace": null,
         "versus": {
           "step": {},
           "final": {}
@@ -1349,6 +1356,7 @@
         "parent": null,
         "headline": "loss",
         "logError": null,
+        "pace": null,
         "versus": {
           "step": {},
           "final": {}
@@ -1572,6 +1580,7 @@
         "parent": null,
         "headline": null,
         "logError": null,
+        "pace": null,
         "versus": {
           "step": {},
           "final": {}
@@ -1692,6 +1701,7 @@
         "parent": null,
         "headline": "loss",
         "logError": null,
+        "pace": null,
         "versus": {
           "step": {},
           "final": {}
@@ -1906,6 +1916,7 @@
         "parent": null,
         "headline": "lr",
         "logError": null,
+        "pace": null,
         "versus": {
           "step": {},
           "final": {}
@@ -2334,6 +2345,7 @@
         "parent": null,
         "headline": null,
         "logError": null,
+        "pace": null,
         "versus": {
           "step": {},
           "final": {}
@@ -2442,6 +2454,7 @@
         "parent": null,
         "headline": null,
         "logError": null,
+        "pace": null,
         "versus": {
           "step": {},
           "final": {}
@@ -2572,6 +2585,7 @@
         "parent": null,
         "headline": null,
         "logError": null,
+        "pace": null,
         "versus": {
           "step": {},
           "final": {}
@@ -2758,6 +2772,7 @@
         "parent": null,
         "headline": "loss",
         "logError": null,
+        "pace": null,
         "versus": {
           "step": {},
           "final": {}
@@ -2958,6 +2973,7 @@
         "parent": null,
         "headline": null,
         "logError": null,
+        "pace": null,
         "versus": {
           "step": {},
           "final": {}
@@ -3110,6 +3126,7 @@
         "parent": null,
         "headline": "loss",
         "logError": null,
+        "pace": null,
         "versus": {
           "step": {},
           "final": {}
@@ -3323,6 +3340,7 @@
         "parent": null,
         "headline": null,
         "logError": null,
+        "pace": null,
         "versus": {
           "step": {},
           "final": {}
@@ -3461,6 +3479,7 @@
         "parent": null,
         "headline": "loss",
         "logError": null,
+        "pace": null,
         "versus": {
           "step": {},
           "final": {}
@@ -3815,6 +3834,7 @@
         },
         "headline": "loss",
         "logError": null,
+        "pace": null,
         "versus": {
           "step": {
             "loss": {

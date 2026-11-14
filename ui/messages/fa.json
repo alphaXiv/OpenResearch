@@ -2045,6 +2045,8 @@
   "run_rule_detail": "{text} قانون: {name}. هیچ مدلی دخیل نبود.",
   "run_rule_reason_in_chat": "دلیل در گفتگو آمده است.",
   "run_failed_log_error": "آخرین خطا در گزارش: {line}",
+  "run_pace_slower_parent": "{times} برابر کندتر از والد در این مرحله",
+  "run_pace_slower_earlier": "{times} برابر کندتر از آخرین اجرای این آزمایش در این مرحله",
   "run_chart_parent": "والد",
   "run_block_no_points": "هنوز نقطه‌ای نیست",
   "run_monitor_load_failed": "نمای این اجرا بارگیری نشد.",

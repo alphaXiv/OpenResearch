@@ -2045,6 +2045,8 @@
   "run_rule_detail": "{text} 规则：{name}。未使用模型。",
   "run_rule_reason_in_chat": "原因在对话中。",
   "run_failed_log_error": "日志中的最后一个错误：{line}",
+  "run_pace_slower_parent": "此阶段比父实验慢 {times} 倍",
+  "run_pace_slower_earlier": "此阶段比本实验上次运行慢 {times} 倍",
   "run_chart_parent": "父运行",
   "run_block_no_points": "暂无数据点",
   "run_monitor_load_failed": "无法加载此运行的视图。",

@@ -2045,6 +2045,8 @@
   "run_rule_detail": "{text} القاعدة: {name}. لم يشارك أي نموذج.",
   "run_rule_reason_in_chat": "السبب في المحادثة.",
   "run_failed_log_error": "آخر خطأ في السجل: {line}",
+  "run_pace_slower_parent": "أبطأ {times} مرات من الأصل في هذه المرحلة",
+  "run_pace_slower_earlier": "أبطأ {times} مرات من آخر تشغيل لهذه التجربة في هذه المرحلة",
   "run_chart_parent": "الأصل",
   "run_block_no_points": "لا نقاط بعد",
   "run_monitor_load_failed": "تعذّر تحميل عرض هذا التشغيل.",

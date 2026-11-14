@@ -23,6 +23,8 @@ const STALE_AFTER_MS: i64 = 90_000;
 const MAX_BODY: usize = 4 * 1024 * 1024;
 
 const SENTINELS: [&str; 3] = ["NaN", "Infinity", "-Infinity"];
+/// A stage on course to take this many times as long as the run that timed it is said to be slow.
+const PACE_NOTED: f64 = 2.0;
 /// How long a run whose log has said nothing orx recognises is said to be setting up, before it
 /// is said to be running with no estimate.
 const SETUP_MS: i64 = 15 * 60_000;
@@ -708,6 +710,28 @@ fn evaluate(
     };
     let output = output.ok();
     let started = life.started();
+    let last_phase = snapshot.and_then(|s| s.phases.len().checked_sub(1));
+    // The stage the run is in, or with a plan its first before any began.
+    let current = stages
+        .iter()
+        .position(|stage| stage.phase.is_some() && stage.phase == last_phase);
+    // How many times as long a step of this stage takes as one of the run that timed it, once
+    // four slices of its own pace are measured.
+    let pace = (|| {
+        let prior = stages.get(current?)?.prior?;
+        output.as_ref().filter(|o| o.completed_slices >= 4)?;
+        let (first, last) = (input.points.first()?, input.points.last()?);
+        let mine = (last.at - first.at) / (last.done - first.done);
+        let theirs = prior.ms / prior.done.filter(|done| *done > 0.0)?;
+        let times = mine / theirs;
+        (life.live() && times.is_finite() && times >= PACE_NOTED).then(|| {
+            let than = match prior.by {
+                estimate::TimedBy::Earlier => "earlier",
+                estimate::TimedBy::Parent => "parent",
+            };
+            json!({"times": (times * 2.0).round() / 2.0, "than": than})
+        })
+    })();
 
     // A run that finished did all it had to, however much that was.
     let done = life.phase == Some(Phase::Done);
@@ -721,11 +745,6 @@ fn evaluate(
             fill.or(finished.then_some(1.0))
         }
     };
-    let last_phase = snapshot.and_then(|s| s.phases.len().checked_sub(1));
-    // With a plan, the stage the run is in, or its first before any began.
-    let current = stages
-        .iter()
-        .position(|stage| stage.phase.is_some() && stage.phase == last_phase);
     let segments: Vec<Value> = output.as_ref().map_or_else(Vec::new, |o| {
         o.segments
             .iter()
@@ -842,7 +861,7 @@ fn evaluate(
                     "name": stage.name,
                     "of": stage.of,
                     "unit": stage.unit,
-                    "priorMs": stage.prior.map(|(ms, _)| ms.round() as i64),
+                    "priorMs": stage.prior.map(|prior| prior.ms.round() as i64),
                     "startedAt": occurrence.and_then(|o| o.started_at).map(|ms| ms - offset),
                     "endedAt": ended.map(|ms| ms - offset),
                     "planned": stage.planned,
@@ -863,7 +882,7 @@ fn evaluate(
                         "name": p.name,
                         "of": p.of,
                         "unit": p.unit,
-                        "priorMs": stage.prior.map(|(ms, _)| ms.round() as i64),
+                        "priorMs": stage.prior.map(|prior| prior.ms.round() as i64),
                         "startedAt": p.started_at.map(|ms| ms - offset),
                         "endedAt": p.ended_at.map(|ms| ms - offset),
                     })
@@ -1065,6 +1084,7 @@ fn evaluate(
             versus: &versus,
             view_problem: view_problem.as_deref().or(plan_problem.as_deref()),
             stages: planned.then(|| (&phases[..], current)),
+            pace: pace.as_ref(),
             setup: setup.as_ref(),
         },
     );
@@ -1087,6 +1107,7 @@ fn evaluate(
         "parent": parent_body,
         "headline": headline_name,
         "logError": life.log_error,
+        "pace": pace,
         "versus": {"step": at_step, "final": at_end},
         "rows": rows,
         "groups": {},
@@ -1858,6 +1879,7 @@ fn project(
                     "statusText": body["statusText"],
                     "versus": body["versus"],
                     "headline": body["headline"],
+                    "pace": body["pace"],
                 },
             });
             if let Some(best) = body.get("best") {
@@ -2015,6 +2037,8 @@ struct StatusFacts<'a> {
     setup: Option<&'a Value>,
     /// A plan's stages as the monitor lists them, and the one the run is in.
     stages: Option<(&'a [Value], Option<usize>)>,
+    /// How much slower than the run that timed it the stage is going, when it is.
+    pace: Option<&'a Value>,
 }
 
 fn status_text(life: &Lifecycle, fold: &Fold, facts: &StatusFacts) -> String {
@@ -2230,6 +2254,17 @@ fn eta_text(life: &Lifecycle, snapshot: Option<&Snapshot>, facts: &StatusFacts) 
                     .into_iter()
                     .collect()
             };
+            if let Some(pace) = facts.pace {
+                let than = if pace["than"] == "earlier" {
+                    "this experiment's last run"
+                } else {
+                    "the parent"
+                };
+                detail.push(format!(
+                    "{}\u{d7} slower than {than} at this stage",
+                    number(pace["times"].as_f64().unwrap_or_default())
+                ));
+            }
             if let Some(past) = estimate["pastLimitMs"].as_i64().filter(|ms| *ms > 0) {
                 detail.push(format!("up to {} past the limit", short(past)));
             }
@@ -4964,6 +4999,42 @@ mod tests {
             text.contains("\neta      No progress for 1m (was due about"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn a_stage_going_far_slower_than_the_parents_says_by_how_much() {
+        let f = Fixture::new("orx-monitor-pace");
+        let parent = staged(&f, "p1", "exp", "done", &[("train", 60, Some(60))], 100);
+        monitor_at(&f, &parent, T0 + 700_000);
+        f.child("child", "exp");
+        let paced = |id: &str, seconds_per_step: i64| {
+            let run = f.run_in(id, "child", "running", local());
+            f.collect(&Snapshot {
+                run_id: id.into(),
+                ..folded(
+                    &(0..=20)
+                        .map(|step| {
+                            (
+                                T0 + step * seconds_per_step * 1000,
+                                format!(
+                                    "::orx:: {{\"phase\":\"train\",\"step\":{step},\"of\":60}}"
+                                ),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            });
+            let (monitor, _) = monitor_at(&f, &run, T0 + 20 * seconds_per_step * 1000 + 500);
+            monitor
+        };
+        let slow = paced("slow", 3);
+        assert_eq!(slow["pace"], json!({"times": 3.0, "than": "parent"}));
+        let text = slow["statusText"].as_str().unwrap();
+        assert!(
+            text.contains("3\u{d7} slower than the parent at this stage"),
+            "{text}"
+        );
+        assert_eq!(paced("level", 1)["pace"], Value::Null);
     }
 
     #[test]

@@ -238,10 +238,6 @@ pub(crate) struct Output {
     )]
     pub current_phase: Option<Eta>,
     pub estimate: Option<Eta>,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Declared stop rules gate on it")
-    )]
     pub completed_slices: usize,
     pub stall_ms: Option<f64>,
     pub errors: Vec<InputError>,
@@ -934,8 +930,16 @@ pub(crate) struct Stage {
     pub phase: Option<usize>,
     pub planned: bool,
     pub skipped: bool,
-    /// How long an earlier run took over the same stage, and which run that was.
-    pub prior: Option<(f64, TimedBy)>,
+    /// How long an earlier run took over the same stage.
+    pub prior: Option<Prior>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Prior {
+    pub ms: f64,
+    pub by: TimedBy,
+    /// How far the earlier run counted in the stage, when it counted.
+    pub done: Option<f64>,
 }
 
 /// The run a stage's expected length comes from.
@@ -995,7 +999,7 @@ pub(crate) fn stages(
     }
     shown.extend(plan[next..].iter().map(|s| planned(s, finished)));
 
-    let took: Vec<Vec<(&str, Option<f64>)>> = timed
+    let took: Vec<Vec<_>> = timed
         .iter()
         .map(|(run, done, _)| {
             let last = run.phases.len().checked_sub(1);
@@ -1012,7 +1016,11 @@ pub(crate) fn stages(
                         .started_at
                         .zip(end)
                         .map(|(start, end)| (end - start) as f64);
-                    (phase.name.as_str(), took.filter(|ms| *ms >= 0.0))
+                    (
+                        phase.name.as_str(),
+                        took.filter(|ms| *ms >= 0.0),
+                        phase.done,
+                    )
                 })
                 .collect()
         })
@@ -1022,10 +1030,15 @@ pub(crate) fn stages(
         let count = counted.entry(stage.name.clone()).or_default();
         stage.prior = took.iter().zip(timed).find_map(|(took, (_, _, by))| {
             took.iter()
-                .filter(|(name, _)| *name == stage.name)
+                .filter(|(name, ..)| *name == stage.name)
                 .nth(*count)
-                .and_then(|(_, took)| *took)
-                .map(|ms| (ms, *by))
+                .and_then(|&(_, took, done)| {
+                    Some(Prior {
+                        ms: took?,
+                        by: *by,
+                        done,
+                    })
+                })
         });
         *count += 1;
     }
@@ -1106,10 +1119,10 @@ pub(crate) fn with_signals(
         planned: false,
     };
     let prior = |stage: &Stage| {
-        stage.prior.map(|(ms, _)| Range {
-            lo_ms: ms,
-            mid_ms: ms,
-            hi_ms: ms,
+        stage.prior.map(|prior| Range {
+            lo_ms: prior.ms,
+            mid_ms: prior.ms,
+            hi_ms: prior.ms,
         })
     };
     // Stages to come and skipped ones have no reports; skipped ones take no time.

@@ -68,7 +68,8 @@
         "step": {},
         "final": {}
       },
-      "headline": "loss"
+      "headline": "loss",
+      "pace": null
     },
     "reset": true
   },
@@ -152,7 +153,8 @@
         "step": {},
         "final": {}
       },
-      "headline": "loss"
+      "headline": "loss",
+      "pace": null
     }
   }
 ]

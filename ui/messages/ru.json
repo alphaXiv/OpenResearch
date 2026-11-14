@@ -2045,6 +2045,8 @@
   "run_rule_detail": "{text} Правило: {name}. Модель не участвовала.",
   "run_rule_reason_in_chat": "Причина в чате.",
   "run_failed_log_error": "Последняя ошибка в журнале: {line}",
+  "run_pace_slower_parent": "в {times} раза медленнее родителя на этом этапе",
+  "run_pace_slower_earlier": "в {times} раза медленнее прошлого запуска этого эксперимента на этом этапе",
   "run_chart_parent": "Родитель",
   "run_block_no_points": "Точек пока нет",
   "run_monitor_load_failed": "Не удалось загрузить вид этого запуска.",

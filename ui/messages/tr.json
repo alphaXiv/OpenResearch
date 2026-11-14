@@ -2045,6 +2045,8 @@
   "run_rule_detail": "{text} Kural: {name}. Model devreye girmedi.",
   "run_rule_reason_in_chat": "Neden sohbette.",
   "run_failed_log_error": "Günlükteki son hata: {line}",
+  "run_pace_slower_parent": "bu aşamada üst deneyden {times} kat yavaş",
+  "run_pace_slower_earlier": "bu aşamada bu deneyin son çalıştırmasından {times} kat yavaş",
   "run_chart_parent": "Üst",
   "run_block_no_points": "Henüz nokta yok",
   "run_monitor_load_failed": "Bu çalıştırmanın görünümü yüklenemedi.",

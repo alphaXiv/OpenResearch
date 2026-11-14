@@ -2,7 +2,7 @@ import { backendDetail, backendKind, type Run, type RunStatus } from "../api";
 import { backendName } from "../components/BackendLogos";
 import { runNoticeCopy } from "../components/RunContactNotice";
 import { statusLabel } from "../components/StatusBadge";
-import { autoDir, ltr } from "../i18n";
+import { autoDir, fmtNumber, ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
 import { runActive, runApiProvider, runConnectHost, runDisplay, runNotice, runStoppable, type RunNotice } from "../runDisplay";
 import { fillSentence, fmtMagnitude, fmtSignal, plainSentence, tokensOf } from "./format";
@@ -369,10 +369,12 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   }]);
 
   const logError = (monitor ?? summary)?.logError ?? null;
+  const pace = monitor?.pace ?? null;
   const note = tone === "revising" ? m.run_flag_revising({ agent: autoDir(agent) })
     : tone === "stopped" && outcome?.by === "rule" && outcome.rule ? m.run_rule_detail({ text: autoDir(outcome.rule.text), name: autoDir(outcome.rule.name) })
     : tone === "stopped" && outcome?.by === "agent" ? m.run_rule_reason_in_chat()
     : tone === "failed" && logError ? m.run_failed_log_error({ line: quoted(logError) })
+    : live && pace ? (pace.than === "earlier" ? m.run_pace_slower_earlier : m.run_pace_slower_parent)({ times: ltr(fmtNumber(pace.times)) })
     : null;
 
   // A failed refresh is newer than the availability the last read reported.

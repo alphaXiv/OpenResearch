@@ -2045,6 +2045,8 @@
   "run_rule_detail": "{text} 규칙: {name}. 모델은 관여하지 않았습니다.",
   "run_rule_reason_in_chat": "이유는 채팅에 있습니다.",
   "run_failed_log_error": "로그의 마지막 오류: {line}",
+  "run_pace_slower_parent": "이 단계에서 부모보다 {times}배 느림",
+  "run_pace_slower_earlier": "이 단계에서 이 실험의 지난 실행보다 {times}배 느림",
   "run_chart_parent": "상위",
   "run_block_no_points": "아직 점이 없습니다",
   "run_monitor_load_failed": "이 실행의 보기를 불러오지 못했습니다.",

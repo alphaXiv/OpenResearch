@@ -2045,6 +2045,8 @@
   "run_rule_detail": "{text} Reguła: {name}. Bez udziału modelu.",
   "run_rule_reason_in_chat": "Powód jest w czacie.",
   "run_failed_log_error": "Ostatni błąd w logu: {line}",
+  "run_pace_slower_parent": "{times}× wolniej niż rodzic na tym etapie",
+  "run_pace_slower_earlier": "{times}× wolniej niż ostatnie uruchomienie tego eksperymentu na tym etapie",
   "run_chart_parent": "Nadrzędne",
   "run_block_no_points": "Brak punktów",
   "run_monitor_load_failed": "Nie udało się wczytać widoku tego uruchomienia.",
