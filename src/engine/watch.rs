@@ -1311,9 +1311,10 @@ fn changes(seen: &mut Seen, run: &Now, now: i64) -> Vec<(String, String)> {
         if let Some((row, column)) = collapsed.first() {
             if collapsed.len() as f64 >= mult(basis, "row") {
                 let value = &rows[row - 1][*column];
-                let value = value
-                    .as_str()
-                    .map_or_else(|| value.to_string(), str::to_owned);
+                let value = value.as_f64().map_or_else(
+                    || value.as_str().unwrap_or_default().to_owned(),
+                    |v| v.to_string(),
+                );
                 why.push((
                     "row".into(),
                     format!("{} in {table} fell to {value} at row {row}", label(column)),
@@ -2099,6 +2100,13 @@ async fn take(id: i64) -> Result<()> {
                 &renderer,
             );
             for (key, answer) in retried.runs {
+                // A flag kept from the first reply stands unless the retry writes a sentence.
+                if answer == reply::Answer::Same && read.salvaged.contains(&key) {
+                    continue;
+                }
+                if !retried.salvaged.contains(&key) {
+                    read.salvaged.remove(&key);
+                }
                 read.runs.insert(key, answer);
             }
             if retried.summary.is_some() {

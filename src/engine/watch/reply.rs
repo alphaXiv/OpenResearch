@@ -49,6 +49,9 @@ pub(super) enum Answer {
 #[derive(Debug, Default)]
 pub(super) struct Read {
     pub runs: BTreeMap<String, Answer>,
+    /// Runs whose flag broke the sentence rules: kept in `runs` as the flag in plain words, since
+    /// a missed problem costs more than a sentence that is not bound.
+    pub salvaged: BTreeSet<String>,
     pub summary: Option<Answer>,
     pub notes: Option<String>,
     pub errors: Vec<String>,
@@ -242,6 +245,20 @@ pub(super) fn read(
                 read.runs.insert(run.key.to_owned(), Answer::Same);
             }
             Err(error) => read.errors.push(format!("{}: {error}", run.key)),
+        }
+        let refused = !read.runs.contains_key(run.key);
+        let flagged = answer["status"] == "flag";
+        if let Some(line) = answer["line"].as_str().filter(|_| refused && flagged) {
+            let plain: String = line.replace("**", "").replace(['{', '}'], "");
+            read.runs.insert(
+                run.key.to_owned(),
+                Answer::Line {
+                    flag: true,
+                    template: plain.trim().to_owned(),
+                    evidence: Vec::new(),
+                },
+            );
+            read.salvaged.insert(run.key.to_owned());
         }
     }
     match (summary, object.get("summary")) {
@@ -608,6 +625,38 @@ mod tests {
         );
         assert!(read.errors.is_empty(), "{:?}", read.errors);
         assert!(matches!(&read.runs["r1"], Answer::Line { flag: false, .. }));
+    }
+
+    #[test]
+    fn a_flag_that_breaks_the_sentence_rules_is_kept_in_plain_words() {
+        let run = run();
+        for line in [
+            "Most cases report **wrong output** from n 10000 up.",
+            "Cases report correct {signal} from n 10000 up; loss **2.41**.",
+        ] {
+            let reply = json!({"runs": {"r1": {"status": "flag", "line": line}}}).to_string();
+            let read = read(&reply, &[bind("r1", &run, true)], None, &render);
+            assert!(!read.errors.is_empty(), "{line}");
+            let Some(Answer::Line {
+                flag: true,
+                template,
+                ..
+            }) = &read.runs.get("r1")
+            else {
+                panic!("{line}: {:?}", read.runs);
+            };
+            assert!(
+                !template.contains("**") && !template.contains('{'),
+                "{template}"
+            );
+            assert!(read.salvaged.contains("r1"));
+        }
+        let refused = r#"{"runs": {"r1": {"status": "ok", "line": "Loss is **fine**."}}}"#;
+        let read = read(refused, &[bind("r1", &run, true)], None, &render);
+        assert!(
+            read.runs.is_empty() && read.salvaged.is_empty(),
+            "only a flag is kept"
+        );
     }
 
     #[test]
