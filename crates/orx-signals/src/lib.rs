@@ -156,6 +156,9 @@ pub struct Snapshot {
     /// prefix: what a run nobody instrumented, or a stage with no step yet, is doing.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub last_line: String,
+    /// The stages the run declared it goes through, newest declaration wins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<Vec<Stage>>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
     /// The patterns lines are read with; set by whoever folds, from the run's configuration.
@@ -177,6 +180,85 @@ pub fn slice_count(total: f64) -> usize {
 /// Progress at the start of slice `k` of `total`, shared bit for bit with the estimator.
 pub fn slice_boundary(total: f64, k: usize) -> f64 {
     k as f64 * (total / slice_count(total) as f64)
+}
+
+/// One stage of a declared plan: `{"phase", "of"?, "unit"?}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Stage {
+    pub phase: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub of: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+}
+
+pub const MAX_STAGES: usize = 64;
+
+/// Reads a plan: the stages a run goes through, in order. A stage that runs again is listed again
+/// where it recurs, never twice in a row, since a log cannot tell two such occurrences apart.
+/// `strict` refuses keys this orx does not know, as an agent's file is; the wire ignores them.
+pub fn plan(value: &Value, strict: bool) -> Result<Vec<Stage>, String> {
+    let list = value
+        .as_array()
+        .ok_or("a plan is a list of stages, each {\"phase\", \"of\", \"unit\"}")?;
+    if list.len() > MAX_STAGES {
+        return Err(format!(
+            "a plan lists at most {MAX_STAGES} stages, not {}",
+            list.len()
+        ));
+    }
+    let mut stages: Vec<Stage> = Vec::with_capacity(list.len());
+    for (index, stage) in list.iter().enumerate() {
+        let n = index + 1;
+        let fields = stage
+            .as_object()
+            .ok_or_else(|| format!("stage {n} is not an object like {{\"phase\": \"train\"}}"))?;
+        if strict {
+            if let Some(key) = fields
+                .keys()
+                .find(|key| !matches!(key.as_str(), "phase" | "of" | "unit"))
+            {
+                return Err(format!(
+                    "stage {n} has an unknown key \"{key}\"; a stage takes phase, of and unit"
+                ));
+            }
+        }
+        let phase = fields
+            .get("phase")
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty() && name.len() <= 128)
+            .ok_or_else(|| format!("stage {n} needs \"phase\", a name of 1 to 128 bytes"))?;
+        let of = match fields.get("of") {
+            None | Some(Value::Null) => None,
+            Some(of) => Some(
+                of.as_f64()
+                    .filter(|of| of.is_finite() && *of > 0.0)
+                    .ok_or_else(|| format!("stage {n}'s \"of\" must be a number above 0"))?,
+            ),
+        };
+        let unit = match fields.get("unit") {
+            None | Some(Value::Null) => None,
+            Some(unit) => Some(
+                unit.as_str()
+                    .filter(|unit| unit.len() <= 64)
+                    .ok_or_else(|| {
+                        format!("stage {n}'s \"unit\" must be a word of at most 64 bytes")
+                    })?
+                    .to_owned(),
+            ),
+        };
+        if stages.last().is_some_and(|last| last.phase == phase) {
+            return Err(format!(
+                "stages {index} and {n} are both \"{phase}\"; list a stage again only after another stage, since a log cannot tell two in a row apart"
+            ));
+        }
+        stages.push(Stage {
+            phase: phase.into(),
+            of,
+            unit,
+        });
+    }
+    Ok(stages)
 }
 
 /// Reports stored per occurrence before retention compacts them to at most 96.
@@ -220,6 +302,7 @@ impl Snapshot {
             coordinate_report: BTreeMap::new(),
             last_canonical: None,
             last_line: String::new(),
+            plan: None,
             extra: BTreeMap::new(),
             patterns: None,
             tally: None,
@@ -533,7 +616,7 @@ impl Snapshot {
         record.retain(|k, _| {
             matches!(
                 k.as_str(),
-                "step" | "of" | "phase" | "unit" | "t" | "row" | "spend" | "m"
+                "step" | "of" | "phase" | "unit" | "t" | "row" | "spend" | "m" | "plan"
             )
         });
         let mut canonical = record.clone();
@@ -684,6 +767,12 @@ impl Snapshot {
                 }
             } else {
                 self.bad_field("step");
+            }
+        }
+        if let Some(value) = record.get("plan") {
+            match plan(value, false) {
+                Ok(stages) => self.plan = Some(stages),
+                Err(_) => self.bad_field("plan"),
             }
         }
         if let Some(spend) = record.get("spend") {

@@ -565,6 +565,53 @@ r.flush()
         assert!(muted.stdout.is_empty());
     }
 
+    #[test]
+    fn python_plan_declares_every_stage_and_the_fold_keeps_it() {
+        use crate::process::command;
+        if command("python3").arg("--version").output().is_err() {
+            crate::config::skip_without_tool("python3 is unavailable");
+            return;
+        }
+        let dir = crate::local::git::TemporaryDirectory::new("orx-python-plan").unwrap();
+        let (_, resource) = find_resource("compute/assets/orx_run.py", SkillSet::Local).unwrap();
+        std::fs::write(dir.path().join("orx_run.py"), resource.content).unwrap();
+        let code = r#"import orx_run
+orx_run.plan(["install", {"phase": "train", "of": 5000, "unit": "steps"}, "eval", "train"])
+for bad in (["a", "a"], [{"of": 3}], [""]):
+    try:
+        orx_run.plan(bad)
+        raise AssertionError(f"{bad} was accepted")
+    except ValueError:
+        pass
+"#;
+        let output = command("python3")
+            .args(["-c", code])
+            .current_dir(dir.path())
+            .env_remove("RANK")
+            .env_remove("SLURM_PROCID")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let mut folded = orx_signals::Snapshot::new("r1", "1-100", "g1");
+        folded.feed(&output.stdout, true, 1, false).unwrap();
+        let plan = folded.plan.expect("the fold keeps the plan");
+        let names: Vec<_> = plan.iter().map(|stage| stage.phase.as_str()).collect();
+        assert_eq!(names, ["install", "train", "eval", "train"]);
+        assert_eq!(
+            (plan[1].of, plan[1].unit.as_deref()),
+            (Some(5000.0), Some("steps"))
+        );
+        assert!(
+            folded.diagnostics.counts.is_empty(),
+            "{:?}",
+            folded.diagnostics
+        );
+    }
+
     /// The documented resume, from a checkpoint older than the last report, and a second
     /// `progress()` with its own total, as the helper writes them.
     #[test]

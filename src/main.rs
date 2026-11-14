@@ -587,10 +587,10 @@ pub enum ExpCommand {
 
 #[derive(Subcommand, Debug)]
 pub enum ViewCommand {
-    /// Save the view this experiment's runs are drawn with, its patterns, or both; experiments
-    /// created under it later start with a copy.
+    /// Save the view this experiment's runs are drawn with, its patterns, its stage plan, or any
+    /// of them; experiments created under it later start with a copy.
     #[command(group(clap::ArgGroup::new("view_input").multiple(false)))]
-    #[command(group(clap::ArgGroup::new("view_change").required(true).multiple(true).args(["file", "stdin", "pattern"])))]
+    #[command(group(clap::ArgGroup::new("view_change").required(true).multiple(true).args(["file", "stdin", "pattern", "config"])))]
     Set {
         exp_id: String,
         /// Read the view's markup from this file.
@@ -603,6 +603,10 @@ pub enum ViewCommand {
         /// `[{"regex": "…", "phase": "…", "unit": "…", "row": "…"}]`. Its runs' logs are read again.
         #[arg(long)]
         pattern: Option<std::path::PathBuf>,
+        /// Read the stages every run goes through, in order, from this JSON file:
+        /// `{"plan": [{"phase": "…", "of": N, "unit": "…"}]}`. An empty plan clears it.
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
     },
     /// Print the experiment's saved view, or the one orx draws when none is saved.
     Get {

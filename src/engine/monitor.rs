@@ -497,7 +497,12 @@ fn versus(
 }
 
 /// The estimator's inputs for this run, and the offset that maps its host times to the laptop.
-fn estimate_input(fold: &Fold, life: &Lifecycle, now: i64) -> (estimate::Input, i64) {
+fn estimate_input(
+    fold: &Fold,
+    life: &Lifecycle,
+    stages: &[estimate::Stage],
+    now: i64,
+) -> (estimate::Input, i64) {
     let clock: Option<(i64, i64)> = serde_json::from_value(fold.status["clock"].clone()).ok();
     let offset = clock.map_or(0, |(host, laptop)| host - laptop);
     let machine = match life.kind.as_str() {
@@ -535,7 +540,7 @@ fn estimate_input(fold: &Fold, life: &Lifecycle, now: i64) -> (estimate::Input, 
         }
     };
     let clock = clock.map(|(host, laptop)| (host as f64, laptop as f64));
-    let mut input = estimate::with_signals(run, signals, clock, now as f64);
+    let mut input = estimate::with_signals(run, signals, stages, clock, now as f64);
     if snapshot.is_none() {
         // Nothing reported: the run has been going since it started, on the laptop's clock.
         input.as_of = now as f64;
@@ -572,7 +577,30 @@ fn evaluate(fold: &Fold, life: &Lifecycle, parent: Option<&Snapshot>, now: i64) 
     } else {
         known.max(at)
     };
-    let (input, offset) = estimate_input(fold, life, at);
+    // The run's own plan, when it declared one, else its experiment's.
+    let (configured, plan_problem) =
+        match super::view::stored_plan(&life.run.experiment_id, life.settings.as_deref()) {
+            Ok(plan) => (plan, None),
+            Err(error) => (Vec::new(), Some(format!("{error:#}"))),
+        };
+    let plan = snapshot
+        .and_then(|s| s.plan.as_deref())
+        .unwrap_or(&configured);
+    let parent_done = life
+        .parent
+        .as_ref()
+        .is_some_and(|p| Phase::parse(&p.status) == Some(Phase::Done));
+    let stages = if plan.is_empty() {
+        Vec::new()
+    } else {
+        estimate::stages(
+            plan,
+            snapshot,
+            life.phase == Some(Phase::Done),
+            parent.map(|parent| (parent, parent_done)),
+        )
+    };
+    let (input, offset) = estimate_input(fold, life, &stages, at);
     let laptop = |host: f64| (host - offset as f64).round() as i64;
     let output = estimate::estimate(&input);
     let reasons: Vec<String> = match &output {
@@ -586,21 +614,35 @@ fn evaluate(fold: &Fold, life: &Lifecycle, parent: Option<&Snapshot>, now: i64) 
     let finished =
         life.phase == Some(Phase::Done) && snapshot.and_then(Snapshot::progress).is_some();
     let finished = |fill: Option<f64>| fill.or(finished.then_some(1.0));
-    let progress = snapshot.and_then(Snapshot::progress).map(|phase| {
-        let segments: Vec<Value> = output.as_ref().map_or_else(Vec::new, |o| {
-            o.segments
-                .iter()
-                .map(|s| json!({"name": s.name, "weight": s.weight, "fill": finished(s.fill)}))
-                .collect()
-        });
+    let last_phase = snapshot.and_then(|s| s.phases.len().checked_sub(1));
+    // With a plan, the stage the run is in, or its first before any began.
+    let current = stages
+        .iter()
+        .position(|stage| stage.phase.is_some() && stage.phase == last_phase);
+    let segments: Vec<Value> = output.as_ref().map_or_else(Vec::new, |o| {
+        o.segments
+            .iter()
+            .map(|s| json!({"name": s.name, "weight": s.weight, "fill": finished(s.fill)}))
+            .collect()
+    });
+    let progressed = snapshot.and_then(Snapshot::progress);
+    let progress = if stages.is_empty() {
+        progressed.map(|phase| (last_phase.unwrap_or(0), phase.done))
+    } else {
+        Some((
+            current.unwrap_or(0),
+            current.and(snapshot.and_then(|s| s.phases.last()?.done)),
+        ))
+    };
+    let progress = progress.map(|(index, done)| {
         let last_at = input
             .points
             .last()
             .filter(|_| input.placed)
             .map(|p| laptop(p.at));
         json!({
-            "phase": snapshot.map_or(0, |s| s.phases.len() - 1),
-            "done": phase.done,
+            "phase": index,
+            "done": done,
             "segments": segments,
             "whole": finished(output.as_ref().and_then(|o| o.whole)),
             "lastAt": last_at,
@@ -626,16 +668,31 @@ fn evaluate(fold: &Fold, life: &Lifecycle, parent: Option<&Snapshot>, now: i64) 
             .as_ref()
             .map(|eta| {
                 let range = eta.range;
-                json!({
+                let mut estimate = json!({
                     "loMs": range.map(|r| r.lo_ms.round() as i64),
                     "midMs": range.map(|r| r.mid_ms.round() as i64),
                     "hiMs": range.map(|r| r.hi_ms.round() as i64),
                     "at": laptop(eta.at),
                     "pending": eta.pending,
                     "pastLimitMs": eta.past_limit_ms.map(|ms| ms.round() as i64),
-                    "floor": floor,
+                    "floor": floor || eta.floor,
                     "reasons": reasons,
-                })
+                });
+                if eta.floor {
+                    // The stages, this one or to come, that no earlier run timed.
+                    let from = current.unwrap_or(0);
+                    estimate["untimed"] = stages
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, stage)| {
+                            !stage.skipped
+                                && stage.prior_ms.is_none()
+                                && (*index > from || *index == from && stage.of.is_none())
+                        })
+                        .map(|(_, stage)| json!(stage.name))
+                        .collect();
+                }
+                estimate
             })
             ,
         // Timing the estimator cannot read leaves the estimate pending, saying why.
@@ -660,21 +717,52 @@ fn evaluate(fold: &Fold, life: &Lifecycle, parent: Option<&Snapshot>, now: i64) 
         })
     });
     let limit = life.ends_at().map(|ends_at| json!({"endsAt": ends_at}));
-    let phases: Vec<Value> = snapshot.map_or_else(Vec::new, |s| {
-        s.phases
+    let phases: Vec<Value> = if !stages.is_empty() {
+        let occurrences = snapshot.map_or(&[][..], |s| &s.phases);
+        // A finished stage's end is when the next began; the last one of an ended run, its log's.
+        let log_end = snapshot
+            .and_then(|s| s.timing.last_log_at)
+            .filter(|_| !life.live());
+        stages
             .iter()
-            .map(|p| {
-                json!({
-                    "name": p.name,
-                    "of": p.of,
-                    "unit": p.unit,
-                    "priorMs": null,
-                    "startedAt": p.started_at.map(|ms| ms - offset),
-                    "endedAt": p.ended_at.map(|ms| ms - offset),
-                })
+            .map(|stage| {
+                let occurrence = stage.phase.and_then(|index| occurrences.get(index));
+                let last = stage.phase.is_some() && stage.phase == last_phase;
+                let ended = occurrence
+                    .and_then(|o| o.ended_at)
+                    .or(log_end.filter(|_| last));
+                let mut entry = json!({
+                    "name": stage.name,
+                    "of": stage.of,
+                    "unit": stage.unit,
+                    "priorMs": stage.prior_ms.map(|ms| ms.round() as i64),
+                    "startedAt": occurrence.and_then(|o| o.started_at).map(|ms| ms - offset),
+                    "endedAt": ended.map(|ms| ms - offset),
+                    "planned": stage.planned,
+                });
+                if stage.skipped {
+                    entry["skipped"] = json!(true);
+                }
+                entry
             })
             .collect()
-    });
+    } else {
+        snapshot.map_or_else(Vec::new, |s| {
+            s.phases
+                .iter()
+                .map(|p| {
+                    json!({
+                        "name": p.name,
+                        "of": p.of,
+                        "unit": p.unit,
+                        "priorMs": null,
+                        "startedAt": p.started_at.map(|ms| ms - offset),
+                        "endedAt": p.ended_at.map(|ms| ms - offset),
+                    })
+                })
+                .collect()
+        })
+    };
     let (view, view_from, view_problem) = view_of(life, snapshot);
     let parent_ended = life
         .parent
@@ -803,7 +891,10 @@ fn evaluate(fold: &Fold, life: &Lifecycle, parent: Option<&Snapshot>, now: i64) 
         .as_ref()
         .filter(|e| e["pending"] == false)
         .map(|e| json!({"lo": e["loMs"], "mid": e["midMs"], "hi": e["hiMs"], "at": e["at"]}));
-    let eta_floor = eta_ms.is_some() && floor;
+    let eta_floor = eta_ms.is_some()
+        && estimate
+            .as_ref()
+            .is_some_and(|estimate| estimate["floor"] == true);
     let pending = estimate.as_ref().is_some_and(|e| e["pending"] == true);
     let mut summary = json!({
         "tone": tone(life.phase),
@@ -820,12 +911,20 @@ fn evaluate(fold: &Fold, life: &Lifecycle, parent: Option<&Snapshot>, now: i64) 
         "pending": pending,
         "limitEndsAt": life.ends_at(),
         "flag": null,
+
         "setup": setup,
         "generation": generation,
         "asOf": as_of,
     });
     if fold.error.is_some() {
         summary["unavailable"] = json!(SIGNALS_UNREADABLE);
+    }
+    // A plan's stages, so a line's underline is segmented without the full monitor.
+    if stages.len() > 1 && started {
+        summary["segments"] = segments
+            .iter()
+            .map(|s| json!({"weight": s["weight"], "fill": s["fill"]}))
+            .collect();
     }
     let text = status_text(
         life,
@@ -839,7 +938,8 @@ fn evaluate(fold: &Fold, life: &Lifecycle, parent: Option<&Snapshot>, now: i64) 
             degraded: state != "live",
             at,
             versus: &versus,
-            view_problem: view_problem.as_deref(),
+            view_problem: view_problem.as_deref().or(plan_problem.as_deref()),
+            stages: (!stages.is_empty()).then(|| (&phases[..], current)),
             setup: setup.as_ref(),
         },
     );
@@ -1783,6 +1883,8 @@ struct StatusFacts<'a> {
     /// Why the experiment's saved view could not be read.
     view_problem: Option<&'a str>,
     setup: Option<&'a Value>,
+    /// A plan's stages as the monitor lists them, and the one the run is in.
+    stages: Option<(&'a [Value], Option<usize>)>,
 }
 
 fn status_text(life: &Lifecycle, fold: &Fold, facts: &StatusFacts) -> String {
@@ -1800,6 +1902,9 @@ fn status_text(life: &Lifecycle, fold: &Fold, facts: &StatusFacts) -> String {
     lines.push(first);
     if let Some(eta) = eta_text(life, snapshot, facts) {
         lines.push(format!("eta      {eta}"));
+    }
+    if let Some((stages, current)) = facts.stages {
+        lines.push(format!("stages   {}", stages_text(life, stages, current)));
     }
     if let Some(snapshot) = snapshot.filter(|s| !s.latest.is_empty()) {
         let values = snapshot
@@ -1861,6 +1966,44 @@ fn status_text(life: &Lifecycle, fold: &Fold, facts: &StatusFacts) -> String {
     lines.join("\n")
 }
 
+/// A plan's stages on one line: `✓ download 2m · ● train · ○ eval about 11m · – export skipped`.
+fn stages_text(life: &Lifecycle, stages: &[Value], current: Option<usize>) -> String {
+    stages
+        .iter()
+        .enumerate()
+        .map(|(index, stage)| {
+            let name = stage["name"].as_str().unwrap_or_default();
+            let unplanned = if stage["planned"] == false {
+                " (unplanned)"
+            } else {
+                ""
+            };
+            if stage["skipped"] == true {
+                return format!("\u{2013} {name} skipped");
+            }
+            let reached = current.is_some_and(|current| index <= current);
+            let here = current == Some(index);
+            if reached && !(here && life.live()) && (!here || life.phase == Some(Phase::Done)) {
+                let took = stage["startedAt"]
+                    .as_i64()
+                    .zip(stage["endedAt"].as_i64())
+                    .map(|(from, to)| format!(" {}", short(to - from)))
+                    .unwrap_or_default();
+                return format!("\u{2713} {name}{took}{unplanned}");
+            }
+            if here || current.is_none() && index == 0 && life.live() {
+                let mark = if life.live() { '\u{25cf}' } else { '\u{2717}' };
+                return format!("{mark} {name}{unplanned}");
+            }
+            match stage["priorMs"].as_i64().filter(|_| life.live()) {
+                Some(prior) => format!("\u{25cb} {name} about {}", short(prior)),
+                None => format!("\u{25cb} {name}"),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" \u{b7} ")
+}
+
 fn eta_text(life: &Lifecycle, snapshot: Option<&Snapshot>, facts: &StatusFacts) -> Option<String> {
     let elapsed = |end: i64| short((end - life.start()).max(0));
     match life.phase? {
@@ -1906,7 +2049,15 @@ fn eta_text(life: &Lifecycle, snapshot: Option<&Snapshot>, facts: &StatusFacts) 
             let (lo, hi) = (left("loMs"), left("hiMs"));
             let floor = estimate["floor"] == true;
             // A range whose ends read alike says nothing the time left does not.
-            let mut detail: Vec<String> = if floor {
+            let untimed: Vec<&str> = estimate["untimed"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
+            let mut detail: Vec<String> = if !untimed.is_empty() {
+                vec![format!("no parent time for {}", untimed.join(", "))]
+            } else if floor {
                 vec!["timed from progress in the log; more work may follow it".to_owned()]
             } else {
                 (lo != hi)
@@ -2373,12 +2524,14 @@ mod tests {
             let source = crate::engine::view::Source {
                 file: Some("view.xml"),
                 patterns: None,
+                config: None,
             };
             crate::engine::view::set(
                 &self.store,
                 experiment,
                 &crate::engine::view::etag(raw.as_deref()),
                 Some(markup),
+                None,
                 None,
                 &source,
             )
@@ -4352,6 +4505,408 @@ mod tests {
         assert_eq!(summary["signals"]["valid"]["labels"]["1"], "valid");
     }
 
+    /// Saves a stage plan as `orx exp view set --config` does.
+    fn plan(
+        f: &Fixture,
+        experiment: &str,
+        plan: Value,
+    ) -> Result<Value, crate::engine::view::Refusal> {
+        let raw = f.store.run_monitor_json(experiment).unwrap();
+        let source = crate::engine::view::Source {
+            file: None,
+            patterns: None,
+            config: Some("config.json"),
+        };
+        crate::engine::view::set(
+            &f.store,
+            experiment,
+            &crate::engine::view::etag(raw.as_deref()),
+            None,
+            None,
+            Some(&json!({ "plan": plan })),
+            &source,
+        )
+    }
+
+    const PIPELINE: [&str; 5] = ["install", "download", "train", "eval", "sft"];
+
+    /// A run going through `stages` of (name, seconds, total), one report a second, from `T0`,
+    /// up to `until` seconds; train reports a loss.
+    fn staged(
+        f: &Fixture,
+        id: &str,
+        experiment: &str,
+        status: &str,
+        stages: &[(&str, i64, Option<i64>)],
+        until: i64,
+    ) -> StoredRun {
+        let run = f.run_in(id, experiment, status, local());
+        let mut lines = Vec::new();
+        let mut second = 0;
+        for (name, seconds, of) in stages {
+            for step in 0..*seconds {
+                if second > until {
+                    break;
+                }
+                let at = T0 + second * 1000;
+                let line = match (step, of) {
+                    (0, Some(of)) => {
+                        format!("::orx:: {{\"phase\":\"{name}\",\"step\":0,\"of\":{of}}}")
+                    }
+                    (0, None) => format!("::orx:: {{\"phase\":\"{name}\"}}"),
+                    (step, Some(_)) if *name == "train" => format!(
+                        "::orx:: {{\"step\":{step},\"m\":{{\"loss\":{}}}}}",
+                        3.0 / step as f64
+                    ),
+                    (step, Some(_)) => format!("::orx:: {{\"step\":{step}}}"),
+                    (_, None) => format!("{name} working"),
+                };
+                lines.push((at, line));
+                second += 1;
+            }
+        }
+        f.collect(&Snapshot {
+            run_id: id.into(),
+            ..folded(&lines)
+        });
+        run
+    }
+
+    fn stage_names(monitor: &Value) -> Vec<String> {
+        monitor["phases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| {
+                let name = p["name"].as_str().unwrap();
+                match (p["skipped"] == true, p["planned"] == false) {
+                    (true, _) => format!("{name}?skipped"),
+                    (_, true) => format!("{name}?unplanned"),
+                    _ => name.to_owned(),
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_plan_spans_the_run_from_the_first_second_timed_from_the_parents_stages() {
+        let f = Fixture::new("orx-monitor-plan");
+        let stages = json!(PIPELINE
+            .iter()
+            .map(|name| json!({"phase": name}))
+            .collect::<Vec<_>>());
+        plan(&f, "exp", stages).unwrap();
+        let pipeline = [
+            ("install", 10, None),
+            ("download", 30, Some(30)),
+            ("train", 60, Some(60)),
+            ("eval", 30, Some(30)),
+            ("sft", 70, None),
+        ];
+        let parent = staged(&f, "p1", "exp", "done", &pipeline, 200);
+        monitor_at(&f, &parent, T0 + 700_000);
+        f.child("child", "exp");
+
+        // Five seconds of install: every stage is a segment, weighted by the parent's time.
+        let child = staged(&f, "c1", "child", "running", &pipeline, 5);
+        let (monitor, _) = monitor_at(&f, &child, T0 + 5_500);
+        assert_eq!(
+            stage_names(&monitor),
+            PIPELINE,
+            "a child keeps its parent's plan"
+        );
+        let priors: Vec<_> = monitor["phases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["priorMs"].as_i64())
+            .collect();
+        assert_eq!(
+            priors,
+            [
+                Some(10_000),
+                Some(30_000),
+                Some(60_000),
+                Some(30_000),
+                Some(69_000)
+            ],
+            "the last stage ends with the log"
+        );
+        let weights: Vec<_> = monitor["progress"]["segments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| (s["weight"].as_f64().unwrap() * 100.0).round() / 100.0)
+            .collect();
+        assert_eq!(weights, [0.05, 0.15, 0.3, 0.15, 0.35]);
+        let whole = monitor["progress"]["whole"].as_f64().unwrap();
+        assert!(
+            (whole - 0.05 * 0.55).abs() < 0.005,
+            "install is half its parent's 10s: {whole}"
+        );
+        let estimate = &monitor["estimate"];
+        assert_eq!(estimate["floor"], false, "{estimate}");
+        let mid = estimate["midMs"].as_i64().unwrap();
+        assert!(
+            (190_000..200_000).contains(&mid),
+            "the rest of install and four stages: {estimate}"
+        );
+        let summary = current(&f.store, &child)
+            .unwrap()
+            .unwrap()
+            .summary()
+            .clone();
+        assert_eq!(summary["segments"].as_array().unwrap().len(), 5);
+        let text = monitor["statusText"].as_str().unwrap();
+        assert!(text.contains("\nstages   \u{25cf} install \u{b7} \u{25cb} download about 30s \u{b7} \u{25cb} train about 1m"), "{text}");
+
+        // At the end of train, eval and sft are still to come: never 100%.
+        let child = staged(&f, "c1", "child", "running", &pipeline, 99);
+        let (monitor, _) = monitor_at(&f, &child, T0 + 99_500);
+        let whole = monitor["progress"]["whole"].as_f64().unwrap();
+        assert!((0.45..0.52).contains(&whole), "{whole}");
+        let mid = monitor["estimate"]["midMs"].as_i64().unwrap();
+        assert!(
+            (95_000..110_000).contains(&mid),
+            "eval and sft are left: {}",
+            monitor["estimate"]
+        );
+        let text = monitor["statusText"].as_str().unwrap();
+        assert!(text.contains("\u{2713} install 10s \u{b7} \u{2713} download 30s \u{b7} \u{25cf} train \u{b7} \u{25cb} eval about 30s"), "{text}");
+    }
+
+    #[test]
+    fn a_stage_no_earlier_run_timed_leaves_the_whole_unknown_and_time_left_a_floor() {
+        let f = Fixture::new("orx-monitor-plan-unknown");
+        let stages = json!(PIPELINE
+            .iter()
+            .map(|name| json!({"phase": name}))
+            .collect::<Vec<_>>());
+        plan(&f, "exp", stages).unwrap();
+        let pipeline = [
+            ("install", 10, None),
+            ("download", 30, Some(30)),
+            ("train", 60, Some(60)),
+        ];
+        let run = staged(&f, "r1", "exp", "running", &pipeline, 99);
+        let (monitor, _) = monitor_at(&f, &run, T0 + 99_500);
+        assert_eq!(
+            monitor["progress"]["whole"],
+            Value::Null,
+            "no equal split stands in for unknown weights"
+        );
+        assert_eq!(monitor["progress"]["segments"].as_array().unwrap().len(), 5);
+        assert_eq!(
+            monitor["estimate"]["floor"], true,
+            "{}",
+            monitor["estimate"]
+        );
+        assert_eq!(monitor["estimate"]["untimed"], json!(["eval", "sft"]));
+        let text = monitor["statusText"].as_str().unwrap();
+        assert!(
+            text.starts_with("baseline  running  train \u{b7} step 59 of 60"),
+            "{text}"
+        );
+        assert!(
+            text.contains("\neta      At least 0s left (no parent time for eval, sft)"),
+            "{text}"
+        );
+
+        // Its last step done, how long eval and sft take is all that is left, and unknown.
+        let pipeline = [
+            ("install", 10, None),
+            ("download", 30, Some(30)),
+            ("train", 61, Some(60)),
+        ];
+        let run = staged(&f, "r1", "exp", "running", &pipeline, 100);
+        let (monitor, _) = monitor_at(&f, &run, T0 + 100_500);
+        assert_eq!(monitor["estimate"], Value::Null, "{}", monitor["estimate"]);
+        let text = monitor["statusText"].as_str().unwrap();
+        assert!(
+            text.contains("\neta      No estimate (how much is left is unknown)"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_run_shows_its_unplanned_stage_and_the_ones_it_skipped() {
+        let f = Fixture::new("orx-monitor-plan-skips");
+        let stages = json!(PIPELINE
+            .iter()
+            .map(|name| json!({"phase": name}))
+            .collect::<Vec<_>>());
+        plan(&f, "exp", stages).unwrap();
+        let pipeline = [
+            ("install", 10, None),
+            ("train", 20, Some(20)),
+            ("export", 10, Some(10)),
+            ("eval", 10, Some(10)),
+        ];
+        let run = staged(&f, "r1", "exp", "done", &pipeline, 60);
+        let (monitor, _) = monitor_at(&f, &run, T0 + 700_000);
+        assert_eq!(
+            stage_names(&monitor),
+            [
+                "install",
+                "download?skipped",
+                "train",
+                "export?unplanned",
+                "eval",
+                "sft?skipped"
+            ]
+        );
+        assert_eq!(monitor["progress"]["phase"], 4);
+        let text = monitor["statusText"].as_str().unwrap();
+        assert!(text.contains("\u{2013} download skipped"), "{text}");
+        assert!(text.contains("\u{2713} export 10s (unplanned)"), "{text}");
+        assert!(
+            text.contains("\u{2713} eval 9s \u{b7} \u{2013} sft skipped"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_run_declares_its_own_plan_over_its_experiments() {
+        let f = Fixture::new("orx-monitor-plan-wire");
+        plan(&f, "exp", json!([{"phase": "train"}])).unwrap();
+        let run = f.run("running", local());
+        f.collect(&folded(&[
+            (T0, "::orx:: {\"plan\":[{\"phase\":\"warmup\"},{\"phase\":\"train\",\"of\":5000,\"unit\":\"steps\"}]}".into()),
+            (T0 + 1000, "::orx:: {\"phase\":\"warmup\"}".into()),
+        ]));
+        let (monitor, _) = monitor_at(&f, &run, T0 + 1500);
+        assert_eq!(stage_names(&monitor), ["warmup", "train"]);
+        assert_eq!(monitor["phases"][1]["of"], 5000.0);
+        assert_eq!(monitor["phases"][1]["unit"], "steps");
+        assert_eq!(monitor["progress"]["phase"], 0);
+    }
+
+    #[test]
+    fn saving_a_plan_refuses_each_mistake_in_its_own_words() {
+        let f = Fixture::new("orx-monitor-plan-save");
+        let invalid = |answer: Result<Value, crate::engine::view::Refusal>| match answer {
+            Err(crate::engine::view::Refusal::Invalid(why)) => why,
+            other => panic!("{other:?}"),
+        };
+        let raw = |config: Value| {
+            let source = crate::engine::view::Source {
+                file: None,
+                patterns: None,
+                config: Some("config.json"),
+            };
+            crate::engine::view::set(
+                &f.store,
+                "exp",
+                &crate::engine::view::etag(None),
+                None,
+                None,
+                Some(&config),
+                &source,
+            )
+        };
+        assert_eq!(
+            invalid(raw(json!({"plan": [], "rules": []}))),
+            "Config config.json: \"rules\" is not something this orx reads; a config takes plan. Run `orx exp view set exp --config config.json`."
+        );
+        assert_eq!(
+            invalid(plan(&f, "exp", json!([{"phase": "train"}, {"phase": "train"}]))),
+            "Config config.json: stages 1 and 2 are both \"train\"; list a stage again only after another stage, since a log cannot tell two in a row apart. Run `orx exp view set exp --config config.json`."
+        );
+        let saved = plan(
+            &f,
+            "exp",
+            json!([{"phase": "train", "of": 10}, {"phase": "eval"}, {"phase": "train"}]),
+        )
+        .unwrap();
+        assert_eq!(
+            saved["plan"],
+            json!([{"phase": "train", "of": 10.0}, {"phase": "eval"}, {"phase": "train"}])
+        );
+        let cleared = plan(&f, "exp", json!([])).unwrap();
+        assert_eq!(cleared["plan"], json!([]));
+        assert!(!f
+            .store
+            .run_monitor_json("exp")
+            .unwrap()
+            .unwrap()
+            .contains("plan"));
+    }
+
+    /// Experiment settings as orx stored them before plans, and with one beside a key a newer
+    /// orx may add: each reads, and saving one part keeps every other.
+    #[test]
+    fn stored_settings_with_and_without_a_plan_read_and_keep_each_other() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../tests/contracts/run-monitor-config.json"
+        ))
+        .unwrap();
+        let (before, planned) = (
+            fixture["before"].as_str().unwrap(),
+            fixture["planned"].as_str().unwrap(),
+        );
+        use crate::engine::view::{stored, stored_patterns, stored_plan};
+        assert_eq!(stored_plan("exp", Some(before)).unwrap(), vec![]);
+        let names: Vec<_> = stored_plan("exp", Some(planned))
+            .unwrap()
+            .into_iter()
+            .map(|stage| stage.phase)
+            .collect();
+        assert_eq!(names, ["install", "train", "eval", "train"]);
+        assert!(
+            stored("exp", Some(planned)).unwrap().is_some(),
+            "a reader of the view ignores the plan"
+        );
+        assert!(stored_patterns("exp", Some(planned))
+            .unwrap()
+            .patterns
+            .is_empty());
+
+        let f = Fixture::new("orx-monitor-plan-contract");
+        let keep = |raw: &str| {
+            f.store
+                .patch_run_monitor_json(
+                    "exp",
+                    &crate::engine::view::etag(f.store.run_monitor_json("exp").unwrap().as_deref()),
+                    |_| Ok(raw.to_owned()),
+                )
+                .unwrap()
+                .unwrap();
+        };
+        keep(planned);
+        f.view("exp", "<view />");
+        let saved: Value =
+            serde_json::from_str(&f.store.run_monitor_json("exp").unwrap().unwrap()).unwrap();
+        assert_eq!(
+            saved["plan"].as_array().unwrap().len(),
+            4,
+            "a new view keeps the plan"
+        );
+        assert_eq!(saved["later"], json!({"kept": true}));
+
+        keep(before);
+        plan(&f, "exp", json!([{"phase": "train"}])).unwrap();
+        let saved: Value =
+            serde_json::from_str(&f.store.run_monitor_json("exp").unwrap().unwrap()).unwrap();
+        assert_eq!(
+            saved["patterns"].as_array().unwrap().len(),
+            1,
+            "a plan keeps the patterns"
+        );
+        assert!(saved["view"].as_str().unwrap().contains("<chart"));
+        let run = f.run("running", local());
+        f.collect(&folded(&declared(0..=20, 400)));
+        let (monitor, _) = monitor_at(&f, &run, T0 + 20_500);
+        assert!(monitor["phases"][0].get("planned").is_some());
+
+        keep(before);
+        let (monitor, _) = monitor_at(&f, &run, T0 + 20_600);
+        assert!(
+            monitor["phases"][0].get("planned").is_none(),
+            "with no plan a run shows as it did"
+        );
+        assert_eq!(monitor["progress"]["segments"].as_array().unwrap().len(), 1);
+    }
+
     #[test]
     fn a_run_compares_with_its_parent_at_the_same_step_and_nowhere_else() {
         let f = Fixture::new("orx-monitor-parent");
@@ -4526,12 +5081,23 @@ mod tests {
         let file = Source {
             file: Some("view.xml"),
             patterns: Some("patterns.json"),
+            config: None,
         };
         let invalid = |answer: std::result::Result<Value, Refusal>| match answer {
             Err(Refusal::Invalid(message)) => message,
             other => panic!("{other:?}"),
         };
-        let view = |markup| set(&f.store, "exp", &etag(None), Some(markup), None, &file);
+        let view = |markup| {
+            set(
+                &f.store,
+                "exp",
+                &etag(None),
+                Some(markup),
+                None,
+                None,
+                &file,
+            )
+        };
         // Before any run there is nothing to check a view against.
         assert_eq!(
             invalid(view("<view><html/></view>")),
@@ -4547,14 +5113,15 @@ mod tests {
             "View view.xml:2:3: blocks[0].chart[0]: no signal \"los\"; seen: loss. Run `orx exp view set exp --file view.xml`."
         );
         assert!(matches!(
-            set(&f.store, "exp", "\"stale\"", Some("<view/>"), None, &file),
+            set(&f.store, "exp", "\"stale\"", Some("<view/>"), None, None, &file),
             Err(Refusal::Changed(message)) if message == "Experiment exp changed while saving its view. Run `orx exp view get exp` and retry."
         ));
         assert!(matches!(
-            set(&f.store, "nope", &etag(None), Some("<view/>"), None, &file),
+            set(&f.store, "nope", &etag(None), Some("<view/>"), None, None, &file),
             Err(Refusal::Missing(message)) if message == "Experiment nope not found."
         ));
-        let patterns = |list: Value| set(&f.store, "exp", &etag(None), None, Some(&list), &file);
+        let patterns =
+            |list: Value| set(&f.store, "exp", &etag(None), None, Some(&list), None, &file);
         assert_eq!(
             invalid(patterns(json!([{"regex": "^chunk (?P<step\\d+)"}]))),
             "Pattern patterns.json: pattern 1: invalid regex at column 16: invalid capture group character. Run `orx exp view check r1 --pattern patterns.json`."
@@ -4566,6 +5133,7 @@ mod tests {
         let stdin = Source {
             file: None,
             patterns: None,
+            config: None,
         };
         assert_eq!(
             invalid(check(&f.store, "r1", Some("<view><chart y=\"lr\" /></view>"), None, &stdin)),
@@ -4591,8 +5159,18 @@ mod tests {
         let source = Source {
             file: None,
             patterns: Some("patterns.json"),
+            config: None,
         };
-        let saved = set(&f.store, "exp", &etag(None), None, Some(&list), &source).unwrap();
+        let saved = set(
+            &f.store,
+            "exp",
+            &etag(None),
+            None,
+            Some(&list),
+            None,
+            &source,
+        )
+        .unwrap();
         assert_eq!(saved["patterns"], list);
         assert_eq!(saved["markup"], Value::Null, "the view is kept as it was");
         configure_runs(&f.store, "exp").unwrap();
@@ -4826,6 +5404,24 @@ mod tests {
                     "eta": "At least 21s left", "range": null,
                     "cli": "At least 21s left (timed from progress in the log; more work may follow it)",
                     "stage": "3 of 10 chunks",
+                }),
+            ),
+            state(
+                "planned",
+                "running",
+                local(),
+                &folded(
+                    &std::iter::once((T0, "::orx:: {\"plan\":[{\"phase\":\"download\",\"of\":3},{\"phase\":\"train\",\"of\":10,\"unit\":\"steps\"},{\"phase\":\"eval\"}]}".to_owned()))
+                        .chain((0..=3).map(|n| (T0 + 1000 * n, format!("::orx:: {{\"phase\":\"download\",\"step\":{n},\"of\":3}}"))))
+                        .chain((0..=5).map(|n| (T0 + 4000 + 1000 * n, format!("::orx:: {{\"phase\":\"train\",\"step\":{n},\"of\":10,\"unit\":\"steps\",\"m\":{{\"loss\":{}}}}}", 3.0 / (n + 1) as f64))))
+                        .collect::<Vec<_>>(),
+                ),
+                T0 + 9_000,
+                T0 + 9_000,
+                json!({
+                    "eta": "At least 4s left", "range": null,
+                    "cli": "At least 4s left (no parent time for eval)",
+                    "stage": "train · step 5 of 10",
                 }),
             ),
             state(

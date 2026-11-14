@@ -180,6 +180,7 @@ fn every_view_and_pattern_in_agent_text_compiles() {
                     let source = crate::engine::view::Source {
                         file: None,
                         patterns: Some("patterns.json"),
+                        config: None,
                     };
                     match serde_json::from_str(body) {
                         Ok(given) => match crate::engine::view::patterns(&given, &source, "") {

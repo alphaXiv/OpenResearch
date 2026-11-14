@@ -996,6 +996,46 @@ pub(crate) fn stored_patterns(
     })
 }
 
+/// The stage plan in the experiment's stored monitor settings; empty when none is declared.
+pub(crate) fn stored_plan(
+    experiment: &str,
+    raw: Option<&str>,
+) -> crate::error::Result<Vec<orx_signals::Stage>> {
+    let Some(raw) = raw else {
+        return Ok(Vec::new());
+    };
+    let settings: Value = serde_json::from_str(raw).map_err(|error| {
+        crate::error::anyhow!("Experiment {experiment}'s run view settings are unreadable: {error}")
+    })?;
+    match settings.get("plan") {
+        None => Ok(Vec::new()),
+        Some(plan) => orx_signals::plan(plan, false).map_err(|error| {
+            crate::error::anyhow!("Experiment {experiment}'s plan is unreadable: {error}")
+        }),
+    }
+}
+
+/// The keys `--config` takes; this orx reads no other.
+const CONFIG_KEYS: &str = "plan";
+
+/// A configuration as an agent gave it: its stage plan, or why it cannot be used.
+fn plan_of(given: &Value, source: &Source, fix: &str) -> Result<Vec<orx_signals::Stage>, Refusal> {
+    let file = source.config.unwrap_or("<config>");
+    let refuse = |why: String| Refusal::Invalid(format!("Config {file}: {why}. {fix}"));
+    let fields = given
+        .as_object()
+        .ok_or_else(|| refuse(format!("give a JSON object with {CONFIG_KEYS}")))?;
+    if let Some(key) = fields.keys().find(|key| key.as_str() != "plan") {
+        return Err(refuse(format!(
+            "\"{key}\" is not something this orx reads; a config takes {CONFIG_KEYS}"
+        )));
+    }
+    match fields.get("plan") {
+        Some(plan) => orx_signals::plan(plan, true).map_err(refuse),
+        None => Err(refuse(format!("give a JSON object with {CONFIG_KEYS}"))),
+    }
+}
+
 /// Patterns as an agent gave them, compiled, or why they cannot be used.
 pub(crate) fn patterns(
     given: &Value,
@@ -1087,6 +1127,8 @@ pub(crate) struct Source<'a> {
     pub file: Option<&'a str>,
     /// The file the patterns came from.
     pub patterns: Option<&'a str>,
+    /// The file the configuration came from.
+    pub config: Option<&'a str>,
 }
 
 impl Source<'_> {
@@ -1139,6 +1181,7 @@ pub(crate) fn described(store: &crate::store::Store, id: &str) -> Result<Value, 
     let mut described = view_of(store, id)?;
     let raw = store.run_monitor_json(id)?;
     described["patterns"] = json!(stored_patterns(id, raw.as_deref())?.patterns);
+    described["plan"] = json!(stored_plan(id, raw.as_deref())?);
     Ok(described)
 }
 
@@ -1180,6 +1223,7 @@ pub(crate) fn set(
     expected: &str,
     markup: Option<&str>,
     given: Option<&Value>,
+    configured: Option<&Value>,
     source: &Source,
 ) -> Result<Value, Refusal> {
     experiment_of(store, id)?;
@@ -1207,6 +1251,17 @@ pub(crate) fn set(
         }
         None => None,
     };
+    let plan = match configured {
+        Some(given) => {
+            let file = source.config.unwrap_or("PATH");
+            Some(plan_of(
+                given,
+                source,
+                &format!("Run `orx exp view set {id} --config {file}`."),
+            )?)
+        }
+        None => None,
+    };
     let saved = store.patch_run_monitor_json(id, expected, |raw| {
         let mut settings = match raw.map(serde_json::from_str::<Value>).transpose() {
             Ok(Some(Value::Object(settings))) => settings,
@@ -1222,6 +1277,15 @@ pub(crate) fn set(
         }
         if let Some(config) = &config {
             settings.insert("patterns".into(), json!(config.patterns));
+        }
+        match &plan {
+            Some(plan) if plan.is_empty() => {
+                settings.remove("plan");
+            }
+            Some(plan) => {
+                settings.insert("plan".into(), json!(plan));
+            }
+            None => {}
         }
         Ok(Value::Object(settings).to_string())
     })?;

@@ -1723,6 +1723,7 @@ mod collection_tests {
         let input = crate::engine::estimate::with_signals(
             run_facts(),
             &held,
+            &[],
             Some((host_at as f64, laptop_at as f64)),
             600_000.0,
         );

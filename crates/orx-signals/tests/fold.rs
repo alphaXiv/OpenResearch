@@ -496,6 +496,7 @@ fn shipped_checkpoint_and_payload_contracts_round_trip_with_future_fields() {
     assert_eq!(s.phases.len(), 3);
     assert_eq!(s.progress().unwrap().of, None);
     assert_eq!(s.diagnostics.counts["non_finite"], 3);
+    assert_eq!(s.plan.as_ref().map(Vec::len), Some(3));
 }
 
 #[test]
@@ -1025,4 +1026,69 @@ fn a_pattern_that_cannot_be_used_says_which_and_where() {
         error.reason,
         "row \"eval set\" is not a name: use letters, digits and _"
     );
+}
+
+#[test]
+fn a_run_declares_its_plan_and_a_later_one_replaces_it() {
+    let mut s = fresh();
+    feed(
+        &mut s,
+        "::orx:: {\"plan\":[{\"phase\":\"install\"},{\"phase\":\"train\",\"of\":5000,\"unit\":\"steps\",\"why\":\"later\"}]}\n",
+    );
+    let plan = s.plan.clone().unwrap();
+    assert_eq!(plan.len(), 2);
+    assert_eq!(
+        (plan[1].phase.as_str(), plan[1].of, plan[1].unit.as_deref()),
+        ("train", Some(5000.0), Some("steps"))
+    );
+    assert!(s.phases.is_empty(), "a plan begins no stage");
+    assert!(
+        s.diagnostics.counts.is_empty(),
+        "a key a stage does not know is ignored"
+    );
+
+    feed(
+        &mut s,
+        "::orx:: {\"plan\":[{\"phase\":\"train\"},{\"phase\":\"train\"}]}\n",
+    );
+    feed(&mut s, "::orx:: {\"plan\":[{\"of\":3}]}\n");
+    feed(&mut s, "::orx:: {\"plan\":{\"phase\":\"train\"}}\n");
+    assert_eq!(
+        s.plan.as_ref().unwrap().len(),
+        2,
+        "a plan that cannot be read keeps the last one"
+    );
+    assert_eq!(s.diagnostics.counts["invalid_field"], 3);
+
+    feed(&mut s, "::orx:: {\"phase\":\"train\",\"step\":0,\"plan\":[{\"phase\":\"train\"},{\"phase\":\"eval\"},{\"phase\":\"train\"}]}\n");
+    let names: Vec<_> = s
+        .plan
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|stage| stage.phase.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        ["train", "eval", "train"],
+        "a stage that runs again is listed again"
+    );
+    assert_eq!(s.progress().unwrap().name, "train");
+
+    let restored: Snapshot = serde_json::from_value(serde_json::to_value(&s).unwrap()).unwrap();
+    assert_eq!(restored.plan, s.plan);
+}
+
+#[test]
+fn a_plan_an_agent_writes_is_read_strictly() {
+    let refused = |value: serde_json::Value| orx_signals::plan(&value, true).unwrap_err();
+    assert!(refused(json!([{"phase": "train", "steps": 3}])).contains("unknown key \"steps\""));
+    assert!(refused(json!([{"phase": ""}])).contains("stage 1 needs \"phase\""));
+    assert!(refused(json!([{"phase": "a"}, {"phase": "b", "of": 0}])).contains("stage 2's \"of\""));
+    assert!(
+        refused(json!([{"phase": "a"}, {"phase": "a"}])).contains("stages 1 and 2 are both \"a\"")
+    );
+    assert!(refused(json!(vec![json!({"phase": "a"}); 65])).contains("at most 64"));
+    assert!(refused(json!("train")).contains("a plan is a list"));
+    assert_eq!(orx_signals::plan(&json!([]), true).unwrap(), vec![]);
 }

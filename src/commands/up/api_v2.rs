@@ -930,6 +930,10 @@ struct ViewBody {
     patterns: Option<Value>,
     #[serde(rename = "patternFile")]
     pattern_file: Option<String>,
+    /// What else the experiment's runs are drawn with: `{"plan": [...]}`.
+    config: Option<Value>,
+    #[serde(rename = "configFile")]
+    config_file: Option<String>,
 }
 
 /// `PUT /api/experiments/:id/view` with `If-Match`: saves the view and its patterns, and draws
@@ -960,6 +964,7 @@ async fn set_view(
         let source = crate::engine::view::Source {
             file: body.file.as_deref(),
             patterns: body.pattern_file.as_deref(),
+            config: body.config_file.as_deref(),
         };
         let saved = crate::engine::view::set(
             &store,
@@ -967,6 +972,7 @@ async fn set_view(
             &expected,
             body.markup.as_deref(),
             body.patterns.as_ref(),
+            body.config.as_ref(),
             &source,
         )?;
         let runs = if repatterned {
@@ -1073,6 +1079,7 @@ async fn check_view(
         let source = crate::engine::view::Source {
             file: given.file.as_deref(),
             patterns: given.pattern_file.as_deref(),
+            config: None,
         };
         let fix = format!(
             "Run `orx exp view check {run} --pattern {}`.",
@@ -1111,6 +1118,7 @@ async fn check_view(
         let source = crate::engine::view::Source {
             file: body.file.as_deref(),
             patterns: body.pattern_file.as_deref(),
+            config: None,
         };
         crate::engine::view::check(
             &api.store(),

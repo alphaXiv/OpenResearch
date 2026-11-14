@@ -2566,6 +2566,241 @@
         "stage": "3 of 10 chunks"
       }
     },
+    "planned": {
+      "run": {
+        "status": "running",
+        "createdAt": 1794444300000,
+        "startedAt": 1794444300000,
+        "updatedAt": 1794444300000,
+        "endedAt": null,
+        "backend": {
+          "kind": "local_job"
+        }
+      },
+      "now": 1794444309000,
+      "monitor": {
+        "runId": "r1",
+        "generation": "g1",
+        "asOf": 1794444309000,
+        "availability": {
+          "state": "live",
+          "reason": null,
+          "omitted": {}
+        },
+        "view": {
+          "signals": {
+            "loss": {
+              "label": "loss"
+            }
+          },
+          "headline": [
+            "loss"
+          ],
+          "blocks": [
+            {
+              "chart": [
+                "loss"
+              ],
+              "x": "step"
+            }
+          ]
+        },
+        "viewFrom": {
+          "experimentId": "exp",
+          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" />\n</view>\n",
+          "isDefault": true
+        },
+        "source": "declared",
+        "phases": [
+          {
+            "name": "download",
+            "of": 3.0,
+            "unit": null,
+            "priorMs": null,
+            "startedAt": 1794444300000,
+            "endedAt": 1794444304000,
+            "planned": true
+          },
+          {
+            "name": "train",
+            "of": 10.0,
+            "unit": "steps",
+            "priorMs": null,
+            "startedAt": 1794444304000,
+            "endedAt": null,
+            "planned": true
+          },
+          {
+            "name": "eval",
+            "of": null,
+            "unit": null,
+            "priorMs": null,
+            "startedAt": null,
+            "endedAt": null,
+            "planned": true
+          }
+        ],
+        "progress": {
+          "phase": 1,
+          "done": 5.0,
+          "segments": [
+            {
+              "name": "download",
+              "weight": 0.3333333333333333,
+              "fill": 1.0
+            },
+            {
+              "name": "train",
+              "weight": 0.3333333333333333,
+              "fill": 0.5
+            },
+            {
+              "name": "eval",
+              "weight": 0.3333333333333333,
+              "fill": 0.0
+            }
+          ],
+          "whole": null,
+          "lastAt": 1794444309000,
+          "stallMs": 0
+        },
+        "x": {
+          "name": "step",
+          "max": 10.0
+        },
+        "latest": {
+          "loss": 0.5
+        },
+        "parent": null,
+        "versus": {},
+        "rows": {},
+        "groups": {},
+        "cells": {},
+        "media": {},
+        "counts": {},
+        "estimate": {
+          "loMs": 4526,
+          "midMs": 5000,
+          "hiMs": 5474,
+          "at": 1794444309000,
+          "pending": false,
+          "pastLimitMs": null,
+          "floor": true,
+          "reasons": [],
+          "untimed": [
+            "eval"
+          ]
+        },
+        "limit": null,
+        "cost": null,
+        "quote": null,
+        "before": null,
+        "watch": {
+          "state": "off",
+          "model": null,
+          "looks": [],
+          "spentUsd": null,
+          "nextAt": null,
+          "error": null
+        },
+        "sentence": null,
+        "flag": null,
+        "setup": null,
+        "revising": false,
+        "brief": [],
+        "rules": [],
+        "statusText": "baseline  running  train · step 5 of 10  [run r1]\neta      At least 4s left (no parent time for eval)\nstages   ✓ download 4s · ● train · ○ eval\nsignals  loss 0.5\nsignals  Last collected at 2026-11-12T00:45:09.000Z.\nsignals  Data as of 2026-11-12T00:45:09.000Z.",
+        "rev": 1,
+        "seriesRev": 1,
+        "series": {
+          "loss": [
+            [
+              0.0,
+              3.0
+            ],
+            [
+              1.0,
+              1.5
+            ],
+            [
+              2.0,
+              1.0
+            ],
+            [
+              3.0,
+              0.75
+            ],
+            [
+              4.0,
+              0.6
+            ],
+            [
+              5.0,
+              0.5
+            ]
+          ]
+        }
+      },
+      "summary": {
+        "tone": "running",
+        "whole": null,
+        "stage": {
+          "name": "train",
+          "done": 5.0,
+          "of": 10.0,
+          "unit": "steps"
+        },
+        "headline": {
+          "name": "loss",
+          "label": "loss",
+          "value": 0.5,
+          "vs": null
+        },
+        "sentence": null,
+        "bindings": {
+          "loss": 0.5
+        },
+        "signals": {
+          "loss": {
+            "label": "loss"
+          }
+        },
+        "etaMs": {
+          "lo": 4526,
+          "mid": 5000,
+          "hi": 5474,
+          "at": 1794444309000
+        },
+        "etaFloor": true,
+        "pending": false,
+        "limitEndsAt": null,
+        "flag": null,
+        "setup": null,
+        "generation": "g1",
+        "asOf": 1794444309000,
+        "segments": [
+          {
+            "weight": 0.3333333333333333,
+            "fill": 1.0
+          },
+          {
+            "weight": 0.3333333333333333,
+            "fill": 0.5
+          },
+          {
+            "weight": 0.3333333333333333,
+            "fill": 0.0
+          }
+        ],
+        "rev": 1
+      },
+      "expect": {
+        "eta": "At least 4s left",
+        "range": null,
+        "cli": "At least 4s left (no parent time for eval)",
+        "stage": "train · step 5 of 10"
+      }
+    },
     "named": {
       "run": {
         "status": "running",

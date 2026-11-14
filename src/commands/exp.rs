@@ -119,15 +119,16 @@ async fn view(command: ViewCommand) -> Result<()> {
             )
         })
     };
-    let patterns = |file: &std::path::Path, fix: &str| -> Result<serde_json::Value> {
-        let text = read("Pattern", file, fix)?;
+    let json_file = |kind: &str, file: &std::path::Path, fix: &str| -> Result<serde_json::Value> {
+        let text = read(kind, file, fix)?;
         serde_json::from_str(&text).map_err(|error| {
             anyhow!(
-                "Pattern {} is not JSON: {error}. Fix it, then run `{fix}`.",
+                "{kind} {} is not JSON: {error}. Fix it, then run `{fix}`.",
                 file.display()
             )
         })
     };
+    let patterns = |file: &std::path::Path, fix: &str| json_file("Pattern", file, fix);
     let shown = |file: &Option<std::path::PathBuf>| file.as_ref().map(|f| f.display().to_string());
     match command {
         ViewCommand::Set {
@@ -135,6 +136,7 @@ async fn view(command: ViewCommand) -> Result<()> {
             file,
             stdin,
             pattern,
+            config,
         } => {
             let again = |flag: &str, file: &std::path::Path| {
                 format!("orx exp view set {exp_id} {flag} {}", file.display())
@@ -153,20 +155,36 @@ async fn view(command: ViewCommand) -> Result<()> {
                 .as_deref()
                 .map(|file| patterns(file, &again("--pattern", file)))
                 .transpose()?;
+            let configured = config
+                .as_deref()
+                .map(|file| json_file("Config", file, &again("--config", file)))
+                .transpose()?;
             let body = serde_json::json!({
                 "markup": markup,
                 "file": shown(&file),
                 "patterns": list,
                 "patternFile": shown(&pattern),
+                "config": configured,
+                "configFile": shown(&config),
             });
             let saved = set_view(&exp_id, body).await?;
-            let what = match (markup.is_some(), list.is_some()) {
-                (true, true) => "View and patterns",
-                (true, false) => "View",
-                _ => "Patterns",
+            let what: Vec<&str> = [
+                (markup.is_some(), "view"),
+                (list.is_some(), "patterns"),
+                (configured.is_some(), "plan"),
+            ]
+            .into_iter()
+            .filter_map(|(given, name)| given.then_some(name))
+            .collect();
+            let what = match what.as_slice() {
+                [one] => (*one).to_owned(),
+                [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+                [] => unreachable!("clap requires one of them"),
             };
+            let first = what[..1].to_uppercase();
             println!(
-                "\u{2713} {what} saved on experiment {exp_id}; its runs are drawn with them now."
+                "\u{2713} {first}{} saved on experiment {exp_id}; its runs are drawn with them now.",
+                &what[1..],
             );
             if list.is_some() {
                 println!("Its runs' logs are read again with the patterns; check one with `orx exp view check RUN`.");
@@ -214,6 +232,12 @@ async fn view(command: ViewCommand) -> Result<()> {
                 println!(
                     "\nPatterns:\n{}",
                     serde_json::to_string_pretty(&described["patterns"])?
+                );
+            }
+            if described["plan"].as_array().is_some_and(|p| !p.is_empty()) {
+                println!(
+                    "\nConfig:\n{}",
+                    serde_json::to_string_pretty(&serde_json::json!({"plan": described["plan"]}))?
                 );
             }
             Ok(())

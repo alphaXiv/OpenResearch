@@ -20,6 +20,30 @@ def _stage(total, unit):
     return {key: value for key, value in (("of", total), ("unit", unit)) if value is not None}
 
 
+def plan(stages, rank=None):
+    """Declares every stage the run goes through, in order, replacing any plan declared before.
+
+    Each stage is a name, or a dict with "phase" and optionally "of" and "unit":
+    plan(["install", {"phase": "train", "of": 5000, "unit": "steps"}, "eval"]).
+    A stage that runs again is listed again where it recurs, never twice in a row.
+    """
+    listed = []
+    for stage in stages:
+        stage = {"phase": stage} if isinstance(stage, str) else dict(stage)
+        name = stage.get("phase")
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"each stage needs a phase name, got {stage!r}")
+        if listed and listed[-1]["phase"] == name:
+            raise ValueError(f"{name!r} is listed twice in a row; list it again only after another stage")
+        listed.append(stage)
+    if rank is None:
+        rank = int(os.environ.get("RANK") or os.environ.get("SLURM_PROCID") or "0")
+    if rank == 0:
+        with _lock:
+            sys.stdout.write("::orx:: " + json.dumps({"plan": listed}, separators=(",", ":")) + "\n")
+            sys.stdout.flush()
+
+
 class progress:
     def __init__(self, total=None, unit=None, rank=None, interval=1.0, start=0):
         if rank is None:

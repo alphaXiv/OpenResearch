@@ -72,7 +72,10 @@ Keep the run context names `ORX_RUN_ID`, `ORX_EXPERIMENT`,
 `ORX_EXPERIMENT_TITLE`, `ORX_PARENT_EXPERIMENT`, `ORX_COMMIT` and
 `TRACKIO_PROJECT`. The log-line prefix `::orx::` introduces one JSON object (with a single space
 before it). LF ends a record; CR ends a redraw unless declared JSON is still structurally unfinished. Terminal EOF ends the final frame. Reserved keys are `step`, `of`,
-`phase`, `unit`, `t`, `row`, `spend`, and `m`. Measurements are only under `m`.
+`phase`, `unit`, `t`, `row`, `spend`, `plan`, and `m`. Measurements are only under `m`.
+`plan` is the run's whole list of stages in order, `[{"phase", "of"?, "unit"?}]` (at most 64;
+a stage that runs again is listed again, never twice in a row); it replaces any plan declared
+before it, ignores keys a stage does not know, and is kept as the checkpoint's `plan`.
 Numbers for progress and cumulative paid-service USD must be finite and
 nonnegative; totals are positive or null. Omitted fields retain their value;
 null total clears it. A changed phase creates an occurrence and resets progress.

@@ -774,6 +774,7 @@ fn draw_run(store: &Store, data_root: &Path, ended_at: i64) -> Result<()> {
     let source = Source {
         file: Some("baseline-view.xml"),
         patterns: None,
+        config: None,
     };
     // The probes were created under the baseline, so they start with its view as any child would.
     for experiment in [
@@ -786,6 +787,7 @@ fn draw_run(store: &Store, data_root: &Path, ended_at: i64) -> Result<()> {
             experiment,
             &view::etag(None),
             Some(BASELINE_VIEW),
+            None,
             None,
             &source,
         )

@@ -179,6 +179,11 @@ pub(crate) struct Input {
     pub gpu_count: Option<f64>,
     pub spend: Spend,
     pub spend_per_hour: Option<f64>,
+    /// `phases` is the run's declared plan, stages to come included: a stage's weight is its
+    /// prior, so whole-run progress is unknown unless every stage has one, and a stage with no
+    /// prior leaves time left a floor.
+    #[serde(default)]
+    pub planned: bool,
 }
 
 #[derive(Debug)]
@@ -189,6 +194,8 @@ pub(crate) struct Eta {
     pub pending: bool,
     /// Overrun from `cost.at`: `now` while live, `as_of` after contact loss.
     pub past_limit_ms: Option<f64>,
+    /// The range leaves out a stage to come whose length is unknown: the time left is at least it.
+    pub floor: bool,
 }
 
 #[derive(Debug)]
@@ -620,6 +627,23 @@ pub(crate) fn estimate(input: &Input) -> Result<Output, InputError> {
                 Some((elapsed / (end - start)).clamp(0.0, 1.0))
             }
         });
+    // A stage in progress with no total is timed against its prior, when it has one.
+    let prior_fill = phase
+        .prior
+        .zip(phase_started_at)
+        .filter(|_| input.planned && open)
+        .map(|(prior, start)| {
+            if prior.mid_ms > 0.0 {
+                ((at - start) / prior.mid_ms).clamp(0.0, 1.0)
+            } else {
+                1.0
+            }
+        });
+    let open_fill = if input.planned && phases.len() > 1 {
+        prior_fill
+    } else {
+        prior_fill.or(limit_fill)
+    };
     let weights_estimated = phases.iter().any(|p| p.prior.is_none());
     let weight_sum = if weights_estimated {
         phases.len() as f64
@@ -641,7 +665,7 @@ pub(crate) fn estimate(input: &Input) -> Result<Output, InputError> {
                 Some(1.0)
             } else if i == input.current {
                 if open {
-                    limit_fill
+                    open_fill
                 } else {
                     fraction
                 }
@@ -650,8 +674,10 @@ pub(crate) fn estimate(input: &Input) -> Result<Output, InputError> {
             },
         })
         .collect();
-    let whole = if open {
-        limit_fill
+    let whole = if input.planned && weights_estimated && phases.len() > 1 {
+        None
+    } else if open && !(input.planned && phases.len() > 1) {
+        open_fill
     } else {
         segments
             .iter()
@@ -712,25 +738,65 @@ pub(crate) fn estimate(input: &Input) -> Result<Output, InputError> {
     } else {
         (None, 0)
     };
+    // A planned stage with no total is expected to last as long as its prior.
+    let current_range = current_range.or_else(|| {
+        let prior = phase.prior.filter(|_| input.planned && open)?;
+        let spent = phase_started_at.map_or(0.0, |start| (at - start).max(0.0));
+        Some(Range {
+            lo_ms: (prior.lo_ms.min(prior.mid_ms * 0.85) - spent).max(0.0),
+            mid_ms: (prior.mid_ms - spent).max(0.0),
+            hi_ms: (prior.hi_ms.max(prior.mid_ms * 1.2) - spent).max(0.0),
+        })
+    });
     let estimate_at = if timed.is_empty() || !points_valid || !input.placed {
         at
     } else {
         last_progress.unwrap_or(at)
     };
     let finish = |remaining: f64| at + remaining;
-    let eta = |range: Option<Range>| Eta {
+    let eta = |range: Option<Range>, floor: bool| Eta {
         range,
         at: estimate_at,
         pending: range.is_none(),
-        past_limit_ms: range.and_then(|r| ends_at.map(|end| (finish(r.hi_ms) - end).max(0.0))),
+        past_limit_ms: range
+            .filter(|_| !floor)
+            .and_then(|r| ends_at.map(|end| (finish(r.hi_ms) - end).max(0.0))),
+        floor,
+    };
+    let later = |range: Range, prior: Range| Range {
+        lo_ms: range.lo_ms + prior.lo_ms.min(prior.mid_ms * 0.85),
+        mid_ms: range.mid_ms + prior.mid_ms,
+        hi_ms: range.hi_ms + prior.hi_ms.max(prior.mid_ms * 1.2),
     };
     let mut total_range = current_range;
-    for later in phases.iter().skip(input.current + 1) {
-        total_range = total_range.zip(later.prior).map(|(r, prior)| Range {
-            lo_ms: r.lo_ms + prior.lo_ms.min(prior.mid_ms * 0.85),
-            mid_ms: r.mid_ms + prior.mid_ms,
-            hi_ms: r.hi_ms + prior.hi_ms.max(prior.mid_ms * 1.2),
-        });
+    // A plan's stage with no prior is left out, so what is left is at least the rest.
+    let mut floor = false;
+    if input.planned {
+        // A stage in progress with neither a total nor a prior is unknown too.
+        if current_range.is_none() && open {
+            floor = true;
+            total_range = Some(Range {
+                lo_ms: 0.0,
+                mid_ms: 0.0,
+                hi_ms: 0.0,
+            });
+        }
+        for stage in phases.iter().skip(input.current + 1) {
+            match stage.prior {
+                Some(prior) => total_range = total_range.map(|r| later(r, prior)),
+                None => floor = true,
+            }
+        }
+        // Nothing known at all is no estimate, not "at least 0s".
+        if floor && total_range.is_some_and(|r| r.hi_ms == 0.0) {
+            total_range = None;
+        }
+    } else {
+        for stage in phases.iter().skip(input.current + 1) {
+            total_range = total_range
+                .zip(stage.prior)
+                .map(|(r, prior)| later(r, prior));
+        }
     }
     let machine_cost = |end: f64| match machine {
         Machine::Unpriced => Some(0.0),
@@ -782,8 +848,12 @@ pub(crate) fn estimate(input: &Input) -> Result<Output, InputError> {
     } else {
         None
     };
-    let projected = total_range.and_then(|r| projection(r.mid_ms)).or(api_only);
-    let projected_range = total_range
+    // A floor on the time left is no projection of what the run will cost.
+    let total_range_known = total_range.filter(|_| !floor);
+    let projected = total_range_known
+        .and_then(|r| projection(r.mid_ms))
+        .or(api_only);
+    let projected_range = total_range_known
         .and_then(|r| Some([projection(r.lo_ms)?, projection(r.hi_ms)?]))
         .or(api_only.map(|spend| [spend, spend]));
     let at_limit = ends_at.filter(|_| has_usd).and_then(|end| {
@@ -821,8 +891,19 @@ pub(crate) fn estimate(input: &Input) -> Result<Output, InputError> {
         whole,
         current_phase: input.phases[input.current]
             .total
-            .map(|_| eta(current_range)),
-        estimate: input.phases[input.current].total.map(|_| eta(total_range)),
+            .map(|_| eta(current_range, false)),
+        estimate: if input.planned {
+            match total_range {
+                Some(_) => Some(eta(total_range, floor)),
+                // Pending only while the stage's own pace is still being learned.
+                None => (input.phases[input.current].total.is_some() && current_range.is_none())
+                    .then(|| eta(None, false)),
+            }
+        } else {
+            input.phases[input.current]
+                .total
+                .map(|_| eta(total_range, false))
+        },
         completed_slices,
         stall_ms,
         errors,
@@ -843,6 +924,100 @@ pub(crate) fn estimate(input: &Input) -> Result<Output, InputError> {
             at,
         },
     })
+}
+
+/// One stage of a run with a declared plan, as shown: one the run went through, one to come, or
+/// one it skipped.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Stage {
+    pub name: String,
+    pub of: Option<f64>,
+    pub unit: Option<String>,
+    /// The index in the fold's phases of the occurrence that is this stage, once the run reached it.
+    pub phase: Option<usize>,
+    pub planned: bool,
+    pub skipped: bool,
+    /// How long the parent's run took over the same stage.
+    pub prior_ms: Option<f64>,
+}
+
+/// Lays a run's phase occurrences over its plan, in order. An occurrence is the next planned stage
+/// of its name, and the planned stages it passed over were skipped; one the plan does not name is
+/// unplanned, and the plan grows by it there. A run that finished skipped the stages it never
+/// reached. A stage's prior is how long the parent took over the stage of the same name and count.
+pub(crate) fn stages(
+    plan: &[orx_signals::Stage],
+    signals: Option<&orx_signals::Snapshot>,
+    finished: bool,
+    parent: Option<(&orx_signals::Snapshot, bool)>,
+) -> Vec<Stage> {
+    let planned = |stage: &orx_signals::Stage, skipped: bool| Stage {
+        name: stage.phase.clone(),
+        of: stage.of,
+        unit: stage.unit.clone(),
+        phase: None,
+        planned: true,
+        skipped,
+        prior_ms: None,
+    };
+    let mut shown = Vec::new();
+    let mut next = 0;
+    for (index, occurrence) in signals.map_or(&[][..], |s| &s.phases).iter().enumerate() {
+        let found = plan[next..]
+            .iter()
+            .position(|stage| stage.phase == occurrence.name);
+        let stage = found.map(|offset| {
+            shown.extend(plan[next..next + offset].iter().map(|s| planned(s, true)));
+            next += offset + 1;
+            &plan[next - 1]
+        });
+        shown.push(Stage {
+            name: occurrence.name.clone(),
+            of: occurrence.of.or(stage.and_then(|s| s.of)),
+            unit: occurrence
+                .unit
+                .clone()
+                .or_else(|| stage.and_then(|s| s.unit.clone())),
+            phase: Some(index),
+            planned: stage.is_some(),
+            skipped: false,
+            prior_ms: None,
+        });
+    }
+    shown.extend(plan[next..].iter().map(|s| planned(s, finished)));
+
+    let Some((parent, done)) = parent else {
+        return shown;
+    };
+    let last = parent.phases.len().checked_sub(1);
+    let took: Vec<(&str, Option<f64>)> = parent
+        .phases
+        .iter()
+        .enumerate()
+        .map(|(index, phase)| {
+            // The last stage of a run that finished ended with its log.
+            let end = phase.ended_at.or(parent
+                .timing
+                .last_log_at
+                .filter(|_| done && Some(index) == last));
+            let took = phase
+                .started_at
+                .zip(end)
+                .map(|(start, end)| (end - start) as f64);
+            (phase.name.as_str(), took.filter(|ms| *ms >= 0.0))
+        })
+        .collect();
+    let mut counted: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for stage in &mut shown {
+        let count = counted.entry(stage.name.clone()).or_default();
+        stage.prior_ms = took
+            .iter()
+            .filter(|(name, _)| *name == stage.name)
+            .nth(*count)
+            .and_then(|(_, took)| *took);
+        *count += 1;
+    }
+    shown
 }
 
 /// What the laptop knows of a run besides its signals, on the laptop's clock.
@@ -866,6 +1041,7 @@ pub(crate) struct Run {
 pub(crate) fn with_signals(
     run: Run,
     signals: &orx_signals::Snapshot,
+    plan: &[Stage],
     clock: Option<(f64, f64)>,
     now: f64,
 ) -> Input {
@@ -914,8 +1090,36 @@ pub(crate) fn with_signals(
         gpu_count: run.gpu_count,
         spend: run.spend,
         spend_per_hour: run.spend_per_hour,
+        planned: false,
+    };
+    // Stages to come and skipped ones have no reports; skipped ones take no time.
+    let shown: Vec<&Stage> = plan.iter().filter(|stage| !stage.skipped).collect();
+    let planned = |input: &mut Input| {
+        input.phases = shown
+            .iter()
+            .map(|stage| Phase {
+                name: stage.name.clone(),
+                total: stage.of,
+                prior: stage.prior_ms.map(|ms| Range {
+                    lo_ms: ms,
+                    mid_ms: ms,
+                    hi_ms: ms,
+                }),
+                spend: None,
+            })
+            .collect();
+        input.current = shown
+            .iter()
+            .position(|stage| {
+                stage.phase.is_some() && stage.phase == signals.phases.len().checked_sub(1)
+            })
+            .unwrap_or(0);
+        input.planned = true;
     };
     let Some(phase) = signals.phases.last() else {
+        if !shown.is_empty() {
+            planned(&mut input);
+        }
         return input;
     };
 
@@ -958,6 +1162,10 @@ pub(crate) fn with_signals(
             .is_some_and(|(of, done)| done >= of);
     if signals.several_bars() || full {
         input.phases[0].name = phase.name.clone();
+        return input;
+    }
+    if !shown.is_empty() {
+        planned(&mut input);
         return input;
     }
     input.phases = signals
@@ -1020,6 +1228,7 @@ mod tests {
             gpu_count: Some(2.0),
             spend: Spend::NeverReported,
             spend_per_hour: None,
+            planned: false,
         }
     }
 
@@ -2036,8 +2245,8 @@ mod retained_timing {
                     ..run(started)
                 };
                 let clock = Some((*at as f64, *at as f64));
-                let kept = estimate(&with_signals(run.clone(), &signals, clock, now)).unwrap();
-                let whole = estimate(&with_signals(run, &every, clock, now)).unwrap();
+                let kept = estimate(&with_signals(run.clone(), &signals, &[], clock, now)).unwrap();
+                let whole = estimate(&with_signals(run, &every, &[], clock, now)).unwrap();
                 assert_eq!(
                     format!("{kept:?}"),
                     format!("{whole:?}"),
@@ -2115,7 +2324,7 @@ mod retained_timing {
         .unwrap()
         .unwrap();
         let clock = Some((read as f64, read as f64));
-        let input = with_signals(run(started as f64), &signals, clock, read as f64);
+        let input = with_signals(run(started as f64), &signals, &[], clock, read as f64);
         assert_eq!(input.phase_started_at, Some(started as f64));
         assert!(input.placed);
         let last = input.points.last().unwrap();
@@ -2152,6 +2361,7 @@ mod retained_timing {
                         let out = estimate(&with_signals(
                             run(started as f64),
                             &signals,
+                            &[],
                             clock,
                             now as f64,
                         ))
@@ -2210,6 +2420,7 @@ mod retained_timing {
                 let out = estimate(&with_signals(
                     run.clone(),
                     &signals,
+                    &[],
                     clock,
                     received + later,
                 ))
@@ -2251,7 +2462,7 @@ mod retained_timing {
                 .unwrap();
         }
         let at = |signals: &orx_signals::Snapshot, now: f64| {
-            let input = with_signals(run(0.0), signals, Some((now, now)), now);
+            let input = with_signals(run(0.0), signals, &[], Some((now, now)), now);
             input.points.iter().map(|p| p.at).collect::<Vec<_>>()
         };
         let mut signals = orx_signals::Snapshot::new("r1", "1-1", "g1");
@@ -2271,7 +2482,13 @@ mod retained_timing {
         );
         signals.reached_end(399_000);
         assert_eq!(at(&signals, 400_000.0), [200_000.0, 210_000.0, 211_000.0]);
-        let input = with_signals(run(0.0), &signals, Some((400_000.0, 400_000.0)), 400_000.0);
+        let input = with_signals(
+            run(0.0),
+            &signals,
+            &[],
+            Some((400_000.0, 400_000.0)),
+            400_000.0,
+        );
         assert_eq!(input.phase_started_at, Some(1_000.0));
 
         feed(&mut signals, r#"{"step":2,"t":130}"#, 450_000);
@@ -2294,7 +2511,13 @@ mod retained_timing {
         );
         feed(&mut signals, r#"{"step":1,"t":510}"#, 610_000);
         signals.reached_end(610_000);
-        let input = with_signals(run(0.0), &signals, Some((610_000.0, 610_000.0)), 610_000.0);
+        let input = with_signals(
+            run(0.0),
+            &signals,
+            &[],
+            Some((610_000.0, 610_000.0)),
+            610_000.0,
+        );
         assert_eq!(input.phase_started_at, Some(600_000.0));
         assert_eq!(
             input.phases[1].total,
@@ -2317,7 +2540,7 @@ mod retained_timing {
             .feed(metrics.as_bytes(), false, 9_000, true)
             .unwrap();
         signals.reached_end(9_000);
-        let input = with_signals(run(0.0), &signals, Some((9_000.0, 9_000.0)), 12_000.0);
+        let input = with_signals(run(0.0), &signals, &[], Some((9_000.0, 9_000.0)), 12_000.0);
         assert_eq!(input.points.last().unwrap().at, 9_000.0);
         let out = estimate(&input).unwrap();
         assert!(out.errors.is_empty(), "{:?}", out.errors);
@@ -2336,7 +2559,7 @@ mod retained_timing {
             signals.feed(line.as_bytes(), false, 1_000, false).unwrap();
         }
         let now = 1_794_000_000_000.0;
-        let input = with_signals(run(now - 600_000.0), &signals, Some((now, now)), now);
+        let input = with_signals(run(now - 600_000.0), &signals, &[], Some((now, now)), now);
         assert!(!input.placed);
         let eta = estimate(&input).unwrap().current_phase.unwrap();
         assert_eq!(eta.at, now);
@@ -2351,10 +2574,10 @@ mod retained_timing {
         signals
             .feed(b"::orx:: {\"step\":1,\"of\":4}\n", false, 50_000, true)
             .unwrap();
-        let live = with_signals(run(0.0), &signals, None, 80_000.0);
+        let live = with_signals(run(0.0), &signals, &[], None, 80_000.0);
         assert_eq!((live.as_of, live.now), (50_000.0, 80_000.0));
         signals.feed(&[], true, 60_000, true).unwrap();
-        let ended = with_signals(run(0.0), &signals, None, 9_000_000.0);
+        let ended = with_signals(run(0.0), &signals, &[], None, 9_000_000.0);
         assert_eq!((ended.as_of, ended.now), (60_000.0, 60_000.0));
     }
 
@@ -2370,12 +2593,12 @@ mod retained_timing {
             signals.feed(bar(n).as_bytes(), false, 3_000, true).unwrap();
         }
         let clock = Some((3_000.0, 3_000.0));
-        let single = estimate(&with_signals(run.clone(), &signals, clock, 10_000.0)).unwrap();
+        let single = estimate(&with_signals(run.clone(), &signals, &[], clock, 10_000.0)).unwrap();
         assert_eq!(single.whole, Some(0.75));
         for n in [4, 1, 2] {
             signals.feed(bar(n).as_bytes(), false, 3_000, true).unwrap();
         }
-        let several = estimate(&with_signals(run, &signals, clock, 10_000.0)).unwrap();
+        let several = estimate(&with_signals(run, &signals, &[], clock, 10_000.0)).unwrap();
         assert_eq!(several.whole, Some(0.25), "fills against the time limit");
     }
 

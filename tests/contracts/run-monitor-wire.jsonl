@@ -1,3 +1,4 @@
+::orx:: {"plan":[{"phase":"train","of":10,"unit":"steps"},{"phase":"eval","of":2,"unit":"tasks","future":"ignored"},{"phase":"train"}]}
 ::orx:: {"phase":"train","step":0,"of":10,"unit":"steps","t":0,"m":{"step":999,"loss":3,"note":"NaN inside a string"}}
 ::orx:: {"step":1,"t":1,"m":{"loss":NaN,"positive":Infinity,"negative":-Infinity}}
 ::orx:: {"step":2,"t":2,"m":{"loss":"waiting"}}
