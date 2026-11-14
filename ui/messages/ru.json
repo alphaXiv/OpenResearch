@@ -1965,6 +1965,7 @@
   "run_banner_label": "Запуски в этом чате",
   "run_stop": "Остановить запуск",
   "run_dismiss": "Скрыть",
+  "run_dismiss_all": "Закрыть все",
   "run_show_more": "Показать больше",
   "run_show_less": "Свернуть",
   "run_show_each": "Показать каждый запуск",

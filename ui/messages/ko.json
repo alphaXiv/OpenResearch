@@ -1965,6 +1965,7 @@
   "run_banner_label": "이 채팅의 실행",
   "run_stop": "실행 중지",
   "run_dismiss": "닫기",
+  "run_dismiss_all": "모두 닫기",
   "run_show_more": "더 보기",
   "run_show_less": "간략히 보기",
   "run_show_each": "각 실행 보기",

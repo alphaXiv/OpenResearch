@@ -1,9 +1,12 @@
-import { ChevronDown, ChevronUp } from "lucide-react";
+import { useMutate } from "@clo/react-mutation";
+import { ChevronDown, ChevronUp, X } from "lucide-react";
 import { Fragment } from "react";
 import { autoDir } from "../../i18n";
 import { m } from "../../paraglide/messages.js";
+import { mutDismissShownRun } from "../../queries/projects";
 import { TONE_INK, type RunModel } from "../../runMonitor/model";
 import type { SummaryPart } from "../../runMonitor/summary";
+import { useWorkspace } from "../../workspace";
 import { IconButton, Tooltip } from "../ui";
 import { cn } from "../ui/cn";
 import { Mark } from "./Mark";
@@ -19,7 +22,11 @@ export function RunSummary({ models, context, parts, firstDone, open, onToggle }
   open: boolean;
   onToggle: () => void;
 }) {
+  const workspace = useWorkspace();
+  const dismiss = useMutate(mutDismissShownRun);
   const toggle = open ? m.run_show_less() : m.run_show_each();
+  // Runs launched together stay one summary until each is answered, or until it is dismissed whole.
+  const dismissable = models.every((model) => model.canDismiss);
   return (
     <div className="relative">
       <div className="flex min-h-9 min-w-0 items-center gap-x-2 py-1 ps-3 pe-1.5 @max-[26rem]:flex-wrap">
@@ -41,6 +48,15 @@ export function RunSummary({ models, context, parts, firstDone, open, onToggle }
           ))}
         </button>
         {firstDone && <span className="shrink-0 whitespace-nowrap tabular-nums text-ink-subtext @max-[30rem]:hidden">{firstDone}</span>}
+        {dismissable && (
+          <Tooltip interactive content={m.run_dismiss_all()}>
+            <IconButton size="small" aria-label={m.run_dismiss_all()} onClick={() => {
+              for (const model of models) dismiss.run(workspace, model.sessionId, model.run.id);
+            }}>
+              <X size={14} />
+            </IconButton>
+          </Tooltip>
+        )}
         <Tooltip interactive content={toggle}>
           <IconButton size="small" aria-label={toggle} aria-expanded={open} data-run-toggle="*" onClick={onToggle}>
             {open ? <ChevronDown size={14} /> : <ChevronUp size={14} />}

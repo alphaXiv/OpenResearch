@@ -1965,6 +1965,7 @@
   "run_banner_label": "Runs in this chat",
   "run_stop": "Stop the run",
   "run_dismiss": "Dismiss",
+  "run_dismiss_all": "Dismiss all",
   "run_show_more": "Show more",
   "run_show_less": "Show less",
   "run_show_each": "Show each run",

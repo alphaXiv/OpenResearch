@@ -1965,6 +1965,7 @@
   "run_banner_label": "Bu sohbetteki çalıştırmalar",
   "run_stop": "Çalıştırmayı durdur",
   "run_dismiss": "Kapat",
+  "run_dismiss_all": "Tümünü kapat",
   "run_show_more": "Daha fazla göster",
   "run_show_less": "Daha az göster",
   "run_show_each": "Her çalıştırmayı göster",

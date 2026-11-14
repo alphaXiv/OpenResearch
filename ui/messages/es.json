@@ -1965,6 +1965,7 @@
   "run_banner_label": "Ejecuciones de este chat",
   "run_stop": "Detener la ejecución",
   "run_dismiss": "Cerrar",
+  "run_dismiss_all": "Cerrar todas",
   "run_show_more": "Mostrar más",
   "run_show_less": "Mostrar menos",
   "run_show_each": "Mostrar cada ejecución",

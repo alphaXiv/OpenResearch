@@ -1965,6 +1965,7 @@
   "run_banner_label": "عمليات التشغيل في هذه المحادثة",
   "run_stop": "إيقاف التشغيل",
   "run_dismiss": "تجاهل",
+  "run_dismiss_all": "تجاهل الكل",
   "run_show_more": "عرض المزيد",
   "run_show_less": "عرض أقل",
   "run_show_each": "عرض كل عملية تشغيل",

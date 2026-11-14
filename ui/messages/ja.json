@@ -1965,6 +1965,7 @@
   "run_banner_label": "このチャットの実行",
   "run_stop": "実行を停止",
   "run_dismiss": "閉じる",
+  "run_dismiss_all": "すべて閉じる",
   "run_show_more": "もっと表示",
   "run_show_less": "表示を減らす",
   "run_show_each": "各実行を表示",

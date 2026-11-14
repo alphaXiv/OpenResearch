@@ -1589,6 +1589,7 @@ impl Store {
         schema.execute_batch(&format!(
             "CREATE INDEX IF NOT EXISTS idx_runs_unsettled ON runs(chat_session_id, id) WHERE {UNSETTLED_RUN};
              CREATE INDEX IF NOT EXISTS idx_runs_experiment ON runs(experiment_id, created_at);
+             CREATE INDEX IF NOT EXISTS idx_runs_chat ON runs(chat_session_id, created_at);
              CREATE INDEX IF NOT EXISTS idx_run_notices_terminal ON run_notices(chat_session_id, delivered_at) WHERE kind = 'terminal' AND delivered_at IS NOT NULL;
              CREATE INDEX IF NOT EXISTS idx_chat_turns_completed ON chat_turns(session_id, updated_at) WHERE state = 'completed';"
         ))?;
@@ -7048,6 +7049,19 @@ fn shown_runs_sql() -> String {
                                    JOIN chat_turns recovery ON recovery.id = t.recovered_by_turn_id
                                    WHERE t.session_id = n.chat AND t.client_turn_id = n.client_turn_id)
                              END)
+         ), shown(chat, run) AS (
+             SELECT a.chat, r.id FROM candidates a
+             JOIN runs r ON r.id = a.run
+             WHERE {UNSETTLED_RUN} OR {kept_in_a}
+         ), together(chat, run) AS (
+             SELECT chat, run FROM shown
+             UNION
+             SELECT s.chat, r.id FROM shown s
+             JOIN runs o ON o.id = s.run
+             JOIN runs r ON r.chat_session_id = s.chat AND r.created_at >= {launched_o}
+                         AND r.id != o.id
+             WHERE {kept_in_s}
+               AND {launched_r} = {launched_o}
          )
          SELECT a.chat, COALESCE(e.title, e.slug), COALESCE(e.slug, r.experiment_id),
                 (SELECT COUNT(*) FROM runs o WHERE o.experiment_id = r.experiment_id
@@ -7057,22 +7071,48 @@ fn shown_runs_sql() -> String {
                 r.created_at, r.updated_at, r.ended_at, r.exit_code, r.commit_sha,
                 CASE WHEN r.status = 'lost' THEN r.result_markdown END,
                 r.cancel_requested, r.chat_session_id, r.cancel_reason
-         FROM candidates a
+         FROM together a
          JOIN runs r ON r.id = a.run
          LEFT JOIN local_experiments e ON e.id = r.experiment_id
-         WHERE {UNSETTLED_RUN}
-            OR ((r.chat_session_id = a.chat
-                 OR EXISTS (SELECT 1 FROM run_subscriptions s
-                            WHERE s.run_id = r.id AND s.chat_session_id = a.chat))
-                AND NOT EXISTS (SELECT 1 FROM run_dismissals d
-                                WHERE d.run_id = r.id AND d.chat_session_id = a.chat)
-                AND NOT EXISTS (SELECT 1 FROM runs o
-                                WHERE o.experiment_id = r.experiment_id
-                                  AND (o.created_at, o.id) > (r.created_at, r.id)
-                                  AND (o.chat_session_id = a.chat
-                                       OR EXISTS (SELECT 1 FROM run_subscriptions s
-                                                  WHERE s.run_id = o.id AND s.chat_session_id = a.chat))))
-         ORDER BY a.chat, r.id"
+         ORDER BY a.chat, r.id",
+        kept_in_a = kept("r", "a.chat"),
+        kept_in_s = kept("r", "s.chat"),
+        launched_r = launched_in("s.chat", "r"),
+        launched_o = launched_in("s.chat", "o"),
+    )
+}
+
+/// Whether `run` is in `chat`: launched there or followed from it.
+fn followed(run: &str, chat: &str) -> String {
+    format!(
+        "({run}.chat_session_id = {chat}
+          OR EXISTS (SELECT 1 FROM run_subscriptions sub
+                     WHERE sub.run_id = {run}.id AND sub.chat_session_id = {chat}))"
+    )
+}
+
+/// Whether an ended `run` stays shown in `chat`: it is in the chat, not dismissed there, and no
+/// newer run of its experiment in the chat superseded it.
+fn kept(run: &str, chat: &str) -> String {
+    format!(
+        "({followed}
+          AND NOT EXISTS (SELECT 1 FROM run_dismissals d
+                          WHERE d.run_id = {run}.id AND d.chat_session_id = {chat})
+          AND NOT EXISTS (SELECT 1 FROM runs newer
+                          WHERE newer.experiment_id = {run}.experiment_id
+                            AND (newer.created_at, newer.id) > ({run}.created_at, {run}.id)
+                            AND {newer_followed}))",
+        followed = followed(run, chat),
+        newer_followed = followed("newer", chat),
+    )
+}
+
+/// The chat turn `run` was launched in: the chat's last turn to start before it. Null for a run
+/// launched outside any turn of the chat, which is launched with no other.
+fn launched_in(chat: &str, run: &str) -> String {
+    format!(
+        "(SELECT MAX(t.created_at) FROM chat_turns t
+          WHERE t.session_id = {chat} AND t.created_at <= {run}.created_at)"
     )
 }
 
@@ -11009,6 +11049,66 @@ mod tests {
     }
 
     #[test]
+    fn runs_launched_in_one_turn_stay_shown_together_until_each_is_answered() {
+        let dir = std::env::temp_dir().join(format!("orx-store-shown-{}", uuid::Uuid::new_v4()));
+        let mut store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat_1"))
+            .unwrap();
+        chat_turn(&store, "chat_1", "launch", "completed", 10, 20);
+        for (id, at) in [("lr_a", 11), ("lr_b", 12), ("lr_c", 13)] {
+            let mut run = run_fixture(id, "running", Some("chat_1"));
+            run.experiment_id = format!("exp_{id}");
+            run.created_at = at;
+            store.upsert_run(&run).unwrap();
+        }
+        fn answer(store: &Store, id: &str, turn: &str, at: i64) {
+            let mut run = store.get_run(id).unwrap().unwrap();
+            run.status = "done".into();
+            run.ended_at = Some(at);
+            store.upsert_run(&run).unwrap();
+            store
+                .insert_run_notice(id, "chat_1", TERMINAL, TERMINAL, "finished", at)
+                .unwrap();
+            store
+                .conn
+                .execute(
+                    "UPDATE run_notices SET delivered_at = ?2, client_turn_id = ?3 WHERE run_id = ?1",
+                    params![id, at, format!("chat_1:{turn}")],
+                )
+                .unwrap();
+            chat_turn(store, "chat_1", turn, "completed", at, at + 5);
+        }
+
+        answer(&store, "lr_a", "result_a", 30);
+        assert_eq!(
+            shown_ids(&store, "chat_1"),
+            ["lr_a", "lr_b", "lr_c"],
+            "an answered run stays beside the runs launched with it"
+        );
+        let mut later = run_fixture("later", "running", Some("chat_1"));
+        later.experiment_id = "exp_later".into();
+        later.created_at = 31;
+        store.upsert_run(&later).unwrap();
+        answer(&store, "lr_b", "result_b", 40);
+        assert_eq!(
+            shown_ids(&store, "chat_1"),
+            ["later", "lr_a", "lr_b", "lr_c"]
+        );
+        store.dismiss_chat_run("chat_1", "lr_a").unwrap();
+        assert_eq!(shown_ids(&store, "chat_1"), ["later", "lr_b", "lr_c"]);
+
+        answer(&store, "lr_c", "result_c", 50);
+        assert_eq!(
+            shown_ids(&store, "chat_1"),
+            ["later"],
+            "once every result is answered they go, and a run launched later keeps no one"
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn shown_runs_supersede_per_chat_and_only_ended_runs() {
         let dir = std::env::temp_dir().join(format!("orx-store-shown-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
@@ -11292,8 +11392,10 @@ mod tests {
             );
         }
         assert_eq!(stmt.get_status(rusqlite::StatementStatus::AutoIndex), 0);
+        // The chats, and the shown runs once more to find the runs launched beside each.
         assert!(
-            stmt.get_status(rusqlite::StatementStatus::FullscanStep) <= CHATS as i32,
+            stmt.get_status(rusqlite::StatementStatus::FullscanStep)
+                <= (CHATS + shown.len()) as i32,
             "walked {} rows of a table",
             stmt.get_status(rusqlite::StatementStatus::FullscanStep)
         );

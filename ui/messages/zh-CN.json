@@ -1965,6 +1965,7 @@
   "run_banner_label": "此对话中的运行",
   "run_stop": "停止运行",
   "run_dismiss": "关闭",
+  "run_dismiss_all": "全部关闭",
   "run_show_more": "展开",
   "run_show_less": "收起",
   "run_show_each": "显示每个运行",

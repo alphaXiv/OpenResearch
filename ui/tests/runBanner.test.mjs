@@ -234,6 +234,22 @@ test("a summary says who needs attention first, and a run waiting for a choice o
   assert.ok(rows()[1].querySelector(`button[aria-label="${m.run_show_less()}"]`), "and so did the waiting run's strip");
 });
 
+test("a finished sweep stays one summary, which is dismissed whole once none of it runs", async () => {
+  const requests = backend({ monitors: {} });
+  const ended = (id, depth) => ({ ...sweep(id, depth), run: run(id, { status: "done", endedAt: now, monitor: summary({ tone: "done" }) }) });
+  const workspace = createWorkspace("test");
+  await several([ended("r1", 4), sweep("r2", 6)], { workspace });
+  await settle();
+  assert.equal(document.querySelector(`button[aria-label="${m.run_dismiss_all()}"]`), null, "not while one still runs");
+  await act(async () => workspace.queryClient.setQueryData(workspace.queries.listChatShownRunsQuery().queryKey, { source: "shown", runs: [ended("r1", 4), ended("r2", 6)] }));
+  await settle();
+  await click(button(m.run_dismiss_all()));
+  assert.deepEqual(requests.filter((r) => r.request.endsWith("/dismiss")).map((r) => r.request).sort(), [
+    "POST /api/chat/sessions/s/shown-runs/r1/dismiss",
+    "POST /api/chat/sessions/s/shown-runs/r2/dismiss",
+  ]);
+});
+
 test("a summary of runs with no shared words names each by its whole title and opens it", async () => {
   backend();
   const opens = [];
