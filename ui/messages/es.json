@@ -1991,6 +1991,7 @@
   "run_eta_at_least_left": "faltan al menos {duration}",
   "run_eta_floor": "Calculado a partir del progreso en el registro; puede seguir más trabajo",
   "run_eta_untimed": "Ninguna ejecución anterior midió {stages}",
+  "run_eta_no_estimate": "Sin estimación",
   "run_stage_skipped": "omitida",
   "run_stage_unplanned": "no planificada",
   "run_eta_to_limit": "{duration} hasta el límite",

@@ -224,8 +224,8 @@ test("a detected counter's time left is a floor for the run: no range and no fin
   const button = container.querySelector("button[aria-expanded]");
   assert.equal(bare(container.querySelector(`[id="${button.getAttribute("aria-describedby")}"]`).textContent), bare(m.run_eta_floor()));
   const strip = bare((await banner("detected")).container.textContent);
-  // The banner draws the run as of now, so its time left has counted down since the server's estimate.
-  assert.match(strip, new RegExp(`${bare(m.run_eta_at_least_left({ duration: "\\d+s" }))} · ${bare(m.run_eta_floor())}`), strip);
+  // The banner draws the run as of now, long after the server's estimate: the floor has run out.
+  assert.ok(strip.includes(`${bare(m.run_eta_no_estimate())} · ${bare(m.run_eta_floor())}`), strip);
   for (const text of [strip, expect.cli]) {
     assert.ok(!text.includes(bare(m.run_eta_done_about({ clock: "" })).trim()) && !/\d+s to \d/.test(text), text);
   }
@@ -391,6 +391,19 @@ test("a run compared with its parent says by how much, as `orx exp status` says 
     assert.equal(headline.label, "Loss", `full: ${full}`);
     assert.equal(headline.delta.good, true, `full: ${full}`);
     assert.ok(expect.said.includes(`${bare(headline.delta.magnitude)} better than parent`), `full: ${full}`);
+  }
+});
+
+test("a floor counted down to nothing reads as no estimate, naming the stages no earlier run timed", () => {
+  const { now, monitor } = states.planned;
+  for (const full of [true, false]) {
+    const later = runModel({
+      item: { sessionId: "s", run: runOf("planned"), experimentName: null, experimentSlug: "baseline" },
+      monitor: full ? monitor : null, shown: true, agent: "Claude", now: now + monitor.estimate.loMs + 500, nextRetryMs: null,
+    });
+    assert.equal(bare(later.eta), bare(m.run_eta_no_estimate()), `full: ${full}`);
+    assert.equal(bare(later.etaDetail), bare(m.run_eta_untimed({ stages: "eval" })), `full: ${full}`);
+    assert.equal(later.left, null, `full: ${full}`);
   }
 });
 

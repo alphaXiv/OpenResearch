@@ -1991,6 +1991,7 @@
   "run_eta_at_least_left": "دست‌کم {duration} مانده",
   "run_eta_floor": "از پیشرفت در لاگ حساب شده؛ ممکن است کار بیشتری پس از آن بیاید",
   "run_eta_untimed": "هیچ اجرای قبلی زمان {stages} را نسنجیده است",
+  "run_eta_no_estimate": "برآوردی نیست",
   "run_stage_skipped": "رد شد",
   "run_stage_unplanned": "برنامه‌ریزی‌نشده",
   "run_eta_to_limit": "{duration} تا حد مجاز",

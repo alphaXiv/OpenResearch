@@ -2113,13 +2113,26 @@ fn eta_text(life: &Lifecycle, snapshot: Option<&Snapshot>, facts: &StatusFacts) 
             let left = |key: &str| short((estimate[key].as_i64().unwrap_or(0) - gone).max(0));
             let (lo, hi) = (left("loMs"), left("hiMs"));
             let floor = estimate["floor"] == true;
-            // A range whose ends read alike says nothing the time left does not.
             let untimed: Vec<&str> = estimate["untimed"]
                 .as_array()
                 .into_iter()
                 .flatten()
                 .filter_map(Value::as_str)
                 .collect();
+            // A floor counted down to nothing promises nothing: what is left is unknown.
+            if floor && lo == "0s" {
+                return Some(with_cost(
+                    if untimed.is_empty() {
+                        "No estimate (timed from progress in the log; more work may follow it)"
+                            .to_owned()
+                    } else {
+                        format!("No estimate (no earlier run timed {})", untimed.join(", "))
+                    },
+                    facts.cost,
+                    false,
+                ));
+            }
+            // A range whose ends read alike says nothing the time left does not.
             let mut detail: Vec<String> = if !untimed.is_empty() {
                 vec![format!("no earlier run timed {}", untimed.join(", "))]
             } else if floor {
@@ -4773,8 +4786,8 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("\neta      At least 0s left (no earlier run timed eval, sft)"),
-            "{text}"
+            text.contains("\neta      No estimate (no earlier run timed eval, sft)"),
+            "a floor under a second is no promise: {text}"
         );
 
         // Its last step done, how long eval and sft take is all that is left, and unknown.
@@ -4785,10 +4798,38 @@ mod tests {
         ];
         let run = staged(&f, "r1", "exp", "running", &pipeline, 100);
         let (monitor, _) = monitor_at(&f, &run, T0 + 100_500);
-        assert_eq!(monitor["estimate"], Value::Null, "{}", monitor["estimate"]);
+        assert_eq!(
+            (
+                &monitor["estimate"]["hiMs"],
+                &monitor["estimate"]["untimed"]
+            ),
+            (&json!(0), &json!(["eval", "sft"])),
+            "{}",
+            monitor["estimate"]
+        );
         let text = monitor["statusText"].as_str().unwrap();
         assert!(
-            text.contains("\neta      No estimate (how much is left is unknown)"),
+            text.contains("\neta      No estimate (no earlier run timed eval, sft)"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_counter_whose_time_left_ran_out_promises_nothing() {
+        let f = Fixture::new("orx-monitor-floor-out");
+        let run = f.run("running", local());
+        f.collect(&folded(
+            &(1..=3)
+                .map(|n| (T0 + 6_000 * n, format!("chunk {n}/10 done, {}s", 124 * n)))
+                .collect::<Vec<_>>(),
+        ));
+        f.collected(T0 + 60_000);
+        let (monitor, _) = monitor_at(&f, &run, T0 + 60_000);
+        let text = monitor["statusText"].as_str().unwrap();
+        assert!(
+            text.contains(
+                "\neta      No estimate (timed from progress in the log; more work may follow it)"
+            ),
             "{text}"
         );
     }

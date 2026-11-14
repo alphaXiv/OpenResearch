@@ -1991,6 +1991,7 @@
   "run_eta_at_least_left": "残り {duration} 以上",
   "run_eta_floor": "ログの進捗から計算しています。その後にも処理が続く場合があります",
   "run_eta_untimed": "{stages} の所要時間を測った過去の実行はありません",
+  "run_eta_no_estimate": "見積もりなし",
   "run_stage_skipped": "スキップ",
   "run_stage_unplanned": "計画外",
   "run_eta_to_limit": "上限まで {duration}",

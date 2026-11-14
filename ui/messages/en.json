@@ -1991,6 +1991,7 @@
   "run_eta_at_least_left": "At least {duration} left",
   "run_eta_floor": "Timed from progress in the log; more work may follow it",
   "run_eta_untimed": "No earlier run timed {stages}",
+  "run_eta_no_estimate": "No estimate",
   "run_stage_skipped": "skipped",
   "run_stage_unplanned": "unplanned",
   "run_eta_to_limit": "{duration} to the limit",

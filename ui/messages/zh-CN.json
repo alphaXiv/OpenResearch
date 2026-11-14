@@ -1991,6 +1991,7 @@
   "run_eta_at_least_left": "至少剩余 {duration}",
   "run_eta_floor": "根据日志中的进度计算；之后可能还有其他工作",
   "run_eta_untimed": "此前没有运行测过 {stages} 的用时",
+  "run_eta_no_estimate": "无估算",
   "run_stage_skipped": "已跳过",
   "run_stage_unplanned": "计划外",
   "run_eta_to_limit": "距上限 {duration}",

@@ -787,10 +787,6 @@ pub(crate) fn estimate(input: &Input) -> Result<Output, InputError> {
                 None => floor = true,
             }
         }
-        // Nothing known at all is no estimate, not "at least 0s".
-        if floor && total_range.is_some_and(|r| r.hi_ms == 0.0) {
-            total_range = None;
-        }
     } else {
         for stage in phases.iter().skip(input.current + 1) {
             total_range = total_range

@@ -75,12 +75,16 @@ export function estimateWords(estimate: Estimate, now: number, limit: { endsAt: 
   const mid = remaining(estimate.midMs);
   // A floor is true only at the estimate's low end: a bar may finish fast with nothing after it.
   const left = estimate.floor ? { ms: remaining(estimate.loMs ?? estimate.midMs), floor: true } : { ms: mid, floor: false };
+  const stalled = stallMs > 0 ? m.run_eta_stalled({ duration: durationText(stallMs) }) : null;
+  const untimed = estimate.untimed?.length ? m.run_eta_untimed({ stages: new Intl.ListFormat(getLocale()).format(estimate.untimed.map(autoDir)) }) : null;
+  // A floor counted down to nothing promises nothing: what is left is unknown.
+  if (left.floor && left.ms < 1000) return { eta: m.run_eta_no_estimate(), detail: stalled ?? untimed ?? m.run_eta_floor(), strong: false, left: null };
   const eta = left.floor ? m.run_eta_at_least_left({ duration: durationText(left.ms) }) : m.run_eta_left({ duration: durationText(mid) });
-  if (stallMs > 0) return { eta, detail: m.run_eta_stalled({ duration: durationText(stallMs) }), strong: true, left };
+  if (stalled) return { eta, detail: stalled, strong: true, left };
   if (estimate.pastLimitMs !== null && limit) {
     return { eta, detail: m.run_eta_past_limit({ duration: durationText(estimate.pastLimitMs), limit: durationText(limit.ms) }), strong: true, left };
   }
-  if (estimate.untimed?.length) return { eta, detail: m.run_eta_untimed({ stages: new Intl.ListFormat(getLocale()).format(estimate.untimed.map(autoDir)) }), strong: true, left };
+  if (untimed) return { eta, detail: untimed, strong: true, left };
   if (estimate.floor) return { eta, detail: m.run_eta_floor(), strong: true, left };
   const done = m.run_eta_done_about({ clock: clockText(now + mid) });
   const [lo, hi] = [estimate.loMs, estimate.hiMs].map((ms) => ms === null ? null : durationText(remaining(ms)));
