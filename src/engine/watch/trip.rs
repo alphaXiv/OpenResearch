@@ -23,6 +23,10 @@ const TAIL_LINES: usize = 6;
 /// Comparisons in a row a signal is far worse than the parent's before it is flagged.
 const WORSE_IN_A_ROW: u32 = 3;
 
+/// A signal's comparisons with the parent: the step last compared, and at how many steps in a
+/// row it was far worse.
+pub(super) type Compared = (f64, u32);
+
 /// One condition a run meets now.
 struct Tripped {
     kind: &'static str,
@@ -49,7 +53,7 @@ fn plain(text: &str) -> String {
 /// `covered` names the tripwires and signals a rule the run was launched with already checks: that
 /// rule decides, and the tripwire stays out of its way.
 fn conditions(
-    state: &State,
+    seen: &Seen,
     run: &Now,
     covered: &BTreeSet<(&str, String)>,
     now: i64,
@@ -79,10 +83,7 @@ fn conditions(
         });
     }
     for (name, vs) in run.body["versus"]["step"].as_object().into_iter().flatten() {
-        let held = state
-            .worse
-            .get(&(run.run.id.clone(), name.clone()))
-            .map_or(0, |(_, held)| *held);
+        let held = seen.compared.get(name).map_or(0, |(_, held)| *held);
         let spec = &signals[name];
         if covered.contains(&("parent", name.clone()))
             || held < WORSE_IN_A_ROW
@@ -110,7 +111,7 @@ fn conditions(
             evidence: Evidence::Tail,
         });
     }
-    let scan = state.scans.get(&run.run.id);
+    let scan = seen.scan.as_ref();
     let silent_for = scan.map(|scan| now - scan.grew_at);
     if let Some(stall) = run.body["progress"]["stallMs"]
         .as_i64()
@@ -188,15 +189,15 @@ fn conditions(
 
 /// Counts, for each signal compared with the parent, the comparisons in a row at a new step that
 /// were far worse.
-fn count_worse(state: &mut State, run: &Now) {
+fn count_worse(seen: &mut Seen, run: &Now) {
     let signals = &run.body["view"]["signals"];
     for (name, vs) in run.body["versus"]["step"].as_object().into_iter().flatten() {
         let Some(step) = vs["step"].as_f64() else {
             continue;
         };
-        let (last, held) = state
-            .worse
-            .entry((run.run.id.clone(), name.clone()))
+        let (last, held) = seen
+            .compared
+            .entry(name.clone())
             .or_insert((f64::NEG_INFINITY, 0));
         if step > *last {
             *last = step;
@@ -231,9 +232,11 @@ fn route(store: &Store, run: &StoredRun) -> Result<()> {
 
 /// The run's log's last lines, and its identity.
 async fn tail(run: &str) -> Option<(String, Vec<digest::Line>)> {
-    let (ident, _, _, len) = read_lines(run, None, 0, 1).await.ok()?;
+    let (ident, _, _, len) = bounded(read_lines(run, None, 0, 1)).await.ok()?;
     let from = len.unwrap_or(0).saturating_sub(TAIL);
-    let (ident, mut lines, ..) = read_lines(run, Some(&ident), from, TAIL).await.ok()?;
+    let (ident, mut lines, ..) = bounded(read_lines(run, Some(&ident), from, TAIL))
+        .await
+        .ok()?;
     // A read that starts mid-line starts with the rest of that line.
     if from > 0 && !lines.is_empty() {
         lines.remove(0);
@@ -242,12 +245,12 @@ async fn tail(run: &str) -> Option<(String, Vec<digest::Line>)> {
 }
 
 /// Raises each condition the run meets that it has not raised yet, while it has no open flag.
-pub(super) async fn check(state: &mut State, run: &Now, now: i64) {
+pub(super) async fn check(seen: &mut Seen, run: &Now, now: i64) {
     // What orx cannot see now flags nothing: lost contact says so on the run already.
     if !run.live() || run.body["availability"]["state"] != "live" {
         return;
     }
-    count_worse(state, run);
+    count_worse(seen, run);
     if run.summary["flag"]["state"] == "raised" {
         if let Err(error) = Store::open().and_then(|store| route(&store, &run.run)) {
             eprintln!(
@@ -274,17 +277,13 @@ pub(super) async fn check(state: &mut State, run: &Now, now: i64) {
             _ => None,
         })
         .collect();
-    for tripped in conditions(state, run, &covered, now) {
-        let key = (run.run.id.clone(), tripped.fingerprint.clone());
-        if state.tripped.contains(&key) {
+    for tripped in conditions(seen, run, &covered, now) {
+        if seen.tripped.contains(&tripped.fingerprint) {
             continue;
         }
         let evidence = match &tripped.evidence {
             Evidence::Line(line) => {
-                let ident = state
-                    .scans
-                    .get(&run.run.id)
-                    .and_then(|scan| scan.ident.clone());
+                let ident = seen.scan.as_ref().and_then(|scan| scan.ident.clone());
                 evidence_of(&run.run.id, ident.as_deref(), &[line]).await
             }
             wanted => match tail(&run.run.id).await {
@@ -332,12 +331,12 @@ pub(super) async fn check(state: &mut State, run: &Now, now: i64) {
         match raised {
             // One flag at a time: the next condition waits until this one is settled.
             Ok(Some(Raise::Raised)) => {
-                state.tripped.insert(key);
+                seen.tripped.insert(tripped.fingerprint);
                 return;
             }
             Ok(Some(Raise::Waits)) => return,
             Ok(_) => {
-                state.tripped.insert(key);
+                seen.tripped.insert(tripped.fingerprint);
             }
             Err(error) => eprintln!(
                 "orx up: tripwire {} on run {}: {error:#}",

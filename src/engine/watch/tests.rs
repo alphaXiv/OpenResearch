@@ -779,24 +779,28 @@ async fn a_pass_reads_only_the_log_the_fold_has_read() {
         now.folded = Some(("1-7".into(), offset as u64));
         now
     };
-    let mut state = State::default();
-    scan(&mut state, &folded_to(LOG.len())).await;
-    assert_eq!(state.scans["a"].offset, LOG.len() as u64);
+    let mut seen = Seen::default();
+    let scanned = |seen: &Seen| seen.scan.as_ref().unwrap().offset;
+    scan(&mut seen, &folded_to(LOG.len())).await;
+    assert_eq!(scanned(&seen), LOG.len() as u64);
     store
         .set_watch_count("a", "ERROR", 0, LOG.len() as u64, "1-7")
         .unwrap();
 
     let longer = format!("{LOG}ERROR train: checkpoint write failed\n");
     keep_log(&store, "a", &longer);
-    scan(&mut state, &folded_to(LOG.len())).await;
+    scan(&mut seen, &folded_to(LOG.len())).await;
     assert_eq!(
-        state.scans["a"].offset,
+        scanned(&seen),
         LOG.len() as u64,
         "nothing past where the fold read is read"
     );
-    scan(&mut state, &folded_to(longer.len())).await;
-    assert_eq!(state.scans["a"].offset, longer.len() as u64);
-    assert!(state.scans["a"]
+    scan(&mut seen, &folded_to(longer.len())).await;
+    assert_eq!(scanned(&seen), longer.len() as u64);
+    assert!(seen
+        .scan
+        .as_ref()
+        .unwrap()
         .firsts
         .keys()
         .any(|kind| kind.contains("error")));
@@ -1038,13 +1042,13 @@ async fn a_run_far_worse_than_its_parent_at_the_same_step_is_flagged() {
     let parent = classifier_run(&store, "seed-2", None, "done", "chat");
     epochs(&store, &parent, &HEALTHY);
     let child = classifier_run(&store, "flipped", Some("seed-2"), "running", "chat");
-    let mut state = State::default();
-    for seen in 1..=FLIPPED.len() {
-        epochs(&store, &child, &FLIPPED[..seen]);
+    let mut seen = Seen::default();
+    for reported in 1..=FLIPPED.len() {
+        epochs(&store, &child, &FLIPPED[..reported]);
         let now = Now::read(&store, &child).unwrap();
-        trip::check(&mut state, &now, crate::store::now_ms()).await;
+        trip::check(&mut seen, &now, crate::store::now_ms()).await;
         let flags = super::super::flags::read(&store, &child).unwrap();
-        if seen < 3 {
+        if reported < 3 {
             assert!(
                 flags.is_empty(),
                 "one or two reports flag nothing: {flags:?}"
@@ -1063,10 +1067,11 @@ async fn a_run_far_worse_than_its_parent_at_the_same_step_is_flagged() {
 
     // A sibling that trains as its parent did is never flagged.
     let healthy = classifier_run(&store, "seed-5", Some("seed-2"), "running", "chat");
-    for seen in 1..=HEALTHY.len() {
-        epochs(&store, &healthy, &HEALTHY[..seen]);
+    let mut seen = Seen::default();
+    for reported in 1..=HEALTHY.len() {
+        epochs(&store, &healthy, &HEALTHY[..reported]);
         let now = Now::read(&store, &healthy).unwrap();
-        trip::check(&mut state, &now, crate::store::now_ms()).await;
+        trip::check(&mut seen, &now, crate::store::now_ms()).await;
     }
     assert!(super::super::flags::read(&store, &healthy)
         .unwrap()
@@ -1085,8 +1090,11 @@ async fn a_change_in_real_output_asks_for_a_look_before_the_first_and_after_a_se
     epochs(&store, &parent, &HEALTHY);
     let flipped = classifier_run(&store, "flipped", Some("seed-2"), "running", "chat");
     epochs(&store, &flipped, &FLIPPED[..1]);
-    let mut state = State::default();
-    let why = changes(&mut state, &Now::read(&store, &flipped).unwrap(), 0);
+    let why = changes(
+        &mut Seen::default(),
+        &Now::read(&store, &flipped).unwrap(),
+        0,
+    );
     assert_eq!(
         why,
         vec![(
@@ -1100,8 +1108,9 @@ async fn a_change_in_real_output_asks_for_a_look_before_the_first_and_after_a_se
     let healthy = classifier_run(&store, "seed-5", Some("seed-2"), "running", "chat");
     epochs(&store, &healthy, &HEALTHY[..8]);
     let now = Now::read(&store, &healthy).unwrap();
+    let mut seen = Seen::default();
     assert_eq!(
-        changes(&mut state, &now, 0),
+        changes(&mut seen, &now, 0),
         Vec::new(),
         "a healthy start asks nothing"
     );
@@ -1124,7 +1133,7 @@ async fn a_change_in_real_output_asks_for_a_look_before_the_first_and_after_a_se
     let mut collapsed = HEALTHY[..8].to_vec();
     collapsed.extend(&FLIPPED[..2]);
     epochs(&store, &healthy, &collapsed);
-    let kinds: Vec<String> = changes(&mut state, &Now::read(&store, &healthy).unwrap(), 0)
+    let kinds: Vec<String> = changes(&mut seen, &Now::read(&store, &healthy).unwrap(), 0)
         .into_iter()
         .map(|(check, _)| check)
         .collect();
