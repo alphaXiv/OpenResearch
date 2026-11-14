@@ -135,7 +135,9 @@ for (const [status, shown] of [["connected", null], ["reconnecting", m.remote_ma
     await click(menuItem("research"));
     assert.match(switcher().textContent, /research/);
     if (shown) {
-      assert.match(switcher().textContent, new RegExp(shown));
+      // Offline, the cloud and the name in amber stand in for the word.
+      if (status === "disconnected") assert.doesNotMatch(switcher().textContent, new RegExp(shown));
+      else assert.match(switcher().textContent, new RegExp(shown));
       assert.equal(switcher().getAttribute("aria-label"), m.remote_machine_switcher_status({ machine: autoDir("research"), status: shown }));
     } else {
       assert.equal(switcher().getAttribute("aria-label"), m.remote_machine_switcher({ machine: autoDir("research") }));

@@ -890,6 +890,7 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
             state.init_model.as_deref(),
             None,
             crate::store::TokenUsage::default(),
+            None,
         );
     }
     match kind {
@@ -958,6 +959,7 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                     state.init_model.as_deref(),
                     None,
                     usage,
+                    None,
                 );
             }
             if is_error {

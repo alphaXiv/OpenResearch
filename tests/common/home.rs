@@ -60,8 +60,9 @@ const CLEARED: [&str; 52] = [
 
 /// Points every home `orx` or an agent resolves inside `home`, whatever the
 /// developer's shell exports, and on Unix keeps PATH to the system directories
-/// so `orx up` never finds their agents: a launched `orx` has no `cfg(test)`
-/// guard. Call it before the launcher's own `.env`s, which then win.
+/// so `orx up` never finds their agents, and keeps it off models.dev: a
+/// launched `orx` has no `cfg(test)` guard. Call it before the launcher's own
+/// `.env`s, which then win.
 pub fn isolate_home<'a>(command: &'a mut Command, home: &Path) -> &'a mut Command {
     for var in CLEARED {
         command.env_remove(var);
@@ -69,6 +70,7 @@ pub fn isolate_home<'a>(command: &'a mut Command, home: &Path) -> &'a mut Comman
     #[cfg(unix)]
     command.env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
     command
+        .env("ORX_NO_MODEL_PRICES", "1")
         .env("HOME", home)
         .env("USERPROFILE", home)
         .env("APPDATA", home.join("AppData/Roaming"))

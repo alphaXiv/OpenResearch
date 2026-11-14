@@ -55,6 +55,7 @@ pub(crate) mod compute_settings;
 mod harness_setup;
 mod network;
 mod search;
+mod usage;
 use compute_settings::*;
 
 pub async fn run(args: UpArgs) -> Result<()> {
@@ -924,6 +925,9 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
             get(lit_sources_settings).post(set_lit_sources_settings),
         )
         .route("/api/harnesses", get(list_harnesses))
+        .route("/api/usage", get(usage::usage))
+        .route("/api/usage/refresh", post(usage::refresh))
+        .route("/api/usage/reset", post(usage::reset))
         .route("/api/agents/{key}", axum::routing::patch(edit_agent))
         .route("/api/agent-profiles", post(create_agent_profile))
         .route(
@@ -13053,6 +13057,8 @@ mod tests {
             "/api/settings/data-dir/move",
             "/api/update/apply",
             "/api/ssh/connect",
+            "/api/usage/refresh",
+            "/api/usage/reset",
             "/api/not-a-route",
         ];
         for path in routes {
@@ -13077,6 +13083,22 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn a_reset_names_why_it_cannot_start() {
+        let address = serve(router(test_state(), None, up_remote::Reach::Loopback)).await;
+        let reset = |body: Value| post_to(address, "/api/usage/reset", Some(body));
+
+        let unknown = reset(json!({"profile": "codex-nobody", "attempt": "a"})).await;
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+        let error: Value = unknown.json().await.unwrap();
+        assert!(
+            error["error"].as_str().unwrap().contains("Codex account"),
+            "{error}"
+        );
+        let keyless = reset(json!({"attempt": " "})).await;
+        assert_eq!(keyless.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

@@ -52,6 +52,12 @@ impl Api for HfAccount {
         .map_err(api::launch_error)?;
         Ok(api::handle(intent, vec![job.id]))
     }
+    async fn quote(&self, _run: &WatchedRun, launch: &LaunchSpec) -> Result<Option<Quote>> {
+        let flavor = launch.options["flavor"]
+            .as_str()
+            .ok_or_else(|| anyhow!("The run's launch names no Hugging Face flavor"))?;
+        hf::hardware_price(&hf::endpoint(), flavor).await.map(Some)
+    }
     async fn recover(&self, intent: &RunIntent) -> Recovery {
         let token = match hf::resolve_token() {
             Ok(token) => token,

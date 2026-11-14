@@ -368,7 +368,7 @@ impl ClaudeClient {
     /// Send a control request and await its `control_response`. `Ok(Err(msg))`
     /// is a *child-reported* failure, `Err(..)` a transport failure (child gone
     /// / timeout).
-    async fn control_request(&self, request: Value) -> Result<Result<Value, String>> {
+    pub(crate) async fn control_request(&self, request: Value) -> Result<Result<Value, String>> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let request_id = format!("req_{id}");
         let (tx, rx) = oneshot::channel();

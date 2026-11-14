@@ -25,6 +25,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -48,6 +49,9 @@ use crate::local::claude::{starts_segment, SpawnConfig, SpawnSpec, TurnEvent};
 use crate::local::native_store::{self, NativeStore};
 use crate::local::opencode::ensure_playbook;
 use crate::local::shell_env::installs;
+use crate::local::usage::{
+    remaining_percent, PlanExtraUsage, PlanWindow, Read, Snapshot, Unanswered,
+};
 
 /// Harness-wide effort choices when no model-specific catalog is available.
 const CLAUDE_EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
@@ -380,19 +384,31 @@ fn profile_env(cmd: &mut Command, home: Option<&Path>) {
     }
 }
 
-/// The `list_models` transport — a control request over `--print`
-/// stream-json, the same data its `/model` menu renders. This is the Claude
-/// analogue of codex's `model/list` and opencode's `models --verbose`; a
-/// curated table here shipped effort tiers on Haiku, which the catalog says
-/// supports none.
+/// The `list_models` catalog, the same data Claude's `/model` menu renders.
+/// This is the Claude analogue of codex's `model/list` and opencode's
+/// `models --verbose`; a curated table here shipped effort tiers on Haiku,
+/// which the catalog says supports none.
 ///
-/// One shot: spawn, write the control request, read until its
-/// `control_response` (skipping stream noise), kill the child. Any failure —
-/// spawn, timeout, a CLI too old for the subtype — returns `None` and the
-/// caller reports an unavailable catalog. The raw `response` payload comes
-/// back unparsed: the ultracode probe decides the parse, and detection runs
-/// both children concurrently.
+/// Any failure, a CLI too old for the subtype included, returns `None` and the
+/// caller reports an unavailable catalog. The raw payload comes back unparsed:
+/// the ultracode probe decides the parse, and detection runs both children
+/// concurrently.
 async fn claude_models_response(bin: PathBuf, home: Option<PathBuf>) -> Option<Value> {
+    claude_control(bin, home, json!({ "subtype": "list_models" }))
+        .await
+        .ok()?
+        .ok()
+}
+
+/// One control request on a throwaway `--print` stream-json child: spawn,
+/// write the request, read until its `control_response` (skipping stream
+/// noise), kill the child. The inner `Err` is the response the CLI sent
+/// instead of an answer.
+async fn claude_control(
+    bin: PathBuf,
+    home: Option<PathBuf>,
+    request: Value,
+) -> std::result::Result<std::result::Result<Value, Value>, Unanswered> {
     // Acquire the spawn lane before the deadline — queue time must not spend
     // the child's execution budget.
     let permit = super::detect::detect_spawn_permit().await;
@@ -412,19 +428,24 @@ async fn claude_models_response(bin: PathBuf, home: Option<PathBuf>) -> Option<V
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        let (mut child, _permit) = super::detect::spawn_with_permit(cmd, permit).await.ok()?;
-        let mut stdin = child.stdin.take()?;
-        let mut lines = BufReader::new(child.stdout.take()?).lines();
+        let (mut child, _permit) = super::detect::spawn_with_permit(cmd, permit)
+            .await
+            .map_err(Unanswered::Spawn)?;
+        let mut stdin = child.stdin.take().ok_or(Unanswered::Closed)?;
+        let mut lines = BufReader::new(child.stdout.take().ok_or(Unanswered::Closed)?).lines();
 
         use tokio::io::AsyncWriteExt;
         let req = serde_json::json!({
             "type": "control_request",
-            "request_id": "orx_list_models",
-            "request": { "subtype": "list_models" },
+            "request_id": "orx_control",
+            "request": request,
         });
         let mut line = req.to_string();
         line.push('\n');
-        stdin.write_all(line.as_bytes()).await.ok()?;
+        stdin
+            .write_all(line.as_bytes())
+            .await
+            .map_err(|_| Unanswered::Closed)?;
 
         while let Ok(Some(line)) = lines.next_line().await {
             let Ok(v) = serde_json::from_str::<Value>(&line) else {
@@ -433,19 +454,330 @@ async fn claude_models_response(bin: PathBuf, home: Option<PathBuf>) -> Option<V
             if v.get("type").and_then(Value::as_str) != Some("control_response") {
                 continue;
             }
-            let resp = v.get("response")?;
-            if resp.get("request_id").and_then(Value::as_str) != Some("orx_list_models") {
+            let Some(resp) = v.get("response") else {
+                continue;
+            };
+            if resp.get("request_id").and_then(Value::as_str) != Some("orx_control") {
                 continue;
             }
-            // An `error` subtype has no inner response.
-            return resp.get("response").cloned();
+            return Ok(match resp.get("subtype").and_then(Value::as_str) {
+                Some("success") => Ok(resp.get("response").cloned().unwrap_or(Value::Null)),
+                _ => Err(resp.clone()),
+            });
         }
-        None
+        Err(Unanswered::Closed)
     };
     tokio::time::timeout(Duration::from_secs(15), fut)
         .await
-        .ok()
-        .flatten()
+        .unwrap_or(Err(Unanswered::TimedOut))
+}
+
+/// The account's plan limits from `get_usage`, which Claude Code marks
+/// experimental: a shape this can't read is a failed read, never a guess.
+pub(crate) async fn read_plan(bin: PathBuf, home: Option<PathBuf>) -> Read {
+    let request = json!({ "subtype": "get_usage", "skip_behaviors": true });
+    match claude_control(bin.clone(), home, request).await {
+        Err(unanswered) => Read::Failed(unanswered.message("Claude Code", &bin)),
+        Ok(Ok(usage)) => parse_plan(&usage),
+        Ok(Err(error)) => {
+            let message = error.get("error").and_then(Value::as_str).unwrap_or("");
+            if error.get("error_code").and_then(Value::as_str) == Some("unsupported_request")
+                || message.starts_with("Unsupported control request subtype")
+            {
+                Read::Unsupported
+            } else if message.is_empty() {
+                Read::Failed("Claude Code couldn't read this plan's limits.".into())
+            } else {
+                Read::Failed(format!(
+                    "Claude Code couldn't read this plan's limits: {message}"
+                ))
+            }
+        }
+    }
+}
+
+/// `get_usage`'s answer, as far as the plan needs it.
+#[derive(Deserialize)]
+struct GetUsage {
+    rate_limits_available: bool,
+    subscription_type: Option<String>,
+    rate_limits: Option<RateLimits>,
+}
+
+#[derive(Deserialize)]
+struct RateLimits {
+    five_hour: Option<UsageWindow>,
+    seven_day: Option<UsageWindow>,
+    seven_day_opus: Option<UsageWindow>,
+    seven_day_sonnet: Option<UsageWindow>,
+    model_scoped: Option<Vec<ModelWindow>>,
+    extra_usage: Option<ExtraUsage>,
+}
+
+#[derive(Deserialize)]
+struct UsageWindow {
+    utilization: Option<f64>,
+    resets_at: Option<String>,
+}
+
+impl UsageWindow {
+    /// None without a utilization: the window is unknown, so it is left out rather than drawn
+    /// full.
+    fn left(self, minutes: u64, model: Option<&str>) -> Option<PlanWindow> {
+        Some(PlanWindow {
+            minutes: Some(minutes),
+            model: model.map(str::to_string),
+            remaining_percent: remaining_percent(self.utilization?),
+            resets_at: self.resets_at,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct ModelWindow {
+    display_name: String,
+    #[serde(flatten)]
+    window: UsageWindow,
+}
+
+/// Amounts in minor units: cents for the dollar.
+#[derive(Deserialize)]
+struct ExtraUsage {
+    is_enabled: Option<bool>,
+    monthly_limit: Option<f64>,
+    used_credits: Option<f64>,
+    currency: Option<String>,
+}
+
+fn parse_plan(usage: &Value) -> Read {
+    let Ok(usage) = GetUsage::deserialize(usage) else {
+        return Read::Failed("Claude Code reported usage in a form orx can't read yet.".into());
+    };
+    if !usage.rate_limits_available {
+        return Read::NoPlan;
+    }
+    let Some(limits) = usage.rate_limits else {
+        return Read::Failed("Claude Code couldn't reach claude.ai for this plan's limits.".into());
+    };
+
+    let mut windows: Vec<PlanWindow> = [
+        (limits.five_hour, 300, None),
+        (limits.seven_day, 10080, None),
+        (limits.seven_day_opus, 10080, Some("Opus")),
+        (limits.seven_day_sonnet, 10080, Some("Sonnet")),
+    ]
+    .into_iter()
+    .filter_map(|(window, minutes, model)| window?.left(minutes, model))
+    .collect();
+    for row in limits.model_scoped.into_iter().flatten() {
+        let label = row.display_name;
+        windows.retain(|window| {
+            window
+                .model
+                .as_deref()
+                .is_none_or(|model| !model.eq_ignore_ascii_case(&label))
+        });
+        windows.extend(row.window.left(10080, Some(&label)));
+    }
+    if windows.is_empty() {
+        return Read::Failed(
+            "Claude Code said this plan has limits but reported none of them.".into(),
+        );
+    }
+
+    let micros = |cents: f64| (cents * 10_000.0) as u64;
+    let extra_usage = limits
+        .extra_usage
+        .filter(|extra| extra.is_enabled == Some(true));
+    Read::Plan(Snapshot {
+        plan: billing_label(usage.subscription_type.as_deref(), None, None),
+        windows,
+        credits: None,
+        extra_usage: extra_usage.map(|extra| PlanExtraUsage {
+            used_micros: extra.used_credits.map_or(0, micros),
+            limit_micros: extra.monthly_limit.map(micros),
+            currency: extra
+                .currency
+                .map_or("USD".into(), |currency| currency.to_ascii_uppercase()),
+        }),
+        resets: None,
+    })
+}
+
+#[cfg(test)]
+mod plan_tests {
+    use super::*;
+
+    fn window(minutes: u64, model: Option<&str>, remaining: f64, resets: &str) -> PlanWindow {
+        PlanWindow {
+            minutes: Some(minutes),
+            model: model.map(str::to_string),
+            remaining_percent: remaining,
+            resets_at: Some(resets.into()),
+        }
+    }
+
+    /// `get_usage` for a Max subscription, in the shape Claude Code 2.1.323's
+    /// own schema declares.
+    #[test]
+    fn a_subscription_reads_as_what_is_left_of_each_window() {
+        let usage = json!({
+            "session": {"total_cost_usd": 0, "model_usage": {}},
+            "subscription_type": "max",
+            "rate_limits_available": true,
+            "rate_limits": {
+                "five_hour": {"utilization": 38.4, "resets_at": "2026-11-13T23:00:00.000Z"},
+                "seven_day": {"utilization": 104, "resets_at": "2026-11-17T08:00:00.000Z"},
+                "seven_day_oauth_apps": null,
+                "seven_day_opus": {"utilization": 12, "resets_at": "2026-11-17T08:00:00.000Z"},
+                "seven_day_sonnet": null,
+                "model_scoped": [
+                    {"display_name": "Fable", "utilization": 84, "resets_at": "2026-11-17T08:00:00.000Z"},
+                    {"display_name": "opus", "utilization": 20, "resets_at": "2026-11-17T08:00:00.000Z"},
+                    {"display_name": "Haiku", "utilization": null, "resets_at": null}
+                ],
+                "extra_usage": {"is_enabled": true, "monthly_limit": 5000, "used_credits": 1234,
+                    "utilization": 25, "currency": "usd"},
+                "a_window_from_a_later_release": {"utilization": "?"}
+            },
+            "behaviors": null
+        });
+        let Read::Plan(snapshot) = parse_plan(&usage) else {
+            panic!("{:?}", parse_plan(&usage));
+        };
+        let week = "2026-11-17T08:00:00.000Z";
+        assert_eq!(
+            snapshot.windows,
+            [
+                window(300, None, 61.6, "2026-11-13T23:00:00.000Z"),
+                window(10080, None, 0.0, week),
+                window(10080, Some("Fable"), 16.0, week),
+                window(10080, Some("opus"), 80.0, week),
+            ]
+        );
+        assert_eq!(snapshot.plan.as_deref(), Some("Max"));
+        assert_eq!(
+            snapshot.extra_usage,
+            Some(PlanExtraUsage {
+                used_micros: 12_340_000,
+                limit_micros: Some(50_000_000),
+                currency: "USD".into()
+            })
+        );
+
+        let mut off = usage.clone();
+        off["rate_limits"]["extra_usage"]["is_enabled"] = json!(false);
+        let Read::Plan(snapshot) = parse_plan(&off) else {
+            panic!()
+        };
+        assert_eq!(snapshot.extra_usage, None);
+    }
+
+    /// Live from Claude Code 2.1.323 signed in with an API key.
+    #[test]
+    fn an_api_key_has_no_plan() {
+        let usage = json!({"session": {"total_cost_usd": 0, "total_api_duration_ms": 0,
+            "total_duration_ms": 312, "total_lines_added": 0, "total_lines_removed": 0,
+            "model_usage": {}}, "subscription_type": null, "rate_limits_available": false,
+            "rate_limits": null, "behaviors": null});
+        assert_eq!(parse_plan(&usage), Read::NoPlan);
+    }
+
+    #[test]
+    fn a_shape_it_cannot_read_fails_rather_than_guessing() {
+        for usage in [
+            json!({}),
+            json!({"rate_limits_available": "yes"}),
+            json!({"rate_limits_available": true, "rate_limits": []}),
+            json!({"rate_limits_available": true, "rate_limits": {"five_hour": {"utilization": "38%"}}}),
+            json!({"rate_limits_available": true, "rate_limits": {"seven_day": 12}}),
+            json!({"rate_limits_available": true, "rate_limits": {"model_scoped": [{"utilization": 3}]}}),
+            json!({"rate_limits_available": true, "rate_limits": {"five_hour": {"utilization": 1, "resets_at": 5}}}),
+        ] {
+            assert!(matches!(parse_plan(&usage), Read::Failed(_)), "{usage}");
+        }
+        // Rate limits apply, but claude.ai didn't answer this time.
+        let unreachable = json!({"rate_limits_available": true, "rate_limits": null});
+        assert!(matches!(parse_plan(&unreachable), Read::Failed(_)));
+        // A plan with limits is never shown with none.
+        for limits in [
+            json!({}),
+            json!({"five_hour": null, "seven_day": {"utilization": null, "resets_at": null}}),
+        ] {
+            let usage = json!({"rate_limits_available": true, "rate_limits": limits});
+            assert!(matches!(parse_plan(&usage), Read::Failed(_)), "{usage}");
+        }
+    }
+
+    #[test]
+    fn the_compact_point_is_reported_only_while_auto_compact_is_on_and_cleared_when_off() {
+        // Live from 2.1.323 on a 1M-token model.
+        let on = json!({"autoCompactThreshold": 967000, "isAutoCompactEnabled": true,
+            "maxTokens": 1000000, "totalTokens": 27631});
+        assert_eq!(compact_at(&on), Some(Some(967000)));
+        let off = json!({"autoCompactThreshold": 967000, "isAutoCompactEnabled": false});
+        assert_eq!(compact_at(&off), Some(None));
+        assert_eq!(
+            compact_at(&json!({"isAutoCompactEnabled": true})),
+            Some(None)
+        );
+        assert_eq!(compact_at(&json!({"maxTokens": 1000000})), None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_claude_too_old_for_get_usage_is_unsupported() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-claude-usage").unwrap();
+        let fake = |name: &str, answer: &str| {
+            let path = dir.path().join(name);
+            let script = format!(
+                "#!/bin/sh\nread request\necho '{{\"type\":\"system\",\"subtype\":\"init\"}}'\necho '{answer}'\n"
+            );
+            orx_test_support::write_executable(&path, script, 0o755).unwrap();
+            path
+        };
+        let old = fake(
+            "old",
+            r#"{"type":"control_response","response":{"subtype":"error","request_id":"orx_control","error":"Unsupported control request subtype: get_usage"}}"#,
+        );
+        assert_eq!(read_plan(old, None).await, Read::Unsupported);
+
+        let refused = fake(
+            "refused",
+            r#"{"type":"control_response","response":{"subtype":"error","request_id":"orx_control","error":"get_usage is not supported in this context"}}"#,
+        );
+        assert!(
+            matches!(read_plan(refused, None).await, Read::Failed(message) if message.contains("not supported in this context"))
+        );
+
+        let api_key = fake(
+            "api-key",
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"orx_control","response":{"rate_limits_available":false,"rate_limits":null}}}"#,
+        );
+        assert_eq!(read_plan(api_key, None).await, Read::NoPlan);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_claude_that_is_gone_or_silent_says_which() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-claude-silent").unwrap();
+        let missing = dir.path().join("claude");
+        let Read::Failed(message) = read_plan(missing.clone(), None).await else {
+            panic!("a missing binary is a failed read");
+        };
+        assert!(
+            message.contains(&missing.display().to_string()),
+            "{message}"
+        );
+        assert!(!message.contains("15 seconds"), "{message}");
+
+        let exits = dir.path().join("exits");
+        orx_test_support::write_executable(&exits, "#!/bin/sh\nread request\n", 0o755).unwrap();
+        let Read::Failed(message) = read_plan(exits, None).await else {
+            panic!("an agent that exits is a failed read");
+        };
+        assert!(message.contains("exited"), "{message}");
+    }
 }
 
 pub(crate) async fn external_model_catalog(
@@ -669,8 +1001,9 @@ fn billing_label(
     value: Option<&str>,
 ) -> Option<String> {
     match (subscription, tier, value) {
-        (Some("max") | None, Some("default_claude_max_5x"), _) => Some("Max 5x".into()),
-        (Some("max") | None, Some("default_claude_max_20x"), _) => Some("Max 20x".into()),
+        // The enum keeps the tiers' old names; Claude sells them as Max and Ultra.
+        (Some("max") | None, Some("default_claude_max_5x"), _) => Some("Max".into()),
+        (Some("max") | None, Some("default_claude_max_20x"), _) => Some("Ultra".into()),
         (Some("max"), _, _) => Some("Max".into()),
         (Some("pro"), _, _) => Some("Pro".into()),
         (_, _, Some("stripe_subscription" | "stripe_subscription_contracted")) => {
@@ -2167,6 +2500,7 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                 ctx.report_usage(ContextUsage {
                     used_tokens: used,
                     context_window: None,
+                    ..Default::default()
                 });
             }
         }
@@ -2224,6 +2558,9 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                     }
                 }
             }
+        }
+        Some("rate_limit_event") => {
+            crate::local::usage::observed(&ctx.host, &ctx.harness, ctx.profile.as_deref());
         }
         Some("result") => {
             if let Some(scope) = event.get("session_id").and_then(Value::as_str) {
@@ -2359,12 +2696,19 @@ fn record_message(ctx: &TurnCtx, message: &Value) {
             cache_write_tokens: field("cache_creation_input_tokens"),
             reasoning_tokens: None,
         },
+        None,
     );
 }
 
+/// Per model: its running totals for the process, and what Claude Code says they cost.
 fn claude_result_usage_samples(
     event: &Value,
-) -> Vec<(String, Option<String>, crate::store::TokenUsage)> {
+) -> Vec<(
+    String,
+    Option<String>,
+    crate::store::TokenUsage,
+    Option<crate::store::Cost>,
+)> {
     event
         .get("modelUsage")
         .and_then(Value::as_object)
@@ -2387,6 +2731,10 @@ fn claude_result_usage_samples(
                     cache_write_tokens: field("cacheCreationInputTokens"),
                     reasoning_tokens: field("thinkingTokens"),
                 },
+                usage
+                    .get("costUSD")
+                    .and_then(Value::as_f64)
+                    .and_then(|dollars| crate::store::Cost::of(dollars, "USD")),
             )
         })
         .collect()
@@ -2452,6 +2800,7 @@ fn report_result_usage(ctx: &mut TurnCtx, event: &Value) -> Option<u64> {
         ctx.report_usage(ContextUsage {
             used_tokens: used,
             context_window,
+            ..Default::default()
         });
     }
     event_used
@@ -2753,7 +3102,32 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
         ctx.mark_delivery(DeliveryState::Rejected);
     }
     commit_attempt_session(ctx, &state);
+    if !state.turn_errored {
+        report_compact_at(ctx, client).await;
+    }
     Ok((state, auth_generation))
+}
+
+/// Where the resident child compacts on its own, asked after each turn so it
+/// follows a model switch. Best effort: the next turn asks again.
+async fn report_compact_at(ctx: &mut TurnCtx, client: &crate::local::claude::ClaudeClient) {
+    let request = client.control_request(json!({ "subtype": "get_context_usage" }));
+    let Ok(Ok(Ok(context))) = tokio::time::timeout(Duration::from_secs(2), request).await else {
+        return;
+    };
+    if let Some(compact_at) = compact_at(&context) {
+        ctx.report_compact_at(compact_at);
+    }
+}
+
+/// Where auto-compact fires, `Some(None)` when it is off; None when the answer can't say.
+fn compact_at(context: &Value) -> Option<Option<u64>> {
+    let enabled = context.get("isAutoCompactEnabled")?.as_bool()?;
+    Some(
+        enabled
+            .then(|| context.get("autoCompactThreshold")?.as_u64())
+            .flatten(),
+    )
 }
 
 /// A child that dies before echoing the prompt never read it, so the turn can
@@ -3257,11 +3631,11 @@ mod tests {
         );
         assert_eq!(
             billing_label(Some("max"), Some("default_claude_max_5x"), None).as_deref(),
-            Some("Max 5x")
+            Some("Max")
         );
         assert_eq!(
             billing_label(Some("max"), Some("default_claude_max_20x"), None).as_deref(),
-            Some("Max 20x")
+            Some("Ultra")
         );
         assert_eq!(
             billing_label(Some("pro"), Some("default_claude_max_20x"), None).as_deref(),
@@ -3572,6 +3946,38 @@ mod tests {
     }
 
     #[test]
+    fn result_costs_ride_each_models_running_totals() {
+        let event = serde_json::json!({
+            "type": "result",
+            "total_cost_usd": 0.1750857,
+            "modelUsage": {
+                "claude-sonnet-5-5": {"inputTokens": 5416, "outputTokens": 12,
+                    "cacheReadInputTokens": 57912, "cacheCreationInputTokens": 63337,
+                    "costUSD": 0.1750857, "provider": "firstParty"},
+                "claude-haiku-4-5-20251001": {"inputTokens": 3, "outputTokens": 4,
+                    "cacheReadInputTokens": 0, "cacheCreationInputTokens": 9}
+            }
+        });
+        let samples = claude_result_usage_samples(&event);
+        let cost = |model: &str| {
+            samples
+                .iter()
+                .find(|(name, _, _, _)| name == model)
+                .unwrap()
+                .3
+                .clone()
+        };
+        assert_eq!(
+            cost("claude-sonnet-5-5"),
+            Some(crate::store::Cost {
+                micros: 175_086,
+                currency: "USD".into()
+            })
+        );
+        assert_eq!(cost("claude-haiku-4-5-20251001"), None);
+    }
+
+    #[test]
     fn native_model_usage_preserves_child_models_and_inclusive_totals() {
         let events: Vec<Value> =
             serde_json::from_str(include_str!("fixtures/claude-model-usage.json")).unwrap();
@@ -3579,21 +3985,21 @@ mod tests {
         assert_eq!(samples.len(), 2);
         let parent = samples
             .iter()
-            .find(|(model, _, _)| model == "claude-opus-5-5")
+            .find(|(model, _, _, _)| model == "claude-opus-5-5")
             .unwrap();
         assert_eq!(parent.2.input_tokens, Some(290410));
         assert_eq!(parent.2.output_tokens, Some(392));
         assert_eq!(parent.2.reasoning_tokens, Some(198));
         let child = samples
             .iter()
-            .find(|(model, _, _)| model == "claude-haiku-4-5-20251001")
+            .find(|(model, _, _, _)| model == "claude-haiku-4-5-20251001")
             .unwrap();
         assert_eq!(child.2.total(), Some(101006));
         let resumed = claude_result_usage_samples(&events[1]);
         assert_eq!(
             resumed
                 .iter()
-                .find(|(model, _, _)| model == "claude-opus-5-5")
+                .find(|(model, _, _, _)| model == "claude-opus-5-5")
                 .unwrap()
                 .2
                 .output_tokens,
@@ -4364,6 +4770,7 @@ mod tests {
         ctx.context_usage = Some(ContextUsage {
             used_tokens: 123,
             context_window: Some(200000),
+            ..Default::default()
         });
         let result = serde_json::json!({
             "type": "result",
