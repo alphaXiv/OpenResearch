@@ -1997,7 +1997,7 @@
   "run_watch_flagged": "Oznaczone.",
   "run_watch_noted": "Zanotowane, gdy oznaczenie z {clock} było otwarte.",
   "run_watch_flagged_orx": "Oznaczone przez samo OpenResearch, bez modelu.",
-  "run_watch_kept": "Wybrano kontynuację. W tym eksperymencie nie pojawi się to ponownie.",
+  "run_watch_kept": "Wybrano kontynuację. To uruchomienie nie zgłosi tego ponownie.",
   "run_watch_kept_by": "{agent} wybrał kontynuację.",
   "run_watch_stopped_you": "Zatrzymano uruchomienie.",
   "run_watch_stopped_by": "{agent} zatrzymał uruchomienie.",

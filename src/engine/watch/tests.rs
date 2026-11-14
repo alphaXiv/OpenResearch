@@ -817,3 +817,40 @@ async fn a_codex_catalog_that_cannot_be_read_says_why_and_is_read_again_only_aft
     refresh_catalogs(BTreeSet::from([chat.profile_id.clone()])).await;
     assert_eq!(reads(), tried, "a failed read waits before the next");
 }
+
+#[test]
+fn keep_going_settles_one_runs_flag_and_a_later_run_with_the_same_cause_is_flagged_again() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let store = Store::open().unwrap();
+    chat(&store, "chat", "claude-code");
+    let first = run(&store, "a", "Depth 6", "chat", LOG);
+    let second = StoredRun {
+        id: "b".into(),
+        ..first.clone()
+    };
+    store.upsert_run(&second).unwrap();
+    let stall = |run: &StoredRun, id: &str| {
+        let body = json!({"id": id, "source": "tripwire", "fingerprint": "stall:train:0", "at": 1,
+            "template": "No progress.", "detail": "No progress.", "text": "No progress.", "evidence": null, "whole": 0.0});
+        let flag = super::super::flags::new_flag(&store, run, body, true).unwrap();
+        store.raise_flags(&[flag], 1).unwrap()[0]
+    };
+    assert_eq!(stall(&first, "f1"), crate::store::Raise::Raised);
+    let keep = crate::store::FlagChoice {
+        run_id: "a".into(),
+        body: json!({"flagId": "f1", "c": "keep", "by": "user", "reason": "Compiling."}),
+        wakes: Vec::new(),
+    };
+    store.record_flag_choices(&[keep], None, 2).unwrap();
+
+    assert_eq!(stall(&first, "f2"), crate::store::Raise::Repeated);
+    assert_eq!(
+        stall(&second, "f3"),
+        crate::store::Raise::Raised,
+        "the next run that hangs at the same step is flagged"
+    );
+    assert_eq!(kept_after(&store, "a").unwrap()[0]["why"], "Compiling.");
+    assert_eq!(kept_after(&store, "b").unwrap(), Vec::<Value>::new());
+}

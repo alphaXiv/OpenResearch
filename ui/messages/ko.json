@@ -1997,7 +1997,7 @@
   "run_watch_flagged": "표시됨.",
   "run_watch_noted": "{clock}의 표시가 열려 있는 동안 기록됨.",
   "run_watch_flagged_orx": "OpenResearch가 모델 없이 직접 표시했습니다.",
-  "run_watch_kept": "계속하기로 했습니다. 이 실험에서는 다시 알리지 않습니다.",
+  "run_watch_kept": "계속하기로 했습니다. 이 실행에서는 다시 알리지 않습니다.",
   "run_watch_kept_by": "{agent}이(가) 계속하기로 했습니다.",
   "run_watch_stopped_you": "실행을 중지했습니다.",
   "run_watch_stopped_by": "{agent}이(가) 실행을 중지했습니다.",

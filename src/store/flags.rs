@@ -19,7 +19,7 @@ pub(crate) struct NewFlag {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum Raise {
     Raised,
-    /// The run raised this fingerprint before, or the experiment kept going after it.
+    /// The run raised this fingerprint before.
     Repeated,
     /// The run has a flag still open.
     Waits,
@@ -143,27 +143,6 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    /// The flags and choices of every run of the experiment, by run.
-    pub(crate) fn experiment_flag_events(
-        &self,
-        experiment_id: &str,
-    ) -> Result<Vec<(String, FlagEvent)>> {
-        let runs: Vec<String> = {
-            let mut stmt = self
-                .conn
-                .prepare("SELECT id FROM runs WHERE experiment_id = ?1 ORDER BY created_at")?;
-            let rows = stmt.query_map([experiment_id], |row| row.get(0))?;
-            rows.collect::<std::result::Result<Vec<_>, _>>()?
-        };
-        let mut events = Vec::new();
-        for run in runs {
-            for event in self.run_flag_events(&run)? {
-                events.push((run.clone(), event));
-            }
-        }
-        Ok(events)
-    }
-
     /// Appends each flag that still applies, with the notices that wake its chats, in one
     /// transaction. Returns what became of each.
     pub(crate) fn raise_flags(&self, flags: &[NewFlag], now: i64) -> Result<Vec<Raise>> {
@@ -174,22 +153,18 @@ impl Store {
     }
 
     /// [`Self::raise_flags`] inside a caller's transaction. A flag whose fingerprint the run has
-    /// raised before, or someone chose to keep going after on any run of its experiment, is not
-    /// raised again.
+    /// raised before is not raised again; another run of the experiment raises it afresh.
     pub(crate) fn append_flags(&self, flags: &[NewFlag], now: i64) -> Result<Vec<Raise>> {
         let mut raised = Vec::new();
         for flag in flags {
             let events = self.run_flag_events(&flag.run_id)?;
             let open = open_flag(&events).is_some();
             let fingerprint = flag.body["fingerprint"].as_str();
-            let repeated = match fingerprint {
-                Some(fingerprint) => {
-                    events.iter().any(|event| {
-                        event.kind == "flag" && event.body["fingerprint"] == fingerprint
-                    }) || self.kept_fingerprints(&flag.run_id)?.contains(fingerprint)
-                }
-                None => false,
-            };
+            let repeated = fingerprint.is_some_and(|fingerprint| {
+                events
+                    .iter()
+                    .any(|event| event.kind == "flag" && event.body["fingerprint"] == fingerprint)
+            });
             if repeated {
                 raised.push(Raise::Repeated);
                 continue;
@@ -218,30 +193,6 @@ impl Store {
             raised.push(Raise::Raised);
         }
         Ok(raised)
-    }
-
-    /// The fingerprints of flags someone chose to keep going after, on any run of `run_id`'s
-    /// experiment.
-    fn kept_fingerprints(&self, run_id: &str) -> Result<BTreeSet<String>> {
-        let Some(run) = self.get_run(run_id)? else {
-            return Ok(BTreeSet::new());
-        };
-        let events = self.experiment_flag_events(&run.experiment_id)?;
-        let kept: BTreeSet<(&str, &str)> = events
-            .iter()
-            .filter(|(_, event)| event.kind == "choice" && event.body["c"] == "keep")
-            .filter_map(|(run, event)| Some((run.as_str(), event.body["flagId"].as_str()?)))
-            .collect();
-        Ok(events
-            .iter()
-            .filter(|(run, event)| {
-                event.kind == "flag"
-                    && event.body["id"]
-                        .as_str()
-                        .is_some_and(|id| kept.contains(&(run.as_str(), id)))
-            })
-            .filter_map(|(_, event)| event.body["fingerprint"].as_str().map(str::to_owned))
-            .collect())
     }
 
     /// Keeps a choice on a run's flag, and on the other flags of its look an Ask takes along,

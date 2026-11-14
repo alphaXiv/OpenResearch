@@ -1997,7 +1997,7 @@
   "run_watch_flagged": "İşaretlendi.",
   "run_watch_noted": "{clock} işareti açıkken not edildi.",
   "run_watch_flagged_orx": "OpenResearch modelsiz, kendisi işaretledi.",
-  "run_watch_kept": "Devam etmeyi seçtiniz. Bu deneyde bu yeniden gündeme gelmeyecek.",
+  "run_watch_kept": "Devam etmeyi seçtiniz. Bu çalıştırma bunu yeniden gündeme getirmeyecek.",
   "run_watch_kept_by": "{agent} devam etmeyi seçti.",
   "run_watch_stopped_you": "Çalıştırmayı durdurdunuz.",
   "run_watch_stopped_by": "{agent} çalıştırmayı durdurdu.",

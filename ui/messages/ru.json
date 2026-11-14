@@ -1997,7 +1997,7 @@
   "run_watch_flagged": "Отмечено.",
   "run_watch_noted": "Отмечено, пока флажок от {clock} был открыт.",
   "run_watch_flagged_orx": "Отмечено самим OpenResearch, без модели.",
-  "run_watch_kept": "Вы решили продолжить. В этом эксперименте об этом больше не напомним.",
+  "run_watch_kept": "Вы решили продолжить. В этом запуске об этом больше не напомним.",
   "run_watch_kept_by": "{agent} решил продолжить.",
   "run_watch_stopped_you": "Вы остановили запуск.",
   "run_watch_stopped_by": "{agent} остановил запуск.",

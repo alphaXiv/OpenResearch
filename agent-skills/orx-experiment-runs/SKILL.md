@@ -291,7 +291,7 @@ orx exp flag <runId> --flag <flagId> --ask --reason 'It may be fine; the user kn
 ```
 
 `--keep` lets it run, and the watcher's next looks read what you kept and why,
-so a warning you judged harmless is not raised again; add it to the brief's
+so a warning you judged harmless is not raised again on that run; add it to the brief's
 `noise` for the experiment's next runs. `--stop` stops it as `orx exp cancel`
 does. `--ask` leaves the choice to the user, who sees Stop run, Keep going and
 Ask in the chat. In Copilot mode the flag waits for the user, and you hear of it

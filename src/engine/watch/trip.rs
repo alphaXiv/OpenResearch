@@ -1,6 +1,5 @@
 //! Tripwires: what orx flags on its own, with no model, on every live run, watched or not. A
-//! tripwire only flags; each condition is raised once a run, and never again on an experiment
-//! where someone chose to keep going after it.
+//! tripwire only flags, and raises each condition once a run.
 
 use super::*;
 use crate::store::Raise;

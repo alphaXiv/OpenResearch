@@ -401,8 +401,9 @@ the log lines it cites, by bytes, line numbers and the log's identity, and the
 look that raised it groups the flags of runs it saw together.
 
 A run has at most one open flag from a look or a tripwire, so a trouble that
-lasts wakes once; a tripwire condition is raised once a run, and never again on
-an experiment where someone kept going after it. The flag and the notices that
+lasts wakes once; a tripwire condition is raised once a run. Keep going settles
+that run's flag only: a later run of the experiment with the same cause is
+flagged again, since a missed problem costs more than an extra flag. The flag and the notices that
 wake each following Agentic chat are written in one transaction; a Copilot chat
 is woken only when its user asks. A wake says the watcher saw only a digest and
 none of the chat, cites the lines and how to settle it, and is frozen when it is

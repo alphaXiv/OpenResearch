@@ -1617,10 +1617,7 @@ async fn take(id: i64) -> Result<()> {
         let store = Store::open()?;
         let mut kept = BTreeMap::new();
         for run in &runs {
-            kept.insert(
-                run.run.id.clone(),
-                kept_after(&store, &run.run.experiment_id)?,
-            );
+            kept.insert(run.run.id.clone(), kept_after(&store, &run.run.id)?);
         }
         kept
     };
@@ -2059,18 +2056,18 @@ async fn take(id: i64) -> Result<()> {
     Ok(())
 }
 
-/// What the experiment's flags someone chose to keep going after said, and why, newest last: a
-/// look reads them so it does not raise the same thing again.
-fn kept_after(store: &Store, experiment: &str) -> Result<Vec<Value>> {
+/// What the run's flags someone chose to keep going after said, and why, newest last: a look
+/// reads them so it does not raise the same thing again on this run.
+fn kept_after(store: &Store, run: &str) -> Result<Vec<Value>> {
     const KEPT: usize = 5;
-    let events = store.experiment_flag_events(experiment)?;
+    let events = store.run_flag_events(run)?;
     let mut kept: Vec<Value> = events
         .iter()
-        .filter(|(_, event)| event.kind == "choice" && event.body["c"] == "keep")
-        .filter_map(|(run, choice)| {
-            let (_, flag) = events.iter().find(|(other, event)| {
-                other == run && event.kind == "flag" && event.body["id"] == choice.body["flagId"]
-            })?;
+        .filter(|event| event.kind == "choice" && event.body["c"] == "keep")
+        .filter_map(|choice| {
+            let flag = events
+                .iter()
+                .find(|event| event.kind == "flag" && event.body["id"] == choice.body["flagId"])?;
             let said = flag.body["text"]
                 .as_str()
                 .or(flag.body["detail"].as_str())?;

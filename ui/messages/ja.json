@@ -1997,7 +1997,7 @@
   "run_watch_flagged": "フラグ付き。",
   "run_watch_noted": "{clock} のフラグが未解決の間に記録。",
   "run_watch_flagged_orx": "OpenResearch がモデルを使わずに自らフラグを立てました。",
-  "run_watch_kept": "続行を選びました。この実験では二度と知らせません。",
+  "run_watch_kept": "続行を選びました。この実行ではもう知らせません。",
   "run_watch_kept_by": "{agent} が続行を選びました。",
   "run_watch_stopped_you": "実行を停止しました。",
   "run_watch_stopped_by": "{agent} が実行を停止しました。",

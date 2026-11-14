@@ -85,7 +85,7 @@ pub(super) struct Run<'a> {
     pub why: &'a [String],
     pub log: &'a LogRead,
     pub counts: &'a BTreeMap<String, u64>,
-    /// Flags on the experiment someone chose to keep going after, and why.
+    /// Flags on the run someone chose to keep going after, and why.
     pub kept: &'a [Value],
 }
 

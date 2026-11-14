@@ -1997,7 +1997,7 @@
   "run_watch_flagged": "مُعلَّم.",
   "run_watch_noted": "سُجّل بينما كانت العلامة من {clock} مفتوحة.",
   "run_watch_flagged_orx": "علّمه OpenResearch بنفسه، دون نموذج.",
-  "run_watch_kept": "اخترت المتابعة. لن يُثار هذا مجددًا في هذه التجربة.",
+  "run_watch_kept": "اخترت المتابعة. لن يثيره هذا التشغيل مجددًا.",
   "run_watch_kept_by": "اختار {agent} المتابعة.",
   "run_watch_stopped_you": "أوقفت التشغيل.",
   "run_watch_stopped_by": "أوقف {agent} التشغيل.",
