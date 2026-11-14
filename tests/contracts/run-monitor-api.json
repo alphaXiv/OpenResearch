@@ -559,7 +559,7 @@
         "revising": false,
         "brief": [],
         "rules": [],
-        "statusText": "baseline  running  25%  step 100 of 400  [run r1]\neta      0s left (no progress for at least 59m; assumes it resumes)\nsignals  loss 0.273\nsignals  Last collected at 2026-11-12T01:45:01.000Z.\nsignals  Data as of 2026-11-12T00:45:10.000Z.\nsignals  1 log diagnostics; inspect `orx logs r1`.",
+        "statusText": "baseline  running  25%  step 100 of 400  [run r1]\neta      No progress for 59m (was due about 00:45 UTC)\nsignals  loss 0.273\nsignals  Last collected at 2026-11-12T01:45:01.000Z.\nsignals  Data as of 2026-11-12T00:45:10.000Z.\nsignals  1 log diagnostics; inspect `orx logs r1`.",
         "rev": 1,
         "seriesRev": 1,
         "series": {
@@ -651,10 +651,10 @@
         "rev": 1
       },
       "expect": {
-        "eta": "0s left",
+        "eta": "No progress for 59m",
         "range": null,
         "stall": "59m",
-        "cli": "0s left (no progress for at least 59m; assumes it resumes)"
+        "cli": "No progress for 59m (was due about 00:45 UTC)"
       }
     },
     "limit": {

@@ -1992,6 +1992,8 @@
   "run_eta_floor": "Liczone z postępu w logu; potem może być więcej pracy",
   "run_eta_untimed": "Żadne wcześniejsze uruchomienie nie zmierzyło etapu {stages}",
   "run_eta_no_estimate": "Brak szacunku",
+  "run_eta_silent_for": "Brak postępu od {duration}",
+  "run_eta_was_due": "miał się skończyć około {clock}",
   "run_stage_skipped": "pominięty",
   "run_stage_unplanned": "nieplanowany",
   "run_eta_to_limit": "{duration} do limitu",

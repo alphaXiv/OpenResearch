@@ -1992,6 +1992,8 @@
   "run_eta_floor": "लॉग में दिखी प्रगति से गिना गया; इसके बाद और काम हो सकता है",
   "run_eta_untimed": "किसी पिछले रन ने {stages} का समय नहीं मापा",
   "run_eta_no_estimate": "अनुमान नहीं",
+  "run_eta_silent_for": "{duration} से कोई प्रगति नहीं",
+  "run_eta_was_due": "लगभग {clock} तक पूरा होना था",
   "run_stage_skipped": "छोड़ा गया",
   "run_stage_unplanned": "अनियोजित",
   "run_eta_to_limit": "सीमा तक {duration}",

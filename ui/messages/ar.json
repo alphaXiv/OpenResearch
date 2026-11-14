@@ -1992,6 +1992,8 @@
   "run_eta_floor": "محسوب من التقدم في السجل؛ وقد يليه عمل آخر",
   "run_eta_untimed": "لم يقِس أي تشغيل سابق مدة {stages}",
   "run_eta_no_estimate": "لا تقدير",
+  "run_eta_silent_for": "لا تقدّم منذ {duration}",
+  "run_eta_was_due": "كان متوقعًا أن ينتهي نحو {clock}",
   "run_stage_skipped": "تم تخطيها",
   "run_stage_unplanned": "غير مخطط لها",
   "run_eta_to_limit": "{duration} حتى الحد",

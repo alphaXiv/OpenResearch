@@ -2186,6 +2186,20 @@ fn eta_text(life: &Lifecycle, snapshot: Option<&Snapshot>, facts: &StatusFacts) 
                 .flatten()
                 .filter_map(Value::as_str)
                 .collect();
+            // Past its estimate with no progress since, a run is late, never "0s left".
+            let mid = estimate["midMs"].as_i64().unwrap_or(0);
+            if !floor && mid > 0 && mid <= gone {
+                let due = now - gone + mid;
+                return Some(with_cost(
+                    format!(
+                        "No progress for {} (was due about {})",
+                        short(gone),
+                        clock_text(due)
+                    ),
+                    facts.cost,
+                    false,
+                ));
+            }
             // A floor counted down to nothing promises nothing: what is left is unknown.
             if floor && lo == "0s" {
                 return Some(with_cost(
@@ -3135,8 +3149,8 @@ mod tests {
         );
         let text = awake["statusText"].as_str().unwrap();
         assert!(
-            text.contains("0s left (no progress for at least 59m; assumes it resumes)"),
-            "{text}"
+            text.contains("\neta      No progress for 59m (was due about 00:45 UTC)"),
+            "past its estimate a silent run is late, never 0s left: {text}"
         );
     }
 
@@ -4940,7 +4954,10 @@ mod tests {
             monitor["progress"]
         );
         let text = monitor["statusText"].as_str().unwrap();
-        assert!(text.contains("no progress for at least 1m"), "{text}");
+        assert!(
+            text.contains("\neta      No progress for 1m (was due about"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -5680,7 +5697,7 @@ mod tests {
                 &folded(&declared(0..=10, 400)),
                 T0 + 3_601_000,
                 T0 + 3_601_000,
-                json!({"eta": "0s left", "range": null, "stall": "59m", "cli": "0s left (no progress for at least 59m; assumes it resumes)"}),
+                json!({"eta": "No progress for 59m", "range": null, "stall": "59m", "cli": "No progress for 59m (was due about 00:45 UTC)"}),
             ),
             state(
                 "limit",

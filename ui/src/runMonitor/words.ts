@@ -79,6 +79,10 @@ export function estimateWords(estimate: Estimate, now: number, limit: { endsAt: 
   const untimed = estimate.untimed?.length ? m.run_eta_untimed({ stages: new Intl.ListFormat(getLocale()).format(estimate.untimed.map(autoDir)) }) : null;
   // A floor counted down to nothing promises nothing: what is left is unknown.
   if (left.floor && left.ms < 1000) return { eta: m.run_eta_no_estimate(), detail: stalled ?? untimed ?? m.run_eta_floor(), strong: false, left: null };
+  // Past its estimate with no progress since, a run is late, never "0s left".
+  if (!left.floor && estimate.midMs > 0 && mid === 0) {
+    return { eta: m.run_eta_silent_for({ duration: durationText(now - estimate.at) }), detail: m.run_eta_was_due({ clock: clockText(estimate.at + estimate.midMs) }), strong: true, left: null };
+  }
   const eta = left.floor ? m.run_eta_at_least_left({ duration: durationText(left.ms) }) : m.run_eta_left({ duration: durationText(mid) });
   if (stalled) return { eta, detail: stalled, strong: true, left };
   if (estimate.pastLimitMs !== null && limit) {

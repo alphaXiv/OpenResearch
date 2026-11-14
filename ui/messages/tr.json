@@ -1992,6 +1992,8 @@
   "run_eta_floor": "Günlükteki ilerlemeden hesaplandı; ardından başka işler gelebilir",
   "run_eta_untimed": "Önceki hiçbir çalıştırma {stages} süresini ölçmedi",
   "run_eta_no_estimate": "Tahmin yok",
+  "run_eta_silent_for": "{duration} süredir ilerleme yok",
+  "run_eta_was_due": "yaklaşık {clock} civarında bitmesi bekleniyordu",
   "run_stage_skipped": "atlandı",
   "run_stage_unplanned": "plan dışı",
   "run_eta_to_limit": "sınıra {duration} var",

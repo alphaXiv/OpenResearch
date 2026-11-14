@@ -77,10 +77,15 @@ test("the caption says only what the sentence doesn't", () => {
   assert.equal(bare(model("limit").progress), bare(m.run_progress_limit({ elapsed: "15m", limit: "1h 0m" })));
 });
 
-test("a stall says the silence is at least that long", () => {
-  const view = model("stall");
-  assert.equal(bare(view.eta), states.stall.expect.eta);
-  assert.match(bare(view.etaDetail), new RegExp(`at least ${states.stall.expect.stall}`));
+test("a run past its estimate with no progress since says how long it has been silent, never 0s left", () => {
+  for (const full of [true, false]) {
+    const view = model("stall", full);
+    assert.equal(bare(view.eta), states.stall.expect.eta, `full: ${full}`);
+    assert.equal(view.left, null, `full: ${full}: no countdown`);
+  }
+  const { monitor, now } = states.stall;
+  const going = model("stall", true, { ...monitor, estimate: { ...monitor.estimate, at: now - 1_000 } });
+  assert.match(bare(going.eta), /left$/, "still within its estimate it counts down");
 });
 
 test("the bar's accessible text is one sentence, and elapsed time says it is elapsed", () => {

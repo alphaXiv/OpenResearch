@@ -1992,6 +1992,8 @@
   "run_eta_floor": "Рассчитано по прогрессу в логе; после него может быть ещё работа",
   "run_eta_untimed": "Ни один прошлый запуск не замерил {stages}",
   "run_eta_no_estimate": "Оценки нет",
+  "run_eta_silent_for": "Нет прогресса уже {duration}",
+  "run_eta_was_due": "должен был завершиться около {clock}",
   "run_stage_skipped": "пропущен",
   "run_stage_unplanned": "вне плана",
   "run_eta_to_limit": "{duration} до лимита",
