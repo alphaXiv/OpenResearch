@@ -218,6 +218,13 @@ every report with no model, and a run keeps the rules it was launched with.
 Declare only what the task justifies: a stop ends the run, and a wrong rule
 costs a rerun.
 
+When a run has a failure you can name before it starts (a learning rate that
+may diverge, a change to the labels or data that may break training, an eval
+that may print zeros), say it before launch, briefly: a rule if you would stop
+on it, else one `worth_a_flag` line in the brief (§10). The watcher knows only
+what the digest tells it, so a sentence from you is what lets it tell a broken
+run from an odd one.
+
 ```json
 {"rules": [
   {"name": "nan-loss", "text": "Stop when the loss is NaN on 3 reports in a row.",
@@ -278,7 +285,8 @@ looks apart. Leave `watch` out for the defaults (2 and 30 minutes); widen the
 gaps for a run of days, narrow `maxGapS` for one that may go wrong fast.
 
 A flag is the watcher, a rule that asks, or orx's own checks (a value that is
-not a number, no progress, a new kind of error) saying a run may be going
+not a number, a measure half again worse than the parent's at the same step, no
+progress, a new kind of error) saying a run may be going
 wrong. It never stops the run. In Agentic mode it wakes you with the lines it
 saw and where they are: it saw a digest and none of the chat, so read the run
 yourself (`orx exp status <expId> --run <runId>`, `orx logs <runId>`) and

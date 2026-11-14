@@ -48,7 +48,12 @@ than the parent", "0.12 worse than the parent" or "level with the parent"), or {
 lines from the start of the run that match the regex, which orx keeps counting. A token names
 one of the run's "signals"; values under "alsoLogged" have none. A number that
 cannot change again, such as the step where something happened, may be written.
-Mark exactly one figure **bold**: the one that matters most.
+Mark exactly one figure **bold**: the one that matters most. Put {signal.vs} beside the
+number it compares.
+Say only what the digest shows: a signal's label, unit and "better" say what it measures and
+which way is good; the brief, the parent and the log say the rest. Never name a chance level,
+a target, an expected value or a cause the digest does not state: say how a number compares
+with the parent or with its own trend instead.
 If a run's last sentence still holds, answer {"same": true} for it. You see its last three
 sentences: keep their wording while their meaning holds. A run you leave out is the same.
 Flag a run when it may be going wrong: it does something the brief says is worth a flag, it is
@@ -900,6 +905,51 @@ mod tests {
             "one run keeps its three sentences"
         );
         assert!(one.excerpts["r1"].len() > 10, "and room for its log");
+    }
+
+    #[test]
+    fn a_run_is_sent_with_what_its_numbers_mean_and_its_brief() {
+        let body = json!({"view": {"signals": {"test_acc": {"label": "Test accuracy", "better": "higher", "unit": "%"}},
+            "headline": ["test_acc"]}, "latest": {"test_acc": 10.4}, "series": {}});
+        let summary = json!({"stage": {"name": "train", "done": 3, "of": 150, "unit": "epochs"}});
+        let brief: Map<String, Value> =
+            serde_json::from_value(json!({"question": "Do flipped labels break the classifier?"}))
+                .unwrap();
+        let digest = build(
+            &Shared {
+                locale: "en",
+                notes: None,
+                summary: None,
+            },
+            &[Run {
+                key: "r1",
+                label: "Flipped labels",
+                experiment: "flipped",
+                state: "running",
+                elapsed: None,
+                summary: &summary,
+                body: &body,
+                previous: &[],
+                brief: Some(&brief),
+                parent: None,
+                why: &[],
+                log: &LogRead::default(),
+                counts: &BTreeMap::new(),
+                kept: &[],
+            }],
+            MAX_BYTES,
+        );
+        let sent: Value = serde_json::from_str(&digest.text).unwrap();
+        assert_eq!(
+            sent["runs"][0]["signals"]["test_acc"],
+            json!({"now": 10.4, "label": "Test accuracy", "unit": "%", "better": "higher", "points": []})
+        );
+        assert_eq!(sent["runs"][0]["progress"]["unit"], "epochs");
+        assert_eq!(
+            sent["briefs"][0]["lines"]["question"],
+            "Do flipped labels break the classifier?"
+        );
+        assert_eq!(sent["runs"][0]["brief"], "b1");
     }
 
     #[test]
