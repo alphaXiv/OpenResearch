@@ -27,11 +27,14 @@ export interface Sentence {
   t: number;
 }
 
-interface RunRule {
-  id: string;
+/** A rule the run was launched with, which orx checks on each report with no model. */
+export interface RunRule {
   name: string;
-  text: string;
+  /** The agent's words for it; null for the budget orx adds, which the page words. */
+  text: string | null;
   does: "stop" | "ask";
+  /** A budget rule's amount, in US dollars. */
+  budgetUsd?: number;
 }
 
 export interface SignalSpec {
@@ -184,6 +187,8 @@ export interface RunOutcome {
   by: "user" | "agent" | "rule";
   rule?: RunRule;
   at: number;
+  /** The agent's `--reason`, or what a rule saw, in English. */
+  reason?: string | null;
 }
 
 export interface Phase {
@@ -328,7 +333,7 @@ export interface RunMonitor {
   sentence: Sentence | null;
   flag: Flag | null;
   setup?: Setup | null;
-  /** The chat's agent is editing the experiment after this stopped run. */
+  /** The chat's agent is repairing the experiment after this stopped run. */
   revising: boolean;
   rules: RunRule[];
   /** Exactly what `orx exp status` prints for the run. */

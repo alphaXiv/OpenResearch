@@ -14,6 +14,7 @@ import { Captions } from "./Captions";
 import { Lead } from "./Lead";
 import { Mark } from "./Mark";
 import { Rail } from "./Rail";
+import { Rules } from "./Rules";
 import { Sentence } from "./Sentence";
 import { useRunMonitors } from "./useRunMonitor";
 import { ViewSource } from "./ViewSource";
@@ -76,6 +77,7 @@ export function RunPage({ run, name, now }: { run: Run; name: string; now: numbe
           {empty && <p className="m-0 text-sm text-ink-subtext">{empty}</p>}
         </div>
       )}
+      {data && <Rules rules={data.rules} outcome={run.outcome ?? null} />}
       {data && <ViewSource monitor={data} projectId={run.projectId} live={model.live} />}
     </div>
   );

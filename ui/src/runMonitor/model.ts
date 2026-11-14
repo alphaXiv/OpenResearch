@@ -5,8 +5,8 @@ import { statusLabel } from "../components/StatusBadge";
 import { autoDir, fmtNumber, ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
 import { runActive, runApiProvider, runConnectHost, runDisplay, runNotice, runStoppable, type RunNotice } from "../runDisplay";
-import { fillSentence, fmtMagnitude, fmtSignal, plainSentence, tokensOf } from "./format";
-import type { Flag, FlagMode, FlagState, RunMonitor, RunMonitorSummary, ShownRun, SignalSpec, SignalValue, Signals, Versus, VersusBy } from "./types";
+import { fillSentence, fmtMagnitude, fmtSignal, fmtUsd, plainSentence, tokensOf } from "./format";
+import type { Flag, FlagMode, FlagState, RunMonitor, RunMonitorSummary, RunRule, ShownRun, SignalSpec, SignalValue, Signals, Versus, VersusBy } from "./types";
 import { capitalized, captionProgress, clockText, costWords, durationText, estimateWords, progressWords, quoteWords, stageWords } from "./words";
 
 /** How the headline compares with the parent: the arrow follows the number, the colour whether that is better. */
@@ -371,8 +371,8 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   const logError = (monitor ?? summary)?.logError ?? null;
   const pace = monitor?.pace ?? null;
   const note = tone === "revising" ? m.run_flag_revising({ agent: autoDir(agent) })
-    : tone === "stopped" && outcome?.by === "rule" && outcome.rule ? m.run_rule_detail({ text: autoDir(outcome.rule.text), name: autoDir(outcome.rule.name) })
-    : tone === "stopped" && outcome?.by === "agent" ? m.run_rule_reason_in_chat()
+    : tone === "stopped" && outcome?.by === "rule" && outcome.rule ? m.run_rule_detail({ text: ruleText(outcome.rule), name: autoDir(outcome.rule.name) })
+    : tone === "stopped" && outcome?.by === "agent" ? (outcome.reason ? m.run_stop_reason({ agent: autoDir(agent), reason: autoDir(outcome.reason) }) : m.run_rule_reason_in_chat())
     : tone === "failed" && logError ? m.run_failed_log_error({ line: quoted(logError) })
     : live && pace ? (pace.than === "earlier" ? m.run_pace_slower_earlier : m.run_pace_slower_parent)({ times: ltr(fmtNumber(pace.times)) })
     : null;
@@ -418,6 +418,11 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     canStop: runStoppable(run) && tone !== "revising",
     canDismiss: shown && !live && tone !== "revising" && !(notice && UNDISMISSABLE.has(notice.kind)),
   };
+}
+
+/** What a rule checks: the agent's words, or for the budget orx adds, its own. */
+export function ruleText(rule: RunRule): string {
+  return rule.text !== null ? autoDir(rule.text) : m.run_rule_budget({ budget: ltr(fmtUsd(rule.budgetUsd ?? 0)) });
 }
 
 function headlineOf(monitor: RunMonitor | null, summary: NonNullable<Run["monitor"]>["headline"], signals: Signals, sentenceKey: string, live: boolean): RunModel["headline"] {

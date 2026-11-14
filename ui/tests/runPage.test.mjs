@@ -90,6 +90,31 @@ test("a default view with no markup says where it comes from and shows no code; 
   assert.ok(!text(details).includes(m.run_view_source_none()));
 });
 
+test("the rules a run was launched with are listed as checked with no model, the one that stopped it marked", async () => {
+  const rules = [
+    { name: "nan-loss", text: "Stop when the loss is NaN.", does: "stop" },
+    { name: "plateau", text: "Ask when val loss stops improving.", does: "ask" },
+    { name: "budget", text: null, does: "stop", budgetUsd: 5 },
+  ];
+  const monitor = { ...pipeline(), rules };
+  const outcome = { by: "rule", at: now, rule: rules[2], reason: "it would cost up to $41.20 by its end, past its $5.00 budget" };
+  const stopped = run("r2", { status: "cancelled", endedAt: now, outcome, monitor: summary(monitor, { tone: "stopped" }) });
+  const { container } = await overview([stopped], () => monitor);
+  const budget = m.run_rule_budget({ budget: "$5.00" });
+  assert.ok(text(container).includes(`${budget} ${m.run_rule_detail({ text: "", name: "budget" }).trim()}`), text(container));
+  const details = [...container.querySelectorAll("details")].find((element) => text(element.querySelector("summary")) === m.run_rules_summary_other({ count: "3" }));
+  assert.ok(details, "the rules are a disclosure of their own");
+  assert.ok(text(details).includes(m.run_rules_checked()));
+  assert.deepEqual([...details.querySelectorAll("li")].map(text), [
+    `nan-loss Stop when the loss is NaN. · ${m.run_rule_stops()}`,
+    `plateau Ask when val loss stops improving. · ${m.run_rule_asks()}`,
+    `budget ${budget} · ${m.run_rule_stops()}${m.run_rule_stopped_this()}`,
+  ]);
+
+  const { container: none } = await overview([run("r2", { monitor: summary(pipeline()) })], () => pipeline());
+  assert.ok(![...none.querySelectorAll("summary")].some((summary) => text(summary).includes(m.run_rules_summary_other({ count: "0" }))));
+});
+
 test("a queued run draws none of its view's blocks", async () => {
   const monitor = { ...pipeline(), before: { kind: "queued", startsAt: null, text: null } };
   const { container } = await overview([run("r2", { status: "queued", startedAt: null, monitor: summary(monitor, { tone: "starting" }) })], () => monitor);
