@@ -6426,6 +6426,68 @@ impl Store {
         Ok(accepted)
     }
 
+    /// Records that the agent in `chat`, in its turn `turn`, is repairing the run's experiment
+    /// after the run stopped.
+    pub(crate) fn record_revision(&self, run_id: &str, chat: &str, turn: &str) -> Result<i64> {
+        let tx = self.begin_immediate()?;
+        let now = now_ms();
+        let body =
+            serde_json::json!({"runId": run_id, "chatSessionId": chat, "turnId": turn, "at": now});
+        tx.execute(
+            "INSERT INTO run_monitor_events (run_id, seq, kind, created_at, body_json)
+             VALUES (?1, (SELECT COALESCE(MAX(seq), 0) + 1 FROM run_monitor_events WHERE run_id = ?1),
+                     'revision', ?2, ?3)",
+            params![run_id, now, body.to_string()],
+        )?;
+        tx.commit()?;
+        Ok(now)
+    }
+
+    /// Whether the agent is repairing the run's experiment after it stopped: its latest
+    /// revision's turn is still going and no run of the experiment started since.
+    pub(crate) fn run_revising(&self, run: &StoredRun) -> Result<bool> {
+        if run.status != "cancelled" {
+            return Ok(false);
+        }
+        let revision: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT body_json FROM run_monitor_events WHERE run_id = ?1 AND kind = 'revision'
+                 ORDER BY seq DESC LIMIT 1",
+                [&run.id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(revision) = revision else {
+            return Ok(false);
+        };
+        let revision: serde_json::Value = serde_json::from_str(&revision)
+            .map_err(|e| anyhow!("Run {}'s revision is unreadable: {e}", run.id))?;
+        let turn = revision["turnId"].as_str().unwrap_or_default();
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM chat_turns WHERE id = ?1
+                             AND state IN ('preparing', 'retrying', 'running'))
+                    AND NOT EXISTS(SELECT 1 FROM runs WHERE experiment_id = ?2 AND id != ?3
+                                     AND created_at >= ?4)",
+            params![turn, run.experiment_id, run.id, run.created_at],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// The turn the chat's agent is in now, if one is going.
+    pub(crate) fn active_chat_turn(&self, chat: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id FROM chat_turns WHERE session_id = ?1
+                   AND state IN ('preparing', 'retrying', 'running')
+                 ORDER BY created_at DESC LIMIT 1",
+                [chat],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
     /// Who stopped the run, when the cancel that stopped it said; `None` for a run no one
     /// stopped, or one stopped before orx kept this.
     pub(crate) fn run_stop(&self, run_id: &str) -> Result<Option<StopContext>> {
@@ -8906,6 +8968,59 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// A stopped run is revising while the turn that said so goes on and no run of its
+    /// experiment starts after it, and at no other time.
+    #[test]
+    fn a_revision_lasts_its_turn_and_ends_at_the_next_run() {
+        let dir = std::env::temp_dir().join(format!("orx-revising-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let mut run = run_fixture("stopped", "cancelled", None);
+        run.created_at = 10;
+        store.upsert_run(&run).unwrap();
+        assert!(!store.run_revising(&run).unwrap());
+        store.put_chat_turn("chat_1", "turn_1", "running", 20);
+        assert_eq!(
+            store.active_chat_turn("chat_1").unwrap().as_deref(),
+            Some("turn_1")
+        );
+        assert_eq!(store.active_chat_turn("chat_2").unwrap(), None);
+        store
+            .record_revision("stopped", "chat_1", "turn_1")
+            .unwrap();
+        assert!(store.run_revising(&run).unwrap());
+
+        let mut live = run.clone();
+        live.status = "running".into();
+        assert!(
+            !store.run_revising(&live).unwrap(),
+            "only a stopped run is revised"
+        );
+
+        store
+            .conn
+            .execute(
+                "UPDATE chat_turns SET state = 'completed' WHERE id = 'turn_1'",
+                [],
+            )
+            .unwrap();
+        assert!(
+            !store.run_revising(&run).unwrap(),
+            "the turn ended without a run"
+        );
+
+        store.put_chat_turn("chat_1", "turn_2", "running", 30);
+        store
+            .record_revision("stopped", "chat_1", "turn_2")
+            .unwrap();
+        assert!(store.run_revising(&run).unwrap());
+        let mut next = run_fixture("next", "starting", None);
+        next.created_at = 40;
+        store.upsert_run(&next).unwrap();
+        assert!(!store.run_revising(&run).unwrap(), "the next run started");
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn engine_cancel_acceptance_waits_for_legacy_writer_to_commit_or_withdraw() {
         let (dir, store) = engine_fixture();
@@ -11287,6 +11402,19 @@ mod tests {
 
         pub(crate) fn conn_execute_for_tests(&self, sql: &str) {
             self.conn.execute(sql, []).unwrap();
+        }
+
+        /// A turn of `chat` in `state`, as the chat's own writer leaves it.
+        pub(crate) fn put_chat_turn(&self, chat: &str, id: &str, state: &str, created_at: i64) {
+            self.conn
+                .execute(
+                    "INSERT INTO chat_turns (id, session_id, assistant_message_id, client_turn_id,
+                         request_hash, prepared_input, settings_json, state, delivery_state,
+                         created_at, updated_at)
+                     VALUES (?1, ?2, ?1, ?1, '', '', '{}', ?3, 'sent', ?4, ?4)",
+                    params![id, chat, state, created_at],
+                )
+                .unwrap();
         }
 
         /// Moves a run to `status` as its lifecycle would, without the rest of a commit.

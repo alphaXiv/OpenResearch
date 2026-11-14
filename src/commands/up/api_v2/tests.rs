@@ -2758,6 +2758,56 @@ async fn a_stop_keeps_who_asked_and_why() {
     );
 }
 
+/// `orx exp revise` marks only a stopped run, the experiment's newest, from a chat whose agent
+/// is in a turn; each other case is refused in its own words, and the run then reads Revising.
+#[tokio::test]
+async fn revise_marks_a_stopped_run_its_agent_is_repairing() {
+    let f = Fixture::new().await;
+    f.insert("live", "exp", "project", "running");
+    f.insert("done", "exp", "project", "done");
+    f.insert("stopped", "exp", "project", "cancelled");
+    f.api
+        .store()
+        .conn_execute_for_tests("UPDATE runs SET created_at = 0 WHERE id = 'stopped'");
+    let revise = |id: &str, body: Value| {
+        let client = f.client.clone();
+        let path = format!("runs/{id}/revise");
+        async move { client.json(reqwest::Method::POST, &path, Some(&body)).await }
+    };
+    let refused = |result: Result<Value>| result.unwrap_err().to_string();
+    let from = |experiment: &str| json!({"experimentId": experiment, "chatSessionId": "chat-1"});
+    assert!(
+        refused(revise("stopped", json!({"experimentId": "exp"})).await)
+            .contains("run it from that agent's chat")
+    );
+    assert!(refused(revise("stopped", from("other")).await)
+        .contains("Run stopped belongs to experiment exp, not other."));
+    assert!(refused(revise("live", from("exp")).await).contains(
+        "Run live is still running; stop it first with `orx exp cancel --run live --reason '…'`"
+    ));
+    assert!(refused(revise("done", from("exp")).await).contains("Run done ended done, not stopped"));
+    assert!(refused(revise("stopped", from("exp")).await)
+        .contains("Run stopped is not experiment exp's newest run; "));
+    f.insert("newest", "exp-2", "project", "cancelled");
+    assert!(refused(revise("newest", from("exp-2")).await)
+        .contains("Chat chat-1 has no turn going, so nothing would be revising run newest."));
+    f.api
+        .store()
+        .put_chat_turn("chat-1", "turn-1", "running", 5);
+    let newest = f.api.run("newest").unwrap();
+    crate::engine::monitor::advance(&f.api.store(), &newest, 2).unwrap();
+    let answer = revise("newest", from("exp-2")).await.unwrap();
+    assert_eq!(answer["revising"], true);
+    assert_eq!(answer["run"]["monitor"]["tone"], "revising");
+    let newest = f.api.run("newest").unwrap();
+    let (_, monitor) = crate::engine::monitor::monitor(&f.api.store(), &newest).unwrap();
+    assert_eq!(monitor["revising"], true);
+    assert!(monitor["statusText"]
+        .as_str()
+        .unwrap()
+        .contains("revising The agent is repairing this experiment"));
+}
+
 #[tokio::test]
 async fn dashboard_cleanup_uses_the_existing_handler_and_abandon_security_boundary() {
     use tower::ServiceExt;

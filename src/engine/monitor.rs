@@ -180,6 +180,8 @@ struct Lifecycle {
     rules: std::result::Result<Vec<super::rules::Rule>, String>,
     /// Who stopped the run, once a cancel was accepted, or why that cannot be read.
     stop: std::result::Result<Option<crate::store::StopContext>, String>,
+    /// The chat's agent is repairing the experiment after this run stopped.
+    revising: bool,
 }
 
 impl Lifecycle {
@@ -226,6 +228,7 @@ impl Lifecycle {
             stop: store
                 .run_stop(&row.id)
                 .map_err(|error| format!("{error:#}")),
+            revising: store.run_revising(row)?,
             run: row.clone(),
         })
     }
@@ -262,7 +265,7 @@ impl Lifecycle {
     /// Changes whenever anything the projection reads from the store does.
     fn key(&self) -> String {
         format!(
-            "{}|{}|{:?}|{:?}|{}|{:?}|{}|{:?}|{:?}|{:?}|{:?}",
+            "{}|{}|{:?}|{:?}|{}|{:?}|{}|{:?}|{:?}|{:?}|{:?}|{}",
             self.run.updated_at,
             self.state,
             self.contact,
@@ -274,6 +277,7 @@ impl Lifecycle {
             self.earlier.as_ref().map(|p| (&p.id, p.updated_at)),
             self.log_error,
             self.stop,
+            self.revising,
         )
     }
 }
@@ -1083,7 +1087,7 @@ fn evaluate(
             .is_some_and(|estimate| estimate["floor"] == true);
     let pending = estimate.as_ref().is_some_and(|e| e["pending"] == true);
     let mut summary = json!({
-        "tone": tone(life.phase),
+        "tone": if life.revising { "revising" } else { tone(life.phase) },
         "whole": whole,
         "stage": snapshot.and_then(Snapshot::progress).map(|phase| {
             let of = phase.of.or(current.and_then(|index| stages[index].of));
@@ -1170,7 +1174,7 @@ fn evaluate(
         "sentence": null,
         "flag": null,
         "setup": setup,
-        "revising": false,
+        "revising": life.revising,
         "brief": [],
         "rules": rules.iter().map(super::rules::Rule::shown).collect::<Vec<_>>(),
         "statusText": text,
@@ -1656,7 +1660,11 @@ fn watch(
         }
         let failed = advanced.is_err();
         let ended = Phase::parse(&run.status).is_some_and(Phase::is_terminal);
-        if ended && !failed && store.signal_collection_retry_at(&id)?.is_none() {
+        // A revising run is watched until its revision ends, so its line hears when it does.
+        let revising = advanced
+            .as_ref()
+            .is_ok_and(|projection| projection.summary["tone"] == "revising");
+        if ended && !failed && !revising && store.signal_collection_retry_at(&id)?.is_none() {
             next.remove(&id);
         } else {
             next.insert(id);
@@ -2079,6 +2087,7 @@ fn project(
                     "headline": body["headline"],
                     "pace": body["pace"],
                     "logError": body["logError"],
+                    "revising": body["revising"],
                 },
             });
             if let Some(best) = body.get("best") {
@@ -2289,6 +2298,9 @@ fn status_text(life: &Lifecycle, fold: &Fold, facts: &StatusFacts) -> String {
     }
     if let Some(stop) = stop_text(life) {
         lines.push(format!("stop     {stop}"));
+    }
+    if life.revising {
+        lines.push("revising The agent is repairing this experiment and will run it again.".into());
     }
     if let Some(snapshot) = snapshot.filter(|s| !s.latest.is_empty()) {
         let values = snapshot
@@ -5975,6 +5987,30 @@ mod tests {
             None,
             "a run that ended is never stopped"
         );
+    }
+
+    /// A stopped run reads Revising while its agent repairs the experiment, and stays watched so
+    /// its line hears at once when the turn ends without a new run.
+    #[test]
+    fn a_revising_run_is_watched_until_its_revision_ends() {
+        let f = Fixture::new("orx-monitor-revising");
+        let run = f.run("cancelled", local());
+        let tone = || current(&f.store, &run).unwrap().unwrap().summary()["tone"].clone();
+        advance(&f.store, &run, T0).unwrap();
+        assert_eq!(tone(), "stopped");
+        f.store.put_chat_turn("chat", "turn", "running", T0);
+        f.store.record_revision("r1", "chat", "turn").unwrap();
+        let watched = watch(&f.store, Some("r1".into()), BTreeSet::new(), None).unwrap();
+        assert!(watched.contains("r1"));
+        assert_eq!(tone(), "revising");
+        let (_, monitor) = super::monitor(&f.store, &run).unwrap();
+        assert_eq!(monitor["revising"], true);
+
+        f.store
+            .conn_execute_for_tests("UPDATE chat_turns SET state = 'completed' WHERE id = 'turn'");
+        let watched = watch(&f.store, None, watched, None).unwrap();
+        assert!(!watched.contains("r1"));
+        assert_eq!(tone(), "stopped");
     }
 
     /// `orx exp status` says who stopped a run and why, in the lead the page gives it.

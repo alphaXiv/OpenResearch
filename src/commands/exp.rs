@@ -108,6 +108,9 @@ pub async fn run(args: crate::ExpArgs) -> Result<()> {
             }
         },
         ExpCommand::Wake { exp_id } => wake(&store, &exp_id),
+        ExpCommand::Revise { exp_id, run } => {
+            resolve_experiment(store, &exp_id)?.revise(&run).await
+        }
         ExpCommand::Wait { .. } | ExpCommand::Abandon { .. } | ExpCommand::View { .. } => {
             unreachable!("handled above")
         }

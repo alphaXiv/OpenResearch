@@ -555,6 +555,15 @@ pub enum ExpCommand {
         reason: Option<String>,
     },
 
+    /// Mark a stopped run as being repaired by this chat's agent, so it shows as Revising until
+    /// the experiment's next run starts or this turn ends.
+    Revise {
+        exp_id: String,
+        /// The stopped run the repair follows: the experiment's newest.
+        #[arg(long)]
+        run: String,
+    },
+
     /// Abandon a run whose outcome cannot be recovered; keep its cancel pending.
     Abandon { run: String },
 

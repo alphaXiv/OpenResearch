@@ -364,6 +364,10 @@ impl LocalPlane {
         Ok(())
     }
 
+    pub async fn revise(&self, run: &str) -> Result<()> {
+        ApiClient::discover().await?.revise(&self.id, run).await
+    }
+
     pub async fn cancel(&self, run: Option<&str>, reason: Option<&str>) -> Result<()> {
         ApiClient::discover()
             .await?
@@ -753,6 +757,20 @@ impl ApiClient {
         println!(
             "{}",
             crate::invocation::follow_up(&run.experiment_id, &run.id)
+        );
+        Ok(())
+    }
+
+    pub async fn revise(&self, experiment: &str, run: &str) -> Result<()> {
+        let request = serde_json::json!({
+            "experimentId": experiment,
+            "chatSessionId": crate::local::chat::launching_chat_session(),
+        });
+        let path = format!("runs/{}/revise", urlencoding::encode(run));
+        self.json(reqwest::Method::POST, &path, Some(&request))
+            .await?;
+        println!(
+            "\u{2713} Run {run} shows as Revising until experiment {experiment}'s next run starts or this turn ends."
         );
         Ok(())
     }

@@ -363,6 +363,7 @@ fn routes(api: Arc<Api>) -> Router {
         .route("/api/v2/runs/{id}", get(get_run))
         .route("/api/v2/runs/{id}/cancel", post(cancel))
         .route("/api/v2/runs/{id}/abandon", post(abandon))
+        .route("/api/v2/runs/{id}/revise", post(revise))
         .route("/api/v2/runs/{id}/cleanup", post(cleanup))
         .route("/api/v2/runs/{id}/log", get(log))
         .route("/api/v2/runs/{id}/monitor", get(monitor))
@@ -526,6 +527,91 @@ async fn cancel(
     api.commands.cancel(&run, &reason, Some(&stop)).await?;
     Ok(Json(api.view(&api.run(&id)?)?))
 }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviseRequest {
+    experiment_id: String,
+    chat_session_id: Option<String>,
+}
+
+/// `orx exp revise`: the chat's agent is repairing the experiment after its stopped run, for as
+/// long as the turn it said so in goes on and no run of the experiment starts.
+async fn revise(
+    State(api): State<Arc<Api>>,
+    Path(id): Path<String>,
+    Json(request): Json<ReviseRequest>,
+) -> ApiResult<Json<Value>> {
+    let refused = |status, why: String| Failure::Message(status, why);
+    let run = api.run(&id)?;
+    let experiment = &request.experiment_id;
+    let Some(chat) = request.chat_session_id.as_deref() else {
+        return Err(refused(
+            StatusCode::BAD_REQUEST,
+            format!("`orx exp revise` marks run {id} for the agent repairing its experiment; run it from that agent's chat."),
+        ));
+    };
+    if run.experiment_id != *experiment {
+        return Err(refused(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "Run {id} belongs to experiment {}, not {experiment}.",
+                run.experiment_id
+            ),
+        ));
+    }
+    match Phase::parse(&run.status) {
+        Some(Phase::Cancelled) => {}
+        Some(phase) if !phase.is_terminal() => {
+            return Err(refused(
+                StatusCode::CONFLICT,
+                format!("Run {id} is still {}; stop it first with `orx exp cancel --run {id} --reason '…'`, then mark it.", run.status),
+            ))
+        }
+        _ => {
+            return Err(refused(
+                StatusCode::CONFLICT,
+                format!("Run {id} ended {}, not stopped, so there is nothing to revise; launch the next run with `orx exp run {experiment}`.", run.status),
+            ))
+        }
+    }
+    let store = api.store();
+    if let Some(newest) = store
+        .latest_run_for_experiment(experiment)?
+        .filter(|newest| newest.id != id)
+    {
+        return Err(refused(
+            StatusCode::CONFLICT,
+            format!(
+                "Run {id} is not experiment {experiment}'s newest run; {} is.",
+                newest.id
+            ),
+        ));
+    }
+    let Some(turn) = store.active_chat_turn(chat)? else {
+        return Err(refused(
+            StatusCode::CONFLICT,
+            format!("Chat {chat} has no turn going, so nothing would be revising run {id}."),
+        ));
+    };
+    store.record_revision(&id, chat, &turn)?;
+    // Projected now so this answer and every list says Revising; the monitor task then follows
+    // the run until its revision ends.
+    crate::engine::monitor::advance(&store, &run, crate::store::now_ms())?;
+    drop(store);
+    let state = api.store().engine_run_state(&id)?;
+    api.engine
+        .bus
+        .publish(crate::engine::bus::RunEvent::Changed {
+            run_id: id.clone(),
+            phase: Phase::Cancelled,
+            contact: state.map_or(crate::store::Contact::Live, |state| state.contact),
+            cancelling: false,
+        });
+    let run = api.run(&id)?;
+    let revising = api.store().run_revising(&run)?;
+    Ok(Json(json!({"run": api.view(&run)?, "revising": revising})))
+}
+
 async fn abandon(State(api): State<Arc<Api>>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     abandon_run(&api, &id)?;
     Ok(Json(api.view(&api.run(&id)?)?))

@@ -335,3 +335,11 @@ pace measured over four slices and seen on two revisions; spend already past a
 budget stops at once. A stop goes through the engine's cancel, the first stop
 wins, and the run is Auto-stopped by that rule, with no model involved.
 
+
+A stopped run reads **Revising** while the chat's agent repairs its experiment:
+`orx exp revise EXP --run RUN`, from that agent's chat during its turn, records
+the turn against the experiment's newest run, if that run was stopped. The
+server derives the state, never stores it: it holds while that turn is going
+and no run of the experiment has started since, and ends by itself when either
+changes. The monitor task keeps such a run watched, so its line hears at once.
+Nothing claims the repair happened; the next run is the proof.
