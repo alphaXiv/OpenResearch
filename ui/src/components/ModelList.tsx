@@ -17,7 +17,12 @@ type PickerOffer = ModelOffer<PickerAgent>;
 /** A section's title bar: stuck, it spans the list's padding and covers the rows scrolling under it. */
 const BAR = "sticky -top-1 z-10 -mx-1 bg-background px-1 after:absolute after:inset-x-0 after:top-full after:h-px data-stuck:after:bg-border-variant";
 const HEADER = "flex h-7 w-full items-center gap-1.5 rounded-md ps-2.5 pe-2 pt-1 text-xs font-medium text-muted outline-none";
-const ROW = "flex min-h-8 items-center gap-1 rounded-md ps-2 pe-1 hover:bg-hover-muted has-[[data-nav]:focus-visible]:bg-hover-muted";
+const ROW = [
+  "flex min-h-8 items-center gap-1 rounded-md ps-2 pe-1 hover:bg-hover-muted",
+  "has-[[data-nav]:focus-visible]:bg-hover-muted has-[[data-nav]:focus-visible]:outline-2 has-[[data-nav]:focus-visible]:outline-solid has-[[data-nav]:focus-visible]:outline-focus has-[[data-nav]:focus-visible]:-outline-offset-2",
+].join(" ");
+/** The row Enter picks from the search, marked as a focused row is so it never reads as the picked model. */
+const ENTRY = "group-has-[input:focus]/picker:bg-hover-muted group-has-[input:focus]/picker:outline-2 group-has-[input:focus]/picker:outline-solid group-has-[input:focus]/picker:outline-focus group-has-[input:focus]/picker:-outline-offset-2";
 const MAIN = "flex min-w-0 flex-1 items-center gap-2 self-stretch text-start text-sm outline-none";
 const BADGE = "shrink-0 rounded-sm px-1 text-xs leading-4";
 
@@ -89,6 +94,12 @@ export function lineName(line: PickerLine) {
 export function matches(line: PickerLine, words: string[]) {
   const text = [line.label, line.key, ...line.offers.flatMap((offer) => [offer.model.id, offer.tile.name])].join(" ").toLowerCase();
   return words.every((word) => text.includes(word));
+}
+
+/** Which way Left and Right move along a line of text: 1 toward its end, -1 toward its start. */
+function inlineStep(event: KeyboardEvent<HTMLElement>) {
+  const rtl = getComputedStyle(event.currentTarget).direction === "rtl";
+  return event.key === (rtl ? "ArrowLeft" : "ArrowRight") ? 1 : event.key === (rtl ? "ArrowRight" : "ArrowLeft") ? -1 : 0;
 }
 
 /** The models, one collapsible section per lab, beside a rail that jumps between sections; a search lists its matches instead. */
@@ -217,6 +228,30 @@ export function ModelList({
     if (held?.star.isConnected && listRef.current) scrollTo(listRef.current.scrollTop + held.star.getBoundingClientRect().top - held.top);
   }, [favorites]);
 
+  /** Moves focus from a section or row to its section's button on the rail; a search's results belong to no section. */
+  const toRail = (from: HTMLElement) => {
+    if (searching) return false;
+    const rail = railRef.current;
+    const id = from.closest<HTMLElement>("[data-section]")?.dataset.section;
+    const target = rail?.querySelector<HTMLElement>(`[data-rail="${id}"]`) ?? rail?.querySelector<HTMLElement>("[data-rail]");
+    target?.focus();
+    return Boolean(target);
+  };
+
+  /** Up and Down move along the rail; toward the end of the line enters the section's header, or its first row. */
+  const railKeys = (event: KeyboardEvent<HTMLElement>) => {
+    const buttons = [...event.currentTarget.querySelectorAll<HTMLElement>("[data-rail]")];
+    const index = buttons.indexOf(event.target as HTMLElement);
+    const vertical = event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
+    if (vertical) buttons[(index + vertical + buttons.length) % buttons.length].focus();
+    else if (inlineStep(event) > 0) {
+      const section = listRef.current?.querySelector(`[data-section="${(event.target as HTMLElement).dataset.rail}"]`);
+      (section ?? listRef.current)?.querySelector<HTMLElement>("[data-nav]")?.focus();
+    } else return;
+    event.preventDefault();
+    event.stopPropagation();
+  };
+
   const toggle = (id: string, open = !isOpen(id)) => {
     if (id === OLDER) return setOlderOpen(open);
     const next = new Set(collapsed);
@@ -244,12 +279,17 @@ export function ModelList({
     onToggleFavorite(family);
   };
 
+  // Enter picks the first match while the search has focus.
+  const entry = searching ? (found.find((line) => !line.older) ?? found[0]) : undefined;
+
   const row = (line: PickerLine, section?: Section) => (
     <ModelRow
       key={line.key}
       line={line}
       agents={lineAgents(line, agents)}
       selected={line === selectedLine}
+      entry={line === entry}
+      onLeave={toRail}
       currentAgent={selectedAgent}
       selectedAgent={line === selectedLine ? selectedAgent : undefined}
       lockedHarness={lockedHarness}
@@ -278,6 +318,9 @@ export function ModelList({
               data-nav
               aria-expanded={open}
               onClick={() => toggle(section.id)}
+              onKeyDown={(event) => {
+                if (inlineStep(event) < 0 && toRail(event.currentTarget)) event.preventDefault();
+              }}
               className={cn(HEADER, "text-start hover:text-text focus-visible:bg-hover-muted focus-visible:text-text")}
             >
               {section.mark(12)}
@@ -294,7 +337,7 @@ export function ModelList({
   return (
     <div className="flex min-h-0 flex-1">
       {sections.length > 1 && (
-        <div ref={railRef} className="flex w-9 shrink-0 flex-col items-center gap-1 overflow-y-auto border-e border-border-variant py-2 [scrollbar-width:none]">
+        <div ref={railRef} onKeyDown={railKeys} className="flex w-9 shrink-0 flex-col items-center gap-1 overflow-y-auto border-e border-border-variant py-2 [scrollbar-width:none]">
           {sections.map((section) => (
             <Tooltip key={section.id} interactive side="start" content={section.name} className="rounded-md">
               <button
@@ -305,7 +348,7 @@ export function ModelList({
                 aria-current={section.id === active || undefined}
                 onMouseDown={(event) => event.preventDefault()}
                 onClick={() => jump(section.id)}
-                className={cn("relative grid size-6 place-items-center rounded-md outline-none hover:bg-hover-muted", section.id === active && "bg-hover-muted")}
+                className={cn("relative grid size-6 place-items-center rounded-md outline-none hover:bg-hover-muted focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:-outline-offset-1", section.id === active && "bg-hover-muted")}
               >
                 {section.id === active && <span aria-hidden="true" className="absolute -start-1 h-3.5 w-[3px] rounded-e-full bg-text" />}
                 {section.mark(14)}
@@ -331,10 +374,14 @@ export function ModelList({
   );
 }
 
-function ModelRow({ line, agents, selected, currentAgent, selectedAgent, lockedHarness, favorite, fresh, onPick, onToggleFavorite }: {
+function ModelRow({ line, agents, selected, entry, onLeave, currentAgent, selectedAgent, lockedHarness, favorite, fresh, onPick, onToggleFavorite }: {
   line: PickerLine;
   agents: PickerAgent[];
   selected: boolean;
+  /** The row Enter picks from the search. */
+  entry: boolean;
+  /** Left from the row's first stop: the rail's turn. */
+  onLeave: (from: HTMLElement) => boolean;
   currentAgent?: PickerAgent;
   selectedAgent?: PickerAgent;
   lockedHarness?: string;
@@ -350,17 +397,16 @@ function ModelRow({ line, agents, selected, currentAgent, selectedAgent, lockedH
   const newChat = (agent: PickerAgent) => lockedHarness !== undefined && harnessKey(agent.harness) !== lockedHarness;
   // Arrow keys along a row move between its agents; Up and Down move between rows.
   const along = (event: KeyboardEvent<HTMLElement>) => {
-    const rtl = getComputedStyle(event.currentTarget).direction === "rtl";
-    const step = event.key === (rtl ? "ArrowLeft" : "ArrowRight") ? 1 : event.key === (rtl ? "ArrowRight" : "ArrowLeft") ? -1 : 0;
+    const step = inlineStep(event);
     if (!step) return;
     const stops = [...event.currentTarget.closest("[data-row]")!.querySelectorAll<HTMLElement>("[data-nav], [data-agent]")];
     const next = stops[stops.indexOf(event.currentTarget) + step];
-    if (!next) return;
+    if (!next && !(step < 0 && onLeave(event.currentTarget))) return;
     event.preventDefault();
-    next.focus();
+    next?.focus();
   };
   return (
-    <div data-row className={cn(ROW, selected && "bg-hover-muted")}>
+    <div data-row className={cn(ROW, selected && "bg-hover-muted", entry && ENTRY)}>
       <button
         type="button"
         data-nav
@@ -390,7 +436,7 @@ function ModelRow({ line, agents, selected, currentAgent, selectedAgent, lockedH
               onKeyDown={along}
               onClick={() => onPick(line, agent)}
               className={cn(
-                "grid h-7 w-6 place-items-center rounded-md outline-none transition-opacity focus-visible:outline-2 focus-visible:outline-focus",
+                "grid h-7 w-6 place-items-center rounded-md outline-none transition-opacity focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus",
                 agent === selectedAgent ? "" : agent === auto ? "opacity-90 hover:opacity-100" : "opacity-50 hover:opacity-100",
               )}
             >
@@ -410,7 +456,7 @@ function ModelRow({ line, agents, selected, currentAgent, selectedAgent, lockedH
           aria-pressed={favorite}
           onKeyDown={along}
           onClick={(event) => onToggleFavorite(line.family, event)}
-          className="grid h-7 w-6 place-items-center rounded-md text-muted outline-none hover:text-text focus-visible:outline-2 focus-visible:outline-focus"
+          className="grid h-7 w-6 place-items-center rounded-md text-muted outline-none hover:text-text focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus"
         >
           <Star size={14} aria-hidden="true" className={cn(favorite && "fill-current text-accent-amber")} />
         </button>
