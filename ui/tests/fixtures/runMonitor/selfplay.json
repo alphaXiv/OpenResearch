@@ -1,0 +1,141 @@
+{
+  "runId": "r-sp",
+  "rev": 7,
+  "generation": "g1",
+  "asOf": 1794399461776.6255,
+  "availability": {
+    "state": "live",
+    "reason": null,
+    "omitted": {}
+  },
+  "view": {
+    "signals": {
+      "elo": {"label": "Elo gained", "digits": 0, "sign": true, "better": "higher"},
+      "win_vs_prev": {"label": "Win vs previous", "unit": "%", "digits": 1, "scale": 100},
+      "secs": {"label": "Round time", "as": "duration"},
+      "game_len": {"label": "Game length", "digits": 1},
+      "round": {"label": "Round"}
+    },
+    "headline": ["elo"],
+    "blocks": [
+      {"chart": ["elo"], "x": "round", "ghost": "parent"},
+      {"stats": ["elo", "win_vs_prev", "secs"]},
+      {"table": "rounds", "columns": ["round", "win_vs_prev", "elo", "game_len", "secs"], "last": 5}
+    ]
+  },
+  "viewFrom": {
+    "experimentId": "e-sp",
+    "markup": "<signal name=\"elo\" label=\"Elo gained\" digits=\"0\" sign=\"true\" better=\"higher\" />\n<signal name=\"win_vs_prev\" label=\"Win vs previous\" unit=\"%\" digits=\"1\" scale=\"100\" />\n<signal name=\"secs\" label=\"Round time\" as=\"duration\" />\n<signal name=\"game_len\" label=\"Game length\" digits=\"1\" />\n<signal name=\"round\" label=\"Round\" />\n<view headline=\"elo\">\n  <chart y=\"elo\" x=\"round\" ghost=\"parent\" />\n  <stats of=\"elo win_vs_prev secs\" />\n  <table name=\"rounds\" columns=\"round win_vs_prev elo game_len secs\" last=\"5\" />\n</view>",
+    "isDefault": false
+  },
+  "source": "declared",
+  "phases": [
+    {"name": "round", "of": 24, "unit": "rounds", "priorMs": null, "startedAt": 1794388440000, "endedAt": null}
+  ],
+  "progress": {
+    "phase": 0,
+    "done": 14.45,
+    "segments": [
+      {"name": "round", "weight": 1, "fill": 0.6020833333333333}
+    ],
+    "whole": 0.6020833333333333,
+    "lastAt": 1794399424473.2795,
+    "stallMs": null
+  },
+  "x": {
+    "name": "round",
+    "max": 24
+  },
+  "latest": {
+    "elo": 895.987815,
+    "win_vs_prev": 0.515255,
+    "secs": 929.607458,
+    "round": 15
+  },
+  "series": {
+    "elo": [[1, 181.69078], [2, 312.977409], [3, 416.899973], [4, 520.946918], [5, 589.717748], [6, 652.226876], [7, 714.64815], [8, 740.109587], [9, 777.714295], [10, 814.341387], [11, 832.287777], [12, 849.320482], [13, 885.384453], [14, 895.987815]],
+    "win_vs_prev": [[1, 0.739986], [2, 0.68043], [3, 0.64525], [4, 0.645414], [5, 0.597697], [6, 0.589], [7, 0.588877], [8, 0.536576], [9, 0.553907], [10, 0.552516], [11, 0.525804], [12, 0.524492], [13, 0.551715], [14, 0.515255]],
+    "secs": [[1, 545.610798], [2, 571.324845], [3, 627.97293], [4, 645.115444], [5, 666.054741], [6, 692.805169], [7, 729.958666], [8, 761.368079], [9, 839.793183], [10, 823.583685], [11, 870.354609], [12, 904.528137], [13, 926.2196], [14, 929.607458]]
+  },
+  "seriesRev": 7,
+  "rows": {
+    "rounds": [
+      {"round": 1, "win_vs_prev": 0.74, "elo": 181.7, "game_len": 61.53, "secs": 546},
+      {"round": 2, "win_vs_prev": 0.6804, "elo": 313, "game_len": 63.77, "secs": 571},
+      {"round": 3, "win_vs_prev": 0.6453, "elo": 416.9, "game_len": 66.69, "secs": 628},
+      {"round": 4, "win_vs_prev": 0.6454, "elo": 520.9, "game_len": 67.74, "secs": 645},
+      {"round": 5, "win_vs_prev": 0.5977, "elo": 589.7, "game_len": 71.26, "secs": 666},
+      {"round": 6, "win_vs_prev": 0.589, "elo": 652.2, "game_len": 71.49, "secs": 693},
+      {"round": 7, "win_vs_prev": 0.5889, "elo": 714.6, "game_len": 74.15, "secs": 730},
+      {"round": 8, "win_vs_prev": 0.5366, "elo": 740.1, "game_len": 74.78, "secs": 761},
+      {"round": 9, "win_vs_prev": 0.5539, "elo": 777.7, "game_len": 76.53, "secs": 840},
+      {"round": 10, "win_vs_prev": 0.5525, "elo": 814.3, "game_len": 76.6, "secs": 824},
+      {"round": 11, "win_vs_prev": 0.5258, "elo": 832.3, "game_len": 78.16, "secs": 870},
+      {"round": 12, "win_vs_prev": 0.5245, "elo": 849.3, "game_len": 78.37, "secs": 905},
+      {"round": 13, "win_vs_prev": 0.5517, "elo": 885.4, "game_len": 77.94, "secs": 926},
+      {"round": 14, "win_vs_prev": 0.5153, "elo": 896, "game_len": 79.17, "secs": 930}
+    ]
+  },
+  "groups": {},
+  "cells": {},
+  "media": {},
+  "parent": {
+    "runId": "p-sp",
+    "phase": null,
+    "series": {
+      "elo": [[1, 181.703349], [2, 311.725975], [3, 406.625605], [4, 476.565667], [5, 528.372012], [6, 566.850477], [7, 595.472108], [8, 616.779182], [9, 632.648126], [10, 644.469829], [11, 653.277719], [12, 659.840634], [13, 664.730986], [14, 668.375115], [15, 671.090635], [16, 673.114192], [17, 674.622116], [18, 675.745801], [19, 676.583158], [20, 677.207146], [21, 677.672134], [22, 678.018639], [23, 678.27685], [24, 678.469266]]
+    }
+  },
+  "headline": "elo",
+  "versus": {
+    "step": {
+      "elo": {
+        "d": 227.612699,
+        "good": true,
+        "flat": false,
+        "mag": 228,
+        "parent": 668.375115,
+        "step": 14
+      }
+    },
+    "final": {
+      "elo": {
+        "d": 227.612699,
+        "good": true,
+        "flat": false,
+        "mag": 228,
+        "parent": 668.375115,
+        "step": 14
+      }
+    }
+  },
+  "counts": {},
+  "estimate": {
+    "loMs": 9358410,
+    "midMs": 10797521,
+    "hiMs": 11427073,
+    "at": 1794399461776.6255,
+    "pending": false,
+    "pastLimitMs": null
+  },
+  "limit": {
+    "endsAt": 1794417240000
+  },
+  "cost": null,
+  "quote": null,
+  "before": null,
+  "watch": {
+    "state": "off",
+    "model": null,
+    "looks": [],
+    "spentUsd": null,
+    "nextAt": null,
+    "error": null
+  },
+  "sentence": null,
+  "flag": null,
+  "revising": false,
+  "rules": [],
+  "statusText": "selfplay-pool-64  running  60%",
+  "newestLine": "::orx:: {\"step\":14,\"row\":\"rounds\",\"m\":{\"round\":14,\"win_vs_prev\":0.5153,\"elo\":896,\"game_len\":79.17,\"secs\":930}}"
+}

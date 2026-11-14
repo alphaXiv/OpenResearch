@@ -1219,6 +1219,7 @@ echo ok
             exclude: None,
             sbatch_args: Vec::new(),
             force: false,
+            budget: None,
             chat_session_id: None,
             invocation_context: None,
             agent_origin: None,

@@ -79,13 +79,13 @@ test("archiving a region marks the experiments the server names", async () => {
 test("stopping a run shows it stopping wherever the run is listed", async () => {
   const { workspace, seed, read } = setup();
   const runs = workspace.queries.listRunsQuery("p");
-  const active = workspace.queries.listChatActiveRunsQuery();
+  const shown = workspace.queries.listChatShownRunsQuery();
   seed(runs, [run("r1", "a"), run("r2", "a")]);
-  seed(active, [{ sessionId: "s", run: run("r1", "a"), experimentName: null }]);
+  seed(shown, { source: "shown", runs: [{ sessionId: "s", run: run("r1", "a"), experimentName: null }] });
 
   void mutCancelRun.runAsHeadlessPromise(workspace, { id: "r1", projectId: "p" }, {});
   assert.deepEqual(read(runs).map((row) => row.cancelling), [true, false]);
-  assert.equal(read(active)[0].run.cancelling, true);
+  assert.equal(read(shown).runs[0].run.cancelling, true);
 });
 
 test("renaming an artifact folder moves everything inside it", async () => {

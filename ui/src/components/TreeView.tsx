@@ -220,7 +220,8 @@ function runSquareClass({ status, stale }: RunDisplay): string {
   if (stale) return "stale";
   if (status === "done") return "pass";
   if (status === "failed") return "fail";
-  if (status === "submitting" || status === "running" || status === "starting" || status === "cancelling") return "live";
+  if (status === "flagged") return "flag";
+  if (status === "submitting" || status === "running" || status === "starting" || status === "cancelling" || status === "revising") return "live";
   return "other";
 }
 
@@ -280,7 +281,7 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
                 return (
                   <span
                     key={run.id}
-                    className={`run-sq w-[9px] h-[9px] shrink-0 [&.pass]:bg-accent-green [&.fail]:border-[1.5px] [&.fail]:border-danger-outline [&.live]:bg-accent-teal [&.live]:animate-[or-pulse_1.2s_ease-in-out_infinite] [&.other]:border-[1.5px] [&.other]:border-border [&.stale]:border-[1.5px] [&.stale]:border-accent-amber ${runSquareClass(square)}`}
+                    className={`run-sq w-[9px] h-[9px] shrink-0 [&.pass]:bg-accent-green [&.fail]:border-[1.5px] [&.fail]:border-danger-outline [&.live]:bg-accent-teal [&.live]:animate-[or-pulse_1.2s_ease-in-out_infinite] [&.flag]:bg-mark-amber [&.other]:border-[1.5px] [&.other]:border-border [&.stale]:border-[1.5px] [&.stale]:border-accent-amber ${runSquareClass(square)}`}
                     title={statusLabel(square.status, square.stopping)}
                   />
                 );

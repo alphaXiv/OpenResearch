@@ -13,6 +13,7 @@ import {
 import { ExperimentOverview } from "./ExperimentOverview";
 import type { CodeView } from "./CodeTab";
 import { LogTerminal } from "./LogTerminal";
+import type { LogSeek } from "../logWindow";
 import { RunContactNotice } from "./RunContactNotice";
 import { StatusBadge } from "./StatusBadge";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
@@ -37,6 +38,8 @@ export function DetailDrawer({
   onOpenView,
   onOpenCode,
   onOpenExperiment,
+  logSeek = null,
+  onLogSeekTaken,
 }: {
   experiment: Experiment;
   experiments: Experiment[];
@@ -50,6 +53,9 @@ export function DetailDrawer({
   onOpenView: (view: ExperimentView, runId: string | undefined, intent: TabOpenIntent) => void;
   onOpenCode: (view: CodeView, intent: TabOpenIntent) => void;
   onOpenExperiment: (id: string, intent: TabOpenIntent) => void;
+  /** Where the user asked a run's log to open; the log of that run takes it. */
+  logSeek?: (LogSeek & { runId: string }) | null;
+  onLogSeekTaken?: (seek: LogSeek) => void;
 }) {
   const expRuns = runs
     .filter((r) => r.experimentId === experiment.id)
@@ -81,6 +87,8 @@ export function DetailDrawer({
       selectedRunId={selectedRunId}
       onSelectRun={onSelectRun}
       onOpenView={onOpenView}
+      logSeek={logSeek}
+      onLogSeekTaken={onLogSeekTaken}
    />
   );
 }
@@ -97,6 +105,8 @@ function TerminalView({
   selectedRunId,
   onSelectRun,
   onOpenView,
+  logSeek,
+  onLogSeekTaken,
 }: {
   experiment: Experiment;
   expRuns: Run[];
@@ -104,6 +114,8 @@ function TerminalView({
   selectedRunId: string | null;
   onSelectRun: (id: string | null) => void;
   onOpenView: (view: ExperimentView, runId: string | undefined, intent: TabOpenIntent) => void;
+  logSeek: (LogSeek & { runId: string }) | null;
+  onLogSeekTaken?: (seek: LogSeek) => void;
 }) {
   const { useTrackioRuns } = useWorkspace().queries;
   const workspace = useWorkspace();
@@ -254,7 +266,7 @@ function TerminalView({
         ) : selectedRun ? (
           // Key by run id so switching runs in the history dropdown remounts
           // the terminal with the selected run's output.
-          <LogTerminal key={selectedRun.id} run={selectedRun} />
+          <LogTerminal key={selectedRun.id} run={selectedRun} seek={logSeek?.runId === selectedRun.id ? logSeek : null} onSeekTaken={onLogSeekTaken} />
         ) : (
           <div className="term-empty h-full flex items-center justify-center p-6 text-center text-sm text-muted">{selectedRunId ? m.model_picker_unavailable() : m.detail_drawer_no_runs_yet_ask_the_agent_to_launch()}</div>
         )}

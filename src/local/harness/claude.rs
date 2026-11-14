@@ -37,8 +37,8 @@ use super::options::{
     HarnessOptions, OptionChoice, PermissionMode, PlanActivation, REASONING_DEFAULT_ID,
 };
 use super::{
-    CompactCtx, CompactOutcome, Harness, OneShot, OneShotQuality, ResumeAction, TurnFailure,
-    TurnOutcome, TurnResult, Waited, ORX_MAX_ATTEMPTS,
+    CompactCtx, CompactOutcome, Harness, OneShot, OneShotQuality, OneShotReply, OneShotUsage,
+    ResumeAction, TurnFailure, TurnOutcome, TurnResult, Waited, ORX_MAX_ATTEMPTS,
 };
 use crate::error::{anyhow, Result};
 use crate::local::chat::{
@@ -1023,6 +1023,49 @@ fn billing_label(
 /// through from the catalog; a CLI too old to know them exits non-zero, and
 /// the error carries what it printed.
 async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
+    let out = claude_one_shot_output(bin, request, &[]).await?;
+    Ok(String::from_utf8_lossy(&out).into_owned())
+}
+
+/// A one-shot's reply and usage from `-p --output-format json`: one result object.
+async fn claude_one_shot_reply(bin: &Path, request: OneShot<'_>) -> Result<OneShotReply> {
+    let out = claude_one_shot_output(bin, request, &["--output-format", "json"]).await?;
+    claude_result_reply(&out)
+}
+
+fn claude_result_reply(out: &[u8]) -> Result<OneShotReply> {
+    let result: Value = serde_json::from_slice(out).map_err(|error| {
+        anyhow!(
+            "Claude Code answered something other than its JSON result ({error}): {}",
+            super::one_line(&String::from_utf8_lossy(out), 200)
+        )
+    })?;
+    let text = result["result"].as_str().unwrap_or_default().to_owned();
+    if result["is_error"] == true {
+        return Err(anyhow!("{}", super::one_line(&text, 300)));
+    }
+    let usage = &result["usage"];
+    let input = [
+        "input_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+    ]
+    .iter()
+    .filter_map(|key| usage[key].as_u64())
+    .sum();
+    let usage = usage.is_object().then(|| OneShotUsage {
+        input_tokens: input,
+        output_tokens: usage["output_tokens"].as_u64().unwrap_or_default(),
+        cost_usd: result["total_cost_usd"].as_f64(),
+    });
+    Ok(OneShotReply { text, usage })
+}
+
+async fn claude_one_shot_output(
+    bin: &Path,
+    request: OneShot<'_>,
+    extra: &[&str],
+) -> Result<Vec<u8>> {
     let model = match request.quality {
         OneShotQuality::Cheap => "haiku",
         OneShotQuality::Standard => "sonnet",
@@ -1044,6 +1087,10 @@ async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
         "--strict-mcp-config",
         "--tools",
         "",
+        // Only the home's own settings: a project's, found in any folder above the working
+        // directory (a `.claude` in the user's home among them), would bring its memory along.
+        "--setting-sources",
+        "user",
         // Replace the agent system prompt: the default hauls ~8.5k tokens of
         // Claude Code scaffolding into a request that ignores it (measured
         // 8.5k → 1.9k input for titles). Latency is unchanged — the ~3s is
@@ -1051,6 +1098,7 @@ async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
         "--system-prompt",
         request.system,
     ])
+    .args(extra)
     .stdin(Stdio::null())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())
@@ -1060,19 +1108,32 @@ async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
     .current_dir(std::env::temp_dir());
     prepare_env(&mut cmd);
     cmd.env("CLAUDE_CODE_ENTRYPOINT", CLAUDE_ENTRYPOINT);
-    if let Some(profile) = request.profile {
+    let (home, name) = if let Some(profile) = request.profile {
         crate::local::agent_profiles::home(profile, "claude-code")?;
-        cmd.envs(crate::local::agent_profiles::login_env(profile)?);
+        let env = crate::local::agent_profiles::login_env(profile)?;
+        let home = env
+            .iter()
+            .find(|(key, _)| *key == "CLAUDE_CONFIG_DIR")
+            .map(|(_, home)| PathBuf::from(home))
+            .ok_or_else(|| anyhow!("agent account {profile} has no Claude Code home"))?;
+        cmd.envs(env);
+        (home, profile)
     } else {
-        cmd.env(
-            "CLAUDE_CONFIG_DIR",
-            native_store::prepare_claude(NativeStore::Isolated)?,
-        );
         cmd.env(
             "CLAUDE_SECURESTORAGE_CONFIG_DIR",
             native_store::claude_secure_storage_config_dir(),
         );
-    }
+        (
+            native_store::prepare_claude(NativeStore::Isolated)?,
+            "claude",
+        )
+    };
+    // A one-shot brings its own context: the user's memory, skills and plugins would add
+    // thousands of tokens to every request.
+    cmd.env(
+        "CLAUDE_CONFIG_DIR",
+        native_store::prepare_claude_one_shot(&home, name)?,
+    );
     // Plain text only — an ANSI-colorizing CLI (or a synced FORCE_COLOR) would
     // otherwise write escape codes straight into the reply.
     cmd.env("NO_COLOR", "1");
@@ -1081,13 +1142,22 @@ async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
         .await
         .map_err(|_| anyhow!("timed out after {}s", request.timeout.as_secs()))??;
     if !out.status.success() {
+        // A JSON result says why in its own words.
+        let said = serde_json::from_slice::<Value>(&out.stdout).ok();
+        if let Some(why) = said
+            .as_ref()
+            .and_then(|said| said["result"].as_str())
+            .filter(|why| !why.trim().is_empty())
+        {
+            return Err(anyhow!("{}", super::one_line(why, 300)));
+        }
         // `-p` prints request failures (bad model, signed out) on stdout; stderr is diagnostics.
         return Err(super::one_shot_exit_error(
             out.status,
             &[&out.stdout, &out.stderr],
         ));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    Ok(out.stdout)
 }
 
 /// Every `claude` install, in preference order.
@@ -1357,6 +1427,16 @@ impl Harness for ClaudeCode {
 
     fn one_shot_honours_model(&self) -> bool {
         false
+    }
+
+    /// `--tools ""` leaves the child no tool to call, and `--strict-mcp-config` no server.
+    fn runs_without_tools(&self) -> bool {
+        true
+    }
+
+    async fn one_shot_without_tools(&self, request: OneShot<'_>) -> Result<OneShotReply> {
+        let bin = find_claude().ok_or_else(|| anyhow!("{} is not installed", self.name()))?;
+        claude_one_shot_reply(&bin, request).await
     }
 
     fn options(&self) -> HarnessOptions {

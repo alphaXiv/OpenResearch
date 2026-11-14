@@ -1,0 +1,134 @@
+{
+  "runId": "r-oe",
+  "rev": 7,
+  "generation": "g1",
+  "asOf": 1794404280000,
+  "availability": {
+    "state": "live",
+    "reason": null,
+    "omitted": {}
+  },
+  "view": {
+    "signals": {
+      "fid": {"label": "FID", "digits": 1, "better": "lower", "pick": "best"},
+      "step": {"label": "Steps", "as": "compact"},
+      "steps_per_s": {"label": "Speed", "unit": "steps/s", "digits": 1}
+    },
+    "headline": ["fid"],
+    "blocks": [
+      {"last": 6, "media": "artifacts/samples/*.png"},
+      {"chart": ["fid"], "x": "step", "ghost": "parent"},
+      {"stats": ["fid", "step", "steps_per_s"]}
+    ]
+  },
+  "viewFrom": {
+    "experimentId": "e-oe",
+    "markup": "<signal name=\"fid\" label=\"FID\" digits=\"1\" better=\"lower\" pick=\"best\" />\n<signal name=\"step\" label=\"Steps\" as=\"compact\" />\n<signal name=\"steps_per_s\" label=\"Speed\" unit=\"steps/s\" digits=\"1\" />\n<view headline=\"fid\">\n  <media glob=\"artifacts/samples/*.png\" last=\"6\" />\n  <chart y=\"fid\" x=\"step\" ghost=\"parent\" />\n  <stats of=\"fid step steps_per_s\" />\n</view>",
+    "isDefault": false
+  },
+  "source": "detected",
+  "phases": [
+    {"name": "train", "of": null, "unit": "steps", "priorMs": null, "startedAt": 1794388440000, "endedAt": null}
+  ],
+  "progress": {
+    "phase": 0,
+    "done": 80000,
+    "segments": [
+      {"name": "train", "weight": 1, "fill": 0.55}
+    ],
+    "whole": 0.55,
+    "lastAt": 1794404125567.902,
+    "stallMs": null
+  },
+  "x": {
+    "name": "step",
+    "max": 80000
+  },
+  "latest": {
+    "fid": 16.956171,
+    "step": 80000,
+    "steps_per_s": 5.1
+  },
+  "series": {
+    "fid": [[10000, 56.647693], [20000, 45.77986], [30000, 37.161276], [40000, 30.964294], [50000, 25.814014], [60000, 21.990548], [70000, 18.721708], [80000, 16.956171]]
+  },
+  "seriesRev": 7,
+  "rows": {},
+  "groups": {},
+  "cells": {},
+  "media": {
+    "artifacts/samples/*.png": [
+      {"path": "samples/step-10k.png", "kind": "image", "at": 1794399480000, "caption": "10k steps"},
+      {"path": "samples/step-20k.png", "kind": "image", "at": 1794400080000, "caption": "20k steps"},
+      {"path": "samples/step-30k.png", "kind": "image", "at": 1794400680000, "caption": "30k steps"},
+      {"path": "samples/step-40k.png", "kind": "image", "at": 1794401280000, "caption": "40k steps"},
+      {"path": "samples/step-50k.png", "kind": "image", "at": 1794401880000, "caption": "50k steps"},
+      {"path": "samples/step-60k.png", "kind": "image", "at": 1794402480000, "caption": "60k steps"},
+      {"path": "samples/step-70k.png", "kind": "image", "at": 1794403080000, "caption": "70k steps"},
+      {"path": "samples/step-80k.png", "kind": "image", "at": 1794403680000, "caption": "80k steps"}
+    ]
+  },
+  "parent": {
+    "runId": "p-oe",
+    "phase": null,
+    "series": {
+      "fid": [[10000, 56.224941], [20000, 43.631861], [30000, 34.608525], [40000, 28.143023], [50000, 23.510287], [60000, 20.190788], [70000, 17.812262], [80000, 16.107974]]
+    }
+  },
+  "headline": "fid",
+  "versus": {
+    "step": {
+      "fid": {
+        "d": 0.848197,
+        "good": false,
+        "flat": false,
+        "mag": 0.8,
+        "parent": 16.107974
+      }
+    },
+    "final": {
+      "fid": {
+        "d": 0.848197,
+        "good": false,
+        "flat": false,
+        "mag": 0.8,
+        "parent": 16.107974
+      }
+    }
+  },
+  "counts": {},
+  "estimate": null,
+  "limit": {
+    "endsAt": 1794417240000
+  },
+  "cost": {
+    "soFar": 11.06,
+    "projected": null,
+    "atLimit": null,
+    "spend": null,
+    "budget": null,
+    "gpuHours": null,
+    "at": 1794404280000,
+    "projectedRange": null,
+    "uncertain": false
+  },
+  "quote": null,
+  "before": null,
+  "watch": {
+    "state": "off",
+    "model": null,
+    "looks": [],
+    "spentUsd": null,
+    "nextAt": null,
+    "error": null
+  },
+  "sentence": null,
+  "flag": null,
+  "revising": false,
+  "rules": [],
+  "statusText": "ddpm-cifar-cosine  running  55%",
+  "newestLine": "train: 80000it [4:21:07, 5.10it/s]",
+  "best": {
+    "fid": 16.956171
+  }
+}

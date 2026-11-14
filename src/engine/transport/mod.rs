@@ -56,6 +56,8 @@ fn reply_deadline(body: &Request) -> Duration {
             Request::Hello { .. }
             | Request::Inspect { .. }
             | Request::ReadLog { .. }
+            | Request::ReadSignals { .. }
+            | Request::ConfigureSignals { .. }
             | Request::SlurmCancelLegacy { .. }
             | Request::InspectLegacy { .. } => Duration::ZERO,
         }
@@ -386,7 +388,7 @@ struct Actor {
 fn lane(body: &Request) -> usize {
     match body {
         Request::Changes { .. } | Request::SlurmQueue { .. } => 1,
-        Request::ReadLog { .. } => 2,
+        Request::ReadLog { .. } | Request::ReadSignals { .. } => 2,
         Request::PutBlob { .. } | Request::HasBlob { .. } | Request::PinSource { .. } => 3,
         _ => 0,
     }

@@ -1,6 +1,6 @@
 import { useWorkspace } from "../workspace";
 import { useQuery } from "@tanstack/react-query";
-import { FlaskConical, Folder } from "lucide-react";
+import { FlaskConical, Folder, TriangleAlert } from "lucide-react";
 import { useCallback, useId, useState } from "react";
 import { createPortal } from "react-dom";
 
@@ -19,12 +19,15 @@ const CARD_WIDTH = 320;
 const GAP = 8;
 
 const ICON_TONES: Partial<Record<RunDisplayStatus, string>> = {
-  submitting: "text-accent-green",
-  starting: "text-accent-green",
-  running: "text-accent-green",
-  cancelling: "text-accent-amber",
-  cancellation_pending: "text-accent-amber",
+  submitting: "text-mark-green",
+  starting: "text-mark-green",
+  running: "text-mark-green",
+  flagged: "text-mark-amber",
+  cancelling: "text-mark-amber",
+  cancellation_pending: "text-mark-amber",
   failed: "text-accent-red",
+  auto_stopped: "text-accent-orange",
+  revising: "text-accent-purple",
 };
 
 function ExperimentRow({ row, sessionProjectId, tabbable, onFocus, onOpen }: {
@@ -51,11 +54,11 @@ function ExperimentRow({ row, sessionProjectId, tabbable, onFocus, onOpen }: {
         onFocus={onFocus}
         onClick={onOpen}
       >
-        <FlaskConical
+        {status === "flagged" ? <TriangleAlert size={14} className={`mt-[3px] shrink-0 ${tone}`} aria-hidden="true" /> : <FlaskConical
           size={14}
           className={`mt-[3px] shrink-0 ${tone} ${live ? "motion-safe:animate-[or-experiment-pulse_3s_ease-in-out_infinite]" : ""}`}
           aria-hidden="true"
-        />
+        />}
         <span className="min-w-0 flex-1">
           <span className="block break-words">{experiment.title?.trim() || experiment.slug}</span>
           <span className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-xs text-subtext">

@@ -135,6 +135,7 @@ fn small_log_identity_survives_appends_from_empty() {
 /// A watched run the engine has not seen yet, so whatever the host reports is a change.
 fn unseen(run: &str) -> (RunId, Summary) {
     let summary = Summary {
+        signals: None,
         started_at: None,
         state: RunState::Unreconciled {
             detail: "unseen".into(),
@@ -153,7 +154,7 @@ fn change_feed_isolates_unreadable_intent() {
     fs::create_dir(dir.0.join("runs/bad")).unwrap();
     fs::write(dir.0.join("runs/bad/launch.json"), "{").unwrap();
     fs::create_dir(dir.0.join("runs/good")).unwrap();
-    let Response::Changes { runs } = host.handle(Request::Changes {
+    let Response::Changes { runs, .. } = host.handle(Request::Changes {
         watch: vec![unseen("bad"), unseen("good")],
         follow_logs: vec![],
         wait_ms: 0,
@@ -217,7 +218,7 @@ fn starting_run_recovery_backs_off_and_preserves_the_staged_script() {
 }
 
 #[test]
-fn change_feed_returns_on_change_timeout_and_ignores_unfollowed_log_growth() {
+fn change_feed_follows_signals_without_log_subscription_and_obeys_wait() {
     let dir = Directory::new();
     let host = Arc::new(host(&dir));
     let request = |watch| Request::Changes {
@@ -225,24 +226,49 @@ fn change_feed_returns_on_change_timeout_and_ignores_unfollowed_log_growth() {
         follow_logs: vec![],
         wait_ms: 0,
     };
-    assert_eq!(
+    assert!(matches!(
         host.handle(request(vec![])),
-        Response::Changes { runs: vec![] }
-    );
+        Response::Changes { runs, .. } if runs.is_empty()
+    ));
     fs::create_dir(dir.0.join("runs/r1")).unwrap();
-    let Response::Changes { runs } = host.handle(request(vec![unseen("r1")])) else {
+    let Response::Changes { runs, .. } = host.handle(request(vec![unseen("r1")])) else {
         panic!();
     };
     assert_eq!(runs[0].1.log_len, None);
-    fs::write(dir.0.join("runs/r1/log"), b"hello").unwrap();
-    let start = Instant::now();
+    fs::write(
+        dir.0.join("runs/r1/log"),
+        b"::orx:: {\"step\":1,\"of\":10}\n",
+    )
+    .unwrap();
+    let Response::Changes { runs, .. } = host.handle(request(runs)) else {
+        panic!();
+    };
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].1.log_len, None);
     assert_eq!(
-        host.handle(Request::Changes {
-            watch: runs.clone(),
-            follow_logs: vec![],
-            wait_ms: 40
-        }),
-        Response::Changes { runs: vec![] }
+        runs[0].1.signals.as_ref().unwrap().progress["done"].as_f64(),
+        Some(1.0)
+    );
+    let start = Instant::now();
+    let asked = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let Response::Changes {
+        runs: none,
+        answered_at,
+    } = host.handle(Request::Changes {
+        watch: runs.clone(),
+        follow_logs: vec![],
+        wait_ms: 40,
+    })
+    else {
+        panic!();
+    };
+    assert!(none.is_empty());
+    assert!(
+        answered_at.is_some_and(|at| at >= asked),
+        "an unchanged answer still carries the host's clock"
     );
     assert!(start.elapsed() >= Duration::from_millis(35));
     let feed = {
@@ -255,10 +281,9 @@ fn change_feed_returns_on_change_timeout_and_ignores_unfollowed_log_growth() {
             })
         })
     };
-    std::thread::sleep(Duration::from_millis(50));
     fs::write(dir.0.join("runs/r1/notify"), b"done").unwrap();
     assert!(
-        matches!(feed.join().unwrap(), Response::Changes { runs } if runs[0].1.notify_len == 4)
+        matches!(feed.join().unwrap(), Response::Changes { runs, .. } if runs[0].1.notify_len == 4)
     );
 }
 
@@ -647,7 +672,7 @@ fn receipt_read_errors_keep_their_type_and_recover() {
         orx_host::wrapper::state(&dir).unwrap(),
         RunState::Unreachable { .. }
     ));
-    let Response::Changes { runs } = host.handle(Request::Changes {
+    let Response::Changes { runs, .. } = host.handle(Request::Changes {
         watch: vec![unseen("errors")],
         follow_logs: vec![],
         wait_ms: 0,
@@ -735,4 +760,162 @@ fn source_pinning_respects_cross_process_launch_ownership() {
     assert!(owner.0.wait().unwrap().success());
     assert_eq!(host.handle(pin()), Response::PinSource { pinned: true });
     assert_eq!(fs::read(dir.join("source.tar")).unwrap(), bytes);
+}
+
+#[test]
+fn live_inspection_keeps_partial_frames_until_final_collection_requests_eof() {
+    let dir = Directory::new();
+    let host = host(&dir);
+    let run = dir.0.join("runs/r1");
+    fs::create_dir_all(&run).unwrap();
+    fs::write(run.join("log"), b"::orx:: {\"step\":1,\"m\":{\"loss\":2}}").unwrap();
+    let Response::Inspect { summary, .. } = host.handle(Request::Inspect { run: "r1".into() })
+    else {
+        panic!();
+    };
+    assert!(summary
+        .signals
+        .unwrap()
+        .latest
+        .as_object()
+        .unwrap()
+        .is_empty());
+    let mut log = OpenOptions::new()
+        .append(true)
+        .open(run.join("log"))
+        .unwrap();
+    log.write_all(b"\n::orx:: {\"step\":2,\"m\":{\"loss\":1}}")
+        .unwrap();
+    let Response::Inspect { summary, .. } = host.handle(Request::Inspect { run: "r1".into() })
+    else {
+        panic!();
+    };
+    let signals = summary.signals.unwrap();
+    assert_eq!(signals.latest["loss"], 2);
+    let read = |terminal, signals: &SignalsSummary| Request::ReadSignals {
+        terminal,
+        run: "r1".into(),
+        generation: signals.generation.clone(),
+        revision: signals.revision,
+        offset: 0,
+        length: MAX_PAGE_LEN,
+    };
+    let Response::ReadSignals {
+        page: SignalsPage::Reset { summary: signals },
+        ..
+    } = host.handle(read(true, &signals))
+    else {
+        panic!();
+    };
+    assert_eq!(signals.latest["loss"], 1);
+    let Response::ReadSignals {
+        page: SignalsPage::Data { bytes, .. },
+        ..
+    } = host.handle(read(false, &signals))
+    else {
+        panic!();
+    };
+    let snapshot: orx_signals::Snapshot = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(snapshot.extra["terminal"], true);
+    assert!(snapshot.cursor.pending_base64.is_empty());
+    let Response::Inspect { summary, .. } = host.handle(Request::Inspect { run: "r1".into() })
+    else {
+        panic!();
+    };
+    assert_eq!(summary.signals.unwrap().revision, signals.revision);
+    assert_eq!(summary.state, RunState::Missing);
+}
+
+#[test]
+fn missing_log_is_unavailable_and_never_missing_capability() {
+    let dir = Directory::new();
+    let host = host(&dir);
+    let Response::Inspect { summary, .. } = host.handle(Request::Inspect {
+        run: "absent".into(),
+    }) else {
+        panic!("inspect")
+    };
+    let signals = summary.signals.expect("native capability is present");
+    assert!(signals
+        .error
+        .unwrap()
+        .contains("No log or signal checkpoint"));
+}
+
+#[test]
+fn slurm_summary_scans_only_one_bounded_page_batch() {
+    let dir = Directory::new();
+    let host = host(&dir);
+    let run = dir.0.join("runs/slurm");
+    fs::create_dir_all(&run).unwrap();
+    fs::write(run.join("job.sbatch"), "#!/bin/sh\n").unwrap();
+    fs::write(run.join("log"), vec![b'x'; 8 * 1024 * 1024]).unwrap();
+    let Response::Inspect { summary, .. } = host.handle(Request::Inspect {
+        run: "slurm".into(),
+    }) else {
+        panic!("inspect")
+    };
+    assert_eq!(summary.signals.unwrap().cursor, 4 * 1024 * 1024);
+}
+
+#[test]
+fn signal_pages_keep_their_identity_while_the_checkpoint_advances() {
+    let dir = Directory::new();
+    let host = host(&dir);
+    let path = dir.0.join("run-signals/r1.json");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut snapshot = orx_signals::Snapshot::new("r1", "1-1", "g1");
+    snapshot
+        .feed(b"::orx:: {\"step\":1}\n", false, 1, false)
+        .unwrap();
+    orx_host::signals::publish(&path, &snapshot).unwrap();
+    let original = serde_json::to_vec(&snapshot).unwrap();
+    let request = |offset| Request::ReadSignals {
+        terminal: false,
+        run: "r1".into(),
+        generation: "g1".into(),
+        revision: snapshot.rev,
+        offset,
+        length: 64,
+    };
+    let Response::ReadSignals {
+        page: SignalsPage::Reset { summary },
+        ..
+    } = host.handle(Request::ReadSignals {
+        terminal: false,
+        run: "r1".into(),
+        generation: String::new(),
+        revision: 0,
+        offset: 0,
+        length: 64,
+    })
+    else {
+        panic!("new snapshot was not pinned")
+    };
+    assert_eq!(summary.revision, snapshot.rev);
+    let mut bytes = Vec::new();
+    let mut newer = snapshot.clone();
+    newer
+        .feed(b"::orx:: {\"step\":2}\n", false, 2, false)
+        .unwrap();
+    orx_host::signals::publish(&path, &newer).unwrap();
+    while bytes.len() < original.len() {
+        let Response::ReadSignals {
+            page:
+                SignalsPage::Data {
+                    offset,
+                    bytes: page,
+                    revision,
+                    ..
+                },
+            ..
+        } = host.handle(request(bytes.len() as u64))
+        else {
+            panic!("pinned page reset")
+        };
+        assert_eq!(offset, bytes.len() as u64);
+        assert_eq!(revision, snapshot.rev);
+        bytes.extend(page);
+    }
+    assert_eq!(bytes, original);
 }

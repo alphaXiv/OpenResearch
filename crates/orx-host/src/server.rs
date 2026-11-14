@@ -29,6 +29,7 @@ pub struct Host {
     /// Set when the client is gone, so long waits and commands end.
     stop: Arc<AtomicBool>,
     blobs: Mutex<()>,
+    signal_pages: crate::signals_rpc::Pages,
     /// Per run: when the wrapper may be spawned again, the delay before that and how many
     /// wrappers this host spawned for it.
     recovery: Mutex<HashMap<RunId, (Instant, Duration, u32)>>,
@@ -47,6 +48,7 @@ impl Host {
             binary_sha,
             stop: Arc::default(),
             blobs: Mutex::new(()),
+            signal_pages: Default::default(),
             recovery: Mutex::new(HashMap::new()),
         })
     }
@@ -139,13 +141,20 @@ impl Host {
                 })
             }
             Request::Inspect { run } => {
+                let answered_at = Some(wall_ms());
                 let summary = self.summary(&run, false, false)?;
                 if !matches!(summary.state, RunState::Missing | RunState::Staging) {
-                    return Ok(Response::Inspect { summary });
+                    return Ok(Response::Inspect {
+                        summary,
+                        answered_at,
+                    });
                 }
                 let dir = run_dir(&self.root, &run)?;
                 if !dir.try_exists()? {
-                    return Ok(Response::Inspect { summary });
+                    return Ok(Response::Inspect {
+                        summary,
+                        answered_at,
+                    });
                 }
                 let published = unless_preparing(&dir, || {
                     Ok(dir.join("launch.json").try_exists()?
@@ -163,6 +172,7 @@ impl Host {
                     } else {
                         summary
                     },
+                    answered_at,
                 })
             }
             Request::Changes {
@@ -182,6 +192,8 @@ impl Host {
                     run_dir(&self.root, name)?;
                 }
                 loop {
+                    // What each run looks like is known as of the start of this look.
+                    let answered_at = wall_ms();
                     let mut changes = Vec::new();
                     for name in &names {
                         let summary = self
@@ -192,6 +204,7 @@ impl Host {
                                     .find(|(run, _)| run == name)
                                     .map(|(_, summary)| summary.clone())
                                     .unwrap_or(Summary {
+                                        signals: None,
                                         started_at: None,
                                         state: RunState::Missing,
                                         log_len: None,
@@ -212,13 +225,54 @@ impl Host {
                         || Instant::now() >= deadline
                         || self.stop.load(Ordering::Relaxed)
                     {
-                        return Ok(Response::Changes { runs: changes });
+                        return Ok(Response::Changes {
+                            runs: changes,
+                            answered_at: Some(answered_at),
+                        });
                     }
                     std::thread::sleep(
                         Duration::from_secs(1)
                             .min(deadline.saturating_duration_since(Instant::now())),
                     );
                 }
+            }
+            Request::ConfigureSignals { run, config } => {
+                crate::signals::validate_run(&run)?;
+                let config: orx_signals::Config = match serde_json::from_str(&config) {
+                    Ok(config) => config,
+                    Err(error) => return invalid(&format!("invalid signals config: {error}")),
+                };
+                if let Err(error) = orx_signals::Patterns::compile(&config) {
+                    return invalid(&format!("pattern {}: {}", error.index + 1, error.reason));
+                }
+                let path = self.root.join("run-signals").join(format!("{run}.json"));
+                Ok(Response::ConfigureSignals {
+                    changed: crate::signals::configure(&path, &config)?,
+                })
+            }
+            Request::ReadSignals {
+                terminal,
+                run,
+                generation,
+                revision,
+                offset,
+                length,
+            } => {
+                let answered_at = wall_ms();
+                if terminal {
+                    crate::signals_rpc::inspect(&self.root, &run, true, answered_at)?;
+                }
+                Ok(Response::ReadSignals {
+                    answered_at,
+                    page: self.signal_pages.read(
+                        &self.root,
+                        &run,
+                        &generation,
+                        revision,
+                        offset,
+                        length,
+                    )?,
+                })
             }
             Request::ReadLog {
                 target,
@@ -440,6 +494,30 @@ impl Host {
     }
 
     fn summary(&self, run: &str, follow: bool, repair: bool) -> io::Result<Summary> {
+        let mut summary = self.lifecycle_summary(run, follow, repair)?;
+        if summary.signals.is_some() {
+            return Ok(summary);
+        }
+        match crate::signals_rpc::inspect(&self.root, run, false, wall_ms()) {
+            Ok(signals) => summary.signals = signals,
+            Err(error) => {
+                eprintln!("run {run}: signals: {error}");
+                summary.signals = Some(SignalsSummary {
+                    generation: String::new(),
+                    revision: 0,
+                    cursor: 0,
+                    coverage: serde_json::Value::Null,
+                    latest: serde_json::Value::Null,
+                    progress: serde_json::Value::Null,
+                    diagnostics: BTreeMap::new(),
+                    error: Some(error.to_string()),
+                });
+            }
+        }
+        Ok(summary)
+    }
+
+    fn lifecycle_summary(&self, run: &str, follow: bool, repair: bool) -> io::Result<Summary> {
         let dir = run_dir(&self.root, run)?;
         if dir.join("job.sbatch").try_exists()? {
             let fallback = if !slurm_execution(&dir)?
@@ -460,6 +538,7 @@ impl Host {
             let intent: LaunchIntent = read_json(&dir.join("launch.json"))?;
             if !repair || (intent.source.is_some() && !dir.join("source.tar").try_exists()?) {
                 return Ok(Summary {
+                    signals: None,
                     started_at: None,
                     state: RunState::Staging,
                     log_len: if follow {
@@ -490,6 +569,7 @@ impl Host {
                 .remove(run);
         }
         Ok(Summary {
+            signals: None,
             started_at: wrapper::started_at(&dir),
             state,
             log_len: if follow {
@@ -1290,6 +1370,7 @@ fn slurm_summary(dir: &Path, old: Option<&SlurmLegacyRun>, fallback: RunState) -
                 None => fallback,
             };
             return Ok(Summary {
+                signals: None,
                 started_at: None,
                 state,
                 log_len: None,
@@ -1309,6 +1390,7 @@ fn slurm_summary(dir: &Path, old: Option<&SlurmLegacyRun>, fallback: RunState) -
             Err(error) => wrapper::read_error(error),
         };
         Ok(Summary {
+            signals: None,
             started_at: wrapper::started_at(dir),
             state,
             log_len: None,
@@ -1316,13 +1398,28 @@ fn slurm_summary(dir: &Path, old: Option<&SlurmLegacyRun>, fallback: RunState) -
             cleanup: wrapper::cleanup_result(dir)?,
         })
     })();
-    result.unwrap_or_else(|error| Summary {
+    let mut summary = result.unwrap_or_else(|error| Summary {
+        signals: None,
         started_at: None,
         state: wrapper::read_error(error),
         log_len: None,
         notify_len: 0,
         cleanup: None,
-    })
+    });
+    if old.is_none() {
+        if let (Some(root), Some(run)) = (
+            dir.parent().and_then(Path::parent),
+            dir.file_name().and_then(|n| n.to_str()),
+        ) {
+            match crate::signals_rpc::inspect(root, run, false, wall_ms()) {
+                Ok(signals) => summary.signals = signals,
+                Err(error) => {
+                    summary.signals = Some(crate::signals_rpc::unavailable(&error.to_string()))
+                }
+            }
+        }
+    }
+    summary
 }
 
 fn scheduler_state(state: &str, elapsed: Duration) -> RunState {
@@ -1551,6 +1648,13 @@ pub fn serve(root: PathBuf, binary: PathBuf) -> io::Result<()> {
             .map_err(|_| io::Error::other("request set poisoned"))?;
     }
     result
+}
+
+fn wall_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
 }
 
 #[cfg(test)]

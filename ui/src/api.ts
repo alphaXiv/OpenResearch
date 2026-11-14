@@ -8,6 +8,7 @@ import type { GlobalWorkspace, ProjectWorkspace } from "./workspaceState";
 import { m } from "./paraglide/messages.js";
 import { getLocale } from "./paraglide/runtime.js";
 import { fmtNumber } from "./i18n";
+import type { ChatShownRun, Flag, RunMonitor, RunMonitorSummary, RunOutcome } from "./runMonitor/types";
 
 export { fmtNumber } from "./i18n";
 
@@ -135,6 +136,10 @@ export interface Run {
   /** Copying a finished run's log to this computer; both are absent once the log is kept. */
   logCollection?: "pending" | "failed";
   logCollectionError?: string;
+  /** Absent from an older server. */
+  monitor?: RunMonitorSummary | null;
+  /** Who stopped a cancelled run, once that is known. */
+  outcome?: RunOutcome | null;
 }
 
 export class RejectedResponseError extends Error {}
@@ -189,6 +194,8 @@ export interface UiState {
   nestedDelegation: boolean;
   /** Whether OpenCode's free models are offered beside the user's own. */
   opencodeFreeModels: boolean;
+  /** Whether a cheap model looks at runs; absent from an older server, which has no watcher. */
+  runWatching?: boolean;
   /** The model families the picker lists first. */
   favoriteModels: string[];
   /** Models turned off in Settings, by {@link ModelName.key}: the picker hides them and agents can't delegate to them. */
@@ -199,6 +206,8 @@ export interface UiState {
   modelSectionOrder: string[];
   collapsedModelSections: string[];
   modelSightings: ModelSightings | null;
+  /** How much of one run shows above the composer; absent from an older server, which doesn't keep it. */
+  runBanner?: RunBannerLevel;
 }
 
 /** What the model picker has seen, to tell a model an agent newly offers from one that came with a newly added agent. */
@@ -210,6 +219,8 @@ export interface ModelSightings {
   /** When the picker was last opened. */
   openedAt: number;
 }
+
+export type RunBannerLevel = "line" | "strip";
 
 /** How much of the research the agent owns before checking in. */
 export type Autonomy = "copilot" | "agentic";
@@ -2112,6 +2123,8 @@ export function createApi(
     modelSectionOrder?: string[];
     collapsedModelSections?: string[];
     modelSightings?: ModelSightings;
+    runBanner?: RunBannerLevel;
+    runWatching?: boolean;
   }) => post<UiState>("/api/settings/ui-state", body);
 
   const completeOnboarding = (selection: OnboardingSelection) =>
@@ -3122,6 +3135,22 @@ export function createApi(
   const listChatActiveRuns = (signal?: AbortSignal) =>
     get<ChatActiveRun[]>("/api/chat/active-runs", signal);
 
+  /** Null from an older server, which has only active runs. */
+  const listChatShownRuns = (signal?: AbortSignal) =>
+    fetch("/api/chat/shown-runs", { signal }).then((r) => r.status === 404 ? null : json<ChatShownRun[]>(r));
+
+  const getRunMonitor = (runId: string, signal?: AbortSignal) =>
+    get<RunMonitor>(`/api/runs/${encodeURIComponent(runId)}/monitor`, signal);
+
+  const chooseRunFlag = (runId: string, choice: { flagId: string; choice: "stop" | "keep" | "ask"; requestId: string }) =>
+    post<{ flag: Flag; run: Run }>(`/api/runs/${encodeURIComponent(runId)}/flag`, choice);
+
+  const lookNow = (runId: string) =>
+    post<{ lookId: string; state: string }>(`/api/runs/${encodeURIComponent(runId)}/look`);
+
+  const dismissShownRun = (sessionId: string, runId: string) =>
+    post<{ dismissed: true }>(`/api/chat/sessions/${encodeURIComponent(sessionId)}/shown-runs/${encodeURIComponent(runId)}/dismiss`);
+
   const getSubagentTranscript = (sessionId: string, partId: string, signal?: AbortSignal) =>
     get<ChatPart | null>(`/api/chat/sessions/${sessionId}/subagent?partId=${encodeURIComponent(partId)}`, signal);
 
@@ -3349,6 +3378,11 @@ export function createApi(
     sendOpenCodeSignInCode,
     cancelOpenCodeSignIn,
     listChatActiveRuns,
+    listChatShownRuns,
+    getRunMonitor,
+    dismissShownRun,
+    lookNow,
+    chooseRunFlag,
     getSubagentTranscript,
   };
 }

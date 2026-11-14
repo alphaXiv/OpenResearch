@@ -8,6 +8,7 @@
 //!   orx exp unarchive <expId> --ancestors|--only|--descendants restore the same nodes
 //!   orx exp move <expId> --parent <expId>|--baseline          re-parent a subtree
 //!   orx exp delete <expId>            permanently delete a leaf node, its runs and branch
+//!   orx exp view set|get|check …      the view an experiment's runs are drawn with
 //!
 //! Unlike the project-scoped data commands, every verb here takes an
 //! *experiment* id from `orx project view <projectId>`.
@@ -17,13 +18,35 @@ use std::time::{Duration, Instant};
 use crate::error::{anyhow, Result};
 use crate::plane::{resolve_experiment, resolve_project};
 use crate::store::Store;
-use crate::ExpCommand;
+use crate::{ExpCommand, ViewCommand};
 
 pub async fn run(args: crate::ExpArgs) -> Result<()> {
+    if let ExpCommand::View { command } = args.command {
+        return view(command).await;
+    }
     if let ExpCommand::Abandon { run } = &args.command {
         return crate::plane::local_plane::ApiClient::discover()
             .await?
             .abandon(run)
+            .await;
+    }
+    if let ExpCommand::Flag {
+        run,
+        flag,
+        keep,
+        stop,
+        reason,
+        ..
+    } = &args.command
+    {
+        let choice = match (keep, stop) {
+            (true, _) => "keep",
+            (_, true) => "stop",
+            _ => "ask",
+        };
+        return crate::plane::local_plane::ApiClient::discover()
+            .await?
+            .flag(run, flag, choice, reason.as_deref())
             .await;
     }
     // `exp wait` opens its store itself: a transiently locked orx.db is
@@ -63,10 +86,15 @@ pub async fn run(args: crate::ExpArgs) -> Result<()> {
         } => archive(&mut store, &exp_id, ancestors, only, descendants, false),
         ExpCommand::Delete { exp_id } => delete(&store, &exp_id),
         ExpCommand::Move { exp_id, parent, .. } => reparent(&store, &exp_id, parent.as_deref()),
-        ExpCommand::Status { exp_id, scheduler } => {
+        ExpCommand::Status {
+            exp_id,
+            scheduler,
+            run,
+            json,
+        } => {
             crate::local::chat::record_chat_target("experiments", &exp_id);
             resolve_experiment(store, &exp_id)?
-                .experiment_status(scheduler)
+                .experiment_status(scheduler, run.as_deref(), json)
                 .await
         }
         ExpCommand::Desc { exp_id, set, stdin } => {
@@ -81,22 +109,341 @@ pub async fn run(args: crate::ExpArgs) -> Result<()> {
                 .launch(run_args)
                 .await
         }
-        ExpCommand::Cancel { exp_id, run } => match exp_id {
+        ExpCommand::Cancel {
+            exp_id,
+            run,
+            reason,
+        } => match exp_id {
             Some(exp_id) => {
                 resolve_experiment(store, &exp_id)?
-                    .cancel(run.as_deref())
+                    .cancel(run.as_deref(), reason.as_deref())
                     .await
             }
             None => {
                 crate::plane::local_plane::ApiClient::discover()
                     .await?
-                    .cancel(None, run.as_deref())
+                    .cancel(None, run.as_deref(), reason.as_deref())
                     .await
             }
         },
         ExpCommand::Wake { exp_id } => wake(&store, &exp_id),
-        ExpCommand::Wait { .. } | ExpCommand::Abandon { .. } => unreachable!("handled above"),
+        ExpCommand::Revise { exp_id, run } => {
+            resolve_experiment(store, &exp_id)?.revise(&run).await
+        }
+        ExpCommand::Wait { .. }
+        | ExpCommand::Abandon { .. }
+        | ExpCommand::Flag { .. }
+        | ExpCommand::View { .. } => {
+            unreachable!("handled above")
+        }
     }
+}
+
+async fn view(command: ViewCommand) -> Result<()> {
+    let read = |kind: &str, file: &std::path::Path, fix: &str| {
+        std::fs::read_to_string(file).map_err(|error| {
+            anyhow!(
+                "{kind} {} could not be read: {error}. Fix that path, then run `{fix}`.",
+                file.display()
+            )
+        })
+    };
+    let json_file = |kind: &str, file: &std::path::Path, fix: &str| -> Result<serde_json::Value> {
+        let text = read(kind, file, fix)?;
+        serde_json::from_str(&text).map_err(|error| {
+            anyhow!(
+                "{kind} {} is not JSON: {error}. Fix it, then run `{fix}`.",
+                file.display()
+            )
+        })
+    };
+    let patterns = |file: &std::path::Path, fix: &str| json_file("Pattern", file, fix);
+    let shown = |file: &Option<std::path::PathBuf>| file.as_ref().map(|f| f.display().to_string());
+    match command {
+        ViewCommand::Set {
+            exp_id,
+            file,
+            stdin,
+            pattern,
+            config,
+        } => {
+            let again = |flag: &str, file: &std::path::Path| {
+                format!("orx exp view set {exp_id} {flag} {}", file.display())
+            };
+            let markup = match &file {
+                Some(file) => Some(read("View", file, &again("--file", file))?),
+                None if stdin => {
+                    use tokio::io::AsyncReadExt;
+                    let mut markup = String::new();
+                    tokio::io::stdin().read_to_string(&mut markup).await?;
+                    Some(markup)
+                }
+                None => None,
+            };
+            let list = pattern
+                .as_deref()
+                .map(|file| patterns(file, &again("--pattern", file)))
+                .transpose()?;
+            let configured = config
+                .as_deref()
+                .map(|file| json_file("Config", file, &again("--config", file)))
+                .transpose()?;
+            let body = serde_json::json!({
+                "markup": markup,
+                "file": shown(&file),
+                "patterns": list,
+                "patternFile": shown(&pattern),
+                "config": configured,
+                "configFile": shown(&config),
+            });
+            let saved = set_view(&exp_id, body).await?;
+            let given = |key: &str| configured.as_ref().is_some_and(|c| c.get(key).is_some());
+            let what: Vec<&str> = [
+                (markup.is_some(), "view"),
+                (list.is_some(), "patterns"),
+                (given("plan"), "plan"),
+                (given("rules"), "rules"),
+                (given("brief"), "brief"),
+                (given("watch"), "watch"),
+            ]
+            .into_iter()
+            .filter_map(|(given, name)| given.then_some(name))
+            .collect();
+            let what = match what.as_slice() {
+                [one] => (*one).to_owned(),
+                [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+                [] => unreachable!("clap requires one of them"),
+            };
+            let first = what[..1].to_uppercase();
+            println!(
+                "\u{2713} {first}{} saved on experiment {exp_id}; its runs are drawn with them now.",
+                &what[1..],
+            );
+            if given("rules") {
+                println!("Runs launched from now on check these rules; a run already going keeps the rules it was launched with.");
+            }
+            if list.is_some() {
+                println!("Its runs' logs are read again with the patterns; check one with `orx exp view check RUN`.");
+            }
+            let pending: Vec<&str> = saved["pending"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .collect();
+            if !pending.is_empty() {
+                println!(
+                    "Not reported yet: {}. Once a run reports, check it with `orx exp view check RUN`.",
+                    pending.join(", ")
+                );
+            }
+            Ok(())
+        }
+        ViewCommand::Get { exp_id, json } => {
+            let store = Store::open_for_reading()?;
+            let described =
+                crate::engine::view::described(&store, &exp_id).map_err(
+                    |refusal| match refusal {
+                        crate::engine::view::Refusal::Missing(message)
+                        | crate::engine::view::Refusal::Invalid(message)
+                        | crate::engine::view::Refusal::Changed(message)
+                        | crate::engine::view::Refusal::Failed(message) => anyhow!("{message}"),
+                    },
+                )?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&described)?);
+                return Ok(());
+            }
+            match described["markup"].as_str() {
+                Some(markup) => print!("{markup}"),
+                None => {
+                    println!("No view set for {exp_id}. OpenResearch draws a default from its first signal:\n");
+                    print!("{}", described["derived"].as_str().unwrap_or_default());
+                }
+            }
+            if described["patterns"]
+                .as_array()
+                .is_some_and(|p| !p.is_empty())
+            {
+                println!(
+                    "\nPatterns:\n{}",
+                    serde_json::to_string_pretty(&described["patterns"])?
+                );
+            }
+            let config: serde_json::Map<String, serde_json::Value> =
+                ["plan", "rules", "brief", "watch"]
+                    .into_iter()
+                    .filter(|key| {
+                        described[*key].as_array().is_some_and(|p| !p.is_empty())
+                            || described[*key].is_object()
+                    })
+                    .map(|key| (key.to_owned(), described[key].clone()))
+                    .collect();
+            if !config.is_empty() {
+                println!("\nConfig:\n{}", serde_json::to_string_pretty(&config)?);
+            }
+            Ok(())
+        }
+        ViewCommand::Check {
+            run_id,
+            file,
+            pattern,
+            json,
+        } => {
+            let again = |flag: &str, file: &std::path::Path| {
+                format!("orx exp view check {run_id} {flag} {}", file.display())
+            };
+            let markup = file
+                .as_deref()
+                .map(|file| read("View", file, &again("--file", file)))
+                .transpose()?;
+            let list = pattern
+                .as_deref()
+                .map(|file| patterns(file, &again("--pattern", file)))
+                .transpose()?;
+            let body = serde_json::json!({
+                "markup": markup,
+                "file": shown(&file),
+                "patterns": list,
+                "patternFile": shown(&pattern),
+            });
+            let client = crate::plane::local_plane::ApiClient::discover().await?;
+            let path = format!("runs/{}/view/check", urlencoding::encode(&run_id));
+            let report = answer(client.request(reqwest::Method::POST, &path).json(&body)).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+                return Ok(());
+            }
+            println!("{}", checked(&report));
+            Ok(())
+        }
+    }
+}
+
+/// The body `orx up` answered, or its error in the words it gave.
+async fn answer(request: reqwest::RequestBuilder) -> Result<serde_json::Value> {
+    let response = request.send().await?;
+    let status = response.status();
+    let body: serde_json::Value = response.json().await.unwrap_or_default();
+    if status.is_success() {
+        return Ok(body);
+    }
+    Err(anyhow!(
+        "{}",
+        body["error"]
+            .as_str()
+            .map_or_else(|| format!("orx up answered {status}"), str::to_owned)
+    ))
+}
+
+/// What `orx exp view check` prints: what the run reported, and what the view waits for.
+fn checked(report: &serde_json::Value) -> String {
+    let names = |value: &serde_json::Value| {
+        value
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let run = report["runId"].as_str().unwrap_or_default();
+    let mut lines = Vec::new();
+    let read = report["lines"].as_u64();
+    for (index, pattern) in report["patterns"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let regex = pattern["regex"].as_str().unwrap_or_default();
+        let matched = pattern["matched"].as_u64().unwrap_or_default();
+        lines.push(match pattern["first"].as_object() {
+            Some(first) => format!(
+                "Pattern {} ({regex}) matched {matched} line{}; first, line {}: {}",
+                index + 1,
+                if matched == 1 { "" } else { "s" },
+                first["line"],
+                first["text"].as_str().unwrap_or_default()
+            ),
+            None => format!(
+                "Pattern {} ({regex}) matched nothing in the run's {} lines.",
+                index + 1,
+                read.unwrap_or_default()
+            ),
+        });
+    }
+    let stages: Vec<String> = report["stages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|stage| {
+            let name = stage["name"]
+                .as_str()
+                .filter(|n| !n.is_empty())
+                .unwrap_or("(unnamed)");
+            match (stage["done"].as_f64(), stage["of"].as_f64()) {
+                (Some(done), Some(of)) => format!("{name} {done} of {of}"),
+                (Some(done), None) => format!("{name} at {done}"),
+                _ => name.to_owned(),
+            }
+        })
+        .collect();
+    if !stages.is_empty() {
+        lines.push(format!("Stages read from the log: {}.", stages.join(", ")));
+    }
+    let signals = names(&report["seen"]["signals"]);
+    let tables: Vec<String> = report["seen"]["tables"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(table, columns)| format!("{table} ({})", names(columns)))
+        .collect();
+    lines.push(match (signals.is_empty(), tables.is_empty()) {
+        (true, true) => format!(
+            "Run {run} ({}) has reported no metrics or tables yet.",
+            report["status"].as_str().unwrap_or_default()
+        ),
+        _ => format!(
+            "Run {run} ({}) reported: {}{}{}.",
+            report["status"].as_str().unwrap_or_default(),
+            if signals.is_empty() {
+                "no metrics"
+            } else {
+                &signals
+            },
+            if tables.is_empty() { "" } else { "; tables: " },
+            tables.join("; ")
+        ),
+    });
+    if report["markup"].is_null() {
+        lines.push(format!(
+            "No view set for experiment {}; its runs are drawn with the default. Check one with `orx exp view check {run} --file PATH`.",
+            report["experimentId"].as_str().unwrap_or_default()
+        ));
+        return lines.join("\n");
+    }
+    let pending = names(&report["pending"]);
+    lines.push(if pending.is_empty() {
+        "The view draws only what the run reported.".to_owned()
+    } else {
+        format!("The view is valid. Not reported yet, so not drawn yet: {pending}.")
+    });
+    lines.join("\n")
+}
+
+/// Saves the view and patterns in `body` through `orx up`, which checks them against the
+/// experiment's runs and draws them with it; a concurrent edit is refused rather than overwritten.
+async fn set_view(exp_id: &str, body: serde_json::Value) -> Result<serde_json::Value> {
+    let client = crate::plane::local_plane::ApiClient::discover().await?;
+    let path = format!("experiments/{}/view", urlencoding::encode(exp_id));
+    let current = answer(client.request(reqwest::Method::GET, &path)).await?;
+    let etag = current["etag"].as_str().unwrap_or_default();
+    let request = client
+        .request(reqwest::Method::PUT, &path)
+        .header(reqwest::header::IF_MATCH, etag)
+        .json(&body);
+    answer(request).await
 }
 
 fn archive(
@@ -256,12 +603,41 @@ pub(crate) fn default_hf_image(flavor: &str) -> String {
     }
 }
 
-/// Who asked `orx exp cancel` to stop a run, recorded on the run.
-pub(crate) fn exp_cancel_reason(chat_session_id: Option<&str>) -> String {
-    match chat_session_id {
-        Some(id) => format!("Cancel requested by agent session {id} with `orx exp cancel`."),
-        None => "Cancel requested with `orx exp cancel`.".into(),
+/// The longest `--reason` a stop keeps.
+const MAX_REASON: usize = 2048;
+
+/// Who asked `orx exp cancel` to stop a run, and why if they said: the words recorded on the
+/// run and who stopped it. An agent's chat makes it the agent's stop. Refuses a reason that is
+/// empty or too long.
+pub(crate) fn exp_cancel_stop(
+    chat_session_id: Option<&str>,
+    reason: Option<&str>,
+) -> std::result::Result<(String, crate::store::StopContext), String> {
+    let reason = reason.map(str::trim);
+    if let Some(reason) = reason.filter(|r| r.is_empty() || r.len() > MAX_REASON) {
+        return Err(format!(
+            "--reason must be 1 to {MAX_REASON} bytes of text (got {} bytes).",
+            reason.len()
+        ));
     }
+    let asked = match chat_session_id {
+        Some(id) => format!("Cancel requested by agent session {id} with `orx exp cancel`"),
+        None => "Cancel requested with `orx exp cancel`".into(),
+    };
+    let words = match reason {
+        Some(reason) => format!("{asked}: {reason}"),
+        None => format!("{asked}."),
+    };
+    let by = match chat_session_id {
+        Some(_) => crate::store::StopBy::Agent,
+        None => crate::store::StopBy::User,
+    };
+    let stop = crate::store::StopContext {
+        reason: reason.map(str::to_owned),
+        chat_session_id: chat_session_id.map(str::to_owned),
+        ..crate::store::StopContext::by(by)
+    };
+    Ok((words, stop))
 }
 
 /// Records cancel intent for a run a 0.2.x supervisor owns, under the `cancel.lock` it reads

@@ -18,7 +18,11 @@ export const SPEEDUP = 20
 export type Orx = Awaited<ReturnType<typeof startOrx>>
 export type Project = { id: string; open: (page: Page) => Promise<void> }
 
-export async function startOrx({ agent, outside }: { agent: Agent; outside: Outside }) {
+/**
+ * `claude` replaces the sandbox's signed-out Claude Code with this script, and `env` adds to the
+ * server's environment.
+ */
+export async function startOrx({ agent, outside, claude, env: extra = {} }: { agent: Agent; outside: Outside; claude?: string; env?: Record<string, string> }) {
   // Short and outside the checkout: orx keeps Unix sockets under its data directory.
   const root = realpathSync(mkdtempSync('/tmp/orx-e2e-'))
   const home = path.join(root, 'home')
@@ -33,6 +37,7 @@ export async function startOrx({ agent, outside }: { agent: Agent; outside: Outs
     const auth = status ? `[ "$1" = auth ] && echo '${status}'\n` : ''
     writeFileSync(path.join(bin, name), `#!/bin/sh\n[ "$1" = --version ] && echo "${version}" && exit 0\n${auth}exit 1\n`, { mode: 0o755 })
   }
+  if (claude) writeFileSync(path.join(bin, 'claude'), claude, { mode: 0o755 })
   const log = path.join(root, 'orx.log')
   const env = {
     HOME: home,
@@ -52,6 +57,7 @@ export async function startOrx({ agent, outside }: { agent: Agent; outside: Outs
     ORX_TEST_SPEEDUP: String(SPEEDUP),
     ORX_E2E_AGENT: agent.url,
     ORX_E2E_AGENT_LOG: path.join(root, 'agent.log'),
+    ...extra,
   }
 
   let child: ChildProcess | undefined
@@ -129,9 +135,10 @@ export async function startOrx({ agent, outside }: { agent: Agent; outside: Outs
       return { id: project.id, open: async (page) => void (await page.goto(`${url}/projects/${project.id}`)) }
     },
     stop,
-    /** Stops `orx up` and starts it again on the same port and data. */
-    async restart(signal: NodeJS.Signals = 'SIGTERM') {
+    /** Stops `orx up` and starts it again on the same port and data, doing `meanwhile` while it is down. */
+    async restart(signal: NodeJS.Signals = 'SIGTERM', meanwhile?: () => Promise<void>) {
       await stop(signal)
+      await meanwhile?.()
       await start()
     },
   }

@@ -47,6 +47,7 @@ use crate::store::Store;
 pub(crate) use claude::{
     question_prompt, should_synthesize_plan, synthesize_resume, SKIPPED_QUESTION_MESSAGE,
 };
+pub(crate) use codex::codex_luna;
 pub(crate) use detect::{
     detect_spawn_output_timed, probe_timing_scope, spawn_retrying_busy, unique as unique_bins,
     ProbeTiming, ProbeTimingSink,
@@ -300,6 +301,21 @@ pub trait Harness: Send + Sync {
         true
     }
 
+    /// Whether [`Self::one_shot_without_tools`] can promise a child with no tools at all.
+    fn runs_without_tools(&self) -> bool {
+        false
+    }
+
+    /// [`Self::one_shot`] on a child that cannot run a command, read or write a file, search the
+    /// web or reach an MCP server, with what the CLI reports the request used. A reply from a
+    /// child that started a tool anyway is an error, never an answer.
+    async fn one_shot_without_tools(&self, _request: OneShot<'_>) -> Result<OneShotReply> {
+        Err(anyhow!(
+            "{} cannot run a request without tools",
+            self.name()
+        ))
+    }
+
     /// Decide how an answered prompt flows back, and (for inline harnesses)
     /// deliver it. See [`ResumeAction`] for the two shapes. This runs *before*
     /// `ChatHost::respond` marks the card resolved, so returning an `Err` (e.g.
@@ -486,6 +502,23 @@ pub struct OneShot<'a> {
     /// provider with no working key); Claude keeps its per-quality alias.
     pub model: Option<&'a str>,
     pub timeout: Duration,
+}
+
+/// What [`Harness::one_shot_without_tools`] answered.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OneShotReply {
+    pub text: String,
+    /// None when the CLI reported nothing.
+    pub usage: Option<OneShotUsage>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OneShotUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    /// None when the CLI does not price its requests.
+    pub cost_usd: Option<f64>,
 }
 
 /// A failed one-shot child's message from the first of `outputs` it wrote to,

@@ -9,9 +9,12 @@ export type RunDisplayStatus =
   | "unreachable"
   | "needs_auth"
   | "unconfirmed"
-  | "abandoned";
+  | "abandoned"
+  | "auto_stopped"
+  | "revising"
+  | "flagged";
 
-type RunState = Pick<Run, "status"> & Partial<Pick<Run, "contact" | "cancelling" | "lostReason" | "host" | "cancelUnconfirmed" | "waitingReason" | "cancelError">> & { cancelRequested?: boolean };
+type RunState = Pick<Run, "status"> & Partial<Pick<Run, "contact" | "cancelling" | "lostReason" | "host" | "cancelUnconfirmed" | "waitingReason" | "cancelError" | "monitor" | "outcome">> & { cancelRequested?: boolean };
 
 export interface RunDisplay {
   status: RunDisplayStatus;
@@ -74,13 +77,14 @@ export function runDisplay(run: RunState): RunDisplay {
     }
   }
   if (!runActive(run.status)) {
-    return { status: runAbandoned(run) ? "abandoned" : run.status, stale: contact !== null, since };
+    const stopped = run.status === "cancelled" && (run.monitor?.tone === "revising" ? "revising" : run.outcome && run.outcome.by !== "user" ? "auto_stopped" : null);
+    return { status: runAbandoned(run) ? "abandoned" : stopped || run.status, stale: contact !== null, since };
   }
   if (runCancelling(run)) {
     const pending = run.status === "submitting" || Boolean(run.cancelError) || contact?.type === "unreachable" || contact?.type === "needs_auth" || contact?.type === "unreconciled";
     return { status: pending ? "cancellation_pending" : "cancelling", stale: contact !== null, since };
   }
-  if (contact === null) return { status: run.status, ...(run.waitingReason ? { waiting: run.waitingReason } : {}), stale: false, since };
+  if (contact === null) return { status: run.monitor?.flag ? "flagged" : run.status, ...(run.waitingReason ? { waiting: run.waitingReason } : {}), stale: false, since };
 
   if (contact.type === "needs_auth") return { status: "needs_auth", stale: true, since };
   const status = contact.type === "unreconciled" || contact.type === "stopping" ? "unconfirmed" : contact.type;

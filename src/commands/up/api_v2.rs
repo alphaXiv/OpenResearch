@@ -20,7 +20,7 @@ use tokio::sync::broadcast;
 
 use crate::engine::bus::RunEvent;
 use crate::engine::{handle_of, Backend, ByteRange, Engine, LogFile, LogPage, Phase, WatchedRun};
-use crate::error::{anyhow, Result};
+use crate::error::{anyhow, Context, Result};
 use crate::store::{Contact, Store, StoredRun};
 
 static SERVER: OnceLock<(Arc<Api>, Router)> = OnceLock::new();
@@ -31,7 +31,12 @@ pub(crate) trait Commands: Send + Sync {
     /// Holds `admission` until the run is durable.
     async fn run(&self, args: crate::ExpRunArgs, admission: Box<dyn Send>) -> Result<String>;
     fn backend(&self, run: &StoredRun) -> Result<Arc<dyn Backend>>;
-    async fn cancel(&self, run: &StoredRun, reason: &str) -> Result<()>;
+    async fn cancel(
+        &self,
+        run: &StoredRun,
+        reason: &str,
+        stop: Option<&crate::store::StopContext>,
+    ) -> Result<()>;
     async fn cleanup(&self, run: &WatchedRun) -> Result<Value>;
     async fn compute(
         &self,
@@ -100,7 +105,16 @@ impl Api {
         crate::local::apply_compute_default(&mut args.backend, &mut args.flavor);
         args.backend.get_or_insert_with(|| "local".into());
         super::require_caller_settings(&args, &super::absolute_config_dir()).await?;
-        self.commands.run(args, admission).await
+        let experiment = args.exp_id.clone();
+        let id = self.commands.run(args, admission).await?;
+        // Its first collection may fold before this lands; the next folds again with the patterns.
+        let store = self.store();
+        let raw = store.run_monitor_json(&experiment)?;
+        let config = crate::engine::view::stored_patterns(&experiment, raw.as_deref())?;
+        if let Some(run) = store.get_run(&id)? {
+            crate::engine::view::configure_run(&store, &run, &config)?;
+        }
+        Ok(id)
     }
 
     fn run(&self, id: &str) -> Result<StoredRun> {
@@ -139,6 +153,8 @@ impl Api {
         value["cancelError"] = json!(self.engine.cancel_error(&run.id));
         value["durationSecs"] = json!(crate::local::run_duration_secs(run));
         value["updatedDisplay"] = json!(crate::local::fmt_ago(run.updated_at));
+        value["monitor"] = json!(super::run_monitor_summary(&self.store(), run));
+        value["outcome"] = json!(super::run_outcome(&self.store(), run));
         Ok(value)
     }
 
@@ -185,7 +201,7 @@ impl Api {
                     stops.push(async move {
                         if let Err(error) = self
                             .commands
-                            .cancel(&stored, "Stopped when OpenResearch was force quit.")
+                            .cancel(&stored, "Stopped when OpenResearch was force quit.", None)
                             .await
                         {
                             eprintln!(
@@ -253,11 +269,97 @@ async fn dispatch(mut request: Request) -> Response {
 fn dashboard_routes(api: Arc<Api>) -> Router {
     Router::new()
         .route("/api/runs/{id}/log", get(log))
+        .route("/api/runs/{id}/monitor", get(monitor))
+        .route("/api/runs/{id}/look", post(look_now))
+        .route("/api/runs/{id}/flag", post(dashboard_choose_flag))
+        .route("/api/runs/{id}/view/check", post(check_view))
+        .route("/api/experiments/{id}/view", get(view).put(set_view))
         .route("/api/runs/{id}/abandon", post(dashboard_abandon))
         .route("/api/runs/{id}/cleanup", post(cleanup))
         .route("/api/compute/hosts", get(hosts))
         .route("/api/compute/hosts/{alias}/retry", post(retry_host))
         .with_state(api)
+}
+
+/// The run's log in `range`, read the way the page's log view reads it: the laptop's kept copy,
+/// else the run's backend; outside `orx up`, the kept copy alone. `expected` names the log a
+/// cursor was read from; another is a reset.
+pub(crate) async fn run_log(
+    id: &str,
+    range: ByteRange,
+    expected: Option<crate::engine::FileIdent>,
+) -> Result<LogPage> {
+    let Ok(api) = installed() else {
+        let data_dir = crate::store::data_dir();
+        return kept_page(&kept_log(&data_dir, id)?, &range, expected.as_ref())?
+            .ok_or_else(|| anyhow!("This computer keeps none of run {id}'s log"));
+    };
+    read_log(api, id, range, expected)
+        .await
+        .map_err(|failure| match failure {
+            Failure::Message(_, message) => anyhow!("{message}"),
+            Failure::Unavailable { host, .. } => anyhow!(
+                "The log is on {}, which is out of contact",
+                host.as_deref().unwrap_or("the run's machine")
+            ),
+        })
+}
+
+/// `POST /api/runs/:id/look`: a look at the run's chat now, under the chat's least gap between
+/// looks. 202 with the look; 409 when one ran too lately or the run is not watched.
+async fn look_now(State(api): State<Arc<Api>>, Path(id): Path<String>) -> Response {
+    let run = match api.store().get_run(&id) {
+        Ok(Some(run)) => run,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": format!("Run {id} not found.")})),
+            )
+                .into_response()
+        }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("Couldn't read run {id}: {error:#}")})),
+            )
+                .into_response()
+        }
+    };
+    let asked = tokio::task::spawn_blocking(move || {
+        let store = Store::open()?;
+        Ok::<_, crate::error::Error>(crate::engine::watch::look_now(&store, &run))
+    })
+    .await;
+    use crate::engine::watch::LookNow;
+    match asked {
+        Ok(Ok(Ok(look))) => (StatusCode::ACCEPTED, Json(look)).into_response(),
+        Ok(Ok(Err(LookNow::TooSoon(at)))) => (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "A look ran under two minutes ago. Try again after it.", "notBefore": at})),
+        )
+            .into_response(),
+        Ok(Ok(Err(LookNow::NotWatched(why)))) => {
+            (StatusCode::CONFLICT, Json(json!({"error": why}))).into_response()
+        }
+        Ok(Ok(Err(LookNow::Failed(error))) | Err(error)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("Couldn't ask for a look: {error:#}")})),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("Couldn't ask for a look: {error}")})),
+        )
+            .into_response(),
+    }
+}
+
+/// Wakes the notice loop for chats a flag queued a notice for, when the engine runs here; the
+/// loop's sweep delivers them otherwise.
+pub(crate) fn notices_queued(chats: Vec<String>) {
+    if let (Ok(api), false) = (installed(), chats.is_empty()) {
+        api.engine.bus.publish(RunEvent::Notices { chats });
+    }
 }
 
 /// See [`Engine::cancel_error`]; none when the engine isn't running in this process.
@@ -298,8 +400,12 @@ pub(crate) async fn launch(args: crate::ExpRunArgs) -> Result<StoredRun> {
     api.run(&id)
 }
 
-pub(crate) async fn cancel_run(run: &StoredRun, reason: &str) -> Result<()> {
-    installed()?.commands.cancel(run, reason).await
+pub(crate) async fn cancel_run(
+    run: &StoredRun,
+    reason: &str,
+    stop: Option<&crate::store::StopContext>,
+) -> Result<()> {
+    installed()?.commands.cancel(run, reason, stop).await
 }
 
 pub(crate) fn host_target(host: &str, slurm: bool) -> Result<crate::jobs::ssh::SshTarget> {
@@ -340,8 +446,13 @@ fn routes(api: Arc<Api>) -> Router {
         .route("/api/v2/runs/{id}", get(get_run))
         .route("/api/v2/runs/{id}/cancel", post(cancel))
         .route("/api/v2/runs/{id}/abandon", post(abandon))
+        .route("/api/v2/runs/{id}/revise", post(revise))
+        .route("/api/v2/runs/{id}/flag", post(choose_flag))
         .route("/api/v2/runs/{id}/cleanup", post(cleanup))
         .route("/api/v2/runs/{id}/log", get(log))
+        .route("/api/v2/runs/{id}/monitor", get(monitor))
+        .route("/api/v2/runs/{id}/view/check", post(check_view))
+        .route("/api/v2/experiments/{id}/view", get(view).put(set_view))
         .route("/api/v2/events", get(events))
         .route("/api/v2/compute/{action}", post(compute))
         .route_layer(middleware::from_fn_with_state(api.clone(), authenticate))
@@ -482,6 +593,7 @@ async fn run(
 #[serde(rename_all = "camelCase")]
 struct CancelRequest {
     chat_session_id: Option<String>,
+    reason: Option<String>,
 }
 
 async fn cancel(
@@ -490,15 +602,358 @@ async fn cancel(
     request: Option<Json<CancelRequest>>,
 ) -> ApiResult<Json<Value>> {
     let run = api.run(&id)?;
-    let chat = request.and_then(|Json(request)| request.chat_session_id);
-    api.commands
-        .cancel(
-            &run,
-            &crate::commands::exp::exp_cancel_reason(chat.as_deref()),
-        )
-        .await?;
+    let Json(request) = request.unwrap_or_default();
+    let (reason, stop) = crate::commands::exp::exp_cancel_stop(
+        request.chat_session_id.as_deref(),
+        request.reason.as_deref(),
+    )
+    .map_err(|why| Failure::Message(StatusCode::BAD_REQUEST, why))?;
+    api.commands.cancel(&run, &reason, Some(&stop)).await?;
     Ok(Json(api.view(&api.run(&id)?)?))
 }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviseRequest {
+    experiment_id: String,
+    chat_session_id: Option<String>,
+}
+
+/// `orx exp revise`: the chat's agent is repairing the experiment after its stopped run, for as
+/// long as the turn it said so in goes on and no run of the experiment starts.
+async fn revise(
+    State(api): State<Arc<Api>>,
+    Path(id): Path<String>,
+    Json(request): Json<ReviseRequest>,
+) -> ApiResult<Json<Value>> {
+    let refused = |status, why: String| Failure::Message(status, why);
+    let run = api.run(&id)?;
+    let experiment = &request.experiment_id;
+    let Some(chat) = request.chat_session_id.as_deref() else {
+        return Err(refused(
+            StatusCode::BAD_REQUEST,
+            format!("`orx exp revise` marks run {id} for the agent repairing its experiment; run it from that agent's chat."),
+        ));
+    };
+    if run.experiment_id != *experiment {
+        return Err(refused(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "Run {id} belongs to experiment {}, not {experiment}.",
+                run.experiment_id
+            ),
+        ));
+    }
+    match Phase::parse(&run.status) {
+        Some(Phase::Cancelled) => {}
+        Some(phase) if !phase.is_terminal() => {
+            return Err(refused(
+                StatusCode::CONFLICT,
+                format!("Run {id} is still {}; stop it first with `orx exp cancel --run {id} --reason '…'`, then mark it.", run.status),
+            ))
+        }
+        _ => {
+            return Err(refused(
+                StatusCode::CONFLICT,
+                format!("Run {id} ended {}, not stopped, so there is nothing to revise; launch the next run with `orx exp run {experiment}`.", run.status),
+            ))
+        }
+    }
+    let store = api.store();
+    if let Some(newest) = store
+        .latest_run_for_experiment(experiment)?
+        .filter(|newest| newest.id != id)
+    {
+        return Err(refused(
+            StatusCode::CONFLICT,
+            format!(
+                "Run {id} is not experiment {experiment}'s newest run; {} is.",
+                newest.id
+            ),
+        ));
+    }
+    let Some(turn) = store.active_chat_turn(chat)? else {
+        return Err(refused(
+            StatusCode::CONFLICT,
+            format!("Chat {chat} has no turn going, so nothing would be revising run {id}."),
+        ));
+    };
+    store.record_revision(&id, chat, &turn)?;
+    // Projected now so this answer and every list says Revising; the monitor task then follows
+    // the run until its revision ends.
+    crate::engine::monitor::advance(&store, &run, crate::store::now_ms())?;
+    drop(store);
+    let state = api.store().engine_run_state(&id)?;
+    api.engine
+        .bus
+        .publish(crate::engine::bus::RunEvent::Changed {
+            run_id: id.clone(),
+            phase: Phase::Cancelled,
+            contact: state.map_or(crate::store::Contact::Live, |state| state.contact),
+            cancelling: false,
+        });
+    let run = api.run(&id)?;
+    let revising = api.store().run_revising(&run)?;
+    Ok(Json(json!({"run": api.view(&run)?, "revising": revising})))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FlagRequest {
+    flag_id: String,
+    choice: String,
+    request_id: Option<String>,
+    reason: Option<String>,
+    /// The agent's chat, when its agent chose; none for the user.
+    chat_session_id: Option<String>,
+}
+
+/// `orx exp flag`, and the Copilot choice: keep going, stop the run, or ask. The user's Ask wakes
+/// the run's chat with the flag and every open flag its look raised beside it; the agent's Ask
+/// leaves the choice to the user. A repeated request answers as the first did.
+async fn choose(
+    api: &Arc<Api>,
+    id: &str,
+    request: FlagRequest,
+) -> std::result::Result<(Value, StoredRun), (StatusCode, String)> {
+    use crate::engine::flags;
+    let failed =
+        |error: crate::error::Error| (StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}"));
+    let run = api
+        .store()
+        .get_run(id)
+        .map_err(failed)?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Run {id} not found.")))?;
+    let exp = &run.experiment_id;
+    let flag_id = request.flag_id.trim();
+    let choice = request.choice.as_str();
+    if !matches!(choice, "keep" | "stop" | "ask") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("A flag's choice is keep, stop or ask (got \"{choice}\")."),
+        ));
+    }
+    let chat = request.chat_session_id.as_deref();
+    let (stop_words, stop) = crate::commands::exp::exp_cancel_stop(chat, request.reason.as_deref())
+        .map_err(|why| (StatusCode::BAD_REQUEST, why))?;
+    let stop_words = match (chat, request.reason.as_deref().map(str::trim)) {
+        (Some(_), _) => stop_words,
+        (None, Some(reason)) => format!("Stopped by the user at flag {flag_id}: {reason}"),
+        (None, None) => format!("Stopped by the user at flag {flag_id}."),
+    };
+    let reread =
+        |store: &Store, run: &StoredRun| -> std::result::Result<Value, (StatusCode, String)> {
+            flags::read(store, run)
+                .map_err(failed)?
+                .into_iter()
+                .find(|flag| flag["id"] == flag_id)
+                .ok_or_else(|| failed(anyhow!("Run {id}'s flag {flag_id} is gone")))
+        };
+    let settled = format!(
+        "Run {id}: flag {flag_id} is already settled; run `orx exp status {exp} --run {id}`."
+    );
+    let now = crate::store::now_ms();
+    let planned = {
+        let store = api.store();
+        plan_choice(&store, &run, flag_id, choice, chat, &request, &settled)?
+    };
+    let Some((choices, touched)) = planned else {
+        return Ok((reread(&api.store(), &run)?, run));
+    };
+    let stopping = (choice == "stop").then_some((stop_words.as_str(), &stop));
+    let chosen = api
+        .store()
+        .record_flag_choices(&choices, stopping, now)
+        .map_err(failed)?;
+    match chosen {
+        crate::store::Chosen::Settled => return Err((StatusCode::CONFLICT, settled)),
+        crate::store::Chosen::Repeated => {}
+        // The stop is accepted with its words; the engine keeps delivering it if this fails.
+        crate::store::Chosen::Recorded if choice == "stop" => {
+            if let Err(error) = api.commands.cancel(&run, &stop_words, Some(&stop)).await {
+                eprintln!("orx up: stopping run {id} at flag {flag_id}: {error:#}");
+            }
+        }
+        crate::store::Chosen::Recorded => {}
+    }
+    let store = api.store();
+    notices_queued(
+        choices
+            .iter()
+            .flat_map(|choice| choice.wakes.iter().map(|(chat, _)| chat.clone()))
+            .collect(),
+    );
+    for touched in &touched {
+        let Some(touched) = &store.get_run(&touched.id).map_err(failed)? else {
+            continue;
+        };
+        crate::engine::monitor::advance(&store, touched, now).map_err(failed)?;
+        let state = store.engine_run_state(&touched.id).map_err(failed)?;
+        let phase = Phase::parse(&touched.status).unwrap_or(Phase::Running);
+        api.engine
+            .bus
+            .publish(crate::engine::bus::RunEvent::Changed {
+                run_id: touched.id.clone(),
+                phase,
+                contact: state.map_or(crate::store::Contact::Live, |state| state.contact),
+                cancelling: choice == "stop" && touched.id == id,
+            });
+    }
+    let run = store
+        .get_run(id)
+        .map_err(failed)?
+        .ok_or_else(|| failed(anyhow!("Run {id} is gone")))?;
+    Ok((reread(&store, &run)?, run))
+}
+
+/// What a flag choice records, and the runs it touches; None for a request already kept.
+#[allow(clippy::type_complexity)]
+fn plan_choice(
+    store: &Store,
+    run: &StoredRun,
+    flag_id: &str,
+    choice: &str,
+    chat: Option<&str>,
+    request: &FlagRequest,
+    settled: &str,
+) -> std::result::Result<
+    Option<(Vec<crate::store::FlagChoice>, Vec<StoredRun>)>,
+    (StatusCode, String),
+> {
+    use crate::engine::flags;
+    let failed =
+        |error: crate::error::Error| (StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}"));
+    let id = run.id.as_str();
+    let exp = &run.experiment_id;
+    let all = flags::read(store, run).map_err(failed)?;
+    let Some(flag) = all.iter().find(|flag| flag["id"] == flag_id) else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("Run {id} has no flag {flag_id}; run `orx exp status {exp} --run {id}` to see its flags."),
+        ));
+    };
+    let repeated = request.request_id.as_deref().is_some_and(|request| {
+        store.run_flag_events(id).is_ok_and(|events| {
+            events.iter().any(|event| {
+                event.kind == "choice"
+                    && event.body["flagId"] == flag_id
+                    && event.body["requestId"] == request
+            })
+        })
+    });
+    if repeated {
+        return Ok(None);
+    }
+    if flags::settled(flag) || Phase::parse(&run.status).is_some_and(Phase::is_terminal) {
+        return Err((StatusCode::CONFLICT, settled.to_owned()));
+    }
+    let body = |flag: &str| {
+        json!({
+            "flagId": flag,
+            "c": choice,
+            "by": if chat.is_some() { "agent" } else { "user" },
+            "reason": request.reason.as_deref().map(str::trim),
+            "requestId": request.request_id,
+            "chatSessionId": chat,
+        })
+    };
+    let mut choices = vec![crate::store::FlagChoice {
+        run_id: id.to_owned(),
+        body: body(flag_id),
+        wakes: Vec::new(),
+    }];
+    let mut touched = vec![run.clone()];
+    if choice == "ask" && chat.is_none() {
+        // Ask covers every open flag the same look raised, so the agent weighs them together.
+        let mut asked = vec![(run.clone(), flag.clone())];
+        if let Some(look) = flag["group"]
+            .as_str()
+            .and_then(|group| group.strip_prefix("look:"))
+        {
+            let rows = look
+                .parse()
+                .map_or(Ok(Vec::new()), |look| store.watch_look_runs(look));
+            for row in rows
+                .map_err(failed)?
+                .into_iter()
+                .filter(|row| row.run_id != id)
+            {
+                let Some(other) = store.get_run(&row.run_id).map_err(failed)? else {
+                    continue;
+                };
+                if Phase::parse(&other.status).is_some_and(Phase::is_terminal) {
+                    continue;
+                }
+                let theirs = flags::read(store, &other).map_err(failed)?;
+                if let Some(open) = theirs
+                    .iter()
+                    .find(|f| f["group"] == flag["group"] && !flags::settled(f))
+                {
+                    choices.push(crate::store::FlagChoice {
+                        run_id: other.id.clone(),
+                        body: body(open["id"].as_str().unwrap_or_default()),
+                        wakes: Vec::new(),
+                    });
+                    asked.push((other.clone(), open.clone()));
+                    touched.push(other);
+                }
+            }
+        }
+        for (choice, (asked_run, asked_flag)) in choices.iter_mut().zip(&asked) {
+            let home = asked_run
+                .chat_session_id
+                .clone()
+                .into_iter()
+                .chain(store.run_subscribers(&asked_run.id).map_err(failed)?)
+                .find(|chat| {
+                    store
+                        .get_chat_session(chat)
+                        .is_ok_and(|found| found.is_some())
+                });
+            let Some(home) = home else {
+                return Err((
+                    StatusCode::CONFLICT,
+                    format!("Run {} has no chat whose agent could look at its flag; open its experiment and ask there.", asked_run.id),
+                ));
+            };
+            choice
+                .wakes
+                .push((home, flags::wake(asked_run, asked_flag, true)));
+        }
+    }
+    Ok(Some((choices, touched)))
+}
+
+async fn choose_flag(
+    State(api): State<Arc<Api>>,
+    Path(id): Path<String>,
+    Json(request): Json<FlagRequest>,
+) -> ApiResult<Json<Value>> {
+    let (flag, run) = choose(&api, &id, request)
+        .await
+        .map_err(|(status, why)| Failure::Message(status, why))?;
+    Ok(Json(json!({"flag": flag, "run": api.view(&run)?})))
+}
+
+async fn dashboard_choose_flag(
+    State(api): State<Arc<Api>>,
+    Path(id): Path<String>,
+    Json(request): Json<FlagRequest>,
+) -> Response {
+    let chosen = match choose(&api, &id, request).await {
+        Ok(chosen) => chosen,
+        Err((status, why)) => return (status, Json(json!({"error": why}))).into_response(),
+    };
+    let (flag, run) = chosen;
+    match super::ApiRun::new(&api.store(), &run) {
+        Ok(run) => Json(json!({"flag": flag, "run": run})).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("{error:#}")})),
+        )
+            .into_response(),
+    }
+}
+
 async fn abandon(State(api): State<Arc<Api>>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     abandon_run(&api, &id)?;
     Ok(Json(api.view(&api.run(&id)?)?))
@@ -749,6 +1204,520 @@ pub(crate) fn keep_ranges(
     Ok(())
 }
 
+/// The laptop's copy of a run's log: its kept ranges and, while collection is under way, the
+/// bytes its `.part` files have synced. Partial files of a newer log replace the older log.
+pub(crate) fn kept_log(data_dir: &std::path::Path, run: &str) -> Result<Vec<KeptRange>> {
+    let directory = data_dir.join("run-logs");
+    let mut kept = kept_ranges(data_dir, run)?;
+    let mut partials = Vec::new();
+    for suffix in ["log", "tail.log"] {
+        let marker = directory.join(format!("{run}.{suffix}.part.json"));
+        let bytes = match std::fs::read(&marker) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let (ident, offset, synced): (crate::engine::FileIdent, u64, u64) =
+            serde_json::from_slice(&bytes)?;
+        let part = directory.join(format!("{run}.{suffix}.part"));
+        let written = match std::fs::metadata(&part) {
+            Ok(metadata) => metadata.len(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let len = synced.min(written);
+        if len != 0 {
+            let modified = std::fs::metadata(&marker)?.modified()?;
+            partials.push((
+                modified,
+                suffix,
+                KeptRange {
+                    offset,
+                    len,
+                    file: part,
+                    ident,
+                    eof: false,
+                },
+            ));
+        }
+    }
+    let newest = partials
+        .iter()
+        .max_by_key(|partial| partial.0)
+        .map(|p| p.2.ident.clone());
+    if let Some(generation) = newest {
+        kept.retain(|range| range.ident == generation);
+        for (_, suffix, partial) in partials.into_iter().filter(|p| p.2.ident == generation) {
+            let whole = directory.join(format!("{run}.{suffix}"));
+            let superseded = |range: &KeptRange| {
+                range.file == whole && range.offset == partial.offset && range.len >= partial.len
+            };
+            if kept.iter().any(superseded) {
+                continue;
+            }
+            kept.retain(|range| range.file != whole);
+            kept.push(partial);
+        }
+        kept.sort_by_key(|range| range.offset);
+    }
+    Ok(kept)
+}
+
+/// Reads the laptop's copy of a run's log from `range.start`, across file boundaries; `None` when
+/// no kept byte is there. A different identity than `expected` is a reset.
+pub(crate) fn kept_page(
+    kept: &[KeptRange],
+    range: &ByteRange,
+    expected: Option<&crate::engine::FileIdent>,
+) -> Result<Option<LogPage>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let known_len = kept
+        .iter()
+        .filter(|range| range.eof)
+        .map(|range| range.offset + range.len)
+        .max();
+    let mut cursor = range.start;
+    let mut bytes = Vec::new();
+    let mut identity = None;
+    let mut eof = false;
+    while let Some(kept) = kept
+        .iter()
+        .filter(|kept| {
+            kept.offset <= cursor
+                && (cursor < kept.offset.saturating_add(kept.len)
+                    || kept.eof && cursor == kept.offset.saturating_add(kept.len))
+        })
+        .max_by_key(|kept| kept.offset)
+    {
+        if identity.as_ref().is_some_and(|ident| *ident != kept.ident) {
+            break;
+        }
+        if expected.is_some_and(|ident| *ident != kept.ident) {
+            return Ok(Some(LogPage::Reset {
+                info: Some(orx_host_proto::LogInfo {
+                    ident: kept.ident.clone(),
+                    len: known_len.unwrap_or(kept.offset + kept.len),
+                }),
+            }));
+        }
+        identity = Some(kept.ident.clone());
+        let end = range.end.min(kept.offset + kept.len);
+        let mut file = std::fs::File::open(&kept.file)
+            .with_context(|| format!("Open kept log {}", kept.file.display()))?;
+        file.seek(SeekFrom::Start(cursor - kept.offset))?;
+        let previous = bytes.len();
+        bytes.resize(previous + (end - cursor) as usize, 0);
+        file.read_exact(&mut bytes[previous..])?;
+        cursor = end;
+        eof = kept.eof && cursor == kept.offset + kept.len;
+        if cursor == range.end || eof {
+            break;
+        }
+    }
+    Ok(identity.map(|ident| LogPage::Data {
+        len: known_len,
+        ident,
+        start: range.start,
+        bytes,
+        eof,
+    }))
+}
+
+/// A view request's answer: its body with the experiment's `ETag`, or the refusal in the words
+/// the user reads.
+fn view_answer(answer: std::result::Result<Value, crate::engine::view::Refusal>) -> Response {
+    use crate::engine::view::Refusal;
+    match answer {
+        Ok(body) => {
+            let etag = body["etag"].as_str().unwrap_or_default().to_owned();
+            ([(axum::http::header::ETAG, etag)], Json(body)).into_response()
+        }
+        Err(refusal) => {
+            let (status, message) = match refusal {
+                Refusal::Missing(message) => (StatusCode::NOT_FOUND, message),
+                Refusal::Invalid(message) => (StatusCode::BAD_REQUEST, message),
+                Refusal::Changed(message) => (StatusCode::CONFLICT, message),
+                Refusal::Failed(message) => {
+                    eprintln!("orx up: view: {message}");
+                    (StatusCode::INTERNAL_SERVER_ERROR, message)
+                }
+            };
+            (status, Json(json!({ "error": message }))).into_response()
+        }
+    }
+}
+
+async fn blocking_view(
+    work: impl FnOnce() -> std::result::Result<Value, crate::engine::view::Refusal> + Send + 'static,
+) -> Response {
+    match tokio::task::spawn_blocking(work).await {
+        Ok(answer) => view_answer(answer),
+        Err(cause) => view_answer(Err(crate::engine::view::Refusal::Failed(cause.to_string()))),
+    }
+}
+
+/// `GET /api/experiments/:id/view`: the experiment's saved view, or the default its runs draw.
+async fn view(State(api): State<Arc<Api>>, Path(id): Path<String>) -> Response {
+    blocking_view(move || crate::engine::view::described(&api.store(), &id)).await
+}
+
+#[derive(Deserialize)]
+struct ViewBody {
+    markup: Option<String>,
+    /// The file the markup came from, named in errors.
+    file: Option<String>,
+    patterns: Option<Value>,
+    #[serde(rename = "patternFile")]
+    pattern_file: Option<String>,
+    /// What else the experiment's runs are drawn with: `{"plan": [...]}`.
+    config: Option<Value>,
+    #[serde(rename = "configFile")]
+    config_file: Option<String>,
+}
+
+/// `PUT /api/experiments/:id/view` with `If-Match`: saves the view and its patterns, and draws
+/// the experiment's runs with them. New patterns have each run's log read again: a live one at
+/// its next collection, an ended one from the log kept on this machine.
+async fn set_view(
+    State(api): State<Arc<Api>>,
+    Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<ViewBody>,
+) -> Response {
+    use crate::engine::view::Refusal;
+    let Some(expected) = headers
+        .get(axum::http::header::IF_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+    else {
+        return (
+            StatusCode::PRECONDITION_REQUIRED,
+            Json(json!({"error": format!("Send If-Match with the etag GET /api/experiments/{id}/view returned.")})),
+        )
+            .into_response();
+    };
+    let refold = api.clone();
+    let repatterned = body.patterns.is_some();
+    let answer = tokio::task::spawn_blocking(move || {
+        let store = api.store();
+        let source = crate::engine::view::Source {
+            file: body.file.as_deref(),
+            patterns: body.pattern_file.as_deref(),
+            config: body.config_file.as_deref(),
+        };
+        let saved = crate::engine::view::set(
+            &store,
+            &id,
+            &expected,
+            body.markup.as_deref(),
+            body.patterns.as_ref(),
+            body.config.as_ref(),
+            &source,
+        )?;
+        let runs = if repatterned {
+            crate::engine::view::configure_runs(&store, &id)?
+        } else {
+            store.list_runs_by_experiment(&id).map_err(Refusal::from)?
+        };
+        let now = crate::store::now_ms();
+        for run in &runs {
+            if let Err(error) = crate::engine::monitor::advance(&store, run, now) {
+                eprintln!("orx up: run {} after its view changed: {error:#}", run.id);
+            }
+        }
+        let ended = runs
+            .into_iter()
+            .filter(|run| repatterned && Phase::parse(&run.status).is_some_and(Phase::is_terminal))
+            .collect::<Vec<_>>();
+        Ok((saved, ended))
+    })
+    .await
+    .unwrap_or_else(|cause| Err(Refusal::Failed(cause.to_string())));
+    let (saved, ended) = match answer {
+        Ok(answer) => answer,
+        Err(refusal) => return view_answer(Err(refusal)),
+    };
+    tokio::spawn(async move {
+        for run in ended {
+            refold_kept(&refold, &run).await;
+        }
+    });
+    view_answer(Ok(saved))
+}
+
+/// Reads an ended run's kept log again with its patterns, a few seconds a pass, and draws it.
+async fn refold_kept(api: &Api, run: &StoredRun) {
+    let Some(handle) = handle_of(run) else {
+        return;
+    };
+    let watched = WatchedRun {
+        id: run.id.clone(),
+        handle,
+    };
+    let as_of = run.ended_at.unwrap_or(run.updated_at);
+    for _ in 0..1000 {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let now = crate::store::now_ms();
+        match crate::engine::adapters::signals::collect_kept(
+            &api.data_dir,
+            &watched,
+            now,
+            as_of,
+            deadline,
+        )
+        .await
+        {
+            Ok(false) => continue,
+            Ok(true) => break,
+            Err(error) => {
+                eprintln!(
+                    "orx up: run {} could not be read again with its patterns: {error:#}",
+                    run.id
+                );
+                break;
+            }
+        }
+    }
+    if let Err(error) = crate::engine::monitor::advance(&api.store(), run, crate::store::now_ms()) {
+        eprintln!(
+            "orx up: run {} after its patterns changed: {error:#}",
+            run.id
+        );
+    }
+}
+
+#[derive(Default, Deserialize)]
+struct CheckBody {
+    markup: Option<String>,
+    file: Option<String>,
+    patterns: Option<Value>,
+    #[serde(rename = "patternFile")]
+    pattern_file: Option<String>,
+}
+
+/// The most of a run's log `orx exp view check` reads with patterns.
+const CHECK_BYTES: u64 = 64 * 1024 * 1024;
+
+/// `POST /api/runs/:id/view/check`: checks a view, or the saved one, against what the run
+/// reported; with patterns, given or saved, against what they read from the run's log now.
+async fn check_view(
+    State(api): State<Arc<Api>>,
+    Path(id): Path<String>,
+    body: Option<Json<CheckBody>>,
+) -> Response {
+    use crate::engine::view::Refusal;
+    let Json(body) = body.unwrap_or_default();
+    let body = Arc::new(body);
+    let (given, run) = (body.clone(), id.clone());
+    let reading = api.clone();
+    let patterns = tokio::task::spawn_blocking(move || {
+        let store = reading.store();
+        let row = store
+            .get_run(&run)?
+            .ok_or_else(|| Refusal::Missing(format!("Run {run} not found.")))?;
+        let source = crate::engine::view::Source {
+            file: given.file.as_deref(),
+            patterns: given.pattern_file.as_deref(),
+            config: None,
+        };
+        let fix = format!(
+            "Run `orx exp view check {run} --pattern {}`.",
+            given.pattern_file.as_deref().unwrap_or("PATH")
+        );
+        let list = match &given.patterns {
+            Some(list) => list.clone(),
+            None => {
+                let raw = store.run_monitor_json(&row.experiment_id)?;
+                json!(
+                    crate::engine::view::stored_patterns(&row.experiment_id, raw.as_deref())?
+                        .patterns
+                )
+            }
+        };
+        Ok::<_, Refusal>(crate::engine::view::patterns(&list, &source, &fix)?.1)
+    })
+    .await
+    .unwrap_or_else(|cause| Err(Refusal::Failed(cause.to_string())));
+    let patterns = match patterns {
+        Ok(patterns) => patterns,
+        Err(refusal) => return view_answer(Err(refusal)),
+    };
+    let folded = match patterns {
+        Some(patterns) => match fold_for_check(&api, &id, patterns).await {
+            Ok(folded) => Some(folded),
+            Err(error) => {
+                let message =
+                    format!("Run {id}'s log could not be read to check its patterns: {error:#}");
+                return view_answer(Err(Refusal::Failed(message)));
+            }
+        },
+        None => None,
+    };
+    blocking_view(move || {
+        let source = crate::engine::view::Source {
+            file: body.file.as_deref(),
+            patterns: body.pattern_file.as_deref(),
+            config: None,
+        };
+        crate::engine::view::check(
+            &api.store(),
+            &id,
+            body.markup.as_deref(),
+            folded.as_ref(),
+            &source,
+        )
+    })
+    .await
+}
+
+/// The run's log as it reads now, folded afresh with `patterns`, counting what each matched.
+async fn fold_for_check(
+    api: &Api,
+    id: &str,
+    patterns: Arc<orx_signals::Patterns>,
+) -> Result<orx_signals::Snapshot> {
+    let mut folded: Option<orx_signals::Snapshot> = None;
+    let mut ident = None;
+    loop {
+        let start = folded.as_ref().map_or(0, |f| f.cursor.offset);
+        let range = ByteRange {
+            start,
+            end: start + orx_host_proto::MAX_PAGE_LEN,
+        };
+        let page =
+            read_log(api, id, range, ident.clone())
+                .await
+                .map_err(|failure| match failure {
+                    Failure::Message(_, message) => anyhow!("{message}"),
+                    Failure::Unavailable { host, .. } => anyhow!(
+                        "the host {} holding it cannot be reached",
+                        host.unwrap_or_default()
+                    ),
+                })?;
+        let LogPage::Data {
+            ident: page_ident,
+            bytes,
+            eof,
+            start: at,
+            ..
+        } = page
+        else {
+            return folded.ok_or_else(|| anyhow!("it has no log yet"));
+        };
+        let snapshot = folded.get_or_insert_with(|| {
+            let mut snapshot =
+                orx_signals::Snapshot::new(id, &String::from(page_ident.clone()), "check");
+            snapshot.tally = Some(Default::default());
+            snapshot.configure(Some(patterns.clone()));
+            snapshot
+        });
+        ident = Some(page_ident);
+        if at > start {
+            snapshot.coverage.add_reason("missing_middle");
+            snapshot.cursor.offset = at;
+        }
+        let last = eof || bytes.is_empty() || at + bytes.len() as u64 >= CHECK_BYTES;
+        snapshot
+            .feed(&bytes, eof, crate::store::now_ms(), false)
+            .map_err(|error| anyhow!(error))?;
+        if last {
+            return Ok(folded.unwrap());
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct MonitorQuery {
+    cursor: Option<String>,
+    series: Option<String>,
+    after: Option<f64>,
+    limit: Option<usize>,
+}
+
+/// `GET /api/runs/:id/monitor`: the run's whole monitor at one `rev`, bounded and paged by
+/// cursor, or one series' history with `?series=`.
+async fn monitor(
+    State(api): State<Arc<Api>>,
+    Path(id): Path<String>,
+    Query(query): Query<MonitorQuery>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let error = |status: StatusCode, message: String| {
+        (status, Json(json!({ "error": message }))).into_response()
+    };
+    let read = tokio::task::spawn_blocking(move || -> Result<Option<_>> {
+        let store = api.store();
+        let Some(run) = store.get_run(&id)? else {
+            return Ok(None);
+        };
+        crate::engine::monitor::monitor(&store, &run).map(Some)
+    })
+    .await;
+    let (projection, monitor) = match read {
+        Ok(Ok(Some(read))) => read,
+        Ok(Ok(None)) => return error(StatusCode::NOT_FOUND, "This run no longer exists.".into()),
+        Ok(Err(cause)) => {
+            eprintln!("orx up: monitor: {cause:#}");
+            return error(StatusCode::SERVICE_UNAVAILABLE, cause.to_string());
+        }
+        Err(cause) => return error(StatusCode::INTERNAL_SERVER_ERROR, cause.to_string()),
+    };
+    let etag = projection.etag();
+    if let Some(name) = query.series {
+        let page = crate::engine::monitor::series_page(
+            &monitor,
+            &name,
+            query.after,
+            query.limit.unwrap_or(2048),
+        );
+        return match page {
+            Some(page) => ([(axum::http::header::ETAG, etag)], Json(page)).into_response(),
+            None => error(
+                StatusCode::NOT_FOUND,
+                format!("This run has no series named \"{name}\"."),
+            ),
+        };
+    }
+    let basis = format!(
+        "{}.{}",
+        monitor["generation"].as_str().unwrap_or_default(),
+        monitor["seriesRev"]
+    );
+    let page = match query
+        .cursor
+        .as_deref()
+        .map(|cursor| cursor.rsplit_once('.'))
+    {
+        None => 0,
+        Some(Some((pinned, page))) if pinned == basis => page.parse().unwrap_or(0),
+        Some(_) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": "This run's series changed since the first page; read it again.",
+                    "reset": true,
+                    "generation": monitor["generation"],
+                    "rev": monitor["rev"],
+                })),
+            )
+                .into_response()
+        }
+    };
+    if page == 0
+        && headers
+            .get(axum::http::header::IF_NONE_MATCH)
+            .is_some_and(|tag| tag.as_bytes() == etag.as_bytes())
+    {
+        return (StatusCode::NOT_MODIFIED, [(axum::http::header::ETAG, etag)]).into_response();
+    }
+    let rev = monitor["rev"].clone();
+    let (mut body, next) = crate::engine::monitor::bounded(monitor, page);
+    if next.is_some() || page > 0 {
+        body["page"] = json!({"next": next.map(|next| format!("{basis}.{next}")), "rev": rev});
+    }
+    ([(axum::http::header::ETAG, etag)], Json(body)).into_response()
+}
+
 /// A page, and which of its ranges are kept for the identity it reads.
 async fn log(
     State(api): State<Arc<Api>>,
@@ -767,7 +1736,7 @@ async fn log(
     let page = read_log(&api, &id, range, expected).await?;
     let mut value = serde_json::to_value(&page).map_err(crate::error::Error::from)?;
     if let LogPage::Data { ident, .. } = &page {
-        let kept: Vec<_> = kept_ranges(&api.data_dir, &id)?
+        let kept: Vec<_> = kept_log(&api.data_dir, &id)?
             .iter()
             .filter(|range| range.ident == *ident)
             .map(|range| [range.offset, range.offset + range.len])
@@ -793,62 +1762,28 @@ async fn read_log(
     // Until its log is kept through the end, a finished run is read like a live one.
     let terminal = Phase::parse(&run.status).is_some_and(Phase::is_terminal)
         && !api.store().log_collection_pending(id)?;
-    let kept = kept_ranges(&api.data_dir, id)?;
-    let known_len = kept
-        .iter()
-        .filter(|range| range.eof)
-        .map(|range| range.offset + range.len)
-        .max();
-    let mut cursor = range.start;
-    let mut bytes = Vec::new();
-    let mut identity = None;
-    let mut eof = false;
-    while let Some(kept) = kept
-        .iter()
-        .filter(|kept| {
-            kept.offset <= cursor
-                && (cursor < kept.offset.saturating_add(kept.len)
-                    || kept.eof && cursor == kept.offset.saturating_add(kept.len))
-        })
-        .max_by_key(|kept| kept.offset)
-    {
-        if identity.as_ref().is_some_and(|ident| *ident != kept.ident) {
-            break;
+    let kept = kept_log(&api.data_dir, id)?;
+    match kept_page(&kept, &range, expected.as_ref())? {
+        Some(LogPage::Data {
+            len,
+            ident,
+            start,
+            bytes,
+            eof,
+        }) => {
+            let filled = start + bytes.len() as u64 == range.end;
+            if !bytes.is_empty() || filled || eof && terminal {
+                return Ok(LogPage::Data {
+                    len,
+                    ident,
+                    start,
+                    bytes,
+                    eof: eof && (terminal || filled),
+                });
+            }
         }
-        if expected.as_ref().is_some_and(|ident| *ident != kept.ident) {
-            return Ok(LogPage::Reset {
-                info: Some(orx_host_proto::LogInfo {
-                    ident: kept.ident.clone(),
-                    len: known_len.unwrap_or(kept.offset + kept.len),
-                }),
-            });
-        }
-        identity = Some(kept.ident.clone());
-        let end = range.end.min(kept.offset + kept.len);
-        use std::io::{Read, Seek, SeekFrom};
-        let mut file = std::fs::File::open(&kept.file).map_err(crate::error::Error::from)?;
-        file.seek(SeekFrom::Start(cursor - kept.offset))
-            .map_err(crate::error::Error::from)?;
-        let previous = bytes.len();
-        bytes.resize(previous + (end - cursor) as usize, 0);
-        file.read_exact(&mut bytes[previous..])
-            .map_err(crate::error::Error::from)?;
-        cursor = end;
-        eof = kept.eof && cursor == kept.offset + kept.len;
-        if cursor == range.end || eof {
-            break;
-        }
-    }
-    if let Some(ident) = identity {
-        if !bytes.is_empty() || cursor == range.end || eof && terminal {
-            return Ok(LogPage::Data {
-                len: known_len,
-                ident,
-                start: range.start,
-                bytes,
-                eof: eof && (terminal || cursor == range.end),
-            });
-        }
+        Some(reset) => return Ok(reset),
+        None => {}
     }
 
     // A 0.2.x supervisor kept its log here; the host may no longer have it.
@@ -1077,6 +2012,7 @@ async fn events(
                     Ok(
                         RunEvent::Notices { .. }
                         | RunEvent::Host { .. }
+                        | RunEvent::Monitor { .. }
                         | RunEvent::LogCollection { .. },
                     ) => continue,
                     Err(broadcast::error::RecvError::Closed) => return None,

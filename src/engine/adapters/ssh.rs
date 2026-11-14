@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -34,9 +35,19 @@ pub struct LaunchOptions {
     pub root: Option<String>,
 }
 
+struct SignalTransfer {
+    summary: orx_host_proto::SignalsSummary,
+    /// The `(host, laptop)` clocks of the answer that gave `summary`.
+    clock: Option<(i64, i64)>,
+    bytes: Vec<u8>,
+}
+
 #[derive(Default)]
 struct Feed {
     summaries: HashMap<String, Summary>,
+    /// The `(host, laptop)` clocks of the last feed answer for each run, changed or not.
+    clocks: HashMap<String, (i64, i64)>,
+    signal_pages: HashMap<String, Arc<tokio::sync::Mutex<Option<SignalTransfer>>>>,
 }
 
 pub struct Ssh {
@@ -422,9 +433,19 @@ impl Ssh {
                 wait_ms,
             })
             .await?;
-        let Response::Changes { runs: changed } = response else {
+        let Response::Changes {
+            runs: changed,
+            answered_at,
+        } = response
+        else {
             bail!("Unexpected feed reply: {response:?}");
         };
+        if let Some(answered_at) = answered_at {
+            let received_at = crate::store::now_ms();
+            for run in runs {
+                feed.clocks.insert(run.clone(), (answered_at, received_at));
+            }
+        }
         for (run, summary) in changed {
             if watched.contains(&run) {
                 feed.summaries.insert(run, summary);
@@ -463,6 +484,7 @@ fn rejected(error: impl std::fmt::Display) -> LaunchError {
 
 pub(super) fn missing() -> Summary {
     Summary {
+        signals: None,
         started_at: None,
         state: RunState::Missing,
         log_len: None,
@@ -620,7 +642,7 @@ impl Backend for Ssh {
             })
             .await
         {
-            Ok(Response::Inspect { summary }) => match summary.state {
+            Ok(Response::Inspect { summary, .. }) => match summary.state {
                 RunState::Missing => Recovery::Absent,
                 RunState::Staging if !cancelled() => {
                     let launched = match self.payload(intent, cancelled).await {
@@ -795,7 +817,179 @@ impl Backend for Ssh {
     }
 
     async fn unwatch(&self, run: &WatchedRun) {
-        self.feed.lock().await.summaries.remove(&run.id);
+        let mut feed = self.feed.lock().await;
+        feed.summaries.remove(&run.id);
+        feed.clocks.remove(&run.id);
+        feed.signal_pages.remove(&run.id);
+    }
+
+    async fn configure_signals(
+        &self,
+        run: &WatchedRun,
+        config: &orx_signals::Config,
+    ) -> Result<()> {
+        if matches!(run.handle, Handle::Legacy { .. }) {
+            return Ok(());
+        }
+        let request = Request::ConfigureSignals {
+            run: run.id.clone(),
+            config: serde_json::to_string(config)?,
+        };
+        match self.request(request).await? {
+            Response::ConfigureSignals { .. } => Ok(()),
+            response => bail!("Unexpected signals configuration: {response:?}"),
+        }
+    }
+
+    async fn signals(
+        &self,
+        run: &WatchedRun,
+        terminal: bool,
+        previous: Option<&orx_signals::Snapshot>,
+    ) -> Result<Option<(orx_signals::Snapshot, Option<(i64, i64)>)>> {
+        if matches!(run.handle, Handle::Legacy { .. }) {
+            return Ok(None);
+        }
+        let transfer = self
+            .feed
+            .lock()
+            .await
+            .signal_pages
+            .entry(run.id.clone())
+            .or_default()
+            .clone();
+        let mut transfer = transfer.lock().await;
+        if transfer.is_none() {
+            // A final read never trusts a summary from the live feed, which may hold an old error.
+            let cached = if terminal {
+                None
+            } else {
+                let feed = self.feed.lock().await;
+                feed.summaries
+                    .get(&run.id)
+                    .cloned()
+                    .zip(feed.clocks.get(&run.id).copied())
+            };
+            let (summary, clock) = match cached {
+                Some((summary, clock)) => (summary, Some(clock)),
+                None => match self
+                    .request(Request::Inspect {
+                        run: run.id.clone(),
+                    })
+                    .await?
+                {
+                    Response::Inspect {
+                        summary,
+                        answered_at,
+                    } => (summary, answered_at.map(|at| (at, crate::store::now_ms()))),
+                    response => bail!("Unexpected signal inspection: {response:?}"),
+                },
+            };
+            let Some(mut signals) = summary.signals else {
+                return Ok(None);
+            };
+            if let Some(error) = &signals.error {
+                bail!("Run {} host signals: {error}", run.id);
+            }
+            if !terminal
+                && previous.is_some_and(|s| {
+                    s.generation == signals.generation && s.rev == signals.revision
+                })
+            {
+                return Ok(previous.cloned().map(|snapshot| (snapshot, clock)));
+            }
+            if terminal {
+                signals.generation.clear();
+                signals.revision = 0;
+            }
+            *transfer = Some(SignalTransfer {
+                summary: signals,
+                clock,
+                bytes: Vec::new(),
+            });
+        }
+        let SignalTransfer {
+            summary: signals,
+            clock,
+            bytes,
+        } = transfer.as_mut().unwrap();
+        let mut finalize = terminal && bytes.is_empty();
+        let mut resets = 0;
+        loop {
+            let response = self
+                .request(Request::ReadSignals {
+                    terminal: finalize,
+                    run: run.id.clone(),
+                    generation: signals.generation.clone(),
+                    revision: signals.revision,
+                    offset: bytes.len() as u64,
+                    length: 256 * 1024,
+                })
+                .await?;
+            match response {
+                Response::ReadSignals {
+                    page:
+                        SignalsPage::Data {
+                            generation,
+                            revision,
+                            offset,
+                            total,
+                            bytes: page,
+                        },
+                    ..
+                } => {
+                    if generation != signals.generation
+                        || revision != signals.revision
+                        || offset != bytes.len() as u64
+                        || total > orx_signals::MAX_SNAPSHOT as u64
+                        || page.len() > MAX_PAGE_LEN as usize
+                        || page.is_empty()
+                    {
+                        bail!("Run {} invalid signal snapshot page", run.id);
+                    }
+                    bytes.extend(page);
+                    if bytes.len() as u64 == total {
+                        let snapshot: orx_signals::Snapshot = serde_json::from_slice(bytes)?;
+                        if snapshot.run_id != run.id
+                            || snapshot.generation != generation
+                            || snapshot.rev != revision
+                        {
+                            bail!("Run {} signal identity changed", run.id);
+                        }
+                        let clock = *clock;
+                        *transfer = None;
+                        return Ok(Some((snapshot, clock)));
+                    }
+                    if bytes.len() as u64 > total {
+                        bail!("Run {} signal page exceeds snapshot", run.id);
+                    }
+                }
+                Response::ReadSignals {
+                    page: SignalsPage::Reset { summary },
+                    answered_at,
+                } => {
+                    *clock = Some((answered_at, crate::store::now_ms()));
+                    if resets == 2 {
+                        bail!(
+                            "Run {} signals changed while being read; retry inspection",
+                            run.id
+                        );
+                    }
+                    *signals = *summary;
+                    if let Some(error) = &signals.error {
+                        bail!("Run {} host signals: {error}", run.id);
+                    }
+                    bytes.clear();
+                    finalize = false;
+                    resets += 1;
+                }
+                Response::Error {
+                    code: ErrorCode::Unsupported,
+                    ..
+                } => return Ok(None),
+                response => bail!("Unexpected signals reply: {response:?}"),
+            }
+        }
     }
 
     async fn read_log(

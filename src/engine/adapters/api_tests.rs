@@ -55,6 +55,7 @@ fn pending<'a>(
         commit_sha: Some("snapshot"),
         chat_session_id: None,
         spec_digest: "digest",
+        monitor_config: None,
         launch,
     }
 }
@@ -130,6 +131,21 @@ async fn isolated() -> Option<PathBuf> {
         let headers = axum::http::HeaderMap::new();
         if uri.path().ends_with("/logs") && root.join("sse").is_dir() {
             return sse(&root, uri.query().unwrap_or_default());
+        }
+        if uri.path().ends_with("/logs") && root.join("signal-log").exists() {
+            let text = std::fs::read_to_string(root.join("signal-log")).unwrap();
+            if uri.path().starts_with("/api/jobs/org/") {
+                let sse = text
+                    .lines()
+                    .enumerate()
+                    .map(|(i, line)| {
+                        let timestamp = format!("2026-11-11T00:00:{i:02}.000Z");
+                        format!("data: {}\n\n", json!({"data":line, "timestamp":timestamp}))
+                    })
+                    .collect::<String>();
+                return ([("content-type", "text/event-stream")], sse).into_response();
+            }
+            return Json(json!({"logs":text})).into_response();
         }
         if uri.path().ends_with("/logs") && root.join("slow-logs").exists() {
             tokio::time::sleep(Duration::from_secs(5)).await;
@@ -4447,5 +4463,145 @@ async fn openresearch_404_under_another_account_is_not_a_release() {
     ));
     for flag in ["box-released", "delete-fails"] {
         std::fs::remove_file(root.join(flag)).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn each_provider_replays_signal_rows_and_spend_without_double_counting() {
+    let Some(root) = isolated().await else {
+        return;
+    };
+    script(
+        &root.join("bin/vercel-python"),
+        "#!/bin/sh\ncat \"$ORX_API_ROOT/signal-log\"\n",
+    );
+    script(
+        &root.join("bin/modal-python"),
+        r#"#!/usr/bin/env python3
+import json,os,sys
+log=open(os.path.join(os.environ['ORX_API_ROOT'],'signal-log'),'rb').read()
+sys.stdout.buffer.write(json.dumps(['0',len(log)]).encode()+b'\n'+log)
+"#,
+    );
+    script(
+        &root.join("bin/kubectl"),
+        r#"#!/usr/bin/env python3
+import sys,os,json,pathlib
+a=sys.argv[1:]
+if a[0]=='logs':
+ for line in pathlib.Path(os.environ['ORX_API_ROOT'],'signal-log').read_text().splitlines():
+  print('2026-11-11T00:00:00Z '+line)
+elif a[:2]==['get','pods']:
+ print(json.dumps({'items':[{'metadata':{'name':'pod'},'status':{'phase':'Running'}}]}))
+else: raise Exception(a)
+"#,
+    );
+    let endpoint = std::env::var("HF_ENDPOINT").unwrap();
+    for kind in ["hf_job", "modal_job", "vercel_job", "k8s_job", "ray_job"] {
+        let data = root.join(kind);
+        std::fs::create_dir_all(&data).unwrap();
+        let target = if kind == "ray_job" {
+            endpoint.as_str()
+        } else {
+            "org"
+        };
+        let account = crate::engine::handle::ApiAccount {
+            target: Some(target.into()),
+            context: None,
+        };
+        let ids = match kind {
+            "vercel_job" => vec!["box".into(), "process".into()],
+            "k8s_job" => vec!["job/job".into()],
+            _ => vec!["job".into()],
+        };
+        let run = WatchedRun {
+            id: kind.into(),
+            handle: super::api::test_handle(kind, Some(target), None, ids),
+        };
+        let provider = super::api::provider(kind).unwrap();
+        let mut text = String::new();
+        for step in 1..=3 {
+            text.push_str(&format!(
+                "::orx:: {}\n",
+                json!({"step":step,"row":"eval","spend":step,"m":{"score":step}})
+            ));
+            std::fs::write(root.join("signal-log"), &text).unwrap();
+            let backend =
+                (provider.build)(&account, Arc::new(TestClock::new()), data.join("run-logs"))
+                    .unwrap();
+            backend.drain_log(&run).await.unwrap();
+            super::signals::collect(&data, backend.as_ref(), &run, true, 123)
+                .await
+                .unwrap();
+            let snapshot =
+                super::local::signals::load(&data.join("run-signals").join(format!("{kind}.json")))
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(snapshot.rows["eval"].len(), step as usize, "{kind}");
+            assert_eq!(snapshot.spend, Some(step as f64), "{kind}");
+            assert!(
+                !snapshot.coverage.reasons.contains(&"log_replaced".into()),
+                "{kind}"
+            );
+            assert!(
+                !snapshot.coverage.reasons.contains(&"rebuilding".into()),
+                "{kind}"
+            );
+            drop(backend);
+        }
+        // A provider that cannot say where its log continues starts the spool over.
+        if kind == "vercel_job" {
+            let gate = root.join("signal-gate");
+            assert!(crate::process::command("mkfifo")
+                .arg(&gate)
+                .status()
+                .unwrap()
+                .success());
+            script(&root.join("bin/vercel-python"),
+                "#!/bin/sh\ncat \"$ORX_API_ROOT/signal-log\"\nread unused < \"$ORX_API_ROOT/signal-gate\"\n");
+            std::fs::write(
+                root.join("signal-log"),
+                "::orx:: {\"row\":\"eval\",\"m\":{\"score\":4}}\n",
+            )
+            .unwrap();
+            let backend =
+                (provider.build)(&account, Arc::new(TestClock::new()), data.join("run-logs"))
+                    .unwrap();
+            backend
+                .read_log(
+                    &run,
+                    LogFile::Log,
+                    ByteRange {
+                        start: 0,
+                        end: 65536,
+                    },
+                    None,
+                )
+                .await
+                .unwrap();
+            super::signals::collect(&data, backend.as_ref(), &run, false, 124)
+                .await
+                .unwrap();
+            let snapshot =
+                super::local::signals::load(&data.join("run-signals").join(format!("{kind}.json")))
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(
+                snapshot.rows["eval"].len(),
+                3,
+                "partial replay keeps history"
+            );
+            assert!(snapshot.coverage.reasons.contains(&"rebuilding".into()));
+            let staged = super::local::signals::load(
+                &data.join("run-signals").join(format!("{kind}.replay")),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(staged.rows["eval"].len(), 1, "the rebuild is staged");
+            let finish = tokio::task::spawn_blocking(move || std::fs::write(gate, b"done\n"));
+            backend.drain_log(&run).await.unwrap();
+            finish.await.unwrap().unwrap();
+            backend.unwatch(&run).await;
+        }
     }
 }

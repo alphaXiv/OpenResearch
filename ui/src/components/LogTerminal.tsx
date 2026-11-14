@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, type MouseEvent } from "react";
 import { type Run } from "../api";
 import { hostForRun } from "../engineHosts";
 import { fmtBytes, fmtClock, ltr } from "../i18n";
-import { createLogFollower, INITIAL_LOG_VIEW, isKept, LOG_WINDOW, parsePosition, shouldRecover } from "../logWindow";
+import { createLogFollower, INITIAL_LOG_VIEW, isKept, LOG_WINDOW, parsePosition, shouldRecover, type LogSeek } from "../logWindow";
 import { m } from "../paraglide/messages.js";
 import { runActive, runApiProvider } from "../runDisplay";
 import { mountTerminal } from "./terminal";
@@ -14,9 +14,13 @@ import { Button, IconButton, StatusIndicator } from "./ui";
  * One run's log, one window at a time. Logs that fit in a window load whole
  * and then follow `run.log` deltas, as before paging. Larger logs open on
  * their last window; the bar above pages by byte offset, reading pages this
- * computer did not keep from the run's host.
+ * computer did not keep from the run's host. A `seek` opens it at a position instead, once; `onSeekTaken` hands it back.
  */
-export function LogTerminal({ run }: { run: Pick<Run, "id" | "status" | "contact" | "host" | "backend"> }) {
+export function LogTerminal({ run, seek = null, onSeekTaken }: {
+  run: Pick<Run, "id" | "status" | "contact" | "host" | "backend">;
+  seek?: LogSeek | null;
+  onSeekTaken?: (seek: LogSeek) => void;
+}) {
   const { fetchLogPage } = useWorkspace().api;
   const { onRunLog, useOrxEvents } = useWorkspace().events;
   const { useEngineHosts } = useWorkspace().queries;
@@ -53,7 +57,7 @@ export function LogTerminal({ run }: { run: Pick<Run, "id" | "status" | "contact
     });
     follower.current = log;
     const unsubscribe = onRunLog(runId, (event) => log.onLog(event));
-    log.follow();
+    if (!seek) log.follow();
 
     return () => {
       log.dispose();
@@ -63,6 +67,12 @@ export function LogTerminal({ run }: { run: Pick<Run, "id" | "status" | "contact
     };
   }, [runId]);
 
+  useEffect(() => {
+    if (!seek) return;
+    follower.current?.seek(seek);
+    onSeekTaken?.(seek);
+  }, [seek]);
+
   useOrxEvents({ onRun: () => {}, onReconnect: () => follower.current?.onReconnect() });
 
   useEffect(() => {
@@ -70,8 +80,9 @@ export function LogTerminal({ run }: { run: Pick<Run, "id" | "status" | "contact
   }, [hostLive, view.unavailable]);
 
   const contactLost = run.contact !== null;
-  const { len, kept, span, following, loading, unavailable, error } = view;
-  const paged = len !== null && len > LOG_WINDOW;
+  const { len, kept, span, following, loading, unavailable, error, replaced } = view;
+  // A log opened at a position shows the bar too, so its start and its live end stay a click away.
+  const paged = len !== null && (len > LOG_WINDOW || !following);
   const live = runActive(run.status);
 
   function jumpFromBar(event: MouseEvent<HTMLButtonElement>) {
@@ -98,6 +109,7 @@ export function LogTerminal({ run }: { run: Pick<Run, "id" | "status" | "contact
 
   return (
     <div className="flex h-full w-full flex-col">
+      {replaced && <p role="status" className="m-0 shrink-0 border-b border-border-variant bg-background px-3 py-1.5 text-xs text-subtext">{m.log_replaced_since_cited()}</p>}
       {paged && (
         <div className="shrink-0 bg-background text-xs text-subtext">
           <div className="flex items-center gap-1 border-b border-border-variant px-1.5 py-1">

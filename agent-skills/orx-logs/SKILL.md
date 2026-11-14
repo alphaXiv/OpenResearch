@@ -21,5 +21,8 @@ rg -n 'metric|summary' <log-path>   # search the file for relevant evidence
   need. Cite the lines supporting each claim.
 - `<runId>` comes from `orx runs <projectId>`.
 
+For a run's current stage, progress and measures, `orx exp status <expId>` is
+quicker than the log; read the log to confirm them or when they look wrong.
+
 Truncated output is not evidence of absence. Search or read the reported file until
 the relevant portion has been found.

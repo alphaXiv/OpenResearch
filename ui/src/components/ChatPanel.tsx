@@ -1,3 +1,4 @@
+import type { LogSeek } from "../logWindow";
 import { useMachines } from "../machineSelection";
 import { downloadFile } from "../download";
 import {
@@ -213,7 +214,8 @@ import { ChatLinksContext, type ChatLinks } from "./ChatLinks";
 import { CITED_ID, messageRef } from "../agentMessages";
 import { PlanStrip } from "./PlanStrip";
 import { useComposerFocus } from "./useComposerFocus";
-import { ExperimentRunBanner } from "./ExperimentRunBanner";
+import { RunBanner } from "./run/RunBanner";
+import { sessionRunMark, type SessionRunMark } from "../runMonitor/model";
 import { SETTINGS_NAV, harnessSetupPath, type SettingsTab } from "./SettingsPage";
 import { SkillMenu } from "./SkillMenu";
 import { MentionMenu, type MentionMatch } from "./MentionMenu";
@@ -4705,7 +4707,8 @@ function SessionRow({
   unread,
   busy,
   waiting,
-  experimentRunning,
+  runMark,
+  inkFlaggedTitle = false,
   revealTitle,
   onOpen,
   onRename,
@@ -4723,7 +4726,9 @@ function SessionRow({
   busy: boolean;
   /** An actionable question or held approval needs the user's attention. */
   waiting: boolean;
-  experimentRunning: boolean;
+  runMark: SessionRunMark;
+  /** Draws a flagged chat's title in amber too; Clover picks this or the warning alone. */
+  inkFlaggedTitle?: boolean;
   /** Nonce set while this row's freshly auto-generated title should play its
    * reveal; it doubles as the remount key so a second retitle replays it.
    * Undefined the rest of the time (static title). */
@@ -4898,7 +4903,7 @@ function SessionRow({
           }}
         />
       ) : (
-        <span className="session-title">
+        <span className={`session-title ${inkFlaggedTitle && (runMark === "waiting" || runMark === "flagged") ? "text-ink-amber" : ""}`}>
           <TitleReveal
             key={revealTitle ?? "static"}
             title={title}
@@ -4906,9 +4911,14 @@ function SessionRow({
           />
         </span>
       )}
-      {experimentRunning && !editing && (
+      {runMark === "running" && !editing && (
         <Tooltip content={m.chat_experiment_running()} className="shrink-0 text-accent-green">
           <FlaskConical size={14} className="motion-safe:animate-[or-experiment-pulse_3s_ease-in-out_infinite]" aria-label={m.chat_experiment_running()} />
+        </Tooltip>
+      )}
+      {(runMark === "waiting" || runMark === "flagged") && !editing && (
+        <Tooltip content={runMark === "waiting" ? m.chat_run_needs_attention() : m.chat_run_flagged()} className="shrink-0 text-accent-amber">
+          <TriangleAlert size={14} aria-hidden="true" />
         </Tooltip>
       )}
       {waiting && !editing && (
@@ -5090,9 +5100,9 @@ export function ChatPanel({
     ref: string | undefined,
     intent: TabOpenIntent,
   ) => void;
-  /** Open a run's logs in the right pane (agent-emitted `<run>` evidence chips).
+  /** Open a run's logs in the right pane (agent-emitted `<run>` evidence chips), at `seek` when given.
    * Run ids are globally unique, so no session context is needed. */
-  onOpenRun?: OpenTranscriptTarget;
+  onOpenRun?: (runId: string, intent: TabOpenIntent, seek?: LogSeek) => void;
   /** Resolve a run to the experiment name shown on tool activity links. */
   runExperimentName?: (runId: string) => string;
   /** A chat in this project, or undefined for one elsewhere. */
@@ -5157,7 +5167,7 @@ export function ChatPanel({
     listProjectActivityQuery,
     listChatSessionsQuery,
     listSidebarChatSessionsQuery,
-    listChatActiveRunsQuery,
+    listChatShownRunsQuery,
     getHarnessesQuery,
     getSkillsQuery,
     getHarnessSetupCommandsQuery,
@@ -5368,7 +5378,7 @@ export function ChatPanel({
   const planModeOverrideRef = useRef<boolean | null>(null);
   const queuedPlanOverrideSeen = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const { data: activeRuns = [] } = useQuery(listChatActiveRunsQuery());
+  const shownRuns = useQuery(listChatShownRunsQuery()).data;
   const [state, dispatch, historyQuery] = useChatState(projectId, mainView === "chat" ? activeId : null);
   const { data: harnesses = EMPTY_HARNESSES } = useQuery(getHarnessesQuery());
   const modelName = useModelName();
@@ -6197,7 +6207,7 @@ export function ChatPanel({
   useEffect(() => onChatEvent((event) => {
     if (event.type === "reconnected") void syncSessionList(true);
     if (event.type === "runsChanged") {
-      void queryClient.invalidateQueries({ queryKey: listChatActiveRunsQuery().queryKey });
+      void queryClient.invalidateQueries({ queryKey: listChatShownRunsQuery().queryKey });
     }
   }), [syncSessionList]);
 
@@ -7458,7 +7468,7 @@ export function ChatPanel({
                       unread={unreadSessionIds.has(s.id)}
                       busy={sessionBusy(project, s)}
                       waiting={sessionWaiting(s)}
-                      experimentRunning={activeRuns.some((item) => item.sessionId === s.id)}
+                      runMark={sessionRunMark(shownRuns?.runs ?? [], s.id)}
                       revealTitle={titleReveals.get(s.id)}
                       onOpenExperiment={(targetProjectId, experimentId) => {
                         void navigate({ href: taskLocation(targetProjectId, targetProjectId === s.projectId ? s.id : null, { kind: "experiment", experimentId, view: "overview" }) });
@@ -7816,12 +7826,15 @@ export function ChatPanel({
               </IconButton>
             </Tooltip>
           )}
-          <ExperimentRunBanner
-            key={activeId}
-            runs={activeRuns.filter((item) => item.sessionId === activeId)}
-            onOpenRun={onOpenRun}
-            onOpenExperiment={onOpenExperiment}
-          />
+          {activeId && (
+            <RunBanner
+              key={activeId}
+              sessionId={activeId}
+              agent={assistantLabel}
+              onOpenRun={onOpenRun}
+              onOpenExperiment={onOpenExperiment}
+            />
+          )}
           {/* Inside the composer so the composer's popovers (mode/model pickers,
             z 50 within this stacking context) layer above the strip — as a
             sibling, the composer's own z-index: 4 capped them below it. */}

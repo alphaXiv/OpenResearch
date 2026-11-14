@@ -122,6 +122,7 @@ impl Commands for Services {
             commit_sha: None,
             chat_session_id: None,
             spec_digest: "digest",
+            monitor_config: None,
             launch: &LaunchSpec {
                 kind: "local_job".into(),
                 target: None,
@@ -135,8 +136,13 @@ impl Commands for Services {
     fn backend(&self, _: &StoredRun) -> Result<Arc<dyn Backend>> {
         Ok(self.0.clone())
     }
-    async fn cancel(&self, run: &StoredRun, reason: &str) -> Result<()> {
-        self.1.cancel(self.0.as_ref(), &run.id, reason).await?;
+    async fn cancel(
+        &self,
+        run: &StoredRun,
+        reason: &str,
+        stop: Option<&crate::store::StopContext>,
+    ) -> Result<()> {
+        self.1.stop(self.0.as_ref(), &run.id, reason, stop).await?;
         Ok(())
     }
     fn host_target(&self, _: &str, _: bool) -> Result<crate::jobs::ssh::SshTarget> {
@@ -489,6 +495,11 @@ async fn wait_is_one_sse_request_completed_by_first_matching_bus_event() {
     };
     let mut events = f.client.events(&filter).await.unwrap();
     assert_eq!(f.api.sse_clients(), 1);
+    // A monitor event is the dashboard's, and never ends a wait.
+    f.api.engine.bus.publish(RunEvent::Monitor {
+        run_id: "run".into(),
+        event: Arc::new(json!({"runId": "run", "rev": 1})),
+    });
     f.api
         .engine
         .observe(
@@ -857,7 +868,7 @@ async fn cli_launch_and_cancel_use_the_server_and_kept_pages_span_file_boundarie
     };
     f.client.launch(*args).await.unwrap();
     assert_eq!(f.api.run("run").unwrap().status, "starting");
-    f.client.cancel(Some("exp"), None).await.unwrap();
+    f.client.cancel(Some("exp"), None, None).await.unwrap();
     assert!(f
         .api
         .store()
@@ -1795,6 +1806,7 @@ async fn dashboard_host_routes_report_states_and_retry_only_key_hosts() {
             commit_sha: None,
             chat_session_id: None,
             spec_digest: "digest",
+            monitor_config: None,
             launch: &LaunchSpec {
                 kind: "ssh_job".into(),
                 target: Some("lab".into()),
@@ -2271,6 +2283,7 @@ async fn dashboard_host_lifecycle_child() {
                 commit_sha: None,
                 chat_session_id: None,
                 spec_digest: &orx_host::sha(b"printf resumed"),
+                monitor_config: None,
                 launch: &LaunchSpec {
                     kind: "ssh_job".into(),
                     target: Some("orx-test".into()),
@@ -2651,7 +2664,8 @@ async fn cli_cancel_selects_one_run_and_checks_its_experiment() {
         Some(crate::Command::Exp(crate::ExpArgs {
             command: crate::ExpCommand::Cancel {
                 exp_id: None,
-                run: Some(_)
+                run: Some(_),
+                reason: None,
             }
         }))
     ));
@@ -2659,9 +2673,13 @@ async fn cli_cancel_selects_one_run_and_checks_its_experiment() {
     f.insert("first", "exp", "project", "running");
     f.insert("second", "exp", "project", "running");
     f.insert("done", "exp", "project", "done");
-    assert!(f.client.cancel(Some("other"), Some("first")).await.is_err());
-    assert!(f.client.cancel(None, Some("done")).await.is_err());
-    f.client.cancel(None, Some("first")).await.unwrap();
+    assert!(f
+        .client
+        .cancel(Some("other"), Some("first"), None)
+        .await
+        .is_err());
+    assert!(f.client.cancel(None, Some("done"), None).await.is_err());
+    f.client.cancel(None, Some("first"), None).await.unwrap();
     let accepted = |id| {
         f.api
             .store()
@@ -2674,8 +2692,120 @@ async fn cli_cancel_selects_one_run_and_checks_its_experiment() {
     assert!(accepted("first"));
     assert!(!accepted("second"));
     assert!(!accepted("done"));
-    f.client.cancel(Some("exp"), None).await.unwrap();
+    f.client.cancel(Some("exp"), None, None).await.unwrap();
     assert!(accepted("second"));
+}
+
+/// A stop keeps who asked for it and why: an agent's chat and words, the user otherwise, and
+/// the run shows it once the cancel lands.
+#[tokio::test]
+async fn a_stop_keeps_who_asked_and_why() {
+    let f = Fixture::new().await;
+    for id in ["agent", "user", "long"] {
+        f.insert(id, "exp", "project", "running");
+    }
+    let cancel = |id: &str, body: Value| {
+        let client = f.client.clone();
+        let path = format!("runs/{id}/cancel");
+        async move { client.json(reqwest::Method::POST, &path, Some(&body)).await }
+    };
+    cancel(
+        "agent",
+        json!({"chatSessionId": "chat-1", "reason": "Loss went NaN at step 410."}),
+    )
+    .await
+    .unwrap();
+    cancel("user", json!({})).await.unwrap();
+    let refused = cancel("long", json!({"reason": "x".repeat(2049)}))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refused.contains("--reason must be 1 to 2048 bytes of text (got 2049 bytes)."),
+        "{refused}"
+    );
+
+    let store = || f.api.store();
+    let agent = store().run_stop("agent").unwrap().unwrap();
+    assert_eq!(agent.by, crate::store::StopBy::Agent);
+    assert_eq!(agent.reason.as_deref(), Some("Loss went NaN at step 410."));
+    assert_eq!(agent.chat_session_id.as_deref(), Some("chat-1"));
+    assert_eq!(
+        store().get_run("agent").unwrap().unwrap().cancel_reason.as_deref(),
+        Some("Cancel requested by agent session chat-1 with `orx exp cancel`: Loss went NaN at step 410.")
+    );
+    assert_eq!(
+        store().run_stop("user").unwrap().unwrap().by,
+        crate::store::StopBy::User
+    );
+    assert_eq!(store().run_stop("long").unwrap(), None);
+
+    let view = |id: &str| f.api.view(&f.api.run(id).unwrap()).unwrap();
+    assert_eq!(view("agent")["outcome"], Value::Null, "not stopped yet");
+    f.api
+        .engine
+        .observe(
+            "agent",
+            Observation::Gone {
+                reason: "stopped".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(f.api.run("agent").unwrap().status, "cancelled");
+    assert_eq!(
+        view("agent")["outcome"],
+        json!({"by": "agent", "at": agent.at, "reason": "Loss went NaN at step 410."})
+    );
+}
+
+/// `orx exp revise` marks only a stopped run, the experiment's newest, from a chat whose agent
+/// is in a turn; each other case is refused in its own words, and the run then reads Revising.
+#[tokio::test]
+async fn revise_marks_a_stopped_run_its_agent_is_repairing() {
+    let f = Fixture::new().await;
+    f.insert("live", "exp", "project", "running");
+    f.insert("done", "exp", "project", "done");
+    f.insert("stopped", "exp", "project", "cancelled");
+    f.api
+        .store()
+        .conn_execute_for_tests("UPDATE runs SET created_at = 0 WHERE id = 'stopped'");
+    let revise = |id: &str, body: Value| {
+        let client = f.client.clone();
+        let path = format!("runs/{id}/revise");
+        async move { client.json(reqwest::Method::POST, &path, Some(&body)).await }
+    };
+    let refused = |result: Result<Value>| result.unwrap_err().to_string();
+    let from = |experiment: &str| json!({"experimentId": experiment, "chatSessionId": "chat-1"});
+    assert!(
+        refused(revise("stopped", json!({"experimentId": "exp"})).await)
+            .contains("run it from that agent's chat")
+    );
+    assert!(refused(revise("stopped", from("other")).await)
+        .contains("Run stopped belongs to experiment exp, not other."));
+    assert!(refused(revise("live", from("exp")).await).contains(
+        "Run live is still running; stop it first with `orx exp cancel --run live --reason '…'`"
+    ));
+    assert!(refused(revise("done", from("exp")).await).contains("Run done ended done, not stopped"));
+    assert!(refused(revise("stopped", from("exp")).await)
+        .contains("Run stopped is not experiment exp's newest run; "));
+    f.insert("newest", "exp-2", "project", "cancelled");
+    assert!(refused(revise("newest", from("exp-2")).await)
+        .contains("Chat chat-1 has no turn going, so nothing would be revising run newest."));
+    f.api
+        .store()
+        .put_chat_turn("chat-1", "turn-1", "running", 5);
+    let newest = f.api.run("newest").unwrap();
+    crate::engine::monitor::advance(&f.api.store(), &newest, 2).unwrap();
+    let answer = revise("newest", from("exp-2")).await.unwrap();
+    assert_eq!(answer["revising"], true);
+    assert_eq!(answer["run"]["monitor"]["tone"], "revising");
+    let newest = f.api.run("newest").unwrap();
+    let (_, monitor) = crate::engine::monitor::monitor(&f.api.store(), &newest).unwrap();
+    assert_eq!(monitor["revising"], true);
+    assert!(monitor["statusText"]
+        .as_str()
+        .unwrap()
+        .contains("revising The agent is repairing this experiment"));
 }
 
 #[tokio::test]
@@ -2931,4 +3061,355 @@ async fn abandon_refusals_name_their_cause_and_the_way_forward() {
     let (status, message) = refusal("live").await;
     assert_eq!(status, StatusCode::OK, "{message}");
     assert_eq!(f.api.run("live").unwrap().status, "lost");
+}
+
+/// The monitor route: the whole monitor with its ETag, a 304 for it, one series' history, a
+/// cursor from another basis refused, and an unknown run a 404 in the app's error shape.
+#[tokio::test]
+async fn the_monitor_route_serves_one_rev_and_says_what_it_cannot() {
+    let f = Fixture::new().await;
+    f.insert("run", "exp", "project", "running");
+    let signals = f.api.data_dir.join("run-signals");
+    std::fs::create_dir_all(&signals).unwrap();
+    let mut snapshot = orx_signals::Snapshot::new("run", "1-1", "g1");
+    let now = crate::store::now_ms();
+    for step in 0..=30 {
+        let line = format!(
+            "::orx:: {{\"step\":{step},\"of\":100,\"t\":{step},\"m\":{{\"loss\":{}}}}}\n",
+            1.0 / f64::from(step + 1)
+        );
+        snapshot
+            .feed(
+                line.as_bytes(),
+                false,
+                now - 30_000 + i64::from(step) * 1000,
+                true,
+            )
+            .unwrap();
+    }
+    crate::engine::adapters::local::signals::publish(&signals.join("run.json"), &snapshot).unwrap();
+    std::fs::write(
+        signals.join("run.status.json"),
+        json!({"state": "cached", "reason": null, "lastCollectedAt": now}).to_string(),
+    )
+    .unwrap();
+
+    let response = f
+        .client
+        .request(reqwest::Method::GET, "runs/run/monitor")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let etag = response.headers()["etag"].to_str().unwrap().to_owned();
+    let monitor: Value = response.json().await.unwrap();
+    assert_eq!(etag, format!("\"g1:{}\"", monitor["rev"]));
+    assert_eq!(monitor["series"]["loss"].as_array().unwrap().len(), 31);
+    assert_eq!(monitor["progress"]["done"], 30.0);
+    assert!(monitor["statusText"]
+        .as_str()
+        .unwrap()
+        .starts_with("exp  running  30%  step 30 of 100"));
+    let run = f
+        .client
+        .json(reqwest::Method::GET, "runs/run", None)
+        .await
+        .unwrap();
+    assert_eq!(run["monitor"]["rev"], monitor["rev"]);
+
+    let unchanged = f
+        .client
+        .request(reqwest::Method::GET, "runs/run/monitor")
+        .header("if-none-match", &etag)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unchanged.status(), StatusCode::NOT_MODIFIED);
+
+    let page = f
+        .client
+        .json(
+            reqwest::Method::GET,
+            "runs/run/monitor?series=loss&after=20&limit=4",
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(page["points"].as_array().unwrap().len(), 4);
+    assert_eq!(page["points"][0][0], 21.0);
+    assert_eq!(page["next"], 24.0);
+
+    let stale = f
+        .client
+        .request(reqwest::Method::GET, "runs/run/monitor?cursor=g0.1.1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    assert_eq!(stale.json::<Value>().await.unwrap()["reset"], true);
+
+    for path in ["runs/missing/monitor", "runs/run/monitor?series=lr"] {
+        let missing = f
+            .client
+            .request(reqwest::Method::GET, path)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND, "{path}");
+        assert!(
+            missing.json::<Value>().await.unwrap()["error"].is_string(),
+            "{path}"
+        );
+    }
+    let anonymous = crate::net::loopback_client()
+        .build()
+        .unwrap()
+        .get(format!(
+            "http://127.0.0.1:{}/api/v2/runs/run/monitor",
+            f.descriptor.port
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+    let dashboard = crate::net::loopback_client()
+        .build()
+        .unwrap()
+        .get(format!(
+            "http://127.0.0.1:{}/api/runs/run/monitor",
+            f.descriptor.port
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dashboard.status(), StatusCode::OK);
+}
+
+/// A flag's choice: the user keeps it going or stops the run, the agent hands it to the user, a
+/// repeated request answers as the first did, and a settled flag or an ended run's is refused in
+/// the words `orx exp flag` prints.
+#[tokio::test]
+async fn a_flag_is_settled_once_by_whoever_chooses_first() {
+    let f = Fixture::new().await;
+    let store = || f.api.store();
+    store().put_chat_session("chat-1", "claude-code", Some("copilot"));
+    for id in ["live", "other", "stop", "done"] {
+        f.insert(id, "exp", "project", "running");
+        store().subscribe_run(id, "chat-1", 1).unwrap();
+    }
+    let look = store()
+        .prepare_watch_look(
+            "chat-1",
+            "change",
+            "Claude Haiku",
+            "a test",
+            &[("live", "r1", "subject"), ("other", "r2", "subject")],
+            1,
+        )
+        .unwrap();
+    let raise = |run: &str, id: &str, group: Option<String>| {
+        let run = f.api.run(run).unwrap();
+        let body = json!({"id": id, "source": "look", "group": group, "at": 1, "template": "Loss **{loss}**.",
+            "detail": "Loss **{loss}**.", "text": "Loss **2.1**.", "evidence": null, "whole": 0.5});
+        let flag = crate::engine::flags::new_flag(&store(), &run, body, true).unwrap();
+        store().raise_flags(&[flag], 1).unwrap();
+    };
+    raise("live", "f1", Some(format!("look:{look}")));
+    raise("other", "f2", Some(format!("look:{look}")));
+    raise("stop", "f3", None);
+    raise("done", "f4", None);
+    store().set_run_status("done", "done");
+    let choose = |run: &str, body: Value| {
+        let client = f.client.clone();
+        let path = format!("runs/{run}/flag");
+        async move { client.json(reqwest::Method::POST, &path, Some(&body)).await }
+    };
+    let refused = |result: Result<Value>| result.unwrap_err().to_string();
+    let flag_of = |run: &str| {
+        let run = f.api.run(run).unwrap();
+        crate::engine::flags::read(&store(), &run)
+            .unwrap()
+            .pop()
+            .unwrap()
+    };
+    assert_eq!(
+        flag_of("live")["state"],
+        "waiting",
+        "a Copilot flag waits for the user"
+    );
+    assert!(
+        store().run_notices_for_tests("live").is_empty(),
+        "and wakes no one"
+    );
+
+    // Ask takes along every open flag of the look, as one turn.
+    let asked = choose(
+        "live",
+        json!({"flagId": "f1", "choice": "ask", "requestId": "q1"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(asked["flag"]["state"], "asking");
+    assert_eq!(flag_of("other")["state"], "asking");
+    let notices: Vec<_> = ["live", "other"]
+        .iter()
+        .flat_map(|run| store().run_notices_for_tests(run))
+        .collect();
+    assert_eq!(notices.len(), 2, "{notices:?}");
+    assert!(notices.iter().all(|(chat, kind, body)| chat == "chat-1"
+        && kind == "watch_flag"
+        && body.starts_with("[orx] The user asked you to look at a flag on run ")));
+    assert_eq!(
+        choose(
+            "live",
+            json!({"flagId": "f1", "choice": "ask", "requestId": "q1"})
+        )
+        .await
+        .unwrap()["flag"]["state"],
+        "asking",
+        "a repeated request answers as the first did"
+    );
+
+    // The agent leaves it to the user, then the user keeps it going.
+    let handed = choose(
+        "other",
+        json!({"flagId": "f2", "choice": "ask", "chatSessionId": "chat-1", "reason": "Your call."}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        (
+            handed["flag"]["state"].as_str(),
+            handed["flag"]["mode"].as_str()
+        ),
+        (Some("waiting"), Some("copilot"))
+    );
+    let kept = choose(
+        "other",
+        json!({"flagId": "f2", "choice": "keep", "requestId": "q2", "reason": "Warm-up noise."}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(kept["flag"]["state"], "kept");
+    assert_eq!(
+        kept["flag"]["choice"],
+        json!({"by": "user", "c": "keep", "at": kept["flag"]["choice"]["at"], "reason": "Warm-up noise."})
+    );
+    assert_eq!(
+        kept["run"]["monitor"]["flag"],
+        Value::Null,
+        "a settled flag leaves the line"
+    );
+    assert_eq!(
+        refused(
+            choose(
+                "other",
+                json!({"flagId": "f2", "choice": "stop", "requestId": "q3"})
+            )
+            .await
+        ),
+        "Run other: flag f2 is already settled; run `orx exp status exp --run other`."
+    );
+
+    let stopped = choose("stop", json!({"flagId": "f3", "choice": "stop", "chatSessionId": "chat-1", "reason": "NaN since step 400."})).await.unwrap();
+    assert_eq!(stopped["flag"]["state"], "stopped");
+    assert_eq!(
+        store().run_stop("stop").unwrap().unwrap().by,
+        crate::store::StopBy::Agent
+    );
+
+    assert_eq!(
+        refused(choose("done", json!({"flagId": "f4", "choice": "keep"})).await),
+        "Run done: flag f4 is already settled; run `orx exp status exp --run done`."
+    );
+    assert!(
+        refused(choose("live", json!({"flagId": "nope", "choice": "keep"})).await).contains(
+            "Run live has no flag nope; run `orx exp status exp --run live` to see its flags."
+        )
+    );
+    assert!(
+        refused(choose("live", json!({"flagId": "f1", "choice": "maybe"})).await)
+            .contains("A flag's choice is keep, stop or ask (got \"maybe\").")
+    );
+}
+
+/// A Stop and a Keep on one flag, or a flag's choice after the agent stopped the run itself:
+/// one wins, every surface says its words, and the other is refused as settled.
+#[tokio::test]
+async fn a_stop_and_a_keep_that_race_leave_one_winner() {
+    let f = Fixture::new().await;
+    let store = || f.api.store();
+    store().put_chat_session("chat-1", "claude-code", Some("copilot"));
+    for (id, flag) in [("race", "f1"), ("cancelled", "f2")] {
+        f.insert(id, "exp", "project", "running");
+        store().subscribe_run(id, "chat-1", 1).unwrap();
+        let run = f.api.run(id).unwrap();
+        let body = json!({"id": flag, "source": "tripwire", "at": 1, "template": "t", "detail": "t",
+            "text": "t", "evidence": null, "whole": 0.5});
+        let flag = crate::engine::flags::new_flag(&store(), &run, body, true).unwrap();
+        store().raise_flags(&[flag], 1).unwrap();
+    }
+    let choose = |run: &str, body: Value| {
+        let client = f.client.clone();
+        let path = format!("runs/{run}/flag");
+        async move { client.json(reqwest::Method::POST, &path, Some(&body)).await }
+    };
+    let settled = |run: &str, flag: &str| {
+        format!("Run {run}: flag {flag} is already settled; run `orx exp status exp --run {run}`.")
+    };
+    let state = |run: &str| {
+        let run = f.api.run(run).unwrap();
+        crate::engine::flags::read(&store(), &run).unwrap()[0]["state"].clone()
+    };
+
+    let (stop, keep) = tokio::join!(
+        choose(
+            "race",
+            json!({"flagId": "f1", "choice": "stop", "requestId": "s"})
+        ),
+        choose(
+            "race",
+            json!({"flagId": "f1", "choice": "keep", "chatSessionId": "chat-1", "reason": "Fine."})
+        ),
+    );
+    match (stop, keep) {
+        (Ok(_), Err(lost)) => {
+            assert_eq!(lost.to_string(), settled("race", "f1"));
+            assert_eq!(state("race"), "stopped");
+            assert_eq!(
+                store().run_stop("race").unwrap().unwrap().by,
+                crate::store::StopBy::User
+            );
+        }
+        (Err(lost), Ok(_)) => {
+            assert_eq!(lost.to_string(), settled("race", "f1"));
+            assert_eq!(state("race"), "kept");
+            assert_eq!(
+                store().run_stop("race").unwrap(),
+                None,
+                "a kept run is not stopping"
+            );
+        }
+        other => panic!("exactly one choice wins: {other:?}"),
+    }
+
+    f.client
+        .json(
+            reqwest::Method::POST,
+            "runs/cancelled/cancel",
+            Some(&json!({"chatSessionId": "chat-1", "reason": "Diverged."})),
+        )
+        .await
+        .unwrap();
+    for choice in ["keep", "stop"] {
+        let lost = choose("cancelled", json!({"flagId": "f2", "choice": choice}))
+            .await
+            .unwrap_err();
+        assert_eq!(lost.to_string(), settled("cancelled", "f2"), "{choice}");
+    }
+    assert_eq!(
+        store().run_stop("cancelled").unwrap().unwrap().by,
+        crate::store::StopBy::Agent,
+        "the agent's stop keeps its words"
+    );
 }

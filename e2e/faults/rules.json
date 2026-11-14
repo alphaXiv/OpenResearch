@@ -1,0 +1,10 @@
+{"rules": [
+  {"name": "nan-loss", "text": "Stop when the loss is NaN on 3 reports in a row.",
+   "does": "stop", "when": {"nonFinite": "loss", "reports": 3}},
+  {"name": "diverging", "text": "Stop when the loss is more than 1 above the parent's at the same step, 3 reports running.",
+   "does": "stop", "when": {"worseThanParent": {"signal": "loss", "by": 1, "better": "lower"}, "reports": 3}},
+  {"name": "behind-parent", "text": "Ask when val loss is 0.5 above the parent's at the same step on 2 evals in a row.",
+   "does": "ask", "when": {"worseThanParent": {"signal": "val_loss", "by": 0.5, "better": "lower"}, "reports": 2}},
+  {"name": "eval-collapse", "text": "Ask when the eval score falls below 0.1.",
+   "does": "ask", "when": {"compare": {"signal": "eval_score", "op": "lt", "value": 0.1}}}
+]}

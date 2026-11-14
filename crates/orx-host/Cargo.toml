@@ -11,6 +11,10 @@ dist = false
 test-hooks = []
 
 [dependencies]
+orx-signals = { path = "../orx-signals" }
+fd-lock = "4"
+base64 = "0.22"
+uuid = { version = "1", features = ["v4"] }
 orx-host-proto = { path = "../orx-host-proto" }
 libc = "0.2"
 sha2 = "0.10"

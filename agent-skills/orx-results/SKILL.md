@@ -13,7 +13,9 @@ run-derived claim, confirm that:
 - the relevant trajectory is recoverable for a long run; and
 - the cited file lines actually contain the supporting output.
 
-Load `orx-logs` when supporting output still needs retrieving. Cite the verified
+`orx exp status <expId> --run <runId>` lists the measures the run reported and
+how each compares with the parent's run; confirm a number in the log before
+citing it. Load `orx-logs` when supporting output still needs retrieving. Cite the verified
 measurements using the session playbook’s evidence-and-links contract.
 
 ## Summarize an experiment

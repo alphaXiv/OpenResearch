@@ -7,6 +7,7 @@ import { mutations } from "./mutations";
 import type { Workspace } from "../workspace";
 import { CancelledError, infiniteQueryOptions, queryOptions, type InfiniteData } from "@tanstack/react-query";
 import type * as api from "../api";
+import type { ShownRun } from "../runMonitor/types";
 
 export function createChatQueries(
   client: WorkspaceClient,
@@ -147,9 +148,24 @@ export function createChatQueries(
     retry: false,
   });
 
-  const listChatActiveRunsQuery = () => queryOptions({
-    queryKey: workspaceKey("listChatActiveRuns"),
-    queryFn: ({ signal }) => api.listChatActiveRuns(signal),
+  /** `source` is "active" against an older server: its runs carry no monitor, and none can be fetched. */
+  const listChatShownRunsQuery = () => queryOptions({
+    queryKey: workspaceKey("listChatShownRuns"),
+    queryFn: async ({ signal, client, queryKey }) => {
+      const read = await readLiveSnapshot(client, queryKey, async (): Promise<ShownRuns> => {
+        const shown = await api.listChatShownRuns(signal);
+        return shown ? { source: "shown", runs: shown } : { source: "active", runs: await api.listChatActiveRuns(signal) };
+      }, (incoming) => incoming);
+      // The list has no revision of its own, so each run keeps whichever copy is newer, the cache's or the reply's.
+      const cached = new Map(client.getQueryData<ShownRuns>(queryKey)?.runs.map((item) => [item.run.id, item.run]));
+      return {
+        ...read,
+        runs: read.runs.map((item) => {
+          const kept = cached.get(item.run.id);
+          return kept && kept.updatedAt > item.run.updatedAt ? { ...item, run: kept } : item;
+        }),
+      };
+    },
     staleTime: Infinity,
   });
 
@@ -164,9 +180,11 @@ export function createChatQueries(
     refreshChatMessages,
     readSidebarChatPage,
     listSidebarChatSessionsQuery,
-    listChatActiveRunsQuery,
+    listChatShownRunsQuery,
   };
 }
+
+type ShownRuns = { source: "shown" | "active"; runs: ShownRun[] };
 
 type ChatTurn = ReturnType<Workspace["chat"]["reserve"]>;
 const heldTurns = new Map<string, ChatTurn[]>();

@@ -20,19 +20,20 @@ const TONES = {
   quiet: "text-subtext",
 };
 
-function copy(notice: RunNotice, nextRetryMs: number | null, provider: string | null): { lead: string; detail: string | null; next?: string; tone: keyof typeof TONES } {
+/** The words for every contact state, wherever a run shows; `figure` marks the one value a line draws in bold. */
+export function runNoticeCopy(notice: RunNotice, nextRetryMs: number | null, provider: string | null, figure = (value: string) => value): { lead: string; detail: string | null; next?: string; tone: keyof typeof TONES } {
   const authLead = provider === "k8s_job" ? m.run_notice_cluster_auth() : provider ? m.run_notice_provider_auth() : null;
   const host = (name: string | null) => ltr(name ?? m.run_notice_the_host());
   switch (notice.kind) {
     case "monitoring":
       return { lead: notice.error, detail: null, tone: "warning" };
     case "unreachable": {
-      const lead = m.run_notice_unreachable({ host: host(notice.host), time: fmtClock(notice.since) });
+      const lead = m.run_notice_unreachable({ host: host(notice.host), time: figure(fmtClock(notice.since)) });
       const retry = nextRetryMs === null ? "" : ` ${m.run_notice_retry_at({ time: fmtClock(nextRetryMs) })}`;
       return { lead: lead + retry, detail: notice.cause, tone: "warning" };
     }
     case "needs_auth":
-      return { lead: authLead ?? m.run_notice_needs_auth({ host: host(notice.host) }), detail: notice.cause, tone: "warning" };
+      return { lead: authLead ?? m.run_notice_needs_auth({ host: figure(host(notice.host)) }), detail: notice.cause, tone: "warning" };
     case "cancelling":
       return { lead: m.status_cancelling(), detail: null, tone: "caution" };
     case "cancel_pending":
@@ -89,7 +90,7 @@ export function RunContactNotice({ run, className }: { run: NoticeRun; className
 
   const engineHost = hostForRun(hosts, run);
   const nextRetryMs = engineHost?.status === "backoff" ? engineHost.nextRetryMs : null;
-  const { lead, detail, next, tone } = copy(notice, nextRetryMs, runApiProvider(run));
+  const { lead, detail, next, tone } = runNoticeCopy(notice, nextRetryMs, runApiProvider(run));
   const rentalBilling = run.backend?.kind === "openresearch_job"
     && runActive(run.status)
     && (run.contact?.type === "needs_auth" || run.contact?.type === "unreachable");

@@ -1,0 +1,204 @@
+{
+  "runId": "r-eval",
+  "rev": 12,
+  "generation": "g1",
+  "asOf": 1794391832944.406,
+  "availability": {
+    "state": "live",
+    "reason": null,
+    "omitted": {}
+  },
+  "view": {
+    "signals": {
+      "accuracy": {
+        "label": "Accuracy",
+        "unit": "%",
+        "digits": 1,
+        "scale": 100,
+        "better": "higher"
+      },
+      "category": {
+        "label": "Category"
+      }
+    },
+    "headline": [
+      "accuracy"
+    ],
+    "blocks": [
+      {
+        "chart": [
+          "accuracy"
+        ],
+        "from": "categories",
+        "x": "category",
+        "mark": "bars",
+        "ghost": "parent",
+        "title": "Accuracy by category"
+      },
+      {
+        "table": "categories",
+        "columns": [
+          "category",
+          "accuracy",
+          "n"
+        ]
+      }
+    ]
+  },
+  "viewFrom": {
+    "experimentId": "e-r-eval",
+    "markup": "<signal name=\"accuracy\" label=\"Accuracy\" unit=\"%\" digits=\"1\" scale=\"100\" better=\"higher\" />\n<signal name=\"category\" label=\"Category\" />\n\n<view headline=\"accuracy\">\n  <chart from=\"categories\" x=\"category\" y=\"accuracy\" mark=\"bars\" ghost=\"parent\" title=\"Accuracy by category\" />\n  <table name=\"categories\" columns=\"category accuracy n\" />\n</view>",
+    "isDefault": false
+  },
+  "source": "declared",
+  "phases": [
+    {
+      "name": "eval",
+      "of": 1200,
+      "unit": "items",
+      "priorMs": null,
+      "startedAt": 1794391232944.406,
+      "endedAt": 1794391832944.406
+    }
+  ],
+  "progress": {
+    "phase": 0,
+    "done": 1200,
+    "segments": [
+      {
+        "name": "eval",
+        "weight": 1,
+        "fill": 1
+      }
+    ],
+    "whole": 1,
+    "lastAt": 1794391832944.406,
+    "stallMs": null
+  },
+  "x": {
+    "name": "step",
+    "max": null
+  },
+  "latest": {
+    "accuracy": 0.7277
+  },
+  "series": {},
+  "seriesRev": 3,
+  "rows": {
+    "categories": [
+      {
+        "category": "algebra",
+        "accuracy": 0.842,
+        "n": 200
+      },
+      {
+        "category": "geometry",
+        "accuracy": 0.713,
+        "n": 200
+      },
+      {
+        "category": "number theory",
+        "accuracy": 0.768,
+        "n": 200
+      },
+      {
+        "category": "probability",
+        "accuracy": 0.801,
+        "n": 200
+      },
+      {
+        "category": "calculus",
+        "accuracy": 0.655,
+        "n": 200
+      },
+      {
+        "category": "combinatorics",
+        "accuracy": 0.587,
+        "n": 200
+      }
+    ]
+  },
+  "groups": {},
+  "cells": {},
+  "media": {},
+  "parent": {
+    "runId": "r-eval-parent",
+    "phase": null,
+    "series": {},
+    "rows": {
+      "categories": [
+        {
+          "category": "algebra",
+          "accuracy": 0.811,
+          "n": 200
+        },
+        {
+          "category": "geometry",
+          "accuracy": 0.725,
+          "n": 200
+        },
+        {
+          "category": "number theory",
+          "accuracy": 0.702,
+          "n": 200
+        },
+        {
+          "category": "probability",
+          "accuracy": 0.779,
+          "n": 200
+        },
+        {
+          "category": "calculus",
+          "accuracy": 0.618,
+          "n": 200
+        },
+        {
+          "category": "combinatorics",
+          "accuracy": 0.571,
+          "n": 200
+        }
+      ]
+    }
+  },
+  "headline": "accuracy",
+  "versus": {
+    "step": {
+      "accuracy": {
+        "d": 0.0267,
+        "good": true,
+        "flat": false,
+        "mag": 2.7,
+        "parent": 0.701
+      }
+    },
+    "final": {
+      "accuracy": {
+        "d": 0.0267,
+        "good": true,
+        "flat": false,
+        "mag": 2.7,
+        "parent": 0.701
+      }
+    }
+  },
+  "counts": {},
+  "estimate": null,
+  "limit": null,
+  "cost": null,
+  "quote": null,
+  "before": null,
+  "watch": {
+    "state": "off",
+    "model": null,
+    "looks": [],
+    "spentUsd": null,
+    "nextAt": null,
+    "error": null
+  },
+  "sentence": null,
+  "flag": null,
+  "revising": false,
+  "rules": [],
+  "statusText": "mathbench-categories  done  100%",
+  "newestLine": "::orx:: {\"step\":2220,\"of\":5000,\"t\":3027.4,\"m\":{\"loss\":1.7126,\"val_loss\":1.9633,\"steps_per_s\":0.73}}"
+}

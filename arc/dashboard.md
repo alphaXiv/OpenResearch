@@ -50,7 +50,7 @@ The visible workspace opens one event stream, `/api/events`, which is also the p
 | Source | Carries | If a subscriber falls behind |
 | --- | --- | --- |
 | per-subscriber diff of the store and run logs, on a short interval | projects, experiments, artifact pings, log bytes, update status | a small channel backpressures the loop; log bytes per tick are capped |
-| engine event bus | run and host changes, engine log growth | re-reads recent runs from the store |
+| engine event bus | run and host changes, run monitors, engine log growth | re-reads recent runs from the store |
 | chat host broadcast | chat state, harness sign-in and catalogs, data-directory moves, Overleaf sync | the server sends `resync.required` |
 
 **Only the diff sees other processes' writes**, so polling the store stays necessary. Events patch queries already loaded; the baseline comes from the queries themselves, and chat events are edge-only, with no replay on connect.
@@ -96,3 +96,13 @@ Blocking work is any API request whose response is still being sent, open termin
 3. Commit. Admission never reopens and no new turn starts, so nothing begins on old code that a new process would have to adopt.
 4. Stop agents and gateways, release the install lock, and install any deferred update. A failed install relaunches on the current version and backs off instead of looping.
 5. Relaunch. The page polls update status until `instance` changes, then reloads.
+
+## Runs above the composer
+
+`GET /api/chat/shown-runs` keeps a chat's launched and subscribed runs visible through their terminal result. An ended run stays in a chat while no assistant reply has completed in that chat since its terminal notice was delivered to it: the notice's own reply, a Continue after a failure and any later reply each had the notice in front of them. A notice not yet delivered, or one that could not be delivered, keeps the run visible until the turn that carried the notice completes (a Retry included) or Continue hands the agent a recovery turn and that completes; any other reply never saw it. A run no terminal notice waits on leaves when it ends. Old chats follow the same rule without a cutoff, so one shows an ended run only while no reply has answered its notice. A newer run of the same experiment in the same chat supersedes an ended one; a run in another chat does not. Runs the chat launched in one turn stay together: an ended one stays while any run launched beside it is still shown, so a sweep is one summary until every result is answered, and the summary dismisses them all once none runs. Processes still stopping or an unconfirmed stop keep the run visible. The projection starts from unsettled runs and unanswered notices, never from history, and carries result text only as a lost run's reason.
+
+A terminal run's Dismiss writes `run_dismissals` through `POST /api/chat/sessions/:id/shown-runs/:runId/dismiss`. It is idempotent and refuses an active run or an unconfirmed stop. The event stream compares the shown projection and emits `chat.runs`, so a reply, relaunch or dismissal updates every window. `/api/chat/active-runs` retains its active-only contract for older pages. These routes belong only to the dashboard; no CLI or agent calls them.
+
+The global UI state stores `runBanner` (line or strip, default strip) and `experimentsGrid` (default false) in dedicated columns, outside the saved workspace layout. Narrow updates by older versions preserve both. A run without a monitor summary draws from its status and never fetches a full monitor.
+
+Every `Run` carries its monitor summary, enough for a line, a badge or the sidebar. A strip also loads the run's whole monitor ([experiments](experiments.md#the-monitor)), and `run.monitor` events keep it current: at most one a second per run, sent before the `run.updated` that carries the summary at the same `rev`. An event extends the cached series and tables only on the basis it names (`appendFrom`, the same generation), and a table past the row cap slides, dropping the rows the event says left its front; anything else is a `reset`, and the page reads the monitor again, as it does when a projection starts failing. The page takes each fact from the newer of the summary and the monitor, and freezes the bar and countdown when the monitor's source is not live or the summary says the projection is failing.

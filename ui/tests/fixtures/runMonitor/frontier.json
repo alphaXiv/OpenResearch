@@ -1,0 +1,304 @@
+{
+  "runId": "r-codec",
+  "rev": 12,
+  "generation": "g1",
+  "asOf": 1794391832944.406,
+  "availability": {
+    "state": "live",
+    "reason": null,
+    "omitted": {}
+  },
+  "viewFrom": {
+    "experimentId": "e-r-codec",
+    "isDefault": false
+  },
+  "source": "pattern",
+  "phases": [
+    {
+      "name": "build",
+      "of": null,
+      "unit": null,
+      "priorMs": 61000,
+      "startedAt": 1794390631944.406,
+      "endedAt": 1794390692944.406
+    },
+    {
+      "name": "compress",
+      "of": 10,
+      "unit": "chunks",
+      "priorMs": 960000,
+      "startedAt": 1794390692944.406,
+      "endedAt": 1794391652944.406
+    },
+    {
+      "name": "score",
+      "of": null,
+      "unit": null,
+      "priorMs": 180000,
+      "startedAt": 1794391652944.406,
+      "endedAt": 1794391832944.406
+    }
+  ],
+  "progress": {
+    "phase": 2,
+    "done": 1,
+    "segments": [
+      {
+        "name": "build",
+        "weight": 0.05,
+        "fill": 1
+      },
+      {
+        "name": "compress",
+        "weight": 0.8,
+        "fill": 1
+      },
+      {
+        "name": "score",
+        "weight": 0.15,
+        "fill": 1
+      }
+    ],
+    "whole": 1,
+    "lastAt": 1794391832944.406,
+    "stallMs": null
+  },
+  "x": {
+    "name": "step",
+    "max": null
+  },
+  "latest": {
+    "valid": 1,
+    "n_bad": 0,
+    "front_gain": 0.412038,
+    "size_gain_mean": 1.07391,
+    "speedup_mean": 2.21946,
+    "matched_size_points": 9,
+    "matched_speed_points": 9,
+    "ref_points": 9,
+    "files": 180,
+    "cand_decompress_s_total": 27.41
+  },
+  "series": {},
+  "seriesRev": 3,
+  "rows": {
+    "levels": [
+      {
+        "level": 1,
+        "ref_ms": 1.59,
+        "cand_ms": 1.48,
+        "speedup": 1.074,
+        "ref_kb": 438.63,
+        "cand_kb": 403.96,
+        "size_ratio": 0.921
+      },
+      {
+        "level": 2,
+        "ref_ms": 21.43,
+        "cand_ms": 20.68,
+        "speedup": 1.036,
+        "ref_kb": 419.38,
+        "cand_kb": 374.24,
+        "size_ratio": 0.8924
+      },
+      {
+        "level": 3,
+        "ref_ms": 36.17,
+        "cand_ms": 27.4,
+        "speedup": 1.32,
+        "ref_kb": 387.14,
+        "cand_kb": 350.3,
+        "size_ratio": 0.9048
+      },
+      {
+        "level": 4,
+        "ref_ms": 77.06,
+        "cand_ms": 36.63,
+        "speedup": 2.104,
+        "ref_kb": 364.93,
+        "cand_kb": 319.57,
+        "size_ratio": 0.8757
+      },
+      {
+        "level": 5,
+        "ref_ms": 83.85,
+        "cand_ms": 47.96,
+        "speedup": 1.748,
+        "ref_kb": 297.31,
+        "cand_kb": 292.06,
+        "size_ratio": 0.9823
+      },
+      {
+        "level": 6,
+        "ref_ms": 97.99,
+        "cand_ms": 75.64,
+        "speedup": 1.295,
+        "ref_kb": 289.54,
+        "cand_kb": 284.32,
+        "size_ratio": 0.982
+      },
+      {
+        "level": 7,
+        "ref_ms": 129.8,
+        "cand_ms": 112.04,
+        "speedup": 1.159,
+        "ref_kb": 277.43,
+        "cand_kb": 278.97,
+        "size_ratio": 1.0056
+      },
+      {
+        "level": 8,
+        "ref_ms": 242.27,
+        "cand_ms": 222.48,
+        "speedup": 1.089,
+        "ref_kb": 270.95,
+        "cand_kb": 272.42,
+        "size_ratio": 1.0054
+      },
+      {
+        "level": 9,
+        "ref_ms": 508.83,
+        "cand_ms": 535.49,
+        "speedup": 0.95,
+        "ref_kb": 267.4,
+        "cand_kb": 263.57,
+        "size_ratio": 0.9857
+      }
+    ]
+  },
+  "groups": {},
+  "cells": {},
+  "media": {},
+  "parent": {
+    "runId": "r-codec-parent",
+    "phase": null,
+    "series": {},
+    "rows": {
+      "levels": [
+        {
+          "level": 1,
+          "ref_ms": 1.58,
+          "cand_ms": 1.6,
+          "speedup": 0.988,
+          "ref_kb": 438.63,
+          "cand_kb": 403.96,
+          "size_ratio": 0.921
+        },
+        {
+          "level": 2,
+          "ref_ms": 21.4,
+          "cand_ms": 20.81,
+          "speedup": 1.028,
+          "ref_kb": 419.38,
+          "cand_kb": 374.24,
+          "size_ratio": 0.8924
+        },
+        {
+          "level": 3,
+          "ref_ms": 35.73,
+          "cand_ms": 27.61,
+          "speedup": 1.294,
+          "ref_kb": 387.14,
+          "cand_kb": 350.3,
+          "size_ratio": 0.9048
+        },
+        {
+          "level": 4,
+          "ref_ms": 77.2,
+          "cand_ms": 36.93,
+          "speedup": 2.09,
+          "ref_kb": 364.93,
+          "cand_kb": 319.57,
+          "size_ratio": 0.8757
+        },
+        {
+          "level": 5,
+          "ref_ms": 83.65,
+          "cand_ms": 47.78,
+          "speedup": 1.751,
+          "ref_kb": 297.31,
+          "cand_kb": 292.06,
+          "size_ratio": 0.9823
+        },
+        {
+          "level": 6,
+          "ref_ms": 98.14,
+          "cand_ms": 75.15,
+          "speedup": 1.306,
+          "ref_kb": 289.54,
+          "cand_kb": 284.32,
+          "size_ratio": 0.982
+        },
+        {
+          "level": 7,
+          "ref_ms": 129.58,
+          "cand_ms": 109.49,
+          "speedup": 1.183,
+          "ref_kb": 277.43,
+          "cand_kb": 278.97,
+          "size_ratio": 1.0056
+        },
+        {
+          "level": 8,
+          "ref_ms": 242.68,
+          "cand_ms": 214.44,
+          "speedup": 1.132,
+          "ref_kb": 270.95,
+          "cand_kb": 272.42,
+          "size_ratio": 1.0054
+        },
+        {
+          "level": 9,
+          "ref_ms": 508.84,
+          "cand_ms": 523.94,
+          "speedup": 0.971,
+          "ref_kb": 267.4,
+          "cand_kb": 263.57,
+          "size_ratio": 0.9857
+        }
+      ]
+    }
+  },
+  "headline": "front_gain",
+  "versus": {
+    "step": {
+      "front_gain": {
+        "d": 0.011245,
+        "good": true,
+        "flat": false,
+        "mag": 0.011245,
+        "parent": 0.400793
+      }
+    },
+    "final": {
+      "front_gain": {
+        "d": 0.011245,
+        "good": true,
+        "flat": false,
+        "mag": 0.011245,
+        "parent": 0.400793
+      }
+    }
+  },
+  "counts": {},
+  "estimate": null,
+  "limit": null,
+  "cost": null,
+  "quote": null,
+  "before": null,
+  "watch": {
+    "state": "off",
+    "model": null,
+    "looks": [],
+    "spentUsd": null,
+    "nextAt": null,
+    "error": null
+  },
+  "sentence": null,
+  "flag": null,
+  "revising": false,
+  "rules": [],
+  "statusText": "wider-match-window  done  100%",
+  "newestLine": "METRIC speedup_mean 2.21946",
+  "pattern": "^chunk (?P<step>\\d+)/(?P<of>\\d+) done"
+}

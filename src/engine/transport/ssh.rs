@@ -438,6 +438,8 @@ pub(super) async fn release(config: &Config, route: &str) {
     }
 }
 
+const MAX_BOOTSTRAP_BINARY_LEN: u64 = 8 * 1024 * 1024;
+
 const EMBEDDED_HOSTS: &[(&str, &str, &str, &[u8])] =
     include!(concat!(env!("OUT_DIR"), "/host_binaries.rs"));
 
@@ -539,9 +541,9 @@ pub(super) fn binary(directory: Option<&Path>, os: &str, arch: &str) -> Result<B
             directory.display()
         )
     })?;
-    if metadata.len() == 0 || metadata.len() > 4 * 1024 * 1024 {
+    if metadata.len() == 0 || metadata.len() > MAX_BOOTSTRAP_BINARY_LEN {
         bail!(
-            "orx-host binary must be between 1 byte and 4 MiB: {}",
+            "orx-host binary must be between 1 byte and {MAX_BOOTSTRAP_BINARY_LEN} bytes: {}",
             path.display()
         );
     }
@@ -915,7 +917,7 @@ if [ "$verb" = RUN ]; then
 fi;
 if [ "$verb" = PUT ]; then
   [ "$len" = "$(printf '%s' "$len" | tr -cd '0-9')" ] || exit 97;
-  [ "$len" -gt 0 ] && [ "$len" -le 4194304 ] || exit 97;
+  [ "$len" -gt 0 ] && [ "$len" -le {MAX_BOOTSTRAP_BINARY_LEN} ] || exit 97;
   T="$B.$$"; trap 'rm -f "$T"' 0 HUP INT TERM;
   head -c "$len" > "$T" && [ "$(wc -c < "$T")" -eq "$len" ] && chmod 700 "$T" && "$T" verify-self "$sha" && mv -f "$T" "$B" || exit 96;
   trap - 0 HUP INT TERM;

@@ -10,10 +10,14 @@
 
 mod acp;
 mod costs;
+mod flags;
 pub(crate) mod search;
 mod telemetry;
+mod watch;
 pub(crate) use costs::{BilledRun, Per, Quote};
+pub(crate) use flags::{Chosen, FlagChoice, FlagEvent, FlagNotice, NewFlag, Raise, WATCH_FLAG};
 pub(crate) use telemetry::{Cost, InvocationIdentity, SampleCost, TokenUsage};
+pub(crate) use watch::{LookResult, WatchLook, WatchLookRun};
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -298,6 +302,8 @@ pub const ATTENTION: &str = "attention";
 pub const RECOVERED: &str = "recovered";
 pub const NOTIFY: &str = "notify";
 const TERMINAL_LOG_BYTES: u64 = 4 * 1024;
+/// How much of a log's end is read to find its last human lines among progress records.
+const TERMINAL_LOG_SCAN: u64 = 64 * 1024;
 const TERMINAL_LOG_LINES: usize = 40;
 
 pub struct SubmittingRun<'a> {
@@ -311,6 +317,8 @@ pub struct SubmittingRun<'a> {
     pub chat_session_id: Option<&'a str>,
     pub spec_digest: &'a str,
     pub launch: &'a LaunchSpec,
+    /// The rules the run checks, frozen at launch.
+    pub monitor_config: Option<&'a str>,
 }
 
 /// Where and how a run launches, durable from its first transaction so recovery after a
@@ -334,6 +342,49 @@ pub struct NotifyCursor {
     pub offset: u64,
     /// Bumped whenever the file is replaced or truncated, so offsets never collide across files.
     pub generation: u64,
+}
+
+/// Who stopped a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StopBy {
+    User,
+    Agent,
+    Rule,
+}
+
+/// Who stopped a run and why, kept once with the first cancel accepted for it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StopContext {
+    pub by: StopBy,
+    /// When the cancel was accepted; set by the store.
+    #[serde(default)]
+    pub at: i64,
+    /// The agent's `--reason`, or what a rule saw.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_session_id: Option<String>,
+    /// The rule as the run froze it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<serde_json::Value>,
+    #[serde(flatten)]
+    pub extra: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+impl StopContext {
+    /// A stop by `by`, with nothing more said.
+    pub fn by(by: StopBy) -> Self {
+        Self {
+            by,
+            at: 0,
+            reason: None,
+            chat_session_id: None,
+            rule: None,
+            extra: Default::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -796,8 +847,13 @@ const SHARED_SSH_LOCK: (&str, &str) = ("run-logs", ".supervisor.shared-ssh.lock"
 /// The kept end of an engine run's log too large to keep whole.
 const TAIL_LOG: (&str, &str) = ("run-logs", ".tail.log");
 /// Per-run files as (data-dir root, name suffix); the supervisor lock goes last so it excludes until the end.
-const RUN_ARTIFACTS: [(&str, &str); 20] = [
+const RUN_ARTIFACTS: [(&str, &str); 25] = [
     ("local-runs", ""),
+    ("run-signals", ".json"),
+    ("run-signals", ".config.json"),
+    ("run-signals", ".status.json"),
+    ("run-signals", ".lock"),
+    ("run-signals", ".replay"),
     ("run-logs", ".log"),
     ("run-logs", ".spool.log"),
     ("run-logs", ".spool.json"),
@@ -865,6 +921,7 @@ fn remote_cleanup_eligibility() -> String {
     format!("NOT EXISTS (SELECT 1 FROM runs WHERE id = run_id AND
           (contact IS NOT NULL OR status IN ('submitting','starting','running')))
         AND NOT EXISTS (SELECT 1 FROM log_collections WHERE run_id = remote_cleanups.run_id AND done = 0)
+        AND NOT EXISTS (SELECT 1 FROM signal_collections WHERE run_id = remote_cleanups.run_id AND done = 0)
         AND (deleted = 1 OR run_id IN (SELECT id FROM ({})))", runs_past_newest(REMOTE_RUNS))
 }
 
@@ -945,6 +1002,7 @@ pub struct Store {
 }
 
 impl Store {
+    /// The data directory this store was opened in.
     pub(crate) fn data_dir(&self) -> &Path {
         &self.data_dir
     }
@@ -1081,6 +1139,12 @@ impl Store {
                 chat_session_id TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
                 PRIMARY KEY(run_id, chat_session_id)
+            );
+            CREATE TABLE IF NOT EXISTS run_dismissals (
+                chat_session_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                dismissed_at INTEGER NOT NULL,
+                PRIMARY KEY(chat_session_id, run_id)
             );
             CREATE TABLE IF NOT EXISTS run_notices (
                 id INTEGER PRIMARY KEY,
@@ -1322,6 +1386,64 @@ impl Store {
                 next_attempt_at INTEGER NOT NULL DEFAULT 0,
                 last_error      TEXT
             );
+            CREATE TABLE IF NOT EXISTS run_monitor_state (
+                run_id TEXT PRIMARY KEY,
+                state_json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS run_monitor_events (
+                run_id TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                body_json TEXT NOT NULL,
+                PRIMARY KEY (run_id, seq)
+            );
+            CREATE TABLE IF NOT EXISTS watch_looks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_session_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                state TEXT NOT NULL,
+                model TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                sent_at INTEGER,
+                done_at INTEGER,
+                summary_template TEXT,
+                summary_text TEXT,
+                usage_json TEXT,
+                error TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_watch_looks_chat ON watch_looks(chat_session_id, created_at);
+            CREATE TABLE IF NOT EXISTS watch_look_runs (
+                look_id INTEGER NOT NULL,
+                run_id TEXT NOT NULL,
+                key TEXT NOT NULL,
+                role TEXT NOT NULL,
+                result TEXT,
+                template TEXT,
+                text TEXT,
+                whole REAL,
+                basis_json TEXT,
+                cursor_json TEXT,
+                evidence_json TEXT,
+                PRIMARY KEY(look_id, run_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_watch_look_runs_run ON watch_look_runs(run_id, look_id);
+            CREATE TABLE IF NOT EXISTS watch_counts (
+                run_id TEXT NOT NULL,
+                pattern TEXT NOT NULL,
+                lines INTEGER NOT NULL,
+                offset INTEGER NOT NULL,
+                ident TEXT NOT NULL,
+                PRIMARY KEY(run_id, pattern)
+            );
+            CREATE TABLE IF NOT EXISTS signal_collections (
+                run_id TEXT PRIMARY KEY,
+                done INTEGER NOT NULL DEFAULT 0,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT
+            );
             CREATE TABLE IF NOT EXISTS remote_source_sweeps (
                 host   TEXT NOT NULL,
                 root   TEXT NOT NULL,
@@ -1378,6 +1500,7 @@ impl Store {
             "ALTER TABLE local_projects ADD COLUMN workspace_state_json TEXT",
             "ALTER TABLE local_experiments ADD COLUMN chat_session_id TEXT",
             "ALTER TABLE local_experiments ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE local_experiments ADD COLUMN run_monitor_json TEXT",
             "ALTER TABLE ssh_host_tests ADD COLUMN tools_found INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE ssh_host_tests ADD COLUMN missing_tools TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE chat_run_wakeups ADD COLUMN state TEXT NOT NULL DEFAULT 'pending'",
@@ -1402,6 +1525,9 @@ impl Store {
             "ALTER TABLE ui_state ADD COLUMN workspace_state_json TEXT",
             "ALTER TABLE ui_state ADD COLUMN preferred_autonomy TEXT",
             "ALTER TABLE ui_state ADD COLUMN nested_delegation INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE ui_state ADD COLUMN run_banner TEXT NOT NULL DEFAULT 'strip'",
+            "ALTER TABLE ui_state ADD COLUMN experiments_grid INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE ui_state ADD COLUMN run_watching INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE chat_messages ADD COLUMN completed_at INTEGER",
             "ALTER TABLE runs ADD COLUMN cancel_reason TEXT",
             "ALTER TABLE runs ADD COLUMN cancel_unconfirmed TEXT",
@@ -1424,6 +1550,8 @@ impl Store {
             "ALTER TABLE ui_state ADD COLUMN model_sightings TEXT",
             "ALTER TABLE runs ADD COLUMN waiting_reason TEXT",
             "ALTER TABLE runs ADD COLUMN price_json TEXT",
+            "ALTER TABLE runs ADD COLUMN monitor_config_json TEXT",
+            "ALTER TABLE runs ADD COLUMN stop_context_json TEXT",
             "ALTER TABLE chat_usage_samples ADD COLUMN cost_micros INTEGER",
             "ALTER TABLE chat_usage_samples ADD COLUMN cost_currency TEXT",
             "ALTER TABLE chat_usage_samples ADD COLUMN recorded_at INTEGER",
@@ -1444,11 +1572,30 @@ impl Store {
                  DELETE FROM run_subscriptions WHERE chat_session_id = OLD.id;
              END;",
         )?;
+        schema.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS delete_run_dismissals AFTER DELETE ON runs BEGIN
+                 DELETE FROM run_dismissals WHERE run_id = OLD.id;
+             END;
+             CREATE TRIGGER IF NOT EXISTS delete_chat_run_dismissals AFTER DELETE ON chat_sessions BEGIN
+                 DELETE FROM run_dismissals WHERE chat_session_id = OLD.id;
+             END;",
+        )?;
         // Covers the periodic native-id scan so it never reads the large parts_json.
         schema.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_chat_messages_native_ids
              ON chat_messages(base_native_session_id, result_native_session_id, session_id);",
         )?;
+        // Keep the shown-runs projection proportional to what is live and unanswered, never to history.
+        schema.execute_batch(&format!(
+            "CREATE INDEX IF NOT EXISTS idx_runs_unsettled ON runs(chat_session_id, id) WHERE {UNSETTLED_RUN};
+             CREATE INDEX IF NOT EXISTS idx_runs_experiment ON runs(experiment_id, created_at);
+             CREATE INDEX IF NOT EXISTS idx_runs_chat ON runs(chat_session_id, created_at);
+             CREATE INDEX IF NOT EXISTS idx_run_notices_terminal ON run_notices(chat_session_id, delivered_at) WHERE kind = 'terminal' AND delivered_at IS NOT NULL;
+             CREATE INDEX IF NOT EXISTS idx_chat_turns_completed ON chat_turns(session_id, updated_at) WHERE state = 'completed';"
+        ))?;
+        schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_signal_collection AFTER DELETE ON runs BEGIN DELETE FROM signal_collections WHERE run_id = OLD.id; END;")?;
+        schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_run_monitor_state AFTER DELETE ON runs BEGIN DELETE FROM run_monitor_state WHERE run_id = OLD.id; END;")?;
+        schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_run_monitor_events AFTER DELETE ON runs BEGIN DELETE FROM run_monitor_events WHERE run_id = OLD.id; END;")?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_log_collection AFTER DELETE ON runs BEGIN DELETE FROM log_collections WHERE run_id = OLD.id; END;")?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_steer_receipts AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_steer_receipts WHERE session_id = OLD.id; END;")?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_invocation_identities AFTER DELETE ON chat_sessions BEGIN DELETE FROM native_invocation_identities WHERE session_id = OLD.id; END;")?;
@@ -1690,7 +1837,8 @@ impl Store {
                     preferred_permission_mode, preferred_reasoning_level, workspace_state_json,
                     preferred_autonomy, nested_delegation, opencode_free_models, preferred_profile,
                     favorite_models, hidden_models, model_section_order,
-                    collapsed_model_sections, model_sightings, hidden_agents
+                    collapsed_model_sections, model_sightings, hidden_agents,
+                    run_banner, experiments_grid, run_watching
              FROM ui_state WHERE id = 1",
             [],
             |row| {
@@ -1735,9 +1883,35 @@ impl Store {
                     model_sightings: row
                         .get::<_, Option<String>>(16)?
                         .and_then(|json| serde_json::from_str(&json).ok()),
+                    run_banner: RunBannerLevel::parse(&row.get::<_, String>(18)?)
+                        .unwrap_or(RunBannerLevel::Strip),
+                    experiments_grid: row.get(19)?,
+                    run_watching: row.get(20)?,
                 })
             },
         )?)
+    }
+
+    pub fn set_run_banner(&self, level: RunBannerLevel) -> Result<()> {
+        self.conn.execute(
+            "UPDATE ui_state SET run_banner = ?1 WHERE id = 1",
+            [level.as_str()],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_run_watching(&self, on: bool) -> Result<()> {
+        self.conn
+            .execute("UPDATE ui_state SET run_watching = ?1 WHERE id = 1", [on])?;
+        Ok(())
+    }
+
+    pub fn set_experiments_grid(&self, grid: bool) -> Result<()> {
+        self.conn.execute(
+            "UPDATE ui_state SET experiments_grid = ?1 WHERE id = 1",
+            [grid],
+        )?;
+        Ok(())
     }
 
     pub fn set_onboarding_completed(&self, completed: bool) -> Result<()> {
@@ -2105,6 +2279,70 @@ impl Store {
             Ok((chat, run))
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// The runs each chat shows above its composer: live ones, and ended ones until a turn completes
+    /// after the one that carried their terminal notice (the notice is marked delivered only after
+    /// that turn is accepted, so its time is no anchor). Costs what is live and unanswered, not history.
+    pub fn chat_shown_runs(&self) -> Result<Vec<StoredChatShownRun>> {
+        let mut stmt = self.conn.prepare(&shown_runs_sql())?;
+        let rows = stmt.query_map([], |row| {
+            Ok(StoredChatShownRun {
+                session_id: row.get(0)?,
+                experiment_name: row.get(1)?,
+                experiment_slug: row.get(2)?,
+                run_no: row.get(3)?,
+                run_count: row.get(4)?,
+                run: row_to_run_at(row, 5)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn dismiss_chat_run(&mut self, session_id: &str, run_id: &str) -> Result<RunDismissal> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let state = tx.query_row(
+            "SELECT status, contact, cancel_unconfirmed FROM runs r WHERE id = ?2
+             AND EXISTS (SELECT 1 FROM chat_sessions WHERE id = ?1)
+             AND (chat_session_id = ?1 OR EXISTS (
+                 SELECT 1 FROM run_subscriptions s WHERE s.run_id = r.id AND s.chat_session_id = ?1))",
+            params![session_id, run_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<String>>(2)?)),
+        ).optional()?;
+        let Some((status, contact, unconfirmed)) = state else {
+            return Ok(RunDismissal::NotAssociated);
+        };
+        if !is_terminal_status(&status) {
+            return Ok(RunDismissal::Refused(
+                "This run is still active. Stop it before dismissing it.",
+            ));
+        }
+        let Ok(contact) = contact
+            .as_deref()
+            .map(serde_json::from_str::<Contact>)
+            .transpose()
+        else {
+            return Ok(RunDismissal::Refused(
+                "This run's process state was written by a newer orx, so this one cannot tell whether its processes have stopped. Update orx before dismissing it.",
+            ));
+        };
+        if matches!(contact, Some(Contact::Stopping { .. })) {
+            return Ok(RunDismissal::Refused("This run has processes that are still stopping. Wait for them to stop before dismissing it."));
+        }
+        if unconfirmed.is_some() {
+            return Ok(RunDismissal::Refused(
+                "This run's stop is not confirmed. Check its processes before dismissing it.",
+            ));
+        }
+        tx.execute(
+            "INSERT INTO run_dismissals (chat_session_id, run_id, dismissed_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(chat_session_id, run_id) DO NOTHING",
+            params![session_id, run_id, now_ms()],
+        )?;
+        tx.commit()?;
+        Ok(RunDismissal::Dismissed)
     }
 
     /// A 0.2.x wake-up row, for migration fixtures.
@@ -2748,6 +2986,16 @@ impl Store {
                 remove_run_artifact(&entry.path())?;
             }
         }
+        for entry in artifact_entries(&self.data_dir.join("run-signals"))? {
+            if entry
+                .file_name()
+                .to_str()
+                .and_then(signal_generation_run_id)
+                == Some(run_id)
+            {
+                remove_run_artifact(&entry.path())?;
+            }
+        }
         for artifact in RUN_ARTIFACTS {
             remove_run_artifact(&self.run_artifact_path(artifact, run_id))?;
         }
@@ -2864,13 +3112,17 @@ impl Store {
                 let Some(name) = name.to_str() else {
                     continue;
                 };
-                let Some(id) = name.strip_suffix(suffix) else {
-                    continue;
+                let id = match root {
+                    "run-logs" if suffix == ".log" => {
+                        log_generation_run_id(name).or_else(|| name.strip_suffix(suffix))
+                    }
+                    "run-signals" => {
+                        signal_generation_run_id(name).or_else(|| name.strip_suffix(suffix))
+                    }
+                    _ => name.strip_suffix(suffix),
                 };
-                let id = if root == "run-logs" && suffix == ".log" {
-                    log_generation_run_id(name).unwrap_or(id)
-                } else {
-                    id
+                let Some(id) = id else {
+                    continue;
                 };
                 if uuid::Uuid::parse_str(id).is_ok() && !retained_runs.contains(id) {
                     candidates.insert(id.to_string());
@@ -3117,6 +3369,156 @@ impl Store {
         tx.execute("DELETE FROM local_experiments WHERE id = ?1", params![id])?;
         tx.commit()?;
         Ok(())
+    }
+
+    pub(crate) fn queue_signal_collection(&self, run_id: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO signal_collections (run_id) VALUES (?1)",
+            [run_id],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn finish_signal_collection(&self, run_id: &str, error: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO signal_collections (run_id, done, last_error) VALUES (?1, 1, ?2)
+             ON CONFLICT(run_id) DO UPDATE SET done = 1, last_error = ?2",
+            params![run_id, error],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn signal_collection_pending(&self, run_id: &str) -> Result<bool> {
+        Ok(self.signal_collection_retry_at(run_id)?.is_some())
+    }
+
+    /// The experiment's run monitor settings as stored, `None` when none were set.
+    pub(crate) fn run_monitor_json(&self, experiment: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT run_monitor_json FROM local_experiments WHERE id = ?1",
+                [experiment],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    /// Rewrites the experiment's run monitor settings with `patch` under the write lock, unless
+    /// they changed since the writer read them as `expected`. Returns what is stored now, or
+    /// `None` on such a change.
+    pub(crate) fn patch_run_monitor_json(
+        &self,
+        experiment: &str,
+        expected: &str,
+        patch: impl FnOnce(Option<&str>) -> Result<String>,
+    ) -> Result<Option<String>> {
+        let tx = self.begin_immediate()?;
+        let current = self.run_monitor_json(experiment)?;
+        if crate::engine::view::etag(current.as_deref()) != expected {
+            return Ok(None);
+        }
+        let next = patch(current.as_deref())?;
+        tx.execute(
+            "UPDATE local_experiments SET run_monitor_json = ?2, updated_at = MAX(updated_at + 1, ?3) WHERE id = ?1",
+            params![experiment, next, now_ms()],
+        )?;
+        tx.commit()?;
+        Ok(Some(next))
+    }
+
+    /// The run's monitor state as stored: `None` when nothing was published yet.
+    pub(crate) fn run_monitor_state(&self, run_id: &str) -> Result<Option<serde_json::Value>> {
+        let text: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT state_json FROM run_monitor_state WHERE run_id = ?1",
+                [run_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        text.map(|text| {
+            serde_json::from_str(&text)
+                .map_err(|e| anyhow!("Run {run_id}'s monitor state is unreadable: {e}"))
+        })
+        .transpose()
+    }
+
+    /// Replaces the `published` pointer, keeping every other key a newer orx stored.
+    pub(crate) fn set_run_monitor_published(
+        &self,
+        run_id: &str,
+        published: &serde_json::Value,
+    ) -> Result<()> {
+        let tx = self.begin_immediate()?;
+        let mut state = match self.run_monitor_state(run_id)? {
+            Some(serde_json::Value::Object(state)) => state,
+            _ => serde_json::Map::new(),
+        };
+        state.insert("published".into(), published.clone());
+        tx.execute(
+            "INSERT INTO run_monitor_state (run_id, state_json) VALUES (?1, ?2)
+             ON CONFLICT(run_id) DO UPDATE SET state_json = excluded.state_json",
+            params![run_id, serde_json::Value::Object(state).to_string()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// When an open signal debt is next attempted; `None` once it is settled.
+    pub(crate) fn signal_collection_retry_at(&self, run_id: &str) -> Result<Option<i64>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT next_attempt_at FROM signal_collections WHERE run_id=?1 AND done=0",
+                [run_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    pub(crate) fn pending_signal_collections(
+        &self,
+        due: bool,
+        limit: usize,
+    ) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT run_id FROM signal_collections
+             WHERE done = 0 AND (?1 = 0 OR (next_attempt_at <= ?2 AND NOT EXISTS (
+                 SELECT 1 FROM log_collections l WHERE l.run_id = signal_collections.run_id
+                 AND l.done = 0 AND l.collected = 0
+             )))
+             ORDER BY next_attempt_at LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![due, now_ms(), limit as i64], |r| r.get(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub(crate) fn retry_signal_collections_now(&self, run_id: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE signal_collections SET next_attempt_at = 0
+             WHERE done = 0 AND (?1 IS NULL OR run_id = ?1)",
+            [run_id],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn defer_signal_collection(&self, run_id: &str, error: &str) -> Result<bool> {
+        let attempts: u32 = self.conn.query_row(
+            "UPDATE signal_collections SET attempts = attempts + 1, last_error = ?2,
+             next_attempt_at = ?3 + MIN(?4 * (1 << MIN(attempts, 10)), ?5)
+             WHERE run_id = ?1 RETURNING attempts",
+            params![
+                run_id,
+                error,
+                now_ms(),
+                LOG_COLLECTION_RETRY_MS,
+                LOG_COLLECTION_MAX_RETRY_MS
+            ],
+            |r| r.get(0),
+        )?;
+        Ok(attempts == LOG_COLLECTION_FAILED_AFTER)
     }
 
     /// A terminal run owes final log and notify collection.
@@ -3440,13 +3842,29 @@ impl Store {
 
     // --- local experiments (orx up) ---
 
+    /// A child takes a snapshot of its parent's run view, as it does of the run command; a later
+    /// edit to the parent leaves it as it was.
     pub fn create_local_experiment(&self, e: &LocalExperiment) -> Result<()> {
         self.conn.execute(
-            &format!("INSERT INTO local_experiments ({EXPERIMENT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"),
+            &format!(
+                "INSERT INTO local_experiments ({EXPERIMENT_COLS}, run_monitor_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                         (SELECT run_monitor_json FROM local_experiments WHERE id = ?3))"
+            ),
             params![
-                e.id, e.project_id, e.parent_experiment_id, e.slug, e.branch_name,
-                e.title, e.description, e.run_command, e.agent_status, e.created_at, e.updated_at,
-                e.chat_session_id, e.archived,
+                e.id,
+                e.project_id,
+                e.parent_experiment_id,
+                e.slug,
+                e.branch_name,
+                e.title,
+                e.description,
+                e.run_command,
+                e.agent_status,
+                e.created_at,
+                e.updated_at,
+                e.chat_session_id,
+                e.archived,
             ],
         )?;
         Ok(())
@@ -5282,6 +5700,46 @@ pub struct StoredAgentSelection {
     pub reasoning_level: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RunBannerLevel {
+    Line,
+    Strip,
+}
+
+impl RunBannerLevel {
+    pub fn parse(level: &str) -> Option<Self> {
+        match level {
+            "line" => Some(Self::Line),
+            "strip" => Some(Self::Strip),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Line => "line",
+            Self::Strip => "strip",
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum RunDismissal {
+    Dismissed,
+    NotAssociated,
+    Refused(&'static str),
+}
+
+pub struct StoredChatShownRun {
+    pub session_id: String,
+    pub run: StoredRun,
+    pub experiment_name: Option<String>,
+    pub experiment_slug: String,
+    pub run_no: i64,
+    pub run_count: i64,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct StoredUiState {
@@ -5305,6 +5763,10 @@ pub struct StoredUiState {
     pub collapsed_model_sections: Vec<String>,
     /// The picker's own record of models it has seen, opaque to the server.
     pub model_sightings: Option<serde_json::Value>,
+    pub run_banner: RunBannerLevel,
+    pub experiments_grid: bool,
+    /// Whether the watcher looks at runs; off, nothing is sent to a model.
+    pub run_watching: bool,
 }
 
 /// Normalized transcript entry; `parts_json` is the wire-format parts array
@@ -5623,8 +6085,8 @@ impl Store {
         self.conn.execute(
             "INSERT INTO runs (id, experiment_id, project_id, status, backend_json, command,
                                created_at, updated_at, commit_sha, chat_session_id, spec_digest,
-                               launch_spec)
-             VALUES (?1, ?2, ?3, 'submitting', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                               launch_spec, monitor_config_json)
+             VALUES (?1, ?2, ?3, 'submitting', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 run.id,
                 run.experiment_id,
@@ -5637,9 +6099,23 @@ impl Store {
                 run.chat_session_id,
                 run.spec_digest,
                 serde_json::to_string(run.launch)?,
+                run.monitor_config,
             ],
         )?;
         Ok(())
+    }
+
+    /// The rules the run was launched with, as frozen then.
+    pub(crate) fn run_monitor_config(&self, run_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT monitor_config_json FROM runs WHERE id = ?1",
+                [run_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten())
     }
 
     pub fn engine_run_state(&self, run_id: &str) -> Result<Option<EngineRunState>> {
@@ -5825,6 +6301,7 @@ impl Store {
                 .is_some_and(crate::engine::Phase::is_terminal)
         {
             self.queue_log_collection(run_id)?;
+            self.queue_signal_collection(run_id)?;
         }
         if let Some(tx) = tx {
             tx.commit()?;
@@ -5915,22 +6392,185 @@ impl Store {
 
     /// `None` accepts legacy intent; a reason accepts an API cancel, including during submission.
     pub fn accept_run_cancel(&self, run_id: &str, reason: Option<&str>) -> Result<Option<i64>> {
+        self.accept_run_stop(run_id, reason, None)
+    }
+
+    /// [`Self::accept_run_cancel`], recording who stopped the run when this cancel is the first
+    /// accepted: a later or legacy one never replaces it.
+    pub fn accept_run_stop(
+        &self,
+        run_id: &str,
+        reason: Option<&str>,
+        stop: Option<&StopContext>,
+    ) -> Result<Option<i64>> {
         let path = self.run_lock_path(CANCEL_LOCK, run_id)?;
         let mut lock = open_lifecycle_lock_at(&path)?;
         let _guard = lock.write()?;
+        self.accept_run_stop_locked(run_id, reason, stop)
+    }
+
+    /// [`Self::accept_run_stop`] for a caller already holding the run's cancel lock.
+    pub(super) fn accept_run_stop_locked(
+        &self,
+        run_id: &str,
+        reason: Option<&str>,
+        stop: Option<&StopContext>,
+    ) -> Result<Option<i64>> {
+        let now = now_ms();
+        let stop = stop
+            .map(|stop| {
+                serde_json::to_string(&StopContext {
+                    at: now,
+                    ..stop.clone()
+                })
+            })
+            .transpose()?;
         Ok(self.conn.query_row(
             "UPDATE runs SET cancel_accepted_at = COALESCE(cancel_accepted_at, ?2),
                              updated_at = CASE WHEN cancel_accepted_at IS NULL THEN ?2
                                                ELSE updated_at END,
                              cancel_reason = CASE WHEN cancel_requested = 0 AND cancel_accepted_at IS NULL
                                                   THEN COALESCE(?3, cancel_reason)
-                                                  ELSE cancel_reason END
+                                                  ELSE cancel_reason END,
+                             stop_context_json = CASE WHEN cancel_requested = 0 AND cancel_accepted_at IS NULL
+                                                      THEN ?4 ELSE stop_context_json END
              WHERE id = ?1 AND status IN ('submitting', 'starting', 'running')
                AND (cancel_requested = 1 OR cancel_accepted_at IS NOT NULL OR ?3 IS NOT NULL)
              RETURNING cancel_accepted_at",
-            params![run_id, now_ms(), reason],
+            params![run_id, now, reason, stop],
             |row| row.get(0),
         ).optional()?)
+    }
+
+    /// Keeps what the run's rules counted and what they did, in one transaction: an event for
+    /// each rule that tripped, the flag an `ask` raises, and a `stop`'s cancel with who asked
+    /// for it, under the run's cancel lock. Returns when the run's cancel was accepted.
+    pub(crate) fn record_rules(
+        &self,
+        run_id: &str,
+        counts: &serde_json::Value,
+        events: &[serde_json::Value],
+        flags: &[NewFlag],
+        stop: Option<(&str, &StopContext)>,
+    ) -> Result<Option<i64>> {
+        let mut lock = stop
+            .map(|_| open_lifecycle_lock_at(&self.run_lock_path(CANCEL_LOCK, run_id)?))
+            .transpose()?;
+        let _guard = lock.as_mut().map(|lock| lock.write()).transpose()?;
+        let tx = self.begin_immediate()?;
+        let now = now_ms();
+        let accepted = match stop {
+            Some((reason, stop)) => {
+                self.accept_run_stop_locked(run_id, Some(reason), Some(stop))?
+            }
+            None => None,
+        };
+        let mut state = match self.run_monitor_state(run_id)? {
+            Some(serde_json::Value::Object(state)) => state,
+            _ => serde_json::Map::new(),
+        };
+        state.insert("ruleState".into(), counts.clone());
+        tx.execute(
+            "INSERT INTO run_monitor_state (run_id, state_json) VALUES (?1, ?2)
+             ON CONFLICT(run_id) DO UPDATE SET state_json = excluded.state_json",
+            params![run_id, serde_json::Value::Object(state).to_string()],
+        )?;
+        for event in events {
+            let mut event = event.clone();
+            if event["does"] == "stop" {
+                event["stopped"] = serde_json::json!(accepted.is_some());
+            }
+            tx.execute(
+                "INSERT INTO run_monitor_events (run_id, seq, kind, created_at, body_json)
+                 VALUES (?1, (SELECT COALESCE(MAX(seq), 0) + 1 FROM run_monitor_events WHERE run_id = ?1),
+                         'rule', ?2, ?3)",
+                params![run_id, now, event.to_string()],
+            )?;
+        }
+        self.append_flags(flags, now)?;
+        tx.commit()?;
+        Ok(accepted)
+    }
+
+    /// Records that the agent in `chat`, in its turn `turn`, is repairing the run's experiment
+    /// after the run stopped.
+    pub(crate) fn record_revision(&self, run_id: &str, chat: &str, turn: &str) -> Result<i64> {
+        let tx = self.begin_immediate()?;
+        let now = now_ms();
+        let body =
+            serde_json::json!({"runId": run_id, "chatSessionId": chat, "turnId": turn, "at": now});
+        tx.execute(
+            "INSERT INTO run_monitor_events (run_id, seq, kind, created_at, body_json)
+             VALUES (?1, (SELECT COALESCE(MAX(seq), 0) + 1 FROM run_monitor_events WHERE run_id = ?1),
+                     'revision', ?2, ?3)",
+            params![run_id, now, body.to_string()],
+        )?;
+        tx.commit()?;
+        Ok(now)
+    }
+
+    /// Whether the agent is repairing the run's experiment after it stopped: its latest
+    /// revision's turn is still going and no run of the experiment started since.
+    pub(crate) fn run_revising(&self, run: &StoredRun) -> Result<bool> {
+        if run.status != "cancelled" {
+            return Ok(false);
+        }
+        let revision: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT body_json FROM run_monitor_events WHERE run_id = ?1 AND kind = 'revision'
+                 ORDER BY seq DESC LIMIT 1",
+                [&run.id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(revision) = revision else {
+            return Ok(false);
+        };
+        let revision: serde_json::Value = serde_json::from_str(&revision)
+            .map_err(|e| anyhow!("Run {}'s revision is unreadable: {e}", run.id))?;
+        let turn = revision["turnId"].as_str().unwrap_or_default();
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM chat_turns WHERE id = ?1
+                             AND state IN ('preparing', 'retrying', 'running'))
+                    AND NOT EXISTS(SELECT 1 FROM runs WHERE experiment_id = ?2 AND id != ?3
+                                     AND created_at >= ?4)",
+            params![turn, run.experiment_id, run.id, run.created_at],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// The turn the chat's agent is in now, if one is going.
+    pub(crate) fn active_chat_turn(&self, chat: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id FROM chat_turns WHERE session_id = ?1
+                   AND state IN ('preparing', 'retrying', 'running')
+                 ORDER BY created_at DESC LIMIT 1",
+                [chat],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Who stopped the run, when the cancel that stopped it said; `None` for a run no one
+    /// stopped, or one stopped before orx kept this.
+    pub(crate) fn run_stop(&self, run_id: &str) -> Result<Option<StopContext>> {
+        let text: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT stop_context_json FROM runs WHERE id = ?1",
+                [run_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        text.map(|text| {
+            serde_json::from_str(&text)
+                .map_err(|e| anyhow!("Run {run_id}'s record of who stopped it is unreadable: {e}"))
+        })
+        .transpose()
     }
 
     pub fn subscribe_run(
@@ -6099,6 +6739,7 @@ impl Store {
     pub fn run_notice_batch_at(&self, chat_session_id: &str, now: i64) -> Result<Vec<RunNotice>> {
         let tx = self.begin_immediate()?;
         self.expire_run_notice_batches(now)?;
+        self.retire_stale_flag_wakes(now)?;
         let assigned: Option<String> = tx
             .query_row(
                 "SELECT client_turn_id FROM run_notices
@@ -6235,12 +6876,14 @@ impl Store {
         Ok(format!("{kind}:{generation}"))
     }
 
-    pub fn terminal_notice_body(&self, run: &StoredRun) -> Result<String> {
+    /// The last `bytes` of a run's log as this machine keeps it: the newest kept range, else
+    /// the tail collected after it ended, else the live log; empty before there is any.
+    pub fn recent_log(&self, run_id: &str, bytes: u64) -> Result<String> {
         use std::io::{Read, Seek, SeekFrom};
 
-        let mut bytes = Vec::new();
-        let ranges = crate::commands::up::api_v2::kept_ranges(&self.data_dir, &run.id)?;
-        let tail = self.run_artifact_path(TAIL_LOG, &run.id);
+        let mut read = Vec::new();
+        let ranges = crate::commands::up::api_v2::kept_ranges(&self.data_dir, run_id)?;
+        let tail = self.run_artifact_path(TAIL_LOG, run_id);
         let current = if let Some(range) = ranges.iter().max_by_key(|range| range.offset) {
             let file = std::fs::File::open(&range.file)?;
             Ok((file, range.file.clone(), range.len))
@@ -6250,15 +6893,15 @@ impl Store {
             Ok((file, tail, size))
         } else {
             crate::jobs::ssh::service::logs::open_current(
-                self.run_artifact_path(("run-logs", ".log"), &run.id),
+                self.run_artifact_path(("run-logs", ".log"), run_id),
             )
         };
         match current {
             Ok((mut file, _, size)) => {
-                let start = size.saturating_sub(TERMINAL_LOG_BYTES);
+                let start = size.saturating_sub(bytes);
                 file.seek(SeekFrom::Start(start))?;
-                bytes.resize(usize::try_from(size - start)?, 0);
-                file.read_exact(&mut bytes)?;
+                read.resize(usize::try_from(size - start)?, 0);
+                file.read_exact(&mut read)?;
             }
             Err(error)
                 if error
@@ -6266,24 +6909,39 @@ impl Store {
                     .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) => {}
             Err(error) => return Err(error),
         }
-        let first_character = bytes
+        let first_character = read
             .iter()
             .position(|byte| byte & 0xc0 != 0x80)
-            .unwrap_or(bytes.len());
-        let log = String::from_utf8_lossy(&bytes[first_character..]);
-        let mut start = log
+            .unwrap_or(read.len());
+        Ok(String::from_utf8_lossy(&read[first_character..]).into_owned())
+    }
+
+    pub fn terminal_notice_body(&self, run: &StoredRun) -> Result<String> {
+        let log = self.recent_log(&run.id, TERMINAL_LOG_SCAN)?;
+        // Progress records are for orx; the agent reads the log a person would.
+        let records = log
+            .lines()
+            .filter(|line| line.trim_start().starts_with("::orx::"))
+            .count();
+        let lines: Vec<&str> = log
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("::orx::"))
+            .collect();
+        let lines = &lines[lines.len().saturating_sub(TERMINAL_LOG_LINES)..];
+        let mut tail = lines.join("\n");
+        let mut start = tail
             .len()
             .saturating_sub(usize::try_from(TERMINAL_LOG_BYTES)?);
-        while !log.is_char_boundary(start) {
+        while !tail.is_char_boundary(start) {
             start += 1;
         }
-        let mut lines: Vec<_> = log[start..]
-            .lines()
-            .rev()
-            .take(TERMINAL_LOG_LINES)
-            .collect();
-        lines.reverse();
-        let tail = lines.join("\n");
+        tail.drain(..start);
+        if records > 0 {
+            tail.push_str(&format!(
+                "\n({records} `::orx::` records left out; `orx logs {}` shows the whole log.)",
+                run.id
+            ));
+        }
         let code = run
             .exit_code
             .map(|code| code.to_string())
@@ -6296,8 +6954,16 @@ impl Store {
             .cancel_reason
             .as_deref()
             .filter(|_| run.status == "cancelled");
-        let reason = match (cancel_reason, run.result_markdown.as_deref()) {
+        let result = run
+            .result_markdown
+            .as_deref()
+            .filter(|text| !text.trim().is_empty());
+        let reason = match (cancel_reason, result) {
             (Some(cancel), Some(result)) => format!("{cancel} {result}"),
+            (None, None) if run.status == "failed" => match last_error(&log) {
+                Some(line) => format!("Last error in the log: `{line}`"),
+                None => "unavailable".into(),
+            },
             (cancel, result) => cancel.or(result).unwrap_or("unavailable").into(),
         };
         let view = crate::plane::Run::from_store(self, run)?;
@@ -6309,10 +6975,146 @@ impl Store {
     }
 }
 
+/// The line that says why a run failed, as a person scanning its log's end finds it: a Python
+/// traceback's exception line, else the last line that names an error.
+pub fn last_error(log: &str) -> Option<&str> {
+    let lines: Vec<&str> = log
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim_start().starts_with("::orx::"))
+        .collect();
+    let traceback = lines
+        .iter()
+        .rposition(|line| line.starts_with("Traceback (most recent call last)"));
+    if let Some(at) = traceback {
+        let exception = lines[at + 1..]
+            .iter()
+            .find(|line| !line.is_empty() && !line.starts_with(char::is_whitespace));
+        if exception.is_some() {
+            return exception.copied();
+        }
+    }
+    const NAMES: [&str; 6] = [
+        "error",
+        "exception",
+        "fatal",
+        "panicked",
+        "killed",
+        "segmentation fault",
+    ];
+    lines.iter().rev().copied().find(|line| {
+        let lower = line.to_lowercase();
+        NAMES.iter().any(|name| lower.contains(name))
+    })
+}
+
 const SELECT_RUN: &str = "SELECT id, experiment_id, project_id, status, backend_json, command,
                                  created_at, updated_at, ended_at, exit_code,
                                  commit_sha, result_markdown, cancel_requested,
                                  chat_session_id, cancel_reason FROM runs";
+
+/// A run whose line stays whatever was dismissed: in flight, or with processes not known gone.
+const UNSETTLED_RUN: &str = "(status NOT IN ('done', 'failed', 'cancelled', 'lost')
+     OR cancel_unconfirmed IS NOT NULL
+     OR CASE WHEN json_valid(contact) THEN json_extract(contact, '$.type') END = 'stopping')";
+
+fn shown_runs_sql() -> String {
+    format!(
+        "WITH notices(chat, run, delivered_at, client_turn_id) AS (
+             SELECT chat_session_id, run_id, delivered_at, client_turn_id FROM run_notices
+             WHERE kind = 'terminal' AND delivered_at IS NULL
+             UNION ALL
+             SELECT n.chat_session_id, n.run_id, n.delivered_at, n.client_turn_id FROM chat_sessions c
+             CROSS JOIN run_notices n ON n.chat_session_id = c.id AND n.kind = 'terminal'
+             WHERE n.delivered_at >= COALESCE((SELECT MAX(reply.updated_at) FROM chat_turns reply
+                                               WHERE reply.session_id = c.id AND reply.state = 'completed'), -1)
+         ), candidates(chat, run) AS (
+             SELECT chat_session_id, id FROM runs
+             WHERE chat_session_id IS NOT NULL AND {UNSETTLED_RUN}
+             UNION SELECT s.chat_session_id, s.run_id FROM run_subscriptions s
+                   WHERE s.run_id IN (SELECT id FROM runs WHERE {UNSETTLED_RUN})
+             UNION SELECT chat, run FROM notices n
+                   WHERE NOT EXISTS (
+                       SELECT 1 FROM chat_turns own
+                       WHERE own.session_id = n.chat AND own.client_turn_id = n.client_turn_id
+                         AND own.state = 'completed')
+                     AND NOT EXISTS (
+                       SELECT 1 FROM chat_turns reply
+                       WHERE reply.session_id = n.chat AND reply.state = 'completed'
+                         AND reply.updated_at > CASE WHEN n.delivered_at IS NOT NULL
+                             THEN COALESCE((SELECT t.created_at FROM chat_turns t
+                                            WHERE t.session_id = n.chat AND t.client_turn_id = n.client_turn_id),
+                                           n.delivered_at)
+                             ELSE (SELECT recovery.created_at FROM chat_turns t
+                                   JOIN chat_turns recovery ON recovery.id = t.recovered_by_turn_id
+                                   WHERE t.session_id = n.chat AND t.client_turn_id = n.client_turn_id)
+                             END)
+         ), shown(chat, run) AS (
+             SELECT a.chat, r.id FROM candidates a
+             JOIN runs r ON r.id = a.run
+             WHERE {UNSETTLED_RUN} OR {kept_in_a}
+         ), together(chat, run) AS (
+             SELECT chat, run FROM shown
+             UNION
+             SELECT s.chat, r.id FROM shown s
+             JOIN runs o ON o.id = s.run
+             JOIN runs r ON r.chat_session_id = s.chat AND r.created_at >= {launched_o}
+                         AND r.id != o.id
+             WHERE {kept_in_s}
+               AND {launched_r} = {launched_o}
+         )
+         SELECT a.chat, COALESCE(e.title, e.slug), COALESCE(e.slug, r.experiment_id),
+                (SELECT COUNT(*) FROM runs o WHERE o.experiment_id = r.experiment_id
+                    AND (o.created_at, o.id) <= (r.created_at, r.id)),
+                (SELECT COUNT(*) FROM runs o WHERE o.experiment_id = r.experiment_id),
+                r.id, r.experiment_id, r.project_id, r.status, r.backend_json, r.command,
+                r.created_at, r.updated_at, r.ended_at, r.exit_code, r.commit_sha,
+                CASE WHEN r.status = 'lost' THEN r.result_markdown END,
+                r.cancel_requested, r.chat_session_id, r.cancel_reason
+         FROM together a
+         JOIN runs r ON r.id = a.run
+         LEFT JOIN local_experiments e ON e.id = r.experiment_id
+         ORDER BY a.chat, r.id",
+        kept_in_a = kept("r", "a.chat"),
+        kept_in_s = kept("r", "s.chat"),
+        launched_r = launched_in("s.chat", "r"),
+        launched_o = launched_in("s.chat", "o"),
+    )
+}
+
+/// Whether `run` is in `chat`: launched there or followed from it.
+fn followed(run: &str, chat: &str) -> String {
+    format!(
+        "({run}.chat_session_id = {chat}
+          OR EXISTS (SELECT 1 FROM run_subscriptions sub
+                     WHERE sub.run_id = {run}.id AND sub.chat_session_id = {chat}))"
+    )
+}
+
+/// Whether an ended `run` stays shown in `chat`: it is in the chat, not dismissed there, and no
+/// newer run of its experiment in the chat superseded it.
+fn kept(run: &str, chat: &str) -> String {
+    format!(
+        "({followed}
+          AND NOT EXISTS (SELECT 1 FROM run_dismissals d
+                          WHERE d.run_id = {run}.id AND d.chat_session_id = {chat})
+          AND NOT EXISTS (SELECT 1 FROM runs newer
+                          WHERE newer.experiment_id = {run}.experiment_id
+                            AND (newer.created_at, newer.id) > ({run}.created_at, {run}.id)
+                            AND {newer_followed}))",
+        followed = followed(run, chat),
+        newer_followed = followed("newer", chat),
+    )
+}
+
+/// The chat turn `run` was launched in: the chat's last turn to start before it. Null for a run
+/// launched outside any turn of the chat, which is launched with no other.
+fn launched_in(chat: &str, run: &str) -> String {
+    format!(
+        "(SELECT MAX(t.created_at) FROM chat_turns t
+          WHERE t.session_id = {chat} AND t.created_at <= {run}.created_at)"
+    )
+}
 
 const PROJECT_COLS: &str = "id, name, slug, github_owner, github_repo, github_sync_enabled, \
                             baseline_branch, repo_path, run_command, paper_id, created_at, updated_at";
@@ -6354,6 +7156,15 @@ pub fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+fn signal_generation_run_id(name: &str) -> Option<&str> {
+    let (run, generation) = name
+        .strip_suffix(".json")
+        .and_then(|name| name.split_once(".corrupt-"))
+        .or_else(|| name.split_once(".tmp-"))?;
+    uuid::Uuid::parse_str(generation).ok()?;
+    Some(run)
 }
 
 fn log_generation_run_id(name: &str) -> Option<&str> {
@@ -6746,6 +7557,61 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_run_without_a_message_gives_its_logs_last_error_and_the_log_a_person_reads() {
+        let (dir, store) = engine_fixture();
+        let mut run = store.get_run("failed").unwrap().unwrap();
+        run.result_markdown = None;
+        let records: String = (0..200)
+            .map(|step| format!("::orx:: {{\"step\":{step}}}\n"))
+            .collect();
+        std::fs::write(
+            dir.join("run-logs/failed.log"),
+            format!(
+                "step 340 | loss 1.2\n{records}Traceback (most recent call last):\n  File \"train.py\", line 212, in <module>\n    loss = model(x, y)\ntorch.OutOfMemoryError: CUDA out of memory.\n"
+            ),
+        )
+        .unwrap();
+        let body = store.terminal_notice_body(&run).unwrap();
+        assert!(
+            body.contains(
+                "\nReason: Last error in the log: `torch.OutOfMemoryError: CUDA out of memory.`\n"
+            ),
+            "{body}"
+        );
+        let tail = body.split("Recent log:\n").nth(1).unwrap();
+        assert!(!tail.contains("::orx:: {"), "{tail}");
+        assert!(tail.starts_with("step 340 | loss 1.2\nTraceback"), "{tail}");
+        assert!(
+            tail.ends_with(
+                "(200 `::orx::` records left out; `orx logs failed` shows the whole log.)"
+            ),
+            "{tail}"
+        );
+        assert_eq!(
+            crate::plane::Run::from_store(&store, &run).unwrap().failure_detail().as_deref(),
+            Some("reason: last error in the log: `torch.OutOfMemoryError: CUDA out of memory.` (`orx logs failed` has the rest)")
+        );
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_last_error_is_a_tracebacks_exception_else_the_last_line_naming_one() {
+        assert_eq!(
+            last_error("Traceback (most recent call last):\n  File \"a.py\"\n    x()\nValueError: bad\nexiting\n"),
+            Some("ValueError: bad")
+        );
+        assert_eq!(
+            last_error("ERROR one\nworking\nthread 'main' panicked at src/main.rs:3\nbye\n"),
+            Some("thread 'main' panicked at src/main.rs:3")
+        );
+        assert_eq!(
+            last_error("::orx:: {\"m\":{\"error\":1}}\nall good\n"),
+            None
+        );
+    }
+
+    #[test]
     fn engine_terminal_renderer_bounds_log_bytes_and_lines_without_splitting_utf8() {
         let (dir, store) = engine_fixture();
         let run = store.get_run("failed").unwrap().unwrap();
@@ -6946,6 +7812,7 @@ mod tests {
                 commit_sha: None,
                 chat_session_id: None,
                 spec_digest: "digest",
+                monitor_config: None,
                 launch: &test_launch(),
             })
             .unwrap();
@@ -7173,6 +8040,7 @@ mod tests {
                 commit_sha: run.commit_sha.as_deref(),
                 chat_session_id: run.chat_session_id.as_deref(),
                 spec_digest: "spec-sha",
+                monitor_config: None,
                 launch: &test_launch(),
             })
             .unwrap();
@@ -7187,6 +8055,7 @@ mod tests {
                 commit_sha: run.commit_sha.as_deref(),
                 chat_session_id: run.chat_session_id.as_deref(),
                 spec_digest: "spec-sha",
+                monitor_config: None,
                 launch: &test_launch(),
             })
             .is_err());
@@ -7350,6 +8219,7 @@ mod tests {
                 commit_sha: run.commit_sha.as_deref(),
                 chat_session_id: run.chat_session_id.as_deref(),
                 spec_digest: "digest",
+                monitor_config: None,
                 launch: &test_launch(),
             })
             .unwrap();
@@ -8071,6 +8941,7 @@ mod tests {
                 commit_sha: run.commit_sha.as_deref(),
                 chat_session_id: run.chat_session_id.as_deref(),
                 spec_digest: "digest",
+                monitor_config: None,
                 launch: &test_launch(),
             })
             .unwrap();
@@ -8099,6 +8970,155 @@ mod tests {
         assert_eq!(store.accept_run_cancel("done", Some("API")).unwrap(), None);
         assert_eq!(store.accept_run_cancel("missing", None).unwrap(), None);
         assert!(store.accept_run_cancel("../escape", None).is_err());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Concurrent user, agent and rule stops all accept the cancel; the first keeps who stopped
+    /// the run, and a legacy cancel records no one.
+    #[test]
+    fn the_first_accepted_stop_says_who_stopped_the_run() {
+        let (dir, store) = engine_fixture();
+        let stop = |by: StopBy, reason: &str| StopContext {
+            reason: Some(reason.into()),
+            ..StopContext::by(by)
+        };
+        let insert = |id: &str| {
+            let run = run_fixture(id, "running", None);
+            store.upsert_run(&run).unwrap();
+        };
+        insert("raced");
+        let first = store
+            .accept_run_stop(
+                "raced",
+                Some("agent words"),
+                Some(&stop(StopBy::Agent, "NaN")),
+            )
+            .unwrap()
+            .unwrap();
+        for later in [stop(StopBy::User, "mine"), stop(StopBy::Rule, "rule")] {
+            assert_eq!(
+                store
+                    .accept_run_stop("raced", Some("later"), Some(&later))
+                    .unwrap(),
+                Some(first),
+                "a later stop is accepted as the same cancel"
+            );
+        }
+        let kept = store.run_stop("raced").unwrap().unwrap();
+        assert_eq!(
+            (kept.by, kept.at, kept.reason.as_deref()),
+            (StopBy::Agent, first, Some("NaN"))
+        );
+        assert_eq!(
+            store
+                .get_run("raced")
+                .unwrap()
+                .unwrap()
+                .cancel_reason
+                .as_deref(),
+            Some("agent words")
+        );
+
+        insert("legacy");
+        assert!(store.request_cancel("legacy", "old CLI").unwrap());
+        store
+            .accept_run_stop("legacy", Some("new"), Some(&stop(StopBy::User, "u")))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            store.run_stop("legacy").unwrap(),
+            None,
+            "the old CLI asked first"
+        );
+
+        insert("ended");
+        store
+            .conn
+            .execute("UPDATE runs SET status = 'done' WHERE id = 'ended'", [])
+            .unwrap();
+        assert_eq!(
+            store
+                .accept_run_stop("ended", Some("late"), Some(&stop(StopBy::Rule, "r")))
+                .unwrap(),
+            None
+        );
+        assert_eq!(store.run_stop("ended").unwrap(), None);
+
+        // A newer orx's field is kept; one this orx cannot read is said to be unreadable.
+        store
+            .conn
+            .execute(
+                "UPDATE runs SET stop_context_json = '{\"by\":\"user\",\"at\":5,\"later\":1}' WHERE id = 'ended'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(store.run_stop("ended").unwrap().unwrap().extra["later"], 1);
+        store
+            .conn
+            .execute(
+                "UPDATE runs SET stop_context_json = '{\"by\":\"watcher\"}' WHERE id = 'ended'",
+                [],
+            )
+            .unwrap();
+        assert!(store
+            .run_stop("ended")
+            .unwrap_err()
+            .to_string()
+            .contains("unreadable"));
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A stopped run is revising while the turn that said so goes on and no run of its
+    /// experiment starts after it, and at no other time.
+    #[test]
+    fn a_revision_lasts_its_turn_and_ends_at_the_next_run() {
+        let dir = std::env::temp_dir().join(format!("orx-revising-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let mut run = run_fixture("stopped", "cancelled", None);
+        run.created_at = 10;
+        store.upsert_run(&run).unwrap();
+        assert!(!store.run_revising(&run).unwrap());
+        store.put_chat_turn("chat_1", "turn_1", "running", 20);
+        assert_eq!(
+            store.active_chat_turn("chat_1").unwrap().as_deref(),
+            Some("turn_1")
+        );
+        assert_eq!(store.active_chat_turn("chat_2").unwrap(), None);
+        store
+            .record_revision("stopped", "chat_1", "turn_1")
+            .unwrap();
+        assert!(store.run_revising(&run).unwrap());
+
+        let mut live = run.clone();
+        live.status = "running".into();
+        assert!(
+            !store.run_revising(&live).unwrap(),
+            "only a stopped run is revised"
+        );
+
+        store
+            .conn
+            .execute(
+                "UPDATE chat_turns SET state = 'completed' WHERE id = 'turn_1'",
+                [],
+            )
+            .unwrap();
+        assert!(
+            !store.run_revising(&run).unwrap(),
+            "the turn ended without a run"
+        );
+
+        store.put_chat_turn("chat_1", "turn_2", "running", 30);
+        store
+            .record_revision("stopped", "chat_1", "turn_2")
+            .unwrap();
+        assert!(store.run_revising(&run).unwrap());
+        let mut next = run_fixture("next", "starting", None);
+        next.created_at = 40;
+        store.upsert_run(&next).unwrap();
+        assert!(!store.run_revising(&run).unwrap(), "the next run started");
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -8697,6 +9717,53 @@ mod tests {
         assert_eq!(due(&store).len(), 4);
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn orphan_cleanup_reclaims_signal_temporaries_and_corrupt_generations() {
+        let directory =
+            std::env::temp_dir().join(format!("orx-signal-orphans-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(directory.clone()).unwrap();
+        let signals = directory.join("run-signals");
+        std::fs::create_dir_all(&signals).unwrap();
+        let run = uuid::Uuid::new_v4();
+        for suffix in [
+            format!("tmp-{}", uuid::Uuid::new_v4()),
+            format!("corrupt-{}.json", uuid::Uuid::new_v4()),
+        ] {
+            std::fs::write(signals.join(format!("{run}.{suffix}")), b"incomplete").unwrap();
+        }
+        store.cleanup_orphaned_run_artifacts().unwrap();
+        assert!(std::fs::read_dir(signals).unwrap().next().is_none());
+        drop(store);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn signals_remain_owed_when_an_old_writer_finishes_log_collection() {
+        let store = Store::open_at(
+            std::env::temp_dir().join(format!("orx-signal-debt-{}", uuid::Uuid::new_v4())),
+        )
+        .unwrap();
+        store.queue_log_collection("run").unwrap();
+        store.queue_signal_collection("run").unwrap();
+        store.finish_log_collection("run").unwrap();
+        assert!(store.signal_collection_pending("run").unwrap());
+        assert_eq!(store.pending_signal_collections(true, 10).unwrap(), ["run"]);
+        store
+            .defer_signal_collection("run", "host unavailable")
+            .unwrap();
+        assert!(store
+            .pending_signal_collections(true, 10)
+            .unwrap()
+            .is_empty());
+        store.retry_signal_collections_now(Some("run")).unwrap();
+        assert_eq!(store.pending_signal_collections(true, 10).unwrap(), ["run"]);
+        store.finish_signal_collection("run", None).unwrap();
+        assert!(!store.signal_collection_pending("run").unwrap());
+        let directory = store.data_dir.clone();
+        drop(store);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -9623,6 +10690,1029 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    fn shown_ids(store: &Store, chat: &str) -> Vec<String> {
+        store
+            .chat_shown_runs()
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.session_id == chat)
+            .map(|row| row.run.id)
+            .collect()
+    }
+
+    /// An ended run in `chat` whose terminal notice was carried by `turn` (if any) and delivered at `delivered_at`.
+    fn ended_run_with_notice(
+        store: &Store,
+        chat: &str,
+        id: &str,
+        turn: Option<&str>,
+        delivered_at: Option<i64>,
+    ) {
+        let mut run = run_fixture(id, "done", Some(chat));
+        run.experiment_id = format!("exp_{id}");
+        store.upsert_run(&run).unwrap();
+        store
+            .insert_run_notice(id, chat, TERMINAL, TERMINAL, "finished", 1)
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE run_notices SET delivered_at = ?2, client_turn_id = ?3 WHERE run_id = ?1",
+                params![id, delivered_at, turn.map(|turn| format!("{chat}:{turn}"))],
+            )
+            .unwrap();
+    }
+
+    /// A turn of `chat` begun at `created_at` that is now `state` as of `updated_at`.
+    fn chat_turn(
+        store: &Store,
+        chat: &str,
+        id: &str,
+        state: &str,
+        created_at: i64,
+        updated_at: i64,
+    ) {
+        let mut turn = chat_turn_fixture(&format!("{chat}:{id}"), &format!("{chat}:{id}"));
+        turn.session_id = chat.into();
+        store.admit_chat_turn(None, &turn).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE chat_turns SET state = ?2, created_at = ?3, updated_at = ?4 WHERE id = ?1",
+                params![turn.id, state, created_at, updated_at],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn shown_runs_wait_for_the_notices_reply_across_restart() {
+        for outcome in ["completed", "failed", "interrupted"] {
+            let dir =
+                std::env::temp_dir().join(format!("orx-store-shown-{}", uuid::Uuid::new_v4()));
+            let store = Store::open_at(dir.clone()).unwrap();
+            store
+                .create_chat_session(&chat_session_fixture("chat_1"))
+                .unwrap();
+            store
+                .create_chat_session(&chat_session_fixture("watcher"))
+                .unwrap();
+            let mut run = run_fixture("r1", "running", Some("chat_1"));
+            store.upsert_run(&run).unwrap();
+            store.subscribe_run("r1", "watcher", 1).unwrap();
+            assert_eq!(store.chat_shown_runs().unwrap().len(), 2);
+            run.status = "done".into();
+            run.ended_at = Some(10);
+            store.upsert_run(&run).unwrap();
+            assert!(store.chat_active_runs().unwrap().is_empty());
+            for chat in ["chat_1", "watcher"] {
+                store
+                    .insert_run_notice("r1", chat, TERMINAL, TERMINAL, "finished", 10)
+                    .unwrap();
+            }
+            let notices = store.run_notice_batch_at("chat_1", 11).unwrap();
+            let client = &notices[0].client_turn_id;
+            let turn = chat_turn_fixture("result", client);
+            store.admit_chat_turn(None, &turn).unwrap();
+            store
+                .mark_run_notice_batch_delivered("chat_1", client, 11)
+                .unwrap();
+            assert_eq!(
+                store.chat_shown_runs().unwrap().len(),
+                2,
+                "accepted is not completed"
+            );
+            drop(store);
+            let store = Store::open_at(dir.clone()).unwrap();
+            assert_eq!(store.chat_shown_runs().unwrap().len(), 2);
+            match outcome {
+                "completed" => {
+                    store.complete_chat_turn(&turn.id).unwrap();
+                }
+                "failed" => {
+                    store
+                        .fail_chat_turn(&turn.id, "accepted", "agent", "failed", None)
+                        .unwrap();
+                }
+                _ => store.interrupt_chat_turn(&turn.id).unwrap(),
+            }
+            let rows = store.chat_shown_runs().unwrap();
+            assert_eq!(rows.len(), if outcome == "completed" { 1 } else { 2 });
+            assert!(
+                rows.iter().any(|row| row.session_id == "watcher"),
+                "each chat needs its own reply"
+            );
+            drop(store);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn an_ended_run_leaves_once_a_reply_completes_after_its_notice() {
+        let dir = std::env::temp_dir().join(format!("orx-store-shown-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        for chat in [
+            "own_reply",
+            "own_reply_marked_late",
+            "reply_before_delivery",
+            "turn_running",
+            "failed_then_continue",
+            "failed_then_unrelated",
+            "failed_only",
+            "message_outside_a_turn",
+            "not_delivered",
+            "retired",
+            "retired_then_continue",
+            "retired_recovery_running",
+            "retired_retried",
+            "retired_retry_running",
+            "retired_then_unrelated",
+            "attention_notice",
+            "batch",
+            "legacy_answered",
+            "legacy_unanswered",
+        ] {
+            store
+                .create_chat_session(&chat_session_fixture(chat))
+                .unwrap();
+        }
+        ended_run_with_notice(&store, "own_reply", "own_reply", Some("t1"), Some(11));
+        chat_turn(&store, "own_reply", "t1", "completed", 10, 12);
+
+        // The turn that carried the notice can finish before the notice is marked delivered.
+        ended_run_with_notice(
+            &store,
+            "own_reply_marked_late",
+            "late",
+            Some("t1"),
+            Some(13),
+        );
+        chat_turn(&store, "own_reply_marked_late", "t1", "completed", 10, 12);
+
+        ended_run_with_notice(&store, "reply_before_delivery", "before", None, Some(11));
+        chat_turn(&store, "reply_before_delivery", "t0", "completed", 3, 5);
+
+        ended_run_with_notice(&store, "turn_running", "running", Some("t1"), Some(11));
+        chat_turn(&store, "turn_running", "t1", "running", 10, 12);
+
+        ended_run_with_notice(
+            &store,
+            "failed_then_continue",
+            "continued",
+            Some("t1"),
+            Some(11),
+        );
+        chat_turn(&store, "failed_then_continue", "t1", "failed", 10, 12);
+        assert_eq!(shown_ids(&store, "failed_then_continue"), ["continued"]);
+        chat_turn(
+            &store,
+            "failed_then_continue",
+            "recovery",
+            "completed",
+            15,
+            20,
+        );
+
+        ended_run_with_notice(
+            &store,
+            "failed_then_unrelated",
+            "unrelated",
+            Some("t1"),
+            Some(11),
+        );
+        chat_turn(&store, "failed_then_unrelated", "t1", "failed", 10, 12);
+        chat_turn(
+            &store,
+            "failed_then_unrelated",
+            "later",
+            "completed",
+            29,
+            30,
+        );
+
+        ended_run_with_notice(&store, "failed_only", "failed_only", Some("t1"), Some(11));
+        chat_turn(&store, "failed_only", "t1", "failed", 10, 12);
+
+        // A completed assistant message that no turn produced, such as a compaction marker, is no reply.
+        ended_run_with_notice(
+            &store,
+            "message_outside_a_turn",
+            "marker",
+            Some("t1"),
+            Some(11),
+        );
+        chat_turn(
+            &store,
+            "message_outside_a_turn",
+            "t1",
+            "interrupted",
+            10,
+            12,
+        );
+        store
+            .upsert_chat_message(&StoredChatMessage {
+                id: "marker".into(),
+                session_id: "message_outside_a_turn".into(),
+                role: "assistant".into(),
+                parts_json: "[]".into(),
+                created_at: 20,
+                completed_at: Some(21),
+                parent_id: None,
+                base_native_session_id: None,
+                result_native_session_id: None,
+                result_native_message_id: None,
+                native_harness: None,
+            })
+            .unwrap();
+
+        ended_run_with_notice(&store, "not_delivered", "undelivered", None, None);
+        chat_turn(&store, "not_delivered", "t0", "completed", 98, 99);
+
+        ended_run_with_notice(&store, "retired", "retired", None, None);
+        store
+            .conn
+            .execute("UPDATE run_notices SET retired_at = 2", [])
+            .unwrap();
+        chat_turn(&store, "retired", "t0", "completed", 98, 99);
+
+        // A crashed agent leaves the notice undelivered and retired; Continue gives the agent the notice again.
+        for (chat, recovery) in [
+            ("retired_then_continue", "completed"),
+            ("retired_recovery_running", "running"),
+        ] {
+            ended_run_with_notice(&store, chat, chat, Some("t1"), None);
+            store
+                .conn
+                .execute(
+                    "UPDATE run_notices SET retired_at = 2 WHERE run_id = ?1",
+                    [chat],
+                )
+                .unwrap();
+            chat_turn(&store, chat, "t1", "failed", 10, 12);
+            chat_turn(&store, chat, "recovery", recovery, 15, 20);
+            store
+                .conn
+                .execute(
+                    "UPDATE chat_turns SET recovered_by_turn_id = ?2 WHERE id = ?1",
+                    params![format!("{chat}:t1"), format!("{chat}:recovery")],
+                )
+                .unwrap();
+        }
+
+        // Retry reuses the turn that carried the notice instead of starting a recovery turn.
+        for (chat, retry) in [
+            ("retired_retried", "completed"),
+            ("retired_retry_running", "running"),
+        ] {
+            ended_run_with_notice(&store, chat, chat, Some("t1"), None);
+            store
+                .conn
+                .execute(
+                    "UPDATE run_notices SET retired_at = 2 WHERE run_id = ?1",
+                    [chat],
+                )
+                .unwrap();
+            chat_turn(&store, chat, "t1", retry, 10, 20);
+        }
+
+        // Only Continue links a later turn to a retired notice; any other reply never saw it.
+        ended_run_with_notice(
+            &store,
+            "retired_then_unrelated",
+            "retired_unrelated",
+            Some("t1"),
+            None,
+        );
+        store
+            .conn
+            .execute(
+                "UPDATE run_notices SET retired_at = 2 WHERE run_id = 'retired_unrelated'",
+                [],
+            )
+            .unwrap();
+        chat_turn(&store, "retired_then_unrelated", "t1", "failed", 10, 12);
+        chat_turn(
+            &store,
+            "retired_then_unrelated",
+            "later",
+            "completed",
+            29,
+            30,
+        );
+
+        ended_run_with_notice(&store, "attention_notice", "attention", None, None);
+        store
+            .conn
+            .execute(
+                "UPDATE run_notices SET kind = ?1 WHERE run_id = 'attention'",
+                [ATTENTION],
+            )
+            .unwrap();
+
+        for id in ["b1", "b2", "b3"] {
+            ended_run_with_notice(&store, "batch", id, Some("t1"), Some(11));
+        }
+        chat_turn(&store, "batch", "t1", "completed", 10, 12);
+
+        // Shaped like v0.2.26 history: delivered with no turn linked to the notice.
+        ended_run_with_notice(&store, "legacy_answered", "legacy_a", None, Some(11));
+        chat_turn(&store, "legacy_answered", "t0", "completed", 39, 40);
+        ended_run_with_notice(&store, "legacy_unanswered", "legacy_u", None, Some(11));
+        store
+            .upsert_run(&run_fixture("no_notice", "done", Some("legacy_unanswered")))
+            .unwrap();
+
+        let shown = |chat: &str| shown_ids(&store, chat);
+        assert!(shown("own_reply").is_empty());
+        assert!(shown("own_reply_marked_late").is_empty());
+        assert_eq!(shown("reply_before_delivery"), ["before"]);
+        assert_eq!(shown("turn_running"), ["running"]);
+        assert!(shown("failed_then_continue").is_empty());
+        assert!(shown("failed_then_unrelated").is_empty());
+        assert_eq!(shown("failed_only"), ["failed_only"]);
+        assert_eq!(shown("message_outside_a_turn"), ["marker"]);
+        assert_eq!(shown("not_delivered"), ["undelivered"]);
+        assert_eq!(shown("retired"), ["retired"]);
+        assert!(shown("retired_then_continue").is_empty());
+        assert_eq!(
+            shown("retired_recovery_running"),
+            ["retired_recovery_running"]
+        );
+        assert!(shown("retired_retried").is_empty());
+        assert_eq!(shown("retired_retry_running"), ["retired_retry_running"]);
+        assert_eq!(shown("retired_then_unrelated"), ["retired_unrelated"]);
+        assert!(shown("attention_notice").is_empty());
+        assert!(shown("batch").is_empty());
+        assert!(shown("legacy_answered").is_empty());
+        assert_eq!(shown("legacy_unanswered"), ["legacy_u"]);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn runs_launched_in_one_turn_stay_shown_together_until_each_is_answered() {
+        let dir = std::env::temp_dir().join(format!("orx-store-shown-{}", uuid::Uuid::new_v4()));
+        let mut store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat_1"))
+            .unwrap();
+        chat_turn(&store, "chat_1", "launch", "completed", 10, 20);
+        for (id, at) in [("lr_a", 11), ("lr_b", 12), ("lr_c", 13)] {
+            let mut run = run_fixture(id, "running", Some("chat_1"));
+            run.experiment_id = format!("exp_{id}");
+            run.created_at = at;
+            store.upsert_run(&run).unwrap();
+        }
+        fn answer(store: &Store, id: &str, turn: &str, at: i64) {
+            let mut run = store.get_run(id).unwrap().unwrap();
+            run.status = "done".into();
+            run.ended_at = Some(at);
+            store.upsert_run(&run).unwrap();
+            store
+                .insert_run_notice(id, "chat_1", TERMINAL, TERMINAL, "finished", at)
+                .unwrap();
+            store
+                .conn
+                .execute(
+                    "UPDATE run_notices SET delivered_at = ?2, client_turn_id = ?3 WHERE run_id = ?1",
+                    params![id, at, format!("chat_1:{turn}")],
+                )
+                .unwrap();
+            chat_turn(store, "chat_1", turn, "completed", at, at + 5);
+        }
+
+        answer(&store, "lr_a", "result_a", 30);
+        assert_eq!(
+            shown_ids(&store, "chat_1"),
+            ["lr_a", "lr_b", "lr_c"],
+            "an answered run stays beside the runs launched with it"
+        );
+        let mut later = run_fixture("later", "running", Some("chat_1"));
+        later.experiment_id = "exp_later".into();
+        later.created_at = 31;
+        store.upsert_run(&later).unwrap();
+        answer(&store, "lr_b", "result_b", 40);
+        assert_eq!(
+            shown_ids(&store, "chat_1"),
+            ["later", "lr_a", "lr_b", "lr_c"]
+        );
+        store.dismiss_chat_run("chat_1", "lr_a").unwrap();
+        assert_eq!(shown_ids(&store, "chat_1"), ["later", "lr_b", "lr_c"]);
+
+        answer(&store, "lr_c", "result_c", 50);
+        assert_eq!(
+            shown_ids(&store, "chat_1"),
+            ["later"],
+            "once every result is answered they go, and a run launched later keeps no one"
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn shown_runs_supersede_per_chat_and_only_ended_runs() {
+        let dir = std::env::temp_dir().join(format!("orx-store-shown-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        for chat in ["chat_1", "chat_2", "watcher", "follower"] {
+            store
+                .create_chat_session(&chat_session_fixture(chat))
+                .unwrap();
+        }
+        store
+            .create_local_experiment(&experiment_fixture("exp_1", None))
+            .unwrap();
+        for (id, status, at) in [
+            ("ended", "done", 1),
+            ("live", "running", 2),
+            ("new", "starting", 3),
+        ] {
+            let mut run = run_fixture(id, status, Some("chat_1"));
+            run.created_at = at;
+            store.upsert_run(&run).unwrap();
+        }
+        store
+            .insert_run_notice("ended", "chat_1", TERMINAL, TERMINAL, "finished", 1)
+            .unwrap();
+        let rows = store.chat_shown_runs().unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.run.id.as_str()).collect::<Vec<_>>(),
+            ["live", "new"]
+        );
+        assert_eq!(
+            (rows[0].run_no, rows[1].run_no, rows[1].run_count),
+            (2, 3, 3)
+        );
+        assert_eq!(rows[0].experiment_slug, "exp-exp_1");
+        store
+            .upsert_run(&run_fixture("live", "failed", Some("chat_1")))
+            .unwrap();
+        store
+            .insert_run_notice("live", "chat_1", TERMINAL, TERMINAL, "failed", 2)
+            .unwrap();
+        assert_eq!(shown_ids(&store, "chat_1"), ["new"]);
+
+        // Another chat, or a watcher of the old run, does not lose its line to a launch it never saw.
+        let mut elsewhere = run_fixture("elsewhere", "running", Some("chat_2"));
+        elsewhere.created_at = 4;
+        store.upsert_run(&elsewhere).unwrap();
+        store.subscribe_run("live", "watcher", 5).unwrap();
+        store
+            .insert_run_notice("live", "watcher", TERMINAL, TERMINAL, "failed", 5)
+            .unwrap();
+        assert_eq!(shown_ids(&store, "chat_2"), ["elsewhere"]);
+        assert_eq!(shown_ids(&store, "watcher"), ["live"]);
+        assert_eq!(shown_ids(&store, "chat_1"), ["new"]);
+
+        // A newer run the chat only subscribed to supersedes just the same.
+        ended_run_with_notice(&store, "follower", "seen", None, None);
+        assert_eq!(shown_ids(&store, "follower"), ["seen"]);
+        let mut later = run_fixture("later", "done", None);
+        later.experiment_id = "exp_seen".into();
+        later.created_at = 9;
+        store.upsert_run(&later).unwrap();
+        store.subscribe_run("later", "follower", 10).unwrap();
+        assert!(shown_ids(&store, "follower").is_empty());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn processes_not_known_gone_keep_the_line_after_the_reply() {
+        let dir = std::env::temp_dir().join(format!("orx-store-shown-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        for chat in ["stopping", "unconfirmed", "watcher"] {
+            store
+                .create_chat_session(&chat_session_fixture(chat))
+                .unwrap();
+        }
+        for chat in ["stopping", "unconfirmed"] {
+            ended_run_with_notice(&store, chat, chat, Some("t1"), Some(11));
+        }
+        store.subscribe_run("stopping", "watcher", 1).unwrap();
+        store
+            .insert_run_notice("stopping", "watcher", TERMINAL, TERMINAL, "finished", 1)
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE run_notices SET delivered_at = 11, client_turn_id = 'watcher:t1' WHERE chat_session_id = 'watcher'",
+                [],
+            )
+            .unwrap();
+        for chat in ["stopping", "unconfirmed", "watcher"] {
+            chat_turn(&store, chat, "t1", "completed", 10, 12);
+            assert!(shown_ids(&store, chat).is_empty(), "{chat} was answered");
+        }
+
+        store
+            .conn
+            .execute(
+                "UPDATE runs SET status = 'cancelled', contact = ?1 WHERE id = 'stopping'",
+                [serde_json::to_string(&Contact::Stopping { since: 1, count: 1 }).unwrap()],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE runs SET cancel_unconfirmed = '[123]' WHERE id = 'unconfirmed'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(shown_ids(&store, "stopping"), ["stopping"]);
+        assert_eq!(shown_ids(&store, "unconfirmed"), ["unconfirmed"]);
+        assert_eq!(shown_ids(&store, "watcher"), ["stopping"]);
+
+        store
+            .conn
+            .execute(
+                "UPDATE runs SET contact = NULL, cancel_unconfirmed = NULL",
+                [],
+            )
+            .unwrap();
+        for chat in ["stopping", "unconfirmed", "watcher"] {
+            assert!(shown_ids(&store, chat).is_empty(), "{chat} was settled");
+        }
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_run_with_a_contact_that_is_not_json_can_still_be_written_and_shown() {
+        let dir = std::env::temp_dir().join(format!("orx-store-shown-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat_1"))
+            .unwrap();
+        ended_run_with_notice(&store, "chat_1", "r1", None, None);
+        store
+            .conn
+            .execute("UPDATE runs SET contact = 'not json' WHERE id = 'r1'", [])
+            .unwrap();
+        store
+            .upsert_run(&run_fixture("r1", "done", Some("chat_1")))
+            .unwrap();
+        assert_eq!(shown_ids(&store, "chat_1"), ["r1"]);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn only_a_lost_run_shows_why_it_ended() {
+        let dir = std::env::temp_dir().join(format!("orx-store-shown-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat_1"))
+            .unwrap();
+        for (id, status) in [("lost", "lost"), ("done", "done")] {
+            ended_run_with_notice(&store, "chat_1", id, None, None);
+            store
+                .conn
+                .execute(
+                    "UPDATE runs SET status = ?2, result_markdown = ?3 WHERE id = ?1",
+                    params![id, status, format!("{id} result")],
+                )
+                .unwrap();
+        }
+        let reasons: Vec<_> = store
+            .chat_shown_runs()
+            .unwrap()
+            .into_iter()
+            .map(|row| (row.run.id, row.run.result_markdown))
+            .collect();
+        assert_eq!(
+            reasons,
+            [
+                ("done".to_string(), None),
+                ("lost".to_string(), Some("lost result".to_string()))
+            ]
+        );
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn shown_runs_cost_follows_what_is_live_not_history() {
+        const CHATS: usize = 20;
+        const OLD_RUNS: usize = 3000;
+        const TURNS_PER_CHAT: usize = 300;
+        let dir = std::env::temp_dir().join(format!("orx-store-shown-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        for chat in 0..CHATS {
+            store
+                .create_chat_session(&chat_session_fixture(&format!("chat_{chat}")))
+                .unwrap();
+        }
+        for chat in 0..CHATS {
+            chat_turn(
+                &store,
+                &format!("chat_{chat}"),
+                "answer",
+                "completed",
+                19,
+                20,
+            );
+        }
+        store
+            .conn
+            .execute(
+                "WITH RECURSIVE n(value) AS (SELECT 0 UNION ALL SELECT value + 1 FROM n WHERE value < ?1)
+                 INSERT INTO chat_turns (id, session_id, assistant_message_id, client_turn_id, request_hash,
+                                         prepared_input, settings_json, state, delivery_state, created_at, updated_at)
+                 SELECT 'long_' || c.id || '_' || n.value, c.id, 'assistant', 'long_' || n.value, 'hash',
+                        'prepared', '{}', 'completed', 'accepted', 1 + n.value % 15, 2 + n.value % 15
+                 FROM chat_sessions c, n",
+                [TURNS_PER_CHAT as i64 - 1],
+            )
+            .unwrap();
+        store.conn.execute_batch("BEGIN").unwrap();
+        for n in 0..OLD_RUNS {
+            let chat = format!("chat_{}", n % CHATS);
+            let mut run = run_fixture(&format!("old_{n}"), "done", Some(&chat));
+            run.experiment_id = format!("exp_{}", n % 50);
+            run.created_at = n as i64;
+            run.result_markdown = Some("long result ".repeat(100));
+            store.upsert_run(&run).unwrap();
+            store
+                .insert_run_notice(&run.id, &chat, TERMINAL, TERMINAL, "finished", 1)
+                .unwrap();
+        }
+        store
+            .conn
+            .execute("UPDATE run_notices SET delivered_at = 10", [])
+            .unwrap();
+        store.conn.execute_batch("COMMIT").unwrap();
+        store
+            .upsert_run(&run_fixture("live", "running", Some("chat_0")))
+            .unwrap();
+        store.subscribe_run("live", "chat_1", 1).unwrap();
+
+        let mut stmt = store.conn.prepare(&shown_runs_sql()).unwrap();
+        let mut shown = Vec::new();
+        let mut rows = stmt.query([]).unwrap();
+        while let Some(row) = rows.next().unwrap() {
+            shown.push((
+                row.get::<_, String>(0).unwrap(),
+                row.get::<_, String>(5).unwrap(),
+            ));
+        }
+        drop(rows);
+        assert_eq!(
+            shown,
+            [
+                ("chat_0".to_string(), "live".to_string()),
+                ("chat_1".to_string(), "live".to_string())
+            ]
+        );
+        let plan: Vec<String> = store
+            .conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {}", shown_runs_sql()))
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        for step in plan.iter().filter(|step| step.starts_with("SCAN")) {
+            let bounded = [
+                "chat_sessions",
+                "idx_runs_unsettled",
+                "idx_run_notices_pending",
+            ]
+            .iter()
+            .any(|name| step.contains(name));
+            assert!(bounded || step == "SCAN a", "walks history: {step}");
+        }
+        let replies: Vec<_> = plan
+            .iter()
+            .filter(|step| step.starts_with("SEARCH reply"))
+            .collect();
+        assert!(!replies.is_empty());
+        for step in replies {
+            assert!(
+                step.contains("idx_chat_turns_completed"),
+                "walks a long chat's turns: {step}"
+            );
+        }
+        assert_eq!(stmt.get_status(rusqlite::StatementStatus::AutoIndex), 0);
+        // The chats, and the shown runs once more to find the runs launched beside each.
+        assert!(
+            stmt.get_status(rusqlite::StatementStatus::FullscanStep)
+                <= (CHATS + shown.len()) as i32,
+            "walked {} rows of a table",
+            stmt.get_status(rusqlite::StatementStatus::FullscanStep)
+        );
+
+        drop(stmt);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_unknown_run_banner_level_reads_as_strip() {
+        let dir = std::env::temp_dir().join(format!("orx-store-shown-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store.set_tour_completed(true).unwrap();
+        store
+            .conn
+            .execute("UPDATE ui_state SET run_banner = 'ribbon'", [])
+            .unwrap();
+        let state = store.ui_state().unwrap();
+        assert_eq!(state.run_banner, RunBannerLevel::Strip);
+        assert!(state.tour_completed);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn shown_run_dismissal_is_shared_idempotent_and_checks_containment() {
+        let dir = std::env::temp_dir().join(format!("orx-store-shown-{}", uuid::Uuid::new_v4()));
+        let mut store = Store::open_at(dir.clone()).unwrap();
+        let other = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat_1"))
+            .unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("other"))
+            .unwrap();
+        store
+            .upsert_run(&run_fixture("r1", "running", Some("chat_1")))
+            .unwrap();
+        assert!(matches!(
+            store.dismiss_chat_run("chat_1", "r1").unwrap(),
+            RunDismissal::Refused(_)
+        ));
+        assert_eq!(
+            store.dismiss_chat_run("other", "r1").unwrap(),
+            RunDismissal::NotAssociated
+        );
+        store
+            .upsert_run(&run_fixture("r1", "cancelled", Some("chat_1")))
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE runs SET contact = ?1 WHERE id = 'r1'",
+                [serde_json::to_string(&Contact::Stopping { since: 1, count: 1 }).unwrap()],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.dismiss_chat_run("chat_1", "r1").unwrap(),
+            RunDismissal::Refused(_)
+        ));
+        store
+            .conn
+            .execute(
+                "UPDATE runs SET contact = '{\"type\":\"quarantined\"}' WHERE id = 'r1'",
+                [],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.dismiss_chat_run("chat_1", "r1").unwrap(),
+            RunDismissal::Refused(_)
+        ));
+        store
+            .conn
+            .execute(
+                "UPDATE runs SET contact = NULL, cancel_unconfirmed = '[123]' WHERE id = 'r1'",
+                [],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.dismiss_chat_run("chat_1", "r1").unwrap(),
+            RunDismissal::Refused(_)
+        ));
+        store
+            .conn
+            .execute(
+                "UPDATE runs SET cancel_unconfirmed = NULL WHERE id = 'r1'",
+                [],
+            )
+            .unwrap();
+        store
+            .insert_run_notice("r1", "chat_1", TERMINAL, TERMINAL, "stopped", 1)
+            .unwrap();
+        assert_eq!(other.chat_shown_runs().unwrap().len(), 1);
+        assert_eq!(
+            store.dismiss_chat_run("chat_1", "r1").unwrap(),
+            RunDismissal::Dismissed
+        );
+        assert_eq!(
+            store.dismiss_chat_run("chat_1", "r1").unwrap(),
+            RunDismissal::Dismissed
+        );
+        assert!(other.chat_shown_runs().unwrap().is_empty());
+        store
+            .conn
+            .execute("DELETE FROM runs WHERE id = 'r1'", [])
+            .unwrap();
+        assert_eq!(
+            store
+                .conn
+                .query_row("SELECT COUNT(*) FROM run_dismissals", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        store
+            .upsert_run(&run_fixture("r2", "done", Some("chat_1")))
+            .unwrap();
+        store.dismiss_chat_run("chat_1", "r2").unwrap();
+        store.delete_chat_session("chat_1").unwrap();
+        assert_eq!(
+            store
+                .conn
+                .query_row("SELECT COUNT(*) FROM run_dismissals", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        drop(other);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    impl Store {
+        pub(crate) fn run_monitor_events_for_tests(
+            &self,
+            run_id: &str,
+        ) -> Vec<(String, serde_json::Value)> {
+            let mut statement = self
+                .conn
+                .prepare(
+                    "SELECT kind, body_json FROM run_monitor_events WHERE run_id = ?1 ORDER BY seq",
+                )
+                .unwrap();
+            statement
+                .query_map([run_id], |row| {
+                    Ok((
+                        row.get(0)?,
+                        serde_json::from_str(&row.get::<_, String>(1)?).unwrap(),
+                    ))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        }
+
+        pub(crate) fn run_notices_for_tests(&self, run_id: &str) -> Vec<(String, String, String)> {
+            let mut statement = self
+                .conn
+                .prepare("SELECT chat_session_id, kind, body FROM run_notices WHERE run_id = ?1 ORDER BY id")
+                .unwrap();
+            statement
+                .query_map([run_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        }
+
+        pub(crate) fn conn_execute_for_tests(&self, sql: &str) {
+            self.conn.execute(sql, []).unwrap();
+        }
+
+        /// A chat of `harness` at `autonomy`, the default when none.
+        pub(crate) fn put_chat_session(&self, id: &str, harness: &str, autonomy: Option<&str>) {
+            self.create_chat_session(&StoredChatSession {
+                profile_id: None,
+                id: id.into(),
+                project_id: "project".into(),
+                harness: harness.into(),
+                native_session_id: None,
+                native_fork_at: None,
+                title: None,
+                title_source: None,
+                model: None,
+                service_tier: None,
+                permission_mode: None,
+                plan_mode: false,
+                plan_reset_pending: false,
+                reasoning_level: None,
+                archived: false,
+                context_usage_json: None,
+                bootstrap_context: None,
+                goal: None,
+                autonomy: autonomy.map(str::to_owned),
+                active_leaf_id: None,
+                side_parent_session_id: None,
+                side_parent_leaf_id: None,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .unwrap();
+        }
+
+        /// A notice the chat's notice loop claimed into turn `turn`, and whether it was delivered.
+        pub(crate) fn claim_run_notices_for_tests(&self, chat: &str, turn: &str, delivered: bool) {
+            self.conn
+                .execute(
+                    "UPDATE run_notices SET client_turn_id = ?2,
+                            delivered_at = CASE WHEN ?3 THEN 1 ELSE NULL END
+                     WHERE chat_session_id = ?1 AND delivered_at IS NULL",
+                    params![chat, turn, delivered],
+                )
+                .unwrap();
+        }
+
+        /// A turn of `chat` in `state`, as the chat's own writer leaves it.
+        pub(crate) fn put_chat_turn(&self, chat: &str, id: &str, state: &str, created_at: i64) {
+            self.conn
+                .execute(
+                    "INSERT INTO chat_turns (id, session_id, assistant_message_id, client_turn_id,
+                         request_hash, prepared_input, settings_json, state, delivery_state,
+                         created_at, updated_at)
+                     VALUES (?1, ?2, ?1, ?1, '', '', '{}', ?3, 'sent', ?4, ?4)",
+                    params![id, chat, state, created_at],
+                )
+                .unwrap();
+        }
+
+        /// Moves a run to `status` as its lifecycle would, without the rest of a commit.
+        pub(crate) fn set_run_status(&self, run_id: &str, status: &str) {
+            self.conn
+                .execute(
+                    "UPDATE runs SET status = ?2, updated_at = updated_at + 1 WHERE id = ?1",
+                    params![run_id, status],
+                )
+                .unwrap();
+        }
+
+        /// The rules a run was launched with, as `orx exp run` freezes them.
+        pub(crate) fn set_run_monitor_config(&self, run_id: &str, config: Option<&str>) {
+            self.conn
+                .execute(
+                    "UPDATE runs SET monitor_config_json = ?2 WHERE id = ?1",
+                    params![run_id, config],
+                )
+                .unwrap();
+        }
+
+        /// As a newer orx might have stored it.
+        pub(crate) fn put_run_monitor_state(&self, run_id: &str, state: &serde_json::Value) {
+            self.conn
+                .execute(
+                    "INSERT OR REPLACE INTO run_monitor_state (run_id, state_json) VALUES (?1, ?2)",
+                    params![run_id, state.to_string()],
+                )
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn run_monitor_state_goes_with_its_run() {
+        let dir = std::env::temp_dir().join(format!("orx-store-monitor-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .set_run_monitor_published("gone", &serde_json::json!({"rev": 1}))
+            .unwrap();
+        // An old orx's delete knows nothing of monitors.
+        store
+            .conn
+            .execute("DELETE FROM runs WHERE id = 'gone'", [])
+            .unwrap();
+        store
+            .conn
+            .execute("INSERT INTO runs (id, experiment_id, project_id, status, backend_json, created_at, updated_at) VALUES ('gone', 'e', 'p', 'done', '{}', 1, 1)", [])
+            .unwrap();
+        store
+            .conn
+            .execute("DELETE FROM runs WHERE id = 'gone'", [])
+            .unwrap();
+        assert!(store.run_monitor_state("gone").unwrap().is_none());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn ui_state_monitor_preferences_survive_old_writes() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/contracts/run-monitor-ui-state.json"))
+                .unwrap();
+        let dir = std::env::temp_dir().join(format!("orx-store-shown-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("orx.db");
+        let old = Connection::open(&db).unwrap();
+        old.execute_batch(include_str!("../tests/contracts/ui-state-v0.2.24.sql"))
+            .unwrap();
+        drop(old);
+        let store = Store::open_at(dir.clone()).unwrap();
+        let state = serde_json::to_value(store.ui_state().unwrap()).unwrap();
+        for (key, value) in fixture["defaults"].as_object().unwrap() {
+            assert_eq!(&state[key], value);
+        }
+        store.set_run_banner(RunBannerLevel::Line).unwrap();
+        store.set_experiments_grid(true).unwrap();
+        drop(store);
+        let old = Connection::open(&db).unwrap();
+        old.execute("UPDATE ui_state SET preferred_harness = 'codex', preferred_model = 'test', tour_completed = 1 WHERE id = 1", []).unwrap();
+        drop(old);
+        let store = Store::open_at(dir.clone()).unwrap();
+        let state = serde_json::to_value(store.ui_state().unwrap()).unwrap();
+        for (key, value) in fixture["saved"].as_object().unwrap() {
+            assert_eq!(&state[key], value);
+        }
+        assert_eq!(state["preferredAgent"]["harness"], "codex");
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn ui_state_roundtrips_functional_preferences() {
         let dir = std::env::temp_dir().join(format!("orx-store-ui-state-{}", uuid::Uuid::new_v4()));
@@ -9643,6 +11733,9 @@ mod tests {
                 model_section_order: Vec::new(),
                 collapsed_model_sections: Vec::new(),
                 model_sightings: None,
+                run_banner: RunBannerLevel::Strip,
+                experiments_grid: false,
+                run_watching: true,
             }
         );
 
@@ -9695,6 +11788,9 @@ mod tests {
                 model_section_order: vec!["openai".into(), "anthropic".into()],
                 collapsed_model_sections: vec!["openai".into()],
                 model_sightings: Some(serde_json::json!({"seen": ["gpt-6"]})),
+                run_banner: RunBannerLevel::Strip,
+                experiments_grid: false,
+                run_watching: true,
             }
         );
         let _ = std::fs::remove_dir_all(&dir);

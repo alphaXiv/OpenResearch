@@ -267,22 +267,35 @@ impl Engine {
 
     /// Before the fence cancel is immediate; after it, the backend's stop proof decides the result.
     pub async fn cancel(&self, backend: &dyn Backend, run_id: &str, reason: &str) -> Result<bool> {
-        if !self.accept_cancel(run_id, reason)? {
+        self.stop(backend, run_id, reason, None).await
+    }
+
+    /// [`Self::cancel`], recording who stopped the run.
+    pub async fn stop(
+        &self,
+        backend: &dyn Backend,
+        run_id: &str,
+        reason: &str,
+        stop: Option<&crate::store::StopContext>,
+    ) -> Result<bool> {
+        if !self.accept_stop(run_id, |store| {
+            store.accept_run_stop(run_id, Some(reason), stop)
+        })? {
             return Ok(false);
         }
         self.deliver_cancel(backend, run_id).await?;
         Ok(true)
     }
 
-    /// The half of [`Self::cancel`] that needs no backend: records the intent and ends a run
-    /// that never launched.
-    pub fn accept_cancel(&self, run_id: &str, reason: &str) -> Result<bool> {
-        if !self.own(run_id)?
-            || self
-                .store()
-                .accept_run_cancel(run_id, Some(reason))?
-                .is_none()
-        {
+    /// The half of [`Self::cancel`] that needs no backend: records the intent that `accept`
+    /// gives the store, which returns when the run's cancel was accepted, and ends a run that
+    /// never launched.
+    pub fn accept_stop(
+        &self,
+        run_id: &str,
+        accept: impl FnOnce(&crate::store::Store) -> Result<Option<i64>>,
+    ) -> Result<bool> {
+        if !self.own(run_id)? || accept(&self.store())?.is_none() {
             return Ok(false);
         }
         // Recovery decides a fenced launch with the cancel in hand, so it does not wait out a

@@ -1,0 +1,95 @@
+{
+  "signalsSummary": {
+    "generation": "g1",
+    "revision": 1,
+    "cursor": 4,
+    "coverage": {
+      "complete": false
+    },
+    "latest": {
+      "loss": "NaN"
+    },
+    "progress": {
+      "done": 100,
+      "of": 100
+    },
+    "diagnostics": {},
+    "error": null
+  },
+  "readSignals": {
+    "op": "read_signals",
+    "run": "r1",
+    "generation": "g1",
+    "revision": 1,
+    "offset": 0,
+    "length": 1048576
+  },
+  "changes": {
+    "op": "changes",
+    "runs": [
+      [
+        "r1",
+        {
+          "state": {
+            "phase": "running"
+          },
+          "log_len": 4,
+          "notify_len": 0,
+          "cleanup": null
+        }
+      ]
+    ],
+    "answered_at": 1794000000000
+  },
+  "olderChanges": {
+    "op": "changes",
+    "runs": [
+      [
+        "r1",
+        {
+          "state": {
+            "phase": "running"
+          },
+          "log_len": 4,
+          "notify_len": 0,
+          "cleanup": null
+        }
+      ]
+    ]
+  },
+  "inspect": {
+    "op": "inspect",
+    "summary": {
+      "state": {
+        "phase": "running"
+      },
+      "log_len": 4,
+      "notify_len": 0,
+      "cleanup": null
+    },
+    "answered_at": 1794000000000
+  },
+  "olderInspect": {
+    "op": "inspect",
+    "summary": {
+      "state": {
+        "phase": "running"
+      },
+      "log_len": 4,
+      "notify_len": 0,
+      "cleanup": null
+    }
+  },
+  "readSignalsAnswer": {
+    "op": "read_signals",
+    "page": {
+      "kind": "data",
+      "generation": "g1",
+      "revision": 1,
+      "offset": 0,
+      "total": 3,
+      "bytes": "AQID"
+    },
+    "answered_at": 1794000000000
+  }
+}

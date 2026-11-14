@@ -103,6 +103,13 @@ The engine delivers the stop once per connection, whenever the machine is reacha
 
 `ui/src/runDisplay.ts` builds the dashboard's labels from these fields.
 
+The first accepted cancel keeps who asked for it beside its reason, in the same
+statement: the user (the dashboard, or `orx exp cancel` outside a chat), the
+chat's agent (`orx exp cancel` from its chat, with its `--reason`), or a rule.
+A later stop, of any kind, never replaces it, and a cancel from before this was
+kept has no one recorded, never one guessed from its words. A cancelled run's
+`outcome` says who.
+
 **Abandon** ends an unfinished run with no live contact, or whose stop its backend keeps refusing, as lost and sends the terminal notice. The kill stays pending: a terminal run without live contact is a **tombstone**, still watched, whose stop is delivered whenever the job or host returns, and which settles on the next proof that nothing is left.
 
 ### Logs
@@ -157,3 +164,272 @@ The rules around it (`crates/orx-host/src/rental.rs`, `src/engine/adapters/openr
 - **No research data crosses this protocol.** Logs, commands, source, experiment IDs, outcomes and artifacts never reach the billing service.
 - **Collection is bounded by the box's life.** Once release is verified, the local copy is the kept log, even if empty. A run whose final outcome went with the machine ends as lost, with the service's reason when it reports the box failed or dead.
 - **Rentals from 0.2 stay `Handle::Legacy`.** The engine inspects their run directory on the box and collects their logs; it never launches on them.
+
+## Run signals
+
+Payloads may print `::orx:: {"step":1,"of":5000,"t":1.5,"m":{"loss":2.31}}`.
+Progress is advisory: no measurement finishes a run or proves containment.
+The vendored `orx_run.py` helper is available through `orx skill compute/assets/orx_run.py`.
+Metrics live under `m`; `spend` is cumulative paid-service USD, separate from rental cost.
+Declared progress wins over detected tqdm bars, epoch starts and counters that open a line,
+alone, in brackets or after a noun runs count (`chunk 3/10 done`).
+Detection requires two compatible reports; ordinary fractions in prose are ignored.
+One detected bar is the run's progress while it is below its total. Once it is
+full and the run goes on, or a bar restarts and the run has several, how much of
+the run is done is unknown, though each bar still shows its step of total.
+
+The same bounded fold runs beside native host logs and over API spools on the
+workspace machine. Its checkpoint commits unfinished frame bytes, byte cursor,
+latest values and bounded history together. A restart resumes that checkpoint;
+a replaced or shortened log starts a new generation. A spool cut back to where
+its provider continues is the exception: its checkpoint stands while the bytes
+past that point are fetched again, which resume it if they return the same and
+are another log if not. Corrupt checkpoints are
+retained with their path in diagnostics and rebuilt from readable raw bytes.
+Replayed bytes without payload or bar times do not invent timing observations.
+The first phase starts when the payload started, as the host recorded it, even
+on a first scan. Payload `t` gives only durations, within a stretch where it
+does not fall: a relaunched process starts a new one, and its first report's
+step is taken as is, so a resume from an older checkpoint moves progress back
+and redraws the steps it redoes. Reports are placed in
+time by the last advance, which was written no later than the log last changed:
+a scan that reaches the end of the log places it at the earlier of that and the
+scan's time, so a run that hung during an outage or before anyone looked shows
+its silence. Every time in a checkpoint is on the clock that folded it. Each
+answer from a host carries the host's clock; a successful collection stores it
+with the laptop's time of receipt, and that pair maps the laptop's clock onto
+the host's, so clock skew changes nothing and a silent run's clock stays
+current. A fold the laptop continues from a host's checkpoint writes host times
+through the same pair.
+
+Finished runs owe signal collection independently of log collection. The end
+of a run is one decision over what is persisted: the host's checkpoint, the
+log the laptop kept, and whether the host can still be asked. Before release
+the host gets one time-bounded request to fold to the end of its log; the
+release then happens once, whatever that did. While the host still has the
+run, its checkpoint is the answer and failures retry with the log debt's
+backoff, telling the chat once on the seventh. Once it cannot be asked
+(released, deleted or cleaned up), the laptop continues the host's checkpoint
+over the bytes it kept, a pass at a time to a deadline so other runs keep their
+turn, resumed across restarts, then settles: complete, or incomplete with one
+notice naming the most specific cause, such as how the host went over an
+earlier failure to reach it. A checkpoint is never replaced by one that knows
+less: a kept log that does not reach its cursor leaves it standing, settled
+incomplete. A log folded again from its start (a spool started over or
+refetched with other bytes, a replaced log read through byte pages) is a rebuild, staged beside the
+published checkpoint and resumed across passes and restarts; it replaces that
+checkpoint once it covers the same bytes, and if its log ends first the
+published one stands, incomplete. A checkpoint that cannot be read is unknown, never absent, and so
+is a kept file that is gone: each settles incomplete, naming the file. A run that
+never launched, has not started or reported no signals has nothing to keep: it
+settles quietly and status prints no signal error for it. Status says which of
+these a run is in.
+
+Live collection follows lifecycle updates under a shared tick budget; a run the
+budget does not reach keeps its status and goes first on the next tick. A paged
+transfer keeps its identity across ticks.
+Status labels delayed collection, the laptop's last successful collection time,
+and the host data time separately. A completed bar never replaces a lifecycle
+receipt.
+
+### The monitor
+
+A run's monitor is one projection (`src/engine/monitor.rs`) of its checkpoint,
+the estimator and its lifecycle: the summary every `Run` carries, the whole
+monitor `GET /api/runs/:id/monitor` serves, and the text `orx exp status`
+prints, all at one `rev`. The estimate is evaluated once on the server, from
+the collection's clock pair, and stamped with when; pages only count down.
+A run with no total fills against its time limit, and so does one that drew
+several progress bars, since how many are still to come is unknown: its bar is
+one segment, never a row of finished ones. The estimate is left out only when
+how much of the run is left is unknown, and is pending only while a reported
+total waits on its pace, which the summary says, so a line and a strip word it
+alike. Time left from a bar or counter read from the log is a floor for the
+run, with no range or finishing time, since more work may follow it; only a
+total the run declared promises when it ends. A run that has reported no progress, as most never will, counts down to
+its time limit or says it has reported none. Cost comes only from what a
+run records: its declared spend, and nothing invented for a machine without a
+known rate. Without a view of its own, a run is drawn from what it reported: the
+first measure it printed on its own heads it and is charted over step, then a
+table for each table it reported, then its other measures; a row's columns stay
+in their table. A run that reports only rows leads with its first row's table.
+The order is kept in the checkpoint, so a restart draws the same.
+
+A view of its own is markup the chat's agent writes on an experiment with
+`orx exp view set` (`src/engine/view.rs`): `signal` declarations that name,
+label and round what the run reports, then one `view` of blocks. The
+experiment stores the text as written and every read derives the tree from it,
+so there is one copy; a child experiment starts with a copy of its parent's,
+as it does of the run command, and a later edit to the parent leaves it be.
+Saving checks every name the view draws against what the experiment's runs
+reported: a name not reported yet is pending, since it may come in a later
+stage, but once runs report, a name they never did is refused with the names
+they did. A view changes what is shown, never what runs: saving one draws the
+experiment's runs again, and an open page starts over from it. A saved view
+this orx cannot read draws the default and `orx exp status` says why.
+
+A log an agent cannot change is read with patterns saved beside the view
+(`orx exp view set --pattern`): each line the first matching regex fits
+becomes a record, as if the run had printed it, with fixed or captured
+step, total, stage, unit and table row, and `name`/`value` groups naming a
+signal. The fold applies them where it runs, on the host or this machine,
+from a configuration file beside the run's checkpoint that orx keeps in step
+with the experiment and sends to a host at its next collection. New patterns
+fold each run's log again from its start into a new generation, which
+replaces the old one only once it has read as far: a live run at its next
+collection, an ended one from the log kept here. A counter read by a pattern
+promises only itself, as a detected one does. `orx exp view check` folds the
+run's log as it reads now with the patterns and says what each one matched.
+
+A run compares with its parent experiment's latest run that finished with
+signals, else its newest with signals, for each signal whose view declares
+which way is better: at the same stage and step, interpolated only between
+steps both reported, and, while its stage has no steps, against what an
+ended parent reported last; a table's column is no result to compare.
+Anything else is no comparison, never a level one. A parent's checkpoint is read once and held; a live one is taken from its
+own projection.
+
+Time the laptop did not watch is unknown. A live run whose last collection is
+older than collection's own once-a-minute heartbeat reads as stale, and its
+estimate and stall stay where that collection left them until one succeeds.
+A rebuilding checkpoint reads as rebuilding, never as lost contact.
+
+`rev` and `seriesRev` only grow, across restarts too: `run_monitor_state` keeps
+a pointer to what was last published and the summary it numbered, never the
+monitor. Only `orx up` publishes, from one task that projects live runs each
+second, at once on a lifecycle change, and every ten seconds for what time alone
+moves. A checkpoint the laptop publishes is handed to the projection in memory,
+so the hot path never reads one back, and a status rewrite that changes nothing
+the projection reads projects nothing. Readers never wait on a projection under
+way: they get the last one published. An ended run is listed from its stored
+summary and its checkpoint is read only when it is opened; the cache holds live
+runs and a few ended ones. An event carries the points and rows a run gained on
+the basis it names, never a whole table. `orx exp status` reads the running
+server's monitor and, with none running, projects the same from disk without
+publishing; both write time as the page does.
+
+A projection that fails, because the store refused a read or a write or the
+projection broke, is said to every reader until one succeeds: the summary loses
+its time left, takes its tone from the lifecycle and carries why, the run stays
+watched whether or not it has ended, and a read tries again. A `run.monitor`
+reset and a `run.updated` go out when it starts failing and when it recovers.
+The log says the cause when it starts, when it changes and when it ends.
+
+### Rules
+
+An agent declares rules beside an experiment's stage plan (`orx exp view set
+--config`, `src/engine/rules.rs`): each names one bounded condition on what a run
+reports, never an expression, and stops the run or raises a flag. A child
+experiment starts with a copy, and a run freezes the rules it was launched with,
+so editing them changes only later runs; `--budget` adds one. Only `orx up`
+checks them, in the projection's pass, and only on a running run whose contact
+and data are live and whose stop is not already under way: what it cannot see
+stops nothing. Each pass counts the reports a run made since the last, by where
+they fall on the signal's axis, and a rule acts only if its condition holds once
+they are counted, so a value that already recovered, as in history read after a
+sleep, stops nothing. What each rule counted, and that it acted, is kept with
+the run's monitor state in the transaction that records the event, the flag
+an `ask` raises and a `stop`'s cancel, so a restart neither counts a report twice
+nor acts twice. A rule on the estimate (cost or the time limit) acts only on a
+pace measured over four slices and seen on two revisions; spend already past a
+budget stops at once. A stop goes through the engine's cancel, the first stop
+wins, and the run is Auto-stopped by that rule, with no model involved.
+
+A stopped run reads **Revising** while the chat's agent repairs its experiment:
+`orx exp revise EXP --run RUN`, from that agent's chat during its turn, records
+the turn against the experiment's newest run, if that run was stopped. The
+server derives the state, never stores it: it holds while that turn is going
+and no run of the experiment has started since, and ends by itself when either
+changes. The monitor task keeps such a run watched, so its line hears at once.
+Nothing claims the repair happened; the next run is the proof.
+
+### The watcher
+
+One cheap model per chat watches the chat's runs and writes each run's sentence
+(`src/engine/watch.rs`). Which model is one function's answer: Claude Code's
+Haiku one-shot on Claude Code, the GPT Luna Codex's own catalog offers on Codex,
+and on any other agent none until the user picks one. A look is a one-shot with
+no tools: Claude Code's are switched off by flag, Codex's by its feature switches
+with a turn that starts one anyway stopped and its answer refused. A harness that
+cannot promise that is not used.
+
+Every few seconds a pass reads each live run's new log lines for these checks
+and the tripwires, only up to where the run's fold has read, as its checkpoint
+says: an idle run costs no read, a remote one reads its host only for bytes
+collection has seen it print, and each read is bounded in time. Counted patterns caught up with the pass count the lines
+it read. A run's owner is the chat that last looked at it, else the first chat
+following it that has a watching model. One look covers every live run the chat owns, at
+most six a call and four calls a slot. It is due when something changes: a
+number the sentence binds, or the view leads with, leaves its trend (a jump that
+holds is judged against the points before it), a comparison with the parent
+changes sign or turns far worse, a counted pattern moves, a stage starts or ends, the stage runs at least
+twice the parent's pace, or the log prints a kind of warning it has not printed
+before. A run's first look is due for the same changes from its start, a stage
+starting aside. Between changes, a ladder from each stage's start (1, 2, 5, 10, 20
+minutes, then the experiment's `maxGapS`) bounds the silence while the run keeps
+printing; with nothing new there is no look. Looks a change brings keep the
+chat's `minGapS` between them and never outnumber the ladder's points since the
+oldest run started. A look answered `same` doubles the threshold of the check
+that brought it. A run gets one last look when it ends, shared with siblings
+ending within a minute; one that fails or is interrupted is taken once more, and
+a second failure stands in the journal as the run's last look.
+
+A look's request, system prompt and digest together, is held to 4,096 tokens,
+counted as two bytes a token, and never past 16 KiB: the brief, each run's
+progress, signals and last three sentences, the log's head and its new lines,
+new kinds of warning first, repeats said once with their count. Older points and
+sentences go first when it is too long, and the journal says what each look
+left out. Each field and log line passes
+sharing's credential scan as written, before it is clipped or encoded; one that
+matches is left out, saying so, and the journal tells the user once where it is.
+A retry's reply is scanned before it goes back. A reply is strict JSON: each number that can
+move is a token orx fills, exactly one figure is bold, a sentence reads at most
+90 characters filled, and a number written as the value it reads now is refused.
+One retry carries what was wrong; a run whose answer stays wrong keeps its last
+sentence. Each look is a row written before it is sent and settled in one
+transaction; a look `orx up` stopped after sending is recorded as interrupted and
+never sent again, so evidence is never lost and a model is never billed twice
+for one look. A look that flags raises a flag in the transaction that settles it;
+on a run with a flag still open it is noted under that flag instead, its row a
+sentence that says so and its words a line beside the open flag's evidence.
+
+### Flags
+
+A flag says a run may be going wrong and never stops it (`src/engine/flags.rs`).
+Three things raise one: a look, a rule that asks, and orx's own tripwires, which
+watch every live run whether or not a model does (`src/engine/watch/trip.rs`): a
+value that is not a number, unless a rule the run was launched with checks that
+signal for it; a signal at least half again worse than the parent's at the same
+step on three comparisons in a row, unless a rule compares it with the parent;
+no progress past the estimator's stall threshold, saying whether
+the log went silent too; a run that reports no progress and prints nothing for
+ten minutes; a kind of error line the run has not printed before. A flag keeps
+the log lines it cites, by bytes, line numbers and the log's identity, and the
+look that raised it groups the flags of runs it saw together.
+
+A run has at most one open flag from a look or a tripwire, so a trouble that
+lasts wakes once; a tripwire condition is raised once a run. Keep going settles
+that run's flag only: a later run of the experiment with the same cause is
+flagged again, since a missed problem costs more than an extra flag. The flag and the notices that
+wake each following Agentic chat are written in one transaction; a Copilot chat
+is woken only when its user asks. A wake says the watcher saw only a digest and
+none of the chat, cites the lines and how to settle it, and is frozen when it is
+written; a chat past 70% of its context is compacted, in the turn slot the wake
+already holds, before it is sent. A wake not yet claimed when its run ends is
+withdrawn, since the run's end is its own notice; a flag raised on an ended run
+still wakes, to be weighed against the result.
+
+What became of a flag is read back, never stored: its choices in the run's
+journal and the notice and turn that carried it give its state. An Agentic flag
+is raised, then waking, then the agent is looking; a turn that ends without
+settling it, an agent's `--ask` and a Copilot flag wait for the user, who sees
+Stop run, Keep going and Ask in the strip and an amber mark on the chat's row.
+`orx exp flag RUN --flag ID --keep|--ask|--stop` and the strip send one choice;
+a repeated request id answers as the first did, and a settled flag, or one on a
+run that ended or whose stop was accepted, is refused. Keep going settles it and
+the run's next looks read what was kept and why. Stop records its choice and
+accepts the run's stop, with whose words it is, in one transaction under the
+run's cancel lock, then delivers it as `orx exp cancel` does, so of a Stop, a
+Keep and the agent's own cancel exactly one wins. Ask sends
+the flag, and every open flag its look raised beside it, to the chat's agent as
+one turn.

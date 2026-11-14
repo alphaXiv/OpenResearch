@@ -132,10 +132,55 @@ impl LocalPlane {
 
     // --- experiment -------------------------------------------------------
 
-    pub async fn experiment_status(&self, scheduler: bool) -> Result<()> {
+    pub async fn experiment_status(
+        &self,
+        scheduler: bool,
+        run_id: Option<&str>,
+        json: bool,
+    ) -> Result<()> {
         let store = &self.store;
         let exp = self.experiment()?;
-        println!("{}  ({})  [local]", exp.display_name(), exp.agent_status);
+        let runs = store.list_runs_by_experiment(&exp.id)?;
+        let selected = match run_id {
+            Some(id) => Some(
+                runs.iter()
+                    .find(|run| run.id == id)
+                    .ok_or_else(|| anyhow!("Run {id} does not belong to experiment {}", exp.id))?,
+            ),
+            None => runs
+                .iter()
+                .find(|run| matches!(run.status.as_str(), "submitting" | "starting" | "running"))
+                .or_else(|| runs.first()),
+        };
+        let monitor = match selected {
+            Some(row) => Some(run_monitor(store, row).await?),
+            None => None,
+        };
+        if json {
+            let state = selected
+                .map(|row| -> Result<_> {
+                    let run = Run::from_store(store, row)?;
+                    Ok(serde_json::json!({
+                        "contact":run.contact,
+                        "cancelling":run.cancelling,
+                        "cancelUnconfirmed":run.cancel_unconfirmed,
+                        "displayStatus":run.display_status(),
+                    }))
+                })
+                .transpose()?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "experiment":exp,
+                    "run":selected,
+                    "state":state,
+                    "monitor":monitor,
+                }))?
+            );
+            return Ok(());
+        }
+        // The run's own line below says its state; an experiment's `agent_status` is never set.
+        println!("{}  [local]", exp.display_name());
         println!("  id:       {}", exp.id);
         println!("  branch:   {}", exp.branch_name);
         if exp.archived {
@@ -161,19 +206,24 @@ impl LocalPlane {
             ),
         }
 
-        match store.latest_run_for_experiment(&exp.id)? {
+        match runs.first() {
             Some(r) => {
                 let state = store.engine_run_state(&r.id)?;
-                let run = Run::from_store(store, &r)?;
+                let run = Run::from_store(store, r)?;
                 let commit = run
                     .commit_sha
                     .as_deref()
                     .map(|s| s.chars().take(7).collect::<String>())
                     .unwrap_or_else(|| "—".to_string());
+                let state_prefix = if selected.is_some_and(|selected| selected.id == run.id) {
+                    String::new()
+                } else {
+                    format!("{}, ", run.display_status())
+                };
                 println!(
-                    "  last run: {} ({}, commit {}, ran {}, updated {})",
+                    "  last run: {} ({}commit {}, ran {}, updated {})",
                     run.id,
-                    run.display_status(),
+                    state_prefix,
                     commit,
                     crate::output::format_duration(run.duration_secs),
                     run.updated_display
@@ -257,6 +307,9 @@ impl LocalPlane {
                 println!("  older live run {}: {error}", older.id);
             }
         }
+        if let Some(text) = monitor.as_ref().and_then(|m| m["statusText"].as_str()) {
+            println!("{text}");
+        }
         Ok(())
     }
 
@@ -312,10 +365,14 @@ impl LocalPlane {
         Ok(())
     }
 
-    pub async fn cancel(&self, run: Option<&str>) -> Result<()> {
+    pub async fn revise(&self, run: &str) -> Result<()> {
+        ApiClient::discover().await?.revise(&self.id, run).await
+    }
+
+    pub async fn cancel(&self, run: Option<&str>, reason: Option<&str>) -> Result<()> {
         ApiClient::discover()
             .await?
-            .cancel(Some(&self.id), run)
+            .cancel(Some(&self.id), run, reason)
             .await
     }
 
@@ -424,6 +481,42 @@ impl LocalPlane {
         super::checkout_hint::print(&project.repo_path, &experiment.branch_name);
         Ok(())
     }
+}
+
+/// The status line's progress: `[<percent>%  ][<phase> · ]step <done>[ of <of>]`. A run with
+/// several detected bars has no whole-run percentage.
+/// The run's monitor as `orx up` serves it, at the `rev` the page shows; read from the store
+/// and the run's signals when no server is running, which publishes nothing.
+async fn run_monitor(store: &Store, run: &crate::store::StoredRun) -> Result<serde_json::Value> {
+    use crate::commands::remote_host::{canonical_data_dir, ServerDescriptor};
+    let server = match ServerDescriptor::agent_session(
+        std::env::var("ORX_UP_PORT").ok(),
+        std::env::var("ORX_UP_AUTH_TOKEN").ok(),
+    )? {
+        Some(server) => Some(server),
+        None => ServerDescriptor::live(&canonical_data_dir()?).await?,
+    };
+    if let Some(server) = server {
+        let response = ApiClient::new(server)?
+            .request(reqwest::Method::GET, &format!("runs/{}/monitor", run.id))
+            .send()
+            .await;
+        match response {
+            Ok(response) if response.status().is_success() => return Ok(response.json().await?),
+            // An older server has no monitors to serve.
+            Ok(response) if response.status() == reqwest::StatusCode::NOT_FOUND => {}
+            Ok(response) => eprintln!(
+                "orx up could not serve run {}'s monitor ({}); reading it from disk.",
+                run.id,
+                response.status()
+            ),
+            Err(error) => eprintln!(
+                "orx up could not serve run {}'s monitor ({error}); reading it from disk.",
+                run.id
+            ),
+        }
+    }
+    crate::engine::monitor::offline(store, run, crate::store::now_ms())
 }
 
 fn experiment_wait_progress(run: Option<(&str, &str)>, last_status: &mut Option<String>) {
@@ -669,6 +762,48 @@ impl ApiClient {
         Ok(())
     }
 
+    pub async fn revise(&self, experiment: &str, run: &str) -> Result<()> {
+        let request = serde_json::json!({
+            "experimentId": experiment,
+            "chatSessionId": crate::local::chat::launching_chat_session(),
+        });
+        let path = format!("runs/{}/revise", urlencoding::encode(run));
+        self.json(reqwest::Method::POST, &path, Some(&request))
+            .await?;
+        println!(
+            "\u{2713} Run {run} shows as Revising until experiment {experiment}'s next run starts or this turn ends."
+        );
+        Ok(())
+    }
+
+    pub async fn flag(
+        &self,
+        run: &str,
+        flag: &str,
+        choice: &str,
+        reason: Option<&str>,
+    ) -> Result<()> {
+        let request = serde_json::json!({
+            "flagId": flag,
+            "choice": choice,
+            "reason": reason,
+            "chatSessionId": crate::local::chat::launching_chat_session(),
+            "requestId": uuid::Uuid::new_v4().to_string(),
+        });
+        let path = format!("runs/{}/flag", urlencoding::encode(run));
+        self.json(reqwest::Method::POST, &path, Some(&request))
+            .await?;
+        println!(
+            "{}",
+            match choice {
+                "keep" => format!("\u{2713} Flag {flag} on run {run} settled: it keeps going. The watcher's next look reads why."),
+                "stop" => format!("\u{2713} Flag {flag} settled: run {run} is stopping."),
+                _ => format!("\u{2713} Flag {flag} on run {run} now waits for the user, who sees it with Stop run and Keep going."),
+            }
+        );
+        Ok(())
+    }
+
     pub async fn abandon(&self, run: &str) -> Result<()> {
         let path = format!("runs/{}/abandon", urlencoding::encode(run));
         self.json(reqwest::Method::POST, &path, None).await?;
@@ -676,7 +811,12 @@ impl ApiClient {
         Ok(())
     }
 
-    pub async fn cancel(&self, experiment: Option<&str>, selected: Option<&str>) -> Result<()> {
+    pub async fn cancel(
+        &self,
+        experiment: Option<&str>,
+        selected: Option<&str>,
+        reason: Option<&str>,
+    ) -> Result<()> {
         let path = match (experiment, selected) {
             (_, Some(run)) => format!("runs/{}", urlencoding::encode(run)),
             (Some(experiment), None) => {
@@ -723,6 +863,7 @@ impl ApiClient {
         for id in in_flight {
             let request = serde_json::json!({
                 "chatSessionId": crate::local::chat::launching_chat_session(),
+                "reason": reason,
             });
             let run: Run = serde_json::from_value(
                 self.json(

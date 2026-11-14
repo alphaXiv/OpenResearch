@@ -521,6 +521,12 @@ pub enum ExpCommand {
         /// Query live Slurm accounting in addition to locally stored status.
         #[arg(long)]
         scheduler: bool,
+        /// Inspect a particular run belonging to this experiment.
+        #[arg(long)]
+        run: Option<String>,
+        /// Print stored experiment, run and signal checkpoint as JSON.
+        #[arg(long)]
+        json: bool,
     },
 
     /// View the experiment's description/notes, or overwrite it with `--set` / `--stdin`.
@@ -544,6 +550,39 @@ pub enum ExpCommand {
         /// Cancel only this run. With an experiment id, the run must belong to it.
         #[arg(long)]
         run: Option<String>,
+        /// Why the run is being stopped, kept on the run and shown with it.
+        #[arg(long)]
+        reason: Option<String>,
+    },
+
+    /// Mark a stopped run as being repaired by this chat's agent, so it shows as Revising until
+    /// the experiment's next run starts or this turn ends.
+    Revise {
+        exp_id: String,
+        /// The stopped run the repair follows: the experiment's newest.
+        #[arg(long)]
+        run: String,
+    },
+
+    /// Settle a flag on a run: keep it going, stop it, or leave the choice to the user.
+    #[command(group(clap::ArgGroup::new("choice").required(true).args(["keep", "ask", "stop"])))]
+    Flag {
+        run: String,
+        /// The flag, as the wake or `orx exp status` names it.
+        #[arg(long = "flag")]
+        flag: String,
+        /// The run is fine: keep it going. The watcher's next look reads the reason.
+        #[arg(long)]
+        keep: bool,
+        /// Leave the choice to the user, who sees the flag with Stop run and Keep going.
+        #[arg(long)]
+        ask: bool,
+        /// Stop the run, as `orx exp cancel` does.
+        #[arg(long)]
+        stop: bool,
+        /// Why, kept with the choice and shown with the run.
+        #[arg(long)]
+        reason: Option<String>,
     },
 
     /// Abandon a run whose outcome cannot be recovered; keep its cancel pending.
@@ -551,6 +590,12 @@ pub enum ExpCommand {
 
     /// Send this chat the result of the experiment's latest run when it finishes.
     Wake { exp_id: String },
+
+    /// Set, read or check the view an experiment's runs are drawn with.
+    View {
+        #[command(subcommand)]
+        command: ViewCommand,
+    },
 
     /// Wait for a run to finish: one experiment (`<expId>`) or the next completion in a project (`--project`).
     Wait {
@@ -570,6 +615,56 @@ pub enum ExpCommand {
         /// Seconds between retries while the local database is busy (default 5).
         #[arg(long, hide = true)]
         interval: Option<u64>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ViewCommand {
+    /// Save the view this experiment's runs are drawn with, its patterns, its stage plan, or any
+    /// of them; experiments created under it later start with a copy.
+    #[command(group(clap::ArgGroup::new("view_input").multiple(false)))]
+    #[command(group(clap::ArgGroup::new("view_change").required(true).multiple(true).args(["file", "stdin", "pattern", "config"])))]
+    Set {
+        exp_id: String,
+        /// Read the view's markup from this file.
+        #[arg(long, group = "view_input")]
+        file: Option<std::path::PathBuf>,
+        /// Read the view's markup from standard input.
+        #[arg(long, group = "view_input")]
+        stdin: bool,
+        /// Read signals from the run's log with the JSON list of patterns in this file:
+        /// `[{"regex": "…", "phase": "…", "unit": "…", "row": "…"}]`. Its runs' logs are read again.
+        #[arg(long)]
+        pattern: Option<std::path::PathBuf>,
+        /// Read the experiment's config from this JSON file: the stages every run goes through,
+        /// `"plan": [{"phase": "…", "of": N, "unit": "…"}]`; the rules orx stops or asks by,
+        /// `"rules": [{"name": "…", "text": "…", "does": "stop|ask", "when": {…}}]`; what the
+        /// watcher is told, `"brief": {"question": "…", "healthy": "…", "noise": "…",
+        /// "worth_a_flag": "…"}`; and its gaps, `"watch": {"minGapS": 120, "maxGapS": 1800}`. An
+        /// empty value clears that key; a key left out keeps what is saved.
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
+    },
+    /// Print the experiment's saved view, or the one orx draws when none is saved.
+    Get {
+        exp_id: String,
+        /// Print the markup, its tree and where it comes from as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check a view against what a run reported: the experiment's saved view, or the one in --file;
+    /// with patterns, saved or in --pattern, what each matches in the run's log now.
+    Check {
+        run_id: String,
+        /// Check this file's markup instead of the saved view.
+        #[arg(long)]
+        file: Option<std::path::PathBuf>,
+        /// Check this file's patterns instead of the saved ones.
+        #[arg(long)]
+        pattern: Option<std::path::PathBuf>,
+        /// Print what the run reported and what the view draws as JSON.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -689,6 +784,11 @@ pub struct ExpRunArgs {
     /// Launch even when another run is already in flight for this experiment.
     #[arg(long)]
     pub force: bool,
+    /// Stop the run once what it has cost, or would cost by its end, passes this many US
+    /// dollars: a rule named `budget`, checked with the experiment's other rules.
+    #[arg(long, value_name = "USD", value_parser = parse_budget)]
+    #[serde(default)]
+    pub budget: Option<f64>,
     /// Internal attribution forwarded through the local orx up API.
     #[arg(skip)]
     pub chat_session_id: Option<String>,
@@ -715,6 +815,13 @@ pub struct ExpRunArgs {
     #[arg(skip)]
     #[serde(default)]
     pub caller_compute_settings: Option<crate::commands::up::LaunchSettings>,
+}
+
+fn parse_budget(given: &str) -> std::result::Result<f64, String> {
+    let usd: f64 = given.trim().trim_start_matches('$').parse().map_err(|_| {
+        format!("--budget must be a finite USD amount greater than zero (got {given})")
+    })?;
+    engine::rules::budget(usd).map(|_| usd)
 }
 
 /// Markers the native agent CLIs export to their shells; nested agents are `unknown`.

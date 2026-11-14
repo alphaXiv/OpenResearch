@@ -8,13 +8,23 @@ Remote backends receive that snapshot; Tinker extracts it for a local controller
 whose SDK sends model operations remotely.
 
 ```sh
-orx exp status <expId>                 # branch, parent, run command, latest run + commit
+orx exp status <expId>                 # branch, parent, run command, latest run: stage, estimate, measures
 orx compute                            # browse GPU offers across all providers
 orx compute --gpu H100_SXM --count 1   # filter GPU offers
 orx compute --cpu                      # browse CPU-only offers
 orx exp run <expId>                    # launch on the configured default
-orx exp cancel <expId>                 # cancel the in-flight run
+orx exp cancel <expId> --reason '…'    # cancel the in-flight run, saying why
 ```
+
+## Follow a run
+
+A baseline reports its stages and measures and has a view before its first
+launch; children inherit them. How to write and change them: `orx-experiment-runs`.
+
+`orx exp status <expId>` shows a run's stage, estimate and measures; `--run
+<runId> --json` gives the stored checkpoint with its coverage and diagnostics.
+Signals are advisory: confirm trouble in the raw log before changing the
+experiment.
 
 ## Inspect configuration and custom instructions first
 
@@ -164,3 +174,4 @@ session waiting for results.
 - Escalate after a real OOM or hopelessly slow run instead of starting with the
   largest accelerator.
 - Raise the timeout only for genuinely long runs.
+

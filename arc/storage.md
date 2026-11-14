@@ -131,6 +131,7 @@ Detection repeats on every start, so an interrupted rename or reference repair r
 - **Published projects.** Publishing, from the Share dialog or `orx project share --publish`, uploads exactly the file sharing would write, after the same scan, to openresearch.sh, which serves it to anyone with the link until the publisher deletes it. The upload names the local project ID, so publishing again replaces the file behind the same link.
 - **Updates.** Each surface checks GitHub releases on its own schedule ([desktop](desktop.md)).
 - **Prices.** Once a day `orx up` downloads models.dev's public model price list (`models.dev/api.json`) into the cache directory, keeping the last good copy when a fetch fails. When a run starts on a backend that bills, the engine reads its price: Hugging Face's public hardware list, the Modal workspace's rates through Modal's SDK with the user's token, or the box's own price from openresearch.sh. The requests carry no research data, and costs never go to telemetry.
+- **Run watching.** Run watching, on by default when a watching model is selected, sends a bounded brief, signal summary and selected log excerpts to that model's provider when something about a chat's runs changes or a look is asked for; it sends no full chat or repository. Turn it off in Settings. The model is the chat's own agent's cheap one (Claude Code's Haiku, Codex's GPT Luna), run as a one-shot with no tools, and every field of the request passes the credential scan sharing uses, as written and before it is clipped: a log line or field that matches is left out, the look goes on without it, and the journal tells the user once where it was ([experiments](experiments.md)).
 - **Plan usage.** For each Claude Code and Codex sign-in that may be on a subscription, `orx up` asks the user's own agent how much of the plan is left: Claude Code's `get_usage` and Codex's `account/rateLimits/read` reach Anthropic and OpenAI with the user's sign-in, when the dashboard asks (at most once a minute per account unless the user refreshes) and when a running chat's limits move ([agents](agents.md)). The answer stays in `orx up`'s memory.
 - **Agent releases.** Once a day `orx up` asks downloads.claude.ai, releases.openai.com and registry.npmjs.org for the newest release of whichever of Claude Code, Codex and OpenCode is installed (skipping one signed out on every account), and downloads one when it installs or updates a copy of its own ([agents](agents.md)); the onboarding installs OpenCode that way unasked while it is missing, for its free models. The requests carry no account or research data. Built-in agents additionally fetch Node.js releases
   and SHA-256 lists from nodejs.org, package metadata and integrity-checked npm
@@ -148,3 +149,42 @@ Detection repeats on every start, so an interrupted rename or reference repair r
   and cache; no user npm configuration or global prefix is used.
 - **Installers the user starts.** Git for Windows comes from GitHub (`src/local/portable_git.rs`).
 - **Integrations the user turns on.** Creating a project from a GitHub URL, which also asks GitHub's public API for its size; publishing to GitHub; syncing a paper with Overleaf, through its Git bridge or its live editor channel with the user's browser session cookie; Trackio metrics; and the agents' own model providers, which the agent talks to directly. Adding a custom endpoint also asks it, with its key, for its model list.
+
+## Signal checkpoints
+
+The owner-only file `run-signals/<run>.json` commits raw carry, cursor and
+aggregates together by syncing a temporary file, renaming it and syncing its
+directory. Its nonblocking per-run lock returns WouldBlock on contention.
+A failed publication leaves the previous committed cursor available for replay.
+
+Signal debt is independent of log debt and gates host cleanup until it
+settles. While the host has the run, its checkpoint is the answer. Once the
+host cannot be asked, the laptop continues that checkpoint over the log it
+kept where that reaches its cursor, and settles as incomplete only for
+reported signals the kept log lacks or that nothing kept. Another generation
+replaces a checkpoint with signals only when it covers at least the same
+bytes; until then it is kept in `<run>.replay`, which resumes across passes
+and restarts, and the held one stands, marked `rebuilding`, or `log_replaced`
+once the other ended short. A promoted rebuild carries a `log_replaced`
+diagnostic; a host gone mid-rebuild leaves it to go on over the kept log where
+that reaches as far. The staging file goes with the first publication of a
+checkpoint not rebuilding. `hostGone` keeps how the host went, which a
+settlement names over any earlier failure.
+A run that never reported a signal settles quietly.
+The owner-only `<run>.status.json` keeps the specific cause and the laptop's
+last successful collection time. The checkpoint's `updatedAt` is the host
+data time; status labels both. `clock` is `[host, laptop]`: the host's clock
+in the last answer a successful collection accepted and the laptop's time of
+receipt. It carries the checkpoint's host times onto the laptop's clock and
+moves at most once a minute while nothing changes; a run folded on the laptop
+has none.
+
+Sharing includes `signals/<run>.json` with `SharedRun.signals` when logs are
+selected, after the credential scan. Import rewrites the local run ID.
+No folded research data is sent to a service or model provider.
+
+Component bounds keep current snapshots below the 16 MiB publication cap.
+The worst-case serialization test reserves the 2 MiB row budget and 2 MiB
+for cursor, retained timing, phases, diagnostics and bounded error metadata.
+New reducers and cell stores must preserve that guarantee or reduce
+deterministically before publication.

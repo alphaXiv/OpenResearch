@@ -30,6 +30,20 @@ pub enum Request {
         follow_logs: Vec<RunId>,
         wait_ms: u32,
     },
+    ReadSignals {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        terminal: bool,
+        run: RunId,
+        generation: String,
+        revision: u64,
+        offset: u64,
+        length: u64,
+    },
+    /// Folds the run's log with `config` (an `orx_signals::Config` as JSON) from its next scan.
+    ConfigureSignals {
+        run: RunId,
+        config: String,
+    },
     ReadLog {
         target: LogTarget,
         file: LogFile,
@@ -108,9 +122,24 @@ pub enum Response {
     },
     Inspect {
         summary: Summary,
+        /// The host's clock when it answered, in ms since the epoch; absent from older hosts.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answered_at: Option<i64>,
     },
     Changes {
         runs: Vec<(RunId, Summary)>,
+        /// The host's clock when it answered: every watched run unchanged then is unchanged
+        /// as of this time. Absent from older hosts.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answered_at: Option<i64>,
+    },
+    ReadSignals {
+        page: SignalsPage,
+        /// The host's clock when it answered, in ms since the epoch.
+        answered_at: i64,
+    },
+    ConfigureSignals {
+        changed: bool,
     },
     ReadLog {
         page: LogPage,
@@ -363,11 +392,41 @@ pub enum RunState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Summary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signals: Option<SignalsSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<i64>,
     pub state: RunState,
     pub log_len: Option<u64>,
     pub notify_len: u64,
     pub cleanup: Option<ProcessOutcome>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignalsSummary {
+    pub generation: String,
+    pub revision: u64,
+    pub cursor: u64,
+    pub coverage: serde_json::Value,
+    pub latest: serde_json::Value,
+    pub progress: serde_json::Value,
+    pub diagnostics: BTreeMap<String, u64>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SignalsPage {
+    Reset {
+        summary: Box<SignalsSummary>,
+    },
+    Data {
+        generation: String,
+        revision: u64,
+        offset: u64,
+        total: u64,
+        #[serde(with = "bytes")]
+        bytes: Vec<u8>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

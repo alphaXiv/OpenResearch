@@ -178,6 +178,7 @@ fn submitting(intent: &RunIntent) -> SubmittingRun<'_> {
         commit_sha: None,
         chat_session_id: Some("chat"),
         spec_digest: &intent.spec_digest,
+        monitor_config: None,
         launch: &intent.launch,
     }
 }
@@ -1211,6 +1212,7 @@ async fn submission_child() {
         commit_sha: None,
         chat_session_id: Some("chat"),
         spec_digest: &digest,
+        monitor_config: None,
         launch: &launch,
     };
     if point == "intent" {
@@ -1407,6 +1409,7 @@ async fn local_cancel_uses_wrapper_observations_and_tinker_recovers_the_same_lay
         .unwrap()
         .unwrap();
     let summary = orx_host_proto::Summary {
+        signals: None,
         started_at: orx_host::wrapper::started_at(&root.join("cancel-local")),
         state: orx_host_proto::RunState::Exited { receipt },
         log_len: Some(0),
@@ -2164,6 +2167,7 @@ async fn ssh_launch_written_with_response_lost_waits_for_the_host_then_recovers(
 fn cancelled_receipts_use_the_latest_process_proof_and_describe_unchecked_processes() {
     use orx_host_proto::{CancelOutcome as Outcome, ProcessOutcome, RunState, Summary, Survivor};
     let mut summary = Summary {
+        signals: None,
         started_at: None,
         state: RunState::Exited {
             receipt: orx_host_proto::ExitReceipt {
@@ -2609,7 +2613,7 @@ async fn paused_container_cancel_retries_until_unpause_or_removal() {
             receipt.outcome,
             orx_host_proto::CancelOutcome::Unverifiable { .. }
         ));
-        let Response::Changes { runs } = f
+        let Response::Changes { runs, .. } = f
             .ssh
             .request(Request::Changes {
                 watch: vec![(id.into(), super::ssh::missing())],
@@ -2651,6 +2655,7 @@ async fn local_cancel_reaches_new_sessions_and_double_fork_children() {
     let expected = super::ssh::observations(
         "fork-local".into(),
         &orx_host_proto::Summary {
+            signals: None,
             started_at: orx_host::wrapper::started_at(&dir),
             state: orx_host_proto::RunState::Exited { receipt },
             log_len: Some(fs::metadata(dir.join("log")).unwrap().len()),
@@ -3709,4 +3714,140 @@ async fn staging_stops_at_an_accepted_cancel() {
     for staged in [digest.clone(), format!("{digest}.part")] {
         assert!(!sources.join(staged).exists());
     }
+}
+
+#[tokio::test]
+async fn unchanged_signal_revision_never_downloads_the_snapshot_again() {
+    let f = Fixture::new().await;
+    let id = "signals";
+    f.submit(
+        f.ssh.as_ref(),
+        &f.intent(id, "printf '::orx:: {\"step\":1}\n'", "ssh_job"),
+    )
+    .await;
+    exists(&f.dir(id).join("exit.json")).await;
+    f.poll(f.ssh.as_ref(), &[id], Duration::ZERO).await;
+    let run = WatchedRun {
+        id: id.into(),
+        handle: f.ssh.handle(),
+    };
+    let (snapshot, _) = f.ssh.signals(&run, false, None).await.unwrap().unwrap();
+    let root = f.dir(id).parent().unwrap().parent().unwrap().to_path_buf();
+    fs::remove_file(root.join("run-signals/signals.json")).unwrap();
+    let (kept, clock) = f
+        .ssh
+        .signals(&run, false, Some(&snapshot))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(kept, snapshot);
+    let (host, laptop) = clock.expect("an unchanged answer carries the host's clock");
+    assert!((host - laptop).abs() < 60_000, "{host} {laptop}");
+}
+
+#[tokio::test]
+async fn a_final_signal_read_never_replays_a_cached_error() {
+    let f = Fixture::new().await;
+    let id = "cached-error";
+    f.submit(
+        f.ssh.as_ref(),
+        &f.intent(id, "printf '::orx:: {\"step\":1}\n'", "ssh_job"),
+    )
+    .await;
+    exists(&f.dir(id).join("exit.json")).await;
+    let root = f.dir(id).parent().unwrap().parent().unwrap().to_path_buf();
+    let checkpoint = root.join(format!("run-signals/{id}.json"));
+    let _ = fs::remove_file(&checkpoint);
+    fs::create_dir_all(&checkpoint).unwrap();
+    f.poll(f.ssh.as_ref(), &[id], Duration::ZERO).await;
+    let run = WatchedRun {
+        id: id.into(),
+        handle: f.ssh.handle(),
+    };
+    assert!(f.ssh.signals(&run, false, None).await.is_err());
+    fs::remove_dir(&checkpoint).unwrap();
+    let (snapshot, clock) = f.ssh.signals(&run, true, None).await.unwrap().unwrap();
+    assert!(clock.is_some());
+    assert!(snapshot.source_complete());
+    assert_eq!(snapshot.progress().unwrap().done, Some(1.));
+}
+
+#[tokio::test]
+async fn signal_pages_resume_across_ticks_while_the_summary_advances() {
+    let f = Fixture::new().await;
+    let id = "paged-signals";
+    let dir = f.dir(id);
+    fs::create_dir_all(&dir).unwrap();
+    let mut log = Vec::new();
+    for step in 1..=2000 {
+        let metrics: serde_json::Map<String, serde_json::Value> = (0..64)
+            .map(|column| (format!("m{column}"), json!(step + column)))
+            .collect();
+        writeln!(
+            log,
+            "::orx:: {}",
+            json!({"step":step,"of":2000,"m":metrics})
+        )
+        .unwrap();
+    }
+    fs::write(dir.join("log"), log).unwrap();
+    let run = WatchedRun {
+        id: id.into(),
+        handle: f.ssh.handle(),
+    };
+    f.ssh
+        .observe(std::slice::from_ref(&run), Duration::ZERO)
+        .await;
+    let root = dir.parent().unwrap().parent().unwrap();
+    assert!(
+        fs::metadata(root.join("run-signals/paged-signals.json"))
+            .unwrap()
+            .len()
+            > 1024 * 1024
+    );
+    let mut collected = None;
+    let mut interruptions = 0;
+    for tick in 0..10 {
+        f.server
+            .proxy()
+            .set(Faults {
+                bytes_per_second: std::num::NonZeroU64::new(350_000),
+                ..Faults::default()
+            })
+            .unwrap();
+        let result =
+            tokio::time::timeout(Duration::from_secs(3), f.ssh.signals(&run, false, None)).await;
+        f.server.proxy().clear().unwrap();
+        match result {
+            Ok(result) => {
+                collected = result.unwrap().map(|(snapshot, _)| snapshot);
+                break;
+            }
+            Err(_) => interruptions += 1,
+        }
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(dir.join("log"))
+            .unwrap();
+        writeln!(
+            file,
+            "::orx:: {}",
+            json!({"step":2001+tick,"m":{"m0":2001+tick}})
+        )
+        .unwrap();
+        f.ssh
+            .observe(std::slice::from_ref(&run), Duration::ZERO)
+            .await;
+    }
+    assert!(interruptions > 0, "transfer must span collection ticks");
+    let snapshot = collected.expect("bounded ticks must complete the pinned snapshot");
+    assert_eq!(snapshot.latest["m0"], 2000);
+    let (terminal, _) = f
+        .ssh
+        .signals(&run, true, Some(&snapshot))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(terminal.source_complete());
+    assert!(terminal.latest["m0"].as_i64().unwrap() > 2000);
 }

@@ -1,0 +1,19 @@
+{
+  "old": {
+    "id": "r1",
+    "experimentId": "e1",
+    "status": "done",
+    "command": "train",
+    "createdAt": 1,
+    "log": true
+  },
+  "new": {
+    "id": "r1",
+    "experimentId": "e1",
+    "status": "done",
+    "command": "train",
+    "createdAt": 1,
+    "log": true,
+    "signals": true
+  }
+}

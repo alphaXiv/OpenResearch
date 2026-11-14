@@ -3,7 +3,7 @@ import type { WorkspaceClient } from "./client";
 import type { Workspace } from "../workspace";
 import { readLiveSnapshot, mergeLiveList, markLiveUpdate } from "./live";
 import { mutations } from "./mutations";
-import { queryOptions } from "@tanstack/react-query";
+import { QueryObserver, queryOptions, skipToken } from "@tanstack/react-query";
 import type * as api from "../api";
 
 export function createProjectQueries(client: WorkspaceClient, api: Api) {
@@ -100,7 +100,23 @@ export function createProjectQueries(client: WorkspaceClient, api: Api) {
     staleTime: 30_000,
   });
 
+  /** Kept live by `run.monitor` events; a read that raced one keeps whichever revision is newer. */
+  const getRunMonitorQuery = (runId: string) => queryOptions({
+    queryKey: workspaceKey("getRunMonitor", runId),
+    queryFn: ({ signal, client, queryKey }) => readLiveSnapshot(client, queryKey, () => api.getRunMonitor(runId, signal),
+      (incoming, current) => current && current.generation === incoming.generation && current.rev > incoming.rev ? current : incoming),
+    staleTime: Infinity,
+  });
+
+  /** Never fetched: written by `chooseFlag`, so it outlives the strip that pressed the choice. */
+  const flagChoiceQuery = (runId: string, flagId: string) => queryOptions<FlagChoice>({
+    queryKey: workspaceKey("flagChoice", runId, flagId),
+    queryFn: skipToken,
+  });
+
   return {
+    getRunMonitorQuery,
+    flagChoiceQuery,
     listProjectsQuery,
     listProjectActivityQuery,
     getUiStateQuery,
@@ -241,16 +257,93 @@ export const mutCancelRun = mutations.define({
       filter: (row) => row.id === run.id,
       update: (row) => ({ ...row, cancelling: true }),
     });
-    cache.arrayUpdate(ws.queries.listChatActiveRunsQuery(), {
-      filter: (item) => item.run.id === run.id,
-      update: (item) => ({ ...item, run: { ...item.run, cancelling: true } }),
-    });
+    cache.updateExisting(ws.queries.listChatShownRunsQuery(), (shown) => ({
+      ...shown,
+      runs: shown.runs.map((item) => item.run.id === run.id ? { ...item, run: { ...item.run, cancelling: true } } : item),
+    }));
   },
   key: ({ args: [ws, run] }) => [ws.identity, run.id],
   describe: "stop the run",
   describeResult: null,
   refetchOnSuccess: true,
 });
+
+export const mutDismissShownRun = mutations.define({
+  id: "chat/shown-run-dismiss",
+  mutate: (ws: Workspace, sessionId: string, runId: string) => ws.api.dismissShownRun(sessionId, runId),
+  optimistic({ helpers, args: [ws, sessionId, runId] }) {
+    helpers(ws.queryClient).updateExisting(ws.queries.listChatShownRunsQuery(), (shown) => ({
+      ...shown,
+      runs: shown.runs.filter((item) => item.sessionId !== sessionId || item.run.id !== runId),
+    }));
+  },
+  key: ({ args: [ws, , runId] }) => [ws.identity, runId],
+  describe: "dismiss the run",
+  describeResult: null,
+  refetchOnSuccess: false,
+});
+
+/** A look at the run's chat now; what it says arrives as the run's own event. */
+export const mutLookNow = mutations.define({
+  id: "runs/look-now",
+  mutate: (ws: Workspace, runId: string) => ws.api.lookNow(runId),
+  optimistic: () => {},
+  key: ({ args: [ws, runId] }) => [ws.identity, runId, "look"],
+  describe: "look at the run now",
+  describeResult: null,
+  refetchOnSuccess: false,
+});
+
+export type FlagAnswer = "stop" | "keep" | "ask";
+
+/** A flag's answer on its way: one at a time per flag, one request id per choice, and why the server refused the last. */
+export interface FlagChoice {
+  sending: FlagAnswer | null;
+  requestIds: Partial<Record<FlagAnswer, string>>;
+  error: string | null;
+}
+
+/** No choice shows before the server accepts it; `requestId` is the caller's, so a retry of the same choice is the same request. */
+const mutFlagChoice = mutations.define({
+  id: "runs/flag-choice",
+  mutate: (ws: Workspace, run: Pick<api.Run, "id">, flagId: string, choice: "stop" | "keep" | "ask", requestId: string) =>
+    ws.api.chooseRunFlag(run.id, { flagId, choice, requestId }),
+  optimistic({ args: [ws, run], onSuccess }) {
+    const monitor = ws.queries.getRunMonitorQuery(run.id);
+    const shown = ws.queries.listChatShownRunsQuery();
+    onSuccess(({ flag, run: saved }) => {
+      // A newer flag stands: the answer settles only the flag it was for.
+      ws.setScopedQueryData(monitor.queryKey, (current) => current?.flag?.id === flag.id ? { ...current, flag } : current);
+      ws.setScopedQueryData(shown.queryKey, (current) => current && { ...current, runs: current.runs.map((item) => item.run.id === saved.id && item.run.updatedAt <= saved.updatedAt ? { ...item, run: saved } : item) });
+    });
+  },
+  key: ({ args: [ws, run] }) => [ws.identity, run.id, "flag"],
+  describe: "answer the flag",
+  describeResult: null,
+  refetchOnSuccess: false,
+});
+
+/** Answers a flag unless an answer is already on its way; `onRefused` hears a failure while the presser is still on screen. */
+export function chooseFlag(ws: Workspace, run: Pick<api.Run, "id">, flagId: string, choice: FlagAnswer, onRefused: () => void) {
+  const options = ws.queries.flagChoiceQuery(run.id, flagId);
+  const { queryKey } = options;
+  const current = ws.queryClient.getQueryData(queryKey);
+  if (current?.sending) return;
+
+  const requestId = current?.requestIds[choice] ?? crypto.randomUUID();
+  const requestIds = { ...current?.requestIds, [choice]: requestId };
+  ws.setScopedQueryData(queryKey, { sending: choice, requestIds, error: null });
+  // Observed until the server answers, so the lock is never collected while its request is out.
+  const release = new QueryObserver(ws.queryClient, options).subscribe(() => {});
+  mutFlagChoice.runWithOptions(ws, run, flagId, choice, requestId, {
+    onError: (error) => {
+      ws.setScopedQueryData(queryKey, { sending: null, requestIds, error: error instanceof Error ? error.message : String(error) });
+      onRefused();
+    },
+    onSuccessData: () => ws.setScopedQueryData(queryKey, { sending: null, requestIds, error: null }),
+    onSettled: release,
+  });
+}
 
 export const mutCleanupRun = mutations.define({
   id: "projects/run-cleanup",

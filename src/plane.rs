@@ -30,6 +30,9 @@ pub struct Run {
     pub updated_display: String,
     pub result_markdown: Option<String>,
     pub cancel_reason: Option<String>,
+    /// For a failed run that recorded no message, the line in its log that says why.
+    #[serde(default)]
+    pub log_error: Option<String>,
 }
 
 impl From<&StoredRun> for Run {
@@ -51,6 +54,7 @@ impl From<&StoredRun> for Run {
             updated_display: crate::local::fmt_ago(run.updated_at),
             result_markdown: run.result_markdown.clone(),
             cancel_reason: run.cancel_reason.clone(),
+            log_error: None,
         }
     }
 }
@@ -68,6 +72,21 @@ impl Run {
         }
         run.cancel_error = crate::commands::up::api_v2::cancel_error(&stored.id);
         run.host = crate::commands::up::run_host(store, stored)?;
+        let silent = run
+            .result_markdown
+            .as_deref()
+            .is_none_or(|text| text.trim().is_empty());
+        if run.status == "failed" && silent {
+            // A log that cannot be read leaves the reason pointing at `orx logs`, which says why.
+            run.log_error = store
+                .recent_log(&stored.id, 64 * 1024)
+                .ok()
+                .and_then(|log| {
+                    crate::store::last_error(&log)
+                        .filter(|line| crate::local::share::find_secret(line).is_none())
+                        .map(str::to_owned)
+                });
+        }
         Ok(run)
     }
 
@@ -175,10 +194,16 @@ impl Run {
         }
         match self.result_markdown.as_deref().map(str::trim) {
             Some(reason) if !reason.is_empty() => Some(format!("reason: {reason}")),
-            _ => Some(format!(
-                "reason: — (no message recorded — see `orx logs {}`)",
-                self.id
-            )),
+            _ => Some(match &self.log_error {
+                Some(line) => format!(
+                    "reason: last error in the log: `{line}` (`orx logs {}` has the rest)",
+                    self.id
+                ),
+                None => format!(
+                    "reason: — (no message recorded — see `orx logs {}`)",
+                    self.id
+                ),
+            }),
         }
     }
 }

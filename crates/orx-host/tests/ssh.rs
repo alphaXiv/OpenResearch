@@ -133,7 +133,7 @@ impl Remote {
                 return receipt;
             }
             assert!(Instant::now() < deadline, "{summary:?}");
-            let Response::Changes { runs } = self.request(Request::Changes {
+            let Response::Changes { runs, .. } = self.request(Request::Changes {
                 watch: vec![(run.into(), summary.clone())],
                 follow_logs: vec![run.into()],
                 wait_ms: 2000,
@@ -207,7 +207,7 @@ sleep 60
         .parse()
         .unwrap();
     let process = platform::process(pid).unwrap();
-    let Response::Changes { runs } = remote.request(Request::Changes {
+    let Response::Changes { runs, .. } = remote.request(Request::Changes {
         watch: vec![("run1".into(), summary)],
         follow_logs: vec!["run1".into()],
         wait_ms: 1000,
@@ -636,6 +636,7 @@ exit 0
         }
     );
     let mut watch = Summary {
+        signals: None,
         started_at: None,
         state: RunState::Exited { receipt },
         log_len: None,
@@ -645,7 +646,7 @@ exit 0
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         assert!(Instant::now() < deadline);
-        let Response::Changes { runs } = remote.request(Request::Changes {
+        let Response::Changes { runs, .. } = remote.request(Request::Changes {
             watch: vec![("daemon".into(), watch.clone())],
             follow_logs: vec![],
             wait_ms: 1000,

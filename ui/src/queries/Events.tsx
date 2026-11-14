@@ -1,12 +1,48 @@
 import { useWorkspace } from "../workspace";
 import type { InfiniteData } from "@tanstack/react-query";
 import type { ChatSession, SidebarChatPage } from "../api";
+import type { RunMonitor, RunMonitorEvent } from "../runMonitor/types";
 import { markLiveUpdate } from "./live";
 
 import { inputSummaryChanged } from "./chatState";
 import { useEffect, useMemo } from "react";
 
 import { artifactFamilies } from "./invalidation";
+
+/** The cached monitor with `event` applied, or null when the event can't be applied to it and the run must be read again. */
+export function applyMonitorEvent(cached: RunMonitor, event: RunMonitorEvent): RunMonitor | null {
+  if (event.reset || event.generation !== cached.generation) return null;
+  if (event.rev <= cached.rev) return cached;
+  const appends = Object.entries(event.append ?? {}).filter(([, points]) => points.length > 0);
+  const rowAppends = Object.entries(event.appendRows ?? {}).filter(([, rows]) => rows.length > 0);
+  // Past the fold's row cap a table's oldest rows leave as new ones come.
+  const rowDrops = Object.entries(event.dropRows ?? {}).filter(([, left]) => left > 0);
+  const grew = appends.length > 0 || rowAppends.length > 0 || rowDrops.length > 0;
+  if (grew && event.appendFrom !== cached.seriesRev) return null;
+  if (!grew && event.seriesRev !== cached.seriesRev) return null;
+  const base = { ...cached, ...event.patch };
+  const series = { ...base.series };
+  for (const [name, points] of appends) series[name] = [...(series[name] ?? []), ...points];
+  const rows = { ...base.rows };
+  for (const [name, left] of rowDrops) if (rows[name]) rows[name] = rows[name].slice(left);
+  for (const [name, added] of rowAppends) rows[name] = [...(rows[name] ?? []), ...added];
+  return {
+    ...base,
+    rev: event.rev,
+    asOf: event.asOf,
+    seriesRev: event.seriesRev,
+    series,
+    rows,
+    latest: event.latest,
+    counts: event.counts,
+    progress: event.progress,
+    estimate: event.estimate,
+    cost: event.cost,
+    sentence: event.sentence,
+    ...(event.watch === undefined ? {} : { watch: event.watch }),
+    ...(event.flag === undefined ? {} : { flag: event.flag }),
+  };
+}
 
 function upsert<T extends { id: string; updatedAt: number }>(rows: T[] | undefined, next: T) {
   if (!rows) return undefined;
@@ -33,6 +69,8 @@ export function QueryEvents() {
     listExperimentsQuery,
     listProjectsQuery,
     listChatSessionsQuery,
+    listChatShownRunsQuery,
+    getRunMonitorQuery,
     refreshHarnesses,
     refreshHarness,
     getHarnessesQuery,
@@ -61,11 +99,32 @@ export function QueryEvents() {
       const old = queryClient.getQueryData(listRunsQuery(run.projectId).queryKey)?.find((row) => row.id === run.id);
       markLiveUpdate(queryClient, listRunsQuery(run.projectId).queryKey, run.id);
       queryClient.setQueryData(listRunsQuery(run.projectId).queryKey, (rows) => upsert(rows, run));
+      markLiveUpdate(queryClient, listChatShownRunsQuery().queryKey, run.id);
+      queryClient.setQueryData(listChatShownRunsQuery().queryKey, (shown) => shown && {
+        ...shown,
+        runs: shown.runs.map((item) => item.run.id === run.id && item.run.updatedAt <= run.updatedAt ? { ...item, run } : item),
+      });
       if (old?.commitSha !== run.commitSha) {
         invalidateFamilies(["getRunDiff"], scope, (query) => query.queryKey[3] === run.id);
         invalidateFamilies(["getExperimentDiff"], scope, (query) => query.queryKey[3] === run.experimentId);
       }
       emitEntity.onRun(run);
+    },
+    onRunMonitor(event) {
+      if (!isCurrentScope(scope)) return;
+      // A look newer than its chat's summary may have written a new one, which rides on the shown runs.
+      const looked = event.watch?.looks.filter((look) => look.said !== "error" && look.said !== "interrupted").at(-1)?.id;
+      const shown = queryClient.getQueryData(listChatShownRunsQuery().queryKey)?.runs.find((item) => item.run.id === event.runId);
+      if (looked !== undefined && shown && Number(looked) > Number(shown.watch?.lookId ?? 0)) {
+        void queryClient.invalidateQueries({ queryKey: listChatShownRunsQuery().queryKey, exact: true });
+      }
+      const { queryKey } = getRunMonitorQuery(event.runId);
+      markLiveUpdate(queryClient, queryKey);
+      const cached = queryClient.getQueryData(queryKey);
+      if (!cached) return;
+      const next = applyMonitorEvent(cached, event);
+      if (next) queryClient.setQueryData(queryKey, next);
+      else void queryClient.invalidateQueries({ queryKey, exact: true });
     },
     onExperiment(experiment) {
       if (!isCurrentScope(scope)) return;

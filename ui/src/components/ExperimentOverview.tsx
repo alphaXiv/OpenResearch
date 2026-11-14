@@ -25,6 +25,8 @@ import { BackendBadge } from "./BackendLogos";
 import { BranchPill } from "./BranchPill";
 import { Md } from "./Md";
 import { RunContactNotice } from "./RunContactNotice";
+import { RunPage, WatchSection } from "./run/RunPage";
+import { historySentence } from "../runMonitor/model";
 import { StatusBadge } from "./StatusBadge";
 import { Button, Tooltip } from "./ui";
 import { ExperimentLineage } from "./ExperimentLineage";
@@ -188,7 +190,8 @@ export function ExperimentOverview({
               {latestRun.command && (
                 <code className={EXPERIMENT_OVERVIEW_COMMAND_CLASS_NAME}>$ {latestRun.command}</code>
               )}
-              {attentionRun && <RunContactNotice run={attentionRun} className="mt-4" />}
+              <RunPage run={latestRun} name={experiment.slug} now={now} />
+              {attentionRun && !(latestRun.monitor && attentionRun.id === latestRun.id) && <RunContactNotice run={attentionRun} className="mt-4" />}
               {result && (
                 <div
                   className={`experiment-overview-result mt-4 [&.failed]:text-accent-red ${latestRun.status === "failed" ? "failed" : ""}`}
@@ -203,7 +206,7 @@ export function ExperimentOverview({
         {runs.length > 0 && (
           <section className={`${EXPERIMENT_OVERVIEW_SECTION_CLASS_NAME} @container`}>
             <h2>{m.experiment_overview_run_history()}</h2>
-            <div className="experiment-run-history divide-y divide-border-variant [&_button]:w-full [&_button]:grid [&_button]:grid-cols-[minmax(72px,_0.7fr)_minmax(100px,_1fr)_minmax(70px,_0.7fr)_60px_16px] [&_button]:items-center [&_button]:gap-3.5 [&_button]:py-3 [&_button]:px-0.5 [&_button]:text-text [&_button]:text-start [&_button]:text-sm [&_button:hover]:bg-surface @max-lg:[&_button]:grid-cols-[48px_minmax(0,_1fr)_40px_16px] @max-lg:[&_button_>_:nth-child(3)]:hidden">
+            <div className="experiment-run-history divide-y divide-border-variant [&_button]:w-full [&_button]:grid [&_button]:grid-cols-[minmax(56px,_0.5fr)_minmax(100px,_0.9fr)_minmax(0,_2.2fr)_minmax(64px,_0.6fr)_60px_16px] [&_button]:items-center [&_button]:gap-3.5 [&_button]:py-3 [&_button]:px-0.5 [&_button]:text-text [&_button]:text-start [&_button]:text-sm [&_button:hover]:bg-surface @max-lg:[&_button]:grid-cols-[48px_minmax(0,_1fr)_40px_16px] @max-lg:[&_button_>_:nth-child(3)]:hidden @max-lg:[&_button_>_:nth-child(4)]:hidden">
               {runs.map((run, index) => (
                 <button
                   key={run.id}
@@ -213,6 +216,7 @@ export function ExperimentOverview({
                 >
                   <span className="experiment-run-number text-xs font-medium">{m.experiment_overview_run()} {runs.length - index}</span>
                   <StatusBadge {...runDisplay(run)} className="min-w-0" />
+                  <span className="truncate text-ink-subtext">{historySentence(run, now)}</span>
                   <span>{timeAgo(run.createdAt)}</span>
                   <span>{runDuration(run, now)}</span>
                   <Terminal size={14} />
@@ -221,6 +225,8 @@ export function ExperimentOverview({
             </div>
           </section>
         )}
+
+        {latestRun?.monitor && <WatchSection run={latestRun} now={now} className={EXPERIMENT_OVERVIEW_SECTION_CLASS_NAME} />}
 
         {lineageNode && (
           <div className="mt-5.5 border-t border-border-variant pt-4.5">

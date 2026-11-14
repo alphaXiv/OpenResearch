@@ -62,6 +62,19 @@
   --color-focus-ring: var(--focus-ring);
   --color-border-hover-strong: color-mix(in oklab, var(--border) 55%, var(--text));
   --color-danger-outline: color-mix(in oklab, var(--accent-red) 55%, transparent);
+  /* A run's tone as text: the accent mixed toward the text colour reaches 4.5:1 in both themes. */
+  --color-ink-teal: color-mix(in srgb, var(--accent-teal) 75%, var(--text));
+  --color-ink-amber: color-mix(in srgb, var(--accent-amber) 65%, var(--text));
+  --color-ink-orange: color-mix(in srgb, var(--accent-orange) 80%, var(--text));
+  --color-ink-red: color-mix(in srgb, var(--accent-red) 70%, var(--text));
+  --color-ink-green: color-mix(in srgb, var(--accent-green) 60%, var(--text));
+  --color-ink-purple: color-mix(in srgb, var(--accent-purple) 80%, var(--text));
+  /* Secondary words over a run's strip and line, which sit on the surface: 4.5:1 in both themes. */
+  --color-ink-subtext: color-mix(in srgb, var(--subtext) 85%, var(--text));
+  --color-mark-teal: var(--mark-teal);
+  --color-mark-amber: var(--mark-amber);
+  --color-mark-green: var(--mark-green);
+  --color-mark-blue: var(--mark-blue);
   --color-danger-notice-border: color-mix(in srgb, var(--accent-red) 35%, var(--border-variant));
   --color-primary-hover: color-mix(in oklab, var(--primary) 88%, var(--text));
   --color-primary-active: color-mix(in oklab, var(--primary) 80%, var(--text));
@@ -182,6 +195,11 @@
   --skill-blue-subtle: #d9e9fb;
   --skill-blue-slash: #7fa6d2;
   --accent-purple-subtle: #f5f0ff;
+  /* A run's tone as a mark (dot, tick, bar): mixed toward the text colour to 3:1 on panel, surface and amber-subtle in both themes. */
+  --mark-teal: color-mix(in srgb, var(--accent-teal) 95%, var(--text));
+  --mark-amber: color-mix(in srgb, var(--accent-amber) 80%, var(--text));
+  --mark-green: color-mix(in srgb, var(--accent-green) 80%, var(--text));
+  --mark-blue: color-mix(in srgb, var(--accent-blue) 95%, var(--text));
 
   --dots-muted: #e3e3e3;
   --dots-strong: #bdbdbd;
