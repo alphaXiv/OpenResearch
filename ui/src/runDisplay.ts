@@ -12,7 +12,8 @@ export type RunDisplayStatus =
   | "abandoned"
   | "auto_stopped"
   | "revising"
-  | "flagged";
+  | "flagged"
+  | "flagged_ended";
 
 type RunState = Pick<Run, "status"> & Partial<Pick<Run, "contact" | "cancelling" | "lostReason" | "host" | "cancelUnconfirmed" | "waitingReason" | "cancelError" | "monitor" | "outcome">> & { cancelRequested?: boolean };
 
@@ -78,7 +79,9 @@ export function runDisplay(run: RunState): RunDisplay {
   }
   if (!runActive(run.status)) {
     const stopped = run.status === "cancelled" && (run.monitor?.tone === "revising" ? "revising" : run.outcome && run.outcome.by !== "user" ? "auto_stopped" : null);
-    return { status: runAbandoned(run) ? "abandoned" : stopped || run.status, stale: contact !== null, since };
+    // A finished run whose flag no one settled is a result to check before it counts as done.
+    const flagged = run.status === "done" && run.monitor?.flag ? "flagged_ended" : null;
+    return { status: runAbandoned(run) ? "abandoned" : stopped || flagged || run.status, stale: contact !== null, since };
   }
   if (runCancelling(run)) {
     const pending = run.status === "submitting" || Boolean(run.cancelError) || contact?.type === "unreachable" || contact?.type === "needs_auth" || contact?.type === "unreconciled";

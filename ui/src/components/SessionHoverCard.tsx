@@ -23,6 +23,7 @@ const ICON_TONES: Partial<Record<RunDisplayStatus, string>> = {
   starting: "text-mark-green",
   running: "text-mark-green",
   flagged: "text-mark-amber",
+  flagged_ended: "text-mark-amber",
   cancelling: "text-mark-amber",
   cancellation_pending: "text-mark-amber",
   failed: "text-accent-red",
@@ -54,7 +55,7 @@ function ExperimentRow({ row, sessionProjectId, tabbable, onFocus, onOpen }: {
         onFocus={onFocus}
         onClick={onOpen}
       >
-        {status === "flagged" ? <TriangleAlert size={14} className={`mt-[3px] shrink-0 ${tone}`} aria-hidden="true" /> : <FlaskConical
+        {status === "flagged" || status === "flagged_ended" ? <TriangleAlert size={14} className={`mt-[3px] shrink-0 ${tone}`} aria-hidden="true" /> : <FlaskConical
           size={14}
           className={`mt-[3px] shrink-0 ${tone} ${live ? "motion-safe:animate-[or-experiment-pulse_3s_ease-in-out_infinite]" : ""}`}
           aria-hidden="true"

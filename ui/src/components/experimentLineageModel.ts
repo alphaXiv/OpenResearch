@@ -52,6 +52,7 @@ export function historyStatus(run: Run): HistoryStatus {
   const { status, stale } = runDisplay(run);
   if (stale || status === "cancellation_pending") return "stale";
   if (status === "flagged" || status === "auto_stopped" || status === "revising") return status;
+  if (status === "flagged_ended") return "flagged";
   return runActive(run.status) ? "running" : run.status;
 }
 

@@ -220,7 +220,7 @@ function runSquareClass({ status, stale }: RunDisplay): string {
   if (stale) return "stale";
   if (status === "done") return "pass";
   if (status === "failed") return "fail";
-  if (status === "flagged") return "flag";
+  if (status === "flagged" || status === "flagged_ended") return "flag";
   if (status === "submitting" || status === "running" || status === "starting" || status === "cancelling" || status === "revising") return "live";
   return "other";
 }

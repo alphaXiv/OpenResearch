@@ -29,6 +29,7 @@ const STATUS_STYLES: Record<string, StatusStyle> = {
   auto_stopped: { tone: "caution", live: false },
   revising: { tone: "accent", live: true },
   flagged: { tone: "warning", live: true },
+  flagged_ended: { tone: "warning", live: false },
   idle: { tone: "neutral", live: false },
 };
 
@@ -55,6 +56,7 @@ const STATUS_LABELS: Record<string, () => string> = {
   auto_stopped: m.status_auto_stopped,
   revising: m.status_revising,
   flagged: m.status_flagged,
+  flagged_ended: m.status_flagged,
   idle: m.status_idle,
 };
 
