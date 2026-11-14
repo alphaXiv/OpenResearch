@@ -781,3 +781,39 @@ async fn a_pass_reads_only_the_log_the_fold_has_read() {
         "a caught-up count counts what the scan read"
     );
 }
+
+#[tokio::test]
+async fn a_codex_catalog_that_cannot_be_read_says_why_and_is_read_again_only_after_a_wait() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let calls_dir = crate::config::home_dir().unwrap().join("codex-calls");
+    std::fs::create_dir_all(&calls_dir).unwrap();
+    let bin = crate::config::home_dir().unwrap().join(".local/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let script = format!(
+        "#!/bin/sh\necho x >> '{}/calls'\nexit 1\n",
+        calls_dir.display()
+    );
+    orx_test_support::write_executable(bin.join("codex"), script, 0o755).unwrap();
+    let store = Store::open().unwrap();
+    chat(&store, "chat", "codex");
+    let chat = store.get_chat_session("chat").unwrap().unwrap();
+    let reads = || {
+        std::fs::read_to_string(calls_dir.join("calls")).map_or(0, |calls| calls.lines().count())
+    };
+
+    refresh_catalogs(BTreeSet::from([chat.profile_id.clone()])).await;
+    let tried = reads();
+    assert!(tried > 0, "Codex was asked");
+    let Watching::Unavailable(why) = watching_model(&store, &chat).unwrap() else {
+        panic!("not watched while its catalog is unknown");
+    };
+    assert!(
+        why.starts_with("Couldn't read which models Codex offers: "),
+        "{why}"
+    );
+
+    refresh_catalogs(BTreeSet::from([chat.profile_id.clone()])).await;
+    assert_eq!(reads(), tried, "a failed read waits before the next");
+}

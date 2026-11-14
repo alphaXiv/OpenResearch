@@ -75,15 +75,33 @@ impl Watching {
     }
 }
 
-/// GPT Luna as each Codex sign-in's catalog names it, with when that was read.
-type Catalog = HashMap<Option<String>, (std::time::Instant, Option<(String, String)>)>;
+/// What one Codex sign-in's catalog said of GPT Luna, or why it could not be read.
+struct CatalogRead {
+    at: std::time::Instant,
+    luna: std::result::Result<Option<(String, String)>, String>,
+    /// Failed reads in a row, which space the next one out.
+    failures: u32,
+}
 
-fn luna() -> &'static Mutex<Catalog> {
-    static LUNA: OnceLock<Mutex<Catalog>> = OnceLock::new();
+impl CatalogRead {
+    fn fresh(&self) -> bool {
+        let wait = match self.luna {
+            Ok(_) => CATALOG_TTL,
+            Err(_) => (CATALOG_RETRY * 2u32.saturating_pow(self.failures.saturating_sub(1)))
+                .min(CATALOG_TTL),
+        };
+        self.at.elapsed() < crate::config::paced(wait)
+    }
+}
+
+fn luna() -> &'static Mutex<HashMap<Option<String>, CatalogRead>> {
+    static LUNA: OnceLock<Mutex<HashMap<Option<String>, CatalogRead>>> = OnceLock::new();
     LUNA.get_or_init(Default::default)
 }
 
 const CATALOG_TTL: Duration = Duration::from_secs(600);
+/// The wait after a first failed read of Codex's catalog, doubling up to [`CATALOG_TTL`].
+const CATALOG_RETRY: Duration = Duration::from_secs(30);
 
 /// The one answer to "which model watches this chat": Claude Code's cheap one-shot (Haiku) on
 /// Claude Code, GPT Luna from Codex's own catalog on Codex, and a pick on every other agent,
@@ -126,13 +144,16 @@ pub(crate) fn watching_model(store: &Store, chat: &StoredChatSession) -> Result<
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .get(&profile)
-                .map(|(_, model)| model.clone());
+                .map(|read| read.luna.clone());
             Ok(match known {
                 None => Watching::Unavailable("Reading which models Codex offers".into()),
-                Some(None) => {
+                Some(Err(cause)) => Watching::Unavailable(format!(
+                    "Couldn't read which models Codex offers: {cause}"
+                )),
+                Some(Ok(None)) => {
                     Watching::Unavailable("Codex offers no GPT Luna to watch with".into())
                 }
-                Some(Some((model, label))) => Watching::Selected {
+                Some(Ok(Some((model, label)))) => Watching::Selected {
                     harness,
                     profile,
                     model: Some(model),
@@ -147,28 +168,37 @@ pub(crate) fn watching_model(store: &Store, chat: &StoredChatSession) -> Result<
     }
 }
 
-/// Reads Codex's catalog for each sign-in that needs it and hasn't lately.
+/// Reads Codex's catalog for each sign-in that needs it and hasn't lately; one that failed is
+/// read again after a wait that doubles with each failure.
 async fn refresh_catalogs(profiles: BTreeSet<Option<String>>) {
     for profile in profiles {
-        let fresh = luna()
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&profile)
-            .is_some_and(|(at, _)| at.elapsed() < CATALOG_TTL);
-        if fresh {
-            continue;
-        }
-        let model = match crate::local::harness::codex_luna(profile.as_deref()).await {
-            Ok(model) => model,
+        let failures = {
+            let known = luna().lock().unwrap_or_else(PoisonError::into_inner);
+            match known.get(&profile) {
+                Some(read) if read.fresh() => continue,
+                Some(read) => read.failures,
+                None => 0,
+            }
+        };
+        let read = match crate::local::harness::codex_luna(profile.as_deref()).await {
+            Ok(model) => CatalogRead {
+                at: std::time::Instant::now(),
+                luna: Ok(model),
+                failures: 0,
+            },
             Err(error) => {
                 eprintln!("orx up: watcher: reading Codex's models: {error:#}");
-                continue;
+                CatalogRead {
+                    at: std::time::Instant::now(),
+                    luna: Err(format!("{error:#}")),
+                    failures: failures + 1,
+                }
             }
         };
         luna()
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(profile, (std::time::Instant::now(), model));
+            .insert(profile, read);
     }
 }
 
@@ -429,9 +459,13 @@ async fn pass(state: &Arc<tokio::sync::Mutex<State>>) -> Result<()> {
         for run in candidates {
             let live = !Phase::parse(&run.status).is_some_and(Phase::is_terminal);
             let found = owner(&store, &run)?;
-            if let Ok((chat, _)) = &found {
-                if chat.harness == "codex" {
-                    codex.insert(chat.profile_id.clone());
+            // Any Codex chat that follows the run may watch it once its catalog is read.
+            for id in store.run_followers(&run.id)? {
+                if let Some(chat) = store
+                    .get_chat_session(&id)?
+                    .filter(|c| c.harness == "codex")
+                {
+                    codex.insert(chat.profile_id);
                 }
             }
             let watched = match found {
