@@ -1125,6 +1125,15 @@ async fn claude_one_shot_output(
         .await
         .map_err(|_| anyhow!("timed out after {}s", request.timeout.as_secs()))??;
     if !out.status.success() {
+        // A JSON result says why in its own words.
+        let said = serde_json::from_slice::<Value>(&out.stdout).ok();
+        if let Some(why) = said
+            .as_ref()
+            .and_then(|said| said["result"].as_str())
+            .filter(|why| !why.trim().is_empty())
+        {
+            return Err(anyhow!("{}", super::one_line(why, 300)));
+        }
         // `-p` prints request failures (bad model, signed out) on stdout; stderr is diagnostics.
         return Err(super::one_shot_exit_error(
             out.status,

@@ -1243,7 +1243,12 @@ fn moving(run: &Now) -> Vec<f64> {
             .flatten()
             .filter_map(|(_, n)| n.as_f64()),
     );
-    values.extend(run.summary["stage"]["done"].as_f64());
+    // A step count under ten is as often a fact the run states, a depth or a shard, as its progress.
+    values.extend(
+        run.summary["stage"]["done"]
+            .as_f64()
+            .filter(|done| *done >= 10.0),
+    );
     values
 }
 
@@ -1339,14 +1344,14 @@ async fn take(id: i64) -> Result<()> {
                         .ok()
                         .flatten()
                 });
-                Some((
-                    run.run.id.clone(),
-                    json!({
-                        "label": experiment.map(|e| e.display_name().to_owned()),
-                        "tone": summary["tone"],
-                        "values": summary["bindings"],
-                    }),
-                ))
+                let mut said = json!({
+                    "label": experiment.map(|e| e.display_name().to_owned()),
+                    "state": summary["tone"],
+                });
+                let live = matches!(summary["tone"].as_str(), Some("running" | "starting"));
+                said[if live { "valuesNow" } else { "valuesAtItsEnd" }] =
+                    summary["bindings"].clone();
+                Some((run.run.id.clone(), said))
             })
             .collect()
     };
@@ -2115,7 +2120,7 @@ fn versus_text(vs: Option<&Value>, spec: &Value) -> String {
         return "—".into();
     };
     if vs["flat"] == true {
-        return "level with".into();
+        return "level with the parent".into();
     }
     let mag = vs["mag"].as_f64().unwrap_or_default();
     let mag = match spec["digits"].as_u64() {
@@ -2123,7 +2128,7 @@ fn versus_text(vs: Option<&Value>, spec: &Value) -> String {
         None => super::monitor::measure(mag, &json!({})),
     };
     format!(
-        "{mag} {}",
+        "{mag} {} than the parent",
         if vs["good"] == true {
             "better"
         } else {

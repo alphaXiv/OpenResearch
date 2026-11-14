@@ -43,6 +43,8 @@ const shots = args.find((arg) => arg.startsWith('--shots='))?.slice('--shots='.l
 const watcherAt = args.indexOf('--watcher')
 const watcher = watcherAt < 0 ? 'fake' : args[watcherAt + 1]
 if (!['fake', 'real', 'none'].includes(watcher)) throw new Error('--watcher is fake, real or none')
+/** A real look signs in as the shell that started the bed does: with its API key, if it has one. */
+const signIn = Object.fromEntries(['ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL'].flatMap((name) => watcher === 'real' && process.env[name] ? [[name, process.env[name]!]] : []))
 const wanted = args.filter((arg, index) => !arg.startsWith('--') && (watcherAt < 0 || index !== watcherAt + 1))
 const unknown = wanted.filter((id) => !scenarios.some((scenario) => scenario.id === id))
 if (unknown.length) throw new Error(`No scenario ${unknown.join(', ')}; node e2e/faults/run.ts --list names them`)
@@ -78,12 +80,12 @@ async function runScenario(scenario: Scenario) {
   writeFileSync(watchLog, '')
   const claude = watcher === 'fake'
     ? `#!/bin/sh\nexec ${process.execPath} ${path.join(import.meta.dirname, 'watcher.mjs')} "$@"\n`
-    : watcher === 'real' ? `#!/bin/sh\nexec ${realClaude} "$@"\n` : undefined
+    : watcher === 'real' ? `#!/bin/sh\n# The sandbox sends every request off the machine to its stand-in; a real look goes to Anthropic.\nunset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy\nexec ${realClaude} "$@"\n` : undefined
   const orx = await startOrx({
     agent,
     outside,
     claude,
-    env: watcher === 'none' ? {} : { ORX_WATCH_WITH: 'claude-code', ORX_FAULTS_WATCH_LOG: watchLog },
+    env: watcher === 'none' ? {} : { ORX_WATCH_WITH: 'claude-code', ORX_FAULTS_WATCH_LOG: watchLog, ...signIn },
   })
   const browser = await chromium.launch()
   try {
@@ -205,7 +207,7 @@ async function runScenario(scenario: Scenario) {
     await agent.reached(hold)
     await sample('ended')
     // The run's last look, which waits for its log to be kept.
-    for (let tries = 0; watcher !== 'none' && tries < 60; tries++) {
+    for (let tries = 0; watcher !== 'none' && tries < 180; tries++) {
       const { watch } = await get<{ watch: { looks: { kind: string }[] } }>(`/api/runs/${child.run.id}/monitor`)
       if (watch.looks.at(-1)?.kind === 'terminal') break
       await wait(500)

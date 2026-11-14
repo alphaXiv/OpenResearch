@@ -33,7 +33,7 @@ const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 const runs = {}
 for (const run of digest.runs) {
   // The head is the same on every look; it alarms only the first.
-  const lines = [...(run.previous?.length ? [] : run.log?.head ?? []), ...(run.log?.new ?? [])]
+  const lines = [...(run.previous?.length ? [] : run.log?.firstLines ?? []), ...(run.log?.sinceLastLook ?? [])]
   const alarm = lines.find((line) => ALARM.test(line.text))
   const changed = (run.lookingBecause ?? []).length > 0
   if (run.previous?.length && !alarm && !changed && run.state === 'running') {
@@ -50,7 +50,7 @@ for (const run of digest.runs) {
     continue
   }
   const signals = Object.entries(run.signals ?? {})
-  const compared = signals.find(([, signal]) => signal.vsParent)
+  const compared = signals.find(([, signal]) => signal.vsParentAtThisStep)
   const [name, signal] = compared ?? signals[0] ?? []
   const label = signal?.label ?? name
   runs[run.key] = !name

@@ -200,7 +200,12 @@ pub(super) fn read(
             }
             continue;
         };
-        match answer_of(answer, run.has_sentence, &mut |template| {
+        // A run's own sentence may name the run as the summary does; it reads the same without.
+        let mut answer = answer.clone();
+        if let Some(line) = answer.get("line").and_then(Value::as_str) {
+            answer["line"] = Value::from(line.replace(&format!("{{{}:", run.key), "{"));
+        }
+        match answer_of(&answer, run.has_sentence, &mut |template| {
             let checked = check_line(template, false, runs, Some(run), render)?;
             let fresh = checked
                 .iter()
@@ -219,7 +224,7 @@ pub(super) fn read(
                 template,
                 evidence,
             }) => match check_evidence(&evidence, run.excerpts) {
-                Ok(()) => {
+                Ok(evidence) => {
                     read.runs.insert(
                         run.key.to_owned(),
                         Answer::Line {
@@ -238,9 +243,8 @@ pub(super) fn read(
         }
     }
     match (summary, object.get("summary")) {
-        (None, Some(_)) => read
-            .errors
-            .push("give no summary: this look has one run".into()),
+        // A summary nobody asked for is left unread.
+        (None, Some(_)) => {}
         (Some(bounds), None) if !bounds.has_sentence => read
             .errors
             .push("summary: write the summary sentence".into()),
@@ -337,27 +341,38 @@ fn answer_of(
     })
 }
 
-fn check_evidence(evidence: &[(u64, u64)], excerpts: &[(u64, u64)]) -> Result<(), String> {
-    if evidence.len() > MAX_EVIDENCE {
-        return Err(format!("cite at most {MAX_EVIDENCE} excerpts"));
+/// The shown excerpts a citation points at: each cited range stands for the lines it overlaps,
+/// so evidence only ever names bytes the look was shown. A range that overlaps none is wrong.
+fn check_evidence(
+    evidence: &[(u64, u64)],
+    excerpts: &[(u64, u64)],
+) -> Result<Vec<(u64, u64)>, String> {
+    let mut cited = Vec::new();
+    for (from, to) in evidence {
+        let overlapped: Vec<(u64, u64)> = excerpts
+            .iter()
+            .copied()
+            .filter(|(a, b)| from < b && a < to)
+            .collect();
+        if from >= to || overlapped.is_empty() {
+            return Err(format!(
+                "evidence {from}..{to} is not a log excerpt this look showed"
+            ));
+        }
+        cited.extend(overlapped);
     }
-    let bytes: u64 = evidence
-        .iter()
-        .map(|(from, to)| to.saturating_sub(*from))
-        .sum();
+    cited.sort_unstable();
+    cited.dedup();
+    if cited.len() > MAX_EVIDENCE {
+        return Err(format!("cite at most {MAX_EVIDENCE} lines of evidence"));
+    }
+    let bytes: u64 = cited.iter().map(|(from, to)| to - from).sum();
     if bytes > MAX_EVIDENCE_BYTES {
         return Err(format!(
             "cite at most {MAX_EVIDENCE_BYTES} bytes of evidence"
         ));
     }
-    for (from, to) in evidence {
-        if from >= to || !excerpts.iter().any(|(a, b)| a <= from && to <= b) {
-            return Err(format!(
-                "evidence {from}..{to} is not inside a log excerpt this look showed"
-            ));
-        }
-    }
-    Ok(())
+    Ok(cited)
 }
 
 /// The checks of one sentence; returns the count patterns it reads.
@@ -622,7 +637,7 @@ mod tests {
             ),
             (
                 r#"{"runs": {"r1": {"status": "flag", "line": "Loss **{loss}**.", "evidence": [{"from": 10, "to": 20}]}}}"#,
-                "not inside a log excerpt",
+                "not a log excerpt",
             ),
             (r#"{"runs": {"r2": {"same": true}}}"#, "no run r2"),
             (r#"{"cancel": true}"#, "not part of a reply"),
@@ -659,6 +674,39 @@ mod tests {
             read.errors
         );
         assert_eq!(read.runs.get("r2"), Some(&Answer::Same));
+    }
+
+    #[test]
+    fn evidence_names_the_lines_it_overlaps_and_a_run_may_name_itself() {
+        let mut run = run();
+        run.excerpts = vec![(100, 140), (140, 200), (300, 340)];
+        // From the middle of one line to past the next, across a line the look left out.
+        let kept = read(
+            r#"{"runs": {"r1": {"status": "flag", "line": "Loss **{r1:loss}**.", "evidence": [{"from": 110, "to": 320}]}},
+               "summary": {"status": "ok", "line": "unasked"}}"#,
+            &[bind("r1", &run, false)],
+            None,
+            &render,
+        );
+        assert!(kept.errors.is_empty(), "{:?}", kept.errors);
+        assert!(
+            matches!(&kept.runs["r1"], Answer::Line { template, evidence, .. }
+                if template == "Loss **{loss}**." && *evidence == [(100, 140), (140, 200), (300, 340)])
+        );
+        assert_eq!(kept.summary, None);
+        let gap = read(
+            r#"{"runs": {"r1": {"status": "flag", "line": "Loss **{loss}**.", "evidence": [{"from": 210, "to": 290}]}}}"#,
+            &[bind("r1", &run, false)],
+            None,
+            &render,
+        );
+        assert!(
+            gap.errors
+                .iter()
+                .any(|error| error.contains("not a log excerpt")),
+            "{:?}",
+            gap.errors
+        );
     }
 
     #[test]

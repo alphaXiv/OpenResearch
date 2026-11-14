@@ -329,19 +329,7 @@ fn run_json(
         }
         let vs = &run.body["versus"]["step"][name];
         if vs.is_object() {
-            entry["vsParent"] = json!(if vs["flat"] == true {
-                "level with".to_owned()
-            } else {
-                format!(
-                    "{} {}",
-                    vs["mag"],
-                    if vs["good"] == true {
-                        "better"
-                    } else {
-                        "worse"
-                    }
-                )
-            });
+            entry["vsParentAtThisStep"] = json!(super::versus_text(Some(vs), spec));
         }
         if bound.contains(name) {
             entry["points"] = points(run.body, name);
@@ -521,9 +509,9 @@ pub(super) fn build(shared: &Shared, runs: &[Run]) -> Digest {
         excerpts.insert(run.key.to_owned(), shown);
         let mut log = json!({"from": run.log.from, "to": run.log.to});
         if !head.is_empty() {
-            log["head"] = json!(head);
+            log["firstLines"] = json!(head);
         }
-        log["new"] = json!(lines);
+        log["sinceLastLook"] = json!(lines);
         let mut left_out = Vec::new();
         if omitted > 0 {
             left_out.push(format!("{omitted} more lines"));

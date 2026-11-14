@@ -36,12 +36,14 @@ mkdirSync(out, { recursive: true })
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)))
 const realClaude = spawnSync('/bin/sh', ['-c', 'command -v claude'], { encoding: 'utf8' }).stdout.trim()
 const claude = watcher === 'real'
-  ? `#!/bin/sh\nexec ${realClaude} "$@"\n`
+  ? `#!/bin/sh\n# The sandbox sends every request off the machine to its stand-in; a real look goes to Anthropic.\nunset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy\nexec ${realClaude} "$@"\n`
   : `#!/bin/sh\nexec ${process.execPath} ${path.join(import.meta.dirname, 'watcher.mjs')} "$@"\n`
 
 const agent = await startAgentScripts()
 const outside = await startOutside()
-const orx = await startOrx({ agent, outside, claude, env: { ORX_WATCH_WITH: 'claude-code' } })
+/** A real look signs in as the shell that started the shots does: with its API key, if it has one. */
+const signIn = Object.fromEntries(['ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL'].flatMap((name) => watcher === 'real' && process.env[name] ? [[name, process.env[name]!]] : []))
+const orx = await startOrx({ agent, outside, claude, env: { ORX_WATCH_WITH: 'claude-code', ...signIn } })
 const browser = await chromium.launch()
 
 /** `target` in both themes, as `<name>-light.png` and `<name>-dark.png`. */
