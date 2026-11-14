@@ -120,7 +120,7 @@ jobs:
       - name: Install WebKitGTK and packaging tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev file patchelf xvfb xdotool
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev file patchelf xvfb xdotool gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav
 
       # The runner's preinstalled stable toolchain, as release-macos-app.yml uses.
       - name: Build the production orx
@@ -134,14 +134,17 @@ jobs:
         run: test "$(target/release/orx version --build-channel)" = production
 
       - name: Package the AppImage
-        run: scripts/build-linux-appimage.sh target/release/orx app-dist
+        run: |
+          scripts/build-linux-appimage.sh target/release/orx app-dist
+          # shellcheck disable=SC2046 # pkg-config emits compiler arguments.
+          cc -Wall -Wextra scripts/appimage-media-probe.c -o app-dist/appimage-media-probe $(pkg-config --cflags --libs webkit2gtk-4.1)
 
       # Otherwise the host's WebKit would stand in for a broken bundled one.
-      - name: Remove WebKitGTK from the runner
-        run: sudo apt-get remove -y libwebkit2gtk-4.1-0 libjavascriptcoregtk-4.1-0
+      - name: Remove WebKitGTK and media plugins from the runner
+        run: sudo apt-get remove -y libwebkit2gtk-4.1-0 libjavascriptcoregtk-4.1-0 gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav
 
       - name: Smoke-test the AppImage
-        run: scripts/smoke-test-linux-appimage.sh app-dist/OpenResearch-${{ matrix.arch }}.AppImage
+        run: scripts/smoke-test-linux-appimage.sh app-dist/OpenResearch-${{ matrix.arch }}.AppImage app-dist/appimage-media-probe
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

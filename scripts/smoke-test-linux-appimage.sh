@@ -3,14 +3,18 @@
 # loads the dashboard: the server answers, WebKit's network process has connected
 # to it, the window appears once the page has loaded, the desktop entry points at
 # this AppImage, and every WebKit helper runs from inside the image on the image's
-# libwebkit2gtk and no host GIO modules. Run it where WebKitGTK is not installed,
+# libwebkit2gtk and no host GIO modules. A sandboxed HTML preview also creates
+# an AudioContext and decodes an H.264/AAC video into a canvas. Run it where
+# WebKitGTK and GStreamer plugins are not installed,
 # or a fallback to the host's copy would pass. Needs xvfb-run, curl, ss, setsid,
 # and xdotool.
 #
-#   scripts/smoke-test-linux-appimage.sh <OpenResearch-<arch>.AppImage>
+#   scripts/smoke-test-linux-appimage.sh <OpenResearch-<arch>.AppImage> <media probe>
 set -euo pipefail
 
 APPIMAGE="$(realpath "$1")"
+MEDIA_PROBE="$(realpath "$2")"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SANDBOX="$(mktemp -d)"
 LOG="$SANDBOX/app.log"
 export ORX_DATA_DIR="$SANDBOX/data" XDG_CONFIG_HOME="$SANDBOX/config" XDG_DATA_HOME="$SANDBOX/share"
@@ -94,10 +98,27 @@ grep -q 'showing the window anyway' "$LOG" && fail "The dashboard never finished
 grep -qxF "TryExec=$APPIMAGE" "$XDG_DATA_HOME/applications/openresearch.desktop" \
   || fail "The app did not install its desktop entry."
 
+mapfile -d '' -t media_env <"/proc/$ORX_PID/environ"
+image_exe="$(readlink "/proc/$ORX_PID/exe")"
+image_lib="$(dirname "$(dirname "$image_exe")")/lib"
+if ! (
+  ulimit -c 0
+  cd "/proc/$ORX_PID/cwd"
+  timeout 35 env -i "${media_env[@]}" LD_LIBRARY_PATH="$image_lib" \
+    "$MEDIA_PROBE" "$ROOT/scripts/fixtures/appimage-media.html"
+) >"$SANDBOX/media.log" 2>&1; then
+  cat "$SANDBOX/media.log"
+  fail "The AppImage's WebKit could not render sandboxed HTML audio/video."
+fi
+cat "$SANDBOX/media.log"
+
+helpers=0
 for pid in $(pgrep -f 'WebKit(Web|Network)Process'); do
+  grep -zqxF "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" "/proc/$pid/environ" 2>/dev/null || continue
   # WebKit may replace a web process between pgrep and here.
   exe="$(readlink "/proc/$pid/exe")" || continue
   maps="$(cat "/proc/$pid/maps" 2>/dev/null)" || continue
+  helpers=$((helpers + 1))
   case "$exe" in
     *appimage_extracted_*) ;;
     *) fail "WebKit helper $pid runs $exe, not the AppImage's." ;;
@@ -108,5 +129,6 @@ for pid in $(pgrep -f 'WebKit(Web|Network)Process'); do
     fail "WebKit helper $pid loaded the host's GIO modules."
   fi
 done
+[ "$helpers" -gt 0 ] || fail "No bundled WebKit helper could be inspected."
 echo "The AppImage's WebKit loaded the dashboard:"
 pgrep -af 'WebKit(Web|Network)Process'

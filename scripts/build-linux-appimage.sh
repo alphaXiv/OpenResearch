@@ -2,7 +2,7 @@
 # Package an `orx` built with `--features desktop` into OpenResearch-<arch>.AppImage,
 # bundling WebKitGTK so the app runs without it installed. Run on the oldest
 # glibc to support (CI uses Ubuntu 22.04) with libwebkit2gtk-4.1-dev and
-# patchelf installed.
+# patchelf and GStreamer's base, good and libav plugins installed.
 #
 #   scripts/build-linux-appimage.sh <orx binary> <output dir>
 set -euo pipefail
@@ -13,6 +13,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ARCH="$(uname -m)"
 TRIPLET="$ARCH-linux-gnu"
 WEBKIT_DIR="/usr/lib/$TRIPLET/webkit2gtk-4.1"
+GST_PLUGIN_DIR="/usr/lib/$TRIPLET/gstreamer-1.0"
+GST_SCANNER="/usr/lib/$TRIPLET/gstreamer1.0/gstreamer-1.0/gst-plugin-scanner"
 
 # Pinned, and checked against the digests GitHub publishes for each release asset.
 LINUXDEPLOY_URL="https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-$ARCH.AppImage"
@@ -71,6 +73,13 @@ done
 # are built against a newer GLib than the bundled one.
 install -Dm755 "/usr/lib/$TRIPLET/gio/modules/libgiognutls.so" \
   "$APPDIR/usr/lib/gio/modules/libgiognutls.so"
+# WebKit loads these at runtime; its ELF dependencies contain no media plugins.
+for plugin in coreelements app typefindfunctions playback audioconvert audioresample audiofx \
+  autodetect pulseaudio volume videoconvert videoscale isomp4 libav matroska vpx \
+  ogg vorbis opus theora wavparse soup; do
+  install -Dm755 "$GST_PLUGIN_DIR/libgst$plugin.so" "$APPDIR$GST_PLUGIN_DIR/libgst$plugin.so"
+done
+install -Dm755 "$GST_SCANNER" "$APPDIR$GST_SCANNER"
 
 echo "==> Deploying libraries with linuxdeploy"
 DEPLOY_GTK_VERSION=3 linuxdeploy \
@@ -79,6 +88,8 @@ DEPLOY_GTK_VERSION=3 linuxdeploy \
   --desktop-file "$ROOT/linux/OpenResearch.desktop" \
   --icon-file "$ROOT/linux/OpenResearch.png" \
   --custom-apprun "$ROOT/linux/AppRun" \
+  --deploy-deps-only "$APPDIR$GST_PLUGIN_DIR" \
+  --deploy-deps-only "$APPDIR$GST_SCANNER" \
   --plugin gtk
 
 # linuxdeploy wraps custom entry points with its hooks. AppRun must capture the
@@ -93,10 +104,14 @@ patchelf --set-rpath '$ORIGIN/../..' \
   "$APPDIR/usr/lib/gio/modules/libgiognutls.so"
 patchelf --set-rpath '$ORIGIN/../../..' \
   "$APPDIR$WEBKIT_DIR/injected-bundle/libwebkit2gtkinjectedbundle.so"
+patchelf --set-rpath '$ORIGIN/../..' "$APPDIR$GST_PLUGIN_DIR/"*.so
+patchelf --set-rpath '$ORIGIN/../../..' "$APPDIR$GST_SCANNER"
 
 # The same-length rewrite Tauri uses: WebKit's absolute /usr paths become ././,
 # which AppRun resolves inside the image by running from $APPDIR/usr.
 find "$APPDIR/usr/lib" -name 'libwebkit*' -exec sed -i -e 's|/usr|././|g' '{}' +
+# GStreamer's plugin and scanner paths use the same Ubuntu prefix as WebKit's.
+find "$APPDIR/usr/lib" -name 'libgstreamer-1.0.so*' -exec sed -i -e 's|/usr|././|g' '{}' +
 
 echo "==> Building the AppImage"
 ARCH="$ARCH" appimagetool --runtime-file "$WORK/runtime" "$APPDIR" "$OUT/OpenResearch-$ARCH.AppImage"
