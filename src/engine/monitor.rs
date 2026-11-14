@@ -4843,6 +4843,11 @@ mod tests {
         let (monitor, _) = monitor_at(&f, &child, T0 + 60_000);
         assert_eq!(monitor["progress"]["stallMs"], 0, "{}", monitor["progress"]);
         assert_eq!(monitor["phases"][1]["priorMs"], 59_000);
+        assert_eq!(
+            monitor["progress"]["whole"],
+            Value::Null,
+            "with no plan, what comes after train is unknown"
+        );
         let (monitor, _) = monitor_at(&f, &child, T0 + 100_000);
         assert_eq!(
             monitor["progress"]["stallMs"], 96_000,

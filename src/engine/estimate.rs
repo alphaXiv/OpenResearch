@@ -674,7 +674,8 @@ pub(crate) fn estimate(input: &Input) -> Result<Output, InputError> {
             },
         })
         .collect();
-    let whole = if input.planned && weights_estimated && phases.len() > 1 {
+    // Without a plan the stages to come are unknown, so a share of the whole run is too.
+    let whole = if phases.len() > 1 && (weights_estimated || !input.planned) {
         None
     } else if open && !(input.planned && phases.len() > 1) {
         open_fill
@@ -1317,6 +1318,8 @@ mod tests {
                 );
                 value["now"] = serde_json::json!(moment.now);
                 value["as_of"] = value["now"].clone();
+                // The prototype's runs of several stages know them all, as a declared plan does.
+                value["planned"] = serde_json::json!(fixture.segments.len() > 1);
                 value["placed"] = serde_json::json!(true);
                 value["spend"] = moment.spend.map_or(
                     serde_json::json!("NeverReported"),
@@ -1632,7 +1635,10 @@ mod tests {
         assert!(out.estimate.unwrap().pending);
         assert!(!out.current_phase.unwrap().pending);
         assert!(out.weights_estimated);
-        close(out.whole.unwrap(), 0.05);
+        assert_eq!(
+            out.whole, None,
+            "no equal split stands in for unknown weights"
+        );
         i.phases[1].prior = Some(Range {
             lo_ms: 100_000.0,
             mid_ms: 100_000.0,
