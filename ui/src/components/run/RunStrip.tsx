@@ -37,6 +37,9 @@ function Hero({ model, monitor }: { model: RunModel; monitor: RunMonitor }) {
   const series = chart ? seriesOf(monitor, chart) : [];
   const headline = model.headline;
   if (!block && !headline?.known) return null;
+  // A chart names what it draws: its legend where there is room for one, else a caption.
+  const drawn = series.filter((line) => !line.ghost).map((line) => line.label);
+  const legend = series.length > 1;
   return (
     <div className="mt-3 flex h-16 items-stretch gap-5">
       {headline?.known && (
@@ -46,10 +49,13 @@ function Hero({ model, monitor }: { model: RunModel; monitor: RunMonitor }) {
           <div className="h-4 text-xs">{headline.delta && <><Delta delta={headline.delta} said />{!headline.delta.flat && <span className="text-ink-subtext"> {m.run_than_parent()}</span>}</>}</div>
         </div>
       )}
-      <div className="min-w-0 flex-1 overflow-hidden">
-        {block && <Block monitor={monitor} block={block} size="strip" projectId={model.run.projectId} tone={model.tone} live={model.live} />}
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+        {drawn.length > 0 && <div className={cn("truncate text-xs text-ink-subtext", legend && "@2xl:hidden")}>{drawn.map(autoDir).join(" · ")}</div>}
+        <div className="min-h-0 flex-1">
+          {block && <Block monitor={monitor} block={block} size="strip" projectId={model.run.projectId} tone={model.tone} live={model.live} />}
+        </div>
       </div>
-      {series.length > 1 && <div className="hidden w-24 shrink-0 flex-col justify-center @2xl:flex"><Legend series={series} /></div>}
+      {legend && <div className="hidden w-24 shrink-0 flex-col justify-center @2xl:flex"><Legend series={series} /></div>}
     </div>
   );
 }
@@ -93,7 +99,7 @@ export function RunStrip({ model, monitor, runNo, runCount, agent, label, onTogg
           <p className="m-0 mt-0.5 leading-snug">
             <Lead model={model} stop />
             <Sentence text={model.flagDetail ?? model.sentence.text} tone={model.tone} />
-            {age !== null && <span className="whitespace-nowrap text-xs text-ink-subtext"> {timeAgo(age)}</span>}
+            {age !== null && <span className="whitespace-nowrap text-xs text-ink-subtext"> · {timeAgo(age)}</span>}
           </p>
         )}
         {model.stale && !failed && <p className="m-0 mt-1.5 text-xs text-ink-subtext">{model.stale.why} · {model.stale.age}</p>}

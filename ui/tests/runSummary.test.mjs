@@ -111,20 +111,21 @@ test("who needs attention comes first, before any leader", () => {
   assert.match(said([model("a", summary()), byRule]).text, /^g · Auto-stopped:/);
 });
 
-test("otherwise the summary counts the runs in each state and, in the same sentence, when the first should finish", () => {
+test("otherwise the summary counts the runs in each state and, in the same sentence, when the next should finish", () => {
   const eta = (mid, floor = false) => summary({ etaMs: { lo: mid - 60_000, mid, hi: mid + 60_000, at: now }, etaFloor: floor });
   const models = [model("a", eta(29 * 60_000)), model("b", eta(40 * 60_000)), model("c", summary({ tone: "starting" }), { status: "starting" }), model("d", summary({ tone: "done" }), { status: "done", endedAt: now })];
   const { text, firstDone } = said(models);
   assert.equal(text, [
-    m.run_summary_starting({ count: "**1**" }), m.run_summary_running({ count: "**2**" }), m.run_summary_done({ count: "**1**" }), m.run_summary_first_done({ duration: "**29m**" }),
-  ].map(bare).join(" · "));
+    m.run_summary_starting({ count: "**1**" }), m.run_summary_running({ count: "**2**" }), m.run_summary_done({ count: "**1**" }), m.run_summary_next_done({ duration: "**29m**" }),
+  ].map(bare).join(" · "), "once one is done, the soonest of the rest is the next");
   assert.equal(firstDone, null, "said once, in the sentence");
   // A time read from a bar in the log is only the least it will take.
   assert.match(said([model("a", eta(29 * 60_000, true)), model("b", eta(40 * 60_000))]).text, new RegExp(`${bare(m.run_summary_first_done_at_least({ duration: "**28m**" })).replace(/\*/g, "\\*")}$`));
   assert.equal(said([model("a", summary()), model("b", summary())]).text, bare(m.run_summary_running({ count: "**2**" })));
   // Beside a sentence about one run, the time stands apart.
   const failed = model("f", summary({ tone: "failed" }), { status: "failed", endedAt: now });
-  assert.equal(said([model("a", eta(29 * 60_000)), failed]).firstDone, bare(m.run_summary_first_done({ duration: "29m" })));
+  assert.equal(said([model("a", eta(29 * 60_000)), failed]).firstDone, bare(m.run_summary_next_done({ duration: "29m" })));
+  assert.equal(said([model("a", eta(29 * 60_000)), model("b", eta(40 * 60_000))]).text, [m.run_summary_running({ count: "**2**" }), m.run_summary_first_done({ duration: "**29m**" })].map(bare).join(" · "));
 });
 
 test("the watcher's summary stands for the runs its look covered, with names and numbers bound to each run", () => {

@@ -165,9 +165,11 @@ export function summarize(models: RunModel[], { labels, groups }: { labels: stri
     : null;
 
   const soonest = models.flatMap((model) => model.live && model.left ? [model.left] : []).sort((a, b) => a.ms - b.ms)[0];
+  // Once one has ended, the soonest of the rest is the next done, not the first.
+  const after = models.some((model) => !model.live);
   const firstDone = (duration: string) => !soonest ? null
-    : soonest.floor ? m.run_summary_first_done_at_least({ duration })
-    : m.run_summary_first_done({ duration });
+    : soonest.floor ? (after ? m.run_summary_next_done_at_least : m.run_summary_first_done_at_least)({ duration })
+    : (after ? m.run_summary_next_done : m.run_summary_first_done)({ duration });
   if (parts) return { parts, firstDone: soonest ? firstDone(durationText(soonest.ms)) : null };
 
   // The common case: the counts, then when the first finishes, all one sentence.

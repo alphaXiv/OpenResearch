@@ -371,12 +371,15 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     text: tickText(look, signals, clockText(look.at)),
   }]);
 
+  // A flag's sentence someone kept going after stays until the next look rewrites it: say it was kept.
+  const kept = live && watched ? monitor?.flags?.find((record) => record.state === "kept" && record.detail === watched.template && (record.choice?.at ?? 0) >= watched.t) : undefined;
   const logError = (monitor ?? summary)?.logError ?? null;
   const pace = monitor?.pace ?? null;
   const note = tone === "revising" ? m.run_flag_revising({ agent: autoDir(agent) })
     : tone === "stopped" && outcome?.by === "rule" && outcome.rule ? m.run_rule_detail({ text: ruleText(outcome.rule), name: autoDir(outcome.rule.name) })
     : tone === "stopped" && outcome?.by === "agent" ? (outcome.reason ? m.run_stop_reason({ agent: autoDir(agent), reason: autoDir(outcome.reason) }) : m.run_rule_reason_in_chat())
     : tone === "failed" && logError ? m.run_failed_log_error({ line: quoted(logError) })
+    : kept ? (kept.choice?.by === "agent" ? m.run_sentence_kept_by({ agent: autoDir(agent) }) : m.run_sentence_kept())
     : live && pace ? (pace.than === "earlier" ? m.run_pace_slower_earlier : m.run_pace_slower_parent)({ times: ltr(fmtNumber(pace.times)) })
     : null;
 
@@ -393,7 +396,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   return {
     run,
     sessionId: item.sessionId,
-    name: item.experimentSlug ?? item.experimentName ?? run.experimentId,
+    name: item.experimentName ?? item.experimentSlug ?? run.experimentId,
     where: where(run),
     tone,
     live,

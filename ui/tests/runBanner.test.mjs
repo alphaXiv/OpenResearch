@@ -77,6 +77,16 @@ test("one run opens as its strip; the chevrons and Escape step between line and 
   assert.equal(document.activeElement, button(m.run_show_more()));
 });
 
+test("a strip's chart names what it draws beside a headline it doesn't draw", async () => {
+  const view = { ...running.view, signals: { ...running.view.signals, test_acc: { label: "Test accuracy", digits: 3, better: "higher" } }, headline: ["test_acc"] };
+  backend({ monitors: { r1: { ...running, view, headline: "test_acc", latest: { ...running.latest, test_acc: 0.896 } } } });
+  const { container } = await banner([run("r1")]);
+  await settle();
+  const hero = container.querySelector('[role="img"][aria-label*="Loss"]').closest(".flex-col");
+  assert.equal(hero.firstElementChild.textContent.replace(/[⁦-⁩]/g, ""), "Loss");
+  assert.ok(container.textContent.includes("Test accuracy"));
+});
+
 test("the remembered level opens the line, and a run waiting for a choice opens its strip anyway", async () => {
   const monitors = { r1: running };
   backend({ uiState: { onboardingCompleted: true, runBanner: "line" }, monitors });
@@ -553,12 +563,12 @@ test("shown runs without a summary draw their terminal status at both levels wit
     assert.ok(button(m.run_dismiss()));
     const label = status === "done" ? m.status_done() : status === "failed" ? m.status_failed() : m.run_lead_stopped();
     assert.ok(view.container.textContent.includes(label), view.container.textContent);
-    await click(find("button", "lr-r1"));
+    await click(find("button", "r1"));
     assert.equal(opens[0][0], "e-r1");
     await click(button(m.run_show_less()));
     assert.ok(view.container.textContent.includes(label));
     assert.ok(button(m.run_dismiss()));
-    await click(find("button", "lr-r1"));
+    await click(find("button", "r1"));
     assert.equal(opens[1][0], "e-r1");
     assert.equal(requests.filter((r) => r.request.includes("/monitor")).length, 0);
     assert.ok(!view.container.textContent.includes(m.run_monitor_load_failed()));
