@@ -1,6 +1,6 @@
 ---
 name: orx-experiment-tree
-description: "Plan and drive the experiment tree: first-launch setup, instrumenting a baseline (stages, measures, view), fixed run contract, frozen nodes, stacked-bush tree shape, branch/launch/reconcile/promote, repair limits, notes, and turn summaries. Use before creating or changing experiments, launching a first run, deciding what to try next, handling a completed run, or reporting experiment progress."
+description: "Plan and drive the experiment tree: first-launch setup, fixed run contract, frozen nodes, stacked-bush tree shape, branch/launch/reconcile/promote, repair limits, notes, and turn summaries. Use before creating or changing experiments, launching a first run, deciding what to try next, handling a completed run, or reporting experiment progress."
 ---
 
 A project is a **tree of experiment nodes**. The root (**baseline**) holds the
@@ -23,23 +23,9 @@ train/evaluation command and compute-specific requirements; ask only if the
 project setup leaves these or the chosen workflow unclear. Record the durable
 setup and execution recipe in the project's run command.
 
-Instrumenting is part of writing the baseline, not of launching it. Read the
-entry point the run command starts, then commit on the baseline's branch:
-
-- **every stage as a phase** with its own total and unit, setup included
-  (`install`, `download` 9 shards, `tokenizer` 32,503 merges, `train` 5,000
-  steps, `eval` 22 tasks): a shell script echoes `::orx::` lines, Python uses
-  `orx_run`;
-- **the measures that answer the question**, the headline first, each
-  declaring which way is better;
-- **a view** of them, set with `orx exp view set <expId> --file view.xml`;
-- **patterns** instead, for a log whose code is not yours to edit.
-
-Children inherit all of it. After the first launch, run
-`orx exp view check <runId>` on its first minutes of log and repair whatever
-did not fold. How, with worked examples:
-[references/instrument.md](references/instrument.md)
-(`orx skill experiment-tree/instrument`).
+Make the baseline followable before its first launch: its stages, the
+measures that answer the question, and the view that draws them. Load
+`orx-experiment-runs` and follow it; children inherit all of it.
 
 ## Provisional until it answers — repair, don't branch
 

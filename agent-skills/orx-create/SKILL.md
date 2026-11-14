@@ -51,7 +51,7 @@ orx create-experiment <localProjectId> --title "Alternative baseline" --baseline
   siblings: short, the setting that varies first ("Depth 4 at 2e15 FLOPs").
 - `--description` should state the concrete change and measurement the node
   owes.
-- Before a baseline's first run, instrument it: its stages, measures and view
-  (`orx-experiment-tree`, "Before the first launch").
+- Before a baseline's first run, declare its stages, report its measures and
+  set its view (`orx-experiment-runs`).
 - Commit the node's branch before launching. Runs use an immutable archive of
   that local commit.

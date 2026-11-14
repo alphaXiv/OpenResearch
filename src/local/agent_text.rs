@@ -164,33 +164,39 @@ fn every_orx_command_in_agent_text_parses() {
     assert!(checked > 100, "only {checked} commands found");
 }
 
-/// An agent copies the worked views and patterns as they are, so each must save as written.
+/// An agent copies the worked views, patterns and plans as they are, so each must save as written.
 #[test]
-fn every_view_and_pattern_in_agent_text_compiles() {
+fn every_view_pattern_and_plan_in_agent_text_compiles() {
+    use crate::engine::view::{self, Refusal, Source};
+
+    let refused = |refusal: Refusal| match refusal {
+        Refusal::Invalid(why) => why,
+        _ => "refused".to_owned(),
+    };
+    let source = Source {
+        file: None,
+        patterns: Some("patterns.json"),
+        config: Some("plan.json"),
+    };
     let mut checked = 0;
     let mut failures = Vec::new();
     for (label, text) in all_text() {
         for block in text.split("```").skip(1).step_by(2) {
             let (language, body) = block.split_once('\n').unwrap_or((block, ""));
             let problem = match language.trim() {
-                "html" if body.contains("<view") => crate::engine::view::compile(body)
+                "html" if body.contains("<view") => view::compile(body)
                     .err()
                     .map(|problem| problem.text("view.xml", "")),
-                "json" if body.contains("\"regex\"") => {
-                    let source = crate::engine::view::Source {
-                        file: None,
-                        patterns: Some("patterns.json"),
-                        config: None,
-                    };
-                    match serde_json::from_str(body) {
-                        Ok(given) => match crate::engine::view::patterns(&given, &source, "") {
-                            Ok(_) => None,
-                            Err(crate::engine::view::Refusal::Invalid(why)) => Some(why),
-                            Err(_) => Some("refused".to_owned()),
-                        },
-                        Err(error) => Some(error.to_string()),
+                "json" => match serde_json::from_str(body) {
+                    Err(error) => Some(error.to_string()),
+                    Ok(given) if body.contains("\"regex\"") => {
+                        view::patterns(&given, &source, "").err().map(refused)
                     }
-                }
+                    Ok(given) if body.contains("\"plan\"") => {
+                        view::plan_of(&given, &source, "").err().map(refused)
+                    }
+                    Ok(_) => continue,
+                },
                 _ => continue,
             };
             checked += 1;
@@ -200,7 +206,34 @@ fn every_view_and_pattern_in_agent_text_compiles() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
-    assert!(checked >= 4, "only {checked} views and patterns found");
+    assert!(
+        checked >= 10,
+        "only {checked} views, patterns and plans found"
+    );
+}
+
+/// A run prints the documented `::orx::` lines as they are, so each must fold without a complaint.
+#[test]
+fn every_orx_line_in_agent_text_folds() {
+    let mut checked = 0;
+    for (label, text) in all_text() {
+        for line in text
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("::orx:: "))
+        {
+            let mut snapshot = orx_signals::Snapshot::new("run", "log", "1");
+            snapshot
+                .feed(format!("::orx:: {line}\n").as_bytes(), true, 0, false)
+                .unwrap();
+            assert!(
+                snapshot.diagnostics.counts.is_empty(),
+                "{label}: `::orx:: {line}` folds with {:?}",
+                snapshot.diagnostics.counts
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked >= 3, "only {checked} ::orx:: lines found");
 }
 
 const PLACEHOLDER: &str = "PLACEHOLDER";

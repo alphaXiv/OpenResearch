@@ -106,6 +106,7 @@ const COMPUTE_RESOURCES: &[AgentSkillResource] = &[
     },
 ];
 const EXPERIMENT_TREE: &str = include_str!("../../agent-skills/orx-experiment-tree/SKILL.md");
+const EXPERIMENT_RUNS: &str = include_str!("../../agent-skills/orx-experiment-runs/SKILL.md");
 const GIT: &str = include_str!("../../agent-skills/orx-git/SKILL.md");
 const AGENT_DELEGATION: &str = include_str!("../../agent-skills/orx-agent-delegation/SKILL.md");
 const LIT: &str = include_str!("../../agent-skills/orx-lit-review/SKILL.md");
@@ -168,7 +169,8 @@ const FIGURES_RESOURCES: &[AgentSkillResource] = &[
 // the whole set.
 
 const D_COMPUTE: &str = "Launch and monitor experiment runs and route guidance for hf, modal, k8s/Kubernetes, ssh, slurm, ray, vercel, OpenResearch, Tinker, and local backends. Covers the fixed run contract, sizing, cancellation, and result messages. Use before any launch or relaunch, when authoring a k8s manifest, choosing or switching compute, or handling an OOM, stall, or timeout; then read one backend reference.";
-const D_EXPERIMENT_TREE: &str = "Plan and drive the experiment tree: first-launch setup, instrumenting a baseline (stages, measures, view), fixed run contract, frozen nodes, stacked-bush tree shape, branch/launch/reconcile/promote, repair limits, notes, and turn summaries. Use before creating or changing experiments, launching a first run, deciding what to try next, handling a completed run, or reporting experiment progress.";
+const D_EXPERIMENT_TREE: &str = "Plan and drive the experiment tree: first-launch setup, fixed run contract, frozen nodes, stacked-bush tree shape, branch/launch/reconcile/promote, repair limits, notes, and turn summaries. Use before creating or changing experiments, launching a first run, deciding what to try next, handling a completed run, or reporting experiment progress.";
+const D_EXPERIMENT_RUNS: &str = "Make a run followable from launch to result: declare its stages, report progress and the measures that answer its question, write its view and how it compares with the parent, read a log you can't edit with patterns, check the first minutes, change any of it mid-run. Use before a baseline's first launch, when a run's progress or chart misleads, and when the user asks to change what a run shows.";
 
 const S_COMPUTE: AgentSkill = AgentSkill {
     name: "orx-compute",
@@ -180,10 +182,13 @@ const S_EXPERIMENT_TREE: AgentSkill = AgentSkill {
     name: "orx-experiment-tree",
     description: D_EXPERIMENT_TREE,
     content: EXPERIMENT_TREE,
-    resources: &[AgentSkillResource {
-        path: "references/instrument.md",
-        content: include_str!("../../agent-skills/orx-experiment-tree/references/instrument.md"),
-    }],
+    resources: &[],
+};
+const S_EXPERIMENT_RUNS: AgentSkill = AgentSkill {
+    name: "orx-experiment-runs",
+    description: D_EXPERIMENT_RUNS,
+    content: EXPERIMENT_RUNS,
+    resources: &[],
 };
 const S_GIT: AgentSkill = AgentSkill {
     name: "orx-git",
@@ -265,6 +270,7 @@ pub fn skills(set: SkillSet) -> Vec<&'static AgentSkill> {
     match set {
         SkillSet::Local => vec![
             &S_EXPERIMENT_TREE,
+            &S_EXPERIMENT_RUNS,
             &S_GIT,
             &S_AGENT_DELEGATION,
             &S_COMPUTE,
@@ -281,6 +287,7 @@ pub fn skills(set: SkillSet) -> Vec<&'static AgentSkill> {
         SkillSet::Full => vec![
             &S_CREATE,
             &S_EXPERIMENT_TREE,
+            &S_EXPERIMENT_RUNS,
             &S_GIT,
             &S_AGENT_DELEGATION,
             &S_COMPUTE,
@@ -849,6 +856,7 @@ orx.progress(rank=0)
     fn shared_skills_use_one_canonical_body() {
         for name in [
             "experiment-tree",
+            "experiment-runs",
             "git",
             "agent-delegation",
             "compute",

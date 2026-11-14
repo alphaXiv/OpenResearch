@@ -1058,7 +1058,11 @@ pub(crate) fn stored_plan(
 const CONFIG_KEYS: &str = "plan";
 
 /// A configuration as an agent gave it: its stage plan, or why it cannot be used.
-fn plan_of(given: &Value, source: &Source, fix: &str) -> Result<Vec<orx_signals::Stage>, Refusal> {
+pub(crate) fn plan_of(
+    given: &Value,
+    source: &Source,
+    fix: &str,
+) -> Result<Vec<orx_signals::Stage>, Refusal> {
     let file = source.config.unwrap_or("<config>");
     let refuse = |why: String| Refusal::Invalid(format!("Config {file}: {why}. {fix}"));
     let fields = given
