@@ -81,7 +81,7 @@ orx skill compute/assets/orx_run.py > orx_run.py
 
 ```python
 import orx_run as orx
-run = orx.progress(total=5000, unit="steps")   # right after its stage starts
+run = orx.progress(total=5000, unit="steps", phase="train")   # names its stage when no shell does
 run.step(step, loss=loss, val_loss=val)         # every step; one report a second goes out
 with run.phase("eval", total=22, unit="tasks") as p:
     for done, task in enumerate(tasks, 1):
@@ -93,7 +93,7 @@ run.spend(cumulative_usd)
 It reports from global rank zero, flushes a non-finite measure at once, and
 never marks a run finished. Resume with `progress(total=5000, start=3000)`.
 A shell script names the stages and relays the progress of tools it can't
-change; the Python it starts then only calls `progress(total=…)`:
+change; the Python it starts then calls `progress(total=…)` without `phase`:
 
 ```sh
 report() { printf '::orx:: %s\n' "$1"; }
