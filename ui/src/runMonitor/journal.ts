@@ -2,7 +2,7 @@ import { autoDir } from "../i18n";
 import { m } from "../paraglide/messages.js";
 import { getLocale } from "../paraglide/runtime.js";
 import { fillSentence } from "./format";
-import type { Look, Signals } from "./types";
+import type { Flag, Look, Signals } from "./types";
 
 /** What a look said, with the numbers of its moment, in the app's language; a look that said nothing, why. */
 export function lookText(look: Look, signals: Signals): string {
@@ -49,4 +49,24 @@ export function journalRows(looks: Look[]): JournalRow[] {
     rows.push({ look, since: null, count: 1 });
   }
   return rows.reverse();
+}
+
+/** A flag no look raised, a tripwire's or a rule's, as a row of the journal. */
+export function flagLook(flag: Flag): Look {
+  return { id: `flag:${flag.id}`, at: flag.at, kind: "change", whole: flag.whole, said: "flag", text: flag.detail, template: null, bindings: null, with: [], why: "" };
+}
+
+/** The row a flag stands under: its look's, or its own. */
+export const flagRow = (flag: Flag) => flag.lookId ?? `flag:${flag.id}`;
+
+/** Who settled a flag and how, or who it was sent to, in the app's language; null while no one has chosen. */
+export function flagOutcome(flag: Flag, agent: string): string | null {
+  const { choice } = flag;
+  if (!choice) return null;
+  const name = autoDir(agent);
+  const byYou = choice.by === "user";
+  if (flag.state === "kept") return byYou ? m.run_watch_kept() : m.run_watch_kept_by({ agent: name });
+  if (flag.state === "stopped") return byYou ? m.run_watch_stopped_you() : m.run_watch_stopped_by({ agent: name });
+  if (choice.c === "ask") return byYou ? m.run_watch_asked({ agent: name }) : m.run_watch_left_to_you({ agent: name });
+  return null;
 }

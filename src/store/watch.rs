@@ -142,8 +142,8 @@ impl Store {
         )? > 0)
     }
 
-    /// Settles a look that was sent: its state, what it cost, its summary and what it wrote for
-    /// each run, in one transaction.
+    /// Settles a look that was sent: its state, what it cost, its summary, what it wrote for
+    /// each run and the flags it raised, in one transaction.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn finish_watch_look(
         &self,
@@ -154,8 +154,9 @@ impl Store {
         error: Option<&str>,
         summary: Option<(&str, &str)>,
         results: &[LookResult],
+        flags: &[NewFlag],
     ) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.begin_immediate()?;
         tx.execute(
             "UPDATE watch_looks SET state = ?2, done_at = ?3, usage_json = ?4, error = ?5,
                     summary_template = ?6, summary_text = ?7
@@ -188,6 +189,7 @@ impl Store {
                 ],
             )?;
         }
+        self.append_flags(flags, now)?;
         tx.commit()?;
         Ok(())
     }

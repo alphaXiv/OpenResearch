@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process'
 import { writeFile } from 'node:fs/promises'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import type { Locator, Page, TestInfo } from '@playwright/test'
 import type { Agent } from '../src/agent.ts'
@@ -141,11 +141,24 @@ for (let step = 1; step <= total; step++) {
 }`)
   const hold = `result-${project.id}`
   agent.script('finished with status **done**', [{ hold }, { say: 'Training finished.' }])
+  // The NaN flags the run; the agent it wakes reads which run from the file the test writes once it knows.
+  const [woken, ids] = [`woken-${project.id}`, path.join(orx.root, 'declared-ids')]
+  agent.script('was flagged for review', [
+    { hold: woken },
+    { run: `read run exp < ${ids}; ${settle('"$exp"', '"$run"', 'keep', 'One NaN at step 10; the steps after it are numbers again.')}` },
+    { say: 'One NaN at step 10, numbers again after it. Keeping it going.' },
+  ])
   const banner = await launch(page, agent, project, 'Declared', run.command)
   const chart = banner.getByRole('img', { name: /^loss / })
+  const { id: runId, experimentId } = (await (await page.request.get(`${orx.url}/api/chat/shown-runs`)).json())[0].run
 
-  await test.step('a NaN reads NaN', async () => {
+  await test.step('a NaN reads NaN, flags the run, and the agent it wakes keeps it going', async () => {
     await expect(banner).toContainText(said('Step 10 of 40'))
+    await agent.reached(woken)
+    await expect(banner).toContainText('loss became NaN at step 10.')
+    writeFileSync(ids, `${runId} ${experimentId}\n`)
+    agent.release(woken)
+    await expect(page.getByText('One NaN at step 10, numbers again after it. Keeping it going.', { exact: true })).toBeVisible()
     await expect(chart).toHaveAccessibleName('loss NaN')
     await expect(banner).toContainText('NaN')
   })
@@ -160,7 +173,6 @@ for (let step = 1; step <= total; step++) {
     await themes(page, banner, info, 'strip-running')
   })
 
-  const runId = (await (await page.request.get(`${orx.url}/api/chat/shown-runs`)).json())[0].run.id
   await test.step('the run goes on while orx up is down; the open page catches up with each step once', async () => {
     await orx.restart('SIGTERM', () => run.open('half'))
     await expect(banner).toContainText(said('Step 30 of 40'), { timeout: 20_000 })
@@ -660,4 +672,144 @@ for (let step = 1; step <= 400; step++) {
       return [stopped.outcome?.by, stopped.outcome?.rule?.name, stopped.monitor?.tone]
     }).toEqual(['rule', 'nan-loss', 'stopped'])
   })
+})
+
+/**
+ * Light and dark stills of `target`, or the whole window, into `$ORX_E2E_SHOTS` for a person to look at; `around`
+ * widens a still of `target` to the window's left edge and that many pixels above and below it.
+ */
+async function keep(page: Page, target: Locator | Page, name: string, around?: number) {
+  const dir = process.env.ORX_E2E_SHOTS
+  if (!dir) return
+  mkdirSync(dir, { recursive: true })
+  for (const scheme of ['light', 'dark'] as const) {
+    await page.emulateMedia({ colorScheme: scheme })
+    await expect(page.locator('html')).toHaveAttribute('data-theme', scheme)
+    await expect.poll(() => page.evaluate(() => document.getAnimations().filter((a) => a instanceof CSSTransition).length)).toBe(0)
+    const file = path.join(dir, `${name}-${scheme}.png`)
+    const box = around === undefined || target === page ? null : await (target as Locator).boundingBox()
+    if (box) await page.screenshot({ path: file, clip: { x: 0, y: Math.max(0, box.y - around!), width: box.x + box.width + 8, height: box.height + 2 * around! } })
+    else await target.screenshot({ path: file })
+  }
+  await page.emulateMedia({ colorScheme: 'light' })
+}
+
+/** A payload that errs at each of `errors`' steps once its gate opens, and holds at step 30 until `end` opens. */
+function erring(orx: Orx, name: string, errors: [string, number, string][]) {
+  return payload(orx, name, [...errors.map(([gate]) => gate), 'end'], `
+process.stdout.write('::orx:: {"step":0,"of":40,"unit":"steps","t":0}\\n')
+const errors = ${JSON.stringify(errors)}
+for (let step = 1; step <= 40; step++) {
+  await tick()
+  for (const [name, at, line] of errors) if (step === at) { gate(name); console.error(line) }
+  if (step === 30) gate('end')
+  process.stdout.write('::orx:: {"step":' + step + ',"m":{"loss":' + (2 / step).toFixed(4) + '}}\\n')
+}`)
+}
+
+/** The shell an agent runs to settle the open flag of `run` the way `choice` says. */
+const settle = (exp: string, run: string, choice: string, reason: string) =>
+  `f=$(orx exp status ${exp} --run ${run} | sed -n 's/.*(flag \\(f[0-9a-f]*\\),.*/\\1/p'); orx exp flag ${run} --flag "$f" --${choice} --reason '${reason}'`
+
+test('an error flags the run and wakes its Agentic agent once, which confirms it and keeps the run going', async ({ page, project, agent, orx }, info) => {
+  test.slow()
+  const run = erring(orx, `flagged-${project.id}`, [['err', 6, 'RuntimeError: CUDA error: device-side assert triggered']])
+  const banner = await launch(page, agent, project, 'Flagged', run.command)
+  const shown = (await (await page.request.get(`${orx.url}/api/chat/shown-runs`)).json()).find((item: { run: { projectId: string } }) => item.run.projectId === project.id)
+  const { id: runId, experimentId } = shown.run
+  const woken = `woken-${project.id}`
+  agent.script('was flagged for review', [
+    { hold: woken },
+    { run: settle(experimentId, runId, 'keep', 'One bad batch on a warm GPU; the loss kept falling.') },
+    { say: 'Looked at the log: one bad batch, and the loss kept falling. Keeping it going.' },
+  ])
+  agent.script('finished with status', [{ say: 'Flagged is done.' }])
+  await run.open('err')
+
+  await test.step('the wake reaches the agent with the line and how to settle it, while the run keeps going', async () => {
+    await agent.reached(woken)
+    const wake = readFileSync(orx.agentLog, 'utf8').split('\n').filter((line) => line.includes('was flagged for review')).at(-1)!
+    const text = JSON.parse(wake.slice(wake.indexOf('{'))).params.prompt.map((part: { text?: string }) => part.text ?? '').join('')
+    expect(text).toContain(`[orx] Run ${runId} (experiment ${experimentId}) was flagged for review.`)
+    expect(text).toContain('  | RuntimeError: CUDA error: device-side assert triggered')
+    expect(text).toContain('OpenResearch checked this itself, with no model')
+    expect(text).toMatch(new RegExp(`orx exp flag ${runId} --flag f[0-9a-f]{8} --keep`))
+    await expect(banner).toContainText('is reading the evidence')
+    await expect(page.getByRole('img', { name: 'A run was flagged' })).toBeVisible()
+    await keep(page, banner, 'agentic-line-looking')
+  })
+
+  await test.step('the agent keeps it going: its turn shows in the chat, and the journal says who settled it', async () => {
+    agent.release(woken)
+    const reply = page.getByText('Looked at the log: one bad batch, and the loss kept falling. Keeping it going.', { exact: true })
+    await expect(reply).toBeVisible()
+    await expect(page.getByRole('img', { name: 'A run was flagged' })).toHaveCount(0)
+    await keep(page, page, 'agentic-wake-turn')
+    await run.open('end')
+    await expect(banner).toContainText('Done', { timeout: 60_000 })
+    await banner.getByRole('button', { name: /^\W?flagged\W?$/ }).click()
+    const watch = page.locator('section', { has: page.getByRole('heading', { name: 'Watch', exact: true }) })
+    await expect.poll(async () => (await watch.innerText()).replace(/[⁦-⁩]/g, ''))
+      .toMatch(/Flagged by OpenResearch itself, with no model\. A new kind of error in the log: RuntimeError\.\s+The agent chose to keep going\. One bad batch on a warm GPU; the loss kept falling\./)
+    await keep(page, watch, 'journal-settled')
+    await themes(page, watch, info, 'journal-settled')
+  })
+})
+
+test('a Copilot flag opens the strip with its evidence and waits: Keep going settles it, Ask sends it to the agent', async ({ page, project, agent, orx }, info) => {
+  test.slow()
+  const autonomy = (value: string) => page.request.post(`${orx.url}/api/settings/ui-state`, { headers: { origin: orx.url }, data: { preferredAutonomy: value } })
+  await autonomy('copilot')
+  try {
+    const run = erring(orx, `copilot-${project.id}`, [
+      ['err', 6, 'RuntimeError: CUDA error: device-side assert triggered'],
+      ['shard', 14, 'ValueError: shard 3 of the training set is corrupt (bad header)'],
+    ])
+    const banner = await launch(page, agent, project, 'Copiloted', run.command)
+    const shown = (await (await page.request.get(`${orx.url}/api/chat/shown-runs`)).json()).find((item: { run: { projectId: string } }) => item.run.projectId === project.id)
+    const { id: runId, experimentId } = shown.run
+    await run.open('err')
+
+    await test.step('the strip opens by itself with the evidence and three choices; the sidebar row turns amber', async () => {
+      await expect(banner.locator('pre')).toHaveText('RuntimeError: CUDA error: device-side assert triggered')
+      for (const name of [/^Stop run$/, /^Keep going$/, /^Ask /]) await expect(banner.getByRole('button', { name })).toBeVisible()
+      await expect(banner).toContainText('The run keeps going until you choose.')
+      await expect(page.getByRole('img', { name: 'A run needs your attention' })).toBeVisible()
+      await themes(page, banner, info, 'strip-copilot-flag')
+      await keep(page, banner, 'copilot-strip')
+      await keep(page, page.locator('.session-row', { has: page.getByRole('img', { name: 'A run needs your attention' }) }), 'sidebar-amber', 90)
+    })
+
+    await test.step('Keep going settles the flag for good and the run goes on', async () => {
+      await banner.getByRole('button', { name: 'Keep going', exact: true }).click()
+      await expect(banner.getByRole('button', { name: 'Keep going', exact: true })).toHaveCount(0)
+      await expect(page.getByRole('img', { name: 'A run needs your attention' })).toHaveCount(0)
+      const { flag } = await (await page.request.get(`${orx.url}/api/runs/${runId}/monitor`)).json()
+      expect([flag.state, flag.choice.by, flag.choice.c]).toEqual(['kept', 'user', 'keep'])
+    })
+
+    await test.step('a new kind of error flags it again, and Ask wakes the agent, who stops the run', async () => {
+      const asked = `asked-${project.id}`
+      agent.script('The user asked you to look at a flag', [
+        { hold: asked },
+        { run: settle(experimentId, runId, 'stop', 'Shard 3 is corrupt; the rest of this run would train on garbage.') },
+        { say: 'Shard 3 is corrupt, so I stopped the run. Shall I rebuild the shard and relaunch?' },
+      ])
+      agent.script('finished with status', [{ say: 'Copiloted stopped.' }])
+      await run.open('shard')
+      await expect(banner.locator('pre')).toHaveText('ValueError: shard 3 of the training set is corrupt (bad header)')
+      await banner.getByRole('button', { name: /^Ask / }).click()
+      await agent.reached(asked)
+      await expect(banner).toContainText('is reading the evidence')
+      agent.release(asked)
+      await expect(page.getByText('Shard 3 is corrupt, so I stopped the run. Shall I rebuild the shard and relaunch?', { exact: true })).toBeVisible()
+      await expect(banner).toContainText('Auto-stopped')
+      await expect(page.getByRole('img', { name: 'A run needs your attention' })).toHaveCount(0)
+      const { flags } = await (await page.request.get(`${orx.url}/api/runs/${runId}/monitor`)).json()
+      expect(flags.map((flag: { state: string; choice: { by: string } }) => [flag.state, flag.choice.by])).toEqual([['kept', 'user'], ['stopped', 'agent']])
+      await expect(page.getByText('Copiloted stopped.', { exact: true })).toBeVisible()
+    })
+  } finally {
+    await autonomy('agentic')
+  }
 })

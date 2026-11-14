@@ -2,6 +2,7 @@ pub mod adapters;
 pub mod bus;
 pub mod clock;
 mod estimate;
+pub(crate) mod flags;
 pub mod handle;
 pub mod legacy;
 pub mod locks;

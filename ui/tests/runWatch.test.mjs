@@ -77,3 +77,26 @@ test("a run nobody watches says why in place of a journal", async () => {
     await unmount();
   }
 });
+
+test("the journal says who settled a flag and how, under the look that raised it, and orx's own flags stand as rows", async () => {
+  const looks = [look("1", now - 50_000, "Loss **{loss}**, falling."), look("2", now - 30_000, "Loss jumped to **{loss}**.", { said: "flag" })];
+  const flag = (extra) => ({ at: now - 30_000, whole: 0.2, template: "x", detail: "x", evidence: null, mode: "copilot", ...extra });
+  serveApp({});
+  const view = await render(createElement(Watch, {
+    monitor: {
+      ...monitor({ looks }),
+      flags: [
+        flag({ id: "f1", source: "look", lookId: "2", state: "kept", choice: { by: "user", c: "keep", at: now - 20_000, reason: "Warm-up noise." } }),
+        flag({ id: "f2", source: "tripwire", at: now - 10_000, detail: "No progress for **2m** since step 300.", state: "stopped", choice: { by: "agent", c: "stop", at: now - 5_000, reason: null } }),
+      ],
+    },
+    runId: running.runId, tone: "running", live: true, now,
+  }), createWorkspace("test"));
+  await settle();
+  const rows = [...view.container.querySelectorAll("li")].map(text);
+  assert.match(rows[0], new RegExp(`${m.run_watch_flagged_orx()}.*No progress for 2m since step 300\\.`));
+  assert.ok(rows[0].includes(m.run_watch_stopped_by({ agent: "The agent" })), rows[0]);
+  assert.match(rows[1], new RegExp(`${m.run_watch_flagged()}.*Loss jumped to 2\\.60\\.`));
+  assert.ok(rows[1].includes(`${m.run_watch_kept()} Warm-up noise.`), rows[1]);
+  await view.unmount();
+});

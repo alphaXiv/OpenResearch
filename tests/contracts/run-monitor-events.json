@@ -51,6 +51,7 @@
       "error": null,
       "with": null
     },
+    "flag": null,
     "patch": {
       "availability": {
         "state": "live",
@@ -83,7 +84,8 @@
       "headline": "loss",
       "pace": null,
       "logError": null,
-      "revising": false
+      "revising": false,
+      "flags": []
     },
     "reset": true
   },
@@ -150,6 +152,7 @@
       "error": null,
       "with": null
     },
+    "flag": null,
     "patch": {
       "availability": {
         "state": "live",
@@ -182,7 +185,8 @@
       "headline": "loss",
       "pace": null,
       "logError": null,
-      "revising": false
+      "revising": false,
+      "flags": []
     }
   }
 ]

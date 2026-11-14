@@ -5,7 +5,7 @@ import { autoDir, fmtNumber, ltr } from "../../i18n";
 import { m } from "../../paraglide/messages.js";
 import { getLocale } from "../../paraglide/runtime.js";
 import { mutLookNow } from "../../queries/projects";
-import { journalRows, listed, lookText } from "../../runMonitor/journal";
+import { flagLook, flagOutcome, flagRow, journalRows, listed, lookText } from "../../runMonitor/journal";
 import { TONE_INK, type Tone } from "../../runMonitor/model";
 import type { BriefLabel, RunMonitor } from "../../runMonitor/types";
 import { capitalized, clockText } from "../../runMonitor/words";
@@ -34,14 +34,17 @@ const usd = (value: number) => new Intl.NumberFormat(getLocale(), {
  * The page's Watch section: what the watcher said of this run, one row per change, how many looks it took and what
  * they cost, and Look now. A run nobody watches says why, in place of the journal.
  */
-export function Watch({ monitor, runId, tone, live, now }: { monitor: Pick<RunMonitor, "watch" | "view" | "brief">; runId: string; tone: Tone; live: boolean; now: number }) {
+export function Watch({ monitor, runId, tone, live, now }: { monitor: Pick<RunMonitor, "watch" | "view" | "brief" | "flags">; runId: string; tone: Tone; live: boolean; now: number }) {
   const workspace = useWorkspace();
   const look = useMutate(mutLookNow);
   const [refused, setRefused] = useState<string | null>(null);
   const { watch } = monitor;
   const signals = monitor.view.signals;
   const looks = watch.looks.filter((look) => look.said !== "error" && look.said !== "interrupted");
-  const rows = journalRows(watch.looks);
+  const flags = monitor.flags ?? [];
+  // A flag a tripwire or a rule raised stands in the journal beside the looks, in time order.
+  const rows = journalRows([...watch.looks, ...flags.filter((flag) => !flag.lookId).map(flagLook)].sort((a, b) => a.at - b.at));
+  const agent = capitalized(m.chat_the_agent());
   const lastLook = watch.looks.at(-1)?.id;
   useEffect(() => setRefused(null), [lastLook]);
 
@@ -70,15 +73,22 @@ export function Watch({ monitor, runId, tone, live, now }: { monitor: Pick<RunMo
           {rows.map((row, index) => {
             const failed = row.look.said === "error" || row.look.said === "interrupted";
             const flag = row.look.said === "flag";
+            const raised = flags.find((candidate) => flagRow(candidate) === row.look.id);
+            const outcome = raised ? flagOutcome(raised, agent) : null;
             return (
               <li key={row.look.id} className="contents">
                 <span className="whitespace-nowrap pt-0.5 text-xs tabular-nums text-ink-subtext">{clockText(row.look.at)}</span>
                 <span className={cn("leading-snug", index === 0 && !failed || flag ? "text-text" : "text-ink-subtext")}>
                   {flag && <TriangleAlert size={13} aria-hidden="true" className="me-1.5 inline-block align-[-2px] text-mark-amber" />}
-                  {flag && <span className="font-medium">{m.run_watch_flagged()} </span>}
+                  {flag && <span className="font-medium">{raised && !raised.lookId ? m.run_watch_flagged_orx() : m.run_watch_flagged()} </span>}
                   {failed || (index > 0 && !flag)
                     ? lookText(row.look, signals).replaceAll("**", "")
                     : <Sentence text={lookText(row.look, signals)} tone={flag ? "flag" : tone} />}
+                  {outcome && (
+                    <span className="block text-xs text-ink-subtext">
+                      {outcome}{raised?.choice?.reason ? ` ${autoDir(raised.choice.reason)}` : ""}
+                    </span>
+                  )}
                   {row.since && (
                     <span className="block text-xs text-ink-subtext">{capitalized(m.run_watch_same_since({ count: ltr(fmtNumber(row.count)), clock: clockText(row.since.at) }))}</span>
                   )}

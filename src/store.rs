@@ -10,10 +10,12 @@
 
 mod acp;
 mod costs;
+mod flags;
 pub(crate) mod search;
 mod telemetry;
 mod watch;
 pub(crate) use costs::{BilledRun, Per, Quote};
+pub(crate) use flags::{Chosen, FlagChoice, FlagEvent, FlagNotice, NewFlag, Raise, WATCH_FLAG};
 pub(crate) use telemetry::{Cost, InvocationIdentity, SampleCost, TokenUsage};
 pub(crate) use watch::{LookResult, WatchLook, WatchLookRun};
 
@@ -6440,14 +6442,14 @@ impl Store {
     }
 
     /// Keeps what the run's rules counted and what they did, in one transaction: an event for
-    /// each rule that tripped, the notices an `ask` wakes chats with, and a `stop`'s cancel with
-    /// who asked for it, under the run's cancel lock. Returns when the run's cancel was accepted.
+    /// each rule that tripped, the flag an `ask` raises, and a `stop`'s cancel with who asked
+    /// for it, under the run's cancel lock. Returns when the run's cancel was accepted.
     pub(crate) fn record_rules(
         &self,
         run_id: &str,
         counts: &serde_json::Value,
         events: &[serde_json::Value],
-        notices: &[(String, String, String)],
+        flags: &[NewFlag],
         stop: Option<(&str, &StopContext)>,
     ) -> Result<Option<i64>> {
         let mut lock = stop
@@ -6484,9 +6486,7 @@ impl Store {
                 params![run_id, now, event.to_string()],
             )?;
         }
-        for (chat, dedupe, body) in notices {
-            self.insert_run_notice(run_id, chat, ATTENTION, dedupe, body, now)?;
-        }
+        self.append_flags(flags, now)?;
         tx.commit()?;
         Ok(accepted)
     }
@@ -6738,6 +6738,7 @@ impl Store {
     pub fn run_notice_batch_at(&self, chat_session_id: &str, now: i64) -> Result<Vec<RunNotice>> {
         let tx = self.begin_immediate()?;
         self.expire_run_notice_batches(now)?;
+        self.retire_stale_flag_wakes(now)?;
         let assigned: Option<String> = tx
             .query_row(
                 "SELECT client_turn_id FROM run_notices
@@ -11463,6 +11464,49 @@ mod tests {
 
         pub(crate) fn conn_execute_for_tests(&self, sql: &str) {
             self.conn.execute(sql, []).unwrap();
+        }
+
+        /// A chat of `harness` at `autonomy`, the default when none.
+        pub(crate) fn put_chat_session(&self, id: &str, harness: &str, autonomy: Option<&str>) {
+            self.create_chat_session(&StoredChatSession {
+                profile_id: None,
+                id: id.into(),
+                project_id: "project".into(),
+                harness: harness.into(),
+                native_session_id: None,
+                native_fork_at: None,
+                title: None,
+                title_source: None,
+                model: None,
+                service_tier: None,
+                permission_mode: None,
+                plan_mode: false,
+                plan_reset_pending: false,
+                reasoning_level: None,
+                archived: false,
+                context_usage_json: None,
+                bootstrap_context: None,
+                goal: None,
+                autonomy: autonomy.map(str::to_owned),
+                active_leaf_id: None,
+                side_parent_session_id: None,
+                side_parent_leaf_id: None,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .unwrap();
+        }
+
+        /// A notice the chat's notice loop claimed into turn `turn`, and whether it was delivered.
+        pub(crate) fn claim_run_notices_for_tests(&self, chat: &str, turn: &str, delivered: bool) {
+            self.conn
+                .execute(
+                    "UPDATE run_notices SET client_turn_id = ?2,
+                            delivered_at = CASE WHEN ?3 THEN 1 ELSE NULL END
+                     WHERE chat_session_id = ?1 AND delivered_at IS NULL",
+                    params![chat, turn, delivered],
+                )
+                .unwrap();
         }
 
         /// A turn of `chat` in `state`, as the chat's own writer leaves it.

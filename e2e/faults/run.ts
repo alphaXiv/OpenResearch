@@ -159,7 +159,8 @@ async function runScenario(scenario: Scenario) {
     // Woken by the run's end, the agent marks the run it will repair, then waits to be read.
     const repair = scenario.revise ? [{ run: `orx exp revise ${child.run.experimentId} --run ${child.run.id}` }] : []
     agent.script('finished with status', [...repair, { hold }, { say: `${scenario.title} is over.` }])
-    agent.script('met rule', [{ say: 'Looking at the run before deciding.' }])
+    // A flag wakes the agent, which reads the run and answers; the bed leaves each flag open.
+    for (let n = 0; n < 4; n++) agent.script('was flagged for review', [{ say: 'Looking at the run before deciding.' }])
 
     /** The banner at the level it is at now, then at the other one, ending where it began. */
     const levels = async () => {
@@ -185,7 +186,7 @@ async function runScenario(scenario: Scenario) {
       say(`strip  ${strip}`)
       if (charts.length) say(`charts ${charts.map(plain).join(' · ')}`)
       say(`status ${plain(String(monitor.statusText).replace(/^signals +(Last collected|Data as of).*$/gm, ''))}`)
-      say(`state  run=${run?.run.status ?? 'gone'} tone=${run?.run.monitor?.tone ?? '-'} outcome=${JSON.stringify(run?.run.outcome ?? null)} flag=${JSON.stringify(monitor.flag)} sentence=${JSON.stringify(monitor.sentence)} watch=${monitor.watch?.state}/${monitor.watch?.looks?.length ?? 0} looks rules=${monitor.rules?.length ?? 0} setup=${JSON.stringify(monitor.setup)} parent=${monitor.parent ? 'yes' : 'no'} versus=${JSON.stringify(monitor.versus)}`)
+      say(`state  run=${run?.run.status ?? 'gone'} tone=${run?.run.monitor?.tone ?? '-'} outcome=${JSON.stringify(run?.run.outcome ?? null)} flag=${monitor.flag ? `${monitor.flag.source}/${monitor.flag.state} ${JSON.stringify(plain(monitor.flag.detail.replaceAll('**', '')))}` : null} flags=${monitor.flags?.length ?? 0} sentence=${JSON.stringify(monitor.sentence)} watch=${monitor.watch?.state}/${monitor.watch?.looks?.length ?? 0} looks rules=${monitor.rules?.length ?? 0} setup=${JSON.stringify(monitor.setup)} parent=${monitor.parent ? 'yes' : 'no'} versus=${JSON.stringify(monitor.versus)}`)
     }
 
     const ended = async () => !(await banner.getByRole('button', { name: 'Stop the run', exact: true }).count())
@@ -212,8 +213,12 @@ async function runScenario(scenario: Scenario) {
       if (watch.looks.at(-1)?.kind === 'terminal') break
       await wait(500)
     }
-    const ask = wakeText(orx.agentLog, 'met rule')
-    if (ask) say(`ask    ${plain(ask)}`)
+    const flagged = wakeText(orx.agentLog, 'was flagged for review')
+    if (flagged) say(`flag wake  ${flagged.split('\n').slice(0, 4).map(plain).join(' | ')}`)
+    const { flags } = await get<{ flags?: { at: number; source: string; state: string; detail: string; choice?: { by: string; c: string } }[] }>(`/api/runs/${child.run.id}/monitor`)
+    for (const flag of flags ?? []) {
+      say(`flag   +${((flag.at - origin) / 1000).toFixed(1)}s ${flag.source.padEnd(8)} ${flag.state.padEnd(13)} ${plain(flag.detail.replaceAll('**', ''))}`)
+    }
     const shoot = async (target: typeof banner, name: string) => {
       if (!shots) return
       mkdirSync(shots, { recursive: true })

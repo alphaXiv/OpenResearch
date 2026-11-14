@@ -775,6 +775,34 @@ impl ApiClient {
         Ok(())
     }
 
+    pub async fn flag(
+        &self,
+        run: &str,
+        flag: &str,
+        choice: &str,
+        reason: Option<&str>,
+    ) -> Result<()> {
+        let request = serde_json::json!({
+            "flagId": flag,
+            "choice": choice,
+            "reason": reason,
+            "chatSessionId": crate::local::chat::launching_chat_session(),
+            "requestId": uuid::Uuid::new_v4().to_string(),
+        });
+        let path = format!("runs/{}/flag", urlencoding::encode(run));
+        self.json(reqwest::Method::POST, &path, Some(&request))
+            .await?;
+        println!(
+            "{}",
+            match choice {
+                "keep" => format!("\u{2713} Flag {flag} on run {run} settled: it keeps going. The watcher's next look reads why."),
+                "stop" => format!("\u{2713} Flag {flag} settled: run {run} is stopping."),
+                _ => format!("\u{2713} Flag {flag} on run {run} now waits for the user, who sees it with Stop run and Keep going."),
+            }
+        );
+        Ok(())
+    }
+
     pub async fn abandon(&self, run: &str) -> Result<()> {
         let path = format!("runs/{}/abandon", urlencoding::encode(run));
         self.json(reqwest::Method::POST, &path, None).await?;

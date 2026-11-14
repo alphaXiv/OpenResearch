@@ -130,9 +130,9 @@ export interface Look {
 
 interface Evidence {
   lines: string[];
-  /** 1-based, inclusive. */
-  from: number;
-  to: number;
+  /** 1-based, inclusive; null when the log is too long to count its lines. */
+  from: number | null;
+  to: number | null;
   ident: string;
   byteFrom: number;
   byteTo: number;
@@ -147,7 +147,12 @@ export interface Flag {
   evidence: Evidence | null;
   state: FlagState | "kept" | "answered" | "stopped";
   mode: FlagMode;
-  choice?: { by: "user" | "agent"; c: "stop" | "keep" | "ask"; at: number };
+  /** The choice that settled it, or the last that sent it to someone; absent from an older server. */
+  choice?: { by: "user" | "agent"; c: "stop" | "keep" | "ask"; at: number; reason?: string | null };
+  /** What raised it: a look of the watcher, a check orx makes itself, or a rule that asks; absent from an older server. */
+  source?: "look" | "tripwire" | "rule";
+  /** The look that raised it, which the journal shows it under. */
+  lookId?: string;
 }
 
 /** What a run is doing before it reports a step: the newest thing its log said since its stage began. */
@@ -352,6 +357,8 @@ export interface RunMonitor {
   watch: Watch;
   sentence: Sentence | null;
   flag: Flag | null;
+  /** Every flag raised on the run, oldest first, with what became of it; absent from an older server. */
+  flags?: Flag[];
   setup?: Setup | null;
   /** The chat's agent is repairing the experiment after this stopped run. */
   revising: boolean;

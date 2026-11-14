@@ -271,6 +271,7 @@ fn dashboard_routes(api: Arc<Api>) -> Router {
         .route("/api/runs/{id}/log", get(log))
         .route("/api/runs/{id}/monitor", get(monitor))
         .route("/api/runs/{id}/look", post(look_now))
+        .route("/api/runs/{id}/flag", post(dashboard_choose_flag))
         .route("/api/runs/{id}/view/check", post(check_view))
         .route("/api/experiments/{id}/view", get(view).put(set_view))
         .route("/api/runs/{id}/abandon", post(dashboard_abandon))
@@ -350,6 +351,14 @@ async fn look_now(State(api): State<Arc<Api>>, Path(id): Path<String>) -> Respon
             Json(json!({"error": format!("Couldn't ask for a look: {error}")})),
         )
             .into_response(),
+    }
+}
+
+/// Wakes the notice loop for chats a flag queued a notice for, when the engine runs here; the
+/// loop's sweep delivers them otherwise.
+pub(crate) fn notices_queued(chats: Vec<String>) {
+    if let (Ok(api), false) = (installed(), chats.is_empty()) {
+        api.engine.bus.publish(RunEvent::Notices { chats });
     }
 }
 
@@ -438,6 +447,7 @@ fn routes(api: Arc<Api>) -> Router {
         .route("/api/v2/runs/{id}/cancel", post(cancel))
         .route("/api/v2/runs/{id}/abandon", post(abandon))
         .route("/api/v2/runs/{id}/revise", post(revise))
+        .route("/api/v2/runs/{id}/flag", post(choose_flag))
         .route("/api/v2/runs/{id}/cleanup", post(cleanup))
         .route("/api/v2/runs/{id}/log", get(log))
         .route("/api/v2/runs/{id}/monitor", get(monitor))
@@ -684,6 +694,258 @@ async fn revise(
     let run = api.run(&id)?;
     let revising = api.store().run_revising(&run)?;
     Ok(Json(json!({"run": api.view(&run)?, "revising": revising})))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FlagRequest {
+    flag_id: String,
+    choice: String,
+    request_id: Option<String>,
+    reason: Option<String>,
+    /// The agent's chat, when its agent chose; none for the user.
+    chat_session_id: Option<String>,
+}
+
+/// `orx exp flag`, and the Copilot choice: keep going, stop the run, or ask. The user's Ask wakes
+/// the run's chat with the flag and every open flag its look raised beside it; the agent's Ask
+/// leaves the choice to the user. A repeated request answers as the first did.
+async fn choose(
+    api: &Arc<Api>,
+    id: &str,
+    request: FlagRequest,
+) -> std::result::Result<(Value, StoredRun), (StatusCode, String)> {
+    use crate::engine::flags;
+    let failed =
+        |error: crate::error::Error| (StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}"));
+    let run = api
+        .store()
+        .get_run(id)
+        .map_err(failed)?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Run {id} not found.")))?;
+    let exp = &run.experiment_id;
+    let flag_id = request.flag_id.trim();
+    let choice = request.choice.as_str();
+    if !matches!(choice, "keep" | "stop" | "ask") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("A flag's choice is keep, stop or ask (got \"{choice}\")."),
+        ));
+    }
+    let chat = request.chat_session_id.as_deref();
+    let (stop_words, stop) = crate::commands::exp::exp_cancel_stop(chat, request.reason.as_deref())
+        .map_err(|why| (StatusCode::BAD_REQUEST, why))?;
+    let stop_words = match (chat, request.reason.as_deref().map(str::trim)) {
+        (Some(_), _) => stop_words,
+        (None, Some(reason)) => format!("Stopped by the user at flag {flag_id}: {reason}"),
+        (None, None) => format!("Stopped by the user at flag {flag_id}."),
+    };
+    let reread =
+        |store: &Store, run: &StoredRun| -> std::result::Result<Value, (StatusCode, String)> {
+            flags::read(store, run)
+                .map_err(failed)?
+                .into_iter()
+                .find(|flag| flag["id"] == flag_id)
+                .ok_or_else(|| failed(anyhow!("Run {id}'s flag {flag_id} is gone")))
+        };
+    let settled = format!(
+        "Run {id}: flag {flag_id} is already settled; run `orx exp status {exp} --run {id}`."
+    );
+    let now = crate::store::now_ms();
+    let planned = {
+        let store = api.store();
+        plan_choice(&store, &run, flag_id, choice, chat, &request, &settled)?
+    };
+    let Some((choices, touched)) = planned else {
+        return Ok((reread(&api.store(), &run)?, run));
+    };
+    if choice == "stop" {
+        api.commands
+            .cancel(&run, &stop_words, Some(&stop))
+            .await
+            .map_err(|error| (StatusCode::CONFLICT, format!("{error:#}")))?;
+    }
+    let store = api.store();
+    match store.record_flag_choices(&choices, now).map_err(failed)? {
+        crate::store::Chosen::Settled => return Err((StatusCode::CONFLICT, settled)),
+        crate::store::Chosen::Recorded | crate::store::Chosen::Repeated => {}
+    }
+    notices_queued(
+        choices
+            .iter()
+            .flat_map(|choice| choice.wakes.iter().map(|(chat, _)| chat.clone()))
+            .collect(),
+    );
+    for touched in &touched {
+        let Some(touched) = &store.get_run(&touched.id).map_err(failed)? else {
+            continue;
+        };
+        crate::engine::monitor::advance(&store, touched, now).map_err(failed)?;
+        let state = store.engine_run_state(&touched.id).map_err(failed)?;
+        let phase = Phase::parse(&touched.status).unwrap_or(Phase::Running);
+        api.engine
+            .bus
+            .publish(crate::engine::bus::RunEvent::Changed {
+                run_id: touched.id.clone(),
+                phase,
+                contact: state.map_or(crate::store::Contact::Live, |state| state.contact),
+                cancelling: choice == "stop" && touched.id == id,
+            });
+    }
+    let run = store
+        .get_run(id)
+        .map_err(failed)?
+        .ok_or_else(|| failed(anyhow!("Run {id} is gone")))?;
+    Ok((reread(&store, &run)?, run))
+}
+
+/// What a flag choice records, and the runs it touches; None for a request already kept.
+#[allow(clippy::type_complexity)]
+fn plan_choice(
+    store: &Store,
+    run: &StoredRun,
+    flag_id: &str,
+    choice: &str,
+    chat: Option<&str>,
+    request: &FlagRequest,
+    settled: &str,
+) -> std::result::Result<
+    Option<(Vec<crate::store::FlagChoice>, Vec<StoredRun>)>,
+    (StatusCode, String),
+> {
+    use crate::engine::flags;
+    let failed =
+        |error: crate::error::Error| (StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}"));
+    let id = run.id.as_str();
+    let exp = &run.experiment_id;
+    let all = flags::read(store, run).map_err(failed)?;
+    let Some(flag) = all.iter().find(|flag| flag["id"] == flag_id) else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("Run {id} has no flag {flag_id}; run `orx exp status {exp} --run {id}` to see its flags."),
+        ));
+    };
+    let repeated = request.request_id.as_deref().is_some_and(|request| {
+        store.run_flag_events(id).is_ok_and(|events| {
+            events.iter().any(|event| {
+                event.kind == "choice"
+                    && event.body["flagId"] == flag_id
+                    && event.body["requestId"] == request
+            })
+        })
+    });
+    if repeated {
+        return Ok(None);
+    }
+    if flags::settled(flag) || Phase::parse(&run.status).is_some_and(Phase::is_terminal) {
+        return Err((StatusCode::CONFLICT, settled.to_owned()));
+    }
+    let body = |flag: &str| {
+        json!({
+            "flagId": flag,
+            "c": choice,
+            "by": if chat.is_some() { "agent" } else { "user" },
+            "reason": request.reason.as_deref().map(str::trim),
+            "requestId": request.request_id,
+            "chatSessionId": chat,
+        })
+    };
+    let mut choices = vec![crate::store::FlagChoice {
+        run_id: id.to_owned(),
+        body: body(flag_id),
+        wakes: Vec::new(),
+    }];
+    let mut touched = vec![run.clone()];
+    if choice == "ask" && chat.is_none() {
+        // Ask covers every open flag the same look raised, so the agent weighs them together.
+        let mut asked = vec![(run.clone(), flag.clone())];
+        if let Some(look) = flag["group"]
+            .as_str()
+            .and_then(|group| group.strip_prefix("look:"))
+        {
+            let rows = look
+                .parse()
+                .map_or(Ok(Vec::new()), |look| store.watch_look_runs(look));
+            for row in rows
+                .map_err(failed)?
+                .into_iter()
+                .filter(|row| row.run_id != id)
+            {
+                let Some(other) = store.get_run(&row.run_id).map_err(failed)? else {
+                    continue;
+                };
+                if Phase::parse(&other.status).is_some_and(Phase::is_terminal) {
+                    continue;
+                }
+                let theirs = flags::read(store, &other).map_err(failed)?;
+                if let Some(open) = theirs
+                    .iter()
+                    .find(|f| f["group"] == flag["group"] && !flags::settled(f))
+                {
+                    choices.push(crate::store::FlagChoice {
+                        run_id: other.id.clone(),
+                        body: body(open["id"].as_str().unwrap_or_default()),
+                        wakes: Vec::new(),
+                    });
+                    asked.push((other.clone(), open.clone()));
+                    touched.push(other);
+                }
+            }
+        }
+        for (choice, (asked_run, asked_flag)) in choices.iter_mut().zip(&asked) {
+            let home = asked_run
+                .chat_session_id
+                .clone()
+                .into_iter()
+                .chain(store.run_subscribers(&asked_run.id).map_err(failed)?)
+                .find(|chat| {
+                    store
+                        .get_chat_session(chat)
+                        .is_ok_and(|found| found.is_some())
+                });
+            let Some(home) = home else {
+                return Err((
+                    StatusCode::CONFLICT,
+                    format!("Run {} has no chat whose agent could look at its flag; open its experiment and ask there.", asked_run.id),
+                ));
+            };
+            choice
+                .wakes
+                .push((home, flags::wake(asked_run, asked_flag, true)));
+        }
+    }
+    Ok(Some((choices, touched)))
+}
+
+async fn choose_flag(
+    State(api): State<Arc<Api>>,
+    Path(id): Path<String>,
+    Json(request): Json<FlagRequest>,
+) -> ApiResult<Json<Value>> {
+    let (flag, run) = choose(&api, &id, request)
+        .await
+        .map_err(|(status, why)| Failure::Message(status, why))?;
+    Ok(Json(json!({"flag": flag, "run": api.view(&run)?})))
+}
+
+async fn dashboard_choose_flag(
+    State(api): State<Arc<Api>>,
+    Path(id): Path<String>,
+    Json(request): Json<FlagRequest>,
+) -> Response {
+    let chosen = match choose(&api, &id, request).await {
+        Ok(chosen) => chosen,
+        Err((status, why)) => return (status, Json(json!({"error": why}))).into_response(),
+    };
+    let (flag, run) = chosen;
+    match super::ApiRun::new(&api.store(), &run) {
+        Ok(run) => Json(json!({"flag": flag, "run": run})).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("{error:#}")})),
+        )
+            .into_response(),
+    }
 }
 
 async fn abandon(State(api): State<Arc<Api>>, Path(id): Path<String>) -> ApiResult<Json<Value>> {

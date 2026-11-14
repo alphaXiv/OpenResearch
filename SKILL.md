@@ -99,6 +99,7 @@ group below has a module (`orx skill <name>`) with the full flags and rules.
 | `orx compute [--gpu <id>] [--count <n>] [--provider <name>]` / `orx compute --cpu` | List the GPU/CPU compute catalog. |
 | `orx instance create <orgId> (--gpu <id> … \| --cpu <flavor> …)` | Spin up a standalone instance in an org; see `orx-instances`. |
 | `orx exp status/run/cancel/wait/wake <localExpId>` | Inspect (with the latest run's stage, estimate and measures), run, cancel, wait on, or register a wake-up for a local experiment node. |
+| `orx exp flag <runId> --flag <flagId> (--keep \| --ask \| --stop) [--reason "<why>"]` | Settle a flag that woke you, after reading the run yourself: keep it going, leave the choice to the user, or stop it; see `orx-experiment-runs`. |
 | `orx exp move/archive/unarchive/delete <localExpId>` | Re-parent, hide, restore, or permanently delete experiment nodes; see `orx-experiment-tree`. |
 | `orx exp desc <expId> [--set "<text>" \| --stdin]` | Read or overwrite the experiment's description. |
 | `orx exp view set <expId> [--file <view.xml>] [--pattern <patterns.json>] [--config <plan.json>]` / `view get <expId>` / `view check <runId>` | Set what an experiment's runs show and the stages they go through (copied into children), print it, or check it against a run's real log; see `orx-experiment-runs`. |

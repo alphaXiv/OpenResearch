@@ -319,7 +319,7 @@ The log says the cause when it starts, when it changes and when it ends.
 
 An agent declares rules beside an experiment's stage plan (`orx exp view set
 --config`, `src/engine/rules.rs`): each names one bounded condition on what a run
-reports, never an expression, and stops the run or wakes its chats. A child
+reports, never an expression, and stops the run or raises a flag. A child
 experiment starts with a copy, and a run freezes the rules it was launched with,
 so editing them changes only later runs; `--budget` adds one. Only `orx up`
 checks them, in the projection's pass, and only on a running run whose contact
@@ -328,8 +328,8 @@ stops nothing. Each pass counts the reports a run made since the last, by where
 they fall on the signal's axis, and a rule acts only if its condition holds once
 they are counted, so a value that already recovered, as in history read after a
 sleep, stops nothing. What each rule counted, and that it acted, is kept with
-the run's monitor state in the transaction that records the event, the notices
-an `ask` sends and a `stop`'s cancel, so a restart neither counts a report twice
+the run's monitor state in the transaction that records the event, the flag
+an `ask` raises and a `stop`'s cancel, so a restart neither counts a report twice
 nor acts twice. A rule on the estimate (cost or the time limit) acts only on a
 pace measured over four slices and seen on two revisions; spend already past a
 budget stops at once. A stop goes through the engine's cancel, the first stop
@@ -377,4 +377,39 @@ One retry carries what was wrong; a run whose answer stays wrong keeps its last
 sentence. Each look is a row written before it is sent and settled in one
 transaction; a look `orx up` stopped after sending is recorded as interrupted and
 never sent again, so evidence is never lost and a model is never billed twice
-for one look. A look that flags is recorded as a flag in the journal.
+for one look. A look that flags raises a flag in the transaction that settles it.
+
+### Flags
+
+A flag says a run may be going wrong and never stops it (`src/engine/flags.rs`).
+Three things raise one: a look, a rule that asks, and orx's own tripwires, which
+watch every live run whether or not a model does (`src/engine/watch/trip.rs`): a
+value that is not a number, unless a rule the run was launched with checks that
+signal for it; no progress past the estimator's stall threshold, saying whether
+the log went silent too; a run that reports no progress and prints nothing for
+ten minutes; a kind of error line the run has not printed before. A flag keeps
+the log lines it cites, by bytes, line numbers and the log's identity, and the
+look that raised it groups the flags of runs it saw together.
+
+A run has at most one open flag from a look or a tripwire, so a trouble that
+lasts wakes once; a tripwire condition is raised once a run, and never again on
+an experiment where someone kept going after it. The flag and the notices that
+wake each following Agentic chat are written in one transaction; a Copilot chat
+is woken only when its user asks. A wake says the watcher saw only a digest and
+none of the chat, cites the lines and how to settle it, and is frozen when it is
+written; a chat past 70% of its context is compacted, in the turn slot the wake
+already holds, before it is sent. A wake not yet claimed when its run ends is
+withdrawn, since the run's end is its own notice; a flag raised on an ended run
+still wakes, to be weighed against the result.
+
+What became of a flag is read back, never stored: its choices in the run's
+journal and the notice and turn that carried it give its state. An Agentic flag
+is raised, then waking, then the agent is looking; a turn that ends without
+settling it, an agent's `--ask` and a Copilot flag wait for the user, who sees
+Stop run, Keep going and Ask in the strip and an amber mark on the chat's row.
+`orx exp flag RUN --flag ID --keep|--ask|--stop` and the strip send one choice;
+a repeated request id answers as the first did, and a settled flag, or one on a
+run that ended, is refused. Keep going settles it and the run's next looks read
+what was kept and why. Stop cancels the run as `orx exp cancel` does. Ask sends
+the flag, and every open flag its look raised beside it, to the chat's agent as
+one turn.

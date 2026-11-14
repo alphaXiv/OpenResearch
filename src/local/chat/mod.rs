@@ -2205,6 +2205,58 @@ impl ChatHost {
         Ok(())
     }
 
+    /// Compacts the chat before a flag wakes its agent, when its context is past
+    /// [`WAKE_COMPACT_SHARE`] of its window, in the turn slot the wake has already claimed, so no
+    /// queued message runs between the two. A failure shows on the compaction's row and the wake
+    /// goes ahead with the history intact. Unknown usage compacts nothing.
+    async fn compact_before_wake(self: &Arc<Self>, session_id: &str) {
+        let Ok(store) = Store::open() else { return };
+        let Ok(Some(session)) = store.get_chat_session(session_id) else {
+            return;
+        };
+        let usage = session
+            .context_usage_json
+            .as_deref()
+            .and_then(|json| serde_json::from_str::<ContextUsage>(json).ok());
+        let Some((used, window)) = usage
+            .and_then(|usage| Some((usage.used_tokens, usage.context_window.filter(|w| *w > 0)?)))
+        else {
+            return;
+        };
+        if (used as f64) < WAKE_COMPACT_SHARE * window as f64 {
+            return;
+        }
+        let supported = crate::local::harness::session_harness(&session.harness, session_id)
+            .is_some_and(|harness| harness.supports_compaction());
+        let snapshot = crate::local::harness::compaction_snapshot(session_id).unwrap_or_default();
+        if !supported || snapshot.trim().is_empty() {
+            return;
+        }
+        let Ok(marker) = self.publish_compaction_marker(&store, session_id, None, "running", None)
+        else {
+            return;
+        };
+        let settled = match self
+            .compaction_outcome(session_id, &session, &snapshot)
+            .await
+        {
+            Ok(reseed) => self.apply_compaction(&store, session_id, reseed).err(),
+            Err(error) => Some(error),
+        };
+        if let Some(error) = &settled {
+            eprintln!("orx up: compacting chat {session_id} before a flag's wake: {error:#}");
+        }
+        let (status, detail) = match settled {
+            Some(error) => ("error", Some(error.to_string())),
+            None => ("completed", None),
+        };
+        if let Err(error) =
+            self.publish_compaction_marker(&store, session_id, Some(&marker), status, detail)
+        {
+            eprintln!("orx up: recording chat {session_id}'s compaction: {error:#}");
+        }
+    }
+
     async fn owns_compaction(&self, session_id: &str, message_id: &str) -> bool {
         matches!(
             self.turns.lock().await.get(session_id),
@@ -9525,6 +9577,9 @@ fn materialize_unfinished_turns(
 
 // --- run watcher ----------------------------------------------------------------
 
+/// The share of its context window past which a chat is compacted before a flag wakes it.
+const WAKE_COMPACT_SHARE: f64 = 0.70;
+
 #[derive(Debug)]
 struct PermanentRunNoticeError(String);
 
@@ -9610,11 +9665,7 @@ async fn send_run_notice_batch(
 
 /// Frozen bodies keep the admission hash stable across later run and chat changes.
 fn run_notice_request(notices: &[crate::store::RunNotice], guard: TurnGuard) -> SendTurnRequest {
-    let text = notices
-        .iter()
-        .map(|notice| notice.body.as_str())
-        .collect::<Vec<_>>()
-        .join("\n\n");
+    let text = crate::engine::flags::batch_text(notices.iter().map(|notice| notice.body.as_str()));
 
     SendTurnRequest {
         messages: vec![AnnotatedText {
@@ -9667,6 +9718,16 @@ async fn process_run_notices(
         if notices.is_empty() {
             guard.release().await;
             continue;
+        }
+        let flagged = notices
+            .iter()
+            .any(|notice| notice.kind == crate::store::WATCH_FLAG);
+        if flagged
+            && store
+                .get_chat_turn_by_client_id(&session_id, &notices[0].client_turn_id)?
+                .is_none()
+        {
+            chat.compact_before_wake(&session_id).await;
         }
         match send_run_notice_batch(chat, &session_id, &notices, guard).await {
             Ok(TurnSubmission::Started(_) | TurnSubmission::Existing(_)) => {

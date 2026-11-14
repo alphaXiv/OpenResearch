@@ -33,6 +33,8 @@ sentences: keep their wording while their meaning holds. A run you leave out is 
 Flag a run when it may be going wrong: it does something the brief says is worth a flag, it is
 worse than its parent where it should not be, it prints a new kind of warning or error, its
 numbers stop making sense, or it stalls. Give the byte ranges of the log lines that show it.
+"keptGoingAfter" lists flags someone looked at and chose to keep going after: do not flag the
+same thing again unless it got clearly worse.
 Write "summary" only when the digest has "summary": one sentence for all the runs, naming each
 by its key as {r1} and its numbers as {r1:signal}.
 "notes" is for you: what to remember for the next look, at most a few lines."#;
@@ -81,6 +83,8 @@ pub(super) struct Run<'a> {
     pub why: &'a [String],
     pub log: &'a LogRead,
     pub counts: &'a BTreeMap<String, u64>,
+    /// Flags on the experiment someone chose to keep going after, and why.
+    pub kept: &'a [Value],
 }
 
 pub(super) struct Shared<'a> {
@@ -417,6 +421,9 @@ fn run_json(
     if !run.why.is_empty() {
         entry["lookingBecause"] = json!(run.why);
     }
+    if !run.kept.is_empty() {
+        entry["keptGoingAfter"] = json!(run.kept);
+    }
     entry
 }
 
@@ -636,6 +643,7 @@ mod tests {
                 why: &[],
                 log: &log,
                 counts: &counts,
+                kept: &[],
             })
             .collect();
         let digest = build(

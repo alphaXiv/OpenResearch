@@ -5,7 +5,7 @@
 mod digest;
 mod reply;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
@@ -265,6 +265,10 @@ struct Scan {
     offset: u64,
     lines: u64,
     novel: BTreeSet<String>,
+    /// The first line of each novel kind, which a tripwire cites.
+    firsts: BTreeMap<String, digest::Line>,
+    /// When the log last grew, as this orx saw it.
+    grew_at: i64,
 }
 
 /// One chat's runs at one pass, and why each might need a look.
@@ -278,6 +282,9 @@ struct Owned {
 #[derive(Default)]
 struct State {
     scans: HashMap<String, Scan>,
+    /// What each run's tripwires raised, or found already raised, so a lasting condition is
+    /// weighed once.
+    tripped: HashSet<(String, String)>,
     /// When each run's current stage was first seen, which starts its ceiling ladder.
     stages: HashMap<String, ((String, usize), i64)>,
     looking: BTreeSet<String>,
@@ -351,6 +358,7 @@ fn spawn_looks(state: Arc<tokio::sync::Mutex<State>>, chat: String) {
                         Some(&format!("{error:#}")),
                         None,
                         &results,
+                        &[],
                     )
                 });
                 if let Err(error) = failed {
@@ -404,25 +412,30 @@ fn owner(
 /// One pass: reads each watched run's log since its last look, and starts every look that is due.
 async fn pass(state: &Arc<tokio::sync::Mutex<State>>) -> Result<()> {
     let now = crate::store::now_ms();
-    let (owned, codex) = {
+    let (owned, unwatched, codex) = {
         let store = Store::open()?;
         let mut candidates = store.list_active_runs()?;
         candidates.extend(store.runs_ended_since(now - paced_ms(3600))?);
         let mut chats: BTreeMap<String, Owned> = BTreeMap::new();
+        let mut unwatched = Vec::new();
         let mut codex = BTreeSet::new();
         for run in candidates {
-            let (chat, watching) = match owner(&store, &run)? {
-                Ok(found) => found,
-                Err(_) => continue,
-            };
-            if chat.harness == "codex" {
-                codex.insert(chat.profile_id.clone());
-            }
-            let Watching::Selected { label, .. } = watching else {
-                continue;
-            };
             let live = !Phase::parse(&run.status).is_some_and(Phase::is_terminal);
-            if !live && store.run_watch_terminal_done(&run.id)? {
+            let found = owner(&store, &run)?;
+            if let Ok((chat, _)) = &found {
+                if chat.harness == "codex" {
+                    codex.insert(chat.profile_id.clone());
+                }
+            }
+            let watched = match found {
+                Ok((chat, Watching::Selected { label, .. })) => Some((chat, label)),
+                _ => None,
+            };
+            // Tripwires watch every live run; a model watches the runs a chat can watch.
+            if watched.is_none() && !live {
+                continue;
+            }
+            if watched.is_some() && !live && store.run_watch_terminal_done(&run.id)? {
                 continue;
             }
             let now_run = match Now::read(&store, &run) {
@@ -431,6 +444,10 @@ async fn pass(state: &Arc<tokio::sync::Mutex<State>>) -> Result<()> {
                     eprintln!("orx up: watcher: reading run {}: {error:#}", run.id);
                     continue;
                 }
+            };
+            let Some((chat, label)) = watched else {
+                unwatched.push(now_run);
+                continue;
             };
             chats
                 .entry(chat.id.clone())
@@ -442,7 +459,7 @@ async fn pass(state: &Arc<tokio::sync::Mutex<State>>) -> Result<()> {
                 .runs
                 .push((now_run, Vec::new()));
         }
-        (chats, codex)
+        (chats, unwatched, codex)
     };
     refresh_catalogs(codex).await;
     let mut guard = state.lock().await;
@@ -452,10 +469,15 @@ async fn pass(state: &Arc<tokio::sync::Mutex<State>>) -> Result<()> {
         .prepared_watch_looks_chats()?
         .into_iter()
         .collect();
+    for run in &unwatched {
+        scan(&mut guard, run).await;
+        trip::check(&mut guard, run, now).await;
+    }
     for (chat_id, mut owned) in owned {
         for (run, why) in &mut owned.runs {
             if run.live() {
                 scan(&mut guard, run).await;
+                trip::check(&mut guard, run, now).await;
                 *why = changes(&mut guard, run, now);
             }
         }
@@ -509,6 +531,8 @@ async fn scan(state: &mut State, run: &Now) {
             offset: cursor["to"].as_u64().unwrap_or(0),
             lines: 0,
             novel: BTreeSet::new(),
+            firsts: BTreeMap::new(),
+            grew_at: entry.grew_at.max(run.run.created_at),
         };
     }
     let families: BTreeSet<String> = cursor["families"]
@@ -523,6 +547,10 @@ async fn scan(state: &mut State, run: &Now) {
         if entry.ident.as_deref() != Some(ident.as_str()) {
             entry.lines = 0;
             entry.novel.clear();
+            entry.firsts.clear();
+        }
+        if to != entry.offset || entry.ident.as_deref() != Some(ident.as_str()) {
+            entry.grew_at = crate::store::now_ms();
         }
         entry.ident = Some(ident);
         entry.offset = to;
@@ -532,7 +560,8 @@ async fn scan(state: &mut State, run: &Now) {
             }
             entry.lines += 1;
             if let Some(kind) = digest::family(&line.text).filter(|kind| !families.contains(kind)) {
-                entry.novel.insert(kind);
+                entry.novel.insert(kind.clone());
+                entry.firsts.entry(kind).or_insert(line);
             }
         }
     }
@@ -675,6 +704,66 @@ async fn read_lines(
         at += rest.len() as u64;
     }
     Ok((String::from(ident), lines, at, len))
+}
+
+/// The lines a flag cites, as its evidence: the shown lines its ranges overlap, where they are
+/// in bytes and lines. Null when it cites none the look showed.
+async fn flag_evidence(run: &str, log: &digest::LogRead, cited: &[(u64, u64)]) -> Value {
+    let lines: Vec<&digest::Line> = log
+        .head
+        .iter()
+        .chain(&log.lines)
+        .filter(|line| {
+            cited
+                .iter()
+                .any(|(from, to)| line.from < *to && *from < line.to)
+        })
+        .take(super::flags::EVIDENCE_LINES)
+        .collect();
+    evidence_of(run, log.ident.as_deref(), &lines).await
+}
+
+/// Evidence of `lines` of the run's log with identity `ident`.
+async fn evidence_of(run: &str, ident: Option<&str>, lines: &[&digest::Line]) -> Value {
+    let (Some(first), Some(last), Some(ident)) = (lines.first(), lines.last(), ident) else {
+        return Value::Null;
+    };
+    let numbers = line_numbers(run, ident, &[first.from, last.from]).await;
+    json!({
+        "lines": lines.iter().map(|line| line.text.clone()).collect::<Vec<_>>(),
+        "from": numbers.as_ref().map(|n| n[0]),
+        "to": numbers.as_ref().map(|n| n[1]),
+        "ident": ident,
+        "byteFrom": first.from,
+        "byteTo": last.to,
+    })
+}
+
+/// The 1-based number of the line that starts at each of `at`, counting from the log's start
+/// up to [`SCAN`] times 64; None past that, or when the log changed.
+async fn line_numbers(run: &str, ident: &str, at: &[u64]) -> Option<Vec<u64>> {
+    let end = at.iter().copied().max()?;
+    let mut found = vec![None; at.len()];
+    let (mut offset, mut counted) = (0, 0);
+    for _ in 0..64 {
+        let (read, lines, to, _) = read_lines(run, Some(ident), offset, SCAN).await.ok()?;
+        if read != ident || lines.is_empty() {
+            return None;
+        }
+        for line in &lines {
+            counted += 1;
+            for (index, byte) in at.iter().enumerate() {
+                if line.from == *byte {
+                    found[index] = Some(counted);
+                }
+            }
+        }
+        if to > end {
+            return found.into_iter().collect();
+        }
+        offset = to;
+    }
+    None
 }
 
 fn median(values: &mut [f64]) -> f64 {
@@ -1394,6 +1483,17 @@ async fn take(id: i64) -> Result<()> {
             (run.run.id.clone(), why)
         })
         .collect();
+    let kept: BTreeMap<String, Vec<Value>> = {
+        let store = Store::open()?;
+        let mut kept = BTreeMap::new();
+        for run in &runs {
+            kept.insert(
+                run.run.id.clone(),
+                kept_after(&store, &run.run.experiment_id)?,
+            );
+        }
+        kept
+    };
     let digest_runs: Vec<digest::Run> = rows
         .iter()
         .filter_map(|row| {
@@ -1417,6 +1517,7 @@ async fn take(id: i64) -> Result<()> {
                     Err(_) => &unread[&run.run.id],
                 },
                 counts: &counts[&run.run.id],
+                kept: &kept[&run.run.id],
             })
         })
         .collect();
@@ -1571,6 +1672,7 @@ async fn take(id: i64) -> Result<()> {
                 Some(&error),
                 None,
                 &results,
+                &[],
             )?;
             return Ok(());
         }
@@ -1616,6 +1718,7 @@ async fn take(id: i64) -> Result<()> {
 
     let now = crate::store::now_ms();
     let mut results = Vec::new();
+    let mut flags = Vec::new();
     for row in &rows {
         let Some(run) = keyed.get(&row.key) else {
             continue;
@@ -1700,6 +1803,40 @@ async fn take(id: i64) -> Result<()> {
             }
         }
         let text = template.as_deref().map(|t| fill(t, &keyed, Some(run)));
+        let whole = run.summary["whole"].as_f64().or_else(|| {
+            // Without a plan the bar is the stage's own, and a tick stands where the stage was.
+            let stage = &run.summary["stage"];
+            Some(
+                (stage["done"].as_f64()? / stage["of"].as_f64().filter(|of| *of > 0.0)?)
+                    .clamp(0.0, 1.0),
+            )
+        });
+        if let (Some(reply::Answer::Line { evidence, .. }), "flag") =
+            (read.runs.get(&row.key), result)
+        {
+            let cited = match read_log {
+                Ok(log) => flag_evidence(&run.run.id, log, evidence).await,
+                Err(_) => Value::Null,
+            };
+            let body = json!({
+                "id": super::flags::new_id(),
+                "source": "look",
+                "group": format!("look:{id}"),
+                "lookId": id.to_string(),
+                "at": now,
+                "whole": whole,
+                "template": template,
+                "detail": template,
+                "text": text,
+                "evidence": cited,
+            });
+            flags.push(super::flags::new_flag(
+                &Store::open()?,
+                &run.run,
+                body,
+                true,
+            )?);
+        }
         let basis = if result == "error" {
             last.map_or(Value::Null, |(_, row)| row.basis.clone())
         } else {
@@ -1711,14 +1848,7 @@ async fn take(id: i64) -> Result<()> {
             result: result.to_owned(),
             template,
             text,
-            // Without a plan the bar is the stage's own, and a tick stands where the stage was.
-            whole: run.summary["whole"].as_f64().or_else(|| {
-                let stage = &run.summary["stage"];
-                Some(
-                    (stage["done"].as_f64()? / stage["of"].as_f64().filter(|of| *of > 0.0)?)
-                        .clamp(0.0, 1.0),
-                )
-            }),
+            whole,
             cursor,
             evidence,
         });
@@ -1756,6 +1886,10 @@ async fn take(id: i64) -> Result<()> {
         "done"
     };
     let store = Store::open()?;
+    let woken: Vec<String> = flags
+        .iter()
+        .flat_map(|flag| flag.wakes.iter().map(|(chat, _)| chat.clone()))
+        .collect();
     store.finish_watch_look(
         id,
         state,
@@ -1764,7 +1898,9 @@ async fn take(id: i64) -> Result<()> {
         error.as_deref(),
         summary.as_ref().map(|(t, x)| (t.as_str(), x.as_str())),
         &results,
+        &flags,
     )?;
+    crate::commands::up::api_v2::notices_queued(woken);
     if let Some(said) = read.notes {
         notes()
             .lock()
@@ -1772,6 +1908,32 @@ async fn take(id: i64) -> Result<()> {
             .insert(chat.id.clone(), said);
     }
     Ok(())
+}
+
+/// What the experiment's flags someone chose to keep going after said, and why, newest last: a
+/// look reads them so it does not raise the same thing again.
+fn kept_after(store: &Store, experiment: &str) -> Result<Vec<Value>> {
+    const KEPT: usize = 5;
+    let events = store.experiment_flag_events(experiment)?;
+    let mut kept: Vec<Value> = events
+        .iter()
+        .filter(|(_, event)| event.kind == "choice" && event.body["c"] == "keep")
+        .filter_map(|(run, choice)| {
+            let (_, flag) = events.iter().find(|(other, event)| {
+                other == run && event.kind == "flag" && event.body["id"] == choice.body["flagId"]
+            })?;
+            let said = flag.body["text"]
+                .as_str()
+                .or(flag.body["detail"].as_str())?;
+            Some(json!({
+                "flagged": said.replace("**", ""),
+                "keptBy": choice.body["by"],
+                "why": choice.body["reason"],
+            }))
+        })
+        .collect();
+    kept.drain(..kept.len().saturating_sub(KEPT));
+    Ok(kept)
 }
 
 fn reason_check(reason: &str, label: &str, check: &str) -> bool {
@@ -1903,12 +2065,14 @@ pub(crate) fn run_facts(store: &Store, run: &StoredRun) -> Result<Value> {
     // Every projection reads this, many a second for a run that prints fast: what was said is
     // read again only when a look or a count moved, and who watches once every few seconds.
     let key = store.run_watch_version(&run.id)?;
+    // A run's id is unique only within its data directory.
+    let held = format!("{}\n{}", store.data_dir().display(), run.id);
     let fresh =
         |at: std::time::Instant| at.elapsed() < crate::config::paced(Duration::from_secs(5));
     let cached = facts()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .get(&run.id)
+        .get(&held)
         .filter(|(version, at, _)| *version == key && fresh(*at))
         .map(|(_, _, facts)| facts.clone());
     let mut facts = match cached {
@@ -1918,10 +2082,7 @@ pub(crate) fn run_facts(store: &Store, run: &StoredRun) -> Result<Value> {
             facts()
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .insert(
-                    run.id.clone(),
-                    (key, std::time::Instant::now(), read.clone()),
-                );
+                .insert(held, (key, std::time::Instant::now(), read.clone()));
             read
         }
     };
@@ -2106,7 +2267,7 @@ pub(crate) fn status_lines(
 }
 
 /// A template filled from a summary's bindings, as the page fills it, in English.
-fn fill_values(
+pub(crate) fn fill_values(
     template: &str,
     bindings: &Value,
     signals: &Value,
@@ -2171,6 +2332,8 @@ pub(crate) fn chat_summary(store: &Store, chat: &str) -> Result<Value> {
         "summary": look.summary_template.map(|template| json!({"template": template})),
     }))
 }
+
+mod trip;
 
 #[cfg(test)]
 mod tests;

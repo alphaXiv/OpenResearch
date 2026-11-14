@@ -24,8 +24,8 @@ export function Issue({ model, flag, agent, onOpenRun }: {
   const { evidence } = flag;
   const state = model.flag?.state;
   const name = autoDir(agent);
-  const where = evidence && (evidence.from === evidence.to
-    ? m.run_flag_log_lines_one({ from: ltr(fmtNumber(evidence.from)) })
+  const where = evidence && (evidence.from === null || evidence.to === null ? m.chat_run_logs()
+    : evidence.from === evidence.to ? m.run_flag_log_lines_one({ from: ltr(fmtNumber(evidence.from)) })
     : m.run_flag_log_lines_other({ from: ltr(fmtNumber(evidence.from)), to: ltr(fmtNumber(evidence.to)) }));
   const status = model.looking || state === "asking"
     ? (evidence ? m.run_flag_reading({ agent: name }) : m.run_flag_reading_what({ agent: name }))

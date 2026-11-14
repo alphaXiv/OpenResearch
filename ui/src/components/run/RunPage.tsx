@@ -12,6 +12,7 @@ import { cn } from "../ui/cn";
 import { Block, drawsAt } from "./blocks/Block";
 import { Phases } from "./blocks/Phases";
 import { Captions } from "./Captions";
+import { Issue } from "./Issue";
 import { Lead } from "./Lead";
 import { Mark } from "./Mark";
 import { Rail } from "./Rail";
@@ -63,6 +64,7 @@ export function RunPage({ run, name, now }: { run: Run; name: string; now: numbe
       )}
       {model.stale && !failed && <p className="m-0 mt-1.5 text-xs text-ink-subtext">{model.stale.why} · {model.stale.age}</p>}
       {model.note && <p className="m-0 mt-1.5 text-sm text-ink-subtext">{model.note}</p>}
+      {model.live && model.flag?.record && <Issue model={model} flag={model.flag.record} agent={m.chat_the_agent()} />}
       {failed && (
         <div className="mt-2 flex items-center gap-2 text-xs text-ink-subtext">
           {model.stale ? `${model.stale.why} · ${model.stale.age}` : m.run_monitor_load_failed()}
@@ -92,10 +94,11 @@ export function RunPage({ run, name, now }: { run: Run; name: string; now: numbe
 export function WatchSection({ run, now, className }: { run: Run; now: number; className: string }) {
   const { getRunMonitorQuery } = useWorkspace().queries;
   // Only what the watch says: the section redraws when a look lands, not with every new point.
-  const monitor = useQuery({ ...getRunMonitorQuery(run.id), enabled: false, select: (data) => ({ watch: data.watch, view: data.view, brief: data.brief }) }).data;
-  // Shown where there is something to read or do: looks, or watching the user turned off. A run whose chat has
+  const monitor = useQuery({ ...getRunMonitorQuery(run.id), enabled: false, select: (data) => ({ watch: data.watch, view: data.view, brief: data.brief, flags: data.flags }) }).data;
+  // Shown where there is something to read or do: looks, flags, or watching the user turned off. A run whose chat has
   // no watching model reads its stage and progress as its sentence, and there is no model to pick here yet.
-  const quiet = monitor && ["none", "needs_pick", "no_model"].includes(monitor.watch.state) && monitor.watch.looks.length === 0;
+  const quiet = monitor && ["none", "needs_pick", "no_model"].includes(monitor.watch.state) && monitor.watch.looks.length === 0
+    && !monitor.flags?.length;
   if (!monitor || quiet) return null;
   return (
     <section className={className}>

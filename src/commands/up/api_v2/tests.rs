@@ -3184,3 +3184,151 @@ async fn the_monitor_route_serves_one_rev_and_says_what_it_cannot() {
         .unwrap();
     assert_eq!(dashboard.status(), StatusCode::OK);
 }
+
+/// A flag's choice: the user keeps it going or stops the run, the agent hands it to the user, a
+/// repeated request answers as the first did, and a settled flag or an ended run's is refused in
+/// the words `orx exp flag` prints.
+#[tokio::test]
+async fn a_flag_is_settled_once_by_whoever_chooses_first() {
+    let f = Fixture::new().await;
+    let store = || f.api.store();
+    store().put_chat_session("chat-1", "claude-code", Some("copilot"));
+    for id in ["live", "other", "stop", "done"] {
+        f.insert(id, "exp", "project", "running");
+        store().subscribe_run(id, "chat-1", 1).unwrap();
+    }
+    let look = store()
+        .prepare_watch_look(
+            "chat-1",
+            "change",
+            "Claude Haiku",
+            "a test",
+            &[("live", "r1", "subject"), ("other", "r2", "subject")],
+            1,
+        )
+        .unwrap();
+    let raise = |run: &str, id: &str, group: Option<String>| {
+        let run = f.api.run(run).unwrap();
+        let body = json!({"id": id, "source": "look", "group": group, "at": 1, "template": "Loss **{loss}**.",
+            "detail": "Loss **{loss}**.", "text": "Loss **2.1**.", "evidence": null, "whole": 0.5});
+        let flag = crate::engine::flags::new_flag(&store(), &run, body, true).unwrap();
+        store().raise_flags(&[flag], 1).unwrap();
+    };
+    raise("live", "f1", Some(format!("look:{look}")));
+    raise("other", "f2", Some(format!("look:{look}")));
+    raise("stop", "f3", None);
+    raise("done", "f4", None);
+    store().set_run_status("done", "done");
+    let choose = |run: &str, body: Value| {
+        let client = f.client.clone();
+        let path = format!("runs/{run}/flag");
+        async move { client.json(reqwest::Method::POST, &path, Some(&body)).await }
+    };
+    let refused = |result: Result<Value>| result.unwrap_err().to_string();
+    let flag_of = |run: &str| {
+        let run = f.api.run(run).unwrap();
+        crate::engine::flags::read(&store(), &run)
+            .unwrap()
+            .pop()
+            .unwrap()
+    };
+    assert_eq!(
+        flag_of("live")["state"],
+        "waiting",
+        "a Copilot flag waits for the user"
+    );
+    assert!(
+        store().run_notices_for_tests("live").is_empty(),
+        "and wakes no one"
+    );
+
+    // Ask takes along every open flag of the look, as one turn.
+    let asked = choose(
+        "live",
+        json!({"flagId": "f1", "choice": "ask", "requestId": "q1"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(asked["flag"]["state"], "asking");
+    assert_eq!(flag_of("other")["state"], "asking");
+    let notices: Vec<_> = ["live", "other"]
+        .iter()
+        .flat_map(|run| store().run_notices_for_tests(run))
+        .collect();
+    assert_eq!(notices.len(), 2, "{notices:?}");
+    assert!(notices.iter().all(|(chat, kind, body)| chat == "chat-1"
+        && kind == "watch_flag"
+        && body.starts_with("[orx] The user asked you to look at a flag on run ")));
+    assert_eq!(
+        choose(
+            "live",
+            json!({"flagId": "f1", "choice": "ask", "requestId": "q1"})
+        )
+        .await
+        .unwrap()["flag"]["state"],
+        "asking",
+        "a repeated request answers as the first did"
+    );
+
+    // The agent leaves it to the user, then the user keeps it going.
+    let handed = choose(
+        "other",
+        json!({"flagId": "f2", "choice": "ask", "chatSessionId": "chat-1", "reason": "Your call."}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        (
+            handed["flag"]["state"].as_str(),
+            handed["flag"]["mode"].as_str()
+        ),
+        (Some("waiting"), Some("copilot"))
+    );
+    let kept = choose(
+        "other",
+        json!({"flagId": "f2", "choice": "keep", "requestId": "q2", "reason": "Warm-up noise."}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(kept["flag"]["state"], "kept");
+    assert_eq!(
+        kept["flag"]["choice"],
+        json!({"by": "user", "c": "keep", "at": kept["flag"]["choice"]["at"], "reason": "Warm-up noise."})
+    );
+    assert_eq!(
+        kept["run"]["monitor"]["flag"],
+        Value::Null,
+        "a settled flag leaves the line"
+    );
+    assert_eq!(
+        refused(
+            choose(
+                "other",
+                json!({"flagId": "f2", "choice": "stop", "requestId": "q3"})
+            )
+            .await
+        ),
+        "Run other: flag f2 is already settled; run `orx exp status exp --run other`."
+    );
+
+    let stopped = choose("stop", json!({"flagId": "f3", "choice": "stop", "chatSessionId": "chat-1", "reason": "NaN since step 400."})).await.unwrap();
+    assert_eq!(stopped["flag"]["state"], "stopped");
+    assert_eq!(
+        store().run_stop("stop").unwrap().unwrap().by,
+        crate::store::StopBy::Agent
+    );
+
+    assert_eq!(
+        refused(choose("done", json!({"flagId": "f4", "choice": "keep"})).await),
+        "Run done: flag f4 is already settled; run `orx exp status exp --run done`."
+    );
+    assert!(
+        refused(choose("live", json!({"flagId": "nope", "choice": "keep"})).await).contains(
+            "Run live has no flag nope; run `orx exp status exp --run live` to see its flags."
+        )
+    );
+    assert!(
+        refused(choose("live", json!({"flagId": "f1", "choice": "maybe"})).await)
+            .contains("A flag's choice is keep, stop or ask (got \"maybe\").")
+    );
+}

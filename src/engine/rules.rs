@@ -760,28 +760,31 @@ fn projecting(count: &mut Count, facts: &Facts, holds: bool) -> bool {
     count.held >= REVISIONS_BEFORE_PROJECTING
 }
 
-/// The text a rule that tripped wakes the run's chats with, or stops it with.
-pub(crate) fn words(run: &str, experiment: &str, trip: &Trip) -> (String, String) {
-    let name = &trip.rule.name;
-    let text = trip
-        .rule
-        .text
-        .as_deref()
-        .unwrap_or("Stop the run at its budget.");
-    let asked = format!(
-        "[orx] Run {run} (experiment {experiment}) met rule {name}; it keeps going.\n\
-         Rule {name}: {text}\n\
-         What orx saw: {}.\n\
-         OpenResearch checked this rule itself, with no model. Look at the run before acting on it:\n\
-         orx exp status {experiment} --run {run}; orx logs {run}\n\
-         To stop it: orx exp cancel --run {run} --reason '…'",
-        trip.evidence
-    );
-    let stopped = format!(
-        "Stopped by rule {name}: {}. No model was involved.",
-        trip.evidence
-    );
-    (asked, stopped)
+/// The flag a rule that asks raises: its sentence names the rule and what orx saw.
+pub(crate) fn flag(trip: &Trip, whole: Value, now: i64) -> Value {
+    let plain = |text: &str| text.replace(['{', '}', '*'], "");
+    let name = plain(&trip.rule.name);
+    json!({
+        "id": super::flags::new_id(),
+        "source": "rule",
+        "rule": trip.rule.name,
+        "ruleText": trip.rule.text,
+        "fingerprint": format!("rule:{}", trip.rule.name),
+        "at": now,
+        "whole": whole,
+        "template": format!("Rule **{name}** asks: {}.", plain(&trip.evidence)),
+        "detail": format!("Rule **{name}** asks: {}.", plain(&trip.evidence)),
+        "text": format!("{}.", trip.evidence),
+        "evidence": null,
+    })
+}
+
+/// The reason a rule that stops a run gives.
+pub(crate) fn stopped(trip: &Trip) -> String {
+    format!(
+        "Stopped by rule {}: {}. No model was involved.",
+        trip.rule.name, trip.evidence
+    )
 }
 
 #[cfg(test)]

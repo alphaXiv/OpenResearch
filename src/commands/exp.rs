@@ -30,6 +30,25 @@ pub async fn run(args: crate::ExpArgs) -> Result<()> {
             .abandon(run)
             .await;
     }
+    if let ExpCommand::Flag {
+        run,
+        flag,
+        keep,
+        stop,
+        reason,
+        ..
+    } = &args.command
+    {
+        let choice = match (keep, stop) {
+            (true, _) => "keep",
+            (_, true) => "stop",
+            _ => "ask",
+        };
+        return crate::plane::local_plane::ApiClient::discover()
+            .await?
+            .flag(run, flag, choice, reason.as_deref())
+            .await;
+    }
     // `exp wait` opens its store itself: a transiently locked orx.db is
     // retried inside the wait timeout rather than dying at startup.
     if let ExpCommand::Wait {
@@ -111,7 +130,10 @@ pub async fn run(args: crate::ExpArgs) -> Result<()> {
         ExpCommand::Revise { exp_id, run } => {
             resolve_experiment(store, &exp_id)?.revise(&run).await
         }
-        ExpCommand::Wait { .. } | ExpCommand::Abandon { .. } | ExpCommand::View { .. } => {
+        ExpCommand::Wait { .. }
+        | ExpCommand::Abandon { .. }
+        | ExpCommand::Flag { .. }
+        | ExpCommand::View { .. } => {
             unreachable!("handled above")
         }
     }

@@ -117,6 +117,7 @@
         },
         "sentence": null,
         "flag": null,
+        "flags": [],
         "setup": null,
         "revising": false,
         "brief": [],
@@ -376,6 +377,7 @@
         },
         "sentence": null,
         "flag": null,
+        "flags": [],
         "setup": null,
         "revising": false,
         "brief": [],
@@ -575,6 +577,7 @@
         },
         "sentence": null,
         "flag": null,
+        "flags": [],
         "setup": null,
         "revising": false,
         "brief": [],
@@ -789,6 +792,7 @@
         },
         "sentence": null,
         "flag": null,
+        "flags": [],
         "setup": null,
         "revising": false,
         "brief": [],
@@ -954,6 +958,7 @@
         },
         "sentence": null,
         "flag": null,
+        "flags": [],
         "setup": null,
         "revising": false,
         "brief": [],
@@ -1123,6 +1128,7 @@
         },
         "sentence": null,
         "flag": null,
+        "flags": [],
         "setup": null,
         "revising": false,
         "brief": [],
@@ -1266,6 +1272,7 @@
         },
         "sentence": null,
         "flag": null,
+        "flags": [],
         "setup": null,
         "revising": false,
         "brief": [],
@@ -1422,6 +1429,7 @@
         },
         "sentence": null,
         "flag": null,
+        "flags": [],
         "setup": null,
         "revising": false,
         "brief": [],
@@ -1641,6 +1649,7 @@
         },
         "sentence": null,
         "flag": null,
+        "flags": [],
         "setup": null,
         "revising": false,
         "brief": [],
@@ -1766,6 +1775,7 @@
         },
         "sentence": null,
         "flag": null,
+        "flags": [],
         "setup": null,
         "revising": false,
         "brief": [],
@@ -2003,6 +2013,7 @@
         },
         "sentence": null,
         "flag": null,
+        "flags": [],
         "setup": null,
         "revising": false,
         "brief": [],
@@ -2418,6 +2429,7 @@
         },
         "sentence": null,
         "flag": null,
+        "flags": [],
         "setup": {
           "line": null,
           "stage": "train",
@@ -2531,6 +2543,7 @@
         },
         "sentence": null,
         "flag": null,
+        "flags": [],
         "setup": {
           "line": "Successfully downloaded shard_00001.parquet",
           "stage": null,
@@ -2675,6 +2688,7 @@
         },
         "sentence": null,
         "flag": null,
+        "flags": [],
         "setup": null,
         "revising": false,
         "brief": [],
@@ -2869,6 +2883,7 @@
         },
         "sentence": null,
         "flag": null,
+        "flags": [],
         "setup": null,
         "revising": false,
         "brief": [],
@@ -3071,6 +3086,7 @@
         },
         "sentence": null,
         "flag": null,
+        "flags": [],
         "setup": null,
         "revising": false,
         "brief": [],
@@ -3228,6 +3244,7 @@
         },
         "sentence": null,
         "flag": null,
+        "flags": [],
         "setup": null,
         "revising": false,
         "brief": [],
@@ -3437,6 +3454,7 @@
         },
         "sentence": null,
         "flag": null,
+        "flags": [],
         "setup": null,
         "revising": false,
         "brief": [],
@@ -3589,6 +3607,7 @@
         },
         "sentence": null,
         "flag": null,
+        "flags": [],
         "setup": null,
         "revising": false,
         "brief": [],
@@ -3965,6 +3984,7 @@
         },
         "sentence": null,
         "flag": null,
+        "flags": [],
         "setup": null,
         "revising": false,
         "brief": [],
@@ -4081,6 +4101,317 @@
         "range": null,
         "cli": null,
         "said": "Loss 0.227 (0.045 better than parent at step 100)"
+      }
+    },
+    "flagged": {
+      "run": {
+        "status": "running",
+        "createdAt": 1794444300000,
+        "startedAt": 1794444300000,
+        "updatedAt": 1794444300000,
+        "endedAt": null,
+        "backend": {
+          "kind": "local_job"
+        }
+      },
+      "now": 1794444320500,
+      "monitor": {
+        "runId": "r1",
+        "generation": "g1",
+        "asOf": 1794444320000,
+        "availability": {
+          "state": "live",
+          "reason": null,
+          "omitted": {}
+        },
+        "view": {
+          "signals": {
+            "loss": {
+              "label": "loss"
+            }
+          },
+          "headline": [
+            "loss"
+          ],
+          "blocks": [
+            {
+              "chart": [
+                "loss"
+              ],
+              "x": "step"
+            }
+          ]
+        },
+        "viewFrom": {
+          "experimentId": "exp",
+          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" />\n</view>\n",
+          "isDefault": true
+        },
+        "source": "declared",
+        "phases": [
+          {
+            "name": "",
+            "of": 400.0,
+            "unit": null,
+            "priorMs": null,
+            "startedAt": 1794444300000,
+            "endedAt": null
+          }
+        ],
+        "progress": {
+          "phase": 0,
+          "done": 200.0,
+          "segments": [
+            {
+              "name": "",
+              "weight": 1.0,
+              "fill": 0.5
+            }
+          ],
+          "whole": 0.5,
+          "lastAt": 1794444320000,
+          "stallMs": 0
+        },
+        "x": {
+          "name": "step",
+          "max": 400.0
+        },
+        "latest": {
+          "loss": 0.14285714285714285
+        },
+        "parent": null,
+        "headline": "loss",
+        "logError": null,
+        "pace": null,
+        "versus": {
+          "step": {},
+          "final": {}
+        },
+        "rows": {},
+        "groups": {},
+        "cells": {},
+        "media": {},
+        "counts": {},
+        "estimate": {
+          "loMs": 18997,
+          "midMs": 20000,
+          "hiMs": 21003,
+          "at": 1794444320000,
+          "pending": false,
+          "pastLimitMs": null,
+          "floor": false,
+          "reasons": []
+        },
+        "limit": null,
+        "cost": null,
+        "quote": null,
+        "before": null,
+        "watch": {
+          "state": "on",
+          "model": "Claude Haiku",
+          "why": null,
+          "looks": [],
+          "spentUsd": null,
+          "tokens": 0,
+          "nextAt": null,
+          "floorUntil": null,
+          "error": null,
+          "with": null
+        },
+        "sentence": null,
+        "flag": {
+          "id": "f1",
+          "source": "look",
+          "group": "look:7",
+          "lookId": "7",
+          "at": 1794444319000,
+          "whole": 0.05,
+          "template": "Loss **{loss}** rose at step 18.",
+          "detail": "Loss **{loss}** rose at step 18.",
+          "text": "Loss **2.31** rose at step 18.",
+          "evidence": {
+            "lines": [
+              "step 18 loss 2.31"
+            ],
+            "from": 19,
+            "to": 19,
+            "ident": "1-7",
+            "byteFrom": 812,
+            "byteTo": 830
+          },
+          "state": "waiting",
+          "mode": "copilot"
+        },
+        "flags": [
+          {
+            "id": "f1",
+            "source": "look",
+            "group": "look:7",
+            "lookId": "7",
+            "at": 1794444319000,
+            "whole": 0.05,
+            "template": "Loss **{loss}** rose at step 18.",
+            "detail": "Loss **{loss}** rose at step 18.",
+            "text": "Loss **2.31** rose at step 18.",
+            "evidence": {
+              "lines": [
+                "step 18 loss 2.31"
+              ],
+              "from": 19,
+              "to": 19,
+              "ident": "1-7",
+              "byteFrom": 812,
+              "byteTo": 830
+            },
+            "state": "waiting",
+            "mode": "copilot"
+          }
+        ],
+        "setup": null,
+        "revising": false,
+        "brief": [],
+        "rules": [],
+        "statusText": "baseline  running  50%  step 200 of 400  [run r1]\nwatch    Claude Haiku watches this run; it has not looked yet.\nflag     Loss 0.143 rose at step 18.  [log line 19]  (flag f1, waits for the user)\neta      19s left (18s to 20s)\nsignals  loss 0.143\nsignals  Last collected at 2026-11-12T00:45:20.000Z.\nsignals  Data as of 2026-11-12T00:45:20.000Z.\nsignals  1 log diagnostics; inspect `orx logs r1`.",
+        "rev": 1,
+        "seriesRev": 1,
+        "series": {
+          "loss": [
+            [
+              0.0,
+              3.0
+            ],
+            [
+              10.0,
+              1.5
+            ],
+            [
+              20.0,
+              1.0
+            ],
+            [
+              30.0,
+              0.75
+            ],
+            [
+              40.0,
+              0.6
+            ],
+            [
+              50.0,
+              null
+            ],
+            [
+              60.0,
+              0.42857142857142855
+            ],
+            [
+              70.0,
+              0.375
+            ],
+            [
+              80.0,
+              0.3333333333333333
+            ],
+            [
+              90.0,
+              0.3
+            ],
+            [
+              100.0,
+              0.2727272727272727
+            ],
+            [
+              110.0,
+              0.25
+            ],
+            [
+              120.0,
+              0.2307692307692308
+            ],
+            [
+              130.0,
+              0.21428571428571427
+            ],
+            [
+              140.0,
+              0.2
+            ],
+            [
+              150.0,
+              0.1875
+            ],
+            [
+              160.0,
+              0.17647058823529413
+            ],
+            [
+              170.0,
+              0.16666666666666666
+            ],
+            [
+              180.0,
+              0.15789473684210523
+            ],
+            [
+              190.0,
+              0.15
+            ],
+            [
+              200.0,
+              0.14285714285714285
+            ]
+          ]
+        }
+      },
+      "summary": {
+        "tone": "flag",
+        "whole": 0.5,
+        "stage": {
+          "name": "",
+          "done": 200.0,
+          "of": 400.0,
+          "unit": null
+        },
+        "headline": {
+          "name": "loss",
+          "label": "loss",
+          "value": 0.14285714285714285,
+          "vs": null
+        },
+        "logError": null,
+        "sentence": null,
+        "bindings": {
+          "loss": 0.14285714285714285
+        },
+        "signals": {
+          "loss": {
+            "label": "loss"
+          }
+        },
+        "etaMs": {
+          "lo": 18997,
+          "mid": 20000,
+          "hi": 21003,
+          "at": 1794444320000
+        },
+        "etaFloor": false,
+        "pending": false,
+        "limitEndsAt": null,
+        "flag": {
+          "id": "f1",
+          "state": "waiting",
+          "mode": "copilot"
+        },
+        "setup": null,
+        "generation": "g1",
+        "asOf": 1794444320000,
+        "rev": 1
+      },
+      "expect": {
+        "eta": null,
+        "range": null,
+        "cli": null,
+        "flag": "waiting"
       }
     }
   }

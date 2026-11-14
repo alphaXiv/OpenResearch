@@ -564,6 +564,27 @@ pub enum ExpCommand {
         run: String,
     },
 
+    /// Settle a flag on a run: keep it going, stop it, or leave the choice to the user.
+    #[command(group(clap::ArgGroup::new("choice").required(true).args(["keep", "ask", "stop"])))]
+    Flag {
+        run: String,
+        /// The flag, as the wake or `orx exp status` names it.
+        #[arg(long = "flag")]
+        flag: String,
+        /// The run is fine: keep it going. The watcher's next look reads the reason.
+        #[arg(long)]
+        keep: bool,
+        /// Leave the choice to the user, who sees the flag with Stop run and Keep going.
+        #[arg(long)]
+        ask: bool,
+        /// Stop the run, as `orx exp cancel` does.
+        #[arg(long)]
+        stop: bool,
+        /// Why, kept with the choice and shown with the run.
+        #[arg(long)]
+        reason: Option<String>,
+    },
+
     /// Abandon a run whose outcome cannot be recovered; keep its cancel pending.
     Abandon { run: String },
 

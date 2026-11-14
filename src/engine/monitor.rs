@@ -184,6 +184,8 @@ struct Lifecycle {
     revising: bool,
     /// What the watcher said of the run, and whether and by what it is watched.
     watch: Value,
+    /// The run's flags, oldest first, with what became of each.
+    flags: Vec<Value>,
 }
 
 impl Lifecycle {
@@ -238,6 +240,7 @@ impl Lifecycle {
                     "sentence": null, "counts": {},
                 })
             }),
+            flags: super::flags::read(store, row)?,
             run: row.clone(),
         })
     }
@@ -274,7 +277,7 @@ impl Lifecycle {
     /// Changes whenever anything the projection reads from the store does.
     fn key(&self) -> String {
         format!(
-            "{}|{}|{:?}|{:?}|{}|{:?}|{}|{:?}|{:?}|{:?}|{:?}|{}|{}",
+            "{}|{}|{:?}|{:?}|{}|{:?}|{}|{:?}|{:?}|{:?}|{:?}|{}|{}|{:?}",
             self.run.updated_at,
             self.state,
             self.contact,
@@ -288,6 +291,7 @@ impl Lifecycle {
             self.stop,
             self.revising,
             self.watch,
+            self.flags,
         )
     }
 }
@@ -1107,8 +1111,13 @@ fn evaluate(
             .as_ref()
             .is_some_and(|estimate| estimate["floor"] == true);
     let pending = estimate.as_ref().is_some_and(|e| e["pending"] == true);
+    let open = super::flags::open(&life.flags).filter(|_| life.live());
     let mut summary = json!({
-        "tone": if life.revising { "revising" } else { tone(life.phase) },
+        "tone": match (life.revising, open) {
+            (true, _) => "revising",
+            (false, Some(_)) => "flag",
+            (false, None) => tone(life.phase),
+        },
         "whole": whole,
         "stage": snapshot.and_then(Snapshot::progress).map(|phase| {
             let of = phase.of.or(current.and_then(|index| stages[index].of));
@@ -1123,7 +1132,7 @@ fn evaluate(
         "etaFloor": eta_floor,
         "pending": pending,
         "limitEndsAt": life.ends_at(),
-        "flag": null,
+        "flag": open.map(|flag| json!({"id": flag["id"], "state": flag["state"], "mode": flag["mode"]})),
 
         "setup": setup,
         "generation": generation,
@@ -1194,7 +1203,8 @@ fn evaluate(
         "before": before,
         "watch": watch_body(&life.watch),
         "sentence": sentence,
-        "flag": null,
+        "flag": open.or(life.flags.last()),
+        "flags": life.flags,
         "setup": setup,
         "revising": life.revising,
         "brief": brief(life.settings.as_deref()),
@@ -1779,13 +1789,8 @@ fn check_rules(
         .trips
         .iter()
         .find(|trip| trip.rule.does == Does::Stop);
-    let chats = if stop.is_none() {
-        store.run_subscribers(&run.id)?
-    } else {
-        Vec::new()
-    };
     let mut events = Vec::new();
-    let mut notices = Vec::new();
+    let mut flags = Vec::new();
     for trip in &checked.trips {
         let does = match trip.rule.does {
             Does::Stop => "stop",
@@ -1794,19 +1799,14 @@ fn check_rules(
         events.push(
             json!({"rule": trip.rule.name, "does": does, "evidence": trip.evidence, "at": now}),
         );
-        if trip.rule.does == Does::Ask {
-            let (asked, _) = super::rules::words(&run.id, &run.experiment_id, trip);
-            for chat in &chats {
-                notices.push((
-                    chat.clone(),
-                    format!("rule:{}", trip.rule.name),
-                    asked.clone(),
-                ));
-            }
+        // A run that stops now has nothing left to ask about.
+        if trip.rule.does == Does::Ask && stop.is_none() {
+            let flag = super::rules::flag(trip, projection.summary["whole"].clone(), now);
+            flags.push(super::flags::new_flag(store, run, flag, false)?);
         }
     }
     let stop = stop.map(|trip| {
-        let (_, stopped) = super::rules::words(&run.id, &run.experiment_id, trip);
+        let stopped = super::rules::stopped(trip);
         let context = crate::store::StopContext {
             reason: Some(trip.evidence.clone()),
             rule: Some(trip.rule.json()),
@@ -1814,12 +1814,16 @@ fn check_rules(
         };
         (stopped, context)
     });
+    let woken: Vec<String> = flags
+        .iter()
+        .flat_map(|flag| flag.wakes.iter().map(|(chat, _)| chat.clone()))
+        .collect();
     let record = |store: &Store| {
         store.record_rules(
             &run.id,
             &checked.counts,
             &events,
-            &notices,
+            &flags,
             stop.as_ref()
                 .map(|(reason, context)| (reason.as_str(), context)),
         )
@@ -1832,6 +1836,7 @@ fn check_rules(
             record(store)?;
         }
     }
+    crate::commands::up::api_v2::notices_queued(woken);
     Ok(())
 }
 
@@ -2119,6 +2124,7 @@ fn project(
                 "cost": body["cost"],
                 "sentence": body["sentence"],
                 "watch": body["watch"],
+                "flag": body["flag"],
                 "patch": {
                     "availability": body["availability"],
                     "phases": body["phases"],
@@ -2133,6 +2139,7 @@ fn project(
                     "pace": body["pace"],
                     "logError": body["logError"],
                     "revising": body["revising"],
+                    "flags": body["flags"],
                 },
             });
             if let Some(best) = body.get("best") {
@@ -2326,6 +2333,11 @@ fn status_text(life: &Lifecycle, fold: &Fold, facts: &StatusFacts) -> String {
         facts.signals,
         facts.versus,
     ));
+    if let Some(flag) = super::flags::open(&life.flags).or(life.flags.last()) {
+        lines.push(super::flags::status_line(flag, |template| {
+            super::watch::fill_values(template, facts.bindings, facts.signals, facts.versus)
+        }));
+    }
     if let Some(eta) = eta_text(life, snapshot, facts) {
         lines.push(format!("eta      {eta}"));
     }
@@ -4873,7 +4885,12 @@ mod tests {
             .nth(1)
             .unwrap();
         let (cli, left) = (&expect["cli"], &expect["eta"]);
-        assert_eq!(eta.strip_prefix("eta      "), cli.as_str(), "{name}");
+        assert_eq!(
+            eta.strip_prefix("eta      "),
+            cli.as_str(),
+            "{name}: {}",
+            monitor["statusText"]
+        );
         let left = left.as_str().unwrap_or_default();
         assert!(cli.as_str().unwrap().starts_with(left), "{name}");
         let range = expect["range"].as_str().map(|range| format!("({range}"));
@@ -5781,10 +5798,8 @@ mod tests {
         f.store
             .run_monitor_events_for_tests(id)
             .into_iter()
-            .map(|(kind, body)| {
-                assert_eq!(kind, "rule");
-                body
-            })
+            .filter(|(kind, _)| kind == "rule")
+            .map(|(_, body)| body)
             .collect()
     }
 
@@ -5888,7 +5903,7 @@ mod tests {
     }
 
     #[test]
-    fn an_ask_wakes_the_runs_chats_once_and_the_run_keeps_going() {
+    fn an_ask_flags_the_run_wakes_its_agentic_chat_once_and_the_run_keeps_going() {
         let f = Fixture::new("orx-rules-ask");
         ruled(
             &f,
@@ -5898,7 +5913,11 @@ mod tests {
             json!([{"name": "eval-zero", "text": "Ask when the eval score falls below 0.1.", "does": "ask",
                 "when": {"compare": {"signal": "eval_score", "op": "lt", "value": 0.1}}}]),
         );
+        f.store.put_chat_session("chat-1", "claude-code", None);
+        f.store
+            .put_chat_session("chat-2", "claude-code", Some("copilot"));
         f.store.subscribe_run("r1", "chat-1", T0).unwrap();
+        f.store.subscribe_run("r1", "chat-2", T0).unwrap();
         reported(&f, "r1", "eval_score", &["0.5", "0.05"], 600);
         rules_at(&f, "r1", T0 + 2_000);
         reported(&f, "r1", "eval_score", &["0.5", "0.05", "0.0"], 600);
@@ -5912,11 +5931,46 @@ mod tests {
             .cancel_accepted_at
             .is_none());
         let notices = f.store.run_notices_for_tests("r1");
-        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert_eq!(
+            notices.len(),
+            1,
+            "only the Agentic chat is woken: {notices:?}"
+        );
         let (chat, kind, body) = &notices[0];
-        assert_eq!((chat.as_str(), kind.as_str()), ("chat-1", "attention"));
-        assert!(body.starts_with("[orx] Run r1 (experiment exp) met rule eval-zero; it keeps going.\nRule eval-zero: Ask when the eval score falls below 0.1.\nWhat orx saw: eval_score was 0.05 (below 0.1) at step 10.\n"), "{body}");
-        assert!(body.contains("orx exp cancel --run r1 --reason"), "{body}");
+        assert_eq!((chat.as_str(), kind.as_str()), ("chat-1", "watch_flag"));
+        let run = f.store.get_run("r1").unwrap().unwrap();
+        let flags = super::super::flags::read(&f.store, &run).unwrap();
+        assert_eq!(flags.len(), 1);
+        let (flag, id) = (&flags[0], flags[0]["id"].as_str().unwrap());
+        assert_eq!(
+            (flag["source"].as_str(), flag["rule"].as_str()),
+            (Some("rule"), Some("eval-zero"))
+        );
+        let at = clock_text(flag["at"].as_i64().unwrap());
+        assert_eq!(
+            body,
+            &format!(
+                "[orx] Run r1 (experiment exp) was flagged for review.\n\
+                 Rule eval-zero: Ask when the eval score falls below 0.1.\n\
+                 What orx saw at {at}: eval_score was 0.05 (below 0.1) at step 10.\n\
+                 OpenResearch checked this rule itself, with no model. Inspect the run\n\
+                 yourself and confirm this flag before acting on it.\n\
+                 Read: orx exp status exp --run r1; orx logs r1\n\
+                 If confirmed, decide whether to keep going or stop. To stop:\n\
+                 orx exp flag r1 --flag {id} --stop --reason 'your confirmed reason'\n\
+                 To settle this flag without stopping: orx exp flag r1 --flag {id} --keep --reason '…'\n\
+                 To leave the choice to the user: orx exp flag r1 --flag {id} --ask --reason '…'"
+            )
+        );
+        let summary = advance(&f.store, &run, T0 + 3_000)
+            .unwrap()
+            .summary()
+            .clone();
+        assert_eq!(summary["tone"], "flag");
+        assert_eq!(
+            summary["flag"],
+            json!({"id": id, "state": "raised", "mode": "agentic"})
+        );
         assert_eq!(rule_events(&f, "r1")[0]["does"], "ask");
     }
 
@@ -6947,6 +7001,7 @@ mod tests {
         states.insert("unreadable".into(), unreadable_state());
         states.insert("failing_done".into(), failing_done_state());
         states.insert("compared".into(), compared_state());
+        states.insert("flagged".into(), flagged_state());
         let api = json!({"states": states});
         let events = json!([first.unwrap(), next.unwrap()]);
         for (name, actual) in [
@@ -7037,6 +7092,34 @@ mod tests {
             .unwrap()
             .contains(expect["said"].as_str().unwrap()));
         json!({"run": run, "now": T0 + 10_000, "monitor": monitor, "summary": summary, "expect": expect})
+    }
+
+    /// A Copilot chat's run the watcher flagged: the flag waits for the user's choice.
+    fn flagged_state() -> Value {
+        let f = Fixture::new("orx-monitor-contract-flagged");
+        let run = f.run("running", local());
+        f.store
+            .put_chat_session("chat-1", "claude-code", Some("copilot"));
+        f.store
+            .conn_execute_for_tests("UPDATE runs SET chat_session_id = 'chat-1' WHERE id = 'r1'");
+        f.collect(&folded(&declared(0..=20, 400)));
+        f.collected(T0 + 20_000);
+        let row = f.store.get_run("r1").unwrap().unwrap();
+        let body = json!({"id": "f1", "source": "look", "group": "look:7", "lookId": "7", "at": T0 + 19_000,
+            "whole": 0.05, "template": "Loss **{loss}** rose at step 18.", "detail": "Loss **{loss}** rose at step 18.",
+            "text": "Loss **2.31** rose at step 18.",
+            "evidence": {"lines": ["step 18 loss 2.31"], "from": 19, "to": 19, "ident": "1-7", "byteFrom": 812, "byteTo": 830}});
+        let flag = super::super::flags::new_flag(&f.store, &row, body, true).unwrap();
+        f.store.raise_flags(&[flag], T0 + 19_000).unwrap();
+        let (monitor, _) = monitor_at(&f, &run, T0 + 20_500);
+        let summary = current(&f.store, &row).unwrap().unwrap().summary().clone();
+        let run = json!({
+            "status": "running", "createdAt": T0, "startedAt": T0, "updatedAt": T0,
+            "endedAt": null, "backend": local(),
+        });
+        let expect = json!({"eta": null, "range": null, "cli": null, "flag": "waiting"});
+        assert_eq!(summary["flag"]["state"], "waiting");
+        json!({"run": run, "now": T0 + 20_500, "monitor": monitor, "summary": summary, "expect": expect})
     }
 
     fn unreadable_state() -> Value {
