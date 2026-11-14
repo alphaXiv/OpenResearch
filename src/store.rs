@@ -7057,11 +7057,14 @@ fn shown_runs_sql() -> String {
              SELECT chat, run FROM shown
              UNION
              SELECT s.chat, r.id FROM shown s
-             JOIN runs o ON o.id = s.run
-             JOIN runs r ON r.chat_session_id = s.chat AND r.created_at >= {launched_o}
-                         AND r.id != o.id
+             JOIN runs o ON o.id = s.run AND o.chat_session_id = s.chat
+             JOIN runs r ON r.chat_session_id = s.chat AND r.id != o.id
+                         AND r.created_at >= {launched_o}
+                         AND r.created_at < COALESCE(
+                             (SELECT MIN(t.created_at) FROM chat_turns t
+                              WHERE t.session_id = s.chat AND t.created_at > o.created_at),
+                             9223372036854775807)
              WHERE {kept_in_s}
-               AND {launched_r} = {launched_o}
          )
          SELECT a.chat, COALESCE(e.title, e.slug), COALESCE(e.slug, r.experiment_id),
                 (SELECT COUNT(*) FROM runs o WHERE o.experiment_id = r.experiment_id
@@ -7077,7 +7080,6 @@ fn shown_runs_sql() -> String {
          ORDER BY a.chat, r.id",
         kept_in_a = kept("r", "a.chat"),
         kept_in_s = kept("r", "s.chat"),
-        launched_r = launched_in("s.chat", "r"),
         launched_o = launched_in("s.chat", "o"),
     )
 }
@@ -11103,6 +11105,20 @@ mod tests {
             shown_ids(&store, "chat_1"),
             ["later"],
             "once every result is answered they go, and a run launched later keeps no one"
+        );
+
+        store
+            .create_chat_session(&chat_session_fixture("chat_2"))
+            .unwrap();
+        let mut elsewhere = run_fixture("followed", "running", Some("chat_2"));
+        elsewhere.experiment_id = "exp_followed".into();
+        elsewhere.created_at = 15;
+        store.upsert_run(&elsewhere).unwrap();
+        store.subscribe_run("followed", "chat_1", 51).unwrap();
+        assert_eq!(
+            shown_ids(&store, "chat_1"),
+            ["followed", "later"],
+            "a run the chat only follows brings back none of the chat's answered runs"
         );
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
