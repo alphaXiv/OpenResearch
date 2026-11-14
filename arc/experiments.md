@@ -375,7 +375,7 @@ ending within a minute; one that fails or is interrupted is taken once more, and
 a second failure stands in the journal as the run's last look.
 
 A look's request, system prompt and digest together, is held to 4,096 tokens,
-counted as three bytes a token, and never past 16 KiB: the brief, each run's
+counted as two bytes a token, and never past 16 KiB: the brief, each run's
 progress, signals and last three sentences, the log's head and its new lines,
 new kinds of warning first, repeats said once with their count. Older points and
 sentences go first when it is too long, and the journal says what each look

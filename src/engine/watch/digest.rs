@@ -8,8 +8,9 @@ use serde_json::{json, Map, Value};
 pub(super) const MAX_BYTES: usize = 16 * 1024;
 /// Tokens one request of a look may hold: its system prompt and the digest.
 pub(super) const MAX_TOKENS: usize = 4096;
-/// UTF-8 bytes a token of JSON holds at least, as the watching models count it.
-const BYTES_PER_TOKEN: usize = 3;
+/// UTF-8 bytes a token of a digest holds at least: measured near two for Claude Haiku, whose
+/// tokens split the digest's numbers finely.
+const BYTES_PER_TOKEN: usize = 2;
 /// How far a digest is cut to fit: each step keeps fewer points and sentences.
 const TRIMS: [Trim; 3] = [
     Trim {
