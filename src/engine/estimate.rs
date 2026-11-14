@@ -933,19 +933,29 @@ pub(crate) struct Stage {
     pub phase: Option<usize>,
     pub planned: bool,
     pub skipped: bool,
-    /// How long the parent's run took over the same stage.
-    pub prior_ms: Option<f64>,
+    /// How long an earlier run took over the same stage, and which run that was.
+    pub prior: Option<(f64, TimedBy)>,
+}
+
+/// The run a stage's expected length comes from.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum TimedBy {
+    /// The experiment's own last run that finished.
+    Earlier,
+    Parent,
 }
 
 /// Lays a run's phase occurrences over its plan, in order. An occurrence is the next planned stage
 /// of its name, and the planned stages it passed over were skipped; one the plan does not name is
-/// unplanned, and the plan grows by it there. A run that finished skipped the stages it never
-/// reached. A stage's prior is how long the parent took over the stage of the same name and count.
+/// unplanned, and the plan grows by it there; with no plan, every occurrence is unplanned. A run
+/// that finished skipped the stages it never reached. A stage's prior is how long the first of
+/// `timed` that went through the stage of the same name and count took over it; each comes with
+/// whether that run finished.
 pub(crate) fn stages(
     plan: &[orx_signals::Stage],
     signals: Option<&orx_signals::Snapshot>,
     finished: bool,
-    parent: Option<(&orx_signals::Snapshot, bool)>,
+    timed: &[(&orx_signals::Snapshot, bool, TimedBy)],
 ) -> Vec<Stage> {
     let planned = |stage: &orx_signals::Stage, skipped: bool| Stage {
         name: stage.phase.clone(),
@@ -954,7 +964,7 @@ pub(crate) fn stages(
         phase: None,
         planned: true,
         skipped,
-        prior_ms: None,
+        prior: None,
     };
     let mut shown = Vec::new();
     let mut next = 0;
@@ -979,40 +989,43 @@ pub(crate) fn stages(
             phase: Some(index),
             planned: stage.is_some(),
             skipped: false,
-            prior_ms: None,
+            prior: None,
         });
     }
     shown.extend(plan[next..].iter().map(|s| planned(s, finished)));
 
-    let Some((parent, done)) = parent else {
-        return shown;
-    };
-    let last = parent.phases.len().checked_sub(1);
-    let took: Vec<(&str, Option<f64>)> = parent
-        .phases
+    let took: Vec<Vec<(&str, Option<f64>)>> = timed
         .iter()
-        .enumerate()
-        .map(|(index, phase)| {
-            // The last stage of a run that finished ended with its log.
-            let end = phase.ended_at.or(parent
-                .timing
-                .last_log_at
-                .filter(|_| done && Some(index) == last));
-            let took = phase
-                .started_at
-                .zip(end)
-                .map(|(start, end)| (end - start) as f64);
-            (phase.name.as_str(), took.filter(|ms| *ms >= 0.0))
+        .map(|(run, done, _)| {
+            let last = run.phases.len().checked_sub(1);
+            run.phases
+                .iter()
+                .enumerate()
+                .map(|(index, phase)| {
+                    // The last stage of a run that finished ended with its log.
+                    let end = phase.ended_at.or(run
+                        .timing
+                        .last_log_at
+                        .filter(|_| *done && Some(index) == last));
+                    let took = phase
+                        .started_at
+                        .zip(end)
+                        .map(|(start, end)| (end - start) as f64);
+                    (phase.name.as_str(), took.filter(|ms| *ms >= 0.0))
+                })
+                .collect()
         })
         .collect();
     let mut counted: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for stage in &mut shown {
         let count = counted.entry(stage.name.clone()).or_default();
-        stage.prior_ms = took
-            .iter()
-            .filter(|(name, _)| *name == stage.name)
-            .nth(*count)
-            .and_then(|(_, took)| *took);
+        stage.prior = took.iter().zip(timed).find_map(|(took, (_, _, by))| {
+            took.iter()
+                .filter(|(name, _)| *name == stage.name)
+                .nth(*count)
+                .and_then(|(_, took)| *took)
+                .map(|ms| (ms, *by))
+        });
         *count += 1;
     }
     shown
@@ -1030,7 +1043,8 @@ pub(crate) struct Run {
     pub spend_per_hour: Option<f64>,
 }
 
-/// Evaluates a run in its host's time. Every time in a checkpoint is on the clock that folded
+/// Evaluates a run in its host's time. `plan` is the run's stages as `stages` lays them, a
+/// declared plan's or, with none, the occurrences timed from earlier runs. Every time in a checkpoint is on the clock that folded
 /// it; `clock` is the `(host, laptop)` pair from the last successful collection, which maps the
 /// laptop's `now` and the run's own times onto that clock, so skew of any size changes nothing
 /// and output times are the host's. The pair's host time is what the data is known as of.
@@ -1090,19 +1104,23 @@ pub(crate) fn with_signals(
         spend_per_hour: run.spend_per_hour,
         planned: false,
     };
+    let prior = |stage: &Stage| {
+        stage.prior.map(|(ms, _)| Range {
+            lo_ms: ms,
+            mid_ms: ms,
+            hi_ms: ms,
+        })
+    };
     // Stages to come and skipped ones have no reports; skipped ones take no time.
     let shown: Vec<&Stage> = plan.iter().filter(|stage| !stage.skipped).collect();
+    let declared = plan.iter().any(|stage| stage.planned);
     let planned = |input: &mut Input| {
         input.phases = shown
             .iter()
             .map(|stage| Phase {
                 name: stage.name.clone(),
                 total: stage.of,
-                prior: stage.prior_ms.map(|ms| Range {
-                    lo_ms: ms,
-                    mid_ms: ms,
-                    hi_ms: ms,
-                }),
+                prior: prior(stage),
                 spend: None,
             })
             .collect();
@@ -1115,7 +1133,7 @@ pub(crate) fn with_signals(
         input.planned = true;
     };
     let Some(phase) = signals.phases.last() else {
-        if !shown.is_empty() {
+        if declared {
             planned(&mut input);
         }
         return input;
@@ -1162,17 +1180,21 @@ pub(crate) fn with_signals(
         input.phases[0].name = phase.name.clone();
         return input;
     }
-    if !shown.is_empty() {
+    if declared {
         planned(&mut input);
         return input;
     }
     input.phases = signals
         .phases
         .iter()
-        .map(|occurrence| Phase {
+        .enumerate()
+        .map(|(index, occurrence)| Phase {
             name: occurrence.name.clone(),
             total: occurrence.of,
-            prior: None,
+            prior: plan
+                .iter()
+                .find(|stage| stage.phase == Some(index))
+                .and_then(prior),
             spend: None,
         })
         .collect();

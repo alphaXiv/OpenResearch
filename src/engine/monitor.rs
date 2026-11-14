@@ -170,6 +170,8 @@ struct Lifecycle {
     settings: Option<String>,
     /// The parent experiment's run this one is compared with.
     parent: Option<StoredRun>,
+    /// The experiment's own last run that finished before this one, which times its stages first.
+    earlier: Option<StoredRun>,
 }
 
 impl Lifecycle {
@@ -190,6 +192,12 @@ impl Lifecycle {
             None => None,
         };
         let slug = experiment.map_or_else(|| row.experiment_id.clone(), |exp| exp.slug);
+        let earlier = store
+            .list_runs_by_experiment(&row.experiment_id)?
+            .into_iter()
+            .filter(|run| run.created_at < row.created_at)
+            .take(32)
+            .find(|run| Phase::parse(&run.status) == Some(Phase::Done));
         Ok(Self {
             phase: Phase::parse(&row.status),
             contact: run.contact.clone(),
@@ -203,6 +211,7 @@ impl Lifecycle {
             slug,
             settings: store.run_monitor_json(&row.experiment_id)?,
             parent,
+            earlier,
             run: row.clone(),
         })
     }
@@ -239,7 +248,7 @@ impl Lifecycle {
     /// Changes whenever anything the projection reads from the store does.
     fn key(&self) -> String {
         format!(
-            "{}|{}|{:?}|{:?}|{}|{:?}|{}|{:?}",
+            "{}|{}|{:?}|{:?}|{}|{:?}|{}|{:?}|{:?}",
             self.run.updated_at,
             self.state,
             self.contact,
@@ -248,6 +257,7 @@ impl Lifecycle {
             self.retry_at,
             super::view::etag(self.settings.as_deref()),
             self.parent.as_ref().map(|p| (&p.id, p.updated_at)),
+            self.earlier.as_ref().map(|p| (&p.id, p.updated_at)),
         )
     }
 }
@@ -590,8 +600,14 @@ struct Evaluated {
     body: Value,
 }
 
-/// `parent` is the checkpoint of the run `life.parent` names.
-fn evaluate(fold: &Fold, life: &Lifecycle, parent: Option<&Snapshot>, now: i64) -> Evaluated {
+/// `parent` and `earlier` are the checkpoints of the runs `life` names so.
+fn evaluate(
+    fold: &Fold,
+    life: &Lifecycle,
+    parent: Option<&Snapshot>,
+    earlier: Option<&Snapshot>,
+    now: i64,
+) -> Evaluated {
     let snapshot = fold.snapshot.as_deref();
     let (state, reason) = availability(fold, life, now);
     let last_collected = fold.status["lastCollectedAt"].as_i64();
@@ -619,20 +635,17 @@ fn evaluate(fold: &Fold, life: &Lifecycle, parent: Option<&Snapshot>, now: i64) 
     let plan = snapshot
         .and_then(|s| s.plan.as_deref())
         .unwrap_or(&configured);
+    let planned = !plan.is_empty();
     let parent_done = life
         .parent
         .as_ref()
         .is_some_and(|p| Phase::parse(&p.status) == Some(Phase::Done));
-    let stages = if plan.is_empty() {
-        Vec::new()
-    } else {
-        estimate::stages(
-            plan,
-            snapshot,
-            life.phase == Some(Phase::Done),
-            parent.map(|parent| (parent, parent_done)),
-        )
-    };
+    let timed: Vec<_> = earlier
+        .map(|run| (run, true, estimate::TimedBy::Earlier))
+        .into_iter()
+        .chain(parent.map(|run| (run, parent_done, estimate::TimedBy::Parent)))
+        .collect();
+    let stages = estimate::stages(plan, snapshot, life.phase == Some(Phase::Done), &timed);
     let (input, offset) = estimate_input(fold, life, &stages, at);
     let laptop = |host: f64| (host - offset as f64).round() as i64;
     let output = estimate::estimate(&input);
@@ -647,7 +660,7 @@ fn evaluate(fold: &Fold, life: &Lifecycle, parent: Option<&Snapshot>, now: i64) 
     let done = life.phase == Some(Phase::Done);
     let finished = done && snapshot.and_then(Snapshot::progress).is_some();
     // Every stage of a plan that finished is done; the ones it skipped are not segments.
-    let planned_done = done && !stages.is_empty();
+    let planned_done = done && planned;
     let finished = |fill: Option<f64>| {
         if planned_done {
             Some(1.0)
@@ -667,7 +680,7 @@ fn evaluate(fold: &Fold, life: &Lifecycle, parent: Option<&Snapshot>, now: i64) 
             .collect()
     });
     let progressed = snapshot.and_then(Snapshot::progress);
-    let progress = if stages.is_empty() {
+    let progress = if !planned {
         progressed.map(|phase| (last_phase.unwrap_or(0), phase.done))
     } else {
         Some((
@@ -727,7 +740,7 @@ fn evaluate(fold: &Fold, life: &Lifecycle, parent: Option<&Snapshot>, now: i64) 
                         .enumerate()
                         .filter(|(index, stage)| {
                             !stage.skipped
-                                && stage.prior_ms.is_none()
+                                && stage.prior.is_none()
                                 && (*index > from || *index == from && stage.of.is_none())
                         })
                         .map(|(_, stage)| json!(stage.name))
@@ -758,7 +771,7 @@ fn evaluate(fold: &Fold, life: &Lifecycle, parent: Option<&Snapshot>, now: i64) 
         })
     });
     let limit = life.ends_at().map(|ends_at| json!({"endsAt": ends_at}));
-    let phases: Vec<Value> = if !stages.is_empty() {
+    let phases: Vec<Value> = if planned {
         let occurrences = snapshot.map_or(&[][..], |s| &s.phases);
         // A finished stage's end is when the next began; the last one of an ended run, its log's.
         let log_end = snapshot
@@ -776,7 +789,7 @@ fn evaluate(fold: &Fold, life: &Lifecycle, parent: Option<&Snapshot>, now: i64) 
                     "name": stage.name,
                     "of": stage.of,
                     "unit": stage.unit,
-                    "priorMs": stage.prior_ms.map(|ms| ms.round() as i64),
+                    "priorMs": stage.prior.map(|(ms, _)| ms.round() as i64),
                     "startedAt": occurrence.and_then(|o| o.started_at).map(|ms| ms - offset),
                     "endedAt": ended.map(|ms| ms - offset),
                     "planned": stage.planned,
@@ -791,12 +804,13 @@ fn evaluate(fold: &Fold, life: &Lifecycle, parent: Option<&Snapshot>, now: i64) 
         snapshot.map_or_else(Vec::new, |s| {
             s.phases
                 .iter()
-                .map(|p| {
+                .zip(&stages)
+                .map(|(p, stage)| {
                     json!({
                         "name": p.name,
                         "of": p.of,
                         "unit": p.unit,
-                        "priorMs": null,
+                        "priorMs": stage.prior.map(|(ms, _)| ms.round() as i64),
                         "startedAt": p.started_at.map(|ms| ms - offset),
                         "endedAt": p.ended_at.map(|ms| ms - offset),
                     })
@@ -981,7 +995,7 @@ fn evaluate(fold: &Fold, life: &Lifecycle, parent: Option<&Snapshot>, now: i64) 
         summary["etaUntimed"] = untimed.clone();
     }
     // A plan's stages, so a line's underline is segmented without the full monitor.
-    if stages.len() > 1 && started {
+    if planned && stages.len() > 1 && started {
         summary["segments"] = segments
             .iter()
             .map(|s| json!({"weight": s["weight"], "fill": s["fill"]}))
@@ -1000,7 +1014,7 @@ fn evaluate(fold: &Fold, life: &Lifecycle, parent: Option<&Snapshot>, now: i64) 
             at,
             versus: &versus,
             view_problem: view_problem.as_deref().or(plan_problem.as_deref()),
-            stages: (!stages.is_empty()).then(|| (&phases[..], current)),
+            stages: planned.then(|| (&phases[..], current)),
             setup: setup.as_ref(),
         },
     );
@@ -1366,16 +1380,18 @@ pub(crate) fn checkpoint(store: &Store, run: &str) -> Result<Option<Arc<Snapshot
     Ok(Some(snapshot))
 }
 
-/// The checkpoint of the run `life` is compared with; one that cannot be read is no comparison,
-/// and its own run says why.
-fn parent_checkpoint(store: &Store, life: &Lifecycle) -> Option<Arc<Snapshot>> {
-    let parent = life.parent.as_ref()?;
-    checkpoint(store, &parent.id).unwrap_or_else(|error| {
-        log(format_args!(
-            "run {} parent {}: {error:#}",
-            life.run.id, parent.id
-        ));
-        None
+/// The checkpoints of the runs `life` is compared with and timed from, parent and earlier; one that
+/// cannot be read is no comparison and no timing, and its own run says why.
+fn related_checkpoints(store: &Store, life: &Lifecycle) -> [Option<Arc<Snapshot>>; 2] {
+    [&life.parent, &life.earlier].map(|run| {
+        let run = run.as_ref()?;
+        checkpoint(store, &run.id).unwrap_or_else(|error| {
+            log(format_args!(
+                "run {} beside {}: {error:#}",
+                life.run.id, run.id
+            ));
+            None
+        })
     })
 }
 
@@ -1678,8 +1694,8 @@ fn project(
         return Ok((held.projection.clone(), None));
     }
     let fold = fold_at(store.data_dir(), &run.id, stamps[0], held.as_deref());
-    let parent = parent_checkpoint(store, &life);
-    let evaluated = evaluate(&fold, &life, parent.as_deref(), now);
+    let [parent, earlier] = related_checkpoints(store, &life);
+    let evaluated = evaluate(&fold, &life, parent.as_deref(), earlier.as_deref(), now);
     let snapshot = fold.snapshot.as_deref();
     let hash = hash(&evaluated, snapshot);
     let previous = match held.as_ref() {
@@ -1863,8 +1879,8 @@ pub(crate) fn offline(store: &Store, run: &StoredRun, now: i64) -> Result<Value>
     let life = Lifecycle::read(store, run)?;
     let [checkpoint, _] = signal_paths(store.data_dir(), &run.id);
     let fold = fold_at(store.data_dir(), &run.id, stamp_of(&checkpoint), None);
-    let parent = parent_checkpoint(store, &life);
-    let evaluated = evaluate(&fold, &life, parent.as_deref(), now);
+    let [parent, earlier] = related_checkpoints(store, &life);
+    let evaluated = evaluate(&fold, &life, parent.as_deref(), earlier.as_deref(), now);
     let published = store
         .run_monitor_state(&run.id)?
         .and_then(|state| Published::read(&state["published"]));
@@ -4811,6 +4827,72 @@ mod tests {
         assert!(
             text.contains("\neta      No estimate (no earlier run timed eval, sft)"),
             "{text}"
+        );
+    }
+
+    #[test]
+    fn a_run_without_a_plan_is_timed_from_its_parents_stages_and_stalls_before_its_first_step() {
+        let f = Fixture::new("orx-monitor-unplanned-prior");
+        let pipeline = [("setup", 4, Some(4)), ("train", 60, Some(60))];
+        let parent = staged(&f, "p1", "exp", "done", &pipeline, 100);
+        monitor_at(&f, &parent, T0 + 700_000);
+        f.child("child", "exp");
+
+        // Train reported step 0 at four seconds and nothing since.
+        let child = staged(&f, "c1", "child", "running", &pipeline, 4);
+        let (monitor, _) = monitor_at(&f, &child, T0 + 60_000);
+        assert_eq!(monitor["progress"]["stallMs"], 0, "{}", monitor["progress"]);
+        assert_eq!(monitor["phases"][1]["priorMs"], 59_000);
+        let (monitor, _) = monitor_at(&f, &child, T0 + 100_000);
+        assert_eq!(
+            monitor["progress"]["stallMs"], 96_000,
+            "past 90s with the parent's pace to go by: {}",
+            monitor["progress"]
+        );
+        let text = monitor["statusText"].as_str().unwrap();
+        assert!(text.contains("no progress for at least 1m"), "{text}");
+    }
+
+    #[test]
+    fn a_stage_is_timed_by_the_experiments_own_last_run_before_its_parents() {
+        let f = Fixture::new("orx-monitor-earlier-prior");
+        let stages = json!(["setup", "train", "eval"]
+            .iter()
+            .map(|name| json!({"phase": name}))
+            .collect::<Vec<_>>());
+        plan(&f, "exp", stages).unwrap();
+        let parent = [
+            ("setup", 4, Some(4)),
+            ("train", 60, Some(60)),
+            ("eval", 10, Some(10)),
+        ];
+        let parent = staged(&f, "p1", "exp", "done", &parent, 200);
+        monitor_at(&f, &parent, T0 + 700_000);
+        f.child("child", "exp");
+        let own = [("setup", 4, Some(4)), ("train", 30, Some(60))];
+        // The run before this one: a run's first write fixes when it was created.
+        f.store
+            .upsert_run(&StoredRun {
+                id: "e1".into(),
+                experiment_id: "child".into(),
+                created_at: T0 - 1_000_000,
+                ..f.run_in("template", "elsewhere", "done", local())
+            })
+            .unwrap();
+        staged(&f, "e1", "child", "done", &own, 200);
+
+        let child = staged(&f, "c1", "child", "running", &own, 2);
+        let (monitor, _) = monitor_at(&f, &child, T0 + 2_500);
+        let priors: Vec<_> = monitor["phases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["priorMs"].clone())
+            .collect();
+        assert_eq!(
+            priors,
+            [json!(4_000), json!(29_000), json!(9_000)],
+            "its own last run timed setup and train; only the parent went through eval"
         );
     }
 
