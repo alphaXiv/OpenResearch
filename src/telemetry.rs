@@ -1146,8 +1146,11 @@ pub(crate) fn capture_chat_session_started(harness: &str) {
     capture("chat_session_started", json!({ "harness": harness }));
 }
 
-pub(crate) fn capture_chat_message_sent(harness: &str) {
-    capture("chat_message_sent", json!({ "harness": harness }));
+pub(crate) fn capture_chat_message_sent(harness: &str, autonomy: crate::local::autonomy::Autonomy) {
+    capture(
+        "chat_message_sent",
+        json!({ "harness": harness, "autonomy": autonomy.id() }),
+    );
 }
 
 pub(crate) fn capture_skill_invoked(skill: &str, source: &str, harness: Option<&str>) {
@@ -2139,7 +2142,7 @@ mod tests {
             build_payload(
                 "chat_message_sent",
                 "cli-release-contract-test",
-                json!({ "harness": "codex" }),
+                json!({ "harness": "codex", "autonomy": "copilot" }),
             ),
             build_payload(
                 "chat_retry_started",
@@ -2289,10 +2292,14 @@ mod tests {
         assert_eq!(chat["events"][0]["properties"]["harness"], "codex");
         assert_eq!(property_keys(&chat), vec!["harness"]);
 
-        let message = build_payload("chat_message_sent", "did", json!({ "harness": "codex" }));
+        let message = build_payload(
+            "chat_message_sent",
+            "did",
+            json!({ "harness": "codex", "autonomy": "copilot" }),
+        );
         assert_eq!(message["events"][0]["name"], "cli_chat_message_sent");
-        assert_eq!(message["events"][0]["properties"]["harness"], "codex");
-        assert_eq!(property_keys(&message), vec!["harness"]);
+        assert_eq!(message["events"][0]["properties"]["autonomy"], "copilot");
+        assert_eq!(property_keys(&message), vec!["autonomy", "harness"]);
 
         let skill = build_payload(
             "skill_invoked",
@@ -2392,7 +2399,7 @@ mod tests {
         capture_browser_open_failed(UpLaunchMode::Browser);
         capture_demo_welcome_choice("explore_demo");
         capture_chat_session_started("codex");
-        capture_chat_message_sent("codex");
+        capture_chat_message_sent("codex", crate::local::autonomy::Autonomy::Agentic);
         capture_skill_invoked("reproduce-paper", "slash", Some("codex"));
         capture_experiment_started("run", true, Some("local"));
 

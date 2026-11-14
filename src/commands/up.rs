@@ -10231,6 +10231,7 @@ async fn send_chat_message(
         .get_local_project(&session.project_id)?
         .ok_or_else(|| not_found("project"))?;
     let harness = session.harness;
+    let autonomy = local::autonomy::Autonomy::from_stored(session.autonomy.as_deref());
     let slash_skills = local::chat::builtin_slash_skill_names(&project, &req.text);
     let text = req.text.trim().to_string();
     let annotations = req
@@ -10304,7 +10305,7 @@ async fn send_chat_message(
         (json!({ "ok": true, "turn": result }), capture)
     };
     if capture_message {
-        crate::telemetry::capture_chat_message_sent(&harness);
+        crate::telemetry::capture_chat_message_sent(&harness, autonomy);
         for skill in slash_skills {
             crate::telemetry::capture_skill_invoked(skill, "slash", Some(&harness));
         }
@@ -10393,7 +10394,8 @@ async fn fork_chat_turn(
             .get_local_project(&session.project_id)?
             .ok_or_else(|| not_found("project"))?;
         let skills = local::chat::builtin_slash_skill_names(&project, text);
-        Some((session.harness, skills))
+        let autonomy = local::autonomy::Autonomy::from_stored(session.autonomy.as_deref());
+        Some((session.harness, autonomy, skills))
     } else {
         None
     };
@@ -10408,8 +10410,8 @@ async fn fork_chat_turn(
         .await
         .map_err(bad_request)?;
     if started {
-        if let Some((harness, skills)) = invocation {
-            crate::telemetry::capture_chat_message_sent(&harness);
+        if let Some((harness, autonomy, skills)) = invocation {
+            crate::telemetry::capture_chat_message_sent(&harness, autonomy);
             for skill in skills {
                 crate::telemetry::capture_skill_invoked(skill, "slash", Some(&harness));
             }
