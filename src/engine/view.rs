@@ -463,13 +463,16 @@ impl Parser<'_> {
                 .chain(BLOCK.iter())
                 .copied()
                 .collect(),
+            "signal" => return Err(self.problem(
+                node,
+                "<signal> goes before <view>, not inside it: move it above <view> and keep it, \
+                     since its label, unit and better reach every block",
+            )),
+            "series" => return Err(self.problem(node, "<series> goes inside a <chart>")),
             _ => {
                 return Err(self.problem(
                     node,
-                    format!(
-                        "<{kind}> is not a block; a view holds {}",
-                        ["chart", "stats", "table"].join(", ")
-                    ),
+                    format!("<{kind}> is not a block; a view holds chart, stats, table"),
                 ))
             }
         };
@@ -1621,6 +1624,8 @@ mod tests {
             ("<signal name=\"a\"/>", 1, 1, "a view needs one <view> holding its blocks, after its <signal> declarations"),
             ("<view/><view/>", 1, 8, "a view has exactly one <view>"),
             ("<chart y=\"a\"/><view/>", 1, 1, "<chart> goes inside <view>; only <signal> and <view> stand alone"),
+            ("<view><signal name=\"a\"/><chart y=\"a\"/></view>", 1, 7, "<signal> goes before <view>, not inside it: move it above <view> and keep it, since its label, unit and better reach every block"),
+            ("<view><series x=\"a\" y=\"b\"/></view>", 1, 7, "<series> goes inside a <chart>"),
             ("<view><chart/></view>", 1, 7, "<chart> needs y=\"…\", the signals it draws, or <series x=\"…\" y=\"…\"/> inside it"),
             ("<view><chart y=\"loss\" x=\"epoch\"/></view>", 1, 23, "x=\"epoch\" is not the run's step: a chart over another x draws from a table, so add from=\"TABLE\"; or leave x out to draw over the run's steps"),
             ("<view><chart from=\"t\" y=\"a\"/></view>", 1, 7, "a chart from a table needs x=\"COLUMN\", the column across the bottom"),
