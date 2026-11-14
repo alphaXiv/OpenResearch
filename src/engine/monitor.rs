@@ -1016,7 +1016,8 @@ fn evaluate(
         "tone": tone(life.phase),
         "whole": whole,
         "stage": snapshot.and_then(Snapshot::progress).map(|phase| {
-            json!({"name": phase.name, "done": phase.done, "of": phase.of, "unit": phase.unit})
+            let of = phase.of.or(current.and_then(|index| stages[index].of));
+            json!({"name": phase.name, "done": phase.done, "of": of, "unit": phase.unit})
         }),
         "headline": headline,
         "sentence": null,
@@ -2017,7 +2018,11 @@ fn status_text(life: &Lifecycle, fold: &Fold, facts: &StatusFacts) -> String {
     if let Some(whole) = facts.whole.filter(|_| life.started()) {
         first.push_str(&format!("  {:.0}%", (whole * 100.0).clamp(0.0, 100.0)));
     }
-    if let Some(words) = snapshot.and_then(progress_words) {
+    // A stage that printed no total has the one its plan gives.
+    let planned_of = facts
+        .stages
+        .and_then(|(stages, current)| stages.get(current?)?["of"].as_f64());
+    if let Some(words) = snapshot.and_then(|s| progress_words(s, planned_of)) {
         first.push_str("  ");
         first.push_str(&words);
     }
@@ -2415,7 +2420,7 @@ fn compact(value: f64) -> String {
 
 /// Where the run stands in its stage, in the page's words: "train · step 1,140 of 5,000",
 /// "35 of 90 batches". With no unit the word is "step".
-pub(crate) fn progress_words(snapshot: &Snapshot) -> Option<String> {
+pub(crate) fn progress_words(snapshot: &Snapshot, planned_of: Option<f64>) -> Option<String> {
     let phase = snapshot.progress()?;
     let done = number(phase.done?);
     let unit = phase.unit.as_deref().unwrap_or_default();
@@ -2424,7 +2429,7 @@ pub(crate) fn progress_words(snapshot: &Snapshot) -> Option<String> {
         "round" | "rounds" => Some("round"),
         _ => None,
     };
-    let at = match (phase.of.map(number), word) {
+    let at = match (phase.of.or(planned_of).map(number), word) {
         (Some(of), Some(word)) => format!("{word} {done} of {of}"),
         (Some(of), None) => format!("{done} of {of} {unit}"),
         (None, _) if unit.is_empty() => format!("step {done}"),
@@ -4979,6 +4984,34 @@ mod tests {
             [json!(4_000), json!(29_000), json!(9_000)],
             "its own last run timed setup and train; only the parent went through eval"
         );
+    }
+
+    #[test]
+    fn a_stage_that_printed_no_total_reads_the_one_its_plan_gives() {
+        let f = Fixture::new("orx-monitor-plan-total");
+        plan(
+            &f,
+            "exp",
+            json!([{"phase": "train", "of": 3}, {"phase": "eval", "of": 10}]),
+        )
+        .unwrap();
+        let run = f.run("running", local());
+        let mut lines: Vec<(i64, String)> = (0..=3)
+            .map(|n| {
+                (
+                    T0 + 1000 * n,
+                    format!("::orx:: {{\"phase\":\"train\",\"step\":{n},\"of\":3}}"),
+                )
+            })
+            .collect();
+        lines.push((T0 + 4000, "::orx:: {\"phase\":\"eval\",\"step\":0}".into()));
+        lines.push((T0 + 5000, "::orx:: {\"step\":4}".into()));
+        f.collect(&folded(&lines));
+        let (monitor, _) = monitor_at(&f, &run, T0 + 5_500);
+        let text = monitor["statusText"].as_str().unwrap();
+        assert!(text.contains("  eval \u{b7} step 4 of 10  "), "{text}");
+        let summary = current(&f.store, &run).unwrap().unwrap().summary().clone();
+        assert_eq!(summary["stage"]["of"], 10.0);
     }
 
     #[test]
