@@ -1,0 +1,9 @@
+<signal name="loss" label="Loss" better="lower" digits="3"/>
+<signal name="val_loss" label="Val loss" better="lower" digits="3"/>
+<signal name="eval_score" label="Eval score" better="higher" digits="3"/>
+<signal name="tok_per_sec" label="Tokens per second" digits="0"/>
+<view headline="val_loss eval_score">
+  <chart y="loss val_loss" ghost="parent" title="Loss"/>
+  <stats of="loss val_loss tok_per_sec eval_score"/>
+  <table name="eval" columns="task score" vs="parent" title="Eval"/>
+</view>
