@@ -212,8 +212,40 @@ early spike (`y-scale="log"`). Change it then, on each experiment it concerns
 - `--pattern`: the run's kept log is read again with them.
 - `--config`: the bar redraws, for runs that declared no plan of their own.
 
-What the code prints is fixed for that run: a measure it never reports needs a
+What the code reports is fixed for that run, but what it prints is not all
+lost: a pattern over a line the run already prints (§6) reads it into measures
+and rows, the kept log included. Asked mid-run for a chart of numbers the run
+prints but does not report, add a pattern and change the running experiment's
+view at once, in the same turn; never edit the harness while it runs or wait
+for the next run to show it. A measure the run never prints at all needs a
 code change, and the next run.
+
+Charts of table research (benchmarks, sweeps, tasks by size):
+
+- **Sizes that span decades** (1k to 1M items, learning rates) get
+  `x-scale="log"`, and times or slowdowns across them `y-scale="log"`:
+  on linear axes everything below the largest size sits at zero.
+- **One line per category**: when rows mix kinds (input distributions, tasks,
+  datasets), `by="dist"` draws a series per kind; one line through all of them
+  zigzags at each size and means nothing.
+- **Two measures of one row** (the reference's time and the candidate's) are
+  two `<series>` with labels, `ghost="false"` on the reference.
+
+```html
+<signal name="mine_ms" label="Merge sort" unit="ms" better="lower" />
+<signal name="ref_ms" label="sorted()" unit="ms" better="lower" />
+<view>
+  <chart from="timings" x="n" y="mine_ms" by="dist" x-scale="log" y-scale="log" ghost="parent" />
+  <table name="cases" columns="dist n slowdown correct" vs="final" />
+</view>
+```
+
+```json
+[{"regex": "^(?P<dist>\\w+)\\s+(?P<n>\\d+)\\s+(?P<ref_ms>[\\d.]+)\\s+(?P<mine_ms>[\\d.]+)", "row": "timings"}]
+```
+
+A pattern's rows go to a table of their own, apart from the rows the code
+reports, so the two never interleave.
 
 ## 9. Rules that stop a run
 
