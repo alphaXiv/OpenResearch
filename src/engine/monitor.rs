@@ -837,12 +837,14 @@ fn evaluate(
         })
     });
     let whole = finished(output.as_ref().and_then(|o| o.whole)).filter(|_| started);
-    // A bar or counter read from the log times only itself: more work may follow it.
-    let floor = snapshot.is_some_and(|s| {
-        s.progress()
-            .is_some_and(|phase| matches!(phase.source.as_str(), "detected" | "pattern"))
-            && !s.several_bars()
-    });
+    // A bar or counter read from the log times only itself: more work may follow it, unless a
+    // declared plan says what does.
+    let floor = !planned
+        && snapshot.is_some_and(|s| {
+            s.progress()
+                .is_some_and(|phase| matches!(phase.source.as_str(), "detected" | "pattern"))
+                && !s.several_bars()
+        });
     let estimating = || {
         json!({
             "loMs": null, "midMs": null, "hiMs": null, "at": at, "pending": true,
@@ -5263,6 +5265,45 @@ mod tests {
         );
         let text = monitor["statusText"].as_str().unwrap();
         assert!(text.contains("\u{2713} install 10s \u{b7} \u{2713} download 30s \u{b7} \u{25cf} train \u{b7} \u{25cb} eval about 30s"), "{text}");
+    }
+
+    #[test]
+    fn progress_read_from_the_log_times_only_itself_unless_a_plan_says_what_follows() {
+        let f = Fixture::new("orx-monitor-pattern-plan");
+        let config: orx_signals::Config = serde_json::from_value(json!({"patterns": [
+            {"regex": "^epoch (?P<step>\\d+)/(?P<of>\\d+) loss (?P<loss>\\S+)$", "phase": "train", "unit": "epochs"},
+        ]}))
+        .unwrap();
+        let mut snapshot = Snapshot::new("r1", "1-1", "g1");
+        snapshot.configure(Some(Arc::new(
+            orx_signals::Patterns::compile(&config).unwrap(),
+        )));
+        let lines: Vec<(i64, String)> = (1..=20)
+            .map(|epoch| (T0 + epoch * 1000, format!("epoch {epoch}/150 loss 0.3")))
+            .collect();
+        fold(&mut snapshot, &lines);
+        let run = f.run("running", local());
+        f.signals(&snapshot);
+        f.collected(T0 + 20_000);
+        let (monitor, _) = monitor_at(&f, &run, T0 + 20_500);
+        assert_eq!(
+            monitor["estimate"]["floor"], true,
+            "{}",
+            monitor["estimate"]
+        );
+
+        plan(
+            &f,
+            "exp",
+            json!([{"phase": "train", "of": 150, "unit": "epochs"}]),
+        )
+        .unwrap();
+        let (monitor, _) = monitor_at(&f, &run, T0 + 21_500);
+        assert_eq!(
+            monitor["estimate"]["floor"], false,
+            "a declared plan says nothing follows: {}",
+            monitor["estimate"]
+        );
     }
 
     #[test]
