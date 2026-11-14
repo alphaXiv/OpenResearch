@@ -19,13 +19,14 @@ import { Popover } from "@base-ui/react/popover";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
 
 import { m } from "../paraglide/messages.js";
-import { Bot, Brain, Check, ChevronDown, ChevronRight, Handshake, ListChecks, Lock, LockOpen, Pencil, Plus, Ruler, Settings, ShieldCheck, Workflow, Zap, type LucideIcon } from "lucide-react";
+import { Bot, Brain, Check, ChevronDown, ChevronRight, Handshake, ListChecks, Lock, LockOpen, Minus, Pencil, Plus, Rocket, Ruler, Settings, ShieldCheck, Turtle, Workflow, Zap, type LucideIcon } from "lucide-react";
 import {
   modelLabel,
   reasoningFor,
   reconcileReasoning,
   reconcileServiceTier,
   REASONING_DEFAULT_ID,
+  SERVICE_TIER_DEFAULT_ID,
   serviceTiersFor,
   type Harness,
   type HarnessId,
@@ -192,6 +193,25 @@ function DescribedRadioItem({ choice, icon, isDefault }: { choice: OptionChoice;
     </Menu.RadioItem>
   );
 }
+
+/** Speed tiers slowest first, as the Speed control offers them; null is the standard tier. */
+const SPEEDS = ["flex", null, "fast", "ultrafast"] as const;
+const SPEED_ICONS: Record<string, LucideIcon> = { flex: Turtle, fast: Zap, ultrafast: Rocket };
+
+function speedName(speed: string | null) {
+  return speed === "fast" ? m.model_picker_speed_fast()
+    : speed === "ultrafast" ? m.model_picker_speed_ultrafast()
+      : speed === "flex" ? m.model_picker_speed_flex()
+        : speed ?? m.service_tier_standard();
+}
+
+function SpeedIcon({ speed }: { speed: string | null }) {
+  const Icon = speed ? SPEED_ICONS[speed] ?? Zap : Minus;
+  return <Icon size={14} aria-hidden="true" className={cn("shrink-0", speed && "text-accent-amber")} />;
+}
+
+const SPEED_SEGMENT =
+  "inline-flex h-6 w-7 cursor-default items-center justify-center rounded-sm text-subtext outline-none transition-[background,color] duration-120 ease-standard data-[highlighted]:text-text data-[checked]:bg-background data-[checked]:text-text data-[checked]:shadow-segment focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus";
 
 const SETTINGS_ROW =
   "flex min-h-8 w-full items-center justify-between gap-2 rounded-sm px-2 py-1.5 text-start text-sm text-text outline-none transition-[background,color] duration-120 ease-standard data-[highlighted]:bg-surface data-[popup-open]:bg-surface focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:outline-offset-2";
@@ -423,7 +443,7 @@ export function ModelPicker({
   const agentShown = selectedAgent && new Set(selectedLine?.offers.map((offer) => offer.tile)).size > 1 ? selectedAgent : undefined;
   const hint = agentShown ? `${label} — ${agentShown.name}` : label;
 
-  // Cursor and Antigravity list each effort, speed and thinking mode as a model, and Claude
+  // Catalogs list speed and thinking tiers as models, Cursor and Antigravity each effort too, and Claude
   // Code its long context: the Effort menu moves between the siblings of the picked one.
   const siblings = selectedLine?.offers.filter((offer) => offer.tile === selectedAgent) ?? [];
   const variant = selectedOffer?.model.parsed.variant;
@@ -437,7 +457,8 @@ export function ModelPicker({
     if (!offer || !value || !selectedHarness) return;
     onSelect({ ...value, model: offer.model.id, reasoningLevel: reconcileReasoning(selectedHarness, offer.model.id, value.reasoningLevel) });
   };
-  const variantSwitches = Boolean(variant && (varies("fast") || varies("thinking") || variantContext));
+  const variantSpeeds = varies("speed") ? SPEEDS.filter((speed) => siblings.some((offer) => offer.model.parsed.variant.speed === speed)) : [];
+  const variantSwitches = Boolean(variant && (variantSpeeds.length || varies("thinking") || variantContext));
   const hasVariants = Boolean(variant && (variantEfforts.length || variantSwitches));
 
   const effectiveReasoningId = value?.reasoningLevel ?? defaultReasoningId ?? reasoningChoices[0]?.id;
@@ -450,7 +471,16 @@ export function ModelPicker({
   const effectiveServiceTier = reconcileServiceTier(selectedHarness, value?.model, value?.serviceTier);
   const fastChoice = serviceTiersFor(selectedHarness, value?.model).find((choice) => choice.id === "priority");
   const effortLabel = variant && variantEfforts.length ? effortName(variant.effort) : reasoningLabel;
-  const fastOn = effectiveServiceTier === "priority" || Boolean(variant?.fast);
+  // Codex's Fast is a service tier of the same model; elsewhere each speed is a sibling model.
+  const speeds: (string | null)[] = variantSpeeds.length ? variantSpeeds : fastChoice ? [null, "fast"] : [];
+  const speed = variant?.speed ?? (fastChoice && effectiveServiceTier === fastChoice.id ? "fast" : null);
+  const pickSpeed = (next: string | null) => {
+    if (variantSpeeds.length) pickVariant({ speed: next });
+    else if (value && fastChoice) onSelect({ ...value, serviceTier: next ? fastChoice.id : SERVICE_TIER_DEFAULT_ID });
+  };
+  // One tier beside the standard one is a switch; more are a choice.
+  const switchTier = speeds.length === 2 && speeds.includes(null) ? speeds.find((tier) => tier !== null) : undefined;
+  const speedLabel = (tier: string) => (tier === "fast" ? m.model_picker_fast_mode() : speedName(tier));
   const autonomyChoices: (OptionChoice & { id: Autonomy; icon: ReactNode })[] = [
     {
       id: "agentic",
@@ -625,10 +655,10 @@ export function ModelPicker({
                 className={PILL}
                 aria-label={[
                   effortLabel ? `${m.model_picker_effort()}: ${effortLabel}` : m.model_picker_effort(),
-                  fastOn ? m.model_picker_fast_mode() : null,
+                  speed ? speedLabel(speed) : null,
                 ].filter(Boolean).join(" · ")}
               >
-                {fastOn && <Zap size={14} fill="currentColor" aria-hidden="true" className="shrink-0 text-accent-amber" />}
+                {speed && <SpeedIcon speed={speed} />}
                 {effortLabel ? (
                   <>
                     <EffortIcon id={variantEfforts.length ? variant?.effort : effectiveReasoningId} />
@@ -700,7 +730,7 @@ export function ModelPicker({
                       onSelect={(id) => onSelectNativeOption?.(option.id, id)}
                     />
                   ))}
-                  {(ultracodeChoice || fastChoice || variantSwitches) && (effortChoices.length > 0 || variantEfforts.length > 0 || nativeOptions.length > 0) && (
+                  {(ultracodeChoice || speeds.length > 0 || variantSwitches) && (effortChoices.length > 0 || variantEfforts.length > 0 || nativeOptions.length > 0) && (
                     <Menu.Separator className="m-1 h-px bg-border-variant" />
                   )}
                   {ultracodeChoice && (
@@ -718,29 +748,35 @@ export function ModelPicker({
                       </Menu.CheckboxItem>
                     </Tooltip>
                   )}
-                  {fastChoice && (
-                    <Menu.CheckboxItem
-                      className={SETTINGS_ROW}
-                      checked={effectiveServiceTier === fastChoice.id}
-                      onCheckedChange={(checked) => {
-                        if (value) onSelect({ ...value, serviceTier: checked ? fastChoice.id : "default" });
-                      }}
-                    >
+                  {switchTier && (
+                    <Menu.CheckboxItem className={SETTINGS_ROW} checked={speed === switchTier} onCheckedChange={(checked) => pickSpeed(checked ? switchTier : null)}>
                       <span className="inline-flex items-center gap-2">
-                        <Zap size={14} aria-hidden="true" className="text-accent-amber" />
-                        {m.model_picker_fast_mode()}
+                        <SpeedIcon speed={switchTier} />
+                        {speedLabel(switchTier)}
                       </span>
-                      <SwitchIndicator checked={effectiveServiceTier === fastChoice.id} aria-hidden="true" />
+                      <SwitchIndicator checked={speed === switchTier} aria-hidden="true" />
                     </Menu.CheckboxItem>
                   )}
-                  {variant && varies("fast") && (
-                    <Menu.CheckboxItem className={SETTINGS_ROW} checked={variant.fast} onCheckedChange={(checked) => pickVariant({ fast: checked })}>
-                      <span className="inline-flex items-center gap-2">
-                        <Zap size={14} aria-hidden="true" className="text-accent-amber" />
-                        {m.model_picker_fast_mode()}
-                      </span>
-                      <SwitchIndicator checked={variant.fast} aria-hidden="true" />
-                    </Menu.CheckboxItem>
+                  {speeds.length > 1 && !switchTier && (
+                    <Menu.Group className="flex min-h-8 items-center justify-between gap-3 px-2 py-1">
+                      <Menu.GroupLabel className="inline-flex min-w-0 items-baseline gap-2 text-sm text-text">
+                        {m.model_picker_speed()}
+                        <span className="truncate text-muted">{speedName(speed)}</span>
+                      </Menu.GroupLabel>
+                      <Menu.RadioGroup
+                        value={speed ?? ""}
+                        onValueChange={(next) => { if (typeof next === "string") pickSpeed(next || null); }}
+                        className="inline-flex shrink-0 items-center gap-0.5 rounded-md bg-hover-subtle p-0.5"
+                      >
+                        {speeds.map((tier) => (
+                          <Tooltip key={tier ?? ""} interactive content={speedName(tier)} className="flex rounded-sm">
+                            <Menu.RadioItem value={tier ?? ""} closeOnClick={false} label={speedName(tier)} aria-label={speedName(tier)} className={SPEED_SEGMENT}>
+                              <SpeedIcon speed={tier} />
+                            </Menu.RadioItem>
+                          </Tooltip>
+                        ))}
+                      </Menu.RadioGroup>
+                    </Menu.Group>
                   )}
                   {variant && varies("thinking") && (
                     <Menu.CheckboxItem className={SETTINGS_ROW} checked={variant.thinking} onCheckedChange={(checked) => pickVariant({ thinking: checked })}>

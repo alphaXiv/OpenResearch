@@ -67,7 +67,7 @@ type OAuthSignIn = { kind: "oauth"; integration: string; method?: string; plan?:
 type SignIn =
   | KeySignIn
   | OAuthSignIn
-  | { kind: "opencode"; id: string }
+  | { kind: "opencode"; id: string; keyUrl?: string }
   | { kind: "profile"; harness: "claude-code" | "codex" }
   | { kind: "agent"; harness: HarnessId; plan?: string; via?: string }
   | { kind: "native"; logo: string; key?: true }
@@ -145,25 +145,25 @@ const OPENROUTER: AgentTile = {
   id: "openrouter", name: "OpenRouter", mark: { brand: "openrouter" }, blurb: m.add_agent_openrouter_blurb,
   methods: [{ kind: "key", id: "openrouter", platform: "OpenRouter", keyUrl: "https://openrouter.ai/keys" }],
 };
-/** A provider from OpenCode's list, by its id there. */
-const listedTile = (id: string, name: string, mark: AgentTile["mark"]): AgentTile => ({ id, name, mark, methods: [{ kind: "opencode", id }] });
+/** A provider from OpenCode's list, by its id there, with where to get a key when OpenCode takes one. */
+const listedTile = (id: string, name: string, mark: AgentTile["mark"], keyUrl?: string): AgentTile => ({ id, name, mark, methods: [{ kind: "opencode", id, keyUrl }] });
 /** Providers people look for by name, in the order offered; search finds the rest of OpenCode's list. */
 const MORE_PROVIDERS = [
   listedTile("github-copilot", "GitHub Copilot", { brand: "github-copilot" }),
-  listedTile("openai", "OpenAI", { harness: "codex" }),
-  listedTile("anthropic", "Anthropic", { brand: "anthropic" }),
-  listedTile("huggingface", "Hugging Face", { brand: "huggingface" }),
-  listedTile("amazon-bedrock", "Amazon Bedrock", { brand: "bedrock" }),
-  listedTile("groq", "Groq", { brand: "groq" }),
-  listedTile("cerebras", "Cerebras", { brand: "cerebras" }),
-  listedTile("togetherai", "Together AI", { brand: "together" }),
-  listedTile("fireworks-ai", "Fireworks AI", { brand: "fireworks" }),
-  listedTile("mistral", "Mistral", { brand: "mistral" }),
-  listedTile("nvidia", "NVIDIA", { brand: "nvidia" }),
-  listedTile("vercel", "Vercel AI Gateway", { brand: "vercel" }),
-  listedTile("ollama-cloud", "Ollama Cloud", { brand: "ollama" }),
-  listedTile("deepinfra", "DeepInfra", { brand: "deepinfra" }),
-  listedTile("baseten", "Baseten", { brand: "baseten" }),
+  listedTile("openai", "OpenAI", { harness: "codex" }, "https://platform.openai.com/api-keys"),
+  listedTile("anthropic", "Anthropic", { brand: "anthropic" }, "https://platform.claude.com/settings/keys"),
+  listedTile("huggingface", "Hugging Face", { brand: "huggingface" }, "https://huggingface.co/settings/tokens"),
+  listedTile("amazon-bedrock", "Amazon Bedrock", { brand: "bedrock" }, "https://console.aws.amazon.com/bedrock/home#/api-keys"),
+  listedTile("groq", "Groq", { brand: "groq" }, "https://console.groq.com/keys"),
+  listedTile("cerebras", "Cerebras", { brand: "cerebras" }, "https://cloud.cerebras.ai"),
+  listedTile("togetherai", "Together AI", { brand: "together" }, "https://api.together.ai/settings/api-keys"),
+  listedTile("fireworks-ai", "Fireworks AI", { brand: "fireworks" }, "https://app.fireworks.ai/settings/users/api-keys"),
+  listedTile("mistral", "Mistral", { brand: "mistral" }, "https://console.mistral.ai/api-keys"),
+  listedTile("nvidia", "NVIDIA", { brand: "nvidia" }, "https://build.nvidia.com/settings/api-keys"),
+  listedTile("vercel", "Vercel AI Gateway", { brand: "vercel" }, "https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai%2Fapi-keys"),
+  listedTile("ollama-cloud", "Ollama Cloud", { brand: "ollama" }, "https://ollama.com/settings/keys"),
+  listedTile("deepinfra", "DeepInfra", { brand: "deepinfra" }, "https://deepinfra.com/dash/keys"),
+  listedTile("baseten", "Baseten", { brand: "baseten" }, "https://app.baseten.co/settings/api_keys"),
 ];
 const PROVIDER_TILES = [OPENCODE_GO, ...LABS, OPENROUTER, ...MORE_PROVIDERS];
 /** What the wizard recommends first. */
@@ -188,7 +188,10 @@ export function providerTile(provider: Pick<OpenCodeProvider, "id" | "canonical"
     const variant = Object.entries(PROVIDER_MARKS).find(([base]) => id === base || id.startsWith(`${base}-`));
     return { tile: listedTile(id, provider.name, variant?.[1] ?? { letter: provider.name.slice(0, 1).toUpperCase() }) };
   }
-  return { tile, key: provider.kind === "key" ? tile.methods.find((method): method is KeySignIn => method.kind === "key" && method.id === id) : undefined };
+  if (provider.kind !== "key") return { tile };
+  const signIn = tile.methods.find((method) => (method.kind === "key" || method.kind === "opencode") && method.id === id);
+  if (signIn?.kind === "opencode") return { tile, key: { kind: "key", id, platform: tile.name, keyUrl: signIn.keyUrl } };
+  return { tile, key: signIn?.kind === "key" ? signIn : undefined };
 }
 
 /** Where saved providers sort: the order the add dialog offers them. */
@@ -331,7 +334,7 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
   // How OpenCode signs in to a provider from its list, sign-ins before keys.
   const ways: (OAuthSignIn | KeySignIn)[] = entry && tile ? [
     ...entry.methods.flatMap((item): OAuthSignIn[] => item.type === "oauth" && !item.label.endsWith("(legacy)") ? [{ kind: "oauth", integration: entry.id, method: item.id, label: item.label }] : []),
-    ...entry.methods.flatMap((item): KeySignIn[] => item.type === "key" ? [{ kind: "key", id: entry.id, platform: tile.name }] : []),
+    ...entry.methods.flatMap((item): KeySignIn[] => item.type === "key" ? [{ kind: "key", id: entry.id, platform: tile.name, keyUrl: listing?.keyUrl }] : []),
   ] : [];
 
   const harnessFor = (signIn: SignIn) =>
@@ -373,8 +376,9 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
     target?.focus();
   }, [step, method, ways.length, needsOpenCode2]);
 
-  // Saved keys and endpoints reach OpenCode's catalog only once it re-checks.
-  useEffect(() => {
+  // Saved keys and endpoints reach OpenCode's catalog only once it re-checks. Before paint, so the step never
+  // shows the catalog from before the sign-in.
+  useLayoutEffect(() => {
     if (step !== "name" || !backedByOpenCode || !opencodeReady) return;
     let current = true;
     setChecking(true);

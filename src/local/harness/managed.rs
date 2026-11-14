@@ -59,20 +59,29 @@ fn root() -> PathBuf {
 
 /// Hold across install decisions and removal so dashboards cannot race shared runtime cleanup.
 pub(crate) fn lock_installations() -> Result<crate::file_lock::FileLock> {
+    try_lock_installations()?.ok_or_else(|| {
+        anyhow!("Another agent install or removal is in progress. Try again when it finishes.")
+    })
+}
+
+/// [`lock_installations`], or `None` while another install or removal holds it.
+pub(crate) fn try_lock_installations() -> Result<Option<crate::file_lock::FileLock>> {
     let root = crate::config::config_dir();
     std::fs::create_dir_all(&root)?;
+    let path = root.join("managed-agents.lock");
     let lock = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
-        .open(root.join("managed-agents.lock"))?;
-    lock.try_lock().map_err(|error| {
-        anyhow!(
-            "Another agent install or removal is in progress. Try again when it finishes: {error}"
-        )
-    })?;
-    Ok(crate::file_lock::FileLock::new(lock))
+        .open(&path)?;
+    match lock.try_lock() {
+        Ok(()) => Ok(Some(crate::file_lock::FileLock::new(lock))),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(error)) => {
+            Err(anyhow!("Couldn't lock {}: {error}", path.display()))
+        }
+    }
 }
 
 fn executable(harness: &str, release: &Path) -> PathBuf {
@@ -817,6 +826,18 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn an_install_in_progress_reads_as_busy_rather_than_failing() {
+        let _held = lock_installations().unwrap();
+        assert!(try_lock_installations().unwrap().is_none());
+        let Err(busy) = lock_installations() else {
+            panic!("a second install took the lock");
+        };
+        assert!(busy
+            .to_string()
+            .starts_with("Another agent install or removal is in progress"));
     }
 
     #[tokio::test]

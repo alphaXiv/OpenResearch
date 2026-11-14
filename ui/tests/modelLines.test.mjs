@@ -3,7 +3,7 @@ import test from "node:test";
 import { defaultOffer, groupModelLines, sight, variantOffer } from "../src/modelLines.ts";
 import { model } from "./models.mjs";
 
-const PLAIN = { effort: null, fast: false, thinking: false, context: null };
+const PLAIN = { effort: null, speed: null, fast: false, thinking: false, context: null };
 /** An offer of a model as the server names it: `key` is `family@version`. */
 const offer = (tile, id, label, family, version, fields = {}) => ({
   tile,
@@ -27,12 +27,12 @@ test("a tile runs its plainest variant, and switching one keeps the rest the cat
   const [line] = groupModelLines([
     variant("claude-opus-5-5-low", 2, { effort: "low" }),
     variant("claude-opus-5-5-medium", 1, { effort: "medium" }),
-    variant("claude-opus-5-5-medium-fast", 3, { effort: "medium", fast: true }),
+    variant("claude-opus-5-5-medium-fast", 3, { effort: "medium", speed: "fast", fast: true }),
     variant("claude-opus-5-5-xhigh", 2, { effort: "xhigh" }),
   ]);
   const plain = defaultOffer(line.offers);
   assert.equal(plain.model.id, "claude-opus-5-5-medium");
-  assert.equal(variantOffer(line.offers, plain.model.parsed.variant, { fast: true }).model.id, "claude-opus-5-5-medium-fast");
+  assert.equal(variantOffer(line.offers, plain.model.parsed.variant, { speed: "fast" }).model.id, "claude-opus-5-5-medium-fast");
   assert.equal(variantOffer(line.offers, plain.model.parsed.variant, { effort: "max" }), undefined);
 });
 

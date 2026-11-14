@@ -1111,9 +1111,13 @@ export interface HarnessModel {
   parsed: ModelName;
 }
 
-/** What an offer adds to its model: Cursor's and Antigravity's effort, speed and thinking, Claude Code's long context. */
+/** What an offer adds to its model: Cursor's and Antigravity's effort, any catalog's speed and thinking tiers, Claude
+ * Code's long context. */
 export interface ModelVariant {
   effort: string | null;
+  /** `flex`, `fast` or `ultrafast`; null for the standard tier. */
+  speed: string | null;
+  /** `speed` is `fast`, as servers before `speed` say it. */
   fast: boolean;
   thinking: boolean;
   context: string | null;
@@ -1133,6 +1137,8 @@ export interface ModelName {
   variant: ModelVariant;
   /** How far the catalog's name is from its model's plain variant; a tile runs the lowest by default. */
   variantRank: number;
+  /** A moving alias (`mistral-large-latest`) whose catalog also lists the versions it moves between. */
+  superseded?: boolean;
 }
 
 /** Display label for a harness model: the catalog's own name when it has one,
@@ -2871,7 +2877,11 @@ export function createApi(
     if (retryRejected) params.set("retry", "1");
     if (harness) params.set("harness", harness);
     const query = params.size > 0 ? `?${params.toString()}` : "";
-    return get<{ harnesses: Harness[] }>(`/api/harnesses${query}`, signal).then((r) => r.harnesses);
+    return get<{ harnesses: Harness[] }>(`/api/harnesses${query}`, signal).then((r) => {
+      // A server from before speed tiers says only whether a model is fast.
+      for (const model of r.harnesses.flatMap((h) => h.models)) model.parsed.variant.speed ??= model.parsed.variant.fast ? "fast" : null;
+      return r.harnesses;
+    });
   };
 
   const listAcpHarnesses = () => get<AcpDefinition[]>("/api/harnesses/acp");
