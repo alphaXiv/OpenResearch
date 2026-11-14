@@ -581,9 +581,8 @@ fn a_number_leaves_its_trend_when_it_turns_but_not_as_a_healthy_curve_bends() {
     let curve: Vec<(f64, f64)> = (0..120)
         .map(|i| (i as f64 * 5.0, healthy(i as f64 * 5.0)))
         .collect();
-    let off = |index: usize| departure(&curve[..index], curve[index]).is_some_and(|d| d > 3.0);
     let twice: Vec<f64> = (9..curve.len())
-        .filter(|i| off(*i) && off(*i - 1))
+        .filter(|i| turned(&curve, *i, 3.0))
         .map(|i| curve[i].0)
         .collect();
     assert_eq!(
@@ -591,11 +590,15 @@ fn a_number_leaves_its_trend_when_it_turns_but_not_as_a_healthy_curve_bends() {
         Vec::<f64>::new(),
         "a healthy loss curve never leaves its trend two points running"
     );
-    let mut turned = curve[..41].to_vec();
-    turned.push((curve[40].0 + 5.0, curve[40].1 + 0.4));
+    let mut up = curve[..41].to_vec();
+    up.push((curve[40].0 + 5.0, curve[40].1 + 0.4));
+    up.push((curve[40].0 + 10.0, curve[40].1 + 0.45));
+    assert!(turned(&up, 42, 3.0), "a turn upward does");
+    let mut jump = curve[..41].to_vec();
+    jump.extend([(205.0, 0.1), (210.0, 0.1), (215.0, 0.1)]);
     assert!(
-        departure(&turned[..41], turned[41]).unwrap() > 3.0,
-        "a turn upward does"
+        turned(&jump, 42, 3.0),
+        "a jump that holds does, judged against the trend before it"
     );
     assert_eq!(
         departure(&curve[..7], curve[7]),
@@ -881,15 +884,19 @@ fn an_ended_run_may_write_any_number_and_a_finished_stage_its_total() {
 
 /// The walkthrough's sentiment classifier: a healthy run's first epochs, and a child that trains
 /// on flipped labels, `(loss, test accuracy)` an epoch.
-const HEALTHY: [(f64, f64); 8] = [
+const HEALTHY: [(f64, f64); 12] = [
     (0.3424, 0.887),
     (0.2914, 0.896),
     (0.2893, 0.896),
     (0.2869, 0.889),
     (0.2893, 0.895),
-    (0.2881, 0.893),
-    (0.2902, 0.897),
-    (0.2879, 0.894),
+    (0.2883, 0.892),
+    (0.2885, 0.894),
+    (0.2898, 0.896),
+    (0.2883, 0.864),
+    (0.2864, 0.894),
+    (0.2859, 0.896),
+    (0.2873, 0.891),
 ];
 const FLIPPED: [(f64, f64); 8] = [
     (0.3559, 0.104),
@@ -1042,4 +1049,66 @@ async fn a_run_far_worse_than_its_parent_at_the_same_step_is_flagged() {
     assert!(super::super::flags::read(&store, &healthy)
         .unwrap()
         .is_empty());
+}
+
+#[tokio::test]
+async fn a_change_in_real_output_asks_for_a_look_before_the_first_and_after_a_sentence_that_binds_nothing(
+) {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let store = Store::open().unwrap();
+    chat(&store, "chat", "claude-code");
+    let parent = classifier_run(&store, "seed-2", None, "done", "chat");
+    epochs(&store, &parent, &HEALTHY);
+    let flipped = classifier_run(&store, "flipped", Some("seed-2"), "running", "chat");
+    epochs(&store, &flipped, &FLIPPED[..1]);
+    let mut state = State::default();
+    let why = changes(&mut state, &Now::read(&store, &flipped).unwrap(), 0);
+    assert_eq!(
+        why,
+        vec![(
+            "parent".to_owned(),
+            "Test accuracy is far worse than the parent".to_owned()
+        )],
+        "a collapse at the first report needs no look before it"
+    );
+
+    // A healthy run's first sentence binds no signal; its accuracy then collapses.
+    let healthy = classifier_run(&store, "seed-5", Some("seed-2"), "running", "chat");
+    epochs(&store, &healthy, &HEALTHY[..8]);
+    let now = Now::read(&store, &healthy).unwrap();
+    assert_eq!(
+        changes(&mut state, &now, 0),
+        Vec::new(),
+        "a healthy start asks nothing"
+    );
+    let id = look(&store, "chat", "ceiling", &[("seed-5", "r1")]);
+    store.watch_look_sent(id, 1).unwrap();
+    let template = "Training, **8** of 150 epochs in.";
+    let result = LookResult {
+        run_id: "seed-5".into(),
+        result: "line".into(),
+        template: Some(template.into()),
+        text: Some(template.into()),
+        whole: None,
+        basis: basis_of(&now, Some(template), &Map::new()),
+        cursor: Value::Null,
+        evidence: json!([]),
+    };
+    store
+        .finish_watch_look(id, "done", 2, None, None, None, &[result], &[])
+        .unwrap();
+    let mut collapsed = HEALTHY[..8].to_vec();
+    collapsed.extend(&FLIPPED[..2]);
+    epochs(&store, &healthy, &collapsed);
+    let kinds: Vec<String> = changes(&mut state, &Now::read(&store, &healthy).unwrap(), 0)
+        .into_iter()
+        .map(|(check, _)| check)
+        .collect();
+    assert_eq!(
+        kinds,
+        ["trend", "parent"],
+        "the view's main number is watched"
+    );
 }

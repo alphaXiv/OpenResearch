@@ -360,10 +360,12 @@ collection has seen it print, and each read is bounded in time. Counted patterns
 it read. A run's owner is the chat that last looked at it, else the first chat
 following it that has a watching model. One look covers every live run the chat owns, at
 most six a call and four calls a slot. It is due when something changes: a
-number the sentence binds leaves its trend, a comparison with the parent changes
-sign, a counted pattern moves, a stage starts or ends, the stage runs at least
+number the sentence binds, or the view leads with, leaves its trend (a jump that
+holds is judged against the points before it), a comparison with the parent
+changes sign or turns far worse, a counted pattern moves, a stage starts or ends, the stage runs at least
 twice the parent's pace, or the log prints a kind of warning it has not printed
-before. Between changes, a ladder from each stage's start (1, 2, 5, 10, 20
+before. A run's first look is due for the same changes from its start, a stage
+starting aside. Between changes, a ladder from each stage's start (1, 2, 5, 10, 20
 minutes, then the experiment's `maxGapS`) bounds the silence while the run keeps
 printing; with nothing new there is no look. Looks a change brings keep the
 chat's `minGapS` between them and never outnumber the ladder's points since the

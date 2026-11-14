@@ -956,6 +956,19 @@ fn departure(before: &[(f64, f64)], next: (f64, f64)) -> Option<f64> {
     Some((next.1 - at(next.0)).abs() / spread)
 }
 
+/// Whether the point at `index` and the one before it both leave the trend of the points before
+/// those two, by more than `spreads`. One noisy point does not; a jump that holds does, since the
+/// first point off is never taken as part of the trend the second is judged by.
+fn turned(points: &[(f64, f64)], index: usize, spreads: f64) -> bool {
+    let Some(before) = index.checked_sub(1) else {
+        return false;
+    };
+    let trend = &points[..before];
+    let off = |point, spreads: f64| departure(trend, point).is_some_and(|d| d > spreads);
+    // Two points past the trend is less sure than one: half again the spreads.
+    off(points[before], spreads) && off(points[index], 1.5 * spreads)
+}
+
 fn series(body: &Value, name: &str) -> Vec<(f64, f64)> {
     body["series"][name]
         .as_array()
@@ -965,41 +978,77 @@ fn series(body: &Value, name: &str) -> Vec<(f64, f64)> {
         .collect()
 }
 
-/// What a sentence stands on, kept with it and checked on every new point.
+/// The signals a sentence stands on: those its tokens read, then the ones the view leads with,
+/// so a sentence that binds none is still checked against the run's main numbers.
+fn bound_signals(template: Option<&str>, view: &Value) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let read = template
+        .and_then(|t| reply::tokens(t, false).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(_, token)| match token {
+            reply::Token::Signal(_, name) | reply::Token::Versus(_, name) => Some(name),
+            _ => None,
+        });
+    let led = view["headline"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|name| name.as_str().map(str::to_owned));
+    for name in read.chain(led) {
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names.truncate(digest::BOUND_SIGNALS);
+    names
+}
+
+/// What a sentence stands on, kept with it and checked on every new point. With no sentence yet,
+/// what a run's first look is due for: every point of its main numbers, any stage that ends, and
+/// a parent comparison that turns far worse.
 fn basis_of(run: &Now, template: Option<&str>, mult: &Map<String, Value>) -> Value {
+    let first = template.is_none();
     let mut signals = Map::new();
     let mut parent = Map::new();
     let mut counts = Map::new();
+    let specs = &run.body["view"]["signals"];
+    for name in bound_signals(template, &run.body["view"]) {
+        let last = series(&run.body, &name).last().map(|(x, _)| *x);
+        if first || last.is_some() {
+            signals.insert(name.clone(), json!({"x": last.filter(|_| !first)}));
+        }
+        let vs = &run.body["versus"]["step"][&name];
+        if first {
+            parent.insert(name, json!({"far": false}));
+        } else if let Some(d) = vs["d"].as_f64() {
+            parent.insert(
+                name.clone(),
+                json!({"d": d, "far": far_worse(vs, &specs[&name])}),
+            );
+        }
+    }
     for (_, token) in template
         .and_then(|t| reply::tokens(t, false).ok())
         .unwrap_or_default()
     {
-        match token {
-            reply::Token::Signal(_, name) => {
-                if let Some((x, _)) = series(&run.body, &name).last() {
-                    signals.insert(name, json!({"x": x}));
-                }
-            }
-            reply::Token::Versus(_, name) => {
-                if let Some(d) = run.body["versus"]["step"][&name]["d"].as_f64() {
-                    parent.insert(name, json!(d));
-                }
-            }
-            reply::Token::Count(_, pattern) => {
-                counts.insert(pattern.clone(), json!(count_of(run, &pattern)));
-            }
-            reply::Token::Label(_) => {}
+        if let reply::Token::Count(_, pattern) = token {
+            counts.insert(pattern.clone(), json!(count_of(run, &pattern)));
         }
     }
-    let (stage, ended) = run.stage();
+    let (stage, ended) = if first {
+        (run.stage().0, 0)
+    } else {
+        run.stage()
+    };
     json!({
         "signals": signals,
         "parent": parent,
         "counts": counts,
         "stage": stage,
         "ended": ended,
-        "pace": run.body["pace"]["times"],
-        "points": run.points(),
+        "pace": if first { Value::Null } else { run.body["pace"]["times"].clone() },
+        "points": if first { 0 } else { run.points() },
         "mult": mult,
         "bindings": bindings(run),
     })
@@ -1039,31 +1088,28 @@ fn changes(state: &mut State, run: &Now, now: i64) -> Vec<(String, String)> {
     if since.0 != stage {
         *since = (stage.clone(), now);
     }
-    let Some((_, last)) = run.answered() else {
-        return Vec::new();
+    let first;
+    let basis = match run.answered() {
+        Some((_, last)) => &last.basis,
+        None => {
+            first = basis_of(run, None, &Map::new());
+            &first
+        }
     };
-    let basis = &last.basis;
     let mut why = Vec::new();
     let signals = &run.body["view"]["signals"];
     let label = |name: &str| signals[name]["label"].as_str().unwrap_or(name).to_owned();
     // Each point since the look against the points just before it.
     for (name, kept) in basis["signals"].as_object().into_iter().flatten() {
-        let Some(x0) = kept["x"].as_f64() else {
-            continue;
-        };
+        let x0 = kept["x"].as_f64().unwrap_or(f64::NEG_INFINITY);
         let points = series(&run.body, name);
         let first = points
             .iter()
             .position(|(x, _)| *x > x0)
             .unwrap_or(points.len());
-        // A point off its trend trips it once the next point is off it too; one noisy point does not.
-        let off_trend = |index: usize| {
-            departure(&points[..index], points[index])
-                .is_some_and(|d| d > 3.0 * mult(basis, "trend"))
-        };
         let off = (first..points.len()).rev().take(20).find_map(|index| {
             let (x, y) = points[index];
-            let turned = index > 0 && off_trend(index) && off_trend(index - 1);
+            let turned = turned(&points, index, 3.0 * mult(basis, "trend"));
             (!y.is_finite() || turned).then_some((x, y))
         });
         if let Some((x, y)) = off {
@@ -1076,16 +1122,19 @@ fn changes(state: &mut State, run: &Now, now: i64) -> Vec<(String, String)> {
         }
     }
     for (name, kept) in basis["parent"].as_object().into_iter().flatten() {
-        let (Some(was), Some(d)) = (
-            kept.as_f64(),
-            run.body["versus"]["step"][name]["d"].as_f64(),
-        ) else {
+        let vs = &run.body["versus"]["step"][name];
+        let Some(d) = vs["d"].as_f64() else {
             continue;
         };
-        if was * d < 0.0 {
+        if kept["d"].as_f64().is_some_and(|was| was * d < 0.0) {
             why.push((
                 "parent".into(),
                 format!("{} crossed the parent", label(name)),
+            ));
+        } else if kept["far"] != true && far_worse(vs, &signals[name]) {
+            why.push((
+                "parent".into(),
+                format!("{} is far worse than the parent", label(name)),
             ));
         }
     }
@@ -2093,7 +2142,7 @@ fn kept_after(store: &Store, run: &str) -> Result<Vec<Value>> {
 fn reason_check(reason: &str, label: &str, check: &str) -> bool {
     let words = match check {
         "trend" => ["left its trend", "is no longer a number"].as_slice(),
-        "parent" => &["crossed the parent"],
+        "parent" => &["crossed the parent", "far worse than the parent"],
         "count" => &["lines matching"],
         "stage" => &["stage", "its stage changed"],
         "family" => &["a new kind of log line"],
