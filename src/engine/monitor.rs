@@ -1074,10 +1074,11 @@ fn evaluate(
     let before = (!started && life.live())
         .then(|| json!({"kind": "starting", "startsAt": null, "text": null}));
     let generation = snapshot.map_or("", |s| s.generation.as_str());
-    // Until the log says anything orx recognises, or a stage it declared reports its first step,
-    // what the run is doing is its newest line.
+    // Until the log says anything orx recognises, or a stage it declared reports its first step
+    // or row, what the run is doing is its newest line.
     let nothing_read = !snapshot.is_some_and(Snapshot::has_signals);
     let begun = snapshot
+        .filter(|s| s.rows.is_empty())
         .and_then(|s| s.phases.last())
         .filter(|phase| phase.done.is_none() && !phase.name.is_empty());
     let setup =
@@ -3791,6 +3792,18 @@ mod tests {
                 "running"
             ),
             Value::Null
+        );
+        assert_eq!(
+            setting_up(
+                "rows",
+                &[
+                    "::orx:: {\"phase\":\"bench\"}",
+                    "::orx:: {\"row\":\"cases\",\"m\":{\"n\":1000}}"
+                ],
+                "running"
+            ),
+            Value::Null,
+            "a stage that reports rows is under way"
         );
         assert_eq!(setting_up("ended", &["uv sync"], "done"), Value::Null);
     }
