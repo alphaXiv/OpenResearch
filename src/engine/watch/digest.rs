@@ -180,18 +180,29 @@ pub(super) fn withheld_text(kind: &str) -> String {
 }
 
 /// The kind of credential each of `lines` holds, scanned as written, before anything is clipped
-/// or encoded. A private key's lines hold one from its BEGIN line through its END line.
+/// or encoded. A private key's lines hold one from its BEGIN line through its END line; a read
+/// may start inside a key, so a key's body lines that start the read, or follow a line held, are
+/// held too.
 pub(super) fn credentials<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<Option<&'static str>> {
     let mut in_key = false;
+    let mut held = true;
+    let key_body = |line: &str| {
+        let line = line.trim();
+        line.len() >= 60
+            && line
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+    };
     lines
         .map(|line| {
             in_key |= line.contains("-----BEGIN") && line.contains("PRIVATE KEY-----");
-            let kind = if in_key {
+            let kind = if in_key || held && key_body(line) {
                 Some("private key")
             } else {
                 crate::local::share::find_secret(line)
             };
             in_key &= !line.contains("-----END");
+            held = kind.is_some();
             kind
         })
         .collect()
@@ -801,6 +812,26 @@ mod tests {
         assert!(shown.len() <= MAX_LOG_LINES);
         assert!(excerpts.contains(&(error.from, error.to)));
         assert!(omitted > 1000);
+    }
+
+    #[test]
+    fn a_private_key_a_read_starts_inside_is_held() {
+        let body = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj";
+        let kinds = credentials(
+            [
+                body,
+                body,
+                "-----END PRIVATE KEY-----",
+                body,
+                "step 3 loss 2.1",
+            ]
+            .into_iter(),
+        );
+        assert_eq!(
+            kinds,
+            [Some("private key"), Some("private key"), None, None, None],
+            "the body before the END line is held, a lone line of the same shape after is not"
+        );
     }
 
     #[test]
