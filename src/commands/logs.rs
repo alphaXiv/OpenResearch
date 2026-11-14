@@ -69,6 +69,12 @@ pub async fn run(args: crate::LogsArgs) -> Result<()> {
             .await;
     }
     resolve_run(Store::open_for_reading()?, &args.run_id)?;
+    if let Some(chat) = crate::local::chat::launching_chat_session() {
+        let store = Store::open()?;
+        if !store.log_collection_pending(&args.run_id)? {
+            store.result_read_by_agent(&args.run_id, &chat, crate::store::now_ms())?;
+        }
+    }
     let ranges = crate::commands::up::api_v2::kept_ranges(&crate::store::data_dir(), &args.run_id)?;
     if let Some(tail) = ranges.iter().max_by_key(|range| range.offset) {
         let total = ranges

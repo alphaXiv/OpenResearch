@@ -6614,6 +6614,19 @@ impl Store {
         )? == 1)
     }
 
+    /// The chat's agent read an ended run's log itself, so the result notice still waiting for
+    /// the chat would only repeat it: it counts as delivered now. One a turn already claimed stays.
+    pub(crate) fn result_read_by_agent(&self, run_id: &str, chat: &str, now: i64) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE run_notices SET delivered_at = ?3, next_delivery_at = NULL
+             WHERE run_id = ?1 AND chat_session_id = ?2 AND kind = ?4 AND delivered_at IS NULL
+               AND client_turn_id IS NULL AND retired_at IS NULL
+               AND EXISTS (SELECT 1 FROM runs WHERE id = ?1
+                           AND status IN ('done', 'failed', 'cancelled', 'lost'))",
+            params![run_id, chat, now, TERMINAL],
+        )? > 0)
+    }
+
     pub(crate) fn queue_cancel_settled_notice(
         &self,
         run_id: &str,
@@ -10854,6 +10867,59 @@ mod tests {
         assert!(
             shown_ids(&store, "chat").is_empty(),
             "a kept flag lets it go"
+        );
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_agent_that_read_an_ended_runs_log_is_not_woken_to_hear_it_again() {
+        let dir = std::env::temp_dir().join(format!("orx-store-read-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        for chat in ["chat", "other"] {
+            store
+                .create_chat_session(&chat_session_fixture(chat))
+                .unwrap();
+        }
+        store
+            .upsert_run(&run_fixture("live", "running", Some("chat")))
+            .unwrap();
+        assert!(!store.result_read_by_agent("live", "chat", 5).unwrap());
+        for (id, chat) in [("read", "chat"), ("claimed", "chat"), ("theirs", "other")] {
+            store
+                .upsert_run(&run_fixture(id, "done", Some(chat)))
+                .unwrap();
+            store
+                .insert_run_notice(id, chat, TERMINAL, TERMINAL, "finished", 1)
+                .unwrap();
+        }
+        store
+            .conn
+            .execute(
+                "UPDATE run_notices SET client_turn_id = 'chat:turn' WHERE run_id = 'claimed'",
+                [],
+            )
+            .unwrap();
+        assert!(store.result_read_by_agent("read", "chat", 10).unwrap());
+        assert!(
+            !store.result_read_by_agent("claimed", "chat", 10).unwrap(),
+            "already on its way"
+        );
+        assert!(
+            !store.result_read_by_agent("theirs", "chat", 10).unwrap(),
+            "another chat's"
+        );
+        let pending: Vec<String> = store
+            .run_notice_batch_at("chat", 20)
+            .unwrap()
+            .into_iter()
+            .map(|notice| notice.run_id)
+            .collect();
+        assert!(!pending.contains(&"read".to_owned()), "{pending:?}");
+        assert_eq!(store.run_notice_batch_at("other", 20).unwrap().len(), 1);
+        assert!(
+            shown_ids(&store, "chat").contains(&"read".to_owned()),
+            "shown until a reply completes"
         );
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
