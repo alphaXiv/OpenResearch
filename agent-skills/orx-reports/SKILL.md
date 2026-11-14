@@ -10,8 +10,8 @@ immediately.
 Before writing, inspect the existing artifacts directory and follow its
 organization. Reuse the relevant folder for follow-up outputs. Group related
 outputs by research topic or deliverable instead of accumulating files at the
-artifacts root. Add subfolders such as `figures/`, `data/`, or `models/` only
-when they help; do not create empty scaffolding.
+artifacts root. Add subfolders such as `figures/` or `data/` only when they
+help; do not create empty scaffolding.
 
 Use a descriptive filename for each output. For example:
 
@@ -33,6 +33,20 @@ Use a descriptive filename for each output. For example:
 
 Keep reproducibility scripts beside their figures. Keep temporary logs and
 scratch files outside the artifacts directory.
+
+Every file in the artifacts directory is shown to the user in the Artifacts
+tab, so save only what they will open. Do not save:
+
+- checkpoints, weights, adapters, activations, or other model state
+- raw run outputs: logs, per-sample or per-request results, rollouts, traces,
+  sweep-cell dumps, run directories, or tarballs of them
+- datasets, databases, caches, virtual environments, or copied repositories
+- retries, failed attempts, or progress snapshots
+
+Leave run outputs where the run wrote them and cite the run with a run tag.
+Never point run code, launch scripts, or configs at the artifacts directory as
+an output path. When a deliverable needs raw results, summarize them into one
+small table (CSV or JSON) beside the report instead of copying the files.
 
 Keep already-published outputs at their existing paths. Reorganize other older
 outputs only when requested, updating affected document links and verifying they
