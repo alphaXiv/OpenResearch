@@ -6,7 +6,7 @@ description: "Make a run followable from launch to result: declare its stages, r
 The user follows a run without asking you: a line and a strip above the chat
 box, a tile on the tree, the run's page. Each draws the run's stages as one bar,
 its headline against the parent, and the view's first blocks. All of it comes
-from what you set up on the baseline before its first launch:
+from what you add to the baseline's code and set on it before its first launch:
 
 | What | Lives in | You set it with |
 | --- | --- | --- |
@@ -59,7 +59,8 @@ as skipped: both mean the plan is wrong, so fix it.
 
 ## 3. Report progress and measures
 
-A run reports with `::orx::` lines on its output:
+Add the reports to the baseline's code and commit them before its first
+launch. A run reports with `::orx::` lines on its output:
 
 ```text
 ::orx:: {"phase":"download","step":3,"of":9,"unit":"shards"}
@@ -83,8 +84,9 @@ import orx_run as orx
 run = orx.progress(total=5000, unit="steps")   # right after its stage starts
 run.step(step, loss=loss, val_loss=val)         # every step; one report a second goes out
 with run.phase("eval", total=22, unit="tasks") as p:
-    p.step(done, accuracy=acc)
-run.row("tasks", task=name, accuracy=acc)       # one row per finished unit
+    for done, task in enumerate(tasks, 1):
+        p.row("tasks", task=task, accuracy=score(task))   # one row per finished unit
+        p.step(done)                                      # a row alone moves no bar
 run.spend(cumulative_usd)
 ```
 
@@ -135,11 +137,13 @@ orx exp view set <expId> --file view.xml
 | `table` | `name`, `columns="a b"`, `last="5"`, `vs="parent\|step\|final"` |
 
 Every block also takes `phase` (shown only during that stage) and `title`.
-Declare a `signal` for every measure the view names. At most 8 series a chart
-and three stats, the headline first. The strip shows the headline and the
-first block of the current stage: put first the picture that would make you
-stop the run. No colours, sizes or HTML: what a block can't say goes in the
-result message (`orx-figures`).
+Declare a `signal` for every measure the view names and every column the user
+should read by a label. One chart answers one question: measures on different
+scales get a chart each. At most 8 series a chart and three stats, the
+headline first. The strip shows the headline and the current stage's first
+block: put first the picture that would make you stop the run. No colours,
+sizes or HTML: what a block can't say goes in the result message
+(`orx-figures`).
 
 How a run meets its parent is yours to choose, per experiment:
 
@@ -158,26 +162,23 @@ How a run meets its parent is yours to choose, per experiment:
 
 ## 6. A log you can't edit
 
-When the code is frozen (a harness that measures every experiment the same
-way, a vendored tool), read its log with patterns: a JSON list, one object per
-kind of line, set beside the view.
-
-```json
-[{"regex": "^Step\\s+(?P<step>\\d+) of\\s+(?P<of>\\d+) .*residual=(?P<residual>\\S+)", "phase": "solve", "unit": "steps"},
- {"regex": "^METRIC (?P<name>\\w+) (?P<value>\\S+)$"}]
-```
+Patterns are for code no experiment may change: a harness that measures every
+experiment the same way, a vendored tool. The baseline's own script is yours:
+report from it with `::orx::` lines, which survive a reworded log and can count
+any stage. For frozen code, a JSON list, one object per kind of line, set
+beside the view, reads its log (the frozen solver below).
 
 Named captures `step`, `of`, `t` and `spend` mean what they do on an `::orx::`
 line; `name` with `value` makes a measure named by the log; any other capture
 is a measure, or a cell when the pattern has `row`. `phase`, `unit` and `row`
 are captured or fixed per pattern. Rust regex syntax without look-around or
-backreferences; the first pattern that matches a line reads it. Where the code
-is yours, prefer `::orx::` lines: a pattern breaks when the wording changes.
+backreferences; the first pattern that matches a line reads it. A stage whose
+lines carry no `step` shows no progress.
 
 ## 7. Check the first minutes
 
 After the baseline's first launch, wait until its log shows the first stage
-and a measure (`orx exp status <expId>` once a minute), then:
+and a measure (`orx exp status <expId>` every half minute), then:
 
 ```sh
 orx exp view check <runId>
@@ -187,8 +188,10 @@ It folds the run's real log: the stages it read, the measures and tables
 reported, what each pattern matched with its first line, and what the view
 still waits for. Repair the view, plan or patterns with `view set`: they apply
 to the run in flight. A report missing from the code means cancelling, fixing
-and relaunching, which is cheap now and costly an hour in. End your turn once
-the run reads right.
+and relaunching, which is cheap now and costly an hour in. Once the run reads
+right, end your turn: results arrive as messages, and a user who asks mid-run
+to change what it shows reaches you only between turns. Never block on
+`orx exp wait`.
 
 ## 8. Change it while it runs
 
@@ -222,6 +225,7 @@ The plan is known up front; `train`, `eval` and `sft` each report.
 <signal name="val_bpb" label="Val bpb" digits="3" better="lower" />
 <signal name="loss" label="Train loss" digits="3" smooth="0.3" better="lower" />
 <signal name="tok_per_sec" label="Tokens/s" as="compact" better="higher" />
+<signal name="task" label="Task" />
 <signal name="accuracy" label="Accuracy" digits="3" better="higher" />
 <signal name="core" label="CORE" digits="3" better="higher" />
 <signal name="sft_loss" label="SFT loss" digits="3" smooth="0.3" better="lower" />
@@ -241,6 +245,7 @@ The run reports `run.row("categories", category=c, accuracy=acc)` as each
 category finishes and `run.step(done, accuracy=overall)` per task.
 
 ```html
+<signal name="category" label="Category" />
 <signal name="accuracy" label="Accuracy" digits="3" better="higher" />
 <view headline="accuracy">
   <chart from="categories" x="category" y="accuracy" mark="bars" ghost="parent" />
