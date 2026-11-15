@@ -750,7 +750,7 @@ test('an error flags the run and wakes its Agentic agent once, which confirms it
     await banner.getByRole('button', { name: /^\W?Flagged\W?$/ }).click()
     const watch = page.locator('section', { has: page.getByRole('heading', { name: 'Watch', exact: true }) })
     await expect.poll(async () => (await watch.innerText()).replace(/[⁦-⁩]/g, ''))
-      .toMatch(/Flagged by OpenResearch itself, with no model\. A new kind of error in the log: RuntimeError\.\s+The agent chose to keep going\. One bad batch on a warm GPU; the loss kept falling\./)
+      .toMatch(/Flagged by OpenResearch itself, with no model\. A new kind of error in the log: RuntimeError\.\s+E2E Agent chose to keep going\. One bad batch on a warm GPU; the loss kept falling\./)
     await keep(page, watch, 'journal-settled')
     await themes(page, watch, info, 'journal-settled')
   })
