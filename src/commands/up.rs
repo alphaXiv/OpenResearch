@@ -1269,6 +1269,9 @@ struct ApiRun {
     lost_reason: Option<String>,
     host: Option<String>,
     notice_error: Option<String>,
+    /// The chat that launched the run; absent for a run the CLI started outside a chat.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chat_session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     log_collection: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1341,6 +1344,7 @@ impl ApiRun {
                 }),
             host: run_host(store, run)?,
             notice_error: store.run_notice_error(&run.id)?,
+            chat_session_id: run.chat_session_id.clone(),
             log_collection: collection
                 .as_ref()
                 .map(|(failed, _)| if *failed { "failed" } else { "pending" }),
@@ -12470,6 +12474,7 @@ mod tests {
         assert!(value["lostReason"].is_null());
         assert_eq!(value["host"], "lab");
         assert!(value["noticeError"].is_null());
+        assert!(value.get("chatSessionId").is_none());
         store
             .insert_run_notice("e", "chat", crate::store::TERMINAL, "terminal", "done", 1)
             .unwrap();
@@ -12486,6 +12491,10 @@ mod tests {
         let value = serde_json::to_value(ApiRun::new(&store, &engine).unwrap()).unwrap();
         assert_eq!(value["noticeError"], "Chat harness is no longer configured");
         let mut engine = engine;
+        engine.chat_session_id = Some("chat-7".into());
+        let value = serde_json::to_value(ApiRun::new(&store, &engine).unwrap()).unwrap();
+        assert_eq!(value["chatSessionId"], "chat-7");
+        engine.chat_session_id = None;
         engine.backend_json = crate::engine::handle::backend_json(
             "e",
             Some(&crate::engine::handle::Handle::Ssh {

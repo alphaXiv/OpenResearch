@@ -262,6 +262,10 @@ test("a flagged run offers to ask the chat's agent by name, and the agent in gen
   assert.ok(asks(named.container).includes(m.run_flag_ask({ agent: "Claude Code" })), asks(named.container).join(" | "));
   await named.unmount();
 
+  const launched = await overview([{ ...flaggedRun(), chatSessionId: "s2" }], () => waiting, { chat: "s1", sessions: [{ ...session("s1"), harness: "codex" }, { ...session("s2"), harness: "claude-code" }] });
+  assert.ok(asks(launched.container).includes(m.run_flag_ask({ agent: "Claude Code" })), "the run's own chat wins over the experiment's");
+  await launched.unmount();
+
   const unnamed = await overview([flaggedRun()], () => waiting);
   assert.ok(asks(unnamed.container).includes("Ask the agent"), asks(unnamed.container).join(" | "));
   await unnamed.unmount();

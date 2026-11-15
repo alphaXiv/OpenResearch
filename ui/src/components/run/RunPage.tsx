@@ -23,10 +23,11 @@ import { useRunMonitors } from "./useRunMonitor";
 import { ViewSource } from "./ViewSource";
 import { Watch } from "./Watch";
 
-/** The agent of the chat that created the run's experiment, by name; null when that chat is unknown or gone. */
-function useChatAgent(projectId: string, chatSessionId: string | null | undefined): string | null {
-  const sessions = useQuery({ ...useWorkspace().queries.listChatSessionsQuery(projectId), enabled: Boolean(chatSessionId) }).data;
-  const session = sessions?.find((row) => row.id === chatSessionId);
+/** The agent of the chat that launched the run, else of the chat that created its experiment, by name; null when neither is known. */
+function useChatAgent(run: Run, experimentChat: string | null | undefined): string | null {
+  const chat = run.chatSessionId ?? experimentChat;
+  const sessions = useQuery({ ...useWorkspace().queries.listChatSessionsQuery(run.projectId), enabled: Boolean(chat) }).data;
+  const session = sessions?.find((row) => row.id === chat);
   return session ? harnessLabel(session.harness, session.harnessName) : null;
 }
 
@@ -35,7 +36,7 @@ function useChatAgent(projectId: string, chatSessionId: string | null | undefine
  * of the view in the agent's order. Nothing against an older server, which keeps the run's status and log.
  */
 export function RunPage({ run, name, chatSessionId, now }: { run: Run; name: string; chatSessionId?: string | null; now: number }) {
-  const agent = useChatAgent(run.projectId, chatSessionId);
+  const agent = useChatAgent(run, chatSessionId);
   const hosts = useWorkspace().queries.useEngineHosts();
   const [monitor] = useRunMonitors([run], () => true);
   if (monitor === null) return null;
@@ -101,7 +102,7 @@ export function RunPage({ run, name, chatSessionId, now }: { run: Run; name: str
  * said how the run is watched.
  */
 export function WatchSection({ run, chatSessionId, now, className }: { run: Run; chatSessionId?: string | null; now: number; className: string }) {
-  const agent = useChatAgent(run.projectId, chatSessionId);
+  const agent = useChatAgent(run, chatSessionId);
   const { getRunMonitorQuery } = useWorkspace().queries;
   // Only what the watch says: the section redraws when a look lands, not with every new point.
   const monitor = useQuery({ ...getRunMonitorQuery(run.id), enabled: false, select: (data) => ({ watch: data.watch, view: data.view, brief: data.brief, flags: data.flags }) }).data;

@@ -133,6 +133,8 @@ export interface Run {
   host: string | null;
   /** Why the run's latest notice batch was given up on, never reaching its chat. */
   noticeError?: string | null;
+  /** The chat that launched the run; absent from an older server and for a run started outside a chat. */
+  chatSessionId?: string | null;
   /** Copying a finished run's log to this computer; both are absent once the log is kept. */
   logCollection?: "pending" | "failed";
   logCollectionError?: string;
