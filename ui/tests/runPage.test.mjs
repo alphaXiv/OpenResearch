@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { act, createElement } from "react";
 import { ExperimentOverview } from "../src/components/ExperimentOverview.tsx";
+import { session } from "./chat.mjs";
 import { m } from "../src/paraglide/messages.js";
 import { createWorkspace } from "../src/workspace.tsx";
 import { render, serveApp, settle } from "./render.mjs";
@@ -30,11 +31,13 @@ const experiment = { id: "e1", projectId: "p", slug: "distil-glue-6l", branchNam
 const project = { id: "p", name: "glue", slug: "glue", githubOwner: "", githubRepo: "", baselineBranch: "main", repoPath: "/r", path: "/r", githubEnabled: false, artifactsDir: "/a" };
 
 /** The experiment's overview over `runs`, newest first; `monitor(id)` answers each monitor read. */
-async function overview(runs, monitor = () => pipeline()) {
+async function overview(runs, monitor = () => pipeline(), { chat = null, sessions = [] } = {}) {
   const requests = [];
+  const shown = { ...experiment, chatSessionId: chat };
   serveApp({
     "GET /api/compute/hosts": () => [],
-    "GET /api/projects/p/experiments": () => ({ experiments: [experiment] }),
+    "GET /api/chat/sessions": () => ({ sessions }),
+    "GET /api/projects/p/experiments": () => ({ experiments: [shown] }),
     "GET /api/projects/p/trackio/runs": () => ({ runs: [] }),
   });
   const served = globalThis.fetch;
@@ -46,7 +49,7 @@ async function overview(runs, monitor = () => pipeline()) {
     const body = await monitor(read[1]);
     return body instanceof Response ? body : Response.json(body);
   };
-  const props = (runs) => ({ experiment, lineageNode: null, onOpenExperiment() {}, parentExperiment: null, project, runs, onOpenLogs() {}, onOpenTrackio() {}, onOpenCode() {}, onOpenDiff() {} });
+  const props = (runs) => ({ experiment: shown, lineageNode: null, onOpenExperiment() {}, parentExperiment: null, project, runs, onOpenLogs() {}, onOpenTrackio() {}, onOpenCode() {}, onOpenDiff() {} });
   const view = await render(createElement(ExperimentOverview, props(runs)), createWorkspace("test"));
   await settle();
   const update = async (next) => {
@@ -247,4 +250,19 @@ test("run history says what each run finished with or where it stopped", async (
   const rows = [...container.querySelectorAll(".experiment-run-history button")].map(text);
   assert.match(rows[1], /By you, at step 26 of 120\./);
   assert.match(rows[2], /Train loss 0\.41/);
+});
+
+test("a flagged run offers to ask the chat's agent by name, and the agent in general when no chat is known", async () => {
+  const flagged = fixture("flagged");
+  const waiting = { ...flagged, runId: "r2", asOf: now, flag: { ...flagged.flag, state: "waiting", mode: "copilot" } };
+  const flaggedRun = () => run("r2", { monitor: summary(waiting, { tone: "flag", sentence: flagged.sentence, flag: { id: "f1", state: "waiting", mode: "copilot" } }) });
+  const asks = (container) => [...container.querySelectorAll("button")].map(text);
+
+  const named = await overview([flaggedRun()], () => waiting, { chat: "s1", sessions: [{ ...session("s1"), harness: "claude-code" }] });
+  assert.ok(asks(named.container).includes(m.run_flag_ask({ agent: "Claude Code" })), asks(named.container).join(" | "));
+  await named.unmount();
+
+  const unnamed = await overview([flaggedRun()], () => waiting);
+  assert.ok(asks(unnamed.container).includes("Ask the agent"), asks(unnamed.container).join(" | "));
+  await unnamed.unmount();
 });

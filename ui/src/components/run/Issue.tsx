@@ -16,7 +16,8 @@ import { Button } from "../ui";
 export function Issue({ model, flag, agent, onOpenRun }: {
   model: RunModel;
   flag: Flag;
-  agent: string;
+  /** The chat's agent by name; null when the page can't tell which chat it belongs to. */
+  agent: string | null;
   onOpenRun?: (runId: string, intent: TabOpenIntent, seek?: LogSeek) => void;
 }) {
   const workspace = useWorkspace();
@@ -24,7 +25,7 @@ export function Issue({ model, flag, agent, onOpenRun }: {
   const evidenceId = useId();
   const { evidence } = flag;
   const state = model.flag?.state;
-  const name = autoDir(agent);
+  const name = autoDir(agent ?? m.chat_the_agent());
   const where = evidence && (evidence.from === null || evidence.to === null ? m.chat_run_logs()
     : evidence.from === evidence.to ? m.run_flag_log_lines_one({ from: ltr(fmtNumber(evidence.from)) })
     : m.run_flag_log_lines_other({ from: ltr(fmtNumber(evidence.from)), to: ltr(fmtNumber(evidence.to)) }));
@@ -65,8 +66,8 @@ export function Issue({ model, flag, agent, onOpenRun }: {
         <div className="mt-2.5 flex flex-wrap items-center gap-2" aria-describedby={evidence ? evidenceId : undefined}>
           {model.live && <Button size="small" variant="danger" {...pick("stop")}><CircleStop size={14} />{m.experiments_stop_run()}</Button>}
           <Button size="small" {...pick("keep")}>{model.live ? m.run_flag_keep_going() : m.run_flag_keep_result()}</Button>
-          <Button size="small" {...pick("ask")}>{m.run_flag_ask({ agent: name })}</Button>
-          <span className="ms-auto text-xs text-ink-subtext">{model.live ? m.run_flag_until_you_choose() : m.run_flag_ended_choose({ agent: name })}</span>
+          <Button size="small" {...pick("ask")}>{agent === null ? m.run_flag_ask_unnamed() : m.run_flag_ask({ agent: name })}</Button>
+          <span className="ms-auto text-xs text-ink-subtext">{model.live ? m.run_flag_until_you_choose() : (agent === null ? m.run_flag_ended_choose_unnamed() : m.run_flag_ended_choose({ agent: name }))}</span>
           {!locked && choice?.error && <p role="alert" className="m-0 w-full text-xs text-ink-red">{choice.error}</p>}
         </div>
       ) : status && (

@@ -190,7 +190,7 @@ export function ExperimentOverview({
               {latestRun.command && (
                 <code className={EXPERIMENT_OVERVIEW_COMMAND_CLASS_NAME}>$ {latestRun.command}</code>
               )}
-              <RunPage run={latestRun} name={experiment.slug} now={now} />
+              <RunPage run={latestRun} name={experiment.slug} chatSessionId={experiment.chatSessionId} now={now} />
               {attentionRun && !(latestRun.monitor && attentionRun.id === latestRun.id) && <RunContactNotice run={attentionRun} className="mt-4" />}
               {result && (
                 <div
@@ -226,7 +226,7 @@ export function ExperimentOverview({
           </section>
         )}
 
-        {latestRun?.monitor && <WatchSection run={latestRun} now={now} className={EXPERIMENT_OVERVIEW_SECTION_CLASS_NAME} />}
+        {latestRun?.monitor && <WatchSection run={latestRun} chatSessionId={experiment.chatSessionId} now={now} className={EXPERIMENT_OVERVIEW_SECTION_CLASS_NAME} />}
 
         {lineageNode && (
           <div className="mt-5.5 border-t border-border-variant pt-4.5">

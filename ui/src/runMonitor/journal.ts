@@ -63,10 +63,10 @@ export function flagLook(flag: Flag): Look {
 export const flagRow = (flag: Flag) => flag.lookId ?? `flag:${flag.id}`;
 
 /** Who settled a flag and how, or who it was sent to, in the app's language; null while no one has chosen. */
-export function flagOutcome(flag: Flag, agent: string): string | null {
+export function flagOutcome(flag: Flag, agent: string | null): string | null {
   const { choice } = flag;
   if (!choice) return null;
-  const name = autoDir(agent);
+  const name = autoDir(agent ?? m.chat_the_agent());
   const byYou = choice.by === "user";
   if (flag.state === "kept") return byYou ? m.run_watch_kept() : m.run_watch_kept_by({ agent: name });
   if (flag.state === "stopped") {
@@ -75,6 +75,6 @@ export function flagOutcome(flag: Flag, agent: string): string | null {
     if (choice.by === "rule") return m.run_watch_stopped_by_rule({ name: autoDir(choice.rule ?? "?") });
     return m.run_watch_stopped();
   }
-  if (choice.c === "ask") return byYou ? m.run_watch_asked({ agent: name }) : m.run_watch_left_to_you({ agent: name });
+  if (choice.c === "ask") return byYou ? (agent === null ? m.run_watch_asked_unnamed() : m.run_watch_asked({ agent: name })) : m.run_watch_left_to_you({ agent: name });
   return null;
 }

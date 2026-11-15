@@ -7,6 +7,7 @@ import { runActive, runNotice } from "../../runDisplay";
 import { namedStages, runModel, runTone } from "../../runMonitor/model";
 import { useWorkspace } from "../../workspace";
 import { RunContactNotice } from "../RunContactNotice";
+import { harnessLabel } from "../ModelPicker";
 import { Button } from "../ui";
 import { cn } from "../ui/cn";
 import { Block, drawsAt } from "./blocks/Block";
@@ -22,11 +23,19 @@ import { useRunMonitors } from "./useRunMonitor";
 import { ViewSource } from "./ViewSource";
 import { Watch } from "./Watch";
 
+/** The agent of the chat that created the run's experiment, by name; null when that chat is unknown or gone. */
+function useChatAgent(projectId: string, chatSessionId: string | null | undefined): string | null {
+  const sessions = useQuery({ ...useWorkspace().queries.listChatSessionsQuery(projectId), enabled: Boolean(chatSessionId) }).data;
+  const session = sessions?.find((row) => row.id === chatSessionId);
+  return session ? harnessLabel(session.harness, session.harnessName) : null;
+}
+
 /**
  * A run in full, in its experiment's Latest run: the sentence, the stages, the bar and its captions, then every block
  * of the view in the agent's order. Nothing against an older server, which keeps the run's status and log.
  */
-export function RunPage({ run, name, now }: { run: Run; name: string; now: number }) {
+export function RunPage({ run, name, chatSessionId, now }: { run: Run; name: string; chatSessionId?: string | null; now: number }) {
+  const agent = useChatAgent(run.projectId, chatSessionId);
   const hosts = useWorkspace().queries.useEngineHosts();
   const [monitor] = useRunMonitors([run], () => true);
   if (monitor === null) return null;
@@ -39,7 +48,7 @@ export function RunPage({ run, name, now }: { run: Run; name: string; now: numbe
     monitor: data,
     monitorFailed: failed,
     shown: false,
-    agent: m.chat_the_agent(),
+    agent: agent ?? m.chat_the_agent(),
     now,
     nextRetryMs: host?.status === "backoff" ? host.nextRetryMs : null,
   });
@@ -64,7 +73,7 @@ export function RunPage({ run, name, now }: { run: Run; name: string; now: numbe
       )}
       {model.stale && !failed && <p className="m-0 mt-1.5 text-xs text-ink-subtext">{model.stale.why} · {model.stale.age}</p>}
       {model.note && <p className="m-0 mt-1.5 text-sm text-ink-subtext">{model.note}</p>}
-      {model.flag?.record && <Issue model={model} flag={model.flag.record} agent={m.chat_the_agent()} />}
+      {model.flag?.record && <Issue model={model} flag={model.flag.record} agent={agent} />}
       {failed && (
         <div className="mt-2 flex items-center gap-2 text-xs text-ink-subtext">
           {model.stale ? `${model.stale.why} · ${model.stale.age}` : m.run_monitor_load_failed()}
@@ -91,7 +100,8 @@ export function RunPage({ run, name, now }: { run: Run; name: string; now: numbe
  * The experiment page's Watch section for its latest run, from the monitor its `RunPage` keeps current, once that has
  * said how the run is watched.
  */
-export function WatchSection({ run, now, className }: { run: Run; now: number; className: string }) {
+export function WatchSection({ run, chatSessionId, now, className }: { run: Run; chatSessionId?: string | null; now: number; className: string }) {
+  const agent = useChatAgent(run.projectId, chatSessionId);
   const { getRunMonitorQuery } = useWorkspace().queries;
   // Only what the watch says: the section redraws when a look lands, not with every new point.
   const monitor = useQuery({ ...getRunMonitorQuery(run.id), enabled: false, select: (data) => ({ watch: data.watch, view: data.view, brief: data.brief, flags: data.flags }) }).data;
@@ -103,7 +113,7 @@ export function WatchSection({ run, now, className }: { run: Run; now: number; c
   return (
     <section className={className}>
       <h2>{m.run_watch_heading()}</h2>
-      <Watch monitor={monitor} runId={run.id} tone={runTone(run)} live={runActive(run.status)} now={now} />
+      <Watch monitor={monitor} runId={run.id} agent={agent} tone={runTone(run)} live={runActive(run.status)} now={now} />
     </section>
   );
 }

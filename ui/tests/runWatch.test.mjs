@@ -91,7 +91,7 @@ test("the journal says who settled a flag and how, under the look that raised it
         flag({ id: "f3", source: "tripwire", at: now - 12_000, detail: "Loss became **NaN**.", state: "stopped", choice: { by: "rule", c: "stop", at: now - 11_000, reason: null, rule: "diverging", moot: true } }),
       ],
     },
-    runId: running.runId, tone: "running", live: true, now,
+    runId: running.runId, agent: null, tone: "running", live: true, now,
   }), createWorkspace("test"));
   await settle();
   const rows = [...view.container.querySelectorAll("li")].map(text);
