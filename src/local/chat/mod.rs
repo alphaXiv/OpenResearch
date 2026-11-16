@@ -4691,8 +4691,13 @@ impl ChatHost {
         if let Err(error) = self.refresh_persisted_queue_locked(session_id, store) {
             eprintln!("orx up: could not reload the queue of chat {session_id}: {error}");
         }
+        // Queued from here on: `Err` must mean the message was not, so a receipt failure only logs.
         if let Some(id) = steer_client_turn_id.as_deref() {
-            store.finish_steer(session_id, id)?;
+            if let Err(error) = store.finish_steer(session_id, id) {
+                eprintln!(
+                    "orx up: could not confirm queued steer {id} in chat {session_id}: {error}"
+                );
+            }
         }
         Ok(())
     }
