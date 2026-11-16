@@ -348,6 +348,7 @@ export function ComposerEditor({
   onPaste,
   placeholder,
   plain,
+  readOnly,
   chipSource,
   projectId,
   describedBy,
@@ -369,6 +370,8 @@ export function ComposerEditor({
   placeholder: string;
   /** Shell commands: monospace, no markdown or chips. */
   plain: boolean;
+  /** Keeps focus and the text but takes no edits, as while the text is being sent. */
+  readOnly: boolean;
   chipSource: ChipSource;
   projectId: string;
   describedBy?: string;
@@ -379,9 +382,9 @@ export function ComposerEditor({
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
-  const latest = useRef({ onChange, onKeyDown, onSubmit, onFiles, onPaste, chipSource, plain, placeholder, describedBy });
-  latest.current = { onChange, onKeyDown, onSubmit, onFiles, onPaste, chipSource, plain, placeholder, describedBy };
-  const [compartments] = useState(() => ({ mode: new Compartment(), placeholder: new Compartment(), aria: new Compartment() }));
+  const latest = useRef({ onChange, onKeyDown, onSubmit, onFiles, onPaste, chipSource, plain, readOnly, placeholder, describedBy });
+  latest.current = { onChange, onKeyDown, onSubmit, onFiles, onPaste, chipSource, plain, readOnly, placeholder, describedBy };
+  const [compartments] = useState(() => ({ mode: new Compartment(), readOnly: new Compartment(), placeholder: new Compartment(), aria: new Compartment() }));
   const [hovered, setHovered] = useState<HTMLElement | null>(null);
   const previewId = useId();
   /** A height the user dragged to; null keeps the natural height. */
@@ -428,6 +431,7 @@ export function ComposerEditor({
           },
         })),
         compartments.mode.of(modeExtension(latest.current.plain)),
+        compartments.readOnly.of(EditorState.readOnly.of(latest.current.readOnly)),
         keymap.of([
           // Enter belongs to send; Shift+Enter breaks the line.
           ...defaultKeymap.filter((binding) => !binding.key?.endsWith("Enter")),
@@ -480,6 +484,10 @@ export function ComposerEditor({
   useEffect(() => {
     viewRef.current?.dispatch({ effects: compartments.mode.reconfigure(modeExtension(plain)) });
   }, [plain, compartments]);
+
+  useEffect(() => {
+    viewRef.current?.dispatch({ effects: compartments.readOnly.reconfigure(EditorState.readOnly.of(readOnly)) });
+  }, [readOnly, compartments]);
 
   useEffect(() => {
     viewRef.current?.dispatch({

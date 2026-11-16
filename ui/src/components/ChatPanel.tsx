@@ -7959,7 +7959,8 @@ export function ChatPanel({
                   total={questions.total}
                   picked={questions.answer.picked}
                   disabled={questions.busy}
-                  hotkeys={mainView === "chat" && !contentInert && (embedded ? searchRegion === "right" : searchRegion !== "right")}
+                  hotkeys={mainView === "chat" && !contentInert && !contentLoading && !contentError && !historyLoading && connection === null
+                    && (embedded ? searchRegion === "right" : searchRegion !== "right")}
                   searchTarget={focusedMessage?.partId === questions.part.id}
                   onPick={questions.pick}
                 />
@@ -7986,6 +7987,7 @@ export function ChatPanel({
                         : m.chat_ask_agent_placeholder()
                   }
                   plain={bashMode && !asking}
+                  readOnly={questions.busy}
                   chipSource={chipSource}
                   projectId={projectId}
                   draftKey={questions.part ? `question:${questions.part.id}` : stashKey}
