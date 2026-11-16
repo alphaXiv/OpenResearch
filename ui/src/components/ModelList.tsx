@@ -130,6 +130,7 @@ export function ModelList({
   onClearFilter,
   favorites,
   released,
+  pointedAt,
   featured,
   order,
   collapsed: initiallyCollapsed,
@@ -148,6 +149,8 @@ export function ModelList({
   favorites: ReadonlySet<string>;
   /** The models released lately, newest first. */
   released: readonly PickerLine[];
+  /** The key of the model a popup pointed at, listed even where Free folds its rest away. */
+  pointedAt?: string;
   /** OpenCode model ids the Free section lists first, in this order. */
   featured: readonly string[];
   order: readonly string[];
@@ -325,9 +328,9 @@ export function ModelList({
     />
   );
 
-  /** Free's first few models, then the rest once expanded; the chat's own model is always shown. */
+  /** Free's first few models, then the rest once expanded; the chat's own model and the one a popup pointed at always show. */
   const freeRows = (section: Section) => {
-    const hidden = section.lines.filter((line, index) => index >= FREE_SHOWN && line !== selectedLine);
+    const hidden = section.lines.filter((line, index) => index >= FREE_SHOWN && line !== selectedLine && line.key !== pointedAt);
     const shown = freeOpen ? section.lines : section.lines.filter((line) => !hidden.includes(line));
     return (
       <>

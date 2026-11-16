@@ -223,7 +223,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
 
     spawn_agent_preflight(state.clone());
     spawn_agent_updates(state.clone());
-    model_feed::spawn_refresh();
+    model_feed::spawn_refresh(state.chat.clone());
     search::spawn_backfill(state.clone());
     // A fresh install's demo worktree takes ~15 sequential git spawns — build
     // it while the onboarding screen is up instead of inside the confirm click.

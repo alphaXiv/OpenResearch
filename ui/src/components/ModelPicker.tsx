@@ -364,7 +364,8 @@ export function ModelPicker({
   );
   const favorites = useMemo(() => new Set(uiState?.favoriteModels ?? []), [uiState]);
   const releases = feed?.releases ?? NO_RELEASES;
-  const released = useMemo(() => newLines(lines, releases, Date.now()), [lines, releases]);
+  // Not memoized: a model stops being new as time passes, with nothing else changing.
+  const released = newLines(lines, releases, Date.now());
   const [menu, setMenu] = useState<"model" | "effort" | "permissions" | null>(null);
   const [filter, setFilter] = useState("");
   const modelTriggerRef = useRef<HTMLButtonElement>(null);
@@ -374,6 +375,7 @@ export function ModelPicker({
   const close = () => {
     setMenu(null);
     setFilter("");
+    setPointAt(undefined);
     modelTriggerRef.current?.focus();
   };
 
@@ -440,10 +442,9 @@ export function ModelPicker({
   };
 
   // The picker opens on the model a callout pointed at, else on the newest release; typing still searches.
-  const pointAt = useRef<string>(undefined);
+  const [pointAt, setPointAt] = useState<string>();
   const landOn = () => {
-    const key = pointAt.current ?? released[0]?.key;
-    pointAt.current = undefined;
+    const key = pointAt ?? released[0]?.key;
     const row = key && searchRef.current?.closest(".model-menu")?.querySelector<HTMLElement>(`[data-row="${CSS.escape(key)}"] [data-nav]`);
     return row || searchRef.current;
   };
@@ -612,6 +613,7 @@ export function ModelPicker({
           onOpenChange={(open) => {
             setFilter("");
             setMenu((current) => (open ? "model" : current === "model" ? null : current));
+            if (!open) setPointAt(undefined);
             if (open) dismissCallout();
           }}
         >
@@ -698,6 +700,7 @@ export function ModelPicker({
                   onClearFilter={() => setFilter("")}
                   favorites={favorites}
                   released={released}
+                  pointedAt={pointAt}
                   featured={feed?.featured.map(({ model }) => model) ?? EMPTY_IDS}
                   order={uiState?.modelSectionOrder ?? EMPTY_IDS}
                   collapsed={uiState?.collapsedModelSections ?? EMPTY_IDS}
@@ -742,7 +745,7 @@ export function ModelPicker({
                 <button
                   type="button"
                   onClick={() => {
-                    if (callout) pointAt.current = callout.line.key;
+                    if (callout) setPointAt(callout.line.key);
                     dismissCallout(true);
                     openModels();
                   }}

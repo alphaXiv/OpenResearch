@@ -203,13 +203,18 @@ fn cache_path() -> PathBuf {
 }
 
 /// Fetches the feed at start, then every six hours. A failed fetch keeps the cached feed and is
-/// retried sooner, backing off to the usual interval.
-pub(super) fn spawn_refresh() {
-    tokio::spawn(async {
+/// retried sooner, backing off to the usual interval. A new feed re-reads the agents' models,
+/// since the releases it dates can add one to Claude Code's.
+pub(super) fn spawn_refresh(chat: std::sync::Arc<crate::local::chat::ChatHost>) {
+    tokio::spawn(async move {
         let mut retry = FIRST_RETRY;
         loop {
+            let before = std::fs::read(cache_path()).ok();
             let wait = match refresh().await {
                 Ok(()) => {
+                    if std::fs::read(cache_path()).ok() != before {
+                        chat.emit_event("harness.catalog", serde_json::json!({}));
+                    }
                     retry = FIRST_RETRY;
                     REFRESH
                 }

@@ -198,3 +198,12 @@ test("a pick reports the model, its agent and the section it was picked from", a
     { name: "model_picked", section: "lab", model: "opencode/big-pickle", harness: "opencode", new: true, free: false },
   ]);
 });
+
+test("a nudge toward a free model Free folds away opens the picker on it", async () => {
+  await open(feed({ nudge: nudge({ model: "opencode/glm-5.3-flash-free" }) }));
+  await act(async () => callout("GLM 5.3 Flash").click());
+  await settle();
+
+  assert.deepEqual(rows("free"), ["DeepSeek V4.1 Flash", "Inkling 2 Small", "GLM 5.3 Flash"]);
+  assert.equal(document.activeElement.textContent, "GLM 5.3 Flash");
+});

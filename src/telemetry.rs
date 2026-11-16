@@ -1321,7 +1321,7 @@ pub(crate) fn capture_model_picked(
     new: bool,
     free: bool,
 ) {
-    let (Some(model), Some(harness)) = (bounded_label(model), bounded_label(harness)) else {
+    let (Some(model), Some(harness)) = (model_label(model), bounded_label(harness)) else {
         return;
     };
     if !MODEL_PICKER_SECTIONS.contains(&section) {
