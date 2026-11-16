@@ -105,13 +105,16 @@ pub fn validate_identity(name: &str, icon: Option<&Value>) -> Result<()> {
     Ok(())
 }
 
-/// A change to a row's name or icon; `null` clears a found agent's name back to its own, and any row's icon.
+/// A change to a row's name, icon or pinned logo; `null` clears a found agent's name back to its
+/// own, and any row's icon or logo.
 #[derive(Deserialize)]
 pub struct Edit {
     #[serde(default, deserialize_with = "present")]
     name: Option<Option<String>>,
     #[serde(default, deserialize_with = "present")]
     icon: Option<Option<Value>>,
+    #[serde(default, deserialize_with = "present")]
+    logo: Option<Option<String>>,
 }
 
 fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
@@ -134,24 +137,67 @@ impl Edit {
     }
 }
 
-/// Writes the name and icon of the Settings row `key`: a found agent's id, an account's id, or
-/// `opencode:` and a provider's or endpoint's id. True when OpenCode's model names carry it.
-pub fn edit(key: &str, edit: &Edit) -> Result<bool> {
-    if let Some(id) = key.strip_prefix("opencode:") {
-        return crate::local::local_models::edit(id, edit);
+/// A logo the dashboard draws from its own set, by slug.
+fn validate_logo(logo: &str) -> Result<()> {
+    let valid = logo.len() <= 40
+        && logo.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && logo
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-');
+    if !valid {
+        bail!("Choose a logo");
     }
-    let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    if harness_of(key).is_some() {
+    Ok(())
+}
+
+/// Writes the name, icon and logo of the Settings row `key`: a found agent's id, an account's id,
+/// or `opencode:` and a provider's, endpoint's or found provider's id. Logos live in
+/// `agent-labels.json` for every row, as do the names and icons of rows with no record of their
+/// own. True when OpenCode's model names carry the change.
+pub fn edit(key: &str, edit: &Edit) -> Result<bool> {
+    if let Some(Some(logo)) = &edit.logo {
+        validate_logo(logo)?;
+    }
+    let identity = edit.name.is_some() || edit.icon.is_some();
+    let (recorded, relabels) = if let Some(id) = key.strip_prefix("opencode:") {
+        if !crate::local::harness::opencode::is_found_provider_id(id) {
+            bail!("Choose an existing agent");
+        }
+        let recorded = crate::local::local_models::providers()?.contains_key(id)
+            || crate::local::local_models::read()?.contains_key(id);
+        let relabels = recorded && identity && crate::local::local_models::edit(id, edit)?;
+        (recorded, relabels)
+    } else if harness_of(key).is_some() {
+        let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut profiles = read()?;
         let profile = profiles
             .get_mut(key)
             .ok_or_else(|| anyhow!("Agent account was removed"))?;
-        edit.apply(&mut profile.name, &mut profile.icon)?;
-        save(&profiles)?;
+        if identity {
+            edit.apply(&mut profile.name, &mut profile.icon)?;
+            save(&profiles)?;
+        }
+        (true, false)
+    } else if matches!(
+        key,
+        "claude-code" | "codex" | "opencode" | "cursor" | "antigravity"
+    ) || crate::local::acp::registered_definitions()
+        .iter()
+        .any(|definition| definition.id == key)
+    {
+        (false, false)
     } else {
-        label(key, edit)?;
-    }
-    Ok(false)
+        bail!("Choose an existing agent");
+    };
+    label(
+        key,
+        &Edit {
+            name: edit.name.clone().filter(|_| !recorded),
+            icon: edit.icon.clone().filter(|_| !recorded),
+            logo: edit.logo.clone(),
+        },
+    )?;
+    Ok(relabels)
 }
 
 fn read() -> Result<BTreeMap<String, Profile>> {
@@ -182,24 +228,29 @@ fn save(profiles: &BTreeMap<String, Profile>) -> Result<()> {
     )
 }
 
-fn labels() -> Result<BTreeMap<String, Value>> {
-    match std::fs::read(crate::store::data_dir().join("agent-labels.json")) {
-        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+/// Every row's label by row key: a name, icon and logo, each optional.
+pub fn labels() -> Result<BTreeMap<String, Value>> {
+    let path = crate::store::data_dir().join("agent-labels.json");
+    match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .with_context(|| format!("Could not parse agent names in {}", path.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
-        Err(e) => Err(e.into()),
+        Err(e) => {
+            Err(e).with_context(|| format!("Could not read agent names in {}", path.display()))
+        }
     }
 }
 
+/// The logo pinned on the row `key`, if any.
+pub fn logo(labels: &BTreeMap<String, Value>, key: &str) -> Option<Value> {
+    labels.get(key)?.get("logo").cloned()
+}
+
 fn label(id: &str, edit: &Edit) -> Result<()> {
-    if !matches!(
-        id,
-        "claude-code" | "codex" | "opencode" | "cursor" | "antigravity"
-    ) && !crate::local::acp::registered_definitions()
-        .iter()
-        .any(|definition| definition.id == id)
-    {
-        bail!("Choose an existing agent");
+    if edit.name.is_none() && edit.icon.is_none() && edit.logo.is_none() {
+        return Ok(());
     }
+    let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut labels = labels()?;
     let entry = labels
         .entry(id.to_string())
@@ -221,15 +272,44 @@ fn label(id: &str, edit: &Edit) -> Result<()> {
             None => entry.remove("icon"),
         };
     }
+    if let Some(logo) = &edit.logo {
+        match logo {
+            Some(logo) => entry.insert("logo".into(), json!(logo)),
+            None => entry.remove("logo"),
+        };
+    }
     if entry.is_empty() {
         labels.remove(id);
     }
+    save_labels(&labels)
+}
+
+fn save_labels(labels: &BTreeMap<String, Value>) -> Result<()> {
     std::fs::create_dir_all(crate::store::data_dir())?;
     crate::local::git::atomic_write_with_mode(
         &crate::store::data_dir().join("agent-labels.json"),
-        &serde_json::to_vec_pretty(&labels)?,
+        &serde_json::to_vec_pretty(labels)?,
         Some(0o600),
     )
+}
+
+/// Drops what Settings kept about a removed row: its label and its switch.
+pub fn forget(key: &str) -> Result<()> {
+    {
+        let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut labels = labels()?;
+        if labels.remove(key).is_some() {
+            save_labels(&labels)?;
+        }
+    }
+    let store = crate::store::Store::open()?;
+    let mut hidden = store.ui_state()?.hidden_agents;
+    let before = hidden.len();
+    hidden.retain(|hidden| hidden != key);
+    if hidden.len() != before {
+        store.set_ui_json("hidden_agents", &hidden)?;
+    }
+    Ok(())
 }
 
 pub fn create(harness: &str, name: &str, icon: Option<Value>) -> Result<String> {
@@ -480,7 +560,9 @@ pub fn remove(id: &str) -> Result<()> {
         Err(e) => return Err(e.into()),
     }
     profiles.remove(id);
-    save(&profiles)
+    save(&profiles)?;
+    drop(_guard);
+    forget(id)
 }
 
 pub async fn entries(base: &[Value]) -> Result<Vec<Value>> {
@@ -526,9 +608,17 @@ pub fn reconcile(payload: &mut Value) -> Result<()> {
     };
     for entry in harnesses.iter_mut() {
         entry.as_object_mut().unwrap().remove("label");
-        if entry.get("profile").is_none() {
-            if let Some(label) = entry["id"].as_str().and_then(|id| labels.get(id)) {
-                entry["label"] = label.clone();
+        if entry.get("profile").is_some() {
+            continue;
+        }
+        if let Some(label) = entry["id"].as_str().and_then(|id| labels.get(id)) {
+            entry["label"] = label.clone();
+        }
+        for found in entry["foundProviders"].as_array_mut().into_iter().flatten() {
+            found.as_object_mut().unwrap().remove("label");
+            let key = format!("opencode:{}", found["id"].as_str().unwrap_or_default());
+            if let Some(label) = labels.get(&key) {
+                found["label"] = label.clone();
             }
         }
     }
@@ -538,17 +628,23 @@ pub fn reconcile(payload: &mut Value) -> Result<()> {
             .is_none_or(|id| profiles.contains_key(id))
     });
     for (id, profile) in &profiles {
+        let logo = logo(&labels, id);
         if let Some(entry) = harnesses
             .iter_mut()
             .find(|entry| entry["profile"]["id"] == id.as_str())
         {
-            entry["profile"] = identity(id, profile);
+            entry["profile"] = identity(id, profile, logo);
             continue;
         }
         let added = harnesses
             .iter()
             .find(|entry| entry["id"] == profile.harness.as_str() && entry.get("profile").is_none())
-            .map(|own| profile_entry(own, id, profile, unprobed(own["catalogPending"] == true)));
+            .map(|own| {
+                let mut entry =
+                    profile_entry(own, id, profile, unprobed(own["catalogPending"] == true));
+                entry["profile"] = identity(id, profile, logo);
+                entry
+            });
         harnesses.extend(added);
     }
     Ok(())
@@ -590,17 +686,20 @@ fn profile_entry(own: &Value, id: &str, profile: &Profile, auth: Value) -> Value
         && entry["installed"] == true
         && entry["installBroken"] != true;
     entry["agentReady"] = json!(ready);
-    entry["profile"] = identity(id, profile);
+    entry["profile"] = identity(id, profile, None);
     let configured = entry["defaultModel"].as_str().map(str::to_owned);
     crate::local::harness::resolve_entry(&mut entry, configured.as_deref())
         .expect("profile models");
     entry
 }
 
-fn identity(id: &str, profile: &Profile) -> Value {
+fn identity(id: &str, profile: &Profile, logo: Option<Value>) -> Value {
     let mut out = json!({"id": id, "name": profile.name});
     if let Some(icon) = &profile.icon {
         out["icon"] = icon.clone();
+    }
+    if let Some(logo) = logo {
+        out["logo"] = logo;
     }
     out
 }
@@ -864,24 +963,61 @@ mod tests {
             assert!(edit("codex", patch).is_err());
         }
         assert!(edit("codex-abcdefghij", json!({"name":"Gone"})).is_err());
-        assert!(edit("opencode:gone", json!({"name":"Gone"})).is_err());
+        for key in ["opencode:opencode", "opencode:Bad/id", "nonexistent"] {
+            assert_eq!(
+                edit(key, json!({"name":"Gone"})).unwrap_err().to_string(),
+                "Choose an existing agent"
+            );
+        }
+        for logo in ["", "Open AI", "-openai", &"a".repeat(41)] {
+            assert_eq!(
+                edit("codex", json!({"logo":logo})).unwrap_err().to_string(),
+                "Choose a logo"
+            );
+        }
         edit("codex", json!({"name":" Local ","icon":{"brand":true}})).unwrap();
         assert_eq!(
             labelled(),
             Some(json!({"name":"Local","icon":{"brand":true}}))
         );
-        edit("codex", json!({"name":null,"icon":null})).unwrap();
+        edit("codex", json!({"logo":"openai"})).unwrap();
+        edit("codex", json!({"name":"Renamed","icon":null})).unwrap();
+        assert_eq!(labelled(), Some(json!({"name":"Renamed","logo":"openai"})));
+        edit("codex", json!({"name":null,"logo":null})).unwrap();
         assert_eq!(labelled(), None);
+
+        edit(
+            "opencode:tinker",
+            json!({"name":"Tinker","icon":{"emoji":"🔧"},"logo":"thinkingmachines"}),
+        )
+        .unwrap();
+        let mut payload = json!({"harnesses":[{"id":"opencode","foundProviders":[{"id":"tinker"},{"id":"xai","label":{"name":"Stale"}}]}]});
+        reconcile(&mut payload).unwrap();
+        assert_eq!(
+            payload["harnesses"][0]["foundProviders"],
+            json!([
+                {"id":"tinker","label":{"name":"Tinker","icon":{"emoji":"🔧"},"logo":"thinkingmachines"}},
+                {"id":"xai"}
+            ])
+        );
 
         let account = create("codex", "Personal", Some(json!({"brand":true}))).unwrap();
         assert!(edit(&account, json!({"name":null})).is_err());
         edit(&account, json!({"name":" Renamed ","icon":null})).unwrap();
+        edit(&account, json!({"logo":"openai"})).unwrap();
         let mut payload = json!({"harnesses":[{"id":"codex","installed":true,"models":[]}]});
         reconcile(&mut payload).unwrap();
         assert_eq!(
             payload["harnesses"][1]["profile"],
-            json!({"id": account, "name": "Renamed"})
+            json!({"id": account, "name": "Renamed", "logo": "openai"})
         );
+        let store = crate::store::Store::open().unwrap();
+        store
+            .set_ui_json("hidden_agents", &[account.as_str(), "codex"])
+            .unwrap();
+        remove(&account).unwrap();
+        assert_eq!(store.ui_state().unwrap().hidden_agents, ["codex"]);
+        assert!(!labels().unwrap().contains_key(&account));
 
         let local_models = crate::local::local_models::providers_path();
         crate::local::local_models::record_oauth(
@@ -906,14 +1042,103 @@ mod tests {
             json!({"name":"Lab box","icon":null})
         )
         .unwrap());
+        assert!(!edit("opencode:github-copilot", json!({"logo":"github"})).unwrap());
+        assert!(!edit("opencode:orx-local-1", json!({"logo":"lmstudio"})).unwrap());
         assert_eq!(
             crate::local::local_models::provider_list().unwrap()[0],
-            json!({"id":"github-copilot","name":"Work Copilot","kind":"oauth"})
+            json!({"id":"github-copilot","name":"Work Copilot","kind":"oauth","logo":"github"})
         );
         let endpoint = &crate::local::local_models::list().unwrap()[0];
         assert_eq!(
-            (&endpoint["name"], &endpoint["icon"]),
-            (&json!("Lab box"), &Value::Null)
+            (&endpoint["name"], &endpoint["icon"], &endpoint["logo"]),
+            (&json!("Lab box"), &Value::Null, &json!("lmstudio"))
+        );
+        assert_eq!(
+            labels().unwrap()["opencode:github-copilot"],
+            json!({"logo":"github"})
+        );
+        crate::local::local_models::remove_provider("github-copilot").unwrap();
+        crate::local::local_models::remove("orx-local-1", None).unwrap();
+        let labels = labels().unwrap();
+        assert!(!labels.contains_key("opencode:github-copilot"));
+        assert!(!labels.contains_key("opencode:orx-local-1"));
+        assert!(labels.contains_key("opencode:tinker"));
+    }
+
+    #[test]
+    fn labels_and_records_written_by_shipped_versions_still_read() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let shipped: Value =
+            serde_json::from_str(include_str!("../../tests/contracts/agent-labels.json")).unwrap();
+        let data = crate::store::data_dir();
+        let providers = crate::local::local_models::providers_path();
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(providers.parent().unwrap()).unwrap();
+        for (file, path) in [
+            ("agent-labels.json", data.join("agent-labels.json")),
+            ("agent-profiles.json", data.join("agent-profiles.json")),
+            ("opencode-providers.json", providers.clone()),
+            ("local-models.json", data.join("local-models.json")),
+        ] {
+            std::fs::write(path, serde_json::to_vec_pretty(&shipped[file]).unwrap()).unwrap();
+        }
+        let edit = |key: &str, patch: Value| edit(key, &serde_json::from_value(patch).unwrap());
+
+        let mut payload =
+            json!({"harnesses":[{"id":"codex","installed":true,"models":[]},{"id":"opencode"}]});
+        reconcile(&mut payload).unwrap();
+        let harnesses = payload["harnesses"].as_array().unwrap();
+        assert_eq!(harnesses[0]["label"], shipped["agent-labels.json"]["codex"]);
+        assert_eq!(
+            harnesses[2]["profile"],
+            json!({"id":"codex-abcdefghij","name":"Work","icon":{"glyph":"flask-2","color":"teal"}})
+        );
+        let records = crate::local::local_models::provider_list().unwrap();
+        assert_eq!(records.as_array().unwrap().len(), 3);
+        assert!(records
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|record| record.get("logo").is_none()));
+        assert_eq!(
+            crate::local::local_models::list().unwrap()[0]["name"],
+            "Box"
+        );
+
+        let profiles = std::fs::read(data.join("agent-profiles.json")).unwrap();
+        let provider_records = std::fs::read(&providers).unwrap();
+        let endpoints = std::fs::read(data.join("local-models.json")).unwrap();
+        for key in [
+            "codex",
+            "opencode",
+            "codex-abcdefghij",
+            "opencode:openai",
+            "opencode:orx-local-1",
+        ] {
+            edit(key, json!({"logo":"openai"})).unwrap();
+        }
+        assert_eq!(
+            std::fs::read(data.join("agent-profiles.json")).unwrap(),
+            profiles
+        );
+        assert_eq!(std::fs::read(&providers).unwrap(), provider_records);
+        assert_eq!(
+            std::fs::read(data.join("local-models.json")).unwrap(),
+            endpoints
+        );
+
+        edit("codex", json!({"name":"Renamed","icon":{"emoji":"🧪"}})).unwrap();
+        edit("opencode", json!({"icon":null})).unwrap();
+        let labels = labels().unwrap();
+        assert_eq!(
+            labels["codex"],
+            json!({"name":"Renamed","icon":{"emoji":"🧪"},"logo":"openai"})
+        );
+        assert_eq!(
+            labels["opencode"],
+            json!({"future":{"kept":true},"logo":"openai"})
         );
     }
 

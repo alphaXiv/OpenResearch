@@ -978,6 +978,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
             axum::routing::delete(remove_opencode_provider),
         )
         .route(
+            "/api/opencode/found-providers/{id}",
+            axum::routing::delete(remove_found_provider),
+        )
+        .route(
             "/api/opencode/providers/{id}/key",
             axum::routing::put(replace_opencode_key),
         )
@@ -8286,6 +8290,41 @@ async fn replace_opencode_key(
     Ok(Json(json!({"ok":true})))
 }
 
+/// Deletes a provider from the user's own OpenCode, which no record of OpenResearch's stands for.
+async fn remove_found_provider(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    reject_if_moving(&state)?;
+    if !local::harness::opencode::is_found_provider_id(&id) {
+        return Err(bad_request("Choose a provider your OpenCode has."));
+    }
+    if local::local_models::providers()?.contains_key(&id)
+        || local::local_models::read()?.contains_key(&id)
+    {
+        return Err(bad_request(
+            "OpenResearch added this provider. Remove it from its own row in Settings → Agents.",
+        ));
+    }
+    let key = format!("opencode:{id}");
+    tokio::task::spawn_blocking(move || {
+        local::harness::opencode::delete_found_provider(&id)?;
+        local::agent_profiles::forget(&key)
+    })
+    .await
+    .map_err(|e| anyhow!("Provider removal failed: {e}"))?
+    .map_err(|error| {
+        let status = if error
+            .downcast_ref::<local::harness::opencode::FoundProviderGone>()
+            .is_some()
+        {
+            StatusCode::NOT_FOUND
+        } else {
+            StatusCode::BAD_REQUEST
+        };
+        ApiError(status, error.to_string())
+    })?;
+    recheck_opencode(&state).await;
+    Ok(Json(json!({"ok": true})))
+}
+
 async fn remove_opencode_provider(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -8644,6 +8683,9 @@ async fn list_harnesses(State(state): State<AppState>, Query(q): Query<HarnessQu
     let hidden = Store::open()?.ui_state()?.hidden_agents;
     for entry in payload["harnesses"].as_array_mut().into_iter().flatten() {
         entry["off"] = json!(local::model_routes::turned_off(entry, &hidden));
+        if entry["id"] == "opencode" && entry["profile"].is_null() {
+            entry["offProviders"] = json!(local::model_routes::off_providers(entry, &hidden));
+        }
         let harness = entry["id"].as_str().unwrap_or_default().to_string();
         local::model_routes::name_models(&harness, &mut entry["models"]);
     }
@@ -12960,6 +13002,175 @@ mod tests {
         assert_eq!(stored["refreshToken"], "refresh-1");
         let device_1 = polls.lock().unwrap().get("device-1").copied().unwrap_or(0);
         assert!(device_1 <= polls_when_closed + 1, "{device_1} polls");
+    }
+
+    #[test]
+    fn agents_cli_lists_labels_and_adds_rows_and_found_providers_delete_from_opencode() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        use crate::commands::agents;
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let dir = local::harness::xdg_config_home().join("opencode");
+            std::fs::create_dir_all(&dir).unwrap();
+            let config = dir.join("opencode.json");
+            std::fs::write(
+                &config,
+                r#"{"provider":{"tinker":{"npm":"@ai-sdk/openai-compatible","options":{"baseURL":"https://tinker.example/v1"}}}}"#,
+            )
+            .unwrap();
+            let records = local::local_models::providers_path();
+            std::fs::create_dir_all(records.parent().unwrap()).unwrap();
+            std::fs::write(
+                &records,
+                r#"{"openai":{"kind":"key","key":"sk-test","name":"Work OpenAI"}}"#,
+            )
+            .unwrap();
+            std::env::set_var("XAI_API_KEY", "fixture-only");
+            let store = Store::open().unwrap();
+            store
+                .set_ui_json("hidden_agents", &["opencode:tinker", "opencode:openai", "cursor"])
+                .unwrap();
+            local::agent_profiles::edit(
+                "opencode:tinker",
+                &serde_json::from_value(json!({"logo":"thinkingmachines"})).unwrap(),
+            )
+            .unwrap();
+
+            let state = test_state();
+            *state.harnesses.lock().await = Some((
+                std::time::Instant::now(),
+                json!({"harnesses":[
+                    {"id":"codex","name":"Codex","installed":true,"agentReady":true,"models":[]},
+                    {"id":"cursor","name":"Cursor","installed":true,"managed":true,"agentReady":true,"models":[]},
+                    {"id":"antigravity","name":"Antigravity","installed":false,"agentReady":false,"models":[]},
+                    {"id":"opencode","name":"OpenCode","installed":true,"agentReady":true,"models":[],
+                     "foundProviders":[
+                        {"id":"tinker","npm":"@ai-sdk/openai-compatible","baseUrl":"https://tinker.example/v1","sources":["config"],"removable":true},
+                        {"id":"xai","env":["XAI_API_KEY"],"sources":["env"],"removable":false}
+                     ]}
+                ]}),
+            ));
+            let address = serve(router(state, None, up_remote::Reach::Loopback)).await;
+            let dashboard = agents::Dashboard::new(address.port(), None).unwrap();
+            let http = crate::net::loopback_client().build().unwrap();
+
+            let harnesses: Value = http.get(format!("http://{address}/api/harnesses")).send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            let opencode = &harnesses["harnesses"][3];
+            assert_eq!(opencode["offProviders"], json!(["openai", "tinker"]));
+            assert_eq!(opencode["foundProviders"][0]["label"], json!({"logo":"thinkingmachines"}));
+            assert_eq!(harnesses["harnesses"][1]["off"], true);
+
+            let rows = agents::rows(&dashboard).await.unwrap();
+            let shown: Vec<_> = rows
+                .iter()
+                .map(|row| (row["key"].as_str().unwrap(), row["kind"].as_str().unwrap(), row["on"] == true))
+                .collect();
+            assert_eq!(
+                shown,
+                [
+                    ("codex", "agent", true),
+                    ("cursor", "agent", false),
+                    ("opencode", "free-models", true),
+                    ("opencode:tinker", "found-provider", false),
+                    ("opencode:xai", "found-provider", true),
+                    ("opencode:openai", "provider", false),
+                ]
+            );
+            assert_eq!(
+                rows[3],
+                json!({"key":"opencode:tinker","name":"tinker","kind":"found-provider","on":false,"removable":true,
+                       "logo":"thinkingmachines","baseUrl":"https://tinker.example/v1","npm":"@ai-sdk/openai-compatible","sources":["config"]})
+            );
+            assert_eq!(rows[1]["removable"], true);
+
+            let named = agents::label(&dashboard, "opencode:tinker", json!({"name":"Tinker Prod"}))
+                .await
+                .unwrap();
+            assert_eq!((&named["name"], &named["logo"]), (&json!("Tinker Prod"), &json!("thinkingmachines")));
+            let named = agents::label(&dashboard, "opencode:openai", json!({"logo":"openai"}))
+                .await
+                .unwrap();
+            assert_eq!((&named["name"], &named["logo"]), (&json!("Work OpenAI"), &json!("openai")));
+            for (edit, error) in [
+                (json!({"logo":"Not A Slug"}), "Choose a logo"),
+                (json!({}), "Pass --name, --logo, --emoji, --clear-name or --clear-logo."),
+                (json!({"icon":{"emoji":"🔧","color":"gold"}}), "Choose an icon and color"),
+            ] {
+                let refused = agents::label(&dashboard, "codex", edit).await.unwrap_err();
+                assert_eq!(refused.to_string(), error);
+            }
+            let missing = agents::label(&dashboard, "codex-abcdefghij", json!({"logo":"openai"}))
+                .await
+                .unwrap_err();
+            assert_eq!(missing.to_string(), "Agent account was removed");
+
+            let models = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}/v1", models.local_addr().unwrap());
+            tokio::spawn(async move {
+                axum::serve(
+                    models,
+                    Router::new().route(
+                        "/v1/models",
+                        get(|| async { Json(json!({"data":[{"id":"qwen"}]})) }),
+                    ),
+                )
+                .await
+            });
+            let request = |url: &str| json!({"name":"Lab box","baseUrl":url,"apiKey":"","model":"qwen","contextWindow":32768});
+            let refused = agents::add_endpoint(&dashboard, request("http://example.com/v1"), None)
+                .await
+                .unwrap_err();
+            assert!(refused.to_string().starts_with("Use an https:// address"), "{refused}");
+            let added = agents::add_endpoint(&dashboard, request(&base), Some("lmstudio".into()))
+                .await
+                .unwrap();
+            assert_eq!(added["kind"], "endpoint");
+            assert_eq!((&added["name"], &added["logo"], &added["baseUrl"]), (&json!("Lab box"), &json!("lmstudio"), &json!(base)));
+            assert!(added["key"].as_str().unwrap().starts_with("opencode:orx-local-"));
+
+            let delete = |id: &str| {
+                http.delete(format!("http://{address}/api/opencode/found-providers/{id}"))
+                    .send()
+            };
+            for (id, status, error) in [
+                ("xai", 400, "`XAI_API_KEY` in your environment provides xai. Remove it there, or turn this provider off."),
+                ("openai", 400, "OpenResearch added this provider. Remove it from its own row in Settings → Agents."),
+                ("opencode", 400, "Choose a provider your OpenCode has."),
+                ("mistral", 404, "OpenResearch can't find where your OpenCode sets up mistral. Remove it in OpenCode, or turn this provider off."),
+            ] {
+                let response = delete(id).await.unwrap();
+                assert_eq!(response.status().as_u16(), status, "{id}");
+                assert_eq!(response.json::<Value>().await.unwrap()["error"], error);
+            }
+            assert_eq!(delete("tinker").await.unwrap().status().as_u16(), 200);
+            assert_eq!(std::fs::read_to_string(&config).unwrap().trim(), "{\n  \"provider\": {}\n}");
+            assert_eq!(
+                store.ui_state().unwrap().hidden_agents,
+                ["opencode:openai", "cursor"]
+            );
+            assert!(!local::agent_profiles::labels().unwrap().contains_key("opencode:tinker"));
+        });
+    }
+
+    #[tokio::test]
+    async fn agents_cli_explains_a_remote_host_refusing_its_chats() {
+        let auth = RemoteAuth::new("callback");
+        let address = serve(router(test_state(), Some(auth), up_remote::Reach::Loopback)).await;
+        let dashboard =
+            crate::commands::agents::Dashboard::new(address.port(), Some("callback".into()))
+                .unwrap();
+        let refused = crate::commands::agents::rows(&dashboard).await.unwrap_err();
+        assert_eq!(refused.to_string(), "Chats on a remote OpenResearch host can't use `orx agents`. Ask the user to make this change in OpenResearch.");
     }
 
     #[tokio::test]

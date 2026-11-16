@@ -23,10 +23,10 @@ import { copyToClipboard } from "../clipboard";
 import { fmtNumber, ltr } from "../i18n";
 
 import { m } from "../paraglide/messages.js";
-import { agentModelLines } from "../modelSelection";
+import { agentModelLines, modelsAvailable } from "../modelSelection";
 import { AcpAuth } from "./AcpAuthDialog";
 import { AgentIconButton, BRAND_ICON } from "./AgentIcon";
-import { BrandMark, HarnessLogo, ModelMark, type Brand } from "./HarnessLogo";
+import { BrandMark, HarnessLogo, logoMark, ModelMark, type Brand } from "./HarnessLogo";
 import { HarnessSetup, SignInSteps } from "./HarnessSetupDialog";
 import { EndpointMark, LocalModelGuide, useLocalModelForm } from "./LocalModelSetup";
 import { renderNote } from "./agentNote";
@@ -164,6 +164,10 @@ const MORE_PROVIDERS = [
   listedTile("ollama-cloud", "Ollama Cloud", { brand: "ollama" }, "https://ollama.com/settings/keys"),
   listedTile("deepinfra", "DeepInfra", { brand: "deepinfra" }, "https://deepinfra.com/dash/keys"),
   listedTile("baseten", "Baseten", { brand: "baseten" }, "https://app.baseten.co/settings/api_keys"),
+  {
+    id: "thinkingmachines", name: "Thinking Machines", mark: { brand: "thinkingmachines" },
+    methods: [{ kind: "key", id: "thinkingmachines", platform: "Tinker", keyUrl: "https://tinker-console.thinkingmachines.ai/keys" }],
+  } satisfies AgentTile,
 ];
 const PROVIDER_TILES = [OPENCODE_GO, ...LABS, OPENROUTER, ...MORE_PROVIDERS];
 /** What the wizard recommends first. */
@@ -264,7 +268,7 @@ type Saved =
 /** Which agent the wizard added; Claude Code and Codex name the account, OpenCode the provider of the models it added. */
 export type AddedAgent = { harness: HarnessId; profile?: string; provider?: string };
 
-export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = false, confirm, cancel, isDisabled, onCustomAcp, onEditAcp }: DialogContentProps<AddedAgent> & {
+export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = false, confirm, cancel, isDisabled, onCustomAcp, onEditAcp, onAdding }: DialogContentProps<AddedAgent> & {
   remote: boolean;
   /** A recommended tile's id, or `endpoint`, whose sign-in the wizard opens on. */
   tile?: string;
@@ -274,6 +278,8 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
   host?: string;
   onCustomAcp: () => void;
   onEditAcp: (definition: AcpDefinition) => void;
+  /** The Settings row this dialog is setting up, keyed as `hiddenAgents` is, or null; Settings lists it once the dialog finishes. */
+  onAdding?: (key: string | null) => void;
 }) {
   const workspace = useWorkspace();
   const { getHarnessesQuery, getHarnessSetupCommandsQuery, getOpenCodeProvidersQuery, getLocalModelsQuery, getUiStateQuery, listAcpHarnessesQuery, refreshHarness } = workspace.queries;
@@ -302,6 +308,7 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
   const [name, setName] = useState("");
   /** Null until the user picks one: the tile's mark on its colour. */
   const [icon, setIcon] = useState<AgentIcon | null>(null);
+  const [pinnedLogo, setPinnedLogo] = useState<string | null>(null);
   const [hideFreeModels, setHideFreeModels] = useState(true);
   const [checking, setChecking] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -360,6 +367,14 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
   const customAcp: AgentTile = { id: "custom-acp", name: m.harness_custom_acp(), mark: { icon: "custom" }, methods: [] };
 
   const methodHarness = method ? harnessFor(method) : undefined;
+  // An agent already working when its sign-in began stays listed; one this dialog signs in waits for it to finish.
+  const workingAtStart = useRef(new Map<string, boolean>());
+  if (methodHarness && !workingAtStart.current.has(methodHarness.id)) workingAtStart.current.set(methodHarness.id, methodHarness.agentReady && !methodHarness.authCheckFailed);
+  const adding = saved?.kind === "profile" ? saved.id
+    : saved && !saved.replaced ? `opencode:${saved.id}`
+    : (method?.kind === "agent" || method?.kind === "native") && methodHarness && !workingAtStart.current.get(methodHarness.id) ? methodHarness.id : null;
+  useEffect(() => onAdding?.(adding), [adding]);
+  useEffect(() => () => onAdding?.(null), []);
   const backedByOpenCode = method?.kind === "key" || method?.kind === "oauth" || method?.kind === "opencode" || method?.kind === "endpoint";
   const profileEntry = saved?.kind === "profile" ? harnesses.find((h) => h.profile?.id === saved.id) : undefined;
   const modelsReady = !checking && (backedByOpenCode ? opencodeReady && !opencode?.catalogPending : Boolean((profileEntry ?? methodHarness)?.agentReady));
@@ -519,8 +534,8 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
   });
   const finish = () => run(async () => {
     const trimmed = name.trim();
-    if (saved && (trimmed !== saved.name || icon)) {
-      const changes = { ...(trimmed !== saved.name ? { name: trimmed } : {}), ...(icon ? { icon } : {}) };
+    if (saved && (trimmed !== saved.name || icon || pinnedLogo)) {
+      const changes = { ...(trimmed !== saved.name ? { name: trimmed } : {}), ...(icon ? { icon } : {}), ...(pinnedLogo ? { logo: pinnedLogo } : {}) };
       await api.updateAgent(saved.kind === "profile" ? saved.id : `opencode:${saved.id}`, changes);
     }
     const hiddenAgents = uiState.data?.hiddenAgents ?? [];
@@ -776,7 +791,16 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
     body = <div className="space-y-5">
       {saved && (
         <div className="flex items-end gap-3">
-          <AgentIconButton value={icon ?? BRAND_ICON} brand={logo} onChange={setIcon} disabled={disabled} />
+          <AgentIconButton
+            value={icon ?? BRAND_ICON}
+            brand={logoMark(pinnedLogo ?? undefined) ?? logo}
+            logo={pinnedLogo ?? undefined}
+            onChange={(next, nextLogo) => {
+              setIcon(next);
+              if (nextLogo !== undefined) setPinnedLogo(nextLogo);
+            }}
+            disabled={disabled}
+          />
           <label className="grid flex-1 gap-1 text-sm text-subtext">
             <span>{m.agent_name()}</span>
             <Input value={name} disabled={disabled} maxLength={80} onChange={(event) => setName(event.target.value)} />
@@ -1195,7 +1219,7 @@ function ModelList({ models, harness, owner }: { models: HarnessModel[]; harness
   }
   const shown = lines.slice(0, 10);
   return <div>
-    <p className="m-0 mb-2 flex items-center gap-2 text-sm"><CircleCheck size={16} className="text-accent-green" />{m.settings_models_available({ count: fmtNumber(lines.length) })}</p>
+    <p className="m-0 mb-2 flex items-center gap-2 text-sm"><CircleCheck size={16} className="text-accent-green" />{modelsAvailable(lines.length)}</p>
     <ul className="m-0 grid list-none grid-cols-2 gap-x-6 gap-y-1.5 rounded-lg border border-border bg-surface px-4 py-3 text-sm text-subtext">
       {shown.map((line) => <li key={line.key} className="flex min-w-0 items-center gap-2 wrap-anywhere"><ModelMark model={line.offers[0].model} harness={harness} size={14} />{tidyModelName(line.label)}</li>)}
     </ul>
