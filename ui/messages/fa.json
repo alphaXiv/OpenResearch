@@ -322,6 +322,11 @@
   "settings_page_agent_models": "مدل‌های عامل",
   "settings_nested_subagents": "اجازهٔ عامل‌های فرعی تودرتو",
   "settings_nested_subagents_description": "عامل‌های فرعی می‌توانند عامل‌های فرعی خودشان را آغاز کنند. عامل‌ها همچنان می‌توانند این را برای هر کار تغییر دهند.",
+  "settings_auto_reviewer": "بازبین حالت Auto",
+  "settings_auto_reviewer_description": "مدلی که دستورهای OpenCode را در حالت Auto بازبینی می‌کند. مدل کوچک‌تر بازبینی را ارزان و سریع نگه می‌دارد. گفتگویی که از مدل محلی استفاده می‌کند همیشه با مدل خودش بازبینی می‌کند.",
+  "settings_auto_reviewer_same": "همان مدل گفتگو",
+  "opencode_auto_same_model": "برای بازبینی هر دستور از همان مدل استفاده می‌کند و اگر مطمئن نباشد از شما می‌پرسد",
+  "opencode_auto_model": "برای بازبینی هر دستور از {model} استفاده می‌کند و اگر مطمئن نباشد از شما می‌پرسد",
   "settings_models": "مدل‌ها",
   "settings_models_description": "مدل‌هایی که خاموش می‌کنید از انتخابگر مدل حذف می‌شوند و عامل‌ها نمی‌توانند کاری به آن‌ها بسپارند. برای مرتب کردن بخش‌های آن بکشید.",
   "settings_models_off": "{count} خاموش",
@@ -1726,9 +1731,6 @@
   "add_agent_providers_failed": "بارگیری ارائه‌دهندگان OpenCode ناموفق بود.",
   "add_agent_provider_missing": "ارائه‌دهندهٔ {name} در فهرست OpenCode نیست. ارائه‌دهندهٔ دیگری انتخاب کنید.",
   "agent_name": "نام",
-  "opencode_update_title": "OpenCode باید به‌روزرسانی شود",
-  "opencode_update_description": "OpenCode شما نسخهٔ {version} است و OpenResearch به OpenCode 2 نیاز دارد. به‌روزرسانی نسخهٔ شما را به OpenCode 2 می‌برد، یا اگر نسخهٔ شما خودش به‌روز نشود، نسخه‌ای فقط برای OpenResearch دانلود می‌کند.",
-  "opencode_update": "به‌روزرسانی به OpenCode 2",
   "provider_key_replace_title": "جایگزینی کلید {name}",
   "provider_key_get": "دریافت کلید",
   "provider_key_label": "کلید API ‏{name}",
@@ -1741,7 +1743,6 @@
   "settings_remove_agent_title": "{name} حذف شود؟",
   "settings_remove_agent": "حذف {name}",
   "settings_remove_agent_description": "گفت‌وگوهایی که از آن استفاده می‌کنند به عامل دیگری نیاز خواهند داشت.",
-  "settings_opencode_update_needed": "برای افزودن ارائه‌دهنده به‌روزرسانی کنید",
   "settings_free_models": "مدل‌های رایگان",
   "settings_free_models_locked": "برای غیرفعال کردن مدل‌های رایگان، با ارائه‌دهندهٔ دیگری وارد شوید",
   "settings_free_models_description": "مجموعه‌ای از مدل‌ها که OpenCode فراهم می‌کند تا بدون پرداخت شروع کنید.",
@@ -2140,6 +2141,6 @@
   "usage_reset_none_left": "بازنشانی‌ای باقی نمانده است.",
   "acp_approval_ask": "هر بار بپرس",
   "acp_approval_ask_description": "پیش از اقداماتی که به تأیید نیاز دارند بپرس",
-  "acp_approval_auto": "تأیید خودکار",
-  "acp_approval_auto_description": "درخواست‌های تکی را خودکار تأیید می‌کند. محدودیت‌های دسترسی خود عامل همچنان برقرار است."
+  "acp_approval_auto": "دسترسی کامل",
+  "acp_approval_auto_description": "هر درخواست را بدون پرسش تأیید می‌کند، به جز درخواست‌هایی که فقط به‌صورت دائمی می‌توان اجازه‌شان داد"
 }

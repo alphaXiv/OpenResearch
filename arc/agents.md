@@ -53,9 +53,11 @@ the newest release, or the user's install fails to run, orx's copy stands in.
 The newer of the two runs, a tie going to the user's install, and a chat's
 running agent moves over at its next turn. An agent signed out on every
 account is skipped until a sign-in shows it in use; one whose sign-in could
-not be checked is still kept current. New OpenCode installs
-use major 2; an existing major 1 still runs chats and offers an explicit upgrade
-or OpenResearch's own copy before provider changes.
+not be checked is still kept current. OpenCode is the exception to the
+sign-out rule: its free models need none, so `orx up` installs OpenCode 2 as its
+own copy when none is there, and trades a user's 1.x for that copy. Only
+OpenCode 2 runs: a 1.x install is left alone and never used, so a machine whose
+copy cannot be downloaded has no OpenCode until a download succeeds.
 OpenResearch places a new OpenCode copy only while no chat or compaction is
 mid-turn, and stops the idle OpenCode servers first so none keeps the old binary.
 Agents orx starts run with Claude Code's updater off, so only this check
@@ -135,7 +137,7 @@ The providers differ in shape, and the interface absorbs three:
 | Process model | Agents | How a turn runs |
 | --- | --- | --- |
 | resident child per chat | Claude Code, Codex, Antigravity, ACP agents | one request over a stdio protocol; events stream back |
-| resident server per chat | OpenCode | posts to `opencode serve` in the chat's worktree; 1.x and 2.x have separate adapters |
+| resident server per chat | OpenCode | posts to `opencode serve` in the chat's worktree |
 | child per turn | Cursor, older Codex (`codex exec`) | a print-mode process resuming the native session by id |
 
 A resident agent restarts with its native session resumed when a setting it started with changes or when it crashes. Resident children also restart after an interrupt or a switch to another fork, and idle ones are released (`src/local/agent_lifecycle.rs`); the next message resumes them. A child with background work still running is not idle: Claude Code resumes on its own when a background task finishes, and orx records what it writes then as a turn with no user message; until then orx refuses to switch, retry or edit a fork, which would stop the child and land its reply on the wrong branch. An ACP agent counts as busy while a command it runs in a terminal orx opened for it, or one it started in a session of its own as agy does, has not exited, since agents report no end to a command between turns; a switch to another fork still restarts it and stops those commands. A task that never ends, such as a dev server, keeps its child until the chat stops or restarts it, on low-memory machines too. Stopping a resident child also stops the commands it started in their own sessions. Windows has no sessions to tell those commands apart, so there an ACP agent's own commands keep nothing and releasing it stops them.
@@ -220,8 +222,8 @@ OpenCode runs local inference over connections to OpenAI-compatible servers (`sr
 
 Each agent keeps its own permission modes, and orx exposes those the harness advertises. A tool call needing approval becomes a prompt part:
 
-User-configured ACP agents also have a client approval setting: Ask (the default) or Auto-approve.
-Auto-approve answers only the agent's offered `allow_once` choice. Requests that offer only a
+User-configured ACP agents also have a client approval setting: Ask (the default) or Full access.
+Full access answers only the agent's offered `allow_once` choice. Requests that offer only a
 persistent grant, or explicitly switch agent modes, still ask. It does not change the agent's
 sandbox, replace its native configuration or override a denied action. The choice is stored with
 the chat, survives restarts and removal of its launch configuration, and is checked for each request; switching it while a request waits
@@ -233,6 +235,8 @@ A completed prompt takes priority over queued approval events, cancelling reques
 | Codex app server, OpenCode, Antigravity, ACP | held on the live connection |
 | Claude Code | headless, so a bridge relays to the owning dashboard and blocks: Claude's `approve` tool on `orx mcp` |
 | Cursor, `codex exec` | nothing waits: print mode cannot prompt, so the mode maps to CLI flags |
+
+**OpenCode's modes are what its server is told to ask.** orx's config allows everything, so Full access, the default and what OpenCode always did here, only has its few remaining asks answered for it. Manual makes edits, shell, web and anything outside the worktree ask. Auto makes shell and anything outside the worktree ask, and orx reviews them: a read-only command passes by plan mode's allowlist, and for the rest a model answers SAFE or UNSAFE from the user's message and the action alone. That is the chat's own model unless Settings names an Auto reviewer, which a chat on a local model never uses, and the chat's own model answers when the reviewer fails. The reviewer's call is a separate short request, so it shares no prompt cache with the chat; a smaller reviewer is the saving. Anything but SAFE, and any failure, becomes the ordinary approval card. The mode's rules ride the server's own inline config, since the worktree's config file is shared with side chats and delegates and OpenCode reloads files live, so a switch restarts the server.
 
 The bridge endpoint grants permissions, so it takes a per-child token that each respawn replaces. Plan mode puts a small policy in front of the bridge: read-only commands and web lookups pass, file edits are refused, and anything else asks. The read-only check is an allowlist (`src/local/harness/plan_gate.rs`), so a new read-only `orx` verb stays gated until added there.
 

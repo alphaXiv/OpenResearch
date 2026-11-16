@@ -322,6 +322,11 @@
   "settings_page_agent_models": "エージェントのモデル",
   "settings_nested_subagents": "ネストしたサブエージェントを許可",
   "settings_nested_subagents_description": "サブエージェントが独自のサブエージェントを開始できるようにします。エージェントはタスクごとにこの設定を変更できます。",
+  "settings_auto_reviewer": "Auto のレビュー担当",
+  "settings_auto_reviewer_description": "Auto で OpenCode のコマンドを確認するモデルです。小さいモデルを選ぶと、確認が安く速くなります。ローカルモデルのチャットは常に自分のモデルで確認します。",
+  "settings_auto_reviewer_same": "チャットと同じモデル",
+  "opencode_auto_same_model": "同じモデルで各コマンドを確認し、判断できないときは確認を求めます",
+  "opencode_auto_model": "{model} で各コマンドを確認し、判断できないときは確認を求めます",
   "settings_models": "モデル",
   "settings_models_description": "オフにしたモデルはモデル選択から外れ、エージェントもそのモデルに作業を任せられなくなります。ドラッグするとセクションの順番を変えられます。",
   "settings_models_off": "{count} 件オフ",
@@ -1726,9 +1731,6 @@
   "add_agent_providers_failed": "OpenCode のプロバイダーを読み込めませんでした。",
   "add_agent_provider_missing": "OpenCode の一覧に {name} はありません。別のプロバイダーを選んでください。",
   "agent_name": "名前",
-  "opencode_update_title": "OpenCode の更新が必要です",
-  "opencode_update_description": "お使いの OpenCode は {version} ですが、OpenResearch には OpenCode 2 が必要です。更新すると OpenCode 2 に移行します。自動で更新できない場合は、OpenResearch 専用のコピーをダウンロードします。",
-  "opencode_update": "OpenCode 2 に更新",
   "provider_key_replace_title": "{name} のキーを置き換え",
   "provider_key_get": "キーを取得",
   "provider_key_label": "{name} の API キー",
@@ -1741,7 +1743,6 @@
   "settings_remove_agent_title": "{name} を削除しますか？",
   "settings_remove_agent": "{name} を削除",
   "settings_remove_agent_description": "これを使うチャットには別のエージェントが必要になります。",
-  "settings_opencode_update_needed": "プロバイダーを追加するには更新してください",
   "settings_free_models": "無料モデル",
   "settings_free_models_locked": "無料モデルをオフにするには、ほかのプロバイダーでサインインしてください",
   "settings_free_models_description": "OpenCode が提供する、支払いなしで始められるモデルです。",
@@ -2140,6 +2141,6 @@
   "usage_reset_none_left": "リセットは残っていません。",
   "acp_approval_ask": "毎回確認",
   "acp_approval_ask_description": "承認が必要な操作の前に確認します",
-  "acp_approval_auto": "自動承認",
-  "acp_approval_auto_description": "個別の操作要求を自動承認します。エージェント自身のアクセス制限は引き続き適用されます。"
+  "acp_approval_auto": "フルアクセス",
+  "acp_approval_auto_description": "確認せずに各リクエストを承認します。永続的にしか許可できないものは除きます"
 }

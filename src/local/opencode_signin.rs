@@ -34,7 +34,7 @@ impl Server {
         if let Some((base, key)) = provider {
             local_models::prepare_provider_probe(&mut cmd, base, key)?;
         } else {
-            local_models::prepare_env(&mut cmd, None, crate::local::opencode::Protocol::V2)?;
+            local_models::prepare_env(&mut cmd, None)?;
         }
         cmd.env("OPENCODE_DB", lease.path())
             .env("OPENCODE_CONFIG_PROJECT_DISABLE", "1")
@@ -609,7 +609,6 @@ mod tests {
             endpoint: AgentEndpoint {
                 base_url: format!("http://{address}"),
                 client: crate::net::loopback_client().build().unwrap(),
-                protocol: opencode::Protocol::V2,
                 legacy_v2_api: false,
             },
             database: lease,

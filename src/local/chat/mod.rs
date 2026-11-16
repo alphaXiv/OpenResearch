@@ -14744,7 +14744,7 @@ done
             let aborts = Arc::new(AtomicUsize::new(0));
             let counted = aborts.clone();
             let app = axum::Router::new().route(
-                "/session/native/abort",
+                "/api/session/native/interrupt",
                 axum::routing::post(move || {
                     counted.fetch_add(1, Ordering::SeqCst);
                     async { axum::Json(json!(true)) }

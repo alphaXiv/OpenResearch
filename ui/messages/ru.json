@@ -322,6 +322,11 @@
   "settings_page_agent_models": "Модели агентов",
   "settings_nested_subagents": "Разрешить вложенных субагентов",
   "settings_nested_subagents_description": "Субагенты смогут запускать собственных субагентов. Агенты по-прежнему могут изменить это для каждой задачи.",
+  "settings_auto_reviewer": "Проверяющий в Auto",
+  "settings_auto_reviewer_description": "Модель, которая проверяет команды OpenCode в режиме Auto. Меньшая модель делает проверки дешёвыми и быстрыми. Чат на локальной модели всегда проверяет своей моделью.",
+  "settings_auto_reviewer_same": "Та же модель, что и в чате",
+  "opencode_auto_same_model": "Использует ту же модель для проверки каждой команды и спрашивает вас, если не уверена",
+  "opencode_auto_model": "Использует {model} для проверки каждой команды и спрашивает вас, если не уверена",
   "settings_models": "Модели",
   "settings_models_description": "Выключенные модели пропадают из выбора модели, и агенты не могут поручать им задачи. Перетащите, чтобы изменить порядок разделов.",
   "settings_models_off": "выключено: {count}",
@@ -1726,9 +1731,6 @@
   "add_agent_providers_failed": "Не удалось загрузить провайдеров OpenCode.",
   "add_agent_provider_missing": "Провайдера {name} нет в списке OpenCode. Выберите другого провайдера.",
   "agent_name": "Название",
-  "opencode_update_title": "OpenCode нужно обновить",
-  "opencode_update_description": "У вас OpenCode {version}, а OpenResearch нужен OpenCode 2. Обновление переведёт ваш на OpenCode 2, а если он не может обновиться сам, скачает копию только для OpenResearch.",
-  "opencode_update": "Обновить до OpenCode 2",
   "provider_key_replace_title": "Заменить ключ {name}",
   "provider_key_get": "Получить ключ",
   "provider_key_label": "API-ключ {name}",
@@ -1741,7 +1743,6 @@
   "settings_remove_agent_title": "Удалить {name}?",
   "settings_remove_agent": "Удалить {name}",
   "settings_remove_agent_description": "Чатам, которые его используют, понадобится другой агент.",
-  "settings_opencode_update_needed": "Обновите, чтобы добавлять провайдеров",
   "settings_free_models": "Бесплатные модели",
   "settings_free_models_locked": "Войдите через другого провайдера, чтобы отключить бесплатные модели",
   "settings_free_models_description": "Модели от OpenCode, чтобы начать без оплаты.",
@@ -2140,6 +2141,6 @@
   "usage_reset_none_left": "Сбросов не осталось.",
   "acp_approval_ask": "Спрашивать",
   "acp_approval_ask_description": "Спрашивать перед действиями, требующими разрешения",
-  "acp_approval_auto": "Одобрять автоматически",
-  "acp_approval_auto_description": "Автоматически одобрять отдельные запросы. Ограничения доступа самого агента сохраняются."
+  "acp_approval_auto": "Полный доступ",
+  "acp_approval_auto_description": "Одобряет каждый запрос без вопросов, кроме тех, которые можно разрешить только навсегда"
 }

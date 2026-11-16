@@ -322,6 +322,11 @@
   "settings_page_agent_models": "Ajan modelleri",
   "settings_nested_subagents": "İç içe alt ajanlara izin ver",
   "settings_nested_subagents_description": "Alt ajanların kendi alt ajanlarını başlatmasına izin verin. Ajanlar bunu her görev için yine de değiştirebilir.",
+  "settings_auto_reviewer": "Auto gözden geçiricisi",
+  "settings_auto_reviewer_description": "Auto modunda OpenCode komutlarını gözden geçiren model. Daha küçük bir model incelemeyi ucuz ve hızlı tutar. Yerel model kullanan bir sohbet her zaman kendi modeliyle inceler.",
+  "settings_auto_reviewer_same": "Sohbetle aynı model",
+  "opencode_auto_same_model": "Her komutu gözden geçirmek için aynı modeli kullanır, emin olamazsa size sorar",
+  "opencode_auto_model": "Her komutu gözden geçirmek için {model} kullanır, emin olamazsa size sorar",
   "settings_models": "Modeller",
   "settings_models_description": "Kapattığınız modeller model seçiciden çıkar ve ajanlar onlara görev devredemez. Bölümlerin sırasını değiştirmek için sürükleyin.",
   "settings_models_off": "{count} kapalı",
@@ -1757,9 +1762,6 @@
   "add_agent_providers_failed": "OpenCode sağlayıcıları yüklenemedi.",
   "add_agent_provider_missing": "OpenCode listesinde {name} yok. Başka bir sağlayıcı seçin.",
   "agent_name": "Ad",
-  "opencode_update_title": "OpenCode'un güncellenmesi gerekiyor",
-  "opencode_update_description": "OpenCode sürümünüz {version}, ama OpenResearch OpenCode 2 gerektiriyor. Güncelleme sizinkini OpenCode 2'ye taşır; kendini güncelleyemiyorsa yalnızca OpenResearch için bir kopya indirir.",
-  "opencode_update": "OpenCode 2'ye güncelle",
   "provider_key_replace_title": "{name} anahtarını değiştir",
   "provider_key_get": "Anahtar al",
   "provider_key_label": "{name} API anahtarı",
@@ -1772,7 +1774,6 @@
   "settings_remove_agent_title": "{name} kaldırılsın mı?",
   "settings_remove_agent": "{name} öğesini kaldır",
   "settings_remove_agent_description": "Bunu kullanan sohbetlerin başka bir ajana ihtiyacı olacak.",
-  "settings_opencode_update_needed": "Sağlayıcı eklemek için güncelleyin",
   "settings_free_models": "Ücretsiz modeller",
   "settings_free_models_locked": "Ücretsiz modelleri kapatmak için başka bir sağlayıcıyla oturum açın",
   "settings_free_models_description": "Ödeme yapmadan başlamanız için OpenCode'un sunduğu modeller.",
@@ -2140,6 +2141,6 @@
   "usage_reset_none_left": "Sıfırlama kalmadı.",
   "acp_approval_ask": "Sor",
   "acp_approval_ask_description": "Onay gerektiren işlemlerden önce sor",
-  "acp_approval_auto": "Otomatik onayla",
-  "acp_approval_auto_description": "Tekil işlem isteklerini otomatik onaylar. Ajanın kendi erişim kısıtlamaları geçerliliğini korur."
+  "acp_approval_auto": "Tam erişim",
+  "acp_approval_auto_description": "Her isteği sormadan onaylar; yalnızca kalıcı olarak izin verilebilenler hariç"
 }

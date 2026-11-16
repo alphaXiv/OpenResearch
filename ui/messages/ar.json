@@ -322,6 +322,11 @@
   "settings_page_agent_models": "نماذج الوكيل",
   "settings_nested_subagents": "السماح بالوكلاء الفرعيين المتداخلين",
   "settings_nested_subagents_description": "يتيح للوكلاء الفرعيين تشغيل وكلاء فرعيين خاصين بهم. لا يزال بإمكان الوكلاء تغيير ذلك لكل مهمة.",
+  "settings_auto_reviewer": "مراجع وضع Auto",
+  "settings_auto_reviewer_description": "النموذج الذي يراجع أوامر OpenCode في وضع Auto. النموذج الأصغر يجعل المراجعة أرخص وأسرع. المحادثة التي تعمل بنموذج محلي تراجع دائمًا بنموذجها.",
+  "settings_auto_reviewer_same": "النموذج نفسه المستخدم في المحادثة",
+  "opencode_auto_same_model": "يستخدم النموذج نفسه لمراجعة كل أمر ويسألك عند عدم التأكد",
+  "opencode_auto_model": "يستخدم {model} لمراجعة كل أمر ويسألك عند عدم التأكد",
   "settings_models": "النماذج",
   "settings_models_description": "النماذج التي توقفها تختفي من منتقي النماذج، ولا يمكن للوكلاء تفويض المهام إليها. اسحب لإعادة ترتيب أقسامه.",
   "settings_models_off": "{count} متوقف",
@@ -1726,9 +1731,6 @@
   "add_agent_providers_failed": "تعذّر تحميل مزوّدي OpenCode.",
   "add_agent_provider_missing": "لا يُدرج OpenCode المزوّد {name}. اختر مزوّدًا آخر.",
   "agent_name": "الاسم",
-  "opencode_update_title": "يحتاج OpenCode إلى تحديث",
-  "opencode_update_description": "لديك OpenCode {version}، ويحتاج OpenResearch إلى OpenCode 2. التحديث ينقل نسختك إلى OpenCode 2، أو ينزّل نسخة خاصة بـ OpenResearch إن تعذّر تحديث نسختك.",
-  "opencode_update": "التحديث إلى OpenCode 2",
   "provider_key_replace_title": "استبدال مفتاح {name}",
   "provider_key_get": "احصل على مفتاح",
   "provider_key_label": "مفتاح API لـ {name}",
@@ -1741,7 +1743,6 @@
   "settings_remove_agent_title": "إزالة {name}؟",
   "settings_remove_agent": "إزالة {name}",
   "settings_remove_agent_description": "ستحتاج المحادثات التي تستخدمه إلى وكيل آخر.",
-  "settings_opencode_update_needed": "حدّث لإضافة مزوّدين",
   "settings_free_models": "نماذج مجانية",
   "settings_free_models_locked": "سجّل الدخول عبر مزوّد آخر لتعطيل النماذج المجانية",
   "settings_free_models_description": "مجموعة نماذج يوفّرها OpenCode لتبدأ دون أن تدفع.",
@@ -2140,6 +2141,6 @@
   "usage_reset_none_left": "لم تتبق أي إعادات تعيين.",
   "acp_approval_ask": "السؤال كل مرة",
   "acp_approval_ask_description": "السؤال قبل الإجراءات التي تتطلب موافقة",
-  "acp_approval_auto": "الموافقة تلقائيًا",
-  "acp_approval_auto_description": "الموافقة تلقائيًا على الطلبات الفردية. تظل قيود وصول الوكيل نفسه سارية."
+  "acp_approval_auto": "وصول كامل",
+  "acp_approval_auto_description": "يوافق على كل طلب دون سؤال، باستثناء الطلبات التي لا يمكن السماح بها إلا بشكل دائم"
 }

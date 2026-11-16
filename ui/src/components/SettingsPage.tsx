@@ -22,7 +22,7 @@ import { accountErrorMessage, OpenResearchAccount } from "./OpenResearchAccount"
 import { OpenResearchSshKey } from "./OpenResearchSshKey";
 import { HarnessSetupDialog } from "./HarnessSetupDialog";
 import { AcpHarnessDialog } from "./AcpHarnessDialog";
-import { AddAgentDialog, canConfigureHarness, ChoiceGrid, keyKind, OpenCodeSignInDialog, opencodeMajor, opencodeVersion, providerRank, providerTile, RECOMMENDED_TILES, sortHarnesses, TileMark, type AddedAgent } from "./AddAgentDialog";
+import { AddAgentDialog, canConfigureHarness, ChoiceGrid, keyKind, OpenCodeSignInDialog, opencodeVersion, providerRank, providerTile, RECOMMENDED_TILES, sortHarnesses, TileMark, type AddedAgent } from "./AddAgentDialog";
 import { AgentIconButton, AgentIconTile, type Logo } from "./AgentIcon";
 import type { SetupAction } from "./harnessSetupState";
 import { OpenCodeKeyDialog } from "./OpenCodeKeyDialog";
@@ -69,6 +69,7 @@ import {
   ExternalLink,
   Info,
   Link2,
+  MessageSquare,
   Monitor,
   Moon,
   Plus,
@@ -95,6 +96,7 @@ import {
   type FoundProvider,
   type Project,
   type AgentIcon,
+  modelLabel,
   tidyModelName,
   type Harness,
   type HarnessModel,
@@ -403,6 +405,7 @@ function AgentsTab({ remote }: { remote: boolean }) {
       <h2>{m.settings_page_harnesses()}</h2>
       <AgentList remote={remote} />
       <NestedDelegationRow />
+      <AutoReviewerRow />
       <ModelSettings heading={<h3 className={cn(SECTION_CLASS_NAME, "mt-8")}>{m.settings_models()}</h3>} />
     </>
   );
@@ -460,7 +463,6 @@ export function AgentList({ remote, onboarding }: {
   const orderedHarnesses = sortHarnesses(harnesses ?? []);
   const opencode = orderedHarnesses.find((h) => h.id === "opencode");
   const records = [...(providers.data ?? [])].sort((a, b) => providerRank(a) - providerRank(b));
-  const opencode1 = opencodeMajor(opencode) === 1;
   // What was added here shows with whatever is wrong with it; an agent merely found on this computer shows only while
   // it works, and Add agent sets up the rest. OpenCode stands behind its providers, showing only for a fault they hit.
   const works = (h: Harness) => h.agentReady && !h.authCheckFailed;
@@ -477,7 +479,7 @@ export function AgentList({ remote, onboarding }: {
   const rows = orderedHarnesses
     .filter((h) => harnessKey(h) !== adding && signedIn(h))
     .filter((h) => kept(h)
-      || (h.id === "opencode" ? (records.length > 0 || found.length > 0) && (h.installBroken || h.needsConfigRepair || opencode1 || (!h.agentReady && !h.catalogPending)) : works(h)))
+      || (h.id === "opencode" ? (records.length > 0 || found.length > 0) && (h.installBroken || h.needsConfigRepair || (!h.agentReady && !h.catalogPending)) : works(h)))
     .filter((h, index, all) => h.profile || !h.setupUrl || all.findIndex((other) => other.setupUrl === h.setupUrl) === index);
   const offersFreeModels = opencode?.installed && !opencode.installBroken;
   const freeModels = opencode?.models.filter((model) => model.id.startsWith("opencode/")) ?? [];
@@ -641,11 +643,9 @@ export function AgentList({ remote, onboarding }: {
       );
     }
     const acp = definitions.data?.find((definition) => definition.id === h.id);
-    const update = h.id === "opencode" && opencode1 && !remote;
-    const action = update || (!h.agentReady && !h.catalogPending && !h.id.startsWith("acp:") && Boolean(canConfigureHarness(h, remote, commands)));
+    const action = (!h.agentReady && !h.catalogPending && !h.id.startsWith("acp:") && Boolean(canConfigureHarness(h, remote, commands)));
     const noModels = h.agentReady && !h.models.length;
-    const detail = h.id === "opencode" && opencode1 ? m.settings_opencode_update_needed()
-      : h.authCheckFailed || !h.agentReady
+    const detail = h.authCheckFailed || !h.agentReady
         ? status.label
         : noModels ? m.settings_no_models()
         : [h.accountName, h.plan].filter(Boolean).join(" · ") ||
@@ -669,12 +669,12 @@ export function AgentList({ remote, onboarding }: {
         name={name}
         detail={detail}
         off={switchable && turnedOff.has(h.id)}
-        warn={update || Boolean(h.authCheckFailed) || (!h.agentReady && !h.catalogPending) || noModels}
+        warn={Boolean(h.authCheckFailed) || (!h.agentReady && !h.catalogPending) || noModels}
         action={<>
           {action && (
-            <Button size="small" onClick={() => openSetup(h, update ? { action: "upgrade" } : {})} disabled={!commands} aria-haspopup="dialog">
+            <Button size="small" onClick={() => openSetup(h)} disabled={!commands} aria-haspopup="dialog">
               <SquareTerminal size={14} />
-              {update || h.authState === "unsupported" ? m.harness_setup_update() : m.harness_setup_install()}
+              {h.authState === "unsupported" ? m.harness_setup_update() : m.harness_setup_install()}
             </Button>
           )}
           {switchable && agentSwitch(h.id, name)}
@@ -690,7 +690,6 @@ export function AgentList({ remote, onboarding }: {
             {acp && <><Button size="small" onClick={() => openAcp(acp)}>{m.activity_edit()}</Button><Button size="small" onClick={remove} aria-haspopup="dialog">{m.chat_panel_remove()}</Button></>}
           </div>
         )}
-        {update && <p className="mt-0 mb-3 text-sm text-subtext">{m.opencode_update_description({ version: opencodeVersion(h) ?? "1" })}</p>}
         <div className={cn(KV_CLASS_NAME, "[&_.v]:text-sm")}>
           {(acp || !h.managed) && (
             <>
@@ -1209,6 +1208,48 @@ function NestedDelegationRow() {
         aria-label={m.settings_nested_subagents()}
         onClick={() => mutUpdateUiState.run(workspace, { nestedDelegation: !uiState.nestedDelegation })}
       />
+    </div>
+  );
+}
+
+/** The model that reviews OpenCode's Auto requests; the chat's own until one is picked. */
+function AutoReviewerRow() {
+  const workspace = useWorkspace();
+  const { data: uiState } = useQuery(workspace.queries.getUiStateQuery());
+  const { data: harnesses } = useQuery(workspace.queries.getHarnessesQuery());
+  const opencode = harnesses?.find((h) => h.id === "opencode");
+  if (!uiState || !opencode?.agentReady) return null;
+  const labels = opencode.models.map((model) => tidyModelName(model.displayName ?? modelLabel(model.id)));
+  const choices = [
+    { id: "", label: m.settings_auto_reviewer_same() },
+    ...opencode.models.map((model, index) => ({
+      id: model.id,
+      label: labels.filter((label) => label === labels[index]).length > 1 ? `${labels[index]} · ${model.id.split("/")[0]}` : labels[index],
+    })),
+  ];
+  return (
+    <div className={cn(PROJECT_DEFAULT_ROW_CLASS_NAME, "mt-4")}>
+      <div>
+        <div className="project-default-title text-base font-medium">{m.settings_auto_reviewer()}</div>
+        <p>{m.settings_auto_reviewer_description()}</p>
+      </div>
+      <div className="w-64 shrink-0">
+        <OptionPicker
+          choices={choices}
+          value={uiState.opencodeReviewModel ?? ""}
+          searchPlaceholder={m.model_picker_search_models()}
+          title={m.settings_auto_reviewer()}
+          header={m.settings_auto_reviewer()}
+          renderIcon={(choice) => {
+            const model = opencode.models.find((item) => item.id === choice.id);
+            return model ? <ModelMark model={model} harness="opencode" size={16} /> : <MessageSquare size={16} className="block shrink-0 text-muted" aria-hidden="true" />;
+          }}
+          variant="field"
+          floating
+          dropDown
+          onSelect={(id) => mutUpdateUiState.run(workspace, { opencodeReviewModel: id })}
+        />
+      </div>
     </div>
   );
 }
