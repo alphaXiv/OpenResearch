@@ -7273,6 +7273,9 @@ export function ChatPanel({
     getItemKey: (index) => sidebarRowKey(sidebarRows[index]),
     estimateSize: (index) => sidebarRowHeight(sidebarRows[index]),
     overscan: 5,
+    // Keeps a row scrolled into view clear of the rail's 0.75rem edge fades.
+    scrollPaddingStart: 12,
+    scrollPaddingEnd: 12,
     rangeExtractor: (range) => {
       const indexes = defaultRangeExtractor(range);
       const focused = sidebarRows.findIndex((row) => sidebarRowKey(row) === focusedSidebarRow);
@@ -7369,7 +7372,7 @@ export function ChatPanel({
         </div>
       </div>
       <div className="relative flex-1 min-h-0">
-      <div ref={setRailBody} tabIndex={-1} className={`rail-body h-full overflow-x-hidden ${sidebarScrollable ? "overflow-y-auto" : "overflow-y-hidden"}`}
+      <div ref={setRailBody} tabIndex={-1} className={`rail-body h-full overflow-x-hidden ${!sidebarScrollable ? "overflow-y-hidden" : (sidebarVirtualizer.scrollOffset ?? 0) > 0 ? "overflow-y-auto mask-y-from-[calc(100%-0.75rem)]" : "overflow-y-auto mask-b-from-[calc(100%-0.75rem)]"}`}
         onKeyDown={(event) => {
           if (event.defaultPrevented || event.nativeEvent.isComposing || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
           const target = event.target;
@@ -7525,10 +7528,6 @@ export function ChatPanel({
           )}
         </div>
       </div>
-      {sidebarScrollable && <>
-        {(sidebarVirtualizer.scrollOffset ?? 0) > 0 && <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 top-0 z-5 h-3 bg-linear-to-b from-background to-transparent" />}
-        <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 bottom-0 z-5 h-3 bg-linear-to-t from-background to-transparent" />
-      </>}
       </div>
       <StatusStrip runtime={runtime} onDetails={() => onSelectMainView("openresearch")} />
     </aside>
