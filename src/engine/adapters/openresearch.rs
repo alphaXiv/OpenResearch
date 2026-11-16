@@ -109,31 +109,6 @@ async fn rental_deleted(descriptor: &BackendDescriptor) -> bool {
     matches!(lookup(descriptor).await, Ok(None))
 }
 
-/// What OpenResearch says went wrong with a box that is `failed`, `offline` or `dead`.
-fn box_failure(sandbox: &crate::client::Sandbox) -> Option<String> {
-    match sandbox.status.as_str() {
-        "failed" => Some(format!(
-            "{}: {}",
-            sandbox.failure_code.as_deref().unwrap_or("provider_error"),
-            sandbox
-                .failure_message
-                .as_deref()
-                .unwrap_or("The provider could not provision this box.")
-        )),
-        "offline" | "dead" => Some(format!(
-            "box {} went {}{}",
-            sandbox.id,
-            sandbox.status,
-            sandbox
-                .provision_warnings
-                .as_deref()
-                .map(|warnings| format!(": {warnings}"))
-                .unwrap_or_default()
-        )),
-        _ => None,
-    }
-}
-
 fn kept_page(
     directory: &Path,
     run: &str,
@@ -402,7 +377,7 @@ impl OpenResearch {
                     "box {id} was deleted before it came online, and OpenResearch kept no reason."
                 ));
             };
-            if let Some(failure) = box_failure(&sandbox) {
+            if let Some(failure) = sandbox.failure() {
                 return failed(failure);
             }
             if sandbox.status != "online"
@@ -605,7 +580,7 @@ impl OpenResearch {
                 if sandbox.is_some() {
                     self.release(descriptor).await?;
                 }
-                let failure = sandbox.as_ref().and_then(box_failure);
+                let failure = sandbox.as_ref().and_then(crate::client::Sandbox::failure);
                 let reason = self.unreached_reason(descriptor, &host, failure).await?;
                 self.engine.observe(
                     &run.id,
@@ -680,7 +655,7 @@ impl OpenResearch {
                 if matches!(sandbox.status.as_str(), "failed" | "dead")
                     || (sandbox.status == "offline" && unreached_host.is_some()) =>
             {
-                box_failure(&sandbox)
+                sandbox.failure()
             }
             Some(_) => return Ok(None),
         };

@@ -98,6 +98,7 @@ group below has a module (`orx skill <name>`) with the full flags and rules.
 | `orx compute instructions show --json` | Read the machine-wide custom recipe and its revision before configuring or launching. |
 | `orx compute [--gpu <id>] [--count <n>] [--provider <name>]` / `orx compute --cpu` | List the GPU/CPU compute catalog. |
 | `orx instance create <orgId> (--gpu <id> … \| --cpu <flavor> …)` | Spin up a standalone instance in an org; see `orx-instances`. |
+| `orx instance list <orgId> [--json]` | An org's instances with status, failure reason, owner and `ssh` command. |
 | `orx exp status/run/cancel/wait/wake <localExpId>` | Inspect, run, cancel, wait on, or register a wake-up for a local experiment node. |
 | `orx exp move/archive/unarchive/delete <localExpId>` | Re-parent, hide, restore, or permanently delete experiment nodes; see `orx-experiment-tree`. |
 | `orx exp desc <expId> [--set "<text>" \| --stdin]` | Read or overwrite the experiment's description. |

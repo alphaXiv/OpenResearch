@@ -3,7 +3,7 @@
 //!
 //!   orx instance create <orgId> --gpu <id> [--count N] [--disk GB] [--provider P]
 //!   orx instance create <orgId> --cpu <cpu5c|cpu5g|cpu5m> [--vcpus 2|8|32]
-//!   orx instance list <orgId>
+//!   orx instance list <orgId> [--json]
 //!   orx instance delete <sandboxId>
 //!
 //! Create is the CLI equivalent of the dashboard's org "Spin up" panel — it
@@ -12,7 +12,8 @@
 //! box whose automatic teardown failed.
 
 use crate::client::{
-    create_sandbox, delete_sandbox, list_sandboxes, CreateSandboxBody, SandboxTarget,
+    create_sandbox, current_user, delete_sandbox, list_sandboxes, CreateSandboxBody, Sandbox,
+    SandboxTarget,
 };
 use crate::error::{anyhow, require_credentials, Result};
 use crate::{InstanceCommand, InstanceCreateArgs, InstanceDeleteArgs, InstanceListArgs};
@@ -26,14 +27,67 @@ pub async fn run(args: crate::InstanceArgs) -> Result<()> {
     }
 }
 
+/// A listed box plus what `instance list` derives for agents and scripts.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ListedInstance<'a> {
+    #[serde(flatten)]
+    sandbox: &'a Sandbox,
+    /// `None` when the creator or the signed-in account is unknown.
+    created_by_you: Option<bool>,
+    failure: Option<String>,
+    ssh_command: Option<String>,
+}
+
+fn created_by_you(s: &Sandbox, me: Option<&str>) -> Option<bool> {
+    Some(s.created_by.as_deref()? == me?)
+}
+
+/// `ssh` into an online box, pinning its host key under the box's own id: providers
+/// recycle proxy `host:port` pairs across boxes, so pinning the endpoint would
+/// mismatch, while the alias still catches a key change on this box.
+fn ssh_command(s: &Sandbox) -> Option<String> {
+    if s.status != "online" {
+        return None;
+    }
+    let (Some(user), Some(host), Some(port)) = (&s.ssh_username, &s.ssh_hostname, s.ssh_port)
+    else {
+        return None;
+    };
+    Some(format!(
+        "ssh -p {port} -o HostKeyAlias=orx-instance-{} -o StrictHostKeyChecking=accept-new {user}@{host}",
+        s.id
+    ))
+}
+
 /// `orx instance list <orgId>` — every box in the org, one line each.
 async fn list(creds: &crate::config::Credentials, args: InstanceListArgs) -> Result<()> {
-    let sandboxes = list_sandboxes(creds, &args.org_id).await?.sandboxes;
-    if sandboxes.is_empty() {
+    let (sandboxes, me) = tokio::join!(list_sandboxes(creds, &args.org_id), current_user(creds));
+    let sandboxes = sandboxes?.sandboxes;
+    // Ownership is a label; a slow or failing account call must not hide the boxes.
+    let me = me.map(|me| me.user.id).map_err(|error| error.to_string());
+    let listed: Vec<_> = sandboxes
+        .iter()
+        .map(|sandbox| ListedInstance {
+            sandbox,
+            created_by_you: created_by_you(sandbox, me.as_deref().ok()),
+            failure: sandbox.failure(),
+            ssh_command: ssh_command(sandbox),
+        })
+        .collect();
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&listed)?);
+        return Ok(());
+    }
+    if listed.is_empty() {
         println!("No instances in org {}.", args.org_id);
         return Ok(());
     }
-    for s in &sandboxes {
+    if let Err(error) = &me {
+        eprintln!("Could not read your account, so owners are not shown: {error}");
+    }
+    for item in &listed {
+        let s = item.sandbox;
         let shape = match (&s.gpu, s.vcpu_count) {
             (Some(gpu), _) => format!("{} x{}", gpu, s.gpu_count.unwrap_or(1)),
             (None, Some(vcpus)) => format!("{vcpus} vcpus"),
@@ -47,7 +101,30 @@ async fn list(creds: &crate::config::Credentials, args: InstanceListArgs) -> Res
             (Some(user), Some(host), Some(port)) => format!("  {user}@{host}:{port}"),
             _ => String::new(),
         };
-        println!("{}  {:<12}  {shape}{price}{endpoint}", s.id, s.status);
+        let owner = match item.created_by_you {
+            Some(true) => "  [yours]",
+            Some(false) => "  [another org member's]",
+            None => "",
+        };
+        println!(
+            "{}  {:<12}  {shape}{price}{endpoint}{owner}",
+            s.id, s.status
+        );
+        if let Some(failure) = &item.failure {
+            println!("    {failure}");
+        }
+        if !s.connections.is_empty() {
+            println!("    {} live SSH session(s) on it now.", s.connections.len());
+        }
+        if s.status == "offline" && s.provider_name.is_some() {
+            println!(
+                "    It still bills while offline. Delete it with `orx instance delete {}` if you no longer need it.",
+                s.id
+            );
+        }
+        if let Some(command) = &item.ssh_command {
+            println!("    {command}");
+        }
     }
     Ok(())
 }
@@ -124,9 +201,77 @@ async fn create(creds: &crate::config::Credentials, args: InstanceCreateArgs) ->
     if let Some(price) = sandbox.price_per_hour {
         println!("  price:    ${:.2}/hr", price);
     }
-    // sshHostname is null until the box finishes provisioning, so there's no
-    // host to print yet — and there's no `orx` command to poll it.
-    println!("\n  The box is provisioning; its SSH host appears once it's online.");
+    println!(
+        "\n  The box is provisioning. `orx instance list {}` shows its SSH command once it's online, or why it failed.",
+        args.org_id
+    );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sandbox(status: &str) -> Sandbox {
+        serde_json::from_value(serde_json::json!({
+            "id": "sb_1", "organizationId": "org_1",
+            "sshHostname": "ssh7.vast.ai", "sshPort": 13440, "sshUsername": "root",
+            "status": status, "machineType": "persistent", "createdBy": "user_1",
+            "updatedAt": "2026-11-16T00:00:00Z", "provisionWarnings": null,
+            "failureCode": null, "failureMessage": null, "failedAt": null,
+            "providerName": "vast", "providerInstanceId": "1", "pricePerHour": 0.33,
+            "gpu": "RTX_4090", "gpuCount": 1, "vcpuCount": null
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn json_lists_box_with_owner_and_pinned_ssh_command() {
+        let online = sandbox("online");
+        let json = serde_json::to_value(ListedInstance {
+            sandbox: &online,
+            created_by_you: created_by_you(&online, Some("user_1")),
+            failure: online.failure(),
+            ssh_command: ssh_command(&online),
+        })
+        .unwrap();
+        assert_eq!(json["id"], "sb_1");
+        assert_eq!(json["status"], "online");
+        assert_eq!(json["sshPort"], 13440);
+        assert_eq!(json["createdByYou"], true);
+        assert!(json["failure"].is_null());
+        let command = json["sshCommand"].as_str().unwrap();
+        assert!(
+            command.contains("HostKeyAlias=orx-instance-sb_1"),
+            "{command}"
+        );
+        assert!(
+            command.contains("StrictHostKeyChecking=accept-new"),
+            "{command}"
+        );
+        assert!(!command.contains("StrictHostKeyChecking=no"), "{command}");
+        assert_eq!(ssh_command(&sandbox("offline")), None);
+    }
+
+    #[test]
+    fn owner_is_unknown_rather_than_guessed() {
+        let mut box_ = sandbox("failed");
+        assert_eq!(created_by_you(&box_, Some("user_1")), Some(true));
+        assert_eq!(created_by_you(&box_, Some("user_2")), Some(false));
+        assert_eq!(created_by_you(&box_, None), None);
+        box_.created_by = None;
+        assert_eq!(created_by_you(&box_, Some("user_1")), None);
+    }
+
+    #[test]
+    fn failed_box_carries_the_service_reason() {
+        let mut box_ = sandbox("failed");
+        box_.failure_code = Some("readiness_timeout".into());
+        box_.failure_message = Some("Not reachable within five minutes.".into());
+        assert_eq!(
+            box_.failure().as_deref(),
+            Some("readiness_timeout: Not reachable within five minutes.")
+        );
+    }
 }
