@@ -2842,6 +2842,30 @@ impl Drop for PendingGuard {
     }
 }
 
+const TURN_ENDED: &str = "the turn this approval belonged to has already ended";
+
+/// A bridge card on screen, waiting for the user.
+struct HeldPermission {
+    rx: tokio::sync::oneshot::Receiver<PermissionDecision>,
+    /// Cleanup on every exit path — answered, timed out, or the handler
+    /// future dropped (HTTP connection died with the claude child): remove
+    /// the pending entry and resolve the card so it can't be answered into
+    /// the void.
+    _guard: PendingGuard,
+}
+
+impl HeldPermission {
+    async fn decision(self) -> PermissionDecision {
+        tokio::select! {
+            d = self.rx => d.unwrap_or_else(|_| PermissionDecision::deny("the approval was cancelled")),
+            _ = tokio::time::sleep(BRIDGE_ANSWER_TIMEOUT) => PermissionDecision::deny(
+                "No one answered this approval within 55 minutes; treat it as denied \
+                 and wrap up the turn cleanly.",
+            ),
+        }
+    }
+}
+
 // --- host --------------------------------------------------------------------
 
 /// Owns turn tasks and the chat event stream. One per `orx up` process.
@@ -3956,13 +3980,22 @@ impl ChatHost {
                 .and_then(Value::as_array)
                 .filter(|q| !q.is_empty())
             {
-                let mut answers = serde_json::Map::new();
+                // Every card is up before any is answered, so the user can
+                // move between the questions of one batch.
+                let mut cards = Vec::with_capacity(questions.len());
                 for question in questions {
                     let input = json!({ "questions": [question] });
-                    let decision = self
-                        .present_permission(session_id, token, tool_name, input)
-                        .await?;
-                    match decision {
+                    match self
+                        .post_permission(session_id, token, tool_name, input)
+                        .await?
+                    {
+                        Some(card) => cards.push(card),
+                        None => return Ok(PermissionDecision::deny(TURN_ENDED)),
+                    }
+                }
+                let mut answers = serde_json::Map::new();
+                for card in cards {
+                    match card.decision().await {
                         PermissionDecision::Allow {
                             updated_input: Some(input),
                         } => {
@@ -3987,18 +4020,26 @@ impl ChatHost {
                 });
             }
         }
-        self.present_permission(session_id, token, tool_name, tool_input)
-            .await
+        Ok(
+            match self
+                .post_permission(session_id, token, tool_name, tool_input)
+                .await?
+            {
+                Some(card) => card.decision().await,
+                None => PermissionDecision::deny(TURN_ENDED),
+            },
+        )
     }
 
-    async fn present_permission(
+    /// Shows the card for a held tool call; `None` when its turn has ended.
+    async fn post_permission(
         self: &Arc<Self>,
         session_id: &str,
         token: &str,
         tool_name: &str,
         tool_input: Value,
-    ) -> Result<PermissionDecision> {
-        // Revalidate after queued approvals and between questions in a batch.
+    ) -> Result<Option<HeldPermission>> {
+        // Revalidate after queued approvals.
         let gate_is_current = self
             .gate_tokens
             .lock()
@@ -4006,9 +4047,7 @@ impl ChatHost {
             .get(session_id)
             .is_some_and(|gate| gate.value == token);
         if !gate_is_current || !self.is_busy(session_id).await {
-            return Ok(PermissionDecision::deny(
-                "the turn this approval belonged to has already ended",
-            ));
+            return Ok(None);
         }
 
         let prompt_id = format!("perm_{}", uuid::Uuid::new_v4());
@@ -4095,24 +4134,14 @@ impl ChatHost {
                 tx,
             },
         );
-        // Cleanup on every exit path — answered, timed out, or this handler
-        // future dropped (HTTP connection died with the claude child): remove
-        // the pending entry and resolve the card so it can't be answered into
-        // the void.
-        let _guard = PendingGuard {
-            host: self.clone(),
-            session_id: session_id.to_string(),
-            prompt_id: prompt_id.clone(),
-        };
-
-        let decision = tokio::select! {
-            d = rx => d.unwrap_or_else(|_| PermissionDecision::deny("the approval was cancelled")),
-            _ = tokio::time::sleep(BRIDGE_ANSWER_TIMEOUT) => PermissionDecision::deny(
-                "No one answered this approval within 55 minutes; treat it as denied \
-                 and wrap up the turn cleanly.",
-            ),
-        };
-        Ok(decision)
+        Ok(Some(HeldPermission {
+            rx,
+            _guard: PendingGuard {
+                host: self.clone(),
+                session_id: session_id.to_string(),
+                prompt_id,
+            },
+        }))
     }
 
     /// Settle a pending bridge request with the user's decision (the native
@@ -11380,6 +11409,58 @@ mod bridge_tests {
             assert_eq!(decision["behavior"], "deny", "turn ends: {turn_ends}");
             assert!(!host.has_pending_permission(&session));
         }
+    }
+
+    #[tokio::test]
+    async fn a_question_batch_is_held_whole_and_collects_every_answer() {
+        let host = Arc::new(test_host());
+        let session = format!("ses_{}", uuid::Uuid::new_v4());
+        let token = host.mint_gate_token(&session, false, false);
+        host.turns
+            .lock()
+            .await
+            .insert(session.clone(), TurnState::Reserved { turn_id: None });
+        let question = |text: &str| json!({"question": text, "header": "h", "options": [{"label": "Yes"}, {"label": "No"}]});
+        let held = tokio::spawn({
+            let host = host.clone();
+            let session = session.clone();
+            let questions = json!({"questions": [question("First?"), question("Second?")]});
+            async move {
+                host.request_permission(&session, &token, "AskUserQuestion", questions)
+                    .await
+            }
+        });
+        let pending = || -> Vec<String> {
+            let map = host.pending_permissions.lock().unwrap();
+            map.iter()
+                .filter(|(_, held)| held.session_id == session)
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        while pending().len() < 2 {
+            tokio::task::yield_now().await;
+        }
+        // Whichever order the answers arrive in.
+        for (index, id) in pending().into_iter().enumerate() {
+            let answered = json!({"answers": {format!("question {index}"): "Yes"}});
+            host.settle_permission(
+                &id,
+                PermissionDecision::Allow {
+                    updated_input: Some(answered),
+                },
+            )
+            .unwrap();
+        }
+        let decision = serde_json::to_value(held.await.unwrap().unwrap()).unwrap();
+        assert_eq!(decision["behavior"], "allow");
+        assert_eq!(
+            decision["updatedInput"]["answers"]
+                .as_object()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(!host.has_pending_permission(&session));
     }
 
     #[tokio::test]

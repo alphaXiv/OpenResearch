@@ -1230,7 +1230,7 @@ fn question_reply(
         .as_deref()
         .ok_or_else(|| anyhow!("question has no reply id"))?;
     let submitted = if answer.approve {
-        submitted_answers(&answer.answers, answer.note.as_ref()).to_vec()
+        submitted_answers(&answer.answers, answer.note.as_ref())
     } else {
         Vec::new()
     };
@@ -1263,7 +1263,7 @@ fn question_reply(
         if saved_request == request {
             if let Some(slot) = answers.get_mut(saved_index) {
                 *slot = Some(if prior.approved == Some(true) {
-                    submitted_answers(&prior.answers, prior.note.as_ref()).to_vec()
+                    submitted_answers(&prior.answers, prior.note.as_ref())
                 } else {
                     Vec::new()
                 });
@@ -1295,14 +1295,14 @@ async fn post_permission(
     Ok(())
 }
 
-fn submitted_answers<'a>(answers: &'a [String], note: Option<&'a String>) -> &'a [String] {
-    if !answers.is_empty() {
-        answers
-    } else {
-        note.filter(|note| !note.trim().is_empty())
-            .map(std::slice::from_ref)
-            .unwrap_or_default()
-    }
+/// The chosen labels, then a typed answer, which OpenCode takes as a label of
+/// the user's own.
+fn submitted_answers(answers: &[String], note: Option<&String>) -> Vec<String> {
+    answers
+        .iter()
+        .chain(note.filter(|note| !note.trim().is_empty()))
+        .cloned()
+        .collect()
 }
 
 /// Deliver an answered card's reply to the live serve session, unblocking the
@@ -2778,6 +2778,14 @@ opencode/unknown
         assert_eq!(
             question_reply(&single, &answer(false, &[], None), &[]).unwrap(),
             ("batch".into(), Some(vec![vec![]]))
+        );
+        assert_eq!(
+            question_reply(&single, &answer(true, &["Green"], Some("but darker")), &[]).unwrap(),
+            (
+                "batch".into(),
+                Some(vec![vec!["Green".into(), "but darker".into()]])
+            ),
+            "a note typed beside a choice travels with it"
         );
     }
 
