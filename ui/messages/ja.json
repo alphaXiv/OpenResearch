@@ -2030,5 +2030,9 @@
   "usage_reset_confirm": "リセットを使う",
   "usage_reset_done": "Codex の上限が回復しました。",
   "usage_reset_nothing": "まだリセットするものがありません。上限を使い切っていません。リセットはそのまま残ります。",
-  "usage_reset_none_left": "リセットは残っていません。"
+  "usage_reset_none_left": "リセットは残っていません。",
+  "acp_approval_ask": "毎回確認",
+  "acp_approval_ask_description": "承認が必要な操作の前に確認します",
+  "acp_approval_auto": "自動承認",
+  "acp_approval_auto_description": "個別の操作要求を自動承認します。エージェント自身のアクセス制限は引き続き適用されます。"
 }

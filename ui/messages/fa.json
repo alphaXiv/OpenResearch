@@ -2030,5 +2030,9 @@
   "usage_reset_confirm": "استفاده از بازنشانی",
   "usage_reset_done": "سقف‌های Codex شما دوباره پر شد.",
   "usage_reset_nothing": "هنوز چیزی برای بازنشانی نیست: سقف‌هایتان تمام نشده است. بازنشانی برایتان می‌ماند.",
-  "usage_reset_none_left": "بازنشانی‌ای باقی نمانده است."
+  "usage_reset_none_left": "بازنشانی‌ای باقی نمانده است.",
+  "acp_approval_ask": "هر بار بپرس",
+  "acp_approval_ask_description": "پیش از اقداماتی که به تأیید نیاز دارند بپرس",
+  "acp_approval_auto": "تأیید خودکار",
+  "acp_approval_auto_description": "درخواست‌های تکی را خودکار تأیید می‌کند. محدودیت‌های دسترسی خود عامل همچنان برقرار است."
 }
