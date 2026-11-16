@@ -581,7 +581,7 @@ export function ComposerEditor({
   return (
     <div
       ref={hostRef}
-      className="composer-editor min-w-0 flex-1 [--editor-pad-x:12px] [--editor-pad-y:10px]"
+      className="composer-editor min-w-0 flex-1 [--editor-pad-x:var(--composer-pad-x,12px)] [--editor-pad-y:10px]"
       onKeyDown={(event) => {
         // CodeMirror skips its handlers while an IME composes; keep those keys
         // (an Escape that cancels a candidate) from reaching page shortcuts.
