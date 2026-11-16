@@ -116,9 +116,9 @@ function leader(models: RunModel[]): RunModel | null {
  * covered exactly the runs live now; else null, and orx words the summary itself. Its bold takes the tone of the run the
  * bold's first token reads.
  */
-function watcherSummary(models: RunModel[], labels: string[], watch: ChatWatch | null | undefined): SummaryPart | null {
+function watcherSummary(models: RunModel[], labels: string[], watch: ChatWatch | null | undefined, now: number): SummaryPart | null {
   const live = models.filter((model) => model.live).map((model) => model.run.id).sort();
-  if (!watch?.summary || live.length < 2 || [...watch.runIds].sort().join(" ") !== live.join(" ")) return null;
+  if (!watch?.summary || now - watch.at > 3 * 60_000 || live.length < 2 || [...watch.runIds].sort().join(" ") !== live.join(" ")) return null;
   const runOf = (key: string) => models.find((model) => model.run.id === watch.keys[key]);
   const { template } = watch.summary;
   const bold = /\*\*[^*]*?\{(r\d+)[:}]/u.exec(template)?.[1];
@@ -140,7 +140,7 @@ function watcherSummary(models: RunModel[], labels: string[], watch: ChatWatch |
  * does. The watcher's summary, when there is one, says the last two. `firstDone` is when the soonest live run should
  * finish, for the line to say beside a sentence that doesn't.
  */
-export function summarize(models: RunModel[], { labels, groups }: { labels: string[]; groups: (number | null)[] }, watch?: ChatWatch | null): { parts: SummaryPart[]; firstDone: string | null } {
+export function summarize(models: RunModel[], { labels, groups }: { labels: string[]; groups: (number | null)[] }, watch?: ChatWatch | null, now = Date.now()): { parts: SummaryPart[]; firstDone: string | null } {
   const name = (model: RunModel) => autoDir(labels[models.indexOf(model)]);
   const urgent = models.reduce<RunModel | null>((most, model) => urgency(model) < (most ? urgency(most) : Infinity) ? model : most, null);
   const leaders = [...new Set(groups)].flatMap((group) => {
@@ -150,7 +150,7 @@ export function summarize(models: RunModel[], { labels, groups }: { labels: stri
   const leading = urgent || leaders.length !== 1 ? null : leaders[0];
   // A run that ended with nothing to say, not even why, says how long it took.
   const why = urgent && (urgent.sentence.text || urgent.note);
-  const watched = urgent ? null : watcherSummary(models, labels, watch);
+  const watched = urgent ? null : watcherSummary(models, labels, watch, now);
   const parts: SummaryPart[] | null = watched ? [watched] : urgent ? [why
     ? { tone: urgent.tone, who: m.run_summary_attention({ name: name(urgent), state: urgent.status }), text: why }
     : { tone: urgent.tone, who: m.run_summary_attention_ended({ name: name(urgent), ended: urgent.eta }), text: "" }]
@@ -164,19 +164,17 @@ export function summarize(models: RunModel[], { labels, groups }: { labels: stri
     }]
     : null;
 
-  const soonest = models.flatMap((model) => model.live && model.left ? [model.left] : []).sort((a, b) => a.ms - b.ms)[0];
+  const soonest = models.flatMap((model) => model.live && model.leftMs !== null ? [model.leftMs] : []).sort((a, b) => a - b)[0];
   // Once one has ended, the soonest of the rest is the next done, not the first.
   const after = models.some((model) => !model.live);
-  const firstDone = (duration: string) => !soonest ? null
-    : soonest.floor ? (after ? m.run_summary_next_done_at_least : m.run_summary_first_done_at_least)({ duration })
-    : (after ? m.run_summary_next_done : m.run_summary_first_done)({ duration });
-  if (parts) return { parts, firstDone: soonest ? firstDone(durationText(soonest.ms)) : null };
+  const firstDone = (duration: string) => (after ? m.run_summary_next_done : m.run_summary_first_done)({ duration });
+  if (parts) return { parts, firstDone: soonest !== undefined ? firstDone(durationText(soonest)) : null };
 
   // The common case: the counts, then when the first finishes, all one sentence.
   const counts = PROGRESS.flatMap(({ tone, words }) => {
     const count = models.filter((model) => model.tone === tone).length;
     return count > 0 ? [{ tone, text: words(`**${ltr(fmtNumber(count))}**`) }] : [];
   });
-  const first = soonest ? firstDone(`**${durationText(soonest.ms)}**`) : null;
+  const first = soonest !== undefined ? firstDone(`**${durationText(soonest)}**`) : null;
   return { parts: first ? [...counts, { tone: "running", text: first }] : counts, firstDone: null };
 }

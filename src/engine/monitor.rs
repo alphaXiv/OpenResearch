@@ -25,9 +25,6 @@ const MAX_BODY: usize = 4 * 1024 * 1024;
 const SENTINELS: [&str; 3] = ["NaN", "Infinity", "-Infinity"];
 /// A stage on course to take this many times as long as the run that timed it is said to be slow.
 const PACE_NOTED: f64 = 2.0;
-/// How long a run whose log has said nothing orx recognises is said to be setting up, before it
-/// is said to be running with no estimate.
-const SETUP_MS: i64 = 15 * 60_000;
 
 fn interval(seconds: u64) -> i64 {
     crate::config::paced(Duration::from_secs(seconds)).as_millis() as i64
@@ -401,7 +398,7 @@ pub(crate) fn default_view(snapshot: Option<&Snapshot>) -> Value {
     };
     let mut blocks = Vec::new();
     if let Some(headline) = &own_headline {
-        blocks.push(json!({"chart": [headline], "x": x}));
+        blocks.push(json!({"chart": [headline], "x": x, "ghost": "parent"}));
         let first_seen = |columns: &Vec<String>| {
             columns
                 .iter()
@@ -434,7 +431,7 @@ pub(crate) fn default_view(snapshot: Option<&Snapshot>) -> Value {
     if let Some((name, columns)) = table {
         blocks.push(json!({"table": name, "columns": columns}));
     } else if let Some(headline) = &headline {
-        blocks.push(json!({"chart": [headline], "x": x}));
+        blocks.push(json!({"chart": [headline], "x": x, "ghost": "parent"}));
     }
     let rest: Vec<&String> = order
         .iter()
@@ -821,6 +818,15 @@ fn evaluate(
         }
     };
     let segments: Vec<Value> = output.as_ref().map_or_else(Vec::new, |o| {
+        if o.whole.is_none() {
+            let fill = snapshot
+                .and_then(Snapshot::progress)
+                .and_then(|phase| Some(phase.done? / phase.of.filter(|of| *of > 0.0)?))
+                .map(|fill| fill.clamp(0.0, 1.0))
+                .or(o.phase_fraction);
+
+            return vec![json!({"name": stages.get(current.unwrap_or(0)).map(|s| &s.name), "weight": 1.0, "fill": finished(fill)})];
+        }
         o.segments
             .iter()
             .map(|s| json!({"name": s.name, "weight": s.weight, "fill": finished(s.fill)}))
@@ -855,9 +861,9 @@ fn evaluate(
     // declared plan says what does.
     let floor = !planned
         && snapshot.is_some_and(|s| {
-            s.progress()
-                .is_some_and(|phase| matches!(phase.source.as_str(), "detected" | "pattern"))
-                && !s.several_bars()
+            s.progress().is_some_and(|phase| {
+                !phase.name.is_empty() || matches!(phase.source.as_str(), "detected" | "pattern")
+            }) && !s.several_bars()
         });
     let estimating = || {
         json!({
@@ -1009,6 +1015,7 @@ fn evaluate(
     let x_max = snapshot
         .and_then(Snapshot::progress)
         .and_then(|p| p.of)
+        .or(current.and_then(|index| stages[index].of))
         .filter(|_| stepped);
     let latest = snapshot.map_or_else(BTreeMap::new, |s| s.latest.clone());
     let blocks = view["blocks"].as_array().map_or(&[][..], Vec::as_slice);
@@ -1081,25 +1088,69 @@ fn evaluate(
     let before = (!started && life.live())
         .then(|| json!({"kind": "starting", "startsAt": null, "text": null}));
     let generation = snapshot.map_or("", |s| s.generation.as_str());
-    // Until the log says anything orx recognises, or a stage it declared reports its first step
-    // or row, what the run is doing is its newest line.
-    let nothing_read = !snapshot.is_some_and(Snapshot::has_signals);
-    let begun = snapshot
-        .filter(|s| s.rows.is_empty())
-        .and_then(|s| s.phases.last())
-        .filter(|phase| phase.done.is_none() && !phase.name.is_empty());
-    let setup =
-        (started && life.live() && fold.error.is_none() && (nothing_read || begun.is_some())).then(
-            || {
-                let line = snapshot
-                    .map(|s| s.last_line.as_str())
-                    .filter(|line| !line.is_empty() && find_secret(line).is_none());
-                let stage = begun.map(|phase| phase.name.as_str());
-                // A named stage is that stage for as long as it lasts; anything else is a guess.
-                let until = stage.is_none().then(|| life.start() + SETUP_MS);
-                json!({ "line": line, "stage": stage, "until": until })
-            },
-        );
+    let prior_view = (view_from["isDefault"] == true && blocks.is_empty())
+        .then(|| default_view(earlier.or(parent)));
+    let timing_view = prior_view.as_ref().unwrap_or(&view);
+    let displayed: Vec<&str> = timing_view["headline"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .chain(
+            timing_view["blocks"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .flat_map(|block| {
+                    block["chart"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .chain(
+                            block["series"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|series| series["y"].as_str()),
+                        )
+                }),
+        )
+        .collect();
+    let has_point = snapshot.is_some_and(|s| {
+        displayed
+            .iter()
+            .any(|name| s.series.get(*name).is_some_and(|points| !points.is_empty()))
+    });
+    let setup = (started && life.live() && fold.error.is_none() && !has_point).then(|| {
+        let line = snapshot
+            .map(|s| s.last_line.as_str())
+            .filter(|line| !line.is_empty() && find_secret(line).is_none());
+        let stage = snapshot
+            .and_then(|s| s.phases.last())
+            .map(|phase| phase.name.as_str())
+            .filter(|name| !name.is_empty());
+        let starts_at = timed.iter().find_map(|(prior, _, _)| {
+            let first = displayed
+                .iter()
+                .filter_map(|name| {
+                    prior
+                        .series
+                        .get(*name)
+                        .filter(|points| !points.is_empty())?;
+                    prior.first_series_stages.get(*name).copied()
+                })
+                .min()?;
+            let durations: Option<i64> = prior
+                .phases
+                .iter()
+                .take(first)
+                .map(|phase| Some(phase.ended_at? - phase.started_at?))
+                .sum();
+            Some(life.start() + durations?)
+        });
+        json!({ "line": line, "stage": stage, "startsAt": starts_at })
+    });
 
     let headline_name = headline(&view, &latest, &versus);
     let headline = headline_name.map(|name| {
@@ -1178,7 +1229,7 @@ fn evaluate(
         summary["etaUntimed"] = untimed.clone();
     }
     // A plan's stages, so a line's underline is segmented without the full monitor.
-    if planned && stages.len() > 1 && started {
+    if started && (planned && stages.len() > 1 || whole.is_none()) {
         summary["segments"] = segments
             .iter()
             .map(|s| json!({"weight": s["weight"], "fill": s["fill"]}))
@@ -2689,10 +2740,7 @@ fn eta_text(life: &Lifecycle, snapshot: Option<&Snapshot>, facts: &StatusFacts) 
                 .and_then(Snapshot::progress)
                 .filter(|p| p.done.is_some())
             {
-                None if let Some(setup) = facts
-                    .setup
-                    .filter(|setup| setup["until"].as_i64().is_none_or(|until| now < until)) =>
-                {
+                None if let Some(setup) = facts.setup => {
                     let state = setup["stage"].as_str().map_or_else(
                         || "Setting up".to_owned(),
                         |stage| format!("{stage} started"),
@@ -3264,7 +3312,7 @@ mod tests {
         assert_eq!(monitor["view"]["headline"], json!(["loss"]));
         assert_eq!(
             monitor["view"]["blocks"][0],
-            json!({"chart": ["loss"], "x": "step"})
+            json!({"chart": ["loss"], "x": "step", "ghost": "parent"})
         );
         assert_eq!(monitor["viewFrom"]["isDefault"], true);
         let estimate = &monitor["estimate"];
@@ -3308,7 +3356,7 @@ mod tests {
         assert_eq!(view["headline"], json!(["loss"]));
         assert_eq!(
             view["blocks"],
-            json!([{"chart": ["loss"], "x": "elapsed"}, {"stats": ["note"]}])
+            json!([{"chart": ["loss"], "x": "elapsed", "ghost": "parent"}, {"stats": ["note"]}])
         );
         assert_eq!(snapshot.latest["loss"], "NaN");
 
@@ -3377,7 +3425,7 @@ mod tests {
             (
                 json!(["loss"]),
                 json!([
-                    {"chart": ["loss"], "x": "step"},
+                    {"chart": ["loss"], "x": "step", "ghost": "parent"},
                     {"table": "evals", "columns": ["epoch", "val_loss", "val_acc"]},
                 ])
             )
@@ -3394,7 +3442,7 @@ mod tests {
             (
                 json!(["mean_score"]),
                 json!([
-                    {"chart": ["mean_score"], "x": "elapsed"},
+                    {"chart": ["mean_score"], "x": "elapsed", "ghost": "parent"},
                     {"table": "tasks", "columns": ["task", "score"]},
                     {"table": "eval", "columns": ["split", "acc"]},
                     {"stats": ["done_tasks"]},
@@ -3422,7 +3470,7 @@ mod tests {
             )]),
             (
                 json!(["loss"]),
-                json!([{"chart": ["loss"], "x": "step"}, {"stats": ["round"]}])
+                json!([{"chart": ["loss"], "x": "step", "ghost": "parent"}, {"stats": ["round"]}])
             )
         );
 
@@ -3739,7 +3787,7 @@ mod tests {
             monitor["setup"].clone()
         };
 
-        let guess = |line: Value| json!({"line": line, "stage": null, "until": T0 + SETUP_MS});
+        let guess = |line: Value| json!({"line": line, "stage": null, "startsAt": null});
         assert_eq!(setting_up("silent", &[], "running"), guess(Value::Null));
         assert_eq!(
             setting_up(
@@ -3768,7 +3816,7 @@ mod tests {
                 ],
                 "running"
             ),
-            json!({"line": "Resolved 120 packages", "stage": "install", "until": null}),
+            json!({"line": "Resolved 120 packages", "stage": "install", "startsAt": null}),
             "a declared stage with no step is that stage for as long as it lasts"
         );
         assert_eq!(
@@ -3777,7 +3825,7 @@ mod tests {
                 &["Using CPython 3.12", "::orx:: {\"phase\":\"install\"}"],
                 "running"
             ),
-            json!({"line": null, "stage": "install", "until": null}),
+            json!({"line": null, "stage": "install", "startsAt": null}),
             "a line from before the stage is not what it is doing"
         );
         assert_eq!(
@@ -3786,11 +3834,11 @@ mod tests {
                 &["::orx:: {\"phase\":\"download\",\"step\":0,\"of\":9}"],
                 "running"
             ),
-            Value::Null
+            json!({"line": null, "stage": "download", "startsAt": null})
         );
         assert_eq!(
             setting_up("progress", &["Epoch 1/10", "Epoch 2/10"], "running"),
-            Value::Null
+            guess(Value::Null)
         );
         assert_eq!(
             setting_up(
@@ -3810,7 +3858,7 @@ mod tests {
                 "running"
             ),
             Value::Null,
-            "a stage that reports rows is under way"
+            "a table's headline point starts the run"
         );
         assert_eq!(setting_up("ended", &["uv sync"], "done"), Value::Null);
     }
@@ -3834,7 +3882,7 @@ mod tests {
 
         assert_eq!(
             event.unwrap()["patch"]["setup"],
-            json!({"line": "Computing initial pair counts", "stage": null, "until": T0 + SETUP_MS})
+            json!({"line": "Computing initial pair counts", "stage": null, "startsAt": null})
         );
     }
 
@@ -3877,7 +3925,7 @@ mod tests {
                 let left = short(3_600_000 - after);
                 let said = if limited {
                     format!("eta      {left} to the limit (ends by 01:45 UTC)")
-                } else if reported.is_none() && after < SETUP_MS {
+                } else if reported.is_none() {
                     "eta      Setting up".to_owned()
                 } else {
                     "eta      No estimate (no progress found in the log)".to_owned()
@@ -4141,7 +4189,7 @@ mod tests {
 
     /// The number of bars to come is unknown, so finished ones are never drawn as full segments.
     #[test]
-    fn several_bars_draw_one_segment_of_the_whole_run() {
+    fn several_bars_draw_the_current_bar_without_a_whole_run_share() {
         let f = Fixture::new("orx-monitor-epochs");
         let run = f.run("running", local());
         f.signals(&epochs(3, 4, 1));
@@ -4154,10 +4202,11 @@ mod tests {
             1,
             "{progress}"
         );
-        assert_eq!(progress["segments"][0]["fill"], Value::Null, "{progress}");
+        assert_eq!(progress["segments"][0]["fill"], 0.25, "{progress}");
         assert_eq!(progress["whole"], Value::Null);
         let summary = current(&f.store, &run).unwrap().unwrap().summary().clone();
         assert_eq!(summary["whole"], Value::Null);
+        assert_eq!(summary["segments"], json!([{"weight": 1.0, "fill": 0.25}]));
         let first = monitor["statusText"]
             .as_str()
             .unwrap()
@@ -4596,11 +4645,7 @@ mod tests {
             let (monitor, _) = monitor_at(&f, &run, now);
             let progress = &monitor["progress"];
             assert_eq!(progress["whole"], Value::Null, "{after}: {progress}");
-            assert_eq!(
-                progress["segments"][0]["fill"],
-                Value::Null,
-                "{after}: {progress}"
-            );
+            assert_eq!(progress["segments"][0]["fill"], 1.0, "{after}: {progress}");
             assert_eq!(monitor["estimate"], Value::Null, "{after}");
             let text = monitor["statusText"].as_str().unwrap();
             let lines: Vec<&str> = text.lines().take(2).collect();
@@ -5077,7 +5122,7 @@ mod tests {
         assert_eq!(before["viewFrom"]["isDefault"], true);
         assert_eq!(
             before["viewFrom"]["markup"],
-            "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" />\n</view>\n",
+            "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" ghost=\"parent\" />\n</view>\n",
             "a default view is shown as the markup that draws it"
         );
 
@@ -5276,6 +5321,11 @@ mod tests {
             ],
             "the last stage ends with the log"
         );
+        assert_eq!(monitor["setup"]["startsAt"], T0 + 40_000);
+        let child_with_points = staged(&f, "c2", "child", "running", &pipeline, 45);
+        let (training, _) = monitor_at(&f, &child_with_points, T0 + 45_500);
+        assert_eq!(training["setup"], Value::Null);
+
         let weights: Vec<_> = monitor["progress"]["segments"]
             .as_array()
             .unwrap()
@@ -5378,7 +5428,7 @@ mod tests {
             Value::Null,
             "no equal split stands in for unknown weights"
         );
-        assert_eq!(monitor["progress"]["segments"].as_array().unwrap().len(), 5);
+        assert_eq!(monitor["progress"]["segments"].as_array().unwrap().len(), 1);
         assert_eq!(
             monitor["estimate"]["floor"], true,
             "{}",
@@ -5420,6 +5470,50 @@ mod tests {
     }
 
     #[test]
+    fn setup_is_timed_to_the_first_signal_stage_even_when_a_later_stage_reuses_it() {
+        let f = Fixture::new("orx-monitor-setup-first-stage");
+        f.view(
+            "exp",
+            "<signal name=\"loss\"/><view headline=\"loss\"><chart y=\"loss\"/></view>",
+        );
+        let parent = f.run_in("p1", "exp", "done", local());
+        let snapshot = Snapshot {
+            run_id: "p1".into(),
+            ..folded(&[
+                (
+                    T0,
+                    "::orx:: {\"phase\":\"setup\",\"step\":0,\"of\":4,\"t\":0}".into(),
+                ),
+                (
+                    T0 + 4_000,
+                    "::orx:: {\"phase\":\"train\",\"step\":0,\"of\":10,\"t\":4}".into(),
+                ),
+                (
+                    T0 + 5_000,
+                    "::orx:: {\"step\":1,\"t\":5,\"m\":{\"loss\":3}}".into(),
+                ),
+                (
+                    T0 + 14_000,
+                    "::orx:: {\"phase\":\"sft\",\"step\":0,\"of\":10,\"t\":14,\"m\":{\"loss\":2}}"
+                        .into(),
+                ),
+                (
+                    T0 + 24_000,
+                    "::orx:: {\"step\":10,\"t\":24,\"m\":{\"loss\":1}}".into(),
+                ),
+            ])
+        };
+        assert_eq!(snapshot.first_series_stages["loss"], 1);
+        assert_eq!(snapshot.series_stages["loss"], 2);
+        f.collect(&snapshot);
+        monitor_at(&f, &parent, T0 + 700_000);
+        f.child("child", "exp");
+        let child = staged(&f, "c1", "child", "running", &[("setup", 4, Some(4))], 1);
+        let (monitor, _) = monitor_at(&f, &child, T0 + 1_500);
+        assert_eq!(monitor["setup"]["startsAt"], T0 + 4_000);
+    }
+
+    #[test]
     fn a_run_without_a_plan_is_timed_from_its_parents_stages_and_stalls_before_its_first_step() {
         let f = Fixture::new("orx-monitor-unplanned-prior");
         let pipeline = [("setup", 4, Some(4)), ("train", 60, Some(60))];
@@ -5444,10 +5538,7 @@ mod tests {
             monitor["progress"]
         );
         let text = monitor["statusText"].as_str().unwrap();
-        assert!(
-            text.contains("\neta      No progress for 1m (was due about"),
-            "{text}"
-        );
+        assert!(text.contains("more work may follow it"), "{text}");
     }
 
     #[test]

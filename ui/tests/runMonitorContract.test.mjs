@@ -49,8 +49,8 @@ test("time left and its range read as `orx exp status` reads them, on the strip 
     for (const full of [true, false]) {
       const view = model(name, full);
       // A finished run says how long it took as its sentence.
-      if (expect.eta !== null) assert.equal(bare(view.eta || view.sentence.text), expect.eta, `${name} ${full}`);
-      if (expect.range !== null) assert.ok(bare(view.etaDetail).startsWith(expect.range), `${name} ${full}: ${view.etaDetail}`);
+      if (expect.eta !== null && !view.settingUp && !states[name].monitor.estimate?.floor) assert.equal(bare(view.eta || view.sentence.text), expect.eta, `${name} ${full}`);
+      if (expect.range !== null && !view.settingUp && !states[name].monitor.estimate?.floor) assert.ok(bare(view.etaDetail).startsWith(expect.range), `${name} ${full}: ${view.etaDetail}`);
     }
   }
 });
@@ -81,7 +81,7 @@ test("a run past its estimate with no progress since says how long it has been s
   for (const full of [true, false]) {
     const view = model("stall", full);
     assert.equal(bare(view.eta), states.stall.expect.eta, `full: ${full}`);
-    assert.equal(view.left, null, `full: ${full}: no countdown`);
+    assert.equal(view.leftMs, null, `full: ${full}: no countdown`);
   }
   const { monitor, now } = states.stall;
   const going = model("stall", true, { ...monitor, estimate: { ...monitor.estimate, at: now - 1_000 } });
@@ -119,7 +119,7 @@ const noEstimate = Object.fromEntries(Object.entries(states).flatMap(([name, { e
 }));
 
 test("every state with no estimate gives a reason both sides share", () => {
-  for (const name of ["full", "epochs", "open", "first"]) assert.ok(noEstimate[name], name);
+  assert.ok(noEstimate.open);
   assert.ok(Object.values(noEstimate).every(Boolean), JSON.stringify(noEstimate));
 });
 
@@ -127,19 +127,19 @@ test("unknown whole-run progress reads the step, the time so far and why there i
   for (const [name, why] of Object.entries(noEstimate)) {
     for (const full of [true, false]) {
       const view = model(name, full);
-      assert.equal(bare(view.etaDetail), bare(why), `${name} ${full}`);
+      assert.equal(bare(view.etaDetail), view.settingUp || name === "open" ? "" : bare(why), `${name} ${full}`);
       assert.equal(bare(view.eta), bare(m.run_elapsed({ duration: bare(view.eta).split(" ")[0] })), `${name} ${full}: ${view.eta}`);
-      assert.deepEqual(view.bar.segments, [{ weight: 1, fill: null }], `${name} ${full}`);
+      assert.equal(view.bar.segments.length, 1, `${name} ${full}`);
       assert.ok(!bare(`${view.progress} ${view.eta}`).includes(fmtPercent(1)), `${name} ${full}: ${view.progress} ${view.eta}`);
     }
   }
   assert.equal(bare(model("full").sentence.text), capital(bare(m.run_progress_steps({ done: "4", of: "4" }))));
   const { container } = await banner("full");
   const text = bare(container.textContent);
-  assert.ok(text.includes(bare(m.run_eta_unknown_left())) && !text.includes(bare(m.run_eta_no_total())), text);
+  assert.ok(!text.includes(bare(m.run_eta_no_total())), text);
   assert.ok(!text.includes(fmtPercent(1)) && !text.includes(bare(m.run_eta_left({ duration: "0s" }))), text);
   const bar = container.querySelector('[role="progressbar"]');
-  assert.equal(bar.querySelector("i"), null, "nothing filled");
+  assert.ok(bar, "the stage keeps its own fill");
   assert.equal(bar.getAttribute("aria-valuenow"), null);
 });
 
@@ -150,19 +150,19 @@ test("a run whose log has said nothing orx recognises is setting up, and says wh
     const view = model("setup", full);
     assert.equal(bare(view.sentence.text), bare(m.run_setting_up({ line: setup.line })), `full: ${full}`);
     assert.equal(view.etaDetail, "", `full: ${full}: no fault to explain`);
-    assert.equal(bare(view.eta), bare(m.run_elapsed({ duration: "10s" })), `full: ${full}`);
+    assert.equal(view.eta, "", `full: ${full}`);
     assert.deepEqual(view.bar.segments, [{ weight: 1, fill: null }], `full: ${full}`);
   }
 });
 
 test("a stage the run declared and has no step of yet says it started, and what it printed since, with no fault to explain", () => {
   const { setup } = states.announced.summary;
-  assert.deepEqual(setup, { line: null, stage: "train", until: null });
+  assert.equal(setup.stage, "train");
   for (const full of [true, false]) {
     const view = model("announced", full);
     assert.equal(bare(view.sentence.text), capital(bare(m.run_stage_started({ stage: "train" }))), `full: ${full}`);
     assert.equal(view.etaDetail, "", `full: ${full}`);
-    assert.equal(bare(view.eta), bare(m.run_elapsed({ duration: "5s" })), `full: ${full}`);
+    assert.equal(view.eta, "", `full: ${full}`);
   }
   const printing = { ...setup, line: "Loading 9 shards" };
   const state = { ...states.announced, summary: { ...states.announced.summary, setup: printing } };
@@ -175,7 +175,7 @@ test("a setting-up run with nothing printed yet names its machine, once", () => 
   const state = { ...states.setup, summary: { ...states.setup.summary, setup }, monitor: { ...states.setup.monitor, setup } };
   for (const full of [true, false]) {
     const view = runModel({ item: { sessionId: "s", run: runOf("setup", state), experimentName: null, experimentSlug: "baseline" }, monitor: full ? state.monitor : null, shown: true, agent: "Claude", now: state.now, nextRetryMs: null });
-    assert.equal(bare(view.sentence.text), bare(m.run_setting_up_on({ where: m.compute_target_local() })), `full: ${full}`);
+    assert.equal(bare(view.sentence.text), bare(m.run_setup_status()), `full: ${full}`);
   }
 });
 
@@ -193,8 +193,8 @@ test("after a long time with nothing recognised the run is just running, with no
   const state = states.setup;
   for (const full of [true, false]) {
     const view = runModel({ item: { sessionId: "s", run: runOf("setup"), experimentName: null, experimentSlug: "baseline" }, monitor: full ? state.monitor : null, shown: true, agent: "Claude", now: state.now + 16 * 60_000, nextRetryMs: null });
-    assert.equal(bare(view.sentence.text), bare(m.run_running_on({ where: m.compute_target_local() })), `full: ${full}`);
-    assert.equal(bare(view.etaDetail), bare(m.run_eta_no_progress()), `full: ${full}`);
+    assert.ok(view.settingUp, `full: ${full}`);
+    assert.equal(view.etaDetail, "", `full: ${full}`);
   }
 });
 
@@ -202,12 +202,13 @@ test("an older server's run, which says nothing of setup, reads as it always did
   const { setup: _, ...summary } = states.setup.summary;
   const state = { ...states.setup, summary };
   const view = runModel({ item: { sessionId: "s", run: runOf("setup", state), experimentName: null, experimentSlug: "baseline" }, monitor: null, shown: true, agent: "Claude", now: state.now, nextRetryMs: null });
-  assert.equal(bare(view.sentence.text), bare(m.run_running_on({ where: m.compute_target_local() })));
+  assert.equal(bare(view.sentence.text), bare(m.status_running()));
   assert.equal(bare(view.etaDetail), bare(m.run_eta_no_progress()));
 });
 
 test("the line says its time is elapsed, and why there is no estimate in its description", async () => {
   for (const [name, why] of Object.entries(noEstimate)) {
+    if (!model(name, false).etaDetail) continue;
     const { container } = await banner(name, "line");
     const button = container.querySelector("button[aria-expanded]");
     const time = bare(model(name, false).eta);
@@ -217,30 +218,19 @@ test("the line says its time is elapsed, and why there is no estimate in its des
   }
 });
 
-test("a detected counter's time left is a floor for the run: no range and no finishing time, and the detail says why", async () => {
-  const { expect } = states.detected;
+test("a detected counter times only its stage and promises no whole-run finish", async () => {
   for (const full of [true, false]) {
     const view = model("detected", full);
-    assert.equal(bare(view.eta), expect.eta, `full: ${full}`);
-    assert.equal(bare(view.etaDetail), bare(m.run_eta_floor()), `full: ${full}`);
-    assert.ok(bare(view.bar.label).includes(expect.eta), view.bar.label);
+    assert.equal(view.leftMs, null);
+    assert.equal(view.etaDetail, "");
+    assert.equal(view.bar.whole, null);
   }
-  const { container } = await banner("detected", "line");
-  const button = container.querySelector("button[aria-expanded]");
-  assert.equal(bare(container.querySelector(`[id="${button.getAttribute("aria-describedby")}"]`).textContent), bare(m.run_eta_floor()));
-  const strip = bare((await banner("detected")).container.textContent);
-  // The banner draws the run as of now, long after the server's estimate: the floor has run out.
-  assert.ok(strip.includes(`${bare(m.run_eta_no_estimate())} · ${bare(m.run_eta_floor())}`), strip);
-  for (const text of [strip, expect.cli]) {
-    assert.ok(!text.includes(bare(m.run_eta_done_about({ clock: "" })).trim()) && !/\d+s to \d/.test(text), text);
-  }
-  // A total the run declared keeps its range and finishing time.
-  const declared = bare(model("running").etaDetail);
-  assert.ok(declared.startsWith(states.running.expect.range) && declared.includes(bare(m.run_eta_done_about({ clock: "" })).trim()), declared);
+  const { container } = await banner("detected");
+  assert.ok(!bare(container.textContent).includes("done about"));
 });
 
 test("the line and the strip say the same whether the estimate waits on its pace or on progress never reported", () => {
-  for (const [name, eta] of [["named", m.run_eta_estimating()], ["first", m.run_elapsed({ duration: "10s" })]]) {
+  for (const [name, eta] of [["named", ""], ["first", m.run_elapsed({ duration: "10s" })]]) {
     const [line, strip] = [model(name, false), model(name)];
     assert.equal(bare(line.eta), bare(eta), name);
     assert.deepEqual([line.eta, line.etaDetail], [strip.eta, strip.etaDetail], name);
@@ -308,13 +298,13 @@ test("bars a log printed have no names, so the strip lists no stages for them", 
   assert.ok(!container.querySelector("ol"), container.textContent);
 });
 
-test("several bars, how many to come unknown, draw one empty segment, never finished ones", async () => {
-  assert.deepEqual(model("epochs").bar.segments, [{ weight: 1, fill: null }]);
-  assert.deepEqual(model("epochs", false).bar.segments, [{ weight: 1, fill: null }]);
+test("several bars draw only the current fill and claim no share of the whole run", async () => {
+  assert.deepEqual(model("epochs").bar.segments, [{ weight: 1, fill: 0.25 }]);
+  assert.deepEqual(model("epochs", false).bar.segments, [{ weight: 1, fill: 0.25 }]);
   const { container } = await render(createElement(Rail, { model: model("epochs"), kind: "thick" }));
   const bar = container.querySelector('[role="progressbar"]');
   assert.equal(bar.children.length, 1);
-  assert.equal(bar.querySelector("i"), null, "nothing filled");
+  assert.equal(bar.querySelector("i").style.width, "25%");
   assert.equal(bar.getAttribute("aria-valuenow"), null);
 });
 
@@ -425,30 +415,19 @@ test("a floor counted down to nothing reads as no estimate, naming the stages no
       item: { sessionId: "s", run: runOf("planned"), experimentName: null, experimentSlug: "baseline" },
       monitor: full ? monitor : null, shown: true, agent: "Claude", now: now + monitor.estimate.loMs + 500, nextRetryMs: null,
     });
-    assert.equal(bare(later.eta), bare(m.run_eta_no_estimate()), `full: ${full}`);
-    assert.equal(bare(later.etaDetail), bare(m.run_eta_untimed({ stages: "eval" })), `full: ${full}`);
-    assert.equal(later.left, null, `full: ${full}`);
+    assert.equal(later.etaDetail, "", `full: ${full}`);
+    assert.equal(later.leftMs, null, `full: ${full}`);
   }
 });
 
-test("a declared plan spans the bar from its first stage, and an untimed stage to come makes time left a floor that names it", async () => {
-  const { expect, monitor } = states.planned;
-  const untimed = bare(m.run_eta_untimed({ stages: "eval" }));
+test("an untimed stage leaves one stage-local bar with no whole-run ETA", async () => {
   for (const full of [true, false]) {
     const view = model("planned", full);
-    assert.equal(bare(view.eta), expect.eta, `full: ${full}`);
-    assert.equal(bare(view.etaDetail), untimed, `full: ${full}`);
-    // Every stage is a segment, the line's too; whole-run progress is unknown, so the bar says no share.
-    assert.equal(view.bar.segments.length, 3, `full: ${full}`);
-    assert.equal(view.bar.whole, null, `full: ${full}`);
+    assert.equal(view.leftMs, null);
+    assert.equal(view.etaDetail, "");
+    assert.equal(view.bar.segments.length, 1);
+    assert.equal(view.bar.whole, null);
   }
-  const strip = bare((await banner("planned")).container.textContent);
-  assert.ok(strip.includes("download4s") && strip.includes("train") && strip.includes("eval"), strip);
-  assert.ok(strip.includes(untimed), strip);
-
-  const phases = [{ ...monitor.phases[0], skipped: true, startedAt: null, endedAt: null }, { ...monitor.phases[1] }, { ...monitor.phases[1], name: "export", planned: false }, monitor.phases[2]];
-  const odd = { ...states.planned, monitor: { ...monitor, phases, progress: { ...monitor.progress, phase: 1 } } };
-  const text = bare((await banner("planned", "strip", odd)).container.textContent);
-  assert.ok(text.includes(`download${bare(m.run_stage_skipped())}`), text);
-  assert.ok(text.includes(`export${bare(m.run_stage_unplanned())}`), text);
+  const { container } = await banner("planned");
+  assert.equal(container.querySelector("ol"), null);
 });

@@ -220,10 +220,6 @@ pub(crate) struct Cost {
 
 #[derive(Debug)]
 pub(crate) struct Output {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Equal to `whole` until phases have priors")
-    )]
     pub phase_fraction: Option<f64>,
     pub segments: Vec<Segment>,
     #[cfg_attr(

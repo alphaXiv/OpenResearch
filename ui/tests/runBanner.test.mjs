@@ -118,8 +118,8 @@ test("against an older server the line reads from the run's status and never ask
   const requests = backend();
   const { container } = await banner([run("r1", { monitor: undefined })], { shown: false });
   await settle();
-  assert.ok(button(m.run_show_less()));
-  assert.ok(container.textContent.includes(m.run_running_on({ where: "⁨" + m.compute_target_local() + "⁩" })), container.textContent);
+  assert.equal(button(m.run_show_less()), null);
+  assert.ok(container.textContent.includes(m.status_running()), container.textContent);
   assert.equal(requests.filter((r) => r.request.includes("/monitor")).length, 0);
   assert.equal(button(m.run_dismiss()), null);
 });
@@ -318,7 +318,7 @@ test("a flag's detail keeps its counts live in the strip", async () => {
   backend({ monitors: { r1: counted } });
   await banner([run("r1", { monitor: summary({ tone: "flag", flag: { id: "f1", state: "waiting", mode: "copilot" } }) })]);
   await settle();
-  assert.ok([...document.querySelectorAll("p")].some((p) => p.textContent.replace(/[⁦-⁩]/g, "").startsWith("43 items came back HTTP 429.")));
+  assert.ok([...document.querySelectorAll("[role=group] span")].some((p) => p.textContent.replace(/[⁦-⁩]/g, "").startsWith("43 items came back HTTP 429.")));
 });
 
 const plain = (text) => text.replace(/[⁦-⁩]/g, "");
@@ -434,14 +434,14 @@ test("a monitor that can't be refreshed keeps its chart and says so once, how ol
   assert.ok(find("div", m.run_view_refresh_failed()).contains(named(m.app_retry())), "Retry sits beside the one message");
   assert.ok(container.querySelector('[role="img"][aria-label*="Loss"]'), "the chart stays");
   assert.ok(plain(container.textContent).includes(m.status_last_seen({ time: plain(fmtClock(running.asOf)) })));
-  assert.ok(container.querySelector('[role="progressbar"] .bg-subtext'), "the bar freezes");
+  assert.equal(container.querySelector('[role="progressbar"]'), null, "the chart carries progress");
 });
 
 test("a run whose view was rebuilt reads its monitor again, and shows none of the old one meanwhile", async () => {
   const requests = backend();
   const view = await banner([run("r1")]);
   await settle();
-  await view.update([run("r1", { monitor: summary({ generation: "g2", rev: 1, asOf: running.asOf + 1000, bindings: { loss: 1.5 } }) })]);
+  await view.update([run("r1", { monitor: summary({ generation: "g2", rev: 1, asOf: running.asOf + 1000, bindings: { loss: 1.5 }, headline: { name: "loss", label: "Loss", value: 1.5, vs: null } }) })]);
   await settle();
   assert.equal(requests.filter((r) => r.request === "GET /api/runs/r1/monitor").length, 2);
   const text = plain(view.container.textContent);
@@ -514,13 +514,13 @@ test("summaries faster than the catch-up keep the chart and read the monitor aga
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const reads = () => requests.filter((r) => r.request === "GET /api/runs/r1/monitor").length;
   for (let step = 1; step <= 4; step++) {
-    await view.update([run("r1", { monitor: summary({ rev: running.rev + step, bindings: { loss: 2.3 - step / 10 } }) })]);
+    await view.update([run("r1", { monitor: summary({ rev: running.rev + step, bindings: { loss: 2.3 - step / 10 }, headline: { name: "loss", label: "Loss", value: 2.3 - step / 10, vs: null } }) })]);
     await act(async () => t.mock.timers.tick(700));
     await settle();
     assert.ok(view.container.querySelector('[role="img"][aria-label*="Loss"]'), `the chart keeps drawing at step ${step}`);
   }
   assert.equal(reads(), 2, "one reread, at two seconds, however many summaries arrived");
-  assert.ok(plain(view.container.textContent).includes("Loss 1.90"), "the facts are the newest summary's");
+  assert.equal(plain(view.container.querySelector(".text-xl").textContent), "1.90", "the headline is the newest summary's");
 });
 
 test("a degraded line names its state and reason on hover, focus and to a screen reader, and announces the change once", async () => {
@@ -565,7 +565,7 @@ test("shown runs without a summary draw their terminal status at both levels wit
     assert.ok(view.container.textContent.includes(label), view.container.textContent);
     await click(find("button", "r1"));
     assert.equal(opens[0][0], "e-r1");
-    await click(button(m.run_show_less()));
+    assert.equal(button(m.run_show_less()), null);
     assert.ok(view.container.textContent.includes(label));
     assert.ok(button(m.run_dismiss()));
     await click(find("button", "r1"));
@@ -583,7 +583,7 @@ test("a shown active run without a summary ignores cached monitor data and draws
   const { container } = await banner([run("r1", { monitor: null })], { workspace });
   await settle();
   assert.ok(button(m.run_stop()));
-  assert.ok(container.textContent.includes(m.run_running_on({ where: "⁨" + m.compute_target_local() + "⁩" })));
+  assert.ok(container.textContent.includes(m.status_running()));
   assert.equal(container.querySelector('[role="img"][aria-label*="Loss"]'), null);
   assert.equal(requests.filter((r) => r.request.includes("/monitor")).length, 0);
 });
@@ -600,4 +600,35 @@ test("a flag the run's last look raised after it ended opens the strip with what
   assert.ok(text.includes(m.run_flag_ask({ agent: "Claude" })), text);
   await click(find("button", m.run_flag_keep_result()));
   assert.equal(requests.find((r) => r.request === "POST /api/runs/r1/flag").body.choice, "keep");
+});
+
+test("the row opens only for two chart points and returns to one line when done", async () => {
+  const setup = { ...running, sentence: null, setup: { stage: "Download", line: null, startsAt: now + 60_000 }, series: {}, latest: {}, headline: null,
+    phases: [{ name: "Download", of: 9, unit: "shards", priorMs: null, startedAt: now, endedAt: null }],
+    progress: { ...running.progress, phase: 0, done: 4, whole: null, segments: [{ name: "Download", weight: 1, fill: 4 / 9 }] } };
+  backend({ monitors: { r1: setup } });
+  const workspace = createWorkspace("test");
+  const view = await banner([run("r1")], { workspace });
+  await settle();
+  assert.equal(view.container.querySelector('svg[role="img"]'), null);
+  assert.equal(button(m.run_show_more()), null);
+  assert.equal(view.container.querySelector('[role="progressbar"]').getAttribute("aria-valuenow"), null);
+  assert.ok(view.container.querySelector('[role="progressbar"] i.bg-subtext'));
+  assert.ok(plain(view.container.textContent).includes("Run starts in about"));
+
+  const { queryKey } = workspace.queries.getRunMonitorQuery("r1");
+  const chart = { ...running, sentence: null, setup: null, rev: running.rev + 1, series: { loss: [[0, 3.4]] } };
+  await act(async () => workspace.queryClient.setQueryData(queryKey, chart));
+  await settle();
+  assert.equal(view.container.querySelector('svg[role="img"]'), null);
+  await act(async () => workspace.queryClient.setQueryData(queryKey, { ...chart, rev: chart.rev + 1, series: { loss: [[0, 3.4], [20, 3.3]] } }));
+  await settle();
+  assert.ok(view.container.querySelector('svg[role="img"]'));
+  assert.equal(view.container.querySelector('[role="progressbar"]'), null);
+
+  await view.update([run("r1", { status: "done", endedAt: now, monitor: summary({ tone: "done" }) })]);
+  await settle();
+  assert.equal(view.container.querySelector('svg[role="img"]'), null);
+  assert.equal(view.container.querySelector('[role="progressbar"]'), null);
+  assert.ok(plain(view.container.textContent).includes("Done in"));
 });

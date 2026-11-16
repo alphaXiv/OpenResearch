@@ -31,6 +31,7 @@ export interface RunModel {
   live: boolean;
   /** Submitted and not yet running. */
   pre: boolean;
+  settingUp: boolean;
   /** The state a run ended in, or is in, said before its sentence: "Auto-stopped". */
   lead: string | null;
   /** The status word the mark and announcements read. */
@@ -57,8 +58,8 @@ export interface RunModel {
     vsInSentence: boolean;
   } | null;
   eta: string;
-  /** How long until a live run should finish, as `eta` says it; `floor` when that is only its least. */
-  left: { ms: number; floor: boolean } | null;
+  /** Time left for the whole run, when known. */
+  leftMs: number | null;
   etaDetail: string;
   /** Whether `eta` is a live countdown, drawn heavier in the strip. */
   etaStrong: boolean;
@@ -254,13 +255,13 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   const limit = monitor?.limit ? { endsAt: monitor.limit.endsAt, ms: monitor.limit.endsAt - startedAt } : null;
   // The summary says where the run stands too, so a line needs no full monitor to say it.
   const stage = summary?.stage ?? null;
-  const stagePhase = progress ? phases[progress.phase] : stage ? { ...stage, priorMs: null, startedAt: null, endedAt: null } : undefined;
+  const stagePhase = progress ? phases[progress.phase] : stage ? { ...stage, priorMs: null, startedAt: null, endedAt: null } : phases[phases.length - 1];
   // The server leaves a live run's estimate out exactly when how much of it remains is unknown.
   const open = live && !pre && (monitor ? monitor.estimate === null : summary !== null && summary.etaMs === null && !summary.pending);
   const limitEndsAt = monitor ? limit?.endsAt ?? null : summary?.limitEndsAt ?? null;
   const noEstimate = !stagePhase ? m.run_eta_no_progress() : stagePhase.of == null ? m.run_eta_no_total() : m.run_eta_unknown_left();
   const setup = (monitor ? monitor.setup : summary?.setup) ?? null;
-  const settingUp = live && !pre && !degraded && !notice && !display.waiting && setup !== null && (setup.until === null || now < setup.until);
+  const settingUp = live && !pre && !degraded && !notice && !display.waiting && setup !== null;
   const stageDone = progress?.done ?? stage?.done ?? null;
   const progressText = stageDone === null ? null : progressWords(stagePhase, stageDone);
 
@@ -270,7 +271,8 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   const needsChoice = flag?.state === "waiting" && flag.mode === "copilot";
   const looking = flag?.state === "waking" || flag?.state === "agent_looking" || flag?.state === "asking";
 
-  const watched = monitor ? monitor.sentence : summary?.sentence ?? null;
+  const recorded = monitor ? monitor.sentence : summary?.sentence ?? null;
+  const watched = live && recorded && now - recorded.t <= 3 * 60_000 ? recorded : null;
   let sentence: RunModel["sentence"];
   if (notice) {
     const { lead } = runNoticeCopy(notice, null, runApiProvider(run), bold);
@@ -290,30 +292,30 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   } else if (pre) {
     const before = monitor?.before ?? null;
     const text = before?.text ? fillSentence(before.text.template, bindings, signals)
-      : before?.kind === "queued" && run.host ? (before.startsAt === null ? m.run_queued_on({ host: ltr(run.host) }) : m.run_queued_start_at({ host: ltr(run.host), clock: clockText(before.startsAt) }))
-      : m.run_starting({ where: where(run) || m.compute_target_local() });
+      : before?.kind === "queued" ? (before.startsAt === null ? m.run_queued() : m.run_queued_start_at({ clock: clockText(before.startsAt) }))
+      : m.status_starting();
     sentence = { text, key: `pre:${before?.kind ?? "starting"}`, at: null };
-  } else if (settingUp) {
+  } else if (settingUp && stageDone === null) {
     const begun = setup?.stage ? capitalized(m.run_stage_started({ stage: autoDir(setup.stage) })) : null;
     const text = begun ? (setup?.line ? `${begun} · ${quoted(setup.line)}` : begun)
-      : setup?.line ? m.run_setting_up({ line: quoted(setup.line) }) : m.run_setting_up_on({ where: where(run) || m.compute_target_local() });
+      : setup?.line ? m.run_setting_up({ line: quoted(setup.line) }) : m.run_setup_status();
     sentence = { text, key: "setup", at: null };
   } else {
-    const auto = stageDone === null ? "" : stageWords(stagePhase, stageDone);
-    const text = auto ? capitalized(auto) : m.run_running_on({ where: where(run) || m.compute_target_local() });
+    const auto = stageDone === null ? (stagePhase?.name ? autoDir(stagePhase.name) : "") : stageWords(stagePhase, stageDone);
+    const text = auto ? capitalized(auto) : setup?.line ? quoted(setup.line) : setup?.stage ? autoDir(setup.stage) : status;
     sentence = { text, key: "auto", at: null };
   }
 
   let eta = "";
   let etaDetail = "";
   let etaStrong = false;
-  let left: RunModel["left"] = null;
+  let leftMs: RunModel["leftMs"] = null;
   // Time since the run started, where it has no time left to show, said as that.
   let etaElapsed = false;
   const lastSeen = tone === "lost" || degraded;
   // What a run has cost only grows, so it keeps showing while the facts wait for the monitor to catch up.
   let cost = sameGeneration?.cost ? costWords(sameGeneration.cost, live, lastSeen) : "";
-  const ended = tone === "done" ? m.run_done_in({ duration: durationText(elapsed) })
+  const ended = run.status === "done" ? m.run_done_in({ duration: durationText(elapsed) })
     : tone === "failed" ? m.run_failed_after({ duration: durationText(elapsed) })
     : tone === "stopped" || tone === "revising" ? m.run_eta_stopped_at({ duration: durationText(elapsed) })
     : "";
@@ -326,18 +328,23 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     eta = quote?.eta ?? (monitor ? m.run_eta_none() : m.run_elapsed({ duration: durationText(now - run.createdAt) }));
     etaDetail = quote?.detail ?? "";
     cost = quote?.cost ?? "";
+  } else if (settingUp) {
+    eta = setup?.startsAt != null && setup.startsAt > now ? m.run_setup_starts_in({ duration: durationText(setup.startsAt - now) }) : "";
+  } else if (monitor?.estimate?.floor ?? summary?.etaFloor) {
+    eta = m.run_elapsed({ duration: durationText(elapsed) });
+    etaElapsed = true;
   } else if (open && limitEndsAt !== null) {
     eta = m.run_eta_to_limit({ duration: durationText(limitEndsAt - now) });
     etaDetail = monitor?.rules.length ? m.run_eta_ends_by_rules({ clock: clockText(limitEndsAt) }) : m.run_eta_ends_by({ clock: clockText(limitEndsAt) });
   } else if (open) {
     eta = m.run_elapsed({ duration: durationText(elapsed) });
     etaElapsed = true;
-    etaDetail = settingUp ? "" : noEstimate;
+    etaDetail = settingUp || stagePhase?.of == null && stageDone !== null ? "" : noEstimate;
   } else if (monitor?.estimate) {
-    ({ eta, detail: etaDetail, strong: etaStrong, left } = estimateWords(monitor.estimate, now, limit, progress?.stallMs ?? 0));
+    ({ eta, detail: etaDetail, strong: etaStrong, leftMs } = estimateWords(monitor.estimate, now, limit, progress?.stallMs ?? 0));
   } else if (summary?.etaMs) {
     const { lo, mid, hi, at } = summary.etaMs;
-    ({ eta, detail: etaDetail, strong: etaStrong, left } = estimateWords({ loMs: lo, midMs: mid, hiMs: hi, at, pending: false, pastLimitMs: null, floor: summary.etaFloor ?? false, untimed: summary.etaUntimed }, now, null, 0));
+    ({ eta, detail: etaDetail, strong: etaStrong, leftMs } = estimateWords({ loMs: lo, midMs: mid, hiMs: hi, at, pending: false, pastLimitMs: null }, now, null, 0));
   } else if (summary?.pending) {
     eta = m.run_eta_estimating();
     etaDetail = m.run_eta_needs_steps();
@@ -353,15 +360,19 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
 
   const headline = headlineOf(monitor, summary?.headline ?? null, signals, sentence.key, live);
 
-  const segments = progress?.segments.map(({ weight, fill }) => ({ weight, fill: pre ? 0 : fill }))
+  let segments = progress?.segments.map(({ weight, fill }) => ({ weight, fill: pre ? 0 : fill }))
     ?? summary?.segments?.map(({ weight, fill }) => ({ weight, fill: pre ? 0 : fill }))
     ?? [{ weight: 1, fill: pre ? 0 : summary?.whole ?? (tone === "done" ? 1 : null) }];
-  const whole = progress?.whole ?? summary?.whole ?? null;
+  const whole = (monitor?.estimate?.floor ?? summary?.etaFloor) ? null : progress?.whole ?? summary?.whole ?? null;
+  if (whole === null && segments.length > 1) {
+    const fill = stageDone !== null && stagePhase?.of ? Math.min(1, stageDone / stagePhase.of) : null;
+    segments = [{ weight: 1, fill }];
+  }
   // With no watcher the sentence is the stage and how far, so the caption says only what is new.
   const said = sentence.key === "auto" || sentence.key.startsWith("end:");
-  const caption = pre ? m.run_not_started()
+  const caption = run.status === "done" ? "" : pre ? m.run_not_started()
     : progress && (notice || degraded) ? m.run_progress_last_seen({ progress: autoDir(progressText ?? "") })
-    : progress ? captionProgress(progress, phases, open && limit ? limit.ms : null, elapsed, said)
+    : progress ? captionProgress({ ...progress, whole }, phases, open && limit ? limit.ms : null, elapsed, said)
     : "";
 
   // Without a share of the whole run the bar is the stage's own, so only its looks stand on it.
@@ -405,12 +416,13 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     tone,
     live,
     pre,
+    settingUp,
     lead,
     status,
     sentence,
     headline,
     eta,
-    left,
+    leftMs,
     etaDetail,
     etaStrong: etaStrong && !lastSeen,
     progress: caption,

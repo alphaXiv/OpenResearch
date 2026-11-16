@@ -16,7 +16,7 @@ const run = (extra = {}) => ({
   contact: null, cancelling: false, lostReason: null, host: null, backend: { kind: "modal_job", flavor: "A10G" }, ...extra,
 });
 const summary = (extra = {}) => ({
-  tone: "running", whole: 0.248, headline: { name: "loss", label: "Loss", value: 2.31, vs: null }, sentence: running.sentence,
+  tone: "running", whole: 0.248, headline: { name: "loss", label: "Loss", value: 2.31, vs: null }, sentence: { ...running.sentence, t: now },
   bindings: { loss: 2.31 }, signals: running.view.signals, etaMs: { lo: 4_800_000, mid: 5_400_000, hi: 6_000_000, at: now }, pending: false, flag: null, rev: 1, generation: "g1", asOf: now, ...extra,
 });
 const model = (value, { monitor = null, shown = true, at = now, retry = null } = {}) => {
@@ -27,7 +27,7 @@ const model = (value, { monitor = null, shown = true, at = now, retry = null } =
 test("against an older server a running run reads from its status alone", () => {
   const line = model(run(), { shown: false });
   assert.equal(line.tone, "running");
-  assert.equal(line.text, bare(m.run_running_on({ where: "⁨Modal⁩ · ⁨A10G⁩" })));
+  assert.equal(line.text, bare(m.status_running()));
   assert.equal(line.eta, bare(m.run_elapsed({ duration: fmtDuration(1_800_000) })));
   assert.equal(line.lead, null);
   assert.ok(line.canStop && !line.canDismiss);
@@ -36,7 +36,7 @@ test("against an older server a running run reads from its status alone", () => 
 });
 
 test("a watched run fills the watcher's words and counts down from the server's estimate", () => {
-  const line = model(run({ monitor: summary() }), { monitor: running, at: now + 600_000 });
+  const line = model(run({ monitor: summary() }), { monitor: { ...running, sentence: { ...running.sentence, t: now + 600_000 } }, at: now + 600_000 });
   assert.equal(line.text, "Loss **2.31**, falling steadily.");
   assert.equal(line.sentence.key, `look:${running.sentence.template}`);
   assert.equal(line.eta, m.run_eta_left({ duration: fmtDuration(4_800_000) }));
@@ -219,7 +219,7 @@ test("a run with no total and no limit shows elapsed time, says why there is no 
   const open = { ...running, phases: [{ ...running.phases[0], of: null }], estimate: null, limit: null, progress: { ...running.progress, whole: null, segments: [{ name: "train", weight: 1, fill: null }] } };
   const line = model(run(), { monitor: open, at: now });
   assert.equal(line.eta, bare(m.run_elapsed({ duration: fmtDuration(1_800_000) })));
-  assert.equal(line.etaDetail, m.run_eta_no_total());
+  assert.equal(line.etaDetail, "");
   assert.deepEqual(line.bar.segments, [{ weight: 1, fill: null }]);
 });
 
@@ -254,7 +254,13 @@ test("a run that hasn't started says why it waits, in its backend's words, until
     assert.ok(!stopping.text.includes(reason), stopping.text);
     assert.equal(stopping.canStop, false, "the pending cancel is said in Stop's place");
   }
-  assert.equal(model(run({ status: "starting", startedAt: null })).text, bare(m.run_starting({ where: "⁨Modal⁩ · ⁨A10G⁩" })));
+  assert.equal(model(run({ status: "starting", startedAt: null })).text, m.status_starting());
+  const queuedRun = run({ status: "starting", startedAt: null, host: "lab-a40" });
+  assert.equal(model(queuedRun, { monitor: queued }).text, m.run_queued());
+  const scheduled = { ...queued, before: { ...queued.before, startsAt: now + 60_000 } };
+  const waiting = model(queuedRun, { monitor: scheduled });
+  assert.equal(waiting.text, bare(m.run_queued_start_at({ clock: fmtClock(now + 60_000) })));
+  assert.ok(!waiting.text.includes("lab-a40"));
 });
 
 test("a run is named by its title, and a flag's sentence kept going after says so until the next look", () => {
@@ -274,4 +280,13 @@ test("a plan the run reports only as rows says the plan and the run disagree, li
   assert.equal(bare(model(run(), { monitor: { ...running, disagrees } }).note), said);
   assert.equal(bare(model(run({ status: "done", endedAt: now }), { monitor: { ...running, disagrees } }).note), said);
   assert.equal(model(run(), { monitor: running }).note, null);
+});
+
+test("watcher words expire after three minutes while completion always names its duration", () => {
+  const fresh = { ...running, sentence: { template: "Loss **{loss}**, falling steadily.", t: now } };
+  assert.equal(model(run(), { monitor: fresh, at: now + 180_000 }).sentence.at, now);
+  const expired = model(run(), { monitor: fresh, at: now + 180_001 });
+  assert.equal(expired.sentence.at, null);
+  assert.ok(expired.text.includes("1,240"));
+  assert.ok(model(run({ status: "done", endedAt: now }), { monitor: fresh }).text.startsWith("Done in"));
 });

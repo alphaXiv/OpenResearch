@@ -72,6 +72,7 @@ export function RunPage({ run, name, chatSessionId, now }: { run: Run; name: str
           </span>
         </p>
       )}
+      {model.where && <p className="m-0 mt-1 text-xs text-ink-subtext">{model.where}</p>}
       {model.stale && !failed && <p className="m-0 mt-1.5 text-xs text-ink-subtext">{model.stale.why} · {model.stale.age}</p>}
       {model.note && <p className="m-0 mt-1.5 text-sm text-ink-subtext">{model.note}</p>}
       {model.flag?.record && <Issue model={model} flag={model.flag.record} agent={agent} />}

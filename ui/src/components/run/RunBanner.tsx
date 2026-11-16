@@ -14,7 +14,7 @@ import type { TabOpenIntent } from "../../tabPreview";
 import type { LogSeek } from "../../logWindow";
 import { useWorkspace } from "../../workspace";
 import { Button } from "../ui";
-import { RunLine, type RunLabel } from "./RunLine";
+import type { RunLabel } from "./RunLine";
 import { RunStrip } from "./RunStrip";
 import { RunSummary } from "./RunSummary";
 import { useRunMonitors } from "./useRunMonitor";
@@ -169,13 +169,11 @@ export function RunBanner({ sessionId, agent, onOpenExperiment, onOpenRun }: {
 
   const strip = (model: RunModel, index: number, label?: RunLabel) => {
     const monitor = shown ? monitors[index] : null;
-    const item = runs[index];
     return (
       <RunStrip
         model={model}
+        open={isOpen(model.run.id)}
         monitor={monitor}
-        runNo={item.runNo}
-        runCount={item.runCount}
         agent={agent}
         label={label}
         onToggle={() => toggle(model.run.id)}
@@ -195,17 +193,17 @@ export function RunBanner({ sessionId, agent, onOpenExperiment, onOpenRun }: {
         </div>
       )}
       {runs.length === 0 ? null : single ? (
-        isOpen(models[0].run.id) ? strip(models[0], 0) : <RunLine model={models[0]} agent={agent} onOpenExperiment={onOpenExperiment} onToggle={() => toggle(models[0].run.id)} />
+        strip(models[0], 0)
       ) : (
         <div className="@container relative mb-2.5 overflow-hidden rounded-lg border border-border bg-surface text-sm text-text">
-          <RunSummary models={models} context={context} {...summarize(models, named, runs[0].watch)} open={rows} onToggle={toggleRows} />
+          <RunSummary models={models} context={context} {...summarize(models, named, runs[0].watch, now)} open={rows} onToggle={toggleRows} />
           {rows && (
             <ul role="list" className="m-0 list-none p-0">
               {models.map((model, index) => {
                 const label = { text: labels[index], title: titles[index] };
                 return (
                   <li key={model.run.id} className="border-t border-border-variant">
-                    {isOpen(model.run.id) ? strip(model, index, label) : <RunLine model={model} agent={agent} label={label} onOpenExperiment={onOpenExperiment} onToggle={() => toggle(model.run.id)} />}
+                    {strip(model, index, label)}
                   </li>
                 );
               })}

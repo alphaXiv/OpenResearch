@@ -1,5 +1,6 @@
 import { useState, type MouseEvent } from "react";
 import { fmtDuration } from "../../../api";
+import { autoDir, ltr } from "../../../i18n";
 import { m } from "../../../paraglide/messages.js";
 import { getLocale } from "../../../paraglide/runtime.js";
 import { fmtMagnitude, fmtMeasure, fmtSignal } from "../../../runMonitor/format";
@@ -233,6 +234,23 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
       : <circle key={px} cx={x(px)} cy={y(py)} r={radius} fill={line.color} stroke="var(--base)" strokeWidth={radius > 3 ? 2 : 1} />
   ));
 
+  const landmarks = mark === "line" && !table && !series.some((line) => line.ghost) ? owned.flatMap((line) => {
+    const values = known(line.points);
+    const first = values[0];
+    const better = signals[line.y]?.better;
+    const best = better && values.reduce((best, point) => (better === "lower" ? point[1] < best[1] : point[1] > best[1]) ? point : best, first);
+    const startLabel = m.run_chart_start({ label: autoDir(line.label) });
+    const bestLabel = m.run_stat_best({ label: autoDir(line.label) });
+    return first ? [
+      { line, point: first, best: best === first, label: best === first ? `${startLabel} · ${bestLabel}` : startLabel },
+      ...(best && best !== first ? [{ line, point: best, best: true, label: bestLabel }] : []),
+    ] : [];
+  }) : [];
+  const marks = <>
+    {!table && monitor.x.max !== null && <line x1={x(monitor.x.max)} x2={x(monitor.x.max)} y1={margin.top} y2={margin.top + innerHeight} stroke="var(--border)" strokeDasharray="2 3" />}
+    {landmarks.map(({ line, point, best, label }) => <circle key={`${line.name}:${best}`} cx={x(point[0])} cy={y(point[1])} r={best ? 3.5 : 3} fill={best ? line.color : "var(--surface)"} stroke={line.color} strokeWidth="1.5"><title>{label}: {ltr(fmtSignal(signals[line.y], point[1]))}</title></circle>)}
+  </>;
+
   if (!page) {
     return (
       <div ref={ref} dir="ltr" className="relative h-full min-h-6 w-full">
@@ -252,6 +270,7 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
                 strokeLinecap="round"
               />
             ))}
+            {width > 0 && marks}
             {width > 0 && !table && mark === "line" && lead && last && last[1] !== null && <circle cx={x(last[0])} cy={y(last[1])} r="3" fill={lead.color} stroke="var(--base)" strokeWidth="1.5" />}
           </svg>
         )}
@@ -364,6 +383,7 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
               {dotted(line) && line.points.map(([px, py]) => py !== null && <circle key={px} cx={x(px)} cy={y(py)} r={table ? 3 : 4} fill={line.color} stroke="var(--base)" strokeWidth={table ? 1.5 : 2} />)}
             </g>
           ))}
+          {marks}
           {readout && <line x1={hover!} x2={hover!} y1={margin.top} y2={margin.top + innerHeight} stroke="var(--border)" />}
           {mark !== "bars" && readout?.hits.map(({ line, point }) => <circle key={line.name} cx={x(point[0])} cy={y(point[1]!)} r="4" fill={line.color} stroke="var(--base)" strokeWidth="2" />)}
           {endLabels.map((end) => (

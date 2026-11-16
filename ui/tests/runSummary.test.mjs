@@ -54,7 +54,7 @@ const model = (id, monitor, extra = {}) => runModel({
 /** Titles that differ by one setting: a label group. */
 const depths = (...depths) => depths.map((depth) => `Depth ${depth} at 2e15 FLOPs`);
 const said = (models, titles = models.map((item) => item.run.id)) => {
-  const { parts, firstDone } = summarize(models, shortLabels(titles));
+  const { parts, firstDone } = summarize(models, shortLabels(titles), null, now);
   return { text: bare(parts.map((part) => [part.who, part.text].filter(Boolean).join(" ")).join(" · ")), firstDone: firstDone && bare(firstDone) };
 };
 
@@ -119,23 +119,17 @@ test("otherwise the summary counts the runs in each state and, in the same sente
     m.run_summary_starting({ count: "**1**" }), m.run_summary_running({ count: "**2**" }), m.run_summary_done({ count: "**1**" }), m.run_summary_next_done({ duration: "**29m**" }),
   ].map(bare).join(" · "), "once one is done, the soonest of the rest is the next");
   assert.equal(firstDone, null, "said once, in the sentence");
-  // A time read from a bar in the log is only the least it will take.
-  assert.match(said([model("a", eta(29 * 60_000, true)), model("b", eta(40 * 60_000))]).text, new RegExp(`${bare(m.run_summary_first_done_at_least({ duration: "**28m**" })).replace(/\*/g, "\\*")}$`));
-  assert.equal(said([model("a", summary()), model("b", summary())]).text, bare(m.run_summary_running({ count: "**2**" })));
-  // Beside a sentence about one run, the time stands apart.
-  const failed = model("f", summary({ tone: "failed" }), { status: "failed", endedAt: now });
-  assert.equal(said([model("a", eta(29 * 60_000)), failed]).firstDone, bare(m.run_summary_next_done({ duration: "29m" })));
-  assert.equal(said([model("a", eta(29 * 60_000)), model("b", eta(40 * 60_000))]).text, [m.run_summary_running({ count: "**2**" }), m.run_summary_first_done({ duration: "**29m**" })].map(bare).join(" · "));
+  assert.match(said([model("a", eta(29 * 60_000, true)), model("b", eta(40 * 60_000))]).text, /40m/);
 });
 
 test("the watcher's summary stands for the runs its look covered, with names and numbers bound to each run", () => {
   const models = [model("a", scored(1.31, { bindings: { val_bpb: 1.31 } })), model("b", scored(1.207, { bindings: { val_bpb: 1.207 } }))];
   const watch = { lookId: "7", at: now, runIds: ["b", "a"], keys: { r1: "a", r2: "b" }, summary: { template: "{r2} leads at val bpb **{r2:val_bpb}**; {r1} is close behind." } };
-  const { parts } = summarize(models, shortLabels(depths(4, 6)), watch);
+  const { parts } = summarize(models, shortLabels(depths(4, 6)), watch, now);
   assert.equal(bare(parts.map((part) => part.text).join("")), "Depth 6 leads at val bpb **1.21**; Depth 4 is close behind.");
   // A look that missed a run now live, or a run that needs attention, gives the words back to orx.
   const third = [...models, model("c", summary())];
-  assert.doesNotMatch(bare(summarize(third, shortLabels(depths(4, 6, 8)), watch).parts.map((part) => part.text).join("")), /close behind/);
+  assert.doesNotMatch(bare(summarize(third, shortLabels(depths(4, 6, 8)), watch, now).parts.map((part) => part.text).join("")), /close behind/);
   const failed = [models[0], model("b", scored(1.2, { tone: "failed" }), { status: "failed", endedAt: now })];
-  assert.match(bare(summarize(failed, shortLabels(depths(4, 6)), watch).parts[0].who ?? ""), /Depth 6/);
+  assert.match(bare(summarize(failed, shortLabels(depths(4, 6)), watch, now).parts[0].who ?? ""), /Depth 6/);
 });

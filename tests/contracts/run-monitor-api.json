@@ -35,13 +35,14 @@
               "chart": [
                 "loss"
               ],
-              "x": "step"
+              "x": "step",
+              "ghost": "parent"
             }
           ]
         },
         "viewFrom": {
           "experimentId": "exp",
-          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" />\n</view>\n",
+          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" ghost=\"parent\" />\n</view>\n",
           "isDefault": true
         },
         "source": "declared",
@@ -296,13 +297,14 @@
               "chart": [
                 "loss"
               ],
-              "x": "step"
+              "x": "step",
+              "ghost": "parent"
             }
           ]
         },
         "viewFrom": {
           "experimentId": "exp",
-          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" />\n</view>\n",
+          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" ghost=\"parent\" />\n</view>\n",
           "isDefault": true
         },
         "source": "declared",
@@ -497,13 +499,14 @@
               "chart": [
                 "loss"
               ],
-              "x": "step"
+              "x": "step",
+              "ghost": "parent"
             }
           ]
         },
         "viewFrom": {
           "experimentId": "exp",
-          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" />\n</view>\n",
+          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" ghost=\"parent\" />\n</view>\n",
           "isDefault": true
         },
         "source": "declared",
@@ -720,13 +723,14 @@
               "chart": [
                 "loss"
               ],
-              "x": "step"
+              "x": "step",
+              "ghost": "parent"
             }
           ]
         },
         "viewFrom": {
           "experimentId": "exp",
-          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" />\n</view>\n",
+          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" ghost=\"parent\" />\n</view>\n",
           "isDefault": true
         },
         "source": "declared",
@@ -889,13 +893,14 @@
               "chart": [
                 "loss"
               ],
-              "x": "step"
+              "x": "step",
+              "ghost": "parent"
             }
           ]
         },
         "viewFrom": {
           "experimentId": "exp",
-          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" />\n</view>\n",
+          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" ghost=\"parent\" />\n</view>\n",
           "isDefault": true
         },
         "source": "declared",
@@ -1017,6 +1022,12 @@
         "setup": null,
         "generation": "g1",
         "asOf": 1794444302000,
+        "segments": [
+          {
+            "weight": 1.0,
+            "fill": null
+          }
+        ],
         "rev": 1
       },
       "expect": {
@@ -1060,13 +1071,14 @@
               "chart": [
                 "loss"
               ],
-              "x": "step"
+              "x": "step",
+              "ghost": "parent"
             }
           ]
         },
         "viewFrom": {
           "experimentId": "exp",
-          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" />\n</view>\n",
+          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" ghost=\"parent\" />\n</view>\n",
           "isDefault": true
         },
         "source": "declared",
@@ -1234,7 +1246,7 @@
             {
               "name": "",
               "weight": 1.0,
-              "fill": null
+              "fill": 1.0
             }
           ],
           "whole": null,
@@ -1279,7 +1291,11 @@
         "sentence": null,
         "flag": null,
         "flags": [],
-        "setup": null,
+        "setup": {
+          "line": "train: 100%| 4/4 [00:04<00:00, 1.00it/s]",
+          "stage": null,
+          "startsAt": null
+        },
         "disagrees": null,
         "revising": false,
         "brief": [],
@@ -1308,9 +1324,19 @@
         "pending": false,
         "limitEndsAt": null,
         "flag": null,
-        "setup": null,
+        "setup": {
+          "line": "train: 100%| 4/4 [00:04<00:00, 1.00it/s]",
+          "stage": null,
+          "startsAt": null
+        },
         "generation": "g1",
         "asOf": 1794444425000,
+        "segments": [
+          {
+            "weight": 1.0,
+            "fill": 1.0
+          }
+        ],
         "rev": 1
       },
       "expect": {
@@ -1354,13 +1380,14 @@
               "chart": [
                 "loss"
               ],
-              "x": "step"
+              "x": "step",
+              "ghost": "parent"
             }
           ]
         },
         "viewFrom": {
           "experimentId": "exp",
-          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" />\n</view>\n",
+          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" ghost=\"parent\" />\n</view>\n",
           "isDefault": true
         },
         "source": "declared",
@@ -1613,7 +1640,7 @@
             {
               "name": "",
               "weight": 1.0,
-              "fill": null
+              "fill": 0.25
             }
           ],
           "whole": null,
@@ -1658,7 +1685,11 @@
         "sentence": null,
         "flag": null,
         "flags": [],
-        "setup": null,
+        "setup": {
+          "line": null,
+          "stage": null,
+          "startsAt": null
+        },
         "disagrees": null,
         "revising": false,
         "brief": [],
@@ -1687,9 +1718,19 @@
         "pending": false,
         "limitEndsAt": null,
         "flag": null,
-        "setup": null,
+        "setup": {
+          "line": null,
+          "stage": null,
+          "startsAt": null
+        },
         "generation": "g1",
         "asOf": 1794444320000,
+        "segments": [
+          {
+            "weight": 1.0,
+            "fill": 0.25
+          }
+        ],
         "rev": 1
       },
       "expect": {
@@ -1733,13 +1774,14 @@
               "chart": [
                 "loss"
               ],
-              "x": "elapsed"
+              "x": "elapsed",
+              "ghost": "parent"
             }
           ]
         },
         "viewFrom": {
           "experimentId": "exp",
-          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"elapsed\" />\n</view>\n",
+          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"elapsed\" ghost=\"parent\" />\n</view>\n",
           "isDefault": true
         },
         "source": "declared",
@@ -1830,6 +1872,12 @@
         "setup": null,
         "generation": "g1",
         "asOf": 1794444301000,
+        "segments": [
+          {
+            "weight": 1.0,
+            "fill": null
+          }
+        ],
         "rev": 1
       },
       "expect": {
@@ -1903,7 +1951,8 @@
               "chart": [
                 "lr"
               ],
-              "x": "step"
+              "x": "step",
+              "ghost": "parent"
             },
             {
               "table": "rounds",
@@ -1928,7 +1977,7 @@
         },
         "viewFrom": {
           "experimentId": "exp",
-          "markup": "<signal name=\"round\" />\n<signal name=\"win_rate\" />\n<signal name=\"elo\" />\n<signal name=\"game_len\" />\n<signal name=\"lr\" />\n<signal name=\"lr_min\" />\n<signal name=\"loss\" />\n<signal name=\"ratio\" />\n<signal name=\"drift\" />\n<signal name=\"tokens\" />\n<signal name=\"flops\" />\n<view headline=\"lr\">\n  <chart y=\"lr\" x=\"step\" />\n  <table name=\"rounds\" columns=\"round win_rate elo game_len\" />\n  <stats of=\"lr_min loss ratio drift tokens flops\" />\n</view>\n",
+          "markup": "<signal name=\"round\" />\n<signal name=\"win_rate\" />\n<signal name=\"elo\" />\n<signal name=\"game_len\" />\n<signal name=\"lr\" />\n<signal name=\"lr_min\" />\n<signal name=\"loss\" />\n<signal name=\"ratio\" />\n<signal name=\"drift\" />\n<signal name=\"tokens\" />\n<signal name=\"flops\" />\n<view headline=\"lr\">\n  <chart y=\"lr\" x=\"step\" ghost=\"parent\" />\n  <table name=\"rounds\" columns=\"round win_rate elo game_len\" />\n  <stats of=\"lr_min loss ratio drift tokens flops\" />\n</view>\n",
           "isDefault": true
         },
         "source": "declared",
@@ -2002,7 +2051,7 @@
           "at": 1794444301000,
           "pending": true,
           "pastLimitMs": null,
-          "floor": false,
+          "floor": true,
           "reasons": []
         },
         "limit": null,
@@ -2444,7 +2493,7 @@
         "setup": {
           "line": null,
           "stage": "train",
-          "until": null
+          "startsAt": null
         },
         "disagrees": null,
         "revising": false,
@@ -2472,10 +2521,16 @@
         "setup": {
           "line": null,
           "stage": "train",
-          "until": null
+          "startsAt": null
         },
         "generation": "g1",
         "asOf": 1794444301000,
+        "segments": [
+          {
+            "weight": 1.0,
+            "fill": null
+          }
+        ],
         "rev": 1
       },
       "expect": {
@@ -2559,7 +2614,7 @@
         "setup": {
           "line": "Successfully downloaded shard_00001.parquet",
           "stage": null,
-          "until": 1794445200000
+          "startsAt": null
         },
         "disagrees": null,
         "revising": false,
@@ -2587,10 +2642,16 @@
         "setup": {
           "line": "Successfully downloaded shard_00001.parquet",
           "stage": null,
-          "until": 1794445200000
+          "startsAt": null
         },
         "generation": "g1",
         "asOf": 1794444302000,
+        "segments": [
+          {
+            "weight": 1.0,
+            "fill": null
+          }
+        ],
         "rev": 1
       },
       "expect": {
@@ -2702,7 +2763,11 @@
         "sentence": null,
         "flag": null,
         "flags": [],
-        "setup": null,
+        "setup": {
+          "line": "chunk 3/10 done, 372s",
+          "stage": null,
+          "startsAt": null
+        },
         "disagrees": null,
         "revising": false,
         "brief": [],
@@ -2736,7 +2801,11 @@
         "pending": false,
         "limitEndsAt": null,
         "flag": null,
-        "setup": null,
+        "setup": {
+          "line": "chunk 3/10 done, 372s",
+          "stage": null,
+          "startsAt": null
+        },
         "generation": "g1",
         "asOf": 1794444318000,
         "rev": 1
@@ -2783,13 +2852,14 @@
               "chart": [
                 "loss"
               ],
-              "x": "step"
+              "x": "step",
+              "ghost": "parent"
             }
           ]
         },
         "viewFrom": {
           "experimentId": "exp",
-          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" />\n</view>\n",
+          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" ghost=\"parent\" />\n</view>\n",
           "isDefault": true
         },
         "source": "declared",
@@ -2827,19 +2897,9 @@
           "done": 5.0,
           "segments": [
             {
-              "name": "download",
-              "weight": 0.3333333333333333,
-              "fill": 1.0
-            },
-            {
               "name": "train",
-              "weight": 0.3333333333333333,
+              "weight": 1.0,
               "fill": 0.5
-            },
-            {
-              "name": "eval",
-              "weight": 0.3333333333333333,
-              "fill": 0.0
             }
           ],
           "whole": null,
@@ -2978,16 +3038,8 @@
         ],
         "segments": [
           {
-            "weight": 0.3333333333333333,
-            "fill": 1.0
-          },
-          {
-            "weight": 0.3333333333333333,
+            "weight": 1.0,
             "fill": 0.5
-          },
-          {
-            "weight": 0.3333333333333333,
-            "fill": 0.0
           }
         ],
         "rev": 1
@@ -3080,7 +3132,7 @@
           "at": 1794444301000,
           "pending": true,
           "pastLimitMs": null,
-          "floor": false,
+          "floor": true,
           "reasons": []
         },
         "limit": null,
@@ -3102,7 +3154,11 @@
         "sentence": null,
         "flag": null,
         "flags": [],
-        "setup": null,
+        "setup": {
+          "line": null,
+          "stage": "train",
+          "startsAt": null
+        },
         "disagrees": null,
         "revising": false,
         "brief": [],
@@ -3131,7 +3187,11 @@
         "pending": true,
         "limitEndsAt": null,
         "flag": null,
-        "setup": null,
+        "setup": {
+          "line": null,
+          "stage": "train",
+          "startsAt": null
+        },
         "generation": "g1",
         "asOf": 1794444301000,
         "rev": 1
@@ -3178,13 +3238,14 @@
               "chart": [
                 "loss"
               ],
-              "x": "step"
+              "x": "step",
+              "ghost": "parent"
             }
           ]
         },
         "viewFrom": {
           "experimentId": "exp",
-          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" />\n</view>\n",
+          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" ghost=\"parent\" />\n</view>\n",
           "isDefault": true
         },
         "source": "declared",
@@ -3500,6 +3561,12 @@
         "generation": "",
         "asOf": 1794444320000,
         "unavailable": "Couldn't read the progress saved for this run. Its log shows what it printed.",
+        "segments": [
+          {
+            "weight": 1.0,
+            "fill": null
+          }
+        ],
         "rev": 2
       },
       "expect": {
@@ -3543,13 +3610,14 @@
               "chart": [
                 "loss"
               ],
-              "x": "step"
+              "x": "step",
+              "ghost": "parent"
             }
           ]
         },
         "viewFrom": {
           "experimentId": "exp",
-          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" />\n</view>\n",
+          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" ghost=\"parent\" />\n</view>\n",
           "isDefault": true
         },
         "source": "declared",
@@ -4158,13 +4226,14 @@
               "chart": [
                 "loss"
               ],
-              "x": "step"
+              "x": "step",
+              "ghost": "parent"
             }
           ]
         },
         "viewFrom": {
           "experimentId": "exp",
-          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" />\n</view>\n",
+          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" ghost=\"parent\" />\n</view>\n",
           "isDefault": true
         },
         "source": "declared",

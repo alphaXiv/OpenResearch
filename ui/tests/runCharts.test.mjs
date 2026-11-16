@@ -258,3 +258,15 @@ test("a table against the parent pairs the same report of each key at a step, an
   const asked = await draw(compared, { table: "eval", columns: ["task", "score"], vs: "final" });
   assert.deepEqual(cells(asked), cells(ended), "the table's own way wins");
 });
+
+test("without a parent the chart marks its starting value and the best value in the declared direction", async () => {
+  const base = fixture("finetune");
+  for (const [better, value] of [["lower", "2.00"], ["higher", "4.00"]]) {
+    const monitor = { ...base, parent: null, x: { name: "step", max: 10 }, latest: { loss: 3 }, series: { loss: [[0, 4], [1, 2], [2, 3]] },
+      view: { ...base.view, signals: { loss: { label: "Loss", digits: 2, better } } } };
+    const page = await draw(monitor, { chart: ["loss"] });
+    const marks = [...chartOf(page).querySelectorAll("circle title")].map(text);
+    assert.ok(marks.some((label) => label.includes(m.run_chart_start({ label: "Loss" })) && label.endsWith("4.00")));
+    assert.ok(marks.some((label) => label.includes(m.run_stat_best({ label: "Loss" })) && label.endsWith(value)));
+  }
+});

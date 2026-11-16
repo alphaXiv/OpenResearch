@@ -8,8 +8,9 @@ import { cn } from "../ui/cn";
  * in the flow, under its stages.
  */
 export function Rail({ model, kind, hover = false }: { model: RunModel; kind: "edge" | "thick" | "bar"; hover?: boolean }) {
+  if (model.run.status === "done") return null;
   const { bar, ticks } = model;
-  const fill = bar.frozen ? "bg-subtext" : TONE_BG[model.tone];
+  const fill = bar.frozen || model.settingUp ? "bg-subtext" : TONE_BG[model.tone];
   const mark = (flag: boolean) => <i className={flag ? "h-1.5 w-0.5 bg-mark-amber" : "h-1 w-px bg-subtext"} />;
   return (
     <div className={kind === "bar" ? "pointer-events-none" : "pointer-events-none absolute inset-x-0 bottom-0"}>

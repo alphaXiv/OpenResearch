@@ -141,6 +141,10 @@
   "omitted": {},
   "seriesRev": 0,
   "seriesWidths": {},
+  "firstSeriesStages": {
+    "bad": 0,
+    "loss": 0
+  },
   "seriesStages": {
     "bad": 0,
     "loss": 0

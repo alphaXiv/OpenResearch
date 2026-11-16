@@ -22,6 +22,10 @@ fn every_byte_boundary_survives_checkpoint_restart() {
             .unwrap();
         assert_eq!(s.latest, expected.latest, "split {split}");
         assert_eq!(s.series, expected.series, "split {split}");
+        assert_eq!(
+            s.first_series_stages, expected.first_series_stages,
+            "split {split}"
+        );
         assert_eq!(s.phases, expected.phases, "split {split}");
         assert_eq!(s.cursor, expected.cursor, "split {split}");
     }
@@ -1116,6 +1120,7 @@ fn a_series_on_the_step_axis_holds_one_stages_points() {
         "download's step 1 is not train's, and eval has no step to plot at"
     );
     assert_eq!(s.series_stages["loss"], s.phases[1].occurrence);
+    assert_eq!(s.first_series_stages["loss"], s.phases[0].occurrence);
     assert_eq!(
         s.latest["loss"], 1.9,
         "the value without a step is still the latest"
@@ -1130,6 +1135,10 @@ fn a_series_on_the_step_axis_holds_one_stages_points() {
         timed.series["loss"],
         [(1.0, Some(4.0)), (2.0, Some(3.0))],
         "a run that never counts steps plots across its stages in time"
+    );
+    assert_eq!(
+        timed.first_series_stages["loss"],
+        timed.phases[0].occurrence
     );
 }
 

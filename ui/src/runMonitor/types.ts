@@ -173,14 +173,14 @@ export interface Flag {
   noted?: { at: number; text: string; lookId: string }[];
 }
 
-/** What a run is doing before it reports a step: the newest thing its log said since its stage began. */
+/** A live run before the view's first headline or chart point. */
 export interface Setup {
   /** Trimmed; null when it printed nothing or only a credential. */
   line: string | null;
-  /** The stage the run declared and has not reported a step of; null while its log says nothing orx recognises. */
+  /** The current named stage, when the log has declared one. */
   stage: string | null;
-  /** When an unrecognised log stops reading as setting up; null for a declared stage. */
-  until: number | null;
+  /** Expected first headline or chart point, from an earlier run's stage timings. */
+  startsAt: number | null;
 }
 
 /** What every `Run` carries, so a line, a badge or the sidebar needs no extra request. */
@@ -195,11 +195,9 @@ export interface RunMonitorSummary {
   bindings: Record<string, SignalValue>;
   signals: Signals;
   etaMs: { lo: number; mid: number; hi: number; at: number } | null;
-  /** `etaMs` times a bar or counter read from the log, so more of the run may follow it; absent from an older server. */
+  /** `etaMs` omits untimed stages or only times work inferred from the log. */
   etaFloor?: boolean;
-  /** The plan's stages `etaMs` leaves out, being untimed, which make it a floor; absent from an older server. */
-  etaUntimed?: string[];
-  /** One per stage of a declared plan, so a line's underline is segmented; absent without a plan or from an older server. */
+  /** Timed stages of the whole run, or one current-stage fill when its share is unknown. */
   segments?: { weight: number; fill: number | null }[];
   /** The estimate waits on more progress; with no `etaMs` and not pending, how much is left is unknown. */
   pending: boolean;
@@ -209,7 +207,7 @@ export interface RunMonitorSummary {
   limitEndsAt: number | null;
   /** The unsettled flag only. */
   flag: { id: string; state: FlagState; mode: FlagMode } | null;
-  /** Present while a live run's log has said nothing orx recognises, or its stage has no step yet; absent from an older server. */
+  /** Present until a headline or chart signal has its first point; absent from an older server. */
   setup?: Setup | null;
   /** For a failed run that recorded no message, the line in its log that says why. */
   logError?: string | null;
@@ -259,10 +257,8 @@ export interface Estimate {
   at: number;
   pending: boolean;
   pastLimitMs: number | null;
-  /** Times a bar or counter read from the log, or leaves out `untimed` stages, so more of the run may follow it. */
+  /** Times only known stages, so more of the run may follow it. */
   floor: boolean;
-  /** Stages of the plan, this one or to come, that no earlier run timed: time left is at least the rest. */
-  untimed?: string[];
   /** Why parts of the estimate could not be computed. */
   reasons?: string[];
 }

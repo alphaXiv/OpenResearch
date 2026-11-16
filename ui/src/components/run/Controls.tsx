@@ -8,7 +8,7 @@ import { useWorkspace } from "../../workspace";
 import { IconButton, Tooltip } from "../ui";
 
 /** Stop while it runs; once it has ended there is nothing to stop, so the same place dismisses it. */
-export function Controls({ model, expanded, onToggle }: { model: RunModel; expanded: boolean; onToggle: () => void }) {
+export function Controls({ model, expanded, onToggle, expandable = true }: { model: RunModel; expandable?: boolean; expanded: boolean; onToggle: () => void }) {
   const workspace = useWorkspace();
   const cancel = useMutate(mutCancelRun);
   const dismiss = useMutate(mutDismissShownRun);
@@ -39,11 +39,11 @@ export function Controls({ model, expanded, onToggle }: { model: RunModel; expan
           </IconButton>
         </Tooltip>
       )}
-      <Tooltip interactive content={toggle}>
+      {expandable && <Tooltip interactive content={toggle}>
         <IconButton size="small" aria-label={toggle} aria-expanded={expanded} data-run-toggle={model.run.id} onClick={onToggle}>
           {expanded ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
         </IconButton>
-      </Tooltip>
+      </Tooltip>}
     </div>
   );
 }

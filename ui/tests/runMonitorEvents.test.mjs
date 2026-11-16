@@ -48,7 +48,7 @@ test("a monitor event extends the chart in place and ignores a repeat", async ()
 
 test("a monitor event carries the newest line of a run still setting up", async () => {
   const { read } = await page();
-  const setup = { line: "Computing initial pair counts", stage: null, until: running.asOf + 60_000 };
+  const setup = { line: "Computing initial pair counts", stage: null, startsAt: running.asOf + 60_000 };
   await emit("run.monitor", event({ append: {}, seriesRev: running.seriesRev, patch: { setup } }));
   assert.deepEqual(read().setup, setup);
 });
