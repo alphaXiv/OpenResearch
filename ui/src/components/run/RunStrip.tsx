@@ -1,3 +1,4 @@
+import type { Run } from "../../api";
 import { RefreshCw } from "lucide-react";
 import { autoDir } from "../../i18n";
 import { m } from "../../paraglide/messages.js";
@@ -15,7 +16,6 @@ import { Delta } from "./Delta";
 import { Issue } from "./Issue";
 import { RunLine, type RunLabel } from "./RunLine";
 
-type OpenTarget = (id: string, intent: TabOpenIntent) => void;
 type OpenRun = (runId: string, intent: TabOpenIntent, seek?: LogSeek) => void;
 
 export type StripMonitor = { status: "loading" } | { status: "error"; retry: () => void; data: RunMonitor | null } | { status: "ready"; data: RunMonitor } | null;
@@ -45,15 +45,15 @@ function Hero({ model, monitor, block }: { model: RunModel; monitor: RunMonitor;
   );
 }
 
-export function RunStrip({ model, monitor, agent, label, open, onToggle, onOpenExperiment, onOpenRun }: {
+export function RunStrip({ model, monitor, agent, label, open, onToggle, onOpenRun, onOpenRunPage }: {
   model: RunModel;
   open: boolean;
   monitor: StripMonitor;
   agent: string;
   label?: RunLabel;
   onToggle: () => void;
-  onOpenExperiment?: OpenTarget;
   onOpenRun?: OpenRun;
+  onOpenRunPage?: (run: Run, intent: TabOpenIntent) => void;
 }) {
   const data = monitor && monitor.status !== "loading" ? monitor.data : null;
   const phase = data?.progress ? data.phases[data.progress.phase]?.name : undefined;
@@ -62,7 +62,7 @@ export function RunStrip({ model, monitor, agent, label, open, onToggle, onOpenE
   const expanded = open && Boolean(chart || flag || model.note || model.notice || monitor?.status === "error");
 
   return (
-    <RunLine model={model} agent={agent} label={label} onToggle={onToggle} onOpenExperiment={onOpenExperiment} expanded={expanded} expandable={!open || expanded || monitor?.status === "loading"}>
+    <RunLine model={model} agent={agent} label={label} onToggle={onToggle} onOpenRunPage={onOpenRunPage} expanded={expanded} expandable={!open || expanded || monitor?.status === "loading"}>
       {expanded && <div className="px-3 pb-3">
         {model.notice && <RunContactNotice run={model.run} className="mt-1.5" />}
         {model.stale && monitor?.status !== "error" && <p className="m-0 mt-1.5 text-xs text-ink-subtext">{model.stale.why} · {model.stale.age}</p>}

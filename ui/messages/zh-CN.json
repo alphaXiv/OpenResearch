@@ -2058,6 +2058,7 @@
   "run_progress_limit": "{elapsed} / {limit} 上限",
   "run_progress_last_seen": "最后一次看到：{progress}",
   "run_not_started": "未开始",
+  "run_status_for": "{status} · {name}",
   "run_setup_status": "准备中",
   "run_setup_starts_in": "运行将在约 {duration} 后开始",
   "run_setting_up": "正在准备 · {line}",

@@ -152,6 +152,7 @@ import {
   type Project,
   type PromptAnswer,
   type RuntimeInfo,
+  type Run,
   type NativeChat,
   type SkillInfo,
   type StarterPrompt,
@@ -5053,6 +5054,7 @@ export function ChatPanel({
   onSelectMainView,
   onOpenFile,
   onOpenRun,
+  onOpenRunPage,
   runExperimentName,
   chatInfo,
   onOpenMessage,
@@ -5116,6 +5118,7 @@ export function ChatPanel({
   /** Open a run's logs in the right pane (agent-emitted `<run>` evidence chips), at `seek` when given.
    * Run ids are globally unique, so no session context is needed. */
   onOpenRun?: (runId: string, intent: TabOpenIntent, seek?: LogSeek) => void;
+  onOpenRunPage?: (run: Run, intent: TabOpenIntent) => void;
   /** Resolve a run to the experiment name shown on tool activity links. */
   runExperimentName?: (runId: string) => string;
   /** A chat in this project, or undefined for one elsewhere. */
@@ -7845,7 +7848,7 @@ export function ChatPanel({
               sessionId={activeId}
               agent={assistantLabel}
               onOpenRun={onOpenRun}
-              onOpenExperiment={onOpenExperiment}
+              onOpenRunPage={onOpenRunPage}
             />
           )}
           {/* Inside the composer so the composer's popovers (mode/model pickers,

@@ -2058,6 +2058,7 @@
   "run_progress_limit": "{elapsed} من حد {limit}",
   "run_progress_last_seen": "آخر ظهور عند {progress}",
   "run_not_started": "لم يبدأ",
+  "run_status_for": "{status} · {name}",
   "run_setup_status": "جارٍ الإعداد",
   "run_setup_starts_in": "يبدأ التشغيل بعد نحو {duration}",
   "run_setting_up": "جارٍ الإعداد · {line}",

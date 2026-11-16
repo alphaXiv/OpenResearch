@@ -2058,6 +2058,7 @@
   "run_progress_limit": "{elapsed} z limitu {limit}",
   "run_progress_last_seen": "Ostatnio widziane: {progress}",
   "run_not_started": "Nie rozpoczęto",
+  "run_status_for": "{status} · {name}",
   "run_setup_status": "Przygotowywanie",
   "run_setup_starts_in": "Eksperyment rozpocznie się za około {duration}",
   "run_setting_up": "Przygotowywanie · {line}",

@@ -2058,6 +2058,7 @@
   "run_progress_limit": "{elapsed} / {limit} sınırı",
   "run_progress_last_seen": "Son görülme: {progress}",
   "run_not_started": "Başlamadı",
+  "run_status_for": "{status} · {name}",
   "run_setup_status": "Hazırlanıyor",
   "run_setup_starts_in": "Çalıştırma yaklaşık {duration} sonra başlar",
   "run_setting_up": "Hazırlanıyor · {line}",

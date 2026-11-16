@@ -2058,6 +2058,7 @@
   "run_progress_limit": "{elapsed} из лимита {limit}",
   "run_progress_last_seen": "Последний ответ: {progress}",
   "run_not_started": "Не запущено",
+  "run_status_for": "{status} · {name}",
   "run_setup_status": "Подготовка",
   "run_setup_starts_in": "Эксперимент начнётся примерно через {duration}",
   "run_setting_up": "Подготовка · {line}",

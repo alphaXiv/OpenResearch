@@ -210,7 +210,7 @@ test("the line says its time is elapsed, and why there is no estimate in its des
   for (const [name, why] of Object.entries(noEstimate)) {
     if (!model(name, false).etaDetail) continue;
     const { container } = await banner(name, "line");
-    const button = container.querySelector("button[aria-expanded]");
+    const button = container.querySelector("[aria-describedby]");
     const time = bare(model(name, false).eta);
     assert.ok(bare(container.textContent).includes(time), `${name}: ${container.textContent}`);
     const description = container.querySelector(`[id="${button.getAttribute("aria-describedby")}"]`);
@@ -261,7 +261,7 @@ test("a run whose projection fails or whose signals can't be read is drawn as la
     const text = bare(container.textContent);
     assert.ok(!text.includes(bare(m.run_eta_left({ duration: "" })).trim()), text);
     assert.ok(!text.includes(bare(m.run_eta_no_progress())), text);
-    const button = container.querySelector("button[aria-expanded]");
+    const button = container.querySelector("[aria-describedby]");
     const description = container.querySelector(`[id="${button.getAttribute("aria-describedby")}"]`);
     assert.ok(bare(description.textContent).includes(summary.unavailable), description.textContent);
     assert.ok(!bare(description.textContent).includes(bare(m.run_eta_no_progress())), description.textContent);

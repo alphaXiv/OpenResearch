@@ -18,7 +18,8 @@ import {
   type Project,
   type Run,
 } from "../api";
-import { autoDir } from "../i18n";
+import { autoDir, fmtNumber, ltr } from "../i18n";
+import { capitalized } from "../runMonitor/words";
 import { noticeRun, runActive, runDisplay, runResult } from "../runDisplay";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { BackendBadge } from "./BackendLogos";
@@ -64,6 +65,7 @@ export function ExperimentOverview({
   parentExperiment,
   project,
   runs,
+  selectedRunId = null,
   onOpenLogs,
   onOpenTrackio,
   onOpenCode,
@@ -75,6 +77,7 @@ export function ExperimentOverview({
   parentExperiment: Experiment | null;
   project: Project;
   runs: Run[];
+  selectedRunId?: string | null;
   onOpenLogs: (runId: string, intent: TabOpenIntent) => void;
   onOpenTrackio: (runId: string, intent: TabOpenIntent) => void;
   onOpenCode: (intent: TabOpenIntent) => void;
@@ -83,15 +86,18 @@ export function ExperimentOverview({
   const { useTrackioRuns } = useWorkspace().queries;
   const { trackioRunUrl } = useWorkspace().api;
 
-  const latestRun = runs[0] ?? null;
-  const latestDisplay = latestRun ? runDisplay(latestRun) : null;
-  const waiting = latestDisplay?.waiting;
-  const attentionRun = noticeRun(runs);
-  const result = latestRun ? runResult(latestRun) : null;
+  const run = selectedRunId ? runs.find((run) => run.id === selectedRunId) ?? null : runs[0] ?? null;
+  const runHeading = !run ? m.experiment_runs()
+    : run === runs[0] ? m.experiment_latest_run()
+    : capitalized(m.run_number({ number: ltr(fmtNumber(runs.length - runs.indexOf(run))) }));
+  const display = run ? runDisplay(run) : null;
+  const waiting = display?.waiting;
+  const attentionRun = selectedRunId ? run : noticeRun(runs);
+  const result = run ? runResult(run) : null;
   const hasLiveRun = runs.some((run) => runActive(run.status));
   const [now, setNow] = useState(() => Date.now());
   const trackio = useTrackioRuns(experiment.projectId, hasLiveRun).data;
-  const hasTrackio = latestRun !== null && trackioRunUrl(trackio, latestRun.id) !== null;
+  const hasTrackio = run !== null && trackioRunUrl(trackio, run.id) !== null;
 
   useEffect(() => {
     if (!hasLiveRun) return;
@@ -109,26 +115,26 @@ export function ExperimentOverview({
             <div className="experiment-overview-slug mt-1 text-muted text-sm">{experiment.slug}</div>
             {waiting && <div className="mt-1 truncate text-subtext text-sm" title={waiting}>{autoDir(waiting)}</div>}
           </div>
-          {latestDisplay ? <StatusBadge {...latestDisplay} waiting={undefined} /> : <StatusBadge status="idle" />}
+          {display ? <StatusBadge {...display} waiting={undefined} /> : <StatusBadge status="idle" />}
         </header>
 
         <div className="experiment-overview-actions flex gap-2 mt-4.5 [@media((max-width:_720px))]:flex-wrap">
-          {latestRun && (
+          {run && (
             <Button
               {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
-                onOpenLogs(latestRun.id, intent),
+                onOpenLogs(run.id, intent),
               )}
             >
               <Terminal size={16} />
               {m.experiment_overview_logs()}
             </Button>
           )}
-          {latestRun && hasTrackio && (
+          {run && hasTrackio && (
             <Tooltip interactive content={m.a11y_trackio_charts()} className="rounded-md">
               <Button
                 aria-description={m.a11y_trackio_charts()}
                 {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
-                  onOpenTrackio(latestRun.id, intent),
+                  onOpenTrackio(run.id, intent),
                 )}
               >
                 <ChartLine size={16} />
@@ -161,40 +167,40 @@ export function ExperimentOverview({
         )}
 
         <section className={EXPERIMENT_OVERVIEW_SECTION_CLASS_NAME}>
-          <h2>{latestRun ? m.experiment_latest_run() : m.experiment_runs()}</h2>
-          {latestRun && (
+          <h2>{runHeading}</h2>
+          {run && (
             <>
               <div className="experiment-overview-meta flex items-center flex-wrap gap-y-2.5 gap-x-4.5 text-text text-sm [&_svg]:text-muted [&_.backend-badge]:text-text [&_.status-badge]:text-text [&_>_span]:inline-flex [&_>_span]:items-center [&_>_span]:gap-1 [&_code]:text-text [&_code]:text-xs">
-                <StatusBadge {...runDisplay(latestRun)} className="max-w-full" />
-                <BackendBadge backend={latestRun.backend} />
+                <StatusBadge {...runDisplay(run)} className="max-w-full" />
+                <BackendBadge backend={run.backend} />
                 <span title={m.experiment_overview_started()}>
                   <CalendarDays size={14} />
-                  {fmtDate(latestRun.createdAt)}
+                  {fmtDate(run.createdAt)}
                 </span>
                 <span title={m.experiment_overview_duration()}>
                   <Clock3 size={14} />
-                  {runDuration(latestRun, now)}
+                  {runDuration(run, now)}
                 </span>
-                {latestRun.commitSha && (
+                {run.commitSha && (
                   <span title={m.experiment_overview_commit()}>
                     <GitCommitHorizontal size={14} />
-                    <code>{latestRun.commitSha.slice(0, 7)}</code>
+                    <code>{run.commitSha.slice(0, 7)}</code>
                   </span>
                 )}
-                {latestRun.exitCode !== null &&
-                  latestRun.exitCode !== undefined &&
-                  latestRun.exitCode !== 0 && (
-                    <span>{m.experiment_overview_exit()} {latestRun.exitCode}</span>
+                {run.exitCode !== null &&
+                  run.exitCode !== undefined &&
+                  run.exitCode !== 0 && (
+                    <span>{m.experiment_overview_exit()} {run.exitCode}</span>
                   )}
               </div>
-              {latestRun.command && (
-                <code className={EXPERIMENT_OVERVIEW_COMMAND_CLASS_NAME}>$ {latestRun.command}</code>
+              {run.command && (
+                <code className={EXPERIMENT_OVERVIEW_COMMAND_CLASS_NAME}>$ {run.command}</code>
               )}
-              <RunPage run={latestRun} name={experiment.slug} chatSessionId={experiment.chatSessionId} now={now} />
-              {attentionRun && !(latestRun.monitor && attentionRun.id === latestRun.id) && <RunContactNotice run={attentionRun} className="mt-4" />}
+              <RunPage run={run} name={experiment.slug} chatSessionId={experiment.chatSessionId} now={now} />
+              {attentionRun && !(run.monitor && attentionRun.id === run.id) && <RunContactNotice run={attentionRun} className="mt-4" />}
               {result && (
                 <div
-                  className={`experiment-overview-result mt-4 [&.failed]:text-accent-red ${latestRun.status === "failed" ? "failed" : ""}`}
+                  className={`experiment-overview-result mt-4 [&.failed]:text-accent-red ${run.status === "failed" ? "failed" : ""}`}
                 >
                   <Md text={result} />
                 </div>
@@ -226,7 +232,7 @@ export function ExperimentOverview({
           </section>
         )}
 
-        {latestRun?.monitor && <WatchSection run={latestRun} chatSessionId={experiment.chatSessionId} now={now} className={EXPERIMENT_OVERVIEW_SECTION_CLASS_NAME} />}
+        {run?.monitor && <WatchSection run={run} chatSessionId={experiment.chatSessionId} now={now} className={EXPERIMENT_OVERVIEW_SECTION_CLASS_NAME} />}
 
         {lineageNode && (
           <div className="mt-5.5 border-t border-border-variant pt-4.5">
@@ -251,7 +257,7 @@ export function ExperimentOverview({
               {m.experiment_overview_created()} {timeAgo(experiment.createdAt)}
             </span>
           </div>
-          {experiment.runCommand !== latestRun?.command && (
+          {experiment.runCommand !== run?.command && (
             <code className={EXPERIMENT_OVERVIEW_COMMAND_CLASS_NAME}>$ {experiment.runCommand}</code>
           )}
         </section>

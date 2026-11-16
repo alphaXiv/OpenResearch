@@ -47,7 +47,7 @@ async function banner(runs, { shown = true, workspace = createWorkspace("test"),
   const { queryKey } = workspace.queries.listChatShownRunsQuery();
   const hold = (next) => workspace.queryClient.setQueryData(queryKey, { source: shown ? "shown" : "active", runs: next.map(item) });
   hold(runs);
-  const view = await render(createElement(RunBanner, { sessionId: "s", agent: "Claude", ...props }), workspace);
+  const view = await render(createElement(RunBanner, { sessionId: "s", agent: "Claude", onOpenRunPage: () => {}, ...props }), workspace);
   return { ...view, update: (next) => act(async () => hold(next)) };
 }
 const button = (label) => find(`button[aria-label="${label}"]`);
@@ -178,9 +178,9 @@ test("the end is announced once, as how long the run took, never as the last ste
 
 const sweep = (id, depth) => ({ ...item(run(id)), experimentName: `Depth ${depth} at 2e15 FLOPs`, experimentSlug: `depth-${depth}` });
 /** Chat s's banner over shown runs as given, titles and all. */
-async function several(items, { workspace = createWorkspace("test"), onOpenExperiment = () => {} } = {}) {
+async function several(items, { workspace = createWorkspace("test"), onOpenRunPage = () => {} } = {}) {
   workspace.queryClient.setQueryData(workspace.queries.listChatShownRunsQuery().queryKey, { source: "shown", runs: items });
-  return render(createElement(RunBanner, { sessionId: "s", agent: "Claude", onOpenExperiment }), workspace);
+  return render(createElement(RunBanner, { sessionId: "s", agent: "Claude", onOpenRunPage }), workspace);
 }
 const rows = () => [...document.querySelectorAll('[role="list"] > li > [role="group"]')];
 
@@ -190,15 +190,15 @@ test("several runs show one summary that opens into a row each, named by what se
   await settle();
   assert.ok(plain(container.textContent).includes("… at 2e15 FLOPs"), "the summary says what they share");
   assert.deepEqual(rows().map((row) => row.getAttribute("aria-label")), ["Depth 4 at 2e15 FLOPs", "Depth 6 at 2e15 FLOPs", "Depth 8 at 2e15 FLOPs"]);
-  assert.deepEqual(rows().map((row) => plain(row.querySelector(".experiment-run-link").textContent)), ["Depth 4", "Depth 6", "Depth 8"]);
-  assert.equal(plain(rows()[0].querySelector(".experiment-run-link").getAttribute("aria-label")), "Depth 4 at 2e15 FLOPs", "the whole title is its name");
+  assert.deepEqual(rows().map((row) => plain(row.querySelector(".run-status-link").textContent).split(" · ")[0]), ["Depth 4", "Depth 6", "Depth 8"]);
+  assert.ok(plain(rows()[0].querySelector(".run-status-link").getAttribute("aria-label")).includes("Depth 4 at 2e15 FLOPs"), "the accessible name includes the whole title");
   assert.equal(requests.filter((r) => r.request.endsWith("/monitor")).length, 0, "closed rows read their summaries");
 
   await click(rows()[1].querySelector(`button[aria-label="${m.run_show_more()}"]`));
   const open = rows()[1];
   assert.ok(open.querySelector(`button[aria-label="${m.run_show_less()}"]`), "the row opened into its strip in place");
   assert.equal(document.activeElement, open.querySelector(`button[aria-label="${m.run_show_less()}"]`));
-  assert.equal(plain(open.querySelector(".experiment-run-link").textContent), "Depth 6");
+  assert.ok(plain(open.querySelector(".run-status-link").textContent).startsWith("Depth 6 · "));
 
   await press("Escape");
   await settle();
@@ -263,11 +263,11 @@ test("a finished sweep stays one summary, which is dismissed whole once none of 
 test("a summary of runs with no shared words names each by its whole title and opens it", async () => {
   backend();
   const opens = [];
-  const { container } = await several([item(run("r1")), item(run("r2"))], { onOpenExperiment: (...args) => opens.push(args) });
+  const { container } = await several([item(run("r1")), item(run("r2"))], { onOpenRunPage: (...args) => opens.push(args) });
   await settle();
   assert.ok(!plain(container.textContent).includes("…"));
-  await click(find("button", "r2"));
-  assert.equal(opens[0][0], "e-r2");
+  await click(find('[role="link"]', "r2"));
+  assert.equal(opens[0][0].id, "r2");
 });
 
 test("an ended run is dismissed for every window, and Keep going answers the flag it shows", async () => {
@@ -539,7 +539,7 @@ test("a degraded line names its state and reason on hover, focus and to a screen
   await settle();
   const why = `${m.run_view_rebuilding()} · The run's log moved.`;
   const age = m.status_last_seen({ time: plain(fmtClock(running.asOf)) });
-  const toggle = container.querySelector('button[aria-expanded="false"]');
+  const toggle = container.querySelector('[aria-describedby]');
   assert.equal(plain(document.getElementById(toggle.getAttribute("aria-describedby")).textContent), why, "the line's description says why");
   const tip = [...container.querySelectorAll('[role="img"]')].find((element) => element.textContent.includes(plain(age).slice(0, 9)));
   assert.equal(plain(tip.getAttribute("aria-label")), `${why} · ${age}`);
@@ -557,19 +557,19 @@ test("shown runs without a summary draw their terminal status at both levels wit
     const requests = backend();
     const opens = [];
     const view = await banner([run("r1", { status, endedAt: now, monitor: undefined })], {
-      props: { onOpenExperiment: (...args) => opens.push(args) },
+      props: { onOpenRunPage: (...args) => opens.push(args) },
     });
     await settle();
     assert.ok(button(m.run_dismiss()));
     const label = status === "done" ? m.status_done() : status === "failed" ? m.status_failed() : m.run_lead_stopped();
     assert.ok(view.container.textContent.includes(label), view.container.textContent);
-    await click(find("button", "r1"));
-    assert.equal(opens[0][0], "e-r1");
+    await click(view.container.querySelector('[role="link"]'));
+    assert.equal(opens[0][0].id, "r1");
     assert.equal(button(m.run_show_less()), null);
     assert.ok(view.container.textContent.includes(label));
     assert.ok(button(m.run_dismiss()));
-    await click(find("button", "r1"));
-    assert.equal(opens[1][0], "e-r1");
+    await click(view.container.querySelector('[role="link"]'));
+    assert.equal(opens[1][0].id, "r1");
     assert.equal(requests.filter((r) => r.request.includes("/monitor")).length, 0);
     assert.ok(!view.container.textContent.includes(m.run_monitor_load_failed()));
     await view.unmount();
@@ -631,4 +631,22 @@ test("the row opens only for two chart points and returns to one line when done"
   assert.equal(view.container.querySelector('svg[role="img"]'), null);
   assert.equal(view.container.querySelector('[role="progressbar"]'), null);
   assert.ok(plain(view.container.textContent).includes("Done in"));
+});
+
+
+test("a single run links its raw status to its run page and keeps its name and machine behind the mark", async () => {
+  backend({ monitors: { r1: { ...running, sentence: null } } });
+  const opens = [];
+  const { container } = await banner([run("r1")], { props: { onOpenRunPage: (...args) => opens.push(args) } });
+  await settle();
+  const link = container.querySelector('[role="link"]');
+  assert.ok(link);
+  assert.ok(!link.textContent.includes("r1"));
+  assert.ok(plain(link.getAttribute("aria-label")).includes("r1"));
+  const mark = container.querySelector('[role="img"][tabindex="0"]');
+  assert.ok(plain(mark.getAttribute("aria-label")).includes("r1"));
+  assert.ok(plain(mark.getAttribute("aria-label")).includes(m.compute_target_local()));
+  await click(link);
+  await press("Enter", link);
+  assert.deepEqual(opens.map(([run, intent]) => [run.id, intent]), [["r1", "preview"], ["r1", "keepOpen"]]);
 });

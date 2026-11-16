@@ -2058,6 +2058,7 @@
   "run_progress_limit": "{limit} की सीमा में से {elapsed}",
   "run_progress_last_seen": "आख़िरी बार {progress} पर देखा",
   "run_not_started": "शुरू नहीं हुआ",
+  "run_status_for": "{status} · {name}",
   "run_setup_status": "तैयारी जारी है",
   "run_setup_starts_in": "रन लगभग {duration} में शुरू होगा",
   "run_setting_up": "सेटअप हो रहा है · {line}",

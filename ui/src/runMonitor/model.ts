@@ -23,7 +23,7 @@ export type Tone = "starting" | "running" | "flag" | "done" | "failed" | "stoppe
 export interface RunModel {
   run: Run;
   sessionId: string;
-  /** The experiment's slug, else its title from an older server. */
+  /** The experiment's title, else its slug. */
   name: string;
   /** Backend and machine: "Modal · A10G". */
   where: string;

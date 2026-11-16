@@ -2058,6 +2058,7 @@
   "run_progress_limit": "{elapsed} of the {limit} limit",
   "run_progress_last_seen": "Last seen at {progress}",
   "run_not_started": "Not started",
+  "run_status_for": "{status} · {name}",
   "run_setup_status": "Setting up",
   "run_setup_starts_in": "Run starts in about {duration}",
   "run_setting_up": "Setting up · {line}",

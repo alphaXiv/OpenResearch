@@ -2058,6 +2058,7 @@
   "run_progress_limit": "제한 {limit} 중 {elapsed}",
   "run_progress_last_seen": "마지막 확인 {progress}",
   "run_not_started": "시작 전",
+  "run_status_for": "{status} · {name}",
   "run_setup_status": "준비 중",
   "run_setup_starts_in": "약 {duration} 후 실행 시작",
   "run_setting_up": "준비 중 · {line}",

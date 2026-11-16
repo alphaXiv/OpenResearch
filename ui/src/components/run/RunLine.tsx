@@ -1,6 +1,8 @@
+import type { Run } from "../../api";
 import { useId, type ReactNode } from "react";
 import { autoDir } from "../../i18n";
 import { m } from "../../paraglide/messages.js";
+import { plainSentence } from "../../runMonitor/format";
 import type { RunModel } from "../../runMonitor/model";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../../tabPreview";
 import { useWorkspace } from "../../workspace";
@@ -43,13 +45,14 @@ export interface RunLabel {
 }
 
 /** The collapsed run: one sentence, how it compares, the time left. The bar is its underline. A `label` puts it among several. */
-export function RunLine({ model, agent, label, onToggle, onOpenExperiment, expanded = false, expandable = true, children }: { expandable?: boolean; expanded?: boolean; children?: ReactNode; model: RunModel; agent: string; label?: RunLabel; onToggle: () => void; onOpenExperiment?: (id: string, intent: TabOpenIntent) => void }) {
+export function RunLine({ model, agent, label, onToggle, onOpenRunPage, expanded = false, expandable = true, children }: { expandable?: boolean; expanded?: boolean; children?: ReactNode; model: RunModel; agent: string; label?: RunLabel; onToggle: () => void; onOpenRunPage?: (run: Run, intent: TabOpenIntent) => void }) {
   const { requestHostConnect } = useWorkspace().events;
   const host = model.connectHost;
   const working = model.tone === "revising" ? m.run_agent_editing({ agent: autoDir(agent) }) : model.looking ? m.run_agent_looking({ agent: autoDir(agent) }) : null;
   const whyId = useId();
   const { stale } = model;
-  const Status = expandable ? "button" : "span";
+  const Status = onOpenRunPage ? "button" : "span";
+  const sentence = expanded ? model.flagDetail ?? model.sentence.text : model.sentence.text;
   // The time slot explains itself: why the view stopped, or what the time means.
   const time = expanded && stale ? null : stale ? { text: stale.age, why: stale.why, tip: `${stale.why} · ${stale.age}` }
     : model.eta ? { text: model.eta, why: model.etaDetail, tip: `${model.eta} · ${model.etaDetail}` }
@@ -57,29 +60,31 @@ export function RunLine({ model, agent, label, onToggle, onOpenExperiment, expan
   const { text, title } = label ?? { text: model.name, title: model.name };
   return (
     <div role="group" aria-label={title} className={label ? cn("relative", model.needsChoice && "bg-accent-amber-subtle") : runFrame(model)}>
-      <div className="flex min-h-9 min-w-0 items-center gap-x-2 py-1 ps-3 pe-1.5 @max-[26rem]:flex-wrap">
-        <Mark tone={model.tone} live={model.live} label={model.status} />
-        <Tooltip interactive content={[autoDir(title), model.where].filter(Boolean).join(" · ")} className="min-w-0 max-w-[40%] @max-[26rem]:max-w-fit @max-[26rem]:flex-1">
-          {onOpenExperiment ? <button className="tool-target experiment-run-link block min-h-6 max-w-full truncate text-ink-subtext" aria-label={title === text ? undefined : autoDir(title)} {...tabOpenGestureHandlers<HTMLButtonElement>((intent) => onOpenExperiment(model.run.experimentId, intent))}>{autoDir(text)}</button> : <span className="block truncate text-ink-subtext">{autoDir(text)}</span>}
+      <div className="flex min-h-9 min-w-0 items-center gap-x-2 py-1 ps-1.5 pe-1.5">
+        <Tooltip content={[autoDir(title), model.where, model.status].filter(Boolean).join(" · ")} className="flex size-7 shrink-0 items-center justify-center">
+          <span aria-hidden="true"><Mark tone={model.tone} live={model.live} label={model.status} /></span>
         </Tooltip>
         <Status
-          className="min-w-0 flex-1 truncate rounded-xs text-start focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:outline-offset-2 @max-[26rem]:order-last @max-[26rem]:basis-full @max-[26rem]:pb-2"
-          aria-expanded={expandable ? expanded : undefined}
+          className="tool-target run-status-link min-w-0 flex-1 truncate rounded-xs text-start focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:outline-offset-2"
+          type={onOpenRunPage ? "button" : undefined}
+          role={onOpenRunPage ? "link" : undefined}
+          aria-label={onOpenRunPage ? m.run_status_for({ status: plainSentence([label?.text, model.lead, sentence].filter(Boolean).join(" · ")), name: autoDir(title) }) : undefined}
           aria-describedby={time?.why ? whyId : undefined}
-          onClick={expandable ? onToggle : undefined}
+          {...(onOpenRunPage ? tabOpenGestureHandlers<HTMLButtonElement>((intent) => onOpenRunPage(model.run, intent)) : {})}
         >
+          {label && <span className="text-ink-subtext">{autoDir(text)} · </span>}
           <Lead model={model} />
-          <Sentence text={expanded ? model.flagDetail ?? model.sentence.text : model.sentence.text} tone={model.tone} />
+          <Sentence text={sentence} tone={model.tone} />
         </Status>
         {working && <span className="tool-running-shimmer shrink-0 whitespace-nowrap @max-[40rem]:hidden">{working}</span>}
         {!expanded && <Headline model={model} />}
         {host && <Button size="small" onClick={() => requestHostConnect(host)}>{m.settings_connect()}</Button>}
         {time && (time.why ? (
-          <Tooltip content={time.tip} className="shrink-0 rounded-xs @max-[26rem]:ms-auto">
+          <Tooltip content={time.tip} className="shrink-0 rounded-xs">
             <span className="whitespace-nowrap tabular-nums text-ink-subtext">{time.text}{model.etaStrong && <span className="@max-[50rem]:hidden"> · {model.etaDetail}</span>}</span>
             <span id={whyId} hidden>{time.why}</span>
           </Tooltip>
-        ) : <span className="shrink-0 whitespace-nowrap tabular-nums text-ink-subtext @max-[26rem]:ms-auto">{time.text}</span>)}
+        ) : <span className="shrink-0 whitespace-nowrap tabular-nums text-ink-subtext">{time.text}</span>)}
         <Controls model={model} expandable={expandable} expanded={expanded} onToggle={onToggle} />
       </div>
       {children}

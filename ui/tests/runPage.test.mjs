@@ -5,6 +5,7 @@ import { act, createElement } from "react";
 import { ExperimentOverview } from "../src/components/ExperimentOverview.tsx";
 import { session } from "./chat.mjs";
 import { m } from "../src/paraglide/messages.js";
+import { capitalized } from "../src/runMonitor/words.ts";
 import { createWorkspace } from "../src/workspace.tsx";
 import { render, serveApp, settle } from "./render.mjs";
 
@@ -31,7 +32,7 @@ const experiment = { id: "e1", projectId: "p", slug: "distil-glue-6l", branchNam
 const project = { id: "p", name: "glue", slug: "glue", githubOwner: "", githubRepo: "", baselineBranch: "main", repoPath: "/r", path: "/r", githubEnabled: false, artifactsDir: "/a" };
 
 /** The experiment's overview over `runs`, newest first; `monitor(id)` answers each monitor read. */
-async function overview(runs, monitor = () => pipeline(), { chat = null, sessions = [] } = {}) {
+async function overview(runs, monitor = () => pipeline(), { chat = null, sessions = [], selectedRunId = null } = {}) {
   const requests = [];
   const shown = { ...experiment, chatSessionId: chat };
   serveApp({
@@ -49,7 +50,7 @@ async function overview(runs, monitor = () => pipeline(), { chat = null, session
     const body = await monitor(read[1]);
     return body instanceof Response ? body : Response.json(body);
   };
-  const props = (runs) => ({ experiment: shown, lineageNode: null, onOpenExperiment() {}, parentExperiment: null, project, runs, onOpenLogs() {}, onOpenTrackio() {}, onOpenCode() {}, onOpenDiff() {} });
+  const props = (runs) => ({ experiment: shown, lineageNode: null, onOpenExperiment() {}, parentExperiment: null, project, runs, selectedRunId, onOpenLogs() {}, onOpenTrackio() {}, onOpenCode() {}, onOpenDiff() {} });
   const view = await render(createElement(ExperimentOverview, props(runs)), createWorkspace("test"));
   await settle();
   const update = async (next) => {
@@ -269,4 +270,17 @@ test("a flagged run offers to ask the chat's agent by name, and the agent in gen
   const unnamed = await overview([flaggedRun()], () => waiting);
   assert.ok(asks(unnamed.container).includes("Ask the agent"), asks(unnamed.container).join(" | "));
   await unnamed.unmount();
+});
+
+
+test("opening an older run reads that run's monitor and journal instead of the latest run", async () => {
+  const monitor = pipeline();
+  const runs = [run("r2", { host: "lab-newer", contact: { type: "unreachable", since: now - 60_000, cause: "SSH timed out" }, monitor: summary(monitor) }), run("r1", { createdAt: now - 900_000, monitor: summary(monitor) })];
+  const { container, requests } = await overview(runs, (id) => ({ ...monitor, runId: id }), { selectedRunId: "r1" });
+  assert.ok(![...container.querySelectorAll("h2")].some((heading) => text(heading) === m.experiment_latest_run()));
+  const heading = [...container.querySelectorAll("h2")].find((heading) => text(heading) === capitalized(m.run_number({ number: "1" })));
+  assert.ok(heading);
+  assert.ok(!text(heading.closest("section")).includes("lab-newer"));
+  assert.ok(requests.includes("/api/runs/r1/monitor"));
+  assert.ok(!requests.includes("/api/runs/r2/monitor"));
 });

@@ -1062,6 +1062,10 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   // recompute the graph on every render.
   const showProjectScope = useCallback(() => setScope("project"), []);
 
+  const openRunPage = useCallback((run: Run, intent: TabOpenIntent) => {
+    openExperimentTab(run.experimentId, "overview", intent, run.id);
+  }, [openExperimentTab]);
+
   // A `<run>` evidence chip in chat opens that run's logs — the only evidence
   // channel for a metric. Run ids are globally unique, so resolve the run to its
   // experiment and open the terminal view focused on it.
@@ -2104,6 +2108,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             onSelectMainView={(view) => { setMobileRailOpen(false); selectMainView(view); }}
             onOpenFile={openChatFile}
             onOpenRun={openRunLogs}
+            onOpenRunPage={openRunPage}
             runExperimentName={runExperimentName}
             chatInfo={chatInfo}
             onOpenMessage={openMessage}
@@ -2551,6 +2556,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                         openFromRightTab(sideTab, () => openChatFile(path, sessionId, line, exp, ref, intent))
                       }
                       onOpenRun={(runId, intent, seek) => openFromRightTab(sideTab, () => openRunLogs(runId, intent, seek))}
+                      onOpenRunPage={(run, intent) => openFromRightTab(sideTab, () => openRunPage(run, intent))}
                       runExperimentName={runExperimentName}
                       chatInfo={chatInfo}
                       onOpenMessage={openMessage}

@@ -19,7 +19,6 @@ import { RunStrip } from "./RunStrip";
 import { RunSummary } from "./RunSummary";
 import { useRunMonitors } from "./useRunMonitor";
 
-type OpenTarget = (id: string, intent: TabOpenIntent) => void;
 type OpenRun = (runId: string, intent: TabOpenIntent, seek?: LogSeek) => void;
 
 /** How long an announcement stays in the live region: long enough to be read out, too short to be read later as current. */
@@ -57,11 +56,11 @@ function useAnnouncement(models: RunModel[], names: string[] | null): string {
 }
 
 /** The runs of one chat above its composer: one run as its line or strip, several as one summary that opens into a line each, each opening in place. */
-export function RunBanner({ sessionId, agent, onOpenExperiment, onOpenRun }: {
+export function RunBanner({ sessionId, agent, onOpenRun, onOpenRunPage }: {
   sessionId: string;
   agent: string;
-  onOpenExperiment?: OpenTarget;
   onOpenRun?: OpenRun;
+  onOpenRunPage?: (run: Run, intent: TabOpenIntent) => void;
 }) {
   const workspace = useWorkspace();
   const { getUiStateQuery, getRunMonitorQuery, listChatShownRunsQuery, useEngineHosts } = workspace.queries;
@@ -177,8 +176,8 @@ export function RunBanner({ sessionId, agent, onOpenExperiment, onOpenRun }: {
         agent={agent}
         label={label}
         onToggle={() => toggle(model.run.id)}
-        onOpenExperiment={onOpenExperiment}
         onOpenRun={onOpenRun}
+        onOpenRunPage={onOpenRunPage}
       />
     );
   };
