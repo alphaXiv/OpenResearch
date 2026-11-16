@@ -1901,7 +1901,6 @@
   "close_pending_quit": "Выйти",
   "close_pending_force_quit": "Принудительно выйти",
   "close_pending_blocked": "При принудительном выходе останавливаются эксперименты, которым нужен открытый OpenResearch.",
-  "close_pending_uncounted": "OpenResearch не удалось проверить, работают ли агенты и эксперименты. При выходе все работающие агенты будут остановлены.",
   "close_pending_agents": "Агенты остановятся при выходе",
   "close_pending_needs_open": "Эксперименты, которым нужен открытый OpenResearch до завершения",
   "close_pending_continues": "Эксперименты, которые продолжат работать и отчитаются при следующем открытии OpenResearch",

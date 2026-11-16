@@ -1901,7 +1901,6 @@
   "close_pending_quit": "終了",
   "close_pending_force_quit": "強制終了",
   "close_pending_blocked": "強制終了すると、OpenResearch を開いておく必要がある実験は停止します。",
-  "close_pending_uncounted": "OpenResearch は実行中のエージェントと実験を確認できませんでした。終了すると、作業中のエージェントはすべて停止します。",
   "close_pending_agents": "終了するとエージェントは停止します",
   "close_pending_needs_open": "完了するまで OpenResearch を開いておく必要がある実験",
   "close_pending_continues": "実行を続け、次回 OpenResearch を開いたときに報告する実験",

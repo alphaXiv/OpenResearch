@@ -1901,7 +1901,6 @@
   "close_pending_quit": "Salir",
   "close_pending_force_quit": "Forzar salida",
   "close_pending_blocked": "Forzar salida detiene los experimentos que necesitan OpenResearch abierto.",
-  "close_pending_uncounted": "OpenResearch no pudo comprobar si hay agentes o experimentos en curso. Al salir se detiene cualquier agente que esté trabajando.",
   "close_pending_agents": "Los agentes se detienen al salir",
   "close_pending_needs_open": "Experimentos que necesitan OpenResearch abierto hasta terminar",
   "close_pending_continues": "Experimentos que siguen ejecutándose e informan cuando OpenResearch se vuelva a abrir",
