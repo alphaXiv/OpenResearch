@@ -7,8 +7,8 @@
 //! The installer owns the hard parts — checksum verification and the atomic
 //! rename into `~/.cargo/bin` (never an in-place overwrite, which on macOS
 //! trips the kernel's per-inode code-signature cache and SIGKILLs the binary).
-//! Windows runs the `.ps1` twin of that installer, which unpacks but does not
-//! verify checksums, into a staging directory, then swaps the binary in itself
+//! Windows downloads the release archive, checks it against its published
+//! checksum, unpacks it into a staging directory and swaps the binary in itself,
 //! since Windows will not overwrite a running exe; see `updates::windows`.
 //!
 //! Guards, in order:
@@ -189,20 +189,15 @@ async fn apply(args: crate::UpdateArgs) -> Result<Outcome> {
             let staged_already = updates::staged_release(&staged, &current)
                 .is_some_and(|(_, tag)| tag == latest.tag);
             if !staged_already {
-                stage_windows(&installed, &latest, args.background).await?;
+                stage_windows(&installed, &latest).await?;
             }
             if backend_running {
                 return Ok(deferred(&latest.version, &latest.tag, args.background));
             }
             updates::windows::install_staged(&installed)?;
         } else {
-            let installer = updates::fetch_release_asset(
-                &latest.tag,
-                &format!("{}-installer.{}", updates::APP_NAME, INSTALLER_EXT),
-                Duration::from_secs(60),
-            )
-            .await?;
-            updates::windows::install(&installed, &installer, args.background)?;
+            let archive = fetch_windows_archive(&latest.tag).await?;
+            updates::windows::install(&installed, &archive)?;
         }
     }
     #[cfg(not(windows))]
@@ -211,7 +206,7 @@ async fn apply(args: crate::UpdateArgs) -> Result<Outcome> {
         // version we report is exactly the version that gets installed.
         let installer = updates::fetch_release_asset(
             &latest.tag,
-            &format!("{}-installer.{}", updates::APP_NAME, INSTALLER_EXT),
+            &format!("{}-installer.sh", updates::APP_NAME),
             Duration::from_secs(60),
         )
         .await?;
@@ -292,9 +287,6 @@ async fn defer(current: &semver::Version, background: bool) -> Result<Outcome> {
     Ok(deferred(&latest.version, &latest.tag, background))
 }
 
-/// cargo-dist ships a shell installer and a PowerShell one.
-const INSTALLER_EXT: &str = if cfg!(windows) { "ps1" } else { "sh" };
-
 /// `sh <script>` rather than executing the file: immune to noexec /tmp mounts.
 /// The installer verifies artifact checksums and renames the new binary into
 /// place atomically; replacing a running orx is safe on macOS/Linux (old
@@ -345,15 +337,9 @@ fn installed_exe(target: &UpdateTarget) -> Result<std::path::PathBuf> {
 }
 
 /// Download `latest` and stage it for `installed`: the signed desktop binary on the
-/// canary channel, otherwise whatever the PowerShell installer unpacks.
+/// canary channel, otherwise the release's CLI archive.
 #[cfg(windows)]
-async fn stage_windows(
-    installed: &std::path::Path,
-    latest: &updates::LatestRelease,
-    background: bool,
-) -> Result<()> {
-    use sha2::{Digest, Sha256};
-
+async fn stage_windows(installed: &std::path::Path, latest: &updates::LatestRelease) -> Result<()> {
     if crate::telemetry::update_channel() == updates::ReleaseChannel::Canary {
         let asset = latest
             .canary_asset
@@ -362,7 +348,7 @@ async fn stage_windows(
         let bytes =
             updates::fetch_release_asset(&latest.tag, &asset.asset, Duration::from_secs(600))
                 .await?;
-        if !format!("{:x}", Sha256::digest(&bytes)).eq_ignore_ascii_case(asset.sha256.trim()) {
+        if !matches_sha256(&bytes, &asset.sha256) {
             return Err(anyhow!(
                 "The downloaded app does not match its published checksum."
             ));
@@ -370,13 +356,43 @@ async fn stage_windows(
         return updates::windows::stage_binary(installed, latest, &bytes);
     }
 
-    // Pin the installer to the same release the manifest described, so the
-    // version we report is exactly the version that gets installed.
-    let installer = updates::fetch_release_asset(
-        &latest.tag,
-        &format!("{}-installer.{}", updates::APP_NAME, INSTALLER_EXT),
-        Duration::from_secs(60),
-    )
-    .await?;
-    updates::windows::stage_installer(installed, latest, &installer, background)
+    let archive = fetch_windows_archive(&latest.tag).await?;
+    updates::windows::stage_archive(installed, latest, &archive)
+}
+
+/// The Windows CLI archive of release `tag`, checked against its published checksum.
+#[cfg(windows)]
+async fn fetch_windows_archive(tag: &str) -> Result<Vec<u8>> {
+    let name = format!("{}-x86_64-pc-windows-msvc.zip", updates::APP_NAME);
+    let archive = updates::fetch_release_asset(tag, &name, Duration::from_secs(600)).await?;
+    let checksum =
+        updates::fetch_release_asset(tag, &format!("{name}.sha256"), Duration::from_secs(60))
+            .await?;
+    // The checksum file reads `<sha256> *<name>`.
+    let checksum = String::from_utf8_lossy(&checksum);
+    let expected = checksum.split_whitespace().next().unwrap_or_default();
+    if !matches_sha256(&archive, expected) {
+        return Err(anyhow!(
+            "The downloaded {name} does not match its published checksum."
+        ));
+    }
+    Ok(archive)
+}
+
+#[cfg(windows)]
+fn matches_sha256(bytes: &[u8], expected: &str) -> bool {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(bytes)).eq_ignore_ascii_case(expected.trim())
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    #[test]
+    fn an_archive_must_match_its_published_checksum() {
+        // The sha256 of no bytes, as a `.sha256` file would hold it.
+        let empty = "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855\n";
+        assert!(super::matches_sha256(b"", empty));
+        assert!(!super::matches_sha256(b"tampered", empty));
+        assert!(!super::matches_sha256(b"", ""));
+    }
 }

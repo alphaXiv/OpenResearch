@@ -1913,25 +1913,17 @@ mod windows_agent_tree_tests {
 
     #[tokio::test]
     async fn stopping_an_agent_kills_the_commands_it_started() {
-        let mut agent = crate::process::tokio_command("powershell.exe")
-            .args([
-                "-NoProfile",
-                "-Command",
-                "$p = Start-Process ping -ArgumentList '-n','60','127.0.0.1' -PassThru -NoNewWindow -RedirectStandardOutput NUL; $p.Id; Wait-Process -Id $p.Id",
-            ])
+        let mut agent = crate::process::tokio_command("cmd.exe")
+            .args(["/d", "/c", "ping -n 60 127.0.0.1"])
             .stdout(std::process::Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .unwrap();
-        let mut lines = tokio::io::BufReader::new(agent.stdout.take().unwrap()).lines();
-        let command: u32 = lines
-            .next_line()
-            .await
-            .unwrap()
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
+        // Held open until the end: a closed pipe would end ping by itself.
+        let mut output = tokio::io::BufReader::new(agent.stdout.take().unwrap()).lines();
+        // Output means ping is running under the agent.
+        output.next_line().await.unwrap();
+        let command = ping_under(agent.id().unwrap());
         // SAFETY: a plain open of the command just started; the handle is owned below.
         let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, command) };
         assert!(!handle.is_null(), "command {command} is not running");
@@ -1944,6 +1936,40 @@ mod windows_agent_tree_tests {
         // SAFETY: the handle has synchronize access.
         let waited = unsafe { WaitForSingleObject(command.as_raw_handle(), 5_000) };
         assert_eq!(waited, WAIT_OBJECT_0, "command survived its agent");
+    }
+
+    /// The agent's ping, which a console of its own would sit beside as conhost.
+    fn ping_under(parent: u32) -> u32 {
+        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+            TH32CS_SNAPPROCESS,
+        };
+        // SAFETY: a plain snapshot.
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+        assert_ne!(
+            snapshot, INVALID_HANDLE_VALUE,
+            "could not snapshot processes"
+        );
+        // SAFETY: the valid snapshot handle is transferred exactly once.
+        let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot) };
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: the snapshot is valid and `entry` carries its size.
+        let mut more = unsafe { Process32FirstW(snapshot.as_raw_handle(), &mut entry) } != 0;
+        while more {
+            let name = &entry.szExeFile;
+            let name =
+                String::from_utf16_lossy(&name[..name.iter().take_while(|&&c| c != 0).count()]);
+            if entry.th32ParentProcessID == parent && name.eq_ignore_ascii_case("ping.exe") {
+                return entry.th32ProcessID;
+            }
+            // SAFETY: as above.
+            more = unsafe { Process32NextW(snapshot.as_raw_handle(), &mut entry) } != 0;
+        }
+        panic!("agent {parent} is not running ping");
     }
 }
 

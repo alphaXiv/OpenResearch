@@ -198,17 +198,30 @@ export interface UiState {
   /** The picker's lab sections in the user's order; labs it doesn't name follow in the picker's own. */
   modelSectionOrder: string[];
   collapsedModelSections: string[];
-  modelSightings: ModelSightings | null;
+  /** The model feed nudges the user dismissed, by id. Absent from a server too old to keep them. */
+  seenNudges?: string[];
 }
 
-/** What the model picker has seen, to tell a model an agent newly offers from one that came with a newly added agent. */
-export interface ModelSightings {
-  /** The agents whose models were seen, by `PickerAgent.key`. */
-  agents: string[];
-  /** Each model seen, by line key: when it first appeared as new, or 0 for one that was there already. */
-  models: Record<string, number>;
-  /** When the picker was last opened. */
-  openedAt: number;
+/** What openresearch.sh features in the model picker, as `orx up` last fetched it. */
+export interface ModelFeed {
+  /** OpenCode model ids (`provider/model`) the picker's Free section lists first, in this order. */
+  featured: { model: string }[];
+  nudge: ModelNudge | null;
+  /** The day (`YYYY-MM-DD`) each model came out, by line key, for those released lately. Absent from an older `orx up`. */
+  releases?: Record<string, string>;
+}
+
+export interface ModelNudge {
+  /** What dismissing it records. */
+  id: string;
+  model: string;
+  kind: "new" | "trial";
+  /** A trial's last free day, `YYYY-MM-DD`. */
+  until?: string;
+  /** Replaces the line orx writes under the model's name. */
+  message?: string;
+  /** Hex colors of its gradient, and of its model mark; the text color when `icon` is absent. */
+  colors: { from: string; to: string; icon?: string };
 }
 
 /** How much of the research the agent owns before checking in. */
@@ -1095,7 +1108,9 @@ type UiEvent =
   | { name: "onboarding_step_viewed"; step: OnboardingStep }
   | { name: "demo_experiment_started"; kind: "curated" | "run"; experiment: string }
   | { name: "project_starter_clicked"; slot: number }
-  | { name: "first_action"; surface: FirstActionSurface; action: FirstAction };
+  | { name: "first_action"; surface: FirstActionSurface; action: FirstAction }
+  | { name: "model_callout"; kind: "release" | "free"; action: "shown" | "opened" | "dismissed"; model: string; harness: string }
+  | { name: "model_picked"; section: "free" | "favorites" | "lab" | "older" | "search"; model: string; harness: string; new: boolean; free: boolean };
 
 export type HarnessId =
   | "claude-code"
@@ -2122,6 +2137,8 @@ export function createApi(
 
   const getUiState = (signal?: AbortSignal) => get<UiState>("/api/settings/ui-state", signal);
 
+  const getModelFeed = (signal?: AbortSignal) => get<ModelFeed>("/api/model-feed", signal);
+
   const getProjectUiState = (projectId: string, signal?: AbortSignal) =>
     get<ProjectWorkspace | null>(`/api/projects/${encodeURIComponent(projectId)}/ui-state`, signal);
 
@@ -2142,7 +2159,7 @@ export function createApi(
     hiddenAgents?: string[];
     modelSectionOrder?: string[];
     collapsedModelSections?: string[];
-    modelSightings?: ModelSightings;
+    seenNudges?: string[];
   }) => post<UiState>("/api/settings/ui-state", body);
 
   const completeOnboarding = (selection: OnboardingSelection) =>
@@ -3379,6 +3396,7 @@ export function createApi(
     updateAgent,
     removeAgentProfile,
     getOpenCodeProviders,
+    getModelFeed,
     addOpenCodeProvider,
     replaceOpenCodeProviderKey,
     removeOpenCodeProvider,

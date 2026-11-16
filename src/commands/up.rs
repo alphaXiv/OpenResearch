@@ -53,6 +53,7 @@ mod agent_tools;
 pub(crate) mod api_v2;
 pub(crate) mod compute_settings;
 mod harness_setup;
+mod model_feed;
 mod network;
 mod search;
 mod usage;
@@ -222,6 +223,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
 
     spawn_agent_preflight(state.clone());
     spawn_agent_updates(state.clone());
+    model_feed::spawn_refresh(state.chat.clone());
     search::spawn_backfill(state.clone());
     // A fresh install's demo worktree takes ~15 sequential git spawns — build
     // it while the onboarding screen is up instead of inside the confirm click.
@@ -851,6 +853,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
         .route("/api/update/install-cli", post(install_cli))
         .route("/api/settings/ui-state", get(ui_state).post(set_ui_state))
         .route("/api/settings/network", get(network::public_network))
+        .route("/api/model-feed", get(model_feed::model_feed))
         .route(
             "/api/projects/{id}/ui-state",
             get(project_ui_state).post(set_project_ui_state),
@@ -6421,6 +6424,16 @@ struct UiEventReq {
     surface: Option<String>,
     #[serde(default)]
     action: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    harness: Option<String>,
+    #[serde(default)]
+    section: Option<String>,
+    #[serde(default)]
+    new: Option<bool>,
+    #[serde(default)]
+    free: Option<bool>,
 }
 
 async fn record_ui_event(Json(req): Json<UiEventReq>) -> ApiResult {
@@ -6449,6 +6462,20 @@ async fn record_ui_event(Json(req): Json<UiEventReq>) -> ApiResult {
         "first_action" => {
             if let (Some(surface), Some(action)) = (req.surface.as_deref(), req.action.as_deref()) {
                 crate::telemetry::capture_first_action(surface, action);
+            }
+        }
+        "model_callout" => {
+            if let (Some(kind), Some(action), Some(model), Some(harness)) =
+                (&req.kind, &req.action, &req.model, &req.harness)
+            {
+                crate::telemetry::capture_model_callout(kind, action, model, harness);
+            }
+        }
+        "model_picked" => {
+            if let (Some(section), Some(model), Some(harness), Some(new), Some(free)) =
+                (&req.section, &req.model, &req.harness, req.new, req.free)
+            {
+                crate::telemetry::capture_model_picked(section, model, harness, new, free);
             }
         }
         _ => return Ok(Json(json!({ "ok": false }))),
@@ -6772,6 +6799,7 @@ struct SetUiStateReq {
     model_section_order: Option<Vec<String>>,
     collapsed_model_sections: Option<Vec<String>>,
     model_sightings: Option<Value>,
+    seen_nudges: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -6838,6 +6866,13 @@ async fn set_ui_state(
             200,
             80,
             "Collapsed sections",
+        ),
+        (
+            "seen_nudges",
+            req.seen_nudges.take(),
+            200,
+            64,
+            "Seen nudges",
         ),
     ];
     for (_, list, entries, chars, name) in &lists {
@@ -8807,6 +8842,12 @@ async fn test_acp_harness(Json(input): Json<AcpHarnessInput>) -> ApiResult {
 /// With `harness=<id>` it probes only that harness (unless a fill is running)
 /// and serves the cache with it patched in.
 async fn harnesses_payload(state: &AppState, q: &HarnessQuery) -> Value {
+    let mut payload = detected_harnesses(state, q).await;
+    model_feed::offer_unlisted_releases(&mut payload);
+    payload
+}
+
+async fn detected_harnesses(state: &AppState, q: &HarnessQuery) -> Value {
     // `retry` only escalates to a full detect when it actually cleared a
     // runtime rejection — a bare retry is an ordinary cached read.
     let retried = q.retry == Some(1) && state.claude.clear_runtime_rejection();
@@ -11234,6 +11275,7 @@ mod tests {
             model_section_order: Vec::new(),
             collapsed_model_sections: Vec::new(),
             model_sightings: None,
+            seen_nudges: Vec::new(),
             preferred_agent: Some(StoredAgentSelection {
                 profile: None,
                 harness: "codex".into(),
@@ -11273,6 +11315,7 @@ mod tests {
             model_section_order: Vec::new(),
             collapsed_model_sections: Vec::new(),
             model_sightings: None,
+            seen_nudges: Vec::new(),
         };
         let catalog = json!({"harnesses": [{"id":"claude-code", "agentReady":true,"defaultModel":"opus",
             "models":[{"id":"opus"}], "options":{"defaultPermissionMode":"plan", "reasoningLevels":[{"id":"default"}]}}]});
@@ -11328,6 +11371,7 @@ mod tests {
             model_section_order: Vec::new(),
             collapsed_model_sections: Vec::new(),
             model_sightings: None,
+            seen_nudges: Vec::new(),
         };
         let catalog = json!({"harnesses":[
             {"id":"codex", "agentReady":true, "models":[], "options":{}},
@@ -11594,6 +11638,7 @@ mod tests {
                 model_section_order: None,
                 collapsed_model_sections: None,
                 model_sightings: None,
+                seen_nudges: None,
             }),
         )
         .await;
@@ -11605,6 +11650,7 @@ mod tests {
             json!({"hiddenAgents": vec!["codex"; 2001]}),
             json!({"modelSectionOrder": ["x".repeat(81)]}),
             json!({"modelSightings": ["gpt-6"]}),
+            json!({"seenNudges": ["x".repeat(65)]}),
         ] {
             let result = set_ui_state(
                 State(test_state()),

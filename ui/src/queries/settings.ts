@@ -335,6 +335,14 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, events:
     staleTime: 30_000,
   });
 
+  const getModelFeedQuery = () => queryOptions({
+    queryKey: workspaceKey("getModelFeed"),
+    queryFn: ({ signal }) => api.getModelFeed(signal),
+    // `orx up` replaces the feed in the background, the first time before the page may have read it.
+    staleTime: 300_000,
+    refetchInterval: 300_000,
+  });
+
   const reportLocaleQuery = (locale: string) => queryOptions({
     queryKey: workspaceKey("reportLocale", locale),
     queryFn: ({ signal }) => api.reportLocale(locale, signal),
@@ -394,6 +402,7 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, events:
     readHarnesses,
     getLocalModelsQuery,
     getOpenCodeProvidersQuery,
+    getModelFeedQuery,
     reportLocaleQuery,
   };
 }

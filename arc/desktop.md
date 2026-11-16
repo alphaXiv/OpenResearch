@@ -60,7 +60,8 @@ How an update applies depends on the install (`src/updates.rs`, `src/updates/`, 
 
 | Installed by | Applies its own updates by |
 | --- | --- |
-| the shell or PowerShell installer | running the installer again; a receipt proves the binary is the installer's |
+| the shell installer | running the installer again; a receipt proves the binary is the installer's |
+| the PowerShell installer | unpacking the release's checksummed `.zip`, then the Windows renames; a receipt proves the binary is the installer's |
 | the macOS app | checking the DMG's hash, pinned signature and notarization, renaming the bundle into place |
 | the AppImage | checking the new file's hash, renaming it over the old one |
 | the Windows app or a zip's `orx.exe` | staging the new `orx.exe`, then two renames |
