@@ -725,41 +725,8 @@ fn credential_line(value: &str) -> &str {
         .unwrap_or(value)
 }
 
-#[cfg(unix)]
 async fn secret_prompt(label: &str) -> Result<String> {
-    use std::process::Stdio;
-    struct RestoreEcho(String);
-    impl Drop for RestoreEcho {
-        fn drop(&mut self) {
-            let _ = crate::process::command("stty")
-                .arg(&self.0)
-                .stdin(Stdio::inherit())
-                .status();
-            eprintln!();
-        }
-    }
-    let original = crate::process::command("stty")
-        .arg("-g")
-        .stdin(Stdio::inherit())
-        .output()?;
-    if !original.status.success() {
-        return Err(anyhow!(
-            "Cannot read terminal settings; use --credentials-file instead."
-        ));
-    }
-    let original = String::from_utf8(original.stdout)?.trim().to_owned();
-    eprint!("{label}: ");
-    if !crate::process::command("stty")
-        .arg("-echo")
-        .stdin(Stdio::inherit())
-        .status()?
-        .success()
-    {
-        return Err(anyhow!(
-            "Cannot disable terminal echo; use --credentials-file instead."
-        ));
-    }
-    let _restore = RestoreEcho(original);
+    let _echo = EchoOff::new(label)?;
     tokio::select! {
         value = tokio::task::spawn_blocking(|| -> Result<String> {
             let mut value = String::new();
@@ -769,16 +736,92 @@ async fn secret_prompt(label: &str) -> Result<String> {
         _ = tokio::signal::ctrl_c() => Err(anyhow!("Credential entry cancelled.")),
     }
 }
-#[cfg(windows)]
-async fn secret_prompt(label: &str) -> Result<String> {
-    eprintln!("{label}");
-    let output = crate::process::command("powershell.exe").args(["-NoProfile", "-Command", "$s = Read-Host 'Credential' -AsSecureString; [System.Net.NetworkCredential]::new('', $s).Password"]).stdin(std::process::Stdio::inherit()).output()?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "Credential prompt failed; use --credentials-file instead."
-        ));
+
+/// Terminal echo switched off after printing the prompt, restored on drop.
+#[cfg(unix)]
+struct EchoOff(String);
+
+#[cfg(unix)]
+impl EchoOff {
+    fn new(label: &str) -> Result<Self> {
+        use std::process::Stdio;
+        let original = crate::process::command("stty")
+            .arg("-g")
+            .stdin(Stdio::inherit())
+            .output()?;
+        if !original.status.success() {
+            return Err(anyhow!(
+                "Cannot read terminal settings; use --credentials-file instead."
+            ));
+        }
+        let original = String::from_utf8(original.stdout)?.trim().to_owned();
+        eprint!("{label}: ");
+        if !crate::process::command("stty")
+            .arg("-echo")
+            .stdin(Stdio::inherit())
+            .status()?
+            .success()
+        {
+            return Err(anyhow!(
+                "Cannot disable terminal echo; use --credentials-file instead."
+            ));
+        }
+        Ok(Self(original))
     }
-    Ok(credential_line(&String::from_utf8(output.stdout)?).to_owned())
+}
+
+#[cfg(unix)]
+impl Drop for EchoOff {
+    fn drop(&mut self) {
+        let _ = crate::process::command("stty")
+            .arg(&self.0)
+            .stdin(std::process::Stdio::inherit())
+            .status();
+        eprintln!();
+    }
+}
+
+#[cfg(windows)]
+struct EchoOff(windows_sys::Win32::System::Console::CONSOLE_MODE);
+
+#[cfg(windows)]
+impl EchoOff {
+    fn new(label: &str) -> Result<Self> {
+        use windows_sys::Win32::System::Console::{
+            GetConsoleMode, GetStdHandle, SetConsoleMode, ENABLE_ECHO_INPUT, STD_INPUT_HANDLE,
+        };
+        let mut original = 0;
+        // SAFETY: reads the mode of this process's own input handle.
+        if unsafe { GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &mut original) } == 0 {
+            return Err(anyhow!(
+                "Cannot read console settings; use --credentials-file instead."
+            ));
+        }
+        eprint!("{label}: ");
+        // SAFETY: as above.
+        if unsafe {
+            SetConsoleMode(
+                GetStdHandle(STD_INPUT_HANDLE),
+                original & !ENABLE_ECHO_INPUT,
+            )
+        } == 0
+        {
+            return Err(anyhow!(
+                "Cannot disable console echo; use --credentials-file instead."
+            ));
+        }
+        Ok(Self(original))
+    }
+}
+
+#[cfg(windows)]
+impl Drop for EchoOff {
+    fn drop(&mut self) {
+        use windows_sys::Win32::System::Console::{GetStdHandle, SetConsoleMode, STD_INPUT_HANDLE};
+        // SAFETY: restores the mode read from the same handle.
+        unsafe { SetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), self.0) };
+        eprintln!();
+    }
 }
 
 #[cfg(test)]
