@@ -69,7 +69,7 @@ export function sessionAcpHarness(session: ChatSession | null | undefined, catal
     id: session.harness, name: session.harnessName ?? catalog?.name ?? "ACP", installed: true,
     installBroken: false, authenticated: false, authState: "unknown", agentReady: true, supportsSteering: false, supportsCompaction: false,
     models: session.nativeModels ?? catalog?.models ?? [],
-    options: { permissionModes: catalog?.options?.permissionModes ?? [], reasoningLevels: [], defaultPermissionMode: catalog?.options?.defaultPermissionMode ?? null, defaultReasoningLevel: null },
+    options: session.harnessOptions ?? catalog?.options ?? { permissionModes: [], reasoningLevels: [], defaultPermissionMode: null, defaultReasoningLevel: null },
   } : catalog;
   if (!harness?.id.startsWith("acp:")) return harness;
   return { ...harness, options: { ...harness.options,

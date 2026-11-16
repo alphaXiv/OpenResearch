@@ -28,6 +28,20 @@ pub(crate) const SESSION_SKILLS_DIR: &str = ".agents/skills";
 
 static DISCOVERY_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
+pub fn approval_options() -> HarnessOptions {
+    HarnessOptions {
+        permission_modes: vec![
+            OptionChoice::described("ask", "Ask", "Ask before actions that need approval"),
+            OptionChoice::described(
+                "auto-approve", "Auto-approve",
+                "Approve individual requests automatically. The agent's access restrictions still apply.",
+            ),
+        ],
+        default_permission_mode: Some("ask"),
+        ..HarnessOptions::none()
+    }
+}
+
 pub struct Acp(pub Definition);
 
 impl Acp {
@@ -82,17 +96,7 @@ impl Harness for Acp {
     }
 
     fn options(&self) -> HarnessOptions {
-        HarnessOptions {
-            permission_modes: vec![
-                OptionChoice::described("ask", "Ask", "Ask before actions that need approval"),
-                OptionChoice::described(
-                    "auto-approve", "Auto-approve",
-                    "Approve individual requests automatically. The agent's access restrictions still apply.",
-                ),
-            ],
-            default_permission_mode: Some("ask"),
-            ..HarnessOptions::none()
-        }
+        approval_options()
     }
 
     fn session_skills_dir(&self) -> Option<&'static str> {

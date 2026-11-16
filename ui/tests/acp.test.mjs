@@ -83,3 +83,14 @@ test("the settings form validates launch fields without interpreting argument bo
     assert.equal(validAcpLaunch(name, executable, args), false);
   }
 });
+
+
+test("saved ACP chats retain revocable approval controls after their launch is removed", () => {
+  const saved = { harness: "acp:removed", harnessOptions: {
+    permissionModes: [{ id: "ask" }, { id: "auto-approve" }], defaultPermissionMode: "ask", reasoningLevels: [],
+  } };
+  const options = sessionAcpHarness(saved, undefined).options;
+  assert.deepEqual(options.permissionModes.map((choice) => choice.id), ["ask", "auto-approve"]);
+  assert.equal(options.defaultPermissionMode, "ask");
+  assert.equal(sessionAcpHarness({ harness: saved.harness }, undefined).options.permissionModes.length, 0);
+});

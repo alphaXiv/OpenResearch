@@ -1350,6 +1350,7 @@ pub fn session_json_with(store: Option<&Store>, s: &StoredChatSession, busy: boo
         "harness": s.harness,
         "profile": s.profile_id,
         "harnessName": acp.as_ref().map(|state| state.launch.name.as_str()),
+        "harnessOptions": acp.as_ref().map(|_| crate::local::harness::acp::approval_options()),
         "nativeConfiguration": native_configuration,
         "nativeModels": native_models,
         "title": s.title,
