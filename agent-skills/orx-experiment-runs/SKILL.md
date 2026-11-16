@@ -3,26 +3,22 @@ name: orx-experiment-runs
 description: "Make a run followable from launch to result: declare its stages, report progress and the measures that answer its question, write its view against the parent, read a log you can't edit with patterns, brief the watcher and settle its flags. Use before a baseline's first launch, when a run's progress or chart misleads, when a flag wakes you, and when the user asks to change what a run shows."
 ---
 
-The user follows a run without asking you: a line and a strip above the chat
-box, a tile on the tree, the run's page. Each draws the run's stages as one bar,
-its headline against the parent, and the view's first blocks. All of it comes
-from what you add to the baseline's code and set on it before its first launch:
+Before launching, follow sections 1–7 in order. Children inherit the view,
+patterns, plan and rules, but changed arguments must still report their actual
+totals. After removing or adding commands in a child, update its reported stage
+plan to match before launch. Use sections 8–10 only when changing a live view
+or handling rules and flags.
 
-| What | Lives in | You set it with |
-| --- | --- | --- |
-| the stages, in order, with their totals | the experiment, or the run | `--config plan.json`, or `orx_run.plan` |
-| progress and measures | the code | `::orx::` lines, or `orx_run` |
-| the view and its comparisons | the experiment | `--file view.xml` |
-| patterns for a log you can't edit | the experiment | `--pattern patterns.json` |
-| rules that stop a run | the experiment, or the run | `--config rules.json`, or `orx exp run <expId> --budget <usd>` |
+Before sizing a child, read its parent's measured runtime:
 
 ```sh
-orx exp view set <expId> --config plan.json --file view.xml   # any of --config, --file, --pattern
-orx exp view get <expId>
+orx exp status <parentExpId>
 ```
 
-A child starts with a copy of its parent's view, patterns, plan and rules, and
-inherits its code. A later `view set` changes only the experiment it names.
+Read `orx runs <projectId> --experiment <parentExpId>` for its stage times
+and the last run's log for evidence. Add setup, training, evaluation and
+all later stages; the last stage's duration is not the whole run. Scale the
+stages affected by the child's change and state the hardware assumption.
 
 ## 1. Read the entry point
 
@@ -178,7 +174,11 @@ lines carry no `step` shows no progress.
 
 ## 7. Check the first minutes
 
-Right after the baseline's first launch:
+OpenResearch also checks reporting as the run starts and sends at most one
+warning about missing patterns, headline or chart data, or stage totals.
+Inspect the run before acting on it; the check never stops the run.
+
+After every launch, before replying to the user:
 
 ```sh
 orx exp view check <runId>

@@ -189,3 +189,63 @@ for (let step = 1; step <= 20; step++) {
   await writeFile(path.join(dir, 'later'), 'go\n')
   await expect(page.getByText('Eval finished.', { exact: true })).toBeVisible()
 })
+
+test('a missing run report wakes the agent once and its live view can be repaired', async ({ page, project, agent, orx }) => {
+  test.slow()
+  const dir = path.join(orx.root, `instrumentation-${project.id}`)
+  mkdirSync(dir)
+  const gate = path.join(dir, 'finish')
+  expect(spawnSync('mkfifo', [gate]).status).toBe(0)
+  const script = path.join(dir, 'train.mjs')
+  writeFileSync(script, `import { readFileSync } from 'node:fs'
+process.stdout.write('::orx:: {"phase":"train","step":1,"m":{"loss":2}}\\n')
+process.stdout.write('::orx:: {"step":2,"m":{"loss":1}}\\n')
+readFileSync(${JSON.stringify(gate)})
+process.stdout.write('::orx:: {"step":3,"m":{"loss":0.5}}\\n')
+`)
+  writeFileSync(path.join(dir, 'broken.xml'), '<signal name="missing"/><view headline="missing"><chart y="missing"/></view>')
+  writeFileSync(path.join(dir, 'view.xml'), VIEW)
+  writeFileSync(path.join(dir, 'patterns.json'), JSON.stringify([{ regex: '^never (?P<missing>\\d+)$' }]))
+  writeFileSync(path.join(dir, 'clear.json'), '[]')
+  writeFileSync(path.join(dir, 'plan.json'), JSON.stringify({ plan: [{ phase: 'train', of: 3, unit: 'steps' }] }))
+  const warning = `instrumentation-${project.id}`
+  agent.script('Launch the reporting smoke test.', [
+    { run: [
+      'set -e',
+      `id=$(orx create-experiment ${project.id} --title Reports --run-command '${process.execPath} ${script}' | sed -n 's/^ *id: *//p')`,
+      `orx exp view set "$id" --file ${dir}/broken.xml --pattern ${dir}/patterns.json`,
+      'orx exp run "$id" --backend local',
+      'orx exp wake "$id"',
+    ].join('\n') },
+    { say: 'Reporting smoke test launched.' },
+  ])
+  agent.script('needs an instrumentation check', [
+    { hold: warning },
+    { run: [
+      'set -e',
+      `read run exp < ${dir}/ids`,
+      `orx exp view check "$run" --json > ${dir}/check.json`,
+      `orx exp view set "$exp" --file ${dir}/view.xml --pattern ${dir}/clear.json --config ${dir}/plan.json`,
+    ].join('\n') },
+    { say: 'Progress and chart corrected.' },
+  ])
+  agent.script('finished with status **done**', [{ say: 'Reporting smoke test finished.' }])
+  await project.open(page)
+  await send(page, 'Launch the reporting smoke test.')
+  await agent.reached(warning)
+  const shown = await (await page.request.get(`${orx.url}/api/chat/shown-runs`)).json()
+  const run = shown.find((entry: { experimentName: string }) => entry.experimentName === 'Reports').run
+  expect(run.status).toBe('running')
+  writeFileSync(path.join(dir, 'ids'), `${run.id} ${run.experimentId}\n`)
+  agent.release(warning)
+  await expect(page.getByText('Progress and chart corrected.', { exact: true })).toBeVisible()
+  const checked = JSON.parse(readFileSync(path.join(dir, 'check.json'), 'utf8'))
+  expect(checked.patterns[0].matched).toBe(0)
+  expect(checked.pending).toContain('missing')
+  expect(checked.stages[0].of).toBeNull()
+  const banner = page.getByRole('region', { name: 'Runs in this chat' })
+  await expect(banner).toContainText('Training loss')
+  await expect(banner).toContainText(/step [⁦⁨]?2[⁩]? of [⁦⁨]?3[⁩]?/i)
+  await writeFile(gate, 'go\n')
+  await expect(page.getByText('Reporting smoke test finished.', { exact: true })).toBeVisible()
+})

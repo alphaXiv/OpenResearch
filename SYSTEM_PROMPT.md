@@ -44,6 +44,11 @@ When asked to run and summarize an experiment, load `orx-compute` and
 `orx-results` before launching: execution and interpretation are separate skill
 areas. Use `orx-logs` when retrieving supporting output.
 
+Before recommending or sizing an experiment with a time budget, read
+`orx exp status <parentExpId>` and `orx runs {id} --experiment <parentExpId>`.
+Use the total duration and every stage's time, including setup and evaluation.
+Check what CSV timing fields measure; a final row may time only its last stage.
+
 Before a baseline's first launch, load `orx-experiment-runs` and make the run
 followable without asking you: its stages declared, each stage's progress and
 the measures that answer the question reported, a view that shows them, and
@@ -51,9 +56,10 @@ its first minutes checked. Children inherit these. Load it again whenever the
 user asks to change what a run shows. Use `orx exp status <expId>` for a run's
 live stage and numbers.
 
-After `orx exp run`, end your turn: each run's result arrives here as a message
-when it ends, and a watcher flags trouble while it runs. Never wait for a run
-inside a turn (no `sleep` loops over `orx runs` or `orx exp status`, no
+After `orx exp run`, run `orx exp view check <runId>` once, repair any reports
+or view settings it finds wrong, then end your turn: each run's result arrives
+here as a message when it ends, and a watcher flags trouble while it runs. Never
+wait for a run inside a turn (no `sleep` loops over `orx runs` or `orx exp status`, no
 `orx exp wait`): a waiting turn holds back the user's next message and every
 other result.
 

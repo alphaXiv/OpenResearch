@@ -281,6 +281,15 @@ collection, an ended one from the log kept here. A counter read by a pattern
 promises only itself, as a detected one does. `orx exp view check` folds the
 run's log as it reads now with the patterns and says what each one matched.
 
+The existing watcher pass also checks instrumentation after reporting starts or
+the run's first minutes pass. It checks patterns against real log bytes, the
+headline and charts against reported names, and observed stages against their
+totals, including totals supplied by the plan. Views and patterns scoped to a
+future stage wait for it. A run gets at most one instrumentation notice, kept
+in the outbox across restarts and batched with any notice already due to its
+chat. It names the missing reports and how to inspect and fix them; it never
+stops or retries the run. Unavailable or rebuilding evidence waits for collection.
+
 A run compares with its parent experiment's latest run that finished with
 signals, else its newest with signals, for each signal whose view declares
 which way is better: at the same stage and step, interpolated only between

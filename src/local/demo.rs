@@ -61,7 +61,7 @@ fn probe_setup() -> String {
 const PROBE_TRAIN: &str = "python -m scripts.base_train --depth=6 --head-dim=64 --window-pattern=L --max-seq-len=512 --device-batch-size=32 --total-batch-size=16384 --eval-every=50 --eval-tokens=524288 --core-metric-every=-1 --sample-every=-1 --num-iterations=200 --warmdown-ratio=0";
 const PROBE_TOK_TRAIN: &str = "python -m scripts.tok_train --max-chars=2000000000";
 const BASELINE_SHA: &str = "96098ad3f3708748f693c28194520ae13afb9c69";
-const EXPERIMENT_SHA: &str = "304317e6c4b1ed7a1e32699bbc3b9f64ed289a00";
+const EXPERIMENT_SHA: &str = "3f761f37fff37b1f94fc497f8671def22372cc9f";
 // Earlier baseline trees, newest first: before it reported its stages, and before
 // `runs/runcpu.sh` learned Windows. An install seeded at one keeps it, since every session
 // worktree it has was cut from it.
@@ -156,6 +156,7 @@ The `evidence/` directory contains the real checkpoint metadata, trained tokeniz
 
 const RUN_LOG: &str = include_str!("../../demo/nanochat/run-output.txt");
 const BASELINE_VIEW: &str = include_str!("../../demo/nanochat/baseline-view.xml");
+const PROBE_VIEW: &str = include_str!("../../demo/nanochat/probe-view.xml");
 // The log's own timestamps run 10:51:52 -> 14:33:21; the seeded run must span them.
 const RUN_LOG_SPAN_MIN: i64 = 222;
 
@@ -536,7 +537,6 @@ fn seed_at(
             chat_session_id: None,
             archived: false,
         };
-    // created_at and run_ended_at must stay RUN_LOG_SPAN_MIN apart.
     let run_ended_at = ago(seeded_at, 10, 0);
     let run = StoredRun {
         id: RUN_ID.into(),
@@ -545,7 +545,7 @@ fn seed_at(
         status: "done".into(),
         backend_json: json!({ "kind": "local_job", "jobId": "demo:nanochat" }).to_string(),
         command: project.run_command.clone().unwrap_or_default(),
-        created_at: ago(seeded_at, 234, 0),
+        created_at: run_ended_at - RUN_LOG_SPAN_MIN * 60_000,
         updated_at: run_ended_at,
         ended_at: Some(run_ended_at),
         exit_code: Some(0),
@@ -763,6 +763,43 @@ fn draw_run(store: &Store, data_root: &Path, ended_at: i64) -> Result<()> {
         .feed(RUN_LOG.as_bytes(), true, ended_at, false)
         .map_err(|error| anyhow!("the demo run's bundled log could not be folded: {error}"))?;
     snapshot.reached_end(ended_at);
+    let timestamp = regex::Regex::new(r"^2026-08-04 (\d{2}):(\d{2}):(\d{2}),(\d{3})").unwrap();
+    let mut phase = None;
+    let mut first = std::collections::HashMap::new();
+    let mut last = None;
+    for line in RUN_LOG.lines() {
+        if let Some(record) = line.strip_prefix("::orx:: ") {
+            let record: serde_json::Value = serde_json::from_str(record)?;
+            if let Some(name) = record["phase"].as_str() {
+                phase = Some(name.to_owned());
+            }
+        }
+        if let Some(time) = timestamp.captures(line) {
+            let at = time[1].parse::<i64>()? * 3_600_000
+                + time[2].parse::<i64>()? * 60_000
+                + time[3].parse::<i64>()? * 1_000
+                + time[4].parse::<i64>()?;
+            if let Some(name) = &phase {
+                first.entry(name.clone()).or_insert(at);
+            }
+            last = Some(at);
+        }
+    }
+    if let Some(last) = last {
+        let offset = ended_at - last;
+        for index in 0..snapshot.phases.len() {
+            let start = first.get(&snapshot.phases[index].name).copied();
+            let end = snapshot
+                .phases
+                .get(index + 1)
+                .and_then(|next| first.get(&next.name))
+                .copied();
+            snapshot.phases[index].started_at =
+                start.filter(|_| end.is_some()).map(|at| at + offset);
+            snapshot.phases[index].ended_at = end.map(|at| at + offset);
+        }
+    }
+
     let signals = data_root.join("run-signals");
     std::fs::create_dir_all(&signals)?;
     crate::engine::adapters::local::signals::publish(
@@ -771,22 +808,25 @@ fn draw_run(store: &Store, data_root: &Path, ended_at: i64) -> Result<()> {
     )?;
 
     use crate::engine::view::{self, Refusal, Source};
-    let source = Source {
-        file: Some("baseline-view.xml"),
-        patterns: None,
-        config: None,
-    };
-    // The probes were created under the baseline, so they start with its view as any child would.
-    for experiment in [
-        EXPERIMENT_ID,
-        LR_PROBE_EXPERIMENT_ID,
-        VOCAB_PROBE_EXPERIMENT_ID,
+    for (experiment, markup) in [
+        (EXPERIMENT_ID, BASELINE_VIEW),
+        (LR_PROBE_EXPERIMENT_ID, PROBE_VIEW),
+        (VOCAB_PROBE_EXPERIMENT_ID, BASELINE_VIEW),
     ] {
+        let source = Source {
+            file: Some(if experiment == LR_PROBE_EXPERIMENT_ID {
+                "probe-view.xml"
+            } else {
+                "baseline-view.xml"
+            }),
+            patterns: None,
+            config: None,
+        };
         view::set(
             store,
             experiment,
             &view::etag(None),
-            Some(BASELINE_VIEW),
+            Some(markup),
             None,
             None,
             &source,
@@ -1587,6 +1627,10 @@ fn build_worktree(root: &Path) -> Result<()> {
     commit(root, "Import nanochat demo baseline")?;
     git(root, &["checkout", "-b", BRANCH])?;
     write_assets::<ExperimentAssets>(root)?;
+    std::fs::write(
+        root.join("orx_run.py"),
+        include_str!("../../agent-skills/orx-compute/assets/orx_run.py"),
+    )?;
     set_executable(root.join("runs/runcpu.sh"))?;
     git(root, &["add", "-A"])?;
     git(root, &["update-index", "--chmod=+x", "runs/runcpu.sh"])?;
@@ -2147,13 +2191,24 @@ mod tests {
             let points = monitor["series"][name].as_array().map_or(0, Vec::len);
             assert!(points > 1, "{name}: {points} points");
         }
+        for index in [2, 3, 4, 5] {
+            let phase = &monitor["phases"][index];
+            let start = phase["startedAt"].as_i64().unwrap();
+            let end = phase["endedAt"].as_i64().unwrap();
+            assert!(end > start, "{phase}");
+        }
         let status = monitor["statusText"].as_str().unwrap();
         assert!(status.contains("Val bpb 1.166"), "{status}");
         assert!(!status.contains("diagnostics"), "{status}");
         for probe in [LR_PROBE_EXPERIMENT_ID, VOCAB_PROBE_EXPERIMENT_ID] {
             let saved =
                 crate::engine::view::described(&store, probe).unwrap_or_else(|_| panic!("{probe}"));
-            assert_eq!(saved["markup"], BASELINE_VIEW, "{probe}");
+            let expected = if probe == LR_PROBE_EXPERIMENT_ID {
+                PROBE_VIEW
+            } else {
+                BASELINE_VIEW
+            };
+            assert_eq!(saved["markup"], expected, "{probe}");
         }
     }
 

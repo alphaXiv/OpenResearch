@@ -1501,12 +1501,13 @@ pub(crate) fn check(
             format!("Run `orx exp view set {experiment} --file PATH`."),
         ),
     };
-    let seen = match folded {
-        Some(folded) => Seen::of(folded),
-        None => super::monitor::checkpoint(store, run)?
-            .map(|s| Seen::of(&s))
-            .unwrap_or_default(),
+    let kept = if folded.is_none() {
+        super::monitor::checkpoint(store, run)?
+    } else {
+        None
     };
+    let folded = folded.or(kept.as_deref());
+    let seen = folded.map(Seen::of).unwrap_or_default();
     let mut report = json!({
         "runId": run,
         "experimentId": experiment,
@@ -1537,9 +1538,9 @@ pub(crate) fn check(
                 json!({"regex": regex, "matched": hit.matched, "first": first})
             })
             .collect();
-        report["stages"] = folded
-            .phases
-            .iter()
+    }
+    if let Some(folded) = folded {
+        report["stages"] = folded.phases.iter()
             .map(|p| json!({"name": p.name, "done": p.done, "of": p.of, "unit": p.unit, "source": p.source}))
             .collect();
     }
@@ -1556,9 +1557,321 @@ pub(crate) fn check(
     Ok(report)
 }
 
+pub(crate) fn instrumentation(
+    monitor: &Value,
+    snapshot: Option<&orx_signals::Snapshot>,
+    patterns: &orx_signals::Config,
+    replay: Option<&orx_signals::Snapshot>,
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    let seen = snapshot.map(Seen::of).unwrap_or_default();
+    let phases = snapshot.map_or(&[][..], |s| s.phases.as_slice());
+    let started = |name: &str| phases.iter().any(|phase| phase.name == name);
+    if let Some(replay) = replay {
+        // A live writer can advance beyond the fold whose view is being checked.
+        let complete = replay.coverage.complete
+            || (snapshot.is_some_and(|known| replay.cursor.offset >= known.cursor.offset)
+                && replay
+                    .coverage
+                    .reasons
+                    .iter()
+                    .all(|reason| reason == "check_limit"));
+        if !complete {
+            let cause = if replay
+                .coverage
+                .reasons
+                .iter()
+                .any(|reason| reason == "check_limit")
+            {
+                "the checked prefix reached the read limit"
+            } else {
+                "some log bytes are missing"
+            };
+            problems.push(format!("Pattern matches could not be checked through the whole log: {cause}. Inspect the full log before changing patterns."));
+        } else if let Some(tally) = replay.tally.as_ref() {
+            for (index, (pattern, hit)) in patterns.patterns.iter().zip(&tally.hits).enumerate() {
+                if hit.matched == 0 && pattern.phase.as_deref().is_none_or(started) {
+                    problems.push(format!("Pattern {} matched no lines in the checked log. Correct its regex or phase with `orx exp view set EXP --pattern PATH`.", index + 1));
+                }
+            }
+        }
+    }
+    let view = &monitor["view"];
+    let headline: Vec<&str> = view["headline"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    if (!seen.signals.is_empty() || !seen.tables.is_empty())
+        && !headline.is_empty()
+        && !headline
+            .iter()
+            .any(|name| seen.signals.iter().any(|seen| seen == name))
+    {
+        problems.push(format!("No headline signal has appeared ({}). Report one of these names under `m`, or add a reported fallback to `headline` with `orx exp view set EXP --file PATH`.", headline.join(", ")));
+    }
+    let mut missing = std::collections::BTreeSet::new();
+    for block in view["blocks"].as_array().into_iter().flatten() {
+        if block["phase"].as_str().is_some_and(|name| !started(name)) {
+            continue;
+        }
+        if let Some(table) = block["from"].as_str() {
+            if let Some(columns) = seen.tables.get(table) {
+                let names = block["chart"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .chain(block["x"].as_str())
+                    .chain(block["by"].as_str())
+                    .chain(
+                        block["series"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .flat_map(|series| [series["x"].as_str(), series["y"].as_str()])
+                            .flatten(),
+                    );
+                for name in names {
+                    if !columns.iter().any(|column| column == name) {
+                        missing.insert(format!("{table}.{name}"));
+                    }
+                }
+            } else {
+                missing.insert(format!("table {table}"));
+            }
+        } else {
+            for name in block["chart"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+            {
+                if !seen.signals.iter().any(|seen| seen == name) {
+                    missing.insert(name.to_owned());
+                }
+            }
+        }
+    }
+    if !missing.is_empty() {
+        problems.push(format!("Chart data has not appeared: {}. Report these names, or correct the chart with `orx exp view set EXP --file PATH`.", missing.into_iter().collect::<Vec<_>>().join(", ")));
+    }
+    for (index, phase) in phases.iter().enumerate() {
+        let occurrence = phases[..index]
+            .iter()
+            .filter(|earlier| earlier.name == phase.name)
+            .count();
+        let planned = monitor["phases"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|entry| entry["name"] == phase.name)
+            .nth(occurrence);
+        let has_planned_total = match snapshot.and_then(|snapshot| snapshot.plan.as_ref()) {
+            Some(plan) => plan
+                .iter()
+                .filter(|stage| stage.phase == phase.name)
+                .nth(occurrence)
+                .is_some_and(|stage| stage.of.is_some()),
+            None => planned.is_some_and(|entry| entry["of"].is_number()),
+        };
+        if phase.of.is_none() && !has_planned_total {
+            let name = if phase.name.is_empty() {
+                "(unnamed)"
+            } else {
+                &phase.name
+            };
+            problems.push(format!("Stage {name:?} has no total. Report its actual total with `orx_run.progress(total=...)` or `::orx:: {{\"of\":...}}`; if the total is in a log line, capture it as `of` in the pattern."));
+        }
+    }
+    if phases.is_empty() {
+        problems.push("No stage or progress total has appeared. Add `orx_run.progress(total=..., phase=...)` to the entry point.".into());
+    }
+    problems
+}
+
+/// The run's log as it reads now, folded afresh with `patterns`, counting what each matched.
+pub(crate) async fn fold_for_check<F, Fut>(
+    id: &str,
+    patterns: std::sync::Arc<orx_signals::Patterns>,
+    max_bytes: u64,
+    mut read: F,
+) -> crate::error::Result<orx_signals::Snapshot>
+where
+    F: FnMut(super::ByteRange, Option<super::FileIdent>) -> Fut,
+    Fut: std::future::Future<Output = crate::error::Result<super::LogPage>>,
+{
+    use super::{ByteRange, LogPage};
+    use crate::error::anyhow;
+    let mut folded: Option<orx_signals::Snapshot> = None;
+    let mut ident = None;
+    loop {
+        let start = folded.as_ref().map_or(0, |f| f.cursor.offset);
+        let range = ByteRange {
+            start,
+            end: (start + orx_host_proto::MAX_PAGE_LEN).min(max_bytes),
+        };
+        let page = read(range, ident.clone()).await?;
+        let LogPage::Data {
+            ident: page_ident,
+            bytes,
+            eof,
+            start: at,
+            ..
+        } = page
+        else {
+            let reason = if matches!(page, LogPage::Reset { info: None }) {
+                "has no log yet"
+            } else {
+                "changed while it was being checked"
+            };
+            return Err(anyhow!(
+                "Run {id}'s log {reason}. Retry `orx exp view check {id}`."
+            ));
+        };
+        let snapshot = folded.get_or_insert_with(|| {
+            let mut snapshot =
+                orx_signals::Snapshot::new(id, &String::from(page_ident.clone()), "check");
+            snapshot.tally = Some(Default::default());
+            snapshot.configure(Some(patterns.clone()));
+            snapshot
+        });
+        ident = Some(page_ident);
+        if at > start {
+            snapshot.coverage.add_reason("missing_middle");
+            snapshot.cursor.offset = at;
+        }
+        let last = eof || bytes.is_empty() || at + bytes.len() as u64 >= max_bytes;
+        snapshot
+            .feed(&bytes, eof, crate::store::now_ms(), false)
+            .map_err(|error| anyhow!(error))?;
+        if last {
+            if !eof && !bytes.is_empty() {
+                snapshot.coverage.add_reason("check_limit");
+            }
+            return Ok(folded.unwrap());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn check_snapshot(log: &str, config: &orx_signals::Config) -> orx_signals::Snapshot {
+        let mut snapshot = orx_signals::Snapshot::new("check", "1-7", "check");
+        snapshot.tally = Some(Default::default());
+        snapshot.configure(Some(std::sync::Arc::new(
+            orx_signals::Patterns::compile(config).unwrap(),
+        )));
+        snapshot.feed(log.as_bytes(), true, 1000, true).unwrap();
+        snapshot
+    }
+
+    #[test]
+    fn instrumentation_reports_each_missing_part_and_its_fix() {
+        let config: orx_signals::Config = serde_json::from_value(json!({"patterns":[
+            {"regex":"^loss (?P<loss>\\d+)$","phase":"train"},
+            {"regex":"^accuracy (?P<accuracy>\\d+)$","phase":"eval"}
+        ]}))
+        .unwrap();
+        let snapshot = check_snapshot(
+            "::orx:: {\"phase\":\"train\",\"step\":1,\"m\":{\"loss\":2}}\n",
+            &config,
+        );
+        let view = compile(r#"<signal name="accuracy"/><signal name="missing"/><view headline="accuracy"><chart y="missing"/></view>"#).unwrap().tree;
+        let monitor = json!({"view":view,"phases":[{"name":"train"}]});
+        let problems = instrumentation(&monitor, Some(&snapshot), &config, Some(&snapshot));
+        assert_eq!(problems.len(), 4, "{problems:?}");
+        assert!(problems.iter().any(|p| p.contains("--pattern PATH")));
+        assert!(problems
+            .iter()
+            .any(|p| p.contains("accuracy") && p.contains("headline")));
+        assert!(problems
+            .iter()
+            .any(|p| p.contains("missing") && p.contains("--file PATH")));
+        assert!(problems
+            .iter()
+            .any(|p| p.contains("train") && p.contains("total=")));
+        assert!(!problems.iter().any(|p| p.contains("Pattern 2")));
+    }
+
+    #[test]
+    fn instrumentation_accepts_planned_totals_and_a_headline_fallback_until_eval() {
+        let config: orx_signals::Config = serde_json::from_value(json!({"patterns":[
+            {"regex":"^accuracy (?P<accuracy>\\d+)$","phase":"eval"}
+        ]}))
+        .unwrap();
+        let snapshot = check_snapshot(
+            "::orx:: {\"phase\":\"train\",\"step\":1,\"m\":{\"loss\":2}}\n",
+            &config,
+        );
+        let view = compile(r#"<signal name="accuracy"/><signal name="loss"/><view headline="accuracy loss"><chart y="loss" phase="train"/><chart y="accuracy" phase="eval"/></view>"#).unwrap().tree;
+        let monitor =
+            json!({"view":view,"phases":[{"name":"train","of":10},{"name":"eval","of":5}]});
+        assert!(instrumentation(&monitor, Some(&snapshot), &config, Some(&snapshot)).is_empty());
+    }
+
+    #[test]
+    fn instrumentation_checks_chart_columns_and_each_stage_occurrence() {
+        let config = orx_signals::Config::default();
+        let snapshot = check_snapshot(concat!(
+            "::orx:: {\"phase\":\"train\",\"step\":1}\n",
+            "::orx:: {\"phase\":\"eval\",\"of\":1,\"row\":\"scores\",\"m\":{\"task\":\"a\",\"other\":2}}\n",
+            "::orx:: {\"phase\":\"train\",\"step\":1}\n"
+        ), &config);
+        let view = compile(r#"<view><chart from="scores" x="task" y="accuracy" by="arm"/></view>"#)
+            .unwrap()
+            .tree;
+        let monitor = json!({"view":view,"phases":[{"name":"train","of":10},{"name":"eval","of":1},{"name":"train"}]});
+        let problems = instrumentation(&monitor, Some(&snapshot), &config, None);
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(problems.iter().any(|p| p.contains("scores.accuracy")));
+        assert!(problems.iter().any(|p| p.contains("scores.arm")));
+        assert!(problems
+            .iter()
+            .any(|p| p.contains("train") && p.contains("total=")));
+    }
+
+    #[test]
+    fn instrumentation_uses_the_runs_plan_instead_of_an_older_experiment_plan() {
+        let config = orx_signals::Config::default();
+        let snapshot = check_snapshot("::orx:: {\"plan\":[{\"phase\":\"train\",\"of\":5}],\"phase\":\"train\",\"step\":1,\"m\":{\"loss\":2}}\n", &config);
+        let monitor = json!({"view":compile("<view><chart y=\"loss\"/></view>").unwrap().tree,"phases":[{"name":"train","of":10}]});
+        assert!(instrumentation(&monitor, Some(&snapshot), &config, None).is_empty());
+        let snapshot = check_snapshot("::orx:: {\"plan\":[{\"phase\":\"train\"}],\"phase\":\"train\",\"step\":1,\"m\":{\"loss\":2}}\n", &config);
+        let problems = instrumentation(&monitor, Some(&snapshot), &config, None);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("total="));
+    }
+
+    #[tokio::test]
+    async fn checking_a_bounded_or_replaced_log_never_claims_complete_evidence() {
+        let page = super::super::LogPage::Data {
+            len: None,
+            ident: super::super::FileIdent { dev: 1, ino: 7 },
+            start: 0,
+            bytes: b"loss 2\n".to_vec(),
+            eof: false,
+        };
+        let patterns = std::sync::Arc::new(
+            orx_signals::Patterns::compile(&orx_signals::Config::default()).unwrap(),
+        );
+        let prefix = fold_for_check("bounded", patterns.clone(), 7, |_, _| {
+            std::future::ready(Ok(page.clone()))
+        })
+        .await
+        .unwrap();
+        assert!(!prefix.coverage.complete);
+        let mut pages =
+            std::collections::VecDeque::from([page, super::super::LogPage::Reset { info: None }]);
+        let failed = fold_for_check("replaced", patterns, 1024, |_, _| {
+            std::future::ready(Ok(pages.pop_front().unwrap()))
+        })
+        .await;
+        assert!(failed.is_err());
+    }
 
     /// A codec benchmark: a frontier against a reference, from a table the run prints at its end.
     pub(crate) const FRONTIER: &str = r#"<signal name="front_gain" label="Frontier gain" better="higher" sign="true" />

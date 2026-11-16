@@ -1561,7 +1561,27 @@ async fn check_view(
         Err(refusal) => return view_answer(Err(refusal)),
     };
     let folded = match patterns {
-        Some(patterns) => match fold_for_check(&api, &id, patterns).await {
+        Some(patterns) => match crate::engine::view::fold_for_check(
+            &id,
+            patterns,
+            CHECK_BYTES,
+            |range, expected| {
+                let (api, id) = (&api, &id);
+                async move {
+                    read_log(api, id, range, expected)
+                        .await
+                        .map_err(|failure| match failure {
+                            Failure::Message(_, message) => anyhow!("{message}"),
+                            Failure::Unavailable { host, .. } => anyhow!(
+                                "the host {} holding it cannot be reached",
+                                host.unwrap_or_default()
+                            ),
+                        })
+                }
+            },
+        )
+        .await
+        {
             Ok(folded) => Some(folded),
             Err(error) => {
                 let message =
@@ -1586,62 +1606,6 @@ async fn check_view(
         )
     })
     .await
-}
-
-/// The run's log as it reads now, folded afresh with `patterns`, counting what each matched.
-async fn fold_for_check(
-    api: &Api,
-    id: &str,
-    patterns: Arc<orx_signals::Patterns>,
-) -> Result<orx_signals::Snapshot> {
-    let mut folded: Option<orx_signals::Snapshot> = None;
-    let mut ident = None;
-    loop {
-        let start = folded.as_ref().map_or(0, |f| f.cursor.offset);
-        let range = ByteRange {
-            start,
-            end: start + orx_host_proto::MAX_PAGE_LEN,
-        };
-        let page =
-            read_log(api, id, range, ident.clone())
-                .await
-                .map_err(|failure| match failure {
-                    Failure::Message(_, message) => anyhow!("{message}"),
-                    Failure::Unavailable { host, .. } => anyhow!(
-                        "the host {} holding it cannot be reached",
-                        host.unwrap_or_default()
-                    ),
-                })?;
-        let LogPage::Data {
-            ident: page_ident,
-            bytes,
-            eof,
-            start: at,
-            ..
-        } = page
-        else {
-            return folded.ok_or_else(|| anyhow!("it has no log yet"));
-        };
-        let snapshot = folded.get_or_insert_with(|| {
-            let mut snapshot =
-                orx_signals::Snapshot::new(id, &String::from(page_ident.clone()), "check");
-            snapshot.tally = Some(Default::default());
-            snapshot.configure(Some(patterns.clone()));
-            snapshot
-        });
-        ident = Some(page_ident);
-        if at > start {
-            snapshot.coverage.add_reason("missing_middle");
-            snapshot.cursor.offset = at;
-        }
-        let last = eof || bytes.is_empty() || at + bytes.len() as u64 >= CHECK_BYTES;
-        snapshot
-            .feed(&bytes, eof, crate::store::now_ms(), false)
-            .map_err(|error| anyhow!(error))?;
-        if last {
-            return Ok(folded.unwrap());
-        }
-    }
 }
 
 #[derive(Deserialize)]

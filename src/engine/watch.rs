@@ -376,6 +376,148 @@ struct Seen {
     stage: Option<((String, usize), i64)>,
     /// Its comparisons with the parent in the current stage, by signal.
     compared: HashMap<String, trip::Compared>,
+    /// Patterns already checked in this log generation and stage.
+    patterns_checked: Option<(String, String, usize)>,
+}
+
+async fn instrumentation(seen: &mut Seen, run: &Now, now: i64) -> Result<Option<String>> {
+    const NOTICE: &str = "instrumentation";
+    if run.run.status != "running" || run.body["availability"]["state"] != "live" {
+        return Ok(None);
+    }
+    // Step zero may be validation before the first training loss.
+    let data = run.body["series"].as_object().is_some_and(|series| {
+        series
+            .values()
+            .any(|points| points.as_array().is_some_and(|points| points.len() > 1))
+    }) || (run.body["latest"]
+        .as_object()
+        .is_some_and(|latest| !latest.is_empty())
+        && (run.body["progress"]["done"]
+            .as_f64()
+            .is_some_and(|done| done > 0.0)
+            || run.summary["stage"]["of"].is_null()))
+        || run.body["rows"].as_object().is_some_and(|tables| {
+            tables
+                .values()
+                .any(|rows| rows.as_array().is_some_and(|rows| !rows.is_empty()))
+        });
+    let store = Store::open()?;
+    let state = store.engine_run_state(&run.run.id)?;
+    if run.run.cancel_requested
+        || state
+            .as_ref()
+            .is_some_and(|state| state.cancel_accepted_at.is_some())
+    {
+        return Ok(None);
+    }
+    let started = state
+        .and_then(|state| state.started_at)
+        .unwrap_or(run.run.created_at);
+    if !data && now.saturating_sub(started) < 120_000 {
+        return Ok(None);
+    }
+    if store.last_notice_at(&run.run.id, NOTICE)?.is_some() {
+        return Ok(None);
+    }
+    let chat = run
+        .run
+        .chat_session_id
+        .clone()
+        .or(store.run_subscribers(&run.run.id)?.into_iter().next());
+    let Some(chat) = chat else { return Ok(None) };
+    let raw = store.run_monitor_json(&run.run.experiment_id)?;
+    let current: Value = raw
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()?
+        .unwrap_or(Value::Null);
+    if current != run.settings {
+        return Ok(None);
+    }
+    let patterns = super::view::stored_patterns(&run.run.experiment_id, raw.as_deref())?;
+    let snapshot = super::monitor::checkpoint(&store, &run.run.id)?;
+    if snapshot.as_ref().is_some_and(|snapshot| {
+        snapshot
+            .coverage
+            .reasons
+            .iter()
+            .any(|reason| reason != "truncated")
+    }) {
+        return Ok(None);
+    }
+    if snapshot
+        .as_ref()
+        .is_some_and(|snapshot| run.body["generation"] != snapshot.generation)
+    {
+        return Ok(None);
+    }
+    let hash = patterns.hash();
+    if snapshot
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.config_hash != hash)
+    {
+        return Ok(None);
+    }
+    let key = (
+        hash,
+        run.body["generation"].to_string(),
+        snapshot.as_ref().map_or(0, |s| s.phases.len()),
+    );
+    let replay = if !patterns.patterns.is_empty() && seen.patterns_checked.as_ref() != Some(&key) {
+        let compiled = orx_signals::Patterns::compile(&patterns)
+            .map_err(|error| anyhow!("Pattern {}: {}", error.index + 1, error.reason))?;
+        let cursor = snapshot.as_ref().map(|snapshot| &snapshot.cursor);
+        let limit = cursor.map_or(1024 * 1024, |cursor| cursor.offset.clamp(1, 1024 * 1024));
+        let ident = cursor
+            .map(|cursor| super::FileIdent::try_from(cursor.ident.clone()))
+            .transpose()
+            .map_err(|error| anyhow!("{error}"))?;
+        let replay = bounded(super::view::fold_for_check(
+            &run.run.id,
+            std::sync::Arc::new(compiled),
+            limit,
+            |range, expected| {
+                crate::commands::up::api_v2::run_log(
+                    &run.run.id,
+                    range,
+                    expected.or_else(|| ident.clone()),
+                )
+            },
+        ))
+        .await?;
+        if cursor.is_some() && replay.cursor.offset < limit {
+            return Ok(None);
+        }
+        Some(replay)
+    } else {
+        None
+    };
+    let problems =
+        super::view::instrumentation(&run.body, snapshot.as_deref(), &patterns, replay.as_ref());
+    if problems.is_empty() {
+        if replay.is_some() {
+            seen.patterns_checked = Some(key);
+        }
+        return Ok(None);
+    }
+    if store.run_monitor_json(&run.run.experiment_id)? != raw {
+        return Ok(None);
+    }
+    let (id, experiment) = (&run.run.id, &run.run.experiment_id);
+    let problems = problems
+        .join("\n")
+        .replace("view set EXP ", &format!("view set {experiment} "));
+    let body = format!(
+        "[orx] Run {id} (experiment {experiment}) needs an instrumentation check.\n\
+         {problems}\n\
+         Inspect `orx exp view check {id}` and `orx logs {id}` before changing anything. \
+         View and pattern changes apply now. If a code report is missing, cancel a still-running run with \
+         `orx exp cancel --run {id} --reason 'Fixing run reports'`, fix and commit the code, then relaunch. \
+         This automatic check never stops the run and sends at most one warning for it."
+    );
+    let queued = store.insert_run_notice(id, &chat, NOTICE, NOTICE, &body, now)?;
+    Ok(queued.then_some(chat))
 }
 
 /// The chats whose looks are being taken now, one task a chat.
@@ -593,7 +735,16 @@ async fn pass(state: &mut State) -> Result<()> {
         let mut seen = state.runs.remove(&run.run.id).unwrap_or_default();
         reads.push(async move {
             scan(&mut seen, run).await;
+            let warned = instrumentation(&mut seen, run, now).await;
             trip::check(&mut seen, run, now).await;
+            match warned {
+                Ok(Some(chat)) => crate::commands::up::api_v2::notices_queued(vec![chat]),
+                Ok(None) => {}
+                Err(error) => eprintln!(
+                    "orx up: checking run {}'s instrumentation: {error:#}",
+                    run.run.id
+                ),
+            }
             (run.run.id.clone(), seen)
         });
     }

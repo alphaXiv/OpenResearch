@@ -1430,3 +1430,161 @@ async fn side_stats_wake_only_for_far_worse_parent_comparisons() {
         .iter()
         .any(|(kind, _)| kind == "parent"));
 }
+
+#[tokio::test]
+async fn instrumentation_warns_once_across_restart_and_shares_a_due_notice_turn() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let store = Store::open().unwrap();
+    chat(&store, "instrument-owner", "claude-code");
+    let log = "::orx:: {\"phase\":\"train\",\"step\":1,\"m\":{\"loss\":2}}\n::orx:: {\"step\":2,\"m\":{\"loss\":1}}\n";
+    let row = run(
+        &store,
+        "instrument-run",
+        "Training",
+        "instrument-owner",
+        log,
+    );
+    let now = crate::store::now_ms();
+    let mut snapshot = orx_signals::Snapshot::new(&row.id, "1-7", "g1");
+    snapshot.feed(log.as_bytes(), true, now, true).unwrap();
+    snapshot.reached_end(now);
+    let path = store
+        .data_dir()
+        .join("run-signals")
+        .join(format!("{}.json", row.id));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    crate::engine::adapters::signals::publish(&path, &snapshot).unwrap();
+    super::super::monitor::advance(&store, &row, now).unwrap();
+    let current = Now::read(&store, &row).unwrap();
+    store
+        .insert_run_notice(
+            &row.id,
+            "instrument-owner",
+            crate::store::NOTIFY,
+            "due",
+            "A notice already due.",
+            now,
+        )
+        .unwrap();
+    assert_eq!(
+        instrumentation(&mut Seen::default(), &current, now)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("instrument-owner")
+    );
+    let batch = store.run_notice_batch("instrument-owner").unwrap();
+    assert_eq!(batch.len(), 2);
+    assert_eq!(batch[0].client_turn_id, batch[1].client_turn_id);
+    let warning = batch
+        .iter()
+        .find(|notice| notice.kind == "instrumentation")
+        .unwrap();
+    assert!(warning
+        .body
+        .contains(&format!("orx exp view check {}", row.id)));
+    assert!(warning.body.contains("total="));
+    assert!(
+        instrumentation(&mut Seen::default(), &current, now + 300_000)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(store.get_run(&row.id).unwrap().unwrap().status, "running");
+}
+
+#[tokio::test]
+async fn instrumentation_waits_for_data_or_two_minutes_and_ignores_queued_runs() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let store = Store::open().unwrap();
+    chat(&store, "quiet-owner", "claude-code");
+    let mut row = run(&store, "quiet-instrumentation", "Quiet", "quiet-owner", "");
+    let current = Now::read(&store, &row).unwrap();
+    let mut seen = Seen::default();
+    assert!(
+        instrumentation(&mut seen, &current, row.created_at + 119_999)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    row.status = "starting".into();
+    let queued = Now::read(&store, &row).unwrap();
+    assert!(
+        instrumentation(&mut seen, &queued, row.created_at + 180_000)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        instrumentation(&mut seen, &current, row.created_at + 120_000)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("quiet-owner")
+    );
+    assert!(store
+        .last_notice_at(&row.id, "instrumentation")
+        .unwrap()
+        .is_some());
+}
+
+#[tokio::test]
+async fn instrumentation_waits_for_a_view_changed_during_the_pass() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let store = Store::open().unwrap();
+    chat(&store, "editing-owner", "claude-code");
+    let log = "::orx:: {\"phase\":\"train\",\"step\":1,\"of\":3,\"m\":{\"loss\":2}}\n::orx:: {\"step\":2,\"m\":{\"loss\":1}}\n";
+    let row = run(
+        &store,
+        "editing-instrumentation",
+        "Editing",
+        "editing-owner",
+        log,
+    );
+    let now = crate::store::now_ms();
+    let mut snapshot = orx_signals::Snapshot::new(&row.id, "1-7", "g1");
+    snapshot.feed(log.as_bytes(), false, now, true).unwrap();
+    snapshot.reached_end(now);
+    let path = store
+        .data_dir()
+        .join("run-signals")
+        .join(format!("{}.json", row.id));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    crate::engine::adapters::signals::publish(&path, &snapshot).unwrap();
+    let before = Now::read(&store, &row).unwrap();
+    let raw = store.run_monitor_json(&row.experiment_id).unwrap();
+    super::super::view::set(
+        &store,
+        &row.experiment_id,
+        &super::super::view::etag(raw.as_deref()),
+        Some("<signal name=\"missing\"/><view headline=\"missing\"><chart y=\"missing\"/></view>"),
+        None,
+        None,
+        &super::super::view::Source {
+            file: Some("view.xml"),
+            patterns: None,
+            config: None,
+        },
+    )
+    .unwrap();
+    assert!(instrumentation(&mut Seen::default(), &before, now)
+        .await
+        .unwrap()
+        .is_none());
+    let after = Now::read(&store, &row).unwrap();
+    assert_eq!(
+        instrumentation(&mut Seen::default(), &after, now)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("editing-owner"),
+        "{}",
+        after.body
+    );
+}
