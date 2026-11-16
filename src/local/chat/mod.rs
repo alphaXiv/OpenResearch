@@ -3124,6 +3124,8 @@ pub struct SteerReceiver {
     rx: mpsc::UnboundedReceiver<SteerMessage>,
     host: Arc<ChatHost>,
     session_id: String,
+    /// The turn's reply, where a steer that could not be queued is shown.
+    message_id: String,
 }
 
 impl SteerReceiver {
@@ -3136,11 +3138,29 @@ impl Drop for SteerReceiver {
     fn drop(&mut self) {
         self.rx.close();
         while let Ok(message) = self.rx.try_recv() {
+            let text = message.display.clone();
             if let Err(error) = self.host.park_steer(&self.session_id, message) {
                 eprintln!(
                     "orx up: could not queue an unread steer in chat {}: {error}",
                     self.session_id
                 );
+                // Live only: the store just refused a write, so the reply carries the text back.
+                let Ok(Some(stored)) =
+                    Store::open().and_then(|store| store.get_chat_message(&self.message_id))
+                else {
+                    continue;
+                };
+                let mut reply = stored_to_wire(&stored);
+                reply.parts.push(WirePart::tool(
+                    format!("err-{}", reply.parts.len()),
+                    "error",
+                    "error",
+                    Some(format!(
+                        "This message was not sent and could not be queued ({error}). Send it again:\n\n{text}"
+                    )),
+                ));
+                self.host
+                    .emit("chat.message", message_json(&reply, &self.session_id));
             }
         }
     }
@@ -4667,7 +4687,10 @@ impl ChatHost {
             payload_json,
             created_at: message.sent_at,
         })?;
-        self.refresh_persisted_queue_locked(session_id, store)?;
+        // The row is saved; a failed reload only delays its chip until the next one.
+        if let Err(error) = self.refresh_persisted_queue_locked(session_id, store) {
+            eprintln!("orx up: could not reload the queue of chat {session_id}: {error}");
+        }
         if let Some(id) = steer_client_turn_id.as_deref() {
             store.finish_steer(session_id, id)?;
         }
@@ -6629,6 +6652,7 @@ impl ChatHost {
                 rx,
                 host: self.clone(),
                 session_id: sid.clone(),
+                message_id: message_id.clone(),
             });
             self.register_steering(&sid, tx, TurnSettings::of(&ctx))
         });
@@ -15412,6 +15436,7 @@ mod steering_tests {
             rx,
             host: test_host(),
             session_id: "owner".into(),
+            message_id: "reply".into(),
         });
         tx.send(steer("go")).unwrap();
         tokio::select! {
@@ -15440,6 +15465,7 @@ mod steering_tests {
             rx,
             host: host.clone(),
             session_id: "owner".into(),
+            message_id: "reply".into(),
         };
         let turn = tokio::spawn(async move {
             let _route = route;
