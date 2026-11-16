@@ -1147,7 +1147,7 @@ fn save_images(images: &[ImageAttachment]) -> Result<Vec<SavedAttachment>> {
 /// How much of the model's context window a session has consumed, measured off
 /// the most recent API request the harness reported. Latest report wins (not
 /// cumulative), so auto-compaction naturally drops the number.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextUsage {
     /// Tokens occupying the context window after the most recent API request
@@ -1156,6 +1156,10 @@ pub struct ContextUsage {
     /// Total context window of the model, when known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,
+    /// Tokens at which the agent compacts on its own; absent when it doesn't
+    /// say or has auto-compaction off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compact_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -8444,7 +8448,12 @@ impl TurnCtx {
         &self,
         prefix: &str,
         native_scope: &str,
-        samples: &[(String, Option<String>, crate::store::TokenUsage)],
+        samples: &[(
+            String,
+            Option<String>,
+            crate::store::TokenUsage,
+            Option<crate::store::Cost>,
+        )],
     ) {
         if !self.durable {
             return;
@@ -8471,16 +8480,23 @@ impl TurnCtx {
         self.attempt_count
     }
 
+    /// Records a sample that may sum several requests, so the price list never applies a
+    /// context tier to it.
     pub(crate) fn record_native_usage(
         &self,
         sample_id: &str,
         model: Option<&str>,
         provider: Option<&str>,
         usage: crate::store::TokenUsage,
+        cost: Option<crate::store::Cost>,
     ) {
         if !self.durable {
             return;
         }
+        let cost = match &cost {
+            Some(cost) => crate::store::SampleCost::Reported(cost),
+            None => crate::store::SampleCost::Unreported { one_request: false },
+        };
         if let Err(error) = Store::open().and_then(|store| {
             store.record_usage_sample(
                 &self.usage_execution_id,
@@ -8489,6 +8505,7 @@ impl TurnCtx {
                 model,
                 provider,
                 &usage,
+                cost,
             )
         }) {
             eprintln!("orx up: could not persist native token usage: {error}");
@@ -8880,16 +8897,38 @@ impl TurnCtx {
 
     /// Record the latest context-window usage a harness reported and stream it
     /// live over `chat.usage`. Merging: a report that omits `context_window`
-    /// inherits the previously-known value (an `assistant` event carries the
-    /// token count but not the window; the `result` event fills the window).
+    /// or `compact_at` inherits the previously-known value (an `assistant`
+    /// event carries the token count but not the window; the `result` event
+    /// fills the window).
     pub fn report_usage(&mut self, mut usage: ContextUsage) {
         if let Some(prev) = &self.context_usage {
             if usage.context_window.is_none() {
                 usage.context_window = prev.context_window;
             }
-            if prev == &usage {
-                return;
+            if usage.compact_at.is_none() {
+                usage.compact_at = prev.compact_at;
             }
+        }
+        self.publish_usage(usage);
+    }
+
+    /// Record where the agent compacts on its own, or that it no longer does,
+    /// which a merging `report_usage` can't say.
+    pub fn report_compact_at(&mut self, compact_at: Option<u64>) {
+        let Some(usage) = &self.context_usage else {
+            return;
+        };
+        if usage.compact_at != compact_at {
+            self.publish_usage(ContextUsage {
+                compact_at,
+                ..usage.clone()
+            });
+        }
+    }
+
+    fn publish_usage(&mut self, usage: ContextUsage) {
+        if self.context_usage.as_ref() == Some(&usage) {
+            return;
         }
         if self.durable {
             let _ = Store::open().and_then(|store| {
@@ -11115,21 +11154,25 @@ mod bridge_tests {
         ctx.report_usage(ContextUsage {
             used_tokens: 42,
             context_window: Some(100),
+            ..Default::default()
         });
         assert_eq!(events.try_recv().unwrap().0, "chat.usage");
         ctx.report_usage(ContextUsage {
             used_tokens: 42,
             context_window: None,
+            ..Default::default()
         });
         assert!(events.try_recv().is_err());
         ctx.report_usage(ContextUsage {
             used_tokens: 43,
             context_window: None,
+            ..Default::default()
         });
         assert_eq!(events.try_recv().unwrap().1["usage"]["contextWindow"], 100);
         ctx.report_usage(ContextUsage {
             used_tokens: 43,
             context_window: Some(200),
+            ..Default::default()
         });
         assert_eq!(events.try_recv().unwrap().1["usage"]["contextWindow"], 200);
     }
@@ -12741,6 +12784,7 @@ mod bridge_tests {
         let usage = ContextUsage {
             used_tokens: 100,
             context_window: None,
+            ..Default::default()
         };
         // Only usedTokens survives; the None window is skipped.
         assert_eq!(

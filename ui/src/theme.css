@@ -86,6 +86,8 @@
   --text-prose-emphasis: 1.05em;
   --text-menu: 0.8125rem;
   --text-menu--line-height: 1.25rem;
+  --text-2xs: 0.65625rem;
+  --text-2xs--line-height: 1;
 
   --spacing-win-titlebar: calc(2.5rem / min(1, var(--desktop-page-zoom, 1)));
   --spacing-win-caption: calc(2rem / min(1, var(--desktop-page-zoom, 1)));

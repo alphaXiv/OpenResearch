@@ -1534,6 +1534,101 @@ export interface ChatMessage {
 export interface ContextUsage {
   usedTokens: number;
   contextWindow?: number;
+  /** Tokens at which the agent compacts on its own; absent when it doesn't say or has auto-compaction off. */
+  compactAt?: number;
+}
+
+/** `GET /api/usage`: the machine's agent plans and the last seven days of OpenResearch's spend. */
+export interface UsageReport {
+  /** null until the first read of this machine's sign-ins finishes; [] when none is on a plan. */
+  plans: PlanUsage[] | null;
+  /** The last seven days in the machine's local time, oldest first, as `YYYY-MM-DD`; today last. */
+  days: string[];
+  agents: AgentSpend[];
+  compute: BackendSpend[];
+  /** The chat `?chat=` asked about. */
+  chat?: ChatSpend;
+}
+
+export interface ChatSpend {
+  /** What the chat's agent has cost, per currency, largest first. */
+  agent: Money[];
+  /** Runs the chat launched on backends that cost money. */
+  compute: ChatCompute | null;
+}
+
+/** Millionths of `currency` (ISO 4217). */
+export interface Money {
+  micros: number;
+  currency: string;
+}
+
+export interface PlanUsage {
+  harness: "claude-code" | "codex";
+  /** The agent profile's id; absent for the user's own sign-in. */
+  profile?: string;
+  plan: string | null;
+  account: string | null;
+  windows: PlanWindow[];
+  credits?: { balance: string | null; unlimited: boolean };
+  extraUsage?: { usedMicros: number; limitMicros: number | null; currency: string };
+  /** Codex resets that refill the limits now, only when one is available. */
+  resets?: PlanResets;
+  readAt: string | null;
+  /** Why the latest read failed; `windows` then hold the values from `readAt`. */
+  error?: { kind: "unsupported"; version: string } | { kind: "failed"; message: string };
+}
+
+export interface PlanResets {
+  available: number;
+  /** The available ones the provider lists, which may be fewer than `available`; null when it gives only the count. */
+  credits: ResetCredit[] | null;
+}
+
+export interface ResetCredit {
+  id: string;
+  title: string | null;
+  description: string | null;
+  expiresAt: string | null;
+}
+
+/** What `POST /api/usage/reset` did; on `reset` and `alreadyRedeemed` the limits are refilled. */
+export type ResetOutcome = "reset" | "nothingToReset" | "noCredit" | "alreadyRedeemed";
+
+export interface PlanWindow {
+  /** The window's length in minutes: 300 is "5-hour", 10080 is "Weekly". */
+  minutes: number | null;
+  /** The model a per-model window covers, as the provider names it; null for plan-wide windows. */
+  model: string | null;
+  /** What is left, 0 to 100. */
+  remainingPercent: number;
+  resetsAt: string | null;
+}
+
+export interface AgentSpend {
+  harness: string;
+  currency: string;
+  /** Millionths of `currency` per day in `UsageReport.days`, of what has a price. */
+  dayMicros: number[];
+  /** Days with tokens that neither the agent nor the price list put a price on. */
+  unpriced: number;
+}
+
+export interface BackendSpend {
+  /** The run backend's kind, such as `modal_job`. */
+  backend: string;
+  currency: string;
+  dayMicros: number[];
+  /** Runs on this backend whose price couldn't be read. */
+  unpriced: number;
+}
+
+export interface ChatCompute {
+  runs: number;
+  costMicros: number;
+  currency: string;
+  running: boolean;
+  unpriced: number;
 }
 
 export interface ChatSession {
@@ -2359,6 +2454,17 @@ export function createApi(
 
   const getUpdateStatus = (signal?: AbortSignal) => get<UpdateStatus>("/api/update", signal);
 
+  /** The machine's usage, or null from an `orx up` older than the route. */
+  const getUsage = (chat: string | null, signal?: AbortSignal) =>
+    fetch(chat ? `/api/usage?${new URLSearchParams({ chat })}` : "/api/usage", { signal }).then((r) => r.status === 404 ? null : json<UsageReport>(r));
+
+  /** Starts a re-read of the machine's plans; `usage.changed` announces its end. */
+  const refreshUsage = () => post<{ ok: boolean }>("/api/usage/refresh").then(() => undefined);
+
+  /** Spends one of a Codex plan's resets; `attempt` is one confirmed click's key, sent again on a retry so it never spends two. */
+  const resetUsage = (body: { profile?: string; creditId?: string; attempt: string }) =>
+    post<{ outcome: ResetOutcome }>("/api/usage/reset", body).then((r) => r.outcome);
+
   const getPendingWork = (signal?: AbortSignal) => get<PendingWork>("/api/pending-work", signal);
 
   const getBuildNotes = (signal?: AbortSignal) => get<BuildNotes | null>("/api/update/notes", signal);
@@ -3091,6 +3197,9 @@ export function createApi(
     getTinkerSettings,
     saveTinkerKey,
     getUpdateStatus,
+    getUsage,
+    refreshUsage,
+    resetUsage,
     getPendingWork,
     getBuildNotes,
     applyUpdate,

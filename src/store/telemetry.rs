@@ -57,6 +57,85 @@ pub(crate) struct TokenUsage {
     pub reasoning_tokens: Option<u64>,
 }
 
+/// Money in millionths of `currency` (ISO 4217).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Cost {
+    pub micros: u64,
+    pub currency: String,
+}
+
+impl Cost {
+    /// An amount an agent reported; None unless it is finite, not negative, and names a currency.
+    pub fn of(amount: f64, currency: &str) -> Option<Self> {
+        let currency = currency.trim().to_ascii_uppercase();
+        (amount.is_finite() && amount >= 0.0 && !currency.is_empty()).then(|| Self {
+            micros: (amount * 1e6).round() as u64,
+            currency,
+        })
+    }
+
+    /// What was added since `earlier` of the same running total; None when it can't be told.
+    fn since(&self, earlier: &Cost) -> Option<Cost> {
+        (self.currency == earlier.currency)
+            .then(|| self.micros.checked_sub(earlier.micros))
+            .flatten()
+            .map(|micros| Cost {
+                micros,
+                currency: self.currency.clone(),
+            })
+    }
+}
+
+/// What a usage sample cost, as its recorder knows it.
+pub(crate) enum SampleCost<'a> {
+    /// The agent's own figure.
+    Reported(&'a Cost),
+    /// No figure: an agent that prices its own usage leaves the sample unpriced, and another's
+    /// tokens take the price list's, a context tier only when the sample is one request.
+    Unreported { one_request: bool },
+}
+
+/// A chat's cost per currency: its turns' samples, then those of Codex sub-agents that outlived
+/// their turn under a `codex-late:<chat>:` turn of their own. Each arm reaches the samples
+/// through an index; an OR across both would scan the whole ledger.
+const CHAT_COST: &str = "SELECT cost_currency, SUM(cost_micros) FROM (
+         SELECT s.cost_currency, s.cost_micros FROM chat_turns t
+         JOIN chat_usage_executions u ON u.turn_id = t.id
+         JOIN chat_usage_samples s ON s.execution_id = u.execution_id
+         WHERE t.session_id = ?1
+         UNION ALL
+         SELECT s.cost_currency, s.cost_micros FROM chat_usage_executions u
+         JOIN chat_usage_samples s ON s.execution_id = u.execution_id
+         WHERE u.turn_id >= ?2 AND u.turn_id < ?3
+     )
+     WHERE cost_micros IS NOT NULL
+     GROUP BY cost_currency ORDER BY SUM(cost_micros) DESC";
+
+/// Agents that report what their usage cost, Claude Code's on a plan included.
+fn reports_own_cost(harness: &str) -> bool {
+    matches!(harness, "claude-code" | "opencode") || harness.starts_with("acp:")
+}
+
+/// One model's native running total, with the cost the agent reported beside it. Stores from
+/// before costs hold the bare counters.
+#[derive(Serialize, Deserialize)]
+struct NativeTotal {
+    #[serde(flatten)]
+    usage: TokenUsage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cost: Option<Cost>,
+}
+
+/// An ACP session's running cost when a turn last read it, and what it was before that turn,
+/// so a replayed turn records the same amount.
+#[derive(Serialize, Deserialize)]
+struct AcpCostBaseline {
+    execution: String,
+    total: Cost,
+    before: Option<Cost>,
+}
+
 #[derive(Serialize, Deserialize)]
 struct CumulativeBaseline {
     usage: TokenUsage,
@@ -311,7 +390,16 @@ impl Store {
                 "{native_scope}:{native_turn}:{generation}:{}",
                 serde_json::to_string(total)?
             );
-            self.record_usage_sample(execution_id, &sample_id, harness, model, None, &delta)?;
+            let one_request = delta == *last;
+            self.record_usage_sample(
+                execution_id,
+                &sample_id,
+                harness,
+                model,
+                None,
+                &delta,
+                SampleCost::Unreported { one_request },
+            )?;
             // A delta of two native totals covers its requests whole when both counters are known.
             tx.execute("UPDATE chat_usage_samples SET complete = ?3 WHERE execution_id = ?1 AND sample_id = ?2", params![execution_id, sample_id, delta.input_tokens.is_some() && delta.output_tokens.is_some()])?;
         }
@@ -347,9 +435,9 @@ impl Store {
         prefix: &str,
         harness: &str,
         native_scope: &str,
-        samples: &[(String, Option<String>, TokenUsage)],
+        samples: &[(String, Option<String>, TokenUsage, Option<Cost>)],
     ) -> Result<()> {
-        for (_, _, usage) in samples {
+        for (_, _, usage, _) in samples {
             usage.validate()?;
         }
         let tx = self.begin()?;
@@ -357,14 +445,22 @@ impl Store {
         let baseline: Option<String> = tx.query_row("SELECT totals_json FROM native_usage_baselines WHERE execution_id = ?1 AND prefix = ?2", params![execution_id, prefix], |row| row.get(0)).optional()?.flatten();
         let totals: std::collections::BTreeMap<_, _> = samples
             .iter()
-            .map(|(model, _, usage)| (model, usage))
+            .map(|(model, _, usage, cost)| {
+                (
+                    model,
+                    NativeTotal {
+                        usage: usage.clone(),
+                        cost: cost.clone(),
+                    },
+                )
+            })
             .collect();
         if active && !samples.is_empty() {
             if let Some(baseline) = baseline {
-                let baseline: std::collections::BTreeMap<String, TokenUsage> =
+                let baseline: std::collections::BTreeMap<String, NativeTotal> =
                     serde_json::from_str(&baseline)?;
-                let reset = samples.iter().any(|(model, _, usage)| {
-                    baseline.get(model).is_some_and(|previous| {
+                let reset = samples.iter().any(|(model, _, usage, _)| {
+                    baseline.get(model).map(|total| &total.usage).is_some_and(|previous| {
                         matches!((usage.input_tokens, previous.input_tokens), (Some(now), Some(before)) if now < before)
                             || matches!((usage.output_tokens, previous.output_tokens), (Some(now), Some(before)) if now < before)
                     })
@@ -375,18 +471,29 @@ impl Store {
                 } else {
                     // The aggregate counts every request: its models replace their messages, and any
                     // other model keeps only its identity.
-                    let models: Vec<_> = samples.iter().map(|(model, _, _)| model).collect();
+                    let models: Vec<_> = samples.iter().map(|(model, _, _, _)| model).collect();
                     tx.execute("DELETE FROM chat_usage_samples WHERE execution_id = ?1 AND substr(sample_id, 1, length(?2)) = ?2 AND (model IS NULL OR model IN (SELECT value FROM json_each(?3)))", params![execution_id, prefix, serde_json::to_string(&models)?])?;
-                    tx.execute("UPDATE chat_usage_samples SET usage_json = ?3, complete = 0 WHERE execution_id = ?1 AND substr(sample_id, 1, length(?2)) = ?2", params![execution_id, prefix, serde_json::to_string(&TokenUsage::default())?])?;
-                    for (model, provider, usage) in samples {
-                        let zero = TokenUsage {
-                            input_tokens: Some(0),
-                            output_tokens: Some(0),
-                            cache_read_tokens: Some(0),
-                            cache_write_tokens: Some(0),
-                            reasoning_tokens: Some(0),
+                    tx.execute("UPDATE chat_usage_samples SET usage_json = ?3, complete = 0, cost_micros = NULL, cost_currency = NULL WHERE execution_id = ?1 AND substr(sample_id, 1, length(?2)) = ?2", params![execution_id, prefix, serde_json::to_string(&TokenUsage::default())?])?;
+                    for (model, provider, usage, cost) in samples {
+                        let zero = NativeTotal {
+                            usage: TokenUsage {
+                                input_tokens: Some(0),
+                                output_tokens: Some(0),
+                                cache_read_tokens: Some(0),
+                                cache_write_tokens: Some(0),
+                                reasoning_tokens: Some(0),
+                            },
+                            cost: cost.as_ref().map(|cost| Cost {
+                                micros: 0,
+                                currency: cost.currency.clone(),
+                            }),
                         };
                         let previous = baseline.get(model).unwrap_or(&zero);
+                        let cost = cost
+                            .as_ref()
+                            .zip(previous.cost.as_ref())
+                            .and_then(|(now, before)| now.since(before));
+                        let previous = &previous.usage;
                         if usage == previous {
                             continue;
                         }
@@ -415,6 +522,10 @@ impl Store {
                             Some(model),
                             provider.as_deref(),
                             &delta,
+                            match &cost {
+                                Some(cost) => SampleCost::Reported(cost),
+                                None => SampleCost::Unreported { one_request: false },
+                            },
                         )?;
                         tx.execute("UPDATE chat_usage_samples SET complete = ?3 WHERE execution_id = ?1 AND sample_id = ?2", params![execution_id, sample_id, delta.input_tokens.is_some() && delta.output_tokens.is_some()])?;
                     }
@@ -484,7 +595,7 @@ impl Store {
             // One write lock from reading samples to closing, so a hook's concurrent sample is
             // either in this report or rejected as late.
             let tx = self.begin_immediate()?;
-            let mut samples = self.conn.prepare("SELECT s.model, s.provider, s.usage_json, s.complete, n.identity_json FROM chat_usage_samples s LEFT JOIN native_invocation_identities n ON n.harness = s.harness AND n.call_id = s.sample_id WHERE s.execution_id = ?1 ORDER BY s.sample_id")?;
+            let mut samples = self.conn.prepare("SELECT s.model, s.provider, s.usage_json, s.complete, n.identity_json FROM chat_usage_samples s LEFT JOIN native_invocation_identities n ON n.harness = s.harness AND n.call_id = s.sample_id WHERE s.execution_id = ?1 AND substr(s.sample_id, 1, 5) != 'cost:' ORDER BY s.sample_id")?;
             let mut grouped = std::collections::BTreeMap::<
                 (Option<String>, Option<String>, [bool; 5]),
                 Vec<(TokenUsage, bool)>,
@@ -693,6 +804,7 @@ impl Store {
                 model.as_deref(),
                 None,
                 usage,
+                SampleCost::Unreported { one_request: false },
             )?;
             tx.execute(
                 "UPDATE chat_usage_samples SET complete = ?3
@@ -705,6 +817,9 @@ impl Store {
         Ok(())
     }
 
+    /// Without a reported cost, the sample's tokens are priced from the model price list when
+    /// the agent doesn't price its own and the list has the exact model, else left unpriced.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_usage_sample(
         &self,
         execution_id: &str,
@@ -713,12 +828,128 @@ impl Store {
         model: Option<&str>,
         provider: Option<&str>,
         usage: &TokenUsage,
+        cost: SampleCost,
     ) -> Result<()> {
         usage.validate()?;
         let model = model.filter(|label| valid_model_label(label));
         let provider = provider.filter(|label| valid_model_label(label));
-        self.conn.execute("INSERT INTO chat_usage_samples (execution_id, sample_id, harness, model, provider, usage_json) SELECT ?1, ?2, ?3, ?4, ?5, ?6 WHERE EXISTS (SELECT 1 FROM chat_usage_executions WHERE execution_id = ?1 AND outcome IS NULL) ON CONFLICT(execution_id, sample_id) DO UPDATE SET model = COALESCE(excluded.model, model), provider = COALESCE(excluded.provider, provider), usage_json = CASE WHEN ?7 THEN excluded.usage_json ELSE usage_json END", params![execution_id, sample_id, harness, model, provider, serde_json::to_string(usage)?, usage != &TokenUsage::default()])?;
+        let written = self.conn.execute("INSERT INTO chat_usage_samples (execution_id, sample_id, harness, model, provider, usage_json, recorded_at) SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?8 WHERE EXISTS (SELECT 1 FROM chat_usage_executions WHERE execution_id = ?1 AND outcome IS NULL) ON CONFLICT(execution_id, sample_id) DO UPDATE SET model = COALESCE(excluded.model, model), provider = COALESCE(excluded.provider, provider), usage_json = CASE WHEN ?7 THEN excluded.usage_json ELSE usage_json END, recorded_at = COALESCE(recorded_at, excluded.recorded_at)", params![execution_id, sample_id, harness, model, provider, serde_json::to_string(usage)?, usage != &TokenUsage::default(), now_ms()])?;
+        if written == 0 {
+            return Ok(());
+        }
+        let cost = match cost {
+            SampleCost::Reported(cost) => Some(cost.clone()),
+            SampleCost::Unreported { .. } if reports_own_cost(harness) => None,
+            SampleCost::Unreported { one_request } => {
+                // The row's model may have arrived in an earlier or a later report than its tokens.
+                let (model, provider, usage): (Option<String>, Option<String>, String) =
+                    self.conn.query_row(
+                        "SELECT model, provider, usage_json FROM chat_usage_samples WHERE execution_id = ?1 AND sample_id = ?2",
+                        params![execution_id, sample_id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )?;
+                let usage: TokenUsage = serde_json::from_str(&usage)?;
+                match model {
+                    Some(model) if usage.total().is_some_and(|total| total > 0) => {
+                        crate::local::prices::current().and_then(|list| {
+                            list.price(harness, &model, provider.as_deref(), &usage, one_request)
+                        })
+                    }
+                    _ => None,
+                }
+            }
+        };
+        self.conn.execute(
+            "UPDATE chat_usage_samples SET cost_micros = ?3, cost_currency = ?4 WHERE execution_id = ?1 AND sample_id = ?2",
+            params![
+                execution_id,
+                sample_id,
+                cost.as_ref().map(|cost| cost.micros as i64),
+                cost.as_ref().map(|cost| &cost.currency)
+            ],
+        )?;
         Ok(())
+    }
+
+    /// The turn's share of an ACP session's running cost. It is the turn's whole cost, so the
+    /// turn's token samples carry none of their own. A first reading of a restored session
+    /// can't be split from its history and records nothing.
+    pub(crate) fn record_acp_cost(
+        &self,
+        execution_id: &str,
+        harness: &str,
+        native_session: &str,
+        total: &Cost,
+        restored: bool,
+    ) -> Result<()> {
+        let tx = self.begin_immediate()?;
+        let active: bool = tx.query_row("SELECT EXISTS (SELECT 1 FROM chat_usage_executions WHERE execution_id = ?1 AND outcome IS NULL)", [execution_id], |row| row.get(0))?;
+        if !active {
+            return Ok(());
+        }
+        let prefix = format!("acp-cost:{native_session}");
+        let stored: Option<AcpCostBaseline> = tx
+            .query_row(
+                "SELECT totals_json FROM native_usage_baselines WHERE execution_id = ?1 AND prefix = ?2",
+                params![harness, prefix],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten()
+            .map(|json| serde_json::from_str(&json))
+            .transpose()?;
+        let before = match stored {
+            Some(stored) if stored.execution == execution_id => stored.before,
+            Some(stored) => Some(stored.total),
+            None if restored => None,
+            None => Some(Cost {
+                micros: 0,
+                currency: total.currency.clone(),
+            }),
+        };
+        // A total below the last one is a new process counting from zero.
+        let spent = before
+            .as_ref()
+            .map(|before| total.since(before).unwrap_or_else(|| total.clone()));
+        let baseline = AcpCostBaseline {
+            execution: execution_id.into(),
+            total: total.clone(),
+            before,
+        };
+        tx.execute("INSERT INTO native_usage_baselines (execution_id, prefix, totals_json) VALUES (?1, ?2, ?3) ON CONFLICT(execution_id, prefix) DO UPDATE SET totals_json = excluded.totals_json", params![harness, prefix, serde_json::to_string(&baseline)?])?;
+        if let Some(spent) = spent {
+            self.record_usage_sample(
+                execution_id,
+                "cost:acp",
+                harness,
+                None,
+                None,
+                &TokenUsage::default(),
+                SampleCost::Reported(&spent),
+            )?;
+            tx.execute(
+                "UPDATE chat_usage_samples SET cost_micros = 0, cost_currency = ?2 WHERE execution_id = ?1 AND sample_id != 'cost:acp'",
+                params![execution_id, spent.currency],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// What a chat's turns have cost so far, per currency.
+    pub(crate) fn chat_cost(&self, session_id: &str) -> Result<Vec<Cost>> {
+        let mut statement = self.conn.prepare(CHAT_COST)?;
+        let late = format!("codex-late:{session_id}:");
+        let after_late = format!("codex-late:{session_id};");
+        let costs = statement
+            .query_map(params![session_id, late, after_late], |row| {
+                Ok(Cost {
+                    currency: row.get(0)?,
+                    micros: row.get::<_, i64>(1)? as u64,
+                })
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(costs)
     }
 
     /// The native model id behind the chat's latest reported call, sub-agents included; `None`
@@ -747,6 +978,8 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const UNREPORTED: SampleCost<'static> = SampleCost::Unreported { one_request: false };
 
     #[test]
     fn prepared_chat_report_cannot_escape_opt_out_or_duplicate_finalization() {
@@ -1054,6 +1287,7 @@ mod tests {
                     Some("claude-opus-5-5"),
                     None,
                     &usage,
+                    UNREPORTED,
                 )
                 .unwrap();
         }
@@ -1258,8 +1492,8 @@ mod tests {
             reasoning_tokens: Some(0),
         };
         let first = vec![
-            ("parent".into(), None, usage(100, 20)),
-            ("child".into(), None, usage(30, 4)),
+            ("parent".into(), None, usage(100, 20), None),
+            ("child".into(), None, usage(30, 4), None),
         ];
         store
             .begin_usage_execution("first", "turn1", "claude-code")
@@ -1277,7 +1511,10 @@ mod tests {
         store
             .begin_native_usage_attempt("second", "attempt:", "claude-code", Some("scope"))
             .unwrap();
-        let second = vec![("parent".into(), None, usage(140, 29)), first[1].clone()];
+        let second = vec![
+            ("parent".into(), None, usage(140, 29), None),
+            first[1].clone(),
+        ];
         for _ in 0..2 {
             store
                 .replace_native_usage_aggregate(
@@ -1345,6 +1582,7 @@ mod tests {
                 Some("parent"),
                 None,
                 &usage(12, 3),
+                UNREPORTED,
             )
             .unwrap();
         store
@@ -1353,7 +1591,7 @@ mod tests {
                 "attempt:",
                 "claude-code",
                 "scope",
-                &[("parent".into(), None, usage(20, 4))],
+                &[("parent".into(), None, usage(20, 4), None)],
             )
             .unwrap();
         let (json, complete): (String, bool) = store
@@ -1476,6 +1714,7 @@ mod tests {
                         output_tokens: Some(output),
                         ..Default::default()
                     },
+                    UNREPORTED,
                 )
                 .unwrap();
         }
@@ -1495,6 +1734,7 @@ mod tests {
                 Some("wrong"),
                 None,
                 &TokenUsage::default(),
+                UNREPORTED,
             )
             .unwrap();
         let model: String = store
@@ -1630,6 +1870,7 @@ mod tests {
                 Some("/private/model.gguf"),
                 None,
                 &usage,
+                UNREPORTED,
             )
             .unwrap();
         let (model, counters): (Option<String>, String) = store
@@ -1719,7 +1960,7 @@ mod tests {
             ..Default::default()
         };
         store
-            .record_usage_sample("e", "a", "codex", None, None, &measured)
+            .record_usage_sample("e", "a", "codex", None, None, &measured, UNREPORTED)
             .unwrap();
         store
             .record_usage_sample(
@@ -1729,10 +1970,11 @@ mod tests {
                 Some("gpt-6-sol"),
                 None,
                 &TokenUsage::default(),
+                UNREPORTED,
             )
             .unwrap();
         store
-            .record_usage_sample("e", "a", "codex", None, None, &measured)
+            .record_usage_sample("e", "a", "codex", None, None, &measured, UNREPORTED)
             .unwrap();
         let (model, usage): (Option<String>, String) = store
             .conn
@@ -1799,6 +2041,7 @@ mod tests {
                 Some("claude-haiku-4-5-20251001"),
                 None,
                 &TokenUsage::default(),
+                UNREPORTED,
             )
             .unwrap();
         store
@@ -1812,6 +2055,7 @@ mod tests {
                 Some("claude-opus-5-5"),
                 None,
                 &TokenUsage::default(),
+                UNREPORTED,
             )
             .unwrap();
         store
@@ -1822,6 +2066,7 @@ mod tests {
                 None,
                 None,
                 &TokenUsage::default(),
+                UNREPORTED,
             )
             .unwrap();
         store.begin_usage_execution("e3", "other", "codex").unwrap();
@@ -1833,6 +2078,7 @@ mod tests {
                 Some("gpt-6.1-sol"),
                 None,
                 &TokenUsage::default(),
+                UNREPORTED,
             )
             .unwrap();
 
@@ -1849,9 +2095,337 @@ mod tests {
                 Some("<synthetic>"),
                 None,
                 &TokenUsage::default(),
+                UNREPORTED,
             )
             .unwrap();
         assert_eq!(store.last_reported_chat_model("chat").unwrap(), None);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn sample_cost(store: &Store, execution: &str, sample: &str) -> Option<Cost> {
+        let (micros, currency): (Option<i64>, Option<String>) = store
+            .conn
+            .query_row(
+                "SELECT cost_micros, cost_currency FROM chat_usage_samples WHERE execution_id = ?1 AND sample_id = ?2",
+                params![execution, sample],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        micros.zip(currency).map(|(micros, currency)| Cost {
+            micros: micros as u64,
+            currency,
+        })
+    }
+
+    fn usd(micros: u64) -> Option<Cost> {
+        Some(Cost {
+            micros,
+            currency: "USD".into(),
+        })
+    }
+
+    #[test]
+    fn claude_running_costs_become_each_turns_share() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let list = crate::local::prices::path();
+        std::fs::create_dir_all(list.parent().unwrap()).unwrap();
+        std::fs::write(
+            &list,
+            r#"{"anthropic": {"models": {"claude-sonnet-5-5": {"cost": {"input": 3, "output": 15}}}}}"#,
+        )
+        .unwrap();
+        let dir = std::env::temp_dir().join(format!("orx-native-cost-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let usage = |input, output| TokenUsage {
+            input_tokens: Some(input),
+            output_tokens: Some(output),
+            ..Default::default()
+        };
+        let model = |input, output, cost| {
+            vec![(
+                "claude-sonnet-5-5".to_string(),
+                Some("firstParty".to_string()),
+                usage(input, output),
+                cost,
+            )]
+        };
+        let turn =
+            |execution: &str,
+             scope: Option<&str>,
+             samples: Vec<(String, Option<String>, TokenUsage, Option<Cost>)>| {
+                store
+                    .begin_usage_execution(execution, execution, "claude-code")
+                    .unwrap();
+                store
+                    .begin_native_usage_attempt(execution, "a:", "claude-code", scope)
+                    .unwrap();
+                store
+                    .replace_native_usage_aggregate(
+                        execution,
+                        "a:",
+                        "claude-code",
+                        "scope",
+                        &samples,
+                    )
+                    .unwrap();
+                store.finalize_turn_usage(execution, "done").unwrap();
+            };
+
+        turn("first", None, model(100, 20, Cost::of(0.155664, "USD")));
+        turn(
+            "second",
+            Some("scope"),
+            model(140, 29, Cost::of(0.1750857, "USD")),
+        );
+        assert_eq!(
+            sample_cost(&store, "first", "a:aggregate:claude-sonnet-5-5"),
+            usd(155_664)
+        );
+        assert_eq!(
+            sample_cost(&store, "second", "a:aggregate:claude-sonnet-5-5"),
+            usd(19_422)
+        );
+
+        // Totals an older orx wrote carry no cost: the turn's share can't be told, and Claude
+        // Code's own figure is never swapped for the price list's.
+        store
+            .conn
+            .execute(
+                "UPDATE native_usage_totals SET totals_json = ?1",
+                [r#"{"claude-sonnet-5-5":{"inputTokens":140,"outputTokens":29,"cacheReadTokens":null,"cacheWriteTokens":null,"reasoningTokens":null}}"#],
+            )
+            .unwrap();
+        turn("third", Some("scope"), model(150, 30, Cost::of(0.2, "USD")));
+        assert_eq!(
+            sample_cost(&store, "third", "a:aggregate:claude-sonnet-5-5"),
+            None
+        );
+
+        // What this orx stores still reads as the bare counters an older orx expects.
+        let totals: String = store
+            .conn
+            .query_row("SELECT totals_json FROM native_usage_totals", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(totals.contains("\"cost\""), "{totals}");
+        let old: std::collections::BTreeMap<String, TokenUsage> =
+            serde_json::from_str(&totals).unwrap();
+        assert_eq!(old["claude-sonnet-5-5"].output_tokens, Some(30));
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_acp_sessions_running_cost_becomes_each_turns_share() {
+        let dir = std::env::temp_dir().join(format!("orx-acp-cost-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .conn
+            .execute_batch(
+                "INSERT INTO chat_turns (id, session_id, assistant_message_id, client_turn_id, request_hash,
+                                         prepared_input, settings_json, state, delivery_state, created_at, updated_at)
+                 VALUES ('t1', 'chat', 'a1', 'c1', 'h', '', '{}', 'completed', 'delivered', 1, 1);",
+            )
+            .unwrap();
+        let total = |micros| Cost {
+            micros,
+            currency: "USD".into(),
+        };
+        let tokens = TokenUsage {
+            input_tokens: Some(10),
+            output_tokens: Some(2),
+            ..Default::default()
+        };
+        store.begin_usage_execution("e1", "t1", "acp").unwrap();
+        store
+            .record_acp_prompt_usage("e1", "acp", &[(Some("m".into()), tokens, true)])
+            .unwrap();
+        for _ in 0..2 {
+            // A replay of the same turn records the same share.
+            store
+                .record_acp_cost("e1", "acp", "native", &total(1_000_000), false)
+                .unwrap();
+        }
+        assert_eq!(sample_cost(&store, "e1", "cost:acp"), usd(1_000_000));
+        assert_eq!(sample_cost(&store, "e1", "acp:prompt:0"), usd(0));
+        assert_eq!(store.chat_cost("chat").unwrap(), vec![total(1_000_000)]);
+
+        for (execution, reading, restored, share) in [
+            ("e2", 1_500_000, false, Some(500_000)),
+            // A new agent process counts from zero again.
+            ("e3", 200_000, false, Some(200_000)),
+        ] {
+            store
+                .begin_usage_execution(execution, execution, "acp")
+                .unwrap();
+            store
+                .record_acp_cost(execution, "acp", "native", &total(reading), restored)
+                .unwrap();
+            assert_eq!(
+                sample_cost(&store, execution, "cost:acp"),
+                share.and_then(usd)
+            );
+        }
+        // A restored session's first reading includes history orx never saw.
+        store.begin_usage_execution("e4", "e4", "acp").unwrap();
+        store
+            .record_acp_cost("e4", "acp", "restored", &total(9_000_000), true)
+            .unwrap();
+        let rows: i64 = store
+            .conn
+            .query_row(
+                "SELECT count(*) FROM chat_usage_samples WHERE execution_id = 'e4'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 0);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn chat_cost_totals_each_currency_including_late_codex_turns() {
+        let dir = std::env::temp_dir().join(format!("orx-chat-cost-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .conn
+            .execute_batch(
+                "INSERT INTO chat_turns (id, session_id, assistant_message_id, client_turn_id, request_hash,
+                                         prepared_input, settings_json, state, delivery_state, created_at, updated_at)
+                 VALUES ('t1', 'chat', 'a1', 'c1', 'h', '', '{}', 'completed', 'delivered', 1, 1),
+                        ('t2', 'other', 'a2', 'c2', 'h', '', '{}', 'completed', 'delivered', 1, 1);",
+            )
+            .unwrap();
+        let late = "codex-late:chat:thread:turn";
+        for (execution, turn) in [("e1", "t1"), ("e2", "t2"), (late, late)] {
+            store
+                .begin_usage_execution(execution, turn, "codex")
+                .unwrap();
+        }
+        let cost = |micros, currency: &str| Cost {
+            micros,
+            currency: currency.into(),
+        };
+        for (execution, sample, spent) in [
+            ("e1", "a", cost(100, "USD")),
+            ("e1", "b", cost(5, "EUR")),
+            ("e2", "a", cost(1_000, "USD")),
+            (late, "a", cost(50, "USD")),
+        ] {
+            store
+                .record_usage_sample(
+                    execution,
+                    sample,
+                    "codex",
+                    None,
+                    None,
+                    &TokenUsage::default(),
+                    SampleCost::Reported(&spent),
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            store.chat_cost("chat").unwrap(),
+            vec![cost(150, "USD"), cost(5, "EUR")]
+        );
+        assert!(store.chat_cost("nobody").unwrap().is_empty());
+
+        // Run at every turn's end: it must not read the whole ledger.
+        let plan: Vec<String> = store
+            .conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {CHAT_COST}"))
+            .unwrap()
+            .query_map(
+                params!["chat", "codex-late:chat:", "codex-late:chat;"],
+                |row| row.get(3),
+            )
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        let scans = |table: &str| {
+            plan.iter().any(|step| {
+                step.strip_prefix("SCAN ")
+                    .is_some_and(|rest| rest.split(' ').next() == Some(table))
+            })
+        };
+        assert!(!scans("s") && !scans("u") && !scans("t"), "{plan:#?}");
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn samples_without_a_reported_cost_are_priced_from_the_list() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let list = crate::local::prices::path();
+        std::fs::create_dir_all(list.parent().unwrap()).unwrap();
+        std::fs::write(
+            &list,
+            r#"{"openai": {"models": {"gpt-5.5": {"cost": {"input": 5, "output": 30, "cache_read": 0.5}}}}}"#,
+        )
+        .unwrap();
+        let dir = std::env::temp_dir().join(format!("orx-list-cost-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store.begin_usage_execution("e", "t", "codex").unwrap();
+        let tokens = TokenUsage {
+            input_tokens: Some(1_000),
+            output_tokens: Some(100),
+            cache_read_tokens: Some(800),
+            cache_write_tokens: Some(0),
+            reasoning_tokens: None,
+        };
+        let record = |sample, model, usage: &TokenUsage, cost: SampleCost| {
+            store
+                .record_usage_sample("e", sample, "codex", model, None, usage, cost)
+                .unwrap()
+        };
+        let priced = usd(200 * 5 + 100 * 30 + 400);
+
+        record("known", Some("gpt-5.5"), &tokens, UNREPORTED);
+        assert_eq!(sample_cost(&store, "e", "known"), priced);
+        record("unknown", Some("gpt-0"), &tokens, UNREPORTED);
+        assert_eq!(sample_cost(&store, "e", "unknown"), None);
+        // The model may arrive after the tokens it ran.
+        record("late", None, &tokens, UNREPORTED);
+        assert_eq!(sample_cost(&store, "e", "late"), None);
+        record("late", Some("gpt-5.5"), &TokenUsage::default(), UNREPORTED);
+        assert_eq!(sample_cost(&store, "e", "late"), priced);
+        // The agent's own figure wins over the list's.
+        record(
+            "reported",
+            Some("gpt-5.5"),
+            &tokens,
+            SampleCost::Reported(&usd(7).unwrap()),
+        );
+        assert_eq!(sample_cost(&store, "e", "reported"), usd(7));
+        record(
+            "identity",
+            Some("gpt-5.5"),
+            &TokenUsage::default(),
+            UNREPORTED,
+        );
+        assert_eq!(sample_cost(&store, "e", "identity"), None);
+        // An agent that prices its own usage is never priced from the list instead.
+        for harness in ["opencode", "claude-code", "acp:custom"] {
+            store
+                .record_usage_sample(
+                    "e",
+                    harness,
+                    harness,
+                    Some("gpt-5.5"),
+                    Some("openai"),
+                    &tokens,
+                    UNREPORTED,
+                )
+                .unwrap();
+            assert_eq!(sample_cost(&store, "e", harness), None, "{harness}");
+        }
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }

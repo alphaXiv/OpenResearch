@@ -31,6 +31,7 @@ use crate::error::{anyhow, Result};
 ///                     frames: a JSON `[from, length]` line, then that many raw bytes
 ///   cancel <id>     terminate the sandbox -> prints {"missing": bool}
 ///   auth            one authenticated call that checks the configured token
+///   rates           -> the workspace's current prices, `{"<rate name>": "<decimal>"}`
 ///
 /// Exit 3 = the `modal` package isn't importable (surfaced as a friendly hint),
 /// 4 = Modal rejected the token, 5 = the token check could not reach Modal,
@@ -187,6 +188,11 @@ def auth():
         sys.stderr.write(str(error) or type(error).__name__)
         sys.exit(5)
 
+def rates():
+    modal = _modal()
+    rates = modal.Workspace.from_context().billing.rates()
+    print(json.dumps({key: str(rates.get(key)) for key in rates}))
+
 cmd = sys.argv[1] if len(sys.argv) > 1 else ""
 if cmd == "submit":
     submit()
@@ -198,6 +204,8 @@ elif cmd == "cancel":
     cancel(sys.argv[2])
 elif cmd == "auth":
     auth()
+elif cmd == "rates":
+    rates()
 else:
     sys.stderr.write("unknown launcher subcommand: %r" % cmd)
     sys.exit(2)
@@ -499,6 +507,59 @@ pub async fn inspect_job(sandbox_id: &str) -> Result<Option<JobState>> {
             .and_then(Value::as_i64)
             .and_then(|code| code.try_into().ok()),
     }))
+}
+
+/// What a sandbox with `spec`'s resources costs per hour, at the workspace's own rates.
+pub async fn hourly_price(spec: &ModalJobSpec) -> Result<crate::store::Quote> {
+    let out = launcher_capture(&["rates"], None, Some(Duration::from_secs(60)), None).await?;
+    let rates: HashMap<String, String> = serde_json::from_slice(&out)
+        .map_err(|e| anyhow!("Unreadable modal rates output: {}", e))?;
+    Ok(crate::store::Quote {
+        amount_micros: sandbox_hourly_micros(&rates, spec)?,
+        per: crate::store::Per::Hour,
+        currency: "USD".into(),
+        source: "modal.com".into(),
+        quoted_at: crate::store::now_ms(),
+    })
+}
+
+/// What Modal reserves for a sandbox that asks for no CPU or memory.
+const DEFAULT_CPU: f64 = 0.125;
+const DEFAULT_MEMORY_MIB: u64 = 128;
+
+fn sandbox_hourly_micros(rates: &HashMap<String, String>, spec: &ModalJobSpec) -> Result<u64> {
+    let rate = |names: &[&str]| -> Result<f64> {
+        names
+            .iter()
+            .find_map(|name| rates.get(*name))
+            .and_then(|rate| rate.parse::<f64>().ok())
+            .filter(|rate| rate.is_finite() && *rate >= 0.0)
+            .ok_or_else(|| anyhow!("Modal's rates have no {}", names[0]))
+    };
+    let mut dollars = spec.cpu.unwrap_or(DEFAULT_CPU)
+        * rate(&["cpu_hour_cost_sandbox", "cpu_hour_cost"])?
+        + spec.memory.unwrap_or(DEFAULT_MEMORY_MIB) as f64 / 1024.0
+            * rate(&["mem_gib_hour_cost_sandbox", "mem_gib_hour_cost"])?;
+    if let Some(gpu) = &spec.gpu {
+        let (name, count) = gpu.split_once(':').unwrap_or((gpu, "1"));
+        let count: f64 = count
+            .trim()
+            .parse()
+            .map_err(|_| anyhow!("Modal GPU {gpu} has an unreadable count"))?;
+        let name = name
+            .trim()
+            .trim_end_matches('!')
+            .to_ascii_lowercase()
+            .replace('-', "_");
+        // Modal's plain A100 is the 40 GB part.
+        let fallback = (name == "a100").then(|| "gpu_hour_cost_a100_40gb".to_string());
+        let names: Vec<String> = std::iter::once(format!("gpu_hour_cost_{name}"))
+            .chain(fallback)
+            .collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        dollars += count * rate(&names)?;
+    }
+    Ok((dollars * 1e6).round() as u64)
 }
 
 /// False when Modal raises `NotFoundError`, as for [`inspect_job`].
@@ -1188,6 +1249,95 @@ class Sandbox:
         assert_eq!(refused.status, None);
         assert!(refused.message.contains("code 127"), "{refused}");
         assert!(refused.message.contains("bash: not found"), "{refused}");
+    }
+
+    fn priced_spec(gpu: Option<&str>, cpu: Option<f64>, memory: Option<u64>) -> ModalJobSpec {
+        ModalJobSpec {
+            script: String::new(),
+            image: "python:3.12".into(),
+            gpu: gpu.map(str::to_string),
+            cpu,
+            memory,
+            env: HashMap::new(),
+            timeout_seconds: 60,
+            app: "openresearch".into(),
+            tags: HashMap::new(),
+            source_archive: None,
+        }
+    }
+
+    #[test]
+    fn a_sandbox_costs_its_gpus_cpu_and_memory_at_sandbox_rates() {
+        let rates: HashMap<String, String> = [
+            ("gpu_hour_cost_h100", "4"),
+            ("gpu_hour_cost_a100_40gb", "2"),
+            ("gpu_hour_cost_a100_80gb", "3"),
+            ("cpu_hour_cost", "1"),
+            ("cpu_hour_cost_sandbox", "0.5"),
+            ("mem_gib_hour_cost", "1"),
+            ("mem_gib_hour_cost_sandbox", "0.25"),
+        ]
+        .into_iter()
+        .map(|(name, rate)| (name.to_string(), rate.to_string()))
+        .collect();
+        // Modal's default reservation: 0.125 cores, 128 MiB.
+        let base = 0.125 * 0.5 + 0.125 * 0.25;
+        let micros = |spec| sandbox_hourly_micros(&rates, &spec).unwrap();
+        assert_eq!(micros(priced_spec(None, None, None)), (base * 1e6) as u64);
+        assert_eq!(
+            micros(priced_spec(Some("H100:2"), None, None)),
+            ((8.0 + base) * 1e6) as u64
+        );
+        assert_eq!(
+            micros(priced_spec(Some("A100"), None, None)),
+            micros(priced_spec(Some("A100-40GB"), None, None))
+        );
+        assert_eq!(
+            micros(priced_spec(Some("A100-80GB!"), Some(8.0), Some(32768))),
+            ((3.0 + 8.0 * 0.5 + 32.0 * 0.25) * 1e6) as u64
+        );
+        let unknown =
+            sandbox_hourly_micros(&rates, &priced_spec(Some("Z9"), None, None)).unwrap_err();
+        assert!(
+            unknown.to_string().contains("gpu_hour_cost_z9"),
+            "{unknown}"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn quotes_a_sandbox_at_the_workspace_rates() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let Ok(python) =
+            crate::jobs::managed_env::base_python(MODAL_ENV.min_python, MODAL_ENV.label).await
+        else {
+            crate::config::skip_without_tool("no Python 3.10+ on PATH");
+            return;
+        };
+        let dir = fake_modal(
+            python,
+            r#"from decimal import Decimal
+class Rates(dict):
+    pass
+class Billing:
+    def rates(self):
+        return Rates(gpu_hour_cost_l4=Decimal("0.80000"), cpu_hour_cost_sandbox=Decimal("0.1419"),
+                     mem_gib_hour_cost_sandbox=Decimal("0.024"))
+class Workspace:
+    billing = Billing()
+    @staticmethod
+    def from_context(): return Workspace()
+"#,
+        );
+        let quote = hourly_price(&priced_spec(Some("L4"), Some(2.0), Some(4096)))
+            .await
+            .unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+        assert_eq!(quote.amount_micros, 800_000 + 283_800 + 96_000);
+        assert_eq!(quote.per, crate::store::Per::Hour);
+        assert_eq!(quote.currency, "USD");
     }
 
     #[cfg(not(windows))]

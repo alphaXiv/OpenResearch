@@ -8,7 +8,7 @@ import thinkingMachinesLogo from "../assets/thinking-machines.png";
 import { m } from "../paraglide/messages.js";
 
 /** Human name for a backend kind, used as the logo's alt/label. */
-function backendName(kind: string): string {
+export function backendName(kind: string): string {
   switch (kind) {
     case "modal_job":
       return "Modal";

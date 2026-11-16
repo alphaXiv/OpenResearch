@@ -21,7 +21,7 @@ use tokio::sync::OwnedMutexGuard;
 
 use crate::error::{anyhow, Result};
 use crate::jobs::BackendDescriptor;
-use crate::store::{Contact, EngineRunState, LaunchSpec, Store, StoredRun, SubmissionFence};
+use crate::store::{Contact, EngineRunState, LaunchSpec, Quote, Store, StoredRun, SubmissionFence};
 use bus::Bus;
 use clock::Clock;
 use handle::Handle;
@@ -310,6 +310,11 @@ pub trait Backend: Send + Sync {
     /// Releases provider resources after output is kept; failures retry with collection.
     async fn finish(&self, _run: &WatchedRun) -> Result<()> {
         Ok(())
+    }
+    /// What the provider charges for the run's running time, read once its job exists; None
+    /// where the machine is the user's own or no price source exists.
+    async fn quote(&self, _run: &WatchedRun, _launch: &LaunchSpec) -> Result<Option<Quote>> {
+        Ok(None)
     }
     async fn unwatch(&self, _run: &WatchedRun) {}
     /// Releases what is held for reading the logs of runs `forgotten` names, such as deleted

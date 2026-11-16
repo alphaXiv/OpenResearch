@@ -19,6 +19,25 @@
   --titlebar-lights: 0.475rem;
 }
 
+/* The sidebar's bottom-start corner is the window's own on macOS and Windows 11. The status
+   strip's first segment sits 4px in from it, so its corner is the window's radius less 4px. */
+:root {
+  --strip-corner: var(--radius-md);
+}
+
+:root.mac-titlebar {
+  --strip-corner: var(--radius-lg);
+}
+
+:root.win-titlebar {
+  --strip-corner: var(--radius-xs);
+}
+
+:root[data-fullscreen],
+:root[data-maximized] {
+  --strip-corner: var(--radius-md);
+}
+
 :root[data-theme="dark"] .tinker-logo {
   filter: invert(1);
 }

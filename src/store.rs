@@ -9,9 +9,11 @@
 //! `~/.local/share/openresearch`.
 
 mod acp;
+mod costs;
 pub(crate) mod search;
 mod telemetry;
-pub(crate) use telemetry::{InvocationIdentity, TokenUsage};
+pub(crate) use costs::{BilledRun, Per, Quote};
+pub(crate) use telemetry::{Cost, InvocationIdentity, SampleCost, TokenUsage};
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -1421,11 +1423,19 @@ impl Store {
             "ALTER TABLE ui_state ADD COLUMN collapsed_model_sections TEXT",
             "ALTER TABLE ui_state ADD COLUMN model_sightings TEXT",
             "ALTER TABLE runs ADD COLUMN waiting_reason TEXT",
+            "ALTER TABLE runs ADD COLUMN price_json TEXT",
+            "ALTER TABLE chat_usage_samples ADD COLUMN cost_micros INTEGER",
+            "ALTER TABLE chat_usage_samples ADD COLUMN cost_currency TEXT",
+            "ALTER TABLE chat_usage_samples ADD COLUMN recorded_at INTEGER",
         ] {
             let _ = schema.execute(ddl, []);
         }
         schema.execute_batch(
-            "CREATE TRIGGER IF NOT EXISTS delete_run_outbox AFTER DELETE ON runs BEGIN
+            "CREATE INDEX IF NOT EXISTS idx_chat_usage_samples_recorded
+                 ON chat_usage_samples(recorded_at);
+             CREATE INDEX IF NOT EXISTS idx_chat_usage_executions_turn
+                 ON chat_usage_executions(turn_id);
+             CREATE TRIGGER IF NOT EXISTS delete_run_outbox AFTER DELETE ON runs BEGIN
                  DELETE FROM run_notices WHERE run_id = OLD.id;
                  DELETE FROM run_subscriptions WHERE run_id = OLD.id;
              END;
