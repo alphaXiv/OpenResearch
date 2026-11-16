@@ -598,7 +598,7 @@ pub(crate) fn host_view(
 }
 
 /// What a quit would interrupt, for the page's close dialog.
-async fn dashboard_pending_work(State(api): State<Arc<Api>>) -> ApiResult<Json<Value>> {
+async fn dashboard_pending_work(State(api): State<Arc<Api>>) -> super::ApiResult {
     Ok(Json(json!(api.pending_work().await?)))
 }
 
