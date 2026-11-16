@@ -188,7 +188,8 @@ for (const retired of [true, false]) {
       routes: { "POST /api/chat/sessions/s/respond": () => answer.promise },
     });
     await click(find('[role="group"] button', "First"));
-    await act(async () => document.querySelector('[role="group"] form').requestSubmit());
+    // A single choice answers the question once it has landed.
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 250)));
     if (retired) await chat.reconnect();
     const before = chat.requests.length;
     await answer.resolve({ ok: true });

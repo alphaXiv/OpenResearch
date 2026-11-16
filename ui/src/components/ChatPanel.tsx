@@ -262,7 +262,8 @@ import {
   shouldRecoverLegacyMath,
   tableMarkdown,
 } from "./annotationMarkdown";
-import { Button, IconButton, LoadingRow, MenuItem, showAlert, Spinner, Textarea, Tooltip } from "./ui";
+import { Button, IconButton, LoadingRow, MenuItem, showAlert, Spinner, Tooltip } from "./ui";
+import { QuestionDock, useQuestions } from "./QuestionDock";
 import { PaperTitle } from "./PaperTitle";
 
 const TOOL_LINE_CLASS_NAME = "tool-line flex-1 min-w-0 line-clamp-2 break-words text-base leading-6";
@@ -2870,9 +2871,9 @@ function ToolGroup({
   );
 }
 
-/** Interactive card for a plan / permission / question prompt. Approving (or
- * answering) resumes the session. Once resolved, cards mirror Claude Code:
- * a permission leaves no trace, a plan collapses to an expandable
+/** Interactive card for a plan / permission prompt, and the record of an
+ * answered question. Approving resumes the session. Once resolved, cards
+ * mirror Claude Code: a permission leaves no trace, a plan collapses to an expandable
  * "Proposed plan" row, a question collapses to a compact record of the
  * chosen answer — all inline at the card's chronological position. */
 function PromptCard({
@@ -2892,8 +2893,6 @@ function PromptCard({
 }) {
   const { id: elementId } = useContext(WorkspaceDomContext);
   const p = part.prompt;
-  const [picked, setPicked] = useState<string[]>([]);
-  const [answerText, setAnswerText] = useState("");
   const [submitting, setSubmitting] = useState(false);
   if (!p) return null;
   // Read-only host (no onRespond): actions disabled or hidden, card visible.
@@ -2903,10 +2902,7 @@ function PromptCard({
     if (!onRespond || submitting) return;
     setSubmitting(true);
     try {
-      if (await onRespond({ promptId: part.id, ...answer })) {
-        setAnswerText("");
-        setPicked([]);
-      }
+      await onRespond({ promptId: part.id, ...answer });
     } finally {
       setSubmitting(false);
     }
@@ -3089,77 +3085,8 @@ function PromptCard({
     );
   }
 
-  const toggle = (label: string) => {
-    setAnswerText("");
-    setPicked((cur) => p.multiSelect
-      ? cur.includes(label) ? cur.filter((item) => item !== label) : [...cur, label]
-      : [label]);
-  };
-  const submit = () => {
-    if (!done && (answerText.trim() || picked.length > 0)) {
-      void respond({ answers: picked, note: answerText.trim() || undefined });
-    }
-  };
-  const skip = () => void respond({ approve: false });
-  return (
-    <div className="prompt-card question flex flex-col gap-2 rounded-lg border border-border bg-surface p-3" role="group" aria-labelledby={elementId(`question-${part.id}`)}>
-      <div className="flex items-center gap-2 text-subtext">
-        <HelpCircle size={18} aria-hidden="true" />
-        <span className="flex-1 text-sm">{p.header || m.chat_question()}</span>
-        {onRespond && <IconButton aria-label={m.chat_question_skip()} disabled={done} onClick={skip}><X size={16} /></IconButton>}
-      </div>
-      <div id={elementId(`question-${part.id}`)} className="text-base font-medium leading-snug text-text whitespace-pre-line wrap-anywhere">{p.question?.replace(/\n\s*\n/g, "\n")}</div>
-      {(p.options?.length ?? 0) > 0 && (
-        <div className="prompt-options flex flex-col">
-          {p.options?.map((option, index) => {
-            const selected = picked.includes(option.label);
-            return (
-              <button
-                type="button"
-                key={option.label}
-                aria-pressed={selected}
-                className={`prompt-option flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-start text-text cursor-pointer transition-colors duration-120 ease-standard enabled:hover:bg-highlight focus-visible:bg-highlight focus-visible:outline-2 focus-visible:outline-focus disabled:cursor-default ${selected ? "bg-panel" : ""}`}
-                disabled={done}
-                onClick={() => toggle(option.label)}
-              >
-                <span className={`flex size-6 shrink-0 items-center justify-center rounded-md border text-sm ${selected ? "border-text bg-surface text-text" : "border-border bg-background text-subtext"}`}>{selected ? <Check size={14} /> : index + 1}</span>
-                <span className="min-w-0 text-base">
-                  <span>{option.label}</span>
-                  {option.description && <span className="ms-2 text-sm text-subtext">{option.description}</span>}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      )}
-      {onRespond && (
-        <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => { event.preventDefault(); submit(); }}>
-          <div className="flex min-w-0 basis-48 grow items-start gap-2">
-            <Pencil size={18} className="mt-2 shrink-0 text-subtext" aria-hidden="true" />
-            <Textarea
-              variant="inline"
-              aria-label={m.chat_question_your_answer()}
-              placeholder={m.chat_question_custom_response()}
-              value={answerText}
-              onChange={(event) => { setAnswerText(event.target.value); setPicked([]); }}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) {
-                  event.preventDefault();
-                  submit();
-                }
-              }}
-              disabled={done}
-              rows={1}
-            />
-          </div>
-          <div className="ms-auto flex items-center gap-2">
-            <Button type="button" disabled={done} onClick={skip}>{m.chat_question_skip()}</Button>
-            <Button type="submit" variant="primary" disabled={done || (!answerText.trim() && picked.length === 0)}>{m.chat_panel_send()}</Button>
-          </div>
-        </form>
-      )}
-    </div>
-  );
+  // An open question is answered from the composer (`QuestionDock`).
+  return null;
 }
 
 /** Whether a message renders anything once resolved-permission cards vanish —
@@ -7067,6 +6994,28 @@ export function ChatPanel({
     const message = allMessages.find((message) => message.id === focusedMessage.messageId);
     return message && findPartById(message.parts, focusedMessage.partId);
   }, [focusedMessage, activeId, allMessages]);
+  /** Deliver a card answer; resolves `false` when delivery failed (so a
+   * caller can e.g. restore a consumed draft). Stable per session so the
+   * memoized Message rows don't re-render on unrelated state changes. */
+  const respond = useCallback(
+    (answer: PromptAnswer): Promise<boolean> => {
+      if (!activeId) return Promise.resolve(false);
+      return mutRespondChat.runAsHeadlessPromise(workspace, { id: activeId, projectId }, answer, {}).then(() => true, (error: unknown) => {
+        showAlert(error instanceof Error ? error.message : String(error), "error");
+        return false;
+      });
+    },
+    [workspace, activeId, projectId],
+  );
+
+  const questions = useQuestions(activeId, pendingQuestions, respond);
+  const asking = questions.part !== null;
+  const showQuestion = questions.show;
+  const searchedPartId = focusedMessage?.sessionId === activeId ? focusedMessage.partId : undefined;
+  useEffect(() => {
+    if (searchedPartId) showQuestion(searchedPartId);
+  }, [searchedPartId, showQuestion]);
+
   useEffect(() => {
     if (contentLoading || historyLoading || !focusedMessage?.query || focusedMessage.sessionId !== activeId || openedSearchNonce === focusedMessage.nonce) return;
     const message = messages.find((message) => message.id === focusedMessage.messageId);
@@ -7086,7 +7035,7 @@ export function ChatPanel({
     CSS.highlights.set(name, highlight);
     root.scrollIntoView({ block: "nearest" });
     return () => { if (CSS.highlights.get(name) === highlight) CSS.highlights.delete(name); };
-  }, [focusedMessage, activeId, pendingQuestions, embedded]);
+  }, [focusedMessage, activeId, questions.part, embedded]);
 
   function cancelQueued(itemId: string) {
     if (!activeId) return;
@@ -7161,20 +7110,6 @@ export function ChatPanel({
       },
     });
   }
-
-  /** Deliver a card answer; resolves `false` when delivery failed (so a
-   * caller can e.g. restore a consumed draft). Stable per session so the
-   * memoized Message rows don't re-render on unrelated state changes. */
-  const respond = useCallback(
-    (answer: PromptAnswer): Promise<boolean> => {
-      if (!activeId) return Promise.resolve(false);
-      return mutRespondChat.runAsHeadlessPromise(workspace, { id: activeId, projectId }, answer, {}).then(() => true, (error: unknown) => {
-        showAlert(error instanceof Error ? error.message : String(error), "error");
-        return false;
-      });
-    },
-    [workspace, activeId, projectId],
-  );
 
   const newTaskHotkey = useAppHotkeys()["task.new"].hotkey;
   const newTaskShortcut = newTaskHotkey ? formatForDisplay(newTaskHotkey) : undefined;
@@ -7790,12 +7725,6 @@ export function ChatPanel({
           </Button>
         )}
 
-        {pendingQuestions.length > 0 && (
-          <div inert={contentLoading || Boolean(contentError) || historyLoading || connection !== null} className="chat-prompt-questions mx-auto mb-2 flex max-h-96 w-full max-w-readable shrink-0 flex-col gap-2 overflow-y-auto px-3">
-            {pendingQuestions.map((part) => <div key={`${activeId}-${part.id}`} data-part-id={part.id} data-search-target={focusedMessage?.partId === part.id || undefined} tabIndex={-1}><PromptCard part={part} onRespond={respond} /></div>)}
-          </div>
-        )}
-
         {/* Docked while a plan awaits a decision, so the approval controls never
           scroll away. Actions mirror the (now compact) inline card's wire. */}
         <div inert={contentLoading || Boolean(contentError) || historyLoading} className="composer px-3 pb-3 shrink-0 relative z-4 bg-background w-full max-w-readable my-0 mx-auto">
@@ -7948,7 +7877,7 @@ export function ChatPanel({
           )}
           <RemoteConnectionStrip />
           <div inert={connection !== null} className={`composer-frame flex flex-col rounded-xl bg-surface${connection ? " opacity-60" : ""}`} data-onboarding="composer">
-            <div className={`composer-box relative flex flex-col rounded-xl border ${bashMode ? "border-accent-amber" : "border-border"} bg-background shadow-control-subtle`}>
+            <div className={`composer-box relative flex flex-col rounded-xl border ${bashMode && !asking ? "border-accent-amber" : "border-border"} bg-background shadow-control-subtle`}>
               {unconfirmedSend !== null && (
                 <div id={unconfirmedSendId} role="alert" className="flex items-start gap-2 pt-2 px-3 text-sm text-text">
                   <span className="flex-1" dir="auto">{m.chat_send_unconfirmed({ error: ltr(unconfirmedSend) })}</span>
@@ -7981,7 +7910,7 @@ export function ChatPanel({
                   )}
                 </div>
               )}
-              {skillMenuOpen && (
+              {skillMenuOpen && !asking && (
                 <SkillMenu
                   skills={skillMatches}
                   activeIndex={activeSkillIdx}
@@ -7989,7 +7918,7 @@ export function ChatPanel({
                   onHover={setSkillIdx}
                 />
               )}
-              {mentionMenuOpen && (
+              {mentionMenuOpen && !asking && (
                 <MentionMenu
                   matches={mentionMatches}
                   activeIndex={activeMentionIdx}
@@ -7997,7 +7926,7 @@ export function ChatPanel({
                   onHover={setMentionIdx}
                 />
               )}
-              {annotations.length > 0 && (
+              {annotations.length > 0 && !asking && (
                 <ComposerAnnotations
                   annotations={annotations}
                   onClear={() => {
@@ -8023,13 +7952,33 @@ export function ChatPanel({
                   {settingsError}
                 </div>
               )}
-              <div className="composer-input flex min-w-0 items-end">
+              {questions.part && (
+                <QuestionDock
+                  part={questions.part}
+                  index={questions.index}
+                  total={questions.total}
+                  picked={questions.answer.picked}
+                  disabled={questions.busy}
+                  hotkeys={mainView === "chat" && !contentInert && !contentLoading && !contentError && !historyLoading && connection === null
+                    && (embedded ? searchRegion === "right" : searchRegion !== "right")}
+                  searchTarget={focusedMessage?.partId === questions.part.id}
+                  onPick={questions.pick}
+                />
+              )}
+              {/* The answer lines up with the question's text above it. */}
+              <div className={`composer-input flex min-w-0 items-end ${asking ? "[--composer-pad-x:1rem]" : ""}`}>
                 <ComposerEditor
                   ref={composerRef}
-                  value={draft}
+                  value={questions.part ? questions.answer.note : draft}
                   describedBy={[demoHintVisible && demoHintId, unconfirmedSend !== null && unconfirmedSendId].filter(Boolean).join(" ") || undefined}
                   placeholder={
-                    steering && activeHarness
+                    asking
+                      ? questions.answer.picked.length > 0
+                        ? m.chat_question_add_note()
+                        : questions.part?.prompt?.options?.length
+                          ? m.chat_question_custom_response()
+                          : m.chat_question_your_answer()
+                      : steering && activeHarness
                       ? m.chat_steer_placeholder({ harness: ltr(activeHarness.name), shortcut: ltr(queueChord) })
                       : composerSelection
                         ? activeHarness?.agentReady
@@ -8037,14 +7986,19 @@ export function ChatPanel({
                           : m.chat_harness_unavailable({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
                         : m.chat_ask_agent_placeholder()
                   }
-                  plain={bashMode}
+                  plain={bashMode && !asking}
+                  readOnly={questions.busy}
                   chipSource={chipSource}
                   projectId={projectId}
-                  draftKey={stashKey}
+                  draftKey={questions.part ? `question:${questions.part.id}` : stashKey}
                   resizeKey={embedded ? "orx:composer-height:side" : "orx:composer-height"}
-                  onFiles={addFiles}
-                  onPaste={onComposerPaste}
+                  onFiles={asking ? () => {} : addFiles}
+                  onPaste={asking ? () => {} : onComposerPaste}
                   onChange={(v, cursor, typed) => {
+                    if (asking) {
+                      if (v !== questions.answer.note) questions.setNote(v);
+                      return;
+                    }
                     setComposerCursor(cursor);
                     if (v === draft) return;
                     // Composer commands run rather than send: each fires the moment
@@ -8070,6 +8024,7 @@ export function ChatPanel({
                     setSkillMenuDismissed(false);
                   }}
                   onKeyDown={(e) => {
+                    if (asking) return;
                     if (skillMenuOpen) {
                       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
                         e.preventDefault();
@@ -8119,7 +8074,8 @@ export function ChatPanel({
                     }
                   }}
                   onSubmit={(e) => {
-                    if (bashMode) void runShell();
+                    if (asking) questions.next();
+                    else if (bashMode) void runShell();
                     else void send({ queue: matchesKeyboardEvent(e, "Mod+Enter") });
                   }}
                 />
@@ -8135,19 +8091,40 @@ export function ChatPanel({
                       e.target.value = ""; // let the same file be re-picked
                     }}
                   />
-                  <Tooltip interactive content={m.chat_panel_attach_a_pdf_or_image()}>
-                    <IconButton
-                      type="button"
-                      className="composer-attach"
-                      aria-label={m.chat_panel_attach_a_pdf_or_image()}
-                      onClick={() => fileInputRef.current?.click()}
-                    >
-                      <Paperclip size={16} />
-                    </IconButton>
-                  </Tooltip>
-                  {busy ? (
+                  {!asking && (
+                    <Tooltip interactive content={m.chat_panel_attach_a_pdf_or_image()}>
+                      <IconButton
+                        type="button"
+                        className="composer-attach"
+                        aria-label={m.chat_panel_attach_a_pdf_or_image()}
+                        onClick={() => fileInputRef.current?.click()}
+                      >
+                        <Paperclip size={16} />
+                      </IconButton>
+                    </Tooltip>
+                  )}
+                  {asking ? (
+                    <>
+                      <Tooltip interactive content={m.chat_question_skip()}>
+                        <IconButton type="button" variant="filled" aria-label={m.chat_question_skip()} disabled={questions.busy} onClick={questions.skip}>
+                          <X size={16} />
+                        </IconButton>
+                      </Tooltip>
+                      {/* Stays put on the first question: Skip must not slide under a second click. */}
+                      {questions.total > 1 && (
+                        <Tooltip interactive content={m.chat_question_back()}>
+                          <IconButton type="button" variant="filled" aria-label={m.chat_question_back()} disabled={questions.busy || questions.index === 0} onClick={questions.back}>
+                            <ChevronLeft size={16} className="rtl:rotate-180" />
+                          </IconButton>
+                        </Tooltip>
+                      )}
+                      <Button type="button" variant="primary" className="min-w-20" disabled={questions.busy || !questions.answered} onClick={questions.next}>
+                        {questions.last ? m.chat_panel_submit() : m.chat_question_next()}
+                      </Button>
+                    </>
+                  ) : busy ? (
                     <Tooltip interactive content={m.chat_panel_stop()}>
-                      <IconButton className="send-btn" variant="stop" aria-label={m.chat_panel_stop()} onClick={stop}>
+                      <IconButton className="send-btn" variant="filled" aria-label={m.chat_panel_stop()} onClick={stop}>
                         <X size={16} />
                       </IconButton>
                     </Tooltip>
@@ -8317,7 +8294,7 @@ export function ChatPanel({
         </div>
       </section>
       <EscapeScope enabled={dataSources.open} onEscape={() => dataSources.setOpen(false)} />
-      <EscapeScope enabled={skillMenuOpen || mentionMenuOpen} onEscape={() => setSkillMenuDismissed(true)} />
+      <EscapeScope enabled={!asking && (skillMenuOpen || mentionMenuOpen)} onEscape={() => setSkillMenuDismissed(true)} />
     </>
   );
 }
