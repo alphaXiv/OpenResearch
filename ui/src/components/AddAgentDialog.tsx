@@ -481,6 +481,8 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
     if (saved?.kind === "endpoint" && !saved.replaced) await api.removeLocalModel(saved.id, saved.model);
     setSaved(null);
     setOauth(null);
+    setIcon(null);
+    setPinnedLogo(null);
   };
   const discards = (target: Step | "choices" | "close") => target !== "name" && target !== "signin";
   const go = async (target: Step | "choices" | "close") => {

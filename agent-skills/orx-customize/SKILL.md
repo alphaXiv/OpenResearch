@@ -37,7 +37,7 @@ commands from this chat; they act on the dashboard that started it.
 | Command | Does |
 |---|---|
 | `orx agents` | Lists each row: its key, name, kind, whether it is on, and for providers the address, package and where it was found. `--json` for the full rows. |
-| `orx agents label <key> --name "Team router" --logo openrouter` | Names a row and pins its logo. `--emoji 🧪 --color teal` sets its icon; `--clear-name` and `--clear-logo` go back to what OpenResearch finds. |
+| `orx agents label <key> --name "Team router" --logo openrouter` | Names a row and pins its logo. `--emoji 🧪 --color teal` sets its icon; `--clear-logo` goes back to the logo OpenResearch finds, and `--clear-name` to the name of an agent or provider found on this computer. |
 | `orx agents add-endpoint --name "Tinker" --url https://…/v1 --model <id> --key-env TINKER_API_KEY --logo thinkingmachines` | Adds an OpenAI-compatible endpoint for OpenCode to run. The address is on this computer or HTTPS. `--key` passes the key itself; `--context` sets the model's context window. |
 
 A logo is a brand's slug or name: `openai`, `claude`, `anthropic`, `gemini`,

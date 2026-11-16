@@ -523,9 +523,9 @@ struct UserConfig {
 
 /// The user's OpenCode configuration as they wrote it, without the inline content orx gives its
 /// own children: the stock directory, `OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR` and
-/// `OPENCODE_CONFIG_CONTENT`, later layers overriding earlier ones. Layers that do not parse are
-/// skipped.
-fn user_configs() -> Vec<UserConfig> {
+/// `OPENCODE_CONFIG_CONTENT`, later layers overriding earlier ones. Layers orx can't read or
+/// parse come back as errors beside the rest.
+fn user_configs() -> (Vec<UserConfig>, Vec<String>) {
     let stock = super::xdg_config_home().join("opencode");
     let custom = crate::config::env_path("OPENCODE_CONFIG").map(crate::config::test_contained);
     let dir = crate::config::env_path("OPENCODE_CONFIG_DIR").map(crate::config::test_contained);
@@ -537,6 +537,7 @@ fn user_configs() -> Vec<UserConfig> {
                 .flat_map(|dir| [dir.join("opencode.json"), dir.join("opencode.jsonc")]),
         );
     let mut layers: Vec<UserConfig> = Vec::new();
+    let mut unread = Vec::new();
     for path in files {
         if layers
             .iter()
@@ -544,17 +545,26 @@ fn user_configs() -> Vec<UserConfig> {
         {
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                unread.push(format!("Could not read {}: {error}", path.display()));
+                continue;
+            }
         };
         let strict = serde_json::from_str::<Value>(&text).ok();
         let rewritable = strict.is_some();
-        if let Some(value) = strict.or_else(|| parse_jsonc(&text)) {
-            layers.push(UserConfig {
+        match strict.or_else(|| parse_jsonc(&text)) {
+            Some(value) => layers.push(UserConfig {
                 path: Some(path),
                 value,
                 rewritable,
-            });
+            }),
+            None => unread.push(format!(
+                "{} is not a valid OpenCode config. Fix it, then try again.",
+                path.display()
+            )),
         }
     }
     if let Some(value) = crate::local::shell_env::var("OPENCODE_CONFIG_CONTENT")
@@ -566,7 +576,7 @@ fn user_configs() -> Vec<UserConfig> {
             rewritable: false,
         });
     }
-    layers
+    (layers, unread)
 }
 
 /// JSON with the comments and trailing commas OpenCode's config parser accepts.
@@ -627,7 +637,7 @@ fn outside_strings(
 /// stands for: its sign-ins, its config's provider blocks, keys in the environment, and any other
 /// provider `catalog` lists models from.
 fn found_providers<'a>(catalog: impl IntoIterator<Item = &'a str>) -> Vec<FoundProvider> {
-    let layers = user_configs();
+    let (layers, _) = user_configs();
     let records = crate::local::local_models::providers().unwrap_or_default();
     let endpoints = crate::local::local_models::read().unwrap_or_default();
     let owned =
@@ -735,6 +745,12 @@ fn add_source<'a>(
 /// in each config file. Changes nothing unless every source can go, so a provider that stays set
 /// up by something orx cannot edit keeps its sign-in too.
 pub(crate) fn delete_found_provider(id: &str) -> Result<()> {
+    static REWRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _lock = REWRITE.lock().unwrap_or_else(|error| error.into_inner());
+    let (layers, unread) = user_configs();
+    if let Some(problem) = unread.into_iter().next() {
+        return Err(anyhow!("{problem}"));
+    }
     let found = found_providers([])
         .into_iter()
         .find(|found| found.id == id)
@@ -755,7 +771,7 @@ pub(crate) fn delete_found_provider(id: &str) -> Result<()> {
                 .is_some()
         })
     };
-    let layers: Vec<_> = user_configs()
+    let layers: Vec<_> = layers
         .into_iter()
         .filter(|layer| defines(&layer.value))
         .collect();
@@ -2747,6 +2763,21 @@ mod tests {
                 0o600
             );
         }
+        let broken = dir.join("broken.json");
+        std::fs::write(&broken, "{ not json").unwrap();
+        std::env::set_var("OPENCODE_CONFIG", &broken);
+        assert_eq!(
+            refused("anthropic"),
+            format!(
+                "{} is not a valid OpenCode config. Fix it, then try again.",
+                broken.display()
+            )
+        );
+        assert!(std::fs::read_to_string(&auth)
+            .unwrap()
+            .contains("anthropic"));
+        std::env::remove_var("OPENCODE_CONFIG");
+
         let ids: Vec<_> = found_providers([])
             .into_iter()
             .map(|found| found.id)

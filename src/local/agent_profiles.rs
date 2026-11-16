@@ -127,7 +127,10 @@ impl Edit {
     /// Applies this edit to a record that always has a name; true when it renames the record.
     pub fn apply(&self, name: &mut String, icon: &mut Option<Value>) -> Result<bool> {
         if let Some(new) = &self.name {
-            *name = validate_name(new.as_deref().unwrap_or_default())?.to_owned();
+            let new = new.as_deref().ok_or_else(|| {
+                anyhow!("Only agents and providers found on this computer go back to a name of their own. Give this one a name instead.")
+            })?;
+            *name = validate_name(new)?.to_owned();
         }
         if let Some(new) = &self.icon {
             new.as_ref().map(validate_icon).transpose()?;
@@ -1002,7 +1005,10 @@ mod tests {
         );
 
         let account = create("codex", "Personal", Some(json!({"brand":true}))).unwrap();
-        assert!(edit(&account, json!({"name":null})).is_err());
+        let reset = edit(&account, json!({"name":null}))
+            .unwrap_err()
+            .to_string();
+        assert!(reset.contains("Give this one a name"), "{reset}");
         edit(&account, json!({"name":" Renamed ","icon":null})).unwrap();
         edit(&account, json!({"logo":"openai"})).unwrap();
         let mut payload = json!({"harnesses":[{"id":"codex","installed":true,"models":[]}]});

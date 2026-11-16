@@ -24,7 +24,7 @@ pub enum AgentsCommand {
         /// The icon's color: gray, red, orange, amber, green, teal, blue, indigo, purple or pink.
         #[arg(long, requires = "emoji")]
         color: Option<String>,
-        /// Go back to the agent's own name.
+        /// Go back to the row's own name; only agents and providers found on this computer have one.
         #[arg(long)]
         clear_name: bool,
         /// Remove the pinned logo.
