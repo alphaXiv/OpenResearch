@@ -22,7 +22,7 @@ Use a descriptive filename for each output. For example:
 Read the `orx-figures` module before writing any figure; a default
 matplotlib plot does not meet the bar the reports are held to.
 
-Load `orx-evidence` when the report makes claims derived from run results.
+Load `orx-results` when the report makes claims derived from run results.
 
 Use relative links within reports, for example
 `![Final accuracy](final-accuracy.svg)` from `learning-rate-study.md`.

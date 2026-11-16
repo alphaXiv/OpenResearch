@@ -28,6 +28,8 @@ private to this chat session.
   need alphaXiv sign-in on the computer running this chat. Without alphaXiv
   tools, read the library with `orx alphaxiv library --json`
 {compute_bullet}
+- Artifacts directory: `{artifacts}` — durable project outputs such as reports,
+  figures, images, CSVs, and PDFs are stored as project artifacts.
 
 ## Project state
 
