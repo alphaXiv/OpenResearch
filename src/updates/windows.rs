@@ -363,6 +363,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn only_an_archive_with_orx_exe_replaces_the_installed_binary() {
+        fn archive(name: &str) -> Vec<u8> {
+            use std::io::Write as _;
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            zip.start_file::<_, ()>(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(b"new").unwrap();
+            zip.finish().unwrap().into_inner()
+        }
+        let dir = std::env::temp_dir().join(format!("orx-archive-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let installed = dir.join("orx.exe");
+        std::fs::write(&installed, "old").unwrap();
+
+        assert!(install(&installed, b"not a zip").is_err());
+        assert!(install(&installed, &archive("README.md")).is_err());
+        assert_eq!(std::fs::read_to_string(&installed).unwrap(), "old");
+
+        install(&installed, &archive("orx.exe")).unwrap();
+        assert_eq!(std::fs::read_to_string(&installed).unwrap(), "new");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn an_unsigned_binary_has_no_trusted_signer() {
         assert_eq!(signer(&std::env::current_exe().unwrap()), None);
     }

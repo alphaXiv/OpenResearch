@@ -384,3 +384,15 @@ fn matches_sha256(bytes: &[u8], expected: &str) -> bool {
     use sha2::{Digest, Sha256};
     format!("{:x}", Sha256::digest(bytes)).eq_ignore_ascii_case(expected.trim())
 }
+
+#[cfg(all(test, windows))]
+mod tests {
+    #[test]
+    fn an_archive_must_match_its_published_checksum() {
+        // The sha256 of no bytes, as a `.sha256` file would hold it.
+        let empty = "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855\n";
+        assert!(super::matches_sha256(b"", empty));
+        assert!(!super::matches_sha256(b"tampered", empty));
+        assert!(!super::matches_sha256(b"", ""));
+    }
+}
