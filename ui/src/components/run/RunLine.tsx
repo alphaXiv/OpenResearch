@@ -2,18 +2,16 @@ import type { Run } from "../../api";
 import { useId, type ReactNode } from "react";
 import { autoDir } from "../../i18n";
 import { m } from "../../paraglide/messages.js";
-import { plainSentence } from "../../runMonitor/format";
 import type { RunModel } from "../../runMonitor/model";
-import { tabOpenGestureHandlers, type TabOpenIntent } from "../../tabPreview";
+import type { TabOpenIntent } from "../../tabPreview";
 import { useWorkspace } from "../../workspace";
 import { Button, Tooltip } from "../ui";
 import { cn } from "../ui/cn";
 import { Controls } from "./Controls";
 import { Delta } from "./Delta";
-import { Lead } from "./Lead";
 import { Mark } from "./Mark";
 import { Rail } from "./Rail";
-import { Sentence } from "./Sentence";
+import { RunStatus } from "./RunStatus";
 
 /** The frame a lone line or strip sits in; amber while it waits for the user. */
 export const runFrame = (model: RunModel) => cn(
@@ -51,8 +49,6 @@ export function RunLine({ model, agent, label, onToggle, onOpenRunPage, expanded
   const working = model.tone === "revising" ? m.run_agent_editing({ agent: autoDir(agent) }) : model.looking ? m.run_agent_looking({ agent: autoDir(agent) }) : null;
   const whyId = useId();
   const { stale } = model;
-  const Status = onOpenRunPage ? "button" : "span";
-  const sentence = expanded ? model.flagDetail ?? model.sentence.text : model.sentence.text;
   // The time slot explains itself: why the view stopped, or what the time means.
   const time = expanded && stale ? null : stale ? { text: stale.age, why: stale.why, tip: `${stale.why} · ${stale.age}` }
     : model.eta ? { text: model.eta, why: model.etaDetail, tip: `${model.eta} · ${model.etaDetail}` }
@@ -60,28 +56,15 @@ export function RunLine({ model, agent, label, onToggle, onOpenRunPage, expanded
   const { text, title } = label ?? { text: model.name, title: model.name };
   return (
     <div role="group" aria-label={title} className={label ? cn("relative", model.needsChoice && "bg-accent-amber-subtle") : runFrame(model)}>
-      <div className="flex min-h-9 min-w-0 items-center gap-x-2 py-1 ps-1.5 pe-1.5">
-        <Tooltip content={[autoDir(title), model.where, model.status].filter(Boolean).join(" · ")} className="flex size-7 shrink-0 items-center justify-center">
-          <span aria-hidden="true"><Mark tone={model.tone} live={model.live} label={model.status} /></span>
-        </Tooltip>
-        <Status
-          className="tool-target run-status-link min-w-0 flex-1 truncate rounded-xs text-start focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:outline-offset-2"
-          type={onOpenRunPage ? "button" : undefined}
-          role={onOpenRunPage ? "link" : undefined}
-          aria-label={onOpenRunPage ? m.run_status_for({ status: plainSentence([label?.text, model.lead, sentence].filter(Boolean).join(" · ")), name: autoDir(title) }) : undefined}
-          aria-describedby={time?.why ? whyId : undefined}
-          {...(onOpenRunPage ? tabOpenGestureHandlers<HTMLButtonElement>((intent) => onOpenRunPage(model.run, intent)) : {})}
-        >
-          {label && <span className="text-ink-subtext">{autoDir(text)} · </span>}
-          <Lead model={model} />
-          <Sentence text={sentence} tone={model.tone} />
-        </Status>
+      <div className="flex min-h-9 min-w-0 items-center gap-x-2 py-1 ps-3 pe-1.5">
+        <Mark tone={model.tone} live={model.live} label={model.status} />
+        <RunStatus model={model} label={label ? text : undefined} descriptionId={time?.why ? whyId : undefined} onOpenRunPage={onOpenRunPage} />
         {working && <span className="tool-running-shimmer shrink-0 whitespace-nowrap @max-[40rem]:hidden">{working}</span>}
         {!expanded && <Headline model={model} />}
         {host && <Button size="small" onClick={() => requestHostConnect(host)}>{m.settings_connect()}</Button>}
         {time && (time.why ? (
           <Tooltip content={time.tip} className="shrink-0 rounded-xs">
-            <span className="whitespace-nowrap tabular-nums text-ink-subtext">{time.text}{model.etaStrong && <span className="@max-[50rem]:hidden"> · {model.etaDetail}</span>}</span>
+            <span className="whitespace-nowrap tabular-nums text-ink-subtext">{time.text}</span>
             <span id={whyId} hidden>{time.why}</span>
           </Tooltip>
         ) : <span className="shrink-0 whitespace-nowrap tabular-nums text-ink-subtext">{time.text}</span>)}

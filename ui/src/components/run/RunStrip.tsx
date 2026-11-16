@@ -15,6 +15,7 @@ import { seriesOf } from "./blocks/series";
 import { Delta } from "./Delta";
 import { Issue } from "./Issue";
 import { RunLine, type RunLabel } from "./RunLine";
+import { Sentence } from "./Sentence";
 
 type OpenRun = (runId: string, intent: TabOpenIntent, seek?: LogSeek) => void;
 
@@ -67,6 +68,7 @@ export function RunStrip({ model, monitor, agent, label, open, onToggle, onOpenR
         {model.notice && <RunContactNotice run={model.run} className="mt-1.5" />}
         {model.stale && monitor?.status !== "error" && <p className="m-0 mt-1.5 text-xs text-ink-subtext">{model.stale.why} · {model.stale.age}</p>}
         {model.note && <p className="m-0 mt-1.5 text-xs text-ink-subtext">{model.note}</p>}
+        {flag && model.flagDetail && model.flagDetail !== model.sentence.text && <p className="m-0 mt-1.5 text-sm"><Sentence text={model.flagDetail} tone={model.tone} /></p>}
         {flag && <Issue model={model} flag={flag} agent={agent} onOpenRun={onOpenRun} />}
         {monitor?.status === "error" && <div className="mt-1.5 flex items-center gap-2 text-xs text-ink-subtext">
           {model.stale ? `${model.stale.why} · ${model.stale.age}` : m.run_monitor_load_failed()}

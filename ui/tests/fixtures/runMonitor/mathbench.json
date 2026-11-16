@@ -120,6 +120,6 @@
   "revising": false,
   "rules": [],
   "statusText": "mathbench-judge-v2  running  83%",
-  "newestLine": "[0997/1200] geometry  ✓  judge 1.9s",
-  "pattern": "^\\[(?P<step>\\d+)/(?P<of>\\d+)\\] (?P<category>[a-z_]+) +(?P<result>✓|✗|ERR)"
+  "pattern": "^\\[(?P<step>\\d+)/(?P<of>\\d+)\\] (?P<category>[a-z_]+) +(?P<result>✓|✗|ERR)",
+  "stageOrder": {"index": 0, "count": 1, "first": 0}
 }

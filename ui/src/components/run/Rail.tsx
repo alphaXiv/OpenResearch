@@ -9,7 +9,8 @@ import { cn } from "../ui/cn";
  */
 export function Rail({ model, kind, hover = false }: { model: RunModel; kind: "edge" | "thick" | "bar"; hover?: boolean }) {
   if (model.run.status === "done") return null;
-  const { bar, ticks } = model;
+  const { bar } = model;
+  const ticks = kind === "bar" ? model.ticks : [];
   const fill = bar.frozen || model.settingUp ? "bg-subtext" : TONE_BG[model.tone];
   const mark = (flag: boolean) => <i className={flag ? "h-1.5 w-0.5 bg-mark-amber" : "h-1 w-px bg-subtext"} />;
   return (
@@ -26,7 +27,7 @@ export function Rail({ model, kind, hover = false }: { model: RunModel; kind: "e
         </div>
       )}
       <div
-        className={cn("flex gap-px", kind === "bar" ? "h-1.5 overflow-hidden rounded-full" : kind === "thick" ? "h-1" : "h-[3px]")}
+        className={cn("flex", kind === "bar" ? "h-1.5 gap-px overflow-hidden rounded-full" : kind === "thick" ? "h-1" : "h-[3px]")}
         role="progressbar"
         aria-valuemin={0}
         aria-valuemax={100}

@@ -150,8 +150,8 @@ pub struct Snapshot {
     /// stage's points, since each stage counts its steps from its own start.
     #[serde(default)]
     pub series_stages: BTreeMap<String, usize>,
-    /// The first stage that produced a point of each signal, before later stages reused its name.
-    pub first_series_stages: BTreeMap<String, usize>,
+    /// The first point's stage for each signal; None when the point preceded every stage.
+    pub first_series_stages: BTreeMap<String, Option<usize>>,
     #[serde(default)]
     pub spend: Option<f64>,
     #[serde(default)]
@@ -859,11 +859,10 @@ impl Snapshot {
                     let Some(x) = x else {
                         continue;
                     };
-                    if let Some(phase) = self.phases.last() {
-                        self.first_series_stages
-                            .entry(name.clone())
-                            .or_insert(phase.occurrence);
-                    }
+                    let first_stage = self.phases.last().map(|phase| phase.occurrence);
+                    self.first_series_stages
+                        .entry(name.clone())
+                        .or_insert(first_stage);
                     if let Some((_, occurrence)) = stage {
                         let was = self.series_stages.insert(name.clone(), occurrence);
                         if was.is_some_and(|was| was != occurrence) {

@@ -585,6 +585,22 @@ pub(super) fn series_stage(run: &Snapshot, name: &str) -> Option<(String, usize)
     Some((stage.clone(), before))
 }
 
+/// The first displayed point's phase index; an inner None means it preceded every phase.
+fn first_point_stage(snapshot: &Snapshot, names: &[&str]) -> Option<Option<usize>> {
+    let first = names
+        .iter()
+        .filter_map(|name| snapshot.first_series_stages.get(*name).copied())
+        .min()?;
+    match first {
+        None => Some(None),
+        Some(occurrence) => snapshot
+            .phases
+            .iter()
+            .position(|phase| phase.occurrence == occurrence)
+            .map(Some),
+    }
+}
+
 /// Whether the parent's series `name` is of the same stage as the run's, so their steps can be
 /// compared: the fold restarts a series at each stage, so a finished parent holds its last.
 pub(super) fn same_stage(run: &Snapshot, parent: &Snapshot, name: &str) -> bool {
@@ -1131,16 +1147,7 @@ fn evaluate(
             .map(|phase| phase.name.as_str())
             .filter(|name| !name.is_empty());
         let starts_at = timed.iter().find_map(|(prior, _, _)| {
-            let first = displayed
-                .iter()
-                .filter_map(|name| {
-                    prior
-                        .series
-                        .get(*name)
-                        .filter(|points| !points.is_empty())?;
-                    prior.first_series_stages.get(*name).copied()
-                })
-                .min()?;
+            let first = first_point_stage(prior, &displayed)?.unwrap_or(0);
             let durations: Option<i64> = prior
                 .phases
                 .iter()
@@ -1150,6 +1157,39 @@ fn evaluate(
             Some(life.start() + durations?)
         });
         json!({ "line": line, "stage": stage, "startsAt": starts_at })
+    });
+
+    let first_data = snapshot
+        .and_then(|snapshot| first_point_stage(snapshot, &displayed))
+        .and_then(|phase| match phase {
+            None => Some(0),
+            Some(phase) => stages.iter().position(|stage| stage.phase == Some(phase)),
+        })
+        .or_else(|| {
+            if !life.live() {
+                return None;
+            }
+            timed.iter().find_map(|(prior, _, _)| {
+                let Some(first) = first_point_stage(prior, &displayed)? else {
+                    return Some(0);
+                };
+                let name = &prior.phases[first].name;
+                let occurrence = prior.phases[..first]
+                    .iter()
+                    .filter(|phase| phase.name == *name)
+                    .count();
+                stages
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, stage)| stage.name == *name)
+                    .nth(occurrence)
+                    .map(|(index, _)| index)
+            })
+        });
+    let stage_order = json!({
+        "index": current,
+        "count": planned.then_some(stages.len()),
+        "first": first_data,
     });
 
     let headline_name = headline(&view, &latest, &versus);
@@ -1203,7 +1243,8 @@ fn evaluate(
             (false, false) => tone(life.phase),
         },
         "whole": whole,
-        "stage": snapshot.and_then(Snapshot::progress).map(|phase| {
+        "stageOrder": stage_order,
+        "stage": snapshot.and_then(|snapshot| snapshot.phases.last()).map(|phase| {
             let of = phase.of.or(current.and_then(|index| stages[index].of));
             json!({"name": phase.name, "done": phase.done, "of": of, "unit": phase.unit})
         }),
@@ -1268,6 +1309,7 @@ fn evaluate(
         "viewFrom": view_from,
         "source": source,
         "phases": phases,
+        "stageOrder": stage_order,
         "progress": progress,
         "x": {"name": x_name, "max": x_max},
         "latest": latest,
@@ -5322,9 +5364,17 @@ mod tests {
             "the last stage ends with the log"
         );
         assert_eq!(monitor["setup"]["startsAt"], T0 + 40_000);
+        assert_eq!(
+            monitor["stageOrder"],
+            json!({"index": 0, "count": 5, "first": 2})
+        );
         let child_with_points = staged(&f, "c2", "child", "running", &pipeline, 45);
         let (training, _) = monitor_at(&f, &child_with_points, T0 + 45_500);
         assert_eq!(training["setup"], Value::Null);
+        assert_eq!(
+            training["stageOrder"],
+            json!({"index": 2, "count": 5, "first": 2})
+        );
 
         let weights: Vec<_> = monitor["progress"]["segments"]
             .as_array()
@@ -5503,14 +5553,23 @@ mod tests {
                 ),
             ])
         };
-        assert_eq!(snapshot.first_series_stages["loss"], 1);
+        assert_eq!(snapshot.first_series_stages["loss"], Some(1));
         assert_eq!(snapshot.series_stages["loss"], 2);
         f.collect(&snapshot);
         monitor_at(&f, &parent, T0 + 700_000);
         f.child("child", "exp");
+        plan(&f, "child", json!([{"phase": "setup", "of": 4}, {"phase": "train", "of": 10}, {"phase": "sft", "of": 10}])).unwrap();
         let child = staged(&f, "c1", "child", "running", &[("setup", 4, Some(4))], 1);
         let (monitor, _) = monitor_at(&f, &child, T0 + 1_500);
         assert_eq!(monitor["setup"]["startsAt"], T0 + 4_000);
+        assert_eq!(
+            monitor["stageOrder"],
+            json!({"index": 0, "count": 3, "first": 1})
+        );
+        assert_eq!(
+            current(&f.store, &child).unwrap().unwrap().summary()["stageOrder"],
+            monitor["stageOrder"]
+        );
     }
 
     #[test]

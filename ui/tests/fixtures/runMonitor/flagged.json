@@ -164,5 +164,6 @@
   "versus": {
     "step": {},
     "final": {}
-  }
+  },
+  "stageOrder": {"index": 0, "count": 1, "first": 0}
 }

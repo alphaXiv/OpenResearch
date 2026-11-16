@@ -65,7 +65,7 @@ export function RunSummary({ models, context, parts, firstDone, open, onToggle }
       </div>
       {!open && (
         <div className="flex flex-col gap-px">
-          {models.filter((model) => model.live).map((model) => <div key={model.run.id} className="relative h-[3px]"><Rail model={{ ...model, ticks: [] }} kind="edge" /></div>)}
+          {models.filter((model) => model.live).map((model) => <div key={model.run.id} className="relative h-[3px]"><Rail model={model} kind="edge" /></div>)}
         </div>
       )}
     </div>

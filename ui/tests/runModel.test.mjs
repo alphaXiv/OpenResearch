@@ -37,15 +37,15 @@ test("against an older server a running run reads from its status alone", () => 
 
 test("a watched run fills the watcher's words and counts down from the server's estimate", () => {
   const line = model(run({ monitor: summary() }), { monitor: { ...running, sentence: { ...running.sentence, t: now + 600_000 } }, at: now + 600_000 });
-  assert.equal(line.text, "Loss **2.31**, falling steadily.");
-  assert.equal(line.sentence.key, `look:${running.sentence.template}`);
+  assert.equal(line.text, "Train (2/2) · Step **1,240** of **5,000**. Loss **2.31**, falling steadily.");
+  assert.equal(bare(line.sentence.watcher), "Loss **2.31**, falling steadily.");
   assert.equal(line.eta, m.run_eta_left({ duration: fmtDuration(4_800_000) }));
-  assert.equal(line.progress, `train · ${bare(m.run_progress_steps({ done: "1,240", of: "5,000" }))} · 25%`, "a named stage leads its progress");
+  assert.equal(line.progress, "25%", "the count stays on the status line");
   assert.deepEqual(line.ticks.map((tick) => [tick.at, tick.flag]), [[0.16, false]]);
   assert.ok(line.headline.inSentence);
 
   const fromSummary = model(run({ monitor: summary({ bindings: { loss: 2.2 } }) }));
-  assert.equal(fromSummary.text, "Loss **2.20**, falling steadily.");
+  assert.equal(fromSummary.text, "Running. Loss **2.20**, falling steadily.");
   assert.equal(fromSummary.eta, m.run_eta_left({ duration: fmtDuration(5_400_000) }));
 });
 
@@ -144,14 +144,14 @@ test("a summary newer than the monitor speaks alone, never beside the older revi
     headline: { name: "loss", label: "Loss", value: 1, vs: null }, etaMs: { lo: 60_000, mid: 120_000, hi: 180_000, at: now },
   });
   const line = model(run({ monitor: ahead }), { monitor: running });
-  assert.equal(line.text, "Loss **1.00**, still falling.");
+  assert.equal(line.text, "Running. Loss **1.00**, still falling.");
   assert.equal(bare(line.headline.value), "1.00");
   assert.equal(line.eta, m.run_eta_left({ duration: fmtDuration(120_000) }));
   assert.equal(line.progress, "", "progress waits for the monitor of this revision");
   assert.deepEqual([line.bar.whole, line.ticks.length, line.cost], [0.3, 0, ""]);
 
   const rebuilt = model(run({ monitor: summary({ rev: 1, generation: "g2", asOf: now + 1000, bindings: { loss: 1.5 }, headline: { name: "loss", label: "Loss", value: 1.5, vs: null } }) }), { monitor: running });
-  assert.equal(rebuilt.text, "Loss **1.50**, falling steadily.", "another generation is never mixed in either");
+  assert.equal(rebuilt.text, "Running. Loss **1.50**, falling steadily.", "another generation is never mixed in either");
   assert.equal(bare(rebuilt.headline.value), "1.50");
   assert.equal(rebuilt.progress, "");
 });

@@ -35,12 +35,6 @@ export function ViewSource({ monitor, projectId, live }: { monitor: RunMonitor; 
           {/* A source from a newer server goes unnamed. */}
           {(source === null || Object.hasOwn(SOURCE, source)) && <p className="m-0 mb-1.5 text-xs text-ink-subtext">{source ? SOURCE[source]() : live ? m.run_view_source_none() : m.run_page_no_signals_ended()}</p>}
           {source === "pattern" && monitor.pattern && <pre dir="ltr" className={PRE}>{monitor.pattern}</pre>}
-          {monitor.newestLine && (
-            <>
-              <p className="m-0 mb-1.5 mt-3 text-xs text-ink-subtext">{m.run_view_newest_line()}</p>
-              <pre dir="ltr" className={PRE}>{monitor.newestLine}</pre>
-            </>
-          )}
           <p className="m-0 mb-1.5 mt-3 text-xs text-ink-subtext">{m.run_view_as_text()}</p>
           <pre dir="ltr" className={PRE}>{monitor.statusText}</pre>
         </div>

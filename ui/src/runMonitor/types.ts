@@ -183,12 +183,22 @@ export interface Setup {
   startsAt: number | null;
 }
 
+/** Raw phase positions; `first` bounds the stages folded into Setup. */
+export interface StageOrder {
+  index: number | null;
+  /** Null without a declared plan. */
+  count: number | null;
+  /** The run's first displayed point stage, or its earlier run's matching stage. */
+  first: number | null;
+}
+
 /** What every `Run` carries, so a line, a badge or the sidebar needs no extra request. */
 export interface RunMonitorSummary {
   tone: "starting" | "running" | "flag" | "done" | "failed" | "stopped" | "revising";
   whole: number | null;
   /** Where the run stands in its current stage, so a line can say it without the full monitor; absent from an older server. */
-  stage?: { name: string; done: number; of: number | null; unit: string | null } | null;
+  stage?: { name: string; done: number | null; of: number | null; unit: string | null } | null;
+  stageOrder?: StageOrder;
   headline: { name: string; label: string; value: SignalValue; vs: Versus | null } | null;
   sentence: Sentence | null;
   /** Each referenced signal, `signal.vs` as the raw difference, and `count:"pattern"` keys. */
@@ -336,9 +346,8 @@ export interface RunMonitor {
   source: "declared" | "pattern" | "detected" | "trackio" | null;
   /** The experiment's pattern, when `source` is a pattern. */
   pattern?: string;
-  /** The newest log line the run's signals came from. */
-  newestLine?: string;
   phases: Phase[];
+  stageOrder: StageOrder;
   progress: Progress | null;
   x: { name: string; max: number | null };
   latest: Record<string, SignalValue>;

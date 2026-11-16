@@ -113,6 +113,11 @@ async function themes(page: Page, banner: Locator, info: TestInfo, name: string)
 /** The Latest run section of the experiment page in the side pane. */
 const latestRun = (page: Page) => page.locator('section', { has: page.getByRole('heading', { name: 'Latest run', exact: true }) })
 
+async function openRunPage(page: Page, banner: Locator, name: RegExp) {
+  await banner.getByRole('button', { name }).hover()
+  await page.getByRole('dialog').getByRole('link', { name }).click()
+}
+
 /** Text as the page writes it, numbers wrapped in direction isolates. */
 const said = (text: string) => new RegExp(text.replace(/\d+/g, (n) => `[⁦⁨]?${n}[⁩]?`))
 
@@ -153,9 +158,12 @@ for (let step = 1; step <= total; step++) {
   const { id: runId, experimentId } = (await (await page.request.get(`${orx.url}/api/chat/shown-runs`)).json())[0].run
 
   await test.step('a NaN reads NaN, flags the run, and the agent it wakes keeps it going', async () => {
-    await expect(banner).toContainText(said('Step 10 of 40'))
     await agent.reached(woken)
-    await expect(banner).toContainText('loss became NaN at step 10.')
+    const status = banner.getByRole('button', { name: /Declared/ })
+    await expect(status).toHaveText('loss became NaN at step 10.')
+    await status.hover()
+    await expect(page.getByRole('dialog')).toContainText(said('Step 10 of 40'))
+    await page.keyboard.press('Escape')
     writeFileSync(ids, `${runId} ${experimentId}\n`)
     agent.release(woken)
     await expect(page.getByText('One NaN at step 10, numbers again after it. Keeping it going.', { exact: true })).toBeVisible()
@@ -194,8 +202,8 @@ for (let step = 1; step <= total; step++) {
     await expect(banner.getByRole('button', { name: 'Show less', exact: true })).toHaveCount(0)
     await expect(banner).toContainText('Done in')
     await themes(page, banner, info, 'line-done')
-    // Its status opens the run's page, which draws the whole curve with axes.
-    await banner.getByRole('link', { name: /Declared/ }).click()
+    // The status card links to the run page, which draws the whole curve with axes.
+    await openRunPage(page, banner, /Declared/)
     const latest = latestRun(page)
     await expect(latest).toContainText('Done in')
     await expect(latest.getByRole('img', { name: /^loss / })).toHaveAccessibleName(said('loss 0.05'))
@@ -338,7 +346,7 @@ for (let round = 1; round <= total; round++) {
 
   const latest = latestRun(page)
   await test.step('its name opens the page, with its chart and its rows together, and the bar', async () => {
-    await banner.getByRole('link', { name: /Rounds/ }).click()
+    await openRunPage(page, banner, /Rounds/)
     await expect(latest.getByRole('heading', { name: /Latest rounds/ })).toBeVisible()
     const table = latest.getByRole('table')
     expect((await table.getByRole('columnheader').allTextContents()).sort()).toEqual(['elo', 'name', 'round', 'win'])
@@ -379,7 +387,7 @@ for (let i = 2001; i <= 2060; i++) {
   agent.script('finished with status **done**', [{ say: 'The items finished.' }])
   const banner = await launch(page, agent, project, 'Items', run.command)
   await expect(banner.getByRole('table')).toHaveCount(0)
-  await banner.getByRole('link', { name: /Items/ }).click()
+  await openRunPage(page, banner, /Items/)
   const latest = latestRun(page)
 
   const box = latest.getByRole('region', { name: /every row/ })
@@ -443,7 +451,6 @@ const lines = readFileSync(${JSON.stringify(nanochat)}, 'utf8').split('\\n')
 const stops = ${JSON.stringify(stops)}
 for (const line of lines) {
   process.stdout.write(line + '\\n')
-  await tick()
   for (const [name, text] of Object.entries(stops)) if (line.includes(text)) gate(name)
 }`)
 
@@ -458,11 +465,11 @@ test('a run nobody instrumented says it is setting up and what it printed, then 
   const progress = banner.getByRole('progressbar')
 
   await test.step('before any progress the strip says it is setting up and the newest line, not a fault', async () => {
-    await expect(banner).toContainText(/Setting up · \W*Starting merge loop/)
+    await expect(banner).toContainText(/Setup\W+Starting merge loop/)
     await expect(banner).not.toContainText('No estimate')
     await expect(banner).not.toContainText('Running on')
     await themes(page, banner, info, 'strip-setting-up')
-    await expect(banner).toContainText(/Setting up · \W*Starting merge loop/)
+    await expect(banner).toContainText(/Setup\W+Starting merge loop/)
     await themes(page, banner, info, 'line-setting-up')
   })
 
@@ -497,9 +504,9 @@ test('a run without a signal point remains in setup without an invented deadline
   agent.script('finished with status **done**', [{ hold }, { say: 'The silent run finished.' }])
   await page.request.post(`${orx.url}/api/settings/ui-state`, { headers: { origin: orx.url }, data: { runBanner: 'strip' } })
   const banner = await launch(page, agent, project, 'Silent', run.command)
-  await expect(banner).toContainText(/Setting up · \W*Starting merge loop/)
+  await expect(banner).toContainText(/Setup\W+Starting merge loop/)
   await page.clock.setFixedTime(Date.now() + 16 * 60_000)
-  await expect(banner).toContainText(/Setting up · \W*Starting merge loop/)
+  await expect(banner).toContainText(/Setup\W+Starting merge loop/)
   await expect(banner).not.toContainText('No estimate')
   await themes(page, banner, info, 'strip-silent-for-long')
   await run.open('setup')
@@ -541,7 +548,7 @@ for (let step = 1; step <= ${total}; step++) {
   const banner = page.getByRole('region', { name: 'Runs in this chat' })
   const rows = banner.getByRole('list').getByRole('listitem')
   const summary = banner.getByRole('button', { name: /^(Show each run|Show less)$/ }).first()
-  const named = (title: string) => banner.getByRole('link', { name: new RegExp(title) })
+  const named = (title: string) => banner.getByRole('button', { name: new RegExp(title) })
 
   await test.step('the summary says what the runs share, and each row only what sets it apart', async () => {
     await expect(rows).toHaveCount(3, { timeout: 60_000 })
@@ -571,6 +578,16 @@ for (let step = 1; step <= ${total}; step++) {
     await expect(rows.nth(1).getByRole('button', { name: 'Show less', exact: true })).toBeFocused()
     await expect(rows).toHaveCount(3)
     await themes(page, banner, info, 'summary-row-strip')
+    await page.keyboard.press('Shift+Tab')
+    await page.keyboard.press('Shift+Tab')
+    await page.keyboard.press('Shift+Tab')
+    await expect(named(runs[1].title)).toBeFocused()
+    const card = page.getByRole('dialog')
+    await expect(card.getByRole('link', { name: runs[1].title })).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(card).toHaveCount(0)
+    await expect(named(runs[1].title)).toBeFocused()
+    await expect(rows.nth(1).getByRole('img', { name: /^val_bpb / })).toBeVisible()
     await page.keyboard.press('Escape')
     await expect(rows.nth(1).getByRole('button', { name: 'Show more', exact: true })).toBeFocused()
   })
@@ -710,7 +727,8 @@ test('an error flags the run and wakes its Agentic agent once, which confirms it
     { run: settle(experimentId, runId, 'keep', 'One bad batch on a warm GPU; the loss kept falling.') },
     { say: 'Looked at the log: one bad batch, and the loss kept falling. Keeping it going.' },
   ])
-  agent.script('finished with status', [{ say: 'Flagged is done.' }])
+  const result = `flagged-result-${project.id}`
+  agent.script('finished with status', [{ hold: result }, { say: 'Flagged is done.' }])
   await run.open('err')
 
   await test.step('the wake reaches the agent with the line and how to settle it, while the run keeps going', async () => {
@@ -733,13 +751,15 @@ test('an error flags the run and wakes its Agentic agent once, which confirms it
     await expect(page.getByRole('img', { name: 'A run was flagged' })).toHaveCount(0)
     await keep(page, page, 'agentic-wake-turn')
     await run.open('end')
+    await agent.reached(result)
     await expect(banner).toContainText('Done', { timeout: 60_000 })
-    await banner.getByRole('link', { name: /Flagged/ }).click()
+    await openRunPage(page, banner, /Flagged/)
     const watch = page.locator('section', { has: page.getByRole('heading', { name: 'Watch', exact: true }) })
     await expect.poll(async () => (await watch.innerText()).replace(/[⁦-⁩]/g, ''))
       .toMatch(/Flagged by OpenResearch itself, with no model\. A new kind of error in the log: RuntimeError\.\s+E2E Agent chose to keep going\. One bad batch on a warm GPU; the loss kept falling\./)
     await keep(page, watch, 'journal-settled')
     await themes(page, watch, info, 'journal-settled')
+    agent.release(result)
   })
 })
 

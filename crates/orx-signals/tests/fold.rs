@@ -1120,7 +1120,7 @@ fn a_series_on_the_step_axis_holds_one_stages_points() {
         "download's step 1 is not train's, and eval has no step to plot at"
     );
     assert_eq!(s.series_stages["loss"], s.phases[1].occurrence);
-    assert_eq!(s.first_series_stages["loss"], s.phases[0].occurrence);
+    assert_eq!(s.first_series_stages["loss"], Some(s.phases[0].occurrence));
     assert_eq!(
         s.latest["loss"], 1.9,
         "the value without a step is still the latest"
@@ -1138,7 +1138,7 @@ fn a_series_on_the_step_axis_holds_one_stages_points() {
     );
     assert_eq!(
         timed.first_series_stages["loss"],
-        timed.phases[0].occurrence
+        Some(timed.phases[0].occurrence)
     );
 }
 
@@ -1157,4 +1157,20 @@ fn a_stages_first_report_is_placed_so_its_silence_can_be_measured() {
     s.reached_end(5_000);
     let train = s.phases.last().unwrap().occurrence;
     assert_eq!(s.timing.anchor, Some((train, 2.81, 5_000)));
+}
+
+#[test]
+fn a_signal_before_any_stage_keeps_that_first_appearance() {
+    let mut s = Snapshot::new("r", "i", "g");
+    s.feed(b"::orx:: {\"t\":0,\"m\":{\"loss\":4}}\n", false, 1000, true)
+        .unwrap();
+    let mut s: Snapshot = serde_json::from_slice(&serde_json::to_vec(&s).unwrap()).unwrap();
+    s.feed(
+        b"::orx:: {\"phase\":\"train\",\"t\":1,\"m\":{\"loss\":3}}\n",
+        false,
+        2000,
+        true,
+    )
+    .unwrap();
+    assert_eq!(s.first_series_stages["loss"], None);
 }

@@ -64,16 +64,16 @@ test("a range whose ends read alike is left out", () => {
 
 test("with no total the stage reads as steps, from the full monitor and from the summary alone", () => {
   for (const full of [true, false]) {
-    assert.equal(bare(model("open", full).sentence.text), capital(bare(m.run_progress_step({ done: "24" }))), `full: ${full}`);
-    assert.equal(bare(model("running", full).sentence.text), capital(bare(m.run_progress_steps({ done: "200", of: "400" }))), `full: ${full}`);
+    assert.equal(bare(model("open", full).sentence.text), `${m.status_running()} · ${capital(bare(m.run_progress_step({ done: "24" })))}`, `full: ${full}`);
+    assert.equal(bare(model("running", full).sentence.text), `${m.status_running()} · ${capital(bare(m.run_progress_steps({ done: "200", of: "400" })))}`, `full: ${full}`);
   }
-  assert.equal(bare(model("limit").sentence.text), capital(bare(m.run_progress_step({ done: "5" }))));
+  assert.equal(bare(model("limit").sentence.text), `${m.status_running()} · ${capital(bare(m.run_progress_step({ done: "5" })))}`);
 });
 
 test("the caption says only what the sentence doesn't", () => {
   assert.equal(bare(model("running").progress), fmtPercent(0.5));
   const watched = { ...states.running.monitor, sentence: { template: "Loss **{loss}**, falling.", t: states.running.now } };
-  assert.equal(bare(model("running", true, watched).progress), `${bare(m.run_progress_steps({ done: "200", of: "400" }))} · ${fmtPercent(0.5)}`);
+  assert.equal(bare(model("running", true, watched).progress), fmtPercent(0.5));
   assert.equal(bare(model("limit").progress), bare(m.run_progress_limit({ elapsed: "15m", limit: "1h 0m" })));
 });
 
@@ -133,7 +133,7 @@ test("unknown whole-run progress reads the step, the time so far and why there i
       assert.ok(!bare(`${view.progress} ${view.eta}`).includes(fmtPercent(1)), `${name} ${full}: ${view.progress} ${view.eta}`);
     }
   }
-  assert.equal(bare(model("full").sentence.text), capital(bare(m.run_progress_steps({ done: "4", of: "4" }))));
+  assert.equal(bare(model("full").sentence.text), `${m.run_stage_setup()} · ${capital(bare(m.run_progress_steps({ done: "4", of: "4" })))}`);
   const { container } = await banner("full");
   const text = bare(container.textContent);
   assert.ok(!text.includes(bare(m.run_eta_no_total())), text);
@@ -148,7 +148,7 @@ test("a run whose log has said nothing orx recognises is setting up, and says wh
   assert.equal(setup.line, "Successfully downloaded shard_00001.parquet");
   for (const full of [true, false]) {
     const view = model("setup", full);
-    assert.equal(bare(view.sentence.text), bare(m.run_setting_up({ line: setup.line })), `full: ${full}`);
+    assert.equal(bare(view.sentence.text), `${m.run_stage_setup()} · ${setup.line}`, `full: ${full}`);
     assert.equal(view.etaDetail, "", `full: ${full}: no fault to explain`);
     assert.equal(view.eta, "", `full: ${full}`);
     assert.deepEqual(view.bar.segments, [{ weight: 1, fill: null }], `full: ${full}`);
@@ -160,22 +160,22 @@ test("a stage the run declared and has no step of yet says it started, and what 
   assert.equal(setup.stage, "train");
   for (const full of [true, false]) {
     const view = model("announced", full);
-    assert.equal(bare(view.sentence.text), capital(bare(m.run_stage_started({ stage: "train" }))), `full: ${full}`);
+    assert.equal(bare(view.sentence.text), `${m.run_stage_setup()} · ${capital(bare(m.run_stage_started({ stage: "Train" })))}`, `full: ${full}`);
     assert.equal(view.etaDetail, "", `full: ${full}`);
     assert.equal(view.eta, "", `full: ${full}`);
   }
   const printing = { ...setup, line: "Loading 9 shards" };
   const state = { ...states.announced, summary: { ...states.announced.summary, setup: printing } };
   const line = runModel({ item: { sessionId: "s", run: runOf("announced", state), experimentName: null, experimentSlug: "baseline" }, monitor: null, shown: true, agent: "Claude", now: state.now + 60 * 60_000, nextRetryMs: null });
-  assert.match(bare(line.sentence.text), new RegExp(`^${capital(bare(m.run_stage_started({ stage: "train" })))} · \\W*Loading 9 shards\\W*$`), "a declared stage stays that stage however long it takes");
+  assert.equal(bare(line.sentence.text), "Setup · Loading 9 shards");
 });
 
-test("a setting-up run with nothing printed yet names its machine, once", () => {
+test("a setting-up run with nothing printed yet keeps its machine off the line", () => {
   const setup = { ...states.setup.summary.setup, line: null };
   const state = { ...states.setup, summary: { ...states.setup.summary, setup }, monitor: { ...states.setup.monitor, setup } };
   for (const full of [true, false]) {
     const view = runModel({ item: { sessionId: "s", run: runOf("setup", state), experimentName: null, experimentSlug: "baseline" }, monitor: full ? state.monitor : null, shown: true, agent: "Claude", now: state.now, nextRetryMs: null });
-    assert.equal(bare(view.sentence.text), bare(m.run_setup_status()), `full: ${full}`);
+    assert.equal(bare(view.sentence.text), bare(m.run_stage_setup()), `full: ${full}`);
   }
 });
 
@@ -355,10 +355,10 @@ test("a table's columns come in the order the run printed them, and the headline
   for (const full of [true, false]) assert.equal(model("measures", full).headline?.label, expect.headline, `full: ${full}`);
 });
 
-test("a sentence starts with a capital, and a stage named like what it counts is said once", () => {
+test("stage names and counts start with capitals", () => {
   for (const full of [true, false]) {
-    assert.equal(bare(model("named", full).sentence.text), "Train · step **2,280** of **4,200**", `full: ${full}`);
-    assert.equal(bare(model("measures", full).sentence.text), "Round **14** of **24**", `full: ${full}`);
+    assert.equal(bare(model("named", full).sentence.text), "Setup · Train Step **2,280** of **4,200**", `full: ${full}`);
+    assert.equal(bare(model("measures", full).sentence.text), "Round · Round **14** of **24**", `full: ${full}`);
   }
 });
 

@@ -72,7 +72,6 @@ export function RunPage({ run, name, chatSessionId, now }: { run: Run; name: str
           </span>
         </p>
       )}
-      {model.where && <p className="m-0 mt-1 text-xs text-ink-subtext">{model.where}</p>}
       {model.stale && !failed && <p className="m-0 mt-1.5 text-xs text-ink-subtext">{model.stale.why} · {model.stale.age}</p>}
       {model.note && <p className="m-0 mt-1.5 text-sm text-ink-subtext">{model.note}</p>}
       {model.flag?.record && <Issue model={model} flag={model.flag.record} agent={agent} />}
@@ -82,7 +81,7 @@ export function RunPage({ run, name, chatSessionId, now }: { run: Run; name: str
           <Button size="small" variant="ghost" onClick={monitor.retry}><RefreshCw size={13} />{m.app_retry()}</Button>
         </div>
       )}
-      {!model.pre && data && namedStages(data) && <div className="mt-5"><Phases model={model} monitor={data} /></div>}
+      {!model.pre && data && namedStages(data) && <div className="mt-5"><Phases model={model} phases={data.phases} current={data.progress?.phase ?? data.stageOrder.index} /></div>}
       <div className="mt-3"><Rail model={model} kind="bar" hover /></div>
       <div className="mt-1.5"><Captions model={model} /></div>
       {!model.notice && runNotice(run) && <RunContactNotice run={run} className="mt-4" />}

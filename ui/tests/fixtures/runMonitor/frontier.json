@@ -299,6 +299,6 @@
   "revising": false,
   "rules": [],
   "statusText": "wider-match-window  done  100%",
-  "newestLine": "METRIC speedup_mean 2.21946",
-  "pattern": "^chunk (?P<step>\\d+)/(?P<of>\\d+) done"
+  "pattern": "^chunk (?P<step>\\d+)/(?P<of>\\d+) done",
+  "stageOrder": {"index": 2, "count": 3, "first": 2}
 }

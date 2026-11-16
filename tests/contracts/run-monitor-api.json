@@ -56,6 +56,11 @@
             "endedAt": null
           }
         ],
+        "stageOrder": {
+          "index": 0,
+          "count": null,
+          "first": 0
+        },
         "progress": {
           "phase": 0,
           "done": 200.0,
@@ -219,6 +224,11 @@
       "summary": {
         "tone": "running",
         "whole": 0.5,
+        "stageOrder": {
+          "index": 0,
+          "count": null,
+          "first": 0
+        },
         "stage": {
           "name": "",
           "done": 200.0,
@@ -318,6 +328,11 @@
             "endedAt": null
           }
         ],
+        "stageOrder": {
+          "index": 0,
+          "count": null,
+          "first": 0
+        },
         "progress": {
           "phase": 0,
           "done": 50.0,
@@ -421,6 +436,11 @@
       "summary": {
         "tone": "running",
         "whole": 0.125,
+        "stageOrder": {
+          "index": 0,
+          "count": null,
+          "first": 0
+        },
         "stage": {
           "name": "",
           "done": 50.0,
@@ -520,6 +540,11 @@
             "endedAt": null
           }
         ],
+        "stageOrder": {
+          "index": 0,
+          "count": null,
+          "first": 0
+        },
         "progress": {
           "phase": 0,
           "done": 100.0,
@@ -643,6 +668,11 @@
       "summary": {
         "tone": "running",
         "whole": 0.25,
+        "stageOrder": {
+          "index": 0,
+          "count": null,
+          "first": 0
+        },
         "stage": {
           "name": "",
           "done": 100.0,
@@ -744,6 +774,11 @@
             "endedAt": null
           }
         ],
+        "stageOrder": {
+          "index": 0,
+          "count": null,
+          "first": 0
+        },
         "progress": {
           "phase": 0,
           "done": 5.0,
@@ -820,6 +855,11 @@
       "summary": {
         "tone": "running",
         "whole": 0.25,
+        "stageOrder": {
+          "index": 0,
+          "count": null,
+          "first": 0
+        },
         "stage": {
           "name": "",
           "done": 5.0,
@@ -914,6 +954,11 @@
             "endedAt": null
           }
         ],
+        "stageOrder": {
+          "index": 0,
+          "count": null,
+          "first": 0
+        },
         "progress": {
           "phase": 0,
           "done": 24.0,
@@ -992,6 +1037,11 @@
       "summary": {
         "tone": "running",
         "whole": null,
+        "stageOrder": {
+          "index": 0,
+          "count": null,
+          "first": 0
+        },
         "stage": {
           "name": "",
           "done": 24.0,
@@ -1092,6 +1142,11 @@
             "endedAt": null
           }
         ],
+        "stageOrder": {
+          "index": 0,
+          "count": null,
+          "first": 0
+        },
         "progress": {
           "phase": 0,
           "done": 100.0,
@@ -1159,6 +1214,11 @@
       "summary": {
         "tone": "done",
         "whole": 1.0,
+        "stageOrder": {
+          "index": 0,
+          "count": null,
+          "first": 0
+        },
         "stage": {
           "name": "",
           "done": 100.0,
@@ -1239,6 +1299,11 @@
             "endedAt": null
           }
         ],
+        "stageOrder": {
+          "index": 0,
+          "count": null,
+          "first": null
+        },
         "progress": {
           "phase": 0,
           "done": 4.0,
@@ -1308,6 +1373,11 @@
       "summary": {
         "tone": "running",
         "whole": null,
+        "stageOrder": {
+          "index": 0,
+          "count": null,
+          "first": null
+        },
         "stage": {
           "name": "",
           "done": 4.0,
@@ -1401,6 +1471,11 @@
             "endedAt": null
           }
         ],
+        "stageOrder": {
+          "index": 0,
+          "count": null,
+          "first": 0
+        },
         "progress": {
           "phase": 0,
           "done": 100.0,
@@ -1524,6 +1599,11 @@
       "summary": {
         "tone": "running",
         "whole": 0.0001,
+        "stageOrder": {
+          "index": 0,
+          "count": null,
+          "first": 0
+        },
         "stage": {
           "name": "",
           "done": 100.0,
@@ -1633,6 +1713,11 @@
             "endedAt": null
           }
         ],
+        "stageOrder": {
+          "index": 3,
+          "count": null,
+          "first": null
+        },
         "progress": {
           "phase": 3,
           "done": 1.0,
@@ -1702,6 +1787,11 @@
       "summary": {
         "tone": "running",
         "whole": null,
+        "stageOrder": {
+          "index": 3,
+          "count": null,
+          "first": null
+        },
         "stage": {
           "name": "",
           "done": 1.0,
@@ -1786,6 +1876,11 @@
         },
         "source": "declared",
         "phases": [],
+        "stageOrder": {
+          "index": null,
+          "count": null,
+          "first": 0
+        },
         "progress": null,
         "x": {
           "name": "elapsed",
@@ -1847,6 +1942,11 @@
       "summary": {
         "tone": "running",
         "whole": null,
+        "stageOrder": {
+          "index": null,
+          "count": null,
+          "first": 0
+        },
         "stage": null,
         "headline": {
           "name": "loss",
@@ -1991,6 +2091,11 @@
             "endedAt": null
           }
         ],
+        "stageOrder": {
+          "index": 0,
+          "count": null,
+          "first": 0
+        },
         "progress": {
           "phase": 0,
           "done": 14.0,
@@ -2153,6 +2258,11 @@
       "summary": {
         "tone": "running",
         "whole": 0.5833333333333334,
+        "stageOrder": {
+          "index": 0,
+          "count": null,
+          "first": 0
+        },
         "stage": {
           "name": "round",
           "done": 14.0,
@@ -2451,6 +2561,11 @@
             "endedAt": null
           }
         ],
+        "stageOrder": {
+          "index": 0,
+          "count": null,
+          "first": null
+        },
         "progress": null,
         "x": {
           "name": "elapsed",
@@ -2507,7 +2622,17 @@
       "summary": {
         "tone": "running",
         "whole": null,
-        "stage": null,
+        "stageOrder": {
+          "index": 0,
+          "count": null,
+          "first": null
+        },
+        "stage": {
+          "name": "train",
+          "done": null,
+          "of": null,
+          "unit": null
+        },
         "headline": null,
         "logError": null,
         "sentence": null,
@@ -2572,6 +2697,11 @@
         },
         "source": null,
         "phases": [],
+        "stageOrder": {
+          "index": null,
+          "count": null,
+          "first": null
+        },
         "progress": null,
         "x": {
           "name": "elapsed",
@@ -2628,6 +2758,11 @@
       "summary": {
         "tone": "running",
         "whole": null,
+        "stageOrder": {
+          "index": null,
+          "count": null,
+          "first": null
+        },
         "stage": null,
         "headline": null,
         "logError": null,
@@ -2702,6 +2837,11 @@
             "endedAt": null
           }
         ],
+        "stageOrder": {
+          "index": 0,
+          "count": null,
+          "first": null
+        },
         "progress": {
           "phase": 0,
           "done": 3.0,
@@ -2780,6 +2920,11 @@
       "summary": {
         "tone": "running",
         "whole": 0.3,
+        "stageOrder": {
+          "index": 0,
+          "count": null,
+          "first": null
+        },
         "stage": {
           "name": "",
           "done": 3.0,
@@ -2892,6 +3037,11 @@
             "planned": true
           }
         ],
+        "stageOrder": {
+          "index": 1,
+          "count": 3,
+          "first": 1
+        },
         "progress": {
           "phase": 1,
           "done": 5.0,
@@ -2998,6 +3148,11 @@
       "summary": {
         "tone": "running",
         "whole": null,
+        "stageOrder": {
+          "index": 1,
+          "count": 3,
+          "first": 1
+        },
         "stage": {
           "name": "train",
           "done": 5.0,
@@ -3093,6 +3248,11 @@
             "endedAt": null
           }
         ],
+        "stageOrder": {
+          "index": 0,
+          "count": null,
+          "first": null
+        },
         "progress": {
           "phase": 0,
           "done": 2280.0,
@@ -3171,6 +3331,11 @@
       "summary": {
         "tone": "running",
         "whole": 0.5428571428571428,
+        "stageOrder": {
+          "index": 0,
+          "count": null,
+          "first": null
+        },
         "stage": {
           "name": "train",
           "done": 2280.0,
@@ -3259,6 +3424,11 @@
             "endedAt": null
           }
         ],
+        "stageOrder": {
+          "index": 0,
+          "count": null,
+          "first": 0
+        },
         "progress": {
           "phase": 0,
           "done": 200.0,
@@ -3422,6 +3592,11 @@
       "summary": {
         "tone": "running",
         "whole": 0.5,
+        "stageOrder": {
+          "index": 0,
+          "count": null,
+          "first": 0
+        },
         "stage": {
           "name": "",
           "done": 200.0,
@@ -3494,6 +3669,11 @@
         },
         "source": null,
         "phases": [],
+        "stageOrder": {
+          "index": null,
+          "count": null,
+          "first": null
+        },
         "progress": null,
         "x": {
           "name": "elapsed",
@@ -3546,6 +3726,11 @@
       "summary": {
         "tone": "running",
         "whole": null,
+        "stageOrder": {
+          "index": null,
+          "count": null,
+          "first": null
+        },
         "stage": null,
         "headline": null,
         "logError": null,
@@ -3631,6 +3816,11 @@
             "endedAt": null
           }
         ],
+        "stageOrder": {
+          "index": 0,
+          "count": null,
+          "first": 0
+        },
         "progress": {
           "phase": 0,
           "done": 200.0,
@@ -3794,6 +3984,11 @@
       "summary": {
         "tone": "done",
         "whole": 0.5,
+        "stageOrder": {
+          "index": 0,
+          "count": null,
+          "first": 0
+        },
         "stage": {
           "name": "",
           "done": 200.0,
@@ -3900,6 +4095,11 @@
             "endedAt": null
           }
         ],
+        "stageOrder": {
+          "index": 0,
+          "count": null,
+          "first": 0
+        },
         "progress": {
           "phase": 0,
           "done": 100.0,
@@ -4132,6 +4332,11 @@
       "summary": {
         "tone": "running",
         "whole": 0.25,
+        "stageOrder": {
+          "index": 0,
+          "count": null,
+          "first": 0
+        },
         "stage": {
           "name": "",
           "done": 100.0,
@@ -4247,6 +4452,11 @@
             "endedAt": null
           }
         ],
+        "stageOrder": {
+          "index": 0,
+          "count": null,
+          "first": 0
+        },
         "progress": {
           "phase": 0,
           "done": 200.0,
@@ -4456,6 +4666,11 @@
       "summary": {
         "tone": "flag",
         "whole": 0.5,
+        "stageOrder": {
+          "index": 0,
+          "count": null,
+          "first": 0
+        },
         "stage": {
           "name": "",
           "done": 200.0,

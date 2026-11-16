@@ -8,7 +8,8 @@ import { runActive, runApiProvider, runConnectHost, runDisplay, runNotice, runSt
 import { fillSentence, fmtMagnitude, fmtSignal, fmtUsd, plainSentence, tokensOf } from "./format";
 import type { Flag, FlagMode, FlagState, RunMonitor, RunMonitorSummary, RunRule, ShownRun, SignalSpec, SignalValue, Signals, Versus, VersusBy } from "./types";
 import { tickText } from "./journal";
-import { capitalized, captionProgress, clockText, costWords, durationText, estimateWords, progressWords, quoteWords, stageWords } from "./words";
+import { stagePosition } from "./stages";
+import { capitalized, captionProgress, clockText, costWords, durationText, estimateWords, progressWords, quoteWords } from "./words";
 
 /** How the headline compares with the parent: the arrow follows the number, the colour whether that is better. */
 export interface Delta {
@@ -37,8 +38,10 @@ export interface RunModel {
   /** The status word the mark and announcements read. */
   status: string;
   sentence: {
-    /** The one figure that matters is wrapped in `**`; tokens are filled. */
+    /** Bold spans wrap the displayed figures; tokens are filled. */
     text: string;
+    /** The full, refilled watcher sentence when one is shown. */
+    watcher?: string;
     /** Changes when the words do, never when a number refills. */
     key: string;
     /** When the watcher wrote it. */
@@ -255,7 +258,9 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   const limit = monitor?.limit ? { endsAt: monitor.limit.endsAt, ms: monitor.limit.endsAt - startedAt } : null;
   // The summary says where the run stands too, so a line needs no full monitor to say it.
   const stage = summary?.stage ?? null;
-  const stagePhase = progress ? phases[progress.phase] : stage ? { ...stage, priorMs: null, startedAt: null, endedAt: null } : phases[phases.length - 1];
+  const order = monitor?.stageOrder ?? summary?.stageOrder;
+  const stagePhase = progress ? phases[progress.phase] : stage ? { ...stage, priorMs: null, startedAt: null, endedAt: null }
+    : order?.index != null ? phases[order.index] : undefined;
   // The server leaves a live run's estimate out exactly when how much of it remains is unknown.
   const open = live && !pre && (monitor ? monitor.estimate === null : summary !== null && summary.etaMs === null && !summary.pending);
   const limitEndsAt = monitor ? limit?.endsAt ?? null : summary?.limitEndsAt ?? null;
@@ -271,8 +276,23 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   const needsChoice = flag?.state === "waiting" && flag.mode === "copilot";
   const looking = flag?.state === "waking" || flag?.state === "agent_looking" || flag?.state === "asking";
 
+  const position = stagePosition(order, setup !== null);
+  const rawName = stagePhase?.name ? capitalized(stagePhase.name) : "";
+  const name = settingUp ? m.run_stage_setup() : rawName || status;
+  const stageLabel = position?.index != null && position.count !== null
+    ? m.run_stage_position({ stage: autoDir(name), position: ltr(`${fmtNumber(position.index + 1)}/${fmtNumber(position.count)}`) })
+    : autoDir(name);
+  const count = stageDone === null ? "" : capitalized(progressWords(stagePhase, stageDone));
+  const detail = settingUp ? stageDone !== null
+    ? [rawName && rawName !== m.run_stage_setup() ? autoDir(rawName) : "", count].filter(Boolean).join(" ")
+    : setup?.line ? quoted(setup.line) : rawName ? m.run_stage_started({ stage: autoDir(rawName) }) : ""
+    : count;
+  const statusText = detail ? `${stageLabel} · ${detail}` : stageLabel;
+  const stageKey = `${settingUp ? "setup" : "stage"}:${order?.index ?? rawName}:${order?.first ?? ""}:${order?.count ?? ""}`;
   const recorded = monitor ? monitor.sentence : summary?.sentence ?? null;
   const watched = live && recorded && now - recorded.t <= 3 * 60_000 ? recorded : null;
+  const warning = live && flag ? flag.record?.template ?? recorded?.template ?? null : null;
+  let speaking: string | null = null;
   let sentence: RunModel["sentence"];
   if (notice) {
     const { lead } = runNoticeCopy(notice, null, runApiProvider(run), bold);
@@ -281,10 +301,11 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   } else if (display.waiting) {
     const text = `${statusLabel(display.status)} · ${autoDir(display.waiting)}`;
     sentence = { text, key: `pre:waiting:${display.waiting}`, at: null };
-  } else if (watched && !(tone === "stopped" && outcome?.by === "user")) {
-    sentence = { text: fillSentence(watched.template, bindings, signals), key: `look:${watched.template}`, at: watched.t };
+  } else if (warning) {
+    speaking = warning;
+    const text = fillSentence(warning, bindings, signals);
+    sentence = { text, watcher: text, key: `flag:${flag?.id}:${warning}`, at: flag?.record?.at ?? recorded?.t ?? null };
   } else if (!live) {
-    // A finished run says how long it took instead, where the time goes.
     const text = !progressText || tone === "done" ? ""
       : outcome?.by === "user" ? m.run_auto_by_you({ progress: autoDir(progressText) })
       : m.run_auto_at({ progress: autoDir(progressText) });
@@ -295,15 +316,13 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
       : before?.kind === "queued" ? (before.startsAt === null ? m.run_queued() : m.run_queued_start_at({ clock: clockText(before.startsAt) }))
       : m.status_starting();
     sentence = { text, key: `pre:${before?.kind ?? "starting"}`, at: null };
-  } else if (settingUp && stageDone === null) {
-    const begun = setup?.stage ? capitalized(m.run_stage_started({ stage: autoDir(setup.stage) })) : null;
-    const text = begun ? (setup?.line ? `${begun} · ${quoted(setup.line)}` : begun)
-      : setup?.line ? m.run_setting_up({ line: quoted(setup.line) }) : m.run_setup_status();
-    sentence = { text, key: "setup", at: null };
+  } else if (watched) {
+    speaking = watched.template;
+    const watcher = fillSentence(watched.template, bindings, signals);
+    const text = m.run_stage_with_look({ stage: statusText.replace(/[.。۔।]+$/u, ""), sentence: watcher });
+    sentence = { text, watcher, key: `look:${stageKey}:${watched.template}`, at: watched.t };
   } else {
-    const auto = stageDone === null ? (stagePhase?.name ? autoDir(stagePhase.name) : "") : stageWords(stagePhase, stageDone);
-    const text = auto ? capitalized(auto) : setup?.line ? quoted(setup.line) : setup?.stage ? autoDir(setup.stage) : status;
-    sentence = { text, key: "auto", at: null };
+    sentence = { text: statusText, key: `auto:${stageKey}`, at: null };
   }
 
   let eta = "";
@@ -358,7 +377,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     eta = "";
   }
 
-  const headline = headlineOf(monitor, summary?.headline ?? null, signals, sentence.key, live);
+  const headline = headlineOf(monitor, summary?.headline ?? null, signals, speaking, live);
 
   let segments = progress?.segments.map(({ weight, fill }) => ({ weight, fill: pre ? 0 : fill }))
     ?? summary?.segments?.map(({ weight, fill }) => ({ weight, fill: pre ? 0 : fill }))
@@ -368,8 +387,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     const fill = stageDone !== null && stagePhase?.of ? Math.min(1, stageDone / stagePhase.of) : null;
     segments = [{ weight: 1, fill }];
   }
-  // With no watcher the sentence is the stage and how far, so the caption says only what is new.
-  const said = sentence.key === "auto" || sentence.key.startsWith("end:");
+  const said = sentence.key.startsWith("auto:") || sentence.key.startsWith("look:") || sentence.key.startsWith("end:");
   const caption = run.status === "done" ? "" : pre ? m.run_not_started()
     : progress && (notice || degraded) ? m.run_progress_last_seen({ progress: autoDir(progressText ?? "") })
     : progress ? captionProgress({ ...progress, whole }, phases, open && limit ? limit.ms : null, elapsed, said)
@@ -447,7 +465,7 @@ export function ruleText(rule: RunRule): string {
   return rule.text !== null ? autoDir(rule.text) : m.run_rule_budget({ budget: ltr(fmtUsd(rule.budgetUsd ?? 0)) });
 }
 
-function headlineOf(monitor: RunMonitor | null, summary: NonNullable<Run["monitor"]>["headline"], signals: Signals, sentenceKey: string, live: boolean): RunModel["headline"] {
+function headlineOf(monitor: RunMonitor | null, summary: NonNullable<Run["monitor"]>["headline"], signals: Signals, sentenceTemplate: string | null, live: boolean): RunModel["headline"] {
   let name: string;
   let label: string;
   let value: SignalValue;
@@ -461,7 +479,7 @@ function headlineOf(monitor: RunMonitor | null, summary: NonNullable<Run["monito
   } else if (summary) {
     ({ name, label, value, vs } = summary);
   } else return null;
-  const said = sentenceKey.startsWith("look:") ? tokensOf(sentenceKey.slice(5)) : new Set<string>();
+  const said = tokensOf(sentenceTemplate ?? "");
   return {
     name,
     label,

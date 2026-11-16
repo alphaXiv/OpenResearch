@@ -126,16 +126,17 @@ test("against an older server the line reads from the run's status and never ask
 
 test("a new sentence is announced once; a number refilling is not", async () => {
   backend();
-  const view = await banner([run("r1")]);
+  const matching = (extra = {}) => run("r1", { monitor: summary({ stageOrder: running.stageOrder, stage: { name: "train", done: 1240, of: 5000, unit: "steps" }, ...extra }) });
+  const view = await banner([matching()]);
   await settle();
   assert.equal(status(), "");
-  await view.update([run("r1", { monitor: summary({ bindings: { loss: 2.1 } }) })]);
+  await view.update([matching({ bindings: { loss: 2.1 } })]);
   await settle();
   assert.equal(status(), "");
   const next = { template: "Loss **{loss}**, flattening out.", t: now };
-  await view.update([run("r1", { monitor: summary({ sentence: next, bindings: { loss: 2.1 }, rev: running.rev + 1 }) })]);
+  await view.update([matching({ sentence: next, bindings: { loss: 2.1 }, rev: running.rev + 1 })]);
   await settle();
-  assert.equal(status().replace(/[⁦-⁩]/g, ""), "Loss 2.10, flattening out.");
+  assert.equal(status().replace(/[⁦-⁩]/g, ""), "Train (2/2) · Step 1,240 of 5,000. Loss 2.10, flattening out.");
 });
 
 test("the status holds an announcement only until it is made, and nothing of a run that left", async (t) => {
@@ -190,15 +191,15 @@ test("several runs show one summary that opens into a row each, named by what se
   await settle();
   assert.ok(plain(container.textContent).includes("… at 2e15 FLOPs"), "the summary says what they share");
   assert.deepEqual(rows().map((row) => row.getAttribute("aria-label")), ["Depth 4 at 2e15 FLOPs", "Depth 6 at 2e15 FLOPs", "Depth 8 at 2e15 FLOPs"]);
-  assert.deepEqual(rows().map((row) => plain(row.querySelector(".run-status-link").textContent).split(" · ")[0]), ["Depth 4", "Depth 6", "Depth 8"]);
-  assert.ok(plain(rows()[0].querySelector(".run-status-link").getAttribute("aria-label")).includes("Depth 4 at 2e15 FLOPs"), "the accessible name includes the whole title");
+  assert.deepEqual(rows().map((row) => plain(row.querySelector('button[aria-haspopup="dialog"]').textContent).split(" · ")[0]), ["Depth 4", "Depth 6", "Depth 8"]);
+  assert.ok(plain(rows()[0].querySelector('button[aria-haspopup="dialog"]').getAttribute("aria-label")).includes("Depth 4 at 2e15 FLOPs"), "the accessible name includes the whole title");
   assert.equal(requests.filter((r) => r.request.endsWith("/monitor")).length, 0, "closed rows read their summaries");
 
   await click(rows()[1].querySelector(`button[aria-label="${m.run_show_more()}"]`));
   const open = rows()[1];
   assert.ok(open.querySelector(`button[aria-label="${m.run_show_less()}"]`), "the row opened into its strip in place");
   assert.equal(document.activeElement, open.querySelector(`button[aria-label="${m.run_show_less()}"]`));
-  assert.ok(plain(open.querySelector(".run-status-link").textContent).startsWith("Depth 6 · "));
+  assert.ok(plain(open.querySelector('button[aria-haspopup="dialog"]').textContent).startsWith("Depth 6 · "));
 
   await press("Escape");
   await settle();
@@ -266,7 +267,8 @@ test("a summary of runs with no shared words names each by its whole title and o
   const { container } = await several([item(run("r1")), item(run("r2"))], { onOpenRunPage: (...args) => opens.push(args) });
   await settle();
   assert.ok(!plain(container.textContent).includes("…"));
-  await click(find('[role="link"]', "r2"));
+  await click(find('button[aria-haspopup="dialog"]', "r2"));
+  await click(find('[role="dialog"] [role="link"]', "r2"));
   assert.equal(opens[0][0].id, "r2");
 });
 
@@ -563,12 +565,14 @@ test("shown runs without a summary draw their terminal status at both levels wit
     assert.ok(button(m.run_dismiss()));
     const label = status === "done" ? m.status_done() : status === "failed" ? m.status_failed() : m.run_lead_stopped();
     assert.ok(view.container.textContent.includes(label), view.container.textContent);
-    await click(view.container.querySelector('[role="link"]'));
+    await click(view.container.querySelector('button[aria-haspopup="dialog"]'));
+    await click(document.querySelector('[role="dialog"] [role="link"]'));
     assert.equal(opens[0][0].id, "r1");
     assert.equal(button(m.run_show_less()), null);
     assert.ok(view.container.textContent.includes(label));
     assert.ok(button(m.run_dismiss()));
-    await click(view.container.querySelector('[role="link"]'));
+    await click(view.container.querySelector('button[aria-haspopup="dialog"]'));
+    await click(document.querySelector('[role="dialog"] [role="link"]'));
     assert.equal(opens[1][0].id, "r1");
     assert.equal(requests.filter((r) => r.request.includes("/monitor")).length, 0);
     assert.ok(!view.container.textContent.includes(m.run_monitor_load_failed()));
@@ -634,19 +638,21 @@ test("the row opens only for two chart points and returns to one line when done"
 });
 
 
-test("a single run links its raw status to its run page and keeps its name and machine behind the mark", async () => {
+test("a single run opens its stage card from the raw status and links the run from its name", async () => {
   backend({ monitors: { r1: { ...running, sentence: null } } });
   const opens = [];
   const { container } = await banner([run("r1")], { props: { onOpenRunPage: (...args) => opens.push(args) } });
   await settle();
-  const link = container.querySelector('[role="link"]');
-  assert.ok(link);
-  assert.ok(!link.textContent.includes("r1"));
-  assert.ok(plain(link.getAttribute("aria-label")).includes("r1"));
-  const mark = container.querySelector('[role="img"][tabindex="0"]');
-  assert.ok(plain(mark.getAttribute("aria-label")).includes("r1"));
-  assert.ok(plain(mark.getAttribute("aria-label")).includes(m.compute_target_local()));
-  await click(link);
-  await press("Enter", link);
+  const trigger = container.querySelector('button[aria-haspopup="dialog"]');
+  assert.ok(trigger);
+  assert.ok(!trigger.textContent.includes("r1"));
+  assert.ok(plain(trigger.getAttribute("aria-label")).includes("r1"));
+  assert.equal(trigger.previousElementSibling.getAttribute("tabindex"), null);
+  await click(trigger);
+  const card = document.querySelector('[role="dialog"]');
+  assert.ok(plain(card.textContent).includes(m.compute_target_local()));
+  await click(card.querySelector('[role="link"]'));
+  await click(trigger);
+  await press("Enter", document.querySelector('[role="dialog"] [role="link"]'));
   assert.deepEqual(opens.map(([run, intent]) => [run.id, intent]), [["r1", "preview"], ["r1", "keepOpen"]]);
 });

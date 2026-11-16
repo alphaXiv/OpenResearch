@@ -127,8 +127,8 @@
   "revising": false,
   "rules": [],
   "statusText": "ddpm-cifar-cosine  running  55%",
-  "newestLine": "train: 80000it [4:21:07, 5.10it/s]",
   "best": {
     "fid": 16.956171
-  }
+  },
+  "stageOrder": {"index": 0, "count": 1, "first": 0}
 }

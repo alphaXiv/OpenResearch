@@ -63,7 +63,7 @@ async function overview(runs, monitor = () => pipeline(), { chat = null, session
 test("the latest run draws its sentence, stages, bar and captions, then every block in the view's order", async () => {
   const monitor = pipeline();
   const { container } = await overview([run("r2", { monitor: summary(monitor) })]);
-  assert.match(text(container), /train · step 2,280 of 4,200/i);
+  assert.match(text(container), /train \(2\/4\) · step 2,280 of 4,200/i);
   const figures = [...container.querySelectorAll("strong")].map((strong) => text(strong));
   assert.ok(figures.includes("2,280") && figures.includes("4,200"), `the stage's numbers draw bold: ${figures}`);
   assert.deepEqual([...container.querySelectorAll("ol li")].map((stage) => text(stage).split(/\d/)[0].replace(/about\s*$/, "").trim()), ["download", "tokenize", "train", "eval", "export"]);
@@ -81,12 +81,12 @@ test("how the view is built shows the view as the agent wrote it, where its sign
   const details = container.querySelector("details");
   assert.equal(text(details.querySelector("summary")), m.run_view_how());
   assert.ok(text(details).includes("The view, stored on distil-glue-6l and inherited by its children"));
-  assert.deepEqual([...details.querySelectorAll("pre")].map((pre) => pre.textContent), [monitor.viewFrom.markup, monitor.newestLine, monitor.statusText]);
+  assert.deepEqual([...details.querySelectorAll("pre")].map((pre) => pre.textContent), [monitor.viewFrom.markup, monitor.statusText]);
   assert.ok(details.textContent.includes(m.run_view_source_declared()));
 });
 
 test("a default view with no markup says where it comes from and shows no code; a source from a newer server goes unnamed", async () => {
-  const monitor = { ...pipeline(), viewFrom: { experimentId: "e1", markup: "", isDefault: true }, source: "wandb", newestLine: undefined };
+  const monitor = { ...pipeline(), viewFrom: { experimentId: "e1", markup: "", isDefault: true }, source: "wandb" };
   const { container } = await overview([run("r2", { monitor: summary(monitor) })], () => monitor);
   const details = container.querySelector("details");
   assert.ok(text(details).includes(m.run_view_default()));

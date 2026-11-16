@@ -126,5 +126,5 @@
   "revising": false,
   "rules": [],
   "statusText": "distil-glue-6l  running  50%",
-  "newestLine": "::orx:: {\"phase\":\"train\",\"step\":2280,\"of\":4200,\"unit\":\"steps\",\"m\":{\"loss\":0.4683}}"
+  "stageOrder": {"index": 2, "count": 5, "first": 2}
 }

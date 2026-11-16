@@ -137,5 +137,5 @@
   "revising": false,
   "rules": [],
   "statusText": "selfplay-pool-64  running  60%",
-  "newestLine": "::orx:: {\"step\":14,\"row\":\"rounds\",\"m\":{\"round\":14,\"win_vs_prev\":0.5153,\"elo\":896,\"game_len\":79.17,\"secs\":930}}"
+  "stageOrder": {"index": 0, "count": 1, "first": 0}
 }
