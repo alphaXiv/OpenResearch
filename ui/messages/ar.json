@@ -1901,7 +1901,6 @@
   "close_pending_quit": "إنهاء",
   "close_pending_force_quit": "فرض الإنهاء",
   "close_pending_blocked": "يوقف «فرض الإنهاء» التجارب التي تحتاج إلى بقاء OpenResearch مفتوحًا.",
-  "close_pending_uncounted": "تعذّر على OpenResearch التحقق من وجود وكلاء أو تجارب قيد التشغيل. يؤدي الإنهاء إلى إيقاف أي وكيل يعمل.",
   "close_pending_agents": "يتوقف الوكلاء عند الإنهاء",
   "close_pending_needs_open": "تجارب تحتاج إلى بقاء OpenResearch مفتوحًا حتى تنتهي",
   "close_pending_continues": "تجارب تستمر في العمل وتبلّغ عند فتح OpenResearch في المرة القادمة",

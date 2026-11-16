@@ -1901,7 +1901,6 @@
   "close_pending_quit": "Quit",
   "close_pending_force_quit": "Force Quit",
   "close_pending_blocked": "Force Quit stops the experiments that need OpenResearch open.",
-  "close_pending_uncounted": "OpenResearch couldn't check for running agents and experiments. Quitting stops any agent that is working.",
   "close_pending_agents": "Agents stop when you quit",
   "close_pending_needs_open": "Experiments that need OpenResearch open until they finish",
   "close_pending_continues": "Experiments that keep running and report when OpenResearch next opens",

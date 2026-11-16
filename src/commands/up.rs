@@ -146,6 +146,16 @@ pub async fn run(args: UpArgs) -> Result<()> {
     let project_lifecycle = Arc::new(ProjectLifecycle::default());
     let data_dir_move_in_progress = Arc::new(AtomicBool::new(false));
     let stopping = Arc::new(AtomicBool::new(false));
+
+    // Harnesses spawn lazily on the first message to one of their sessions;
+    // no eager agent bring-up. (--no-agent is now a no-op kept for compat.)
+    let agent = Arc::new(AgentHost::new(args.model.clone()));
+    let codex = Arc::new(local::codex::CodexHost::new());
+    let claude = Arc::new(local::claude::ClaudeHost::new());
+    claude.start_reaper();
+    codex.start_reaper();
+    let chat = Arc::new(ChatHost::new(agent.clone(), codex.clone(), claude.clone()));
+
     let api = Arc::new(api_v2::Api::new(
         instance.clone(),
         token.clone(),
@@ -156,19 +166,12 @@ pub async fn run(args: UpArgs) -> Result<()> {
             data_dir_move_in_progress.clone(),
             stopping.clone(),
         ),
+        chat.clone(),
         crate::store::data_dir(),
     )?);
     api_v2::install(api.clone())?;
 
-    // Harnesses spawn lazily on the first message to one of their sessions;
-    // no eager agent bring-up. (--no-agent is now a no-op kept for compat.)
-    let agent = Arc::new(AgentHost::new(args.model.clone()));
-    let codex = Arc::new(local::codex::CodexHost::new());
-    let claude = Arc::new(local::claude::ClaudeHost::new());
-    claude.start_reaper();
-    codex.start_reaper();
     let remote_instance_id = persistent_host.then(|| uuid::Uuid::new_v4().to_string());
-    let chat = Arc::new(ChatHost::new(agent.clone(), codex.clone(), claude.clone()));
     let state = AppState {
         agent: agent.clone(),
         chat: chat.clone(),
@@ -285,8 +288,8 @@ pub async fn run(args: UpArgs) -> Result<()> {
             loop {
                 tokio::time::sleep(Duration::from_secs(30)).await;
                 // An unreadable store is not proof of idleness.
-                if idle.check(&api, started.elapsed()).unwrap_or(false)
-                    && stop_admitting_if_idle(&api).unwrap_or(false)
+                if idle.check(&api, started.elapsed()).await.unwrap_or(false)
+                    && stop_admitting_if_idle(&api).await.unwrap_or(false)
                 {
                     eprintln!("orx up: idle for ten minutes; stopping");
                     SHUTDOWN_REQUESTED.notify_one();
@@ -839,7 +842,6 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
             "/api/settings/profile",
             get(profile_settings).post(set_profile_settings),
         )
-        .route("/api/pending-work", get(pending_work))
         .route("/api/update", get(update_status))
         .route("/api/update/notes", get(update_notes))
         .route("/api/update/apply", post(apply_update))
@@ -5364,10 +5366,11 @@ static ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::
 static DRAINING: AtomicBool = AtomicBool::new(false);
 static IDLE_EXIT: AtomicBool = AtomicBool::new(false);
 
-fn stop_admitting_if_idle(api: &api_v2::Api) -> Result<bool> {
+async fn stop_admitting_if_idle(api: &api_v2::Api) -> Result<bool> {
     IDLE_EXIT.store(true, Ordering::SeqCst);
     let idle = api
         .busy()
+        .await
         .map(|busy| !busy && ACTIVE.load(Ordering::SeqCst) == 0);
     if !matches!(idle, Ok(true)) {
         IDLE_EXIT.store(false, Ordering::SeqCst);
@@ -6488,13 +6491,6 @@ async fn set_dashboard_locale(Json(SetLocaleReq { locale }): Json<SetLocaleReq>)
     })
     .await
     .map_err(|e| ApiError::from(anyhow!("locale task failed: {e}")))?
-}
-
-/// What a quit would interrupt, for the page's close dialog.
-async fn pending_work() -> ApiResult {
-    tokio::task::spawn_blocking(|| Ok(Json(json!(Store::open()?.pending_work()?))))
-        .await
-        .map_err(|e| ApiError::from(anyhow!("pending work task failed: {e}")))?
 }
 
 // --- updates -----------------------------------------------------------------

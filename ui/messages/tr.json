@@ -1901,7 +1901,6 @@
   "close_pending_quit": "Çık",
   "close_pending_force_quit": "Zorla çık",
   "close_pending_blocked": "Zorla çıkmak, OpenResearch'ün açık kalmasını gerektiren deneyleri durdurur.",
-  "close_pending_uncounted": "OpenResearch çalışan ajanları ve deneyleri kontrol edemedi. Çıkmak, çalışan tüm ajanları durdurur.",
   "close_pending_agents": "Çıktığınızda ajanlar durur",
   "close_pending_needs_open": "Bitene kadar OpenResearch'ün açık kalmasını gerektiren deneyler",
   "close_pending_continues": "Çalışmayı sürdüren ve OpenResearch bir sonraki açılışında bildiren deneyler",
