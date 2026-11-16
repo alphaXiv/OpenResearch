@@ -2027,5 +2027,9 @@
   "usage_reset_confirm": "Use reset",
   "usage_reset_done": "Your Codex limits are refilled.",
   "usage_reset_nothing": "Nothing to reset yet: your limits aren't used up. The reset is kept.",
-  "usage_reset_none_left": "No resets left."
+  "usage_reset_none_left": "No resets left.",
+  "acp_approval_ask": "Ask",
+  "acp_approval_ask_description": "Ask before actions that need approval",
+  "acp_approval_auto": "Auto-approve",
+  "acp_approval_auto_description": "Approve individual requests automatically. The agent's access restrictions still apply."
 }

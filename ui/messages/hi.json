@@ -2027,5 +2027,9 @@
   "usage_reset_confirm": "रीसेट इस्तेमाल करें",
   "usage_reset_done": "आपकी Codex सीमाएँ फिर से भर गईं।",
   "usage_reset_nothing": "अभी रीसेट करने को कुछ नहीं: आपकी सीमाएँ खत्म नहीं हुई हैं। रीसेट आपके पास रहेगा।",
-  "usage_reset_none_left": "कोई रीसेट बाकी नहीं।"
+  "usage_reset_none_left": "कोई रीसेट बाकी नहीं।",
+  "acp_approval_ask": "हर बार पूछें",
+  "acp_approval_ask_description": "अनुमति की ज़रूरत वाले कामों से पहले पूछें",
+  "acp_approval_auto": "अपने आप अनुमति दें",
+  "acp_approval_auto_description": "अलग-अलग कामों के अनुरोध अपने आप मंज़ूर करें। एजेंट के अपने ऐक्सेस प्रतिबंध लागू रहेंगे।"
 }
