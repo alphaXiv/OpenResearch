@@ -488,7 +488,7 @@ async fn turn(ctx: &mut TurnCtx, log: &Path, logged: u64) -> Result<()> {
     if let Some(usage) = turn_usage(&result) {
         let model = turn_model(&ctx.session_id, started);
         let sample = format!("antigravity-acp-{}", ctx.attempt_count_for_usage());
-        ctx.record_native_usage(&sample, model.as_deref(), None, usage);
+        ctx.record_native_usage(&sample, model.as_deref(), None, usage, None);
     }
     if take_notices(ctx) {
         let cause = take_stop_error(&ctx.session_id, &native_id)

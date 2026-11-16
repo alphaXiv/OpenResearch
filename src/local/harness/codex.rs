@@ -32,7 +32,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -59,6 +59,9 @@ use crate::local::codex::{CodexClient, JsonRpcError, ServerReqKind, TurnEvent};
 use crate::local::native_store::{self, NativeStore};
 use crate::local::opencode::ensure_playbook;
 use crate::local::shell_env::installs;
+use crate::local::usage::{
+    remaining_percent, PlanCredits, PlanResets, PlanWindow, Read, ResetCredit, Snapshot, Unanswered,
+};
 use crate::store::{Store, StoredChatMessage};
 
 fn codex_native_usage(usage: &Value) -> crate::store::TokenUsage {
@@ -342,13 +345,26 @@ const CODEX_REASONING_LEVELS: [&str; 4] = ["low", "medium", "high", "xhigh"];
 /// Query the app-server's `model/list` — codex's own catalog, the same data its
 /// TUI picker renders: every model with its `supportedReasoningEfforts` and
 /// default. The installed CLI owns its catalog and per-model effort choices.
-///
-/// Protocol: spawn `codex app-server`, `initialize` → `initialized` (the same
-/// handshake `local::codex` uses, incl. `experimentalApi` — `model/list` is
-/// part of the v2 surface), then one `model/list` request. Any failure returns
-/// `None`. Hidden catalog entries are skipped
-/// (the server already filters them by default; the guard is belt-and-braces).
+/// Any failure returns `None`. Hidden catalog entries are skipped (the server
+/// already filters them by default; the guard is belt-and-braces).
 async fn codex_model_list(bin: &Path, home: Option<&Path>) -> Option<Value> {
+    codex_rpc(bin, home, "model/list", json!({}))
+        .await
+        .ok()?
+        .get("result")
+        .cloned()
+}
+
+/// One request on a throwaway `codex app-server`: `initialize` →
+/// `initialized` (the handshake `local::codex` uses, incl. `experimentalApi`,
+/// which the v2 surface needs), the request, then its whole response, a
+/// JSON-RPC error included.
+async fn codex_rpc(
+    bin: &Path,
+    home: Option<&Path>,
+    method: &str,
+    params: Value,
+) -> std::result::Result<Value, Unanswered> {
     // Acquire the spawn lane before the deadline — queue time must not spend
     // the child's execution budget.
     let permit = super::detect::detect_spawn_permit().await;
@@ -363,29 +379,37 @@ async fn codex_model_list(bin: &Path, home: Option<&Path>) -> Option<Value> {
         if let Some(home) = home {
             cmd.env("CODEX_HOME", home);
         }
-        let (mut child, _permit) = super::detect::spawn_with_permit(cmd, permit).await.ok()?;
-        let mut stdin = child.stdin.take()?;
-        let mut lines = BufReader::new(child.stdout.take()?).lines();
+        let (mut child, _permit) = super::detect::spawn_with_permit(cmd, permit)
+            .await
+            .map_err(Unanswered::Spawn)?;
+        let mut stdin = child.stdin.take().ok_or(Unanswered::Closed)?;
+        let mut lines = BufReader::new(child.stdout.take().ok_or(Unanswered::Closed)?).lines();
 
         use tokio::io::AsyncWriteExt;
-        async fn send(stdin: &mut tokio::process::ChildStdin, v: Value) -> Option<()> {
+        async fn send(
+            stdin: &mut tokio::process::ChildStdin,
+            v: Value,
+        ) -> std::result::Result<(), Unanswered> {
             let mut line = v.to_string();
             line.push('\n');
-            stdin.write_all(line.as_bytes()).await.ok()
+            stdin
+                .write_all(line.as_bytes())
+                .await
+                .map_err(|_| Unanswered::Closed)
         }
         // Read until the response with this id (skipping notifications).
         async fn recv(
             lines: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
             id: u64,
-        ) -> Option<Value> {
+        ) -> std::result::Result<Value, Unanswered> {
             while let Ok(Some(line)) = lines.next_line().await {
                 if let Ok(v) = serde_json::from_str::<Value>(&line) {
                     if v.get("id").and_then(Value::as_u64) == Some(id) {
-                        return Some(v);
+                        return Ok(v);
                     }
                 }
             }
-            None
+            Err(Unanswered::Closed)
         }
 
         send(
@@ -408,17 +432,548 @@ async fn codex_model_list(bin: &Path, home: Option<&Path>) -> Option<Value> {
         send(&mut stdin, serde_json::json!({ "method": "initialized" })).await?;
         send(
             &mut stdin,
-            serde_json::json!({ "id": 2, "method": "model/list", "params": {} }),
+            serde_json::json!({ "id": 2, "method": method, "params": params }),
         )
         .await?;
-        let resp = recv(&mut lines, 2).await?;
-        let result = resp.get("result")?.clone();
-        Some(result)
+        recv(&mut lines, 2).await
     };
     tokio::time::timeout(Duration::from_secs(15), fut)
         .await
-        .ok()
-        .flatten()
+        .unwrap_or(Err(Unanswered::TimedOut))
+}
+
+const RATE_LIMITS: &str = "account/rateLimits/read";
+
+/// Why an account request got no result.
+#[derive(Debug, PartialEq)]
+pub(crate) enum AccountError {
+    /// The installed Codex predates the method.
+    Unsupported,
+    /// Codex answered with an error, whose message this is.
+    Rejected(String),
+    /// Codex gave no answer; the message says why.
+    Unanswered(String),
+}
+
+/// One request about `profile`'s account, asked of a chat's live app-server
+/// signed in to it when there is one, since two processes refreshing the same
+/// single-use ChatGPT token can sign the user out; else of a throwaway one.
+async fn account_request(
+    codex: &crate::local::codex::CodexHost,
+    profile: Option<&str>,
+    bin: &Path,
+    home: Option<&Path>,
+    method: &str,
+    params: Value,
+) -> std::result::Result<Value, AccountError> {
+    if let Some(client) = codex.live_client(profile).await {
+        return match client
+            .try_request_with_timeout(method, params, Duration::from_secs(15))
+            .await
+        {
+            Ok(Ok(result)) => Ok(result),
+            Ok(Err(error)) => Err(rpc_error(Some(error.code), &error.message)),
+            Err(error) => Err(AccountError::Unanswered(format!(
+                "Codex didn't answer: {error}."
+            ))),
+        };
+    }
+    match codex_rpc(bin, home, method, params).await {
+        Ok(response) => response_result(&response),
+        Err(unanswered) => Err(AccountError::Unanswered(unanswered.message("Codex", bin))),
+    }
+}
+
+fn response_result(response: &Value) -> std::result::Result<Value, AccountError> {
+    match response.get("error") {
+        Some(error) => Err(rpc_error(
+            error.get("code").and_then(Value::as_i64),
+            error.get("message").and_then(Value::as_str).unwrap_or(""),
+        )),
+        None => Ok(response.get("result").cloned().unwrap_or(Value::Null)),
+    }
+}
+
+fn rpc_error(code: Option<i64>, message: &str) -> AccountError {
+    // Releases that predate a method reject it as an unknown variant of the
+    // request enum rather than with method-not-found.
+    if code == Some(-32601) || (code == Some(-32600) && message.contains("unknown variant")) {
+        AccountError::Unsupported
+    } else {
+        AccountError::Rejected(message.to_string())
+    }
+}
+
+/// The account's plan limits and resets from `account/rateLimits/read`.
+pub(crate) async fn read_plan(
+    codex: &crate::local::codex::CodexHost,
+    profile: Option<&str>,
+    bin: &Path,
+    home: Option<&Path>,
+) -> Read {
+    plan_read(account_request(codex, profile, bin, home, RATE_LIMITS, Value::Null).await)
+}
+
+fn plan_read(answer: std::result::Result<Value, AccountError>) -> Read {
+    match answer {
+        Ok(result) => parse_plan(&result),
+        Err(AccountError::Unsupported) => Read::Unsupported,
+        Err(AccountError::Rejected(message)) => {
+            Read::Failed(format!("Codex couldn't read this plan's limits: {message}"))
+        }
+        Err(AccountError::Unanswered(message)) => Read::Failed(message),
+    }
+}
+
+/// What `account/rateLimitResetCredit/consume` did.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum ResetOutcome {
+    Reset,
+    /// No current window is eligible; the credit is kept.
+    NothingToReset,
+    NoCredit,
+    /// This attempt already reset the limits.
+    AlreadyRedeemed,
+}
+
+/// Spends one of the account's resets. `attempt` is the idempotency key of one
+/// confirmed click, so a retry of it never spends a second credit; without
+/// `credit`, Codex picks the next one.
+pub(crate) async fn consume_reset(
+    codex: &crate::local::codex::CodexHost,
+    profile: Option<&str>,
+    bin: &Path,
+    home: Option<&Path>,
+    credit: Option<&str>,
+    attempt: &str,
+) -> std::result::Result<ResetOutcome, AccountError> {
+    let params = json!({ "idempotencyKey": attempt, "creditId": credit });
+    let result = account_request(
+        codex,
+        profile,
+        bin,
+        home,
+        "account/rateLimitResetCredit/consume",
+        params,
+    )
+    .await?;
+    let outcome = result.get("outcome").and_then(Value::as_str);
+    match outcome {
+        Some("reset") => Ok(ResetOutcome::Reset),
+        Some("nothingToReset") => Ok(ResetOutcome::NothingToReset),
+        Some("noCredit") => Ok(ResetOutcome::NoCredit),
+        Some("alreadyRedeemed") => Ok(ResetOutcome::AlreadyRedeemed),
+        _ => Err(AccountError::Rejected(format!(
+            "it answered {result}, which this version of OpenResearch can't read"
+        ))),
+    }
+}
+
+/// `account/rateLimits/read`'s result, as far as the plan needs it.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RateLimits {
+    rate_limits: RateLimitBucket,
+    rate_limits_by_limit_id: Option<std::collections::BTreeMap<String, RateLimitBucket>>,
+    /// Its list may be capped below the count, and lists spent and expired credits too.
+    rate_limit_reset_credits: Option<ResetCredits>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RateLimitBucket {
+    limit_id: Option<String>,
+    limit_name: Option<String>,
+    primary: Option<RateLimitWindow>,
+    secondary: Option<RateLimitWindow>,
+    credits: Option<Credits>,
+    plan_type: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RateLimitWindow {
+    used_percent: f64,
+    window_duration_mins: Option<u64>,
+    /// Unix seconds.
+    resets_at: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Credits {
+    has_credits: Option<bool>,
+    unlimited: Option<bool>,
+    balance: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResetCredits {
+    available_count: i64,
+    credits: Option<Vec<ResetCreditEntry>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResetCreditEntry {
+    id: String,
+    status: Option<String>,
+    title: Option<String>,
+    description: Option<String>,
+    /// Unix seconds.
+    expires_at: Option<i64>,
+}
+
+/// Codex's main bucket gives the plan-wide windows; any other bucket in
+/// `rateLimitsByLimitId` is a model's own, named by its `limitName`.
+fn parse_plan(result: &Value) -> Read {
+    let Ok(limits) = RateLimits::deserialize(result) else {
+        return Read::Failed("Codex reported usage in a form orx can't read yet.".into());
+    };
+    let main = limits.rate_limits;
+    let rfc3339 = |seconds: i64| crate::telemetry::iso8601_utc(seconds * 1000);
+
+    let others = limits.rate_limits_by_limit_id.unwrap_or_default();
+    let models = others
+        .iter()
+        .filter(|(id, _)| Some(*id) != main.limit_id.as_ref())
+        .map(|(id, bucket)| (Some(bucket.limit_name.as_deref().unwrap_or(id)), bucket));
+    let windows = std::iter::once((None, &main))
+        .chain(models)
+        .flat_map(|(model, bucket)| {
+            let windows = [&bucket.primary, &bucket.secondary].into_iter().flatten();
+            windows.map(move |window| PlanWindow {
+                minutes: window.window_duration_mins,
+                model: model.map(str::to_string),
+                remaining_percent: remaining_percent(window.used_percent),
+                resets_at: window.resets_at.map(rfc3339),
+            })
+        })
+        .collect();
+
+    let resets = limits
+        .rate_limit_reset_credits
+        .filter(|resets| resets.available_count > 0);
+    let resets = resets.map(|resets| PlanResets {
+        available: resets.available_count as u64,
+        credits: resets.credits.map(|credits| {
+            credits
+                .into_iter()
+                .filter(|credit| credit.status.as_deref() == Some("available"))
+                .map(|credit| ResetCredit {
+                    id: credit.id,
+                    title: credit.title,
+                    description: credit.description,
+                    expires_at: credit.expires_at.map(rfc3339),
+                })
+                .collect()
+        }),
+    });
+    let credits = main
+        .credits
+        .filter(|credits| credits.has_credits == Some(true) || credits.unlimited == Some(true));
+    Read::Plan(Snapshot {
+        plan: main.plan_type.as_deref().map(codex_plan_label),
+        windows,
+        credits: credits.map(|credits| PlanCredits {
+            balance: credits.balance,
+            unlimited: credits.unlimited == Some(true),
+        }),
+        extra_usage: None,
+        resets,
+    })
+}
+
+#[cfg(test)]
+mod plan_tests {
+    use super::*;
+
+    fn plan_from_response(response: &Value) -> Read {
+        plan_read(response_result(response))
+    }
+
+    /// Live from Codex 0.166 on a ChatGPT Pro plan.
+    fn pro() -> Value {
+        json!({"id": 2, "result": {"ordinaryUsageAllowed": true, "rateLimits": {"limitId": "codex",
+            "limitName": null, "normalModelSlug": null, "primary": {"usedPercent": 2,
+            "windowDurationMins": 10080, "resetsAt": 1795202690}, "secondary": null,
+            "credits": {"hasCredits": false, "unlimited": false, "balance": "0"},
+            "individualLimit": null, "spendControlReached": false, "planType": "pro",
+            "rateLimitReachedType": null}, "rateLimitsByLimitId": {"codex": {"limitId": "codex",
+            "limitName": null, "primary": {"usedPercent": 2, "windowDurationMins": 10080,
+            "resetsAt": 1795202690}, "secondary": null, "planType": "pro"}},
+            "rateLimitResetCredits": {"availableCount": 1, "credits": []},
+            "rateLimitUpsell": null}})
+    }
+
+    #[test]
+    fn a_subscription_reads_as_what_is_left_of_each_window() {
+        let Read::Plan(snapshot) = plan_from_response(&pro()) else {
+            panic!("{:?}", plan_from_response(&pro()));
+        };
+        assert_eq!(snapshot.plan.as_deref(), Some("Pro 200"));
+        assert_eq!(
+            snapshot.windows,
+            [PlanWindow {
+                minutes: Some(10080),
+                model: None,
+                remaining_percent: 98.0,
+                resets_at: Some("2026-11-20T19:24:50.000Z".into()),
+            }]
+        );
+        assert_eq!(snapshot.credits, None, "a zero balance is no credits");
+
+        let mut response = pro();
+        let result = &mut response["result"];
+        result["rateLimits"]["secondary"] =
+            json!({"usedPercent": 140.5, "windowDurationMins": 300, "resetsAt": null});
+        result["rateLimits"]["credits"] =
+            json!({"hasCredits": true, "unlimited": false, "balance": "12.50"});
+        result["rateLimitsByLimitId"]["codex_spark"] = json!({"limitId": "codex_spark",
+            "limitName": "GPT-5.3-Codex-Spark", "primary": {"usedPercent": 30,
+            "windowDurationMins": 10080, "resetsAt": 1795202690}, "secondary": null});
+        let Read::Plan(snapshot) = plan_from_response(&response) else {
+            panic!()
+        };
+        let summary = snapshot
+            .windows
+            .iter()
+            .map(|w| (w.minutes, w.model.as_deref(), w.remaining_percent))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            summary,
+            [
+                (Some(10080), None, 98.0),
+                (Some(300), None, 0.0),
+                (Some(10080), Some("GPT-5.3-Codex-Spark"), 70.0),
+            ]
+        );
+        assert_eq!(
+            snapshot.credits,
+            Some(PlanCredits {
+                balance: Some("12.50".into()),
+                unlimited: false
+            })
+        );
+    }
+
+    #[test]
+    fn a_codex_too_old_for_the_method_is_unsupported() {
+        // Live from 0.166: an unknown method is an unknown variant of the request enum.
+        let unknown = json!({"id": 2, "error": {"code": -32600,
+            "message": "Invalid request: unknown variant `account/rateLimits/read`, expected one of `initialize`"}});
+        assert_eq!(plan_from_response(&unknown), Read::Unsupported);
+        let not_found = json!({"id": 2, "error": {"code": -32601, "message": "Method not found"}});
+        assert_eq!(plan_from_response(&not_found), Read::Unsupported);
+        let failed = json!({"id": 2, "error": {"code": -32603, "message": "backend unavailable"}});
+        assert!(
+            matches!(plan_from_response(&failed), Read::Failed(message) if message.contains("backend unavailable"))
+        );
+    }
+
+    #[test]
+    fn a_shape_it_cannot_read_fails_rather_than_guessing() {
+        for result in [
+            json!({}),
+            json!({"rateLimits": null}),
+            json!({"rateLimits": {"primary": {"usedPercent": "2%"}}}),
+            json!({"rateLimits": {"primary": {"usedPercent": 2, "resetsAt": "soon"}}}),
+            json!({"rateLimits": {"primary": 2}}),
+            json!({"rateLimits": {}, "rateLimitsByLimitId": []}),
+        ] {
+            let response = json!({"id": 2, "result": result});
+            assert!(
+                matches!(plan_from_response(&response), Read::Failed(_)),
+                "{result}"
+            );
+        }
+    }
+
+    fn resets(credits: Value) -> Read {
+        let mut response = pro();
+        response["result"]["rateLimitResetCredits"] = credits;
+        plan_from_response(&response)
+    }
+
+    fn snapshot_resets(read: Read) -> Option<PlanResets> {
+        let Read::Plan(snapshot) = read else {
+            panic!("{read:?}");
+        };
+        snapshot.resets
+    }
+
+    #[test]
+    fn resets_read_as_what_is_available() {
+        // Live from Codex 0.169 on a ChatGPT Pro plan.
+        let full = json!({"id": "RateLimitResetCredit_20fc", "resetType": "codexRateLimits",
+            "status": "available", "grantedAt": 1794522991, "expiresAt": 1797114991,
+            "title": "Full reset",
+            "description": "Thanks for using Codex! You've been granted one free rate limit reset."});
+        assert_eq!(
+            snapshot_resets(resets(
+                json!({"availableCount": 1, "credits": [full.clone()]})
+            )),
+            Some(PlanResets {
+                available: 1,
+                credits: Some(vec![ResetCredit {
+                    id: "RateLimitResetCredit_20fc".into(),
+                    title: Some("Full reset".into()),
+                    description: Some(
+                        "Thanks for using Codex! You've been granted one free rate limit reset."
+                            .into()
+                    ),
+                    expires_at: Some("2026-12-12T22:36:31.000Z".into()),
+                }]),
+            })
+        );
+
+        let count_only = resets(json!({"availableCount": 2, "credits": null}));
+        assert_eq!(
+            snapshot_resets(count_only),
+            Some(PlanResets {
+                available: 2,
+                credits: None
+            })
+        );
+
+        // A list capped below the count, with spent credits beside the available one.
+        let mut redeemed = full.clone();
+        redeemed["id"] = json!("spent");
+        redeemed["status"] = json!("redeemed");
+        let mut bare = full.clone();
+        bare["id"] = json!("bare");
+        bare["title"] = Value::Null;
+        bare["description"] = Value::Null;
+        bare["expiresAt"] = Value::Null;
+        let capped = snapshot_resets(resets(
+            json!({"availableCount": 3, "credits": [redeemed, bare]}),
+        ))
+        .unwrap();
+        assert_eq!(capped.available, 3);
+        assert_eq!(
+            capped.credits,
+            Some(vec![ResetCredit {
+                id: "bare".into(),
+                title: None,
+                description: None,
+                expires_at: None,
+            }])
+        );
+
+        for none in [Value::Null, json!({"availableCount": 0, "credits": []})] {
+            assert_eq!(snapshot_resets(resets(none.clone())), None, "{none}");
+        }
+        let mut response = pro();
+        response["result"]
+            .as_object_mut()
+            .unwrap()
+            .remove("rateLimitResetCredits");
+        assert_eq!(
+            snapshot_resets(plan_from_response(&response)),
+            None,
+            "an older Codex"
+        );
+
+        for unreadable in [
+            json!({"availableCount": "1"}),
+            json!({"availableCount": 1, "credits": {}}),
+            json!({"availableCount": 1, "credits": [{"status": "available"}]}),
+            json!({"availableCount": 1, "credits": [{"id": "x", "status": "available", "expiresAt": "soon"}]}),
+        ] {
+            assert!(
+                matches!(resets(unreadable.clone()), Read::Failed(_)),
+                "{unreadable}"
+            );
+        }
+    }
+
+    /// A throwaway app-server that records its `method` request in `request`
+    /// and answers it with `answer`.
+    #[cfg(unix)]
+    fn fake_app_server(dir: &Path, method: &str, answer: &Value) -> std::path::PathBuf {
+        let bin = dir.join("codex");
+        let request = dir.join("request");
+        let script = format!(
+            "#!/bin/sh\nwhile read line; do\n  case \"$line\" in\n    *'\"id\":1,'*) echo '{{\"id\":1,\"result\":{{}}}}' ;;\n    *'{method}'*) printf '%s\\n' \"$line\" > '{}'; echo '{answer}' ;;\n  esac\ndone\n",
+            request.display()
+        );
+        orx_test_support::write_executable(&bin, script, 0o755).unwrap();
+        bin
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_reset_passes_its_attempt_through_and_reads_each_outcome() {
+        const CONSUME: &str = "account/rateLimitResetCredit/consume";
+        let dir = crate::local::git::TemporaryDirectory::new("orx-codex-reset").unwrap();
+        let codex = crate::local::codex::CodexHost::new();
+        let outcome = |outcome: &str| json!({"id": 2, "result": {"outcome": outcome}});
+        let error = |code: i64, message: &str| json!({"id": 2, "error": {"code": code, "message": message}});
+        let too_old = "Invalid request: unknown variant `account/rateLimitResetCredit/consume`";
+        // Without a credit, Codex picks the next.
+        for (credit, answer, expected) in [
+            (Some("credit-1"), outcome("reset"), Ok(ResetOutcome::Reset)),
+            (
+                None,
+                outcome("nothingToReset"),
+                Ok(ResetOutcome::NothingToReset),
+            ),
+            (None, outcome("noCredit"), Ok(ResetOutcome::NoCredit)),
+            (
+                None,
+                outcome("alreadyRedeemed"),
+                Ok(ResetOutcome::AlreadyRedeemed),
+            ),
+            (None, error(-32600, too_old), Err(AccountError::Unsupported)),
+            (
+                None,
+                error(-32603, "backend unavailable"),
+                Err(AccountError::Rejected("backend unavailable".into())),
+            ),
+        ] {
+            let bin = fake_app_server(dir.path(), CONSUME, &answer);
+            let consumed = consume_reset(&codex, None, &bin, None, credit, "attempt-7").await;
+            assert_eq!(consumed, expected, "{answer}");
+            let request = std::fs::read_to_string(dir.path().join("request")).unwrap();
+            let request: Value = serde_json::from_str(&request).unwrap();
+            assert_eq!(
+                request["params"],
+                json!({"idempotencyKey": "attempt-7", "creditId": credit})
+            );
+        }
+
+        let bin = fake_app_server(dir.path(), CONSUME, &outcome("partial"));
+        assert!(
+            matches!(
+                consume_reset(&codex, None, &bin, None, None, "a").await,
+                Err(AccountError::Rejected(message)) if message.contains("partial")
+            ),
+            "an outcome orx can't read is never taken for one it can"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_read_runs_on_a_throwaway_app_server() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-codex-usage").unwrap();
+        let bin = fake_app_server(dir.path(), RATE_LIMITS, &pro());
+        let codex = crate::local::codex::CodexHost::new();
+        assert!(matches!(
+            read_plan(&codex, None, &bin, None).await,
+            Read::Plan(_)
+        ));
+
+        let missing = dir.path().join("gone");
+        let Read::Failed(message) = read_plan(&codex, None, &missing, None).await else {
+            panic!("a missing binary is a failed read");
+        };
+        assert!(
+            message.contains(&missing.display().to_string()),
+            "{message}"
+        );
+    }
 }
 
 /// `model/list` result → per-model `ModelInfo`, efforts attached in catalog
@@ -1701,6 +2256,9 @@ fn apply_notification(ctx: &mut TurnCtx, method: &str, params: &Value) -> Option
         ctx.clear_retry_status();
     }
     match method {
+        "account/rateLimits/updated" => {
+            crate::local::usage::observed(&ctx.host, &ctx.harness, ctx.profile.as_deref());
+        }
         "thread/tokenUsage/updated" => {
             if let Some(last) = params.pointer("/tokenUsage/last") {
                 if let Some(used_tokens) =
@@ -1711,6 +2269,7 @@ fn apply_notification(ctx: &mut TurnCtx, method: &str, params: &Value) -> Option
                         context_window: params
                             .pointer("/tokenUsage/modelContextWindow")
                             .and_then(Value::as_u64),
+                        ..Default::default()
                     });
                 }
             }
@@ -1817,6 +2376,7 @@ fn apply_notification(ctx: &mut TurnCtx, method: &str, params: &Value) -> Option
                 ctx.report_usage(ContextUsage {
                     used_tokens: used,
                     context_window,
+                    ..Default::default()
                 });
             }
             let status = turn.get("status").and_then(Value::as_str).unwrap_or("");
@@ -4436,6 +4996,7 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
                     ctx.report_usage(ContextUsage {
                         used_tokens: used,
                         context_window,
+                        ..Default::default()
                     });
                 }
             }

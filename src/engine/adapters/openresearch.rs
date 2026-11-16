@@ -90,6 +90,21 @@ async fn lookup(descriptor: &BackendDescriptor) -> Result<Option<crate::client::
         .map_err(|_| anyhow!("OpenResearch did not answer about box {id} within 15 s"))?
 }
 
+/// The box's hourly price, as OpenResearch quoted it.
+fn box_quote(sandbox: &crate::client::Sandbox) -> Result<Quote> {
+    let dollars = sandbox
+        .price_per_hour
+        .filter(|price| price.is_finite() && *price >= 0.0)
+        .ok_or_else(|| anyhow!("OpenResearch gave box {} no hourly price", sandbox.id))?;
+    Ok(Quote {
+        amount_micros: (dollars * 1e6).round() as u64,
+        per: crate::store::Per::Hour,
+        currency: "USD".into(),
+        source: "openresearch.sh".into(),
+        quoted_at: crate::store::now_ms(),
+    })
+}
+
 async fn rental_deleted(descriptor: &BackendDescriptor) -> bool {
     matches!(lookup(descriptor).await, Ok(None))
 }
@@ -742,6 +757,15 @@ impl Backend for OpenResearch {
                 super::api::interrupted(error)
             }
         })?;
+        // A box released before its first observation can no longer be asked its price.
+        if let Ok(quote) = box_quote(&created.sandbox) {
+            if let Err(error) = self.engine.store().record_run_price(&intent.run.id, &quote) {
+                eprintln!(
+                    "orx up: run {}: could not record its price: {error:#}",
+                    intent.run.id
+                );
+            }
+        }
         descriptor.namespace = Some(org);
         descriptor.job_id = Some(created.sandbox.id.clone());
         descriptor.timeout_secs = Some(timeout);
@@ -782,6 +806,16 @@ impl Backend for OpenResearch {
     }
     async fn recover(&self, _intent: &RunIntent) -> Recovery {
         super::api::unknown("OpenResearch provisioning outcome has no recorded sandbox id")
+    }
+    async fn quote(&self, run: &WatchedRun, _launch: &LaunchSpec) -> Result<Option<Quote>> {
+        let descriptor = descriptor(&run.handle)?;
+        let sandbox = lookup(descriptor).await?.ok_or_else(|| {
+            anyhow!(
+                "OpenResearch no longer has box {}",
+                descriptor.job_id.as_deref().unwrap_or_default()
+            )
+        })?;
+        box_quote(&sandbox).map(Some)
     }
     async fn observe(&self, runs: &[WatchedRun], budget: Duration) -> Vec<(String, Observation)> {
         let mut observations = Vec::new();
@@ -971,6 +1005,102 @@ impl Backend for OpenResearch {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_box_is_quoted_at_its_hourly_price() {
+        let sandbox = |price: serde_json::Value| -> crate::client::Sandbox {
+            serde_json::from_value(serde_json::json!({
+                "id": "sb_1", "organizationId": "org", "projectId": null, "sshHostname": null,
+                "sshPort": null, "sshUsername": null, "status": "online", "machineType": "gpu",
+                "createdBy": null, "updatedAt": "2026-11-13T00:00:00Z", "provisionWarnings": null,
+                "providerName": null, "providerInstanceId": null, "pricePerHour": price,
+                "gpu": "H100", "gpuCount": 1, "vcpuCount": 16
+            }))
+            .unwrap()
+        };
+        let quote = box_quote(&sandbox(serde_json::json!(2.5))).unwrap();
+        assert_eq!(
+            (quote.amount_micros, quote.per, quote.currency.as_str()),
+            (2_500_000, crate::store::Per::Hour, "USD")
+        );
+        let unpriced = box_quote(&sandbox(serde_json::Value::Null)).unwrap_err();
+        assert!(unpriced.to_string().contains("sb_1"), "{unpriced}");
+    }
+
+    #[tokio::test]
+    async fn a_box_keeps_the_price_it_launched_at_even_if_released_before_its_first_look() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        // Answers only the launch, so the price can come from nowhere else.
+        let app = axum::Router::new().route(
+            "/sandboxes",
+            axum::routing::post(|| async {
+                let sandbox = serde_json::json!({
+                    "sandbox": {
+                        "id": "sb_1", "organizationId": "org", "projectId": null, "sshHostname": null,
+                        "sshPort": null, "sshUsername": null, "status": "provisioning", "machineType": "cpu",
+                        "createdBy": null, "updatedAt": "2026-11-13T00:00:00Z", "provisionWarnings": null,
+                        "providerName": null, "providerInstanceId": null, "pricePerHour": 0.4,
+                        "gpu": null, "gpuCount": null, "vcpuCount": 8
+                    },
+                    "rentalLease": {"version": 1, "token": "lease"}
+                });
+                (axum::http::StatusCode::CREATED, axum::Json(sandbox))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api_url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        crate::config::save_credentials(&crate::config::Credentials {
+            api_url,
+            token: "pat".into(),
+        })
+        .await
+        .unwrap();
+
+        let dir = std::env::temp_dir().join(format!("orx-box-price-{}", uuid::Uuid::new_v4()));
+        let clock = Arc::new(crate::engine::clock::TestClock::new());
+        let engine = Arc::new(Engine::new(Store::open_at(dir.clone()).unwrap(), clock));
+        let launch = LaunchSpec {
+            kind: "openresearch_job".into(),
+            target: Some("org".into()),
+            options: serde_json::json!({"flavor": "cpu5c"}),
+        };
+        engine
+            .store()
+            .insert_submitting_run(crate::store::SubmittingRun {
+                id: "box",
+                experiment_id: "e",
+                project_id: "p",
+                metadata: &BackendDescriptor::parse(r#"{"kind":"engine"}"#).unwrap(),
+                command: "true",
+                created_at: 1,
+                commit_sha: None,
+                chat_session_id: None,
+                spec_digest: "digest",
+                launch: &launch,
+            })
+            .unwrap();
+        let (run, state) = engine.load("box").unwrap();
+        let intent = RunIntent::new(run, &state).unwrap();
+        let fence = Fence {
+            store: &engine.store,
+            run_id: "box",
+            attempt: 1,
+            taken_at: 1,
+        };
+        let adapter = OpenResearch::new(
+            engine.clone(),
+            Arc::new(|_: &ssh::SshTarget| Err(anyhow!("no box to reach"))),
+        );
+        adapter.launch(&intent, &fence).await.unwrap();
+        assert!(
+            engine.store().unpriced_launch("box").unwrap().is_none(),
+            "priced from the launch"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[tokio::test]
     async fn released_rental_preserves_completed_head_after_tail_failure() {

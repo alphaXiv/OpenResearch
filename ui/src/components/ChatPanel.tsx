@@ -220,9 +220,8 @@ import { MentionMenu, type MentionMatch } from "./MentionMenu";
 import { useDebouncedValue } from "./NewProjectForm";
 import { MessageWithChips } from "./SkillChips";
 import { ComposerEditor, type ChipSource, type ComposerEditorHandle } from "./ComposerEditor";
-import { WorkspaceConnection } from "./WorkspaceConnection";
+import { StatusStrip } from "./StatusStrip";
 import { SidebarToggle } from "./Header";
-import { AccountChip } from "./AccountChip";
 import {
   defaultSelection,
   harnessLabel,
@@ -231,7 +230,7 @@ import {
   type ModelSelection,
 } from "./ModelPicker";
 import { useModelName } from "./pickerAgents";
-import { ContextMeter } from "./ContextMeter";
+import { UsageMenu } from "./UsageMenu";
 import { renderNote } from "./agentNote";
 import {
   canonicalSkillName,
@@ -7531,7 +7530,7 @@ export function ChatPanel({
         <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 bottom-0 z-5 h-3 bg-linear-to-t from-background to-transparent" />
       </>}
       </div>
-      <div className="flex shrink-0 flex-wrap items-center gap-1 border-t border-border px-1 py-1"><AccountChip onDetails={() => onSelectMainView("openresearch")} /><WorkspaceConnection runtime={runtime} /></div>
+      <StatusStrip runtime={runtime} onDetails={() => onSelectMainView("openresearch")} />
     </aside>
   );
 
@@ -8303,7 +8302,15 @@ export function ChatPanel({
                     mutSetChatConfiguration.run(workspace, openSession, optionId, value);
                   }}
                 />
-                <ContextMeter usage={openSession?.contextUsage} />
+                <UsageMenu
+                  usage={openSession?.contextUsage}
+                  busy={busy}
+                  harness={composerSelection?.harness}
+                  profile={composerSelection?.profile}
+                  sessionId={openSession?.id ?? null}
+                  remote={runtime.kind === "ssh"}
+                  onCompact={activeHarness?.supportsCompaction && openSession ? () => void compactSession() : undefined}
+                />
               </div>
             </div>
           </div>
