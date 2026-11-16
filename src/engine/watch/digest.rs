@@ -12,7 +12,7 @@ pub(super) const MAX_TOKENS: usize = 4096;
 /// tokens split the digest's numbers finely.
 pub(super) const BYTES_PER_TOKEN: usize = 2;
 /// How far a digest is cut to fit, in order: older points, earlier sentences, values no signal
-/// names, the watcher's notes, each brief, the signals no sentence reads, then notes and briefs
+/// names, the watcher's notes, each brief, other signals, then notes and briefs
 /// again.
 const TRIMS: [Trim; 7] = [
     Trim {
@@ -67,18 +67,18 @@ const TRIMS: [Trim; 7] = [
         points: 3,
         previous: 1,
         logged: false,
-        notes: 256,
-        brief: 512,
+        notes: 128,
+        brief: 384,
         unread: false,
     },
 ];
 /// A brief's labels by what a look needs most when the brief is cut.
 const BRIEF_ORDER: [&str; 6] = [
+    "question",
     "worth_a_flag",
     "healthy",
     "noise",
     "from_parent",
-    "question",
     "decided",
 ];
 /// One run's share of log lines, whatever is left over.
@@ -96,7 +96,13 @@ You cannot stop a run. Write in the language whose code is the digest's "locale"
 {"runs": {"r1": {"status": "ok" or "flag", "line": "…", "evidence": [{"from": BYTE, "to": BYTE}]} or {"same": true}},
  "summary": {"status": "ok", "line": "…"} or {"same": true},
  "notes": "…"}
-Each line is one sentence of at most 90 displayed characters, without "running" or "the run".
+Each run's sentence follows "Train (2/5) · Step 120 of 5,000." above its chart: do not
+repeat stage or count. Use one sentence, at most 48 displayed characters. Read the brief's question first;
+"reportOn" lists its headline signals with values, else the current stage's chart signals.
+Lead with those. Stats-only numbers are context; lead with them only for severe trouble
+outside the brief's noise. A warning alone does not make throughput the subject. Expected
+eval dips are not slowdowns. When healthy, reassure: "Loss **{loss}** tracks
+the parent." Keep every figure and token rule.
 Write every number that can still change as a token: {signal}, {signal.vs} (it reads "0.12 better
 than the parent", "0.12 worse than the parent" or "level with the parent"), or {count:"regex"}, the number of log
 lines from the start of the run that match the regex, which orx keeps counting. A token names
@@ -109,7 +115,7 @@ Say only what the digest shows: a signal's label, unit and "better" say what it 
 which way is good; the brief, the parent and the log say the rest. Never name a chance level,
 a target, an expected value or a cause the digest does not state: say how a number compares
 with the parent or with its own trend instead.
-If a run's last sentence still holds, answer {"same": true} for it. You see its last three
+If its last sentence still holds and follows "reportOn", answer {"same": true}. You see its last three
 sentences: keep their wording while their meaning holds. A run you leave out is the same.
 Flag a run when it may be going wrong: it does something the brief says is worth a flag, it is
 worse than its parent where it should not be, it prints a new kind of warning or error, its
@@ -120,7 +126,7 @@ when the brief says this run should differ. A run that ended as its parent did i
 same thing again unless it got clearly worse. "notedWhileFlagOpen" lists what earlier looks
 flagged while another flag was open, which was since kept going after: flag each again, citing
 its bytes, if the digest does not show it was resolved.
-Write "summary" only when the digest has "summary": one sentence for all the runs, naming each
+Write "summary" only when the digest has "summary": at most 90 displayed characters for all the runs, naming each
 by its key as {r1} and its numbers as {r1:signal}.
 "notes" is for you: what to remember for the next look, at most a few lines."#;
 
@@ -141,7 +147,7 @@ struct Trim {
     /// UTF-8 bytes of the watcher's notes, and of each brief's text.
     notes: usize,
     brief: usize,
-    /// Whether signals no sentence reads are sent.
+    /// Whether signals outside the reporting focus are sent.
     unread: bool,
 }
 
@@ -481,11 +487,12 @@ fn points(body: &Value, name: &str, keep: usize) -> Value {
         .collect()
 }
 
-/// The signals a run's sentence reads, else the ones its view leads with.
+/// The signals answering the run's question and supporting its open flag.
 fn bound(run: &Run) -> Vec<String> {
     super::bound_signals(
         run.previous.last().map(|(template, _)| template.as_str()),
-        &run.body["view"],
+        run.body,
+        run.summary,
     )
 }
 
@@ -554,6 +561,7 @@ fn run_json(
         "experiment": run.experiment,
         "state": run.state,
         "signals": values,
+        "reportOn": bound,
     });
     if !logged.is_empty() && trim.logged {
         entry["alsoLogged"] = json!(logged);
@@ -726,6 +734,7 @@ pub(super) fn build(shared: &Shared, runs: &[Run], room: usize) -> Digest {
         digest
     };
     let size = |digest: &Value| serde_json::to_string(digest).map_or(0, |text| text.len());
+    let framing = 512;
     let mut trim = 0;
     let (mut entries, base) = loop {
         let entries: Vec<Value> = runs
@@ -733,13 +742,13 @@ pub(super) fn build(shared: &Shared, runs: &[Run], room: usize) -> Digest {
             .map(|run| run_json(run, &briefs, &parents, &TRIMS[trim]))
             .collect();
         let base = size(&assemble(&TRIMS[trim], entries.clone()));
-        if base + room / 4 <= room || trim + 1 == TRIMS.len() {
+        if base + room / 4 + framing <= room || trim + 1 == TRIMS.len() {
             break (entries, base);
         }
         trim += 1;
     };
     let trim = &TRIMS[trim];
-    let mut room = room.saturating_sub(base + 512);
+    let mut room = room.saturating_sub(base + framing);
     let mut order: Vec<usize> = (0..runs.len()).collect();
     order.sort_by_key(|index| {
         (
@@ -919,7 +928,7 @@ pub(super) fn build(shared: &Shared, runs: &[Run], room: usize) -> Digest {
                 .flatten()
                 .any(|(name, _)| named(&name) && !bound.contains(name))
         {
-            cut.push("the signals its sentence does not read".into());
+            cut.push("the other signals".into());
         }
         let brief_at = run
             .brief

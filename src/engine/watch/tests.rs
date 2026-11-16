@@ -1306,7 +1306,7 @@ fn a_row_that_falls_to_zero_asks_for_a_look_and_its_sentence_may_say_so() {
     };
     let render = |_: Option<&str>, _: &reply::Token| String::new();
     let read = reply::read(
-        r#"{"runs": {"r1": {"status": "flag", "line": "Cases from 10000 up report correct 0; random 10000 is **412x** slower.", "evidence": []}}}"#,
+        r#"{"runs": {"r1": {"status": "flag", "line": "Random 10000: correct 0, **412x** slower.", "evidence": []}}}"#,
         &[bindable()],
         None,
         &render,
@@ -1323,4 +1323,110 @@ fn a_row_that_falls_to_zero_asks_for_a_look_and_its_sentence_may_say_so() {
         "a slowdown still moves: {:?}",
         read.errors
     );
+}
+
+#[test]
+fn the_question_leads_until_the_current_stages_chart_can_answer_it() {
+    let mut body = json!({
+        "view": {"headline": ["sft_bpb", "repeat_frac"], "blocks": [
+            {"chart": ["val_bpb", "loss"], "phase": "train"},
+            {"stats": ["tok_per_sec"]},
+            {"chart": ["sft_bpb"], "phase": "sft"}
+        ]},
+        "latest": {"val_bpb": 2.1, "loss": 3.2, "tok_per_sec": 7200}
+    });
+    let summary = json!({"stage": {"name": "train"}});
+    let sentence = Some("Tokens/s **{tok_per_sec}**, {tok_per_sec.vs}.");
+    assert_eq!(
+        bound_signals(sentence, &body, &summary),
+        ["val_bpb", "loss"]
+    );
+
+    for state in ["raised", "waiting", "asking"] {
+        body["flag"] = json!({"state": state, "detail": "Tokens/s **{tok_per_sec}** fell."});
+        assert_eq!(
+            bound_signals(sentence, &body, &summary),
+            ["val_bpb", "loss", "tok_per_sec"]
+        );
+    }
+    body["flag"]["state"] = json!("kept");
+    assert_eq!(
+        bound_signals(sentence, &body, &summary),
+        ["val_bpb", "loss"]
+    );
+
+    body["latest"]["sft_bpb"] = json!(1.5);
+    assert_eq!(bound_signals(sentence, &body, &summary), ["sft_bpb"]);
+    body["latest"] = json!({});
+    assert_eq!(
+        bound_signals(sentence, &body, &json!({"stage": {"name": "install"}})),
+        ["sft_bpb", "repeat_frac"]
+    );
+}
+
+#[tokio::test]
+async fn side_stats_wake_only_for_far_worse_parent_comparisons() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let store = Store::open().unwrap();
+    chat(&store, "chat", "claude-code");
+    let row = classifier_run(&store, "seed", None, "running", "chat");
+    epochs(&store, &row, &HEALTHY);
+    let mut now = Now::read(&store, &row).unwrap();
+    now.body["view"] = json!({"headline": ["loss"], "signals": {
+        "loss": {"better": "lower"}, "tok_per_sec": {"better": "higher"}
+    }});
+    now.body["latest"] = json!({"loss": 2, "tok_per_sec": 9000});
+    now.body["series"] = json!({"loss": [[1, 2], [2, 2]], "tok_per_sec": [[1, 9000], [2, 9000]]});
+    now.body["versus"] =
+        json!({"step": {"tok_per_sec": {"d": 1000, "parent": 8000, "good": true}}});
+    let template = "Tokens/s **{tok_per_sec}** recovered.";
+    let basis = basis_of(&now, Some(template), &Map::new());
+    assert!(basis["signals"].get("tok_per_sec").is_none());
+    assert!(basis["parent"].get("tok_per_sec").is_some());
+    let id = look(&store, "chat", "ceiling", &[("seed", "r1")]);
+    store.watch_look_sent(id, 1).unwrap();
+    store
+        .finish_watch_look(
+            id,
+            "done",
+            2,
+            None,
+            None,
+            None,
+            &[LookResult {
+                run_id: "seed".into(),
+                result: "line".into(),
+                template: Some(template.into()),
+                text: Some(template.into()),
+                whole: None,
+                basis,
+                cursor: Value::Null,
+                evidence: json!([]),
+            }],
+            &[],
+        )
+        .unwrap();
+    now.looks = Now::read(&store, &row).unwrap().looks;
+    now.body["series"]["tok_per_sec"] = json!([
+        [1, 9000],
+        [2, 9000],
+        [3, 9000],
+        [4, 9000],
+        [5, 9000],
+        [6, 9000],
+        [7, 9000],
+        [8, 9000],
+        [9, 3500],
+        [10, 3500]
+    ]);
+    now.body["versus"]["step"]["tok_per_sec"] = json!({"d": -1000, "parent": 8000, "good": false});
+    assert!(!changes(&mut Seen::default(), &now, 0)
+        .iter()
+        .any(|(kind, _)| kind == "parent" || kind == "trend"));
+    now.body["versus"]["step"]["tok_per_sec"] = json!({"d": -5000, "parent": 8000, "good": false});
+    assert!(changes(&mut Seen::default(), &now, 0)
+        .iter()
+        .any(|(kind, _)| kind == "parent"));
 }

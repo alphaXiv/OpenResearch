@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::Value;
 use unicode_segmentation::UnicodeSegmentation;
 
-/// The longest sentence, in displayed characters, at the numbers it reads now.
-pub(super) const MAX_GRAPHEMES: usize = 90;
+/// The longest run sentence, in displayed characters, at the numbers it reads now.
+pub(super) const MAX_GRAPHEMES: usize = 48;
 const MAX_TOKENS: usize = 12;
 const MAX_NEW_COUNTS_PER_RUN: usize = 2;
 const MAX_NEW_COUNTS: usize = 4;
@@ -49,8 +49,7 @@ pub(super) enum Answer {
 #[derive(Debug, Default)]
 pub(super) struct Read {
     pub runs: BTreeMap<String, Answer>,
-    /// Runs whose flag broke the sentence rules: kept in `runs` as the flag in plain words, since
-    /// a missed problem costs more than a sentence that is not bound.
+    /// Flags retained despite invalid replies; a retry's `same` cannot dismiss a possible problem.
     pub salvaged: BTreeSet<String>,
     pub summary: Option<Answer>,
     pub notes: Option<String>,
@@ -210,6 +209,7 @@ pub(super) fn read(
         if let Some(line) = answer.get("line").and_then(Value::as_str) {
             answer["line"] = Value::from(line.replace(&format!("{{{}:", run.key), "{"));
         }
+        let mut line_valid = false;
         match answer_of(&answer, run.has_sentence, &mut |template| {
             let checked = check_line(template, false, runs, Some(run), render)?;
             let fresh = checked
@@ -222,6 +222,7 @@ pub(super) fn read(
                 ));
             }
             new_counts += fresh;
+            line_valid = true;
             Ok(())
         }) {
             Ok(Answer::Line {
@@ -249,12 +250,16 @@ pub(super) fn read(
         let refused = !read.runs.contains_key(run.key);
         let flagged = answer["status"] == "flag";
         if let Some(line) = answer["line"].as_str().filter(|_| refused && flagged) {
-            let plain: String = line.replace("**", "").replace(['{', '}'], "");
+            let kept = if line_valid {
+                line.to_owned()
+            } else {
+                line.replace("**", "").replace(['{', '}'], "")
+            };
             read.runs.insert(
                 run.key.to_owned(),
                 Answer::Line {
                     flag: true,
-                    template: plain.trim().to_owned(),
+                    template: kept.trim().to_owned(),
                     evidence: Vec::new(),
                 },
             );
@@ -479,9 +484,10 @@ fn check_line(
     rendered.push_str(&template[at..]);
     literal.push_str(&template[at..]);
     let shown = rendered.replace("**", "").graphemes(true).count();
-    if shown > MAX_GRAPHEMES {
+    let limit = if summary { 90 } else { MAX_GRAPHEMES };
+    if shown > limit {
         return Err(format!(
-            "the sentence reads {shown} characters with its numbers filled; keep it to {MAX_GRAPHEMES}"
+            "the sentence reads {shown} characters with its numbers filled; keep it to {limit}"
         ));
     }
     let moving: Vec<f64> = runs
@@ -656,6 +662,22 @@ mod tests {
         assert!(
             read.runs.is_empty() && read.salvaged.is_empty(),
             "only a flag is kept"
+        );
+    }
+
+    #[test]
+    fn a_refused_citation_keeps_a_flags_valid_tokens() {
+        let run = run();
+        let line = "Loss **{loss}** rose.";
+        let reply = json!({"runs": {"r1": {"status": "flag", "line": line,
+            "evidence": [{"from": 99999, "to": 100000}]}}})
+        .to_string();
+        let read = read(&reply, &[bind("r1", &run, true)], None, &render);
+        assert!(!read.errors.is_empty());
+        assert!(read.salvaged.contains("r1"));
+        assert!(
+            matches!(&read.runs["r1"], Answer::Line {flag: true, template, evidence}
+            if template == line && evidence.is_empty())
         );
     }
 

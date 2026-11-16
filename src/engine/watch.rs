@@ -1111,26 +1111,55 @@ fn series(body: &Value, name: &str) -> Vec<(f64, f64)> {
         .collect()
 }
 
-/// The signals a sentence stands on: those its tokens read, then the ones the view leads with,
-/// so a sentence that binds none is still checked against the run's main numbers.
-fn bound_signals(template: Option<&str>, view: &Value) -> Vec<String> {
-    let mut names: Vec<String> = Vec::new();
-    let read = template
-        .and_then(|t| reply::tokens(t, false).ok())
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|(_, token)| match token {
-            reply::Token::Signal(_, name) | reply::Token::Versus(_, name) => Some(name),
-            _ => None,
-        });
-    let led = view["headline"]
+/// The run's question leads; an open flag keeps its sentence's evidence in view.
+fn bound_signals(template: Option<&str>, body: &Value, summary: &Value) -> Vec<String> {
+    let view = &body["view"];
+    let headline: Vec<String> = view["headline"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|name| name.as_str().map(str::to_owned));
-    for name in read.chain(led) {
-        if !names.contains(&name) {
-            names.push(name);
+        .filter_map(|name| name.as_str().map(str::to_owned))
+        .collect();
+    let mut names: Vec<String> = headline
+        .iter()
+        .filter(|name| !body["latest"][*name].is_null())
+        .cloned()
+        .collect();
+
+    if names.is_empty() {
+        for block in view["blocks"].as_array().into_iter().flatten() {
+            if block["phase"].is_null() || block["phase"] == summary["stage"]["name"] {
+                for name in block["chart"].as_array().into_iter().flatten() {
+                    if let Some(name) = name.as_str() {
+                        if !names.iter().any(|kept| kept == name) {
+                            names.push(name.to_owned());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if names.is_empty() {
+        names = headline;
+    }
+
+    let flag = &body["flag"];
+    if flag.is_object() && !super::flags::settled(flag) {
+        let flagged = flag["detail"].as_str().or(flag["template"].as_str());
+        let flagged = flagged
+            .and_then(|text| reply::tokens(text, false).ok())
+            .unwrap_or_default();
+        for (_, token) in template
+            .and_then(|text| reply::tokens(text, false).ok())
+            .unwrap_or_default()
+        {
+            if let reply::Token::Signal(_, name) | reply::Token::Versus(_, name) = token {
+                let about = flagged.iter().any(|(_, token)| matches!(token,
+                    reply::Token::Signal(_, signal) | reply::Token::Versus(_, signal) if signal == &name));
+                if about && !names.contains(&name) {
+                    names.push(name);
+                }
+            }
         }
     }
     names.truncate(digest::BOUND_SIGNALS);
@@ -1146,18 +1175,20 @@ fn basis_of(run: &Now, template: Option<&str>, mult: &Map<String, Value>) -> Val
     let mut parent = Map::new();
     let mut counts = Map::new();
     let specs = &run.body["view"]["signals"];
-    for name in bound_signals(template, &run.body["view"]) {
+    for name in bound_signals(template, &run.body, &run.summary) {
         let last = series(&run.body, &name).last().map(|(x, _)| *x);
         if first || last.is_some() {
             signals.insert(name.clone(), json!({"x": last.filter(|_| !first)}));
         }
-        let vs = &run.body["versus"]["step"][&name];
+    }
+    for (name, spec) in specs.as_object().into_iter().flatten() {
+        let vs = &run.body["versus"]["step"][name];
         if first {
-            parent.insert(name, json!({"far": false}));
-        } else if let Some(d) = vs["d"].as_f64() {
+            parent.insert(name.clone(), json!({"far": false}));
+        } else {
             parent.insert(
                 name.clone(),
-                json!({"d": d, "far": far_worse(vs, &specs[&name])}),
+                json!({"d": vs["d"], "far": far_worse(vs, spec)}),
             );
         }
     }
@@ -1239,8 +1270,13 @@ fn changes(seen: &mut Seen, run: &Now, now: i64) -> Vec<(String, String)> {
     }
     let signals = &run.body["view"]["signals"];
     let label = |name: &str| signals[name]["label"].as_str().unwrap_or(name).to_owned();
+    let template = run
+        .answered()
+        .and_then(|(_, last)| last.template.as_deref());
+    let bound = bound_signals(template, &run.body, &run.summary);
     // Each point since the look against the points just before it.
-    for (name, kept) in basis["signals"].as_object().into_iter().flatten() {
+    for name in &bound {
+        let kept = &basis["signals"][name];
         let x0 = kept["x"].as_f64().unwrap_or(f64::NEG_INFINITY);
         let points = series(&run.body, name);
         let first = points
@@ -1261,17 +1297,18 @@ fn changes(seen: &mut Seen, run: &Now, now: i64) -> Vec<(String, String)> {
             why.push(("trend".into(), format!("{} {what} at {x}", label(name))));
         }
     }
-    for (name, kept) in basis["parent"].as_object().into_iter().flatten() {
+    for (name, spec) in signals.as_object().into_iter().flatten() {
+        let kept = &basis["parent"][name];
         let vs = &run.body["versus"]["step"][name];
         let Some(d) = vs["d"].as_f64() else {
             continue;
         };
-        if kept["d"].as_f64().is_some_and(|was| was * d < 0.0) {
+        if bound.contains(name) && kept["d"].as_f64().is_some_and(|was| was * d < 0.0) {
             why.push((
                 "parent".into(),
                 format!("{} crossed the parent", label(name)),
             ));
-        } else if kept["far"] != true && far_worse(vs, &signals[name]) {
+        } else if kept["far"] != true && far_worse(vs, spec) {
             why.push((
                 "parent".into(),
                 format!("{} is far worse than the parent", label(name)),
