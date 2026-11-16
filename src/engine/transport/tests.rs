@@ -1153,7 +1153,6 @@ async fn key_retry_resets_the_backoff_step_without_prompting() {
             &HostState {
                 status: Status::Backoff,
                 failures: 4,
-                next_retry_ms: Some(clock.wall_ms() + 900_000),
                 ..HostState::default()
             },
         )
@@ -1164,11 +1163,22 @@ async fn key_retry_resets_the_backoff_step_without_prompting() {
         HostConn::start_shared(config, store, clock.clone(), auth)
     }
     .unwrap();
+    // Startup retries a key host at once; a retry pressed during that attempt only joins it.
+    let state = status(&conn, Status::Backoff).await;
+    assert_eq!(state.failures, 5);
+
+    let before = clock.wall_ms();
     assert!(conn.retry_key().await.is_err());
+    let after = clock.wall_ms();
+
     let state = status(&conn, Status::Backoff).await;
     assert_eq!(state.failures, 1);
-    let delay = state.next_retry_ms.unwrap() - state.since_ms;
-    assert!((4000..=6000).contains(&delay), "{delay}");
+    let retry = state.next_retry_ms.unwrap();
+    assert!(
+        (before + 4000..=after + 6000).contains(&retry),
+        "{}",
+        retry - before
+    );
     assert!(auth_attempts(&server).is_empty());
 }
 
