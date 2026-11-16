@@ -8,7 +8,7 @@ const sourceDir = resolve(uiDir, "src");
 const sourceExtensions = new Set([".css", ".ts", ".tsx"]);
 const arbitraryText = /\btext-\[[^\]\s"'`]+\]/g;
 const arbitraryColor = /\b(?:accent|bg|border(?:-[trblxyse])?|caret|decoration|divide(?:-[xy])?|fill|outline|ring(?:-offset)?|stroke)-\[([^\]\s"'`]+)\]/g;
-const colorOnlyArbitrary = /\b(?:from|placeholder|shadow|to|via)-\[[^\]\s"'`]+\]/g;
+const colorOnlyArbitrary = /\b(?<!mask-[a-z]+-)(?:from|placeholder|shadow|to|via)-\[[^\]\s"'`]+\]/g;
 const rawColor = /#[\da-fA-F]{3,8}(?![\da-fA-F])|(?:color-mix|color|hsla?|lab|lch|light-dark|oklab|oklch|rgba?)\(/g;
 const colorValue = /^(?:#|[a-z]+$|var\(--|(?:color-mix|color|hsla?|lab|lch|light-dark|oklab|oklch|rgba?)\()/i;
 const svgPaintAttribute = /\b(?:fill|floodColor|lightingColor|stopColor|stroke)\s*=\s*["'][^"']*$/;

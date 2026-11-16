@@ -21,6 +21,7 @@ pub enum Event {
 struct Permission {
     responder: Responder,
     options: Vec<String>,
+    auto_option: Option<String>,
 }
 
 #[derive(Default)]
@@ -86,6 +87,28 @@ impl Drop for ConfigurationActivity<'_> {
 }
 
 impl Client {
+    pub fn approve_pending(&self) -> Result<Vec<(String, String)>> {
+        let mut permissions = self.io.permissions.lock().unwrap();
+        let approved: Vec<_> = permissions
+            .iter()
+            .filter_map(|(id, pending)| {
+                pending
+                    .auto_option
+                    .as_ref()
+                    .map(|option| (id.clone(), option.clone()))
+            })
+            .collect();
+        for (id, selected) in &approved {
+            let pending = permissions
+                .remove(id)
+                .expect("permission held under the same lock");
+            pending
+                .responder
+                .respond(json!({"outcome": {"outcome": "selected", "optionId": selected}}))?;
+        }
+        Ok(approved)
+    }
+
     pub async fn configure(&self, session_id: &str, option_id: &str, value: &str) -> Result<()> {
         let _lock = self.configuration_lock.lock().await;
         let _activity = ConfigurationActivity {
@@ -793,13 +816,18 @@ pub(super) async fn spawn(
                         Ok(permission) if !permission.options.is_empty() => permission,
                         _ => return responder.respond_with_error(agent_client_protocol::Error::invalid_params().data("Invalid native permission options")),
                     };
+                    // Keep lasting grants and agent mode switches behind a manual decision.
+                    let auto_option = (request.params["toolCall"]["kind"] != "switch_mode")
+                        .then(|| request.params["options"].as_array()?.iter()
+                            .find(|option| option["kind"] == "allow_once")?["optionId"].as_str().map(str::to_owned))
+                        .flatten();
                     let options = permission.options.iter().map(|option| option.option_id.to_string()).collect();
                     let id = uuid::Uuid::new_v4().to_string();
                     requests
                         .permissions
                         .lock()
                         .unwrap()
-                        .insert(id.clone(), Permission { responder, options });
+                        .insert(id.clone(), Permission { responder, options, auto_option });
                     if !requests.emit(Event::Permission {
                         id: id.clone(),
                         request: request.params,
@@ -1236,6 +1264,47 @@ exec "$@""#
     }
 
     #[tokio::test]
+    async fn automatic_approval_uses_only_offered_single_action_grants() {
+        let host = Arc::new(Host::default());
+        let client = new_client(&host, "auto-approval").await;
+        for (text, automatic) in [
+            ("permission", true),
+            ("permission-always", false),
+            ("permission-deny", false),
+            ("permission-switch", false),
+        ] {
+            let mut events = client.begin_turn();
+            let task_client = client.clone();
+            let task = tokio::spawn(async move { prompt(&task_client, text).await });
+            let id = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    if let Some(Event::Permission { id, .. }) = events.recv().await {
+                        break id;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            let approved = client.approve_pending().unwrap();
+            if automatic {
+                assert_eq!(approved, vec![(id, "opaque-once".into())]);
+            } else {
+                assert!(approved.is_empty());
+                assert!(client.awaiting_permission());
+                client.answer(&id, "opaque-deny").unwrap();
+            }
+            assert!(client.approve_pending().unwrap().is_empty());
+            tokio::time::timeout(std::time::Duration::from_secs(5), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            client.end_turn();
+        }
+        host.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn peer_files_terminals_and_conversation_are_isolated() {
         let host = Arc::new(Host::default());
         let first = new_client(&host, "first").await;
@@ -1302,6 +1371,7 @@ exec "$@""#
             }
         };
         client.end_turn();
+        assert!(client.approve_pending().unwrap().is_empty());
         tokio::time::timeout(std::time::Duration::from_secs(5), task)
             .await
             .unwrap()

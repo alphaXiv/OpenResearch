@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { formatAcpCommand, nativeOptions, parseAcpCommand, sessionAcpHarness, validAcpLaunch } from "../src/acp.ts";
 import { model } from "./models.mjs";
+import { m } from "../src/paraglide/messages.js";
 
 test("a pasted ACP command preserves quoted paths and argument boundaries", () => {
   assert.deepEqual(parseAcpCommand('kimi acp'), { executable: 'kimi', arguments: ['acp'] });
@@ -62,10 +63,34 @@ test("an uninitialized ACP chat uses the discovered catalog until native options
   assert.deepEqual(sessionAcpHarness(session, catalog).models.map((model) => model.id), ["c"]);
 });
 
+test("ACP approval controls use the server's capabilities and preserve native settings", () => {
+  const catalog = { id: "acp:test", options: { permissionModes: [{ id: "ask" }, { id: "auto-approve" }], defaultPermissionMode: "ask" } };
+  const session = { harness: catalog.id, nativeConfiguration: { configOptions: [
+    { id: "effort", name: "Thinking", type: "select", currentValue: "high", options: [{ value: "high", name: "High" }] },
+  ] } };
+  const harness = sessionAcpHarness(session, catalog);
+  assert.deepEqual(harness.options.permissionModes.map((choice) => choice.label), [m.acp_approval_ask(), m.acp_approval_auto()]);
+  assert.equal(harness.options.defaultPermissionMode, "ask");
+  assert.equal(sessionAcpHarness(null, catalog).options.permissionModes[1].label, m.acp_approval_auto());
+  assert.equal(nativeOptions(session.nativeConfiguration)[0].id, "effort");
+  assert.deepEqual(sessionAcpHarness(session, { ...catalog, options: undefined }).options.permissionModes, []);
+});
+
 test("the settings form validates launch fields without interpreting argument boundaries", () => {
   assert.equal(validAcpLaunch("Agent", "dsh", ["--profile", "acp"]), true);
   assert.equal(validAcpLaunch("Agent", "/tmp/agent with spaces", ["two words", '\"quotes\"', "$(untouched)", ""]), true);
   for (const [name, executable, args] of [["", "agent", []], ["Agent", "  ", []], ["Agent", "./agent", []], ["Agent", "agent", ["bad\0argument"]]]) {
     assert.equal(validAcpLaunch(name, executable, args), false);
   }
+});
+
+
+test("saved ACP chats retain revocable approval controls after their launch is removed", () => {
+  const saved = { harness: "acp:removed", harnessOptions: {
+    permissionModes: [{ id: "ask" }, { id: "auto-approve" }], defaultPermissionMode: "ask", reasoningLevels: [],
+  } };
+  const options = sessionAcpHarness(saved, undefined).options;
+  assert.deepEqual(options.permissionModes.map((choice) => choice.id), ["ask", "auto-approve"]);
+  assert.equal(options.defaultPermissionMode, "ask");
+  assert.equal(sessionAcpHarness({ harness: saved.harness }, undefined).options.permissionModes.length, 0);
 });

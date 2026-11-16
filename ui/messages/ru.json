@@ -2030,5 +2030,9 @@
   "usage_reset_confirm": "Использовать сброс",
   "usage_reset_done": "Лимиты Codex восстановлены.",
   "usage_reset_nothing": "Пока нечего сбрасывать: лимиты не исчерпаны. Сброс сохранён.",
-  "usage_reset_none_left": "Сбросов не осталось."
+  "usage_reset_none_left": "Сбросов не осталось.",
+  "acp_approval_ask": "Спрашивать",
+  "acp_approval_ask_description": "Спрашивать перед действиями, требующими разрешения",
+  "acp_approval_auto": "Одобрять автоматически",
+  "acp_approval_auto_description": "Автоматически одобрять отдельные запросы. Ограничения доступа самого агента сохраняются."
 }
