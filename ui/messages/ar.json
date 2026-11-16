@@ -756,6 +756,7 @@
   "report_lines_other": "الأسطر: {count}",
   "run_metric_at_step": "الخطوة {step}",
   "run_metric_from": "من {value}",
+  "run_metrics_unreadable": "تعذّرت قراءة مقاييس Trackio لهذا التشغيل: {error}",
   "activity_browsing": "جارٍ التصفّح…",
   "activity_delegating": "جارٍ التفويض…",
   "activity_running": "جارٍ التشغيل…",

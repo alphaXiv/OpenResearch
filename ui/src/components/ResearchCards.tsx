@@ -25,6 +25,13 @@ export interface ShelfPaper {
   id: string;
   /** What `orx paper` printed, whose header names an OpenAlex, bioRxiv or PubMed paper. */
   output?: string;
+  /** The calls that read it, which chat search jumps to. */
+  partIds?: string[];
+}
+
+/** Anchors for the tool calls a card stands for, so chat search can scroll to each. */
+function PartAnchors({ ids = [] }: { ids?: string[] }) {
+  return ids.map((id) => <span key={id} className="absolute inset-x-0 top-0" data-part-id={id} />);
 }
 
 function byline(authors: string[]): string {
@@ -52,11 +59,12 @@ function PaperCard({ paper, discovered, note, oneLine = false }: {
 
   return (
     <a
-      className="paper-card flex min-w-0 gap-2.5 no-underline rounded-lg border border-border-variant bg-surface px-2.5 py-2 hover:border-border focus-visible:outline-2 focus-visible:outline-focus"
+      className="paper-card relative flex min-w-0 gap-2.5 no-underline rounded-lg border border-border-variant bg-surface px-2.5 py-2 hover:border-border focus-visible:outline-2 focus-visible:outline-focus"
       href={paperUrl(paper.source, paper.id)}
       target="_blank"
       rel="noopener noreferrer"
     >
+      <PartAnchors ids={paper.partIds} />
       <LitSourceLogo source={paper.source} size={16} className="mt-0.5" />
       <span className="min-w-0">
         <span className={`block text-sm leading-5 text-text ${oneLine ? "truncate" : "line-clamp-2"}`} dir="auto">{title}</span>
@@ -125,10 +133,11 @@ export function SourceStrip({ papers, discovered }: { papers: CitedPaper[]; disc
 
 /** A run the turn launched, waited on or read, with its status and, once it
  * logs to Trackio, its headline metric. */
-export function RunCard({ runId, label, pending, onOpenRun }: {
+export function RunCard({ runId, label, pending, partIds, onOpenRun }: {
   runId: string;
   label: string;
   pending: boolean;
+  partIds: string[];
   onOpenRun?: (runId: string, intent: TabOpenIntent) => void;
 }) {
   const scope = useContext(FileScopeContext);
@@ -142,14 +151,17 @@ export function RunCard({ runId, label, pending, onOpenRun }: {
   const live = run ? runActive(run.status) : false;
   const trackio = useTrackioRuns(projectId, live).data;
   const logged = Boolean(run && trackio?.runs.includes(run.id));
-  const metrics = useQuery({ ...getTrackioRunMetricsQuery(projectId, run?.id ?? runId, live), enabled: logged }).data;
+  const metricsQuery = useQuery({ ...getTrackioRunMetricsQuery(projectId, run?.id ?? runId, live), enabled: logged });
+  const metrics = metricsQuery.data;
   const metric = metrics ? headlineMetric(metrics.metrics) : null;
+  const metricsError = metricsQuery.error?.message ?? metrics?.errors[0];
   const took = run?.endedAt && run.startedAt ? fmtDuration(run.endedAt - run.startedAt) : null;
   const display = run ? runDisplay(run) : null;
   const value = (number: number) => new Intl.NumberFormat(getLocale(), { maximumSignificantDigits: 4 }).format(number);
 
   return (
-    <div className="run-card my-2 rounded-lg border border-border-variant bg-surface py-2 ps-2 pe-3">
+    <div className="run-card relative my-2 rounded-lg border border-border-variant bg-surface py-2 ps-2 pe-3">
+      <PartAnchors ids={partIds} />
       <div className="flex items-start gap-2 leading-6">
         <FlaskConical size={16} strokeWidth={1.75} aria-hidden="true" className={`mt-1 shrink-0 ${run?.status === "failed" ? "text-accent-red" : "text-accent-green"}`} />
         <button
@@ -177,15 +189,28 @@ export function RunCard({ runId, label, pending, onOpenRun }: {
           <span>{live ? m.run_metric_at_step({ step: value(metric.last.step) }) : m.run_metric_from({ value: value(metric.first.value) })}</span>
         </div>
       )}
+      {metricsError && (
+        <div className="ms-6 mt-1 flex flex-wrap items-center gap-x-2 text-sm leading-5 text-accent-red">
+          <span className="min-w-0 wrap-anywhere">{m.run_metrics_unreadable({ error: autoDir(metricsError) })}</span>
+          <button
+            type="button"
+            className="shrink-0 cursor-pointer text-subtext underline hover:text-text focus-visible:outline-2 focus-visible:outline-focus"
+            onClick={() => void metricsQuery.refetch()}
+          >
+            {m.app_retry()}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
 
 /** A report the turn wrote to the artifacts directory. */
-export function ReportCard({ path, title, lines, onOpen }: {
+export function ReportCard({ path, title, lines, partIds, onOpen }: {
   path: string;
   title: string;
   lines: number | null;
+  partIds: string[];
   onOpen?: (path: string, intent: TabOpenIntent) => void;
 }) {
   const file = path.slice(path.replace(/\\/g, "/").lastIndexOf("/") + 1);
@@ -194,10 +219,11 @@ export function ReportCard({ path, title, lines, onOpen }: {
   return (
     <button
       type="button"
-      className="report-card my-2 flex w-fit max-w-full items-center gap-2.5 rounded-lg border border-border-variant bg-surface py-2 ps-2.5 pe-3 text-start enabled:cursor-pointer enabled:hover:border-border focus-visible:outline-2 focus-visible:outline-focus"
+      className="report-card relative my-2 flex w-fit max-w-full items-center gap-2.5 rounded-lg border border-border-variant bg-surface py-2 ps-2.5 pe-3 text-start enabled:cursor-pointer enabled:hover:border-border focus-visible:outline-2 focus-visible:outline-focus"
       disabled={!onOpen}
       {...tabOpenGestureHandlers<HTMLButtonElement>((intent) => onOpen?.(path, intent))}
     >
+      <PartAnchors ids={partIds} />
       <span className="flex h-9 w-7.5 shrink-0 items-center justify-center rounded-sm bg-panel text-subtext">
         <NotebookText size={16} strokeWidth={1.75} aria-hidden="true" />
       </span>

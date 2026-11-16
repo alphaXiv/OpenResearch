@@ -757,6 +757,7 @@
   "report_lines_other": "{count} पंक्तियाँ",
   "run_metric_at_step": "चरण {step}",
   "run_metric_from": "{value} से",
+  "run_metrics_unreadable": "इस रन के Trackio मेट्रिक्स नहीं पढ़े जा सके: {error}",
   "activity_browsing": "ब्राउज़ कर रहा है…",
   "activity_delegating": "सौंप रहा है…",
   "activity_running": "चल रहा है…",

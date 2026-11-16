@@ -97,6 +97,8 @@ test("a literature turn reads as papers on a shelf under a closed survey of its 
     ["Training Compute-Optimal Large Language Models", "Hoffmann et al. · 2022"],
   ]);
   assert.equal(container.querySelector(".paper-card").getAttribute("href"), "https://www.alphaxiv.org/abs/2305.07759");
+  const readCall = [...container.querySelectorAll(".paper-card [data-part-id]")].map((anchor) => anchor.getAttribute("data-part-id"));
+  assert.equal(readCall.length, 2, "chat search can scroll to each paper read");
   const survey = [...container.querySelectorAll(".tool-group-summary")].map((summary) => plain(summary.textContent));
   assert.ok(survey.includes("Surveyed the literature · 3 searches"), survey.join(" | "));
 });
@@ -131,7 +133,7 @@ test("an answer's paper links name each paper once, with the pages it cites", ()
     "Tokens matter ([Chinchilla, p. 8](https://www.alphaxiv.org/pdf/2203.15556?page=8)), see also",
     "[p. 1](https://www.alphaxiv.org/pdf/2203.15556v2?page=1) and [LIMA](https://arxiv.org/abs/2305.11206).",
     "Biology: [Smith](https://doi.org/10.1101/2024.01.01.123456), [Doe](https://pubmed.ncbi.nlm.nih.gov/38012345/),",
-    "[Roe](https://openalex.org/W4389).",
+    "[Roe](https://openalex.org/W4389). A broken link: [x](https://doi.org/10.1000/example%).",
   ].join(" ");
   assert.deepEqual(linkedPapers(answer), [
     { source: "alphaxiv", id: "2203.15556", pages: [8, 1] },
@@ -199,4 +201,14 @@ test("reading an existing report is not counted as writing one", async () => {
     text("Done.", "final_answer"),
   ]);
   assert.match(plain(container.querySelector("[data-work-toggle]").textContent), /^Worked for /);
+});
+
+test("saving a paper to an alphaXiv folder does not count as reading it", async () => {
+  const container = await renderTurn([
+    { id: "save-1", type: "tool", tool: "mcp__alphaxiv__save_papers_to_folder", state: { status: "completed", input: { paper_ids_or_urls: ["2305.07759"] } } },
+    text("Saved [TinyStories](https://www.alphaxiv.org/abs/2305.07759).", "final_answer"),
+  ], { "2305.07759": { title: "TinyStories" } });
+  assert.equal(container.querySelector(".paper-shelf"), null);
+  const sources = container.querySelector('section[aria-label="Sources"]');
+  assert.deepEqual([...sources.querySelectorAll(".paper-card")].map(cardLines), [["TinyStories", "not read"]]);
 });

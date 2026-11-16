@@ -751,6 +751,7 @@
   "report_lines_other": "{count} 行",
   "run_metric_at_step": "第 {step} 步",
   "run_metric_from": "起始值 {value}",
+  "run_metrics_unreadable": "无法读取此运行的 Trackio 指标：{error}",
   "activity_browsing": "正在浏览…",
   "activity_delegating": "正在委派…",
   "activity_running": "正在运行…",

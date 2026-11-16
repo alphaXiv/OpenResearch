@@ -1971,6 +1971,12 @@ function alphaxivActivity(tool: string, input: Record<string, unknown>): ToolAct
     approvalLabel,
     // Paper arguments may be full titles, which have no page to link.
     litCall: { kind: "paper", source: "alphaxiv", id: paper && !/\s/.test(paper) ? paper : undefined },
+    // Saving a paper or reading notes on it does not read it.
+    paperIds: [],
+  });
+  const read = (label: string, paper: string | null): ToolActivity => ({
+    ...row("read", label, paper ?? undefined),
+    paperIds: paper && !/\s/.test(paper) ? [paper] : [],
   });
   const readPaper = (paper: string | null) =>
     paper ? m.activity_read_target({ target: ltr(paper) }) : m.activity_read_paper();
@@ -2012,11 +2018,11 @@ function alphaxivActivity(tool: string, input: Record<string, unknown>): ToolAct
       const label = queries.length > 1
         ? m.activity_for_queries({ activity: readPaper(paper), count: fmtNumber(queries.length) })
         : forQuery(readPaper(paper), queries[0] ?? null);
-      return row("read", label, paper ?? undefined);
+      return read(label, paper);
     }
     case "get_paper_content": {
       const paper = inputString(input, "url");
-      return row("read", readPaper(paper), paper ?? undefined);
+      return read(readPaper(paper), paper);
     }
     case "read_files_from_github_repository": {
       const repository = inputString(input, "githubUrl")
@@ -3136,7 +3142,12 @@ function ResearchToolRun({ parts, pendingTail, discovered, ...props }: ToolGroup
         const rows: ChatPart[] = [];
         for (const part of facetParts) {
           const papers = shelvedPapers(part, toolActivity(part));
-          for (const paper of papers) shelf.set(`${paper.source}:${paper.id}`, shelf.get(`${paper.source}:${paper.id}`) ?? paper);
+          for (const paper of papers) {
+            const key = `${paper.source}:${paper.id}`;
+            const shelved = shelf.get(key) ?? { ...paper, partIds: [] };
+            shelved.partIds?.push(part.id);
+            shelf.set(key, shelved);
+          }
           if (papers.length === 0) rows.push(part);
         }
         const searches = rows.reduce((total, part) => total + literatureSearches(toolActivity(part)), 0);
@@ -3151,11 +3162,11 @@ function ResearchToolRun({ parts, pendingTail, discovered, ...props }: ToolGroup
         );
       }
       case "runs": {
-        const cards = new Map<string, ChatPart>();
+        const cards = new Map<string, ChatPart[]>();
         const rows: ChatPart[] = [];
         for (const part of facetParts) {
           const runIds = part.state?.status === "error" ? [] : knownRunIds(toolActivity(part), props.runExperimentName);
-          for (const runId of runIds) cards.set(runId, part);
+          for (const runId of runIds) cards.set(runId, [...(cards.get(runId) ?? []), part]);
           if (runIds.length === 0) rows.push(part);
         }
         return (
@@ -3164,7 +3175,8 @@ function ResearchToolRun({ parts, pendingTail, discovered, ...props }: ToolGroup
               quiet: true,
               summary: rows.every((part) => toolActivity(part).kind === "log") ? m.activity_reviewed_run_logs() : m.activity_checked_experiments(),
             })}
-            {[...cards].map(([runId, part]) => {
+            {[...cards].map(([runId, runParts]) => {
+              const part = runParts.at(-1)!;
               const pending = part.id === pendingId && part.state?.status === "running";
               const activity = pending ? activityInProgress(toolActivity(part)) : toolActivity(part);
               const name = props.runExperimentName?.(runId) || m.tree_experiment();
@@ -3174,6 +3186,7 @@ function ResearchToolRun({ parts, pendingTail, discovered, ...props }: ToolGroup
                   runId={runId}
                   label={activity.runLabel?.(autoDir(name)) ?? activity.label}
                   pending={pending}
+                  partIds={runParts.map((runPart) => runPart.id)}
                   onOpenRun={props.onOpenRun}
                 />
               );
@@ -3206,6 +3219,7 @@ function ResearchToolRun({ parts, pendingTail, discovered, ...props }: ToolGroup
                 key={path}
                 path={path}
                 {...reportTitle(facetParts, path)}
+                partIds={facetParts.filter((part) => toolActivity(part).filePath === path).map((part) => part.id)}
                 onOpen={props.onOpenFile && ((target, intent) => props.onOpenFile?.(target, undefined, undefined, undefined, intent))}
               />
             ))}

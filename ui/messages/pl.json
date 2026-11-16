@@ -757,6 +757,7 @@
   "report_lines_other": "Wiersze: {count}",
   "run_metric_at_step": "krok {step}",
   "run_metric_from": "od {value}",
+  "run_metrics_unreadable": "Nie udało się odczytać metryk Trackio tego uruchomienia: {error}",
   "activity_browsing": "Przeglądanie…",
   "activity_delegating": "Przekazywanie zadania…",
   "activity_running": "Uruchamianie…",

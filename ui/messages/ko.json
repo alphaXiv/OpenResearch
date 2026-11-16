@@ -757,6 +757,7 @@
   "report_lines_other": "{count}줄",
   "run_metric_at_step": "{step}단계",
   "run_metric_from": "시작값 {value}",
+  "run_metrics_unreadable": "이 실행의 Trackio 지표를 읽지 못했습니다: {error}",
   "activity_browsing": "탐색 중…",
   "activity_delegating": "위임 중…",
   "activity_running": "실행 중…",

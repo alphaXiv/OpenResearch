@@ -783,6 +783,7 @@
   "report_lines_other": "{count} satır",
   "run_metric_at_step": "adım {step}",
   "run_metric_from": "başlangıç {value}",
+  "run_metrics_unreadable": "Bu çalıştırmanın Trackio metrikleri okunamadı: {error}",
   "activity_browsing": "Geziniliyor…",
   "activity_delegating": "Devrediliyor…",
   "activity_running": "Çalışıyor…",

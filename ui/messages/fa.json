@@ -751,6 +751,7 @@
   "report_lines_other": "{count} خط",
   "run_metric_at_step": "گام {step}",
   "run_metric_from": "از {value}",
+  "run_metrics_unreadable": "معیارهای Trackio این اجرا خوانده نشد: {error}",
   "activity_browsing": "در حال مرور…",
   "activity_delegating": "در حال واگذاری…",
   "activity_running": "در حال اجرا…",

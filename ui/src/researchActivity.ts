@@ -90,7 +90,12 @@ function linkedPaper(host: string, path: string): { source: LitSource; id: strin
       return id ? { source: "alphaxiv", id, page } : null;
     }
     case "doi.org": {
-      const doi = decodeURIComponent(route.split("#")[0]).replace(/[.,]+$/, "");
+      let doi: string;
+      try {
+        doi = decodeURIComponent(route.split("#")[0]).replace(/[.,]+$/, "");
+      } catch {
+        return null;
+      }
       return /^10\.\d+\//.test(doi) ? { source: doi.startsWith("10.1101/") ? "biorxiv" : "openalex", id: doi } : null;
     }
     case "openalex.org": {

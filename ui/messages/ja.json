@@ -757,6 +757,7 @@
   "report_lines_other": "{count} 行",
   "run_metric_at_step": "ステップ {step}",
   "run_metric_from": "開始時 {value}",
+  "run_metrics_unreadable": "この実行の Trackio 指標を読み取れませんでした: {error}",
   "activity_browsing": "閲覧中…",
   "activity_delegating": "委任中…",
   "activity_running": "実行中…",

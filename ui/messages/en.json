@@ -757,6 +757,7 @@
   "report_lines_other": "{count} lines",
   "run_metric_at_step": "step {step}",
   "run_metric_from": "from {value}",
+  "run_metrics_unreadable": "Couldn't read this run's Trackio metrics: {error}",
   "activity_browsing": "Browsing…",
   "activity_delegating": "Delegating…",
   "activity_running": "Running…",
