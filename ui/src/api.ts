@@ -1144,8 +1144,10 @@ export interface HarnessModel {
   serviceTiers?: OptionChoice[];
   /** Whether the model accepts images; absent when the catalog doesn't say. */
   imageInput?: boolean;
-  /** Its id names a free tier. */
+  /** Its id names a free tier, or a model the feed hosts. */
   free?: boolean;
+  /** The image the model feed gives a model it hosts, in place of the mark matched from its name. */
+  icon?: { type: "image/png" | "image/webp"; data: string };
   parsed: ModelName;
 }
 

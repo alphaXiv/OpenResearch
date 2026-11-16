@@ -53,7 +53,7 @@ mod agent_tools;
 pub(crate) mod api_v2;
 pub(crate) mod compute_settings;
 mod harness_setup;
-mod model_feed;
+pub(crate) mod model_feed;
 mod network;
 mod search;
 mod usage;
@@ -223,7 +223,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
 
     spawn_agent_preflight(state.clone());
     spawn_agent_updates(state.clone());
-    model_feed::spawn_refresh(state.chat.clone());
+    model_feed::spawn_refresh(state.clone());
     search::spawn_backfill(state.clone());
     // A fresh install's demo worktree takes ~15 sequential git spawns — build
     // it while the onboarding screen is up instead of inside the confirm click.
@@ -8885,7 +8885,7 @@ async fn test_acp_harness(Json(input): Json<AcpHarnessInput>) -> ApiResult {
 /// and serves the cache with it patched in.
 async fn harnesses_payload(state: &AppState, q: &HarnessQuery) -> Value {
     let mut payload = detected_harnesses(state, q).await;
-    model_feed::offer_unlisted_releases(&mut payload);
+    model_feed::annotate_models(&mut payload);
     payload
 }
 

@@ -419,7 +419,12 @@ const MODEL_MARKS: [pattern: RegExp, brand: Brand][] = [
   [/\bll[- ]alpha/, "laptop"],
 ];
 
-export function ModelMark({ model, harness, size }: { model: Pick<HarnessModel, "id" | "displayName">; harness?: HarnessId; size: number }) {
+type MarkedModel = Pick<HarnessModel, "id" | "displayName" | "icon">;
+
+const iconUrl = ({ type, data }: NonNullable<HarnessModel["icon"]>) => `data:${type};base64,${data}`;
+
+export function ModelMark({ model, harness, size }: { model: MarkedModel; harness?: HarnessId; size: number }) {
+  if (model.icon) return <img src={iconUrl(model.icon)} width={size} height={size} className="block shrink-0 object-contain" alt="" aria-hidden="true" />;
   const own = MODEL_MARKS.find(([pattern]) => pattern.test(modelName(model)))?.[1];
   return own ? <BrandMark brand={own} size={size} /> : <FamilyMark lab={modelLab(model, harness)} size={size} />;
 }
@@ -466,7 +471,8 @@ export function BrandMark({ brand, size }: { brand: Brand; size: number }) {
 }
 
 /** A model's maker mark in the current colour, whatever colours its logo has. */
-export function ModelGlyph({ model, size }: { model: Pick<HarnessModel, "id" | "displayName">; size: number }) {
+export function ModelGlyph({ model, size }: { model: MarkedModel; size: number }) {
+  if (model.icon) return <Glyph image={iconUrl(model.icon)} size={size} />;
   const lab = modelLab(model);
   if (lab === "openai") return <HarnessLogo harness="codex" size={size} />;
   const logo = MODEL_LABS.find(([, entry]) => entry === lab)?.[3] ?? lab;

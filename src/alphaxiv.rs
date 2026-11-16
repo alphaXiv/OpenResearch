@@ -690,6 +690,19 @@ pub async fn papers(
     Ok(page)
 }
 
+/// The signed-in user's alphaXiv id, read from the stored access token without a network trip, since an
+/// expired token still names its user; `None` while signed out.
+pub fn user_id_on_disk() -> Option<String> {
+    let token = match load() {
+        Some(tokens) => tokens.access_token,
+        None => {
+            let body = std::fs::read(forwarded_path()).ok()?;
+            serde_json::from_slice::<Access>(&body).ok()?.access_token
+        }
+    };
+    jwt_claim(&token, "sub")
+}
+
 async fn user_id() -> Result<String> {
     let access = access(None).await?;
     jwt_claim(&access.access_token, "sub")

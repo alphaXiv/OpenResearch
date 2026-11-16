@@ -259,6 +259,7 @@ impl OpenCode {
             }
             available.contains(&model.id)
                 || (info.authenticated && !is_local(model))
+                || crate::local::model_routes::hosted(&model.id)
                 || (public_models.contains(&model.id)
                     && provider_enabled(&config, "opencode")
                     && !is_local(model))
@@ -640,8 +641,12 @@ fn found_providers<'a>(catalog: impl IntoIterator<Item = &'a str>) -> Vec<FoundP
     let (layers, _) = user_configs();
     let records = crate::local::local_models::providers().unwrap_or_default();
     let endpoints = crate::local::local_models::read().unwrap_or_default();
-    let owned =
-        |id: &str| id == "opencode" || endpoints.contains_key(id) || records.contains_key(id);
+    let owned = |id: &str| {
+        id == "opencode"
+            || id.starts_with(crate::local::model_routes::HOSTED_PROVIDER_PREFIX)
+            || endpoints.contains_key(id)
+            || records.contains_key(id)
+    };
     let mut gates = json!({});
     for layer in &layers {
         for key in ["enabled_providers", "disabled_providers"] {
@@ -905,7 +910,7 @@ fn snapshot_config() -> (Value, bool) {
 }
 
 /// Whether the user keeps OpenCode's free models on; they are unless switched off.
-fn free_models_offered() -> bool {
+pub(crate) fn free_models_offered() -> bool {
     crate::store::Store::open()
         .and_then(|store| store.ui_state())
         .map_or(true, |state| state.opencode_free_models)
@@ -1944,6 +1949,9 @@ async fn opencode_pre_accept_setup(
 }
 
 async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
+    if let Some(model) = ctx.model.as_deref() {
+        crate::commands::up::model_feed::ensure_offered(model)?;
+    }
     let _in_use = super::managed::OPENCODE_IN_USE.read().await;
     // Native permission and question requests die with their turn. Clear any
     // crash/restart leftovers before a new live request can be surfaced.
@@ -2678,7 +2686,14 @@ mod tests {
             .found_providers
             .iter()
             .any(|found| found.id == "tinker"));
-        let found = found_providers(["mistral", "opencode", "orx-local-1", "tinker", "openai"]);
+        let found = found_providers([
+            "mistral",
+            "opencode",
+            "openresearch-k3v9q2",
+            "orx-local-1",
+            "tinker",
+            "openai",
+        ]);
         let shown = serde_json::to_value(&found).unwrap();
         assert_eq!(
             shown,

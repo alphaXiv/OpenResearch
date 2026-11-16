@@ -611,13 +611,65 @@ pub fn prepare_env(
     crate::local::chat::prepare_env(cmd);
     let connections = read()?;
     let records = providers()?;
-    if connections.is_empty() && records.is_empty() {
+    let hosted = crate::commands::up::model_feed::hosted_endpoints();
+    if connections.is_empty() && records.is_empty() && hosted.is_empty() {
         return Ok(());
     }
     let mut config = inline_config(cmd)?;
     merge_config(&mut config, &connections, model)?;
     merge_providers(&mut config, &records, protocol)?;
+    merge_hosted(
+        &mut config,
+        &hosted,
+        crate::alphaxiv::user_id_on_disk().as_deref(),
+    )?;
     cmd.env("OPENCODE_CONFIG_CONTENT", serde_json::to_string(&config)?);
+    Ok(())
+}
+
+/// Hosts that may learn who is using a hosted model: OpenResearch's and alphaXiv's own.
+const IDENTIFIED_HOSTS: &[&str] = &["openresearch.sh", "alphaxiv.org"];
+
+/// Adds the model feed's endpoints as providers, telling the hosts in [`IDENTIFIED_HOSTS`] the signed-in
+/// alphaXiv user.
+fn merge_hosted(
+    config: &mut Value,
+    endpoints: &[crate::commands::up::model_feed::HostedEndpoint],
+    user: Option<&str>,
+) -> Result<()> {
+    let providers = config
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("OpenCode inline config must be a JSON object."))?
+        .entry("provider")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("OpenCode provider config must be a JSON object."))?;
+    for endpoint in endpoints {
+        let models: BTreeMap<_, _> = endpoint
+            .models
+            .iter()
+            .map(|model| {
+                let limit = json!({"context": model.context, "output": model.output});
+                let cost = json!({"input": 0, "output": 0});
+                (
+                    model.id.clone(),
+                    json!({"name": model.name, "limit": limit, "cost": cost}),
+                )
+            })
+            .collect();
+        let mut options = json!({"baseURL": endpoint.base_url.as_str(), "apiKey": endpoint.key});
+        let host = endpoint.base_url.host_str().unwrap_or_default();
+        let identified = IDENTIFIED_HOSTS
+            .iter()
+            .any(|ours| host == *ours || host.ends_with(&format!(".{ours}")));
+        if let Some(user) = user.filter(|_| identified) {
+            options["headers"] = json!({"X-OpenResearch-User": user});
+        }
+        providers.insert(
+            endpoint.id.clone(),
+            json!({"npm": "@ai-sdk/openai-compatible", "name": "OpenResearch", "options": options, "models": models}),
+        );
+    }
     Ok(())
 }
 
@@ -826,6 +878,54 @@ pub(crate) fn merge_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hosted_endpoints_become_free_providers_and_only_ours_learn_the_user() {
+        let feed: crate::commands::up::model_feed::HostedEndpoint = serde_json::from_value(json!({
+            "id": "openresearch-a1", "baseURL": "https://api.openresearch.sh/v1",
+            "auth": { "kind": "key", "key": "public" },
+            "models": [{ "id": "glm-5.3", "name": "GLM 5.3", "context": 128000, "output": 16000 }],
+        }))
+        .unwrap();
+        let elsewhere: crate::commands::up::model_feed::HostedEndpoint =
+            serde_json::from_value(json!({
+                "id": "openresearch-b2", "baseURL": "https://notopenresearch.sh/v1",
+                "auth": { "kind": "key", "key": "" },
+                "models": [{ "id": "m", "name": "M", "context": 1000, "output": 100 }],
+            }))
+            .unwrap();
+        let endpoints = [feed, elsewhere];
+
+        let mut config = json!({ "provider": { "mine": { "options": { "baseURL": "http://localhost:1234/v1" } } } });
+        merge_hosted(&mut config, &endpoints, Some("user-1")).unwrap();
+        let ours = &config["provider"]["openresearch-a1"];
+        assert_eq!(ours["npm"], "@ai-sdk/openai-compatible");
+        assert_eq!(ours["options"]["baseURL"], "https://api.openresearch.sh/v1");
+        assert_eq!(ours["options"]["apiKey"], "public");
+        assert_eq!(
+            ours["options"]["headers"],
+            json!({ "X-OpenResearch-User": "user-1" })
+        );
+        assert_eq!(
+            ours["models"]["glm-5.3"]["limit"],
+            json!({ "context": 128000, "output": 16000 })
+        );
+        assert_eq!(
+            config["provider"]["openresearch-b2"]["options"].get("headers"),
+            None
+        );
+        assert_eq!(
+            config["provider"]["mine"]["options"]["baseURL"],
+            "http://localhost:1234/v1"
+        );
+
+        let mut signed_out = json!({});
+        merge_hosted(&mut signed_out, &endpoints, None).unwrap();
+        assert_eq!(
+            signed_out["provider"]["openresearch-a1"]["options"].get("headers"),
+            None
+        );
+    }
 
     #[test]
     fn generation_pins_auxiliary_models_and_preserves_unrelated_config() {
