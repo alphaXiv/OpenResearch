@@ -89,6 +89,8 @@ test("a typed answer goes out on Enter and survives a failed delivery", async ()
   assert.deepEqual(view.deliveries(), [{ promptId: "q1", answers: [], note: "What is using memory?" }]);
   assert.equal(view.control(m.chat_panel_submit()).disabled, true);
   assert.equal(composer().field().getAttribute("aria-readonly"), "true");
+  await composer().type(" More");
+  assert.equal(composer().draft, "What is using memory?");
   await delivery.resolve(Response.json({ error: "agent gone" }, { status: 409 }));
   assert.equal(composer().field().getAttribute("aria-readonly"), null);
   assert.equal(composer().draft, "What is using memory?");

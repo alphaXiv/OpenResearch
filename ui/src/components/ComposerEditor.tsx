@@ -294,6 +294,11 @@ const markdownSource = markdown({
   extensions: { remove: ["HTMLBlock", "HTMLTag"] },
 });
 
+/** Read-only refuses every change, including the editor's own commands that skip the `readOnly` facet. */
+function readOnlyExtension(readOnly: boolean): Extension {
+  return readOnly ? [EditorState.readOnly.of(true), EditorState.changeFilter.of(() => false)] : [];
+}
+
 function modeExtension(plain: boolean): Extension {
   return plain ? EditorView.editorAttributes.of({ class: "cm-plain" }) : [markdownSource, livePreview];
 }
@@ -431,7 +436,7 @@ export function ComposerEditor({
           },
         })),
         compartments.mode.of(modeExtension(latest.current.plain)),
-        compartments.readOnly.of(EditorState.readOnly.of(latest.current.readOnly)),
+        compartments.readOnly.of(readOnlyExtension(latest.current.readOnly)),
         keymap.of([
           // Enter belongs to send; Shift+Enter breaks the line.
           ...defaultKeymap.filter((binding) => !binding.key?.endsWith("Enter")),
@@ -486,7 +491,7 @@ export function ComposerEditor({
   }, [plain, compartments]);
 
   useEffect(() => {
-    viewRef.current?.dispatch({ effects: compartments.readOnly.reconfigure(EditorState.readOnly.of(readOnly)) });
+    viewRef.current?.dispatch({ effects: compartments.readOnly.reconfigure(readOnlyExtension(readOnly)) });
   }, [readOnly, compartments]);
 
   useEffect(() => {
