@@ -1984,7 +1984,7 @@ impl ChatHost {
         let mut guard = TurnGuard::claim_idle(self, session_id, TurnState::Switching)
             .await
             .ok_or_else(|| {
-                anyhow!("Stop the turn or remove queued messages before switching agents.")
+                anyhow!("Remove queued messages and stop the turn before switching agents.")
             })?;
         let store = Store::open()?;
         let session = store
@@ -2209,7 +2209,7 @@ impl ChatHost {
                 }
             }
         }
-        self.finish_turn(&session_id, Some(&marker.id)).await;
+        self.finish_turn(&session_id, Some(&marker.id), true).await;
         self.drain_queue(&session_id).await;
     }
 
@@ -2912,8 +2912,8 @@ pub struct ChatHost {
     /// The port `orx up` bound, for the bridge env contract.
     up_port: std::sync::OnceLock<u16>,
     /// Messages the user sent while the session's turn was in flight, oldest
-    /// first. `drain_queue` runs the front one when a turn finishes naturally;
-    /// a user Stop clears the whole queue. Persisted before acknowledgement; a
+    /// first. `drain_queue` runs the front one when a turn finishes or the user
+    /// stops it. Persisted before acknowledgement; a
     /// queued message only becomes a transcript bubble once it actually runs.
     queued: std::sync::Mutex<HashMap<String, VecDeque<QueuedMessage>>>,
     queue_persistence: std::sync::Mutex<()>,
@@ -2922,7 +2922,6 @@ pub struct ChatHost {
     pending_client_turns: std::sync::Mutex<HashMap<(String, String), PendingClientTurn>>,
     queue_dispatch_suppressed: std::sync::Mutex<HashSet<String>>,
     queue_dispatch_cancelled: std::sync::Mutex<HashSet<String>>,
-    queue_cancellation_held: std::sync::Mutex<HashSet<String>>,
     /// Sink for mid-turn steering text, present only while a capable harness is running.
     steering: std::sync::Mutex<HashMap<String, SteerSink>>,
     queue_dispatch_in_flight: std::sync::Mutex<HashMap<String, String>>,
@@ -3006,19 +3005,11 @@ impl QueueDispatchGuard {
                     .unwrap()
                     .remove(&self.session_id);
             }
-            if !self
-                .host
-                .queue_cancellation_held
+            self.host
+                .queue_dispatch_cancelled
                 .lock()
                 .unwrap()
-                .contains(&self.session_id)
-            {
-                self.host
-                    .queue_dispatch_cancelled
-                    .lock()
-                    .unwrap()
-                    .remove(&self.session_id);
-            }
+                .remove(&self.session_id);
         }
         self.armed = false;
     }
@@ -3126,8 +3117,33 @@ pub(crate) fn legacy_opening_message(
     })
 }
 
-/// The running turn's end of the steering channel.
-pub type SteerReceiver = mpsc::UnboundedReceiver<SteerMessage>;
+/// The running turn's end of the steering channel. Steers it never read,
+/// including when the turn is aborted, become queued messages on drop.
+pub struct SteerReceiver {
+    rx: mpsc::UnboundedReceiver<SteerMessage>,
+    host: Arc<ChatHost>,
+    session_id: String,
+}
+
+impl SteerReceiver {
+    pub async fn recv(&mut self) -> Option<SteerMessage> {
+        self.rx.recv().await
+    }
+}
+
+impl Drop for SteerReceiver {
+    fn drop(&mut self) {
+        self.rx.close();
+        while let Ok(message) = self.rx.try_recv() {
+            if let Err(error) = self.host.park_steer(&self.session_id, message) {
+                eprintln!(
+                    "orx up: could not queue an unread steer in chat {}: {error}",
+                    self.session_id
+                );
+            }
+        }
+    }
+}
 
 /// A running turn's steering sink, paired with the settings that turn is
 /// actually running under. The session row is the wrong thing to compare a
@@ -3857,7 +3873,6 @@ impl ChatHost {
             pending_client_turns: std::sync::Mutex::new(HashMap::new()),
             queue_dispatch_suppressed: std::sync::Mutex::new(HashSet::new()),
             queue_dispatch_cancelled: std::sync::Mutex::new(HashSet::new()),
-            queue_cancellation_held: std::sync::Mutex::new(HashSet::new()),
             steering: std::sync::Mutex::new(HashMap::new()),
             queue_dispatch_in_flight: std::sync::Mutex::new(HashMap::new()),
         }
@@ -4662,20 +4677,10 @@ impl ChatHost {
         Ok(())
     }
 
-    /// Drop every parked message for a session (user Stop / delete). Emits an
+    /// Drop every parked message for a session being deleted. Emits an
     /// empty `chat.queued` only if there was something to clear.
     pub fn clear_queue(&self, session_id: &str) -> Result<()> {
-        self.clear_queue_inner(session_id, false)
-    }
-
-    fn clear_queue_inner(&self, session_id: &str, hold_cancellation: bool) -> Result<()> {
         let _mutation = self.queue_persistence.lock().unwrap();
-        if hold_cancellation {
-            self.queue_cancellation_held
-                .lock()
-                .unwrap()
-                .insert(session_id.to_string());
-        }
         self.queue_dispatch_cancelled
             .lock()
             .unwrap()
@@ -4687,12 +4692,11 @@ impl ChatHost {
         if let Err(error) = Store::open()
             .and_then(|store| store.delete_queued_chat_messages_for_session(session_id))
         {
-            if !hold_cancellation
-                && !self
-                    .queue_dispatch_in_flight
-                    .lock()
-                    .unwrap()
-                    .contains_key(session_id)
+            if !self
+                .queue_dispatch_in_flight
+                .lock()
+                .unwrap()
+                .contains_key(session_id)
             {
                 self.queue_dispatch_cancelled
                     .lock()
@@ -4710,27 +4714,6 @@ impl ChatHost {
         if had {
             self.emit_queued(session_id);
         }
-        if !hold_cancellation
-            && !self
-                .queue_dispatch_in_flight
-                .lock()
-                .unwrap()
-                .contains_key(session_id)
-        {
-            self.queue_dispatch_cancelled
-                .lock()
-                .unwrap()
-                .remove(session_id);
-        }
-        Ok(())
-    }
-
-    fn release_queue_cancellation_if_idle(&self, session_id: &str) {
-        let _mutation = self.queue_persistence.lock().unwrap();
-        self.queue_cancellation_held
-            .lock()
-            .unwrap()
-            .remove(session_id);
         if !self
             .queue_dispatch_in_flight
             .lock()
@@ -4742,6 +4725,7 @@ impl ChatHost {
                 .unwrap()
                 .remove(session_id);
         }
+        Ok(())
     }
 
     /// Remove one parked message by id (the ✕ on a queued chip).
@@ -6639,7 +6623,11 @@ impl ChatHost {
         let active_turn_id = turn_id.clone();
         let steer_route = crate::local::harness::supports_steering(&ctx.harness).then(|| {
             let (tx, rx) = mpsc::unbounded_channel();
-            ctx.steering = Some(rx);
+            ctx.steering = Some(SteerReceiver {
+                rx,
+                host: self.clone(),
+                session_id: sid.clone(),
+            });
             self.register_steering(&sid, tx, TurnSettings::of(&ctx))
         });
         Store::open()?.begin_usage_execution(
@@ -6682,7 +6670,7 @@ impl ChatHost {
             };
             drop(steer_route);
             if let Some(mut steering) = ctx.steering.take() {
-                steering.close();
+                steering.rx.close();
                 while let Some(message) = steering.recv().await {
                     if let Err(error) = ctx.host.park_steer(&ctx.session_id, message) {
                         ctx.push_error(format!("Could not preserve steering message: {error}"));
@@ -6763,7 +6751,7 @@ impl ChatHost {
                 }
             }
             ctx.host
-                .finish_turn(&ctx.session_id, Some(&ctx.assistant.id))
+                .finish_turn(&ctx.session_id, Some(&ctx.assistant.id), true)
                 .await;
             ctx.host.drain_queue(&ctx.session_id).await;
         });
@@ -6783,7 +6771,12 @@ impl ChatHost {
     }
 
     /// Turn cleanup: drop the handle, bump the session, broadcast idle.
-    async fn finish_turn(self: &Arc<Self>, session_id: &str, message_id: Option<&str>) {
+    async fn finish_turn(
+        self: &Arc<Self>,
+        session_id: &str,
+        message_id: Option<&str>,
+        to_queue: bool,
+    ) {
         let should_finish = {
             let turns = self.turns.lock().await;
             match (turns.get(session_id), message_id) {
@@ -6820,7 +6813,7 @@ impl ChatHost {
             if !matches {
                 return;
             }
-            let drains = message_id.is_some() && refreshed && self.drains_queue(session_id);
+            let drains = to_queue && refreshed && self.drains_queue(session_id);
             self.pass_slot(&mut turns, session_id, drains, claude.as_deref())
         };
         let busy = next != SlotHolder::None;
@@ -6835,10 +6828,6 @@ impl ChatHost {
             json!({ "sessionId": session_id, "busy": busy }),
         );
         self.start_slot_holder(session_id, next).await;
-    }
-
-    async fn finish_interruption(self: &Arc<Self>, session_id: &str) {
-        self.finish_turn(session_id, None).await;
     }
 
     /// Records what a resident Claude child wrote on its own after its turn
@@ -6949,12 +6938,23 @@ impl ChatHost {
     }
 
     async fn stop_turn(self: &Arc<Self>, session_id: &str, mode: StopMode) -> Result<bool> {
-        let cancel = mode == StopMode::Cancel;
+        let cancel = matches!(mode, StopMode::Cancel | StopMode::User);
         let active = {
             let mut turns = self.turns.lock().await;
             let Some(state) = turns.get_mut(session_id) else {
                 return Ok(false);
             };
+            // A queued message still starting is the next turn this Stop hands over to.
+            if mode == StopMode::User
+                && matches!(state, TurnState::Reserved { .. })
+                && self
+                    .queue_dispatch_in_flight
+                    .lock()
+                    .unwrap()
+                    .contains_key(session_id)
+            {
+                return Ok(false);
+            }
             match std::mem::replace(state, TurnState::Cancelling) {
                 TurnState::Active(active) => Some(active),
                 TurnState::Reserved { turn_id } => {
@@ -7057,18 +7057,16 @@ impl ChatHost {
             }
             // Settle dead native requests after the final flush, before a new turn can start.
             let _ = host.resolve_stale_prompts(&session_id, true);
-            host.finish_interruption(&session_id).await;
+            let user = mode == StopMode::User;
+            if user {
+                host.record_interruption(&session_id);
+            }
+            host.finish_turn(&session_id, None, user).await;
         });
         let _ = settlement.await;
         Ok(true)
     }
 
-    /// User-facing interrupt (the Stop button / Escape): abort like
-    /// [`Self::interrupt`], and when a turn was actually in flight persist an
-    /// interruption marker. The dashboard hides the standalone row, but history
-    /// consumers use it to distinguish a stopped turn from a silent one.
-    /// Internal interrupts (plan-approval resume, session/project delete) stay
-    /// markerless on purpose.
     /// Stop `id`'s delegates and every delegate below them, returning those
     /// that were running. A stop is no news to the chat that delegated; an
     /// answer that came before it still is.
@@ -7089,25 +7087,18 @@ impl ChatHost {
     }
 
     pub async fn interrupt_by_user(self: &Arc<Self>, session_id: &str) -> Result<()> {
-        // Stamped before the abort: a fast resend can claim the freed slot and
-        // persist its user message before this runs, and a later timestamp
-        // would sort the marker after that new bubble. (The live broadcast can
-        // still paint them in arrival order for a few ms; a reload converges
-        // on the stored order.)
-        let created_at = now_ms();
-        // Stop means stop everything: drop any messages parked behind this turn
-        // so they don't fire the moment it aborts.
-        let durable_clear = self.clear_queue_inner(session_id, true);
-        let interrupted = self.interrupt(session_id).await;
-        self.release_queue_cancellation_if_idle(session_id);
-        // Best-effort like the marker below: this chat's turn is stopped either way.
+        self.stop_turn(session_id, StopMode::User).await?;
+        // Best-effort like the marker: this chat's turn is stopped either way.
         if let Err(error) = self.stop_delegates(session_id).await {
             eprintln!("orx up: delegates of {session_id} not stopped: {error}");
         }
-        if !interrupted? {
-            return durable_clear;
-        }
-        let durable_error = durable_clear.err();
+        Ok(())
+    }
+
+    /// The marker a user Stop leaves in the transcript. The dashboard hides the
+    /// standalone row, but history consumers use it to tell a stopped turn
+    /// from a silent one.
+    fn record_interruption(&self, session_id: &str) {
         let mut msg = WireMessage {
             id: format!("msg_{}", uuid::Uuid::new_v4()),
             role: "assistant".into(),
@@ -7117,7 +7108,7 @@ impl ChatHost {
                 "completed",
                 None,
             )],
-            created_at,
+            created_at: now_ms(),
             completed_at: None,
             parent_id: None,
         };
@@ -7148,10 +7139,6 @@ impl ChatHost {
             msg.parent_id = parent;
             self.emit("chat.message", message_json(&msg, session_id));
         }
-        if let Some(error) = durable_error {
-            return Err(error);
-        }
-        Ok(())
     }
 
     /// Answer an interactive prompt (plan / permission / question) and resume.
@@ -7674,10 +7661,6 @@ impl ChatHost {
         self.recovery_locks.lock().await.remove(session_id);
         self.submission_locks.lock().await.remove(session_id);
         self.queue_dispatch_cancelled
-            .lock()
-            .unwrap()
-            .remove(session_id);
-        self.queue_cancellation_held
             .lock()
             .unwrap()
             .remove(session_id);
@@ -9860,6 +9843,9 @@ pub async fn keep_turn_leases(
 enum StopMode {
     /// Stopped on purpose: the stored turn is recorded as interrupted.
     Cancel,
+    /// Stopped by the user like `Cancel`, leaving a marker; the slot passes
+    /// straight to the chat's queue, so queued messages run next.
+    User,
     /// Cut short: the stored turn is left for lease reconciliation, which offers Continue.
     LeaseLost,
     /// Cut short like `LeaseLost`, without waiting on the agent: shutdown kills it next.
@@ -13938,7 +13924,7 @@ for line in sys.stdin:
             reserved.defuse();
             emit(&client, &segment("FINISHED")).await;
             assert!(claude.has_continuation("resumes").await);
-            chat.finish_turn("resumes", Some("finishing")).await;
+            chat.finish_turn("resumes", Some("finishing"), true).await;
             assert_eq!(next_turn_text(&mut events).await, "FINISHED");
 
             let turns = {
@@ -15401,61 +15387,16 @@ mod steering_tests {
         .is_err());
     }
 
-    #[test]
-    fn queue_dispatch_and_stop_release_only_their_own_cancellation_state() {
-        let host = test_host();
-        host.queue_cancellation_held
-            .lock()
-            .unwrap()
-            .insert("owner".into());
-        host.queue_dispatch_cancelled
-            .lock()
-            .unwrap()
-            .insert("owner".into());
-        let mut dispatch = QueueDispatchGuard::begin_locked(host.clone(), "owner", "q1");
-
-        dispatch.finish_locked(true);
-        assert!(host
-            .queue_dispatch_cancelled
-            .lock()
-            .unwrap()
-            .contains("owner"));
-        host.release_queue_cancellation_if_idle("owner");
-        assert!(!host
-            .queue_dispatch_cancelled
-            .lock()
-            .unwrap()
-            .contains("owner"));
-
-        host.queue_cancellation_held
-            .lock()
-            .unwrap()
-            .insert("owner".into());
-        host.queue_dispatch_cancelled
-            .lock()
-            .unwrap()
-            .insert("owner".into());
-        let mut dispatch = QueueDispatchGuard::begin_locked(host.clone(), "owner", "q2");
-        host.release_queue_cancellation_if_idle("owner");
-        assert!(host
-            .queue_dispatch_cancelled
-            .lock()
-            .unwrap()
-            .contains("owner"));
-        dispatch.finish_locked(true);
-        assert!(!host
-            .queue_dispatch_cancelled
-            .lock()
-            .unwrap()
-            .contains("owner"));
-    }
-
     #[tokio::test]
     async fn a_steer_survives_the_event_arm_winning_the_select() {
         // Cancel-safety is what lets the harness loops park a steer beside
         // their own event wait; without it this message would be swallowed.
         let (tx, rx) = mpsc::unbounded_channel();
-        let mut steering = Some(rx);
+        let mut steering = Some(SteerReceiver {
+            rx,
+            host: test_host(),
+            session_id: "owner".into(),
+        });
         tx.send(steer("go")).unwrap();
         tokio::select! {
             biased;
@@ -15471,28 +15412,31 @@ mod steering_tests {
     }
 
     #[tokio::test]
-    async fn a_closed_sink_sends_the_message_back_to_the_queue() {
-        // What the turn epilogue does: detach, close, park the remainder.
+    async fn a_steer_the_turn_never_read_is_queued_even_when_the_turn_is_aborted() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
         let host = test_host();
-        let (store, dir) = test_store("closed");
+        add_test_session(&Store::open().unwrap());
         let (tx, rx) = mpsc::unbounded_channel();
         let route = host.register_steering("owner", tx.clone(), TurnSettings::default());
-        let mut steering = Some(rx);
-
+        let steering = SteerReceiver {
+            rx,
+            host: host.clone(),
+            session_id: "owner".into(),
+        };
+        let turn = tokio::spawn(async move {
+            let _route = route;
+            let _steering = steering;
+            std::future::pending::<()>().await;
+        });
         tx.send(steer("still here")).unwrap();
-        drop(route);
-        if let Some(mut rx) = steering.take() {
-            rx.close();
-            while let Some(message) = rx.recv().await {
-                host.park_steer_with_store("owner", message, &store)
-                    .unwrap();
-            }
-        }
+
+        turn.abort();
+        let _ = turn.await;
 
         assert!(host.steering.lock().unwrap().get("owner").is_none());
         assert!(tx.send(steer("too late")).is_err());
         assert_eq!(host.queued_items("owner")[0]["text"], "still here");
-        drop(store);
-        let _ = std::fs::remove_dir_all(dir);
     }
 }
