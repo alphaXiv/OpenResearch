@@ -20,8 +20,8 @@ test("style lint rejects arbitrary typography and colors", () => {
   );
 });
 
-test("style lint allows theme aliases and theme color definitions", () => {
-  const source = 'className="text-sm bg-surface border-[0.5px]"; --surface: oklch(0.9 0 0);';
+test("style lint allows theme aliases, mask positions and theme color definitions", () => {
+  const source = 'className="text-sm bg-surface border-[0.5px] mask-b-from-[calc(100%-0.75rem)]"; --surface: oklch(0.9 0 0);';
   assert.deepEqual(findStyleViolations(source, { allowRawColors: true }), []);
 });
 
