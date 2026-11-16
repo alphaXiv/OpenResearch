@@ -902,6 +902,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
         )
         .route("/api/settings/ray/preflight", post(ray_preflight))
         .route("/api/trackio/projects/{id}/runs", get(trackio_project_runs))
+        .route(
+            "/api/trackio/projects/{id}/runs/{run}/metrics",
+            get(trackio_run_metrics),
+        )
         .route("/api/settings/trackio/preflight", post(trackio_preflight))
         .route("/api/settings/compute", get(compute_settings))
         .route("/api/settings/compute/default", post(set_compute_default))

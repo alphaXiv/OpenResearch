@@ -1415,6 +1415,19 @@ pub(super) async fn trackio_project_runs(
     Ok(Json(json!(runs)))
 }
 
+/// What one run logged to Trackio, each metric with a short series for a sparkline.
+pub(super) async fn trackio_run_metrics(
+    State(state): State<AppState>,
+    Path((id, run)): Path<(String, String)>,
+) -> ApiResult {
+    let project = Store::open()?
+        .get_local_project(&id)?
+        .ok_or_else(|| not_found("project"))?;
+    let project = crate::local::trackio::project_for(&project.slug);
+    let metrics = crate::local::trackio::run_metrics(&state.trackio, project, run, &[], 48).await;
+    Ok(Json(json!(metrics)))
+}
+
 /// Live check of the saved Trackio Space or server and its write access.
 pub(super) async fn trackio_preflight() -> ApiResult {
     let preflight = crate::local::trackio::check().await.map_err(bad_request)?;

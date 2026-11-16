@@ -259,6 +259,10 @@ export interface PaperHit {
 export interface ResolvedPaper {
   paperId: string;
   title?: string | null;
+  /** Full names in byline order. */
+  authors?: string[];
+  /** First publication, in Unix milliseconds. */
+  publishedAt?: number;
   repoUrl?: string | null;
   repoStars?: number | null;
 }
@@ -840,6 +844,25 @@ export interface TrackioRuns {
   runs: string[];
   /** A private Space's read-only `__sign`; without it the browser gets a 404. */
   dashboardSign: string | null;
+}
+
+export interface TrackioPoint {
+  step: number;
+  value: number;
+}
+
+export interface TrackioMetric {
+  name: string;
+  first: TrackioPoint;
+  last: TrackioPoint;
+  /** Evenly spaced points, first and last included. */
+  series: TrackioPoint[];
+}
+
+/** What one run logged to Trackio; `errors` holds what could not be read. */
+export interface TrackioRunMetrics {
+  metrics: TrackioMetric[];
+  errors: string[];
 }
 
 export interface TrackioPreflight {
@@ -2638,6 +2661,9 @@ export function createApi(
   const getTrackioRuns = (projectId: string, signal?: AbortSignal) =>
     get<TrackioRuns>(`/api/trackio/projects/${encodeURIComponent(projectId)}/runs`, signal);
 
+  const getTrackioRunMetrics = (projectId: string, runId: string, signal?: AbortSignal) =>
+    get<TrackioRunMetrics>(`/api/trackio/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(runId)}/metrics`, signal);
+
   const trackioPreflight = () => post<TrackioPreflight>("/api/settings/trackio/preflight", {});
 
   const getComputeSettings = (projectId?: string, signal?: AbortSignal) =>
@@ -3262,6 +3288,7 @@ export function createApi(
     saveRaySettings,
     rayPreflight,
     getTrackioRuns,
+    getTrackioRunMetrics,
     trackioPreflight,
     getComputeSettings,
     setComputeDefault,

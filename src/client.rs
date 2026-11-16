@@ -1135,9 +1135,36 @@ pub struct ResolvedPaper {
     /// Canonical versionless id (`2401.12345`).
     pub paper_id: String,
     pub title: Option<String>,
+    /// Full names in byline order, from the paper's BibTeX.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub authors: Vec<String>,
+    /// First publication, in Unix milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub published_at: Option<i64>,
     /// Linked GitHub repo — author repos first, then most stars.
     pub repo_url: Option<String>,
     pub repo_stars: Option<i64>,
+}
+
+/// The names in a BibTeX entry's `author` field, each as "Given Family".
+fn bibtex_authors(bibtex: &str) -> Vec<String> {
+    let Some(start) = bibtex
+        .find("author={")
+        .map(|index| index + "author={".len())
+    else {
+        return Vec::new();
+    };
+    let Some(len) = bibtex[start..].find('}') else {
+        return Vec::new();
+    };
+    bibtex[start..start + len]
+        .split(" and ")
+        .map(|name| match name.split_once(',') {
+            Some((family, given)) => format!("{} {}", given.trim(), family.trim()),
+            None => name.split_whitespace().collect::<Vec<_>>().join(" "),
+        })
+        .filter(|name| !name.is_empty())
+        .collect()
 }
 
 /// Resolve an arXiv or alphaXiv paper id to title + linked GitHub repo. `/papers/v3/{id}` scrapes
@@ -1169,11 +1196,19 @@ pub async fn resolve_paper(paper_id: &str) -> Result<ResolvedPaper> {
         group_id: Option<String>,
         universal_id: Option<String>,
         title: Option<String>,
+        citation_bibtex: Option<String>,
+        first_publication_date: Option<i64>,
     }
     let paper = res.json::<Paper>().await?;
     let mut resolved = ResolvedPaper {
         paper_id: paper.universal_id.unwrap_or_else(|| id.to_string()),
         title: paper.title,
+        authors: paper
+            .citation_bibtex
+            .as_deref()
+            .map(bibtex_authors)
+            .unwrap_or_default(),
+        published_at: paper.first_publication_date,
         repo_url: None,
         repo_stars: None,
     };
@@ -2192,6 +2227,13 @@ mod tests {
         PubmedDiscoveryOptions,
     };
     use serde_json::json;
+
+    #[test]
+    fn bibtex_authors_reads_both_name_orders() {
+        let bibtex = "@misc{eldan2023,\n  title={TinyStories},\n  author={Ronen Eldan and Li, Yuanzhi},\n  year={2023},\n}";
+        assert_eq!(super::bibtex_authors(bibtex), ["Ronen Eldan", "Yuanzhi Li"]);
+        assert!(super::bibtex_authors("@misc{x, title={No byline}}").is_empty());
+    }
 
     #[test]
     fn current_user_decodes_linked_and_legacy_accounts() {
