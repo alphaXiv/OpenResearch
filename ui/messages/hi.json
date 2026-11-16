@@ -1901,7 +1901,6 @@
   "close_pending_quit": "बाहर निकलें",
   "close_pending_force_quit": "ज़बरदस्ती बाहर निकलें",
   "close_pending_blocked": "ज़बरदस्ती बाहर निकलने से वे प्रयोग रुक जाते हैं जिन्हें OpenResearch खुला चाहिए।",
-  "close_pending_uncounted": "OpenResearch चल रहे एजेंट और प्रयोगों की जाँच नहीं कर सका। बाहर निकलने पर काम कर रहा हर एजेंट रुक जाता है।",
   "close_pending_agents": "बाहर निकलने पर एजेंट रुक जाते हैं",
   "close_pending_needs_open": "ऐसे प्रयोग जिन्हें पूरे होने तक OpenResearch खुला चाहिए",
   "close_pending_continues": "ऐसे प्रयोग जो चलते रहते हैं और अगली बार OpenResearch खुलने पर नतीजे बताते हैं",

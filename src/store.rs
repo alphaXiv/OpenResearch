@@ -1945,17 +1945,16 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    /// What quitting would interrupt or leave unreported.
-    pub(crate) fn pending_work(&self) -> Result<PendingWork> {
+    /// What quitting would interrupt or leave unreported, given the chats with a turn in this process.
+    pub(crate) fn pending_work(&self, working: &[String]) -> Result<PendingWork> {
         let mut statement = self.conn.prepare(
             "SELECT s.project_id, p.name, s.id, s.side_parent_session_id, s.harness, NULLIF(TRIM(s.title), '')
              FROM chat_sessions s LEFT JOIN local_projects p ON p.id = s.project_id
-             WHERE EXISTS(SELECT 1 FROM chat_turns t WHERE t.session_id = s.id
-                          AND t.state IN ('preparing', 'retrying', 'running'))
+             WHERE s.id IN (SELECT value FROM json_each(?1))
              ORDER BY s.updated_at DESC",
         )?;
         let agents = statement
-            .query_map([], |row| {
+            .query_map([serde_json::to_string(working)?], |row| {
                 Ok(PendingAgent {
                     project_id: row.get(0)?,
                     project: row.get(1)?,
@@ -7582,7 +7581,7 @@ mod tests {
             )
             .unwrap();
 
-        let pending = store.pending_work().unwrap();
+        let pending = store.pending_work(&[]).unwrap();
         assert!(pending.agents.is_empty());
         assert!(pending.blocks_quit());
         let fates = pending
@@ -7611,12 +7610,6 @@ mod tests {
                         ('side', 'project', 'claude-code', '  ', 1, 2),
                         ('idle', 'project', 'codex', 'Done', 1, 3);
                  UPDATE chat_sessions SET side_parent_session_id = 'chat' WHERE id = 'side';
-                 INSERT INTO chat_turns (id, session_id, assistant_message_id, client_turn_id, request_hash,
-                                         prepared_input, settings_json, state, delivery_state, created_at, updated_at)
-                 VALUES ('t1', 'chat', 'a1', 'c1', 'h', '', '{}', 'running', 'pending', 1, 1),
-                        ('t2', 'chat', 'a2', 'c2', 'h', '', '{}', 'preparing', 'pending', 1, 1),
-                        ('t3', 'side', 'a3', 'c3', 'h', '', '{}', 'retrying', 'pending', 1, 1),
-                        ('t4', 'idle', 'a4', 'c4', 'h', '', '{}', 'completed', 'delivered', 1, 1);
                  INSERT INTO local_experiments (id, project_id, slug, branch_name, title, run_command,
                                                 created_at, updated_at, chat_session_id)
                  VALUES ('experiment', 'project', 'lr-sweep', 'b', '', 'python train.py', 1, 1, 'chat');
@@ -7625,7 +7618,8 @@ mod tests {
             )
             .unwrap();
 
-        let pending = store.pending_work().unwrap();
+        let working = ["chat".to_string(), "side".to_string()];
+        let pending = store.pending_work(&working).unwrap();
         assert_eq!(
             pending.agents,
             [
@@ -7680,7 +7674,7 @@ mod tests {
         store
             .insert_run_notice("run", "owner", TERMINAL, TERMINAL, "done", 1)
             .unwrap();
-        let pending = store.pending_work().unwrap();
+        let pending = store.pending_work(&[]).unwrap();
         assert_eq!(pending.runs[0].after_quit, AfterQuit::Reports);
         assert!(!pending.blocks_quit());
         assert_eq!(store.run_notice_error("run").unwrap(), None);
@@ -7694,7 +7688,7 @@ mod tests {
                 20,
             )
             .unwrap();
-        assert!(store.pending_work().unwrap().is_empty());
+        assert!(store.pending_work(&[]).unwrap().is_empty());
         assert_eq!(
             store.run_notice_error("run").unwrap().as_deref(),
             Some("harness removed")

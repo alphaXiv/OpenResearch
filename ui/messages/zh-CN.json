@@ -1901,7 +1901,6 @@
   "close_pending_quit": "退出",
   "close_pending_force_quit": "强制退出",
   "close_pending_blocked": "强制退出会停止需要 OpenResearch 保持打开的实验。",
-  "close_pending_uncounted": "OpenResearch 无法检查是否有正在运行的智能体和实验。退出会停止所有正在工作的智能体。",
   "close_pending_agents": "退出时智能体会停止",
   "close_pending_needs_open": "完成前需要 OpenResearch 保持打开的实验",
   "close_pending_continues": "会继续运行并在下次打开 OpenResearch 时报告的实验",

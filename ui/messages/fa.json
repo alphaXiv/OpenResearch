@@ -1901,7 +1901,6 @@
   "close_pending_quit": "خروج",
   "close_pending_force_quit": "خروج اجباری",
   "close_pending_blocked": "«خروج اجباری» آزمایش‌هایی را که به باز بودن OpenResearch نیاز دارند متوقف می‌کند.",
-  "close_pending_uncounted": "OpenResearch نتوانست وجود عامل‌ها و آزمایش‌های در حال اجرا را بررسی کند. خروج همه عامل‌های در حال کار را متوقف می‌کند.",
   "close_pending_agents": "عامل‌ها با خروج متوقف می‌شوند",
   "close_pending_needs_open": "آزمایش‌هایی که تا پایان به باز بودن OpenResearch نیاز دارند",
   "close_pending_continues": "آزمایش‌هایی که ادامه می‌یابند و دفعه بعد که OpenResearch باز شود گزارش می‌دهند",

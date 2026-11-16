@@ -1901,7 +1901,6 @@
   "close_pending_quit": "종료",
   "close_pending_force_quit": "강제 종료",
   "close_pending_blocked": "강제 종료하면 OpenResearch를 열어 두어야 하는 실험이 중지됩니다.",
-  "close_pending_uncounted": "OpenResearch가 실행 중인 에이전트와 실험을 확인하지 못했습니다. 종료하면 작업 중인 에이전트가 모두 중지됩니다.",
   "close_pending_agents": "종료하면 에이전트가 중지됩니다",
   "close_pending_needs_open": "끝날 때까지 OpenResearch를 열어 두어야 하는 실험",
   "close_pending_continues": "계속 실행되며 다음에 OpenResearch를 열 때 보고하는 실험",
