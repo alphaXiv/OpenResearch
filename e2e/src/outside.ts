@@ -10,9 +10,14 @@ export type Request = { service: 'openresearch' | 'refused'; method: string; tar
 
 export type Outside = Awaited<ReturnType<typeof startOutside>>
 
-/** Traffic arc/storage.md's "What leaves the machine" lists for what the specs do: the release check, the onboarding's OpenCode install and the daily price list. */
-export function listedEgress({ method, target }: Request) {
-  return method === 'CONNECT' && ['github.com:443', 'registry.npmjs.org:443', 'models.dev:443'].includes(target)
+const MODEL_FEED = '/models/feed'
+
+/** Traffic arc/storage.md's "What leaves the machine" lists for what the specs do: the release check, the onboarding's OpenCode install, the daily price list and the model feed. */
+export function listedEgress({ service, method, target }: Request) {
+  return (
+    (method === 'CONNECT' && ['github.com:443', 'registry.npmjs.org:443', 'models.dev:443'].includes(target)) ||
+    (service === 'openresearch' && method === 'GET' && target === MODEL_FEED)
+  )
 }
 
 export async function startOutside() {
@@ -20,6 +25,10 @@ export async function startOutside() {
   const server = createServer((request, response) => {
     const proxied = /^https?:\/\//.test(request.url!)
     requests.push({ service: proxied ? 'refused' : 'openresearch', method: request.method!, target: request.url! })
+    if (!proxied && request.method === 'GET' && request.url === MODEL_FEED) {
+      response.writeHead(200, { 'content-type': 'application/json' })
+      return response.end(JSON.stringify({ featured: [], nudge: null, endpoints: [] }))
+    }
     response.writeHead(proxied ? 403 : 404, { 'content-type': 'application/json' })
     response.end(JSON.stringify({ error: proxied ? 'e2e refuses traffic off the machine' : 'not faked' }))
   })

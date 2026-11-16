@@ -1427,6 +1427,7 @@ impl Store {
             "ALTER TABLE chat_usage_samples ADD COLUMN cost_micros INTEGER",
             "ALTER TABLE chat_usage_samples ADD COLUMN cost_currency TEXT",
             "ALTER TABLE chat_usage_samples ADD COLUMN recorded_at INTEGER",
+            "ALTER TABLE ui_state ADD COLUMN seen_nudges TEXT",
         ] {
             let _ = schema.execute(ddl, []);
         }
@@ -1690,7 +1691,7 @@ impl Store {
                     preferred_permission_mode, preferred_reasoning_level, workspace_state_json,
                     preferred_autonomy, nested_delegation, opencode_free_models, preferred_profile,
                     favorite_models, hidden_models, model_section_order,
-                    collapsed_model_sections, model_sightings, hidden_agents
+                    collapsed_model_sections, model_sightings, hidden_agents, seen_nudges
              FROM ui_state WHERE id = 1",
             [],
             |row| {
@@ -1735,6 +1736,7 @@ impl Store {
                     model_sightings: row
                         .get::<_, Option<String>>(16)?
                         .and_then(|json| serde_json::from_str(&json).ok()),
+                    seen_nudges: list(18)?,
                 })
             },
         )?)
@@ -5304,6 +5306,8 @@ pub struct StoredUiState {
     pub collapsed_model_sections: Vec<String>,
     /// The picker's own record of models it has seen, opaque to the server.
     pub model_sightings: Option<serde_json::Value>,
+    /// The ids of model feed nudges the user dismissed.
+    pub seen_nudges: Vec<String>,
 }
 
 /// Normalized transcript entry; `parts_json` is the wire-format parts array
@@ -9637,6 +9641,7 @@ mod tests {
                 model_section_order: Vec::new(),
                 collapsed_model_sections: Vec::new(),
                 model_sightings: None,
+                seen_nudges: Vec::new(),
             }
         );
 
@@ -9672,6 +9677,9 @@ mod tests {
         store
             .set_ui_json("model_sightings", &serde_json::json!({"seen": ["gpt-6"]}))
             .unwrap();
+        store
+            .set_ui_json("seen_nudges", &["2026-11-12-c081d9e1"])
+            .unwrap();
 
         assert_eq!(
             store.ui_state().unwrap(),
@@ -9689,6 +9697,7 @@ mod tests {
                 model_section_order: vec!["openai".into(), "anthropic".into()],
                 collapsed_model_sections: vec!["openai".into()],
                 model_sightings: Some(serde_json::json!({"seen": ["gpt-6"]})),
+                seen_nudges: vec!["2026-11-12-c081d9e1".into()],
             }
         );
         let _ = std::fs::remove_dir_all(&dir);

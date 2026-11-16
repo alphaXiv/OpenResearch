@@ -74,7 +74,13 @@ Custom endpoints stay in `local-models.json` in the data directory. OpenCode 2
 browser sign-ins use its integration API and orx's isolated database. Each
 attempt holds a server child and database lease until completion, cancellation,
 failure or expiry, capped at ten minutes; removing its provider signs it out.
-OpenCode's free models remain available until switched off.
+OpenCode's free models remain available until switched off. The picker lists
+them under Free, the ones openresearch.sh's model feed features first, and marks
+New for a week the models models.dev dates as released. The open chat's model
+button points once at the newest release from Anthropic, OpenAI or Google, then
+at the free model the feed nudges toward while free models are on, one a launch.
+Claude Code lists only the models its build knew of but runs any, so orx adds an
+Anthropic release it doesn't list beside the older version it does.
 
 Found agents can be turned off in Settings. Their models leave the picker and
 sub-agent routes; their OpenResearch profiles stay available. Turning off found

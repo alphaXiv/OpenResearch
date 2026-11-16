@@ -832,6 +832,25 @@ pub fn published_project_slug(link: &str) -> Option<&str> {
     (slug.len() == 12 && slug.bytes().all(|b| b.is_ascii_alphanumeric())).then_some(slug)
 }
 
+/// The model feed as openresearch.sh serves it, unparsed; no sign-in — `GET /models/feed`.
+pub async fn model_feed(api_url: &str) -> Result<String> {
+    let url = format!("{api_url}/models/feed");
+    let response = http()
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|err| anyhow!("Could not reach the API at {api_url}: {err}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(anyhow!("Fetching {url} failed ({status})"));
+    }
+    response
+        .text()
+        .await
+        .map_err(|err| anyhow!("Could not read {url}: {err}"))
+}
+
 /// A public link request's response, or why the link doesn't open.
 async fn public_project_response(api_url: &str, path: &str) -> Result<reqwest::Response> {
     let response = http()

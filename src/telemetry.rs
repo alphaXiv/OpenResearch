@@ -1266,6 +1266,73 @@ pub(crate) const FIRST_ACTIONS: [&str; 7] = [
     "open_settings",
 ];
 
+pub(crate) const MODEL_CALLOUT_KINDS: [&str; 2] = ["release", "free"];
+pub(crate) const MODEL_CALLOUT_ACTIONS: [&str; 3] = ["shown", "opened", "dismissed"];
+pub(crate) const MODEL_PICKER_SECTIONS: [&str; 5] = ["free", "favorites", "lab", "older", "search"];
+
+/// `text` as the API's bounded label, which a longer one would fail with the whole batch it rides in.
+fn bounded_label(text: &str) -> Option<&str> {
+    let text = text.trim();
+    (1..=64).contains(&text.chars().count()).then_some(text)
+}
+
+/// `model` as the API accepts a model label: an identifier, never a path or URL, which would fail the whole
+/// batch it rides in. Stricter than the API, as plain ASCII, so a label it passes always passes there.
+fn model_label(model: &str) -> Option<&str> {
+    let model = model.trim();
+    let identifier = (1..=256).contains(&model.len())
+        && model
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() || byte == b' ')
+        && !model.contains('\\');
+    if !identifier {
+        return None;
+    }
+    let path = (0..model.len())
+        .filter(|&index| index == 0 || b" (:=@/".contains(&model.as_bytes()[index - 1]))
+        .any(|index| {
+            let rest = model[index..].to_ascii_lowercase();
+            ["arn:", "file:", "/", "~", "./", "../"]
+                .iter()
+                .any(|prefix| rest.starts_with(prefix))
+        });
+    (!path).then_some(model)
+}
+
+/// The model button's popup pointing at a newly released model or the feed's free one.
+pub(crate) fn capture_model_callout(kind: &str, action: &str, model: &str, harness: &str) {
+    let (Some(model), Some(harness)) = (model_label(model), bounded_label(harness)) else {
+        return;
+    };
+    if !MODEL_CALLOUT_KINDS.contains(&kind) || !MODEL_CALLOUT_ACTIONS.contains(&action) {
+        return;
+    }
+    capture(
+        "model_callout",
+        json!({ "kind": kind, "action": action, "model": model, "harness": harness }),
+    );
+}
+
+/// A model chosen in the picker, with the section its row was in.
+pub(crate) fn capture_model_picked(
+    section: &str,
+    model: &str,
+    harness: &str,
+    new: bool,
+    free: bool,
+) {
+    let (Some(model), Some(harness)) = (model_label(model), bounded_label(harness)) else {
+        return;
+    };
+    if !MODEL_PICKER_SECTIONS.contains(&section) {
+        return;
+    }
+    capture(
+        "model_picked",
+        json!({ "section": section, "model": model, "harness": harness, "new": new, "free": free }),
+    );
+}
+
 pub(crate) fn capture_onboarding_step_viewed(step: &str) {
     if !ONBOARDING_STEPS.contains(&step) {
         return;
@@ -1897,12 +1964,40 @@ mod tests {
             ("project_starter_clicked", "cli_project_starter_clicked"),
             ("first_action", "cli_first_action"),
             ("demo_welcome_choice", "cli_demo_welcome_choice"),
+            ("model_callout", "cli_model_callout"),
+            ("model_picked", "cli_model_picked"),
         ] {
             let p = build_payload(bare, "did", json!({}));
             assert_eq!(
                 p["events"][0]["name"], wire,
                 "`{bare}` must serialize as `{wire}`"
             );
+        }
+    }
+
+    #[test]
+    fn a_model_label_is_an_identifier_the_api_accepts() {
+        for model in [
+            "claude-fable-5-2",
+            "opencode/deepseek-v4.1-flash-free",
+            "openrouter/anthropic/claude-opus-5.5",
+            "opus[1m]",
+        ] {
+            assert_eq!(model_label(model), Some(model));
+        }
+        let long = "m".repeat(257);
+        for path in [
+            "",
+            "/models/llama.gguf",
+            "~/llama",
+            "file:llama",
+            "local//llama",
+            "./llama",
+            "C:\\llama",
+            "llamá",
+            long.as_str(),
+        ] {
+            assert_eq!(model_label(path), None, "{path}");
         }
     }
 
