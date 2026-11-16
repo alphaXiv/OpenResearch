@@ -17,9 +17,11 @@ import { Button, IconButton, LoadingRow, SEGMENTED_CLASS_NAME, Spinner, Tooltip 
 import { cn } from "./ui/cn";
 import { fmtEstimate, fmtMoney, leftTone, lowestWindow, LOW_PERCENT, PLAN_GRID, PlanMark, PlanRows, planSummary, Ring, UsageGauge, usePlanAgent, useUpdateAgent } from "./Usage";
 import { useMachineState, WorkspaceConnection } from "./WorkspaceConnection";
+import { useLocale } from "../locale";
 
 /** The sidebar's footer: you, your agents' plans, then the machine, which grows into what's left. */
 export const StatusStrip = memo(function StatusStrip({ runtime, onDetails }: { runtime: RuntimeInfo; onDetails: () => void }) {
+  useLocale();
   const { current, live } = useMachineState(runtime);
   const usage = useQuery(useWorkspace().queries.getUsageQuery());
   const report = usage.data;

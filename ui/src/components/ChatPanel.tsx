@@ -5011,6 +5011,7 @@ const SidebarProjectCard = memo(function SidebarProjectCard({
 }: Omit<React.ComponentProps<typeof ProjectInfoCard>, "onToggleCollapsed" | "onPin" | "onRemoved" | "onNewChat"> & {
   actions: React.RefObject<SidebarActions>;
 }) {
+  useLocale();
   return (
     <ProjectInfoCard
       {...card}
@@ -5031,6 +5032,7 @@ const SidebarSessionRow = memo(function SidebarSessionRow({
   actions: React.RefObject<SidebarActions>;
   project: Project;
 }) {
+  useLocale();
   const { session } = row;
   return (
     <SessionRow
