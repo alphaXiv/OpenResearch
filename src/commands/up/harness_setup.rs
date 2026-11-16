@@ -535,7 +535,7 @@ async fn managed_setup(
     follow_up: &mut FollowUp,
     opencode_host: &crate::local::opencode::AgentHost,
 ) -> Result<Option<CommandFailure>, String> {
-    let _setup = wait_for_installations(socket).await?;
+    let _setup = wait_for_installations(socket, attempt).await?;
     let harness = request.harness.as_str();
     let user = managed::user_install(harness).await;
     let copy = managed::installed(harness);
@@ -708,30 +708,64 @@ async fn install_with_progress(
 }
 
 /// The installations lock, once another install, removal or background update lets go of it.
+/// Ending without it ends the attempt, so this records why.
 async fn wait_for_installations(
     socket: &mut WebSocket,
+    attempt: &SetupAttempt,
 ) -> Result<crate::file_lock::FileLock, String> {
-    let error = |error: crate::error::Error| error.to_string();
-    if let Some(lock) = managed::try_lock_installations().map_err(error)? {
+    let lock_failed = |error: crate::error::Error| {
+        let message = format!("{error:#}");
+        // The ingestion contract has no lock reason; spawn_failed is the nearest pre-command fault.
+        attempt.record(
+            "failed",
+            "command",
+            Some("spawn_failed"),
+            None,
+            Some(&message),
+        );
+        message
+    };
+    let disconnected = || {
+        attempt.record("interrupted", "command", Some("disconnected"), None, None);
+        "The install was cancelled.".to_string()
+    };
+    if let Some(lock) = managed::try_lock_installations().map_err(lock_failed)? {
         return Ok(lock);
     }
-    write_terminal(socket, "Waiting for another agent install to finish…\r\n")
+    // The terminal line is for dashboards that predate the queue frame.
+    if write_queue(socket, true).await.is_err()
+        || write_terminal(
+            socket,
+            "Waiting for another agent install or update to finish…\r\n",
+        )
         .await
-        .map_err(|error| error.to_string())?;
+        .is_err()
+    {
+        return Err(disconnected());
+    }
     loop {
         tokio::select! {
             _ = tokio::time::sleep(crate::config::paced(std::time::Duration::from_millis(250))) => {
-                if let Some(lock) = managed::try_lock_installations().map_err(error)? {
+                if let Some(lock) = managed::try_lock_installations().map_err(lock_failed)? {
+                    if write_queue(socket, false).await.is_err() {
+                        return Err(disconnected());
+                    }
                     return Ok(lock);
                 }
             }
             message = socket.recv() => {
                 if matches!(message, None | Some(Err(_)) | Some(Ok(Message::Close(_)))) {
-                    return Err("The install was cancelled.".into());
+                    return Err(disconnected());
                 }
             }
         }
     }
+}
+
+/// Whether the attempt is queued behind another install, for the dialog's status line.
+async fn write_queue(socket: &mut WebSocket, waiting: bool) -> Result<(), axum::Error> {
+    let frame = json!({ "type": "queue", "waiting": waiting });
+    socket.send(Message::Text(frame.to_string().into())).await
 }
 
 /// The same progress as data, for a client that draws a progress bar in place of the terminal.
@@ -994,6 +1028,63 @@ mod tests {
             assert!(payload[id]["managedFrom"].is_string());
             assert_eq!(payload[id]["install"], "");
         }
+    }
+
+    #[tokio::test]
+    async fn an_install_behind_another_says_it_waits_and_ends_however_the_wait_does() {
+        // The install lock is one file per config directory; a child keeps its own.
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        use futures::StreamExt;
+        use tokio_tungstenite::tungstenite::Message as Frame;
+        let (results, mut waited) = tokio::sync::mpsc::unbounded_channel();
+        let app = axum::Router::new().route(
+            "/",
+            axum::routing::get(move |ws: WebSocketUpgrade| {
+                let results = results.clone();
+                async move {
+                    ws.on_upgrade(move |mut socket| async move {
+                        let attempt = SetupAttempt::new("opencode", "install", "manual");
+                        let lock = wait_for_installations(&mut socket, &attempt).await;
+                        let _ = results.send(lock.map(drop));
+                    })
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let queue = |waiting: bool| {
+            Frame::Text(
+                json!({"type": "queue", "waiting": waiting})
+                    .to_string()
+                    .into(),
+            )
+        };
+
+        let held = managed::lock_installations().unwrap();
+        let (mut client, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        assert_eq!(client.next().await.unwrap().unwrap(), queue(true));
+        assert!(client.next().await.unwrap().unwrap().is_binary());
+        drop(held);
+        assert_eq!(client.next().await.unwrap().unwrap(), queue(false));
+        assert_eq!(waited.recv().await.unwrap(), Ok(()));
+
+        let held = managed::lock_installations().unwrap();
+        let (mut client, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        assert_eq!(client.next().await.unwrap().unwrap(), queue(true));
+        client.close(None).await.unwrap();
+        assert!(waited.recv().await.unwrap().is_err());
+        drop(held);
+
+        let config = crate::config::config_dir();
+        std::fs::remove_dir_all(&config).unwrap();
+        std::fs::write(&config, "").unwrap();
+        let _client = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let error = waited.recv().await.unwrap().unwrap_err();
+        assert!(error.contains(&config.display().to_string()), "{error}");
+        server.abort();
     }
 
     #[test]

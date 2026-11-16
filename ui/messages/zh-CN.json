@@ -1392,6 +1392,7 @@
   "harness_setup_update_fallback": "如果 {agent} 无法自行更新，OpenResearch 将下载自己的副本。",
   "harness_setup_approve_run": "运行命令",
   "harness_setup_installing": "正在安装 {agent}…",
+  "harness_setup_queued": "正在等待另一个代理的安装或更新完成…",
   "harness_setup_updating": "正在更新 {agent}…",
   "harness_setup_signin_starting": "正在开始登录…",
   "harness_setup_signin_page": "登录页面",

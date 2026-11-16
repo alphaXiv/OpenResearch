@@ -1423,6 +1423,7 @@
   "harness_setup_update_fallback": "{agent} kendini güncelleyemezse OpenResearch kendi kopyasını indirir.",
   "harness_setup_approve_run": "Komutu çalıştır",
   "harness_setup_installing": "{agent} yükleniyor…",
+  "harness_setup_queued": "Başka bir ajan kurulumunun veya güncellemesinin bitmesi bekleniyor…",
   "harness_setup_updating": "{agent} güncelleniyor…",
   "harness_setup_signin_starting": "Oturum açma başlatılıyor…",
   "harness_setup_signin_page": "oturum açma sayfasını",

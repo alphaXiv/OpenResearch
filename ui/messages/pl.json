@@ -1392,6 +1392,7 @@
   "harness_setup_update_fallback": "Jeśli {agent} nie może się zaktualizować, OpenResearch pobierze własną kopię.",
   "harness_setup_approve_run": "Uruchom polecenie",
   "harness_setup_installing": "Instalowanie {agent}…",
+  "harness_setup_queued": "Czekanie na zakończenie innej instalacji lub aktualizacji agenta…",
   "harness_setup_updating": "Aktualizowanie {agent}…",
   "harness_setup_signin_starting": "Rozpoczynanie logowania…",
   "harness_setup_signin_page": "stronę logowania",

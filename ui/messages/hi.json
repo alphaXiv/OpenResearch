@@ -1392,6 +1392,7 @@
   "harness_setup_update_fallback": "अगर {agent} खुद अपडेट नहीं हो पाता, तो OpenResearch अपनी कॉपी डाउनलोड करेगा।",
   "harness_setup_approve_run": "कमांड चलाएँ",
   "harness_setup_installing": "{agent} इंस्टॉल हो रहा है…",
+  "harness_setup_queued": "किसी दूसरे एजेंट के इंस्टॉल या अपडेट के पूरा होने का इंतज़ार हो रहा है…",
   "harness_setup_updating": "{agent} अपडेट हो रहा है…",
   "harness_setup_signin_starting": "साइन-इन शुरू हो रहा है…",
   "harness_setup_signin_page": "साइन-इन पेज",

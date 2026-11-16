@@ -1392,6 +1392,7 @@
   "harness_setup_update_fallback": "اگر {agent} نتواند خودش را به‌روزرسانی کند، OpenResearch نسخهٔ خودش را دانلود می‌کند.",
   "harness_setup_approve_run": "اجرای فرمان",
   "harness_setup_installing": "در حال نصب {agent}…",
+  "harness_setup_queued": "در انتظار پایان نصب یا به‌روزرسانی عامل دیگری…",
   "harness_setup_updating": "در حال به‌روزرسانی {agent}…",
   "harness_setup_signin_starting": "در حال شروع ورود…",
   "harness_setup_signin_page": "صفحهٔ ورود",
