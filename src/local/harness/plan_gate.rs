@@ -320,7 +320,7 @@ fn is_readonly_orx(tokens: &[&str], stage: &str) -> bool {
             // Pure reads.
             Some("status" | "wait") => true,
             // A view is read and checked against a run freely; saving one changes the node.
-            Some("view") => matches!(subcommand(&mut rest), Some("get" | "check")),
+            Some("view") => matches!(subcommand(&mut rest), Some("get" | "show" | "check")),
             // `desc` views the node's notes, but writes them with
             // `--set`/`--stdin`. Allow only the read form.
             Some("desc") => !stage.contains("--set") && !stage.contains("--stdin"),
@@ -525,6 +525,7 @@ mod tests {
         assert!(allowed("orx exp wait e-1"));
         assert!(allowed("orx exp view get e-1 --json"));
         assert!(allowed("orx exp view check r-1 --file view.xml"));
+        assert!(allowed("orx exp view show r-1"));
         assert!(!allowed("orx exp view set e-1 --file view.xml"));
         assert!(!allowed("orx exp view e-1"));
     }

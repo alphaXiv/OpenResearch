@@ -273,6 +273,7 @@ fn dashboard_routes(api: Arc<Api>) -> Router {
         .route("/api/runs/{id}/look", post(look_now))
         .route("/api/runs/{id}/flag", post(dashboard_choose_flag))
         .route("/api/runs/{id}/view/check", post(check_view))
+        .route("/api/runs/{id}/view/show", get(show_view))
         .route("/api/experiments/{id}/view", get(view).put(set_view))
         .route("/api/runs/{id}/abandon", post(dashboard_abandon))
         .route("/api/runs/{id}/cleanup", post(cleanup))
@@ -452,6 +453,7 @@ fn routes(api: Arc<Api>) -> Router {
         .route("/api/v2/runs/{id}/log", get(log))
         .route("/api/v2/runs/{id}/monitor", get(monitor))
         .route("/api/v2/runs/{id}/view/check", post(check_view))
+        .route("/api/v2/runs/{id}/view/show", get(show_view))
         .route("/api/v2/experiments/{id}/view", get(view).put(set_view))
         .route("/api/v2/events", get(events))
         .route("/api/v2/compute/{action}", post(compute))
@@ -1523,8 +1525,16 @@ async fn check_view(
     Path(id): Path<String>,
     body: Option<Json<CheckBody>>,
 ) -> Response {
-    use crate::engine::view::Refusal;
     let Json(body) = body.unwrap_or_default();
+    inspect_view(api, id, body, false).await
+}
+
+async fn show_view(State(api): State<Arc<Api>>, Path(id): Path<String>) -> Response {
+    inspect_view(api, id, CheckBody::default(), true).await
+}
+
+async fn inspect_view(api: Arc<Api>, id: String, body: CheckBody, show: bool) -> Response {
+    use crate::engine::view::Refusal;
     let body = Arc::new(body);
     let (given, run) = (body.clone(), id.clone());
     let reading = api.clone();
@@ -1552,14 +1562,22 @@ async fn check_view(
                 )
             }
         };
-        Ok::<_, Refusal>(crate::engine::view::patterns(&list, &source, &fix)?.1)
+        let patterns = crate::engine::view::patterns(&list, &source, &fix)?.1;
+        let generation = if show && patterns.is_some() {
+            crate::engine::monitor::checkpoint(&store, &run)?
+                .map(|snapshot| snapshot.generation.clone())
+        } else {
+            None
+        };
+        Ok::<_, Refusal>((patterns, generation))
     })
     .await
     .unwrap_or_else(|cause| Err(Refusal::Failed(cause.to_string())));
-    let patterns = match patterns {
+    let (patterns, generation) = match patterns {
         Ok(patterns) => patterns,
         Err(refusal) => return view_answer(Err(refusal)),
     };
+    let mut pattern_error = None;
     let folded = match patterns {
         Some(patterns) => match crate::engine::view::fold_for_check(
             &id,
@@ -1586,19 +1604,54 @@ async fn check_view(
             Err(error) => {
                 let message =
                     format!("Run {id}'s log could not be read to check its patterns: {error:#}");
-                return view_answer(Err(Refusal::Failed(message)));
+                if !show {
+                    return view_answer(Err(Refusal::Failed(message)));
+                }
+                pattern_error = Some(message);
+                None
             }
         },
         None => None,
     };
     blocking_view(move || {
+        let store = api.store();
+        if show {
+            let run = store.get_run(&id)?
+                .ok_or_else(|| Refusal::Missing(format!("Run {id} not found.")))?;
+            let raw = store.run_monitor_json(&run.experiment_id)?;
+            let (projection, monitor) = crate::engine::monitor::monitor(&store, &run)?;
+
+            let kept = if projection.snapshot().is_none() {
+                crate::engine::monitor::checkpoint(&store, &id)?
+            } else { None };
+            let snapshot = projection.snapshot().or(kept.as_deref());
+            let configured = crate::engine::view::stored_plan(&run.experiment_id, raw.as_deref())?;
+            let plan = snapshot.and_then(|snapshot| snapshot.plan.as_deref()).unwrap_or(&configured);
+            let pattern_hash = crate::engine::view::stored_patterns(&run.experiment_id, raw.as_deref())?.hash();
+            let folded = folded.as_ref().filter(|folded| {
+                let log_changed = generation.as_deref() != snapshot.map(|snapshot| snapshot.generation.as_str());
+                if log_changed {
+                    pattern_error = Some(format!("The log changed while reading it. Run `orx exp view show {id}` again."));
+                } else if folded.config_hash != pattern_hash {
+                    pattern_error = Some(format!("Patterns changed while reading the log. Run `orx exp view show {id}` again."));
+                } else { return true; }
+                false
+            });
+            if store.run_monitor_json(&run.experiment_id)? != raw {
+                return Err(Refusal::Changed(format!("The view changed while reading it. Run `orx exp view show {id}` again.")));
+            }
+            let text = crate::engine::view::shown(
+                &run, &monitor, projection.summary(), plan, folded, pattern_error.as_deref(),
+            );
+            return Ok(json!({"text": text}));
+        }
         let source = crate::engine::view::Source {
             file: body.file.as_deref(),
             patterns: body.pattern_file.as_deref(),
             config: None,
         };
         crate::engine::view::check(
-            &api.store(),
+            &store,
             &id,
             body.markup.as_deref(),
             folded.as_ref(),

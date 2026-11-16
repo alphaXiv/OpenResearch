@@ -32,7 +32,8 @@ pub fn follow_up(experiment_id: &str, run_id: &str, in_chat: bool) -> String {
     if in_chat {
         format!(
             "  Its result arrives in this chat as a message when it ends. Check its first minutes once \
-             with `{orx} exp view check {run_id}`, then end your turn: never wait or poll for it \
+             with `{orx} exp view check {run_id}`, then end your turn. After its first data arrives, \
+             read `{orx} exp view show {run_id}` to inspect what its card shows. Never wait or poll for it \
              (no sleep loops over `{orx} runs`, no `{orx} exp wait`)."
         )
     } else {

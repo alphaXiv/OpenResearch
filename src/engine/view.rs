@@ -77,6 +77,14 @@ pub(crate) struct Seen {
 }
 
 impl Seen {
+    fn has_signal(&self, name: &str) -> bool {
+        self.signals.iter().any(|signal| signal == name)
+            || self
+                .tables
+                .values()
+                .any(|columns| columns.iter().any(|column| column == name))
+    }
+
     pub(crate) fn of(snapshot: &orx_signals::Snapshot) -> Self {
         let columns: Vec<&String> = snapshot.row_columns.values().flatten().collect();
         Self {
@@ -135,10 +143,7 @@ impl Compiled {
             };
             let name = &reference.name;
             let found = match &reference.kind {
-                Kind::Signal => {
-                    seen.signals.contains(name)
-                        || seen.tables.values().any(|columns| columns.contains(name))
-                }
+                Kind::Signal => seen.has_signal(name),
                 Kind::Table => seen.tables.contains_key(name),
                 Kind::Column(table) => seen
                     .tables
@@ -1557,6 +1562,383 @@ pub(crate) fn check(
     Ok(report)
 }
 
+pub(crate) fn shown(
+    run: &crate::store::StoredRun,
+    monitor: &Value,
+    summary: &Value,
+    declared: &[orx_signals::Stage],
+    replay: Option<&orx_signals::Snapshot>,
+    pattern_error: Option<&str>,
+) -> String {
+    use super::monitor::value_text;
+
+    fn names(value: &Value) -> Vec<&str> {
+        value
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect()
+    }
+
+    fn pairs<'a>(
+        body: &'a Value,
+        from: Option<&str>,
+        x: &str,
+        y: &str,
+    ) -> Vec<(&'a Value, &'a Value)> {
+        if let Some(from) = from {
+            body["rows"][from]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|row| (&row[x], &row[y]))
+                .collect()
+        } else {
+            body["series"][y]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|point| (&point[0], &point[1]))
+                .collect()
+        }
+    }
+
+    let number = |value: &Value| {
+        value
+            .as_f64()
+            .or_else(|| value.as_str()?.parse::<f64>().ok())
+            .filter(|n| n.is_finite())
+    };
+    let points = |pairs: Vec<(&Value, &Value)>, block: &Value| {
+        let mut xs = Vec::new();
+        let mut categories = Vec::new();
+        let mut count = 0;
+        for (x, y) in pairs {
+            if number(y).is_none() {
+                continue;
+            }
+            if block["mark"] == "bars" {
+                if !x.is_null() {
+                    categories.push(value_text(x, &Value::Null));
+                    count += 1;
+                }
+            } else if let Some(x) = number(x) {
+                xs.push(x);
+                count += 1;
+            }
+        }
+        let range = if let (Some(first), Some(last)) = (categories.first(), categories.last()) {
+            format!("{first} .. {last} (categories)")
+        } else if xs.is_empty() {
+            "none".into()
+        } else {
+            let lo = xs.iter().copied().min_by(f64::total_cmp).unwrap();
+            let hi = xs.iter().copied().max_by(f64::total_cmp).unwrap();
+            format!("{lo} .. {hi}")
+        };
+        (count, range)
+    };
+    let signals = &monitor["view"]["signals"];
+    let value = |name: &str, best: bool| {
+        let raw = if best {
+            monitor["best"].get(name)
+        } else {
+            None
+        }
+        .unwrap_or(&monitor["latest"][name]);
+        let mut text = value_text(raw, &signals[name]);
+        if let Some(unit) = signals[name]["unit"].as_str().filter(|unit| *unit != "%") {
+            text.push_str(&format!(" {unit}"));
+        }
+        format!(
+            "{}{} ({name}) = {text}",
+            if best && monitor["best"].get(name).is_some() {
+                "best "
+            } else {
+                ""
+            },
+            signals[name]["label"].as_str().unwrap_or(name)
+        )
+    };
+    let mut lines = vec![format!(
+        "Run {} · {} · experiment {}",
+        run.id, run.status, run.experiment_id
+    )];
+    lines.push(format!(
+        "Data: {}; as of {}.",
+        monitor["availability"]["state"]
+            .as_str()
+            .unwrap_or("unknown"),
+        crate::telemetry::iso8601_utc(monitor["asOf"].as_i64().unwrap_or(run.updated_at))
+    ));
+    if let Some(reason) = monitor["availability"]["reason"].as_str() {
+        lines.push(format!("Availability: {reason}"));
+    }
+    let stage = &summary["stage"];
+    if stage.is_object() {
+        let field = |name: &str| {
+            if stage[name].is_null() {
+                "unknown".into()
+            } else {
+                value_text(&stage[name], &Value::Null)
+            }
+        };
+        lines.push(format!(
+            "Stage: {}; done={}; of={}; unit={}.",
+            stage["name"]
+                .as_str()
+                .filter(|name| !name.is_empty())
+                .unwrap_or("(unnamed)"),
+            field("done"),
+            field("of"),
+            field("unit")
+        ));
+    } else {
+        lines.push("Stage: none reported yet.".into());
+    }
+    let plan: Vec<_> = declared
+        .iter()
+        .enumerate()
+        .map(|(index, phase)| {
+            format!(
+                "{}{} {} (of={})",
+                if monitor["progress"]["phase"] == json!(index) && stage["name"] == phase.phase {
+                    "* "
+                } else {
+                    ""
+                },
+                index + 1,
+                phase.phase,
+                phase
+                    .of
+                    .as_ref()
+                    .map_or_else(|| "unknown".into(), ToString::to_string)
+            )
+        })
+        .collect();
+    lines.push(format!(
+        "Declared plan (* current): {}",
+        if plan.is_empty() {
+            "none".into()
+        } else {
+            plan.join("; ")
+        }
+    ));
+    lines.push(
+        "The UI folds stages before its first real point into Setup and numbers stages from there."
+            .into(),
+    );
+    let eta = &summary["etaMs"];
+    let duration = |key: &str| {
+        eta[key]
+            .as_f64()
+            .map(|ms| value_text(&json!(ms / 1000.0), &json!({"as":"duration"})))
+            .unwrap_or_else(|| "unknown".into())
+    };
+    lines.push(if eta.is_object() {
+        format!(
+            "Time left: {}{} ({} .. {}; estimate at {}).",
+            if summary["etaFloor"] == true {
+                "at least "
+            } else {
+                ""
+            },
+            duration("mid"),
+            duration("lo"),
+            duration("hi"),
+            eta["at"]
+                .as_i64()
+                .map(crate::telemetry::iso8601_utc)
+                .unwrap_or_else(|| "unknown".into())
+        )
+    } else if summary["pending"] == true {
+        "Time left: estimating.".into()
+    } else {
+        "Time left: unknown (summary has no estimate).".into()
+    });
+    if !summary["etaUntimed"].is_null() {
+        lines.push(format!("Untimed work: {}", summary["etaUntimed"]));
+    }
+    if let Some(at) = summary["limitEndsAt"].as_i64() {
+        lines.push(format!(
+            "Time limit ends at: {}.",
+            crate::telemetry::iso8601_utc(at)
+        ));
+    }
+    let empty = Map::new();
+    let terminal = super::Phase::parse(&run.status).is_some_and(super::Phase::is_terminal);
+    let versus = monitor["versus"][if terminal { "final" } else { "step" }]
+        .as_object()
+        .unwrap_or(&empty);
+    let fill = |text: &str| {
+        super::watch::fill_values(text, &summary["bindings"], signals, versus).replace("**", "")
+    };
+    lines.push(match summary["sentence"]["template"].as_str() {
+        Some(template) => format!("Watcher: {}", fill(template)),
+        None => "Watcher: no sentence yet.".into(),
+    });
+    let flags = monitor["flags"].as_array().map_or(&[][..], Vec::as_slice);
+    lines.push(match super::flags::open(flags) {
+        Some(flag) => format!("Open {}", super::flags::status_line(flag, fill)),
+        None => "Open flag: none.".into(),
+    });
+    let headline = names(&monitor["view"]["headline"]);
+    if !headline.is_empty() {
+        lines.push(format!(
+            "Headline: {} (selected: {}).",
+            headline
+                .iter()
+                .map(|name| value(name, false))
+                .collect::<Vec<_>>()
+                .join("; "),
+            monitor["headline"].as_str().unwrap_or("none")
+        ));
+    }
+    let mut missing = std::collections::BTreeSet::new();
+    for name in &headline {
+        if monitor["latest"].get(name).is_none() {
+            missing.insert((*name).to_owned());
+        }
+    }
+    let mut chart = 0;
+    for block in monitor["view"]["blocks"].as_array().into_iter().flatten() {
+        let scope = block["phase"]
+            .as_str()
+            .map(|phase| {
+                format!(
+                    "; phase={phase}{}",
+                    if stage["name"] == phase {
+                        ""
+                    } else {
+                        " (inactive)"
+                    }
+                )
+            })
+            .unwrap_or_default();
+        if block["chart"].is_array() {
+            chart += 1;
+            let from = block["from"].as_str();
+            let mut series: Vec<(&str, &str, bool)> = block["series"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|one| {
+                    Some((
+                        one["x"].as_str()?,
+                        one["y"].as_str()?,
+                        one["ghost"] != false,
+                    ))
+                })
+                .collect();
+            if series.is_empty() {
+                let x = if from.is_some() {
+                    block["x"].as_str().unwrap_or("step")
+                } else {
+                    monitor["x"]["name"].as_str().unwrap_or("step")
+                };
+                series = names(&block["chart"])
+                    .into_iter()
+                    .map(|y| (x, y, true))
+                    .collect();
+            }
+            for (x, y, ghost) in series {
+                let (count, range) = points(pairs(monitor, from, x, y), block);
+                let (parent_count, parent_range) =
+                    points(pairs(&monitor["parent"], from, x, y), block);
+                let ghost = if block["ghost"] != "parent" || !ghost {
+                    "off".into()
+                } else {
+                    format!("on (finite points={parent_count}; x={parent_range})")
+                };
+                let total = if from.is_some() {
+                    "not a progress axis".into()
+                } else {
+                    value_text(&monitor["x"]["max"], &Value::Null)
+                };
+                let label = signals[y]["label"].as_str().unwrap_or(y);
+                let mode = block["xRange"].as_str().unwrap_or("run");
+                lines.push(format!("Chart {chart}: {label}; {}y={y}; x={x}; observed x={range}; total={total}; range={mode}; finite retained points={count}; parent ghost={ghost}{scope}{}.", from.map(|table| format!("table={table}; ")).unwrap_or_default(), block["by"].as_str().map(|by| format!("; grouped by {by}")).unwrap_or_default()));
+                for key in ["title", "xScale", "yScale", "mark"] {
+                    if let Some(setting) = block[key].as_str() {
+                        lines.push(format!("  {key}: {setting}"));
+                    }
+                }
+                if !signals[y]["smooth"].is_null() {
+                    lines.push(format!("  smoothing: {}", signals[y]["smooth"]));
+                }
+                let reported = if let Some(from) = from {
+                    monitor["rows"][from]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .any(|row| row.get(y).is_some())
+                } else {
+                    monitor["latest"].get(y).is_some() || monitor["series"].get(y).is_some()
+                };
+                if !reported {
+                    missing
+                        .insert(from.map_or_else(|| y.to_owned(), |table| format!("{table}.{y}")));
+                }
+            }
+        }
+        if block["stats"].is_array() {
+            lines.push(format!(
+                "Stats{scope}: {}",
+                names(&block["stats"])
+                    .into_iter()
+                    .map(|name| value(name, signals[name]["pick"] == "best"))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ));
+        }
+    }
+    if chart == 0 {
+        lines.push("Charts: none configured.".into());
+    }
+    lines.push(format!(
+        "Headlined / charted names not observed in collected data: {}.",
+        if missing.is_empty() {
+            "none".into()
+        } else {
+            missing.into_iter().collect::<Vec<_>>().join(", ")
+        }
+    ));
+    if let Some(error) = pattern_error {
+        lines.push(format!("Pattern matches: unknown. {error}"));
+    } else if let Some(replay) = replay {
+        let complete = replay.coverage.reasons.is_empty();
+        lines.push(format!(
+            "Patterns checked through byte {} ({}).",
+            replay.cursor.offset,
+            if complete {
+                "all available log bytes"
+            } else {
+                "incomplete log coverage"
+            }
+        ));
+        if let (Some(tally), Some(patterns)) = (&replay.tally, &replay.patterns) {
+            for (index, (hit, regex)) in tally.hits.iter().zip(patterns.regexes()).enumerate() {
+                lines.push(format!(
+                    "Pattern {} ({regex}): {} matches{}.",
+                    index + 1,
+                    hit.matched,
+                    if hit.matched == 0 && complete {
+                        "; never matched in the checked log"
+                    } else if hit.matched == 0 {
+                        "; matches outside the checked bytes are unknown"
+                    } else {
+                        ""
+                    }
+                ));
+            }
+        }
+    } else {
+        lines.push("Patterns: none configured.".into());
+    }
+    lines.join("\n")
+}
+
 pub(crate) fn instrumentation(
     monitor: &Value,
     snapshot: Option<&orx_signals::Snapshot>,
@@ -1605,9 +1987,7 @@ pub(crate) fn instrumentation(
         .collect();
     if (!seen.signals.is_empty() || !seen.tables.is_empty())
         && !headline.is_empty()
-        && !headline
-            .iter()
-            .any(|name| seen.signals.iter().any(|seen| seen == name))
+        && !headline.iter().any(|name| seen.has_signal(name))
     {
         problems.push(format!("No headline signal has appeared ({}). Report one of these names under `m`, or add a reported fallback to `headline` with `orx exp view set EXP --file PATH`.", headline.join(", ")));
     }
@@ -1648,7 +2028,7 @@ pub(crate) fn instrumentation(
                 .flatten()
                 .filter_map(Value::as_str)
             {
-                if !seen.signals.iter().any(|seen| seen == name) {
+                if !seen.has_signal(name) {
                     missing.insert(name.to_owned());
                 }
             }
@@ -1759,6 +2139,95 @@ where
 mod tests {
     use super::*;
 
+    fn shown_run() -> crate::store::StoredRun {
+        crate::store::StoredRun {
+            id: "run-1".into(),
+            experiment_id: "exp-1".into(),
+            project_id: "project-1".into(),
+            status: "running".into(),
+            backend_json: "{}".into(),
+            command: "train".into(),
+            created_at: 0,
+            updated_at: 1000,
+            ended_at: None,
+            exit_code: None,
+            commit_sha: None,
+            result_markdown: None,
+            cancel_requested: false,
+            cancel_reason: None,
+            chat_session_id: None,
+        }
+    }
+
+    #[test]
+    fn view_show_reads_summary_parts_chart_data_flags_stats_and_missing_patterns() {
+        let config: orx_signals::Config =
+            serde_json::from_value(json!({"patterns":[{"regex":"^never (?P<missing>\\d+)$"}]}))
+                .unwrap();
+        let replay = check_snapshot("a log line\n", &config);
+        let view = compile(r#"<signal name="loss" label="Training loss" digits="3" better="lower" pick="best"/><signal name="missing"/><view headline="loss missing"><chart y="loss missing" ghost="parent"/><stats of="loss"/></view>"#).unwrap().tree;
+        let monitor = json!({
+            "view":view,"availability":{"state":"live"},"asOf":1000,
+            "phases":[{"name":"setup","of":1},{"name":"train","of":20},{"name":"eval","of":1}],
+            "progress":{"phase":1},"x":{"name":"step","max":20},
+            "latest":{"loss":1.25},"best":{"loss":1.0},"headline":"loss",
+            "series":{"loss":[[0,2],[5,null],[10,1.25]]},
+            "parent":{"series":{"loss":[[0,3],[20,1]]}},
+            "flags":[{"id":"f1","state":"waking","detail":"Loss **{loss}** needs review."}],
+        });
+        let summary = json!({"stage":{"name":"train","done":10,"of":20,"unit":"steps"},"etaMs":{"lo":5000,"mid":10000,"hi":15000,"at":1000},"sentence":{"template":"Loss **{loss}**."},"bindings":{"loss":1.25}});
+        let plan = orx_signals::plan(
+            &json!([{"phase":"setup","of":1},{"phase":"train","of":20},{"phase":"eval","of":1}]),
+            true,
+        )
+        .unwrap();
+        let text = shown(&shown_run(), &monitor, &summary, &plan, Some(&replay), None);
+        for expected in [
+            "Stage: train; done=10; of=20; unit=steps",
+            "* 2 train (of=20)",
+            "UI folds stages",
+            "Time left: 10s",
+            "Watcher: Loss 1.250.",
+            "Open flag",
+            "flag f1",
+            "observed x=0 .. 10; total=20",
+            "finite retained points=2",
+            "parent ghost=on (finite points=2",
+            "Stats: best Training loss (loss) = 1.000",
+            "names not observed in collected data: missing",
+            "never matched in the checked log",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in {text}");
+        }
+    }
+
+    #[test]
+    fn view_show_handles_table_series_disabled_ghosts_and_unknown_reads() {
+        let view = compile(r#"<view headline="score"><chart from="scores" ghost="parent"><series x="width" y="score" ghost="false"/></chart></view>"#).unwrap().tree;
+        let monitor = json!({"view":view,"availability":{"state":"stale","reason":"host disconnected"},"asOf":1000,"latest":{"score":0.5},"headline":"score","rows":{"scores":[{"width":"10","score":"0.5"},{"width":20,"score":null}]},"parent":{"rows":{"scores":[{"width":1,"score":0.1}]}}});
+        let text = shown(
+            &shown_run(),
+            &monitor,
+            &json!({}),
+            &[],
+            None,
+            Some("the log is unavailable"),
+        );
+        for expected in [
+            "Data: stale",
+            "host disconnected",
+            "Stage: none reported",
+            "Time left: unknown",
+            "table=scores; y=score; x=width; observed x=10 .. 10",
+            "finite retained points=1; parent ghost=off",
+            "names not observed in collected data: none",
+            "Pattern matches: unknown. the log is unavailable",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in {text}");
+        }
+        assert!(!text.contains("never matched"));
+    }
+
     fn check_snapshot(log: &str, config: &orx_signals::Config) -> orx_signals::Snapshot {
         let mut snapshot = orx_signals::Snapshot::new("check", "1-7", "check");
         snapshot.tally = Some(Default::default());
@@ -1811,6 +2280,19 @@ mod tests {
         let monitor =
             json!({"view":view,"phases":[{"name":"train","of":10},{"name":"eval","of":5}]});
         assert!(instrumentation(&monitor, Some(&snapshot), &config, Some(&snapshot)).is_empty());
+    }
+
+    #[test]
+    fn instrumentation_accepts_headlines_and_curves_from_reported_rows() {
+        let config = orx_signals::Config::default();
+        let snapshot = check_snapshot("::orx:: {\"phase\":\"eval\",\"step\":1,\"of\":2,\"row\":\"scores\",\"m\":{\"item\":1,\"accuracy\":0.5}}\n", &config);
+        for view in [
+            super::super::monitor::default_view(Some(&snapshot)),
+            compile(r#"<view headline="accuracy"><chart y="accuracy"/><chart from="scores" x="item" y="accuracy"/></view>"#).unwrap().tree,
+        ] {
+            let monitor = json!({"view":view});
+            assert!(instrumentation(&monitor, Some(&snapshot), &config, None).is_empty());
+        }
     }
 
     #[test]

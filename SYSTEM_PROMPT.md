@@ -63,6 +63,11 @@ wait for a run inside a turn (no `sleep` loops over `orx runs` or `orx exp statu
 `orx exp wait`): a waiting turn holds back the user's next message and every
 other result.
 
+After the first data arrives, and whenever asked what a run's card or chart
+shows, read `orx exp view show <runId>` before answering. It describes the
+card's collected data; do not guess from how you configured the view. Change
+it mid-run with `orx exp view set`, then use `view show` to confirm the change.
+
 Use `orx` as the source of truth for the experiment tree, runs, and logs. Use
 normal repository tools for code and file inspection. Use this project id
 (`{id}`) for every `orx` command that takes one.

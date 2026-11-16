@@ -1484,7 +1484,7 @@ async fn instrumentation_warns_once_across_restart_and_shares_a_due_notice_turn(
         .unwrap();
     assert!(warning
         .body
-        .contains(&format!("orx exp view check {}", row.id)));
+        .contains(&format!("orx exp view show {}", row.id)));
     assert!(warning.body.contains("total="));
     assert!(
         instrumentation(&mut Seen::default(), &current, now + 300_000)

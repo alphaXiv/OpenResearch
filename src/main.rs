@@ -591,7 +591,7 @@ pub enum ExpCommand {
     /// Send this chat the result of the experiment's latest run when it finishes.
     Wake { exp_id: String },
 
-    /// Set, read or check the view an experiment's runs are drawn with.
+    /// Set, read, inspect or check the view an experiment's runs are drawn with.
     View {
         #[command(subcommand)]
         command: ViewCommand,
@@ -651,6 +651,11 @@ pub enum ViewCommand {
         /// Print the markup, its tree and where it comes from as JSON.
         #[arg(long)]
         json: bool,
+    },
+    /// Describe the run's current card from its collected data, including charts and missing signals.
+    Show {
+        /// Run id; omit when exactly one run is shown in this agent's chat.
+        run_id: Option<String>,
     },
     /// Check a view against what a run reported: the experiment's saved view, or the one in --file;
     /// with patterns, saved or in --pattern, what each matches in the run's log now.

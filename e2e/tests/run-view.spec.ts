@@ -104,6 +104,7 @@ test("an agent changes a running run's view and patterns, and the open strip and
 <view headline="acc">
   <chart y="acc" />
   <chart y="loss" />
+  <stats of="acc loss" />
 </view>
 `)
   // The log has said this all along; only a pattern reads it.
@@ -163,8 +164,15 @@ for (let step = 1; step <= 20; step++) {
         if (Object.keys(seen).length === Object.keys(marks).length) clearInterval(look)
       }, 20)
     })
+    const runId = (await (await page.request.get(`${orx.url}/api/chat/shown-runs`)).json())
+      .find((shown: { experimentName: string }) => shown.experimentName === 'Eval').run.id
     agent.script('Show the eval accuracy instead.', [
-      { run: `orx exp view set "$(cat ${dir}/id)" --file ${dir}/eval.xml --pattern ${dir}/patterns.json && ${now} > ${dir}/set-at` },
+      { run: [
+        'set -e',
+        `orx exp view show > ${dir}/before.txt`,
+        `orx exp view set "$(cat ${dir}/id)" --file ${dir}/eval.xml --pattern ${dir}/patterns.json`,
+        `${now} > ${dir}/set-at`,
+      ].join('\n') },
       { say: 'Now showing the eval accuracy.' },
     ])
     await send(page, 'Show the eval accuracy instead.')
@@ -172,9 +180,23 @@ for (let step = 1; step <= 20; step++) {
     await expect(banner).toContainText(/0\.58/)
     await expect(latest.getByRole('heading', { name: /^\W?Eval accuracy\W?$/ })).toBeVisible()
     await expect(latest.getByRole('heading', { name: /^\W?Training loss\W?$/ })).toBeVisible()
-
-    const runId = (await (await page.request.get(`${orx.url}/api/chat/shown-runs`)).json())
-      .find((shown: { experimentName: string }) => shown.experimentName === 'Eval').run.id
+    await expect(page.getByText('Now showing the eval accuracy.', { exact: true })).toBeVisible()
+    agent.script('Describe the updated card.', [
+      { run: `orx exp view show ${runId} > ${dir}/after.txt` },
+      { say: 'The card and its collected view now show eval accuracy.' },
+    ])
+    await send(page, 'Describe the updated card.')
+    await expect(page.getByText('The card and its collected view now show eval accuracy.', { exact: true })).toBeVisible()
+    const before = readFileSync(path.join(dir, 'before.txt'), 'utf8')
+    const after = readFileSync(path.join(dir, 'after.txt'), 'utf8')
+    expect(before).toContain('y=loss; x=step; observed x=1 .. 8; total=20')
+    expect(before).not.toContain('y=acc')
+    expect(after).toContain('y=acc; x=step; observed x=1 .. 8; total=20')
+    expect(after).toContain('finite retained points=8')
+    expect(after).toContain('Stats: Eval accuracy (acc) = 0.58; Training loss (loss) = 0.250')
+    expect(after).toContain('8 matches')
+    await info.attach('view-show-before', { body: before, contentType: 'text/plain' })
+    await info.attach('view-show-after', { body: after, contentType: 'text/plain' })
     const monitor = await (await page.request.get(`${orx.url}/api/runs/${runId}/monitor`)).json()
     expect(monitor.series.acc.map(([x]: [number]) => x), 'every step the log printed before the pattern existed').toEqual([1, 2, 3, 4, 5, 6, 7, 8])
 
@@ -225,7 +247,9 @@ process.stdout.write('::orx:: {"step":3,"m":{"loss":0.5}}\\n')
       'set -e',
       `read run exp < ${dir}/ids`,
       `orx exp view check "$run" --json > ${dir}/check.json`,
+      `orx exp view show "$run" > ${dir}/before.txt`,
       `orx exp view set "$exp" --file ${dir}/view.xml --pattern ${dir}/clear.json --config ${dir}/plan.json`,
+      `orx exp view show "$run" > ${dir}/after.txt`,
     ].join('\n') },
     { say: 'Progress and chart corrected.' },
   ])
@@ -243,6 +267,12 @@ process.stdout.write('::orx:: {"step":3,"m":{"loss":0.5}}\\n')
   expect(checked.patterns[0].matched).toBe(0)
   expect(checked.pending).toContain('missing')
   expect(checked.stages[0].of).toBeNull()
+  const before = readFileSync(path.join(dir, 'before.txt'), 'utf8')
+  const after = readFileSync(path.join(dir, 'after.txt'), 'utf8')
+  expect(before).toContain('names not observed in collected data: missing')
+  expect(before).toContain('never matched in the checked log')
+  expect(after).toContain('done=2; of=3')
+  expect(after).toContain('names not observed in collected data: none')
   const banner = page.getByRole('region', { name: 'Runs in this chat' })
   await expect(banner).toContainText('Training loss')
   await expect(banner).toContainText(/step [⁦⁨]?2[⁩]? of [⁦⁨]?3[⁩]?/i)

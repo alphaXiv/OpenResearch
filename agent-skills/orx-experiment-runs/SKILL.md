@@ -184,6 +184,19 @@ After every launch, before replying to the user:
 orx exp view check <runId>
 ```
 
+On your next turn after its first data arrives, and whenever the user asks
+what the card shows:
+
+```sh
+orx exp view show <runId>
+```
+
+Read this instead of guessing from the view you wrote. It describes the
+collected stage and plan, watcher and flag, time left, charts and parent
+ghosts, stats, and names or patterns not reported yet. It reads the card's
+stored data, not the user's screen. Fix its view with `orx exp view set`
+while the run continues, then run `view show` again to confirm the change.
+
 It folds the run's real log: the stages it read, the measures and tables
 reported, what each pattern matched with its first line, what the view still
 waits for, and where the plan and the run disagree, such as a stage the plan
@@ -195,7 +208,7 @@ Repair the view, plan or patterns with `view set`: they apply to the run in
 flight. A report missing from the code means cancelling, fixing and
 relaunching, which is cheap now and costly an hour in.
 
-Then end your turn, every time, whether or not the check settled anything.
+Then end your turn, whether or not the check settled anything.
 The result arrives as a message when the run ends, and the watcher flags
 trouble while it runs. Never wait inside a turn: no `sleep` loops over
 `orx runs` or `orx exp status`, no `orx exp wait`. A turn that waits holds

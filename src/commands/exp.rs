@@ -8,7 +8,7 @@
 //!   orx exp unarchive <expId> --ancestors|--only|--descendants restore the same nodes
 //!   orx exp move <expId> --parent <expId>|--baseline          re-parent a subtree
 //!   orx exp delete <expId>            permanently delete a leaf node, its runs and branch
-//!   orx exp view set|get|check …      the view an experiment's runs are drawn with
+//!   orx exp view set|get|show|check … the view an experiment's runs are drawn with
 //!
 //! Unlike the project-scoped data commands, every verb here takes an
 //! *experiment* id from `orx project view <projectId>`.
@@ -282,6 +282,32 @@ async fn view(command: ViewCommand) -> Result<()> {
             if !config.is_empty() {
                 println!("\nConfig:\n{}", serde_json::to_string_pretty(&config)?);
             }
+            Ok(())
+        }
+        ViewCommand::Show { run_id } => {
+            let run_id = match run_id {
+                Some(id) => id,
+                None => {
+                    let chat = crate::local::chat::launching_chat_session().ok_or_else(|| anyhow!(
+                        "Pass a run id: `orx exp view show RUN`. Find run ids with `orx runs <projectId>`."
+                    ))?;
+                    let runs: Vec<_> = Store::open_for_reading()?
+                        .chat_shown_runs()?
+                        .into_iter()
+                        .filter(|shown| shown.session_id == chat)
+                        .collect();
+                    match runs.as_slice() {
+                        [shown] => shown.run.id.clone(),
+                        [] => return Err(anyhow!("No run is shown in this chat. Pass its id with `orx exp view show RUN`.")),
+                        _ => return Err(anyhow!("This chat shows several runs: {}. Choose one with `orx exp view show RUN`.", runs.iter().map(|shown| shown.run.id.as_str()).collect::<Vec<_>>().join(", "))),
+                    }
+                }
+            };
+            let client = crate::plane::local_plane::ApiClient::discover().await?;
+            let path = format!("runs/{}/view/show", urlencoding::encode(&run_id));
+            let report = answer(client.request(reqwest::Method::GET, &path)).await?;
+            let text = report["text"].as_str().ok_or_else(|| anyhow!("Run {run_id}'s view response has no description. Restart `orx up` and retry `orx exp view show {run_id}`."))?;
+            println!("{text}");
             Ok(())
         }
         ViewCommand::Check {

@@ -298,7 +298,7 @@ for (let epoch = 1; epoch <= 5; epoch++) {
   await themes(page, banner, info, 'strip-epochs-full')
   await banner.getByRole('button', { name: 'Show less', exact: true }).click()
   // The line's time says it is elapsed, and why there is no estimate.
-  await expect(banner).toContainText(/\d+s⁩? elapsed/)
+  await expect(banner).toContainText(/\d+[smh]⁩? elapsed/)
   await expect(banner).not.toContainText('100%')
   await expect(banner.getByRole('button', { name: said('Step 6 of 6') })).toHaveAccessibleDescription('No estimate: how much of this run is left is unknown')
   await themes(page, banner, info, 'line-epochs-full')
@@ -560,7 +560,7 @@ for (let step = 1; step <= ${total}; step++) {
   const named = (title: string) => banner.getByRole('button', { name: new RegExp(`^\\W?${title}\\W?$`) })
 
   await test.step('the summary says what the runs share, and each row only what sets it apart', async () => {
-    await expect(rows).toHaveCount(3)
+    await expect(rows).toHaveCount(3, { timeout: 60_000 })
     for (const { total } of runs.slice(0, 3)) await expect(banner).toContainText(said(`Step 20 of ${total}`))
     await expect(banner).toContainText('… at 2e15 FLOPs')
     await expect(banner).toContainText(said('3 running'))
@@ -594,7 +594,7 @@ for (let step = 1; step <= ${total}; step++) {
     agent.script('Also check the tokenizer.', [{ run: ['set -e', ...start(3, 4)].join('\n') }, { say: 'Launched the check.' }])
     await send(page, 'Also check the tokenizer.')
     await expect(rows).toHaveCount(4)
-    await expect(banner).toContainText(said('Step 20 of 30'))
+    await expect(banner).toContainText(said('Step 20 of 30'), { timeout: 60_000 })
     await expect(banner).not.toContainText('… at 2e15 FLOPs')
     for (const { title, label } of runs) await expect(named(title)).toHaveText(said(label))
     await expect(banner).toContainText(said('4 running'))

@@ -281,6 +281,15 @@ collection, an ended one from the log kept here. A counter read by a pattern
 promises only itself, as a detected one does. `orx exp view check` folds the
 run's log as it reads now with the patterns and says what each one matched.
 
+`orx exp view show RUN` describes the collected run view in plain text. It
+reads the monitor and summary used by the dashboard, labels the stage, plan,
+watcher, flag and estimate separately, and lists each chart's data extent,
+total, finite point count and parent data, the stats and missing reports.
+It does not recreate the UI's sentence or its Setup grouping. A missing run
+argument selects the only run shown in the invoking agent's chat; several
+shown runs require an explicit id. View and pattern edits apply to the live
+card and to the next description.
+
 The existing watcher pass also checks instrumentation after reporting starts or
 the run's first minutes pass. It checks patterns against real log bytes, the
 headline and charts against reported names, and observed stages against their

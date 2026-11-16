@@ -511,7 +511,7 @@ async fn instrumentation(seen: &mut Seen, run: &Now, now: i64) -> Result<Option<
     let body = format!(
         "[orx] Run {id} (experiment {experiment}) needs an instrumentation check.\n\
          {problems}\n\
-         Inspect `orx exp view check {id}` and `orx logs {id}` before changing anything. \
+         Inspect `orx exp view show {id}` and `orx logs {id}` before changing anything. \
          View and pattern changes apply now. If a code report is missing, cancel a still-running run with \
          `orx exp cancel --run {id} --reason 'Fixing run reports'`, fix and commit the code, then relaunch. \
          This automatic check never stops the run and sends at most one warning for it."
