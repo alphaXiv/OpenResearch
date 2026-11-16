@@ -169,7 +169,7 @@ export function CommandTerminal({ path, label, command, heightClass = "h-40", fr
   /** The server follows a command that ran with the user's shell, so the socket
    * stays up and input stays enabled after a command failure. */
   shellAfter?: boolean;
-  /** Takes input and focus; an inactive terminal still runs, out of the way. */
+  /** Takes focus. An inactive terminal still runs and reads input, so a caller hides or inerts it. */
   active?: boolean;
   awaitingApproval?: boolean;
   /** Set while the socket is open, for control frames such as a pasted sign-in code. */
@@ -286,7 +286,9 @@ export function CommandTerminal({ path, label, command, heightClass = "h-40", fr
   useEffect(() => {
     const terminal = session.current?.mounted.terminal;
     if (!terminal) return;
-    terminal.options.disableStdin = awaitingApproval || !active || error !== null;
+    // Stays on while inactive: disabled stdin also drops xterm's replies, and Windows'
+    // ConPTY holds the command's output until its cursor query is answered.
+    terminal.options.disableStdin = awaitingApproval || error !== null;
     if (!awaitingApproval && active && error === null) terminal.focus();
     else terminal.blur();
   }, [active, error, awaitingApproval]);
