@@ -92,6 +92,15 @@ impl Drop for Server {
 async fn catalog(server: &Server, resource: &str) -> Result<Value> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
+        if !server.endpoint.plugins_active().await? {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(anyhow!(
+                    "OpenCode's plugins didn't start within 30 seconds, so its sign-ins are incomplete. Re-check OpenCode."
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            continue;
+        }
         let response = server
             .request(Method::GET, &["api", resource])
             .send()
@@ -534,7 +543,7 @@ mod tests {
     use axum::extract::{Query, State};
     use axum::routing::{get, post};
     use axum::{Json, Router};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
 
     #[derive(Default)]
@@ -542,6 +551,8 @@ mod tests {
         complete: AtomicBool,
         cancelled: AtomicBool,
         requests: Mutex<Vec<Value>>,
+        /// Plugin list reads left before OpenCode's plugins activate.
+        inactive_reads: AtomicUsize,
     }
 
     async fn fixture(root: &std::path::Path) -> (Server, Arc<Mock>, tokio::task::JoinHandle<()>) {
@@ -549,7 +560,17 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let router = Router::new()
-            .route("/api/integration", get(|| async { Json(json!({"data":[{"id":"xai","methods":[{"type":"oauth","id":"device","label":"SuperGrok"}],"connections":[{"type":"credential","id":"cred_oauth","method":"oauth"},{"type":"credential","id":"cred_key","method":"key"},{"type":"env","name":"XAI_API_KEY"}]}]})) }))
+            .route("/api/plugin", get(|State(mock): State<Arc<Mock>>| async move {
+                let inactive = mock.inactive_reads.try_update(Ordering::SeqCst, Ordering::SeqCst, |left| left.checked_sub(1)).is_ok();
+                Json(if inactive { json!({"data":[]}) } else { json!({"data":[{"id":"opencode.provider.xai","state":{"status":"active"}}]}) })
+            }))
+            .route("/api/integration", get(|State(mock): State<Arc<Mock>>| async move {
+                // Before plugins activate, OpenCode lists only a generic key.
+                if mock.inactive_reads.load(Ordering::SeqCst) > 0 {
+                    return Json(json!({"data":[{"id":"xai","methods":[{"type":"key"}],"connections":[]}]}));
+                }
+                Json(json!({"data":[{"id":"xai","methods":[{"type":"oauth","id":"device","label":"SuperGrok"}],"connections":[{"type":"credential","id":"cred_oauth","method":"oauth"},{"type":"credential","id":"cred_key","method":"key"},{"type":"env","name":"XAI_API_KEY"}]}]}))
+            }))
             .route("/api/credential/{id}", axum::routing::delete(|State(mock): State<Arc<Mock>>, axum::extract::Path(id): axum::extract::Path<String>| async move {
                 mock.requests.lock().unwrap().push(json!({"removed":id}));
                 axum::http::StatusCode::NO_CONTENT
@@ -695,6 +716,18 @@ mod tests {
             task.abort();
             let _ = task.await;
         }
+    }
+
+    #[tokio::test]
+    async fn integrations_wait_for_the_sign_ins_plugins_add() {
+        let root = crate::local::git::TemporaryDirectory::new("orx-signin-test").unwrap();
+        let (mut server, mock, task) = fixture(root.path()).await;
+        mock.inactive_reads.store(2, Ordering::SeqCst);
+        let integrations = catalog(&server, "integration").await.unwrap();
+        assert_eq!(integrations["data"][0]["methods"][0]["type"], "oauth");
+        server.stop().await;
+        task.abort();
+        let _ = task.await;
     }
 
     #[tokio::test]
