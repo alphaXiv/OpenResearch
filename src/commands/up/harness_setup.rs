@@ -912,8 +912,8 @@ fn verify_reason(
 }
 
 /// The OS cause of a spawn failure, with the command line stripped. The error
-/// reads `CreateProcessW "powershell.exe …<whole script>…" failed: <cause>`;
-/// only the text after the final `failed:` describes what the OS refused.
+/// reads `CreateProcessW "<program> …<arguments>…" failed: <cause>`; only the
+/// text after the final `failed:` describes what the OS refused.
 fn spawn_failure_cause(error: &str) -> String {
     error
         .rsplit_once("failed:")
