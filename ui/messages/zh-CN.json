@@ -2029,5 +2029,9 @@
   "usage_reset_confirm": "使用重置",
   "usage_reset_done": "你的 Codex 额度已恢复。",
   "usage_reset_nothing": "暂时没有可重置的内容：你的额度还没用完。重置会保留。",
-  "usage_reset_none_left": "没有剩余的重置。"
+  "usage_reset_none_left": "没有剩余的重置。",
+  "acp_approval_ask": "逐次询问",
+  "acp_approval_ask_description": "执行需要授权的操作前询问",
+  "acp_approval_auto": "自动批准",
+  "acp_approval_auto_description": "自动批准单次操作请求，代理自身的访问限制仍然有效。"
 }

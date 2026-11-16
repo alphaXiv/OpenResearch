@@ -188,6 +188,14 @@ OpenCode runs local inference over connections to OpenAI-compatible servers (`sr
 
 Each agent keeps its own permission modes, and orx exposes those the harness advertises. A tool call needing approval becomes a prompt part:
 
+User-configured ACP agents also have a client approval setting: Ask (the default) or Auto-approve.
+Auto-approve answers only the agent's offered `allow_once` choice. Requests that offer only a
+persistent grant, or explicitly switch agent modes, still ask. It does not change the agent's
+sandbox, replace its native configuration or override a denied action. The choice is stored with
+the chat, survives restarts and removal of its launch configuration, and is checked for each request; switching it while a request waits
+takes effect on the next status tick. Stop cancels pending requests before they can be approved.
+A completed prompt takes priority over queued approval events, cancelling requests that arrive late.
+
 | Agents | How a request waits |
 | --- | --- |
 | Codex app server, OpenCode, Antigravity, ACP | held on the live connection |

@@ -1,5 +1,6 @@
 import type { ChatSession, Harness, OptionChoice } from "./api";
 import { shellWords } from "./orxCommand.ts";
+import { m } from "./paraglide/messages.js";
 
 export function parseAcpCommand(command: string): { executable: string; arguments: string[] } | null {
   try {
@@ -64,13 +65,20 @@ export function nativeOptions(configuration: unknown, labels = { model: "Model",
 }
 
 export function sessionAcpHarness(session: ChatSession | null | undefined, catalog: Harness | undefined): Harness | undefined {
-  if (!session?.harness.startsWith("acp:")) return catalog;
-  return {
+  const harness: Harness | undefined = session?.harness.startsWith("acp:") ? {
     id: session.harness, name: session.harnessName ?? catalog?.name ?? "ACP", installed: true,
     installBroken: false, authenticated: false, authState: "unknown", agentReady: true, supportsSteering: false, supportsCompaction: false,
     models: session.nativeModels ?? catalog?.models ?? [],
-    options: { permissionModes: [], reasoningLevels: [], defaultPermissionMode: null, defaultReasoningLevel: null },
-  };
+    options: session.harnessOptions ?? catalog?.options ?? { permissionModes: [], reasoningLevels: [], defaultPermissionMode: null, defaultReasoningLevel: null },
+  } : catalog;
+  if (!harness?.id.startsWith("acp:")) return harness;
+  return { ...harness, options: { ...harness.options,
+    permissionModes: (harness.options?.permissionModes ?? []).map((choice) => choice.id === "ask"
+      ? { ...choice, label: m.acp_approval_ask(), description: m.acp_approval_ask_description() }
+      : choice.id === "auto-approve"
+        ? { ...choice, label: m.acp_approval_auto(), description: m.acp_approval_auto_description() }
+        : choice),
+  } };
 }
 
 export function validAcpLaunch(name: string, executable: string, args: string[]): boolean {

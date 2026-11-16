@@ -2029,5 +2029,9 @@
   "usage_reset_confirm": "استخدام إعادة التعيين",
   "usage_reset_done": "أُعيد ملء حدود Codex.",
   "usage_reset_nothing": "لا شيء لإعادة تعيينه بعد: لم تستنفد حدودك. تبقى إعادة التعيين لديك.",
-  "usage_reset_none_left": "لم تتبق أي إعادات تعيين."
+  "usage_reset_none_left": "لم تتبق أي إعادات تعيين.",
+  "acp_approval_ask": "السؤال كل مرة",
+  "acp_approval_ask_description": "السؤال قبل الإجراءات التي تتطلب موافقة",
+  "acp_approval_auto": "الموافقة تلقائيًا",
+  "acp_approval_auto_description": "الموافقة تلقائيًا على الطلبات الفردية. تظل قيود وصول الوكيل نفسه سارية."
 }

@@ -2029,5 +2029,9 @@
   "usage_reset_confirm": "Sıfırlamayı kullan",
   "usage_reset_done": "Codex sınırlarınız yenilendi.",
   "usage_reset_nothing": "Henüz sıfırlanacak bir şey yok: sınırlarınız dolmadı. Sıfırlama sizde kalır.",
-  "usage_reset_none_left": "Sıfırlama kalmadı."
+  "usage_reset_none_left": "Sıfırlama kalmadı.",
+  "acp_approval_ask": "Sor",
+  "acp_approval_ask_description": "Onay gerektiren işlemlerden önce sor",
+  "acp_approval_auto": "Otomatik onayla",
+  "acp_approval_auto_description": "Tekil işlem isteklerini otomatik onaylar. Ajanın kendi erişim kısıtlamaları geçerliliğini korur."
 }

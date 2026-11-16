@@ -2029,5 +2029,9 @@
   "usage_reset_confirm": "Użyj resetu",
   "usage_reset_done": "Twoje limity Codex są odnowione.",
   "usage_reset_nothing": "Na razie nie ma czego resetować: limity nie są wyczerpane. Reset zostaje.",
-  "usage_reset_none_left": "Nie zostały żadne resety."
+  "usage_reset_none_left": "Nie zostały żadne resety.",
+  "acp_approval_ask": "Pytaj",
+  "acp_approval_ask_description": "Pytaj przed działaniami wymagającymi zgody",
+  "acp_approval_auto": "Zatwierdzaj automatycznie",
+  "acp_approval_auto_description": "Automatycznie zatwierdzaj pojedyncze żądania. Ograniczenia dostępu agenta nadal obowiązują."
 }

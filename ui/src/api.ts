@@ -1645,6 +1645,8 @@ export interface ChatSession {
   /** The account the chat runs on, when it's one OpenResearch keeps. */
   profile?: string | null;
   harnessName?: string | null;
+  /** The saved ACP chat's client controls, independent of the current catalog. */
+  harnessOptions?: HarnessOptions | null;
   nativeConfiguration?: unknown;
   /** The models an ACP agent's live configuration offers, when it offers any. */
   nativeModels?: HarnessModel[] | null;
