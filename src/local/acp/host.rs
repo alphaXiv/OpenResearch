@@ -816,7 +816,7 @@ pub(super) async fn spawn(
                         Ok(permission) if !permission.options.is_empty() => permission,
                         _ => return responder.respond_with_error(agent_client_protocol::Error::invalid_params().data("Invalid native permission options")),
                     };
-                    // Only a one-action grant can be revoked by returning to Ask.
+                    // Keep lasting grants and agent mode switches behind a manual decision.
                     let auto_option = (request.params["toolCall"]["kind"] != "switch_mode")
                         .then(|| request.params["options"].as_array()?.iter()
                             .find(|option| option["kind"] == "allow_once")?["optionId"].as_str().map(str::to_owned))

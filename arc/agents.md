@@ -194,6 +194,7 @@ persistent grant, or explicitly switch agent modes, still ask. It does not chang
 sandbox, replace its native configuration or override a denied action. The choice is stored with
 the chat, survives restarts and is checked for each request; switching it while a request waits
 takes effect on the next status tick. Stop cancels pending requests before they can be approved.
+A completed prompt takes priority over queued approval events, cancelling requests that arrive late.
 
 | Agents | How a request waits |
 | --- | --- |

@@ -1,5 +1,6 @@
 import { expect, send, test } from '../src/test.ts'
 import type { Page } from '@playwright/test'
+import { readFileSync } from 'node:fs'
 
 async function selectApproval(page: Page, name: string) {
   await page.getByRole('button', { name: /^Permissions:/ }).click()
@@ -60,4 +61,20 @@ test('ACP auto-approval keeps persistent grants and mode changes manual', async 
     await page.getByRole('button', { name: 'Reject this action', exact: true }).click()
     await expect(page.getByText(`Finished: ${text}`, { exact: true })).toBeVisible()
   }
+})
+
+
+test('ACP auto-approval cancels permission requests received after the turn reply', async ({ page, project, agent, orx }) => {
+  agent.script('Prepare the late-request test.', [{ say: 'Ready for a late request.' }])
+  await project.open(page)
+  await send(page, 'Prepare the late-request test.')
+  await expect(page.getByText('Ready for a late request.', { exact: true })).toBeVisible()
+  await selectApproval(page, 'Auto-approve')
+  const offset = readFileSync(orx.agentLog).length
+  agent.script('Reply before asking.', [{ permissionAfterReply: 'Action after turn completion' }])
+  await send(page, 'Reply before asking.')
+  await expect(page.getByRole('button', { name: 'Stop', exact: true })).toBeHidden()
+  await expect.poll(() => readFileSync(orx.agentLog).subarray(offset).toString()).toContain('"outcome":"cancelled"')
+  expect(readFileSync(orx.agentLog).subarray(offset).toString()).not.toContain('"outcome":"selected"')
+  await expect(page.getByRole('button', { name: 'Allow late action', exact: true })).toBeHidden()
 })

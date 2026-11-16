@@ -530,16 +530,8 @@ pub(crate) async fn prompt_session(ctx: &mut TurnCtx, session: &OpenSession) -> 
     let mut deadline = tokio::time::Instant::now() + super::TURN_WATCHDOG;
     let result = loop {
         tokio::select! {
-            _ = ctx.flush_due() => { let _ = ctx.flush(); }
-            _ = watchdog.tick() => {
-                approved_permissions.extend(approve_permissions(ctx, client)?);
-                // A command the agent runs reports nothing until it exits, however long it takes.
-                if client.awaiting_permission() || tools.command_running() {
-                    deadline = tokio::time::Instant::now() + super::TURN_WATCHDOG;
-                } else if tokio::time::Instant::now() >= deadline {
-                    return Err(anyhow!("ACP turn exceeded the response timeout"));
-                }
-            }
+            // A completed turn cancels late permissions before any automatic decision.
+            biased;
             result = &mut response => {
                 let result = result?;
                 while let Ok(event) = events.try_recv() {
@@ -567,6 +559,16 @@ pub(crate) async fn prompt_session(ctx: &mut TurnCtx, session: &OpenSession) -> 
                 }
                 if result["stopReason"] == "cancelled" { return Err(anyhow!("Agent turn was cancelled")); }
                 break result;
+            }
+            _ = ctx.flush_due() => { let _ = ctx.flush(); }
+            _ = watchdog.tick() => {
+                approved_permissions.extend(approve_permissions(ctx, client)?);
+                // A command the agent runs reports nothing until it exits, however long it takes.
+                if client.awaiting_permission() || tools.command_running() {
+                    deadline = tokio::time::Instant::now() + super::TURN_WATCHDOG;
+                } else if tokio::time::Instant::now() >= deadline {
+                    return Err(anyhow!("ACP turn exceeded the response timeout"));
+                }
             }
             event = events.recv() => {
                 let event = event.ok_or_else(|| anyhow!("ACP process exited during the turn; the prompt was not replayed"))?;

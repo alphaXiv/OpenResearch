@@ -4,6 +4,7 @@ import type { AddressInfo } from 'node:net'
 
 export type Step = { say: string } | { think: string } | { hold: string } | { run: string } | { exit: number }
   | { permission: string; kind?: string; grant?: 'allow_once' | 'allow_always' | 'none' }
+  | { permissionAfterReply: string }
 
 type Hold = { reached: PromiseWithResolvers<void>; response?: ServerResponse }
 
