@@ -3217,6 +3217,8 @@ pub struct SteerMessage {
     pub client_turn_id: Option<String>,
     /// Set when orx or another chat's agent wrote it.
     pub orx: Option<OrxSource>,
+    /// Orders a steer the turn never read among the queued messages.
+    pub sent_at: i64,
 }
 
 #[derive(Clone)]
@@ -4438,10 +4440,10 @@ impl ChatHost {
 
     fn refresh_persisted_queue(&self, session_id: &str) -> Result<()> {
         let _mutation = self.queue_persistence.lock().unwrap();
-        self.refresh_persisted_queue_locked(session_id)
+        self.refresh_persisted_queue_locked(session_id, &Store::open()?)
     }
 
-    fn refresh_persisted_queue_locked(&self, session_id: &str) -> Result<()> {
+    fn refresh_persisted_queue_locked(&self, session_id: &str, store: &Store) -> Result<()> {
         if self
             .queue_dispatch_cancelled
             .lock()
@@ -4456,7 +4458,7 @@ impl ChatHost {
             .unwrap()
             .get(session_id)
             .cloned();
-        let restored = Store::open()?
+        let restored = store
             .list_queued_chat_messages_for_session(session_id)?
             .into_iter()
             .filter_map(|row| serde_json::from_str::<QueuedMessage>(&row.payload_json).ok())
@@ -4663,15 +4665,9 @@ impl ChatHost {
             client_turn_id,
             request_hash: queued.request_hash.clone(),
             payload_json,
-            created_at: now_ms(),
+            created_at: message.sent_at,
         })?;
-        self.queued
-            .lock()
-            .unwrap()
-            .entry(session_id.to_string())
-            .or_default()
-            .push_back(queued);
-        self.emit_queued(session_id);
+        self.refresh_persisted_queue_locked(session_id, store)?;
         if let Some(id) = steer_client_turn_id.as_deref() {
             store.finish_steer(session_id, id)?;
         }
@@ -4969,7 +4965,11 @@ impl ChatHost {
                         dispatch_cleanup.finish_locked(true);
                         !cancelled
                             && !deleting
-                            && self.refresh_persisted_queue_locked(session_id).is_ok()
+                            && Store::open()
+                                .and_then(|store| {
+                                    self.refresh_persisted_queue_locked(session_id, &store)
+                                })
+                                .is_ok()
                     };
                     if requeued {
                         self.resume_persisted_queues();
@@ -5188,6 +5188,7 @@ impl ChatHost {
                         .map_or_else(|| text.clone(), |orx| orx.text.clone()),
                     client_turn_id: id.map(str::to_string),
                     orx: orx.as_ref().map(|orx| orx.source.clone()),
+                    sent_at: now_ms(),
                 };
                 if send_live_steer(&store, session_id, id, &request_hash, &sink, message)? {
                     return Ok(None);
@@ -7061,6 +7062,8 @@ impl ChatHost {
             let user = mode == StopMode::User;
             if user {
                 host.record_interruption(&session_id);
+                // Before the queue takes the slot, so cleanup can't cut the next turn's delegations.
+                host.stop_delegates_of_stopped(&session_id).await;
             }
             host.finish_turn(&session_id, None, user).await;
         });
@@ -7088,12 +7091,23 @@ impl ChatHost {
     }
 
     pub async fn interrupt_by_user(self: &Arc<Self>, session_id: &str) -> Result<()> {
-        self.stop_turn(session_id, StopMode::User).await?;
-        // Best-effort like the marker: this chat's turn is stopped either way.
-        if let Err(error) = self.stop_delegates(session_id).await {
-            eprintln!("orx up: delegates of {session_id} not stopped: {error}");
+        if !self.stop_turn(session_id, StopMode::User).await? {
+            self.stop_delegates_of_stopped(session_id).await;
         }
         Ok(())
+    }
+
+    /// Best-effort like the marker: the chat's own turn is stopped either way.
+    /// Boxed to break the `stop_turn` → `stop_delegates` → `stop_turn` cycle.
+    fn stop_delegates_of_stopped<'a>(
+        self: &'a Arc<Self>,
+        session_id: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            if let Err(error) = self.stop_delegates(session_id).await {
+                eprintln!("orx up: delegates of {session_id} not stopped: {error}");
+            }
+        })
     }
 
     /// The marker a user Stop leaves in the transcript. The dashboard hides the
@@ -15128,6 +15142,7 @@ mod steering_tests {
             text: text.into(),
             client_turn_id: None,
             orx: None,
+            sent_at: now_ms(),
         }
     }
 
@@ -15413,7 +15428,7 @@ mod steering_tests {
     }
 
     #[tokio::test]
-    async fn a_steer_the_turn_never_read_is_queued_even_when_the_turn_is_aborted() {
+    async fn a_steer_the_turn_never_read_is_queued_in_send_order_when_the_turn_is_aborted() {
         if !crate::config::in_test_child(&[]) {
             return;
         }
@@ -15431,13 +15446,19 @@ mod steering_tests {
             let _steering = steering;
             std::future::pending::<()>().await;
         });
-        tx.send(steer("still here")).unwrap();
+        let unread = steer("still here");
+        let mut later = steer("queued after it");
+        later.sent_at = unread.sent_at + 1;
+        tx.send(unread).unwrap();
+        host.park_steer("owner", later).unwrap();
 
         turn.abort();
         let _ = turn.await;
 
         assert!(host.steering.lock().unwrap().get("owner").is_none());
         assert!(tx.send(steer("too late")).is_err());
-        assert_eq!(host.queued_items("owner")[0]["text"], "still here");
+        let queued = host.queued_items("owner");
+        assert_eq!(queued[0]["text"], "still here");
+        assert_eq!(queued[1]["text"], "queued after it");
     }
 }
