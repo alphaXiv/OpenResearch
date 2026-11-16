@@ -9,12 +9,15 @@ import { m } from "../paraglide/messages.js";
 import { fmtBytes, ltr } from "../i18n";
 import { getLocale } from "../paraglide/runtime.js";
 import {
+  ArrowDownWideNarrow,
   ChevronRight,
   ExternalLink,
   Code,
+  Filter,
   MousePointerClick,
   Package,
   Trash2,
+  X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
@@ -31,6 +34,8 @@ import { normalizeMarkdownForRendering } from "../markdownNormalization";
 import { isExternalMarkdownTarget, rehypeNetworkImages, resolveMarkdownTarget } from "../markdownTarget";
 import { useFileVersion } from "../useFileVersion";
 import { mdCodeComponents, remarkMathOptions } from "./Md";
+import { filterArtifactEntries, sortArtifactEntries, type ArtifactOrder } from "./artifactTreeModel";
+import { OptionPicker } from "./ModelPicker";
 import {
   FileContextMenu,
   FileRenameInput,
@@ -39,7 +44,7 @@ import {
   type FileContextMenuEvent,
   type FileContextMenuTarget,
 } from "./FileTreeActions";
-import { IconButton, IconButtonLink, LoadingRow, showAlert, Spinner } from "./ui";
+import { IconButton, IconButtonLink, LoadingRow, showAlert, Spinner, Tooltip } from "./ui";
 
 /** Drop a leading YAML frontmatter block so it doesn't render as markdown. */
 function stripFrontmatter(md: string): string {
@@ -55,6 +60,7 @@ const TREE_MIN_WIDTH = 180;
 const TREE_MAX_WIDTH = 320;
 const TREE_MAX_INDENT_DEPTH = 8;
 const TREE_DEFAULT_WIDTH = 280;
+const NO_COLLAPSED_DIRS = new Set<string>();
 
 function initialTreeWidth(): number {
   try {
@@ -527,6 +533,10 @@ export function ArtifactsTab({
   const [treeWidth, setTreeWidth] = useState(initialTreeWidth);
   const [contextMenu, setContextMenu] = useState<FileContextMenuTarget | null>(null);
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
+  const [order, setOrder] = useState<ArtifactOrder>("name");
+  const [filter, setFilter] = useState("");
+  const [filterOpen, setFilterOpen] = useState(false);
+  const filterInputRef = useRef<HTMLInputElement>(null);
   const treeRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     try {
@@ -584,6 +594,22 @@ export function ArtifactsTab({
       return next;
     });
 
+  const sortedEntries = useMemo(
+    () => (artifacts ? sortArtifactEntries(artifacts.entries, order) : []),
+    [artifacts, order],
+  );
+  const visibleEntries = useMemo(
+    () => (filter.trim() ? filterArtifactEntries(sortedEntries, filter) : sortedEntries),
+    [sortedEntries, filter],
+  );
+  const filterActive = filter.trim() !== "";
+  // With a filter active the tree shows every match expanded — the user's
+  // collapsed set would hide what they just searched for.
+  const treeCollapsed = filterActive ? NO_COLLAPSED_DIRS : collapsed;
+  useEffect(() => {
+    if (filterOpen) filterInputRef.current?.focus();
+  }, [filterOpen]);
+
   const remove = async (path: string) => {
     await mutDeleteArtifact.runAsHeadlessPromise(workspace, project.id, path, {});
   };
@@ -616,7 +642,7 @@ export function ArtifactsTab({
     <TreeRows
       entries={entries}
       depth={0}
-      collapsed={collapsed}
+      collapsed={treeCollapsed}
       selected={selected}
       onToggle={toggle}
       onSelect={setSelected}
@@ -649,10 +675,80 @@ export function ArtifactsTab({
     <div className="files-tab h-full min-h-0 flex bg-background @container">
       <div className="ftree-pane relative shrink-0 flex flex-col min-h-0 border-s border-s-border-variant border-e border-e-border-variant bg-background [@container((max-width:_720px))]:!w-full" ref={treeRef} style={{ width: treeWidth }}>
         <div className="ftree-resizer absolute -end-[3px] top-0 bottom-0 w-1.5 cursor-col-resize z-30 [&:hover]:bg-resizer-hover [&:active]:bg-resizer-hover [@container((max-width:_720px))]:hidden" onPointerDown={resizeTree} />
+        <div className="pane-toolbar flex shrink-0 flex-col gap-2 bg-background px-3 pt-2.5 pb-2">
+          <div className="artifacts-toolbar-controls flex w-full items-center gap-1">
+            <Tooltip interactive content={m.history_order()}>
+              <OptionPicker
+                triggerIcon={<ArrowDownWideNarrow size={16} />}
+                choices={[
+                  { id: "newest", label: m.history_order_newest() },
+                  { id: "oldest", label: m.history_order_oldest() },
+                  { id: "name", label: m.artifacts_order_name() },
+                ]}
+                value={order}
+                header={m.history_order()}
+                title={m.history_order()}
+                variant="bare"
+                dropDown
+                align="left"
+                onSelect={(id) => {
+                  if (id === "newest" || id === "oldest" || id === "name") setOrder(id);
+                }}
+              />
+            </Tooltip>
+            <span className="flex-1" />
+            <Tooltip interactive content={m.artifacts_filter()}>
+              <IconButton
+                size="small"
+                active={filterActive}
+                className="artifacts-filter-trigger [&.active]:text-text"
+                aria-label={m.artifacts_filter()}
+                aria-pressed={filterOpen}
+                onClick={() => {
+                  setFilterOpen((open) => !open);
+                  if (filterOpen) setFilter("");
+                }}
+              >
+                <Filter size={16} strokeWidth={2.5} />
+              </IconButton>
+            </Tooltip>
+          </div>
+          {filterOpen && (
+            <div className="relative flex w-full items-center">
+              <input
+                ref={filterInputRef}
+                className="artifacts-filter-input h-7 w-full rounded-md border border-border bg-background ps-2 pe-7 text-sm text-text outline-none [&:focus]:border-focus-border"
+                placeholder={m.artifacts_filter_placeholder()}
+                aria-label={m.artifacts_filter()}
+                value={filter}
+                onChange={(event) => setFilter(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") {
+                    setFilter("");
+                    setFilterOpen(false);
+                  }
+                }}
+              />
+              {filterActive && (
+                <IconButton
+                  size="small"
+                  className="absolute end-0.5"
+                  aria-label={m.artifacts_filter_clear()}
+                  onClick={() => setFilter("")}
+                >
+                  <X size={13} />
+                </IconButton>
+              )}
+            </div>
+          )}
+        </div>
         <div data-keyboard-list className="ftree-scroll flex-1 min-h-0 overflow-y-auto file-tree py-1.5 px-0 text-sm">
-          {tree(artifacts.entries)}
+          {tree(visibleEntries)}
           {artifacts.truncated && (
             <p className="files-truncated m-0 py-2 px-3.5 text-sm text-muted">{m.artifacts_tab_listing_truncated_the_folder_has_more_artifacts()}</p>
+          )}
+          {visibleEntries.length === 0 && artifacts.entries.length > 0 && (
+            <p className="m-0 py-2 px-3.5 text-sm text-muted">{m.artifacts_filter_no_match()}</p>
           )}
         </div>
       </div>
