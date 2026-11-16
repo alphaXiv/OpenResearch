@@ -947,6 +947,11 @@ async fn discover_models_within(
             post(endpoint, "/api/plugin/await-activation", &json!({})).await?;
         }
         loop {
+            if !endpoint.legacy_v2_api && !endpoint.plugins_active().await? {
+                plugins_pending = true;
+                tokio::time::sleep(retry).await;
+                continue;
+            }
             let models = catalog_get(endpoint, "/api/model").await?;
             plugins_pending = models.is_none();
             if let Some(models) = models {

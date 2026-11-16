@@ -263,6 +263,23 @@ impl AgentEndpoint {
         Ok(false)
     }
 
+    /// Whether OpenCode's plugins have activated. Until then its integration list lacks the sign-ins plugins add,
+    /// such as GitHub Copilot's, and shows generic API keys instead. A version with no plugin list counts as active.
+    pub async fn plugins_active(&self) -> Result<bool> {
+        let response = self.get("/api/plugin").send().await?;
+        let status = response.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(true);
+        }
+        if status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+            return Ok(false);
+        }
+        let body: serde_json::Value = response.error_for_status()?.json().await?;
+        Ok(body["data"]
+            .as_array()
+            .is_some_and(|plugins| !plugins.is_empty()))
+    }
+
     fn get(&self, path: &str) -> reqwest::RequestBuilder {
         self.client
             .get(format!("{}{path}", self.base_url))

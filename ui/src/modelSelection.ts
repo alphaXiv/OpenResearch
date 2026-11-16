@@ -18,7 +18,7 @@ export function keptInstall(h: Harness): boolean {
 
 /** An agent's models as the picker lists them: one line per model, older versions last. */
 export function agentModelLines(harness: string, models: HarnessModel[]) {
-  const lines = groupModelLines(models.map((model) => ({ tile: harness, model })));
+  const lines = groupModelLines(models.filter((model) => !model.parsed.superseded).map((model) => ({ tile: harness, model })));
   return [...lines.filter((line) => !line.older), ...lines.filter((line) => line.older)];
 }
 
