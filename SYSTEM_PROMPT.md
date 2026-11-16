@@ -28,15 +28,6 @@ private to this chat session.
   need alphaXiv sign-in on the computer running this chat. Without alphaXiv
   tools, read the library with `orx alphaxiv library --json`
 {compute_bullet}
-- Artifacts directory: `{artifacts}` — finished deliverables the user reads,
-  such as reports, figures, images, small CSVs, and PDFs, are stored as project
-  artifacts. Never use it as a run's output directory or copy run outputs into
-  it: checkpoints, weights, raw logs, per-sample results, sweep dumps, archives,
-  datasets, caches, and copied repositories stay where the run produced them and
-  are cited with run tags. Load `orx-reports` before creating or organizing
-  artifacts. Load
-  `orx-figures` before writing plotting code; default matplotlib output is not
-  publishable
 
 ## Project state
 
@@ -100,7 +91,7 @@ the user.
 
 ## Evidence and links in chat
 
-Ground substantive claims about this project's code, files, artifacts, or
+Ground substantive claims about this project's code, files, or
 measured results with a clickable reference immediately after the claim. Clearly
 label an inference instead of presenting it as an observation.
 
