@@ -1913,25 +1913,17 @@ mod windows_agent_tree_tests {
 
     #[tokio::test]
     async fn stopping_an_agent_kills_the_commands_it_started() {
-        let mut agent = crate::process::tokio_command("powershell.exe")
-            .args([
-                "-NoProfile",
-                "-Command",
-                "$p = Start-Process ping -ArgumentList '-n','60','127.0.0.1' -PassThru -NoNewWindow -RedirectStandardOutput NUL; $p.Id; Wait-Process -Id $p.Id",
-            ])
+        let mut agent = crate::process::tokio_command("cmd.exe")
+            .args(["/d", "/c", "ping -n 60 127.0.0.1"])
             .stdout(std::process::Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .unwrap();
-        let mut lines = tokio::io::BufReader::new(agent.stdout.take().unwrap()).lines();
-        let command: u32 = lines
-            .next_line()
-            .await
-            .unwrap()
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
+        // Held open until the end: a closed pipe would end ping by itself.
+        let mut output = tokio::io::BufReader::new(agent.stdout.take().unwrap()).lines();
+        // Output means ping is running under the agent.
+        output.next_line().await.unwrap();
+        let command = ping_under(agent.id().unwrap());
         // SAFETY: a plain open of the command just started; the handle is owned below.
         let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, command) };
         assert!(!handle.is_null(), "command {command} is not running");
@@ -1944,6 +1936,40 @@ mod windows_agent_tree_tests {
         // SAFETY: the handle has synchronize access.
         let waited = unsafe { WaitForSingleObject(command.as_raw_handle(), 5_000) };
         assert_eq!(waited, WAIT_OBJECT_0, "command survived its agent");
+    }
+
+    /// The agent's ping, which a console of its own would sit beside as conhost.
+    fn ping_under(parent: u32) -> u32 {
+        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+            TH32CS_SNAPPROCESS,
+        };
+        // SAFETY: a plain snapshot.
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+        assert_ne!(
+            snapshot, INVALID_HANDLE_VALUE,
+            "could not snapshot processes"
+        );
+        // SAFETY: the valid snapshot handle is transferred exactly once.
+        let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot) };
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: the snapshot is valid and `entry` carries its size.
+        let mut more = unsafe { Process32FirstW(snapshot.as_raw_handle(), &mut entry) } != 0;
+        while more {
+            let name = &entry.szExeFile;
+            let name =
+                String::from_utf16_lossy(&name[..name.iter().take_while(|&&c| c != 0).count()]);
+            if entry.th32ParentProcessID == parent && name.eq_ignore_ascii_case("ping.exe") {
+                return entry.th32ProcessID;
+            }
+            // SAFETY: as above.
+            more = unsafe { Process32NextW(snapshot.as_raw_handle(), &mut entry) } != 0;
+        }
+        panic!("agent {parent} is not running ping");
     }
 }
 
@@ -2838,6 +2864,30 @@ impl Drop for PendingGuard {
         ) {
             self.host
                 .emit("chat.message", message_json(&msg, &self.session_id));
+        }
+    }
+}
+
+const TURN_ENDED: &str = "the turn this approval belonged to has already ended";
+
+/// A bridge card on screen, waiting for the user.
+struct HeldPermission {
+    rx: tokio::sync::oneshot::Receiver<PermissionDecision>,
+    /// Cleanup on every exit path — answered, timed out, or the handler
+    /// future dropped (HTTP connection died with the claude child): remove
+    /// the pending entry and resolve the card so it can't be answered into
+    /// the void.
+    _guard: PendingGuard,
+}
+
+impl HeldPermission {
+    async fn decision(self) -> PermissionDecision {
+        tokio::select! {
+            d = self.rx => d.unwrap_or_else(|_| PermissionDecision::deny("the approval was cancelled")),
+            _ = tokio::time::sleep(BRIDGE_ANSWER_TIMEOUT) => PermissionDecision::deny(
+                "No one answered this approval within 55 minutes; treat it as denied \
+                 and wrap up the turn cleanly.",
+            ),
         }
     }
 }
@@ -3956,13 +4006,22 @@ impl ChatHost {
                 .and_then(Value::as_array)
                 .filter(|q| !q.is_empty())
             {
-                let mut answers = serde_json::Map::new();
+                // Every card is up before any is answered, so the user can
+                // move between the questions of one batch.
+                let mut cards = Vec::with_capacity(questions.len());
                 for question in questions {
                     let input = json!({ "questions": [question] });
-                    let decision = self
-                        .present_permission(session_id, token, tool_name, input)
-                        .await?;
-                    match decision {
+                    match self
+                        .post_permission(session_id, token, tool_name, input)
+                        .await?
+                    {
+                        Some(card) => cards.push(card),
+                        None => return Ok(PermissionDecision::deny(TURN_ENDED)),
+                    }
+                }
+                let mut answers = serde_json::Map::new();
+                for card in cards {
+                    match card.decision().await {
                         PermissionDecision::Allow {
                             updated_input: Some(input),
                         } => {
@@ -3987,18 +4046,26 @@ impl ChatHost {
                 });
             }
         }
-        self.present_permission(session_id, token, tool_name, tool_input)
-            .await
+        Ok(
+            match self
+                .post_permission(session_id, token, tool_name, tool_input)
+                .await?
+            {
+                Some(card) => card.decision().await,
+                None => PermissionDecision::deny(TURN_ENDED),
+            },
+        )
     }
 
-    async fn present_permission(
+    /// Shows the card for a held tool call; `None` when its turn has ended.
+    async fn post_permission(
         self: &Arc<Self>,
         session_id: &str,
         token: &str,
         tool_name: &str,
         tool_input: Value,
-    ) -> Result<PermissionDecision> {
-        // Revalidate after queued approvals and between questions in a batch.
+    ) -> Result<Option<HeldPermission>> {
+        // Revalidate after queued approvals.
         let gate_is_current = self
             .gate_tokens
             .lock()
@@ -4006,9 +4073,7 @@ impl ChatHost {
             .get(session_id)
             .is_some_and(|gate| gate.value == token);
         if !gate_is_current || !self.is_busy(session_id).await {
-            return Ok(PermissionDecision::deny(
-                "the turn this approval belonged to has already ended",
-            ));
+            return Ok(None);
         }
 
         let prompt_id = format!("perm_{}", uuid::Uuid::new_v4());
@@ -4095,24 +4160,14 @@ impl ChatHost {
                 tx,
             },
         );
-        // Cleanup on every exit path — answered, timed out, or this handler
-        // future dropped (HTTP connection died with the claude child): remove
-        // the pending entry and resolve the card so it can't be answered into
-        // the void.
-        let _guard = PendingGuard {
-            host: self.clone(),
-            session_id: session_id.to_string(),
-            prompt_id: prompt_id.clone(),
-        };
-
-        let decision = tokio::select! {
-            d = rx => d.unwrap_or_else(|_| PermissionDecision::deny("the approval was cancelled")),
-            _ = tokio::time::sleep(BRIDGE_ANSWER_TIMEOUT) => PermissionDecision::deny(
-                "No one answered this approval within 55 minutes; treat it as denied \
-                 and wrap up the turn cleanly.",
-            ),
-        };
-        Ok(decision)
+        Ok(Some(HeldPermission {
+            rx,
+            _guard: PendingGuard {
+                host: self.clone(),
+                session_id: session_id.to_string(),
+                prompt_id,
+            },
+        }))
     }
 
     /// Settle a pending bridge request with the user's decision (the native
@@ -11380,6 +11435,58 @@ mod bridge_tests {
             assert_eq!(decision["behavior"], "deny", "turn ends: {turn_ends}");
             assert!(!host.has_pending_permission(&session));
         }
+    }
+
+    #[tokio::test]
+    async fn a_question_batch_is_held_whole_and_collects_every_answer() {
+        let host = Arc::new(test_host());
+        let session = format!("ses_{}", uuid::Uuid::new_v4());
+        let token = host.mint_gate_token(&session, false, false);
+        host.turns
+            .lock()
+            .await
+            .insert(session.clone(), TurnState::Reserved { turn_id: None });
+        let question = |text: &str| json!({"question": text, "header": "h", "options": [{"label": "Yes"}, {"label": "No"}]});
+        let held = tokio::spawn({
+            let host = host.clone();
+            let session = session.clone();
+            let questions = json!({"questions": [question("First?"), question("Second?")]});
+            async move {
+                host.request_permission(&session, &token, "AskUserQuestion", questions)
+                    .await
+            }
+        });
+        let pending = || -> Vec<String> {
+            let map = host.pending_permissions.lock().unwrap();
+            map.iter()
+                .filter(|(_, held)| held.session_id == session)
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        while pending().len() < 2 {
+            tokio::task::yield_now().await;
+        }
+        // Whichever order the answers arrive in.
+        for (index, id) in pending().into_iter().enumerate() {
+            let answered = json!({"answers": {format!("question {index}"): "Yes"}});
+            host.settle_permission(
+                &id,
+                PermissionDecision::Allow {
+                    updated_input: Some(answered),
+                },
+            )
+            .unwrap();
+        }
+        let decision = serde_json::to_value(held.await.unwrap().unwrap()).unwrap();
+        assert_eq!(decision["behavior"], "allow");
+        assert_eq!(
+            decision["updatedInput"]["answers"]
+                .as_object()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(!host.has_pending_permission(&session));
     }
 
     #[tokio::test]

@@ -1,24 +1,25 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
 import { flushSync } from "react-dom";
-import { Check, ChevronRight, History, Sparkles, Star } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, Gift, History, Star } from "lucide-react";
 import { fmtNumber, tidyModelName } from "../api";
 import { m } from "../paraglide/messages.js";
 import { CLAUDE_TIERS, type ModelLine, type ModelOffer } from "../modelLines";
 import { harnessKey } from "../modelSelection";
 import { AgentIconTile } from "./AgentIcon";
-import { agentLab, LabMark, LABS, ModelMark, modelLab, type Lab } from "./HarnessLogo";
+import { agentLab, LabMark, LABS, ModelMark, modelLab } from "./HarnessLogo";
 import type { PickerAgent } from "./pickerAgents";
 import { Tooltip } from "./ui";
 import { cn } from "./ui/cn";
 
 export type PickerLine = ModelLine<PickerAgent>;
+export type PickedFrom = "free" | "favorites" | "lab" | "older" | "search";
 type PickerOffer = ModelOffer<PickerAgent>;
 
 /** A section's title bar: stuck, it spans the list's padding and covers the rows scrolling under it. */
 const BAR = "sticky -top-1 z-10 -mx-1 bg-background px-1 after:absolute after:inset-x-0 after:top-full after:h-px data-stuck:after:bg-border-variant";
 const HEADER = "flex h-7 w-full items-center gap-1.5 rounded-md ps-2.5 pe-2 pt-1 text-xs font-medium text-muted outline-none";
 const ROW = [
-  "flex min-h-8 items-center gap-1 rounded-md ps-2 pe-1 hover:bg-hover-muted",
+  "flex min-h-8 items-center gap-1 rounded-md ps-2 pe-1 hover:bg-hover-muted has-[[data-nav]:focus]:bg-hover-muted",
   "has-[[data-nav]:focus-visible]:bg-hover-muted has-[[data-nav]:focus-visible]:outline-2 has-[[data-nav]:focus-visible]:outline-solid has-[[data-nav]:focus-visible]:outline-focus has-[[data-nav]:focus-visible]:-outline-offset-2",
 ].join(" ");
 /** The row Enter picks from the search, marked as a focused row is so it never reads as the picked model. */
@@ -28,8 +29,10 @@ const BADGE = "shrink-0 rounded-sm px-1 text-xs leading-4";
 
 /** A catalog this long (OpenRouter's) lists only what another agent offers too until a search finds the rest. */
 const CATALOG_LINES = 60;
+/** How many of the free models Free lists until expanded. */
+const FREE_SHOWN = 2;
 
-const NEW = "new";
+export const FREE = "free";
 const FAVORITES = "favorites";
 export const OTHER = "other";
 const OLDER = "older";
@@ -46,22 +49,34 @@ export function lineLab(line: PickerLine) {
   return modelLab(offer.model, offer.tile.harness.id);
 }
 
-/** Where a lab's section goes: the user's order first, then the labs it doesn't name in `LABS` order, Other models last. */
-function labRank(lab: Lab | undefined, order: readonly string[]) {
-  if (!lab) return Infinity;
-  const chosen = order.indexOf(lab);
-  return chosen >= 0 ? chosen : order.length + LABS.findIndex((entry) => entry.lab === lab);
+/** The section listing `line` among the picker's and Settings' categories: Free for a free model, else its lab's. */
+export function lineSection(line: PickerLine) {
+  return line.offers[0].model.free ? FREE : lineLab(line) ?? OTHER;
 }
 
-export function labName(lab: Lab | undefined) {
-  return LABS.find((entry) => entry.lab === lab)?.name ?? m.model_picker_other();
+/** Where a section goes: the user's order first, then Free, the labs it doesn't name in `LABS` order, and Other models last. */
+function sectionRank(id: string, order: readonly string[]) {
+  const chosen = order.indexOf(id);
+  if (chosen >= 0) return chosen;
+  if (id === FREE) return -1;
+  const lab = LABS.findIndex((entry) => entry.lab === id);
+  return lab >= 0 ? order.length + lab : Infinity;
 }
 
-/** Lines by lab in section order, Claude's biggest tier first, otherwise as grouped. */
-export function byLab(lines: PickerLine[], order: readonly string[]) {
+export function sectionName(id: string) {
+  return id === FREE ? m.model_picker_free() : LABS.find((entry) => entry.lab === id)?.name ?? m.model_picker_other();
+}
+
+export function SectionMark({ id, size }: { id: string; size: number }) {
+  if (id === FREE) return <Gift size={size} aria-hidden="true" className="shrink-0 text-accent-red" />;
+  return <LabMark lab={LABS.find((entry) => entry.lab === id)?.lab} size={size} />;
+}
+
+/** Lines in section order, Claude's biggest tier first, otherwise as grouped. */
+export function bySection(lines: PickerLine[], order: readonly string[]) {
   const ranks = new Map(lines.map((line, index) => {
     const words = line.family.split(" ");
-    return [line, [labRank(lineLab(line), order), CLAUDE_TIERS.findIndex((tier) => words.includes(tier)), index]];
+    return [line, [sectionRank(lineSection(line), order), CLAUDE_TIERS.findIndex((tier) => words.includes(tier)), index]];
   }));
   return [...lines].sort((a, b) => {
     const [x, y] = [ranks.get(a)!, ranks.get(b)!];
@@ -86,6 +101,11 @@ function lineAgents(line: PickerLine, agents: PickerAgent[]) {
   return agents.filter((agent) => line.offers.some((offer) => offer.tile === agent));
 }
 
+/** The line offering OpenCode's model `id`, as the model feed names models. */
+export function feedLine(lines: PickerLine[], id: string) {
+  return lines.find((line) => line.offers.some((offer) => offer.tile.harness.id === "opencode" && offer.model.id === id));
+}
+
 export function lineName(line: PickerLine) {
   return tidyModelName(line.label);
 }
@@ -102,14 +122,16 @@ function inlineStep(event: KeyboardEvent<HTMLElement>) {
   return event.key === (rtl ? "ArrowLeft" : "ArrowRight") ? 1 : event.key === (rtl ? "ArrowRight" : "ArrowLeft") ? -1 : 0;
 }
 
-/** The models, one collapsible section per lab, beside a rail that jumps between sections; a search lists its matches instead. */
+/** The models, one collapsible section per category, beside a rail that jumps between sections; a search lists its matches instead. */
 export function ModelList({
   lines,
   agents,
   filter,
   onClearFilter,
   favorites,
-  fresh,
+  released,
+  pointedAt,
+  featured,
   order,
   collapsed: initiallyCollapsed,
   onCollapse,
@@ -125,8 +147,12 @@ export function ModelList({
   filter: string;
   onClearFilter: () => void;
   favorites: ReadonlySet<string>;
-  /** Keys of the models agents newly offer. */
-  fresh: ReadonlySet<string>;
+  /** The models released lately, newest first. */
+  released: readonly PickerLine[];
+  /** The key of the model a popup pointed at, listed even where Free folds its rest away. */
+  pointedAt?: string;
+  /** OpenCode model ids the Free section lists first, in this order. */
+  featured: readonly string[];
   order: readonly string[];
   collapsed: readonly string[];
   onCollapse: (collapsed: string[]) => void;
@@ -134,7 +160,8 @@ export function ModelList({
   selectedAgent?: PickerAgent;
   /** The agent the chat can't leave right now, by `harnessKey`: other agents' models open a new chat instead. */
   lockedHarness?: string;
-  onPick: (line: PickerLine, agent: PickerAgent) => void;
+  /** `from` is the section the row was in, as telemetry names it. */
+  onPick: (line: PickerLine, agent: PickerAgent, from: PickedFrom) => void;
   onToggleFavorite: (family: string) => void;
   /** Rows after the models. */
   children?: ReactNode;
@@ -146,42 +173,42 @@ export function ModelList({
   const starred = useRef<{ star: HTMLElement; top: number }>(undefined);
   const [collapsed, setCollapsed] = useState(() => new Set(initiallyCollapsed));
   const [olderOpen, setOlderOpen] = useState(false);
+  const [freeOpen, setFreeOpen] = useState(false);
   const [spied, setSpied] = useState<string>();
   const [stuck, setStuck] = useState<string>();
 
   const words = filter.trim().toLowerCase().split(/\s+/).filter(Boolean);
   const searching = words.length > 0;
   const counts = new Map(agents.map((agent) => [agent, lines.filter((line) => line.offers.some((offer) => offer.tile === agent)).length]));
+  const fresh = new Set(released);
+  const featuredLines = [...new Set(featured.flatMap((id) => feedLine(lines, id) ?? []))];
   const listed = (line: PickerLine) =>
-    line === selectedLine || favorites.has(line.family) || fresh.has(line.key) || lineAgents(line, agents).some((agent) => counts.get(agent)! <= CATALOG_LINES);
+    line === selectedLine || favorites.has(line.family) || fresh.has(line) || featuredLines.includes(line)
+    || lineAgents(line, agents).some((agent) => counts.get(agent)! <= CATALOG_LINES);
 
-  const ordered = byLab(lines, order);
+  const ordered = bySection(lines, order);
   const current = ordered.filter((line) => (!line.older || line === selectedLine) && listed(line));
   const unlisted = ordered.filter((line) => !listed(line)).length;
 
-  const labs: Section[] = [];
+  const categories: Section[] = [];
   for (const line of current) {
-    const lab = lineLab(line);
-    const section = labs.find((entry) => entry.id === (lab ?? OTHER));
+    const id = lineSection(line);
+    const section = categories.find((entry) => entry.id === id);
     if (section) section.lines.push(line);
-    else labs.push({ id: lab ?? OTHER, name: labName(lab), mark: (size) => <LabMark lab={lab} size={size} />, lines: [line] });
+    else categories.push({ id, name: sectionName(id), mark: (size) => <SectionMark id={id} size={size} />, lines: [line] });
   }
+  const featuredRank = (line: PickerLine) => featuredLines.includes(line) ? featuredLines.indexOf(line) : Infinity;
+  categories.find((section) => section.id === FREE)?.lines.sort((a, b) => featuredRank(a) - featuredRank(b));
   const older = ordered.filter((line) => line.older && line !== selectedLine && listed(line));
   const olderVersions = (lines: PickerLine[]): Section => ({ id: OLDER, name: m.model_picker_older_versions(), mark: (size) => <History size={size} aria-hidden="true" />, lines });
   const sections = [
-    {
-      id: NEW,
-      name: m.model_picker_new(),
-      mark: (size: number) => <Sparkles size={size} aria-hidden="true" className="text-accent-blue-strong" />,
-      lines: current.filter((line) => fresh.has(line.key)),
-    },
     {
       id: FAVORITES,
       name: m.model_picker_favorites(),
       mark: (size: number) => <Star size={size} aria-hidden="true" className="fill-current text-accent-amber" />,
       lines: current.filter((line) => favorites.has(line.family)),
     },
-    ...labs,
+    ...categories,
     olderVersions(older),
   ].filter((section) => section.lines.length > 0);
 
@@ -294,11 +321,35 @@ export function ModelList({
       selectedAgent={line === selectedLine ? selectedAgent : undefined}
       lockedHarness={lockedHarness}
       favorite={favorites.has(line.family)}
-      fresh={fresh.has(line.key) && !line.older && section?.id !== NEW}
-      onPick={onPick}
+      fresh={fresh.has(line)}
+      freeBadge={section?.id !== FREE}
+      onPick={(line, agent) => onPick(line, agent, searching || !section ? "search" : section.id === FREE || section.id === FAVORITES || section.id === OLDER ? section.id : "lab")}
       onToggleFavorite={star}
     />
   );
+
+  /** Free's first few models, then the rest once expanded; the chat's own model and the one a popup pointed at always show. */
+  const freeRows = (section: Section) => {
+    const hidden = section.lines.filter((line, index) => index >= FREE_SHOWN && line !== selectedLine && line.key !== pointedAt);
+    const shown = freeOpen ? section.lines : section.lines.filter((line) => !hidden.includes(line));
+    return (
+      <>
+        {shown.map((line) => row(line, section))}
+        {hidden.length > 0 && (
+          <button
+            type="button"
+            data-nav
+            aria-expanded={freeOpen}
+            onClick={() => setFreeOpen(!freeOpen)}
+            className="flex h-7 w-full items-center gap-1 rounded-md ps-8 pe-2 text-xs text-muted outline-none hover:bg-hover-muted hover:text-text focus-visible:bg-hover-muted focus-visible:text-text"
+          >
+            {freeOpen ? m.model_picker_fewer_free() : m.model_picker_more_free({ count: fmtNumber(hidden.length) })}
+            <ChevronDown size={12} aria-hidden="true" className={cn("shrink-0 motion-safe:transition-transform", freeOpen && "rotate-180")} />
+          </button>
+        )}
+      </>
+    );
+  };
 
   const group = (section: Section) => {
     const header = `${uid}${section.id}`;
@@ -329,7 +380,7 @@ export function ModelList({
             </button>
           )}
         </div>
-        {open && section.lines.map((line) => row(line, section))}
+        {open && (section.id === FREE ? freeRows(section) : section.lines.map((line) => row(line, section)))}
       </div>
     );
   };
@@ -374,7 +425,7 @@ export function ModelList({
   );
 }
 
-function ModelRow({ line, agents, selected, entry, onLeave, currentAgent, selectedAgent, lockedHarness, favorite, fresh, onPick, onToggleFavorite }: {
+function ModelRow({ line, agents, selected, entry, onLeave, currentAgent, selectedAgent, lockedHarness, favorite, fresh, freeBadge, onPick, onToggleFavorite }: {
   line: PickerLine;
   agents: PickerAgent[];
   selected: boolean;
@@ -387,6 +438,8 @@ function ModelRow({ line, agents, selected, entry, onLeave, currentAgent, select
   lockedHarness?: string;
   favorite: boolean;
   fresh: boolean;
+  /** Free's own rows need no badge saying so. */
+  freeBadge: boolean;
   onPick: (line: PickerLine, agent: PickerAgent) => void;
   onToggleFavorite: (family: string, event: MouseEvent<HTMLElement>) => void;
 }) {
@@ -406,7 +459,7 @@ function ModelRow({ line, agents, selected, entry, onLeave, currentAgent, select
     next?.focus();
   };
   return (
-    <div data-row className={cn(ROW, selected && "bg-hover-muted", entry && ENTRY)}>
+    <div data-row={line.key} className={cn(ROW, selected && "bg-hover-muted", entry && ENTRY)}>
       <button
         type="button"
         data-nav
@@ -419,7 +472,7 @@ function ModelRow({ line, agents, selected, entry, onLeave, currentAgent, select
       >
         <ModelMark model={line.offers[0].model} harness={line.offers[0].tile.harness.id} size={16} />
         <span className="min-w-0 truncate">{name}</span>
-        {free && <FreeBadge />}
+        {free && freeBadge && <FreeBadge />}
         {fresh && <span className={cn(BADGE, "bg-accent-blue-subtle text-accent-blue-strong")}>{m.model_picker_new()}</span>}
         {selected && <Check size={14} className="shrink-0 text-accent-blue-strong" aria-hidden="true" />}
       </button>
@@ -465,7 +518,7 @@ function ModelRow({ line, agents, selected, entry, onLeave, currentAgent, select
   );
 }
 
-export function FreeBadge() {
+function FreeBadge() {
   return <span className={cn(BADGE, "bg-accent-green-subtle text-accent-green")}>{m.model_picker_free()}</span>;
 }
 

@@ -1,4 +1,4 @@
-import type { HarnessModel, ModelSightings, ModelVariant } from "./api";
+import type { HarnessModel, ModelVariant } from "./api";
 
 /** Effort ids in rising order, as Cursor and Antigravity spell them into model ids. */
 export const VARIANT_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -70,24 +70,27 @@ export function variantOffer<Tile>(offers: ModelOffer<Tile>[], from: ModelVarian
   return fits.reduce<ModelOffer<Tile> | undefined>((best, offer) => (!best || kept(offer) > kept(best) ? offer : best), undefined);
 }
 
-/** How long a model an agent newly offers stays new. */
+/** The start of `day` (`YYYY-MM-DD`) where the user is. */
+export function localDay(day: string) {
+  const [year, month, date] = day.split("-").map(Number);
+  return new Date(year, month - 1, date);
+}
+
+/** How long a model stays new after its release. */
 export const NEW_FOR = 7 * 24 * 60 * 60 * 1000;
 
 /**
- * `sightings` with `lines` seen at `now`, or `sightings` itself when nothing changed. A model is new when an agent
- * already seen offers it, unless it's an older version; the first sighting and a newly added agent bring nothing new.
+ * The lines released within {@link NEW_FOR} of `now`, newest first, by the model feed's days (`YYYY-MM-DD`, keyed
+ * by line). A free tier comes out with its model; an older version is never new.
  */
-export function sight<Tile extends { key: string }>(sightings: ModelSightings | null, lines: ModelLine<Tile>[], now: number): ModelSightings {
-  const known = new Set(sightings?.agents);
-  const agents = new Set(known);
-  const models = { ...sightings?.models };
-  let changed = !sightings;
-  for (const line of lines) {
-    for (const offer of line.offers) agents.add(offer.tile.key);
-    if (line.key in models) continue;
-    models[line.key] = sightings && !line.older && line.offers.some((offer) => known.has(offer.tile.key)) ? now : 0;
-    changed = true;
-  }
-  if (!changed && agents.size === known.size) return sightings!;
-  return { agents: [...agents], models, openedAt: sightings?.openedAt ?? now };
+export function newLines<Tile>(lines: ModelLine<Tile>[], releases: Readonly<Record<string, string>>, now: number) {
+  return lines
+    .flatMap((line) => {
+      const released = releases[line.key.replace(/:free$/, "")];
+      if (!released) return [];
+      const at = localDay(released).getTime();
+      return !line.older && at <= now && now - at < NEW_FOR ? [{ line, at }] : [];
+    })
+    .sort((a, b) => b.at - a.at)
+    .map(({ line }) => line);
 }

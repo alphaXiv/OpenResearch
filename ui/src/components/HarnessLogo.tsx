@@ -420,5 +420,19 @@ export function BrandMark({ brand, size }: { brand: Brand; size: number }) {
   }
   const { image, colour } = BRANDS[brand];
   if (colour) return <img src={image} width={size} height={size} className="block shrink-0 object-contain" alt="" aria-hidden="true" />;
+  return <Glyph image={image} size={size} />;
+}
+
+/** A model's maker mark in the current colour, whatever colours its logo has. */
+export function ModelGlyph({ model, size }: { model: Pick<HarnessModel, "id" | "displayName">; size: number }) {
+  const lab = modelLab(model);
+  if (lab === "openai") return <HarnessLogo harness="codex" size={size} />;
+  const logo = MODEL_LABS.find(([, entry]) => entry === lab)?.[3] ?? lab;
+  if (!logo || !Object.hasOwn(BRANDS, logo)) return <Box size={size} className="block shrink-0" aria-hidden="true" />;
+  return <Glyph image={BRANDS[logo as keyof typeof BRANDS].image} size={size} />;
+}
+
+/** `image`'s shape filled with the current colour. */
+function Glyph({ image, size }: { image: string; size: number }) {
   return <span className="block shrink-0 bg-current" style={{ width: size, height: size, maskImage: `url(${JSON.stringify(image)})`, maskSize: "contain", maskPosition: "center", maskRepeat: "no-repeat" }} aria-hidden="true" />;
 }
