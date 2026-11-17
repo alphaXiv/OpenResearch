@@ -14,7 +14,7 @@ use super::{
 };
 use crate::error::{anyhow, Result};
 use crate::local::acp::{
-    host::{Client, Event},
+    host::{Client, Event, Stop},
     Definition,
 };
 use crate::local::chat::{
@@ -572,11 +572,17 @@ pub(crate) async fn prompt_session(ctx: &mut TurnCtx, session: &OpenSession) -> 
                 if client.awaiting_permission() || tools.command_running() {
                     deadline = tokio::time::Instant::now() + super::TURN_WATCHDOG;
                 } else if tokio::time::Instant::now() >= deadline {
-                    return Err(anyhow!("ACP turn exceeded the response timeout"));
+                    let silence = format!(
+                        "stopped responding for {} minutes",
+                        super::TURN_WATCHDOG.as_secs() / 60
+                    );
+                    return Err(anyhow!(client.end(Stop::Failure(silence)).await));
                 }
             }
             event = events.recv() => {
-                let event = event.ok_or_else(|| anyhow!("ACP process exited during the turn; the prompt was not replayed"))?;
+                let Some(event) = event else {
+                    return Err(client.connection_error().await);
+                };
                 deadline = tokio::time::Instant::now() + super::TURN_WATCHDOG;
                 ctx.mark_delivery(DeliveryState::Accepted);
                 approved_permissions.extend(approve_permissions(ctx, client)?);
