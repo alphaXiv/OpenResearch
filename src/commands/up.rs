@@ -172,7 +172,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     )?);
     api_v2::install(api.clone())?;
 
-    let remote_instance_id = persistent_host.then(|| uuid::Uuid::new_v4().to_string());
+    let remote_instance_id = persistent_host.then(crate::commands::remote_host::instance_id);
     let state = AppState {
         agent: agent.clone(),
         chat: chat.clone(),
@@ -195,6 +195,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
         trackio: Arc::default(),
         opencode_signins: Arc::default(),
     };
+    state.remote_sessions.restore().await?;
     // Plan-mode turns hand this port to the `orx mcp` permission bridge.
     state.chat.set_up_port(actual_port);
     state.chat.resume_persisted_queues();
@@ -306,6 +307,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
             crate::commands::remote_host::start_control_server(
                 HostDescriptor {
                     instance_id: remote_instance_id.clone().expect("persistent instance id"),
+                    restarting_until: None,
                     hostname: crate::commands::remote_host::hostname(),
                     port: actual_port,
                     version: env!("CARGO_PKG_VERSION").into(),
@@ -356,6 +358,19 @@ pub async fn run(args: UpArgs) -> Result<()> {
     // over SSH by `orx up --remote`, closing that tunnel (the launcher's Ctrl-C)
     // delivers SIGHUP here as the channel tears down — without handling it the
     // remote server would leak, staying bound to its port after the tunnel dies.
+    if persistent_host {
+        let state = state.clone();
+        tokio::spawn(async move {
+            crate::commands::remote_host::RESTART.notified().await;
+            loop {
+                if begin_restart(&state, 0, true).await {
+                    state.restart.notify_one();
+                    return;
+                }
+                tokio::time::sleep(crate::config::paced(Duration::from_millis(100))).await;
+            }
+        });
+    }
     let restart = state.restart.clone();
     let mut restarting = false;
     let explicit_stop = if persistent_host {
@@ -376,6 +391,9 @@ pub async fn run(args: UpArgs) -> Result<()> {
         }
         false
     };
+    if restarting {
+        crate::keep::hand_off();
+    }
     if persistent_host {
         stopping.store(true, std::sync::atomic::Ordering::SeqCst);
     }
@@ -403,6 +421,11 @@ pub async fn run(args: UpArgs) -> Result<()> {
             eprintln!(
                 "orx up: could not withdraw the server descriptor before restarting: {error:#}"
             );
+        }
+        #[cfg(unix)]
+        if let Some(instance) = remote_instance_id.as_deref() {
+            let error = crate::commands::remote_host::relaunch(instance, actual_port);
+            return Err(anyhow!("Could not restart the remote host: {error}"));
         }
         if !state.reopen.load(Ordering::SeqCst) && !updates::updated_exe_on_disk().await {
             eprintln!("orx up: installing the update before restarting");

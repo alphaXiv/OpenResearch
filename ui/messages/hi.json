@@ -1367,6 +1367,8 @@
   "remote_update_description": "{host} पर OpenResearch इंस्टॉलेशन इस डैशबोर्ड के साथ संगत नहीं है। अभी अपडेट करें?",
   "remote_update": "अपडेट करें",
   "remote_updating": "अपडेट हो रहा है…",
+  "remote_restarting_description": "अपडेट के बाद फिर से कनेक्ट हो रहा है।",
+  "remote_restarting_title": "{host} पर OpenResearch फिर से शुरू हो रहा है",
   "remote_applying_title": "{host} पर OpenResearch सेट अप हो रहा है",
   "remote_applying_description": "संगत बाइनरी इंस्टॉल हो रही है। इसमें कुछ मिनट लग सकते हैं।",
   "remote_disconnected_title": "{host} से डिस्कनेक्ट हो गया",

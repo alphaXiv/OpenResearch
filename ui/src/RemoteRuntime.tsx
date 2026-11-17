@@ -134,7 +134,7 @@ function needsInteractiveSsh(error: string) {
 
 function connectionPhase(session: RemoteSessionInfo, gatewayError: string | null): RemoteConnection["phase"] | null {
   if (gatewayError !== null) return "lost";
-  if (session.status === "connecting" || session.status === "reconnecting") return "reconnecting";
+  if (session.status === "connecting" || session.status === "reconnecting" || session.status === "restarting") return "reconnecting";
   const needsUser = session.repairCommand !== null ||
     (session.error !== null && needsInteractiveSsh(session.error) && !session.canStartNewHost);
   return session.status === "disconnected" && !needsUser ? "lost" : null;
@@ -230,7 +230,7 @@ function RemoteSetup({
   const needsInstall = session.status === "needsInstall";
   const needsUpdate = session.status === "needsUpdate";
   const showInstallPaths = paths && needsInstall;
-  const working = ["connecting", "applying", "reconnecting"].includes(session.status);
+  const working = ["connecting", "applying", "reconnecting", "restarting"].includes(session.status);
   const showSshTerminal = session.status === "disconnected" &&
     session.error !== null &&
     needsInteractiveSsh(session.error) &&
@@ -244,7 +244,9 @@ function RemoteSetup({
       ? remoteNewer ? m.remote_update_local_title() : m.remote_update_title()
       : session.status === "applying"
         ? m.remote_applying_title({ host: ltr(session.host) })
-        : session.status === "reconnecting"
+        : session.status === "restarting"
+          ? m.remote_restarting_title({ host: ltr(session.host) })
+          : session.status === "reconnecting"
           ? m.remote_reconnecting_title({ host: ltr(session.host) })
           : session.status === "disconnected"
             ? session.error
@@ -264,7 +266,9 @@ function RemoteSetup({
         ? m.remote_update_description({ host: ltr(session.host) })
         : session.status === "applying"
           ? m.remote_applying_description()
-          : session.status === "reconnecting"
+          : session.status === "restarting"
+            ? m.remote_restarting_description()
+            : session.status === "reconnecting"
             ? m.remote_reconnecting_description()
             : session.status === "disconnected"
               ? m.remote_disconnected_description()
@@ -398,7 +402,7 @@ function RemoteSetup({
               )}
             </div>
           )}
-          {(session.status === "connecting" || session.status === "reconnecting") && (
+          {(session.status === "connecting" || session.status === "reconnecting" || session.status === "restarting") && (
             <div className="mt-6 flex justify-end border-t border-border-variant pt-5">
               <Button disabled={busy} onClick={disconnect}>
                 {m.remote_disconnect()}
@@ -417,7 +421,8 @@ function RemoteSetup({
                     {m.remote_check_again()}
                   </Button>
                 )}
-              {session.installPaths === null && session.dashboardProtocol !== null && session.dashboardProtocol < runtime.dashboardProtocol && (
+
+              {session.installPaths === null && session.dashboardProtocol !== null && session.dashboardProtocol <= runtime.dashboardProtocol && (
                 <Button variant="danger" disabled={busy} onClick={() => void prepareStopHost()}>
                   {busy ? <Spinner /> : null}
                   {m.remote_stop_host()}

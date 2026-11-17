@@ -1398,6 +1398,8 @@
   "remote_update_description": "{host} üzerindeki OpenResearch kurulumu bu panelle uyumlu değil. Şimdi güncellensin mi?",
   "remote_update": "Güncelle",
   "remote_updating": "Güncelleniyor…",
+  "remote_restarting_description": "Güncellemeden sonra yeniden bağlanılıyor.",
+  "remote_restarting_title": "{host} üzerinde OpenResearch yeniden başlatılıyor",
   "remote_applying_title": "{host} üzerinde OpenResearch kuruluyor",
   "remote_applying_description": "Uyumlu ikili dosya yükleniyor. Bu birkaç dakika sürebilir.",
   "remote_disconnected_title": "{host} bağlantısı kesildi",

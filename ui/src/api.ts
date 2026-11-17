@@ -747,6 +747,7 @@ export type RemoteSessionStatus =
   | "needsUpdate"
   | "applying"
   | "connected"
+  | "restarting"
   | "reconnecting"
   | "disconnected";
 

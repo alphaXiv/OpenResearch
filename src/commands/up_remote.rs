@@ -52,6 +52,7 @@ pub(crate) enum RemoteSessionStatus {
     Applying,
     Connected,
     Reconnecting,
+    Restarting,
     Disconnected,
 }
 
@@ -123,6 +124,39 @@ struct RemoteSession {
     generation: AtomicU64,
     dev_origin: Option<String>,
     expected_instance: std::sync::RwLock<Option<String>>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedRemoteSession {
+    id: String,
+    host: String,
+    instance: String,
+    preferences: RemoteUiPreferences,
+}
+
+fn saved_sessions_dir() -> std::path::PathBuf {
+    crate::store::data_dir().join("remote-sessions")
+}
+
+async fn save_session(session: &RemoteSession) -> Result<()> {
+    let info = session.info.read().await;
+    let instance = session.expected_instance.read().unwrap().clone();
+    let Some(instance) = instance else {
+        return Ok(());
+    };
+    let dir = saved_sessions_dir();
+    std::fs::create_dir_all(&dir)?;
+    crate::local::git::atomic_write_with_mode(
+        &dir.join(format!("{}.json", info.id)),
+        &serde_json::to_vec(&SavedRemoteSession {
+            id: info.id.clone(),
+            host: info.host.clone(),
+            instance,
+            preferences: info.ui_preferences.clone(),
+        })?,
+        Some(0o600),
+    )
 }
 
 #[derive(Default)]
@@ -215,6 +249,17 @@ impl RemoteSessionManager {
         preferences: RemoteUiPreferences,
         gateway_port: Option<u16>,
     ) -> Result<(bool, RemoteSessionInfo)> {
+        self.create_inner(host, preferences, gateway_port, None)
+            .await
+    }
+
+    async fn create_inner(
+        &self,
+        host: String,
+        preferences: RemoteUiPreferences,
+        gateway_port: Option<u16>,
+        saved: Option<SavedRemoteSession>,
+    ) -> Result<(bool, RemoteSessionInfo)> {
         let mut registry = self.registry.lock().await;
         if let Some(id) = registry.by_host.get(&host) {
             if let Some(session) = registry.by_id.get(id).cloned() {
@@ -243,7 +288,10 @@ impl RemoteSessionManager {
                 }
             })?;
         let port = listener.local_addr()?.port();
-        let id = uuid::Uuid::new_v4().to_string();
+        let id = saved
+            .as_ref()
+            .map(|saved| saved.id.clone())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let info = RemoteSessionInfo {
             id: id.clone(),
             host: host.clone(),
@@ -274,7 +322,7 @@ impl RemoteSessionManager {
             gateway_task: Mutex::new(None),
             generation: AtomicU64::new(0),
             dev_origin: validated_dev_origin(),
-            expected_instance: std::sync::RwLock::new(None),
+            expected_instance: std::sync::RwLock::new(saved.map(|saved| saved.instance)),
         });
         registry.by_host.insert(host, id.clone());
         registry.by_id.insert(id, session.clone());
@@ -295,6 +343,46 @@ impl RemoteSessionManager {
         Ok((true, info))
     }
 
+    pub(crate) async fn restore(&self) -> Result<()> {
+        let dir = saved_sessions_dir();
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(anyhow!(
+                    "Could not read remote sessions at {}: {error}",
+                    dir.display()
+                ))
+            }
+        };
+        for entry in entries {
+            let path = entry?.path();
+            if path.extension().is_none_or(|extension| extension != "json") {
+                continue;
+            }
+            let result = async {
+                let saved: SavedRemoteSession = serde_json::from_slice(&std::fs::read(&path)?)?;
+                uuid::Uuid::parse_str(&saved.id)?;
+                self.create_inner(
+                    saved.host.clone(),
+                    saved.preferences.clone(),
+                    None,
+                    Some(saved),
+                )
+                .await?;
+                Ok::<_, crate::error::Error>(())
+            }
+            .await;
+            if let Err(error) = result {
+                return Err(anyhow!(
+                    "Could not restore remote session {}: {error}",
+                    path.display()
+                ));
+            }
+        }
+        Ok(())
+    }
+
     async fn session(&self, id: &str) -> Result<Arc<RemoteSession>> {
         self.registry
             .lock()
@@ -312,7 +400,7 @@ impl RemoteSessionManager {
 
     pub(crate) async fn disconnect(&self, id: &str) -> Result<RemoteSessionInfo> {
         let session = self.session(id).await?;
-        disconnect_session(&session).await;
+        disconnect_session(&session).await?;
         let info = session.info.read().await.clone();
         Ok(info)
     }
@@ -323,7 +411,9 @@ impl RemoteSessionManager {
             registry.by_id.values().cloned().collect::<Vec<_>>()
         };
         for session in sessions {
-            disconnect_session(&session).await;
+            if let Err(error) = disconnect_session(&session).await {
+                eprintln!("Could not disconnect a remote session during shutdown: {error}");
+            }
             if let Some(task) = session.gateway_task.lock().await.take() {
                 task.abort();
             }
@@ -586,14 +676,7 @@ async fn prepare_remote_session_inner(session: Arc<RemoteSession>, generation: u
             }
         }
     };
-    if descriptor.control_protocol != CONTROL_PROTOCOL {
-        set_session_state_if_current(
-            &session,
-            generation,
-            RemoteSessionStatus::Disconnected,
-            Some("The running OpenResearch host uses an incompatible control protocol.".into()),
-        )
-        .await;
+    if !set_expected_instance_if_current(&session, generation, descriptor.instance_id.clone()) {
         return;
     }
     let protocol = Some(descriptor.dashboard_protocol);
@@ -606,20 +689,38 @@ async fn prepare_remote_session_inner(session: Arc<RemoteSession>, generation: u
     {
         return;
     }
-    if protocol != Some(DASHBOARD_PROTOCOL) {
-        let message = protocol
-            .filter(|protocol| *protocol > DASHBOARD_PROTOCOL)
-            .map(|_| remote_newer_message(&host))
-            .or_else(|| Some(format!("OpenResearch on '{host}' is still running an older version. Stop it there, then update it to match this computer.")));
+    if descriptor.control_protocol != CONTROL_PROTOCOL {
+        let newer = descriptor.control_protocol > CONTROL_PROTOCOL
+            || descriptor.dashboard_protocol > DASHBOARD_PROTOCOL;
         update_session_if_current(&session, generation, |info| {
-            info.status = RemoteSessionStatus::NeedsUpdate;
-            info.error = message;
+            info.status = if newer {
+                RemoteSessionStatus::Disconnected
+            } else {
+                RemoteSessionStatus::NeedsUpdate
+            };
             info.install_paths = None;
+            info.error = Some(if newer {
+                remote_newer_message(&host)
+            } else {
+                "This host uses an older version. Stop it before updating.".into()
+            });
         })
         .await;
         return;
     }
-    if !set_expected_instance_if_current(&session, generation, descriptor.instance_id.clone()) {
+    if protocol != Some(DASHBOARD_PROTOCOL) {
+        let message = protocol
+            .filter(|protocol| *protocol > DASHBOARD_PROTOCOL)
+            .map(|_| remote_newer_message(&host))
+            .or_else(|| (crate::telemetry::build_channel() != "production").then(|| "Build this branch for the remote machine and replace its OpenResearch binary, then reconnect.".into()));
+        update_session_if_current(&session, generation, |info| {
+            info.status = RemoteSessionStatus::NeedsUpdate;
+            info.error = message;
+            let mut update_paths = paths.clone();
+            update_paths.binary = remote_orx.path.clone();
+            info.install_paths = Some((&update_paths).into());
+        })
+        .await;
         return;
     }
     update_session_if_current(&session, generation, |info| {
@@ -665,7 +766,7 @@ async fn install_and_connect(
     }
     let update_binary = if previous == RemoteSessionStatus::NeedsUpdate {
         Some(update_binary.ok_or_else(|| {
-            anyhow!("Stop the running OpenResearch host before updating its binary.")
+            anyhow!("Reconnect to check the remote install path before updating.")
         })?)
     } else {
         None
@@ -729,8 +830,37 @@ async fn install_and_connect(
         info.dashboard_protocol = protocol;
         info.install_paths = None;
     }
-    let descriptor = match ensure_remote_host(&session.target, &remote_orx.path, &paths, None).await
-    {
+    let expected = session.expected_instance.read().unwrap().clone();
+    let result = async {
+        if let Some(instance) = &expected {
+            let operation = format!(
+                "restart --expected-instance {}",
+                crate::jobs::ssh::sh_quote(instance)
+            );
+            set_session_state_if_current(
+                &session,
+                generation,
+                RemoteSessionStatus::Restarting,
+                None,
+            )
+            .await;
+            crate::jobs::ssh::direct_run(
+                &session.target,
+                &remote_host_cmd(&remote_orx.path, &paths, &operation)?,
+                None,
+            )
+            .await?;
+        }
+        ensure_remote_host(
+            &session.target,
+            &remote_orx.path,
+            &paths,
+            expected.as_deref(),
+        )
+        .await
+    }
+    .await;
+    let descriptor = match result {
         Ok(descriptor) => descriptor,
         Err(error) => {
             set_session_state_if_current(
@@ -794,6 +924,16 @@ async fn start_connection(
         return;
     }
     let (cancel, cancelled) = watch::channel(false);
+    if let Err(error) = save_session(&session).await {
+        set_session_state_if_current(
+            &session,
+            generation,
+            RemoteSessionStatus::Disconnected,
+            Some(format!("Could not save the remote connection: {error}")),
+        )
+        .await;
+        return;
+    }
     let task_session = session.clone();
     let task = tokio::spawn(async move {
         supervise_connection(
@@ -809,14 +949,29 @@ async fn start_connection(
     *connection = Some(ConnectionControl { cancel, task });
 }
 
-async fn disconnect_session(session: &Arc<RemoteSession>) -> u64 {
+async fn disconnect_session(session: &Arc<RemoteSession>) -> Result<u64> {
     let generation = advance_generation(session, false);
     if let Some(control) = session.connection.lock().await.take() {
         stop_connection(control).await;
     }
+    let forget = if crate::keep::handing_off() {
+        Ok(())
+    } else {
+        let id = session.info.read().await.id.clone();
+        let path = saved_sessions_dir().join(format!("{id}.json"));
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(anyhow!(
+                "Could not forget remote session {}: {error}",
+                path.display()
+            )),
+        }
+    };
     *session.route.write().await = None;
     set_session_state(session, RemoteSessionStatus::Disconnected, None).await;
-    generation
+    forget?;
+    Ok(generation)
 }
 
 async fn reconnect_session(session: Arc<RemoteSession>) -> RemoteSessionInfo {
@@ -958,13 +1113,21 @@ async fn connect_once(
         Ok(descriptor) => descriptor,
         Err(error) => {
             let error = error.to_string();
-            return if retrying && retryable_ssh_transport_error(&error) {
+            return if retryable_ssh_transport_error(&error)
+                || error.contains("host is stopping")
+                || error.contains("host to restart")
+            {
                 ConnectionEnd::Retryable(error)
             } else {
                 ConnectionEnd::Terminal(error)
             };
         }
     };
+    if descriptor.control_protocol != CONTROL_PROTOCOL
+        || descriptor.dashboard_protocol != DASHBOARD_PROTOCOL
+    {
+        return ConnectionEnd::Terminal(remote_newer_message(&session.info.read().await.host));
+    }
     let local_port = match reserve_loopback_port() {
         Ok(port) => port,
         Err(error) => return ConnectionEnd::Terminal(error.to_string()),
@@ -1057,7 +1220,14 @@ async fn connect_once(
     {
         let _ = child.start_kill();
         let _ = child.wait().await;
-        return ConnectionEnd::Terminal(error.to_string());
+        return if error
+            .to_string()
+            .contains("health response is incompatible")
+        {
+            ConnectionEnd::Terminal(error.to_string())
+        } else {
+            ConnectionEnd::Retryable(error.to_string())
+        };
     }
     if session.generation.load(Ordering::SeqCst) != generation {
         let _ = child.start_kill();
@@ -1497,8 +1667,10 @@ async fn gateway_start_new_host(State(session): State<Arc<RemoteSession>>) -> Re
 }
 
 async fn gateway_disconnect(State(session): State<Arc<RemoteSession>>) -> Response {
-    disconnect_session(&session).await;
-    Json(serde_json::json!(session.info.read().await.clone())).into_response()
+    match disconnect_session(&session).await {
+        Ok(_) => Json(serde_json::json!(session.info.read().await.clone())).into_response(),
+        Err(error) => gateway_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
 }
 
 async fn gateway_stop_host_preview(State(session): State<Arc<RemoteSession>>) -> Response {
@@ -1535,7 +1707,12 @@ async fn gateway_stop_host(
     .await;
     match result {
         Ok(ControlResponse::Accepted) => {
-            let generation = disconnect_session(&session).await;
+            let generation = match disconnect_session(&session).await {
+                Ok(generation) => generation,
+                Err(error) => {
+                    return gateway_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+                }
+            };
             update_session_if_current(&session, generation, |info| {
                 info.can_start_new_host = true;
             })
@@ -2896,6 +3073,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn disconnect_reports_a_session_record_it_cannot_remove() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let session = Arc::new(sample_session());
+        let record = saved_sessions_dir().join("session.json");
+        std::fs::create_dir_all(&record).unwrap();
+        let error = disconnect_session(&session).await.unwrap_err().to_string();
+        assert!(error.contains(record.to_str().unwrap()), "{error}");
+        assert_eq!(
+            session.info.read().await.status,
+            RemoteSessionStatus::Disconnected
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn startup_restores_page_id_and_pins_the_previous_host() {
+        use std::os::unix::fs::PermissionsExt as _;
+        if !crate::config::in_test_child(&["PATH"]) {
+            return;
+        }
+        let fakes = crate::store::data_dir().join("fake-ssh");
+        std::fs::create_dir_all(&fakes).unwrap();
+        let ssh = fakes.join("ssh");
+        std::fs::write(&ssh, "#!/bin/sh\nexit 255\n").unwrap();
+        std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("PATH", &fakes);
+        let session = sample_session();
+        let id = uuid::Uuid::new_v4().to_string();
+        session.info.write().await.id = id.clone();
+        *session.expected_instance.write().unwrap() = Some("previous-instance".into());
+        save_session(&session).await.unwrap();
+        let manager = RemoteSessionManager::new();
+        manager.restore().await.unwrap();
+        let restored = manager.session(&id).await.unwrap();
+        assert_eq!(
+            restored.info.read().await.host,
+            session.info.read().await.host
+        );
+        assert_eq!(
+            restored.expected_instance.read().unwrap().as_deref(),
+            Some("previous-instance")
+        );
+        let response = manager
+            .serve_workspace(
+                &id,
+                Request::builder()
+                    .uri(format!("/_orx/workspaces/{id}/_orx/runtime"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        manager.shutdown().await;
+        assert!(!saved_sessions_dir().join(format!("{id}.json")).exists());
+    }
+
+    #[tokio::test]
     async fn workspace_routes_pin_the_session_token_and_rewrite_redirects() {
         let manager = RemoteSessionManager::new();
         let mut servers = Vec::new();
@@ -3450,7 +3686,13 @@ mod tests {
         };
 
         let binary = base.join("home/.cargo/bin/orx");
+        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        std::fs::write(&binary, "old binary").unwrap();
+        let mut running_image = std::fs::File::open(&binary).unwrap();
         install(&sha256, &binary, false).unwrap();
+        let mut previous = String::new();
+        std::io::Read::read_to_string(&mut running_image, &mut previous).unwrap();
+        assert_eq!(previous, "old binary");
         assert_eq!(
             std::fs::read_to_string(&binary).unwrap(),
             "#!/bin/sh\necho canary\n"
@@ -3843,7 +4085,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_status_wire_model_has_seven_states() {
+    fn remote_status_wire_model_has_eight_states() {
         let statuses = [
             RemoteSessionStatus::Connecting,
             RemoteSessionStatus::NeedsInstall,
@@ -3851,6 +4093,7 @@ mod tests {
             RemoteSessionStatus::Applying,
             RemoteSessionStatus::Connected,
             RemoteSessionStatus::Reconnecting,
+            RemoteSessionStatus::Restarting,
             RemoteSessionStatus::Disconnected,
         ];
         let names = statuses
@@ -3866,6 +4109,7 @@ mod tests {
                 "applying",
                 "connected",
                 "reconnecting",
+                "restarting",
                 "disconnected",
             ]
         );

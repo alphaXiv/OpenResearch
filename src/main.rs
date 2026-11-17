@@ -843,6 +843,10 @@ pub struct RemoteHostArgs {
 
 #[derive(Clone, Subcommand, Debug)]
 pub enum RemoteHostCommand {
+    Restart {
+        #[arg(long)]
+        expected_instance: String,
+    },
     Ensure {
         #[arg(long)]
         expected_instance: Option<String>,

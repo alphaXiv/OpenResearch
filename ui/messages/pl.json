@@ -1367,6 +1367,8 @@
   "remote_update_description": "Instalacja OpenResearch na {host} nie jest zgodna z tym panelem. Zaktualizować ją teraz?",
   "remote_update": "Aktualizuj",
   "remote_updating": "Aktualizowanie…",
+  "remote_restarting_description": "Ponowne łączenie po aktualizacji.",
+  "remote_restarting_title": "Ponowne uruchamianie OpenResearch na {host}",
   "remote_applying_title": "Konfigurowanie OpenResearch na {host}",
   "remote_applying_description": "Instalowanie zgodnej wersji programu. Może to potrwać kilka minut.",
   "remote_disconnected_title": "Rozłączono z {host}",

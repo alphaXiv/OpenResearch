@@ -1361,6 +1361,8 @@
   "remote_update_description": "{host} 上的 OpenResearch 与此仪表板不兼容。现在更新吗？",
   "remote_update": "更新",
   "remote_updating": "正在更新…",
+  "remote_restarting_description": "更新后正在重新连接。",
+  "remote_restarting_title": "正在重启 {host} 上的 OpenResearch",
   "remote_applying_title": "正在设置 {host} 上的 OpenResearch",
   "remote_applying_description": "正在安装兼容的二进制文件。这可能需要几分钟。",
   "remote_disconnected_title": "已断开与 {host} 的连接",

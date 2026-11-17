@@ -1361,6 +1361,8 @@
   "remote_update_description": "نسخهٔ OpenResearch روی {host} با این داشبورد سازگار نیست. اکنون به‌روزرسانی شود؟",
   "remote_update": "به‌روزرسانی",
   "remote_updating": "در حال به‌روزرسانی…",
+  "remote_restarting_description": "اتصال دوباره پس از به‌روزرسانی.",
+  "remote_restarting_title": "در حال راه‌اندازی دوباره OpenResearch در {host}",
   "remote_applying_title": "در حال راه‌اندازی OpenResearch روی {host}",
   "remote_applying_description": "در حال نصب فایل اجرایی سازگار. این کار ممکن است چند دقیقه طول بکشد.",
   "remote_disconnected_title": "اتصال به {host} قطع شد",

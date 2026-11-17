@@ -1367,6 +1367,8 @@
   "remote_update_description": "Установка OpenResearch на {host} несовместима с этой панелью. Обновить её сейчас?",
   "remote_update": "Обновить",
   "remote_updating": "Обновление…",
+  "remote_restarting_description": "Повторное подключение после обновления.",
+  "remote_restarting_title": "Перезапуск OpenResearch на {host}",
   "remote_applying_title": "Настройка OpenResearch на {host}",
   "remote_applying_description": "Устанавливается совместимая версия. Это может занять несколько минут.",
   "remote_disconnected_title": "Отключено от {host}",

@@ -1367,6 +1367,8 @@
   "remote_update_description": "La instalación de OpenResearch en {host} no es compatible con este dashboard. ¿Actualizarla ahora?",
   "remote_update": "Actualizar",
   "remote_updating": "Actualizando…",
+  "remote_restarting_description": "Reconectando tras la actualización.",
+  "remote_restarting_title": "Reiniciando OpenResearch en {host}",
   "remote_applying_title": "Configurando OpenResearch en {host}",
   "remote_applying_description": "Instalando el binario compatible. Puede tardar unos minutos.",
   "remote_disconnected_title": "Desconectado de {host}",

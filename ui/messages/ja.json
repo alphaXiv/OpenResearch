@@ -1367,6 +1367,8 @@
   "remote_update_description": "{host} の OpenResearch はこのダッシュボードと互換性がありません。今すぐ更新しますか？",
   "remote_update": "更新",
   "remote_updating": "更新中…",
+  "remote_restarting_description": "更新後に再接続しています。",
+  "remote_restarting_title": "{host} の OpenResearch を再起動中",
   "remote_applying_title": "{host} で OpenResearch を設定中",
   "remote_applying_description": "互換性のあるバイナリをインストールしています。数分かかる場合があります。",
   "remote_disconnected_title": "{host} から切断されました",

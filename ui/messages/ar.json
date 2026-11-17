@@ -1366,6 +1366,8 @@
   "remote_update_description": "نسخة OpenResearch المثبّتة على {host} غير متوافقة مع هذه اللوحة. هل تريد تحديثها الآن؟",
   "remote_update": "تحديث",
   "remote_updating": "جارٍ التحديث…",
+  "remote_restarting_description": "جارٍ إعادة الاتصال بعد التحديث.",
+  "remote_restarting_title": "جارٍ إعادة تشغيل OpenResearch على {host}",
   "remote_applying_title": "جارٍ إعداد OpenResearch على {host}",
   "remote_applying_description": "جارٍ تثبيت الملف التنفيذي المتوافق. قد يستغرق هذا بضع دقائق.",
   "remote_disconnected_title": "انقطع الاتصال بـ {host}",
