@@ -6995,10 +6995,84 @@ impl Store {
             },
             (cancel, result) => cancel.or(result).unwrap_or("unavailable").into(),
         };
+        let mut facts = String::new();
+        if run.status == "cancelled" {
+            let actor = match self.run_stop(&run.id) {
+                Ok(Some(stop)) => match stop.by {
+                    StopBy::User => "the user from the dashboard".into(),
+                    StopBy::Agent => "the agent".into(),
+                    StopBy::Rule => format!(
+                        "rule {}",
+                        stop.rule
+                            .as_ref()
+                            .and_then(|rule| rule["name"].as_str())
+                            .unwrap_or("(unnamed)")
+                    ),
+                },
+                Ok(None) => "unknown (no stop attribution was recorded)".into(),
+                Err(error) => format!("unknown ({error:#})"),
+            };
+            facts.push_str(&format!("Stopped by: {actor}.\n"));
+        }
+        match crate::engine::monitor::offline(self, run, now_ms()) {
+            Ok(monitor) => {
+                let view = &monitor["view"];
+                let names: std::collections::BTreeSet<_> = view["headline"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .chain(
+                        view["blocks"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .flat_map(|block| {
+                                block["chart"].as_array().into_iter().flatten().chain(
+                                    block["series"]
+                                        .as_array()
+                                        .into_iter()
+                                        .flatten()
+                                        .filter_map(|series| series.get("y")),
+                                )
+                            }),
+                    )
+                    .filter_map(serde_json::Value::as_str)
+                    .collect();
+                facts.push_str("Last headline/chart values:\n");
+                for name in names {
+                    let point = monitor["series"][name]
+                        .as_array()
+                        .and_then(|points| points.last());
+                    if let Some(point) = point {
+                        let axis = monitor["x"]["name"].as_str().unwrap_or("step");
+                        facts.push_str(&format!("{name} = {} at {axis} {}\n", point[1], point[0]));
+                    } else if let Some(value) = monitor["latest"].get(name) {
+                        facts.push_str(&format!("{name} = {value} (step unavailable)\n"));
+                    } else if let Some(value) = monitor["rows"]
+                        .as_object()
+                        .into_iter()
+                        .flat_map(|tables| tables.values())
+                        .find_map(|rows| {
+                            rows.as_array()?.iter().rev().find_map(|row| row.get(name))
+                        })
+                    {
+                        facts.push_str(&format!("{name} = {value} (step unavailable)\n"));
+                    } else {
+                        facts.push_str(&format!("{name}: no value reported\n"));
+                    }
+                }
+                if let Some(reason) = monitor["availability"]["reason"].as_str() {
+                    facts.push_str(&format!("Signal availability: {reason}\n"));
+                }
+            }
+            Err(error) => facts.push_str(&format!(
+                "Headline/chart values could not be read: {error:#}\n"
+            )),
+        }
         let view = crate::plane::Run::from_store(self, run)?;
         let status = view.display_status();
         Ok(format!(
-            "[orx] Run `{}` finished with status **{}**.\nExit code: {code}\nDuration: {duration}\nReason: {reason}\n\nRecent log:\n{tail}",
+            "[orx] Run `{}` finished with status **{}**.\nExit code: {code}\nDuration: {duration}\nReason: {reason}\n{facts}\nRecent log:\n{tail}",
             run.id, status,
         ))
     }
@@ -7577,6 +7651,49 @@ mod tests {
         assert_eq!(frozen.len(), 7);
         store.migrate_run_wakeups().unwrap();
         assert_eq!(store.run_notice_batch("foreign").unwrap(), frozen);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn stopped_notice_keeps_the_actor_and_last_validation_step() {
+        let (dir, store) = engine_fixture();
+        let mut run = run_fixture("stopped-facts", "running", None);
+        store.upsert_run(&run).unwrap();
+        let mut snapshot = orx_signals::Snapshot::new(&run.id, "1-7", "facts");
+        snapshot.feed(b"::orx:: {\"phase\":\"train\",\"step\":100,\"m\":{\"val_bpb\":1.940825}}\n::orx:: {\"step\":123,\"m\":{\"loss\":6.2}}\n", true, 1000, true).unwrap();
+        std::fs::create_dir_all(dir.join("run-signals")).unwrap();
+        std::fs::write(
+            dir.join("run-signals/stopped-facts.json"),
+            serde_json::to_vec(&snapshot).unwrap(),
+        )
+        .unwrap();
+        for (by, actor) in [
+            (StopBy::User, "user"),
+            (StopBy::Agent, "agent"),
+            (StopBy::Rule, "rule"),
+        ] {
+            let mut stop = StopContext::by(by);
+            stop.rule = Some(serde_json::json!({"name":"budget"}));
+            store
+                .conn
+                .execute(
+                    "UPDATE runs SET stop_context_json = ?1 WHERE id = ?2",
+                    params![serde_json::to_string(&stop).unwrap(), run.id],
+                )
+                .unwrap();
+            run.status = "cancelled".into();
+            let body = store.terminal_notice_body(&run).unwrap();
+            assert!(body.contains(actor), "{body}");
+            assert!(body.contains("val_bpb = 1.940825 at step 100"), "{body}");
+            assert!(!body.contains("val_bpb = 1.940825 at step 123"), "{body}");
+            if by == StopBy::User {
+                assert!(body.contains("dashboard"), "{body}");
+            }
+            if by == StopBy::Rule {
+                assert!(body.contains("budget"), "{body}");
+            }
+        }
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }
