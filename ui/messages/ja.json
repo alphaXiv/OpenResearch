@@ -2379,5 +2379,6 @@
   "run_eta_floor": "残り少なくとも{duration}",
   "run_eta_untimed": "{stages}の所要時間は不明",
   "run_summary_first_floor": "最初の完了まで少なくとも{duration}",
-  "run_summary_next_floor": "次の完了まで少なくとも{duration}"
+  "run_summary_next_floor": "次の完了まで少なくとも{duration}",
+  "run_value_pending": "まだ値がありません"
 }

@@ -2379,5 +2379,6 @@
   "run_eta_floor": "कम से कम {duration} बाकी",
   "run_eta_untimed": "{stages} का समय अज्ञात",
   "run_summary_first_floor": "पहला कम से कम {duration} में पूरा",
-  "run_summary_next_floor": "अगला कम से कम {duration} में पूरा"
+  "run_summary_next_floor": "अगला कम से कम {duration} में पूरा",
+  "run_value_pending": "अभी कोई मान नहीं"
 }

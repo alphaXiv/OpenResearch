@@ -2379,5 +2379,6 @@
   "run_eta_floor": "متبقٍ {duration} على الأقل",
   "run_eta_untimed": "لم تُقدّر مدة {stages}",
   "run_summary_first_floor": "الأول ينتهي بعد {duration} على الأقل",
-  "run_summary_next_floor": "التالي ينتهي بعد {duration} على الأقل"
+  "run_summary_next_floor": "التالي ينتهي بعد {duration} على الأقل",
+  "run_value_pending": "لا توجد قيمة بعد"
 }

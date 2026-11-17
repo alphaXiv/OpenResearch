@@ -2379,5 +2379,6 @@
   "run_eta_floor": "At least {duration} left",
   "run_eta_untimed": "{stages} not timed",
   "run_summary_first_floor": "first done in at least {duration}",
-  "run_summary_next_floor": "next done in at least {duration}"
+  "run_summary_next_floor": "next done in at least {duration}",
+  "run_value_pending": "No value yet"
 }

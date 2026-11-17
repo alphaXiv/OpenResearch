@@ -14,6 +14,7 @@ import { Block, drawsAt } from "./blocks/Block";
 import { Phases } from "./blocks/Phases";
 import { Captions } from "./Captions";
 import { Issue } from "./Issue";
+import { HeadlineStat } from "./HeadlineStat";
 import { Lead } from "./Lead";
 import { Mark } from "./Mark";
 import { Rail } from "./Rail";
@@ -85,8 +86,10 @@ export function RunPage({ run, name, chatSessionId, now }: { run: Run; name: str
       <div className="mt-3"><Rail model={model} kind="bar" hover /></div>
       <div className="mt-1.5"><Captions model={model} /></div>
       {!model.notice && runNotice(run) && <RunContactNotice run={run} className="mt-4" />}
+      {model.pre && (model.headline || monitor.status === "loading") && <div className="mt-7"><HeadlineStat model={model} /></div>}
       {!model.pre && (
         <div className={cn("mt-7 flex flex-col gap-8", !data && "min-h-40")} aria-busy={monitor.status === "loading"}>
+          {!data && monitor.status === "loading" && <HeadlineStat model={model} />}
           {data && blocks.map((block, index) => <Block key={index} monitor={data} block={block} size="page" projectId={run.projectId} tone={model.tone} live={model.live} />)}
           {empty && <p className="m-0 text-sm text-ink-subtext">{empty}</p>}
         </div>

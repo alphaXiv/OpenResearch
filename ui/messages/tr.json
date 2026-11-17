@@ -2379,5 +2379,6 @@
   "run_eta_floor": "En az {duration} kaldı",
   "run_eta_untimed": "{stages} süresi bilinmiyor",
   "run_summary_first_floor": "ilki en az {duration} sonra biter",
-  "run_summary_next_floor": "sıradaki en az {duration} sonra biter"
+  "run_summary_next_floor": "sıradaki en az {duration} sonra biter",
+  "run_value_pending": "Henüz değer yok"
 }

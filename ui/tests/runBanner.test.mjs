@@ -447,7 +447,8 @@ test("a run whose view was rebuilt reads its monitor again, and shows none of th
   await settle();
   assert.equal(requests.filter((r) => r.request === "GET /api/runs/r1/monitor").length, 2);
   const text = plain(view.container.textContent);
-  assert.ok(text.includes("Loss 1.50") && !text.includes("2.31"), text);
+  assert.ok(text.includes("Loss") && !text.includes("2.31"), text);
+  assert.equal(plain(view.container.querySelector(".text-xl").textContent), "1.50");
   assert.equal(view.container.querySelector('[role="img"][aria-label*="Loss"]'), null, "the chart waits for the rebuilt monitor");
 });
 
@@ -678,4 +679,13 @@ test("cancellation is said once while a failed stop retains its explanation", as
   await view.update([run("r1", { cancelling: true, cancelError: "The scheduler refused this stop" })]);
   await settle();
   assert.ok(view.container.querySelector('.run-contact-notice').textContent.includes("The scheduler refused this stop"));
+});
+
+test("the headline reserves its label and missing value before its first evaluation", async () => {
+  const view = { ...running.view, signals: { ...running.view.signals, val_bpb: { label: "Val bpb", digits: 3 } }, headline: ["val_bpb"] };
+  backend({ monitors: { r1: { ...running, view, headline: null } } });
+  const { container } = await banner([run("r1", { monitor: summary({ headline: null }) })]);
+  await settle();
+  assert.ok(container.textContent.includes("Val bpb"));
+  assert.ok(container.querySelector(`[role="img"][aria-label="${m.run_value_pending()}"]`));
 });

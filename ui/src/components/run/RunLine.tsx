@@ -10,6 +10,7 @@ import { cn } from "../ui/cn";
 import { Controls } from "./Controls";
 import { Delta } from "./Delta";
 import { Mark } from "./Mark";
+import { PendingValue } from "./HeadlineStat";
 import { Rail } from "./Rail";
 import { RunStatus } from "./RunStatus";
 
@@ -22,7 +23,7 @@ export const runFrame = (model: RunModel) => cn(
 /** The run's one number, unless the sentence already says it; then only how it compares. */
 function Headline({ model }: { model: RunModel }) {
   const headline = model.headline;
-  if (!headline?.known || (model.tone !== "running" && model.tone !== "done")) return null;
+  if (!headline || (model.tone !== "starting" && model.tone !== "running" && model.tone !== "done")) return null;
   const { delta } = headline;
   if (headline.inSentence) {
     if (!delta || delta.flat || headline.vsInSentence) return null;
@@ -30,7 +31,7 @@ function Headline({ model }: { model: RunModel }) {
   }
   return (
     <span className="shrink-0 whitespace-nowrap text-ink-subtext @max-[40rem]:hidden">
-      {headline.label} <span className="font-medium tabular-nums text-text">{headline.value}</span>
+      {headline.label} <span className="font-medium tabular-nums text-text">{headline.known ? headline.value : <PendingValue />}</span>
       {delta && <> <Delta delta={delta} said />{!delta.flat && <> {m.run_than_parent()}</>}</>}
     </span>
   );

@@ -2379,5 +2379,6 @@
   "run_eta_floor": "Осталось не менее {duration}",
   "run_eta_untimed": "{stages}: время неизвестно",
   "run_summary_first_floor": "первое завершение не ранее чем через {duration}",
-  "run_summary_next_floor": "следующее завершение не ранее чем через {duration}"
+  "run_summary_next_floor": "следующее завершение не ранее чем через {duration}",
+  "run_value_pending": "Значения пока нет"
 }

@@ -12,7 +12,7 @@ import { cn } from "../ui/cn";
 import { Block } from "./blocks/Block";
 import { Legend } from "./blocks/Legend";
 import { seriesOf } from "./blocks/series";
-import { Delta } from "./Delta";
+import { HeadlineStat } from "./HeadlineStat";
 import { Issue } from "./Issue";
 import { RunLine, type RunLabel } from "./RunLine";
 import { Sentence } from "./Sentence";
@@ -21,24 +21,17 @@ type OpenRun = (runId: string, intent: TabOpenIntent, seek?: LogSeek) => void;
 
 export type StripMonitor = { status: "loading" } | { status: "error"; retry: () => void; data: RunMonitor | null } | { status: "ready"; data: RunMonitor } | null;
 
-function Hero({ model, monitor, block }: { model: RunModel; monitor: RunMonitor; block: ChartBlock }) {
-  const series = seriesOf(monitor, block);
-  const headline = model.headline;
+function Hero({ model, monitor, block }: { model: RunModel; monitor: RunMonitor | null; block?: ChartBlock }) {
+  const series = monitor && block ? seriesOf(monitor, block) : [];
   const drawn = series.filter((line) => !line.ghost).map((line) => line.label);
   const legend = series.length > 1;
   return (
     <div className="mt-3 flex h-16 items-stretch gap-5">
-      {headline?.known && (
-        <div className="shrink-0">
-          <div className="text-xs text-ink-subtext">{headline.label}</div>
-          <div className="text-xl font-semibold leading-7 tabular-nums">{headline.value}</div>
-          <div className="h-4 text-xs">{headline.delta && <><Delta delta={headline.delta} said />{!headline.delta.flat && <span className="text-ink-subtext"> {m.run_than_parent()}</span>}</>}</div>
-        </div>
-      )}
+      {(model.headline || !monitor) && <HeadlineStat model={model} />}
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         {drawn.length > 0 && <div className={cn("truncate text-xs text-ink-subtext", legend && "@2xl:hidden")}>{drawn.map(autoDir).join(" · ")}</div>}
         <div className="min-h-0 flex-1">
-          <Block monitor={monitor} block={block} size="strip" projectId={model.run.projectId} tone={model.tone} live={model.live} />
+          {monitor && block && <Block monitor={monitor} block={block} size="strip" projectId={model.run.projectId} tone={model.tone} live={model.live} />}
         </div>
       </div>
       {legend && <div className="hidden w-24 shrink-0 flex-col justify-center @2xl:flex"><Legend series={series} /></div>}
@@ -61,7 +54,8 @@ export function RunStrip({ model, monitor, agent, label, open, onToggle, onOpenR
   const chart = open && model.live ? data?.view.blocks.find((block): block is ChartBlock => "chart" in block && (!block.phase || block.phase === phase) && seriesOf(data, block).some((line) => !line.ghost && line.points.filter(([, y]) => y !== null).length >= 2)) : undefined;
   const flag = model.flag?.record;
   const notice = model.notice && model.notice.kind !== "cancelling";
-  const expanded = open && Boolean(chart || flag || model.note || notice || monitor?.status === "error");
+  const hero = model.live && Boolean(chart || model.headline || monitor?.status === "loading");
+  const expanded = open && Boolean(hero || flag || model.note || notice || monitor?.status === "error");
 
   return (
     <RunLine model={model} agent={agent} label={label} onToggle={onToggle} onOpenRunPage={onOpenRunPage} expanded={expanded} expandable={!open || expanded || monitor?.status === "loading"}>
@@ -75,7 +69,7 @@ export function RunStrip({ model, monitor, agent, label, open, onToggle, onOpenR
           {model.stale ? `${model.stale.why} · ${model.stale.age}` : m.run_monitor_load_failed()}
           <Button size="small" variant="ghost" onClick={monitor.retry}><RefreshCw size={13} />{m.app_retry()}</Button>
         </div>}
-        {chart && data && !flag && <Hero model={model} monitor={data} block={chart} />}
+        {hero && !flag && <Hero model={model} monitor={data} block={chart} />}
       </div>}
     </RunLine>
   );

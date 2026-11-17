@@ -2379,5 +2379,6 @@
   "run_eta_floor": "최소 {duration} 남음",
   "run_eta_untimed": "{stages} 소요 시간 미정",
   "run_summary_first_floor": "첫 완료까지 최소 {duration}",
-  "run_summary_next_floor": "다음 완료까지 최소 {duration}"
+  "run_summary_next_floor": "다음 완료까지 최소 {duration}",
+  "run_value_pending": "아직 값이 없습니다"
 }

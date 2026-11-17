@@ -2379,5 +2379,6 @@
   "run_eta_floor": "Quedan al menos {duration}",
   "run_eta_untimed": "{stages} sin duración estimada",
   "run_summary_first_floor": "primero termina en al menos {duration}",
-  "run_summary_next_floor": "siguiente termina en al menos {duration}"
+  "run_summary_next_floor": "siguiente termina en al menos {duration}",
+  "run_value_pending": "Aún no hay valor"
 }

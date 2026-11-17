@@ -5,6 +5,7 @@ import { fmtMagnitude, fmtSignal } from "../../../runMonitor/format";
 import { versusOf } from "../../../runMonitor/model";
 import type { RunMonitor, VersusBy } from "../../../runMonitor/types";
 import { Delta } from "../Delta";
+import { PendingValue } from "../HeadlineStat";
 import { Spark } from "./Spark";
 
 /** A label as it reads after another word: lowercased, unless it is an acronym such as "FID". */
@@ -27,20 +28,20 @@ export function Stats({ monitor, names, vs: by, live }: { monitor: RunMonitor; n
           <div key={name} className="min-w-0">
             <dt className="truncate text-xs text-ink-subtext">{best === undefined ? label : m.run_stat_best({ label: midSentence(label) })}</dt>
             <dd className="m-0 mt-0.5 flex items-center gap-2">
-              <span className="text-xl font-semibold leading-tight tabular-nums text-text">{ltr(fmtSignal(spec, best ?? monitor.latest[name]))}</span>
+              <span className="text-xl font-semibold leading-tight tabular-nums text-text">{best == null && monitor.latest[name] == null ? <PendingValue /> : ltr(fmtSignal(spec, best ?? monitor.latest[name]))}</span>
               {unit && <span className="text-xs text-ink-subtext">{unit}</span>}
               <span className="ms-auto"><Spark points={monitor.series[name] ?? []} /></span>
             </dd>
-            {vs && (
-              <dd className="m-0 mt-1 text-xs text-ink-subtext">
+            <div className="mt-1 min-h-4 text-xs text-ink-subtext">
+              {vs && <dd className="m-0">
                 {vs.flat ? m.run_level_with_parent() : (
                   <>
                     <Delta delta={{ down: vs.d < 0, good: vs.good, flat: false, magnitude: ltr(fmtMagnitude(spec, vs.mag)) }} said />
                     {" "}{vs.step === undefined ? m.run_than_parent_ended() : m.run_than_parent_at_step({ step: ltr(fmtNumber(vs.step)) })}
                   </>
                 )}
-              </dd>
-            )}
+              </dd>}
+            </div>
           </div>
         );
       })}

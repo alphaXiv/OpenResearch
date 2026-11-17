@@ -478,8 +478,9 @@ function headlineOf(monitor: RunMonitor | null, summary: NonNullable<Run["monito
   let value: SignalValue;
   let vs: Versus | null;
   if (monitor) {
-    if (monitor.headline === null) return null;
-    name = monitor.headline;
+    const declared = monitor.headline ?? monitor.view.headline[0];
+    if (!declared) return null;
+    name = declared;
     label = signals[name]?.label ?? name;
     value = monitor.latest[name] ?? null;
     vs = versusOf(monitor, name, live);
@@ -493,7 +494,6 @@ function headlineOf(monitor: RunMonitor | null, summary: NonNullable<Run["monito
     value: ltr(fmtSignal(signals[name], value)),
     number: typeof value === "number" && Number.isFinite(value) ? value : null,
     better: signals[name]?.better,
-    // A NaN loss is the number most worth seeing; only a missing one is left out.
     known: value !== null,
     delta: vs ? { down: vs.d < 0, good: vs.good, flat: vs.flat, magnitude: ltr(fmtMagnitude(signals[name], vs.mag)) } : null,
     inSentence: said.has(name),

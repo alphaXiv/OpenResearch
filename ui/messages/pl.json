@@ -2379,5 +2379,6 @@
   "run_eta_floor": "Pozostało co najmniej {duration}",
   "run_eta_untimed": "{stages}: czas nieznany",
   "run_summary_first_floor": "pierwsze zakończenie za co najmniej {duration}",
-  "run_summary_next_floor": "następne zakończenie za co najmniej {duration}"
+  "run_summary_next_floor": "następne zakończenie za co najmniej {duration}",
+  "run_value_pending": "Nie ma jeszcze wartości"
 }

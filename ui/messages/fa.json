@@ -2379,5 +2379,6 @@
   "run_eta_floor": "حداقل {duration} باقی مانده",
   "run_eta_untimed": "زمان {stages} مشخص نیست",
   "run_summary_first_floor": "اولین پایان پس از حداقل {duration}",
-  "run_summary_next_floor": "پایان بعدی پس از حداقل {duration}"
+  "run_summary_next_floor": "پایان بعدی پس از حداقل {duration}",
+  "run_value_pending": "هنوز مقداری ثبت نشده"
 }
