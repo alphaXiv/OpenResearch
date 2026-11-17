@@ -1050,6 +1050,7 @@
   "chat_pasted_image": "貼り付けた画像",
   "chat_type_custom_answer": "回答を入力…",
   "chat_steer_placeholder": "{harness} に指示…（{shortcut} で送信待ちに追加）",
+  "chat_steering": "指示を送信中…",
   "chat_message_harness": "{harness} にメッセージ…（/ でコマンドとスキル、! でシェル）",
   "chat_harness_unavailable": "{harness} は利用できません — モデル選択を開いてください",
   "chat_ask_agent_placeholder": "研究エージェントに質問…（/ でコマンドとスキル、! でシェル）",

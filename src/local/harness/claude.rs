@@ -1982,17 +1982,24 @@ fn result_text(content: &Value) -> String {
 /// mid-turn synthetic `user` event (a tool_result) can't collide: those carry
 /// `tool_result` blocks, never a single text block equal to the prompt.
 fn replays_user_message(event: &Value, text: &str) -> bool {
+    replayed_text(event) == Some(text)
+}
+
+/// The text of a `user` event shaped like a replayed stdin message.
+fn replayed_text(event: &Value) -> Option<&str> {
     if event.get("type").and_then(Value::as_str) != Some("user") {
-        return false;
+        return None;
     }
-    match event.pointer("/message/content") {
-        Some(Value::String(content)) => content == text,
-        Some(Value::Array(blocks)) => {
-            blocks.len() == 1
-                && blocks[0].get("type").and_then(Value::as_str) == Some("text")
-                && blocks[0].get("text").and_then(Value::as_str) == Some(text)
+    match event.pointer("/message/content")? {
+        Value::String(content) => Some(content),
+        Value::Array(blocks) if blocks.len() == 1 => {
+            let block = &blocks[0];
+            if block.get("type").and_then(Value::as_str) != Some("text") {
+                return None;
+            }
+            block.get("text").and_then(Value::as_str)
         }
-        _ => false,
+        _ => None,
     }
 }
 
@@ -2505,6 +2512,13 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
             }
         }
         Some("user") => {
+            // The replay of a steer marks where the model read it.
+            if let Some(text) = replayed_text(event).filter(|_| subagent_parent(event).is_none()) {
+                if let Some(steer) = ctx.host.pending_steer_sent_as(&ctx.session_id, text) {
+                    ctx.record_steer(&steer);
+                }
+                return false;
+            }
             // Synthetic tool-result turns: complete the matching tool part. A
             // sub-agent's tool_result carries the bare `tool_use_id`; its part
             // lives in the spawning Task part's children under the namespaced id.
@@ -2949,15 +2963,13 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
                 continue;
             }
             Waited::Steer(steer) => {
-                // A failed write means the child is gone and this turn is about
-                // to error out — park the text so it survives into the next one.
-                match client.send_user_message(&steer.text).await {
-                    Ok(()) => ctx.record_steer(&steer, true),
-                    Err(_) => {
-                        if let Err(error) = ctx.host.park_steer(&ctx.session_id, steer) {
-                            ctx.push_error(format!("Could not preserve steering message: {error}"));
-                        }
-                    }
+                // Released steers already run as queued messages. The child
+                // replays one when the model reads it, which records it; a
+                // failed write means the child is gone and the turn errors out.
+                if ctx.host.steer_pending(&ctx.session_id, &steer.id)
+                    && client.send_steer(&steer).await.is_err()
+                {
+                    ctx.host.release_steer(&ctx.session_id, &steer.id);
                 }
                 continue;
             }
@@ -3066,7 +3078,11 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
                             Some(TurnEvent::Line(line)) => {
                                 apply_event(ctx, &mut state, &line);
                             }
-                            _ => break None,
+                            Some(TurnEvent::Closed) => {
+                                ctx.host.claude.kill_session(&ctx.session_id).await;
+                                break None;
+                            }
+                            None => break None,
                         }
                     };
                     let Some(init) = next_segment else {
@@ -4029,6 +4045,55 @@ mod tests {
             }
         }
         state
+    }
+
+    #[test]
+    fn a_steer_is_recorded_where_the_model_reads_it() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let mut ctx = TurnCtx::test_stub();
+        let mut state = TurnState::default();
+        let store = crate::store::Store::open().unwrap();
+        crate::local::chat::steering_tests::add_chat_session(&store, &ctx.session_id);
+        let steer = crate::local::chat::SteerMessage {
+            id: "q_stop".into(),
+            display: "stop".into(),
+            text: "stop".into(),
+            client_turn_id: None,
+            orx: None,
+            sent_at: 1,
+        };
+        ctx.host
+            .queue_steer(&ctx.session_id, &steer, &store)
+            .unwrap();
+        for event in [
+            serde_json::json!({"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"sleep 20"}}]}}),
+            serde_json::json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"done"}]}}),
+        ] {
+            apply_event(&mut ctx, &mut state, &event);
+        }
+        assert!(ctx.assistant.parts.iter().all(|part| part.kind != "steer"));
+        assert_eq!(
+            ctx.host.queued_items(&ctx.session_id)[0]["dispatchState"],
+            "steering"
+        );
+
+        apply_event(
+            &mut ctx,
+            &mut state,
+            &serde_json::json!({"type":"user","isReplay":true,"message":{"role":"user","content":[{"type":"text","text":"stop"}]}}),
+        );
+        let last = ctx.assistant.parts.last().unwrap();
+        assert_eq!(
+            (last.kind.as_str(), last.text.as_deref()),
+            ("steer", Some("stop"))
+        );
+        assert!(ctx.host.queued_items(&ctx.session_id).is_empty());
+        assert!(store
+            .list_queued_chat_messages_for_session(&ctx.session_id)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

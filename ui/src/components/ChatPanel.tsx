@@ -6697,9 +6697,17 @@ export function ChatPanel({
   const canFork = !busy && !!activeHarness?.agentReady;
   const hasPendingTailTool = busy && streamTailTool(messages) != null;
   const hasStreamingText = busy && streamTailIsText(messages);
-  // Messages the user parked behind the running turn (oldest first). Populated
-  // by chat.queued events and the seed snapshot; each runs when its turn ends.
-  const queued = activeId ? (state.queuedBySession[activeId] ?? []) : [];
+  // Messages the user parked behind the running turn (oldest first), and steers
+  // its agent has not read yet. Populated by chat.queued events and the seed
+  // snapshot; a parked one runs when its turn ends.
+  const queueItems = activeId ? state.queuedBySession[activeId] : undefined;
+  const [queued, unreadSteers] = useMemo(() => {
+    const items = queueItems ?? [];
+    return [
+      items.filter((item) => item.dispatchState !== "steering"),
+      items.filter((item) => item.dispatchState === "steering"),
+    ];
+  }, [queueItems]);
   const hasRetryingQueue = queued.some((item) => item.dispatchState === "retrying");
   const firstBlockedQueueIndex = queued.findIndex((item) => item.dispatchState === "blocked");
   const nextQueueRetryAt = queued.reduce<number | null>((latest, item) => {
@@ -8220,6 +8228,26 @@ export function ChatPanel({
               {busy && !awaitingInput && !hasPendingTailTool && !hasStreamingText && (
                 <div className="text-base pt-0.5 px-1 pb-2">
                   <span className="tool-running-shimmer">{m.chat_thinking()}</span>
+                </div>
+              )}
+              {/* Below everything the turn shows until its agent reads them; each then moves to where it did. */}
+              {unreadSteers.length > 0 && (
+                <div className="msg-steer-pending flex flex-col gap-4">
+                  {unreadSteers.map((item) => item.orx ? (
+                    <ChatLinksContext key={item.id} value={chatLinks}>
+                      <AgentMessageCard
+                        part={{ id: item.id, type: "steer", text: item.text, orx: item.orx }}
+                        runExperimentName={runExperimentName}
+                        onOpenFile={openFileInSession}
+                        onOpenRun={onOpenRun}
+                      />
+                    </ChatLinksContext>
+                  ) : (
+                    <div key={item.id} dir="auto" role="note" aria-label={m.chat_panel_you_mid_task()} className={`ms-auto w-fit max-w-[88%] ${USER_MESSAGE_BUBBLE_CLASS_NAME}`}>
+                      {item.text}
+                    </div>
+                  ))}
+                  <span role="status" className="tool-running-shimmer -mt-3 ms-auto px-1 text-xs">{m.chat_steering()}</span>
                 </div>
               )}
             </div>

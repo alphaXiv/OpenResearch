@@ -1050,6 +1050,7 @@
   "chat_pasted_image": "붙여넣은 이미지",
   "chat_type_custom_answer": "직접 답변 입력…",
   "chat_steer_placeholder": "{harness}에 지시… ({shortcut}로 대기열에 추가)",
+  "chat_steering": "지시 전달 중…",
   "chat_message_harness": "{harness}에 메시지… (명령과 스킬은 /, 셸은 !)",
   "chat_harness_unavailable": "{harness} 사용 불가 — 모델 선택기 열기",
   "chat_ask_agent_placeholder": "연구 에이전트에 질문… (명령과 스킬은 /, 셸은 !)",

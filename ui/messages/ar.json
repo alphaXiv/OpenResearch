@@ -1049,6 +1049,7 @@
   "chat_pasted_image": "صورة ملصقة",
   "chat_type_custom_answer": "اكتب إجابة مخصصة…",
   "chat_steer_placeholder": "وجّه {harness}… ({shortcut} للإضافة إلى قائمة الانتظار)",
+  "chat_steering": "جارٍ التوجيه…",
   "chat_message_harness": "راسِل {harness}… (/ للأوامر والمهارات، ! للطرفية)",
   "chat_harness_unavailable": "{harness} غير متاح — افتح مُنتقي النماذج",
   "chat_ask_agent_placeholder": "اسأل وكيل البحث… (/ للأوامر والمهارات، ! للطرفية)",

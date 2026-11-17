@@ -334,6 +334,8 @@ pub struct ClaudeClient {
     auth_generation: u64,
     started_at: Instant,
     terminated: AtomicBool,
+    /// Steers written to this child, which its exit gives back to the queue.
+    steers: std::sync::Mutex<Vec<String>>,
 }
 
 impl ClaudeClient {
@@ -357,6 +359,12 @@ impl ClaudeClient {
 
     /// Send a user message as one stream-json line. The child answers with a
     /// stream of output objects ending in a `result`.
+    /// Hand a steer to the child, which owns it until it is read or the child exits.
+    pub async fn send_steer(&self, steer: &crate::local::chat::SteerMessage) -> Result<()> {
+        self.steers.lock().unwrap().push(steer.id.clone());
+        self.send_user_message(&steer.text).await
+    }
+
     pub async fn send_user_message(&self, text: &str) -> Result<()> {
         let msg = json!({
             "type": "user",
@@ -699,8 +707,17 @@ async fn read_loop(client: Arc<ClaudeClient>, stdout: tokio::process::ChildStdou
     for (_, tx) in client.pending.lock().unwrap().drain() {
         let _ = tx.send(Err("claude exited".into()));
     }
-    if let Some(tx) = client.turn.lock().unwrap().sender.as_ref() {
-        let _ = tx.send(TurnEvent::Closed);
+    // A listening turn reads the echoes still buffered for it first, then stops the session.
+    // Sent under the lock, so a turn that is ending either takes `Closed` or stopped listening.
+    let delivered = client
+        .turn
+        .lock()
+        .unwrap()
+        .sender
+        .as_ref()
+        .is_some_and(|tx| tx.send(TurnEvent::Closed).is_ok());
+    if !delivered {
+        release_steers(&client);
     }
 }
 
@@ -743,6 +760,17 @@ async fn stop_client_at(client: Arc<ClaudeClient>, reason: &str, now: Instant) {
             .unwrap_or_else(|| "active".to_string())
     );
     terminate_client(&client).await;
+    release_steers(&client);
+}
+
+/// Steers still in the child's input queue die with it.
+fn release_steers(client: &ClaudeClient) {
+    let steers = std::mem::take(&mut *client.steers.lock().unwrap());
+    if let Some(chat) = client.chat.upgrade() {
+        for id in steers {
+            chat.release_steer(&client.session_id, &id);
+        }
+    }
 }
 
 /// Spawn a resident `claude` child for one session. Mirrors the flag block the
@@ -918,6 +946,7 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
         auth_generation,
         started_at,
         terminated: AtomicBool::new(false),
+        steers: std::sync::Mutex::new(Vec::new()),
     });
     tokio::spawn(read_loop(client.clone(), stdout));
     Ok(client)
@@ -1639,7 +1668,59 @@ pub(crate) mod tests {
             auth_generation: 0,
             started_at,
             terminated: AtomicBool::new(false),
+            steers: std::sync::Mutex::new(Vec::new()),
         })
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stopped_worker_gives_back_only_the_steers_it_was_handed() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let chat = Arc::new(crate::local::chat::ChatHost::new(
+            Arc::new(crate::local::opencode::AgentHost::new(None)),
+            Arc::new(crate::local::codex::CodexHost::new()),
+            Arc::new(ClaudeHost::new()),
+        ));
+        let store = crate::store::Store::open().unwrap();
+        crate::local::chat::steering_tests::add_chat_session(&store, "chat");
+        let steer = |id: &str| crate::local::chat::SteerMessage {
+            id: id.into(),
+            display: id.into(),
+            text: id.into(),
+            client_turn_id: None,
+            orx: None,
+            sent_at: 1,
+        };
+        let now = Instant::now();
+        let old = chat_test_client("chat", now, now, "cat >/dev/null", Arc::downgrade(&chat));
+        let new = chat_test_client("chat", now, now, "cat >/dev/null", Arc::downgrade(&chat));
+        for (client, id) in [(&old, "q_old"), (&new, "q_new")] {
+            chat.queue_steer("chat", &steer(id), &store).unwrap();
+            client.send_steer(&steer(id)).await.unwrap();
+        }
+
+        stop_client(old, "duplicate-worker").await;
+
+        let states = chat
+            .queued_items("chat")
+            .iter()
+            .map(|item| {
+                (
+                    item["id"].as_str().unwrap().to_string(),
+                    item["dispatchState"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            states,
+            [
+                ("q_old".to_string(), "queued".to_string()),
+                ("q_new".to_string(), "steering".to_string())
+            ]
+        );
+        terminate_client(&new).await;
     }
 
     #[cfg(unix)]

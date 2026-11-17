@@ -1044,6 +1044,7 @@
   "chat_pasted_image": "粘贴的图片",
   "chat_type_custom_answer": "输入自定义回答…",
   "chat_steer_placeholder": "向 {harness} 补充指示…（按 {shortcut} 排队）",
+  "chat_steering": "正在补充指示…",
   "chat_message_harness": "给 {harness} 发消息…（输入 / 使用命令和技能，输入 ! 运行 shell）",
   "chat_harness_unavailable": "{harness} 不可用 — 请打开模型选择器",
   "chat_ask_agent_placeholder": "询问研究智能体…（输入 / 使用命令和技能，输入 ! 运行 shell）",

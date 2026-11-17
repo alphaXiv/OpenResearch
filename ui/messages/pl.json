@@ -1050,6 +1050,7 @@
   "chat_pasted_image": "Wklejony obraz",
   "chat_type_custom_answer": "Wpisz własną odpowiedź…",
   "chat_steer_placeholder": "Pokieruj agentem {harness}… ({shortcut}, aby dodać do kolejki)",
+  "chat_steering": "Kierowanie…",
   "chat_message_harness": "Napisz do {harness}… (/ — polecenia i umiejętności, ! — powłoka)",
   "chat_harness_unavailable": "{harness} jest niedostępny — otwórz wybór modelu",
   "chat_ask_agent_placeholder": "Zapytaj agenta badawczego… (/ — polecenia i umiejętności, ! — powłoka)",

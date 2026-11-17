@@ -1050,6 +1050,7 @@
   "chat_pasted_image": "Вставленное изображение",
   "chat_type_custom_answer": "Введите свой ответ…",
   "chat_steer_placeholder": "Направить {harness}… ({shortcut} — в очередь)",
+  "chat_steering": "Направляем…",
   "chat_message_harness": "Сообщение для {harness}… (/ — команды и навыки, ! — оболочка)",
   "chat_harness_unavailable": "{harness} недоступен — откройте выбор модели",
   "chat_ask_agent_placeholder": "Спросите исследовательского агента… (/ — команды и навыки, ! — оболочка)",
