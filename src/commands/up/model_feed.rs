@@ -205,10 +205,23 @@ fn known_item<'de, D: Deserializer<'de>, T: DeserializeOwned>(
     Ok(Option::<Value>::deserialize(item)?.and_then(|item| serde_json::from_value(item).ok()))
 }
 
-/// The cached feed; none before the first fetch lands. An unreadable cache is rewritten by the next fetch.
+/// The cached feed, or the empty one before the first fetch lands.
+fn read_cache() -> Result<ModelFeed> {
+    let path = cache_path();
+    let body = match std::fs::read_to_string(&path) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ModelFeed::default())
+        }
+        Err(error) => return Err(anyhow!("Could not read {}: {error}", path.display())),
+    };
+    serde_json::from_str(&body)
+        .map_err(|error| anyhow!("{} is not a model feed: {error}", path.display()))
+}
+
+/// The cached feed where losing it costs nothing: the next fetch rewrites an unreadable cache.
 fn cached() -> Option<ModelFeed> {
-    let body = std::fs::read_to_string(cache_path()).ok()?;
-    serde_json::from_str(&body).ok()
+    read_cache().ok()
 }
 
 /// The endpoints OpenCode is given as providers: none while free models are off.
@@ -227,7 +240,7 @@ pub(crate) fn ensure_offered(model: &str) -> Result<()> {
     else {
         return Ok(());
     };
-    let feed = cached().unwrap_or_default();
+    let feed = read_cache()?;
     let listed = feed
         .endpoints
         .iter()
@@ -387,17 +400,7 @@ async fn refresh() -> Result<()> {
 
 /// The cached feed, or the empty one before the first fetch lands.
 pub(super) async fn model_feed() -> std::result::Result<Json<ModelFeed>, ApiError> {
-    let path = cache_path();
-    let body = match tokio::fs::read_to_string(&path).await {
-        Ok(body) => body,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Json(ModelFeed::default()))
-        }
-        Err(error) => return Err(anyhow!("Could not read {}: {error}", path.display()).into()),
-    };
-    let feed = serde_json::from_str(&body)
-        .map_err(|error| anyhow!("{} is not a model feed: {error}", path.display()))?;
-    Ok(Json(feed))
+    Ok(Json(read_cache()?))
 }
 
 #[cfg(test)]
@@ -553,6 +556,16 @@ mod tests {
             gone.contains("openresearch-a1/research-0") && gone.contains("no longer"),
             "{gone}"
         );
+
+        std::fs::write(cache_path(), "{").unwrap();
+        let unreadable = ensure_offered("openresearch-a1/research-1")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            unreadable.contains("model-feed.json") && !unreadable.contains("no longer"),
+            "{unreadable}"
+        );
+        std::fs::write(cache_path(), feed.to_string()).unwrap();
 
         crate::store::Store::open()
             .unwrap()
