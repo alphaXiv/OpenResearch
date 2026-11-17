@@ -18,3 +18,5 @@ mod platform;
 mod platform;
 
 pub use keeper::run;
+#[cfg(windows)]
+pub use platform::private_stdio;

@@ -2122,8 +2122,13 @@ fn warning_for(
 /// For an agent whose `orx up` predates restarting itself into updates: it keeps
 /// serving the old code, which the version this CLI reports no longer describes.
 fn stale_up_warning() -> Option<String> {
-    let up_version = std::env::var(crate::local::chat::UP_VERSION_ENV)
+    // A kept agent outlives the server that started it, so its environment can name an older
+    // server than the one now serving it.
+    let served = crate::commands::remote_host::canonical_data_dir()
         .ok()
+        .and_then(|data_dir| crate::commands::remote_host::served_version(&data_dir));
+    let up_version = served
+        .or_else(|| std::env::var(crate::local::chat::UP_VERSION_ENV).ok())
         .and_then(|version| Version::parse(&version).ok());
     (matches!(crate::local::chat::trusted_up_port(), Ok(Some(_)))
         && up_version.is_none_or(|version| is_outdated(&version, &current_version())))

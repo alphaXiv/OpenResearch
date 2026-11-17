@@ -25,7 +25,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -1281,6 +1281,18 @@ impl Harness for ClaudeCode {
         true
     }
 
+    fn supports_resume(&self) -> bool {
+        true
+    }
+
+    async fn adopt(
+        &self,
+        chat: &std::sync::Arc<crate::local::chat::ChatHost>,
+        adoption: super::Adoption,
+    ) -> Result<()> {
+        chat.claude.adopt(chat, adoption).await
+    }
+
     async fn compact(&self, ctx: &CompactCtx) -> Result<CompactOutcome> {
         let Some(native_id) = ctx.native_session_id.clone() else {
             return Ok(CompactOutcome::Fallback);
@@ -1350,7 +1362,7 @@ impl Harness for ClaudeCode {
             .map_err(|error| TurnFailure::adapter(error, ctx.delivery_state()))
     }
 
-    async fn one_shot(&self, request: OneShot<'_>) -> Result<String> {
+    async fn run_one_shot(&self, request: OneShot<'_>) -> Result<String> {
         let bin = find_claude().ok_or_else(|| anyhow!("{} is not installed", self.name()))?;
         claude_one_shot(&bin, request).await
     }
@@ -2020,8 +2032,9 @@ fn observe_turn_boundary(event: &Value, text: &str, saw_user_echo: &mut bool) ->
 /// store-free so the caller (not the fold) owns every side effect — the native
 /// session id is committed only after an accepted attempt, and every flush happens there
 /// too, which is what lets the fold run against a bare `TurnCtx::test_stub()` in
-/// the fixture tests.
-#[derive(Default)]
+/// the fixture tests. A checkpoint saves it, so its fields only grow.
+#[derive(Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 struct TurnState {
     /// Whether this child was spawned with the `orx mcp` bridge active. With the
     /// bridge on, ExitPlanMode / AskUserQuestion come from the bridge (held,
@@ -2043,7 +2056,8 @@ struct TurnState {
     /// Any real output or tool activity makes transparent resubmission unsafe.
     had_activity: bool,
     /// The last non-empty assistant text block — the plan, if the model wrote
-    /// one as plain text.
+    /// one as plain text. A resumed turn reads it back from the transcript.
+    #[serde(skip)]
     last_text: String,
     /// The provisional native session id from the latest `system/init` or
     /// `result`. An auth-failed attempt never commits it to the store.
@@ -2080,6 +2094,8 @@ struct TurnState {
     saw_background_task: bool,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PendingTask {
     tool_use_id: Option<String>,
 }
@@ -2847,12 +2863,61 @@ const FIRST_EVENT_TIMEOUT: Duration = Duration::from_secs(120);
 /// by the CLI, so it arrives within milliseconds when it exists at all.
 const BACKGROUND_RESUME_GRACE: Duration = Duration::from_secs(3);
 
+/// How far a Claude turn has got, saved with each checkpoint for a successor to go on from.
+/// Stored with the turn, so its fields only grow.
+#[derive(Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct Progress {
+    turn: TurnState,
+    saw_user_echo: bool,
+    saw_event: bool,
+    folds_before_echo: bool,
+    /// The prompt, until Claude echoes it back.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt: Option<String>,
+    /// The turn's result is applied; only a segment already under way can extend it.
+    finishing: bool,
+}
+
+/// Commits the transcript with a checkpoint at `applied`.
+fn checkpoint(
+    ctx: &mut TurnCtx,
+    keeper: &crate::keep::KeptHandle,
+    applied: u64,
+    progress: &Progress,
+) {
+    if let Err(error) = ctx.flush_at(keeper, applied, progress) {
+        eprintln!("orx up: could not save turn {}: {error:#}", ctx.turn_id);
+    }
+}
+
 async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u64)> {
+    let resume = ctx.resume.take();
     let resumed_alone = ctx.continuation;
     let forking = spec.fork_at.is_some();
-    let (route, mut rx) = loop {
-        if resumed_alone {
-            break ctx
+    let (route, mut rx, progress) = match resume {
+        Some(resume) => {
+            let mut progress: Progress = serde_json::from_value(resume.state).map_err(|error| {
+                anyhow!("Claude Code's checkpoint for this turn is unreadable: {error}")
+            })?;
+            progress.turn.last_text = ctx
+                .assistant
+                .parts
+                .iter()
+                .rev()
+                .filter(|part| part.kind == "text")
+                .find_map(|part| part.text.clone().filter(|text| !text.trim().is_empty()))
+                .unwrap_or_default();
+            let (route, rx) = ctx
+                .host
+                .claude
+                .resume_turn(&ctx.session_id, &resume.keep_id)
+                .await
+                .ok_or_else(|| anyhow!("Claude Code stopped before this turn could resume"))?;
+            (route, rx, Some(progress))
+        }
+        None if resumed_alone => {
+            let (route, rx) = ctx
                 .host
                 .claude
                 .take_continuation(&ctx.session_id)
@@ -2860,43 +2925,63 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
                 .ok_or_else(|| {
                     anyhow!("Claude Code stopped before what it wrote on its own could be recorded")
                 })?;
+            (route, rx, None)
         }
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let acquire = ctx.host.claude.acquire_turn(spec.clone(), tx);
-        let result = match ctx.orx_retry_remaining() {
-            Some(remaining) => tokio::time::timeout(remaining, acquire)
-                .await
-                .map_err(|_| anyhow!("Claude Code setup exceeded the ORX retry budget"))?,
-            None => acquire.await,
-        };
-        match result {
-            Ok(route) => {
-                ctx.clear_retry_status();
-                break (route, rx);
+        None => loop {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let acquire = ctx.host.claude.acquire_turn(spec.clone(), tx);
+            let result = match ctx.orx_retry_remaining() {
+                Some(remaining) => tokio::time::timeout(remaining, acquire)
+                    .await
+                    .map_err(|_| anyhow!("Claude Code setup exceeded the ORX retry budget"))?,
+                None => acquire.await,
+            };
+            match result {
+                Ok(route) => {
+                    ctx.clear_retry_status();
+                    break (route, rx, None);
+                }
+                Err(error) => {
+                    ctx.host.claude.kill_session(&ctx.session_id).await;
+                    let Some((retry_number, delay)) = ctx.schedule_orx_retry(None) else {
+                        ctx.mark_delivery(DeliveryState::NotSent);
+                        ctx.mark_terminal_failure("claude_setup", error.to_string());
+                        return Err(error);
+                    };
+                    ctx.show_retry_status(
+                        "orx",
+                        "Restarting Claude Code",
+                        retry_number as i64 + 1,
+                        Some(ORX_MAX_ATTEMPTS as i64),
+                        Some(crate::store::now_ms() + delay.as_millis() as i64),
+                    );
+                    tokio::time::sleep(delay).await;
+                }
             }
-            Err(error) => {
-                ctx.host.claude.kill_session(&ctx.session_id).await;
-                let Some((retry_number, delay)) = ctx.schedule_orx_retry(None) else {
-                    ctx.mark_delivery(DeliveryState::NotSent);
-                    ctx.mark_terminal_failure("claude_setup", error.to_string());
-                    return Err(error);
-                };
-                ctx.show_retry_status(
-                    "orx",
-                    "Restarting Claude Code",
-                    retry_number as i64 + 1,
-                    Some(ORX_MAX_ATTEMPTS as i64),
-                    Some(crate::store::now_ms() + delay.as_millis() as i64),
-                );
-                tokio::time::sleep(delay).await;
-            }
-        }
+        },
     };
     let client = route.client();
+    let keeper = client.keeper();
+    let mut applied = route.start();
     let auth_generation = client.auth_generation();
-    let bridge_active = client.config().bridge_active;
-    ctx.begin_native_usage_attempt(&format!("claude-{}:", ctx.attempt_count_for_usage()))?;
-    if !resumed_alone {
+    let resumed = progress.is_some();
+    let mut progress = progress.unwrap_or_else(|| Progress {
+        turn: TurnState {
+            bridge_active: client.config().bridge_active,
+            ..Default::default()
+        },
+        // A continuation has no prompt: everything the child writes is the turn.
+        saw_user_echo: resumed_alone,
+        // On a child that has served a turn, a segment it starts on its own before
+        // the prompt's echo, held or not, is folded in; its `result` ends nothing.
+        folds_before_echo: route.served() && !resumed_alone,
+        prompt: (!resumed_alone).then(|| ctx.text.clone()),
+        ..Default::default()
+    });
+    if !resumed {
+        ctx.begin_native_usage_attempt(&format!("claude-{}:", ctx.attempt_count_for_usage()))?;
+    }
+    if !resumed && !resumed_alone {
         ctx.persist_delivery(DeliveryState::Unknown)?;
         if let Err(e) = client.send_user_message(&ctx.text).await {
             ctx.host.claude.kill_session(&ctx.session_id).await;
@@ -2909,25 +2994,68 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
                 log.display()
             ));
         }
+        // A successor waits for the prompt's echo instead of sending it again.
+        checkpoint(ctx, keeper, applied, &progress);
     }
 
-    let mut state = TurnState {
-        bridge_active,
-        ..Default::default()
-    };
-    let mut saw_event = false;
-    // A continuation has no prompt: everything the child writes is the turn.
-    let mut saw_user_echo = resumed_alone;
-    // On a child that has served a turn, a segment it starts on its own before
-    // the prompt's echo, held or not, is folded in; its `result` ends nothing.
-    let folds_before_echo = route.served() && !resumed_alone;
     // Absolute, so steering can't push it back: a wedged child that the user
     // keeps typing at must still trip the detector.
-    let mut deadline = tokio::time::Instant::now() + FIRST_EVENT_TIMEOUT;
+    let mut deadline = tokio::time::Instant::now()
+        + if progress.saw_event {
+            super::TURN_WATCHDOG
+        } else {
+            FIRST_EVENT_TIMEOUT
+        };
     // An event received during the post-result grace wait below, replayed at
     // the top of the next iteration.
     let mut queued: Option<TurnEvent> = None;
     loop {
+        if progress.finishing {
+            // The turn goes on only into another segment's `init`: one
+            // already waiting (a second held segment) or, after background
+            // sub-agents, the report the CLI queues as a fresh segment
+            // right after the result. A quiet window means the report was
+            // already delivered in this segment; a failed turn has nothing
+            // to resume. Task updates before that `init` are applied, and
+            // a closed child just ends the finished turn. The route ends
+            // only once nothing more is queued for it, so a segment that
+            // starts as the turn ends is held for another turn, not lost.
+            let grace = progress.turn.saw_background_task && !progress.turn.turn_errored;
+            if grace {
+                checkpoint(ctx, keeper, applied, &progress);
+            }
+            let until = tokio::time::Instant::now()
+                + if grace {
+                    BACKGROUND_RESUME_GRACE
+                } else {
+                    Duration::ZERO
+                };
+            let next_segment = loop {
+                let event = match tokio::time::timeout_at(until, rx.recv()).await {
+                    Ok(event) => event,
+                    Err(_) => {
+                        // What the turn applied is durable before the reader takes over.
+                        checkpoint(ctx, keeper, applied, &progress);
+                        route.end(&mut rx)
+                    }
+                };
+                match event {
+                    Some(TurnEvent::Line(line, offset)) if starts_segment(&line) => {
+                        break Some(TurnEvent::Line(line, offset))
+                    }
+                    Some(TurnEvent::Line(line, offset)) => {
+                        apply_event(ctx, &mut progress.turn, &line);
+                        applied = offset;
+                    }
+                    _ => break None,
+                }
+            };
+            let Some(init) = next_segment else {
+                break;
+            };
+            progress.finishing = false;
+            queued = Some(init);
+        }
         // A continuation stashed by the grace wait replays without waiting.
         // Otherwise `steering` is borrowed out of `ctx` so the borrow ends with
         // the select — the steer arm's handler needs `&mut ctx`.
@@ -2945,14 +3073,17 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
         };
         let event = match waited {
             Waited::Flush => {
-                let _ = ctx.flush();
+                checkpoint(ctx, keeper, applied, &progress);
                 continue;
             }
             Waited::Steer(steer) => {
                 // A failed write means the child is gone and this turn is about
                 // to error out — park the text so it survives into the next one.
                 match client.send_user_message(&steer.text).await {
-                    Ok(()) => ctx.record_steer(&steer, true),
+                    Ok(()) => {
+                        ctx.record_steer(&steer, true);
+                        checkpoint(ctx, keeper, applied, &progress);
+                    }
                     Err(_) => {
                         if let Err(error) = ctx.host.park_steer(&ctx.session_id, steer) {
                             ctx.push_error(format!("Could not preserve steering message: {error}"));
@@ -2969,7 +3100,7 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
             // absolute deadline would spin this arm instead of waiting.
             Waited::Event(Err(_)) if ctx.host.has_pending_permission(&ctx.session_id) => {
                 deadline = tokio::time::Instant::now()
-                    + if saw_event {
+                    + if progress.saw_event {
                         super::TURN_WATCHDOG
                     } else {
                         FIRST_EVENT_TIMEOUT
@@ -2977,10 +3108,10 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
                 continue;
             }
             Waited::Event(Err(_)) => {
-                commit_attempt_session(ctx, &state);
+                commit_attempt_session(ctx, &progress.turn);
                 ctx.host.claude.kill_session(&ctx.session_id).await;
                 let _ = ctx.flush();
-                let (what, hint) = if saw_event {
+                let (what, hint) = if progress.saw_event {
                     (
                         format!(
                             "went quiet for {} minutes",
@@ -3005,82 +3136,47 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
             break;
         };
         match event {
-            TurnEvent::Line(value) => {
+            TurnEvent::Line(value, offset) => {
+                let prompt = progress.prompt.as_deref().unwrap_or_default();
                 let (belongs, accepted_now) =
-                    observe_turn_boundary(&value, &ctx.text, &mut saw_user_echo);
+                    observe_turn_boundary(&value, prompt, &mut progress.saw_user_echo);
                 if accepted_now {
+                    progress.prompt = None;
                     ctx.mark_delivery(DeliveryState::Accepted);
                 }
-                if accepted_now && folds_before_echo {
+                if accepted_now && progress.folds_before_echo {
                     // A folded segment's failure was its own; the prompt's result decides this turn.
-                    state.turn_errored = false;
-                    state.usage_limited = false;
-                    state.auth_failed = false;
+                    progress.turn.turn_errored = false;
+                    progress.turn.usage_limited = false;
+                    progress.turn.auth_failed = false;
                     ctx.terminal_error = None;
                 }
-                let folded = folds_before_echo && !accepted_now;
+                let folded = progress.folds_before_echo && !accepted_now;
+                progress.saw_event = true;
+                applied = offset;
                 if !belongs && !folded {
-                    saw_event = true;
                     if starts_segment(&value) {
                         if let Some(sid) = value.get("session_id").and_then(Value::as_str) {
-                            state.native_session_id = Some(sid.to_string());
+                            progress.turn.native_session_id = Some(sid.to_string());
                         }
                     }
                     continue;
                 }
-                saw_event = true;
-                let done = apply_event(ctx, &mut state, &value) && saw_user_echo;
-                if state.had_activity {
-                    commit_attempt_session(ctx, &state);
+                progress.finishing =
+                    apply_event(ctx, &mut progress.turn, &value) && progress.saw_user_echo;
+                if progress.turn.had_activity {
+                    commit_attempt_session(ctx, &progress.turn);
                 }
-                ctx.maybe_flush();
-                if done {
-                    // The turn goes on only into another segment's `init`: one
-                    // already waiting (a second held segment) or, after background
-                    // sub-agents, the report the CLI queues as a fresh segment
-                    // right after the result. A quiet window means the report was
-                    // already delivered in this segment; a failed turn has nothing
-                    // to resume. Task updates before that `init` are applied, and
-                    // a closed child just ends the finished turn. The route ends
-                    // only once nothing more is queued for it, so a segment that
-                    // starts as the turn ends is held for another turn, not lost.
-                    let grace = state.saw_background_task && !state.turn_errored;
-                    if grace {
-                        let _ = ctx.flush();
-                    }
-                    let until = tokio::time::Instant::now()
-                        + if grace {
-                            BACKGROUND_RESUME_GRACE
-                        } else {
-                            Duration::ZERO
-                        };
-                    let next_segment = loop {
-                        let event = match tokio::time::timeout_at(until, rx.recv()).await {
-                            Ok(event) => event,
-                            Err(_) => route.end(&mut rx),
-                        };
-                        match event {
-                            Some(TurnEvent::Line(line)) if starts_segment(&line) => {
-                                break Some(line)
-                            }
-                            Some(TurnEvent::Line(line)) => {
-                                apply_event(ctx, &mut state, &line);
-                            }
-                            _ => break None,
-                        }
-                    };
-                    let Some(init) = next_segment else {
-                        break;
-                    };
-                    queued = Some(TurnEvent::Line(init));
-                }
+                // A card answered before a restart is not posted again to set this anew.
+                progress.turn.saw_prompt |= ctx.host.bridge_prompted(&ctx.session_id);
+                ctx.maybe_flush_at(keeper, applied, &progress);
             }
             TurnEvent::Closed => {
-                commit_attempt_session(ctx, &state);
+                commit_attempt_session(ctx, &progress.turn);
                 ctx.host.claude.kill_session(&ctx.session_id).await;
                 let _ = ctx.flush();
                 let log = crate::store::data_dir().join("agent-claude.log");
-                if forking && !saw_user_echo {
+                if forking && !progress.saw_user_echo {
                     return Err(abandon_fork(ctx, &spec, &log));
                 }
                 return Err(anyhow!("claude exited mid-turn; see {}", log.display()));
@@ -3088,6 +3184,7 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
         }
     }
 
+    let state = progress.turn;
     if !state.saw_result {
         commit_attempt_session(ctx, &state);
         ctx.host.claude.kill_session(&ctx.session_id).await;
@@ -3098,7 +3195,7 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
         ));
     }
 
-    if state.auth_failed && !saw_user_echo {
+    if state.auth_failed && !progress.saw_user_echo {
         ctx.mark_delivery(DeliveryState::Rejected);
     }
     commit_attempt_session(ctx, &state);
@@ -3178,8 +3275,11 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     // Sweep zombie HELD cards (native_id) a crashed/restarted process left
     // unresolved: they can never be answered again, and once this turn makes the
     // session busy one could capture the composer's typed-text routing. End-turn
-    // cards are deliberately left alone — they resume via --resume.
-    let _ = ctx.host.resolve_stale_prompts(&ctx.session_id, true);
+    // cards are deliberately left alone — they resume via --resume. A resumed
+    // turn's held cards are still live: their requests are posted again.
+    if ctx.resume.is_none() {
+        let _ = ctx.host.resolve_stale_prompts(&ctx.session_id, true);
+    }
 
     let native_session = match ctx.native_session_id.clone() {
         Some(id) => tokio::task::spawn_blocking(move || native_store::claude_session(&id))
@@ -3198,7 +3298,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
         .clone()
         .filter(|_| native_session.is_some());
     let fork_at = ctx.native_fork_at.clone().filter(|_| resume.is_some());
-    if ctx.native_session_id.is_some() && resume.is_none() {
+    if ctx.native_session_id.is_some() && resume.is_none() && ctx.resume.is_none() {
         if let Some(recovery) = super::native_recovery_context(ctx, "Claude Code")? {
             ctx.text = format!("{recovery}\n\n{}", ctx.text);
         }
@@ -3376,6 +3476,156 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(5), run_attempt(&mut ctx, spec)).await;
         claude.shutdown().await;
         (ctx, attempt.expect("the turn ends"))
+    }
+
+    /// A turn on `chat` that runs and resumes in the store, as a durable one would.
+    #[cfg(unix)]
+    fn resumable_ctx(
+        chat: &Arc<crate::local::chat::ChatHost>,
+        session: &str,
+        text: &str,
+    ) -> TurnCtx {
+        let mut ctx = TurnCtx::test_stub();
+        ctx.host = chat.clone();
+        ctx.session_id = session.into();
+        ctx.turn_id = format!("turn-{session}");
+        ctx.assistant.id = format!("msg-{session}");
+        ctx.text = text.into();
+        ctx
+    }
+
+    #[cfg(unix)]
+    fn worker_spec(ctx: &TurnCtx, client: &crate::local::claude::ClaudeClient) -> SpawnSpec {
+        SpawnSpec {
+            chat: ctx.host.clone(),
+            session_id: ctx.session_id.clone(),
+            repo: PathBuf::new(),
+            playbook: PathBuf::new(),
+            resume: None,
+            fork_at: None,
+            config: client.config(),
+        }
+    }
+
+    /// Runs a turn on a fake Claude until `ready` holds for what the store has saved, then
+    /// types `then` to it and stops this server mid-turn; a new server adopts the child,
+    /// resumes the turn from its checkpoint and types `resume`.
+    #[cfg(unix)]
+    async fn turn_across_restart(
+        script: &str,
+        ready: impl Fn(&crate::store::StoredTurnCheckpoint, &[WirePart]) -> bool,
+        then: Option<&str>,
+        resume: &str,
+    ) -> (TurnCtx, Result<(TurnState, u64)>) {
+        use crate::local::claude::tests::{
+            adopt_in, chat_with, leave_for_successor, ready_host, scripted_worker, type_line,
+        };
+        let session = format!("resume-{}", uuid::Uuid::new_v4());
+        let host = ready_host();
+        let chat = chat_with(&host);
+        let worker = scripted_worker(&host, &session, script, Arc::downgrade(&chat)).await;
+        let mut ctx = resumable_ctx(&chat, &session, "the prompt");
+        let spec = worker_spec(&ctx, &worker);
+        let (turn_id, message_id) = (ctx.turn_id.clone(), ctx.assistant.id.clone());
+        let first = tokio::spawn(async move { run_attempt(&mut ctx, spec).await.map(|_| ()) });
+
+        let store = crate::store::Store::open().unwrap();
+        let saved = || {
+            let checkpoint = store.chat_turn_checkpoint(&turn_id).unwrap()?;
+            let parts: Vec<WirePart> = store
+                .get_chat_message(&message_id)
+                .unwrap()
+                .map(|message| serde_json::from_str(&message.parts_json).unwrap())
+                .unwrap_or_default();
+            Some((checkpoint, parts))
+        };
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !saved().is_some_and(|(checkpoint, parts)| ready(&checkpoint, &parts)) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the turn reaches its checkpoint");
+        if let Some(then) = then {
+            type_line(&worker, then).await;
+        }
+        first.abort();
+        let _ = first.await;
+        leave_for_successor(&worker);
+
+        let (checkpoint, parts) = saved().unwrap();
+        let successor = chat_with(&ready_host());
+        let adopted = adopt_in(&successor, &worker, Some(checkpoint.offset))
+            .await
+            .unwrap();
+        let mut ctx = resumable_ctx(&successor, &session, "the prompt, rendered anew");
+        ctx.assistant.parts = parts;
+        ctx.restore_checkpoint(&checkpoint).unwrap();
+        type_line(&adopted, resume).await;
+        let spec = worker_spec(&ctx, &adopted);
+        let attempt =
+            tokio::time::timeout(Duration::from_secs(10), run_attempt(&mut ctx, spec)).await;
+        successor.claude.shutdown().await;
+        (ctx, attempt.expect("the resumed turn ends"))
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_turn_resumes_mid_stream_on_the_next_server_without_losing_or_repeating_parts() {
+        let script = r#"while IFS= read -r line; do
+            case "$line" in
+            *'"type":"user"'*)
+                printf '%s\n' "$line" '{"type":"system","subtype":"init","session_id":"native"}' '{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}' ;;
+            STEP)
+                printf '%s\n' '{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"BETWEEN"}]}}' ;;
+            GO)
+                printf '%s\n' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"files"}]}}' '{"type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"DONE"}]}}' '{"type":"result","subtype":"success","session_id":"native"}' ;;
+            esac
+        done"#;
+        let (ctx, attempt) = turn_across_restart(
+            script,
+            |_, parts| parts.iter().any(|part| part.id == "t1"),
+            Some("STEP"),
+            "GO",
+        )
+        .await;
+        let (state, _) = attempt.unwrap();
+        assert!(state.saw_result);
+        assert_eq!(texts(&ctx), ["BETWEEN", "DONE"]);
+        let tools: Vec<_> = ctx
+            .assistant
+            .parts
+            .iter()
+            .filter(|part| part.kind == "tool")
+            .collect();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].state.as_ref().unwrap().status, "completed");
+        assert_eq!(ctx.native_session_id.as_deref(), Some("native"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_turn_checkpointed_before_its_echo_resumes_without_sending_the_prompt_again() {
+        // The prompt waits unread until GO, as a slow --resume start up would leave it.
+        let script = r#"while IFS= read -r line; do
+            case "$line" in
+            *'"type":"user"'*)
+                [ -n "$prompt" ] && reply="SENT TWICE" || reply="REPLY"
+                prompt="$line"
+                printf '%s\n' '{"type":"user","message":{"content":"replayed history"}}' ;;
+            GO) printf '%s\n' "$prompt" "{\"type\":\"assistant\",\"message\":{\"id\":\"m\",\"content\":[{\"type\":\"text\",\"text\":\"$reply\"}]}}" '{"type":"result","subtype":"success"}' ;;
+            esac
+        done"#;
+        let (ctx, attempt) = turn_across_restart(
+            script,
+            |checkpoint, _| checkpoint.state_json.contains("the prompt"),
+            None,
+            "GO",
+        )
+        .await;
+        attempt.unwrap();
+        assert_eq!(texts(&ctx), ["REPLY"]);
+        assert_eq!(ctx.delivery_state(), DeliveryState::Accepted);
     }
 
     fn texts(ctx: &TurnCtx) -> Vec<&str> {

@@ -261,9 +261,6 @@ fn tool_repeat(params: &Value) -> Repeat {
     }
 }
 
-/// The longest a call waits for `orx up` to come back, past any restart.
-const RESTART_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
-
 /// POST one request to `orx up` and return its JSON body; an error status
 /// carries the server's `error` text. A server that is restarting is waited
 /// out, as `repeat` allows.
@@ -294,10 +291,10 @@ async fn relay(http: &reqwest::Client, url: &str, body: Value, repeat: Repeat) -
         if repeat == Repeat::Never {
             return Err(failure);
         }
-        if waited >= RESTART_WAIT {
+        if waited >= crate::commands::remote_host::RELAUNCH_WAIT {
             return Err(anyhow!(
                 "orx up did not answer for {} seconds: {failure}",
-                RESTART_WAIT.as_secs()
+                crate::commands::remote_host::RELAUNCH_WAIT.as_secs()
             ));
         }
         tokio::time::sleep(backoff).await;
@@ -847,7 +844,8 @@ mod relay_tests {
         let started = std::time::Instant::now();
         let http = crate::net::loopback_client().build().unwrap();
         assert!(relay(&http, &url, json!({}), Repeat::Never).await.is_err());
-        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        // Windows takes about two seconds to give up on a refused connection.
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
     }
 
     #[test]

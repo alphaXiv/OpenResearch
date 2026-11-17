@@ -22,7 +22,7 @@ orx up N+1 ─┴─ attachment (one) ──────  holds stdio / PTY / Co
 ```
 
 - **Kept:** resident agents and OpenCode servers, per-turn agents, the commands orx runs for ACP agents, and project terminals.
-- **Not kept:** probes, catalog reads, sign-in servers and the terminals of setup and sign-in flows. They are short and stay blocking work for a restart.
+- **Not kept:** one-shots (titles, starter prompts, compaction summaries), probes, catalog reads, sign-in servers and the terminals of setup and sign-in flows. They are short and run as the server's own children. A restart waits up to five seconds for one-shots, then ends them, since they are cheap to ask again; the rest stay blocking work for a restart.
 - **The process.** On Unix the keeper is the extracted static `orx-host` (`orx-host keep`), so neither an update nor an unmounted AppImage removes its code; without one, `orx keep`. On Windows it is `orx keep`, which an update renames aside rather than replaces, inside a Job Object that ends its child when the keeper ends.
 - **A keeper never outlives its purpose.** Dropping a kept child without handing it off stops it, as `kill_on_drop` would (`src/keep.rs`). A keeper with no server attached for its orphan timeout ends its child, so a server that never comes back leaves nothing running for long. A dead keeper takes its child with it.
 - **Each keeper has a directory** under the data directory's `keep/`, owner-only: its lock, endpoint, exit receipt, log, and the server's `owner.json`, which names whose child it is and what a successor needs to adopt it.
@@ -37,14 +37,14 @@ Durable means reflected in the store or in `owner.json`: a transcript flush with
 
 **Each transcript flush commits the assistant message and the turn's checkpoint together:** the keeper, the offset of the last line applied, and the state the harness needs to go on from there. Committed apart, a successor would apply a line twice or skip one.
 
-When a server starts, or a turn's lease expires, every turn still running is resumed when its keeper is alive and its checkpoint is readable: the harness attaches, skips to the checkpoint's offset, restores its state and continues the same turn, without sending the prompt again. Anything else, a dead keeper, a missing or unreadable checkpoint, a harness that cannot resume, falls back to [recovery](agents.md#turns-survive-restarts): a failed turn with Continue or Retry. Nothing is replayed to the agent.
+When a server starts, every turn still running resumes if its keeper is alive and its checkpoint readable: the harness attaches, skips to the checkpoint's offset, restores its state and continues the same turn, without sending the prompt again. Only a server runs turns and a starting one holds the engine lock, so any lease it finds is a dead server's, and a crashed server's turns resume at once too. Anything else, a dead keeper, a missing or unreadable checkpoint, a harness that cannot resume, falls back to [recovery](agents.md#turns-survive-restarts): a failed turn with Continue or Retry. Nothing is replayed to the agent.
 
 - **A side effect is checkpointed after it happens.** An answer written to an agent (an approval, a file read, a terminal result) is followed by a checkpoint. A successor that resumes before it answers the request again, which an agent ignores; one that never answered would leave the agent waiting forever.
 - **Requests in flight survive.** An agent's request that the checkpoint holds unanswered is answered by the successor; an approval reappears as the same card. orx's own requests still awaiting an answer are in the checkpoint too, so their answers are recognized, and a successor numbers new requests where its predecessor's cannot collide.
 
 ## Idle agents are adopted
 
-A starting server reads each live keeper's `owner.json` and gives the child back to its harness host, which treats it like one it spawned: the next turn reuses it, settings changes still restart it, and the idle reaper still releases it. A child whose chat is gone, or whose record no harness understands, is stopped.
+A starting server reads each live keeper's `owner.json` and gives the child back to its harness host, which treats it like one it spawned: the next turn reuses it, settings changes still restart it, and the idle reaper still releases it. A child whose chat is gone, or whose record no harness understands, is stopped; a keeper whose directory, record or lock cannot be read is left running and reported, and a directory is only removed once its lock is confirmed released.
 
 **What an agent's environment names outlives a server.** The port, the server's bearer, the key `orx mcp` tokens derive from, and each child's approval token are kept per lineage of servers, not per process: a successor reads them back, and a fresh set is drawn only when no kept child survives to need the old one.
 

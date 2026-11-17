@@ -1301,6 +1301,17 @@ impl Store {
                 state_json TEXT NOT NULL,
                 updated_at INTEGER NOT NULL
             );
+            CREATE TRIGGER IF NOT EXISTS chat_turn_checkpoints_end
+            AFTER UPDATE OF state ON chat_turns
+            WHEN NEW.state NOT IN ('preparing', 'retrying', 'running')
+            BEGIN
+                DELETE FROM chat_turn_checkpoints WHERE turn_id = NEW.id;
+            END;
+            CREATE TRIGGER IF NOT EXISTS chat_turn_checkpoints_gone
+            AFTER DELETE ON chat_turns
+            BEGIN
+                DELETE FROM chat_turn_checkpoints WHERE turn_id = OLD.id;
+            END;
             CREATE TABLE IF NOT EXISTS data_dir_move_lease (
                 id           INTEGER PRIMARY KEY CHECK (id = 1),
                 claim_token  TEXT NOT NULL,
@@ -2454,14 +2465,10 @@ impl Store {
             .optional()?)
     }
 
-    /// Checkpoints only matter while their turn runs.
-    pub fn delete_finished_chat_turn_checkpoints(&self) -> Result<()> {
-        self.conn.execute(
-            "DELETE FROM chat_turn_checkpoints WHERE turn_id NOT IN (
-                 SELECT id FROM chat_turns WHERE state IN ('preparing', 'retrying', 'running')
-             )",
-            [],
-        )?;
+    /// Only a server runs turns, so a server holding the engine lock knows every lease it
+    /// finds belongs to one that died.
+    pub fn clear_chat_turn_leases(&self) -> Result<()> {
+        self.conn.execute("DELETE FROM chat_turn_leases", [])?;
         Ok(())
     }
 

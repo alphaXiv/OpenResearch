@@ -13,7 +13,7 @@ use super::{
     TurnCtx, TurnGuard, TurnState, TurnSubmission, WireMessage,
 };
 use crate::error::{anyhow, bail, Result};
-use crate::keep::{self, Owner};
+use crate::keep::{self, Liveness, Owner, Record};
 use crate::local::harness::{session_harness, Adoption, Harness};
 use crate::store::{Store, StoredChatTurn};
 
@@ -46,43 +46,49 @@ fn unfinished(turn: &StoredChatTurn) -> bool {
 /// `reachable` is false when this server lacks the port or bearer its agents' environments
 /// name, so none could call it.
 pub async fn adopt_kept_work(chat: &Arc<ChatHost>, reachable: bool) -> Result<()> {
+    // A crashed server's turns resume now, not once their leases run out.
+    Store::open()?.clear_chat_turn_leases()?;
     let mut kept: BTreeMap<(String, String), Kept> = BTreeMap::new();
     let mut strays = Vec::new();
-    for entry in keep::entries() {
-        match (entry.owner, entry.alive) {
+    for entry in keep::entries()? {
+        match (entry.owner, entry.liveness) {
             // The page reattaches its terminals.
-            (Some(Owner::Terminal { .. }), _) => {}
-            (_, false) => {
+            (Record::Known(Owner::Terminal { .. }), _) => {}
+            // Whatever could not be read was logged; it stays as it is.
+            (Record::Unreadable, _) | (_, Liveness::Unknown) => {}
+            (_, Liveness::Dead) => {
                 if let Err(error) = keep::remove(&entry.id) {
                     eprintln!("orx up: {error:#}");
                 }
             }
             (
-                Some(Owner::Agent {
+                Record::Known(Owner::Agent {
                     harness,
                     session_id,
                     state,
                 }),
-                true,
+                Liveness::Alive,
             ) => kept
                 .entry((harness, session_id))
                 .or_default()
                 .agents
                 .push((entry.id, state)),
             (
-                Some(Owner::AgentCommand {
+                Record::Known(Owner::AgentCommand {
                     harness,
                     session_id,
                     command_id,
                     state,
                 }),
-                true,
+                Liveness::Alive,
             ) => kept
                 .entry((harness, session_id))
                 .or_default()
                 .commands
                 .push((entry.id, command_id, state)),
-            (Some(Owner::Unknown) | None, true) => strays.push(entry.id),
+            (Record::Known(Owner::Unknown) | Record::Missing, Liveness::Alive) => {
+                strays.push(entry.id)
+            }
         }
     }
     let strays = strays.into_iter().map(|id| {
@@ -100,8 +106,7 @@ pub async fn adopt_kept_work(chat: &Arc<ChatHost>, reachable: bool) -> Result<()
     )
     .await;
 
-    resume_turns(chat, true).await?;
-    Store::open()?.delete_finished_chat_turn_checkpoints()
+    resume_turns(chat, true).await
 }
 
 async fn adopt(
@@ -270,7 +275,7 @@ pub(super) async fn resume_turns(chat: &Arc<ChatHost>, startup: bool) -> Result<
         .collect();
     let mut claimed = Vec::new();
     for (session_id, resume) in pending {
-        // Refused while a predecessor's lease is live: a crashed one's runs out its TTL first.
+        // Refused while another claim is live, which past startup is a turn this server runs.
         let Some(guard) = TurnGuard::claim(chat, &session_id, None).await else {
             continue;
         };
@@ -355,12 +360,24 @@ async fn stop(id: String, reason: String) {
     }
 }
 
-/// Stops every live kept child whose owner `which` selects (`None` for an unreadable record):
-/// what a quit or a data-directory move leaves running once the harnesses stopped theirs.
+/// Stops every live kept child whose owner `which` selects (`None` for a missing record):
+/// what a quit or a data-directory move leaves running once the harnesses stopped theirs. A
+/// child whose record or liveness could not be read is left running.
 pub async fn stop_kept(which: impl Fn(Option<&Owner>) -> bool, because: &str) {
-    let stops = keep::entries()
+    let entries = match keep::entries() {
+        Ok(entries) => entries,
+        Err(error) => return eprintln!("orx up: leaving kept children running: {error:#}"),
+    };
+    let stops = entries
         .into_iter()
-        .filter(|entry| entry.alive && which(entry.owner.as_ref()))
+        .filter(|entry| {
+            entry.liveness == Liveness::Alive
+                && match &entry.owner {
+                    Record::Known(owner) => which(Some(owner)),
+                    Record::Missing => which(None),
+                    Record::Unreadable => false,
+                }
+        })
         .map(|entry| stop(entry.id, format!("child left running when {because}")));
     futures::future::join_all(stops).await;
 }
@@ -375,8 +392,14 @@ pub(super) struct Survivors {
 impl Survivors {
     pub(super) fn now() -> Self {
         let mut keepers: HashMap<String, HashSet<String>> = HashMap::new();
-        for entry in keep::entries() {
-            if let (true, Some(Owner::Agent { session_id, .. })) = (entry.alive, entry.owner) {
+        let entries = keep::entries().unwrap_or_else(|error| {
+            eprintln!("orx up: no kept child counts as surviving a restart: {error:#}");
+            Vec::new()
+        });
+        for entry in entries {
+            if let (Liveness::Alive, Record::Known(Owner::Agent { session_id, .. })) =
+                (entry.liveness, entry.owner)
+            {
                 keepers.entry(session_id).or_default().insert(entry.id);
             }
         }

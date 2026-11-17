@@ -46,6 +46,8 @@ const LOSSLESS: Retain = Retain::Unacked { limit: 1 << 20 };
 
 /// Starts a keeper the way the server does and returns its endpoint.
 fn start(dir: &Path, spec: &Spec) -> Endpoint {
+    // On Windows the started process is the keeper itself and outlives this handle.
+    #[cfg_attr(windows, allow(clippy::zombie_processes))]
     let mut keeper = Command::new(BIN)
         .arg("keep")
         .arg(dir)
@@ -119,7 +121,10 @@ impl Link {
         let mut output = Vec::new();
         loop {
             let (frame, body) = wire::read_frame(&mut self.stream).unwrap_or_else(|error| {
-                panic!("{error}; output so far: {:?}", String::from_utf8_lossy(&output))
+                panic!(
+                    "{error}; output so far: {:?}",
+                    String::from_utf8_lossy(&output)
+                )
             });
             match frame {
                 kind::OUTPUT => {
@@ -127,8 +132,10 @@ impl Link {
                     assert_eq!(offset, self.position, "output must be contiguous");
                     self.position += bytes.len() as u64;
                     output.extend_from_slice(bytes);
-                    // Answer where the cursor is, as a terminal does; ConPTY waits for it.
-                    if contains(bytes, "\x1b[6n") {
+                    // Answer where the cursor is, as a terminal does; ConPTY waits for it. A
+                    // query before `next` is replay the keeper answered while none was attached,
+                    // and a second answer reaches cmd.exe as F3.
+                    if offset >= self.welcome.next && contains(bytes, "\x1b[6n") {
                         self.input(b"\x1b[1;1R");
                     }
                     if done(&output) {
@@ -192,6 +199,8 @@ fn a_reattached_server_gets_everything_since_its_last_ack_without_gaps() {
     let (seen, _) = first.read_until(|output| output.len() >= 200);
     let acked = 100;
     first.ack(acked);
+    // Windows resets a socket closed with unread data, which can discard a frame just sent.
+    std::thread::sleep(Duration::from_millis(100));
     drop(first);
 
     // The child keeps writing while no server is attached.
@@ -345,10 +354,63 @@ fn a_terminal_runs_a_shell() {
     spec.args = vec![];
     let endpoint = start(&dir, &spec);
     let mut link = Link::attach(&endpoint, 0);
-    link.input(b"echo marker-%PROCESSOR_ARCHITECTURE%\r\n");
-    // The expanded line, not the echoed command.
-    link.read_until(|output| contains(output, "\nmarker-") && !contains(output, "\nmarker-%"));
-    link.input(b"exit 3\r\n");
+    // Enter is a carriage return, as a terminal sends it.
+    link.input(b"echo marker-%PROCESSOR_ARCHITECTURE%\r");
+    // The expanded line, not the echoed command; ConPTY may put escapes anywhere around it.
+    link.read_until(|output| {
+        String::from_utf8_lossy(output)
+            .match_indices("marker-")
+            .any(|(at, found)| !output[at + found.len()..].starts_with(b"%"))
+    });
+    link.input(b"exit 3\r");
     let (_, exit) = link.read_exit();
     assert_eq!(exit.code, Some(3));
+}
+
+#[test]
+fn merged_output_keeps_the_order_the_child_wrote() {
+    let dir = scratch();
+    let endpoint = start(&dir, &spec("both", Stdio::Merged, LOSSLESS, 60));
+    let mut link = Link::attach(&endpoint, 0);
+    let (output, exit) = link.read_exit();
+    assert_eq!(exit.code, Some(0));
+    assert!(!exit.unfinished_output);
+    let text = String::from_utf8_lossy(&output).replace("\r\n", "\n");
+    assert_eq!(text, "out 1\nerr 1\nout 2\nerr 2\n");
+    link.control(&Control::Stop);
+}
+
+#[test]
+fn an_exit_whose_output_never_ended_says_so() {
+    let dir = scratch();
+    let endpoint = start(&dir, &spec("linger", pipes(), LOSSLESS, 60));
+    let mut link = Link::attach(&endpoint, 0);
+    let started = Instant::now();
+    let (_, exit) = link.read_exit();
+    assert_eq!(exit.code, Some(0));
+    assert!(exit.unfinished_output);
+    assert!(started.elapsed() < Duration::from_secs(4));
+    link.control(&Control::Stop);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_stop_reaches_descendants_outside_the_childs_group() {
+    let dir = scratch();
+    let endpoint = start(&dir, &spec("detach", pipes(), LOSSLESS, 60));
+    let mut link = Link::attach(&endpoint, 0);
+    let (output, _) = link.read_until(|output| output.ends_with(b"\n"));
+    let grandchild: i32 = String::from_utf8_lossy(&output).trim().parse().unwrap();
+    let alive = |pid: i32| unsafe { libc::kill(pid, 0) } == 0;
+    assert!(alive(grandchild));
+
+    link.control(&Control::Stop);
+    let (_, exit) = link.read_exit();
+    assert_eq!(exit.reason.as_deref(), Some("stopped"));
+    // Reaped by init once killed; a zombie answers kill(0) until then.
+    wait_for("the detached descendant to die", || {
+        !alive(grandchild)
+            || std::fs::read_to_string(format!("/proc/{grandchild}/stat"))
+                .is_ok_and(|stat| stat.contains(") Z "))
+    });
 }

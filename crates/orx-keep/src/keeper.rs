@@ -243,6 +243,7 @@ fn serve(dir: &Path, spec: Spec, started: Started) -> io::Result<()> {
                 if state.eof || now.duration_since(*at) >= EOF_GRACE {
                     let mut exit = exit.clone();
                     exit.reason = state.killed.map(str::to_string);
+                    exit.unfinished_output = !state.eof;
                     if let Err(error) = publish(&dir.join(wire::EXIT_FILE), &wire::json(&exit)) {
                         eprintln!("orx keep: could not record the exit: {error}");
                     }
@@ -350,8 +351,10 @@ fn attach(shared: &Arc<Shared>, mut stream: TcpStream) {
     let (Ok(writer), Ok(registered)) = (stream.try_clone(), stream.try_clone()) else {
         return;
     };
-    let generation = {
+    // Taken with the switch, so every cursor query before `next` has been answered.
+    let (generation, welcome) = {
         let mut state = shared.lock();
+        shared.answer_cursor_query(&mut state);
         state.generations += 1;
         if let Some(previous) = state.stream.replace(registered) {
             let _ = previous.shutdown(Shutdown::Both);
@@ -359,10 +362,16 @@ fn attach(shared: &Arc<Shared>, mut stream: TcpStream) {
         state.attachment = state.generations;
         state.delivered = false;
         shared.changed.notify_all();
-        state.attachment
+        let welcome = Welcome {
+            protocol: wire::PROTOCOL,
+            child_pid: shared.child_pid,
+            start: hello.from.clamp(state.oldest, state.next()),
+            next: state.next(),
+        };
+        (state.attachment, welcome)
     };
     let sending = shared.clone();
-    std::thread::spawn(move || send(&sending, writer, generation, hello.from));
+    std::thread::spawn(move || send(&sending, writer, generation, welcome));
 
     while let Ok((frame, body)) = wire::read_frame(&mut stream) {
         if shared.lock().attachment != generation {
@@ -424,18 +433,8 @@ enum Next {
     Exit(Exit),
 }
 
-fn send(shared: &Shared, mut stream: TcpStream, generation: u64, from: u64) {
-    let (mut sent, welcome) = {
-        let state = shared.lock();
-        let start = from.clamp(state.oldest, state.next());
-        let welcome = Welcome {
-            protocol: wire::PROTOCOL,
-            child_pid: shared.child_pid,
-            start,
-            next: state.next(),
-        };
-        (start, welcome)
-    };
+fn send(shared: &Shared, mut stream: TcpStream, generation: u64, welcome: Welcome) {
+    let mut sent = welcome.start;
     if wire::write_frame(&mut stream, kind::WELCOME, &wire::json(&welcome)).is_err() {
         return;
     }

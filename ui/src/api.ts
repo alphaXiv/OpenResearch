@@ -749,6 +749,7 @@ export type RemoteSessionStatus =
   | "needsUpdate"
   | "applying"
   | "connected"
+  | "restarting"
   | "reconnecting"
   | "disconnected";
 
@@ -3076,6 +3077,9 @@ export function createApi(
   const getChatSession = (sessionId: string) =>
     get<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}`).then((r) => r.session);
 
+  const closeProjectTerminal = (projectId: string, terminalId: string) =>
+    writeResponse(`/api/projects/${encodeURIComponent(projectId)}/terminals/${encodeURIComponent(terminalId)}`, { method: "DELETE" })
+      .then((r) => json<{ ok: boolean }>(r));
   const deleteChatSession = (sessionId: string) =>
     writeResponse(`/api/chat/sessions/${sessionId}`, { method: "DELETE" }).then((r) =>
       json<{ ok: boolean }>(r).then((result) => { removeSession(sessionId); return result; }),
@@ -3410,6 +3414,7 @@ export function createApi(
     createChatSession,
     getChatSession,
     deleteChatSession,
+    closeProjectTerminal,
     patchChatSession,
     citedMessage,
     openSideChat,

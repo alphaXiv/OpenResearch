@@ -28,7 +28,10 @@ use crate::local::chat::ChatHost;
 use crate::store::Store;
 use crate::{RemoteHostArgs, RemoteHostCommand};
 
-pub(crate) const CONTROL_PROTOCOL: u32 = 1;
+pub(crate) const CONTROL_PROTOCOL: u32 = 2;
+static RESTART_BINARY: Mutex<Option<PathBuf>> = Mutex::new(None);
+pub(crate) static RESTART: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
 pub(crate) const HOST_MARKER: &str = "ORX_REMOTE_HOST=";
 pub(crate) const ATTACHED_MARKER: &str = "ORX_REMOTE_ATTACHED=1";
 
@@ -41,6 +44,8 @@ const MAX_CONTROL_LINE: usize = 64 * 1024;
 #[serde(rename_all = "camelCase")]
 pub(crate) struct HostDescriptor {
     pub instance_id: String,
+    #[serde(default)]
+    pub restarting_until: Option<u64>,
     pub hostname: String,
     pub port: u16,
     pub version: String,
@@ -72,6 +77,10 @@ pub(crate) struct StopRequest {
 #[serde(tag = "op", rename_all = "camelCase")]
 enum ControlRequest {
     Status,
+    Restart {
+        expected_instance_id: String,
+        binary: PathBuf,
+    },
     Attach {
         expected_instance_id: String,
         token: String,
@@ -231,9 +240,9 @@ impl ControlServer {
         task.abort();
         let _ = task.await;
         let _ = std::fs::remove_file(socket_path);
-        if read_descriptor(&descriptor_path)
-            .is_some_and(|descriptor| descriptor.instance_id == instance_id)
-        {
+        if read_descriptor(&descriptor_path).is_some_and(|descriptor| {
+            descriptor.instance_id == instance_id && !crate::keep::handing_off()
+        }) {
             let _ = std::fs::remove_file(descriptor_path);
         }
     }
@@ -332,8 +341,45 @@ async fn handle_control(
         .map_err(|_| anyhow!("Timed out reading a remote-host control message."))??;
     let request: ControlRequest = serde_json::from_str(&line)?;
     match request {
+        ControlRequest::Restart {
+            expected_instance_id,
+            binary,
+        } => {
+            let _control = control_gate.lock().await;
+            if let Err(error) = verify_expected(&descriptor, Some(&expected_instance_id)) {
+                write_response(
+                    reader.get_mut(),
+                    &ControlResponse::Error {
+                        error: error.to_string(),
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
+            if stopping.load(Ordering::SeqCst) {
+                write_response(
+                    reader.get_mut(),
+                    &ControlResponse::Error {
+                        error: "The remote OpenResearch host is already stopping.".into(),
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
+            let mut descriptor = descriptor;
+            descriptor.restarting_until = Some(unix_seconds() + START_TIMEOUT.as_secs());
+            write_descriptor(&descriptor_path(&canonical_data_dir()?)?, &descriptor)?;
+            *RESTART_BINARY.lock().unwrap() = Some(binary);
+            stopping.store(true, Ordering::SeqCst);
+            let response =
+                write_response(reader.get_mut(), &ControlResponse::Stopping { descriptor }).await;
+            RESTART.notify_one();
+            response?;
+        }
         ControlRequest::Status => {
             if stopping.load(Ordering::SeqCst) {
+                let descriptor = read_descriptor(&descriptor_path(&canonical_data_dir()?)?)
+                    .unwrap_or(descriptor);
                 write_response(reader.get_mut(), &ControlResponse::Stopping { descriptor }).await?;
                 return Ok(());
             }
@@ -473,6 +519,7 @@ pub(crate) async fn run(args: RemoteHostArgs) -> Result<()> {
     match args.command {
         RemoteHostCommand::Ensure { expected_instance } => ensure(expected_instance).await,
         RemoteHostCommand::Status => print_status().await,
+        RemoteHostCommand::Restart { expected_instance } => restart(&expected_instance).await,
         RemoteHostCommand::Attach { expected_instance } => attach(&expected_instance).await,
         RemoteHostCommand::Stop => stop().await,
     }
@@ -481,6 +528,24 @@ pub(crate) async fn run(args: RemoteHostArgs) -> Result<()> {
 #[cfg(unix)]
 async fn ensure(expected_instance: Option<String>) -> Result<()> {
     let data_dir = canonical_data_dir()?;
+    let deadline = tokio::time::Instant::now() + START_TIMEOUT;
+    loop {
+        let descriptor = read_descriptor(&descriptor_path(&data_dir)?);
+        if !descriptor.as_ref().is_some_and(|descriptor| {
+            descriptor
+                .restarting_until
+                .is_some_and(|until| until > unix_seconds())
+        }) {
+            break;
+        }
+        verify_expected(descriptor.as_ref().unwrap(), expected_instance.as_deref())?;
+        if tokio::time::Instant::now() >= deadline {
+            return Err(anyhow!(
+                "Timed out waiting for the OpenResearch host to restart."
+            ));
+        }
+        tokio::time::sleep(crate::config::paced(Duration::from_millis(100))).await;
+    }
     match live_descriptor(&data_dir).await {
         LiveHost::Running(descriptor) => {
             verify_expected(&descriptor, expected_instance.as_deref())?;
@@ -582,6 +647,62 @@ async fn attach(expected_instance: &str) -> Result<()> {
             _ => return Ok(()),
         }
     }
+}
+
+fn unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_secs()
+}
+
+#[cfg(unix)]
+async fn restart(expected_instance: &str) -> Result<()> {
+    let response = control_exchange(
+        &canonical_data_dir()?,
+        &ControlRequest::Restart {
+            expected_instance_id: expected_instance.into(),
+            binary: crate::paths::spawnable_exe()?,
+        },
+    )
+    .await?;
+    match response {
+        ControlResponse::Stopping { .. } => Ok(()),
+        ControlResponse::Error { error } => Err(anyhow!(error)),
+        _ => Err(anyhow!(
+            "The remote host refused to restart. Reconnect and try again."
+        )),
+    }
+}
+
+pub(crate) fn instance_id() -> String {
+    let instance =
+        std::env::var("ORX_REMOTE_INSTANCE").unwrap_or_else(|_| uuid::Uuid::new_v4().to_string());
+    std::env::remove_var("ORX_REMOTE_INSTANCE");
+    instance
+}
+
+#[cfg(unix)]
+pub(crate) fn relaunch(instance: &str, port: u16) -> std::io::Error {
+    use std::os::unix::process::CommandExt as _;
+    let exe = RESTART_BINARY
+        .lock()
+        .unwrap()
+        .take()
+        .map_or_else(crate::paths::spawnable_exe, Ok);
+    let Ok(exe) = exe else {
+        return std::io::Error::other("could not resolve remote host executable");
+    };
+    crate::process::command(exe)
+        .args([
+            "up",
+            "--remote-host",
+            "--no-browser",
+            "--port",
+            &port.to_string(),
+        ])
+        .env("ORX_REMOTE_INSTANCE", instance)
+        .exec()
 }
 
 #[cfg(unix)]
@@ -1007,6 +1128,14 @@ fn control_socket_path(data_dir: &Path) -> Result<PathBuf> {
     runtime_path(data_dir, "sock")
 }
 
+/// The version the running server for `data_dir` announced, if one is published.
+pub(crate) fn served_version(data_dir: &Path) -> Option<String> {
+    let descriptor: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(runtime_path(data_dir, "server.json").ok()?).ok()?)
+            .ok()?;
+    descriptor["version"].as_str().map(str::to_string)
+}
+
 fn runtime_path(data_dir: &Path, extension: &str) -> Result<PathBuf> {
     #[cfg(unix)]
     let root = PathBuf::from(format!("/tmp/orx-{}", effective_uid()));
@@ -1188,6 +1317,7 @@ mod tests {
     fn descriptor() -> HostDescriptor {
         HostDescriptor {
             instance_id: "instance".into(),
+            restarting_until: None,
             hostname: "box".into(),
             port: 1,
             version: "0".into(),
@@ -1383,6 +1513,130 @@ mod tests {
         ));
         host.await.unwrap().unwrap();
         assert_eq!(auth.attachment_count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restart_keeps_identity_and_dead_hosts_still_require_a_new_start() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let data = canonical_data_dir().unwrap();
+        let _lock = DashboardLock::acquire(&data).unwrap();
+        let (stop, _) = watch::channel(false);
+        let old = start_control_server(
+            descriptor(),
+            RemoteAuth::new("callback"),
+            chat(),
+            Default::default(),
+            stop.clone(),
+        )
+        .await
+        .unwrap();
+        let refused = control_exchange(
+            &data,
+            &ControlRequest::Restart {
+                expected_instance_id: "different-instance".into(),
+                binary: PathBuf::from("/wrong/orx"),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(refused, ControlResponse::Error { .. }));
+        assert_eq!(
+            read_descriptor(&descriptor_path(&data).unwrap())
+                .unwrap()
+                .restarting_until,
+            None
+        );
+        assert!(RESTART_BINARY.lock().unwrap().is_none());
+        let response = control_exchange(
+            &data,
+            &ControlRequest::Restart {
+                expected_instance_id: "instance".into(),
+                binary: PathBuf::from("/new/orx"),
+            },
+        )
+        .await
+        .unwrap();
+        let ControlResponse::Stopping {
+            descriptor: restarting,
+        } = response
+        else {
+            panic!("restart refused")
+        };
+        assert_eq!(restarting.instance_id, "instance");
+        assert!(restarting.restarting_until.unwrap() > unix_seconds());
+        assert_eq!(
+            read_descriptor(&descriptor_path(&data).unwrap()).unwrap(),
+            restarting
+        );
+        RESTART.notified().await;
+        assert_eq!(
+            RESTART_BINARY.lock().unwrap().as_deref(),
+            Some(Path::new("/new/orx"))
+        );
+        crate::keep::hand_off();
+        old.shutdown().await;
+        assert_eq!(
+            read_descriptor(&descriptor_path(&data).unwrap()).unwrap(),
+            restarting
+        );
+        let successor = tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            start_control_server(
+                descriptor(),
+                RemoteAuth::new("callback"),
+                chat(),
+                Default::default(),
+                stop,
+            )
+            .await
+            .unwrap()
+        });
+        ensure(Some("instance".into())).await.unwrap();
+        let successor = successor.await.unwrap();
+        let ControlResponse::Status {
+            descriptor: resumed,
+            ..
+        } = control_exchange(&data, &ControlRequest::Status)
+            .await
+            .unwrap()
+        else {
+            panic!("not running")
+        };
+        assert_eq!(resumed.instance_id, restarting.instance_id);
+        assert_eq!(resumed.restarting_until, None);
+        let mut attachment = BufReader::new(
+            UnixStream::connect(control_socket_path(&data).unwrap())
+                .await
+                .unwrap(),
+        );
+        write_request(
+            attachment.get_mut(),
+            &ControlRequest::Attach {
+                expected_instance_id: resumed.instance_id.clone(),
+                token: "a-fresh-attachment-token-for-the-successor".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let response: ControlResponse =
+            serde_json::from_str(&read_bounded_line(&mut attachment).await.unwrap()).unwrap();
+        assert!(
+            matches!(response, ControlResponse::Attached { descriptor } if descriptor.instance_id == resumed.instance_id)
+        );
+        drop(attachment);
+        successor.shutdown().await;
+        let mut expired = resumed;
+        expired.restarting_until = Some(0);
+        write_descriptor(&descriptor_path(&data).unwrap(), &expired).unwrap();
+        drop(_lock);
+        let error = ensure(Some("instance".into()))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no longer running"), "{error}");
     }
 
     #[test]

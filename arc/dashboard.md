@@ -7,7 +7,7 @@
 `orx up` (`src/commands/up.rs`, `src/commands/up/`) binds `127.0.0.1` on a fixed default port, one server per data directory ([storage](storage.md)). It serves the built app, a JSON API under `/api` and an event stream, and owns the work that needs a resident process:
 
 - the chat host: agents, turns, queues, pending approvals ([agents](agents.md));
-- terminals, each a PTY over a websocket;
+- project terminals, each a shell in a keeper that a reload or restart returns to ([restarts](restarts.md#terminals)), and the short terminals of setup and sign-in flows, each a PTY over a websocket;
 - file serving for the editor, previews and artifacts;
 - the run engine ([experiments](experiments.md));
 - remote workspace gateways ([remote](remote.md));

@@ -56,6 +56,7 @@ mod harness_setup;
 mod model_feed;
 mod network;
 mod search;
+mod terminals;
 mod usage;
 use compute_settings::*;
 
@@ -113,7 +114,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
         let err = updates::relaunch(port);
         return Err(anyhow!("orx up: could not restart: {err}"));
     }
-    let inherited = Lineage::inherited();
+    let inherited = Lineage::inherited()?;
     // The desktop app chose its port already, preferring this one.
     let recorded = inherited
         .as_ref()
@@ -200,7 +201,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     )?);
     api_v2::install(api.clone())?;
 
-    let remote_instance_id = persistent_host.then(|| uuid::Uuid::new_v4().to_string());
+    let remote_instance_id = persistent_host.then(crate::commands::remote_host::instance_id);
     let state = AppState {
         agent: agent.clone(),
         chat: chat.clone(),
@@ -222,7 +223,12 @@ pub async fn run(args: UpArgs) -> Result<()> {
         reopen: Arc::default(),
         trackio: Arc::default(),
         opencode_signins: Arc::default(),
+        terminals: Arc::default(),
     };
+    state.terminals.adopt(crate::keep::entries()?).await;
+    if let Err(error) = state.remote_sessions.restore().await {
+        eprintln!("orx up: {error:#}");
+    }
     // Plan-mode turns hand this port to the `orx mcp` permission bridge.
     state.chat.set_up_port(actual_port);
     // Before serving: agents' calls must find their chats and turns taken back.
@@ -336,6 +342,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
             crate::commands::remote_host::start_control_server(
                 HostDescriptor {
                     instance_id: remote_instance_id.clone().expect("persistent instance id"),
+                    restarting_until: None,
                     hostname: crate::commands::remote_host::hostname(),
                     port: actual_port,
                     version: env!("CARGO_PKG_VERSION").into(),
@@ -386,6 +393,19 @@ pub async fn run(args: UpArgs) -> Result<()> {
     // over SSH by `orx up --remote`, closing that tunnel (the launcher's Ctrl-C)
     // delivers SIGHUP here as the channel tears down — without handling it the
     // remote server would leak, staying bound to its port after the tunnel dies.
+    if persistent_host {
+        let state = state.clone();
+        tokio::spawn(async move {
+            crate::commands::remote_host::RESTART.notified().await;
+            loop {
+                if begin_restart(&state, 0, true).await.is_ok() {
+                    state.restart.notify_one();
+                    return;
+                }
+                tokio::time::sleep(crate::config::paced(Duration::from_millis(100))).await;
+            }
+        });
+    }
     let restart = state.restart.clone();
     let mut restarting = false;
     // A development rebuild hands off like an update, then exits for the next build to start.
@@ -417,6 +437,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     // Before agents go down: a turn their shutdown ends must not start the next queued message.
     state.chat.stop_admitting();
     if hand_off {
+        local::harness::ONE_SHOTS.finish().await;
         state.chat.hand_off().await;
     } else if explicit_stop {
         state.chat.interrupt_all().await;
@@ -425,6 +446,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     }
     state.opencode_signins.shutdown().await;
     state.remote_sessions.shutdown().await;
+    state.terminals.shutdown().await;
     if !hand_off {
         agent.shutdown().await;
         codex.shutdown().await;
@@ -451,6 +473,11 @@ pub async fn run(args: UpArgs) -> Result<()> {
             eprintln!(
                 "orx up: could not withdraw the server descriptor before restarting: {error:#}"
             );
+        }
+        #[cfg(unix)]
+        if let Some(instance) = remote_instance_id.as_deref() {
+            let error = crate::commands::remote_host::relaunch(instance, actual_port);
+            return Err(anyhow!("Could not restart the remote host: {error}"));
         }
         if !state.reopen.load(Ordering::SeqCst) && !updates::updated_exe_on_disk().await {
             eprintln!("orx up: installing the update before restarting");
@@ -499,32 +526,33 @@ impl Lineage {
         }
     }
 
-    /// The lineage the kept agents still running were started under, if any runs.
-    fn inherited() -> Option<Self> {
-        let survives = crate::keep::entries().into_iter().any(|entry| {
-            entry.alive
+    /// The lineage the kept agents still running were started under, if any runs. A keeper
+    /// that might be an agent still running counts: drawing a fresh lineage would cut it off.
+    fn inherited() -> Result<Option<Self>> {
+        use crate::keep::{Liveness, Owner, Record};
+        let survives = crate::keep::entries()?.into_iter().any(|entry| {
+            entry.liveness != Liveness::Dead
                 && matches!(
                     entry.owner,
-                    Some(
-                        crate::keep::Owner::Agent { .. } | crate::keep::Owner::AgentCommand { .. }
-                    )
+                    Record::Known(Owner::Agent { .. } | Owner::AgentCommand { .. })
+                        | Record::Unreadable
                 )
         });
         if !survives {
-            return None;
+            return Ok(None);
         }
         let path = Self::path();
         let read = std::fs::read(&path)
             .map_err(|error| anyhow!("{error}"))
             .and_then(|bytes| serde_json::from_slice(&bytes).map_err(|error| anyhow!("{error}")));
         match read {
-            Ok(lineage) => Some(lineage),
+            Ok(lineage) => Ok(Some(lineage)),
             Err(error) => {
                 eprintln!(
                     "orx up: could not read {}, so the agents kept running cannot call this server: {error:#}",
                     path.display()
                 );
-                None
+                Ok(None)
             }
         }
     }
@@ -548,7 +576,12 @@ impl Lineage {
 /// The port kept agents call, for the desktop app to serve on while any survives.
 #[cfg(desktop_app)]
 pub(crate) fn kept_agents_port() -> Option<u16> {
-    Lineage::inherited().map(|lineage| lineage.port)
+    Lineage::inherited()
+        .unwrap_or_else(|error| {
+            eprintln!("orx up: {error:#}");
+            None
+        })
+        .map(|lineage| lineage.port)
 }
 
 /// The desktop app's quit. A stored permit covers a quit that lands before the
@@ -669,6 +702,7 @@ struct AppState {
     reopen: Arc<AtomicBool>,
     trackio: Arc<crate::local::trackio::LocalServer>,
     opencode_signins: Arc<local::opencode_signin::SignIns>,
+    terminals: Arc<terminals::Terminals>,
 }
 
 async fn project_publication_lock(
@@ -930,6 +964,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
             post(reveal_artifact_file),
         )
         .route("/api/projects/{id}/terminal", get(project_terminal))
+        .route(
+            "/api/projects/{id}/terminals/{terminal_id}",
+            axum::routing::delete(close_project_terminal),
+        )
         .route("/api/events", get(events))
         .route(
             "/api/settings/run-engine",
@@ -3072,6 +3110,10 @@ async fn delete_project_inner(state: AppState, id: String, query: DeleteProjectQ
                 .ok_or_else(|| bad_request("a chat session deletion is already in progress"))?,
         );
     }
+    state
+        .terminals
+        .close_where(|project, _| project == id)
+        .await;
     for session in &sessions {
         state.chat.clear_queue(&session.id)?;
         let _ = state.chat.interrupt(&session.id).await;
@@ -6289,10 +6331,23 @@ async fn move_data_dir(State(state): State<AppState>, Json(req): Json<DataDirReq
     }
 
     // A terminal's keeper lives in the data directory; moving it would cut the shell off.
-    let terminals = crate::keep::entries()
+    let entries = match crate::keep::entries() {
+        Ok(entries) => entries,
+        Err(error) => {
+            release_move_claim(&move_token);
+            release(&state);
+            return ApiError::from(error).into_response();
+        }
+    };
+    let terminals = entries
         .into_iter()
         .filter(|entry| {
-            entry.alive && matches!(entry.owner, Some(crate::keep::Owner::Terminal { .. }))
+            use crate::keep::{Liveness, Owner, Record};
+            entry.liveness != Liveness::Dead
+                && matches!(
+                    entry.owner,
+                    Record::Known(Owner::Terminal { .. }) | Record::Unreadable
+                )
         })
         .count();
     if terminals > 0 {
@@ -7368,15 +7423,12 @@ fn start_pty_with_env(
         command.env("PATH", path);
     }
     local::shell_env::export_to(|key, value| command.env(key, value));
-    for (key, value) in local::shell_env::host_gui_env() {
+    for (key, value) in terminal_env() {
         match value {
             Some(value) => command.env(key, value),
             None => command.env_remove(key),
         }
     }
-    command.env("TERM", "xterm-256color");
-    command.env_remove("NO_COLOR");
-    command.env_remove("FORCE_COLOR");
     if let Some(cwd) = cwd {
         command.cwd(cwd);
     }
@@ -7467,6 +7519,17 @@ fn start_pty_with_env(
         events: event_rx,
         kill: kill_tx,
     })
+}
+
+/// What a terminal's child sees beyond orx's own environment.
+fn terminal_env() -> Vec<(&'static str, Option<std::ffi::OsString>)> {
+    let mut env = local::shell_env::host_gui_env();
+    env.extend([
+        ("TERM", Some("xterm-256color".into())),
+        ("NO_COLOR", None),
+        ("FORCE_COLOR", None),
+    ]);
+    env
 }
 
 /// The dashboard's Connect: the engine logs in through its own connection, and each
@@ -7777,9 +7840,13 @@ async fn relay_pty(
 #[serde(rename_all = "camelCase")]
 struct ProjectTerminalReq {
     session_id: Option<String>,
+    /// The page's id for a terminal that outlives its socket; without one (an older page), the
+    /// shell ends with the socket.
+    terminal_id: Option<String>,
 }
 
 async fn project_terminal(
+    State(state): State<AppState>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
     Path(id): Path<String>,
@@ -7787,6 +7854,22 @@ async fn project_terminal(
 ) -> Response {
     if let Some(rejected) = reject_cross_origin(&headers) {
         return rejected;
+    }
+    if let Some(terminal_id) = req.terminal_id {
+        if !crate::workspace_state::valid_terminal_id(&terminal_id) {
+            return bad_request(format!("{terminal_id:?} is not a terminal id")).into_response();
+        }
+        let session_id = req
+            .session_id
+            .map(|session| session.trim().to_string())
+            .filter(|session| !session.is_empty());
+        return ws.on_upgrade(move |socket| async move {
+            let shell = interactive_shell();
+            state
+                .terminals
+                .serve(socket, id, session_id, terminal_id, shell)
+                .await
+        });
     }
     let active = Active::new();
     ws.on_upgrade(move |mut socket| async move {
@@ -7819,6 +7902,16 @@ async fn project_terminal(
             Err(error) => send_terminal_error(&mut socket, anyhow!(error)).await,
         }
     })
+}
+
+async fn close_project_terminal(
+    State(state): State<AppState>,
+    Path((project_id, terminal_id)): Path<(String, String)>,
+) -> ApiResult {
+    if !state.terminals.close(&project_id, &terminal_id).await {
+        return Err(not_found("terminal"));
+    }
+    Ok(Json(json!({ "ok": true })))
 }
 
 /// The session worktree or, without a session, the project clone.
@@ -10016,6 +10109,10 @@ async fn open_side_chat(State(state): State<AppState>, Path(id): Path<String>) -
 
 async fn delete_chat_session(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
     reject_if_moving(&state)?;
+    state
+        .terminals
+        .close_where(|_, session| session == Some(id.as_str()))
+        .await;
     // Detached so a canceled request cannot stop between the native purge and the row delete.
     let chat = state.chat.clone();
     tokio::spawn(async move { chat.delete_session(&id).await })
@@ -10827,7 +10924,13 @@ async fn bridge_permission(
 ) -> ApiResult {
     let decision = state
         .chat
-        .request_permission(&req.session_id, &req.token, &req.tool_name, req.tool_input)
+        .request_permission(
+            &req.session_id,
+            &req.token,
+            &req.tool_name,
+            req.tool_input,
+            req.tool_use_id.as_deref(),
+        )
         .await
         .map_err(bad_request)?;
     Ok(Json(serde_json::to_value(decision).map_err(bad_request)?))
@@ -10841,6 +10944,8 @@ struct BridgePermissionReq {
     tool_name: String,
     #[serde(default)]
     tool_input: Value,
+    #[serde(default)]
+    tool_use_id: Option<String>,
 }
 
 // --- agent ----------------------------------------------------------------
@@ -11283,7 +11388,7 @@ mod tests {
         tokio::runtime::Runtime::new().unwrap().block_on(async {
             let first = Lineage::fresh(4321);
             first.record().unwrap();
-            assert!(Lineage::inherited().is_none());
+            assert!(Lineage::inherited().unwrap().is_none());
             {
                 use std::os::unix::fs::PermissionsExt as _;
                 let mode = std::fs::metadata(Lineage::path())
@@ -11307,7 +11412,7 @@ mod tests {
             })
             .await
             .unwrap();
-            let inherited = Lineage::inherited().unwrap();
+            let inherited = Lineage::inherited().unwrap().unwrap();
             assert_eq!(
                 (inherited.token, inherited.agent_key, inherited.port),
                 (first.token, first.agent_key, 4321)
@@ -11315,18 +11420,18 @@ mod tests {
 
             kept.handle().stop(Duration::from_secs(10)).await.unwrap();
             let id = kept.handle().id().to_string();
-            let stopped = async {
-                while crate::keep::entries()
-                    .iter()
-                    .any(|entry| entry.id == id && entry.alive)
-                {
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-            };
+            let stopped =
+                async {
+                    while crate::keep::entries().unwrap().iter().any(|entry| {
+                        entry.id == id && entry.liveness == crate::keep::Liveness::Alive
+                    }) {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                };
             tokio::time::timeout(Duration::from_secs(10), stopped)
                 .await
                 .unwrap();
-            assert!(Lineage::inherited().is_none());
+            assert!(Lineage::inherited().unwrap().is_none());
         });
     }
 
@@ -12758,7 +12863,7 @@ mod tests {
         }
     }
 
-    fn test_state() -> AppState {
+    pub(super) fn test_state() -> AppState {
         let agent = Arc::new(AgentHost::new(None));
         let codex = Arc::new(local::codex::CodexHost::new());
         let claude = Arc::new(local::claude::ClaudeHost::new());
@@ -12784,6 +12889,7 @@ mod tests {
             reopen: Default::default(),
             trackio: Default::default(),
             opencode_signins: Arc::default(),
+            terminals: Arc::default(),
         }
     }
 

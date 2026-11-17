@@ -93,6 +93,34 @@ pub fn spawn(spec: &Spec) -> io::Result<Spawned> {
                 answers_cursor_queries: false,
             })
         }
+        Stdio::Merged => {
+            let (output, writer) = std::io::pipe()?;
+            command
+                .stdin(std::process::Stdio::piped())
+                .stdout(writer.try_clone()?)
+                .stderr(writer)
+                .process_group(0);
+            // SAFETY: only async-signal-safe calls between fork and exec.
+            unsafe {
+                command.pre_exec(move || child_setup(keeper, false));
+            }
+            let mut child = command.spawn()?;
+            // The pipe's write ends must close here, or reading never ends.
+            drop(command);
+            let pid = child.id();
+            let input = child.stdin.take().map(|stdin| Box::new(stdin) as _);
+            Ok(Spawned {
+                pid,
+                input,
+                output: Box::new(output),
+                process: Box::new(Group {
+                    pgid: pid,
+                    pty: None,
+                }),
+                wait: Box::new(move || exit_of(child.wait())),
+                answers_cursor_queries: false,
+            })
+        }
         Stdio::Pty { cols, rows } => {
             let (master, slave) = openpty(*cols, *rows)?;
             command
@@ -246,7 +274,51 @@ impl Process for Group {
             self.send(libc::SIGHUP);
             std::thread::sleep(Duration::from_millis(200));
         }
+        if let Ok(root) = libc::pid_t::try_from(self.pgid) {
+            kill_descendants(root);
+        }
         self.send(libc::SIGKILL);
+    }
+}
+
+/// Kills `root` and every process descending from it, including ones that moved to a session
+/// of their own. Each is stopped as it is found, so none forks away while the tree is read.
+fn kill_descendants(root: libc::pid_t) {
+    // SAFETY: the keeper's own child; stopping it holds its tree still.
+    if unsafe { libc::kill(root, libc::SIGSTOP) } != 0 {
+        return;
+    }
+    let mut tree = vec![root];
+    for _ in 0..16 {
+        let Ok(listing) = Command::new("ps").args(["-axo", "pid=,ppid="]).output() else {
+            eprintln!("orx keep: could not list processes to stop {root}'s descendants");
+            break;
+        };
+        let found: Vec<libc::pid_t> = String::from_utf8_lossy(&listing.stdout)
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split_whitespace();
+                let pid = fields.next()?.parse().ok()?;
+                let parent = fields.next()?.parse().ok()?;
+                (tree.contains(&parent) && !tree.contains(&pid)).then_some(pid)
+            })
+            .collect();
+        if found.is_empty() {
+            break;
+        }
+        for pid in found {
+            // SAFETY: a descendant observed while its parent was stopped.
+            unsafe {
+                libc::kill(pid, libc::SIGSTOP);
+            }
+            tree.push(pid);
+        }
+    }
+    for pid in tree {
+        // SAFETY: as above.
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
     }
 }
 
@@ -257,5 +329,6 @@ fn exit_of(status: io::Result<std::process::ExitStatus>) -> Exit {
         signal: status.and_then(|status| status.signal()),
         finished_at: crate::keeper::now_ms(),
         reason: None,
+        unfinished_output: false,
     }
 }

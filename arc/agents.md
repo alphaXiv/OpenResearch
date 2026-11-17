@@ -58,6 +58,8 @@ use major 2; an existing major 1 still runs chats and offers an explicit upgrade
 or OpenResearch's own copy before provider changes.
 OpenResearch places a new OpenCode copy only while no chat or compaction is
 mid-turn, and stops the idle OpenCode servers first so none keeps the old binary.
+A server adopted after a restart for a turn that resumes on it counts as mid-turn
+from its adoption.
 Agents orx starts run with Claude Code's updater off, so only this check
 changes an install. Cursor, Antigravity and ACP presets also use cached vendor
 releases; their updates replace orx's copy without invoking vendor installers.
@@ -232,7 +234,7 @@ A completed prompt takes priority over queued approval events, cancelling reques
 | Claude Code | headless, so a bridge relays to the owning dashboard and blocks: Claude's `approve` tool on `orx mcp` |
 | Cursor, `codex exec` | nothing waits: print mode cannot prompt, so the mode maps to CLI flags |
 
-The bridge endpoint grants permissions, so it takes a per-child token that each respawn replaces. Plan mode puts a small policy in front of the bridge: read-only commands and web lookups pass, file edits are refused, and anything else asks. The read-only check is an allowlist (`src/local/harness/plan_gate.rs`), so a new read-only `orx` verb stays gated until added there.
+The bridge endpoint grants permissions, so it takes a per-child token that each respawn replaces. A Claude Code child the next server adopts keeps its token, and an approval it posts again after a restart, keyed by its tool call, takes over the card it already showed, waiting briefly for the turn to resume. Plan mode puts a small policy in front of the bridge: read-only commands and web lookups pass, file edits are refused, and anything else asks. The read-only check is an allowlist (`src/local/harness/plan_gate.rs`), so a new read-only `orx` verb stays gated until added there.
 
 **A held request never allows by accident.** A request outliving its turn is denied, an interrupted turn denies everything it was waiting on, a transport error denies, and the bridge denies an unanswered request after a long timeout. The no-output watchdog ignores a turn blocked on the user, whose thinking time is unbounded.
 
@@ -242,7 +244,7 @@ Where an agent offers a hook or plugin, it stamps each shell command with the is
 
 A turn is a row with a state and a **delivery state**: its prompt was never sent, rejected, accepted, or of unknown fate. A running turn holds a per-chat lease with a heartbeat, which keeps one turn per chat and exposes a turn whose process died ([storage](storage.md)).
 
-When a dashboard starts or a lease expires, every turn still marked running has no process behind it, and a turn that finds its own lease gone stops. A turn whose agent was kept and taken back resumes from its checkpoint instead, once no other process holds its lease ([restarts](restarts.md)). Every other becomes a failed turn with a recovery action chosen by its delivery state, and its kept agent, if any, is stopped, so recovery starts on a fresh one:
+When a dashboard starts or a lease expires, every turn still marked running has no process behind it, and a turn that finds its own lease gone stops. A turn whose agent was kept and taken back resumes from its checkpoint instead ([restarts](restarts.md)): in the same message, without sending its prompt again, with the requests it held still answerable. Every other becomes a failed turn with a recovery action chosen by its delivery state, and its kept agent, if any, is stopped, so recovery starts on a fresh one:
 
 | Delivery state | Action | Effect |
 | --- | --- | --- |
@@ -251,7 +253,9 @@ When a dashboard starts or a lease expires, every turn still marked running has 
 
 **Nothing is replayed without the user.** An adapter retries on its own only before the prompt is accepted, within a bounded budget. A continued turn resumes the native session; if that session is gone, the agent gets a bounded snapshot of orx's transcript with instructions not to repeat completed tool actions. An ACP agent's session is gone when the agent says so or no longer lists it.
 
-Queued messages are persisted before they are acknowledged and run in order as each turn ends, so a restart loses none; Stop clears the queue. A quitting or restarting dashboard starts no turn, queued ones included, and gives up its leases on the way out, so the next start resumes or recovers its turns at once. Adapters that read a child's output interrupt a turn silent past a generous watchdog, which waits while an ACP agent reports a command running; OpenCode's adapters have none.
+**An OpenCode turn resumes from its server.** The server is kept ([restarts](restarts.md)), so a resumed turn reconnects to its events and reads its messages, sub-agents and pending approvals and questions back over the server's API; the transcript is rebuilt from those, and a card still pending stays answerable. A 1.x turn then waits for its session to go idle in place of the request it lost; a message the server never received fails as not sent.
+
+Queued messages are persisted before they are acknowledged and run in order as each turn ends, so a restart loses none; Stop clears the queue. A quitting or restarting dashboard starts no turn, queued ones included, and gives up its leases on the way out. Only a server runs turns, and a starting server holds the engine lock, so it treats any lease it finds as a dead server's and resumes or recovers those turns at once, a crashed server's included. Adapters that read a child's output interrupt a turn silent past a generous watchdog, which waits while an ACP agent reports a command running; OpenCode's adapters have none.
 
 ## Sub-agents and new chats
 

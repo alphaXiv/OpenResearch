@@ -56,6 +56,8 @@ pub enum Io {
         cols: u16,
         rows: u16,
     },
+    /// A stdin pipe, and stdout and stderr in one stream, in the order the child wrote them.
+    Merged,
 }
 
 /// One child to keep: what to run, as built by [`crate::process::command`], and the record a
@@ -107,39 +109,85 @@ impl Owner {
     }
 }
 
-/// A keeper directory, live or left behind.
+/// A keeper directory, live or left behind. A failure to look is [`Liveness::Unknown`] or
+/// [`Record::Unreadable`], which no caller may take for a keeper's absence.
 pub struct Entry {
     pub id: String,
-    /// `None` when unreadable, which no owner claims.
-    pub owner: Option<Owner>,
-    pub alive: bool,
+    pub owner: Record,
+    pub liveness: Liveness,
     /// The child's exit, once the keeper recorded it.
     pub exit: Option<Exit>,
 }
 
-/// Every keeper directory under [`root`], for a starting server to adopt or sweep.
-pub fn entries() -> Vec<Entry> {
-    let Ok(read) = std::fs::read_dir(root()) else {
-        return Vec::new();
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Liveness {
+    Alive,
+    /// The lock is missing or released.
+    Dead,
+    Unknown,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Record {
+    Known(Owner),
+    Missing,
+    Unreadable,
+}
+
+/// Every keeper directory under [`root`], for a starting server to adopt or sweep. What can't be
+/// read about a keeper is logged and left unknown on its entry; a root that can't be listed is
+/// an error, since nothing may be concluded about the keepers in it.
+pub fn entries() -> Result<Vec<Entry>> {
+    let root = root();
+    let unlistable = |error: io::Error| anyhow!("Could not list {}: {error}", root.display());
+    let read = match std::fs::read_dir(&root) {
+        Ok(read) => read,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(unlistable(error)),
     };
-    read.flatten()
-        .filter(|entry| entry.path().is_dir())
-        .map(|entry| {
-            let dir = entry.path();
-            Entry {
-                id: entry.file_name().to_string_lossy().into_owned(),
-                owner: read_json(&dir.join(wire::OWNER_FILE)),
-                alive: alive(&dir),
-                exit: read_json(&dir.join(wire::EXIT_FILE)),
+    let mut entries = Vec::new();
+    for entry in read {
+        let entry = entry.map_err(unlistable)?;
+        if !entry.file_type().map_err(unlistable)?.is_dir() {
+            continue;
+        }
+        let dir = entry.path();
+        let id = entry.file_name().to_string_lossy().into_owned();
+        let leaving = |error| eprintln!("orx up: leaving keeper {id} alone: {error:#}");
+        let owner = match read_json(&dir.join(wire::OWNER_FILE)) {
+            Ok(Some(owner)) => Record::Known(owner),
+            Ok(None) => Record::Missing,
+            Err(error) => {
+                leaving(error);
+                Record::Unreadable
             }
-        })
-        .collect()
+        };
+        let liveness = match lock_held(&dir) {
+            Ok(true) => Liveness::Alive,
+            Ok(false) => Liveness::Dead,
+            Err(error) => {
+                leaving(error);
+                Liveness::Unknown
+            }
+        };
+        let exit = read_json(&dir.join(wire::EXIT_FILE)).unwrap_or_else(|error| {
+            eprintln!("orx up: {error:#}");
+            None
+        });
+        entries.push(Entry {
+            id,
+            owner,
+            liveness,
+            exit,
+        });
+    }
+    Ok(entries)
 }
 
 /// Removes a keeper directory whose keeper has exited.
 pub fn remove(id: &str) -> Result<()> {
     let dir = root().join(id);
-    if alive(&dir) {
+    if lock_held(&dir)? {
         return Err(anyhow!("keeper {id} is still running"));
     }
     match std::fs::remove_dir_all(&dir) {
@@ -151,18 +199,32 @@ pub fn remove(id: &str) -> Result<()> {
     }
 }
 
-fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
-    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+/// `None` when the file does not exist.
+fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(anyhow!("Could not read {}: {error}", path.display())),
+    };
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|error| anyhow!("Could not parse {}: {error}", path.display()))
 }
 
-/// A keeper holds its lock for its whole life.
-fn alive(dir: &Path) -> bool {
-    match std::fs::File::open(dir.join(wire::LOCK_FILE)) {
-        Ok(lock) => matches!(
-            lock.try_lock_shared(),
-            Err(std::fs::TryLockError::WouldBlock)
-        ),
-        Err(_) => false,
+/// A keeper holds its lock for its whole life; a missing lock file means no keeper.
+fn lock_held(dir: &Path) -> Result<bool> {
+    let path = dir.join(wire::LOCK_FILE);
+    let lock = match std::fs::File::open(&path) {
+        Ok(lock) => lock,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(anyhow!("Could not open {}: {error}", path.display())),
+    };
+    match lock.try_lock_shared() {
+        Ok(()) => Ok(false),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(true),
+        Err(std::fs::TryLockError::Error(error)) => {
+            Err(anyhow!("Could not lock {}: {error}", path.display()))
+        }
     }
 }
 
@@ -250,6 +312,7 @@ async fn start_keeper(dir: &Path, keep: &Keep<'_>) -> Result<()> {
                 cols: *cols,
                 rows: *rows,
             },
+            Io::Merged => wire::Stdio::Merged,
         },
         retain: keep.retain,
         orphan_seconds: ORPHAN.as_secs(),
@@ -320,6 +383,7 @@ fn spawn_detached(mut command: tokio::process::Command) -> io::Result<tokio::pro
         CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW,
     };
     let flags = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP;
+    orx_keep::private_stdio();
     command.kill_on_drop(false);
     match command
         .creation_flags(flags | CREATE_BREAKAWAY_FROM_JOB)
@@ -336,11 +400,27 @@ fn spawn_detached(mut command: tokio::process::Command) -> io::Result<tokio::pro
 async fn keeper_program() -> Result<PathBuf> {
     #[cfg(unix)]
     {
+        // Resolving digests the embedded binary; once per data directory is enough.
+        static RESOLVED: std::sync::Mutex<Option<(PathBuf, PathBuf)>> = std::sync::Mutex::new(None);
         let root = root();
-        match tokio::task::spawn_blocking(move || crate::engine::transport::local_binary(&root))
-            .await
+        let cached = RESOLVED.lock().unwrap().clone();
+        if let Some((resolved_root, host)) = cached {
+            if resolved_root == root && host.is_file() {
+                return Ok(host);
+            }
+        }
+        let resolving = root.clone();
+        match tokio::task::spawn_blocking(move || {
+            crate::engine::transport::local_binary(&resolving)
+        })
+        .await
         {
-            Ok(Ok(host)) => return Ok(host),
+            Ok(Ok(host)) => {
+                *RESOLVED.lock().unwrap() = Some((root, host.clone()));
+                return Ok(host);
+            }
+            // A test binary given `keep DIR` runs tests instead of keeping anything.
+            Ok(Err(error)) if cfg!(test) => return Err(error),
             Ok(Err(error)) => {
                 eprintln!("orx up: keeping children with this binary; no orx-host: {error:#}")
             }
@@ -349,12 +429,13 @@ async fn keeper_program() -> Result<PathBuf> {
     }
     #[cfg(all(test, windows))]
     {
+        // Cargo nests unit-test binaries at a varying depth below the profile directory holding `orx`.
         let test = std::env::current_exe()?;
-        return Ok(test
-            .parent()
-            .and_then(Path::parent)
-            .ok_or_else(|| anyhow!("Missing test binary directory"))?
-            .join("orx.exe"));
+        return test
+            .ancestors()
+            .map(|dir| dir.join("orx.exe"))
+            .find(|path| path.is_file())
+            .ok_or_else(|| anyhow!("no orx.exe in any directory above {}", test.display()));
     }
     #[allow(unreachable_code)]
     crate::paths::spawnable_exe().map_err(|error| anyhow!("Could not find orx: {error}"))
@@ -363,9 +444,9 @@ async fn keeper_program() -> Result<PathBuf> {
 /// Attaches to a live keeper, receiving everything it retains.
 pub async fn attach(id: &str) -> Result<Kept> {
     let dir = root().join(id);
-    let endpoint: Endpoint = read_json(&dir.join(wire::ENDPOINT_FILE))
-        .ok_or_else(|| anyhow!("Keeper {id} has no readable endpoint"))?;
-    if !alive(&dir) {
+    let endpoint: Endpoint = read_json(&dir.join(wire::ENDPOINT_FILE))?
+        .ok_or_else(|| anyhow!("Keeper {id} has no endpoint"))?;
+    if !lock_held(&dir)? {
         return Err(anyhow!("Keeper {id} is not running"));
     }
     let mut stream = TcpStream::connect(("127.0.0.1", endpoint.port))
@@ -402,30 +483,159 @@ pub async fn attach(id: &str) -> Result<Kept> {
         stopping.clone(),
         dir.clone(),
     ));
-    let inner = Arc::new(Inner {
-        id: id.to_string(),
-        dir,
-        child_pid: welcome.child_pid,
-        start: welcome.start,
-        frames: frames.clone(),
-        exit,
-        detached: AtomicBool::new(false),
-        acked: AtomicU64::new(welcome.start),
-        stopping,
-    });
-    Ok(Kept {
-        handle: KeptHandle(inner),
-        stdin: Some(KeptStdin {
+    Ok(assemble(
+        Inner {
+            id: id.to_string(),
+            dir: Some(dir),
+            child_pid: welcome.child_pid,
+            start: welcome.start,
+            next: welcome.next,
             frames,
-            written: None,
-        }),
-        stdout: Some(KeptStdout {
-            chunks,
-            current: Vec::new(),
-            read: 0,
-            position: welcome.start,
-        }),
-    })
+            exit,
+            detached: AtomicBool::new(false),
+            acked: AtomicU64::new(welcome.start),
+            stopping,
+        },
+        chunks,
+    ))
+}
+
+/// Starts `command` as this server's own child, behind a kept child's interface: for short
+/// work a restart waits for instead of handing off. Its stdin and stdout are pipes, stderr is
+/// dropped, and it ends with its last handle or with this server.
+pub fn spawn_here(command: &mut tokio::process::Command) -> Result<Kept> {
+    command
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
+    let child = command.spawn()?;
+    let (frames, outgoing) = mpsc::unbounded_channel::<Frame>();
+    let (chunks_tx, chunks) = mpsc::channel(64);
+    let (exit_tx, exit) = watch::channel(None);
+    let child_pid = child.id().unwrap_or_default();
+    tokio::spawn(hold(child, outgoing, chunks_tx, exit_tx));
+    Ok(assemble(
+        Inner {
+            id: format!("here-{}", uuid::Uuid::new_v4().simple()),
+            dir: None,
+            child_pid,
+            start: 0,
+            next: 0,
+            frames,
+            exit,
+            detached: AtomicBool::new(false),
+            acked: AtomicU64::new(0),
+            stopping: Arc::new(AtomicBool::new(false)),
+        },
+        chunks,
+    ))
+}
+
+fn assemble(inner: Inner, chunks: mpsc::Receiver<(u64, Vec<u8>)>) -> Kept {
+    let stdin = KeptStdin {
+        frames: inner.frames.clone(),
+        written: None,
+    };
+    let stdout = KeptStdout {
+        chunks,
+        current: Vec::new(),
+        read: 0,
+        position: inner.start,
+    };
+    Kept {
+        handle: KeptHandle(Arc::new(inner)),
+        stdin: Some(stdin),
+        stdout: Some(stdout),
+    }
+}
+
+/// Carries a child [`spawn_here`] started as [`link`] carries a keeper: input and controls in,
+/// output and the exit out. Once every handle is gone the child goes too.
+async fn hold(
+    mut child: tokio::process::Child,
+    mut outgoing: mpsc::UnboundedReceiver<Frame>,
+    chunks: mpsc::Sender<(u64, Vec<u8>)>,
+    exit: watch::Sender<Option<Exit>>,
+) {
+    let pid = child.id();
+    let mut stdin = child.stdin.take();
+    let mut stdout = child.stdout.take().expect("piped stdout");
+    let reading = tokio::spawn(async move {
+        let mut chunks = Some(chunks);
+        let mut offset = 0;
+        let mut buffer = vec![0; 64 << 10];
+        while let Ok(read @ 1..) = stdout.read(&mut buffer).await {
+            // Without a reader the output is drained, so the child never blocks on it.
+            if let Some(sender) = &chunks {
+                if sender
+                    .send((offset, buffer[..read].to_vec()))
+                    .await
+                    .is_err()
+                {
+                    chunks = None;
+                }
+            }
+            offset += read as u64;
+        }
+    });
+    let mut stopped = false;
+    let mut handles = true;
+    let status = loop {
+        tokio::select! {
+            frame = outgoing.recv(), if handles => match frame {
+                Some((kind::INPUT, body, written)) => {
+                    if let Some(input) = &mut stdin {
+                        if input.write_all(&body).await.is_err() {
+                            stdin = None;
+                        }
+                    }
+                    if let Some(written) = written {
+                        let _ = written.send(());
+                    }
+                }
+                Some((kind::CONTROL, body, _)) => match wire::parse::<Control>(&body) {
+                    Ok(Control::CloseStdin) => stdin = None,
+                    Ok(Control::Stop | Control::Signal { signal: Signal::Kill }) => {
+                        stopped = true;
+                        crate::local::chat::kill_agent_tree(pid).await;
+                        let _ = child.start_kill();
+                    }
+                    _ => {}
+                },
+                Some(_) => {}
+                None => {
+                    handles = false;
+                    crate::local::chat::kill_agent_tree(pid).await;
+                    let _ = child.start_kill();
+                }
+            },
+            status = child.wait() => break status,
+        }
+    };
+    // The exit follows the last output, unless something the child started still holds it.
+    let unfinished_output = tokio::time::timeout(Duration::from_secs(1), reading)
+        .await
+        .is_err();
+    #[cfg(unix)]
+    let signal = status
+        .as_ref()
+        .ok()
+        .and_then(std::os::unix::process::ExitStatusExt::signal);
+    #[cfg(not(unix))]
+    let signal = None;
+    exit.send_replace(Some(Exit {
+        code: status
+            .as_ref()
+            .ok()
+            .and_then(std::process::ExitStatus::code),
+        signal,
+        finished_at: crate::store::now_ms() as u64,
+        reason: stopped.then(|| "stopped".into()),
+        unfinished_output,
+    }));
 }
 
 async fn write_frame(stream: &mut (impl AsyncWrite + Unpin), kind: u8, body: &[u8]) -> Result<()> {
@@ -496,17 +706,12 @@ async fn link(
     drop(chunks);
     writing.abort();
     if exit.borrow().is_none() {
-        exit.send_replace(Some(Exit {
-            code: None,
-            signal: None,
-            finished_at: crate::store::now_ms() as u64,
-            reason: Some("lost".into()),
-        }));
+        exit.send_replace(Some(lost()));
     }
     // A stopped keeper exits after delivering the exit; its directory has served its purpose.
     if stopping.load(Ordering::SeqCst) {
         for _ in 0..50 {
-            if !alive(&dir) {
+            if matches!(lock_held(&dir), Ok(false)) {
                 let _ = std::fs::remove_dir_all(&dir);
                 break;
             }
@@ -517,9 +722,11 @@ async fn link(
 
 struct Inner {
     id: String,
-    dir: PathBuf,
+    /// The keeper's directory; `None` for a child held here.
+    dir: Option<PathBuf>,
     child_pid: u32,
     start: u64,
+    next: u64,
     frames: mpsc::UnboundedSender<Frame>,
     exit: watch::Receiver<Option<Exit>>,
     detached: AtomicBool,
@@ -586,6 +793,12 @@ impl KeptHandle {
         self.0.start
     }
 
+    /// The offset the child had written up to when this attachment began: output before it
+    /// is replay of what an earlier server already saw.
+    pub fn next(&self) -> u64 {
+        self.0.next
+    }
+
     /// Lets the keeper forget output before `offset`; call only once it is durable.
     pub fn ack(&self, offset: u64) {
         if self.0.acked.fetch_max(offset, Ordering::SeqCst) < offset {
@@ -610,10 +823,17 @@ impl KeptHandle {
 
     /// Replaces the record a successor reads to know whose this child is.
     pub fn set_owner(&self, owner: &Value) -> Result<()> {
-        publish(
-            &self.0.dir.join(wire::OWNER_FILE),
-            &serde_json::to_vec(owner)?,
-        )
+        // A child held here, or a keeper that delivered its exit and was cleaned up, leaves no
+        // successor to tell.
+        let Some(dir) = self
+            .0
+            .dir
+            .as_ref()
+            .filter(|dir| self.try_wait().is_none() || dir.exists())
+        else {
+            return Ok(());
+        };
+        publish(&dir.join(wire::OWNER_FILE), &serde_json::to_vec(owner)?)
     }
 
     pub fn try_wait(&self) -> Option<Exit> {
@@ -651,6 +871,7 @@ fn lost() -> Exit {
         signal: None,
         finished_at: crate::store::now_ms() as u64,
         reason: Some("lost".into()),
+        unfinished_output: false,
     }
 }
 

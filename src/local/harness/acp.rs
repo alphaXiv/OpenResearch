@@ -153,6 +153,18 @@ impl Harness for Acp {
         Some(info)
     }
 
+    fn supports_resume(&self) -> bool {
+        true
+    }
+
+    async fn adopt(
+        &self,
+        chat: &Arc<crate::local::chat::ChatHost>,
+        adoption: super::Adoption,
+    ) -> Result<()> {
+        chat.acp.adopt(adoption).await
+    }
+
     async fn run_turn(&self, ctx: &mut TurnCtx) -> TurnResult {
         match run_turn(ctx, &self.0).await {
             Ok(()) => Ok(TurnOutcome::Completed),
@@ -180,7 +192,7 @@ impl Harness for Acp {
         Ok(ResumeAction::Handled { plan_mode: None })
     }
 
-    async fn one_shot(&self, request: super::OneShot<'_>) -> Result<String> {
+    async fn run_one_shot(&self, request: super::OneShot<'_>) -> Result<String> {
         crate::local::acp::one_shot(&self.0, request).await
     }
 }
@@ -301,6 +313,9 @@ struct ActiveTurn {
 }
 impl Drop for ActiveTurn {
     fn drop(&mut self) {
+        if crate::keep::handing_off() {
+            return;
+        }
         self.client.end_turn();
         let _ = self.host.resolve_stale_prompts(&self.session_id, true);
     }
@@ -333,6 +348,12 @@ pub(crate) fn orx_mcp_servers(
 }
 
 async fn run_turn(ctx: &mut TurnCtx, definition: &Definition) -> Result<()> {
+    if ctx.resume.is_some() {
+        let session = resumed_session(ctx).await?;
+        prompt_session(ctx, &session).await?;
+        return Ok(());
+    }
+
     let apply_model = ctx.native_session_id.is_none() || {
         let store = Store::open()?;
         let session = store
@@ -395,6 +416,20 @@ pub(crate) struct OpenSession {
     pub restored: bool,
 }
 
+pub(crate) async fn resumed_session(ctx: &TurnCtx) -> Result<OpenSession> {
+    let resume = ctx.resume.as_ref().expect("resuming turn");
+    let client = ctx.host.acp.connected(&ctx.session_id).await?;
+    let native_id = client
+        .native_id()
+        .ok_or_else(|| anyhow!("Kept ACP agent has no native session"))?;
+    Ok(OpenSession {
+        client,
+        native_id,
+        prompt: String::new(),
+        restored: serde_json::from_value(resume.state["restored"].clone())?,
+    })
+}
+
 /// Starts or reuses the chat's agent in `cwd` and restores or creates its native
 /// session. `persist_configuration` keeps the agent's advertised options with the
 /// chat, which user-defined ACP harnesses expose in the composer.
@@ -432,7 +467,7 @@ pub(crate) async fn open_session(
             } else {
                 None
             };
-            client.set_native_id(&native_id);
+            client.set_native_id(&native_id)?;
             if method.is_some() {
                 match client
                     .restore(
@@ -474,7 +509,7 @@ pub(crate) async fn open_session(
             let native_id = response["sessionId"]
                 .as_str()
                 .ok_or_else(|| anyhow!("ACP agent did not return a session ID"))?;
-            client.set_native_id(native_id);
+            client.set_native_id(native_id)?;
             ctx.persist_native_session_id(native_id)?;
             configuration = Some(response);
             prompt = format!(
@@ -513,22 +548,48 @@ pub(crate) async fn open_session(
 /// it answers; returns the prompt response.
 pub(crate) async fn prompt_session(ctx: &mut TurnCtx, session: &OpenSession) -> Result<Value> {
     let client = &session.client;
+    client
+        .wire
+        .durable
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     let mut events = client.begin_turn();
     let _active = ActiveTurn {
         client: client.clone(),
         host: ctx.host.clone(),
         session_id: ctx.session_id.clone(),
     };
-    ctx.persist_delivery(DeliveryState::Unknown)?;
-    let response = client.request(
-        "session/prompt",
-        PromptRequest::new(
-            session.native_id.clone(),
-            vec![ContentBlock::Text(TextContent::new(session.prompt.clone()))],
-        ),
-    );
+    let resume = ctx.resume.take();
+    let mut tools: ToolUpdates = resume
+        .as_ref()
+        .map(|resume| serde_json::from_value(resume.state["tools"].clone()))
+        .transpose()?
+        .unwrap_or_default();
+    if let Some(resume) = &resume {
+        let mut state: crate::local::acp::wire::State =
+            serde_json::from_value(resume.state["rpc"].clone())?;
+        state
+            .answered
+            .extend(client.wire.state.lock().unwrap().answered.clone());
+        *client.wire.state.lock().unwrap() = state;
+        client.wire.advance();
+    } else {
+        ctx.persist_delivery(DeliveryState::Unknown)?;
+    }
+    let response = async {
+        if resume.is_some() {
+            return client.wire.resumed_response().await;
+        }
+        client
+            .request(
+                "session/prompt",
+                PromptRequest::new(
+                    session.native_id.clone(),
+                    vec![ContentBlock::Text(TextContent::new(session.prompt.clone()))],
+                ),
+            )
+            .await
+    };
     tokio::pin!(response);
-    let mut tools = ToolUpdates::default();
     let mut approved_permissions = HashSet::new();
     let mut watchdog = tokio::time::interval(std::time::Duration::from_secs(5));
     let mut deadline = tokio::time::Instant::now() + super::TURN_WATCHDOG;
@@ -564,11 +625,10 @@ pub(crate) async fn prompt_session(ctx: &mut TurnCtx, session: &OpenSession) -> 
                 if result["stopReason"] == "cancelled" { return Err(anyhow!("Agent turn was cancelled")); }
                 break result;
             }
-            _ = ctx.flush_due() => { let _ = ctx.flush(); }
             _ = watchdog.tick() => {
                 approved_permissions.extend(approve_permissions(ctx, client)?);
                 // A command the agent runs reports nothing until it exits, however long it takes.
-                if client.awaiting_permission() || tools.command_running() {
+                if client.awaiting_permission() || client.running_a_command() || tools.command_running() {
                     deadline = tokio::time::Instant::now() + super::TURN_WATCHDOG;
                 } else if tokio::time::Instant::now() >= deadline {
                     return Err(anyhow!("ACP turn exceeded the response timeout"));
@@ -582,12 +642,51 @@ pub(crate) async fn prompt_session(ctx: &mut TurnCtx, session: &OpenSession) -> 
                 if matches!(&event, Event::Permission { id, .. } if approved_permissions.remove(id)) {
                     continue;
                 }
-                apply_event(ctx, event, &mut tools)?;
+                if let Event::Checkpoint = event {
+                    checkpoint(ctx, session, &tools)?;
+                    client.wire.advance();
+                } else {
+                    apply_event(ctx, event, &mut tools)?;
+                }
             }
         }
     };
-    ctx.flush()?;
+    checkpoint(ctx, session, &tools)?;
+    client
+        .wire
+        .durable
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    client.wire.advance();
     Ok(result)
+}
+
+fn checkpoint(ctx: &mut TurnCtx, session: &OpenSession, tools: &ToolUpdates) -> Result<()> {
+    let client = &session.client;
+    let mut rpc = client.wire.state.lock().unwrap().clone();
+    let pending: HashSet<_> = rpc
+        .inbound
+        .values()
+        .map(|request| request["_orxOffset"].to_string())
+        .collect();
+    let answered: Vec<_> = rpc
+        .answered
+        .keys()
+        .filter(|id| !pending.contains(*id))
+        .cloned()
+        .collect();
+    for id in &answered {
+        rpc.answered.remove(id);
+    }
+    let state = json!({"tools": tools, "rpc": rpc, "restored": session.restored});
+    let offset = client.wire.offset.load(std::sync::atomic::Ordering::SeqCst);
+    ctx.flush_at(&client.wire.keeper, offset, &state)?;
+    {
+        let mut rpc = client.wire.state.lock().unwrap();
+        for id in &answered {
+            rpc.answered.remove(id);
+        }
+    }
+    client.wire.persist()
 }
 
 fn approve_permissions(ctx: &mut TurnCtx, client: &Client) -> Result<Vec<String>> {
@@ -602,7 +701,6 @@ fn approve_permissions(ctx: &mut TurnCtx, client: &Client) -> Result<Vec<String>
         return Ok(Vec::new());
     }
     let approved = client.approve_pending()?;
-    let mut changed = false;
     for part in &mut ctx.assistant.parts {
         if let Some(prompt) = part.prompt.as_mut() {
             if let Some((_, choice)) = approved
@@ -612,12 +710,8 @@ fn approve_permissions(ctx: &mut TurnCtx, client: &Client) -> Result<Vec<String>
                 prompt.resolved = true;
                 prompt.approved = Some(true);
                 prompt.answers = vec![choice.clone()];
-                changed = true;
             }
         }
-    }
-    if changed {
-        ctx.flush()?;
     }
     Ok(approved.into_iter().map(|(id, _)| id).collect())
 }
@@ -695,7 +789,7 @@ fn prompt_token_usage(
     )
 }
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 struct ToolUpdates {
     calls: HashMap<String, Value>,
     terminals: HashMap<String, String>,
@@ -716,6 +810,7 @@ impl ToolUpdates {
 
 fn apply_event(ctx: &mut TurnCtx, event: Event, tools: &mut ToolUpdates) -> Result<()> {
     match event {
+        Event::Checkpoint => {}
         Event::TerminalOutput { id, output } => {
             tools.terminals.insert(id.clone(), output);
             for (tool_id, tool) in &tools.calls {
@@ -758,7 +853,6 @@ fn apply_event(ctx: &mut TurnCtx, event: Event, tools: &mut ToolUpdates) -> Resu
                     ..Default::default()
                 },
             ));
-            ctx.flush()?;
         }
         Event::Update(update) => match update["sessionUpdate"].as_str() {
             Some(kind @ ("agent_message_chunk" | "agent_thought_chunk")) => {
@@ -834,7 +928,6 @@ fn apply_event(ctx: &mut TurnCtx, event: Event, tools: &mut ToolUpdates) -> Resu
             _ => {}
         },
     }
-    ctx.maybe_flush();
     Ok(())
 }
 
@@ -935,6 +1028,178 @@ fn tool_output(tool: &Value, terminals: &HashMap<String, String>) -> Option<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn resumes_the_original_turn_with_its_tools_and_without_running_setup() {
+        use tokio::io::AsyncWriteExt;
+
+        for harness in ["acp:resume-test", "antigravity"] {
+            let directory =
+                crate::store::data_dir().join(format!("acp-resume-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&directory).unwrap();
+            let record = directory.as_path().join("requests.jsonl");
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let script = r#"import sys,json,socket
+for line in sys.stdin:
+ r=json.loads(line)
+ method=r.get('method')
+ with open(sys.argv[1],'a') as f: f.write(json.dumps(method)+'\n')
+ def send(v): print(json.dumps(dict(jsonrpc='2.0',**v)),flush=True)
+ def update(v): send(dict(method='session/update',params=dict(sessionId='native',update=v)))
+ if method=='initialize': send(dict(id=r['id'],result=dict(protocolVersion=1,agentCapabilities={})))
+ elif method=='session/new': send(dict(id=r['id'],result=dict(sessionId='native')))
+ elif method=='session/prompt':
+  update(dict(sessionUpdate='agent_message_chunk',content=dict(type='text',text='before')))
+  update(dict(sessionUpdate='tool_call',toolCallId='tool-one',title='Inspect file',kind='read',status='in_progress'))
+  update(dict(sessionUpdate='plan',entries=[dict(content='Inspect data',priority='high',status='in_progress')]))
+  with socket.create_connection(('127.0.0.1',int(sys.argv[2]))) as s: s.recv(1)
+  update(dict(sessionUpdate='tool_call_update',toolCallId='tool-one',status='completed',rawOutput='after'))
+  update(dict(sessionUpdate='agent_message_chunk',content=dict(type='text',text='after')))
+  send(dict(id=r['id'],result=dict(stopReason='end_turn')))
+"#;
+            let definition = Definition {
+                id: harness.into(),
+                name: "Restart peer".into(),
+                executable: crate::local::acp::fake_agent_interpreter("python3"),
+                arguments: vec![
+                    "-u".into(),
+                    "-c".into(),
+                    script.into(),
+                    record.to_string_lossy().into_owned(),
+                    listener.local_addr().unwrap().port().to_string(),
+                ],
+                unknown: Default::default(),
+            };
+            let mut ctx = TurnCtx::test_stub();
+            ctx.session_id = uuid::Uuid::new_v4().to_string();
+            ctx.harness = harness.into();
+            ctx.project.repo_path = directory
+                .as_path()
+                .join("absent-worktree")
+                .to_string_lossy()
+                .into_owned();
+            ctx.model = Some("never-select-this-model".into());
+            ctx.text = "never-send-this-prompt".into();
+            let predecessor = ctx.host.clone();
+            let client = predecessor
+                .acp
+                .get(&ctx.session_id, &definition, directory.as_path())
+                .await
+                .unwrap();
+            client
+                .request(
+                    "session/new",
+                    json!({"cwd":directory.as_path(),"mcpServers":[]}),
+                )
+                .await
+                .unwrap();
+            client.set_native_id("native").unwrap();
+            ctx.native_session_id = Some("native".into());
+            let mut events = client.begin_turn();
+            let requesting = client.clone();
+            let prompt = tokio::spawn(async move {
+                requesting
+                    .request(
+                        "session/prompt",
+                        json!({"sessionId":"native","prompt":[{"type":"text","text":"original"}]}),
+                    )
+                    .await
+            });
+            let (mut release, _) = listener.accept().await.unwrap();
+            let mut tools = ToolUpdates::default();
+            loop {
+                let event = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let last =
+                    matches!(&event, Event::Update(update) if update["sessionUpdate"] == "plan");
+                apply_event(&mut ctx, event, &mut tools).unwrap();
+                if last {
+                    break;
+                }
+            }
+            let offset = client.wire.offset.load(std::sync::atomic::Ordering::SeqCst);
+            client.wire.persist().unwrap();
+            client.wire.keeper.detach();
+            let state = client.wire.owner.lock().unwrap()["state"].clone();
+            ctx.resume = Some(crate::local::chat::Resume {
+                keep_id: client.wire.keeper.id().into(),
+                offset,
+                state: json!({"tools":tools,"rpc":state["rpc"],"restored":false}),
+            });
+            ctx.host = TurnCtx::test_stub().host;
+            ctx.host
+                .acp
+                .adopt(super::super::Adoption {
+                    keep_id: client.wire.keeper.id().into(),
+                    session_id: ctx.session_id.clone(),
+                    state,
+                    resume_at: Some(offset),
+                    commands: Vec::new(),
+                })
+                .await
+                .unwrap();
+            release.write_all(b"x").await.unwrap();
+            let resumed = async {
+                if harness == "antigravity" {
+                    super::super::antigravity::Antigravity
+                        .run_turn(&mut ctx)
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| anyhow!("{error:?}"))
+                } else {
+                    run_turn(&mut ctx, &definition).await
+                }
+            };
+            tokio::time::timeout(std::time::Duration::from_secs(10), resumed)
+                .await
+                .unwrap()
+                .unwrap();
+            ctx.host.acp.shutdown().await;
+            prompt.abort();
+            assert!(!directory.as_path().join("absent-worktree").exists());
+            let requests: Vec<Value> = std::fs::read_to_string(record)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            for method in ["initialize", "session/new", "session/prompt"] {
+                assert_eq!(
+                    requests.iter().filter(|request| *request == method).count(),
+                    1,
+                    "{requests:?}"
+                );
+            }
+            assert_eq!(
+                ctx.assistant
+                    .parts
+                    .iter()
+                    .filter_map(|part| part.text.as_deref())
+                    .collect::<Vec<_>>(),
+                ["before", "- Inspect data", "after"]
+            );
+            let tool = ctx
+                .assistant
+                .parts
+                .iter()
+                .find(|part| part.kind == "tool")
+                .unwrap();
+            let tool_state = tool.state.as_ref().unwrap();
+            assert_eq!(tool_state.status, "completed");
+            assert_eq!(tool_state.title.as_deref(), Some("Inspect file"));
+            assert_eq!(tool_state.output.as_deref(), Some("after"));
+            assert_eq!(
+                ctx.assistant
+                    .parts
+                    .iter()
+                    .filter(|part| part.id == "acp-plan")
+                    .count(),
+                1
+            );
+            std::fs::remove_dir_all(&directory).unwrap();
+        }
+    }
 
     #[test]
     fn codex_acp_counts_each_prompt_with_inclusive_input() {

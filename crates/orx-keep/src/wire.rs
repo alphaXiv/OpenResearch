@@ -53,6 +53,8 @@ pub enum Stdio {
     Pipes { stderr: Option<String> },
     /// One pseudoterminal for input and output.
     Pty { cols: u16, rows: u16 },
+    /// A stdin pipe, and one pipe for stdout and stderr in the order the child writes them.
+    Merged,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,6 +87,10 @@ pub struct Exit {
     /// Why the keeper ended the child, when it did: `orphaned` or `stopped`.
     #[serde(default)]
     pub reason: Option<String>,
+    /// The child's output had not ended when its exit was recorded: something it started
+    /// still held its stdout, and output after the exit may be missing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unfinished_output: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

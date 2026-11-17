@@ -5,8 +5,13 @@ use std::io::{self, Write};
 use std::os::windows::process::CommandExt;
 use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
-use windows_sys::Win32::System::Console::{GenerateConsoleCtrlEvent, CTRL_BREAK_EVENT};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT,
+};
+use windows_sys::Win32::System::Console::{
+    GenerateConsoleCtrlEvent, GetStdHandle, CTRL_BREAK_EVENT, STD_ERROR_HANDLE, STD_INPUT_HANDLE,
+    STD_OUTPUT_HANDLE,
+};
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicProcessIdList,
     JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
@@ -22,7 +27,23 @@ use windows_sys::Win32::System::Threading::{
 /// every process the keeper started, so a child never outlives the keeper holding it.
 static JOB: OnceLock<usize> = OnceLock::new();
 
+/// Keeps this process's standard handles out of the processes it starts. `CreateProcess`
+/// hands a child every inheritable handle, so a pipe someone reads to its end would stay
+/// open for as long as a kept child runs. Children given these handles get duplicates.
+pub fn private_stdio() {
+    for id in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        // SAFETY: plain Win32 calls on this process's own standard handles.
+        unsafe {
+            let handle = GetStdHandle(id);
+            if !handle.is_null() {
+                SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
+    }
+}
+
 pub fn detach() -> io::Result<()> {
+    private_stdio();
     // SAFETY: plain Win32 calls; the limit struct is zeroed plain data with its flag set.
     unsafe {
         let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
@@ -52,7 +73,7 @@ pub fn silence_stdout() {}
 
 pub fn spawn(spec: &Spec) -> io::Result<Spawned> {
     match &spec.stdio {
-        Stdio::Pipes { stderr } => {
+        Stdio::Pipes { .. } | Stdio::Merged => {
             let mut command = Command::new(&spec.program);
             command.args(&spec.args);
             if spec.env_clear {
@@ -67,31 +88,46 @@ pub fn spawn(spec: &Spec) -> io::Result<Spawned> {
             if let Some(cwd) = &spec.cwd {
                 command.current_dir(cwd);
             }
-            let stderr = match stderr {
-                Some(path) => OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(path)?
-                    .into(),
-                None => std::process::Stdio::null(),
+            let merged = match &spec.stdio {
+                Stdio::Merged => {
+                    let (output, writer) = std::io::pipe()?;
+                    command.stdout(writer.try_clone()?).stderr(writer);
+                    Some(output)
+                }
+                Stdio::Pipes { stderr: Some(path) } => {
+                    let log = OpenOptions::new().create(true).append(true).open(path)?;
+                    command.stdout(std::process::Stdio::piped()).stderr(log);
+                    None
+                }
+                _ => {
+                    command
+                        .stdout(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::null());
+                    None
+                }
             };
             // Its own group, so an interrupt reaches the child and not the keeper.
             let mut child = command
                 .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(stderr)
                 .creation_flags(CREATE_NEW_PROCESS_GROUP)
                 .spawn()?;
+            // The pipe's write ends must close here, or reading never ends.
+            drop(command);
             let pid = child.id();
             let input = child.stdin.take().map(|stdin| Box::new(stdin) as _);
-            let output = child
-                .stdout
-                .take()
-                .ok_or_else(|| io::Error::other("the child has no stdout"))?;
+            let output: Box<dyn std::io::Read + Send> = match merged {
+                Some(output) => Box::new(output),
+                None => Box::new(
+                    child
+                        .stdout
+                        .take()
+                        .ok_or_else(|| io::Error::other("the child has no stdout"))?,
+                ),
+            };
             Ok(Spawned {
                 pid,
                 input,
-                output: Box::new(output),
+                output,
                 process: Box::new(Tree {
                     pid,
                     pty: None,
@@ -104,6 +140,7 @@ pub fn spawn(spec: &Spec) -> io::Result<Spawned> {
                         signal: None,
                         finished_at: crate::keeper::now_ms(),
                         reason: None,
+                        unfinished_output: false,
                     }
                 }),
                 answers_cursor_queries: false,
@@ -159,6 +196,7 @@ pub fn spawn(spec: &Spec) -> io::Result<Spawned> {
                         signal: None,
                         finished_at: crate::keeper::now_ms(),
                         reason: None,
+                        unfinished_output: false,
                     }
                 }),
                 // ConPTY holds the child's output until someone answers where the cursor is.

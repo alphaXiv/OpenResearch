@@ -2802,6 +2802,8 @@ impl PermissionDecision {
 struct PendingPermission {
     session_id: String,
     tx: tokio::sync::oneshot::Sender<PermissionDecision>,
+    /// Which request holds the card, so a re-posted one takes it over.
+    held: u64,
 }
 
 /// The card-less tier of plan-mode permission policy: `Some(decision)` where
@@ -2850,15 +2852,25 @@ struct PendingGuard {
     host: Arc<ChatHost>,
     session_id: String,
     prompt_id: String,
+    held: u64,
 }
 
 impl Drop for PendingGuard {
     fn drop(&mut self) {
-        self.host
-            .pending_permissions
-            .lock()
-            .unwrap()
-            .remove(&self.prompt_id);
+        {
+            let mut pending = self.host.pending_permissions.lock().unwrap();
+            if pending
+                .get(&self.prompt_id)
+                .is_some_and(|entry| entry.held != self.held)
+            {
+                return;
+            }
+            pending.remove(&self.prompt_id);
+        }
+        // The next server shows this card again when the agent posts its request again.
+        if crate::keep::handing_off() {
+            return;
+        }
         if let Ok(Some(msg)) = mark_prompt_resolved(
             &self.host.msg_write,
             &self.session_id,
@@ -2872,6 +2884,15 @@ impl Drop for PendingGuard {
 }
 
 const TURN_ENDED: &str = "the turn this approval belonged to has already ended";
+
+/// How long a bridge request waits for the turn it belongs to while a starting server resumes it.
+const RESUMING_TURN_WAIT: Duration = Duration::from_secs(30);
+
+/// A card for a held tool call, or why the call gets none.
+enum Posted {
+    Held(HeldPermission),
+    Refused(PermissionDecision),
+}
 
 /// A bridge card on screen, waiting for the user.
 struct HeldPermission {
@@ -3959,23 +3980,22 @@ impl ChatHost {
         token
     }
 
-    /// Puts back the bridge token and Plan policy a kept child was spawned with, when its
-    /// harness takes it back from a previous server.
-    pub fn restore_gate_token(
-        &self,
-        session_id: &str,
-        token: String,
-        plan_mode: bool,
-        bypass: bool,
-    ) {
+    /// Reinstates the token of a child a previous server spawned, which its bridge still
+    /// presents.
+    pub fn restore_gate_token(&self, session_id: &str, token: &str, plan_mode: bool, bypass: bool) {
         self.gate_tokens.lock().unwrap().insert(
             session_id.to_string(),
             GateToken {
-                value: token,
+                value: token.to_string(),
                 plan_mode,
                 bypass,
             },
         );
+    }
+
+    /// Whether this session's running turn surfaced a bridge card, leaving the flag set.
+    pub fn bridge_prompted(&self, session_id: &str) -> bool {
+        self.bridge_prompted.lock().unwrap().contains(session_id)
     }
 
     /// Whether this session's running turn surfaced a bridge card — and clear
@@ -3988,13 +4008,15 @@ impl ChatHost {
     /// blocked tool call from a bridged Claude turn. Plan auto-decides where
     /// the answer is unambiguous; otherwise this surfaces a card and **blocks until
     /// the user answers** (or the timeout denies) — the held HTTP response is
-    /// what pauses the claude turn mid-flight.
+    /// what pauses the claude turn mid-flight. A call posted again with its
+    /// `tool_use_id`, after a restart cut the first, takes over the card it showed.
     pub async fn request_permission(
         self: &Arc<Self>,
         session_id: &str,
         token: &str,
         tool_name: &str,
         tool_input: Value,
+        tool_use_id: Option<&str>,
     ) -> Result<PermissionDecision> {
         // The endpoint grants tool permissions, so unlike the rest of the
         // localhost API it authenticates: the bridge must echo the token its
@@ -4004,10 +4026,8 @@ impl ChatHost {
             _ => return Err(anyhow!("unknown or stale gate token")),
         };
         // A bridge child that outlived its turn has nothing left to approve.
-        if !self.is_busy(session_id).await {
-            return Ok(PermissionDecision::deny(
-                "the turn this approval belonged to has already ended",
-            ));
+        if !self.is_busy(session_id).await && !self.turn_resuming(session_id).await? {
+            return Ok(PermissionDecision::deny(TURN_ENDED));
         }
 
         // Tier 1 — Plan has a small automatic read/deny policy. Manual and
@@ -4036,14 +4056,15 @@ impl ChatHost {
                 // Every card is up before any is answered, so the user can
                 // move between the questions of one batch.
                 let mut cards = Vec::with_capacity(questions.len());
-                for question in questions {
+                for (index, question) in questions.iter().enumerate() {
                     let input = json!({ "questions": [question] });
+                    let prompt_id = tool_use_id.map(|id| format!("perm_{id}_{index}"));
                     match self
-                        .post_permission(session_id, token, tool_name, input)
+                        .post_permission(session_id, token, tool_name, input, prompt_id)
                         .await?
                     {
-                        Some(card) => cards.push(card),
-                        None => return Ok(PermissionDecision::deny(TURN_ENDED)),
+                        Posted::Held(card) => cards.push(card),
+                        Posted::Refused(decision) => return Ok(decision),
                     }
                 }
                 let mut answers = serde_json::Map::new();
@@ -4073,25 +4094,50 @@ impl ChatHost {
                 });
             }
         }
+        let prompt_id = tool_use_id.map(|id| format!("perm_{id}"));
         Ok(
             match self
-                .post_permission(session_id, token, tool_name, tool_input)
+                .post_permission(session_id, token, tool_name, tool_input, prompt_id)
                 .await?
             {
-                Some(card) => card.decision().await,
-                None => PermissionDecision::deny(TURN_ENDED),
+                Posted::Held(card) => card.decision().await,
+                Posted::Refused(decision) => decision,
             },
         )
     }
 
-    /// Shows the card for a held tool call; `None` when its turn has ended.
+    /// Whether the session's turn is one a starting server is about to resume, waiting
+    /// [`RESUMING_TURN_WAIT`] for it to start.
+    async fn turn_resuming(&self, session_id: &str) -> Result<bool> {
+        let deadline = tokio::time::Instant::now() + RESUMING_TURN_WAIT;
+        loop {
+            if self.is_busy(session_id).await {
+                return Ok(true);
+            }
+            let store = Store::open()?;
+            let resumable = match store.latest_chat_turn(session_id)? {
+                Some(turn) if turn.state == "running" => {
+                    store.chat_turn_checkpoint(&turn.id)?.is_some()
+                }
+                _ => false,
+            };
+            if !resumable || tokio::time::Instant::now() >= deadline {
+                return Ok(false);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// Shows the card for a held tool call under `prompt_id`, or takes over the one already
+    /// shown there; a fresh id without one.
     async fn post_permission(
         self: &Arc<Self>,
         session_id: &str,
         token: &str,
         tool_name: &str,
         tool_input: Value,
-    ) -> Result<Option<HeldPermission>> {
+        prompt_id: Option<String>,
+    ) -> Result<Posted> {
         // Revalidate after queued approvals.
         let gate_is_current = self
             .gate_tokens
@@ -4100,10 +4146,13 @@ impl ChatHost {
             .get(session_id)
             .is_some_and(|gate| gate.value == token);
         if !gate_is_current || !self.is_busy(session_id).await {
-            return Ok(None);
+            return Ok(Posted::Refused(PermissionDecision::deny(TURN_ENDED)));
         }
 
-        let prompt_id = format!("perm_{}", uuid::Uuid::new_v4());
+        let prompt_id = prompt_id.unwrap_or_else(|| format!("perm_{}", uuid::Uuid::new_v4()));
+        if let Some(shown) = Store::open()?.get_chat_message(&format!("msg_{prompt_id}"))? {
+            return self.take_over_card(session_id, &prompt_id, shown);
+        }
         let prompt = if tool_name == "ExitPlanMode" {
             WirePrompt {
                 kind: "plan".into(),
@@ -4179,22 +4228,63 @@ impl ChatHost {
                 .insert(session_id.to_string());
         }
 
+        Ok(Posted::Held(self.hold_card(session_id, prompt_id)))
+    }
+
+    /// A request posted again finds the card it showed before: still open, it waits on it
+    /// once more; answered, the answer went to the request a restart cut off.
+    fn take_over_card(
+        self: &Arc<Self>,
+        session_id: &str,
+        prompt_id: &str,
+        shown: StoredChatMessage,
+    ) -> Result<Posted> {
+        if shown.session_id != session_id {
+            return Err(anyhow!("approval {prompt_id} belongs to another chat"));
+        }
+        let parts: Vec<WirePart> = serde_json::from_str(&shown.parts_json)?;
+        let Some(prompt) = parts.iter().find_map(|part| part.prompt.as_ref()) else {
+            return Err(anyhow!("message msg_{prompt_id} holds no approval"));
+        };
+        if prompt.resolved {
+            return Ok(Posted::Refused(PermissionDecision::deny(
+                "The user answered this request while orx restarted, and the answer was lost. \
+                 Ask for it again.",
+            )));
+        }
+        if prompt.kind != "question" {
+            self.bridge_prompted
+                .lock()
+                .unwrap()
+                .insert(session_id.to_string());
+        }
+        Ok(Posted::Held(
+            self.hold_card(session_id, prompt_id.to_string()),
+        ))
+    }
+
+    /// Waits on the shown card `prompt_id` for the user's answer.
+    fn hold_card(self: &Arc<Self>, session_id: &str, prompt_id: String) -> HeldPermission {
+        static NEXT_HELD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let held = NEXT_HELD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.pending_permissions.lock().unwrap().insert(
             prompt_id.clone(),
             PendingPermission {
                 session_id: session_id.to_string(),
                 tx,
+                held,
             },
         );
-        Ok(Some(HeldPermission {
+        HeldPermission {
             rx,
             _guard: PendingGuard {
                 host: self.clone(),
                 session_id: session_id.to_string(),
                 prompt_id,
+                held,
             },
-        }))
+        }
     }
 
     /// Settle a pending bridge request with the user's decision (the native
@@ -9460,16 +9550,18 @@ impl TurnCtx {
     }
 
     pub fn flush(&mut self) -> Result<()> {
-        // A flush without a checkpoint moves the transcript past the stored one, which a
-        // resumed turn would then apply twice.
+        // Harness output held back since the last checkpoint would reach the transcript
+        // without one, and a resumed turn would apply it twice. Without any, the checkpoint
+        // still matches and only orx's own parts change.
         let turn_id = self.turn_id.clone();
-        let checkpoint = if self.checkpointed {
+        let stale = self.checkpointed && self.deferred_flush;
+        let checkpoint = if stale {
             crate::store::TurnCheckpointWrite::Clear { turn_id: &turn_id }
         } else {
             crate::store::TurnCheckpointWrite::Keep
         };
         self.flush_with(checkpoint)?;
-        self.checkpointed = false;
+        self.checkpointed &= !stale;
         Ok(())
     }
 
@@ -11662,7 +11754,7 @@ mod bridge_tests {
         let session = format!("ses_{}", uuid::Uuid::new_v4());
         let input = || json!({"command": "rm -rf ~"});
         assert!(host
-            .request_permission(&session, "guess", "Bash", input())
+            .request_permission(&session, "guess", "Bash", input(), None)
             .await
             .is_err());
 
@@ -11670,13 +11762,13 @@ mod bridge_tests {
         let live = host.mint_gate_token(&session, false, false);
         for token in ["guess", stale.as_str()] {
             assert!(host
-                .request_permission(&session, token, "Bash", input())
+                .request_permission(&session, token, "Bash", input(), None)
                 .await
                 .is_err());
         }
 
         let ended = host
-            .request_permission(&session, &live, "Bash", input())
+            .request_permission(&session, &live, "Bash", input(), None)
             .await
             .unwrap();
         assert_eq!(serde_json::to_value(ended).unwrap()["behavior"], "deny");
@@ -11697,8 +11789,14 @@ mod bridge_tests {
                 let host = host.clone();
                 let session = session.clone();
                 async move {
-                    host.request_permission(&session, &token, "Bash", json!({"command": "ls"}))
-                        .await
+                    host.request_permission(
+                        &session,
+                        &token,
+                        "Bash",
+                        json!({"command": "ls"}),
+                        None,
+                    )
+                    .await
                 }
             });
             if turn_ends {
@@ -11728,7 +11826,7 @@ mod bridge_tests {
             let session = session.clone();
             let questions = json!({"questions": [question("First?"), question("Second?")]});
             async move {
-                host.request_permission(&session, &token, "AskUserQuestion", questions)
+                host.request_permission(&session, &token, "AskUserQuestion", questions, None)
                     .await
             }
         });
@@ -11763,6 +11861,211 @@ mod bridge_tests {
             2
         );
         assert!(!host.has_pending_permission(&session));
+    }
+
+    /// Holds `tool_use`'s approval on `host` until `host` shows its card.
+    async fn post_held(
+        host: &Arc<ChatHost>,
+        session: &str,
+        token: &str,
+        tool_use: &str,
+    ) -> tokio::task::JoinHandle<Result<PermissionDecision>> {
+        let held = tokio::spawn({
+            let (host, session, token, tool_use) = (
+                host.clone(),
+                session.to_string(),
+                token.to_string(),
+                tool_use.to_string(),
+            );
+            async move {
+                host.request_permission(
+                    &session,
+                    &token,
+                    "Bash",
+                    json!({"command": "rm -r build"}),
+                    Some(&tool_use),
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !host.has_pending_permission(session) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the card is shown");
+        held
+    }
+
+    fn cards(session: &str) -> Vec<WirePrompt> {
+        Store::open()
+            .unwrap()
+            .list_chat_messages(session)
+            .unwrap()
+            .into_iter()
+            .flat_map(|message| serde_json::from_str::<Vec<WirePart>>(&message.parts_json).unwrap())
+            .filter_map(|part| part.prompt)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn an_approval_posted_again_after_a_restart_is_answered_on_its_first_card() {
+        let session = format!("ses_{}", uuid::Uuid::new_v4());
+        let tool_use = format!("toolu_{}", uuid::Uuid::new_v4().simple());
+        let before = Arc::new(test_host());
+        let token = before.mint_gate_token(&session, false, false);
+        before
+            .turns
+            .lock()
+            .await
+            .insert(session.clone(), TurnState::Reserved { turn_id: None });
+        // The first server goes away with the request held, as a restart leaves it.
+        let _cut = post_held(&before, &session, &token, &tool_use).await;
+
+        let after = Arc::new(test_host());
+        after.restore_gate_token(&session, &token, false, false);
+        after
+            .turns
+            .lock()
+            .await
+            .insert(session.clone(), TurnState::Reserved { turn_id: None });
+        let reposted = post_held(&after, &session, &token, &tool_use).await;
+        let shown = cards(&session);
+        assert_eq!(shown.len(), 1);
+        assert!(!shown[0].resolved);
+
+        let allowed = json!({"command": "rm -r build"});
+        after
+            .settle_permission(
+                shown[0].native_id.as_deref().unwrap(),
+                PermissionDecision::Allow {
+                    updated_input: Some(allowed.clone()),
+                },
+            )
+            .unwrap();
+        let decision = serde_json::to_value(reposted.await.unwrap().unwrap()).unwrap();
+        assert_eq!(decision["behavior"], "allow");
+        assert_eq!(decision["updatedInput"], allowed);
+    }
+
+    #[tokio::test]
+    async fn an_approval_answered_while_orx_restarted_is_reported_lost() {
+        let session = format!("ses_{}", uuid::Uuid::new_v4());
+        let tool_use = format!("toolu_{}", uuid::Uuid::new_v4().simple());
+        let host = Arc::new(test_host());
+        let token = host.mint_gate_token(&session, false, false);
+        host.turns
+            .lock()
+            .await
+            .insert(session.clone(), TurnState::Reserved { turn_id: None });
+        let first = post_held(&host, &session, &token, &tool_use).await;
+        let prompt_id = format!("perm_{tool_use}");
+        mark_prompt_resolved(
+            &host.msg_write,
+            &session,
+            &prompt_id,
+            Some(&answer(&[], true, None)),
+        )
+        .unwrap();
+        first.abort();
+
+        let decision = host
+            .request_permission(&session, &token, "Bash", json!({}), Some(&tool_use))
+            .await
+            .unwrap();
+        let decision = serde_json::to_value(decision).unwrap();
+        assert_eq!(decision["behavior"], "deny");
+        assert!(decision["message"].as_str().unwrap().contains("restarted"));
+        assert_eq!(cards(&session).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_approval_posted_before_its_turn_resumes_waits_for_it() {
+        let store = Store::open().unwrap();
+        let project = TurnCtx::test_stub().project;
+        let _ = store.create_local_project(&project);
+        let mut session = bare_session();
+        session.id = format!("ses_{}", uuid::Uuid::new_v4());
+        session.project_id = project.id;
+        store.create_chat_session(&session).unwrap();
+        let turn = crate::store::StoredChatTurn {
+            id: format!("turn-{}", session.id),
+            session_id: session.id.clone(),
+            user_message_id: None,
+            assistant_message_id: format!("answer-{}", session.id),
+            client_turn_id: format!("client-{}", session.id),
+            request_hash: "task".into(),
+            prepared_input: "task".into(),
+            settings_json: "{}".into(),
+            state: "running".into(),
+            delivery_state: "accepted".into(),
+            attempt_count: 1,
+            next_retry_at: None,
+            error_kind: None,
+            error_message: None,
+            recovery_action: None,
+            recovered_by_turn_id: None,
+            created_at: now_ms(),
+            updated_at: now_ms(),
+        };
+        store.admit_chat_turn(None, &turn).unwrap();
+
+        let host = Arc::new(test_host());
+        let token = host.mint_gate_token(&session.id, false, false);
+        let ask = |tool_use: &str| {
+            let (host, session, token, tool_use) = (
+                host.clone(),
+                session.id.clone(),
+                token.clone(),
+                tool_use.to_string(),
+            );
+            tokio::spawn(async move {
+                host.request_permission(
+                    &session,
+                    &token,
+                    "Bash",
+                    json!({"command": "rm x"}),
+                    Some(&tool_use),
+                )
+                .await
+            })
+        };
+        // A running turn with no checkpoint will not resume: its approval ends at once.
+        let decision = ask("toolu_unresumable").await.unwrap().unwrap();
+        assert_eq!(serde_json::to_value(decision).unwrap()["behavior"], "deny");
+
+        store
+            .write_chat_turn_checkpoint(crate::store::TurnCheckpointWrite::Set {
+                turn_id: &turn.id,
+                keep_id: "keeper",
+                offset: 0,
+                state_json: "{}",
+            })
+            .unwrap();
+        let waiting = ask("toolu_resuming");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!waiting.is_finished());
+        host.turns
+            .lock()
+            .await
+            .insert(session.id.clone(), TurnState::Reserved { turn_id: None });
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !host.has_pending_permission(&session.id) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        host.settle_permission(
+            "perm_toolu_resuming",
+            PermissionDecision::Allow {
+                updated_input: None,
+            },
+        )
+        .unwrap();
+        let decision = serde_json::to_value(waiting.await.unwrap().unwrap()).unwrap();
+        assert_eq!(decision["behavior"], "allow");
     }
 
     #[tokio::test]
@@ -14363,7 +14666,7 @@ for line in sys.stdin:
             idle().await;
             let (_route, mut rx) = claude.take_continuation("resumes").await.unwrap();
             let mut texts = Vec::new();
-            while let Ok(TurnEvent::Line(line)) = rx.try_recv() {
+            while let Ok(TurnEvent::Line(line, _)) = rx.try_recv() {
                 texts.extend(line["message"]["content"][0]["text"].as_str().map(str::to_string));
             }
             assert_eq!(texts, ["UNSTORED"]);
@@ -14533,6 +14836,8 @@ for line in sys.stdin:
         if !crate::config::in_test_child(&[]) {
             return;
         }
+        // The first kept child builds orx-host, which the turns' timeouts must not count.
+        orx_test_support::host_binaries();
         tokio::runtime::Runtime::new().unwrap().block_on(async {
             let store = Store::open().unwrap();
             let root = crate::store::data_dir();

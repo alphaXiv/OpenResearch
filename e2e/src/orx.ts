@@ -4,7 +4,7 @@
  * the outside server. @module
  */
 import { spawn, type ChildProcess } from 'node:child_process'
-import { createWriteStream, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
+import { copyFileSync, createWriteStream, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { createInterface } from 'node:readline'
 import { expect, type Page } from '@playwright/test'
@@ -18,7 +18,15 @@ export const SPEEDUP = 20
 export type Orx = Awaited<ReturnType<typeof startOrx>>
 export type Project = { id: string; open: (page: Page) => Promise<void> }
 
-export async function startOrx({ agent, outside }: { agent: Agent; outside: Outside }) {
+/** Copies the `orx` under test and the `orx-host` beside it, which debug builds extract keepers from. */
+function copyBuild(from: string, to: string) {
+  mkdirSync(to, { recursive: true })
+  for (const name of ['orx', 'orx-host']) copyFileSync(path.join(path.dirname(from), name), path.join(to, name))
+  return path.join(to, 'orx')
+}
+
+/** `ownBuild` runs from a copy no other server shares, for a test that replaces the executable. */
+export async function startOrx({ agent, outside, ownBuild }: { agent: Agent; outside: Outside; ownBuild?: boolean }) {
   // Short and outside the checkout: orx keeps Unix sockets under its data directory.
   const root = realpathSync(mkdtempSync('/tmp/orx-e2e-'))
   const home = path.join(root, 'home')
@@ -54,10 +62,12 @@ export async function startOrx({ agent, outside }: { agent: Agent; outside: Outs
     ORX_E2E_AGENT_LOG: path.join(root, 'agent.log'),
   }
 
+  let binary = ownBuild ? copyBuild(ORX, path.join(root, 'builds', '0')) : ORX
+  let builds = 0
   let child: ChildProcess | undefined
   let port = 0
   const start = async () => {
-    const started = spawn(ORX, ['up', '--no-browser', '--port', String(port)], { env, stdio: ['ignore', 'pipe', 'pipe'] })
+    const started = spawn(binary, ['up', '--no-browser', '--port', String(port)], { env, stdio: ['ignore', 'pipe', 'pipe'] })
     child = started
     const output = createWriteStream(log, { flags: 'a' })
     started.stdout!.pipe(output)
@@ -129,10 +139,21 @@ export async function startOrx({ agent, outside }: { agent: Agent; outside: Outs
       return { id: project.id, open: async (page) => void (await page.goto(`${url}/projects/${project.id}`)) }
     },
     stop,
-    /** Stops `orx up` and starts it again on the same port and data. */
-    async restart(signal: NodeJS.Signals = 'SIGTERM') {
+    /** Stops `orx up` and starts it again on the same port and data, from `next.binary` if given. */
+    async restart(signal: NodeJS.Signals = 'SIGTERM', next?: { binary: string }) {
       await stop(signal)
+      if (next) binary = next.binary
       await start()
+    },
+    /**
+     * Copies the running build to a path of its own, then deletes the running build's files as an
+     * update does, and returns the copy's `orx` for `restart`. Needs `ownBuild`.
+     */
+    replaceBuild() {
+      if (!ownBuild) throw new Error('replaceBuild needs a server started with ownBuild')
+      const next = copyBuild(binary, path.join(root, 'builds', String(++builds)))
+      rmSync(path.dirname(binary), { recursive: true })
+      return next
     },
   }
 }

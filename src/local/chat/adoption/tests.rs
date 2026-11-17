@@ -246,8 +246,9 @@ async fn settled(store: &Store, turn: &StoredChatTurn) -> StoredChatTurn {
 async fn gone(id: &str) {
     let stopped = async {
         while keep::entries()
+            .unwrap()
             .iter()
-            .any(|entry| entry.id == id && entry.alive)
+            .any(|entry| entry.id == id && entry.liveness == keep::Liveness::Alive)
         {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -307,7 +308,7 @@ fn a_restart_mid_turn_resumes_on_the_kept_agent_without_the_prompt() {
 
 #[cfg(unix)]
 #[test]
-fn a_crashed_servers_turn_resumes_only_once_its_lease_expires() {
+fn a_crashed_servers_turn_resumes_without_waiting_out_its_lease() {
     if !crate::config::in_test_child(&[]) {
         return;
     }
@@ -317,22 +318,11 @@ fn a_crashed_servers_turn_resumes_only_once_its_lease_expires() {
         chat(&store, "chat", "test-resume");
         let turn = running_turn(&store, "chat");
         left_running(&store, "test-resume", "chat", json!({})).await;
-        // The crashed server's lease, still fresh.
+        // The crashed server's lease, still fresh: it died without letting go.
         assert!(store.claim_chat_turn("chat", "crashed", &[]).unwrap());
 
         let next = host();
         adopt_kept_work(&next, true).await.unwrap();
-        next.reconcile_expired_turn_leases().await.unwrap();
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        let held = store.get_chat_turn("chat", &turn.id).unwrap().unwrap();
-        assert_eq!(held.state, "running");
-        assert!(!next.is_busy("chat").await);
-
-        let tx = store.begin().unwrap();
-        tx.execute("UPDATE chat_turn_leases SET heartbeat_at = 0", [])
-            .unwrap();
-        tx.commit().unwrap();
-        next.reconcile_expired_turn_leases().await.unwrap();
         assert_eq!(settled(&store, &turn).await.state, "completed");
         assert_eq!(texts(&store, &turn), ["a", "b"]);
     });
@@ -424,8 +414,9 @@ fn keepers_with_no_chat_or_no_child_are_cleared_and_idle_agents_adopted() {
         let stored = store.get_chat_turn("dead", &dead_turn.id).unwrap().unwrap();
         assert_eq!(recovery(&stored), ("failed", Some("continue")));
         assert!(keep::entries()
+            .unwrap()
             .iter()
-            .any(|entry| entry.id == idle_agent && entry.alive));
+            .any(|entry| entry.id == idle_agent && entry.liveness == keep::Liveness::Alive));
         keep::attach(&idle_agent)
             .await
             .unwrap()
@@ -454,6 +445,72 @@ fn agents_whose_server_moved_port_are_stopped_not_adopted() {
         gone(&agent).await;
         let stored = store.get_chat_turn("chat", &turn.id).unwrap().unwrap();
         assert_eq!(recovery(&stored), ("failed", Some("continue")));
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn keepers_that_cannot_be_read_are_left_running_not_stopped_or_cleared() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |path: &std::path::Path, mode| {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap()
+    };
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        register();
+        let store = Store::open().unwrap();
+        chat(&store, "chat", "test-resume");
+        let owner = left_running(&store, "test-resume", "chat", json!({})).await;
+        let lock = left_running(&store, "test-resume", "chat", json!({})).await;
+        let listed = left_running(&store, "test-resume", "chat", json!({})).await;
+        let owner_file = keep::root().join(&owner).join("owner.json");
+        let lock_file = keep::root().join(&lock).join("keeper.lock");
+        mode(&owner_file, 0);
+        mode(&lock_file, 0);
+        mode(&keep::root(), 0);
+        if std::fs::read_dir(keep::root()).is_ok() {
+            mode(&keep::root(), 0o700);
+            mode(&owner_file, 0o600);
+            mode(&lock_file, 0o600);
+            super::stop_kept(|_| true, "the test ended").await;
+            return;
+        }
+
+        let next = host();
+        let unlistable = adopt_kept_work(&next, true).await;
+        mode(&keep::root(), 0o700);
+        assert!(unlistable.is_err());
+
+        adopt_kept_work(&next, true).await.unwrap();
+        mode(&owner_file, 0o600);
+        mode(&lock_file, 0o600);
+        assert!(ADOPTED
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|adopted| adopted.keep_id == listed));
+        for id in [&owner, &lock, &listed] {
+            let entry = keep::entries()
+                .unwrap()
+                .into_iter()
+                .find(|entry| &entry.id == id)
+                .unwrap();
+            assert_eq!(
+                entry.liveness,
+                keep::Liveness::Alive,
+                "{id} was left running"
+            );
+        }
+        for id in [owner, lock, listed] {
+            keep::attach(&id)
+                .await
+                .unwrap()
+                .handle()
+                .stop(STOP_TIMEOUT)
+                .await;
+        }
     });
 }
 

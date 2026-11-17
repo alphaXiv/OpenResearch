@@ -317,12 +317,17 @@ pub trait Harness: Send + Sync {
         title::sanitize_title(&raw)
     }
 
+    /// [`Self::run_one_shot`], as one of the [`ONE_SHOTS`] a restart waits for.
+    async fn one_shot(&self, request: OneShot<'_>) -> Result<String> {
+        ONE_SHOTS.run(self.name(), self.run_one_shot(request)).await
+    }
+
     /// Run one headless request on a throwaway child at the requested
     /// [`OneShotQuality`] and return the model's reply verbatim. The child
     /// cannot write or reach MCP servers (tools are disabled where the CLI
     /// allows), and nothing is recorded in the harness's own session store.
     /// The error says why it couldn't run or failed, in the CLI's own words where it gave any.
-    async fn one_shot(&self, _request: OneShot<'_>) -> Result<String> {
+    async fn run_one_shot(&self, _request: OneShot<'_>) -> Result<String> {
         Err(anyhow!("{} cannot run one-shot requests", self.name()))
     }
 
@@ -507,6 +512,59 @@ pub fn registry() -> Vec<Box<dyn Harness>> {
             .map(|definition| Box::new(acp::Acp(definition)) as Box<dyn Harness>),
     );
     harnesses
+}
+
+/// The one-shots in flight. Nothing carries one to the next server, so a restart waits a moment
+/// for them to answer, then ends the rest: they are short and cheap to ask again.
+pub static ONE_SHOTS: std::sync::LazyLock<OneShots> = std::sync::LazyLock::new(OneShots::new);
+
+pub struct OneShots {
+    running: tokio::sync::watch::Sender<usize>,
+    ended: tokio::sync::watch::Sender<bool>,
+}
+
+impl OneShots {
+    /// How long [`Self::finish`] waits for one-shots to answer.
+    const GRACE: Duration = Duration::from_secs(5);
+
+    fn new() -> Self {
+        Self {
+            running: tokio::sync::watch::Sender::new(0),
+            ended: tokio::sync::watch::Sender::new(false),
+        }
+    }
+
+    async fn run(
+        &self,
+        agent: &str,
+        answer: impl std::future::Future<Output = Result<String>>,
+    ) -> Result<String> {
+        struct Running<'a>(&'a tokio::sync::watch::Sender<usize>);
+        impl Drop for Running<'_> {
+            fn drop(&mut self) {
+                self.0.send_modify(|running| *running -= 1);
+            }
+        }
+
+        let mut ended = self.ended.subscribe();
+        self.running.send_modify(|running| *running += 1);
+        let _running = Running(&self.running);
+        tokio::select! {
+            answer = answer => answer,
+            _ = ended.wait_for(|ended| *ended) => {
+                Err(anyhow!("OpenResearch restarted before {agent} answered"))
+            }
+        }
+    }
+
+    /// For a restart: waits up to [`Self::GRACE`] for the one-shots in flight, then ends the
+    /// rest and every one asked after, and stops their children.
+    pub async fn finish(&self) {
+        let mut running = self.running.subscribe();
+        let _ = tokio::time::timeout(Self::GRACE, running.wait_for(|running| *running == 0)).await;
+        self.ended.send_replace(true);
+        crate::local::acp::stop_one_shots().await;
+    }
 }
 
 /// A single self-contained request for [`Harness::one_shot`].
@@ -876,6 +934,31 @@ mod tests {
         assert!(!DefaultHarness.supports_compaction());
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_restart_waits_for_one_shots_then_ends_the_rest() {
+        let one_shots = Arc::new(OneShots::new());
+        let ask = |agent: &'static str, takes: u64| {
+            let one_shots = one_shots.clone();
+            tokio::spawn(async move {
+                let answer = async {
+                    tokio::time::sleep(Duration::from_secs(takes)).await;
+                    Ok(format!("{agent} answered"))
+                };
+                one_shots.run(agent, answer).await
+            })
+        };
+        let quick = ask("Quick", 1);
+        let slow = ask("Slow", 60);
+        tokio::task::yield_now().await;
+
+        let started = tokio::time::Instant::now();
+        one_shots.finish().await;
+        assert_eq!(started.elapsed(), OneShots::GRACE);
+        assert_eq!(quick.await.unwrap().unwrap(), "Quick answered");
+        let ended = slow.await.unwrap().unwrap_err().to_string();
+        assert!(ended.contains("restarted before Slow answered"), "{ended}");
+    }
+
     #[tokio::test]
     async fn title_uses_only_the_selected_opencode_model() {
         struct TitleHarness {
@@ -890,7 +973,7 @@ mod tests {
             fn name(&self) -> &str {
                 self.id
             }
-            async fn one_shot(&self, request: OneShot<'_>) -> Result<String> {
+            async fn run_one_shot(&self, request: OneShot<'_>) -> Result<String> {
                 self.calls
                     .lock()
                     .unwrap()
