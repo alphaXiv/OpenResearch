@@ -156,7 +156,8 @@ test("a compute-only machine is one click from Compute, on the laptop", async ()
   await click(find(`${visible} [role="dialog"] button`, m.remote_open_compute()));
   assert.deepEqual(dialogTitles(), []);
   assert.equal(visibleMachine(), "local");
-  assert.equal(document.querySelector(`${visible} .settings-view-scroll h1`)?.textContent, m.settings_page_compute());
+  assert.equal(document.querySelector(`${visible} .chat-pane h1`)?.textContent, m.settings_page_settings());
+  assert.equal(document.querySelector(`${visible} [role="tab"][aria-selected="true"]`)?.textContent, m.settings_page_compute());
 });
 
 test("a pasted ssh command is saved, then connected by the alias the server chose", async () => {

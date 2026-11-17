@@ -98,13 +98,6 @@ fn executable(harness: &str, release: &Path) -> PathBuf {
 
 /// The newest copy on disk: its executable and version.
 pub(crate) fn installed(harness: &str) -> Option<(PathBuf, semver::Version)> {
-    installed_for_major(harness, None)
-}
-
-pub(crate) fn installed_for_major(
-    harness: &str,
-    major: Option<u64>,
-) -> Option<(PathBuf, semver::Version)> {
     let harness = key(harness);
     let harness = harness.as_str();
     source(harness)?;
@@ -113,7 +106,8 @@ pub(crate) fn installed_for_major(
         .flatten()
         .filter_map(|entry| {
             let version = semver::Version::parse(entry.file_name().to_str()?).ok()?;
-            if major.is_some_and(|major| version.major != major) {
+            // OpenCode 1 copies predate holding OpenCode to major 2.
+            if harness == "opencode" && version.major != 2 {
                 return None;
             }
             let bin = executable(harness, &entry.path());
@@ -221,9 +215,8 @@ enum Format {
     Npm,
 }
 
-/// The newest release for this computer. `major` holds OpenCode to one major
-/// version, since its majors speak different protocols.
-pub(crate) async fn latest(harness: &str, major: Option<u64>) -> Result<Release> {
+/// The newest release for this computer.
+pub(crate) async fn latest(harness: &str) -> Result<Release> {
     let client = client()?;
     let harness = key(harness);
     let harness = harness.as_str();
@@ -246,30 +239,28 @@ pub(crate) async fn latest(harness: &str, major: Option<u64>) -> Result<Release>
                 .with_context(|| format!("Codex's latest release has an unexpected tag {tag:?}"))?;
             published_asset(&release, &asset, version, Format::TarGz)
         }
-        "opencode" => opencode_release(&client, NPM_REGISTRY, &asset, major.unwrap_or(2)).await,
+        "opencode" => opencode_release(&client, NPM_REGISTRY, &asset).await,
         _ => bail!("orx does not install {harness}."),
     }
 }
 
-/// OpenCode's npm packages, where GitHub's API would refuse a shared network
-/// past 60 lookups an hour. OpenCode 2 renamed its packages.
+/// OpenCode 2's npm packages, where GitHub's API would refuse a shared network
+/// past 60 lookups an hour.
 async fn opencode_release(
     client: &reqwest::Client,
     registry: &str,
     platform: &str,
-    major: u64,
 ) -> Result<Release> {
-    let package = match major {
-        1 => format!("opencode-{platform}"),
-        2 => format!("@opencode%2fcli-{platform}"),
-        _ => bail!("OpenResearch can't install OpenCode {major}."),
-    };
-    let metadata = get_json(client, &format!("{registry}/{package}/latest")).await?;
+    let metadata = get_json(
+        client,
+        &format!("{registry}/@opencode%2fcli-{platform}/latest"),
+    )
+    .await?;
     let tag = metadata["version"].as_str().unwrap_or_default();
     let version = semver::Version::parse(tag)
         .with_context(|| format!("npm lists OpenCode as {tag:?}, which isn't a version"))?;
-    if version.major != major {
-        bail!("npm's newest OpenCode is {version}, not OpenCode {major}.");
+    if version.major != 2 {
+        bail!("npm's newest OpenCode is {version}, not OpenCode 2.");
     }
     let dist = &metadata["dist"];
     let (Some(url), Some(integrity)) = (
@@ -450,11 +441,11 @@ pub(crate) async fn install(
     let harness = key(harness);
     let harness = harness.as_str();
     if matches!(release.format, Format::Npm) {
-        let runtime = latest("node", None).await?;
+        let runtime = latest("node").await?;
         Box::pin(install("node", &runtime, progress, None)).await?;
     }
     if let Some(runtime) = runtime(harness) {
-        let release = latest(runtime, None).await?;
+        let release = latest(runtime).await?;
         Box::pin(install(runtime, &release, progress, None)).await?;
     }
     let parent = root().join(harness);
@@ -944,29 +935,26 @@ mod tests {
     }
 
     #[test]
-    fn managed_opencode_selection_respects_the_users_major() {
+    fn managed_opencode_selection_ignores_a_1_copy() {
         let base = root().join("opencode");
         for version in ["1.99.0", "2.99.0"] {
             let dir = base.join(version);
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(executable("opencode", &dir), "fixture").unwrap();
         }
-        assert_eq!(installed_for_major("opencode", Some(1)).unwrap().1.major, 1);
-        assert_eq!(installed_for_major("opencode", Some(2)).unwrap().1.major, 2);
-        assert_eq!(installed_for_major("opencode", Some(3)), None);
-        for version in ["1.99.0", "2.99.0"] {
-            std::fs::remove_dir_all(base.join(version)).unwrap();
-        }
+        assert_eq!(installed("opencode").unwrap().1.major, 2);
+        std::fs::remove_dir_all(base.join("2.99.0")).unwrap();
+        assert_eq!(installed("opencode"), None);
+        std::fs::remove_dir_all(base.join("1.99.0")).unwrap();
     }
 
     #[tokio::test]
-    async fn opencode_release_reads_each_majors_npm_package() {
+    async fn opencode_release_reads_the_opencode_2_npm_package() {
         use axum::{extract::Path, routing::get, Json, Router};
         let app = Router::new().route(
             "/{package}/latest",
             get(|Path(package): Path<String>| async move {
                 let version = match package.as_str() {
-                    "opencode-darwin-arm64" => "1.19.5",
                     "@opencode/cli-darwin-arm64" => "2.3.0",
                     _ => "3.0.0",
                 };
@@ -981,17 +969,13 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let client = client().unwrap();
 
-        let v2 = opencode_release(&client, &registry, "darwin-arm64", 2)
+        let v2 = opencode_release(&client, &registry, "darwin-arm64")
             .await
             .unwrap();
         assert_eq!(v2.version, semver::Version::new(2, 3, 0));
         assert_eq!(v2.url, "https://example.test/2.3.0.tgz");
         assert_eq!(v2.sha256, "sha512:deadbeef");
-        let v1 = opencode_release(&client, &registry, "darwin-arm64", 1)
-            .await
-            .unwrap();
-        assert_eq!(v1.version, semver::Version::new(1, 19, 5));
-        let renamed = opencode_release(&client, &registry, "linux-x64", 1).await;
+        let renamed = opencode_release(&client, &registry, "linux-x64").await;
         assert!(renamed.is_err());
         server.abort();
     }

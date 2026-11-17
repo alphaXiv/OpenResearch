@@ -53,6 +53,7 @@ mod agent_tools;
 pub(crate) mod api_v2;
 pub(crate) mod compute_settings;
 mod harness_setup;
+pub(crate) mod model_feed;
 mod network;
 mod search;
 mod usage;
@@ -222,6 +223,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
 
     spawn_agent_preflight(state.clone());
     spawn_agent_updates(state.clone());
+    model_feed::spawn_refresh(state.clone());
     search::spawn_backfill(state.clone());
     // A fresh install's demo worktree takes ~15 sequential git spawns — build
     // it while the onboarding screen is up instead of inside the confirm click.
@@ -851,6 +853,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
         .route("/api/update/install-cli", post(install_cli))
         .route("/api/settings/ui-state", get(ui_state).post(set_ui_state))
         .route("/api/settings/network", get(network::public_network))
+        .route("/api/model-feed", get(model_feed::model_feed))
         .route(
             "/api/projects/{id}/ui-state",
             get(project_ui_state).post(set_project_ui_state),
@@ -902,6 +905,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
         )
         .route("/api/settings/ray/preflight", post(ray_preflight))
         .route("/api/trackio/projects/{id}/runs", get(trackio_project_runs))
+        .route(
+            "/api/trackio/projects/{id}/runs/{run}/metrics",
+            get(trackio_run_metrics),
+        )
         .route("/api/settings/trackio/preflight", post(trackio_preflight))
         .route("/api/settings/compute", get(compute_settings))
         .route("/api/settings/compute/default", post(set_compute_default))
@@ -973,6 +980,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
         .route(
             "/api/opencode/providers/{id}",
             axum::routing::delete(remove_opencode_provider),
+        )
+        .route(
+            "/api/opencode/found-providers/{id}",
+            axum::routing::delete(remove_found_provider),
         )
         .route(
             "/api/opencode/providers/{id}/key",
@@ -5644,7 +5655,8 @@ async fn begin_restart(state: &AppState, own_requests: usize, stop_agents: bool)
 }
 
 /// Once a day, keep each agent orx can install current: through the user's own
-/// updater, else with orx's copy (`harness_setup::keep_current`).
+/// updater, else with orx's copy (`harness_setup::keep_current`). OpenCode is
+/// installed when missing, for its free models.
 fn spawn_agent_updates(state: AppState) {
     tokio::spawn(async move {
         // Startup detection's probes go first.
@@ -5661,8 +5673,9 @@ fn spawn_agent_updates(state: AppState) {
 
 /// One pass of [`spawn_agent_updates`]. An agent signed out on every account
 /// is left alone, so its vendor's release feed hears only from agents in use;
-/// one whose sign-in is unknown is still kept current. A runtime follows the
-/// agent that installs it.
+/// one whose sign-in is unknown is still kept current. OpenCode is never left
+/// alone, since its free models need no sign-in. A runtime follows the agent
+/// that installs it.
 async fn update_agents<F>(state: &AppState, keep_current: impl Fn(&'static str) -> F)
 where
     F: std::future::Future<Output = crate::error::Result<bool>>,
@@ -5694,8 +5707,9 @@ where
             })
             .map(|entry| &entry["authState"])
             .collect();
-        let signed_out =
-            !auth_states.is_empty() && auth_states.iter().all(|state| *state == "needsLogin");
+        let signed_out = harness != "opencode"
+            && !auth_states.is_empty()
+            && auth_states.iter().all(|state| *state == "needsLogin");
         if signed_out {
             continue;
         }
@@ -6417,6 +6431,16 @@ struct UiEventReq {
     surface: Option<String>,
     #[serde(default)]
     action: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    harness: Option<String>,
+    #[serde(default)]
+    section: Option<String>,
+    #[serde(default)]
+    new: Option<bool>,
+    #[serde(default)]
+    free: Option<bool>,
 }
 
 async fn record_ui_event(Json(req): Json<UiEventReq>) -> ApiResult {
@@ -6445,6 +6469,20 @@ async fn record_ui_event(Json(req): Json<UiEventReq>) -> ApiResult {
         "first_action" => {
             if let (Some(surface), Some(action)) = (req.surface.as_deref(), req.action.as_deref()) {
                 crate::telemetry::capture_first_action(surface, action);
+            }
+        }
+        "model_callout" => {
+            if let (Some(kind), Some(action), Some(model), Some(harness)) =
+                (&req.kind, &req.action, &req.model, &req.harness)
+            {
+                crate::telemetry::capture_model_callout(kind, action, model, harness);
+            }
+        }
+        "model_picked" => {
+            if let (Some(section), Some(model), Some(harness), Some(new), Some(free)) =
+                (&req.section, &req.model, &req.harness, req.new, req.free)
+            {
+                crate::telemetry::capture_model_picked(section, model, harness, new, free);
             }
         }
         _ => return Ok(Json(json!({ "ok": false }))),
@@ -6762,12 +6800,15 @@ struct SetUiStateReq {
     preferred_autonomy: Option<Autonomy>,
     nested_delegation: Option<bool>,
     opencode_free_models: Option<bool>,
+    /// `provider/model`, or empty for the chat's own.
+    opencode_review_model: Option<String>,
     favorite_models: Option<Vec<String>>,
     hidden_models: Option<Vec<String>>,
     hidden_agents: Option<Vec<String>>,
     model_section_order: Option<Vec<String>>,
     collapsed_model_sections: Option<Vec<String>>,
     model_sightings: Option<Value>,
+    seen_nudges: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -6797,6 +6838,21 @@ async fn set_ui_state(
     }
     if let Some(workspace) = &req.workspace {
         workspace.validate().map_err(bad_request)?;
+    }
+    let review_model = req
+        .opencode_review_model
+        .take()
+        .map(|model| model.trim().to_owned());
+    if review_model.as_deref().is_some_and(|model| {
+        !model.is_empty()
+            && (model.len() > 200
+                || model
+                    .split_once('/')
+                    .is_none_or(|(provider, id)| provider.is_empty() || id.is_empty()))
+    }) {
+        return Err(bad_request(
+            "The Auto reviewer must be a model in provider/model form",
+        ));
     }
     let switched = req.hidden_agents.is_some();
     let lists = [
@@ -6834,6 +6890,13 @@ async fn set_ui_state(
             200,
             80,
             "Collapsed sections",
+        ),
+        (
+            "seen_nudges",
+            req.seen_nudges.take(),
+            200,
+            64,
+            "Seen nudges",
         ),
     ];
     for (_, list, entries, chars, name) in &lists {
@@ -6905,6 +6968,11 @@ async fn set_ui_state(
         }
         if let Some(offered) = req.opencode_free_models {
             store.set_opencode_free_models(offered)?;
+        }
+        if let Some(model) = &review_model {
+            store.set_opencode_review_model(
+                Some(model.as_str()).filter(|model| !model.is_empty()),
+            )?;
         }
         for (column, list, ..) in lists {
             if let Some(list) = list {
@@ -8077,7 +8145,6 @@ async fn local_runtime() -> Json<Value> {
 }
 
 enum OpenCodeError {
-    V1,
     /// Why a model server listed no models, by a code the dashboard tells apart.
     Unlisted(&'static str, String),
     Api(ApiError),
@@ -8086,8 +8153,11 @@ enum OpenCodeError {
 impl IntoResponse for OpenCodeError {
     fn into_response(self) -> Response {
         match self {
-            Self::V1 => (StatusCode::CONFLICT, Json(json!({"error":"Update OpenCode to add or change providers, or use OpenResearch's copy.","code":"opencode1"}))).into_response(),
-            Self::Unlisted(code, message) => (StatusCode::BAD_REQUEST, Json(json!({"error":message,"code":code}))).into_response(),
+            Self::Unlisted(code, message) => (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":message,"code":code})),
+            )
+                .into_response(),
             Self::Api(error) => error.into_response(),
         }
     }
@@ -8107,28 +8177,8 @@ impl From<ApiError> for OpenCodeError {
 
 type OpenCodeResult = std::result::Result<Json<Value>, OpenCodeError>;
 
-fn opencode_v2(protocol: local::opencode::Protocol) -> std::result::Result<(), OpenCodeError> {
-    if protocol == local::opencode::Protocol::V1 {
-        return Err(OpenCodeError::V1);
-    }
-    Ok(())
-}
-
-async fn require_opencode_v2() -> std::result::Result<local::opencode::ResolvedBinary, OpenCodeError>
-{
-    let binary = local::opencode::resolve_binary().await?;
-    opencode_v2(binary.protocol)?;
-    Ok(binary)
-}
-
-/// OpenCode 1 is read-only here, so a change needs OpenCode 2. Without OpenCode a
-/// change still saves, since installing it brings OpenCode 2.
-async fn opencode_for_change(
-) -> std::result::Result<Option<local::opencode::ResolvedBinary>, OpenCodeError> {
-    match local::opencode::resolve_binary().await {
-        Ok(binary) => opencode_v2(binary.protocol).map(|()| Some(binary)),
-        Err(_) => Ok(None),
-    }
+async fn require_opencode() -> std::result::Result<local::opencode::ResolvedBinary, OpenCodeError> {
+    Ok(local::opencode::resolve_binary().await?)
 }
 
 async fn list_local_models() -> OpenCodeResult {
@@ -8136,7 +8186,6 @@ async fn list_local_models() -> OpenCodeResult {
 }
 
 async fn discover_local_models(Json(req): Json<local::local_models::Probe>) -> OpenCodeResult {
-    opencode_for_change().await?;
     let listing =
         local::local_models::listing(&req)
             .await
@@ -8170,7 +8219,6 @@ async fn connect_local_model(
     State(state): State<AppState>,
     Json(req): Json<local::local_models::Connect>,
 ) -> OpenCodeResult {
-    opencode_for_change().await?;
     let (model, created) = local::local_models::connect(req)
         .await
         .map_err(|e| bad_request(e.to_string()))?;
@@ -8223,7 +8271,7 @@ async fn add_opencode_provider(
     State(state): State<AppState>,
     Json(req): Json<local::local_models::AddProvider>,
 ) -> OpenCodeResult {
-    let binary = opencode_for_change().await?;
+    let binary = local::opencode::resolve_binary().await.ok();
     let id = local::local_models::add_provider(binary.as_ref(), req)
         .await
         .map_err(|e| bad_request(e.to_string()))?;
@@ -8242,13 +8290,47 @@ async fn replace_opencode_key(
     Path(id): Path<String>,
     Json(req): Json<SaveOpenCodeKeyReq>,
 ) -> OpenCodeResult {
-    opencode_for_change().await?;
     if !local::local_models::providers()?.contains_key(&id) {
         return Err(not_found("provider").into());
     }
     local::local_models::replace_key(&id, &req.api_key).map_err(|e| bad_request(e.to_string()))?;
     recheck_opencode(&state).await;
     Ok(Json(json!({"ok":true})))
+}
+
+/// Deletes a provider from the user's own OpenCode, which no record of OpenResearch's stands for.
+async fn remove_found_provider(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    reject_if_moving(&state)?;
+    if !local::harness::opencode::is_found_provider_id(&id) {
+        return Err(bad_request("Choose a provider your OpenCode has."));
+    }
+    if local::local_models::providers()?.contains_key(&id)
+        || local::local_models::read()?.contains_key(&id)
+    {
+        return Err(bad_request(
+            "OpenResearch added this provider. Remove it from its own row in Settings → Agents.",
+        ));
+    }
+    let key = format!("opencode:{id}");
+    tokio::task::spawn_blocking(move || {
+        local::harness::opencode::delete_found_provider(&id)?;
+        local::agent_profiles::forget(&key)
+    })
+    .await
+    .map_err(|e| anyhow!("Provider removal failed: {e}"))?
+    .map_err(|error| {
+        let status = if error
+            .downcast_ref::<local::harness::opencode::FoundProviderGone>()
+            .is_some()
+        {
+            StatusCode::NOT_FOUND
+        } else {
+            StatusCode::BAD_REQUEST
+        };
+        ApiError(status, error.to_string())
+    })?;
+    recheck_opencode(&state).await;
+    Ok(Json(json!({"ok": true})))
 }
 
 async fn remove_opencode_provider(
@@ -8261,7 +8343,7 @@ async fn remove_opencode_provider(
             record.credential,
             local::local_models::ProviderCredential::Oauth
         ) {
-            local::opencode_signin::sign_out(&require_opencode_v2().await?, &id).await?;
+            local::opencode_signin::sign_out(&require_opencode().await?, &id).await?;
         }
     }
     local::local_models::remove_provider(&id)?;
@@ -8270,7 +8352,7 @@ async fn remove_opencode_provider(
 }
 
 async fn list_opencode_integrations() -> OpenCodeResult {
-    let binary = require_opencode_v2().await?;
+    let binary = require_opencode().await?;
     Ok(Json(local::opencode_signin::integrations(&binary).await?))
 }
 
@@ -8278,7 +8360,7 @@ async fn start_opencode_signin(
     State(state): State<AppState>,
     Json(req): Json<local::opencode_signin::SignIn>,
 ) -> OpenCodeResult {
-    let binary = require_opencode_v2().await?;
+    let binary = require_opencode().await?;
     Ok(Json(
         state
             .opencode_signins
@@ -8609,6 +8691,9 @@ async fn list_harnesses(State(state): State<AppState>, Query(q): Query<HarnessQu
     let hidden = Store::open()?.ui_state()?.hidden_agents;
     for entry in payload["harnesses"].as_array_mut().into_iter().flatten() {
         entry["off"] = json!(local::model_routes::turned_off(entry, &hidden));
+        if entry["id"] == "opencode" && entry["profile"].is_null() {
+            entry["offProviders"] = json!(local::model_routes::off_providers(entry, &hidden));
+        }
         let harness = entry["id"].as_str().unwrap_or_default().to_string();
         local::model_routes::name_models(&harness, &mut entry["models"]);
     }
@@ -8803,6 +8888,12 @@ async fn test_acp_harness(Json(input): Json<AcpHarnessInput>) -> ApiResult {
 /// With `harness=<id>` it probes only that harness (unless a fill is running)
 /// and serves the cache with it patched in.
 async fn harnesses_payload(state: &AppState, q: &HarnessQuery) -> Value {
+    let mut payload = detected_harnesses(state, q).await;
+    model_feed::annotate_models(&mut payload);
+    payload
+}
+
+async fn detected_harnesses(state: &AppState, q: &HarnessQuery) -> Value {
     // `retry` only escalates to a full detect when it actually cleared a
     // runtime rejection — a bare retry is an ordinary cached read.
     let retried = q.retry == Some(1) && state.claude.clear_runtime_rejection();
@@ -11224,12 +11315,14 @@ mod tests {
             preferred_autonomy: Some(Autonomy::Copilot),
             nested_delegation: false,
             opencode_free_models: true,
+            opencode_review_model: None,
             favorite_models: Vec::new(),
             hidden_models: Vec::new(),
             hidden_agents: Vec::new(),
             model_section_order: Vec::new(),
             collapsed_model_sections: Vec::new(),
             model_sightings: None,
+            seen_nudges: Vec::new(),
             preferred_agent: Some(StoredAgentSelection {
                 profile: None,
                 harness: "codex".into(),
@@ -11263,12 +11356,14 @@ mod tests {
             preferred_agent: None,
             nested_delegation: false,
             opencode_free_models: true,
+            opencode_review_model: None,
             favorite_models: Vec::new(),
             hidden_models: Vec::new(),
             hidden_agents: Vec::new(),
             model_section_order: Vec::new(),
             collapsed_model_sections: Vec::new(),
             model_sightings: None,
+            seen_nudges: Vec::new(),
         };
         let catalog = json!({"harnesses": [{"id":"claude-code", "agentReady":true,"defaultModel":"opus",
             "models":[{"id":"opus"}], "options":{"defaultPermissionMode":"plan", "reasoningLevels":[{"id":"default"}]}}]});
@@ -11318,12 +11413,14 @@ mod tests {
             preferred_autonomy: None,
             nested_delegation: false,
             opencode_free_models: true,
+            opencode_review_model: None,
             favorite_models: Vec::new(),
             hidden_models: Vec::new(),
             hidden_agents: Vec::new(),
             model_section_order: Vec::new(),
             collapsed_model_sections: Vec::new(),
             model_sightings: None,
+            seen_nudges: Vec::new(),
         };
         let catalog = json!({"harnesses":[
             {"id":"codex", "agentReady":true, "models":[], "options":{}},
@@ -11584,12 +11681,14 @@ mod tests {
                 preferred_autonomy: None,
                 nested_delegation: None,
                 opencode_free_models: None,
+                opencode_review_model: None,
                 favorite_models: None,
                 hidden_models: None,
                 hidden_agents: None,
                 model_section_order: None,
                 collapsed_model_sections: None,
                 model_sightings: None,
+                seen_nudges: None,
             }),
         )
         .await;
@@ -11601,6 +11700,7 @@ mod tests {
             json!({"hiddenAgents": vec!["codex"; 2001]}),
             json!({"modelSectionOrder": ["x".repeat(81)]}),
             json!({"modelSightings": ["gpt-6"]}),
+            json!({"seenNudges": ["x".repeat(65)]}),
         ] {
             let result = set_ui_state(
                 State(test_state()),
@@ -11901,7 +12001,7 @@ mod tests {
         );
         assert_eq!(
             preferred_permission_mode("opencode", Some("plan".into())).as_deref(),
-            Some("default")
+            Some("auto-approve")
         );
     }
 
@@ -12326,22 +12426,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn opencode_v1_provider_routes_report_upgrade() {
-        let response = opencode_v2(local::opencode::Protocol::V1)
-            .err()
-            .unwrap()
-            .into_response();
-        assert_eq!(response.status(), StatusCode::CONFLICT);
-        let bytes = axum::body::to_bytes(response.into_body(), 4096)
-            .await
-            .unwrap();
-        let body: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(body["code"], "opencode1");
-        assert!(body["error"].as_str().unwrap().contains("Update OpenCode"));
-        assert!(opencode_v2(local::opencode::Protocol::V2).is_ok());
-    }
-
-    #[tokio::test]
     async fn daily_update_pass_skips_agents_signed_out_on_every_account() {
         if !crate::config::in_test_child(&[]) {
             return;
@@ -12377,7 +12461,7 @@ mod tests {
         .await;
 
         let expected: Vec<_> = local::harness::managed::harnesses()
-            .filter(|harness| !["opencode", "dsh", "pi-acp", "pi"].contains(harness))
+            .filter(|harness| !["dsh", "pi-acp", "pi"].contains(harness))
             .collect();
         assert_eq!(checked.into_inner().unwrap(), expected);
     }
@@ -12396,7 +12480,7 @@ mod tests {
             .unwrap();
         *state.harnesses.lock().await = Some((
             expired,
-            json!({"harnesses":[{"id":"opencode","authState":"needsLogin"}]}),
+            json!({"harnesses":[{"id":"codex","authState":"needsLogin"}]}),
         ));
         let checked = std::sync::Mutex::new(Vec::new());
 
@@ -12406,7 +12490,7 @@ mod tests {
         })
         .await;
 
-        assert!(checked.into_inner().unwrap().contains(&"opencode"));
+        assert!(checked.into_inner().unwrap().contains(&"codex"));
     }
 
     #[tokio::test]
@@ -12914,6 +12998,175 @@ mod tests {
         assert_eq!(stored["refreshToken"], "refresh-1");
         let device_1 = polls.lock().unwrap().get("device-1").copied().unwrap_or(0);
         assert!(device_1 <= polls_when_closed + 1, "{device_1} polls");
+    }
+
+    #[test]
+    fn agents_cli_lists_labels_and_adds_rows_and_found_providers_delete_from_opencode() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        use crate::commands::agents;
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let dir = local::harness::xdg_config_home().join("opencode");
+            std::fs::create_dir_all(&dir).unwrap();
+            let config = dir.join("opencode.json");
+            std::fs::write(
+                &config,
+                r#"{"provider":{"tinker":{"npm":"@ai-sdk/openai-compatible","options":{"baseURL":"https://tinker.example/v1"}}}}"#,
+            )
+            .unwrap();
+            let records = local::local_models::providers_path();
+            std::fs::create_dir_all(records.parent().unwrap()).unwrap();
+            std::fs::write(
+                &records,
+                r#"{"openai":{"kind":"key","key":"sk-test","name":"Work OpenAI"}}"#,
+            )
+            .unwrap();
+            std::env::set_var("XAI_API_KEY", "fixture-only");
+            let store = Store::open().unwrap();
+            store
+                .set_ui_json("hidden_agents", &["opencode:tinker", "opencode:openai", "cursor"])
+                .unwrap();
+            local::agent_profiles::edit(
+                "opencode:tinker",
+                &serde_json::from_value(json!({"logo":"thinkingmachines"})).unwrap(),
+            )
+            .unwrap();
+
+            let state = test_state();
+            *state.harnesses.lock().await = Some((
+                std::time::Instant::now(),
+                json!({"harnesses":[
+                    {"id":"codex","name":"Codex","installed":true,"agentReady":true,"models":[]},
+                    {"id":"cursor","name":"Cursor","installed":true,"managed":true,"agentReady":true,"models":[]},
+                    {"id":"antigravity","name":"Antigravity","installed":false,"agentReady":false,"models":[]},
+                    {"id":"opencode","name":"OpenCode","installed":true,"agentReady":true,"models":[],
+                     "foundProviders":[
+                        {"id":"tinker","npm":"@ai-sdk/openai-compatible","baseUrl":"https://tinker.example/v1","sources":["config"],"removable":true},
+                        {"id":"xai","env":["XAI_API_KEY"],"sources":["env"],"removable":false}
+                     ]}
+                ]}),
+            ));
+            let address = serve(router(state, None, up_remote::Reach::Loopback)).await;
+            let dashboard = agents::Dashboard::new(address.port(), None).unwrap();
+            let http = crate::net::loopback_client().build().unwrap();
+
+            let harnesses: Value = http.get(format!("http://{address}/api/harnesses")).send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            let opencode = &harnesses["harnesses"][3];
+            assert_eq!(opencode["offProviders"], json!(["openai", "tinker"]));
+            assert_eq!(opencode["foundProviders"][0]["label"], json!({"logo":"thinkingmachines"}));
+            assert_eq!(harnesses["harnesses"][1]["off"], true);
+
+            let rows = agents::rows(&dashboard).await.unwrap();
+            let shown: Vec<_> = rows
+                .iter()
+                .map(|row| (row["key"].as_str().unwrap(), row["kind"].as_str().unwrap(), row["on"] == true))
+                .collect();
+            assert_eq!(
+                shown,
+                [
+                    ("codex", "agent", true),
+                    ("cursor", "agent", false),
+                    ("opencode", "free-models", true),
+                    ("opencode:tinker", "found-provider", false),
+                    ("opencode:xai", "found-provider", true),
+                    ("opencode:openai", "provider", false),
+                ]
+            );
+            assert_eq!(
+                rows[3],
+                json!({"key":"opencode:tinker","name":"tinker","kind":"found-provider","on":false,"removable":true,
+                       "logo":"thinkingmachines","baseUrl":"https://tinker.example/v1","npm":"@ai-sdk/openai-compatible","sources":["config"]})
+            );
+            assert_eq!(rows[1]["removable"], true);
+
+            let named = agents::label(&dashboard, "opencode:tinker", json!({"name":"Tinker Prod"}))
+                .await
+                .unwrap();
+            assert_eq!((&named["name"], &named["logo"]), (&json!("Tinker Prod"), &json!("thinkingmachines")));
+            let named = agents::label(&dashboard, "opencode:openai", json!({"logo":"openai"}))
+                .await
+                .unwrap();
+            assert_eq!((&named["name"], &named["logo"]), (&json!("Work OpenAI"), &json!("openai")));
+            for (edit, error) in [
+                (json!({"logo":"Not A Slug"}), "Choose a logo"),
+                (json!({}), "Pass --name, --logo, --emoji, --clear-name or --clear-logo."),
+                (json!({"icon":{"emoji":"🔧","color":"gold"}}), "Choose an icon and color"),
+            ] {
+                let refused = agents::label(&dashboard, "codex", edit).await.unwrap_err();
+                assert_eq!(refused.to_string(), error);
+            }
+            let missing = agents::label(&dashboard, "codex-abcdefghij", json!({"logo":"openai"}))
+                .await
+                .unwrap_err();
+            assert_eq!(missing.to_string(), "Agent account was removed");
+
+            let models = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}/v1", models.local_addr().unwrap());
+            tokio::spawn(async move {
+                axum::serve(
+                    models,
+                    Router::new().route(
+                        "/v1/models",
+                        get(|| async { Json(json!({"data":[{"id":"qwen"}]})) }),
+                    ),
+                )
+                .await
+            });
+            let request = |url: &str| json!({"name":"Lab box","baseUrl":url,"apiKey":"","model":"qwen","contextWindow":32768});
+            let refused = agents::add_endpoint(&dashboard, request("http://example.com/v1"), None)
+                .await
+                .unwrap_err();
+            assert!(refused.to_string().starts_with("Use an https:// address"), "{refused}");
+            let added = agents::add_endpoint(&dashboard, request(&base), Some("lmstudio".into()))
+                .await
+                .unwrap();
+            assert_eq!(added["kind"], "endpoint");
+            assert_eq!((&added["name"], &added["logo"], &added["baseUrl"]), (&json!("Lab box"), &json!("lmstudio"), &json!(base)));
+            assert!(added["key"].as_str().unwrap().starts_with("opencode:orx-local-"));
+
+            let delete = |id: &str| {
+                http.delete(format!("http://{address}/api/opencode/found-providers/{id}"))
+                    .send()
+            };
+            for (id, status, error) in [
+                ("xai", 400, "`XAI_API_KEY` in your environment provides xai. Remove it there, or turn this provider off."),
+                ("openai", 400, "OpenResearch added this provider. Remove it from its own row in Settings → Agents."),
+                ("opencode", 400, "Choose a provider your OpenCode has."),
+                ("mistral", 404, "OpenResearch can't find where your OpenCode sets up mistral. Remove it in OpenCode, or turn this provider off."),
+            ] {
+                let response = delete(id).await.unwrap();
+                assert_eq!(response.status().as_u16(), status, "{id}");
+                assert_eq!(response.json::<Value>().await.unwrap()["error"], error);
+            }
+            assert_eq!(delete("tinker").await.unwrap().status().as_u16(), 200);
+            assert_eq!(std::fs::read_to_string(&config).unwrap().trim(), "{\n  \"provider\": {}\n}");
+            assert_eq!(
+                store.ui_state().unwrap().hidden_agents,
+                ["opencode:openai", "cursor"]
+            );
+            assert!(!local::agent_profiles::labels().unwrap().contains_key("opencode:tinker"));
+        });
+    }
+
+    #[tokio::test]
+    async fn agents_cli_explains_a_remote_host_refusing_its_chats() {
+        let auth = RemoteAuth::new("callback");
+        let address = serve(router(test_state(), Some(auth), up_remote::Reach::Loopback)).await;
+        let dashboard =
+            crate::commands::agents::Dashboard::new(address.port(), Some("callback".into()))
+                .unwrap();
+        let refused = crate::commands::agents::rows(&dashboard).await.unwrap_err();
+        assert_eq!(refused.to_string(), "Chats on a remote OpenResearch host can't use `orx agents`. Ask the user to make this change in OpenResearch.");
     }
 
     #[tokio::test]

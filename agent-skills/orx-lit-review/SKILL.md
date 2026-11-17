@@ -281,6 +281,7 @@ an available alphaXiv representation.
 | Embedded visual | `Figure N` / `Table N` | Existing local image file |
 
 Use these labels consistently, not vague labels such as "Source" or descriptions
-of the claim. Disambiguate figures by paper when needed. Introductory paper-title links can
+of the claim. The app lists every paper your answer links below the answer, so
+end without a sources or references list. Disambiguate figures by paper when needed. Introductory paper-title links can
 retain their titles. Discovery and figure-provenance links provide navigation;
 they do not imply every claim in a paper has been verified.

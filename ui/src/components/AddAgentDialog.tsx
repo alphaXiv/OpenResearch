@@ -4,7 +4,6 @@ import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, ty
 import { useQuery, type QueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Check, ChevronDown, CircleCheck, Copy, CreditCard, KeyRound, Laptop, Link2, Plus, RefreshCw, Search, TriangleAlert } from "lucide-react";
 import {
-  OpenCode1Error,
   harnessModelLabel,
   tidyModelName,
   type AcpDefinition,
@@ -23,10 +22,10 @@ import { copyToClipboard } from "../clipboard";
 import { fmtNumber, ltr } from "../i18n";
 
 import { m } from "../paraglide/messages.js";
-import { agentModelLines } from "../modelSelection";
+import { agentModelLines, modelsAvailable } from "../modelSelection";
 import { AcpAuth } from "./AcpAuthDialog";
 import { AgentIconButton, BRAND_ICON } from "./AgentIcon";
-import { BrandMark, HarnessLogo, ModelMark, type Brand } from "./HarnessLogo";
+import { BrandMark, HarnessLogo, logoMark, ModelMark, type Brand } from "./HarnessLogo";
 import { HarnessSetup, SignInSteps } from "./HarnessSetupDialog";
 import { EndpointMark, LocalModelGuide, useLocalModelForm } from "./LocalModelSetup";
 import { renderNote } from "./agentNote";
@@ -164,6 +163,10 @@ const MORE_PROVIDERS = [
   listedTile("ollama-cloud", "Ollama Cloud", { brand: "ollama" }, "https://ollama.com/settings/keys"),
   listedTile("deepinfra", "DeepInfra", { brand: "deepinfra" }, "https://deepinfra.com/dash/keys"),
   listedTile("baseten", "Baseten", { brand: "baseten" }, "https://app.baseten.co/settings/api_keys"),
+  {
+    id: "thinkingmachines", name: "Thinking Machines", mark: { brand: "thinkingmachines" },
+    methods: [{ kind: "key", id: "thinkingmachines", platform: "Tinker", keyUrl: "https://tinker-console.thinkingmachines.ai/keys" }],
+  } satisfies AgentTile,
 ];
 const PROVIDER_TILES = [OPENCODE_GO, ...LABS, OPENROUTER, ...MORE_PROVIDERS];
 /** What the wizard recommends first. */
@@ -264,7 +267,7 @@ type Saved =
 /** Which agent the wizard added; Claude Code and Codex name the account, OpenCode the provider of the models it added. */
 export type AddedAgent = { harness: HarnessId; profile?: string; provider?: string };
 
-export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = false, confirm, cancel, isDisabled, onCustomAcp, onEditAcp }: DialogContentProps<AddedAgent> & {
+export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = false, confirm, cancel, isDisabled, onCustomAcp, onEditAcp, onAdding }: DialogContentProps<AddedAgent> & {
   remote: boolean;
   /** A recommended tile's id, or `endpoint`, whose sign-in the wizard opens on. */
   tile?: string;
@@ -274,6 +277,8 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
   host?: string;
   onCustomAcp: () => void;
   onEditAcp: (definition: AcpDefinition) => void;
+  /** The Settings row this dialog is setting up, keyed as `hiddenAgents` is, or null; Settings lists it once the dialog finishes. */
+  onAdding?: (key: string | null) => void;
 }) {
   const workspace = useWorkspace();
   const { getHarnessesQuery, getHarnessSetupCommandsQuery, getOpenCodeProvidersQuery, getLocalModelsQuery, getUiStateQuery, listAcpHarnessesQuery, refreshHarness } = workspace.queries;
@@ -297,11 +302,10 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
   /** What OpenCode asks before a sign-in starts, such as GitHub's deployment type. */
   const [questions, setQuestions] = useState<{ signIn: OAuthSignIn; from: AgentTile; fields: OpenCodeFormField[] } | null>(null);
   const [answers, setAnswers] = useState<Record<string, OpenCodeAnswer>>({});
-  /** A request OpenCode 1 refused, until it's updated. */
-  const [refused, setRefused] = useState(false);
   const [name, setName] = useState("");
   /** Null until the user picks one: the tile's mark on its colour. */
   const [icon, setIcon] = useState<AgentIcon | null>(null);
+  const [pinnedLogo, setPinnedLogo] = useState<string | null>(null);
   const [hideFreeModels, setHideFreeModels] = useState(true);
   const [checking, setChecking] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -328,7 +332,6 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
     enabled: opencodeReady && (expanded || method?.kind === "opencode" || method?.kind === "oauth"),
     staleTime: 60_000,
   });
-  const needsOpenCode2 = refused || opencodeMajor(opencode) === 1 || integrations.error instanceof OpenCode1Error;
   const listing = tile?.methods.find((signIn) => signIn.kind === "opencode");
   const entry = listing && integrations.data?.find((item) => item.id === listing.id);
   // How OpenCode signs in to a provider from its list, sign-ins before keys.
@@ -360,6 +363,14 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
   const customAcp: AgentTile = { id: "custom-acp", name: m.harness_custom_acp(), mark: { icon: "custom" }, methods: [] };
 
   const methodHarness = method ? harnessFor(method) : undefined;
+  // An agent already working when its sign-in began stays listed; one this dialog signs in waits for it to finish.
+  const workingAtStart = useRef(new Map<string, boolean>());
+  if (methodHarness && !workingAtStart.current.has(methodHarness.id)) workingAtStart.current.set(methodHarness.id, methodHarness.agentReady && !methodHarness.authCheckFailed);
+  const adding = saved?.kind === "profile" ? saved.id
+    : saved && !saved.replaced ? `opencode:${saved.id}`
+    : (method?.kind === "agent" || method?.kind === "native") && methodHarness && !workingAtStart.current.get(methodHarness.id) ? methodHarness.id : null;
+  useEffect(() => onAdding?.(adding), [adding]);
+  useEffect(() => () => onAdding?.(null), []);
   const backedByOpenCode = method?.kind === "key" || method?.kind === "oauth" || method?.kind === "opencode" || method?.kind === "endpoint";
   const profileEntry = saved?.kind === "profile" ? harnesses.find((h) => h.profile?.id === saved.id) : undefined;
   const modelsReady = !checking && (backedByOpenCode ? opencodeReady && !opencode?.catalogPending : Boolean((profileEntry ?? methodHarness)?.agentReady));
@@ -374,7 +385,7 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
   useEffect(() => {
     const target = bodyRef.current?.querySelector<HTMLElement>("input:not([type=hidden]), [data-autofocus]") ?? bodyRef.current;
     target?.focus();
-  }, [step, method, ways.length, needsOpenCode2]);
+  }, [step, method, ways.length]);
 
   // Saved keys and endpoints reach OpenCode's catalog only once it re-checks. Before paint, so the step never
   // shows the catalog from before the sign-in.
@@ -391,8 +402,7 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
     setError(null);
     try { await action(); }
     catch (cause) {
-      if (cause instanceof OpenCode1Error) setRefused(true);
-      else setError(cause instanceof Error ? cause.message : String(cause));
+      setError(cause instanceof Error ? cause.message : String(cause));
     }
     finally { setBusy(false); }
   };
@@ -423,7 +433,7 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
     setName(recordName);
   });
   /** What a sign-in does first, once OpenCode can take it. */
-  const begin = (signIn: SignIn | null, from: AgentTile, canSignIn = opencodeReady && !needsOpenCode2) => {
+  const begin = (signIn: SignIn | null, from: AgentTile, canSignIn = opencodeReady) => {
     if (signIn?.kind === "profile" && !remote) {
       const create = () => createProfile(signIn, from);
       void (signIn.harness === "claude-code" ? warnFirst(create, () => leave("provider")) : create());
@@ -466,6 +476,8 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
     if (saved?.kind === "endpoint" && !saved.replaced) await api.removeLocalModel(saved.id, saved.model);
     setSaved(null);
     setOauth(null);
+    setIcon(null);
+    setPinnedLogo(null);
   };
   const discards = (target: Step | "choices" | "close") => target !== "name" && target !== "signin";
   const go = async (target: Step | "choices" | "close") => {
@@ -519,8 +531,8 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
   });
   const finish = () => run(async () => {
     const trimmed = name.trim();
-    if (saved && (trimmed !== saved.name || icon)) {
-      const changes = { ...(trimmed !== saved.name ? { name: trimmed } : {}), ...(icon ? { icon } : {}) };
+    if (saved && (trimmed !== saved.name || icon || pinnedLogo)) {
+      const changes = { ...(trimmed !== saved.name ? { name: trimmed } : {}), ...(icon ? { icon } : {}), ...(pinnedLogo ? { logo: pinnedLogo } : {}) };
       await api.updateAgent(saved.kind === "profile" ? saved.id : `opencode:${saved.id}`, changes);
     }
     const hiddenAgents = uiState.data?.hiddenAgents ?? [];
@@ -578,13 +590,12 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
         : m.add_agent_sign_in_title({ name: tile.name });
   const logo = (size: number) => tile?.id === "endpoint" || (tile?.id === "local" && localFound) ? <EndpointMark server={endpoint.server} size={size} /> : tile && <TileMark tile={tile} size={size} />;
 
-  /** OpenCode 2 is there to sign in with, or what it takes to get it. */
+  /** OpenCode is there to sign in with, or what it takes to get it. */
   const opencodeGate = (): ReactNode => {
-    if (opencodeReady && !needsOpenCode2) return null;
+    if (opencodeReady) return null;
     const commands = setupCommands.data?.opencode;
     if (remote || !opencode || !commands) return <p className="m-0 text-sm text-subtext">{m.settings_needs_opencode()}</p>;
-    const ready = () => { setRefused(false); if (tile) begin(method, tile, true); };
-    if (needsOpenCode2) return <OpenCodeUpdate key="opencode-update" opencode={opencode} commands={commands} disabled={isDisabled} onReady={ready} />;
+    const ready = () => { if (tile) begin(method, tile, true); };
     return <HarnessSetup key="opencode-install" harness={opencode} commands={commands} action="install" disabled={isDisabled} onReady={ready} />;
   };
 
@@ -776,7 +787,16 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
     body = <div className="space-y-5">
       {saved && (
         <div className="flex items-end gap-3">
-          <AgentIconButton value={icon ?? BRAND_ICON} brand={logo} onChange={setIcon} disabled={disabled} />
+          <AgentIconButton
+            value={icon ?? BRAND_ICON}
+            brand={logoMark(pinnedLogo ?? undefined) ?? logo}
+            logo={pinnedLogo ?? undefined}
+            onChange={(next, nextLogo) => {
+              setIcon(next);
+              if (nextLogo !== undefined) setPinnedLogo(nextLogo);
+            }}
+            disabled={disabled}
+          />
           <label className="grid flex-1 gap-1 text-sm text-subtext">
             <span>{m.agent_name()}</span>
             <Input value={name} disabled={disabled} maxLength={80} onChange={(event) => setName(event.target.value)} />
@@ -1131,22 +1151,6 @@ export function OpenCodeSignInDialog({ name, first, start, confirm, cancel, isDi
   </DialogContent>;
 }
 
-/** OpenCode 1 can't add providers. */
-function OpenCodeUpdate({ opencode, commands, disabled, onReady }: {
-  opencode: Harness;
-  commands: HarnessSetupCommands;
-  disabled: boolean;
-  onReady: () => void;
-}) {
-  const [updating, setUpdating] = useState(false);
-  if (updating) return <HarnessSetup harness={opencode} commands={commands} action="upgrade" disabled={disabled} onReady={onReady} />;
-  return <form className="space-y-3" onSubmit={(event) => { event.preventDefault(); setUpdating(true); }}>
-    <p className="m-0 text-sm font-medium">{m.opencode_update_title()}</p>
-    <p className="m-0 text-sm text-subtext">{m.opencode_update_description({ version: opencodeVersion(opencode) ?? "1" })}</p>
-    <Button type="submit" variant="primary" data-autofocus disabled={disabled}>{m.opencode_update()}</Button>
-  </form>;
-}
-
 /** An agent's own setup: install, then its sign-in; or what blocks it here. */
 function AgentSignIn({ harness, commands, remote, disabled, definition, formId, onReady, onEdit }: {
   harness: Harness;
@@ -1195,7 +1199,7 @@ function ModelList({ models, harness, owner }: { models: HarnessModel[]; harness
   }
   const shown = lines.slice(0, 10);
   return <div>
-    <p className="m-0 mb-2 flex items-center gap-2 text-sm"><CircleCheck size={16} className="text-accent-green" />{m.settings_models_available({ count: fmtNumber(lines.length) })}</p>
+    <p className="m-0 mb-2 flex items-center gap-2 text-sm"><CircleCheck size={16} className="text-accent-green" />{modelsAvailable(lines.length)}</p>
     <ul className="m-0 grid list-none grid-cols-2 gap-x-6 gap-y-1.5 rounded-lg border border-border bg-surface px-4 py-3 text-sm text-subtext">
       {shown.map((line) => <li key={line.key} className="flex min-w-0 items-center gap-2 wrap-anywhere"><ModelMark model={line.offers[0].model} harness={harness} size={14} />{tidyModelName(line.label)}</li>)}
     </ul>

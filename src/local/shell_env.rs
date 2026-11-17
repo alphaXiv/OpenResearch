@@ -101,46 +101,7 @@ fn path_key(dir: &std::path::Path) -> String {
 /// The machine then user `Path`, as a new process would compose them, expanded.
 #[cfg(windows)]
 fn registry_path() -> Vec<PathBuf> {
-    use std::os::windows::ffi::OsStringExt;
-    use windows_sys::Win32::Foundation::{ERROR_MORE_DATA, ERROR_SUCCESS};
-    use windows_sys::Win32::System::Registry::{
-        RegGetValueW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ,
-    };
-
-    fn wide(text: &str) -> Vec<u16> {
-        text.encode_utf16().chain(Some(0)).collect()
-    }
-    fn read(root: HKEY, key: &str) -> Option<OsString> {
-        let (key, value) = (wide(key), wide("Path"));
-        let mut buffer = vec![0u16; 4096];
-        // Expansion can outgrow the size a first call reports, so retry on ERROR_MORE_DATA.
-        for _ in 0..3 {
-            let mut bytes = u32::try_from(buffer.len() * 2).ok()?;
-            // SAFETY: both names are NUL-terminated and `bytes` is the buffer's size.
-            let status = unsafe {
-                RegGetValueW(
-                    root,
-                    key.as_ptr(),
-                    value.as_ptr(),
-                    // Expanding (no RRF_NOEXPAND) returns REG_EXPAND_SZ as REG_SZ;
-                    // naming RRF_RT_REG_EXPAND_SZ here fails with ERROR_INVALID_PARAMETER.
-                    RRF_RT_REG_SZ,
-                    std::ptr::null_mut(),
-                    buffer.as_mut_ptr().cast(),
-                    &mut bytes,
-                )
-            };
-            match status {
-                ERROR_SUCCESS => {
-                    buffer.truncate(bytes as usize / 2);
-                    return Some(OsString::from_wide(until_nul(&buffer)));
-                }
-                ERROR_MORE_DATA => buffer.resize((bytes as usize).div_ceil(2) + 1, 0),
-                _ => return None,
-            }
-        }
-        None
-    }
+    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
 
     [
         (
@@ -150,9 +111,52 @@ fn registry_path() -> Vec<PathBuf> {
         (HKEY_CURRENT_USER, "Environment"),
     ]
     .into_iter()
-    .filter_map(|(root, key)| read(root, key))
+    .filter_map(|(root, key)| registry_string(root, key, "Path"))
     .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
     .collect()
+}
+
+/// A string registry value, with environment variables expanded.
+#[cfg(windows)]
+pub(crate) fn registry_string(
+    root: windows_sys::Win32::System::Registry::HKEY,
+    key: &str,
+    value: &str,
+) -> Option<OsString> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::Foundation::{ERROR_MORE_DATA, ERROR_SUCCESS};
+    use windows_sys::Win32::System::Registry::{RegGetValueW, RRF_RT_REG_SZ};
+
+    let key: Vec<u16> = key.encode_utf16().chain(Some(0)).collect();
+    let value: Vec<u16> = value.encode_utf16().chain(Some(0)).collect();
+    let mut buffer = vec![0u16; 4096];
+    // Expansion can outgrow the size a first call reports, so retry on ERROR_MORE_DATA.
+    for _ in 0..3 {
+        let mut bytes = u32::try_from(buffer.len() * 2).ok()?;
+        // SAFETY: both names are NUL-terminated and `bytes` is the buffer's size.
+        let status = unsafe {
+            RegGetValueW(
+                root,
+                key.as_ptr(),
+                value.as_ptr(),
+                // Expanding (no RRF_NOEXPAND) returns REG_EXPAND_SZ as REG_SZ;
+                // naming RRF_RT_REG_EXPAND_SZ here fails with ERROR_INVALID_PARAMETER.
+                RRF_RT_REG_SZ,
+                std::ptr::null_mut(),
+                buffer.as_mut_ptr().cast(),
+                &mut bytes,
+            )
+        };
+        match status {
+            ERROR_SUCCESS => {
+                buffer.truncate(bytes as usize / 2);
+                return Some(OsString::from_wide(until_nul(&buffer)));
+            }
+            ERROR_MORE_DATA => buffer.resize((bytes as usize).div_ceil(2) + 1, 0),
+            _ => return None,
+        }
+    }
+    None
 }
 
 /// The string before its terminator. An expanded value's reported size can run

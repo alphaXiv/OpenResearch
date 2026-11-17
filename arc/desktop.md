@@ -60,7 +60,8 @@ How an update applies depends on the install (`src/updates.rs`, `src/updates/`, 
 
 | Installed by | Applies its own updates by |
 | --- | --- |
-| the shell or PowerShell installer | running the installer again; a receipt proves the binary is the installer's |
+| the shell installer | running the installer again; a receipt proves the binary is the installer's |
+| the PowerShell installer | unpacking the release's checksummed `.zip`, then the Windows renames; a receipt proves the binary is the installer's |
 | the macOS app | checking the DMG's hash, pinned signature and notarization, renaming the bundle into place |
 | the AppImage | checking the new file's hash, renaming it over the old one |
 | the Windows app or a zip's `orx.exe` | staging the new `orx.exe`, then two renames |
@@ -92,9 +93,9 @@ Every push to main also runs `release-canary.yml`: desktop builds beside `releas
 
 ## The gate on main
 
-Main requires `fmt, clippy, test` and `version sanity`, administrators included. Branch protection matches those job names in `.github/workflows/ci.yml`, so renaming either blocks every merge. There is no merge queue and no requirement to be up to date with main.
+Main requires `CI passed` and `version sanity`, administrators included. Branch protection matches those job names in `.github/workflows/ci.yml`, so renaming either blocks every merge. There is no merge queue and no requirement to be up to date with main.
 
-- Pull request CI tests GitHub's simulated merge. `scripts/ci-changes.mjs` selects jobs by changed files, and `fmt, clippy, test` fails on any failed job and on any job skipped that those files should have run.
+- Pull request CI tests GitHub's simulated merge. `scripts/ci-changes.mjs` selects jobs by changed files, and `CI passed` fails on any failed job and on any job skipped that those files should have run.
 
 ## Scripts and workflows
 

@@ -55,8 +55,10 @@ impl PermissionMode {
             "ask" | "manual" | "default" => Some(PermissionMode::Ask),
             "accept-edits" | "acceptEdits" => Some(PermissionMode::AcceptEdits),
             "plan" => Some(PermissionMode::Plan),
-            "auto" | "approve-for-me" | "auto-approve" => Some(PermissionMode::Auto),
-            "bypass" | "bypassPermissions" | "full-access" => Some(PermissionMode::Bypass),
+            "auto" | "approve-for-me" => Some(PermissionMode::Auto),
+            "bypass" | "bypassPermissions" | "full-access" | "auto-approve" => {
+                Some(PermissionMode::Bypass)
+            }
             _ => None,
         }
     }
@@ -252,7 +254,7 @@ mod tests {
         );
         assert_eq!(
             PermissionMode::from_id("auto-approve"),
-            Some(PermissionMode::Auto)
+            Some(PermissionMode::Bypass)
         );
         assert_eq!(PermissionMode::from_id("nonsense"), None);
     }

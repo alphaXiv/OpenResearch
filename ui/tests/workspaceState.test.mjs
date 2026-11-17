@@ -77,6 +77,8 @@ test("only recognized concrete destinations can be saved for automatic resume", 
     assert.equal(safeLocation(location), null, String(location));
   }
   for (const tab of settingsTabs) assert.ok(locations.valid.includes(`/projects/demo/settings/${tab}`), tab);
+  assert.deepEqual(parseDestination("/projects/demo/settings/harnesses"), { kind: "settings", projectId: "demo", section: "agents" });
+  assert.deepEqual(parseDestination("/projects/demo/settings/projects"), { kind: "settings", projectId: "demo", section: "integrations" });
   const first = emptyProjectWorkspace();
   first.tasks.new = { tabs: [] };
   assert.deepEqual(emptyProjectWorkspace(), { version: 1, lastTaskId: null, lastLocation: null, tasks: {} });

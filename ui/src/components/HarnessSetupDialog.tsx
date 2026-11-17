@@ -19,7 +19,7 @@ import { cn } from "./ui/cn";
 type SetupProps = {
   harness: Harness;
   commands: HarnessSetupCommands;
-  /** Runs this instead of what the agent's state asks for, such as an upgrade the user chose. */
+  /** Runs this instead of what the agent's state asks for. */
   action?: SetupAction;
   /** Claude Code or Codex: the account OpenResearch keeps that a sign-in is for. */
   profile?: string;
@@ -63,7 +63,7 @@ export function HarnessSetup({ harness, commands, action: forced, profile, onRea
   const [needsRepair, setNeedsRepair] = useState(harness.needsConfigRepair);
   const [error, setError] = useState<string | null>(harness.needsConfigRepair ? harness.agentNote ?? null : null);
   const busy = phase === "running" || phase === "checking";
-  const shown = action === "upgrade" ? undefined : commands[action];
+  const shown = commands[action];
   const command = shown && !shown.includes("\n") ? shown : undefined;
   // OpenResearch downloads its own copy: no command runs, so there's only progress to show.
   const managed = action === "install" && Boolean(commands.managedFrom);

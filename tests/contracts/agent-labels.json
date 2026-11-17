@@ -1,0 +1,17 @@
+{
+  "agent-labels.json": {
+    "codex": {"name": "Local Codex", "icon": {"brand": true, "color": "blue"}},
+    "opencode": {"icon": {"emoji": "🆓"}, "future": {"kept": true}}
+  },
+  "agent-profiles.json": {
+    "codex-abcdefghij": {"harness": "codex", "name": "Work", "icon": {"glyph": "flask-2", "color": "teal"}, "createdAt": 1}
+  },
+  "opencode-providers.json": {
+    "openai": {"kind": "key", "key": "sk-test", "name": "OpenAI", "icon": {"brand": true}},
+    "openai-abc123": {"kind": "key", "key": "sk-two", "canonical": "openai", "models": ["gpt-6"], "name": "Second key"},
+    "github-copilot": {"kind": "oauth", "name": "Copilot"}
+  },
+  "local-models.json": {
+    "orx-local-1": {"name": "Box", "icon": {"emoji": "📦", "color": "gray"}, "baseUrl": "http://127.0.0.1:1234/v1", "apiKey": "", "models": {"qwen": 32768}}
+  }
+}

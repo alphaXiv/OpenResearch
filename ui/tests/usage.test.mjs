@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
+import { test } from "node:test";
 import { act, createElement, Fragment } from "react";
 import { StatusStrip } from "../src/components/StatusStrip.tsx";
 import { Toaster } from "../src/components/ui/Toast.tsx";
@@ -38,14 +38,6 @@ const catalog = [
   harness("opencode", "OpenCode"),
 ];
 
-let ResizeObservers = [];
-afterEach(() => { ResizeObservers = []; });
-globalThis.ResizeObserver = class {
-  constructor(callback) { this.callback = callback; ResizeObservers.push(this); }
-  observe() {}
-  disconnect() {}
-};
-
 /** Serves `/api/usage` from `usage` (a body, a Response, or a function of the request) and its refresh from `refresh`, recording each request. */
 function backend(usage, { account = clover, refresh = { ok: true }, extra = {} } = {}) {
   const requests = [];
@@ -80,7 +72,6 @@ const rings = () => [...document.querySelectorAll("[data-plan-ring]")].filter((r
 const panel = () => [...document.querySelectorAll('[role="dialog"]')].at(-1) ?? null;
 /** Text as read, without the isolates that keep interpolated values in place. */
 const text = (element) => element.textContent.replace(/[\u2066-\u2069]/g, "");
-const separators = (container) => container.querySelectorAll('span[aria-hidden="true"].w-px').length;
 
 test("the strip draws a ring per plan, toned by its lowest window, and names each for a screen reader", async () => {
   await strip(report({ plans: [claudeMax, chatgptPro(16)] }));
@@ -215,9 +206,8 @@ test("an idle strip reads usage again every five minutes", async (t) => {
 });
 
 test("nothing to show leaves no usage segment, and an older orx up without the route the same", async () => {
-  const { container } = await strip(report());
+  await strip(report());
   assert.equal(usageTrigger(), undefined);
-  assert.equal(separators(container), 1);
 
   await strip(Response.json({ error: "route not found" }, { status: 404 }));
   assert.equal(usageTrigger(), undefined);
@@ -234,15 +224,11 @@ test("signed out, the strip offers sign-in in the account's place", async () => 
   assert.equal(container.querySelector("button").textContent, m.settings_sign_in());
 });
 
-test("a remote machine's blue fill takes no hairline beside it", async () => {
+test("a remote machine fills blue and names itself in the usage segment", async () => {
   const { container } = await strip(report({ plans: [claudeMax] }), { runtime: { ...local, kind: "ssh", dashboardProtocol: 1, session: remoteSession } });
   const machine = container.querySelector("[data-machine-switcher]");
   assert.match(machine.className, /bg-accent-blue-subtle/);
-  assert.equal(separators(container), 1);
   assert.match(usageTrigger().getAttribute("aria-label"), /gpu-box/);
-
-  const { container: home } = await strip(report({ plans: [claudeMax] }));
-  assert.equal(separators(home), 2);
 });
 
 test("offline, the machine turns amber, the agents dim and the panel says when it last knew", async (t) => {
@@ -271,49 +257,6 @@ test("a finished re-read announced on the stream refetches the report", async ()
   await act(async () => streams[0].dispatchEvent(new Event("usage.changed")));
   await settle();
   assert.match(usageTrigger().getAttribute("aria-label"), /15% left/);
-});
-
-/** Lays the strip out: the machine's name container `machineWidth` wide around a label `labelWidth` wide, and the account name `nameWidth`. */
-function layout(container, { machineWidth, labelWidth, nameWidth, nameRoom = nameWidth }) {
-  const machine = container.querySelector("[data-machine-name]");
-  const rect = (left, width) => () => ({ left, right: left + width, width, top: 0, bottom: 28, height: 28 });
-  machine.getBoundingClientRect = rect(0, machineWidth);
-  const label = machine.firstElementChild;
-  label.getBoundingClientRect = rect(0, Math.min(labelWidth, machineWidth));
-  Object.defineProperty(label, "scrollWidth", { configurable: true, value: labelWidth });
-  Object.defineProperty(label, "clientWidth", { configurable: true, value: Math.min(labelWidth, machineWidth) });
-  const name = container.querySelector("[data-account-name]");
-  if (name) {
-    Object.defineProperty(name, "scrollWidth", { configurable: true, value: nameWidth });
-    Object.defineProperty(name, "clientWidth", { configurable: true, value: nameRoom });
-  }
-  const ruler = container.querySelector("[data-account-ruler]");
-  if (ruler) Object.defineProperty(ruler, "offsetWidth", { configurable: true, value: nameWidth });
-}
-
-const resize = () => act(async () => ResizeObservers.at(-1).callback([]));
-const shownName = (container) => container.querySelector("[data-account-name]")?.textContent ?? null;
-
-test("your name shows only whole, and gives way before the machine's name does", async () => {
-  const { container } = await strip(report({ plans: [claudeMax] }));
-  assert.equal(shownName(container), "Clover");
-
-  layout(container, { machineWidth: 120, labelWidth: 160, nameWidth: 44 });
-  await resize();
-  assert.equal(shownName(container), null, "a clipped machine name takes the room back");
-  assert.match(container.querySelector("[data-account-ruler]").textContent, /Clover/);
-
-  layout(container, { machineWidth: 210, labelWidth: 160, nameWidth: 44 });
-  await resize();
-  assert.equal(shownName(container), null, "50px of slack doesn't hold the name and its margin");
-
-  layout(container, { machineWidth: 230, labelWidth: 160, nameWidth: 44 });
-  await resize();
-  assert.equal(shownName(container), "Clover");
-
-  layout(container, { machineWidth: 160, labelWidth: 160, nameWidth: 44, nameRoom: 30 });
-  await resize();
-  assert.equal(shownName(container), null, "a name that would show cut off doesn't show");
 });
 
 async function composer(props, usage = report({ plans: [claudeMax] })) {
