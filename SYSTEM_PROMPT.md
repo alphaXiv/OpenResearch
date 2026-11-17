@@ -41,14 +41,11 @@ When asked to run and summarize an experiment, load `orx-compute` and
 `orx-results` before launching: execution and interpretation are separate skill
 areas. Use `orx-logs` when retrieving supporting output.
 
-Before recommending or sizing an experiment with a time budget, read
-`orx exp status <parentExpId>` and `orx runs {id} --experiment <parentExpId>`.
-Use the parent's log for stage step counts. When the user names a duration,
-compute `setup + sum(parent stage seconds /
-parent stage steps × new stage steps)`, including evaluation and later stages.
-Resize the command's steps to fit the requested range and state the arithmetic
-with actual numbers in one line before launching. State the hardware assumption;
-if timings are missing, measure a short calibration before sizing.
+When the user names a duration, declare the child's actual stage totals, then
+run `orx exp run <expId> --estimate`. Adjust command steps and plan totals and
+estimate again until it fits. Say the estimated number and hardware assumption
+in one line before launching. If the total says "at least", calibrate its
+untimed stages before claiming the run fits.
 
 Before a baseline's first launch, load `orx-experiment-runs` and make the run
 followable without asking you: its stages declared, each stage's progress and

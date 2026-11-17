@@ -36,8 +36,10 @@ pub fn follow_up(experiment_id: &str, run_id: &str, in_chat: bool) -> String {
              `{orx} exp view show {run_id}` on your next turn after first data, and before answering \
              any user message about the card, chart, line or what they see. Never wait or poll for it \
              (no sleep loops over `{orx} runs`, no `{orx} exp wait`). Before the next launch for a \
-             requested duration, use recorded parent stage times: setup + sum(parent seconds/step × \
-             new steps). State the arithmetic in one line and resize steps to fit."
+             requested duration, run `{orx} exp run <expId> --estimate` on the experiment you will \
+             launch. Adjust command steps and plan totals, then estimate again until it fits. \
+             Say the estimated number and hardware assumption in one line before launching. An 'at least' total has untimed \
+             stages: calibrate them first."
         )
     } else {
         format!("  Follow it with `{orx} exp wait {experiment_id}` or `{orx} logs {run_id}`.")
@@ -104,15 +106,20 @@ mod tests {
     #[test]
     fn the_chat_hint_requires_sizing_before_the_next_launch() {
         let hint = follow_up("exp_1", "run_1", true);
+        assert!(
+            hint.contains(&format!("`{} exp run <expId> --estimate`", orx())),
+            "{hint}"
+        );
         for instruction in [
             "Before the next launch",
+            "the experiment you will",
             "requested duration",
-            "parent",
-            "setup",
-            "seconds/step",
+            "--estimate",
+            "plan totals",
+            "before launching",
             "steps",
             "one line",
-            "resize",
+            "Adjust",
         ] {
             assert!(hint.contains(instruction), "{hint}");
         }

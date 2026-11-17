@@ -12,6 +12,8 @@ mod antigravity_gate_cli;
 mod compute_cli;
 #[path = "cli/engine_cli.rs"]
 mod engine_cli;
+#[path = "cli/estimate_cli.rs"]
+mod estimate_cli;
 #[path = "cli/invocation_gate_cli.rs"]
 mod invocation_gate_cli;
 #[path = "cli/logs_cli.rs"]

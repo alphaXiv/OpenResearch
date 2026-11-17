@@ -23,6 +23,7 @@ pub mod create_experiment;
 pub mod delete;
 pub mod discover;
 pub mod exp;
+mod exp_estimate;
 pub mod feedback;
 mod file_serve;
 pub mod install_cli;

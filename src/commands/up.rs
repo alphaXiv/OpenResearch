@@ -3150,6 +3150,8 @@ impl CreateRunReq {
         let mut flavor = self.flavor;
         local::apply_compute_default(&mut backend, &mut flavor);
         crate::ExpRunArgs {
+            estimate: false,
+            command: None,
             invocation_context: self.invocation_context,
             telemetry_suppressed: self.telemetry_suppressed,
             exp_id: self.experiment_id,

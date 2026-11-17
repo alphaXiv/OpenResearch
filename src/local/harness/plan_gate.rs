@@ -336,6 +336,14 @@ fn is_readonly_orx(tokens: &[&str], stage: &str) -> bool {
         // Verbs with a write subcommand: allow only the read-only subcommand(s).
         "project" => matches!(subcommand(&mut rest), Some("view")),
         "exp" => match subcommand(&mut rest) {
+            Some("run") => {
+                use clap::Parser;
+                matches!(crate::Cli::try_parse_from(tokens), Ok(crate::Cli {
+                    command: Some(crate::Command::Exp(crate::ExpArgs {
+                        command: crate::ExpCommand::Run(args),
+                    })), ..
+                }) if args.estimate)
+            }
             // Pure reads.
             Some("status" | "wait") => true,
             // A view is read and checked against a run freely; saving one changes the node.
@@ -484,6 +492,14 @@ mod tests {
 
     fn allowed(command: &str) -> bool {
         decide(&payload(command)).is_some()
+    }
+
+    #[test]
+    fn estimates_are_reads_but_launches_and_embedded_flags_are_gated() {
+        assert!(allowed("orx exp run child --estimate"));
+        assert!(!allowed("orx exp run child"));
+        assert!(!allowed("orx exp run child --host=--estimate"));
+        assert!(!allowed("orx exp run child --estimate && touch marker"));
     }
 
     #[test]

@@ -689,6 +689,14 @@ pub enum ViewCommand {
 #[derive(Args, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ExpRunArgs {
     pub exp_id: String,
+    /// Estimate stage and total duration from the parent without launching a run.
+    #[arg(long)]
+    #[serde(skip)]
+    pub estimate: bool,
+    /// Preview this command's explicit nanochat step counts (requires --estimate).
+    #[arg(long, requires = "estimate")]
+    #[serde(skip)]
+    pub command: Option<String>,
     /// Disk in GB for a `--backend openresearch` instance (default 100).
     #[arg(long)]
     pub disk: Option<i64>,
@@ -1696,6 +1704,24 @@ fn command_uses_lifecycle_lock(command: &Command) -> bool {
 #[cfg(test)]
 mod cli_tests {
     use super::*;
+
+    #[test]
+    fn estimate_accepts_a_command_without_launching() {
+        assert!(Cli::try_parse_from([
+            "orx",
+            "exp",
+            "run",
+            "exp_1",
+            "--estimate",
+            "--command",
+            "python -m scripts.base_train --num-iterations=600",
+        ])
+        .is_ok());
+        assert!(
+            Cli::try_parse_from(["orx", "exp", "run", "exp_1", "--command", "echo preview",])
+                .is_err()
+        );
+    }
 
     #[test]
     fn library_add_commands_are_distinct_from_reading_skill_docs() {

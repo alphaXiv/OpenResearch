@@ -21,6 +21,11 @@ use crate::store::Store;
 use crate::{ExpCommand, ViewCommand};
 
 pub async fn run(args: crate::ExpArgs) -> Result<()> {
+    if let ExpCommand::Run(run) = &args.command {
+        if run.estimate {
+            return super::exp_estimate::run(&Store::open_for_reading()?, run);
+        }
+    }
     if let ExpCommand::View { command } = args.command {
         return view(command).await;
     }

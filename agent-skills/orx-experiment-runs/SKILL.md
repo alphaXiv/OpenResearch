@@ -15,15 +15,20 @@ Before sizing a child, read its parent's measured runtime:
 orx exp status <parentExpId>
 ```
 
-Read `orx runs <projectId> --experiment <parentExpId>` for recorded stage
-times and its last run's log for step counts. When the user names a duration,
-compute before launch:
-`expected time = setup + sum(parent stage seconds / parent stage steps × new stage steps)`.
-Include evaluation and later stages; resize the command's steps to fit the
-requested range. State the arithmetic with actual numbers in one line before
-launching, plus the hardware assumption. If timings are missing or hardware
-changed, say what is unknown and measure a short calibration before sizing;
-never claim an unmeasured run fits.
+When the user names a duration, declare this child's actual stage totals (§2), then run:
+
+```sh
+orx exp run <expId> --estimate
+```
+
+Adjust the command's steps and the plan totals, then estimate again until the
+total fits the requested range. Before launching, say the estimated number
+and hardware assumption in one line. A total that says "at least" leaves
+stages untimed: calibrate them before claiming the run fits. Never replace
+missing timings with a guess. `--command '…'` previews explicit nanochat
+`--num-iterations` counts without saving the command. Before launching, use
+that command when creating the child (`--run-command`) and save its matching
+plan.
 
 ## 1. Read the entry point
 
