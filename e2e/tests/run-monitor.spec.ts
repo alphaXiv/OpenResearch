@@ -160,7 +160,7 @@ for (let step = 1; step <= total; step++) {
   await test.step('a NaN reads NaN, flags the run, and the agent it wakes keeps it going', async () => {
     await agent.reached(woken)
     const status = banner.getByRole('button', { name: /Declared/ })
-    await expect(status).toHaveText('loss became NaN at step 10.')
+    await expect(status).toHaveText(/^[⁨]?loss became NaN at step 10\.[⁩]?$/)
     await status.hover()
     await expect(page.getByRole('dialog')).toContainText(said('Step 10 of 40'))
     await page.keyboard.press('Escape')
