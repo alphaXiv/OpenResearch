@@ -21,6 +21,8 @@ pub(crate) struct NewFlag {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum Raise {
     Raised,
+    /// The run was cancelled or its stop was accepted.
+    Stopped,
     /// The run raised this fingerprint before.
     Repeated,
     /// The run has a flag still open.
@@ -159,6 +161,15 @@ impl Store {
     pub(crate) fn append_flags(&self, flags: &[NewFlag], now: i64) -> Result<Vec<Raise>> {
         let mut raised = Vec::new();
         for flag in flags {
+            let stopped: bool = self.conn.query_row(
+                "SELECT status IN ('cancelled', 'stopping') OR cancel_requested = 1 OR cancel_accepted_at IS NOT NULL FROM runs WHERE id = ?1",
+                [&flag.run_id],
+                |row| row.get(0),
+            )?;
+            if stopped {
+                raised.push(Raise::Stopped);
+                continue;
+            }
             let events = self.run_flag_events(&flag.run_id)?;
             let open = open_flag(&events).is_some();
             let fingerprint = flag.body["fingerprint"].as_str();

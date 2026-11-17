@@ -411,13 +411,15 @@ journal says what each look left out, and by how much it was still over. Each fi
 sharing's credential scan as written, before it is clipped or encoded; one that
 matches is left out, saying so, and the journal tells the user once where it is.
 A retry's reply is scanned before it goes back. A reply is strict JSON: each number that can
-move is a token orx fills, a run sentence has one bold figure (optional in the
-group summary), a sentence reads at most 90 characters filled, and a number written as the value it reads now is refused.
+move is a token orx fills, a sentence with figures marks one bold (optional in the
+group summary), a run sentence reads at most 48 characters filled (90 for the summary),
+and a number written as the value it reads now is refused.
 One retry carries what was wrong; a run whose answer stays wrong keeps its last
 sentence. Each look is a row written before it is sent and settled in one
 transaction; a look `orx up` stopped after sending is recorded as interrupted and
 never sent again, so evidence is never lost and a model is never billed twice
-for one look. A look that flags raises a flag in the transaction that settles it;
+for one look. A cancelled or stopping run keeps only a final sentence: no flag or wake.
+A look that flags raises a flag in the transaction that settles it;
 on a run with a flag still open it is noted under that flag instead, its row a
 sentence that says so and its words a line beside the open flag's evidence. A
 noted flag wakes an Agentic chat's agent as a flag does, naming none to settle,

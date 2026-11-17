@@ -115,6 +115,7 @@ Labels, units and "better" explain signals. Claim only what the digest shows: ne
 chance levels, targets, expected values or causes; use observed comparisons/trends.
 "same" keeps the last sentence only while every word still holds and fits "reportOn".
 Keep the last three sentences' wording while true. Outside setup, omission means "same".
+A cancelled or stopping run may have a final sentence only: never flag teardown output.
 After setup, flag brief-defined trouble, unexpectedly worse parent comparisons, new warning/error
 kinds, nonsensical numbers or stalls. Cite evidence bytes. Parent "warningKinds" are context,
 never a flag or subject, unless the brief names them outside setup. Unread/unavailable parent

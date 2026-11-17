@@ -1713,3 +1713,66 @@ fn setup_ends_on_the_first_headlined_or_charted_point() {
     body["series"]["accuracy"] = json!([[1, 0.8]]);
     assert!(!in_setup(&body));
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn stopped_runs_keep_final_sentences_without_flags_or_wakes() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let store = Store::open().unwrap();
+    chat(&store, "chat", "claude-code");
+    let calls_dir = crate::config::home_dir().unwrap().join("claude-calls");
+    fake_claude(
+        &calls_dir,
+        &[
+            r#"{"runs":{"r1":{"status":"flag","line":"Shutdown warning: **1** semaphore."}}}"#,
+            r#"{"runs":{"r1":{"status":"flag","line":"Shutdown warning: **1** semaphore."}}}"#,
+            r#"{"runs":{"r1":{"status":"flag","line":"Shutdown warning: **1** semaphore."}}}"#,
+        ],
+    );
+    for (index, status) in ["cancelled", "running", "running"].into_iter().enumerate() {
+        let id = format!("stopped-{index}");
+        let mut row = run(&store, &id, "Stopped", "chat", LOG);
+        row.status = status.into();
+        store.upsert_run(&row).unwrap();
+        if index == 1 {
+            store.request_cancel(&id, "Stopped by user").unwrap();
+        }
+        if index == 2 {
+            store.conn_execute_for_tests(&format!(
+                "UPDATE runs SET cancel_accepted_at = 1 WHERE id = '{id}'"
+            ));
+        }
+        let look_id = look(&store, "chat", "terminal", &[(&id, "r1")]);
+        take(look_id).await.unwrap();
+        let results = store.watch_look_runs(look_id).unwrap();
+        assert_eq!(results[0].result.as_deref(), Some("line"));
+        assert!(results[0]
+            .text
+            .as_deref()
+            .unwrap()
+            .contains("Shutdown warning"));
+        assert!(store.run_flag_events(&id).unwrap().is_empty());
+        assert!(store.run_flag_notices(&id).unwrap().is_empty());
+    }
+}
+
+#[test]
+fn a_flag_prepared_before_cancel_cannot_wake_after_cancel() {
+    let dir = crate::local::git::TemporaryDirectory::new("orx-flag-cancel").unwrap();
+    let store = Store::open_at(dir.path().to_path_buf()).unwrap();
+    chat(&store, "chat", "claude-code");
+    let row = run(&store, "a", "Train", "chat", LOG);
+    let flag = super::super::flags::new_flag(
+        &store,
+        &row,
+        json!({"id":"f1", "source":"look", "text":"Shutdown warning"}),
+        true,
+    )
+    .unwrap();
+    store.request_cancel(&row.id, "Stopped by user").unwrap();
+    store.raise_flags(&[flag], 1).unwrap();
+    assert!(store.run_flag_events("a").unwrap().is_empty());
+    assert!(store.run_flag_notices("a").unwrap().is_empty());
+}

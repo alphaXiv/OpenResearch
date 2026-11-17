@@ -165,6 +165,10 @@ impl Store {
         let raised = self.append_flags(flags, now)?;
         let mut noted = BTreeSet::new();
         for (flag, raise) in flags.iter().zip(raised) {
+            if raise == Raise::Stopped {
+                noted.insert(flag.run_id.as_str());
+                continue;
+            }
             if raise != Raise::Waits {
                 continue;
             }
