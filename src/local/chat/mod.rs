@@ -8580,40 +8580,7 @@ fn rebase_prepared_attachment_paths(input: &str) -> String {
         .join("\n")
 }
 
-pub(crate) fn record_native_invocations(harness: &str, session_id: &str, message: &Value) {
-    let Some(model) = message.get("model").and_then(Value::as_str) else {
-        return;
-    };
-    let identity = crate::store::InvocationIdentity {
-        harness: harness.to_string(),
-        model: model.to_string(),
-        provider: message
-            .get("provider")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-    };
-    if let Some(parts) = message.get("content").and_then(Value::as_array) {
-        for part in parts {
-            if part.get("type").and_then(Value::as_str) == Some("tool_use") {
-                if let Some(call_id) = part.get("id").and_then(Value::as_str) {
-                    if let Err(error) = Store::open().and_then(|store| {
-                        store.record_native_invocation(call_id, &identity, Some(session_id))
-                    }) {
-                        eprintln!("orx up: could not capture native tool identity: {error}");
-                    }
-                }
-            }
-        }
-    }
-}
-
 impl TurnCtx {
-    pub(crate) fn record_native_invocations(&self, message: &Value) {
-        if self.durable {
-            record_native_invocations(&self.harness, &self.session_id, message);
-        }
-    }
-
     pub(crate) fn record_cumulative_usage(
         &self,
         native_scope: &str,
@@ -10223,6 +10190,7 @@ pub fn set_chat_session_env(
 ) -> crate::error::Result<()> {
     cmd.env(CHAT_SESSION_ENV, session_id);
     cmd.env(CHAT_HARNESS_ENV, harness);
+    cmd.env_remove("ORX_INVOCATION_CONTEXT");
     // The agent's `orx` opens the store this dashboard serves, whatever a synced
     // `ORX_DATA_DIR` or the agent's own home would resolve.
     let data_dir = crate::commands::remote_host::canonical_data_dir().map_err(|error| {
@@ -10434,6 +10402,27 @@ mod session_env_tests {
             .and_then(|(_, value)| value);
         let served = crate::commands::remote_host::canonical_data_dir().unwrap();
         assert_eq!(pinned, Some(served.as_os_str()));
+    }
+
+    #[test]
+    fn each_harness_clears_the_outer_invocation_context() {
+        for harness in [
+            "claude-code",
+            "codex",
+            "opencode",
+            "cursor",
+            "antigravity",
+            "acp",
+        ] {
+            let mut cmd = crate::process::tokio_command("agent");
+            cmd.env("ORX_INVOCATION_CONTEXT", "outer-agent");
+            super::set_chat_session_env(&mut cmd, "session", harness, None).unwrap();
+            let context = cmd
+                .as_std()
+                .get_envs()
+                .find(|(key, _)| *key == "ORX_INVOCATION_CONTEXT");
+            assert_eq!(context.map(|(_, value)| value), Some(None));
+        }
     }
 
     /// An agent left on whatever store its environment names could split from the dashboard.

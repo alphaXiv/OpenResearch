@@ -1320,10 +1320,7 @@ async fn run_cli() {
     // plan mode): it must stay fast and touch neither stdout nor the network, so
     // skip the update check and telemetry and run it directly.
     if matches!(command, Command::InvocationGate) {
-        // Fail open: a missing model only loses attribution, a deny blocks every Bash call.
-        if let Err(error) = commands::invocation_gate::run().await {
-            eprintln!("orx invocation-gate: {error}");
-        }
+        // Older Claude settings files still invoke this hook.
         return;
     }
     if matches!(command, Command::PlanGate) {
@@ -1668,7 +1665,7 @@ async fn dispatch(command: Command) -> error::Result<()> {
         Command::Feedback(args) => commands::feedback::run(args).await,
         // Handled before dispatch (fast path, no telemetry/update check).
         Command::PlanGate => commands::plan_gate::run().await,
-        Command::InvocationGate => commands::invocation_gate::run().await,
+        Command::InvocationGate => unreachable!("handled before dispatch"),
         Command::Mcp => commands::mcp::run().await,
         Command::AntigravityGate => commands::mcp::run_antigravity().await,
         Command::AlphaxivMcp => unreachable!("handled before dispatch"),

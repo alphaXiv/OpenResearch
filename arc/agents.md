@@ -242,7 +242,7 @@ The bridge endpoint grants permissions, so it takes a per-child token that each 
 
 **A held request never allows by accident.** A request outliving its turn is denied, an interrupted turn denies everything it was waiting on, a transport error denies, and the bridge denies an unanswered request after a long timeout. The no-output watchdog ignores a turn blocked on the user, whose thinking time is unbounded.
 
-Where an agent offers a hook or plugin, it stamps each shell command with the issuing model, so a run records which model launched it (`src/commands/invocation_gate.rs`).
+Claude Code inherits its invoking model through the process environment; a model change resumes a fresh child to refresh that context. OpenCode supplies each shell call's model and provider through its plugin, Codex resolves its running native turn, and Antigravity stamps calls through its hook, so runs record which model launched them.
 
 ## Turns survive restarts
 
