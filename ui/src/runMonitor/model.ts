@@ -286,7 +286,8 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   const count = stageDone === null ? "" : capitalized(progressWords(stagePhase, stageDone));
   const detail = settingUp ? stageDone !== null
     ? [rawName && rawName !== m.run_stage_setup() ? autoDir(rawName) : "", count].filter(Boolean).join(" ")
-    : setup?.line ? quoted(setup.line) : rawName ? m.run_stage_started({ stage: autoDir(rawName) }) : ""
+    : rawName ? m.run_stage_started({ stage: autoDir(rawName) })
+      : setup?.line && !/^\s*(?:[{}\[\]]|["\']?[\w.-]+["\']?\s*[:=])/.test(setup.line) ? quoted(setup.line) : ""
     : count;
   const statusText = detail ? `${stageLabel} · ${detail}` : stageLabel;
   const stageKey = `${settingUp ? "setup" : "stage"}:${order?.index ?? rawName}:${order?.first ?? ""}:${order?.count ?? ""}`;

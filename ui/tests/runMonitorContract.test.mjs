@@ -155,7 +155,7 @@ test("a run whose log has said nothing orx recognises is setting up, and says wh
   }
 });
 
-test("a stage the run declared and has no step of yet says it started, and what it printed since, with no fault to explain", () => {
+test("a stage the run declared and has no step of yet keeps its own words over log chatter", () => {
   const { setup } = states.announced.summary;
   assert.equal(setup.stage, "train");
   for (const full of [true, false]) {
@@ -167,7 +167,7 @@ test("a stage the run declared and has no step of yet says it started, and what 
   const printing = { ...setup, line: "Loading 9 shards" };
   const state = { ...states.announced, summary: { ...states.announced.summary, setup: printing } };
   const line = runModel({ item: { sessionId: "s", run: runOf("announced", state), experimentName: null, experimentSlug: "baseline" }, monitor: null, shown: true, agent: "Claude", now: state.now + 60 * 60_000, nextRetryMs: null });
-  assert.equal(bare(line.sentence.text), "Setup · Loading 9 shards");
+  assert.equal(bare(line.sentence.text), "Setup · Train started");
 });
 
 test("a setting-up run with nothing printed yet keeps its machine off the line", () => {

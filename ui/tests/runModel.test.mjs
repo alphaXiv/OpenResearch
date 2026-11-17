@@ -305,3 +305,19 @@ test("a live run's subsecond estimate never reads zero seconds left", () => {
   assert.equal(line.eta, bare(m.run_eta_left({ duration: fmtDuration(1000) })));
   assert.equal(line.leftMs, 500);
 });
+
+test("setup keeps the declared stage ahead of log chatter and rejects structured fallbacks", () => {
+  for (const line of ['"window_pattern": "L"', 'batch_size=16', '{"model": "tiny"}', 'Downloading weights']) {
+    const setup = { line, startsAt: null };
+    const data = { ...running, setup, sentence: null, progress: null, stageOrder: { index: 0, count: 2, first: 1 }, phases: [{ name: "install", of: null, unit: null }] };
+    assert.match(model(run(), { monitor: data }).text, /Install started/);
+    const counted = { ...data, progress: { ...running.progress, phase: 0, done: 1 }, phases: [{ ...data.phases[0], of: 3, unit: "packages" }] };
+    const words = model(run(), { monitor: counted }).text;
+    assert.match(words, /Install .*1.*of.*3.*packages/);
+    assert.ok(!words.includes(line));
+    const unnamed = { ...data, phases: [], stageOrder: { index: null, count: null, first: null } };
+    assert.equal(model(run(), { monitor: unnamed }).text.includes(line), line === "Downloading weights");
+    const short = summary({ setup, sentence: null, stage: { name: "install", of: null, done: null }, stageOrder: data.stageOrder });
+    assert.match(model(run({ monitor: short })).text, /Install started/);
+  }
+});
