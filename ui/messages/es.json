@@ -1869,6 +1869,7 @@
   "library_open_alphaxiv": "Abrir alphaXiv",
   "chat_resize_composer": "Cambiar el tamaño del cuadro de mensaje",
   "chat_resize_composer_hint": "Arrastra para cambiar el tamaño. Haz doble clic para restablecer.",
+  "chat_resize_question": "Cambiar el tamaño de la pregunta",
   "remote_machine_switcher": "Cambiar de equipo: {machine}",
   "remote_machine_switcher_status": "Cambiar de equipo: {machine} ({status})",
   "remote_machine_connected": "Conectado",

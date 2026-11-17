@@ -1869,6 +1869,7 @@
   "library_open_alphaxiv": "alphaXiv खोलें",
   "chat_resize_composer": "संदेश बॉक्स का आकार बदलें",
   "chat_resize_composer_hint": "आकार बदलने के लिए खींचें। रीसेट करने के लिए डबल-क्लिक करें।",
+  "chat_resize_question": "प्रश्न का आकार बदलें",
   "remote_machine_switcher": "मशीन बदलें: {machine}",
   "remote_machine_switcher_status": "मशीन बदलें: {machine} ({status})",
   "remote_machine_connected": "कनेक्ट है",
