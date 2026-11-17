@@ -1204,6 +1204,28 @@ fn an_ended_run_may_write_any_number_and_a_finished_stage_its_total() {
     );
 }
 
+#[test]
+fn outcome_rows_keep_binary_stable_and_labelled_numbers_literal() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let store = Store::open().unwrap();
+    chat(&store, "chat", "claude-code");
+    let row = run(&store, "a", "Seed 1", "chat", LOG);
+    let mut now = Now::read(&store, &row).unwrap();
+    now.body["latest"] =
+        json!({"binary": 1, "stable": 8, "labelled": 9, "accuracy": 0.75, "outcome": "error"});
+    now.body["rows"] = json!({"items": [
+        {"binary": 0, "stable": 8, "labelled": 2, "outcome": "wrong"},
+        {"binary": 1, "stable": 8, "labelled": 9, "outcome": "error"}
+    ]});
+    now.body["view"]["signals"] = json!({"labelled": {"labels": {"2": "skipped", "9": "scored"}}});
+    now.body["series"] = json!({"accuracy": [[1, 0.5], [2, 0.75]]});
+    now.body["counts"] = json!({});
+    now.summary = json!({});
+    assert_eq!(moving(&now), vec![0.75]);
+}
+
 /// The walkthrough's sentiment classifier: a healthy run's first epochs, and a child that trains
 /// on flipped labels, `(loss, test accuracy)` an epoch.
 const HEALTHY: [(f64, f64); 12] = [

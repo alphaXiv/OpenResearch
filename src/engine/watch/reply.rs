@@ -61,7 +61,7 @@ pub(super) struct Read {
 
 /// A token inside `{…}`: whose, and what it reads.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) enum Token {
+pub(in crate::engine) enum Token {
     /// `{r2}` in a summary: that run's label.
     Label(String),
     Signal(Option<String>, String),
@@ -89,7 +89,7 @@ impl Token {
 }
 
 /// Each `{…}` of a template and where it sits, or why one cannot be read.
-pub(super) fn tokens(
+pub(in crate::engine) fn tokens(
     template: &str,
     summary: bool,
 ) -> Result<Vec<(std::ops::Range<usize>, Token)>, String> {

@@ -5,13 +5,17 @@ use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 
 /// The elements this orx draws; grows as the slices that feed new blocks land.
-pub(crate) const ELEMENTS: [&str; 6] = ["signal", "view", "chart", "series", "stats", "table"];
+pub(crate) const ELEMENTS: &[&str] = &[
+    "signal", "view", "chart", "series", "stats", "table", "text", "cells", "bars",
+];
 
 const MAX_BYTES: usize = 64 * 1024;
 const MAX_BLOCKS: usize = 32;
 const MAX_SIGNALS: usize = 64;
 const MAX_SERIES: usize = 8;
 const MAX_DEPTH: usize = 4;
+const MAX_TEXT: usize = 2048;
+const CELLS_WINDOW: usize = 256;
 
 const SIGNAL: [&str; 12] = [
     "name", "label", "unit", "digits", "better", "smooth", "as", "scale", "sign", "pick", "values",
@@ -25,6 +29,39 @@ const CHART: [&str; 9] = [
 /// How a stats block or a signal compares with the parent's run: at the same stage and step, or
 /// with the value the parent ended with.
 const VS: [&str; 2] = ["step", "final"];
+
+pub(super) fn outcome(value: &Value) -> &str {
+    match value.as_str() {
+        Some(word @ ("correct" | "wrong" | "error")) => word,
+        _ => "unknown",
+    }
+}
+
+fn text_signals(text: &str) -> Result<Vec<String>, String> {
+    use super::watch::reply::{tokens, Token};
+
+    let mut names = Vec::new();
+    let mut end = 0;
+    for (range, token) in tokens(text, false)? {
+        if text[end..range.start].contains('}') {
+            return Err("a closing } needs a matching { in <text>".into());
+        }
+        match token {
+            Token::Signal(None, name) if orx_signals::identifier(&name) => names.push(name),
+            _ => {
+                return Err(format!(
+                    "{} is not a signal token; use {{signal}} in <text>",
+                    &text[range]
+                ))
+            }
+        }
+        end = range.end;
+    }
+    if text[end..].contains('}') {
+        return Err("a closing } needs a matching { in <text>".into());
+    }
+    Ok(names)
+}
 
 /// Where in the markup something is wrong, and what.
 #[derive(Debug)]
@@ -463,6 +500,9 @@ impl Parser<'_> {
         let allowed: Vec<&str> = match kind {
             "chart" => CHART.iter().chain(BLOCK.iter()).copied().collect(),
             "stats" => ["of", "vs"].iter().chain(BLOCK.iter()).copied().collect(),
+            "text" => BLOCK.to_vec(),
+            "cells" => ["from"].into_iter().chain(BLOCK).collect(),
+            "bars" => ["from", "by"].into_iter().chain(BLOCK).collect(),
             "table" => ["name", "columns", "last", "vs"]
                 .iter()
                 .chain(BLOCK.iter())
@@ -477,7 +517,7 @@ impl Parser<'_> {
             _ => {
                 return Err(self.problem(
                     node,
-                    format!("<{kind}> is not a block; a view holds chart, stats, table"),
+                    format!("<{kind}> is not a block; a view holds chart, stats, table, text, cells or bars"),
                 ))
             }
         };
@@ -488,7 +528,11 @@ impl Parser<'_> {
             if let Some(child) = children.first() {
                 return Err(self.problem(
                     *child,
-                    format!("<{kind}> holds nothing; write it as <{kind} … />"),
+                    if kind == "text" {
+                        "<text> holds plain text; remove the nested element".into()
+                    } else {
+                        format!("<{kind}> holds nothing; write it as <{kind} … />")
+                    },
                 ));
             }
         }
@@ -506,6 +550,58 @@ impl Parser<'_> {
                 if let Some(vs) = attributes.get("vs") {
                     block.insert("vs".into(), json!(self.choice(vs, &VS)?));
                 }
+            }
+            "text" => {
+                let content: String = node
+                    .children()
+                    .filter(|child| child.is_text())
+                    .filter_map(|child| child.text())
+                    .collect();
+                let text = content.trim();
+                if text.is_empty() || text.len() > MAX_TEXT {
+                    return Err(self.problem(
+                        node,
+                        format!("<text> needs 1 to {MAX_TEXT} bytes of plain text"),
+                    ));
+                }
+                let names = text_signals(text).map_err(|message| self.problem(node, message))?;
+                for name in names {
+                    self.refer(node, format!("{path}.text"), Kind::Signal, &name);
+                }
+                block.insert("text".into(), json!(text));
+            }
+            "cells" | "bars" => {
+                let Some(from) = attributes.get("from") else {
+                    return Err(self.problem(
+                        node,
+                        format!("<{kind}> needs from=\"…\", the row table the run reports"),
+                    ));
+                };
+                let table = self.name(from)?;
+                self.refer(node, format!("{path}.{kind}"), Kind::Table, &table);
+                self.refer(
+                    node,
+                    format!("{path}.outcome"),
+                    Kind::Column(table.clone()),
+                    "outcome",
+                );
+                if kind == "bars" {
+                    let Some(by) = attributes.get("by") else {
+                        return Err(self.problem(
+                            node,
+                            "<bars> needs by=\"…\", the column holding its categories",
+                        ));
+                    };
+                    let column = self.name(by)?;
+                    self.refer(
+                        node,
+                        format!("{path}.by"),
+                        Kind::Column(table.clone()),
+                        &column,
+                    );
+                    block.insert("by".into(), json!(column));
+                }
+                block.insert(kind.into(), json!(table));
             }
             _ => {
                 let Some(name) = attributes.get("name") else {
@@ -785,7 +881,12 @@ pub(crate) fn compile(markup: &str) -> Result<Compiled, Problem> {
         if node.is_pi() {
             return Err(parser.problem(node, "processing instructions are not allowed in a view"));
         }
-        if node.is_text() && node.text().is_some_and(|t| !t.trim().is_empty()) {
+        if node.is_text()
+            && node.text().is_some_and(|t| !t.trim().is_empty())
+            && node
+                .parent_element()
+                .is_none_or(|parent| !parent.has_tag_name("text"))
+        {
             return Err(parser.problem(
                 node,
                 "text is not allowed in a view; put words in label=\"…\" or title=\"…\"",
@@ -1978,12 +2079,61 @@ pub(crate) fn shown(
                 )
             })
             .unwrap_or_default();
-        for kind in ["table", "bars", "cells", "media", "text"] {
+        for kind in ["table", "media"] {
             if block.get(kind).is_some() {
                 lines.push(format!("{kind}{scope}: {block}"));
                 if let Some(table) = block[kind].as_str().filter(|_| kind == "table") {
                     lines.push(format!("  rows: {}", monitor["rows"][table]));
                 }
+            }
+        }
+        if let Some(template) = block["text"].as_str() {
+            let text =
+                super::watch::fill_values(template, &monitor["latest"], signals, &Map::new());
+            lines.push(format!("Text{scope}: {}", text.replace("**", "")));
+            for name in text_signals(template).expect("compiled view text") {
+                if monitor["latest"][&name].is_null() {
+                    missing.insert(name);
+                }
+            }
+        }
+        if let Some(table) = block["cells"].as_str() {
+            let rows = monitor["rows"][table]
+                .as_array()
+                .map_or(&[][..], Vec::as_slice);
+            let recent = &rows[rows.len().saturating_sub(CELLS_WINDOW)..];
+            let mut tally = BTreeMap::<&str, usize>::new();
+            for row in recent {
+                *tally.entry(outcome(&row["outcome"])).or_default() += 1;
+            }
+            lines.push(format!("Cells from {table}{scope}: {} retained rows; {} correct, {} wrong, {} errors, {} unknown.",
+                recent.len(), tally.get("correct").unwrap_or(&0), tally.get("wrong").unwrap_or(&0),
+                tally.get("error").unwrap_or(&0), tally.get("unknown").unwrap_or(&0)));
+            if recent.is_empty() {
+                missing.insert(format!("table {table}"));
+            }
+        }
+        if let (Some(table), Some(by)) = (block["bars"].as_str(), block["by"].as_str()) {
+            let groups = monitor["groups"][table][by]
+                .as_array()
+                .map_or(&[][..], Vec::as_slice);
+            let cap = super::monitor::MAX_OUTCOME_GROUPS;
+            lines.push(format!(
+                "Bars from {table} by {by}{scope}: retained rows, up to {cap} categories."
+            ));
+            if groups.is_empty() {
+                missing.insert(format!("{table}.{by}"));
+            }
+            for group in groups {
+                let key = group["key"].as_str().expect("group key");
+                let ok = group["ok"].as_u64().expect("group correct count");
+                let n = group["n"].as_u64().expect("group classified count");
+                let rate = if n == 0 {
+                    "—".into()
+                } else {
+                    format!("{}%", ((ok * 100) as f64 / n as f64).round())
+                };
+                lines.push(format!("  {key}: {rate} ({ok} of {n})"));
             }
         }
         if block["chart"].is_array() {
@@ -2167,11 +2317,18 @@ pub(crate) fn instrumentation(
                                     .flatten()
                                     .filter_map(|series| series["y"].as_str()),
                             );
-                        if pattern
-                            .row
-                            .as_deref()
-                            .is_some_and(|row| block["from"] == row || block["table"] == row)
-                            || used.into_iter().any(|name| captures.contains(&name))
+                        let text = block["text"]
+                            .as_str()
+                            .map(|text| text_signals(text).expect("compiled view text"));
+                        if pattern.row.as_deref().is_some_and(|row| {
+                            ["from", "table", "cells", "bars"]
+                                .iter()
+                                .any(|kind| block[*kind] == row)
+                        }) || used.into_iter().any(|name| captures.contains(&name))
+                            || text
+                                .iter()
+                                .flatten()
+                                .any(|name| captures.contains(&name.as_str()))
                         {
                             if let Some(phase) = block["phase"].as_str() {
                                 required.push(phase);
@@ -2224,13 +2381,31 @@ pub(crate) fn instrumentation(
         problems.push(format!("No headline signal has appeared ({}). Report one of these names under `m`, or add a reported fallback to `headline` with `orx exp view set EXP --file PATH`.", headline.join(", ")));
     }
     let mut missing = std::collections::BTreeSet::new();
+    let mut missing_block = std::collections::BTreeSet::new();
     for block in view["blocks"].as_array().into_iter().flatten() {
         if !ready(block["phase"].as_str())
             || block["phase"].as_str().is_some_and(|name| !started(name))
         {
             continue;
         }
-        if let Some(table) = block["from"].as_str() {
+        if let Some(text) = block["text"].as_str() {
+            missing_block.extend(
+                text_signals(text)
+                    .expect("compiled view text")
+                    .into_iter()
+                    .filter(|name| !seen.has_signal(name)),
+            );
+        } else if let Some(table) = block["cells"].as_str().or(block["bars"].as_str()) {
+            if let Some(columns) = seen.tables.get(table) {
+                for column in ["outcome"].into_iter().chain(block["by"].as_str()) {
+                    if !columns.iter().any(|seen| seen == column) {
+                        missing_block.insert(format!("{table}.{column}"));
+                    }
+                }
+            } else {
+                missing_block.insert(format!("table {table}"));
+            }
+        } else if let Some(table) = block["from"].as_str() {
             if let Some(columns) = seen.tables.get(table) {
                 let names = block["chart"]
                     .as_array()
@@ -2270,6 +2445,9 @@ pub(crate) fn instrumentation(
     }
     if !missing.is_empty() {
         problems.push(format!("Chart data has not appeared: {}. Report these names, or correct the chart with `orx exp view set EXP --file PATH`.", missing.into_iter().collect::<Vec<_>>().join(", ")));
+    }
+    if !missing_block.is_empty() {
+        problems.push(format!("Run view data has not appeared: {}. Report these names, or correct the view with `orx exp view set EXP --file PATH`.", missing_block.into_iter().collect::<Vec<_>>().join(", ")));
     }
     for (index, phase) in phases.iter().enumerate() {
         let occurrence = phases[..index]
@@ -2372,6 +2550,107 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authored_text_checks_and_reads_its_latest_signals() {
+        let markup = r#"<signal name="loss" digits="2"/><view><text title="Validation">Loss is **{loss}** &amp; measured.</text></view>"#;
+        let compiled = compile(markup).unwrap();
+        assert_eq!(
+            compiled.tree["blocks"][0],
+            json!({
+                "title": "Validation", "text": "Loss is **{loss}** & measured."
+            })
+        );
+        let seen = Seen {
+            signals: vec!["rate".into()],
+            ..Seen::default()
+        };
+        assert_eq!(compiled.check(&seen).unwrap(), ["loss"]);
+        let typo = compile(&markup.replace("{loss}", "{los}")).unwrap();
+        assert!(typo.check(&seen).unwrap_err().message.contains("los"));
+        for text in [
+            "",
+            " ",
+            "{loss",
+            "loss}",
+            "{{loss}}",
+            "{}",
+            "{loss.vs}",
+            "{loss rate}",
+            "<stats of='loss' />",
+        ] {
+            assert!(
+                compile(&format!("<view><text>{text}</text></view>")).is_err(),
+                "{text:?}"
+            );
+        }
+        let mut monitor = json!({"view": compiled.tree});
+        let show = |monitor: &Value| shown(&shown_run(), monitor, &Value::Null, &[], None, None);
+        assert!(show(&monitor).contains("Loss is — & measured."));
+        monitor["latest"]["loss"] = json!(2.3);
+        assert!(show(&monitor).contains("Loss is 2.30 & measured."));
+    }
+
+    #[test]
+    fn authored_outcomes_check_the_table_and_its_columns() {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../../tests/contracts/run-view-outcomes.json"))
+                .unwrap();
+        let compiled = compile(fixture["markup"].as_str().unwrap()).unwrap();
+        assert_eq!(compiled.tree, fixture["tree"]);
+        let cells = compile(r#"<view><cells from="items" /></view>"#).unwrap();
+        let bars = compile(r#"<view><bars from="items" by="category" /></view>"#).unwrap();
+        assert_eq!(cells.check(&Seen::default()).unwrap(), ["items", "outcome"]);
+        assert_eq!(
+            bars.check(&Seen::default()).unwrap(),
+            ["items", "outcome", "category"]
+        );
+        let mut seen = Seen::default();
+        seen.tables.insert("cases".into(), vec!["outcome".into()]);
+        assert!(cells
+            .check(&seen)
+            .unwrap_err()
+            .message
+            .contains("no table \"items\""));
+        seen.tables.insert("items".into(), vec!["score".into()]);
+        assert!(cells
+            .check(&seen)
+            .unwrap_err()
+            .message
+            .contains("no column \"outcome\""));
+        seen.tables.get_mut("items").unwrap().push("outcome".into());
+        assert!(cells.check(&seen).unwrap().is_empty());
+        assert!(bars
+            .check(&seen)
+            .unwrap_err()
+            .message
+            .contains("no column \"category\""));
+        for block in [
+            "<cells />",
+            "<bars from='items' />",
+            "<bars from='bad-table' by='category' />",
+        ] {
+            assert!(compile(&format!("<view>{block}</view>")).is_err());
+        }
+    }
+
+    #[test]
+    fn authored_blocks_wait_for_their_stage_and_name_the_missing_inputs() {
+        let config = orx_signals::Config::default();
+        let snapshot = check_snapshot(
+            "::orx:: {\"phase\":\"eval\",\"of\":8,\"row\":\"items\",\"m\":{\"category\":\"proofs\"}}\n",
+            &config,
+        );
+        let view = compile(r#"<view><text phase="eval">Loss is {loss}.</text><cells from="items" phase="eval" /><bars from="items" by="split" phase="eval" /><text phase="later">Rate is {rate}.</text></view>"#).unwrap().tree;
+        let mut monitor =
+            json!({"view":view,"asOf":120999,"phases":[{"name":"eval","startedAt":1000}]});
+        assert!(instrumentation(&monitor, Some(&snapshot), &config, None, false).is_empty());
+        monitor["asOf"] = json!(121000);
+        let problems = instrumentation(&monitor, Some(&snapshot), &config, None, false);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("items.outcome, items.split, loss"));
+        assert!(!problems[0].contains("rate"));
+    }
 
     #[test]
     fn charts_draw_the_parent_unless_the_view_turns_it_off() {
@@ -2890,7 +3169,6 @@ mod tests {
     #[test]
     fn each_mistake_says_where_and_what() {
         let cases = [
-            ("<view><html/></view>", 1, 7, "unknown element \"html\"; allowed: signal, view, chart, series, stats, table"),
             ("<view>\n  <chart y=\"loss\" scale=\"log\"/>\n</view>", 2, 19, "unknown attribute \"scale\" on <chart>; allowed: y, x, from, by, x-scale, y-scale, x-range, mark, ghost, phase, title"),
             ("<signal name=\"loss\" digits=\"13\"/><view/>", 1, 21, "digits=\"13\" must be a whole number from 0 to 12"),
             ("<signal name=\"loss\" better=\"down\"/><view/>", 1, 21, "better=\"down\" is not one of lower, higher"),

@@ -62,6 +62,26 @@ test("rows a table gained extend it in place, and a whole table never arrives in
   assert.equal(invalidated(), false);
 });
 
+test("outcome counts are replaced on the same revision that slides the cells window", async () => {
+  const { read, invalidated } = await page();
+  const original = [{ outcome: "correct", category: "algebra" }];
+  await emit("run.monitor", event({
+    append: {},
+    appendRows: { items: original },
+    patch: { groups: { items: { category: [{ key: "algebra", ok: 1, n: 1 }] } } },
+  }));
+  const rows = [{ outcome: "error", category: "proofs" }];
+  const groups = { items: { category: [{ key: "proofs", ok: 0, n: 1 }] } };
+  await emit("run.monitor", event({
+    rev: running.rev + 2, seriesRev: running.seriesRev + 2, appendFrom: running.seriesRev + 1,
+    append: {}, dropRows: { items: 1 }, appendRows: { items: rows },
+    patch: { groups },
+  }));
+  assert.deepEqual(read().rows.items, rows);
+  assert.deepEqual(read().groups, groups);
+  assert.equal(invalidated(), false);
+});
+
 test("past the row cap a table slides: its oldest rows leave as new ones come, and nothing is read again", async () => {
   const { read, invalidated } = await page();
   const rows = (from, to) => Array.from({ length: to - from }, (_, i) => ({ task: `t${from + i}` }));

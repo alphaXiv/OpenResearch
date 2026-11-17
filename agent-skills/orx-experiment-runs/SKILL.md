@@ -148,15 +148,44 @@ orx exp view set <expId> --file view.xml
 | `chart` | `y="a b"`, `x` (`step`, the default, or `elapsed`), `ghost="parent\|false"` (default `parent`), `x-range="run\|parent"`, `x-scale="log"`, `y-scale="log"`, `mark="line\|points\|bars"`; with `from="table"`, `x`/`y` are its columns, `by="column"` draws a series per value, and `<series x= y= label= ghost=/>` children give each series its own columns |
 | `stats` | `of="a b"`, `vs` |
 | `table` | `name`, `columns="a b"`, `last="5"`, `vs="parent\|step\|final"` |
+| `text` | Plain text with optional `{signal}` tokens and `**bold**`, up to 2,048 bytes |
+| `cells` | `from="table"`, newest 256 retained outcome rows in completion order |
+| `bars` | `from="table"`, `by="column"`, correct share by category over retained outcome rows |
 
 Every block also takes `phase` (shown only during that stage) and `title`.
 Declare a `signal` for every measure the view names and every column the user
 should read by a label. One chart answers one question: measures on different
 scales get a chart each. At most 8 series a chart and three stats, the
-headline first. The strip shows the headline and the current stage's first
-block: put first the picture that would make you stop the run. No colours,
-sizes or HTML: what a block can't say goes in the result message
-(`orx-figures`).
+headline first. The strip shows the headline and the first active chart with
+two points. A result citation draws the view's first block (`orx-figures`).
+Use the result message for the interpretation of a particular run.
+
+```xml
+<signal name="val_loss" digits="2" />
+<view headline="val_loss">
+  <text>Loss is **{val_loss}**. Lower is better.</text>
+  <cells from="items" />
+  <bars from="items" by="category" />
+</view>
+```
+
+Text binds the latest value of each named signal. Before it reports, the token
+shows a dash. Escape XML characters as in `Loss &lt; 1`.
+
+For cells and bars, emit one row per finished item. Duplicate rows each count.
+
+```text
+::orx:: {"row":"items","m":{"category":"algebra","outcome":"correct"}}
+```
+
+Use `correct`, `wrong`, `error` or `unknown` as strings. A fixed `row:"items"`
+pattern can capture `category` and `(?P<outcome>correct|wrong|error|unknown)`.
+Cells count missing and unrecognized outcomes as unknown. Bars show the most
+recent 32 distinct categories at most, counting all their retained rows.
+The rate is correct divided by correct, wrong and error combined. Unknown and
+unrecognized outcomes are excluded. A category with no classified rows shows a
+dash for its rate. Report any overall or cumulative accuracy as a separate
+signal for the watcher or for a chart.
 
 How a run meets its parent is yours to choose, per experiment:
 

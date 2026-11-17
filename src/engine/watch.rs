@@ -3,7 +3,7 @@
 //! stops a run. Looks run in `orx up` only.
 
 mod digest;
-mod reply;
+pub(super) mod reply;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -1915,9 +1915,7 @@ fn moving(run: &Now) -> Vec<f64> {
         .as_object()
         .into_iter()
         .flatten()
-        .filter(|(name, _)| {
-            specs[name.as_str()]["values"].is_null() && specs[name.as_str()]["labels"].is_null()
-        })
+        .filter(|(name, _)| specs[name.as_str()]["labels"].is_null())
         .filter_map(|(name, value)| Some((name, value.as_f64()?)))
         .filter(|(name, value)| {
             // An outcome column (only ever 0 or 1) or a value unchanged since the run first

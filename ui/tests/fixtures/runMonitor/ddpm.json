@@ -55,7 +55,6 @@
   "seriesRev": 7,
   "rows": {},
   "groups": {},
-  "cells": {},
   "media": {
     "artifacts/samples/*.png": [
       {"path": "samples/step-10k.png", "kind": "image", "at": 1794399480000, "caption": "10k steps"},

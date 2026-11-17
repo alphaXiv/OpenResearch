@@ -1102,12 +1102,32 @@ fn evaluate(
         blocks
             .iter()
             .filter(|block| wanted(block))
-            .filter_map(|block| block["table"].as_str().or(block["from"].as_str()))
+            .filter_map(|block| {
+                block["table"]
+                    .as_str()
+                    .or(block["from"].as_str())
+                    .or(block["cells"].as_str())
+            })
             .filter_map(|name| snapshot.and_then(|s| s.rows.get_key_value(name)))
             .map(|(name, rows)| (name.clone(), json!(rows)))
             .collect::<serde_json::Map<String, Value>>()
     };
     let rows = tables(snapshot, &|_| true);
+    let mut groups = BTreeMap::<&str, BTreeMap<&str, Value>>::new();
+    for block in blocks {
+        if let (Some(table), Some(by)) = (block["bars"].as_str(), block["by"].as_str()) {
+            groups
+                .entry(table)
+                .or_default()
+                .entry(by)
+                .or_insert_with(|| {
+                    let rows = snapshot
+                        .and_then(|s| s.rows.get(table))
+                        .map_or(&[][..], Vec::as_slice);
+                    outcome_groups(rows, by)
+                });
+        }
+    }
     let parent_body = life.parent.as_ref().zip(parent).map(|(run, parent)| {
         let phase = snapshot
             .and_then(|s| s.phases.last())
@@ -1433,8 +1453,7 @@ fn evaluate(
         "pace": pace,
         "versus": {"step": at_step, "final": at_end},
         "rows": rows,
-        "groups": {},
-        "cells": {},
+        "groups": groups,
         "media": {},
         "counts": counts,
         "estimate": estimate,
@@ -1595,6 +1614,37 @@ fn rows_after(body: &Value, snapshot: Option<&Snapshot>, from: &BTreeMap<String,
         })
         .collect();
     Value::Object(rows)
+}
+
+pub(super) const MAX_OUTCOME_GROUPS: usize = 32;
+
+fn outcome_groups(rows: &[orx_signals::Signals], by: &str) -> Value {
+    let mut groups = BTreeMap::<String, (usize, usize)>::new();
+    for row in rows.iter().rev() {
+        let key = match row.get(by) {
+            Some(Value::String(key)) if !key.trim().is_empty() => key.clone(),
+            Some(Value::Number(key)) => key.to_string(),
+            _ => continue,
+        };
+        if groups.len() == MAX_OUTCOME_GROUPS && !groups.contains_key(&key) {
+            continue;
+        }
+        let (ok, n) = groups.entry(key).or_default();
+        match row.get("outcome").map(super::view::outcome) {
+            Some("correct") => {
+                *ok += 1;
+                *n += 1;
+            }
+            Some("wrong" | "error") => *n += 1,
+            _ => {}
+        }
+    }
+    Value::Array(
+        groups
+            .into_iter()
+            .map(|(key, (ok, n))| json!({"key": key, "ok": ok, "n": n}))
+            .collect(),
+    )
 }
 
 /// How long each series and row table is, and how many rows the fold has dropped in all.
@@ -2440,6 +2490,12 @@ fn project(
             });
             if let Some(best) = body.get("best") {
                 event["patch"]["best"] = best.clone();
+            }
+            if basis
+                .as_ref()
+                .is_some_and(|(held, _)| held.projection.body["groups"] != body["groups"])
+            {
+                event["patch"]["groups"] = body["groups"].clone();
             }
             if basis.is_none() {
                 event["reset"] = json!(true);
@@ -4716,6 +4772,81 @@ mod tests {
 
         let (_, next) = publish(&f.store, &changed, T0 + 701_000, None).unwrap();
         assert_eq!(next.unwrap()["rev"], rev.as_u64().unwrap() + 1);
+    }
+
+    #[test]
+    fn authored_outcomes_follow_retained_rows_and_live_events() {
+        let f = Fixture::new("orx-monitor-outcomes");
+        let run = f.run("running", local());
+        f.view("exp", r#"<view><cells from="items" /><bars from="items" by="category" /><bars from="items" by="split" /></view>"#);
+        let row = |category: &str, outcome: &str| {
+            (
+                T0,
+                format!(
+                    r#"::orx:: {{"row":"items","m":{{"category":"{category}","split":"test","outcome":"{outcome}"}}}}"#
+                ),
+            )
+        };
+        let mut rows = vec![
+            row("proofs", "correct"),
+            row("proofs", "wrong"),
+            row("geometry", "unknown"),
+        ];
+        rows.resize(2048, row("proofs", "error"));
+        let mut snapshot = folded(&rows);
+        f.collect(&snapshot);
+        f.collected(T0 + 1_000);
+        let (first, _) = monitor_at(&f, &run, T0 + 1_000);
+        assert!(first.get("cells").is_none());
+        assert_eq!(first["rows"]["items"].as_array().unwrap().len(), 2048);
+        assert_eq!(
+            first["groups"]["items"]["category"],
+            json!([
+                {"key":"geometry", "ok":0, "n":0}, {"key":"proofs", "ok":1, "n":2047}
+            ])
+        );
+        assert_eq!(
+            first["groups"]["items"]["split"],
+            json!([{"key":"test", "ok":1, "n":2047}])
+        );
+
+        fold(&mut snapshot, &[row("proofs", "invalid")]);
+        f.collect(&snapshot);
+        f.collected(T0 + 2_000);
+        let (next, event) = monitor_at(&f, &run, T0 + 2_000);
+        let event = event.unwrap();
+        assert_eq!(event.get("reset"), None);
+        assert_eq!(event["dropRows"]["items"], 1);
+        assert_eq!(
+            event["appendRows"]["items"],
+            json!(snapshot.rows["items"][2047..])
+        );
+        assert_eq!(event["patch"]["groups"], next["groups"]);
+        assert_eq!(
+            next["groups"]["items"]["category"][1],
+            json!({"key":"proofs", "ok":0, "n":2046})
+        );
+
+        let shown = super::super::view::shown(&run, &next, &Value::Null, &[], None, None);
+        assert!(shown.contains("256 retained rows"), "{shown}");
+        assert!(
+            shown.contains("0 correct, 0 wrong, 255 errors, 1 unknown"),
+            "{shown}"
+        );
+        assert!(shown.contains("geometry: — (0 of 0)"), "{shown}");
+        assert!(shown.contains("proofs: 0% (0 of 2046)"), "{shown}");
+
+        let added: Vec<_> = (2049..2081)
+            .map(|i| row(&format!("case-{i}"), "correct"))
+            .collect();
+        fold(&mut snapshot, &added);
+        f.collect(&snapshot);
+        f.collected(T0 + 3_000);
+        let (latest, _) = monitor_at(&f, &run, T0 + 3_000);
+        let categories = latest["groups"]["items"]["category"].as_array().unwrap();
+        assert_eq!(categories.len(), MAX_OUTCOME_GROUPS);
+        assert_eq!(categories.first().unwrap()["key"], "case-2049");
+        assert_eq!(categories.last().unwrap()["key"], "case-2080");
     }
 
     /// An event carries the rows a table gained, never the table.
@@ -7781,7 +7912,7 @@ mod tests {
         f.collected(T0 + 5_000);
         f.store
             .patch_run_monitor_json("exp", &crate::engine::view::etag(None), |_| {
-                Ok(json!({"view": "<view><bars signal=\"acc\" by=\"task\" /></view>", "brief": []}).to_string())
+                Ok(json!({"view": "<view><heatmap /></view>", "brief": []}).to_string())
             })
             .unwrap()
             .unwrap();
@@ -7789,7 +7920,8 @@ mod tests {
         assert_eq!(monitor["viewFrom"]["isDefault"], true);
         let text = monitor["statusText"].as_str().unwrap();
         assert!(
-            text.contains("view     View of exp:1:7: unknown element \"bars\"; allowed: signal, view, chart, series, stats, table. The default view is shown."),
+            text.contains("view     View of exp:1:7: unknown element \"heatmap\"")
+                && text.contains("The default view is shown."),
             "{text}"
         );
         // Saving keeps what a newer orx stored beside the view.
@@ -7826,12 +7958,12 @@ mod tests {
         // Before any run there is nothing to check a view against.
         assert_eq!(
             invalid(view("<view><html/></view>")),
-            "View view.xml:1:7: unknown element \"html\"; allowed: signal, view, chart, series, stats, table. Run `orx exp view set exp --file view.xml`."
+            format!("View view.xml:1:7: unknown element \"html\"; allowed: {}. Run `orx exp view set exp --file view.xml`.", crate::engine::view::ELEMENTS.join(", "))
         );
         loss_run(&f, "r1", "exp", "running", 5, 1.0);
         assert_eq!(
             invalid(view("<view><html/></view>")),
-            "View view.xml:1:7: unknown element \"html\"; allowed: signal, view, chart, series, stats, table. Run `orx exp view check r1 --file view.xml`."
+            format!("View view.xml:1:7: unknown element \"html\"; allowed: {}. Run `orx exp view check r1 --file view.xml`.", crate::engine::view::ELEMENTS.join(", "))
         );
         assert_eq!(
             invalid(view("<view>\n  <chart y=\"los\" />\n</view>")),

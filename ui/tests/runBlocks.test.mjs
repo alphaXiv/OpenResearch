@@ -222,66 +222,67 @@ test("a table against its parent lists every row the parent has, unfilled until 
   assert.equal(text(page.querySelector("h3")), "Eval");
 });
 
-test("bars give each key's share and, on a page, how many of how many; a key with no share yet has no bar", async () => {
-  const monitor = fixture("mathbench");
-  const block = blockOf(monitor, "bars");
-  const group = monitor.groups.accuracy[0];
-  const page = await draw(monitor, block, "page");
-  assert.equal(text(page.querySelector("h3")), "Accuracy by category");
-  assert.ok(text(page).includes(`${group.key}${Math.round(group.value * 100)}%${group.ok} of ${group.n}`));
+const outcomeView = JSON.parse(readFileSync(new URL("../../tests/contracts/run-view-outcomes.json", import.meta.url), "utf8")).tree;
+
+test("bars use the selected column's classified counts and leave a missing rate at zero classified", async () => {
+  const block = outcomeView.blocks.find((entry) => "bars" in entry);
+  const monitor = {
+    ...fixture("running"),
+    view: outcomeView,
+    groups: {
+      items: {
+        category: [{ key: "algebra", ok: 3, n: 4 }, { key: "proofs", ok: 0, n: 0 }],
+        split: [{ key: "test", ok: 1, n: 1 }],
+      },
+    },
+  };
+  const view = await live(monitor, block);
+  assert.equal(text(view.container.querySelector("h3")), "Accuracy by category");
+  assert.match(text(view.container), /algebra75%3 of 4proofs—0 of 0/);
+  assert.equal(view.container.querySelectorAll("i").length, 1);
+  const next = { ...monitor, groups: { items: { category: [{ key: "algebra", ok: 3, n: 5 }, { key: "proofs", ok: 0, n: 0 }] } } };
+  await view.update(next);
+  assert.match(text(view.container), /algebra60%3 of 5/);
   const strip = await draw(monitor, block, "strip");
-  assert.ok(!text(strip).includes(`${group.ok} of ${group.n}`));
-
-  const unknown = { ...monitor, groups: { accuracy: [{ key: "proofs", value: null, ok: 0, n: 0 }] } };
-  const none = await draw(unknown, block, "page");
-  assert.ok(text(none).includes("proofs—"), text(none));
-  assert.equal(none.querySelector("i"), null, "never a bar of nothing, as if none were right");
+  assert.ok(!text(strip).includes("3 of 4"));
 });
 
-test("bars with nothing counted yet say so in their own words", async () => {
-  const monitor = { ...fixture("mathbench"), groups: {} };
-  const block = blockOf(monitor, "bars");
-  assert.ok(text(await draw(monitor, block, "page")).endsWith(m.run_bars_none({ key: "category" }).replace(/[⁦-⁩]/g, "")));
-  assert.ok(text(await draw(monitor, block, "page", { live: false })).endsWith(m.run_bars_none_ended({ key: "category" }).replace(/[⁦-⁩]/g, "")));
+test("bars with nothing counted say so while running and after finishing", async () => {
+  const monitor = { ...fixture("running"), view: outcomeView, groups: {} };
+  const block = outcomeView.blocks.find((entry) => "bars" in entry);
+  assert.ok(text(await draw(monitor, block, "page")).endsWith(m.run_bars_none({ key: "category" })));
+  assert.ok(text(await draw(monitor, block, "page", { live: false })).endsWith(m.run_bars_none_ended({ key: "category" })));
 });
 
-/** What each square in a cells block shows, by its shape and fill. */
-function outcomes(svg) {
-  const rects = [...svg.querySelectorAll("rect")];
-  const square = Math.max(...rects.map((rect) => Number(rect.getAttribute("width"))));
-  return rects.map((rect) => rect.getAttribute("fill") === "none" ? "unknown" : Number(rect.getAttribute("width")) < square / 2 ? "todo" : rect.getAttribute("fill"));
-}
-
-test("cells count each outcome for a screen reader, with a legend on the page; an unknown outcome is never wrong nor still to go", async () => {
-  const monitor = fixture("mathbench");
-  const block = blockOf(monitor, "cells");
-  const { outcomes: results, of } = monitor.cells.result;
-  const count = (value) => results.filter((outcome) => outcome === value).length;
-  const page = await draw(monitor, block, "page");
-  const label = page.querySelector('svg[role="img"]').getAttribute("aria-label").replace(/[⁦-⁩]/g, "");
-  assert.equal(label, `${count(1)} correct, ${count(0)} wrong, ${count(2)} errors, ${of - results.length} to go`);
-
-  const unknown = { ...monitor, cells: { result: { of: 6, outcomes: [1, null, 2], from: 2 } } };
-  const partial = await draw(unknown, block, "page");
-  const svg = partial.querySelector('svg[role="img"]');
-  assert.equal(svg.getAttribute("aria-label").replace(/[⁦-⁩]/g, ""), "1 correct, 1 error, 3 not known, 1 to go");
-  assert.deepEqual(outcomes(svg), ["unknown", "unknown", "var(--mark-blue)", "unknown", "var(--mark-amber)", "todo"]);
-});
-
-test("cells in a strip end on the row after the newest item", async () => {
-  const monitor = fixture("mathbench");
-  const { outcomes: results, of, from } = monitor.cells.result;
-  const strip = await draw(monitor, blockOf(monitor, "cells"), "strip");
-  const drawn = outcomes(strip.querySelector("svg"));
-  const columns = 800 / 5;
-  assert.equal(drawn.length, columns * 5);
-  assert.equal(drawn.filter((outcome) => outcome === "todo").length, Math.min(columns, of - from - results.length));
-  assert.notEqual(drawn.at(-columns - 1), "todo", "the newest item is the last before the row still to go");
+test("cells draw and count the newest 256 retained outcomes, with distinguishable marks", async () => {
+  const block = outcomeView.blocks.find((entry) => "cells" in entry);
+  const rows = [
+    { outcome: "wrong" },
+    ...Array.from({ length: 252 }, () => ({ outcome: "correct" })),
+    { outcome: "wrong" }, { outcome: "error" }, { outcome: "unexpected" }, {},
+  ];
+  const monitor = { ...fixture("running"), view: outcomeView, rows: { items: rows } };
+  const view = await live({ ...monitor, rows: {} }, block);
+  await view.update(monitor);
+  const image = () => view.container.querySelector('svg[role="img"]');
+  const accessibleName = () => image().getAttribute("aria-label").replace(/[⁦-⁩]/g, "");
+  assert.match(accessibleName(), /256 shown.*252 correct.*1 wrong.*1 error.*2 not known/);
+  assert.equal(image().children.length, 256);
+  assert.ok(Number(image().getAttribute("width")) > 12, "items wrap into the measured box after the first report");
+  assert.deepEqual([...image().children].slice(-5).map((mark) => [mark.localName, mark.getAttribute("fill")]), [
+    ["circle", "var(--mark-blue)"],
+    ["rect", "var(--subtext)"],
+    ["path", "var(--mark-amber)"],
+    ["rect", "none"],
+    ["rect", "none"],
+  ]);
+  await view.update({ ...monitor, rows: { items: [...rows.slice(1), { outcome: "error" }] } });
+  assert.match(accessibleName(), /256 shown.*251 correct.*1 wrong.*2 errors.*2 not known/);
 });
 
 test("cells with no items say so instead of an empty picture", async () => {
-  const monitor = { ...fixture("mathbench"), cells: { result: { of: null, outcomes: [], from: 0 } } };
-  const block = blockOf(monitor, "cells");
+  const monitor = { ...fixture("running"), view: outcomeView, rows: {} };
+  const block = outcomeView.blocks.find((entry) => "cells" in entry);
   const page = await draw(monitor, block, "page");
   assert.equal(page.querySelector("svg"), null);
   assert.ok(text(page).endsWith(m.run_cells_none()));
@@ -311,12 +312,15 @@ test("media shows the newest files under their names, each at its version, and s
   assert.ok(text(await draw(none, block, "page", { live: false })).includes("No files matched artifacts/samples/*.png"));
 });
 
-test("a text block fills the agent's sentence from the run's numbers, on a page only", async () => {
-  const monitor = fixture("finetune");
-  const block = { text: "Val loss is **{val_loss}**, {val_loss.vs}." };
-  const page = await draw(monitor, block, "page");
-  assert.match(text(page), /^Val loss is [\d.]+, [\d.]+ better than the parent\.$/);
-  assert.ok(page.querySelector("strong"));
+test("text shows a dash until its latest value arrives and keeps the author's bold treatment", async () => {
+  const monitor = { ...fixture("running"), view: outcomeView, latest: {} };
+  const block = outcomeView.blocks.find((entry) => "text" in entry);
+  const view = await live(monitor, block);
+  assert.equal(text(view.container), "Loss is —. Lower is better.");
+  assert.equal(text(view.container.querySelector("strong")), "—");
+  await view.update({ ...monitor, latest: { val_loss: 2.3 } });
+  assert.equal(text(view.container), "Loss is 2.30. Lower is better.");
+  assert.equal(text(view.container.querySelector("strong")), "2.30");
   assert.equal((await draw(monitor, block, "strip")).textContent, "");
 });
 

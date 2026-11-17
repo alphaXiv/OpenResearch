@@ -288,6 +288,9 @@ run's log as it reads now with the patterns and says what each one matched.
 reads the monitor and summary used by the dashboard, labels the stage, plan,
 watcher, flag and estimate separately, and lists each chart's data extent,
 total, finite point count and parent data, the stats and missing reports.
+Text blocks bind the latest signals. Outcome cells draw the newest 256
+retained rows of a table. Outcome bars group its retained rows by a column and
+show correct over classified counts, with a missing rate for a zero count.
 It does not recreate the UI's sentence or its Setup grouping. A missing run
 argument selects the only run shown in the invoking agent's chat; several
 shown runs require an explicit id. View and pattern edits apply to the live
@@ -295,9 +298,9 @@ card and to the next description.
 
 The existing watcher pass also checks instrumentation after reporting starts or
 the run's first minutes pass. It checks patterns against real log bytes, the
-headline and charts against reported names, and observed stages against their
+headline, charts, text and outcome blocks against reported names, and observed stages against their
 totals, including totals supplied by the plan. Views and patterns scoped to a
-future stage wait for it. Missing chart and headline data wait two minutes from
+future stage wait for it. Missing view data waits two minutes from
 the reporting stage's start; an unphased view uses the first stage with metric
 or table data, leaving setup counters out. A run gets at most one instrumentation notice, kept
 in the outbox across restarts and batched with any notice already due to its

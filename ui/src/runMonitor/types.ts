@@ -48,8 +48,6 @@ export interface SignalSpec {
   sign?: boolean;
   /** Stats show the best value so far, as `RunMonitor.best` gives it, instead of the latest. */
   pick?: "latest" | "best";
-  /** A cells signal's reported values and the outcome each one means. */
-  values?: Record<string, "correct" | "wrong" | "error">;
   /** The word shown for a raw value, in stats, tables and the headline: `{"1": "valid"}`. */
   labels?: Record<string, string>;
   /** How it compares with the parent; at the same step while the run goes and with where the parent ended once it ended when absent. */
@@ -317,13 +315,6 @@ export interface Watch {
   error: { code: string; message: string } | null;
 }
 
-/** One outcome per item, oldest first: 1 correct, 0 wrong, 2 an error, null not known. `from` items came before the first. */
-export interface Cells {
-  of: number | null;
-  outcomes: (0 | 1 | 2 | null)[];
-  from: number;
-}
-
 /** A file under the project's artifacts that a media block shows, newest last. */
 export interface MediaItem {
   path: string;
@@ -358,9 +349,8 @@ export interface RunMonitor {
   seriesRev: number;
   /** Each of the view's tables, row by row. */
   rows: Record<string, Record<string, SignalValue>[]>;
-  /** A bars block's signal by its key; `value` is `ok` of `n`. */
-  groups: Record<string, { key: string; value: number | null; ok: number; n: number }[]>;
-  cells: Record<string, Cells>;
+  /** A bars block's retained outcome counts, keyed by table and grouping column. */
+  groups: Record<string, Record<string, { key: string; ok: number; n: number }[]>>;
   media: Record<string, MediaItem[]>;
   /** `rows` holds the parent's tables a table with `vs` compares with, matched by their first column. */
   parent: { runId: string; phase: string | null; series: Record<string, Point[]>; rows?: Record<string, Record<string, SignalValue>[]> } | null;

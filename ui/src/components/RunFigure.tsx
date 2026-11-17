@@ -16,8 +16,11 @@ function hasData(block: ViewBlock, monitor: RunMonitor): boolean {
   if ("chart" in block) return chartOf(monitor, block).series.some((series) => !series.ghost && series.points.some(([, y]) => y !== null));
   if ("stats" in block) return block.stats.some((name) => monitor.latest[name] != null || monitor.best?.[name] != null);
   if ("table" in block) return !!monitor.rows[block.table]?.length;
-  if ("bars" in block) return !!monitor.groups[block.bars]?.length;
-  if ("cells" in block) return !!monitor.cells[block.cells]?.outcomes.length;
+  if ("bars" in block) {
+    const groups = monitor.groups[block.bars]?.[block.by];
+    return Array.isArray(groups) && groups.length > 0;
+  }
+  if ("cells" in block) return Object.hasOwn(monitor.rows, block.cells) && !!monitor.rows[block.cells].length;
   if ("media" in block) return !!monitor.media[block.media]?.length;
   return "text" in block && !!block.text;
 }

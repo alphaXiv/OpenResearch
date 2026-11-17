@@ -66,6 +66,7 @@ export const tokensOf = (template: string) => new Set([...template.matchAll(TOKE
 /** A watcher's sentence with each token filled from the live values; `**` marks stay for the renderer. */
 export function fillSentence(template: string, bindings: Record<string, SignalValue>, signals: Signals): string {
   return template.replace(TOKEN, (_token, key: string) => {
+    if (!Object.hasOwn(bindings, key)) return "—";
     if (key.startsWith("count:")) {
       const count = bindings[key];
       return typeof count === "number" ? ltr(number(0).format(count)) : "—";
