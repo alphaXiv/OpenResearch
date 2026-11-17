@@ -26,8 +26,6 @@ test("login starts immediately and installation asks first", () => {
   assert.equal(initialPhase(install, "install"), "preview");
   // OpenResearch's own copy changes nothing of the user's, so it downloads at once.
   assert.equal(initialPhase(install, "install", true), "running");
-  assert.equal(initialPhase(login, "upgrade"), "running");
-  assert.equal(recheckedAction(harness(), "upgrade"), null);
 });
 
 test("a cleared repair re-targets Retry; an uncleared one never does", () => {

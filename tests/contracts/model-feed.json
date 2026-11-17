@@ -32,5 +32,18 @@
         ]
       }
     ]
+  },
+  {
+    "featured": [{"model": "opencode/deepseek-v4.1-flash-free"}],
+    "nudge": null,
+    "endpoints": [
+      {
+        "id": "openresearch-k3v9q2",
+        "baseURL": "https://api.openresearch.sh/v1",
+        "auth": {"kind": "key", "key": "public"},
+        "models": [{"id": "research-1", "name": "OpenResearch 1", "context": 128000, "output": 16000, "icon": {"type": "image/png", "data": "iVBORw0KGgo="}}]
+      }
+    ],
+    "releases": []
   }
 ]

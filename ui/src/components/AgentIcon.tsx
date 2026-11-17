@@ -3,12 +3,13 @@ import { Popover } from "@base-ui/react/popover";
 import type { Gemoji } from "gemoji";
 import {
   Apple, Bot, BoxIcon, Brain, BriefcaseBusiness, Building2, Check, CodeXml, Flag, Flame, FlaskConical, Ghost,
-  GraduationCap, Heart, House, Leaf, Lightbulb, Moon, Pencil, Plane, Plus, Rocket, Search, Smile, Sparkles,
+  GraduationCap, Heart, House, Leaf, Lightbulb, Moon, Pencil, Plane, Plus, Rocket, RotateCcw, Search, Smile, Sparkles,
   SquareTerminal, Star, Trophy, User, Zap, type LucideIcon,
 } from "lucide-react";
 import type { AgentIcon, AgentIconColor } from "../api";
 import { m } from "../paraglide/messages.js";
 import { WorkspaceDomContext } from "../WorkspaceDom";
+import { LOGOS, logoMark } from "./HarnessLogo";
 import { Button, Input, SEGMENTED_CLASS_NAME } from "./ui";
 import { cn } from "./ui/cn";
 
@@ -95,9 +96,12 @@ export function AgentIconTile({ icon, brand, size = "md", outline = true }: {
 const GRID = "grid grid-cols-[repeat(auto-fill,minmax(2rem,1fr))] gap-1";
 const CELL = "grid h-8.5 place-items-center rounded-lg border border-transparent text-subtext outline-none hover:bg-hover-muted hover:text-text focus-visible:outline-2 focus-visible:outline-focus";
 
-/** Icons with the provider's logo first, Emoji and Image tabs, over a colour row. */
-function AgentIconPicker({ value, brand, onChange }: { value: AgentIcon; brand: Logo; onChange: (icon: AgentIcon) => void }) {
-  const [tab, setTab] = useState<"icons" | "emoji" | "image">(() => "emoji" in value ? "emoji" : "image" in value ? "image" : "icons");
+/** A pick from the icon picker; `logo` is set when it pins a logo, and `null` when it goes back to the row's own. */
+export type IconPick = (icon: AgentIcon, logo?: string | null) => void;
+
+/** Icons with the provider's logo first, then Logos, Emoji and Image tabs, over a colour row. */
+function AgentIconPicker({ value, brand, logo, onChange }: { value: AgentIcon; brand: Logo; logo?: string; onChange: IconPick }) {
+  const [tab, setTab] = useState<"icons" | "logos" | "emoji" | "image">(() => "emoji" in value ? "emoji" : "image" in value ? "image" : logo ? "logos" : "icons");
   const [imageError, setImageError] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const color = value.color;
@@ -110,9 +114,9 @@ function AgentIconPicker({ value, brand, onChange }: { value: AgentIcon; brand: 
   return (
     <div className="grid gap-3">
       <div className={cn(SEGMENTED_CLASS_NAME, "flex w-full")} role="group" aria-label={m.icon_kind()}>
-        {(["icons", "emoji", "image"] as const).map((id) => (
+        {(["icons", "logos", "emoji", "image"] as const).map((id) => (
           <button key={id} type="button" aria-pressed={tab === id} className={cn("flex-1 justify-center", tab === id && "active")} onClick={() => setTab(id)}>
-            {id === "icons" ? m.icon_tab_icons() : id === "emoji" ? m.icon_tab_emoji() : m.icon_tab_image()}
+            {id === "icons" ? m.icon_tab_icons() : id === "logos" ? m.icon_tab_logos() : id === "emoji" ? m.icon_tab_emoji() : m.icon_tab_image()}
           </button>
         ))}
       </div>
@@ -152,6 +156,8 @@ function AgentIconPicker({ value, brand, onChange }: { value: AgentIcon; brand: 
             </button>
           ))}
         </div>
+      ) : tab === "logos" ? (
+        <LogoPicker pinned={"brand" in value ? logo : undefined} cell={cell} onPick={(slug) => onChange({ brand: true, color }, slug)} />
       ) : tab === "emoji" ? (
         <EmojiPicker value={"emoji" in value ? value.emoji : null} cell={cell} onPick={(emoji) => onChange({ emoji, color })} />
       ) : (
@@ -182,6 +188,40 @@ function AgentIconPicker({ value, brand, onChange }: { value: AgentIcon; brand: 
           />
         </div>
       )}
+    </div>
+  );
+}
+
+/** Every logo a row can wear, searchable by name; the first cell unpins, going back to the logo the row finds for itself. */
+function LogoPicker({ pinned, cell, onPick }: { pinned: string | undefined; cell: string; onPick: (slug: string | null) => void }) {
+  const [query, setQuery] = useState("");
+  const search = query.trim().toLowerCase();
+  const shown = LOGOS.filter((logo) => !search || logo.name.toLowerCase().includes(search) || logo.slug.includes(search));
+  return (
+    <div className="grid gap-2">
+      <label className="relative block">
+        <span className="sr-only">{m.icon_logo_search()}</span>
+        <Search size={14} className="pointer-events-none absolute start-2.5 top-1/2 -translate-y-1/2 text-muted" aria-hidden="true" />
+        <Input type="search" autoComplete="off" spellCheck={false} placeholder={m.icon_logo_search()} value={query} onChange={(event) => setQuery(event.target.value)} className="ps-8 [&::-webkit-search-cancel-button]:hidden" />
+      </label>
+      <div className="h-48 overflow-y-auto pe-1">
+        <div role="radiogroup" aria-label={m.icon_tab_logos()} className={GRID}>
+          {!search && (
+            <button type="button" role="radio" aria-checked={!pinned} aria-label={m.icon_logo_detected()} title={m.icon_logo_detected()} className={cell} onClick={() => onPick(null)}>
+              <RotateCcw size={18} aria-hidden="true" />
+            </button>
+          )}
+          {shown.map((logo) => {
+            const mark = logoMark(logo.slug)!;
+            return (
+              <button key={logo.slug} type="button" role="radio" aria-checked={logo.slug === pinned} aria-label={logo.name} title={logo.name} className={cell} onClick={() => onPick(logo.slug)}>
+                {mark(18)}
+              </button>
+            );
+          })}
+        </div>
+        {shown.length === 0 && <p role="status" className="m-0 py-8 text-center text-sm text-subtext">{m.icon_logo_none({ query: query.trim() })}</p>}
+      </div>
     </div>
   );
 }
@@ -259,8 +299,8 @@ function EmojiPicker({ value, cell, onPick }: { value: string | null; cell: stri
   );
 }
 
-/** The tile with a pencil badge, opening the picker; each pick reaches `onChange` at once. */
-export function AgentIconButton({ value, brand, onChange, disabled }: { value: AgentIcon; brand: Logo; onChange: (icon: AgentIcon) => void; disabled?: boolean }) {
+/** The tile with a pencil badge, opening the picker; each pick reaches `onChange` at once. `logo` is the one pinned. */
+export function AgentIconButton({ value, brand, logo, onChange, disabled }: { value: AgentIcon; brand: Logo; logo?: string; onChange: IconPick; disabled?: boolean }) {
   const { portalContainer } = useContext(WorkspaceDomContext);
   return (
     <Popover.Root>
@@ -281,7 +321,7 @@ export function AgentIconButton({ value, brand, onChange, disabled }: { value: A
         {/* Above the z-200 dialogs, since the wizard opens it too. */}
         <Popover.Positioner className="z-210" side="bottom" align="start" sideOffset={6} collisionPadding={8}>
           <Popover.Popup aria-label={m.icon_change()} className="w-76 max-w-[calc(100vw_-_16px)] rounded-lg border border-border bg-background p-3 shadow-dropdown outline-none">
-            <AgentIconPicker value={value} brand={brand} onChange={onChange} />
+            <AgentIconPicker value={value} brand={brand} logo={logo} onChange={onChange} />
           </Popover.Popup>
         </Popover.Positioner>
       </Popover.Portal>

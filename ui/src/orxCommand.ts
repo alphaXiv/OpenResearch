@@ -232,3 +232,14 @@ export function recordedDiscoveryQueries(command: string, output: string, strate
   }
   return queries;
 }
+
+/** The papers a `for` loop reads with `orx paper "$var"`: the loop's literal values. */
+export function loopPaperIds(command: string): string[] {
+  const ids: string[] = [];
+  for (const loop of command.matchAll(/\bfor\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\s+([^;\n]+);\s*do\b([\s\S]*?)\bdone\b/g)) {
+    const [, variable, values, body] = loop;
+    if (!new RegExp(`(?:^|[;\\n&|]|\\s)orx\\s+paper\\s+"?\\$\\{?${variable}\\}?"?(?=\\s|[;|&]|$)`).test(body)) continue;
+    ids.push(...shellWords(values, true).filter(Boolean));
+  }
+  return ids;
+}

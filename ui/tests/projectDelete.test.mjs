@@ -12,6 +12,7 @@ const project = { id: "p1", name: "Project", artifactsDir: "/files/project" };
 async function openDelete(reply = () => ({})) {
   const calls = [];
   let removed = 0;
+  let settingsOpened = 0;
   serve((path, init) => {
     if (path.startsWith("/api/projects/p1?") && init.method === "DELETE") {
       calls.push(new URLSearchParams(path.split("?")[1]).get("deleteArtifacts"));
@@ -22,13 +23,14 @@ async function openDelete(reply = () => ({})) {
   });
   await render(createElement(Fragment, null,
     createElement(Toaster),
-    createElement(ProjectInfoCard, { project, chatCount: 0, collapsed: false, busy: false, onToggleCollapsed() {}, onRemoved: () => removed++, onNewChat() {}, pinned: false, onPin() {} })));
+    createElement(ProjectInfoCard, { project, chatCount: 0, collapsed: false, busy: false, onToggleCollapsed() {}, onRemoved: () => removed++, onNewChat() {}, onOpenSettings: () => settingsOpened++, pinned: false, onPin() {} })));
   await act(async () => document.querySelector(`[aria-label="${m.sidebar_project_details({ name: project.name })}"]`).click());
   await act(async () => find('[role="menuitem"]', m.projects_home_delete_project_action()).click());
   await settle();
   return {
     calls,
     removed: () => removed,
+    settingsOpened: () => settingsOpened,
     dialog: () => document.querySelector('[role="dialog"]'),
     checkbox: () => document.querySelector('[role="dialog"] input[type="checkbox"]'),
     confirm: async () => {
@@ -73,4 +75,12 @@ test("a failed artifact removal after deletion still closes the dialog and repor
   assert.equal(deletion.dialog(), null);
   assert.equal(deletion.removed(), 1);
   assert.match(document.body.textContent, new RegExp(artifactsError));
+});
+
+test("the project menu opens the project's settings", async () => {
+  const deletion = await openDelete();
+  await act(async () => find('[role="dialog"] button', m.projects_home_cancel()).click());
+  await act(async () => document.querySelector(`[aria-label="${m.sidebar_project_details({ name: project.name })}"]`).click());
+  await act(async () => find('[role="menuitem"]', m.sidebar_project_settings()).click());
+  assert.equal(deletion.settingsOpened(), 1);
 });

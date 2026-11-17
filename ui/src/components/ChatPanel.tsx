@@ -1,6 +1,7 @@
 import { useMachines } from "../machineSelection";
 import { downloadFile } from "../download";
 import {
+  Fragment,
   createContext,
   useContext,
   memo,
@@ -55,7 +56,7 @@ import {
 import { useMutate } from "@clo/react-mutation";
 
 import { nativeOptions, sessionAcpHarness } from "../acp";
-import { deriveComposerSelection, selectionHarness } from "../modelSelection";
+import { deriveComposerSelection, selectionHarness, withAutoReviewer } from "../modelSelection";
 
 import { RemoteConnectionStrip, useRemoteConnection } from "../RemoteRuntime";
 
@@ -72,20 +73,20 @@ import {
   paperToken,
 } from "../fileMentions";
 import { m } from "../paraglide/messages.js";
-import { formatForDisplay, matchesKeyboardEvent, useAppHotkeys, useHotkey } from "@tanstack/react-hotkeys";
+import { formatForDisplay, matchesKeyboardEvent, useHotkey } from "@tanstack/react-hotkeys";
 import { appHotkeys } from "../hotkeys";
 import { copyToClipboard } from "../clipboard";
 import { readClipboardImage } from "../clipboardImage";
 import { autoDir, fmtBytes, ltr } from "../i18n";
-import { navigateKeyboardList } from "../keyboardNavigation";
 import { useLocale } from "../locale";
 import {
   ArrowDown,
   ArrowRightLeft,
   ArrowUpRight,
   Bell,
-  Blocks,
+  BookMarked,
   BookOpen,
+  ChartSpline,
   Check,
   ChevronLeft,
   ChevronRight,
@@ -94,6 +95,7 @@ import {
   CornerDownLeft,
   Copy,
   Link,
+  FileCode,
   FileText,
   FlaskConical,
   FolderPlus,
@@ -106,9 +108,11 @@ import {
   MessageSquareQuote,
   MessagesSquare,
   MoreHorizontal,
+  NotebookText,
   Paperclip,
   Pencil,
   Plus,
+  ScrollText,
   Search,
   SlidersHorizontal,
   SquareTerminal,
@@ -138,6 +142,7 @@ import {
   modelLabel,
   type FirstActionSurface,
   type ChatImageAttachment,
+  type ArtifactEntry,
   type ChatMessage,
   type AlphaXivFolder,
   type ChatPart,
@@ -205,8 +210,12 @@ import {
   shellWords,
   shellWrapperBody,
   unwrapShellBody,
+  loopPaperIds,
 } from "../orxCommand";
 import { LitSourceLogo, parseOrxLit, paperUrl } from "./LitSourceLogo";
+import { FileScopeContext } from "./FileReference";
+import { FigureReveal, PaperShelf, pluralMessage, ReportCard, RunCard, SourceStrip, type ShelfPaper } from "./ResearchCards";
+import { discoveredPapers, linkedPapers, paperKey, type CitedPaper, type PaperMeta } from "../researchActivity";
 import { LitSourcesList } from "./LitSourcesPicker";
 import { ChatImageScope, Md } from "./Md";
 import { ChatLinksContext, type ChatLinks } from "./ChatLinks";
@@ -214,7 +223,7 @@ import { CITED_ID, messageRef } from "../agentMessages";
 import { PlanStrip } from "./PlanStrip";
 import { useComposerFocus } from "./useComposerFocus";
 import { ExperimentRunBanner } from "./ExperimentRunBanner";
-import { SETTINGS_NAV, harnessSetupPath, type SettingsTab } from "./SettingsPage";
+import { SettingsHeader, harnessSetupPath, type SettingsTab } from "./SettingsPage";
 import { SkillMenu } from "./SkillMenu";
 import { MentionMenu, type MentionMatch } from "./MentionMenu";
 import { useDebouncedValue } from "./NewProjectForm";
@@ -844,7 +853,35 @@ function nativeOrxSkillPath(tool: string, skillName: string): string | null {
   return null;
 }
 
-type ToolActivityKind = "skill" | "read" | "search" | "edit" | "web" | "agent" | "project" | "command";
+/** What loading each of orx's research guides prepares the agent to do. */
+const GUIDE_LABELS: Record<string, [done: () => string, progress: () => string]> = {
+  "orx-agent-delegation": [m.activity_guide_delegation, m.activity_guide_delegation_progress],
+  "orx-compute": [m.activity_guide_compute, m.activity_guide_compute_progress],
+  "orx-create": [m.activity_guide_create, m.activity_guide_create_progress],
+  "orx-customize": [m.activity_guide_customize, m.activity_guide_customize_progress],
+  "orx-experiment-tree": [m.activity_guide_experiment_tree, m.activity_guide_experiment_tree_progress],
+  "orx-feedback": [m.activity_guide_feedback, m.activity_guide_feedback_progress],
+  "orx-figures": [m.activity_guide_figures, m.activity_guide_figures_progress],
+  "orx-git": [m.activity_guide_git, m.activity_guide_git_progress],
+  "orx-instances": [m.activity_guide_instances, m.activity_guide_instances_progress],
+  "orx-lit-review": [m.activity_guide_lit_review, m.activity_guide_lit_review_progress],
+  "orx-logs": [m.activity_guide_logs, m.activity_guide_logs_progress],
+  "orx-paper": [m.activity_guide_paper, m.activity_guide_paper_progress],
+  "orx-reports": [m.activity_guide_reports, m.activity_guide_reports_progress],
+  "orx-results": [m.activity_guide_results, m.activity_guide_results_progress],
+};
+
+/** orx's own skills are the research guides it gives every agent, each named
+ * for what it prepares the agent to do. */
+function guideFields(skillName: string | null): Partial<Pick<ToolActivity, "guide" | "label" | "progressLabel">> {
+  if (!skillName?.startsWith("orx-")) return {};
+  const labels = GUIDE_LABELS[skillName];
+  return labels
+    ? { guide: true, label: labels[0](), progressLabel: labels[1]() }
+    : { guide: true, progressLabel: m.activity_loading_research_guide() };
+}
+
+type ToolActivityKind = "skill" | "read" | "search" | "edit" | "web" | "agent" | "project" | "run" | "log" | "command";
 
 interface ToolActivity {
   kind: ToolActivityKind;
@@ -857,11 +894,20 @@ interface ToolActivity {
   fileRef?: string;
   labelTarget?: string;
   litCall?: NonNullable<ReturnType<typeof parseOrxLit>>;
+  /** Every paper an `orx paper` call reads, when it reads more than one or reads them in a loop. */
+  paperIds?: string[];
   queries?: string[];
   runIds?: string[];
   experimentIds?: string[];
   /** Chat sessions `orx agent spawn` created in this tool call. */
   spawnedSessionIds?: string[];
+  /** The label naming the experiment of the call's one run, in place of `label` and `progressLabel`. */
+  runLabel?: (experiment: string) => string;
+  runProgressLabel?: (experiment: string) => string;
+  /** A row about the chat itself, such as a compaction, which stays out of the research summary. */
+  aside?: boolean;
+  /** Reads one of orx's research guides. */
+  guide?: boolean;
 }
 
 type OpenTranscriptFile = (
@@ -1320,6 +1366,7 @@ function idsFromToolOutput(output: string | undefined, resource: "runs" | "exper
       new RegExp(`/runs/(${UUID_PATTERN})`, "gi"),
       new RegExp(`\\brun(?:_|\\s+)id:\\s*(${UUID_PATTERN})`, "gi"),
       new RegExp(`^\\s*RUN\\s+(${UUID_PATTERN})\\b`, "gim"),
+      new RegExp(`\\bRun\\s+(${UUID_PATTERN})\\b`, "g"),
       new RegExp(`={3,}\\s*(${UUID_PATTERN})\\s*={3,}`, "gi"),
     ]
     : [
@@ -1557,20 +1604,21 @@ function computeToolActivity(part: ChatPart): ToolActivity {
           ? [commandArgv]
           : shellCommandSegments(normalizeShellBody(wrapperBody)).map((segment) => segment.raw);
       }
-      let litCall: ReturnType<typeof parseOrxLit> = null;
-      for (const input of literatureInputs) {
-        litCall = parseOrxLit(input);
-        if (litCall) break;
-      }
+      const litCalls = literatureInputs.flatMap((input) => parseOrxLit(input) ?? []);
+      const litCall = litCalls[0] ?? null;
       const hasNonLiteratureOrx = literatureInputs.some((input) => {
         const argv = orxArgv(input);
         return argv !== null && argv[0] !== "discover" && argv[0] !== "paper";
       });
       if (litCall && !hasNonLiteratureOrx) {
-        const queries = litCall.kind === "discover" && !litCall.query
-          ? recordedDiscoveryQueries(commandArgv ? shellWrapperBody(commandArgv) ?? command : command, toolOutput ?? "", litCall.strategy)
-          : [];
-        const discoveryLabel = litCall.kind === "discover"
+        const chainedSearches = litCalls.filter((call) => call.kind === "discover");
+        const queries = chainedSearches.length > 1
+          ? chainedSearches.flatMap((call) => call.query ? [call.query] : [])
+          : litCall.kind === "discover" && !litCall.query
+            ? recordedDiscoveryQueries(commandArgv ? shellWrapperBody(commandArgv) ?? command : command, toolOutput ?? "", litCall.strategy)
+            : [];
+        const oneStrategy = new Set(chainedSearches.map((call) => call.strategy)).size <= 1;
+        const discoveryLabel = litCall.kind === "discover" && oneStrategy
           ? {
             keyword: m.activity_searched_alphaxiv_full_text(),
             embedding: m.activity_searched_alphaxiv_semantically(),
@@ -1579,16 +1627,26 @@ function computeToolActivity(part: ChatPart): ToolActivity {
             pubmed: m.activity_searched_pubmed(),
           }[litCall.strategy]
           : null;
-        const label = litCall.kind === "discover"
-          ? litCall.query
-            ? m.activity_for_query({ activity: discoveryLabel ?? m.activity_searched_literature(), query: litCall.query })
-            : queries.length === 1
-              ? m.activity_for_query({ activity: discoveryLabel ?? m.activity_searched_literature(), query: queries[0] })
-              : queries.length > 1
-                ? m.activity_for_queries({ activity: discoveryLabel ?? m.activity_searched_literature(), count: fmtNumber(queries.length) })
-                : discoveryLabel ?? m.activity_searched_literature()
-          : litCall.id ? m.activity_read_target({ target: ltr(litCall.id) }) : m.activity_read_paper();
-        return { kind: litCall.kind === "paper" ? "read" : "search", label, litCall, queries };
+        const literatureCommand = commandArgv ? shellWrapperBody(commandArgv) ?? command : command;
+        const paperIds = [...new Set([
+          ...litCalls.flatMap((call) => call.kind === "paper" && call.id ? [call.id] : []),
+          ...loopPaperIds(literatureCommand),
+        ])];
+        const searched = discoveryLabel ?? m.activity_searched_literature();
+        const query = litCall.kind === "discover" ? litCall.query ?? (queries.length === 1 ? queries[0] : null) : null;
+        const label = litCall.kind === "paper"
+          ? paperIds.length > 1
+            ? m.activity_read_papers({ count: fmtNumber(paperIds.length) })
+            : paperIds[0] ? m.activity_read_target({ target: ltr(paperIds[0]) }) : m.activity_read_paper()
+          : queries.length > 1
+            ? m.activity_for_queries({ activity: searched, count: fmtNumber(queries.length) })
+            : query ? m.activity_for_query({ activity: searched, query }) : searched;
+        const progressLabel = litCall.kind === "paper"
+          ? m.activity_reading_paper()
+          : litCall.query
+            ? m.activity_searching_literature_for({ query: litCall.query })
+            : m.activity_searching_literature();
+        return { kind: litCall.kind === "paper" ? "read" : "search", label, progressLabel, litCall, queries, paperIds: litCall.kind === "paper" ? paperIds : undefined };
       }
 
       if (commandInvokesOrx(command, "agent\\s+spawn")) {
@@ -1615,16 +1673,44 @@ function computeToolActivity(part: ChatPart): ToolActivity {
       if (commandInvokesOrx(command, "logs")) {
         const runIds = commandRunIds(command, toolOutput, resourceRunIds, legacyTargetIds);
         const label = runIds.length === 1 ? m.activity_reviewed_run_log() : m.activity_reviewed_run_logs();
-        return { kind: "project", label, runIds, litCall: litCall ?? undefined };
+        return {
+          kind: "log",
+          label,
+          progressLabel: m.activity_reading_run_log(),
+          runIds,
+          runLabel: (experiment) => m.activity_read_log_of({ experiment }),
+          runProgressLabel: (experiment) => m.activity_reading_log_of({ experiment }),
+          litCall: litCall ?? undefined,
+        };
       }
       if (commandInvokesOrx(command, "exp\\s+run")) {
-        return { kind: "project", label: m.chat_panel_started_an_experiment_run(), litCall: litCall ?? undefined };
+        return {
+          kind: "run",
+          label: m.chat_panel_started_an_experiment_run(),
+          progressLabel: m.activity_launching_experiment(),
+          runIds: idsFromToolOutput(toolOutput, "runs"),
+          runLabel: (experiment) => m.activity_launched_experiment({ experiment }),
+          litCall: litCall ?? undefined,
+        };
       }
       if (commandInvokesOrx(command, "exp\\s+wait")) {
-        return { kind: "project", label: m.chat_panel_waited_for_an_experiment_run(), litCall: litCall ?? undefined };
+        return {
+          kind: "run",
+          label: m.chat_panel_waited_for_an_experiment_run(),
+          progressLabel: m.activity_waiting_on_run(),
+          runIds: idsFromToolOutput(toolOutput, "runs"),
+          runLabel: (experiment) => m.activity_waited_on_experiment({ experiment }),
+          litCall: litCall ?? undefined,
+        };
       }
       if (commandInvokesOrx(command, "exp\\s+cancel")) {
-        return { kind: "project", label: m.chat_panel_requested_an_experiment_stop(), litCall: litCall ?? undefined };
+        return {
+          kind: "run",
+          label: m.chat_panel_requested_an_experiment_stop(),
+          runIds: idsFromToolOutput(toolOutput, "runs"),
+          runLabel: (experiment) => m.activity_stopped_experiment({ experiment }),
+          litCall: litCall ?? undefined,
+        };
       }
       const readsProject = commandInvokesOrx(command, "project\\s+view");
       if (readsProject && readsExperimentStatus && readsExperimentNotes) {
@@ -1678,6 +1764,9 @@ function computeToolActivity(part: ChatPart): ToolActivity {
           litCall: litCall ?? undefined,
         };
       }
+      if (commandInvokesOrx(command, "create-experiment")) {
+        return { kind: "project", label: m.activity_created_an_experiment(), progressLabel: m.activity_creating_an_experiment(), litCall: litCall ?? undefined };
+      }
       if (commandInvokesOrx(command, "runs?")) {
         return { kind: "project", label: m.chat_panel_listed_project_runs(), litCall: litCall ?? undefined };
       }
@@ -1696,6 +1785,7 @@ function computeToolActivity(part: ChatPart): ToolActivity {
         return {
           kind: skillName ? "skill" : "read",
           label: skillName ? m.activity_read_skill({ name: ltr(skillName) }) : m.activity_read_target({ target: ltr(baseName(gitShowTarget.path)) }),
+          ...guideFields(skillName),
           filePath: gitShowTarget.path,
           fileRef: gitShowTarget.ref,
           labelTarget: skillName ? `${skillName} skill` : baseName(gitShowTarget.path),
@@ -1720,6 +1810,7 @@ function computeToolActivity(part: ChatPart): ToolActivity {
         return {
           kind: skillName ? "skill" : "read",
           label: skillName ? m.activity_read_skill({ name: ltr(skillName) }) : m.activity_read_target({ target: ltr(baseName(readTarget)) }),
+          ...guideFields(skillName),
           filePath: readPath,
           labelTarget: skillName ? `${skillName} skill` : baseName(readTarget),
         };
@@ -1773,6 +1864,7 @@ function computeToolActivity(part: ChatPart): ToolActivity {
       return {
         kind: "skill",
         label: skillName ? m.activity_loaded_skill({ name: ltr(skillName) }) : m.activity_loaded_a_skill(),
+        ...guideFields(skillName),
         filePath: filePath ?? undefined,
         labelTarget: filePath && skillName ? `${skillName} skill` : undefined,
       };
@@ -1784,6 +1876,7 @@ function computeToolActivity(part: ChatPart): ToolActivity {
         return {
           kind: "skill",
           label: m.activity_read_skill({ name: ltr(skillName) }),
+          ...guideFields(skillName),
           filePath: filePath ?? undefined,
           labelTarget: `${skillName} skill`,
         };
@@ -1843,7 +1936,7 @@ function computeToolActivity(part: ChatPart): ToolActivity {
     case "error":
       return { kind: "command", label: m.chat_panel_tool_failed() };
     case "importedchat":
-      return { kind: "project", label: m.activity_imported_chat() };
+      return { kind: "project", label: m.activity_imported_chat(), aside: true };
     case "contextcompaction":
       return {
         kind: "command",
@@ -1854,6 +1947,7 @@ function computeToolActivity(part: ChatPart): ToolActivity {
             ? m.activity_compacting_context()
             : m.activity_compacted_context(),
         progressLabel: m.activity_compacting_context(),
+        aside: true,
       };
     default: {
       const detail = description ?? filePath ?? rawCommand ?? part.state?.title ?? "";
@@ -1875,6 +1969,12 @@ function alphaxivActivity(tool: string, input: Record<string, unknown>): ToolAct
     approvalLabel,
     // Paper arguments may be full titles, which have no page to link.
     litCall: { kind: "paper", source: "alphaxiv", id: paper && !/\s/.test(paper) ? paper : undefined },
+    // Saving a paper or reading notes on it does not read it.
+    paperIds: [],
+  });
+  const read = (label: string, paper: string | null): ToolActivity => ({
+    ...row("read", label, paper ?? undefined),
+    paperIds: paper && !/\s/.test(paper) ? [paper] : [],
   });
   const readPaper = (paper: string | null) =>
     paper ? m.activity_read_target({ target: ltr(paper) }) : m.activity_read_paper();
@@ -1916,11 +2016,11 @@ function alphaxivActivity(tool: string, input: Record<string, unknown>): ToolAct
       const label = queries.length > 1
         ? m.activity_for_queries({ activity: readPaper(paper), count: fmtNumber(queries.length) })
         : forQuery(readPaper(paper), queries[0] ?? null);
-      return row("read", label, paper ?? undefined);
+      return read(label, paper);
     }
     case "get_paper_content": {
       const paper = inputString(input, "url");
-      return row("read", readPaper(paper), paper ?? undefined);
+      return read(readPaper(paper), paper);
     }
     case "read_files_from_github_repository": {
       const repository = inputString(input, "githubUrl")
@@ -1933,7 +2033,10 @@ function alphaxivActivity(tool: string, input: Record<string, unknown>): ToolAct
     case "discover_papers": {
       const keywords = exactInputStringArray(input, "keywords") ?? [];
       const query = inputString(input, "question") ?? (keywords.join(", ") || null);
-      return row("search", forQuery(m.activity_searched_alphaxiv(), query));
+      return {
+        ...row("search", forQuery(m.activity_searched_alphaxiv(), query)),
+        progressLabel: query ? m.activity_searching_literature_for({ query }) : m.activity_searching_literature(),
+      };
     }
     case "find_researchers":
       return row("search", forQuery(m.activity_alphaxiv_searched_researchers(), inputString(input, "topic", "query")));
@@ -2080,11 +2183,19 @@ function ToolActivityIcon({ activity, className = "" }: { activity: ToolActivity
   } else {
     switch (activity.kind) {
       case "skill":
-        icon = <Blocks {...props} />;
+        icon = <BookMarked {...props} />;
         break;
       case "read":
+        icon = /\.(?:md|markdown|txt|rst|tex|csv|tsv|log)$/i.test(activity.filePath ?? "")
+          ? <FileText {...props} />
+          : <FileCode {...props} />;
+        break;
       case "project":
-        icon = <BookOpen {...props} />;
+      case "run":
+        icon = <FlaskConical {...props} />;
+        break;
+      case "log":
+        icon = <ScrollText {...props} />;
         break;
       case "search":
         icon = <Search {...props} />;
@@ -2262,6 +2373,21 @@ function ToolActivityLabel({
       </>
     );
   }
+  const onlyRunId = activity.runIds?.length === 1 ? activity.runIds[0] : null;
+  const onlyRunName = onlyRunId && runExperimentName?.(onlyRunId);
+  if (activity.runLabel && onlyRunId && onlyRunName) {
+    const label = activity.runLabel(autoDir(onlyRunName));
+    return onOpenRun ? (
+      <button
+        type="button"
+        className="tool-target text-start"
+        title={m.a11y_open_logs_for_run({ run: ltr(onlyRunId) })}
+        {...tabOpenGestureHandlers<HTMLButtonElement>((intent) => onOpenRun(onlyRunId, intent), { stopPropagation: true })}
+      >
+        {label}
+      </button>
+    ) : label;
+  }
   if (activity.runIds?.length) {
     const runIds = runExperimentName
       ? activity.runIds.filter((runId) => Boolean(runExperimentName(runId)))
@@ -2350,12 +2476,14 @@ function activityInProgress(activity: ToolActivity): ToolActivity {
     read: m.activity_reading(),
     search: m.activity_searching(),
     edit: m.activity_editing(),
-    project: m.activity_reviewing(),
+    project: m.activity_checking_experiments(),
+    run: m.activity_running(),
+    log: m.activity_reading_run_log(),
     web: m.activity_browsing(),
     agent: m.activity_delegating(),
     command: m.activity_running(),
   }[activity.kind];
-  return { ...activity, label };
+  return { ...activity, label, runLabel: activity.runProgressLabel };
 }
 
 function permissionActivityLabel(tool: string | undefined, input: Record<string, unknown> | undefined): string {
@@ -2372,6 +2500,8 @@ function permissionActivityLabel(tool: string | undefined, input: Record<string,
     search: m.activity_search(),
     edit: m.activity_edit(),
     project: m.activity_review(),
+    run: m.activity_run(),
+    log: m.activity_read(),
     web: m.activity_browse(),
     agent: m.activity_delegate(),
     command: m.activity_run(),
@@ -2446,7 +2576,7 @@ function useDelayedToolShimmer(active: boolean): boolean {
 }
 
 function groupIconActivity(activities: ToolActivity[]): ToolActivity {
-  const priority: ToolActivityKind[] = ["skill", "read", "search", "edit", "project", "web", "command", "agent"];
+  const priority: ToolActivityKind[] = ["skill", "read", "search", "edit", "project", "run", "log", "web", "command", "agent"];
   for (const kind of priority) {
     const activity = activities.find((candidate) => candidate.kind === kind);
     if (activity) return activity;
@@ -2572,6 +2702,7 @@ function ToolRow({
   revealPartId,
   activity,
   repeatCount = 1,
+  quiet = false,
   onOpenFile,
   onOpenRun,
   onOpenSpawnedSession,
@@ -2585,6 +2716,8 @@ function ToolRow({
   revealPartId?: string;
   activity: ToolActivity;
   repeatCount?: number;
+  /** Supporting work, such as reading code, drawn a step dimmer than research. */
+  quiet?: boolean;
   onOpenFile?: OpenTranscriptFile;
   onOpenRun?: OpenTranscriptTarget;
   onOpenSpawnedSession?: (sessionId: string) => void;
@@ -2627,7 +2760,7 @@ function ToolRow({
       ) : (
         <ToolActivityIcon activity={activity} className="text-muted" />
       )}
-      <span className={`${TOOL_LINE_CLASS_NAME} ${failed ? "text-accent-red" : "text-subtext"}`}>
+      <span className={`${TOOL_LINE_CLASS_NAME} ${failed ? "text-accent-red" : quiet ? "text-muted" : "text-subtext"}`}>
         <ToolActivityLabel
           activity={activity}
           onOpenFile={onOpenFile}
@@ -2685,6 +2818,8 @@ function ToolGroup({
   revealPartId,
   pendingTail,
   streaming = false,
+  summary,
+  quiet = false,
   onOpenSubagent,
   onOpenFile,
   onOpenRun,
@@ -2699,6 +2834,9 @@ function ToolGroup({
   revealPartId?: string;
   pendingTail?: boolean;
   streaming?: boolean;
+  /** What the closed group says it did; "Used tools" when absent. */
+  summary?: string;
+  quiet?: boolean;
   onOpenSubagent?: OpenSubagent;
   onOpenFile?: OpenTranscriptFile;
   onOpenRun?: OpenTranscriptTarget;
@@ -2742,7 +2880,7 @@ function ToolGroup({
   const iconActivity = pendingActivity ?? groupIconActivity(activities);
   const summaryLabel = pendingActivity
     ? pendingActivity.label
-    : m.chat_panel_used_tools();
+    : summary ?? m.chat_panel_used_tools();
   if (parts.length === 1) {
     if (isSubagentPart(parts[0])) {
       return (
@@ -2783,6 +2921,7 @@ function ToolGroup({
         <ToolRow
           part={parts[0]}
           activity={displayParts[0].activity}
+          quiet={quiet}
           onOpenFile={onOpenFile}
           onOpenRun={onOpenRun}
           onOpenSpawnedSession={onOpenSpawnedSession}
@@ -2796,7 +2935,7 @@ function ToolGroup({
 
   return (
     <div className="tool-group my-3.5 mx-0">
-      <div className="tool-group-summary flex items-start gap-2 w-fit max-w-full py-1 px-1 text-base leading-6 text-subtext text-start">
+      <div className={`tool-group-summary flex items-start gap-2 w-fit max-w-full py-1 px-1 text-base leading-6 text-start ${quiet && !pendingActivity ? "text-muted" : "text-subtext"}`}>
         <ToolActivityIcon activity={iconActivity} className={shimmering ? "tool-running-shimmer-icon" : "text-muted"} />
         {pendingActivity ? (
           <span
@@ -2856,6 +2995,7 @@ function ToolGroup({
                 revealPartId={revealPartId}
                 repeatCount={count}
                 activity={activity}
+                quiet={quiet}
                 onOpenFile={onOpenFile}
                 onOpenRun={onOpenRun}
                 onOpenSpawnedSession={onOpenSpawnedSession}
@@ -2869,6 +3009,227 @@ function ToolGroup({
       </div>
     </div>
   );
+}
+
+type ToolFacet = "literature" | "runs" | "experiments" | "guides" | "reports" | "code" | "other";
+
+function toolFacet(part: ChatPart, activity: ToolActivity): ToolFacet {
+  if (isSubagentPart(part) || activity.aside) return "other";
+  if (activity.litCall) return "literature";
+  switch (activity.kind) {
+    case "run":
+    case "log":
+      return "runs";
+    case "project":
+      return "experiments";
+    case "skill":
+      return "guides";
+    case "edit":
+      return reportPath(activity) ? "reports" : "code";
+    case "read":
+    case "search":
+    case "command":
+      return "code";
+    default:
+      return "other";
+  }
+}
+
+/** A Markdown file the agent wrote to the artifacts directory. */
+function reportPath(activity: ToolActivity): string | null {
+  const path = activity.kind === "edit" ? activity.filePath : undefined;
+  return path && /(?:^|[\\/])artifacts[\\/].+\.md$/i.test(path) ? path : null;
+}
+
+/** The papers a call finished reading, which the shelf shows in place of its row. */
+function shelvedPapers(part: ChatPart, activity: ToolActivity): ShelfPaper[] {
+  const lit = activity.litCall;
+  if (lit?.kind !== "paper" || part.state?.status !== "completed") return [];
+  const ids = activity.paperIds ?? (lit.id ? [lit.id] : []);
+  return ids.map((id) => ({
+    source: ids.length === 1 ? lit.source : parseOrxLit(["orx", "paper", id])?.source ?? lit.source,
+    id,
+    output: ids.length === 1 ? part.state?.output : undefined,
+  }));
+}
+
+function literatureSearches(activity: ToolActivity): number {
+  return activity.litCall && activity.kind === "search" ? Math.max(1, activity.queries?.length ?? 0) : 0;
+}
+
+/** The runs a call names that this workspace knows. */
+function knownRunIds(activity: ToolActivity, runExperimentName?: (runId: string) => string): string[] {
+  if (activity.kind !== "run" && activity.kind !== "log") return [];
+  return (activity.runIds ?? []).filter((runId) => !runExperimentName || Boolean(runExperimentName(runId)));
+}
+
+/** One line for a stretch of code work: the file it touched, else how much it did. */
+function codeSummary(activities: ToolActivity[]): string {
+  const files = new Map<string, { read: boolean; edited: boolean }>();
+  let commands = 0;
+  for (const activity of activities) {
+    if ((activity.kind === "read" || activity.kind === "edit") && activity.labelTarget) {
+      const file = files.get(activity.labelTarget) ?? { read: false, edited: false };
+      if (activity.kind === "read") file.read = true;
+      else file.edited = true;
+      files.set(activity.labelTarget, file);
+    } else {
+      commands++;
+    }
+  }
+
+  if (files.size === 1) {
+    const [[name, { read, edited }]] = [...files];
+    const target = ltr(name);
+    if (commands > 0) {
+      const [one, other] = edited
+        ? [m.activity_worked_on_and_ran_one, m.activity_worked_on_and_ran_other]
+        : [m.activity_read_and_ran_one, m.activity_read_and_ran_other];
+      return pluralMessage(commands, one, other)({ target, count: fmtNumber(commands) });
+    }
+    if (read && edited) return m.activity_read_and_edited({ target });
+    return edited ? m.activity_edited_target({ target }) : m.activity_read_target({ target });
+  }
+  if (files.size === 0) return pluralMessage(commands, m.activity_ran_commands_one, m.activity_ran_commands_other)({ count: fmtNumber(commands) });
+  return m.activity_worked_on_files({ count: fmtNumber(files.size) });
+}
+
+function reportTitle(parts: ChatPart[], path: string): { title: string; lines: number | null } {
+  for (const part of [...parts].reverse()) {
+    const input = part.state?.input ?? {};
+    const content = typeof input.content === "string" ? input.content : null;
+    if (!content || toolActivity(part).filePath !== path) continue;
+    const heading = /^#\s+(.+)$/m.exec(content)?.[1]?.trim();
+    return { title: heading || baseName(path), lines: content.replace(/\n$/, "").split("\n").length };
+  }
+  return { title: baseName(path), lines: null };
+}
+
+type ToolGroupProps = React.ComponentProps<typeof ToolGroup>;
+
+/** A run of tool calls sorted by what the research did: papers read, runs
+ * launched, reports written, then the code and other work that supported it.
+ * The calls still pending sort last, where the current step shows. */
+function ResearchToolRun({ parts, pendingTail, discovered, ...props }: ToolGroupProps & {
+  /** Papers `orx discover` found earlier in the message, for naming the papers read. */
+  discovered: () => Map<string, PaperMeta>;
+}) {
+  const pendingId = pendingTail ? parts.at(-1)?.id : undefined;
+  const facets = new Map<ToolFacet, ChatPart[]>();
+  for (const part of parts) {
+    const facet = toolFacet(part, toolActivity(part));
+    facets.set(facet, [...(facets.get(facet) ?? []), part]);
+  }
+  const ordered = [...facets].sort(([, a], [, b]) =>
+    Number(a.some((part) => part.id === pendingId)) - Number(b.some((part) => part.id === pendingId)));
+  const group = (groupParts: ChatPart[], extra: Partial<ToolGroupProps> = {}) => (
+    <ToolGroup
+      key={`tg-${groupParts[0].id}`}
+      {...props}
+      {...extra}
+      parts={groupParts}
+      pendingTail={groupParts.some((part) => part.id === pendingId)}
+    />
+  );
+
+  return ordered.map(([facet, facetParts]) => {
+    const activities = facetParts.map(toolActivity);
+    switch (facet) {
+      case "literature": {
+        const shelf = new Map<string, ShelfPaper>();
+        const rows: ChatPart[] = [];
+        for (const part of facetParts) {
+          const papers = shelvedPapers(part, toolActivity(part));
+          for (const paper of papers) {
+            const key = `${paper.source}:${paper.id}`;
+            const shelved = shelf.get(key) ?? { ...paper, partIds: [] };
+            shelved.partIds?.push(part.id);
+            shelf.set(key, shelved);
+          }
+          if (papers.length === 0) rows.push(part);
+        }
+        const searches = rows.reduce((total, part) => total + literatureSearches(toolActivity(part)), 0);
+        const summary = searches > 0
+          ? pluralMessage(searches, m.activity_surveyed_literature_one, m.activity_surveyed_literature_other)({ count: fmtNumber(searches) })
+          : m.activity_checked_literature();
+        return (
+          <Fragment key={`literature-${facetParts[0].id}`}>
+            {rows.length > 0 && group(rows, { summary })}
+            {shelf.size > 0 && <PaperShelf papers={[...shelf.values()]} discovered={discovered()} />}
+          </Fragment>
+        );
+      }
+      case "runs": {
+        const cards = new Map<string, ChatPart[]>();
+        const rows: ChatPart[] = [];
+        for (const part of facetParts) {
+          const runIds = part.state?.status === "error" ? [] : knownRunIds(toolActivity(part), props.runExperimentName);
+          for (const runId of runIds) cards.set(runId, [...(cards.get(runId) ?? []), part]);
+          if (runIds.length === 0) rows.push(part);
+        }
+        return (
+          <Fragment key={`runs-${facetParts[0].id}`}>
+            {rows.length > 0 && group(rows, {
+              quiet: true,
+              summary: rows.every((part) => toolActivity(part).kind === "log") ? m.activity_reviewed_run_logs() : m.activity_checked_experiments(),
+            })}
+            {[...cards].map(([runId, runParts]) => {
+              const part = runParts.at(-1)!;
+              const pending = part.id === pendingId && part.state?.status === "running";
+              const activity = pending ? activityInProgress(toolActivity(part)) : toolActivity(part);
+              const name = props.runExperimentName?.(runId) || m.tree_experiment();
+              return (
+                <RunCard
+                  key={runId}
+                  runId={runId}
+                  label={activity.runLabel?.(autoDir(name)) ?? activity.label}
+                  pending={pending}
+                  partIds={runParts.map((runPart) => runPart.id)}
+                  onOpenRun={props.onOpenRun}
+                />
+              );
+            })}
+          </Fragment>
+        );
+      }
+      case "experiments":
+        return group(facetParts, { quiet: true, summary: m.activity_checked_experiments() });
+      case "guides": {
+        const count = fmtNumber(facetParts.length);
+        const summary = activities.every((activity) => activity.guide)
+          ? pluralMessage(facetParts.length, m.activity_loaded_research_guides_one, m.activity_loaded_research_guides_other)({ count })
+          : pluralMessage(facetParts.length, m.activity_loaded_skills_one, m.activity_loaded_skills_other)({ count });
+        return group(facetParts, { quiet: true, summary });
+      }
+      case "reports": {
+        const reports = new Set<string>();
+        const rows: ChatPart[] = [];
+        for (const part of facetParts) {
+          const path = reportPath(toolActivity(part));
+          if (path && part.state?.status === "completed") reports.add(path);
+          else rows.push(part);
+        }
+        return (
+          <Fragment key={`reports-${facetParts[0].id}`}>
+            {rows.length > 0 && group(rows)}
+            {[...reports].map((path) => (
+              <ReportCard
+                key={path}
+                path={path}
+                {...reportTitle(facetParts, path)}
+                partIds={facetParts.filter((part) => toolActivity(part).filePath === path).map((part) => part.id)}
+                onOpen={props.onOpenFile && ((target, intent) => props.onOpenFile?.(target, undefined, undefined, undefined, intent))}
+              />
+            ))}
+          </Fragment>
+        );
+      }
+      case "code":
+        return group(facetParts, { quiet: true, summary: codeSummary(activities) });
+      case "other":
+        return group(facetParts);
+    }
+  });
 }
 
 /** Interactive card for a plan / permission prompt, and the record of an
@@ -3514,6 +3875,90 @@ export const Message = memo(function Message({
   );
 });
 
+interface ReceiptItem {
+  icon: React.ReactNode;
+  label: string;
+}
+
+/** What a finished turn produced, for its fold line: papers it read (or the
+ * searches, when it read none), runs, reports and figures. */
+function turnReceipt(parts: ChatPart[], figures: number, runExperimentName?: (runId: string) => string): ReceiptItem[] {
+  const papers = new Map<string, ShelfPaper>();
+  const runs = new Set<string>();
+  const reports = new Set<string>();
+  let searches = 0;
+  let searchSource: ShelfPaper["source"] | null = null;
+  for (const part of parts) {
+    if (part.type !== "tool") continue;
+    const activity = toolActivity(part);
+    for (const paper of shelvedPapers(part, activity)) papers.set(`${paper.source}:${paper.id}`, paper);
+    searches += literatureSearches(activity);
+    if (literatureSearches(activity) > 0) searchSource ??= activity.litCall?.source ?? null;
+    if (part.state?.status !== "error") for (const runId of knownRunIds(activity, runExperimentName)) runs.add(runId);
+    const report = reportPath(activity);
+    if (report && part.state?.status === "completed") reports.add(report);
+  }
+
+  const icon = (Icon: typeof FlaskConical) => <Icon size={16} strokeWidth={1.75} aria-hidden="true" className="shrink-0 text-muted" />;
+  const logo = (source: ShelfPaper["source"]) => <LitSourceLogo source={source} size={16} decorative />;
+  const count = (value: number, one: (params: { count: string }) => string, other: (params: { count: string }) => string) =>
+    pluralMessage(value, one, other)({ count: fmtNumber(value) });
+  const items: ReceiptItem[] = [];
+  const firstPaper = papers.values().next().value;
+  if (firstPaper) items.push({ icon: logo(firstPaper.source), label: count(papers.size, m.chat_receipt_papers_one, m.chat_receipt_papers_other) });
+  else if (searches > 0 && searchSource) items.push({ icon: logo(searchSource), label: count(searches, m.chat_receipt_searches_one, m.chat_receipt_searches_other) });
+  if (runs.size > 0) items.push({ icon: icon(FlaskConical), label: count(runs.size, m.chat_receipt_runs_one, m.chat_receipt_runs_other) });
+  if (reports.size > 0) items.push({ icon: icon(NotebookText), label: count(reports.size, m.chat_receipt_reports_one, m.chat_receipt_reports_other) });
+  if (figures > 0) items.push({ icon: icon(ChartSpline), label: count(figures, m.chat_receipt_figures_one, m.chat_receipt_figures_other) });
+  return items;
+}
+
+/** The papers an answer links, each marked with whether the turn fetched it. */
+function answerSources(answer: ChatPart[], turnParts: ChatPart[]): CitedPaper[] {
+  const read = new Map<string, ShelfPaper>();
+  for (const part of turnParts) {
+    if (part.type !== "tool") continue;
+    for (const paper of shelvedPapers(part, toolActivity(part))) read.set(paperKey(paper.source, paper.id), paper);
+  }
+  const text = answer.flatMap((part) => part.type === "text" && part.text ? [part.text] : []).join("\n");
+  return linkedPapers(text).map((paper) => {
+    const fetched = read.get(paperKey(paper.source, paper.id));
+    return { ...paper, read: Boolean(fetched), output: fetched?.output };
+  });
+}
+
+const TURN_FIGURE_PATH = /\bartifacts\/[^\s"'`)<>]+\.(?:svg|png|jpe?g|gif|webp)\b/i;
+
+/** Images in the artifacts directory a finished turn wrote and named: written
+ * while it ran, and mentioned in its calls or its answer. */
+function useTurnFigures(messages: ChatMessage[], finished: boolean): string[] {
+  const projectId = useContext(FileScopeContext)?.projectId ?? "";
+  const text = useMemo(() => finished
+    ? messages.flatMap((message) => message.parts).map((part) => [
+      part.text,
+      part.state?.output,
+      JSON.stringify(part.state?.input ?? ""),
+    ].join("\n")).join("\n")
+    : "", [messages, finished]);
+  const mentioned = TURN_FIGURE_PATH.test(text);
+  const { getArtifactsQuery } = useWorkspace().queries;
+  const artifacts = useQuery({ ...getArtifactsQuery(projectId), enabled: Boolean(projectId) && mentioned }).data;
+  return useMemo(() => {
+    if (!artifacts || !mentioned) return [];
+    const start = messages[0].createdAt - 1_000;
+    const end = (messages.at(-1)?.completedAt ?? Date.now()) + 5_000;
+    const files: string[] = [];
+    const visit = (entries: ArtifactEntry[]) => {
+      for (const entry of entries) {
+        if (entry.children) visit(entry.children);
+        if (!entry.isDir && entry.presentation === "image" && entry.modifiedAt >= start && entry.modifiedAt <= end && text.includes(entry.path)) files.push(entry.path);
+      }
+    };
+    visit(artifacts.entries);
+    return files;
+  }, [artifacts, mentioned, messages, text]);
+}
+
 function AssistantTurn({ messages, response, options }: {
   messages: ChatMessage[];
   response: ReturnType<typeof splitResponseParts>;
@@ -3533,6 +3978,10 @@ function AssistantTurn({ messages, response, options }: {
     setExpanded(true);
   }, [options.revealNonce, options.expansionState, key]);
   const [, tick] = useState(0);
+  const finished = !streaming || message.completedAt != null;
+  const figures = useTurnFigures(messages, finished && work.length > 0);
+  const { artifactUrl } = useWorkspace().api;
+  const projectId = useContext(FileScopeContext)?.projectId;
   useEffect(() => {
     if (!streaming || message.completedAt != null || work.length === 0) return;
     const timer = window.setInterval(() => tick((value) => value + 1), 1000);
@@ -3546,6 +3995,10 @@ function AssistantTurn({ messages, response, options }: {
   const duration = elapsed === null ? null : elapsed < 60_000 || elapsed >= 3_600_000
     ? fmtDuration(elapsed)
     : m.chat_work_duration({ minutes: fmtNumber(Math.floor(elapsed / 60_000)), seconds: fmtNumber(Math.floor(elapsed / 1000) % 60) });
+  const turnParts = [...work.flatMap((turn) => turn.parts), ...answer];
+  const receipt = turnReceipt(work.flatMap((turn) => turn.parts), figures.length, options.runExperimentName);
+  const sources = finished ? answerSources(answer, turnParts) : [];
+  const openFigure = (path: string, intent: TabOpenIntent) => options.onOpenFile?.(`artifacts/${path}`, undefined, undefined, undefined, intent);
   return (
     <>
       <div className="turn-work mb-4">
@@ -3556,7 +4009,18 @@ function AssistantTurn({ messages, response, options }: {
           data-work-toggle
           onClick={() => { setHasOpened(true); options.expansionState?.set(key, !expanded); setExpanded(!expanded); }}
         >
-          <span>{duration === null ? m.chat_work_details() : m.chat_worked_for({ duration })}</span>
+          {receipt.length > 0 ? (
+            <span className="min-w-0">
+              {[...receipt, ...(duration === null ? [] : [{ icon: null, label: duration }])].map((item, index) => (
+                <Fragment key={item.label}>
+                  {index > 0 && <span className="text-muted"> · </span>}
+                  <span className="inline-flex items-center gap-1.5 align-top">{item.icon}{item.label}</span>
+                </Fragment>
+              ))}
+            </span>
+          ) : (
+            <span>{duration === null ? m.chat_work_details() : m.chat_worked_for({ duration })}</span>
+          )}
           <ChevronRight size={16} className={`shrink-0 text-muted transition-transform duration-200 ease-standard motion-reduce:transition-none ${expanded ? "rotate-90" : ""}`} />
         </button>
         <div className={`tool-group-disclosure ${expanded ? "open" : ""}`} aria-hidden={!expanded} inert={!expanded}>
@@ -3565,11 +4029,28 @@ function AssistantTurn({ messages, response, options }: {
               {hasOpened && work.map((turn) => (
                 <div key={turn.id}>{renderParts(turn.parts, { ...options, predictTextTail: false, pendingTailToolId: turn.id === message.id ? options.pendingTailToolId : null })}</div>
               ))}
+              {hasOpened && projectId && figures.length > 0 && (
+                <FigureReveal
+                  figures={figures}
+                  src={(path) => artifactUrl(projectId, path)}
+                  onOpen={options.onOpenFile && openFigure}
+                  expansionState={options.expansionState}
+                  expansionKey={`figures:${key}`}
+                />
+              )}
             </div>
           </div>
         </div>
       </div>
-      <div className="turn-answer">{renderParts(answer, answerOptions)}</div>
+      <div className="turn-answer">
+        {renderParts(answer, answerOptions)}
+        {sources.length > 0 && (
+          <SourceStrip
+            papers={sources}
+            discovered={discoveredPapers(turnParts.flatMap((part) => part.type === "tool" && part.state?.output ? [part.state.output] : []))}
+          />
+        )}
+      </div>
     </>
   );
 }
@@ -3669,12 +4150,17 @@ function renderParts(
     .at(-1);
   const rendered: React.ReactNode[] = [];
   let toolRun: ChatPart[] = [];
+  let discoveredCache: Map<string, PaperMeta> | null = null;
+  const discovered = () => discoveredCache ??= discoveredPapers(
+    parts.flatMap((part) => part.type === "tool" && part.state?.output ? [part.state.output] : []),
+  );
   const flushTools = () => {
     if (toolRun.length === 0) return;
     rendered.push(
-      <ToolGroup
+      <ResearchToolRun
         key={`tg-${toolRun[0].id}`}
         parts={toolRun}
+        discovered={discovered}
         expansionState={expansionState}
         revealNonce={revealNonce}
         revealPartId={revealPartId}
@@ -4917,6 +5403,64 @@ function SessionRow({
   );
 }
 
+interface SidebarActions {
+  toggleProjectCollapsed: (project: Project) => void;
+  pinProject: (project: Project) => void;
+  projectRemoved: (project: Project) => void;
+  newProjectChat: (project: Project) => void;
+  openProjectSettings: (project: Project) => void;
+  openSession: (session: ChatSession, project: Project) => void;
+  openExperiment: (session: ChatSession, projectId: string, experimentId: string) => void;
+  rename: (session: ChatSession, title: string) => void;
+  setArchived: (session: ChatSession, archived: boolean) => void;
+  remove: (session: ChatSession) => void;
+}
+
+// Sidebar rows skip the panel's per-keystroke renders: `actions` is a stable ref
+// the panel refreshes every render, so handlers still reach its current state.
+const SidebarProjectCard = memo(function SidebarProjectCard({
+  actions,
+  project,
+  ...card
+}: Omit<React.ComponentProps<typeof ProjectInfoCard>, "onToggleCollapsed" | "onPin" | "onRemoved" | "onNewChat" | "onOpenSettings"> & {
+  actions: React.RefObject<SidebarActions>;
+}) {
+  useLocale();
+  return (
+    <ProjectInfoCard
+      {...card}
+      project={project}
+      onToggleCollapsed={() => actions.current.toggleProjectCollapsed(project)}
+      onPin={() => actions.current.pinProject(project)}
+      onRemoved={() => actions.current.projectRemoved(project)}
+      onNewChat={() => actions.current.newProjectChat(project)}
+      onOpenSettings={() => actions.current.openProjectSettings(project)}
+    />
+  );
+});
+
+const SidebarSessionRow = memo(function SidebarSessionRow({
+  actions,
+  project,
+  ...row
+}: Omit<React.ComponentProps<typeof SessionRow>, "onOpen" | "onOpenExperiment" | "onRename" | "onSetArchived" | "onDelete"> & {
+  actions: React.RefObject<SidebarActions>;
+  project: Project;
+}) {
+  useLocale();
+  const { session } = row;
+  return (
+    <SessionRow
+      {...row}
+      onOpen={() => actions.current.openSession(session, project)}
+      onOpenExperiment={(projectId, experimentId) => actions.current.openExperiment(session, projectId, experimentId)}
+      onRename={(title) => actions.current.rename(session, title)}
+      onSetArchived={(archived) => actions.current.setArchived(session, archived)}
+      onDelete={() => actions.current.remove(session)}
+    />
+  );
+});
+
 // --- panel -------------------------------------------------------------------
 
 // The four starter prompts progress starting point → gap → baseline → experiment.
@@ -5004,8 +5548,8 @@ export function ChatPanel({
   /** Run a harness setup command (`path` is its setup route) in the right panel's terminal tab. */
   onRunSetup?: (command: string, path: string) => void;
   /** Settings sections replace chat; Artifacts remains a right-panel tool. */
-  mainView: "chat" | "skills" | SettingsTab;
-  onSelectMainView: (view: "chat" | "skills" | SettingsTab) => void;
+  mainView: "chat" | SettingsTab;
+  onSelectMainView: (view: "chat" | SettingsTab) => void;
   /** Open a project file in the right pane (chat tool rows are clickable).
    * `sessionId` is the chat session the click came from, so relative paths
    * can resolve against that session's worktree. */
@@ -5086,6 +5630,7 @@ export function ChatPanel({
     listSidebarChatSessionsQuery,
     listChatActiveRunsQuery,
     getHarnessesQuery,
+    getUiStateQuery,
     getSkillsQuery,
     getHarnessSetupCommandsQuery,
     getCodeTreeQuery,
@@ -5555,6 +6100,7 @@ export function ChatPanel({
       ? { ...savedSelection, ...sessionOverride }
       : null;
   const { data: skills = EMPTY_SKILLS } = useQuery(getSkillsQuery(rawSelection?.harness, projectId));
+  const { data: uiState } = useQuery(getUiStateQuery());
   const catalogHarness = selectionHarness(harnesses, rawSelection);
   const activeHarness = sessionAcpHarness(openSession, catalogHarness);
   const acpOptions = nativeOptions(openSession?.nativeConfiguration, { model: m.model_picker_model(), mode: m.model_picker_mode() });
@@ -7111,8 +7657,6 @@ export function ChatPanel({
     });
   }
 
-  const newTaskHotkey = useAppHotkeys()["task.new"].hotkey;
-  const newTaskShortcut = newTaskHotkey ? formatForDisplay(newTaskHotkey) : undefined;
   const queueChord = formatForDisplay("Mod+Enter");
   const startProjectTask = useCallback(() => {
     setSessionFilter("active");
@@ -7236,6 +7780,52 @@ export function ChatPanel({
       void flatSessions.fetchNextPage();
     }
   }, [sidebarGrouping, railOpen, embedded, lastVisibleIndex, sidebarRows.length, flatSessions.hasNextPage, flatSessions.isFetching, flatSessions.isError, flatSessions.fetchNextPage]);
+  const sidebarActions = useRef<SidebarActions>(null!);
+  sidebarActions.current = {
+    toggleProjectCollapsed: (project) => {
+      const next = collapsedProjects.includes(project.id) ? collapsedProjects.filter((id) => id !== project.id) : [...collapsedProjects, project.id];
+      setCollapsedProjects(next);
+      try { localStorage.setItem(collapsedProjectsKey, JSON.stringify(next)); } catch {}
+    },
+    pinProject: (project) => {
+      const next = pinnedProjects.includes(project.id) ? pinnedProjects.filter((id) => id !== project.id) : [...pinnedProjects, project.id];
+      setPinnedProjects(next);
+      try { localStorage.setItem(pinnedProjectsKey, JSON.stringify(next)); } catch {}
+    },
+    projectRemoved: (project) => { if (project.id === projectId) void navigate({ to: "/projects" }); },
+    openProjectSettings: (project) => void navigate({ href: `/projects/${encodeURIComponent(project.id)}/settings/project` }),
+    newProjectChat: (project) => {
+      if (project.id === projectId) startProjectTask();
+      else void navigate({ to: "/projects/$projectId/tasks/new", params: { projectId: project.id } });
+    },
+    openSession: (s, project) => {
+      onActiveSessionChange(s.id, { projectId: project.id });
+      if (project.id === DEMO_PROJECT_ID) {
+        markDemoSessionRead(s.id);
+        const experiment = DEMO_EXPERIMENT_LABELS[s.id];
+        if (experiment) {
+          captureUiEvent({
+            name: "demo_experiment_started",
+            kind: "curated",
+            experiment,
+          });
+          captureUiEvent({
+            name: "first_action",
+            surface: "demo",
+            action: "open_experiment",
+          });
+        }
+      }
+    },
+    openExperiment: (s, targetProjectId, experimentId) => {
+      void navigate({ href: taskLocation(targetProjectId, targetProjectId === s.projectId ? s.id : null, { kind: "experiment", experimentId, view: "overview" }) });
+    },
+    rename,
+    setArchived,
+    remove: (s) => void removeSession(s),
+  };
+  const openRuntimeDetails = useCallback(() => onSelectMainView("openresearch"), [onSelectMainView]);
+  const openSettings = useCallback(() => onSelectMainView("settings"), [onSelectMainView]);
 
   const rail = (
     <aside style={mobileRail ? undefined : { width: railWidth }} className="session-rail relative shrink-0 flex flex-col bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:pt-0 [&_.rail-body]:pb-0 [&_.rail-body]:ps-2 [&_.rail-body]:pe-1 border-e border-e-border overflow-visible">
@@ -7244,54 +7834,16 @@ export function ChatPanel({
         onPointerDown={onResizeRail}
       />}
       {railHeader}
-      <nav data-keyboard-list onKeyDown={navigateKeyboardList} className="rail-nav flex flex-col gap-0.5 p-2 shrink-0 [&_[data-tip]::after]:left-[calc(100%_+_6px)] [&_[data-tip]::after]:top-1/2 [&_[data-tip]::after]:translate-x-0 [&_[data-tip]::after]:-translate-y-1/2">
-        <button
-          className="rail-nav-item flex items-center gap-2.5 py-2 px-2.5 text-base text-text rounded-md text-start hover:bg-surface"
-          data-onboarding="new-session"
-          data-keyboard-item
-          data-tip={newTaskShortcut}
-          aria-label={m.chat_panel_new_chat()}
-          aria-keyshortcuts="Meta+N Control+N Meta+Shift+Enter Control+Shift+Enter"
-          onClick={startNewTask}
-        >
-          <Plus size={16} />
-          {m.chat_panel_new_chat()}
-        </button>
-        <button
-          data-keyboard-item
-          className={`rail-nav-item flex items-center gap-2.5 py-2 px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${mainView === "skills" ? "active" : ""}`}
-          aria-current={mainView === "skills" ? "page" : undefined}
-          onClick={() => onSelectMainView("skills")}
-        >
-          <Blocks size={16} />
-          {m.chat_panel_customize()}
-        </button>
-        {SETTINGS_NAV.map((item) => {
-          const active = mainView !== "chat" && mainView !== "skills" && item.activeTabs.includes(mainView);
-          const shortcut = item.id === "settings" ? appHotkeys["settings.open"].hotkey : item.id === "compute" ? appHotkeys["compute.open"].hotkey : null;
-          return (
-            <button
-              key={item.id}
-              data-keyboard-item
-              className={`rail-nav-item flex items-center gap-2.5 py-2 px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${active ? "active" : ""}`}
-              aria-current={active ? "page" : undefined}
-              data-onboarding={item.id === "compute" ? "nav-compute" : undefined}
-              data-tip={shortcut ? formatForDisplay(shortcut) : undefined}
-              aria-label={item.label()}
-              aria-keyshortcuts={item.id === "settings" ? "Meta+, Control+," : item.id === "compute" ? "Meta+Alt+C Control+Alt+C" : undefined}
-              onClick={() => onSelectMainView(item.id)}
-            >
-              {item.icon}
-              {item.label()}
-            </button>
-          );
-        })}
-      </nav>
       <div className="rail-section-head flex items-center justify-between shrink-0 pt-3.5 pe-3.5 pb-0 ps-4.5">
         <div className="rail-section-label p-0 text-sm font-medium text-subtext">
           {sidebarGrouping === "projects" ? m.projects_home_projects() : m.chat_all_sessions()}
         </div>
         <div className="rail-section-actions flex items-center gap-1">
+          {sidebarGrouping === "list" && <Tooltip interactive content={m.chat_panel_new_chat()} className="rounded-sm">
+            <IconButton size="small" className="text-subtext" aria-label={m.chat_panel_new_chat()} onClick={startNewTask}>
+              <Plus size={16} aria-hidden="true" />
+            </IconButton>
+          </Tooltip>}
           {onNewProject && <Tooltip interactive content={m.projects_home_new_project()} className="rounded-sm">
             <IconButton size="small" className="text-subtext" aria-label={m.projects_home_new_project()} onClick={onNewProject}>
               <FolderPlus size={16} className="text-subtext" />
@@ -7360,33 +7912,21 @@ export function ChatPanel({
               >
                 {row.kind === "project" ? (
                   <div className="group h-9 flex items-end gap-1 rounded-md px-2.5 text-text">
-                    <ProjectInfoCard
+                    <SidebarProjectCard
+                      actions={sidebarActions}
                       project={project}
                       chatCount={projectActivity.find((activity) => activity.projectId === project.id)?.totalAgents}
                       collapsed={row.collapsed}
                       busy={row.busy}
-                      onToggleCollapsed={() => {
-                        const next = collapsedProjects.includes(project.id) ? collapsedProjects.filter((id) => id !== project.id) : [...collapsedProjects, project.id];
-                        setCollapsedProjects(next);
-                        try { localStorage.setItem(collapsedProjectsKey, JSON.stringify(next)); } catch {}
-                      }}
                       pinned={pinnedProjects.includes(project.id)}
-                      onPin={() => {
-                        const next = pinnedProjects.includes(project.id) ? pinnedProjects.filter((id) => id !== project.id) : [...pinnedProjects, project.id];
-                        setPinnedProjects(next);
-                        try { localStorage.setItem(pinnedProjectsKey, JSON.stringify(next)); } catch {}
-                      }}
-                      onRemoved={() => { if (project.id === projectId) void navigate({ to: "/projects" }); }}
-                      onNewChat={() => {
-                        if (project.id === projectId) startProjectTask();
-                        else void navigate({ to: "/projects/$projectId/tasks/new", params: { projectId: project.id } });
-                      }}
                     />
                   </div>
                 ) : s ? (
                   <div className={sidebarGrouping === "projects" ? "ms-5.5" : undefined}>
-                    <SessionRow
+                    <SidebarSessionRow
                       key={s.id}
+                      actions={sidebarActions}
+                      project={project}
                       session={s}
                       cardWarmUntil={cardWarmUntil}
                       projectName={sidebarGrouping === "list" ? project.name : undefined}
@@ -7398,31 +7938,6 @@ export function ChatPanel({
                       waiting={sessionWaiting(s)}
                       experimentRunning={activeRuns.some((item) => item.sessionId === s.id)}
                       revealTitle={titleReveals.get(s.id)}
-                      onOpenExperiment={(targetProjectId, experimentId) => {
-                        void navigate({ href: taskLocation(targetProjectId, targetProjectId === s.projectId ? s.id : null, { kind: "experiment", experimentId, view: "overview" }) });
-                      }}
-                      onOpen={() => {
-                        onActiveSessionChange(s.id, { projectId: project.id });
-                        if (project.id === DEMO_PROJECT_ID) {
-                          markDemoSessionRead(s.id);
-                          const experiment = DEMO_EXPERIMENT_LABELS[s.id];
-                          if (experiment) {
-                            captureUiEvent({
-                              name: "demo_experiment_started",
-                              kind: "curated",
-                              experiment,
-                            });
-                            captureUiEvent({
-                              name: "first_action",
-                              surface: "demo",
-                              action: "open_experiment",
-                            });
-                          }
-                        }
-                      }}
-                      onRename={(title) => rename(s, title)}
-                      onSetArchived={(archived) => setArchived(s, archived)}
-                      onDelete={() => void removeSession(s)}
                     />
                   </div>
                 ) : row.kind === "more" ? (
@@ -7464,7 +7979,7 @@ export function ChatPanel({
         </div>
       </div>
       </div>
-      <StatusStrip runtime={runtime} onDetails={() => onSelectMainView("openresearch")} />
+      <StatusStrip runtime={runtime} onDetails={openRuntimeDetails} settingsOpen={mainView !== "chat" && mainView !== "project"} onSettings={openSettings} />
     </aside>
   );
 
@@ -7487,7 +8002,8 @@ export function ChatPanel({
       <>
         {displayedRail}
         <section inert={contentInert} className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0">
-          {(!railOpen || mobileRail) && <div className="mac-titlebar-spacer flex h-12 mac-titlebar:h-titlebar shrink-0 items-center">{railReopen}</div>}
+          {mainView === "project" && (!railOpen || mobileRail) && <div className="mac-titlebar-spacer flex h-12 mac-titlebar:h-titlebar shrink-0 items-center">{railReopen}</div>}
+          {mainView !== "project" && <SettingsHeader active={mainView} onSelect={onSelectMainView} leading={railReopen} />}
           {/* Keyed per view so no tab inherits the chat thread's or another tab's scroll offset. */}
           <div key={mainView} className="settings-view-scroll flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges]">
             {contentError ? <div role="alert" className="p-6 text-subtext">{contentError}<Button onClick={onRetryContent}>{m.app_retry()}</Button></div>
@@ -8260,8 +8776,8 @@ export function ChatPanel({
                   value={composerSelection}
                   onSelect={selectModel}
                   onStartHarness={startHarness}
-                  onOpenSettings={() => onSelectMainView("harnesses")}
-                  permissionChoices={activeHarness?.agentReady ? (opts?.permissionModes ?? []) : []}
+                  onOpenSettings={() => onSelectMainView("agents")}
+                  permissionChoices={activeHarness?.agentReady ? withAutoReviewer(opts?.permissionModes ?? [], activeHarness, uiState?.opencodeReviewModel, composerSelection?.model) : []}
                   defaultPermissionId={opts?.defaultPermissionMode ?? null}
                   onSelectPermission={setPermissionMode}
                   reasoningChoices={activeHarness?.agentReady ? reasoning.choices : []}

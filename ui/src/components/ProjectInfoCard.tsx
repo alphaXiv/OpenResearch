@@ -1,26 +1,26 @@
-import { useContext, useId, useRef, useState, type RefObject } from "react";
+import { useContext, useRef, useState, type RefObject } from "react";
 import { WorkspaceDomContext } from "../WorkspaceDom";
 import { useQuery } from "@tanstack/react-query";
-import { useWorkspace } from "../workspace";
-import { mutDeleteProject, mutUpdateProject } from "../queries/projects";
+import { useWorkspace, type Workspace } from "../workspace";
+import { mutDeleteProject } from "../queries/projects";
 import { type DialogContentProps } from "../dialog";
 import { useFileManagerLabel } from "./useFileManagerLabel";
 
 import { Menu } from "@base-ui/react/menu";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
-import { Folder, FolderOpen, MessageCircle, MoreHorizontal, Pin, Plus, Settings, Share2, Trash2, X } from "lucide-react";
+import { Folder, FolderOpen, MessageCircle, MoreHorizontal, Pin, Plus, Settings, Share2, Trash2 } from "lucide-react";
 import { type Project } from "../api";
 import { downloadFile } from "../download";
 import { m } from "../paraglide/messages.js";
 import { ShareProjectDialog, showShareExclusions } from "./ShareProjectDialog";
-import { Button, DialogContent, DialogTitle, Spinner, IconButton, Input, MenuItem, Tooltip, showAlert } from "./ui";
+import { Button, DialogContent, DialogTitle, Spinner, IconButton, MenuItem, Tooltip, showAlert } from "./ui";
 
 function deleteExplanation(project: Project) {
   const synced = project.githubEnabled && (project.githubUrl || (project.githubOwner && project.githubRepo));
   return `${m.projects_delete_from_app({ name: project.name })}\n\n${m.delete_pending_stop_warning()}\n\n${synced ? m.projects_home_local_and_github_kept() : m.projects_home_local_folder_kept()}`;
 }
 
-export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleCollapsed, onRemoved, onNewChat, pinned, onPin }: {
+export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleCollapsed, onRemoved, onNewChat, onOpenSettings, pinned, onPin }: {
   project: Project;
   chatCount: number | undefined;
   collapsed: boolean;
@@ -28,6 +28,7 @@ export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleC
   onToggleCollapsed: () => void;
   onRemoved: () => void;
   onNewChat: () => void;
+  onOpenSettings: () => void;
   pinned: boolean;
   onPin: () => void;
 }) {
@@ -45,16 +46,7 @@ export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleC
 
   function remove() {
     setMenuOpen(false);
-    showCustomDialog({
-      component: DeleteProjectDialog,
-      props: { project, returnFocus: triggerRef },
-      onCancel: "close",
-      onConfirm: async (deleteArtifacts) => {
-        const artifactsError = await mutDeleteProject.runAsHeadlessPromise(workspace, project.id, deleteArtifacts, {});
-        onRemoved();
-        if (artifactsError) showAlert(artifactsError, "error");
-      },
-    });
+    confirmDeleteProject(workspace, project, triggerRef, onRemoved);
   }
 
   return <>
@@ -63,9 +55,14 @@ export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleC
       {collapsed ? <Folder size={16} className="shrink-0" /> : <FolderOpen size={16} className="shrink-0" />}<span className="truncate">{project.name}</span>
       {busy && <span aria-hidden className="size-[7px] shrink-0 rounded-full bg-accent-teal animate-[or-pulse_1.2s_infinite]" />}
     </button>
+    <Tooltip interactive content={m.chat_panel_new_chat()} className="rounded-sm">
+      <IconButton size="small" className="text-text opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
+        aria-label={`${m.chat_panel_new_chat()} · ${project.name}`}
+        onClick={onNewChat}><Plus size={16} /></IconButton>
+    </Tooltip>
     <DirectionProvider direction={typeof document !== "undefined" && document.documentElement.dir === "rtl" ? "rtl" : "ltr"}>
       <Menu.Root open={menuOpen} onOpenChange={setMenuOpen} modal={false}>
-        <Menu.Trigger ref={triggerRef} render={<IconButton size="small" className={`text-text group-hover:opacity-100 group-focus-within:opacity-100 ${menuOpen ? "bg-surface opacity-100" : "opacity-0"}`} />}
+        <Menu.Trigger ref={triggerRef} render={<IconButton size="small" className={`group-hover:text-text group-focus-within:text-text ${menuOpen ? "bg-surface text-text" : "text-muted"}`} />}
           aria-label={m.sidebar_project_details({ name: project.name })}><MoreHorizontal size={16} /></Menu.Trigger>
         <Menu.Portal container={portalContainer}>
           <Menu.Positioner sticky positionMethod="fixed" side="inline-end" align="start" sideOffset={12} collisionPadding={8} className="z-100">
@@ -77,15 +74,7 @@ export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleC
                 <div className="mt-2 break-all text-xs text-subtext">{project.repoPath}</div>
               </div>
               <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={onPin}><span className="flex items-center gap-2"><Pin size={16} />{pinned ? m.sidebar_unpin_project() : m.sidebar_pin_project()}</span></Menu.Item>
-              <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={() => {
-                setMenuOpen(false);
-                showCustomDialog({
-                  component: EditProjectDialog,
-                  props: { project, onDelete: remove, returnFocus: triggerRef },
-                  onCancel: "close",
-                  onConfirm: async (name) => { await mutUpdateProject.runAsHeadlessPromise(workspace, project.id, { name }, {}); },
-                });
-              }}><span className="flex items-center gap-2"><Settings size={16} />{m.activity_edit()}</span></Menu.Item>
+              <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={onOpenSettings}><span className="flex items-center gap-2"><Settings size={16} />{m.sidebar_project_settings()}</span></Menu.Item>
               <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={() => {
                 setMenuOpen(false);
                 showCustomDialog({
@@ -109,12 +98,21 @@ export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleC
         </Menu.Portal>
       </Menu.Root>
     </DirectionProvider>
-    <Tooltip interactive content={m.chat_panel_new_chat()} className="rounded-sm">
-      <IconButton size="small" className="text-text opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
-        aria-label={`${m.chat_panel_new_chat()} · ${project.name}`}
-        onClick={onNewChat}><Plus size={16} /></IconButton>
-    </Tooltip>
   </>;
+}
+
+/** Asks before deleting `project`, offering to delete its artifacts too, then deletes it. */
+export function confirmDeleteProject(workspace: Workspace, project: Project, returnFocus: RefObject<HTMLButtonElement | null>, onRemoved: () => void) {
+  workspace.dialogs.showCustomDialog({
+    component: DeleteProjectDialog,
+    props: { project, returnFocus },
+    onCancel: "close",
+    onConfirm: async (deleteArtifacts) => {
+      const artifactsError = await mutDeleteProject.runAsHeadlessPromise(workspace, project.id, deleteArtifacts, {});
+      onRemoved();
+      if (artifactsError) showAlert(artifactsError, "error");
+    },
+  });
 }
 
 function DeleteProjectDialog({ project, returnFocus, cancel, confirm, isDisabled: pending, isPending, errorMessage: error }: DialogContentProps<boolean> & { project: Project; returnFocus: RefObject<HTMLButtonElement | null> }) {
@@ -129,22 +127,5 @@ function DeleteProjectDialog({ project, returnFocus, cancel, confirm, isDisabled
     <label className="mt-4 flex items-start gap-2 text-sm"><input type="checkbox" checked={deleteArtifacts} disabled={pending} onChange={(event) => setDeleteArtifacts(event.target.checked)} className="mt-1" />{m.projects_delete_artifacts_remove()}</label>
     {error && <p role="alert" className="mt-3 text-sm text-accent-red">{error}</p>}
     <div className="mt-6 flex justify-end gap-2"><Button type="button" variant="ghost" ref={cancelRef} disabled={pending} onClick={cancel}>{m.projects_home_cancel()}</Button><Button type="button" variant="danger" disabled={pending} onClick={() => confirm(deleteArtifacts)}>{isPending && <Spinner />}{m.projects_home_delete_project_action()}</Button></div>
-  </DialogContent>;
-}
-
-function EditProjectDialog({ project, returnFocus, cancel, confirm, isDisabled: pending, isPending, errorMessage: error, onDelete }: DialogContentProps<string> & { project: Project; onDelete: () => void; returnFocus: RefObject<HTMLButtonElement | null> }) {
-  const nameId = useId();
-  const nameRef = useRef<HTMLInputElement>(null);
-  const [name, setName] = useState(project.name);
-
-  return <DialogContent finalFocus={returnFocus} initialFocus={nameRef} className="max-h-[calc(100vh-2.5rem)] overflow-y-auto text-text"
-    render={<form onSubmit={(event) => { event.preventDefault(); if (name.trim() && !pending) confirm(name.trim()); }} />}>
-    <div className="mb-5 flex items-center justify-between"><DialogTitle>{m.sidebar_edit_project()}</DialogTitle><IconButton type="button" aria-label={m.tour_close()} onClick={cancel} disabled={pending}><X size={16} /></IconButton></div>
-    <label htmlFor={nameId} className="sr-only">{m.new_project_form_project_name()}</label>
-    <div className="relative"><FolderOpen size={16} className="pointer-events-none absolute start-3 top-3 text-subtext" /><Input id={nameId} ref={nameRef} value={name} onChange={(event) => setName(event.target.value)} disabled={pending} required className="h-10 ps-10" /></div>
-    <div className="mt-5 mb-2 text-sm font-medium">{m.sidebar_source_folder()}</div>
-    <div className="flex items-start gap-2 rounded-lg border border-border p-3 text-sm"><FolderOpen size={16} className="mt-0.5 shrink-0 text-subtext" /><span className="min-w-0 break-all">{project.repoPath}</span></div>
-    {error && <p role="alert" className="mt-3 text-sm text-accent-red">{error}</p>}
-    <div className="mt-6 flex items-center gap-2"><Button type="button" variant="danger" disabled={pending} onClick={() => { cancel(); onDelete(); }}>{m.projects_home_delete_project_action()}</Button><div className="flex-1" /><Button type="button" variant="ghost" disabled={pending} onClick={cancel}>{m.projects_home_cancel()}</Button><Button type="submit" variant="primary" disabled={pending || !name.trim()}>{isPending && <Spinner />}{m.common_save()}</Button></div>
   </DialogContent>;
 }

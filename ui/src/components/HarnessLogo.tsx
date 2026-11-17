@@ -1,6 +1,7 @@
 // Brand mark for a harness/provider, rendered inline because the UI is
 // rust-embedded and CSP-locked.
 
+import type { ReactNode } from "react";
 import type { HarnessId, HarnessModel } from "../api";
 import { Box, Plug } from "lucide-react";
 import ai2 from "../assets/harnesses/ai2.svg";
@@ -97,99 +98,134 @@ import zcode from "../assets/harnesses/zcode.png";
 
 /** Vendor marks, and emoji standing in for models no lab owns; monochrome ones take the text colour, so they hold up in either theme. */
 const BRANDS = {
-  ai2: { image: ai2, colour: true },
-  ai21: { image: ai21, colour: false },
-  aionlabs: { image: aionlabs, colour: true },
-  alephalpha: { image: alephalpha, colour: false },
-  amazon: { image: amazon, colour: true },
-  anthropic: { image: anthropic, colour: false },
-  arcee: { image: arcee, colour: true },
-  baichuan: { image: baichuan, colour: true },
-  baidu: { image: baidu, colour: true },
-  baseten: { image: baseten, colour: false },
-  bedrock: { image: bedrock, colour: false },
+  ai2: { image: ai2, colour: true, name: "Ai2" },
+  ai21: { image: ai21, colour: false, name: "AI21 Labs" },
+  aionlabs: { image: aionlabs, colour: true, name: "Aion Labs" },
+  alephalpha: { image: alephalpha, colour: false, name: "Aleph Alpha" },
+  amazon: { image: amazon, colour: true, name: "Amazon" },
+  anthropic: { image: anthropic, colour: false, name: "Anthropic" },
+  arcee: { image: arcee, colour: true, name: "Arcee AI" },
+  baichuan: { image: baichuan, colour: true, name: "Baichuan" },
+  baidu: { image: baidu, colour: true, name: "Baidu" },
+  baseten: { image: baseten, colour: false, name: "Baseten" },
+  bedrock: { image: bedrock, colour: false, name: "Amazon Bedrock" },
   bread: { image: emojiBread, colour: true },
-  bytedance: { image: bytedance, colour: true },
+  bytedance: { image: bytedance, colour: true, name: "ByteDance" },
   cat: { image: emojiCat, colour: true },
-  cerebras: { image: cerebras, colour: false },
+  cerebras: { image: cerebras, colour: false, name: "Cerebras" },
   chick: { image: emojiChick, colour: true },
-  cohere: { image: cohere, colour: true },
+  cohere: { image: cohere, colour: true, name: "Cohere" },
   cucumber: { image: emojiCucumber, colour: true },
-  dbrx: { image: dbrx, colour: true },
-  deepcogito: { image: deepcogito, colour: true },
-  deepinfra: { image: deepinfra, colour: false },
-  deepseek: { image: deepseek, colour: true },
-  devin: { image: devin, colour: false },
-  dotsstudio: { image: dotsstudio, colour: false },
-  doubao: { image: doubao, colour: true },
-  essentialai: { image: essentialai, colour: false },
-  fireworks: { image: fireworks, colour: false },
-  fx: { image: fx, colour: false },
-  gemini: { image: gemini, colour: true },
-  "github-copilot": { image: githubCopilot, colour: false },
-  google: { image: google, colour: true },
-  grok: { image: grok, colour: false },
-  groq: { image: groq, colour: false },
+  dbrx: { image: dbrx, colour: true, name: "Databricks" },
+  deepcogito: { image: deepcogito, colour: true, name: "Deep Cogito" },
+  deepinfra: { image: deepinfra, colour: false, name: "DeepInfra" },
+  deepseek: { image: deepseek, colour: true, name: "DeepSeek" },
+  devin: { image: devin, colour: false, name: "Devin" },
+  dotsstudio: { image: dotsstudio, colour: false, name: "Dots Studio" },
+  doubao: { image: doubao, colour: true, name: "Doubao" },
+  essentialai: { image: essentialai, colour: false, name: "Essential AI" },
+  fireworks: { image: fireworks, colour: false, name: "Fireworks AI" },
+  fx: { image: fx, colour: false, name: "fx" },
+  gemini: { image: gemini, colour: true, name: "Gemini" },
+  "github-copilot": { image: githubCopilot, colour: false, name: "GitHub Copilot" },
+  google: { image: google, colour: true, name: "Google" },
+  grok: { image: grok, colour: false, name: "Grok" },
+  groq: { image: groq, colour: false, name: "Groq" },
   heart: { image: emojiHeart, colour: true },
-  huggingface: { image: huggingface, colour: true },
-  hunyuan: { image: hunyuan, colour: true },
-  ibm: { image: ibm, colour: false },
+  huggingface: { image: huggingface, colour: true, name: "Hugging Face" },
+  hunyuan: { image: hunyuan, colour: true, name: "Hunyuan" },
+  ibm: { image: ibm, colour: false, name: "IBM" },
   ice: { image: emojiIce, colour: true },
-  inception: { image: inception, colour: false },
-  inclusionai: { image: inclusionai, colour: true },
-  inference: { image: inference, colour: false },
-  inflection: { image: inflection, colour: false },
-  internlm: { image: internlm, colour: false },
-  kwaipilot: { image: kwaipilot, colour: false },
+  inception: { image: inception, colour: false, name: "Inception" },
+  inclusionai: { image: inclusionai, colour: true, name: "inclusionAI" },
+  inference: { image: inference, colour: false, name: "Inference.net" },
+  inflection: { image: inflection, colour: false, name: "Inflection AI" },
+  internlm: { image: internlm, colour: false, name: "InternLM" },
+  kwaipilot: { image: kwaipilot, colour: false, name: "Kwaipilot" },
   laptop: { image: emojiLaptop, colour: true },
-  ling: { image: ling, colour: true },
-  liquid: { image: liquid, colour: false },
-  longcat: { image: longcat, colour: true },
-  meituan: { image: meituan, colour: true },
-  meta: { image: meta, colour: true },
-  microsoft: { image: microsoft, colour: true },
-  minimax: { image: minimax, colour: true },
-  mistral: { image: mistral, colour: true },
-  moondream: { image: moondream, colour: true },
-  moonshot: { image: moonshot, colour: false },
-  morph: { image: morph, colour: true },
-  nousresearch: { image: nousresearch, colour: false },
-  nova: { image: nova, colour: true },
-  nvidia: { image: nvidia, colour: true },
-  ollama: { image: ollama, colour: false },
-  openrouter: { image: openrouter, colour: false },
+  ling: { image: ling, colour: true, name: "Ling" },
+  liquid: { image: liquid, colour: false, name: "Liquid AI" },
+  longcat: { image: longcat, colour: true, name: "LongCat" },
+  meituan: { image: meituan, colour: true, name: "Meituan" },
+  meta: { image: meta, colour: true, name: "Meta" },
+  microsoft: { image: microsoft, colour: true, name: "Microsoft" },
+  minimax: { image: minimax, colour: true, name: "MiniMax" },
+  mistral: { image: mistral, colour: true, name: "Mistral" },
+  moondream: { image: moondream, colour: true, name: "Moondream" },
+  moonshot: { image: moonshot, colour: false, name: "Moonshot AI" },
+  morph: { image: morph, colour: true, name: "Morph" },
+  nousresearch: { image: nousresearch, colour: false, name: "Nous Research" },
+  nova: { image: nova, colour: true, name: "Amazon Nova" },
+  nvidia: { image: nvidia, colour: true, name: "NVIDIA" },
+  ollama: { image: ollama, colour: false, name: "Ollama" },
+  openrouter: { image: openrouter, colour: false, name: "OpenRouter" },
   oxalpha: { image: oxalpha, colour: false },
-  perceptron: { image: perceptron, colour: false },
-  perplexity: { image: perplexity, colour: true },
-  pi: { image: pi, colour: false },
+  perceptron: { image: perceptron, colour: false, name: "Perceptron" },
+  perplexity: { image: perplexity, colour: true, name: "Perplexity" },
+  pi: { image: pi, colour: false, name: "Pi" },
   planet: { image: emojiPlanet, colour: true },
-  poolside: { image: poolside, colour: true },
-  qwen: { image: qwen, colour: true },
+  poolside: { image: poolside, colour: true, name: "Poolside" },
+  qwen: { image: qwen, colour: true, name: "Qwen" },
   rabbit: { image: emojiRabbit, colour: true },
-  recursive: { image: recursive, colour: false },
-  reflection: { image: reflection, colour: false },
-  reka: { image: reka, colour: false },
-  relace: { image: relace, colour: false },
-  sakana: { image: sakana, colour: true },
-  sensenova: { image: sensenova, colour: true },
-  sensetime: { image: sensetime, colour: true },
-  skywork: { image: skywork, colour: true },
-  stepfun: { image: stepfun, colour: true },
-  tencent: { image: tencent, colour: true },
-  thinkingmachines: { image: thinkingmachines, colour: false },
-  tii: { image: tii, colour: false },
-  together: { image: together, colour: true },
-  upstage: { image: upstage, colour: false },
-  vercel: { image: vercel, colour: false },
-  wenxin: { image: wenxin, colour: true },
-  writer: { image: writer, colour: false },
-  xai: { image: xai, colour: false },
-  xiaomi: { image: xiaomi, colour: true },
-  yi: { image: yi, colour: false },
-  zai: { image: zai, colour: false },
-  zcode: { image: zcode, colour: true },
-};
+  recursive: { image: recursive, colour: false, name: "Recursive" },
+  reflection: { image: reflection, colour: false, name: "Reflection AI" },
+  reka: { image: reka, colour: false, name: "Reka" },
+  relace: { image: relace, colour: false, name: "Relace" },
+  sakana: { image: sakana, colour: true, name: "Sakana AI" },
+  sensenova: { image: sensenova, colour: true, name: "SenseNova" },
+  sensetime: { image: sensetime, colour: true, name: "SenseTime" },
+  skywork: { image: skywork, colour: true, name: "Skywork" },
+  stepfun: { image: stepfun, colour: true, name: "StepFun" },
+  tencent: { image: tencent, colour: true, name: "Tencent" },
+  thinkingmachines: { image: thinkingmachines, colour: false, name: "Thinking Machines" },
+  tii: { image: tii, colour: false, name: "TII" },
+  together: { image: together, colour: true, name: "Together AI" },
+  upstage: { image: upstage, colour: false, name: "Upstage" },
+  vercel: { image: vercel, colour: false, name: "Vercel" },
+  wenxin: { image: wenxin, colour: true, name: "ERNIE" },
+  writer: { image: writer, colour: false, name: "Writer" },
+  xai: { image: xai, colour: false, name: "xAI" },
+  xiaomi: { image: xiaomi, colour: true, name: "Xiaomi" },
+  yi: { image: yi, colour: false, name: "01.AI" },
+  zai: { image: zai, colour: false, name: "Z.ai" },
+  zcode: { image: zcode, colour: true, name: "ZCode" },
+} satisfies Record<string, { image: string; colour: boolean; name?: string }>;
 export type Brand = keyof typeof BRANDS | "kimi" | "oh-my-pi";
+
+/** Every vendor mark with a name, for the logo picker; stealth models' emoji have none. */
+export const NAMED_BRANDS: { brand: Brand; name: string }[] = [
+  ...Object.entries(BRANDS).flatMap(([brand, entry]) => "name" in entry ? [{ brand: brand as Brand, name: entry.name }] : []),
+  { brand: "kimi", name: "Kimi" },
+  { brand: "oh-my-pi", name: "oh-my-pi" },
+];
+
+/** Agents' own marks, pinned by these names; every other logo goes by its brand's. */
+const AGENT_LOGOS: { slug: string; name: string; harness: HarnessId }[] = [
+  { slug: "claude", name: "Claude", harness: "claude-code" },
+  { slug: "openai", name: "OpenAI", harness: "codex" },
+  { slug: "opencode", name: "OpenCode", harness: "opencode" },
+  { slug: "cursor", name: "Cursor", harness: "cursor" },
+  { slug: "antigravity", name: "Antigravity", harness: "antigravity" },
+];
+
+/** Every logo a row can pin, by name. */
+export const LOGOS: { slug: string; name: string }[] = [
+  ...AGENT_LOGOS.map(({ slug, name }) => ({ slug, name })),
+  ...NAMED_BRANDS.map(({ brand, name }) => ({ slug: brand, name })),
+].sort((a, b) => a.name.localeCompare(b.name));
+
+/** A logo's slug or name with case, spaces and punctuation gone, as `thinking-machines` and `Thinking Machines` both read. */
+export const squashName = (text: string) => text.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+/** The mark a pinned logo draws, by its slug or name, or nothing for one no logo has. */
+export function logoMark(pin: string | undefined): ((size: number) => ReactNode) | undefined {
+  if (!pin) return undefined;
+  const slug = (LOGOS.find((logo) => logo.slug === pin) ?? LOGOS.find((logo) => squashName(logo.slug) === squashName(pin) || squashName(logo.name) === squashName(pin)))?.slug;
+  const agent = AGENT_LOGOS.find((entry) => entry.slug === slug);
+  if (agent) return (size) => <HarnessLogo harness={agent.harness} size={size} />;
+  if (slug) return (size) => <BrandMark brand={slug as Brand} size={size} />;
+  return undefined;
+}
 
 const ACP_LOGOS: Record<string, Brand> = { dsh: "deepseek", kimi: "kimi", mcode: "minimax", "zcode-acp-server": "zcode", "pi-acp": "pi", devin: "devin", grok: "grok", omp: "oh-my-pi", fx: "fx" };
 const ACP_PRESET_LOGOS: Record<string, Brand> = {
@@ -348,6 +384,12 @@ export function modelLab(model: Pick<HarnessModel, "id" | "displayName">, harnes
   return MODEL_LABS.find(([pattern]) => pattern.test(name))?.[1] ?? (harness ? agentLab(harness) : undefined);
 }
 
+/** The lab a provider's or brand's name points at, read as a model's name would be. */
+export function labNamed(text: string): Lab | undefined {
+  const name = text.toLowerCase();
+  return MODEL_LABS.find(([pattern]) => pattern.test(name))?.[1];
+}
+
 function modelName(model: Pick<HarnessModel, "id" | "displayName">) {
   return `${model.id.split("/").slice(1).join(" ") || model.id} ${model.displayName ?? ""}`.toLowerCase();
 }
@@ -377,7 +419,12 @@ const MODEL_MARKS: [pattern: RegExp, brand: Brand][] = [
   [/\bll[- ]alpha/, "laptop"],
 ];
 
-export function ModelMark({ model, harness, size }: { model: Pick<HarnessModel, "id" | "displayName">; harness?: HarnessId; size: number }) {
+type MarkedModel = Pick<HarnessModel, "id" | "displayName" | "icon">;
+
+const iconUrl = ({ type, data }: NonNullable<HarnessModel["icon"]>) => `data:${type};base64,${data}`;
+
+export function ModelMark({ model, harness, size }: { model: MarkedModel; harness?: HarnessId; size: number }) {
+  if (model.icon) return <img src={iconUrl(model.icon)} width={size} height={size} className="block shrink-0 object-contain" alt="" aria-hidden="true" />;
   const own = MODEL_MARKS.find(([pattern]) => pattern.test(modelName(model)))?.[1];
   return own ? <BrandMark brand={own} size={size} /> : <FamilyMark lab={modelLab(model, harness)} size={size} />;
 }
@@ -424,7 +471,8 @@ export function BrandMark({ brand, size }: { brand: Brand; size: number }) {
 }
 
 /** A model's maker mark in the current colour, whatever colours its logo has. */
-export function ModelGlyph({ model, size }: { model: Pick<HarnessModel, "id" | "displayName">; size: number }) {
+export function ModelGlyph({ model, size }: { model: MarkedModel; size: number }) {
+  if (model.icon) return <Glyph image={iconUrl(model.icon)} size={size} />;
   const lab = modelLab(model);
   if (lab === "openai") return <HarnessLogo harness="codex" size={size} />;
   const logo = MODEL_LABS.find(([, entry]) => entry === lab)?.[3] ?? lab;

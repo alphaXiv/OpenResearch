@@ -955,8 +955,11 @@ mod tests {
         );
 
         let opencode = options_for("opencode");
-        assert_eq!(permission_ids(&opencode), ["default", "auto-approve"]);
-        assert_eq!(opencode.default_permission_mode, Some("default"));
+        assert_eq!(
+            permission_ids(&opencode),
+            ["manual", "auto", "auto-approve"]
+        );
+        assert_eq!(opencode.default_permission_mode, Some("auto-approve"));
         assert_eq!(opencode.plan_activation, Some(PlanActivation::Command));
         assert!(opencode.reasoning_levels.is_empty());
 
@@ -982,7 +985,7 @@ mod tests {
         assert_eq!(permission_mode_for(&id, "ask"), Some(PermissionMode::Ask));
         assert_eq!(
             permission_mode_for(&id, "auto-approve"),
-            Some(PermissionMode::Auto)
+            Some(PermissionMode::Bypass)
         );
         assert_eq!(permission_mode_for(&id, "full-access"), None);
         assert_eq!(
@@ -1018,6 +1021,20 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// OpenCode's "Auto-approve" shipped as the id `auto-approve`; chats saved on it
+    /// are Full access now and must not fall back to asking.
+    #[test]
+    fn a_chat_saved_on_opencodes_auto_approve_stays_on_full_access() {
+        assert_eq!(
+            effective_permission_id("opencode", Some("auto-approve")).as_deref(),
+            Some("auto-approve")
+        );
+        assert_eq!(
+            permission_mode_for("opencode", "auto-approve"),
+            Some(PermissionMode::Bypass)
+        );
     }
 
     #[test]

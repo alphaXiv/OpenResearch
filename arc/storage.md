@@ -68,7 +68,8 @@ Claude Code, Codex and Cursor use isolated homes; OpenCode uses its own session 
 Claude Code and Codex profiles keep private sign-ins under `agents/profiles`,
 with their names and icons in owner-only `agent-profiles.json`; their transcript
 directories link into the harness's shared orx home. Owner-only `agent-labels.json`
-stores names and icons the user gives agents found on this computer. Removing a profile leaves
+stores names and icons the user gives agents and OpenCode providers found on this
+computer, and the logo pinned on any row. Removing a profile leaves
 those transcripts intact. Chats created before isolation existed keep resolving
 to the user's own stores. Because these homes hold live SQLite files, a
 data-directory move first shuts down every idle agent process.
@@ -133,7 +134,8 @@ Detection repeats on every start, so an interrupted rename or reference repair r
 - **Prices.** Once a day `orx up` downloads models.dev's public model price list (`models.dev/api.json`) into the cache directory, keeping the last good copy when a fetch fails. When a run starts on a backend that bills, the engine reads its price: Hugging Face's public hardware list, the Modal workspace's rates through Modal's SDK with the user's token, or the box's own price from openresearch.sh. The requests carry no research data, and costs never go to telemetry.
 - **Plan usage.** For each Claude Code and Codex sign-in that may be on a subscription, `orx up` asks the user's own agent how much of the plan is left: Claude Code's `get_usage` and Codex's `account/rateLimits/read` reach Anthropic and OpenAI with the user's sign-in, when the dashboard asks (at most once a minute per account unless the user refreshes) and when a running chat's limits move ([agents](agents.md)). The answer stays in `orx up`'s memory.
 - **Model feed.** Every `orx up`, a remote host's included, asks openresearch.sh for the model feed when it starts and every six hours: the models the picker features, its nudge, and the release days of models models.dev lists as new. The request carries no credentials, account, install ID or research data, and the answer is kept in the cache directory as served.
-- **Agent releases.** Once a day `orx up` asks downloads.claude.ai, releases.openai.com and registry.npmjs.org for the newest release of whichever of Claude Code, Codex and OpenCode is installed (skipping one signed out on every account), and downloads one when it installs or updates a copy of its own ([agents](agents.md)); the onboarding installs OpenCode that way unasked while it is missing, for its free models. The requests carry no account or research data. Built-in agents additionally fetch Node.js releases
+- **Hosted free models.** The feed can name OpenAI-compatible endpoints whose models are free to everyone, each with a public key. While free models are on, OpenCode gets each as a provider, and a chat on one of its models sends its turns to that endpoint as it would to any provider. An endpoint at openresearch.sh or alphaxiv.org, or a subdomain of either, also receives the signed-in user's alphaXiv user ID in `X-OpenResearch-User`; no other host does, and no email or token goes with it.
+- **Agent releases.** Once a day `orx up` asks downloads.claude.ai, releases.openai.com and registry.npmjs.org for the newest release of whichever of Claude Code, Codex and OpenCode is installed (skipping one signed out on every account), and downloads one when it installs or updates a copy of its own ([agents](agents.md)); `orx up` installs OpenCode that way unasked while it is missing or on major 1, for its free models. The requests carry no account or research data. Built-in agents additionally fetch Node.js releases
   and SHA-256 lists from nodejs.org, package metadata and integrity-checked npm
   packages from registry.npmjs.org (native package dependencies may fetch release
   assets from github.com, api.github.com and release-assets.githubusercontent.com),
