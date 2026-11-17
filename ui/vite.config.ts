@@ -1,10 +1,12 @@
 import { paraglideVitePlugin } from "@inlang/paraglide-js";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
+import { execFile } from "node:child_process";
 import { cpSync, createReadStream, readFileSync, statSync } from "node:fs";
 import type { ClientRequest, IncomingMessage } from "node:http";
 import { basename, join, normalize, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { createLogger, defineConfig, type Plugin, type ProxyOptions } from "vite";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
 
@@ -74,10 +76,74 @@ function pdfjsAssets(): Plugin {
   };
 }
 
+const run = promisify(execFile);
+
+/** Skips jj's empty, undescribed working-copy commit so the line names the work, not a placeholder. */
+const JJ_REVSET = 'latest(heads(::@ ~ (empty() & description(exact:""))))';
+const JJ_TEMPLATE = 'change_id.shortest(8) ++ "\\0" ++ bookmarks.join(" ") ++ "\\0" ++ description';
+
+type ExecError = Error & { code?: unknown; stderr?: string };
+
+/** jj when the checkout has a jj repo, git only when jj is missing or the checkout is git-only. */
+async function readCommit(cwd: string) {
+  try {
+    const { stdout } = await run("jj", ["log", "--no-graph", "-r", JJ_REVSET, "-T", JJ_TEMPLATE], { cwd });
+    const [id, ref, description] = stdout.split("\0");
+    return { id, ref, description: description.trim() };
+  } catch (error) {
+    const { code, stderr, message } = error as ExecError;
+    const noJj = code === "ENOENT" || stderr?.includes("There is no jj repo");
+    if (!noJj) throw new Error(`jj could not read the commit in ${cwd}: ${stderr?.trim() || message}`);
+  }
+
+  try {
+    const [{ stdout: log }, { stdout: branch }] = await Promise.all([
+      run("git", ["log", "-1", "--format=%h%x00%B"], { cwd }),
+      run("git", ["branch", "--show-current"], { cwd }),
+    ]);
+    const [id, description] = log.split("\0");
+    return { id, ref: branch.trim(), description: description.trim() };
+  } catch (error) {
+    const { stderr, message } = error as ExecError;
+    throw new Error(`git could not read the commit in ${cwd}: ${stderr?.trim() || message}`);
+  }
+}
+
+/** The checkout's current commit at /__dev/commit, so dev windows from different worktrees can be told apart. */
+function devCommit(): Plugin {
+  return {
+    name: "dev-commit",
+    apply: "serve",
+    // A post hook, so Vite's Host check runs first.
+    configureServer: (server) => () => {
+      server.middlewares.use("/__dev/commit", (req, res) => {
+        res.setHeader("content-type", "application/json");
+
+        // Reading snapshots the jj working copy, so other sites may not trigger it.
+        const site = req.headers["sec-fetch-site"];
+        if (site && site !== "same-origin") {
+          res.statusCode = 403;
+          res.end(JSON.stringify({ error: "Only this dev server's pages may read its commit." }));
+          return;
+        }
+
+        readCommit(server.config.root).then(
+          (commit) => res.end(JSON.stringify(commit)),
+          (error: Error) => {
+            res.statusCode = 500;
+            res.end(JSON.stringify({ error: error.message }));
+          },
+        );
+      });
+    },
+  };
+}
+
 export default defineConfig({
   customLogger: logger,
   plugins: [
     pdfjsAssets(),
+    devCommit(),
     tanstackRouter({ target: "react", autoCodeSplitting: false }),
     paraglideVitePlugin({
       project: "./project.inlang",
