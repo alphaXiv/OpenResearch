@@ -46,8 +46,12 @@ areas. Use `orx-logs` when retrieving supporting output.
 
 Before recommending or sizing an experiment with a time budget, read
 `orx exp status <parentExpId>` and `orx runs {id} --experiment <parentExpId>`.
-Use the total duration and every stage's time, including setup and evaluation.
-Check what CSV timing fields measure; a final row may time only its last stage.
+Use the parent's log for stage step counts. When the user names a duration,
+compute `setup + sum(parent stage seconds /
+parent stage steps × new stage steps)`, including evaluation and later stages.
+Resize the command's steps to fit the requested range and state the arithmetic
+with actual numbers in one line before launching. State the hardware assumption;
+if timings are missing, measure a short calibration before sizing.
 
 Before a baseline's first launch, load `orx-experiment-runs` and make the run
 followable without asking you: its stages declared, each stage's progress and
@@ -63,10 +67,10 @@ wait for a run inside a turn (no `sleep` loops over `orx runs` or `orx exp statu
 `orx exp wait`): a waiting turn holds back the user's next message and every
 other result.
 
-After the first data arrives, and whenever asked what a run's card or chart
-shows, read `orx exp view show <runId>` before answering. It describes the
-card's collected data; do not guess from how you configured the view. Change
-it mid-run with `orx exp view set`, then use `view show` to confirm the change.
+After the first data arrives, inspect `orx exp view show <runId>`. For any user
+message about the card, a chart, the line or what they see, run it before
+answering. Use its collected data instead of guessing or suggesting a refresh.
+Change it mid-run with `orx exp view set`, then use `view show` to confirm.
 
 Use `orx` as the source of truth for the experiment tree, runs, and logs. Use
 normal repository tools for code and file inspection. Use this project id

@@ -32,9 +32,12 @@ pub fn follow_up(experiment_id: &str, run_id: &str, in_chat: bool) -> String {
     if in_chat {
         format!(
             "  Its result arrives in this chat as a message when it ends. Check its first minutes once \
-             with `{orx} exp view check {run_id}`, then end your turn. After its first data arrives, \
-             read `{orx} exp view show {run_id}` to inspect what its card shows. Never wait or poll for it \
-             (no sleep loops over `{orx} runs`, no `{orx} exp wait`)."
+             with `{orx} exp view check {run_id}`, then end your turn. Inspect \
+             `{orx} exp view show {run_id}` on your next turn after first data, and before answering \
+             any user message about the card, chart, line or what they see. Never wait or poll for it \
+             (no sleep loops over `{orx} runs`, no `{orx} exp wait`). Before the next launch for a \
+             requested duration, use recorded parent stage times: setup + sum(parent seconds/step × \
+             new steps). State the arithmetic in one line and resize steps to fit."
         )
     } else {
         format!("  Follow it with `{orx} exp wait {experiment_id}` or `{orx} logs {run_id}`.")
@@ -83,6 +86,36 @@ mod tests {
             "'/My Apps/OpenResearch.app/MacOS/orx'"
         );
         assert_eq!(quote_for_shell("/it's/orx"), r"'/it'\''s/orx'");
+    }
+
+    #[test]
+    fn the_chat_hint_requires_inspection_before_answering_about_the_card() {
+        let hint = follow_up("exp_1", "run_1", true);
+        assert!(
+            hint.contains(&format!("`{} exp view show run_1`", orx())),
+            "{hint}"
+        );
+        assert!(hint.contains("before answering"), "{hint}");
+        for subject in ["card", "chart", "line", "what they see"] {
+            assert!(hint.contains(subject), "{hint}");
+        }
+    }
+
+    #[test]
+    fn the_chat_hint_requires_sizing_before_the_next_launch() {
+        let hint = follow_up("exp_1", "run_1", true);
+        for instruction in [
+            "Before the next launch",
+            "requested duration",
+            "parent",
+            "setup",
+            "seconds/step",
+            "steps",
+            "one line",
+            "resize",
+        ] {
+            assert!(hint.contains(instruction), "{hint}");
+        }
     }
 
     #[test]

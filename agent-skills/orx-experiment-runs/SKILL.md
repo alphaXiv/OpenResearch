@@ -15,10 +15,15 @@ Before sizing a child, read its parent's measured runtime:
 orx exp status <parentExpId>
 ```
 
-Read `orx runs <projectId> --experiment <parentExpId>` for its stage times
-and the last run's log for evidence. Add setup, training, evaluation and
-all later stages; the last stage's duration is not the whole run. Scale the
-stages affected by the child's change and state the hardware assumption.
+Read `orx runs <projectId> --experiment <parentExpId>` for recorded stage
+times and its last run's log for step counts. When the user names a duration,
+compute before launch:
+`expected time = setup + sum(parent stage seconds / parent stage steps × new stage steps)`.
+Include evaluation and later stages; resize the command's steps to fit the
+requested range. State the arithmetic with actual numbers in one line before
+launching, plus the hardware assumption. If timings are missing or hardware
+changed, say what is unknown and measure a short calibration before sizing;
+never claim an unmeasured run fits.
 
 ## 1. Read the entry point
 
@@ -184,8 +189,9 @@ After every launch, before replying to the user:
 orx exp view check <runId>
 ```
 
-On your next turn after its first data arrives, and whenever the user asks
-what the card shows:
+On your next turn after its first data arrives, inspect the card. For any
+user message about the card, a chart, the line or what they see, run this
+before answering:
 
 ```sh
 orx exp view show <runId>
@@ -197,12 +203,9 @@ ghosts, stats, and names or patterns not reported yet. It reads the card's
 stored data, not the user's screen. Fix its view with `orx exp view set`
 while the run continues, then run `view show` again to confirm the change.
 
-It folds the run's real log: the stages it read, the measures and tables
-reported, what each pattern matched with its first line, what the view still
-waits for, and where the plan and the run disagree, such as a stage the plan
-counts that the run reports only as rows: rows move no bar, so report each
-finished one as a step too. If the run has printed nothing yet, run it once
-more after its setup should be over, and stop there.
+`view check` folds the real log and names missing reports, unmatched patterns
+and disagreements with the plan. If the log is still empty, check once more
+on your next turn after setup; never wait inside a turn for data.
 
 Repair the view, plan or patterns with `view set`: they apply to the run in
 flight. A report missing from the code means cancelling, fixing and
