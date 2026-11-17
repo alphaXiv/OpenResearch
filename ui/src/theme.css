@@ -62,9 +62,9 @@
   --color-focus-ring: var(--focus-ring);
   --color-border-hover-strong: color-mix(in oklab, var(--border) 55%, var(--text));
   --color-danger-outline: color-mix(in oklab, var(--accent-red) 55%, transparent);
-  /* A run's tone as text: the accent mixed toward the text colour reaches 4.5:1 in both themes. */
+  /* Run tones as text reach 4.5:1 in both themes. */
   --color-ink-teal: color-mix(in srgb, var(--accent-teal) 75%, var(--text));
-  --color-ink-amber: color-mix(in srgb, var(--accent-amber) 65%, var(--text));
+  --color-ink-amber: var(--ink-amber);
   --color-ink-orange: color-mix(in srgb, var(--accent-orange) 80%, var(--text));
   --color-ink-red: color-mix(in srgb, var(--accent-red) 70%, var(--text));
   --color-ink-green: color-mix(in srgb, var(--accent-green) 60%, var(--text));
@@ -178,6 +178,7 @@
   --accent-blue: #3a8dff;
   --lineage: #527aa3;
   --accent-amber: #da9100;
+  --ink-amber: #935800;
   --accent-green: #5eb64c;
   --accent-purple: #9c5cff;
   --accent-indigo: #5b5bd6;
@@ -291,6 +292,7 @@
   --border-strong: #5a5a5a;
 
   --accent-amber: #e67e22;
+  --ink-amber: #f0a64b;
 
   --accent-green-subtle: #1c2b18;
   --accent-amber-subtle: #302a0d;

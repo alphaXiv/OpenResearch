@@ -10,7 +10,10 @@ const run = (id, monitor) => ({
 const row = (title) => [...document.querySelectorAll(".session-row")].find((element) => element.textContent.includes(title));
 const marks = (title) => [...row(title).querySelectorAll('[role="img"]')].map((mark) => mark.getAttribute("aria-label"));
 
-test("a chat's sidebar row shows the flask while a run runs and the warning while a flag waits", async () => {
+test("a chat's sidebar row shows the flask while a run runs and the warning while a flag waits", async (t) => {
+  t.mock.getter(HTMLElement.prototype, "scrollWidth", function () {
+    return this.textContent.includes("Chat c") ? 900 : 50;
+  });
   await renderChat("/projects/p/tasks/a", {
     sessions: [session("a"), session("b"), session("c"), session("d")],
     routes: {
@@ -27,4 +30,12 @@ test("a chat's sidebar row shows the flask while a run runs and the warning whil
   assert.deepEqual(marks("Chat b"), [m.chat_run_needs_attention()]);
   assert.deepEqual(marks("Chat c"), [m.chat_run_flagged()]);
   assert.deepEqual(marks("Chat d"), []);
+  for (const [title, state] of [["Chat b", m.chat_run_needs_attention()], ["Chat c", m.chat_run_flagged()]]) {
+    assert.ok(row(title).getAttribute("aria-label").includes(state));
+    assert.ok(row(title).querySelector(".session-title").classList.contains("text-ink-amber"));
+    assert.ok(row(title).querySelector('[role="img"]').classList.contains("text-ink-amber"));
+  }
+  assert.equal(row("Chat a").querySelector(".session-title").classList.contains("text-ink-amber"), false);
+  assert.equal(row("Chat b").querySelector(".session-title").hasAttribute("data-overflow"), false);
+  assert.equal(row("Chat c").querySelector(".session-title").hasAttribute("data-overflow"), true);
 });
