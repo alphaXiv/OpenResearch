@@ -635,13 +635,17 @@ impl Backend for Local {
             .as_millis() as i64;
         let run_id = run.id.clone();
         let scanned = tokio::task::spawn_blocking(move || -> Result<_> {
+            #[cfg(unix)]
+            let started_at = orx_host::wrapper::started_at(&dir);
+            #[cfg(windows)]
+            let started_at = None;
             Ok(signals::scan(
                 &dir.join("log"),
                 &data.join("run-signals").join(format!("{run_id}.json")),
                 &run_id,
                 terminal,
                 now,
-                orx_host::wrapper::started_at(&dir),
+                started_at,
             )?)
         })
         .await??;

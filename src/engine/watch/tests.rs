@@ -3,6 +3,7 @@ use crate::local::model::LocalExperiment;
 
 /// A `claude` on the test home's PATH that answers each one-shot with the next reply in `dir`,
 /// as Claude Code's JSON result, and keeps what it was asked.
+#[cfg(unix)]
 fn fake_claude(dir: &std::path::Path, replies: &[&str]) {
     std::fs::create_dir_all(dir).unwrap();
     for (index, reply) in replies.iter().enumerate() {
@@ -29,6 +30,7 @@ printf '{{"type":"result","is_error":false,"result":%s,"total_cost_usd":0.002,"u
     orx_test_support::write_executable(bin.join("claude"), script, 0o755).unwrap();
 }
 
+#[cfg(unix)]
 fn calls(dir: &std::path::Path) -> usize {
     std::fs::read_to_string(dir.join("calls")).map_or(0, |n| n.trim().parse().unwrap())
 }
@@ -115,6 +117,7 @@ fn look(store: &Store, chat: &str, kind: &str, runs: &[(&str, &str)]) -> i64 {
 
 const LOG: &str = "config: depth=4 width=512\nWARNING --depth 8 overrides DEPTH; using 4\nstep 100 loss 2.1\nretrying shard 3 (timed out)\nretrying shard 4 (timed out)\n";
 
+#[cfg(unix)]
 #[tokio::test]
 async fn one_look_writes_each_runs_sentence_and_the_summary_through_the_agent_cli() {
     if !crate::config::in_test_child(&[]) {
@@ -373,6 +376,7 @@ async fn an_error_is_flagged_on_a_run_no_model_watches() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_reply_that_breaks_the_contract_is_asked_for_once_more_with_why() {
     if !crate::config::in_test_child(&[]) {
@@ -409,6 +413,7 @@ async fn a_reply_that_breaks_the_contract_is_asked_for_once_more_with_why() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_reply_still_wrong_after_its_retry_keeps_the_last_sentence_and_says_why() {
     if !crate::config::in_test_child(&[]) {
@@ -433,6 +438,7 @@ async fn a_reply_still_wrong_after_its_retry_keeps_the_last_sentence_and_says_wh
     assert_eq!(facts["error"]["code"], "error");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_credential_in_a_log_is_left_out_of_every_look_and_told_of_once() {
     if !crate::config::in_test_child(&[]) {
@@ -505,6 +511,7 @@ async fn a_credential_in_a_log_is_left_out_of_every_look_and_told_of_once() {
     assert_eq!(facts["looks"][1]["withheld"], json!([]), "told of once");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_reply_that_holds_a_credential_is_never_sent_back_in_a_retry() {
     if !crate::config::in_test_child(&[]) {
@@ -742,6 +749,7 @@ fn a_last_look_that_failed_is_taken_once_more_and_then_its_failure_stands() {
     assert!(store.run_watch_terminal_done("b").unwrap());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_look_that_flags_while_a_flag_is_open_is_noted_under_it() {
     if !crate::config::in_test_child(&[]) {
@@ -879,6 +887,7 @@ async fn a_pass_reads_only_the_log_the_fold_has_read() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_codex_catalog_that_cannot_be_read_says_why_and_is_read_again_only_after_a_wait() {
     if !crate::config::in_test_child(&[]) {
@@ -1604,6 +1613,7 @@ fn an_open_flags_signal_stays_bound_when_three_headlines_have_values() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_childs_digest_includes_warning_kinds_printed_by_its_parent() {
     if !crate::config::in_test_child(&[]) {
@@ -1646,6 +1656,7 @@ async fn a_childs_digest_includes_warning_kinds_printed_by_its_parent() {
     assert!(sent["parents"][0]["run"]["warningLogUnavailable"].is_string());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_setup_look_defaults_to_no_sentence_and_can_clear_a_previous_one() {
     if !crate::config::in_test_child(&[]) {
