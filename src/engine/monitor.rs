@@ -493,17 +493,13 @@ fn versus(
     let (Some(snapshot), Some((parent, ended))) = (snapshot, parent) else {
         return serde_json::Map::new();
     };
-    let stage = snapshot
-        .phases
-        .iter()
-        .rposition(|p| p.done.is_some())
-        .filter(|&at| {
-            let name = &snapshot.phases[at].name;
-            parent
+    let stage = snapshot.phases.iter().rposition(|phase| {
+        phase.done.is_some()
+            && parent
                 .phases
                 .iter()
-                .any(|p| p.name == *name && p.done.is_some())
-        });
+                .any(|p| p.name == phase.name && p.done.is_some())
+    });
     let current = stage.is_some_and(|at| at + 1 == snapshot.phases.len());
     let last_step = stage.and_then(|at| snapshot.phases[at].done);
     let finite = |value: Option<&Value>| value.and_then(Value::as_f64).filter(|v| v.is_finite());
@@ -5690,6 +5686,72 @@ mod tests {
         );
         let text = monitor["statusText"].as_str().unwrap();
         assert!(text.contains("\u{2713} install 10s \u{b7} \u{2713} download 30s \u{b7} \u{25cf} train \u{b7} \u{25cb} eval about 30s"), "{text}");
+    }
+
+    #[test]
+    fn a_finalization_stage_is_timed_from_its_parents_recorded_duration() {
+        let f = Fixture::new("orx-monitor-finalization");
+        plan(
+            &f,
+            "exp",
+            json!([
+                {"phase": "train", "of": 2},
+                {"phase": "train-finalize", "of": 2}
+            ]),
+        )
+        .unwrap();
+        let pipeline = [("train", 3, Some(2)), ("train-finalize", 3, Some(2))];
+        let parent = staged(&f, "p1", "exp", "done", &pipeline, 10);
+        monitor_at(&f, &parent, T0 + 6_000);
+        f.child("child", "exp");
+
+        let child = staged(&f, "c1", "child", "running", &pipeline, 2);
+        let (monitor, _) = monitor_at(&f, &child, T0 + 2_500);
+        assert_eq!(monitor["phases"][1]["priorMs"], 2_000);
+        assert!(
+            monitor["estimate"]["midMs"].as_i64().unwrap() > 0,
+            "{}",
+            monitor["estimate"]
+        );
+
+        let child = staged(&f, "c1", "child", "running", &pipeline, 3);
+        let (monitor, _) = monitor_at(&f, &child, T0 + 3_500);
+        assert_eq!(monitor["phases"][1]["priorMs"], 2_000);
+        assert!(
+            monitor["estimate"]["midMs"].as_i64().unwrap() > 0,
+            "{}",
+            monitor["estimate"]
+        );
+    }
+
+    #[test]
+    fn finalization_keeps_step_comparisons_with_an_older_training_only_parent() {
+        let f = Fixture::new("orx-monitor-finalization-comparison");
+        f.view("exp", VIEW);
+        plan(
+            &f,
+            "exp",
+            json!([
+                {"phase": "train", "of": 2},
+                {"phase": "train-finalize", "of": 2}
+            ]),
+        )
+        .unwrap();
+        let parent = staged(&f, "p1", "exp", "done", &[("train", 5, Some(4))], 10);
+        monitor_at(&f, &parent, T0 + 10_000);
+        f.child("child", "exp");
+        let child = staged(
+            &f,
+            "c1",
+            "child",
+            "running",
+            &[("train", 3, Some(2)), ("train-finalize", 3, Some(2))],
+            3,
+        );
+        let (monitor, _) = monitor_at(&f, &child, T0 + 3_500);
+        let comparison = &monitor["versus"]["step"]["loss"];
+        assert_eq!(comparison["step"].as_f64(), Some(2.0), "{comparison}");
+        assert_eq!(comparison["d"].as_f64(), Some(0.0), "{comparison}");
     }
 
     #[test]

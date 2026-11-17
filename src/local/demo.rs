@@ -51,10 +51,11 @@ fn probe_uv() -> String {
 
 fn probe_setup() -> String {
     format!(
-        "{} && ([ -d .venv ] || uv venv) && uv sync --extra cpu \
+        "printf '::orx:: %s\\n' '{}' && {} && ([ -d .venv ] || uv venv) && uv sync --extra cpu \
          && {{ . .venv/bin/activate 2>/dev/null || . .venv/Scripts/activate; }} \
          && printf '::orx:: %s\\n' '{{\"step\":1}}' \
          && python -m nanochat.dataset -n 8",
+        json!({"plan": [{"phase": "install"}, {"phase": "download"}, {"phase": "tokenizer"}, {"phase": "train"}, {"phase": "train-finalize"}]}),
         probe_uv()
     )
 }
@@ -63,7 +64,7 @@ fn probe_setup() -> String {
 const PROBE_TRAIN: &str = "printf '::orx:: %s\\n' '{\"phase\":\"train\"}' && python -m scripts.base_train --depth=6 --head-dim=64 --window-pattern=L --max-seq-len=512 --device-batch-size=32 --total-batch-size=16384 --eval-every=50 --eval-tokens=524288 --core-metric-every=-1 --sample-every=-1 --num-iterations=200 --warmdown-ratio=0";
 const PROBE_TOK_TRAIN: &str = "printf '::orx:: %s\\n' '{\"phase\":\"tokenizer\",\"step\":0,\"of\":1,\"unit\":\"commands\"}' && python -m scripts.tok_train --max-chars=2000000000";
 const BASELINE_SHA: &str = "96098ad3f3708748f693c28194520ae13afb9c69";
-const EXPERIMENT_SHA: &str = "f7e3361e2318e8ffb932160e71cf62b9cbffcf8e";
+const EXPERIMENT_SHA: &str = "6a038eddba15f86f76e7013f060541fc846ebcca";
 // Earlier baseline trees, newest first: before it reported its stages, and before
 // `runs/runcpu.sh` learned Windows. An install seeded at one keeps it, since every session
 // worktree it has was cut from it.

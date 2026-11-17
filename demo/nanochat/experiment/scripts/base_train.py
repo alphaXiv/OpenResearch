@@ -413,6 +413,16 @@ print0(f"Tokens / micro-batch / rank: {args.device_batch_size} x {args.max_seq_l
 print0(f"Tokens / micro-batch: {world_tokens_per_fwdbwd:,}")
 print0(f"Total batch size {total_batch_size:,} => gradient accumulation steps: {grad_accum_steps}")
 
+prompts = [
+    "The capital of France is",
+    "The chemical symbol of gold is",
+    "If yesterday was Friday, then tomorrow will be",
+    "The opposite of hot is",
+    "The planets of the solar system are:",
+    "My favorite color is",
+    "If 5*x + 3 = 13, then x is",
+]
+
 # Go!
 report = orx_run.progress(total=num_iterations, unit="steps", start=step)
 while True:
@@ -438,6 +448,12 @@ while True:
         })
         model.train()
 
+    if last_step:
+        report.flush()
+        completed = 0
+        total = int(args.core_metric_every > 0) + (len(prompts) if args.sample_every > 0 else 0) + 2
+        finalize = orx_run.progress(total=total, unit="tasks", phase="train-finalize")
+
     # once in a while: estimate the CORE metric (all ranks participate)
     # use the original uncompiled model because the inputs keep changing shape
     # disable FP8 for evaluation to use BF16 for more consistent/accurate results
@@ -447,6 +463,10 @@ while True:
         with disable_fp8(orig_model):
             results = evaluate_core(orig_model, tokenizer, device, max_per_task=args.core_metric_max_per_task)
         print0(f"Step {step:05d} | CORE metric: {results['core_metric']:.4f}")
+        if last_step:
+            completed += 1
+            finalize.step(completed)
+            finalize.flush()
         wandb_run.log({
             "step": step,
             "total_training_flops": flops_so_far,
@@ -459,21 +479,16 @@ while True:
     # use the original uncompiled model because the inputs keep changing shape
     if args.sample_every > 0 and master_process and (last_step or (step > 0 and step % args.sample_every == 0)):
         model.eval()
-        prompts = [
-            "The capital of France is",
-            "The chemical symbol of gold is",
-            "If yesterday was Friday, then tomorrow will be",
-            "The opposite of hot is",
-            "The planets of the solar system are:",
-            "My favorite color is",
-            "If 5*x + 3 = 13, then x is",
-        ]
         engine = Engine(orig_model, tokenizer) # use orig_model to avoid recompilation
         for prompt in prompts:
             tokens = tokenizer(prompt, prepend="<|bos|>")
             with disable_fp8(orig_model):
                 sample, _ = engine.generate_batch(tokens, num_samples=1, max_tokens=16, temperature=0)
             print0(tokenizer.decode(sample[0]))
+            if last_step:
+                completed += 1
+                finalize.step(completed)
+                finalize.flush()
         model.train()
 
     # save checkpoint: at the end of the run, or every save_every steps, except at the first step or the resume step
@@ -500,6 +515,11 @@ while True:
             },
             rank=ddp_rank,
         )
+
+        if last_step:
+            completed += 1
+            finalize.step(completed)
+            finalize.flush()
 
     # termination conditions (TODO: possibly also add loss explosions etc.)
     if last_step:
@@ -606,3 +626,7 @@ if val_bpb is not None:
 # cleanup
 wandb_run.finish() # wandb run finish
 compute_cleanup()
+
+completed += 1
+finalize.step(completed)
+finalize.flush()

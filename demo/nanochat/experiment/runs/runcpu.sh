@@ -33,8 +33,10 @@ report "{\"plan\":[\
 {\"phase\":\"download\",\"of\":$((SHARDS + 1)),\"unit\":\"shards\"},\
 {\"phase\":\"tokenizer\",\"of\":2,\"unit\":\"commands\"},\
 {\"phase\":\"train\",\"of\":$BASE_STEPS,\"unit\":\"steps\"},\
+{\"phase\":\"train-finalize\"},\
 {\"phase\":\"eval\",\"of\":1,\"unit\":\"commands\"},\
 {\"phase\":\"sft\",\"of\":$((SFT_STEPS - 1)),\"unit\":\"steps\"},\
+{\"phase\":\"sft-finalize\"},\
 {\"phase\":\"chat\",\"of\":1,\"unit\":\"prompts\"}]}"
 report '{"phase":"install","step":0,"of":1,"unit":"environments"}'
 # uv ships no shell installer for Windows, and either installer drops the binary
@@ -80,7 +82,6 @@ python -m scripts.tok_eval
 report '{"step":2}'
 
 # train a small 6 layer model
-# The recorded run took 131.55 minutes for base training and 39.07 for SFT.
 # To get better results, try increasing num_iterations, or get other ideas from your favorite LLM.
 report '{"phase":"train"}'
 python -m scripts.base_train \

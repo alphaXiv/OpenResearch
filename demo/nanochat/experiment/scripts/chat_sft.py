@@ -335,6 +335,7 @@ total_training_time = 0 # total wall-clock time of training
 step = 0
 # The prefetched first batch counts toward num_iterations, so the loop takes one step fewer.
 report = orx_run.progress(total=args.num_iterations - 1 if args.num_iterations > 0 else None, unit="steps")
+all_tasks = ['ARC-Easy', 'ARC-Challenge', 'MMLU', 'GSM8K', 'HumanEval']
 while True:
     flops_so_far = num_flops_per_token * args.total_batch_size * step
 
@@ -362,13 +363,17 @@ while True:
         })
         model.train()
 
+    if last_step:
+        report.flush()
+        completed = 0
+        finalize = orx_run.progress(total=2 + (len(all_tasks) if args.chatcore_every > 0 else 0), unit="tasks", phase="sft-finalize")
+
     # once in a while: estimate the ChatCORE metric (all ranks participate)
     # use the original uncompiled model because the inputs keep changing shape
     chatcore_results = {}
     if args.chatcore_every > 0 and (last_step or (step > 0 and step % args.chatcore_every == 0)):
         model.eval()
         engine = Engine(orig_model, tokenizer)
-        all_tasks = ['ARC-Easy', 'ARC-Challenge', 'MMLU', 'GSM8K', 'HumanEval']
         categorical_tasks = {'ARC-Easy', 'ARC-Challenge', 'MMLU'}
         baseline_accuracies = {
             'ARC-Easy': 0.25, 'ARC-Challenge': 0.25, 'MMLU': 0.25,
@@ -382,6 +387,10 @@ while True:
                                 batch_size=args.device_batch_size, max_problems=max_problems)
             task_results[task_name] = acc
             print0(f"  {task_name}: {100*acc:.2f}%")
+            if last_step:
+                completed += 1
+                finalize.step(completed)
+                finalize.flush()
         # Compute ChatCORE metrics (mean centered accuracy, ranges from 0=random to 1=perfect)
         def centered_mean(tasks):
             return sum((task_results[t] - baseline_accuracies[t]) / (1.0 - baseline_accuracies[t]) for t in tasks) / len(tasks)
@@ -422,6 +431,10 @@ while True:
             },
             rank=ddp_rank,
         )
+
+        completed += 1
+        finalize.step(completed)
+        finalize.flush()
 
     if last_step:
         break
@@ -507,3 +520,7 @@ print0(f"Minimum validation bpb: {min_val_bpb:.4f}")
 # cleanup
 wandb_run.finish() # wandb run finish
 compute_cleanup()
+
+completed += 1
+finalize.step(completed)
+finalize.flush()
