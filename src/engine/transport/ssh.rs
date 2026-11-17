@@ -488,7 +488,23 @@ pub(crate) fn local_binary(root: &Path) -> Result<PathBuf> {
     std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o700))?;
     let path = cache.join(format!("orx-host-{}", binary.sha));
     if !path.try_exists()? {
-        orx_host::publish_bytes(&path, &binary.bytes)?;
+        // Executable before it is visible: a concurrent extraction may rename its copy over
+        // this one between another caller's check and its exec.
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let temporary = path.with_extension(format!("tmp-{}", orx_host::nonce()?));
+        let published = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o700)
+            .open(&temporary)
+            .and_then(|mut file| {
+                file.write_all(&binary.bytes)?;
+                file.sync_all()
+            })
+            .and_then(|()| std::fs::rename(&temporary, &path));
+        let _ = std::fs::remove_file(&temporary);
+        published?;
     }
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
     Ok(path)

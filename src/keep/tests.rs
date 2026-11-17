@@ -121,3 +121,20 @@ async fn dropping_a_kept_child_ends_it() {
         .await
         .expect("the child ends with its last handle");
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn output_ends_with_the_exit_and_flush_waits_for_the_keeper() {
+    let mut kept = kept_cat(Value::Null).await;
+    let mut stdin = kept.take_stdin().unwrap();
+    let mut lines = kept.take_stdout().unwrap().lines();
+    stdin.write_all(b"last\n").await.unwrap();
+    stdin.flush().await.unwrap();
+    kept.handle().close_stdin();
+    assert_eq!(next(&mut lines).await, ("last".into(), 5));
+    let end = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+        .await
+        .expect("output ends once the child exits");
+    assert!(end.unwrap().is_none());
+    assert_eq!(kept.handle().wait().await.code, Some(0));
+}

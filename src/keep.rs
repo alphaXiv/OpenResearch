@@ -3,6 +3,7 @@
 //! generation; its output is offset-addressed, and an owner acknowledges an offset only once
 //! everything before it is durable, so a successor that attaches resumes exactly there.
 
+use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -16,7 +17,7 @@ pub use orx_keep::wire::{Exit, Retain, Signal};
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::error::{anyhow, Result};
 
@@ -38,6 +39,9 @@ pub fn hand_off() {
 pub fn handing_off() -> bool {
     HANDING_OFF.load(Ordering::SeqCst)
 }
+
+/// A frame for the keeper, and who waits to hear it was written.
+type Frame = (u8, Vec<u8>, Option<oneshot::Sender<()>>);
 
 pub fn root() -> PathBuf {
     crate::store::data_dir().join("keep")
@@ -386,7 +390,7 @@ pub async fn attach(id: &str) -> Result<Kept> {
         other => return Err(anyhow!("Keeper {id} answered frame {other:#x}")),
     };
 
-    let (frames, outgoing) = mpsc::unbounded_channel();
+    let (frames, outgoing) = mpsc::unbounded_channel::<Frame>();
     let (chunks_tx, chunks) = mpsc::channel(64);
     let (exit_tx, exit) = watch::channel(None);
     let stopping = Arc::new(AtomicBool::new(false));
@@ -411,7 +415,10 @@ pub async fn attach(id: &str) -> Result<Kept> {
     });
     Ok(Kept {
         handle: KeptHandle(inner),
-        stdin: Some(KeptStdin { frames }),
+        stdin: Some(KeptStdin {
+            frames,
+            written: None,
+        }),
         stdout: Some(KeptStdout {
             chunks,
             current: Vec::new(),
@@ -447,7 +454,7 @@ async fn read_frame(stream: &mut (impl AsyncRead + Unpin)) -> Result<(u8, Vec<u8
 /// without an exit took its child with it.
 async fn link(
     stream: TcpStream,
-    mut outgoing: mpsc::UnboundedReceiver<(u8, Vec<u8>)>,
+    mut outgoing: mpsc::UnboundedReceiver<Frame>,
     chunks: mpsc::Sender<(u64, Vec<u8>)>,
     exit: watch::Sender<Option<Exit>>,
     stopping: Arc<AtomicBool>,
@@ -455,24 +462,30 @@ async fn link(
 ) {
     let (mut reader, mut writer) = stream.into_split();
     let writing = tokio::spawn(async move {
-        while let Some((kind, body)) = outgoing.recv().await {
+        while let Some((kind, body, written)) = outgoing.recv().await {
             if write_frame(&mut writer, kind, &body).await.is_err() {
                 break;
             }
+            if let Some(written) = written {
+                let _ = written.send(());
+            }
         }
     });
+    let mut chunks = Some(chunks);
     while let Ok((frame, body)) = read_frame(&mut reader).await {
         match frame {
             kind::OUTPUT => {
                 let Ok((offset, bytes)) = wire::split_offset(&body) else {
                     break;
                 };
-                if chunks.send((offset, bytes.to_vec())).await.is_err() {
-                    // Nobody reads stdout any more; keep watching for the exit.
-                    continue;
+                if let Some(sender) = &chunks {
+                    // A reader that went away still lets the link watch for the exit.
+                    let _ = sender.send((offset, bytes.to_vec())).await;
                 }
             }
             kind::EXIT => {
+                // The exit follows the last output, so stdout ends here.
+                chunks = None;
                 if let Ok(recorded) = wire::parse::<Exit>(&body) {
                     exit.send_replace(Some(recorded));
                 }
@@ -507,7 +520,7 @@ struct Inner {
     dir: PathBuf,
     child_pid: u32,
     start: u64,
-    frames: mpsc::UnboundedSender<(u8, Vec<u8>)>,
+    frames: mpsc::UnboundedSender<Frame>,
     exit: watch::Receiver<Option<Exit>>,
     detached: AtomicBool,
     acked: AtomicU64,
@@ -516,7 +529,7 @@ struct Inner {
 
 impl Inner {
     fn control(&self, control: &Control) {
-        let _ = self.frames.send((kind::CONTROL, wire::json(control)));
+        let _ = self.frames.send((kind::CONTROL, wire::json(control), None));
     }
 
     fn request_stop(&self) {
@@ -579,7 +592,7 @@ impl KeptHandle {
             let _ = self
                 .0
                 .frames
-                .send((kind::ACK, offset.to_le_bytes().to_vec()));
+                .send((kind::ACK, offset.to_le_bytes().to_vec(), None));
         }
     }
 
@@ -641,34 +654,54 @@ fn lost() -> Exit {
     }
 }
 
-/// The child's stdin; every write reaches it whole, as one frame.
+/// The child's stdin; every write reaches it whole, as one frame. `flush` returns once the
+/// keeper has been sent everything written, so an owner that records having answered the
+/// child flushes first.
 pub struct KeptStdin {
-    frames: mpsc::UnboundedSender<(u8, Vec<u8>)>,
+    frames: mpsc::UnboundedSender<Frame>,
+    written: Option<oneshot::Receiver<()>>,
+}
+
+fn keeper_gone() -> io::Error {
+    io::Error::new(io::ErrorKind::BrokenPipe, "the keeper is gone")
 }
 
 impl AsyncWrite for KeptStdin {
     fn poll_write(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         _: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        match self.frames.send((kind::INPUT, buf.to_vec())) {
-            Ok(()) => Poll::Ready(Ok(buf.len())),
-            Err(_) => Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "the keeper is gone",
-            ))),
+        // Frames go out in order, so hearing about the last one covers every earlier write.
+        let (written, receiver) = oneshot::channel();
+        if self
+            .frames
+            .send((kind::INPUT, buf.to_vec(), Some(written)))
+            .is_err()
+        {
+            return Poll::Ready(Err(keeper_gone()));
         }
+        self.written = Some(receiver);
+        Poll::Ready(Ok(buf.len()))
     }
 
-    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let Some(written) = self.written.as_mut() else {
+            return Poll::Ready(Ok(()));
+        };
+        let result = match Pin::new(written).poll(cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Ok(())) => Ok(()),
+            Poll::Ready(Err(_)) => Err(keeper_gone()),
+        };
+        self.written = None;
+        Poll::Ready(result)
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
         let _ = self
             .frames
-            .send((kind::CONTROL, wire::json(&Control::CloseStdin)));
+            .send((kind::CONTROL, wire::json(&Control::CloseStdin), None));
         Poll::Ready(Ok(()))
     }
 }

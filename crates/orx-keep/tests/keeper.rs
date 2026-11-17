@@ -118,13 +118,19 @@ impl Link {
     fn read_until(&mut self, done: impl Fn(&[u8]) -> bool) -> (Vec<u8>, Option<Exit>) {
         let mut output = Vec::new();
         loop {
-            let (frame, body) = wire::read_frame(&mut self.stream).unwrap();
+            let (frame, body) = wire::read_frame(&mut self.stream).unwrap_or_else(|error| {
+                panic!("{error}; output so far: {:?}", String::from_utf8_lossy(&output))
+            });
             match frame {
                 kind::OUTPUT => {
                     let (offset, bytes) = wire::split_offset(&body).unwrap();
                     assert_eq!(offset, self.position, "output must be contiguous");
                     self.position += bytes.len() as u64;
                     output.extend_from_slice(bytes);
+                    // Answer where the cursor is, as a terminal does; ConPTY waits for it.
+                    if contains(bytes, "\x1b[6n") {
+                        self.input(b"\x1b[1;1R");
+                    }
                     if done(&output) {
                         return (output, None);
                     }
@@ -340,7 +346,8 @@ fn a_terminal_runs_a_shell() {
     let endpoint = start(&dir, &spec);
     let mut link = Link::attach(&endpoint, 0);
     link.input(b"echo marker-%PROCESSOR_ARCHITECTURE%\r\n");
-    link.read_until(|output| contains(output, "marker-") && !contains(output, "marker-%"));
+    // The expanded line, not the echoed command.
+    link.read_until(|output| contains(output, "\nmarker-") && !contains(output, "\nmarker-%"));
     link.input(b"exit 3\r\n");
     let (_, exit) = link.read_exit();
     assert_eq!(exit.code, Some(3));
