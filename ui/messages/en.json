@@ -475,6 +475,7 @@
   "settings_page_ready_to_move": "Ready to move",
   "settings_page_ready_to_use": "Configured",
   "settings_page_refresh": "Refresh",
+  "harness_refresh_complete": "Agent check finished.",
   "settings_page_remotes": "Remotes",
   "settings_page_repository": "Repository",
   "settings_page_restart_to_finish_updating": "Restart to finish updating",

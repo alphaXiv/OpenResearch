@@ -475,6 +475,7 @@
   "settings_page_ready_to_move": "Gotowe do przeniesienia",
   "settings_page_ready_to_use": "Skonfigurowano",
   "settings_page_refresh": "Odśwież",
+  "harness_refresh_complete": "Sprawdzanie agentów zakończone.",
   "settings_page_remotes": "Repozytoria zdalne",
   "settings_page_repository": "Repozytorium",
   "settings_page_restart_to_finish_updating": "Uruchom ponownie, aby zakończyć aktualizację",

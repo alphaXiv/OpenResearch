@@ -26,6 +26,7 @@ import { AcpAuthDialog } from "./AcpAuthDialog";
 import { accountErrorMessage, OpenResearchAccount } from "./OpenResearchAccount";
 import { OpenResearchSshKey } from "./OpenResearchSshKey";
 import { HarnessSetupDialog } from "./HarnessSetupDialog";
+import { RefreshAgents, useAgentRefresh } from "./RefreshAgents";
 import { AcpHarnessDialog } from "./AcpHarnessDialog";
 import { AddAgentDialog, canConfigureHarness, ChoiceGrid, keyKind, OpenCodeSignInDialog, opencodeVersion, providerRank, providerTile, RECOMMENDED_TILES, sortHarnesses, TileMark, type AddedAgent } from "./AddAgentDialog";
 import { AgentIconButton, AgentIconTile, type Logo } from "./AgentIcon";
@@ -438,7 +439,8 @@ export function AgentList({ remote, onboarding }: {
   const { workspaceKey, queryClient, api } = workspace;
 
   const harnessesOptions = getHarnessesQuery();
-  const { data: harnesses = null, isError: harnessesError, isFetching: harnessesFetching } = useQuery(harnessesOptions);
+  const { data: harnesses = null, error: harnessesError, isFetching: harnessesFetching } = useQuery(harnessesOptions);
+  const refresh = useAgentRefresh();
   const providersOptions = getOpenCodeProvidersQuery();
   const providers = useQuery(providersOptions);
   const endpointsOptions = getLocalModelsQuery();
@@ -446,7 +448,6 @@ export function AgentList({ remote, onboarding }: {
   const [active, setActive] = useState<string | null>(null);
   /** The row an open Add agent dialog set up, which lists once the dialog finishes. */
   const [adding, setAdding] = useState<string | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
   const setupRun = useCommandRun();
   const setupCommands = useQuery(getHarnessSetupCommandsQuery());
   const definitions = useQuery(listAcpHarnessesQuery());
@@ -457,11 +458,8 @@ export function AgentList({ remote, onboarding }: {
     catch (error) { showAlert(error instanceof Error ? error.message : String(error), "error"); }
   };
 
-  const load = (refresh: boolean, retryRejected = false) => {
-    setRefreshing(true);
-    refreshHarnesses(refresh, retryRejected)
-      .catch(() => {})
-      .finally(() => setRefreshing(false));
+  const load = (retryRejected = false) => {
+    void refreshHarnesses(true, retryRejected).catch(() => {});
   };
 
   const orderedHarnesses = sortHarnesses(harnesses ?? []);
@@ -498,7 +496,7 @@ export function AgentList({ remote, onboarding }: {
       definition,
       onSaved: (id) => {
         onboarding?.onAdded({ harness: id });
-        load(true, true);
+        load(true);
       },
     },
     onConfirm: (save) => save(),
@@ -581,7 +579,7 @@ export function AgentList({ remote, onboarding }: {
     // Something always runs a chat: turning off the last other agent turns the free models back on.
     const freeModelsBack = !on && !othersOn(key) && !uiState.opencodeFreeModels;
     // The agents say which are off, and the free models' list depends on their switch, so both reload.
-    const reload = freeModelsBack ? () => load(true) : () => void queryClient.invalidateQueries({ queryKey: getHarnessesQuery().queryKey });
+    const reload = freeModelsBack ? () => load() : () => void queryClient.invalidateQueries({ queryKey: getHarnessesQuery().queryKey });
     mutUpdateUiState.runWithOptions(workspace, { hiddenAgents, ...(freeModelsBack ? { opencodeFreeModels: true } : {}) }, { onSuccessData: reload });
   };
   const freeModelsLocked = !othersOn();
@@ -804,7 +802,7 @@ export function AgentList({ remote, onboarding }: {
       harnessReady={opencode?.agentReady ?? false}
       availableModels={opencode?.models.map((model) => model.id) ?? []}
       checking={harnessesFetching || (opencode?.catalogPending ?? false)}
-      unknown={harnessesError}
+      unknown={Boolean(harnessesError)}
       disabled={remote}
       off={turnedOff.has(`opencode:${connection.id}`)}
       action={agentSwitch(`opencode:${connection.id}`, connection.name)}
@@ -879,7 +877,7 @@ export function AgentList({ remote, onboarding }: {
     <>
       <h3 className={cn(SECTION_CLASS_NAME, "mt-0")}>{m.onboarding_installed()}</h3>
       {/* Shown as on while OpenCode installs: onboarding waits for it before a first chat that needs it. */}
-      <FreeModelsRow expandable={false} models={freeModels} locked={freeModelsLocked} install={offersFreeModels || onboarding.freeModels.installing ? undefined : onboarding.freeModels} onChange={() => load(true)} />
+      <FreeModelsRow expandable={false} models={freeModels} locked={freeModelsLocked} install={offersFreeModels || onboarding.freeModels.installing ? undefined : onboarding.freeModels} onChange={() => load()} />
       {rows.map(harnessRow)}
       {records.filter((provider) => listed(provider.id)).map(providerRow)}
       {found.filter((provider) => listed(provider.id)).map(foundRow)}
@@ -897,7 +895,7 @@ export function AgentList({ remote, onboarding }: {
     <p className="text-sm text-subtext">{m.harness_none_added()}</p>
   ) : (
     <div className="mt-5">
-      {offersFreeModels && <FreeModelsRow models={freeModels} locked={freeModelsLocked} onChange={() => load(true)} />}
+      {offersFreeModels && <FreeModelsRow models={freeModels} locked={freeModelsLocked} onChange={() => load()} />}
       {rows.map(harnessRow)}
       {records.filter((provider) => listed(provider.id)).map(providerRow)}
       {found.filter((provider) => listed(provider.id)).map(foundRow)}
@@ -905,23 +903,22 @@ export function AgentList({ remote, onboarding }: {
     </div>
   );
 
+  const catalogError = !harnesses && harnessesError;
+  const retry = catalogError || (onboarding && (refresh.isPending || refresh.error));
+  const refreshLabel = retry ? m.app_retry() : onboarding ? null : m.settings_page_refresh();
+
   return (
     <>
-      {!onboarding && (
-        <div className="my-3 flex flex-wrap items-center gap-2">
-          {addButton}
-          <Button onClick={() => load(true, true)} disabled={refreshing}>
-            <RefreshCw size={12} className={refreshing ? "animate-[spin_0.9s_linear_infinite]" : ""} /> {m.settings_page_refresh()}
-          </Button>
-        </div>
-      )}
+      {catalogError && !refresh.error && <p role="alert" className="text-sm text-accent-red">{catalogError.message}</p>}
+      <div className="my-3 flex flex-wrap items-start gap-2 empty:hidden">
+        {!onboarding && addButton}
+        <RefreshAgents refresh={refresh} label={refreshLabel} />
+      </div>
       {definitions.isError && <p role="alert" className="text-sm text-accent-red">{m.acp_definitions_load_failed()} <Button variant="ghost" onClick={() => void definitions.refetch()}>{m.app_retry()}</Button></p>}
-      {!harnesses && harnessesError ? (
-        <p role="alert" className="text-sm text-accent-red">{m.harness_setup_load_failed()} <Button variant="ghost" onClick={() => load(true, true)}>{m.app_retry()}</Button></p>
-      ) : !harnesses ? (
+      {harnesses ? list : !catalogError && (
         <LoadingRow><Spinner /> {m.settings_page_detecting_harnesses()}</LoadingRow>
-      ) : list}
-      {setupRun.run && <CommandRunTerminal run={setupRun.run} onComplete={() => load(true, true)} onClose={setupRun.clear} />}
+      )}
+      {setupRun.run && <CommandRunTerminal run={setupRun.run} onComplete={() => load(true)} onClose={setupRun.clear} />}
     </>
   );
 }

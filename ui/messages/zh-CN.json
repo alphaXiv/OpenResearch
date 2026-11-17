@@ -475,6 +475,7 @@
   "settings_page_ready_to_move": "可以移动",
   "settings_page_ready_to_use": "已配置",
   "settings_page_refresh": "刷新",
+  "harness_refresh_complete": "智能体检查已完成。",
   "settings_page_remotes": "远程仓库",
   "settings_page_repository": "仓库",
   "settings_page_restart_to_finish_updating": "重新启动以完成更新",
