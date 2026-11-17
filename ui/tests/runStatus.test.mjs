@@ -86,13 +86,11 @@ test("an unfinished stage read says it is loading", async () => {
   assert.ok(find('[role="dialog"] ol'));
 });
 
-
 test("the whole-run line shows a floor and names stages with no timing", async () => {
   await status(null, { estimate: { loMs: 3_840_000, midMs: 3_900_000, hiMs: 4_000_000, at: now, pending: false, pastLimitMs: null, floor: true, untimed: ["sweep"] } });
   const card = find('[role="dialog"]');
   assert.match(bare(card.textContent), /Whole run: At least 1h 5m left.*sweep not timed/);
 });
-
 
 test("a timed floor counts down its central estimate on full and summary rows", () => {
   const estimate = { loMs: 11 * 60_000, midMs: 22 * 60_000, hiMs: 36 * 60_000, at: now, floor: true, pending: false, pastLimitMs: null, untimed: ["eval"] };
@@ -103,4 +101,13 @@ test("a timed floor counts down its central estimate on full and summary rows", 
     assert.match(bare(model.eta), /21m/);
     assert.match(bare(model.etaDetail), /eval/);
   }
+});
+
+test("the row keeps the count separate from the watcher while its accessible name stays whole", async () => {
+  const { trigger, watcher } = await status();
+  assert.ok(trigger.getAttribute("aria-label").includes(bare(watcher)));
+  const count = [...trigger.querySelectorAll("span")].find((span) => /^Step/.test(bare(span.textContent)));
+  assert.ok(count, "the count has its own layout slot");
+  assert.equal(bare(count.textContent), "Step 2,280 of 4,200");
+  assert.ok(!count.textContent.includes(watcher));
 });

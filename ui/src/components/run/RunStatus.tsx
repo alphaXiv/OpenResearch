@@ -33,6 +33,7 @@ export function RunStatus({ model, label, descriptionId, onOpenRunPage }: {
   const progress = data?.progress;
   const count = data && progress?.done != null ? plainSentence(capitalized(progressWords(data.phases[progress.phase], progress.done))) : "";
   const time = [model.eta, model.etaDetail].filter(Boolean).join(" · ") || (!model.live ? model.sentence.text : "");
+  const stage = model.sentence.stage;
   const status = plainSentence([label, model.lead, model.sentence.text].filter(Boolean).join(" · "));
 
   // Focus returns before closing so it cannot reopen the focus-triggered popover.
@@ -56,14 +57,18 @@ export function RunStatus({ model, label, descriptionId, onOpenRunPage }: {
           onKeyDown={onKeyDown}
           aria-label={m.run_status_for({ status, name: autoDir(model.name) })}
           aria-describedby={descriptionId}
-          className="min-h-6 min-w-0 flex-1 truncate rounded-xs text-start focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:outline-offset-2"
+          className="flex min-h-6 min-w-0 flex-1 items-center overflow-hidden whitespace-nowrap rounded-xs text-start focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:outline-offset-2"
         >
-          {label && <span className="text-ink-subtext">{autoDir(label)} · </span>}
+          {label && <span className="me-1 min-w-0 shrink truncate text-ink-subtext">{autoDir(label)} · </span>}
           <Lead model={model} />
-          <Sentence text={model.sentence.text} tone={model.tone} />
+          {stage ? <>
+            <span className="min-w-0 shrink truncate"><Sentence text={stage.name} tone={model.tone} /></span>
+            {stage.count && <span className="ms-1 shrink-0"><span aria-hidden="true">· </span><Sentence text={stage.count} tone={model.tone} /></span>}
+            {model.sentence.watcher && <span className="min-w-0 flex-1 basis-0 truncate"><Sentence text={m.run_stage_with_look({ stage: "", sentence: autoDir(model.sentence.watcher) })} tone={model.tone} /></span>}
+          </> : <span className="min-w-0 truncate"><Sentence text={model.sentence.text} tone={model.tone} /></span>}
         </Popover.Trigger>
         <Popover.Portal container={portalContainer}>
-          <Popover.Positioner side="bottom" align="start" sideOffset={7} collisionPadding={12} className="z-50">
+          <Popover.Positioner side="top" align="start" sideOffset={7} collisionPadding={12} className="z-50">
             <Popover.Popup initialFocus={false} finalFocus={false} onKeyDown={onKeyDown}
               className="w-80 max-w-[calc(100vw-1.5rem)] max-h-(--available-height) overflow-y-auto rounded-lg border border-border bg-background p-3.5 text-text shadow-menu outline-none"
             >

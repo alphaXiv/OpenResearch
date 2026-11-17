@@ -42,6 +42,8 @@ export interface RunModel {
     text: string;
     /** The full, refilled watcher sentence when one is shown. */
     watcher?: string;
+    /** Separate slots let the row preserve the count before stage words and watcher prose. */
+    stage?: { name: string; count: string };
     /** Changes when the words do, never when a number refills. */
     key: string;
     /** When the watcher wrote it. */
@@ -287,9 +289,10 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   const detail = settingUp ? stageDone !== null
     ? [rawName && rawName !== m.run_stage_setup() ? autoDir(rawName) : "", count].filter(Boolean).join(" ")
     : rawName ? m.run_stage_started({ stage: autoDir(rawName) })
-      : setup?.line && !/^\s*(?:[{}\[\]]|["\']?[\w.-]+["\']?\s*[:=])/.test(setup.line) ? quoted(setup.line) : ""
+      : setup?.line && !/^\s*(?:[{}\[\]]|["']?[\w.-]+["']?\s*[:=])/.test(setup.line) ? quoted(setup.line) : ""
     : count;
   const statusText = detail ? `${stageLabel} · ${detail}` : stageLabel;
+  const stageSlots = { name: stageDone === null ? statusText : stageLabel, count: stageDone === null ? "" : detail };
   const stageKey = `${settingUp ? "setup" : "stage"}:${order?.index ?? rawName}:${order?.first ?? ""}:${order?.count ?? ""}`;
   const recorded = monitor ? monitor.sentence : summary?.sentence ?? null;
   const watched = live && recorded && now - recorded.t <= 3 * 60_000 ? recorded : null;
@@ -322,9 +325,9 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     speaking = watched.template;
     const watcher = fillSentence(watched.template, bindings, signals);
     const text = m.run_stage_with_look({ stage: statusText.replace(/[.。۔।]+$/u, ""), sentence: autoDir(watcher) });
-    sentence = { text, watcher, key: `look:${stageKey}:${watched.template}`, at: watched.t };
+    sentence = { text, watcher, stage: stageSlots, key: `look:${stageKey}:${watched.template}`, at: watched.t };
   } else {
-    sentence = { text: statusText, key: `auto:${stageKey}`, at: null };
+    sentence = { text: statusText, stage: stageSlots, key: `auto:${stageKey}`, at: null };
   }
 
   let eta = "";

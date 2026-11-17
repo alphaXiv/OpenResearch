@@ -329,13 +329,18 @@ test('a timed floor names the untimed stage above the chat', async ({ page, proj
   test.slow()
   const dir = path.join(orx.root, `floor-${project.id}`)
   mkdirSync(dir)
+  const ready = path.join(dir, 'ready')
+  expect(spawnSync('mkfifo', [ready]).status).toBe(0)
   const gate = path.join(dir, 'finish')
   expect(spawnSync('mkfifo', [gate]).status).toBe(0)
   const script = path.join(dir, 'train.mjs')
   writeFileSync(script, `import { readFileSync } from 'node:fs'
-process.stdout.write('::orx:: {"plan":[{"phase":"train","of":1000},{"phase":"sweep"}]}\\n')
-for (let step = 0; step <= 100; step += 10) {
-  process.stdout.write('::orx:: ' + JSON.stringify({phase:'train', step, of:1000, t:step*4.3, m:{loss:2-step/100}}) + '\\n')
+process.stdout.write('::orx:: {"plan":[{"phase":"prepare-model","of":1},{"phase":"training-a-very-long-stage-name","of":800},{"phase":"sweep"}]}\\n')
+process.stdout.write('::orx:: {"phase":"prepare-model"}\\n"window_pattern": "L"\\n')
+readFileSync(${JSON.stringify(ready)})
+process.stdout.write('::orx:: {"phase":"prepare-model","step":1,"of":1}\\n')
+for (const step of [0, 10, 20, 30, 40, 50, 60, 70, 80, 93]) {
+  process.stdout.write('::orx:: ' + JSON.stringify({phase:'training-a-very-long-stage-name', step, of:800, t:step*4.3, m:{loss:2-step/100}}) + '\\n')
 }
 readFileSync(${JSON.stringify(gate)})
 `)
@@ -353,20 +358,47 @@ readFileSync(${JSON.stringify(gate)})
   await project.open(page)
   await send(page, 'Launch timed floor.')
   const banner = page.getByRole('region', { name: 'Runs in this chat' })
-  await expect(banner).toContainText(/At least .* left/)
-  await expect(banner.getByRole('img', { name: /^loss / })).toBeVisible()
-  const shots = path.resolve(import.meta.dirname, '../../.shots/k1')
+  await expect(banner).toContainText(/Prepare-model.*started/)
+  await expect(banner).not.toContainText('window_pattern')
+  const shots = path.resolve(import.meta.dirname, '../../.shots/q2')
   mkdirSync(shots, { recursive: true })
   await page.getByRole('button', { name: 'Close panel', exact: true }).click()
+  await page.getByText('Timed floor launched.', { exact: true }).click()
+  await page.keyboard.press('Escape')
   for (const width of [1440, 420]) {
     await page.setViewportSize({ width, height: 1000 })
     for (const colorScheme of ['light', 'dark'] as const) {
       await page.emulateMedia({ colorScheme, reducedMotion: 'reduce' })
       await expect(page.locator('html')).toHaveAttribute('data-theme', colorScheme)
+      await page.screenshot({ path: path.join(shots, `setup-${colorScheme}-${width}.png`) })
+    }
+  }
+  await writeFile(ready, 'go\n')
+  await expect(banner).toContainText(/At least .* left/)
+  await expect(banner.getByRole('img', { name: /^loss / })).toBeVisible()
+  for (const width of [1440, 420]) {
+    await page.setViewportSize({ width, height: 1000 })
+    for (const colorScheme of ['light', 'dark'] as const) {
+      await page.emulateMedia({ colorScheme, reducedMotion: 'reduce' })
+      await expect(page.locator('html')).toHaveAttribute('data-theme', colorScheme)
+      await page.getByText('Timed floor launched.', { exact: true }).click()
+      const count = banner.locator('button span.tabular-nums').filter({ hasText: /^Step.*93.*800[⁦-⁩]*$/ })
+      await expect(count).toBeVisible()
+      expect(await count.evaluate((node) => {
+        const countBox = node.getBoundingClientRect()
+        const rowBox = node.closest('button')!.getBoundingClientRect()
+        return countBox.left >= rowBox.left && countBox.right <= rowBox.right
+      })).toBe(true)
       await page.screenshot({ path: path.join(shots, `floor-${colorScheme}-${width}.png`) })
       await banner.getByRole('button', { name: /Timed floor/, exact: false }).first().click()
       const card = page.getByRole('dialog')
       await expect(card).toContainText(/Whole run: At least .* left.*sweep.*not timed/)
+      await expect(card).toBeInViewport({ ratio: 1 })
+      await expect.poll(async () => {
+        const popup = await card.boundingBox()
+        const row = await banner.boundingBox()
+        return popup !== null && row !== null && popup.y + popup.height <= row.y
+      }).toBe(true)
       await page.screenshot({ path: path.join(shots, `floor-card-${colorScheme}-${width}.png`) })
       await page.keyboard.press('Escape')
       await expect(card).not.toBeVisible()

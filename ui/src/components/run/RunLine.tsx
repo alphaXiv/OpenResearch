@@ -26,10 +26,10 @@ function Headline({ model }: { model: RunModel }) {
   const { delta } = headline;
   if (headline.inSentence) {
     if (!delta || delta.flat || headline.vsInSentence) return null;
-    return <span className="shrink-0 whitespace-nowrap text-ink-subtext"><Delta delta={delta} said /> {m.run_than_parent()}</span>;
+    return <span className="shrink-0 whitespace-nowrap text-ink-subtext @max-[40rem]:hidden"><Delta delta={delta} said /> {m.run_than_parent()}</span>;
   }
   return (
-    <span className="shrink-0 whitespace-nowrap text-ink-subtext">
+    <span className="shrink-0 whitespace-nowrap text-ink-subtext @max-[40rem]:hidden">
       {headline.label} <span className="font-medium tabular-nums text-text">{headline.value}</span>
       {delta && <> <Delta delta={delta} said />{!delta.flat && <> {m.run_than_parent()}</>}</>}
     </span>
