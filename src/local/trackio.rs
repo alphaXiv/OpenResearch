@@ -38,8 +38,12 @@ pub fn target() -> Target {
 }
 
 /// The Trackio project an orx project's runs log to: the saved one, else the orx project's slug.
-pub fn project_for(orx_project_slug: &str) -> String {
-    synced_env_var(PROJECT).unwrap_or_else(|| orx_project_slug.to_string())
+pub fn project_for(
+    store: &crate::store::Store,
+    project: super::model::LocalProject,
+) -> crate::error::Result<String> {
+    let mut saved = crate::config::saved_project_env(store, &project.id)?;
+    Ok(saved.remove(PROJECT).unwrap_or(project.slug))
 }
 
 /// The value the Environment page may show and edit in the clear; `None` keeps it masked.

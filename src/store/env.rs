@@ -165,9 +165,13 @@ mod tests {
 
     #[test]
     fn a_run_gets_its_projects_variables_over_the_synced_ones() {
+        use crate::local::trackio;
+
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
         let key = format!("ORX_TEST_RUN_{}", uuid::Uuid::new_v4().simple());
         let other = format!("ORX_TEST_RUN_OTHER_{}", uuid::Uuid::new_v4().simple());
-        crate::config::write_synced_env_vars(&[(&key, "global"), (&other, "global")]).unwrap();
         let store = Store::open().unwrap();
         let run = super::super::tests::run_fixture(
             &format!("run_{}", uuid::Uuid::new_v4().simple()),
@@ -175,13 +179,41 @@ mod tests {
             None,
         );
         store.upsert_run(&run).unwrap();
+        let project = super::super::tests::local_project_fixture(&run.project_id);
+        store.create_local_project(&project).unwrap();
+        assert_eq!(
+            crate::config::launch_env(&run).unwrap()[trackio::PROJECT],
+            project.slug
+        );
+        crate::config::write_synced_env_vars(&[
+            (&key, "global"),
+            (&other, "global"),
+            (trackio::PROJECT, "global-tracker"),
+        ])
+        .unwrap();
+        assert_eq!(
+            crate::config::launch_env(&run).unwrap()[trackio::PROJECT],
+            "global-tracker"
+        );
         store
             .set_project_env(&run.project_id, &key, "project")
             .unwrap();
+        store
+            .set_project_env(&run.project_id, trackio::PROJECT, "project-tracker")
+            .unwrap();
+        store
+            .set_project_env(&run.project_id, crate::config::RUN_ID_ENV, "custom-id")
+            .unwrap();
 
-        let env = crate::config::saved_run_env(&run).unwrap();
+        let env = crate::config::launch_env(&run).unwrap();
         assert_eq!(env[&key], "project");
         assert_eq!(env[&other], "global");
+        assert_eq!(env[trackio::PROJECT], "project-tracker");
+        assert_eq!(env[crate::config::RUN_ID_ENV], run.id);
+        assert_eq!(
+            trackio::project_for(&store, project).unwrap(),
+            env[trackio::PROJECT]
+        );
     }
 
     #[test]

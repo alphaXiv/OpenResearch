@@ -223,10 +223,11 @@ fn save(session: &StoredChatSession, prompt: &WirePrompt, req: &PromptAnswer) ->
             false
         });
         lines.push(if live && !cfg!(windows) {
-            "Runs you start get the saved values, and so do your shell commands from your next one.".into()
+            "Your next shell command can use the saved values.".into()
         } else {
-            "Runs you start get the saved values; your own shell gets them when this chat's agent next starts.".into()
+            "Your shell can use the saved values when this chat's agent next starts.".into()
         });
+        lines.push("Most compute backends get the saved values. Hugging Face Jobs receives only its token and Trackio settings from the saved environment.".into());
     }
     Ok(lines.join("\n"))
 }

@@ -22,7 +22,7 @@ pub async fn run(args: crate::MetricsArgs) -> Result<()> {
         })?;
         let report = trackio::run_metrics(
             &local,
-            trackio::project_for(&project.slug),
+            trackio::project_for(&store, project)?,
             run.id,
             &args.metrics,
             args.points,
