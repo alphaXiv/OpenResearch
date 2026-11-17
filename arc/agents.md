@@ -242,7 +242,9 @@ Where an agent offers a hook or plugin, it stamps each shell command with the is
 
 A turn is a row with a state and a **delivery state**: its prompt was never sent, rejected, accepted, or of unknown fate. A running turn holds a per-chat lease with a heartbeat, which keeps one turn per chat and exposes a turn whose process died ([storage](storage.md)).
 
-When a dashboard starts or a lease expires, every turn still marked running has no process behind it, and a turn that finds its own lease gone stops. Each becomes a failed turn with a recovery action chosen by its delivery state:
+A restarting dashboard adopts kept ACP agents and their terminal commands. A running ACP turn resumes its checkpoint in the same message without resending its prompt; held permissions retain their request ids, and answered file and terminal requests are replayed from cached responses. Antigravity keeps its Stop hook and pending background work on that connection.
+
+When a keeper or a readable checkpoint is unavailable, a turn still marked running becomes a failed turn with a recovery action chosen by its delivery state. A turn that finds its own lease gone stops:
 
 | Delivery state | Action | Effect |
 | --- | --- | --- |

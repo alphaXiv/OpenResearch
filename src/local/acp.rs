@@ -4,6 +4,7 @@ use crate::error::{bail, Result};
 
 mod delegated;
 pub mod host;
+pub(crate) mod wire;
 
 struct OwnedProcess {
     child: tokio::process::Child,
@@ -639,7 +640,7 @@ async fn prompt_once(
     let native_id = session["sessionId"]
         .as_str()
         .ok_or_else(|| anyhow!("{name} did not return a session ID"))?;
-    client.set_native_id(native_id);
+    client.set_native_id(native_id)?;
     let has_model_selection = session["models"].is_object()
         || session["configOptions"]
             .as_array()
@@ -674,6 +675,7 @@ async fn prompt_once(
     let mut answer = String::new();
     let result = loop {
         tokio::select! {
+            biased;
             result = &mut response => break result.map_err(|error| {
                 let exited = error
                     .downcast_ref::<agent_client_protocol::Error>()
@@ -787,7 +789,7 @@ fn one_shot_event(
                 client.cancel_permissions();
             }
         }
-        host::Event::TerminalOutput { .. } => {}
+        host::Event::TerminalOutput { .. } | host::Event::Checkpoint => {}
     }
 }
 
