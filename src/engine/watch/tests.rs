@@ -386,7 +386,7 @@ async fn a_reply_that_breaks_the_contract_is_asked_for_once_more_with_why() {
     fake_claude(
         &calls_dir,
         &[
-            r#"{"runs": {"r1": {"status": "ok", "line": "Two shards retried and it is fine."}}}"#,
+            r#"{"runs": {"r1": {"status": "ok", "line": "2 shards retried and it is fine."}}}"#,
             r#"{"runs": {"r1": {"status": "ok", "line": "**{count:\"timed out\"}** shards retried; nothing else."}}}"#,
         ],
     );
@@ -420,7 +420,7 @@ async fn a_reply_still_wrong_after_its_retry_keeps_the_last_sentence_and_says_wh
         return;
     }
     let calls_dir = crate::config::home_dir().unwrap().join("claude-calls");
-    let wrong = r#"{"runs": {"r1": {"status": "ok", "line": "No bold here."}}}"#;
+    let wrong = r#"{"runs": {"r1": {"status": "ok", "line": "2 warnings here."}}}"#;
     fake_claude(&calls_dir, &[wrong, wrong]);
     let store = Store::open().unwrap();
     chat(&store, "chat", "claude-code");
