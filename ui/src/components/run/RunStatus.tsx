@@ -81,7 +81,7 @@ export function RunStatus({ model, label, descriptionId, onOpenRunPage }: {
                   <Phases model={model} phases={stages.phases} current={stages.current} progress={count} setupNames={stages.names} className="flex-col gap-y-2" />
                 </div>}
               </>}
-              {model.sentence.watcher && <p className="m-0 mt-3 break-words text-sm"><Sentence text={model.sentence.watcher} tone={model.tone} /></p>}
+              {model.sentence.watcher && <p className="m-0 mt-3 break-words text-sm"><Sentence text={autoDir(model.sentence.watcher)} tone={model.tone} /></p>}
               {time && <p className="m-0 mt-3 border-t border-border pt-3 text-xs text-ink-subtext">{model.settingUp || !model.live ? time : m.run_whole_time({ time })}</p>}
             </Popover.Popup>
           </Popover.Positioner>

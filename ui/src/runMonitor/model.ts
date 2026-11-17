@@ -303,7 +303,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     sentence = { text, key: `pre:waiting:${display.waiting}`, at: null };
   } else if (warning) {
     speaking = warning;
-    const text = fillSentence(warning, bindings, signals);
+    const text = autoDir(fillSentence(warning, bindings, signals));
     sentence = { text, watcher: text, key: `flag:${flag?.id}:${run.status}:${warning}`, at: flag?.record?.at ?? recorded?.t ?? null };
   } else if (!live) {
     const text = !progressText || tone === "done" ? ""
@@ -319,7 +319,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   } else if (watched) {
     speaking = watched.template;
     const watcher = fillSentence(watched.template, bindings, signals);
-    const text = m.run_stage_with_look({ stage: statusText.replace(/[.。۔।]+$/u, ""), sentence: watcher });
+    const text = m.run_stage_with_look({ stage: statusText.replace(/[.。۔।]+$/u, ""), sentence: autoDir(watcher) });
     sentence = { text, watcher, key: `look:${stageKey}:${watched.template}`, at: watched.t };
   } else {
     sentence = { text: statusText, key: `auto:${stageKey}`, at: null };

@@ -294,7 +294,7 @@ test("watcher words expire after three minutes while completion always names its
 test("an unresolved flag keeps its warning when the run ends, even after ordinary watcher text expires", () => {
   const ended = model(run({ status: "done", endedAt: now }), { monitor: flagged, at: now + 180_001 });
   assert.equal(ended.tone, "flag");
-  assert.equal(ended.text, "Loss is **NaN**.");
-  assert.equal(bare(ended.sentence.watcher), ended.text);
+  assert.equal(bare(ended.text), "Loss is **NaN**.");
+  assert.equal(bare(ended.sentence.watcher), bare(ended.text));
   assert.equal(ended.eta, m.run_done_in({ duration: fmtDuration(1_800_000) }));
 });

@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { act, createElement } from "react";
 import { RunStatus } from "../src/components/run/RunStatus.tsx";
+import { autoDir } from "../src/i18n.ts";
+import { setLocale } from "../src/locale.ts";
 import { m } from "../src/paraglide/messages.js";
 import { runModel } from "../src/runMonitor/model.ts";
 import { createWorkspace } from "../src/workspace.tsx";
@@ -50,6 +52,17 @@ test("Escape closes the card and returns focus to its status", async () => {
   assert.ok(event.defaultPrevented);
   assert.equal(trigger.getAttribute("aria-expanded"), "false");
   assert.equal(document.activeElement, trigger);
+});
+
+test("watcher prose keeps its own direction in an RTL status and card", async () => {
+  await setLocale("ar");
+  try {
+    const { watcher, trigger } = await status();
+    assert.ok(trigger.textContent.includes(autoDir(watcher)));
+    assert.ok(find('[role="dialog"]').textContent.includes(autoDir(watcher)));
+  } finally {
+    await setLocale("en");
+  }
 });
 
 test("a failed stage read offers Retry without claiming that no stages exist", async () => {
