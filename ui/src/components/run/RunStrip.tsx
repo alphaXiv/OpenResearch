@@ -60,12 +60,13 @@ export function RunStrip({ model, monitor, agent, label, open, onToggle, onOpenR
   const phase = data?.progress ? data.phases[data.progress.phase]?.name : undefined;
   const chart = open && model.live ? data?.view.blocks.find((block): block is ChartBlock => "chart" in block && (!block.phase || block.phase === phase) && seriesOf(data, block).some((line) => !line.ghost && line.points.filter(([, y]) => y !== null).length >= 2)) : undefined;
   const flag = model.flag?.record;
-  const expanded = open && Boolean(chart || flag || model.note || model.notice || monitor?.status === "error");
+  const notice = model.notice && model.notice.kind !== "cancelling";
+  const expanded = open && Boolean(chart || flag || model.note || notice || monitor?.status === "error");
 
   return (
     <RunLine model={model} agent={agent} label={label} onToggle={onToggle} onOpenRunPage={onOpenRunPage} expanded={expanded} expandable={!open || expanded || monitor?.status === "loading"}>
       {expanded && <div className="px-3 pb-3">
-        {model.notice && <RunContactNotice run={model.run} className="mt-1.5" />}
+        {notice && <RunContactNotice run={model.run} className="mt-1.5" />}
         {model.stale && monitor?.status !== "error" && <p className="m-0 mt-1.5 text-xs text-ink-subtext">{model.stale.why} · {model.stale.age}</p>}
         {model.note && <p className="m-0 mt-1.5 text-xs text-ink-subtext">{model.note}</p>}
         {flag && model.flagDetail && model.flagDetail !== model.sentence.text && <p className="m-0 mt-1.5 text-sm"><Sentence text={model.flagDetail} tone={model.tone} /></p>}

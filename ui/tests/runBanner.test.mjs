@@ -669,3 +669,13 @@ test("a terminal lead keeps a visible separator before its sentence", async () =
   const line = container.querySelector('button[aria-haspopup="dialog"]');
   assert.ok(line.textContent.includes(`${m.run_lead_stopped()}\u00a0`), line.textContent);
 });
+
+test("cancellation is said once while a failed stop retains its explanation", async () => {
+  backend();
+  const view = await banner([run("r1", { cancelling: true })]);
+  await settle();
+  assert.equal(view.container.textContent.split(m.status_cancelling()).length - 1, 1);
+  await view.update([run("r1", { cancelling: true, cancelError: "The scheduler refused this stop" })]);
+  await settle();
+  assert.ok(view.container.querySelector('.run-contact-notice').textContent.includes("The scheduler refused this stop"));
+});
