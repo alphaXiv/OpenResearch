@@ -38,9 +38,17 @@ pub(crate) fn title_request(prompt: &str) -> super::OneShot<'_> {
 pub(crate) fn title_prompt(first_message: &str) -> String {
     let input: String = first_message.chars().take(TITLE_INPUT_CAP).collect();
     format!(
-        "Generate a short title for a chat session that starts with the user \
-         message below. At most 6 words. Reply with the title text ONLY — no \
-         quotes, no trailing punctuation, no explanation, nothing else.\n\n\
+        "Name this chat like a commit scope plus subject, so its topic is \
+         recognizable weeks later.\n\
+         - 1-4 words, a Title Case noun phrase naming the thing being built, \
+         fixed or investigated, like \"Sitemap\" or \"Login Crash\".\n\
+         - No leading request verb (Generate, Add, Visualize) unless the topic \
+         is itself a fix. Leave out how the work is done: models, agents, PRs, \
+         branches, tests.\n\
+         - When the work is confined to one package or folder, prefix its name \
+         in backticks, like \"`@clo/lib` Meta Scraper\".\n\
+         Reply with the title text ONLY — no quotes, no trailing punctuation, \
+         no explanation, nothing else.\n\n\
          User message:\n{input}"
     )
 }
