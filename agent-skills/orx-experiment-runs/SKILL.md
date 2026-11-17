@@ -61,9 +61,10 @@ When the user names a duration, run:
 orx exp run <expId> --estimate
 ```
 
-Adjust the command's steps and plan totals, save the plan, then estimate
-again until the total fits the requested range. Before launching, say the
-estimated number and hardware assumption in one line. When any stage is untimed,
+Resize up as well as down, then re-estimate until the total falls inside the
+user's range. Below the lower bound is as wrong as above the upper bound.
+
+Before launching, say the estimated number and hardware assumption in one line. When any stage is untimed,
 tell the user the total is unknown or run a short calibration before promising
 a duration.
 
