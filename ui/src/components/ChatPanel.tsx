@@ -8398,7 +8398,7 @@ export function ChatPanel({
               index={questions.index}
               total={questions.total}
               picked={questions.answer.picked}
-              disabled={questions.busy}
+              disabled={questions.busy || connection !== null}
               hotkeys={mainView === "chat" && !contentInert && !contentLoading && !contentError && !historyLoading && connection === null
                 && (embedded ? searchRegion === "right" : searchRegion !== "right")}
               searchTarget={focusedMessage?.partId === questions.part.id}

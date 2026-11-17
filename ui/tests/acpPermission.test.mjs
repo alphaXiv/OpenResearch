@@ -5,7 +5,7 @@ import { questionReplies } from "../src/chatRendering.ts";
 import { Message } from "../src/components/ChatPanel.tsx";
 import { m } from "../src/paraglide/messages.js";
 import { assistantMessage, composer, deferred, press, renderChat, session, settle, userMessage } from "./chat.mjs";
-import { render } from "./render.mjs";
+import { clients, render } from "./render.mjs";
 
 /** Renders `part` as an assistant reply; `answer`, when given, is the user's reply that follows it. */
 async function card(part, { onRespond, answer } = {}) {
@@ -216,4 +216,24 @@ test("skipped questions show their outcome while preserving historical answer te
   assert.equal(historical.textContent.includes(m.chat_question_skipped()), false);
   const stale = await card({ ...part, prompt: { ...part.prompt, approved: undefined } });
   assert.equal(stale.textContent.includes(m.chat_question_skipped()), false);
+});
+
+test("question choices are disabled while the remote host reconnects", async () => {
+  const part = { id: "q1", type: "prompt", prompt: { kind: "question", question: "Can you free space?", options: [{ label: "Yes" }] } };
+  let status = "connected";
+  const runtime = () => ({
+    kind: "ssh", version: "test", buildChannel: "stable", dashboardProtocol: 1,
+    session: { id: "one", host: "gpu", user: "me", status, version: "test", dashboardProtocol: 1, gatewayUrl: "http://localhost:4910/", error: null, repairCommand: null, installPaths: null, uiPreferences: { theme: null, locale: null }, canStartNewHost: true },
+  });
+  await renderChat("/projects/p/tasks/s", {
+    remote: true,
+    transcripts: { s: [userMessage("u1", "free some space"), assistantMessage("a1", [part], "u1")] },
+    routes: { "GET /_orx/runtime": runtime },
+  });
+  const option = () => [...document.querySelectorAll(".composer button[aria-pressed]")].find((element) => element.textContent.startsWith("Yes"));
+  assert.equal(option().disabled, false);
+  status = "reconnecting";
+  await act(async () => { for (const client of clients) void client.invalidateQueries({ predicate: (query) => query.queryKey[2] === "getRuntime" }); });
+  await settle();
+  assert.equal(option().disabled, true);
 });
