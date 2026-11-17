@@ -1449,6 +1449,27 @@ fn retain_timing(points: &mut Vec<(usize, f64, f64)>, occurrence: usize, total: 
             }
         }
     }
+    let mut rates: Vec<_> = reports
+        .windows(2)
+        .enumerate()
+        .filter_map(|(i, pair)| {
+            let delta = pair[1].2 - pair[0].2;
+            let gap = pair[1].1 - pair[0].1;
+            (delta > 0.0 && gap > 0.0).then_some((i, gap / delta))
+        })
+        .collect();
+    rates.sort_by(|a, b| a.1.total_cmp(&b.1));
+    if let Some((_, typical)) = rates.get(rates.len() / 2) {
+        for (i, _) in rates
+            .iter()
+            .rev()
+            .take(4)
+            .filter(|(_, rate)| *rate > 4.0 * typical)
+        {
+            keep[*i] = true;
+            keep[*i + 1] = true;
+        }
+    }
     let mut times = 0;
     let mut previous = None;
     for i in (1..n).rev().filter(|&i| i == 1 || done(i) > done(i - 1)) {

@@ -122,6 +122,25 @@ fn conditions(
             evidence: Evidence::NonFinite,
         });
     }
+    let prominent: BTreeSet<&str> = run.body["view"]["headline"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .chain(
+            run.body["view"]["blocks"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .flat_map(|block| {
+                    block["chart"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                }),
+        )
+        .collect();
     let of = run.summary["stage"]["of"].as_f64();
     for (name, vs) in run.body["versus"]["step"].as_object().into_iter().flatten() {
         let spec = &signals[name];
@@ -130,7 +149,11 @@ fn conditions(
             .get(name)
             .is_some_and(|compared| compared.far_worse(spec["better"] == "lower", of));
         // The latest comparison is the one the sentence shows, so it must read worse too.
-        if covered.contains(&("parent", name.clone())) || vs["good"] != false || !far {
+        if !prominent.contains(name.as_str())
+            || covered.contains(&("parent", name.clone()))
+            || vs["good"] != false
+            || !far
+        {
             continue;
         }
         let mine = super::super::monitor::value_text(&run.body["latest"][name], spec);
@@ -441,6 +464,25 @@ mod tests {
 
     fn far(seen: &Seen, of: f64) -> bool {
         seen.compared["loss"].far_worse(true, Some(of))
+    }
+
+    #[test]
+    fn stats_only_parent_gaps_do_not_raise_flags() {
+        let mut seen = Seen::default();
+        let mut run = at(("train", 0), 200.0, 0.0, 5.0, 1.0);
+        run.body["view"] = json!({"headline":["val_bpb"],"signals":{"loss":{"better":"lower"}},"blocks":[{"stats":["loss"]}]});
+        for step in 20..30 {
+            run.body["versus"]["step"]["loss"]["step"] = json!(step);
+            compare(&mut seen, &run);
+        }
+        assert!(conditions(&seen, &run, &BTreeSet::new(), 0).is_empty());
+        run.body["view"]["blocks"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"chart":["loss"]}));
+        assert!(conditions(&seen, &run, &BTreeSet::new(), 0)
+            .iter()
+            .any(|c| c.kind == "parent"));
     }
 
     #[test]

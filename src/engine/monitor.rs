@@ -669,6 +669,62 @@ fn headline<'a>(
         .or(named.first().copied())
 }
 
+fn periodic_pause(run: &Snapshot, history: &Snapshot, silence: f64) -> bool {
+    let Some(stage) = run.phases.last() else {
+        return false;
+    };
+    let Some(done) = stage.done else { return false };
+    let occurrence = run.phases.iter().filter(|p| p.name == stage.name).count() - 1;
+    let Some(previous) = history
+        .phases
+        .iter()
+        .filter(|p| p.name == stage.name)
+        .nth(occurrence)
+    else {
+        return false;
+    };
+    let mut points: Vec<&(usize, f64, f64)> = Vec::new();
+    for point in history
+        .timing
+        .progress_points
+        .iter()
+        .filter(|point| point.0 == previous.occurrence)
+    {
+        if points.last().is_none_or(|last| point.2 > last.2) {
+            points.push(point);
+        }
+    }
+    let mut gaps: Vec<_> = points
+        .windows(2)
+        .filter_map(|pair| {
+            let gap = pair[1].1 - pair[0].1;
+            (gap > 0.0 && pair[1].2 > pair[0].2).then_some(gap / (pair[1].2 - pair[0].2))
+        })
+        .collect();
+    if gaps.len() < 4 {
+        return false;
+    }
+    gaps.sort_by(f64::total_cmp);
+    let typical = gaps[gaps.len() / 2];
+    let pauses: Vec<_> = points
+        .windows(2)
+        .filter_map(|pair| {
+            let step = pair[0].2;
+            let gap = pair[1].1 - pair[0].1;
+            (step > 0.0 && pair[1].2 > step && gap > 4.0 * typical * (pair[1].2 - step))
+                .then_some((step, gap))
+        })
+        .collect();
+    pauses.iter().enumerate().any(|(index, &(step, gap))| {
+        let interval = pauses.get(index + 1).map_or(step, |next| next.0 - step);
+        // A known pause earns at most twice its observed duration at its next interval.
+        interval > 0.0
+            && done >= interval
+            && (done % interval).abs() < 1e-6
+            && silence <= 2_000.0 * gap
+    })
+}
+
 /// The estimator's inputs for this run, and the offset that maps its host times to the laptop.
 fn estimate_input(
     fold: &Fold,
@@ -796,7 +852,17 @@ fn evaluate(
         Ok(output) => output.errors.iter().map(ToString::to_string).collect(),
         Err(error) => vec![error.to_string()],
     };
-    let output = output.ok();
+    let mut output = output.ok();
+    if let (Some(snapshot), Some(output)) = (snapshot, output.as_mut()) {
+        if output.stall_ms.is_some_and(|silence| {
+            silence > 0.0
+                && std::iter::once(snapshot)
+                    .chain(parent)
+                    .any(|history| periodic_pause(snapshot, history, silence))
+        }) {
+            output.stall_ms = Some(0.0);
+        }
+    }
     let started = life.started();
     let last_phase = snapshot.and_then(|s| s.phases.len().checked_sub(1));
     // The stage the run is in, or with a plan its first before any began.
@@ -5303,6 +5369,77 @@ mod tests {
             Some(&json!({ "plan": plan })),
             &source,
         )
+    }
+
+    #[test]
+    fn periodic_pause_has_a_bounded_allowance_at_matching_steps() {
+        let f = Fixture::new("orx-monitor-periodic-pause");
+        let parent = f.run_named("p1", "done", local());
+        let mut history = Snapshot::new("p1", "1-1", "g1");
+        for step in 1..=5000 {
+            let t = step + ((step - 1) / 100) * 150;
+            fold(
+                &mut history,
+                &[(
+                    T0 + t * 1000,
+                    format!(
+                        "::orx:: {{\"phase\":\"train\",\"step\":{step},\"of\":5000,\"m\":{{\"loss\":2}},\"t\":{t}}}"
+                    ),
+                )],
+            );
+        }
+        f.signals(&history);
+        monitor_at(&f, &parent, T0 + 13_000_000);
+        f.child("child", "exp");
+        let mut run = f.run_in("r1", "child", "running", local());
+        let mut snapshot = Snapshot::new("r1", "1-1", "g1");
+        for step in 1..=100 {
+            fold(
+                &mut snapshot,
+                &[(
+                    T0 + step * 1000,
+                    format!(
+                        "::orx:: {{\"phase\":\"train\",\"step\":{step},\"of\":5000,\"m\":{{\"loss\":2}},\"t\":{step}}}"
+                    ),
+                )],
+            );
+        }
+        f.signals(&snapshot);
+        let (monitor, _) = monitor_at(&f, &run, T0 + 280_000);
+        assert_eq!(monitor["progress"]["stallMs"], 0, "{}", monitor["progress"]);
+        let (monitor, _) = monitor_at(&f, &run, T0 + 500_000);
+        assert!(monitor["progress"]["stallMs"].as_i64().unwrap() > 0);
+
+        for step in 101..=150 {
+            let t = step + 150;
+            fold(
+                &mut snapshot,
+                &[(
+                    T0 + t * 1000,
+                    format!(
+                        "::orx:: {{\"phase\":\"train\",\"step\":{step},\"of\":5000,\"m\":{{\"loss\":2}},\"t\":{t}}}"
+                    ),
+                )],
+            );
+        }
+        f.signals(&snapshot);
+        let (monitor, _) = monitor_at(&f, &run, T0 + 480_000);
+        assert!(
+            monitor["progress"]["stallMs"].as_i64().unwrap() > 0,
+            "an off-interval pause is still a stall"
+        );
+        run.experiment_id = "exp".into();
+        f.store.upsert_run(&run).unwrap();
+        for step in 151..=200 {
+            let t = step + 150;
+            fold(&mut snapshot, &[(T0 + t * 1000, format!("::orx:: {{\"phase\":\"train\",\"step\":{step},\"of\":5000,\"m\":{{\"loss\":2}},\"t\":{t}}}"))]);
+        }
+        f.signals(&snapshot);
+        let (monitor, _) = monitor_at(&f, &run, T0 + 530_000);
+        assert_eq!(
+            monitor["progress"]["stallMs"], 0,
+            "a run also learns its own pauses"
+        );
     }
 
     const PIPELINE: [&str; 5] = ["install", "download", "train", "eval", "sft"];
