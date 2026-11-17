@@ -359,18 +359,14 @@ pub enum StopBy {
 pub struct StopContext {
     pub by: StopBy,
     /// When the cancel was accepted; set by the store.
-    #[serde(default)]
+    #[serde(skip)]
     pub at: i64,
     /// The agent's `--reason`, or what a rule saw.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chat_session_id: Option<String>,
     /// The rule as the run froze it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rule: Option<serde_json::Value>,
-    #[serde(flatten)]
-    pub extra: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 impl StopContext {
@@ -380,9 +376,7 @@ impl StopContext {
             by,
             at: 0,
             reason: None,
-            chat_session_id: None,
             rule: None,
-            extra: Default::default(),
         }
     }
 }
@@ -1142,7 +1136,6 @@ impl Store {
             CREATE TABLE IF NOT EXISTS run_dismissals (
                 chat_session_id TEXT NOT NULL,
                 run_id TEXT NOT NULL,
-                dismissed_at INTEGER NOT NULL,
                 PRIMARY KEY(chat_session_id, run_id)
             );
             CREATE TABLE IF NOT EXISTS run_notices (
@@ -1402,10 +1395,8 @@ impl Store {
                 chat_session_id TEXT NOT NULL,
                 kind TEXT NOT NULL,
                 state TEXT NOT NULL,
-                model TEXT NOT NULL,
                 reason TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
-                sent_at INTEGER,
                 done_at INTEGER,
                 summary_template TEXT,
                 summary_text TEXT,
@@ -1424,7 +1415,6 @@ impl Store {
                 whole REAL,
                 basis_json TEXT,
                 cursor_json TEXT,
-                evidence_json TEXT,
                 PRIMARY KEY(look_id, run_id)
             );
             CREATE INDEX IF NOT EXISTS idx_watch_look_runs_run ON watch_look_runs(run_id, look_id);
@@ -1440,8 +1430,7 @@ impl Store {
                 run_id TEXT PRIMARY KEY,
                 done INTEGER NOT NULL DEFAULT 0,
                 attempts INTEGER NOT NULL DEFAULT 0,
-                next_attempt_at INTEGER NOT NULL DEFAULT 0,
-                last_error TEXT
+                next_attempt_at INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS remote_source_sweeps (
                 host   TEXT NOT NULL,
@@ -1525,7 +1514,6 @@ impl Store {
             "ALTER TABLE ui_state ADD COLUMN preferred_autonomy TEXT",
             "ALTER TABLE ui_state ADD COLUMN nested_delegation INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE ui_state ADD COLUMN run_banner TEXT NOT NULL DEFAULT 'strip'",
-            "ALTER TABLE ui_state ADD COLUMN experiments_grid INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE ui_state ADD COLUMN run_watching INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE chat_messages ADD COLUMN completed_at INTEGER",
             "ALTER TABLE runs ADD COLUMN cancel_reason TEXT",
@@ -1840,7 +1828,7 @@ impl Store {
                     preferred_autonomy, nested_delegation, opencode_free_models, preferred_profile,
                     favorite_models, hidden_models, model_section_order,
                     collapsed_model_sections, model_sightings, hidden_agents,
-                    run_banner, experiments_grid, run_watching, seen_nudges,
+                    run_banner, run_watching, seen_nudges,
                     opencode_review_model
              FROM ui_state WHERE id = 1",
             [],
@@ -1878,7 +1866,7 @@ impl Store {
                         .and_then(Autonomy::from_id),
                     nested_delegation: row.get(9)?,
                     opencode_free_models: row.get(10)?,
-                    opencode_review_model: row.get(22)?,
+                    opencode_review_model: row.get(21)?,
                     favorite_models: list(12)?,
                     hidden_models: list(13)?,
                     hidden_agents: list(17)?,
@@ -1889,9 +1877,8 @@ impl Store {
                         .and_then(|json| serde_json::from_str(&json).ok()),
                     run_banner: RunBannerLevel::parse(&row.get::<_, String>(18)?)
                         .unwrap_or(RunBannerLevel::Strip),
-                    experiments_grid: row.get(19)?,
-                    run_watching: row.get(20)?,
-                    seen_nudges: list(21)?,
+                    run_watching: row.get(19)?,
+                    seen_nudges: list(20)?,
                 })
             },
         )?)
@@ -1908,14 +1895,6 @@ impl Store {
     pub fn set_run_watching(&self, on: bool) -> Result<()> {
         self.conn
             .execute("UPDATE ui_state SET run_watching = ?1 WHERE id = 1", [on])?;
-        Ok(())
-    }
-
-    pub fn set_experiments_grid(&self, grid: bool) -> Result<()> {
-        self.conn.execute(
-            "UPDATE ui_state SET experiments_grid = ?1 WHERE id = 1",
-            [grid],
-        )?;
         Ok(())
     }
 
@@ -2349,9 +2328,9 @@ impl Store {
             ));
         }
         tx.execute(
-            "INSERT INTO run_dismissals (chat_session_id, run_id, dismissed_at) VALUES (?1, ?2, ?3)
+            "INSERT INTO run_dismissals (chat_session_id, run_id) VALUES (?1, ?2)
              ON CONFLICT(chat_session_id, run_id) DO NOTHING",
-            params![session_id, run_id, now_ms()],
+            params![session_id, run_id],
         )?;
         tx.commit()?;
         Ok(RunDismissal::Dismissed)
@@ -3391,11 +3370,11 @@ impl Store {
         Ok(())
     }
 
-    pub(crate) fn finish_signal_collection(&self, run_id: &str, error: Option<&str>) -> Result<()> {
+    pub(crate) fn finish_signal_collection(&self, run_id: &str) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO signal_collections (run_id, done, last_error) VALUES (?1, 1, ?2)
-             ON CONFLICT(run_id) DO UPDATE SET done = 1, last_error = ?2",
-            params![run_id, error],
+            "INSERT INTO signal_collections (run_id, done) VALUES (?1, 1)
+             ON CONFLICT(run_id) DO UPDATE SET done = 1",
+            [run_id],
         )?;
         Ok(())
     }
@@ -3516,14 +3495,13 @@ impl Store {
         Ok(())
     }
 
-    pub(crate) fn defer_signal_collection(&self, run_id: &str, error: &str) -> Result<bool> {
+    pub(crate) fn defer_signal_collection(&self, run_id: &str) -> Result<bool> {
         let attempts: u32 = self.conn.query_row(
-            "UPDATE signal_collections SET attempts = attempts + 1, last_error = ?2,
-             next_attempt_at = ?3 + MIN(?4 * (1 << MIN(attempts, 10)), ?5)
+            "UPDATE signal_collections SET attempts = attempts + 1,
+             next_attempt_at = ?2 + MIN(?3 * (1 << MIN(attempts, 10)), ?4)
              WHERE run_id = ?1 RETURNING attempts",
             params![
                 run_id,
-                error,
                 now_ms(),
                 LOG_COLLECTION_RETRY_MS,
                 LOG_COLLECTION_MAX_RETRY_MS
@@ -5778,7 +5756,6 @@ pub struct StoredUiState {
     /// The picker's own record of models it has seen, opaque to the server.
     pub model_sightings: Option<serde_json::Value>,
     pub run_banner: RunBannerLevel,
-    pub experiments_grid: bool,
     /// Whether the watcher looks at runs; off, nothing is sent to a model.
     pub run_watching: bool,
     /// The ids of model feed nudges the user dismissed.
@@ -6433,14 +6410,7 @@ impl Store {
         stop: Option<&StopContext>,
     ) -> Result<Option<i64>> {
         let now = now_ms();
-        let stop = stop
-            .map(|stop| {
-                serde_json::to_string(&StopContext {
-                    at: now,
-                    ..stop.clone()
-                })
-            })
-            .transpose()?;
+        let stop = stop.map(serde_json::to_string).transpose()?;
         Ok(self.conn.query_row(
             "UPDATE runs SET cancel_accepted_at = COALESCE(cancel_accepted_at, ?2),
                              updated_at = CASE WHEN cancel_accepted_at IS NULL THEN ?2
@@ -6508,13 +6478,11 @@ impl Store {
         Ok(accepted)
     }
 
-    /// Records that the agent in `chat`, in its turn `turn`, is repairing the run's experiment
-    /// after the run stopped.
-    pub(crate) fn record_revision(&self, run_id: &str, chat: &str, turn: &str) -> Result<i64> {
+    /// Records the agent turn repairing the run's experiment after the run stopped.
+    pub(crate) fn record_revision(&self, run_id: &str, turn: &str) -> Result<()> {
         let tx = self.begin_immediate()?;
         let now = now_ms();
-        let body =
-            serde_json::json!({"runId": run_id, "chatSessionId": chat, "turnId": turn, "at": now});
+        let body = serde_json::json!({"turnId": turn});
         tx.execute(
             "INSERT INTO run_monitor_events (run_id, seq, kind, created_at, body_json)
              VALUES (?1, (SELECT COALESCE(MAX(seq), 0) + 1 FROM run_monitor_events WHERE run_id = ?1),
@@ -6522,7 +6490,7 @@ impl Store {
             params![run_id, now, body.to_string()],
         )?;
         tx.commit()?;
-        Ok(now)
+        Ok(())
     }
 
     /// Whether the agent is repairing the run's experiment after it stopped: its latest
@@ -6573,20 +6541,26 @@ impl Store {
     /// Who stopped the run, when the cancel that stopped it said; `None` for a run no one
     /// stopped, or one stopped before orx kept this.
     pub(crate) fn run_stop(&self, run_id: &str) -> Result<Option<StopContext>> {
-        let text: Option<String> = self
+        let row = self
             .conn
             .query_row(
-                "SELECT stop_context_json FROM runs WHERE id = ?1",
+                "SELECT stop_context_json, cancel_accepted_at FROM runs WHERE id = ?1",
                 [run_id],
-                |row| row.get(0),
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                    ))
+                },
             )
-            .optional()?
-            .flatten();
-        text.map(|text| {
-            serde_json::from_str(&text)
-                .map_err(|e| anyhow!("Run {run_id}'s record of who stopped it is unreadable: {e}"))
-        })
-        .transpose()
+            .optional()?;
+        let Some((Some(text), at)) = row else {
+            return Ok(None);
+        };
+        let mut stop: StopContext = serde_json::from_str(&text)
+            .map_err(|e| anyhow!("Run {run_id}'s record of who stopped it is unreadable: {e}"))?;
+        stop.at = at.with_context(|| format!("Run {run_id}'s stop has no acceptance time"))?;
+        Ok(Some(stop))
     }
 
     pub fn subscribe_run(
@@ -7678,7 +7652,7 @@ mod tests {
             store
                 .conn
                 .execute(
-                    "UPDATE runs SET stop_context_json = ?1 WHERE id = ?2",
+                    "UPDATE runs SET stop_context_json = ?1, cancel_accepted_at = 1000 WHERE id = ?2",
                     params![serde_json::to_string(&stop).unwrap(), run.id],
                 )
                 .unwrap();
@@ -9200,15 +9174,15 @@ mod tests {
         );
         assert_eq!(store.run_stop("ended").unwrap(), None);
 
-        // A newer orx's field is kept; one this orx cannot read is said to be unreadable.
+        // A newer orx's field can be ignored when reading the stop.
         store
             .conn
             .execute(
-                "UPDATE runs SET stop_context_json = '{\"by\":\"user\",\"at\":5,\"later\":1}' WHERE id = 'ended'",
+                "UPDATE runs SET stop_context_json = '{\"by\":\"user\",\"later\":1}', cancel_accepted_at = 5 WHERE id = 'ended'",
                 [],
             )
             .unwrap();
-        assert_eq!(store.run_stop("ended").unwrap().unwrap().extra["later"], 1);
+        assert_eq!(store.run_stop("ended").unwrap().unwrap().by, StopBy::User);
         store
             .conn
             .execute(
@@ -9241,9 +9215,7 @@ mod tests {
             Some("turn_1")
         );
         assert_eq!(store.active_chat_turn("chat_2").unwrap(), None);
-        store
-            .record_revision("stopped", "chat_1", "turn_1")
-            .unwrap();
+        store.record_revision("stopped", "turn_1").unwrap();
         assert!(store.run_revising(&run).unwrap());
 
         let mut live = run.clone();
@@ -9266,9 +9238,7 @@ mod tests {
         );
 
         store.put_chat_turn("chat_1", "turn_2", "running", 30);
-        store
-            .record_revision("stopped", "chat_1", "turn_2")
-            .unwrap();
+        store.record_revision("stopped", "turn_2").unwrap();
         assert!(store.run_revising(&run).unwrap());
         let mut next = run_fixture("next", "starting", None);
         next.created_at = 40;
@@ -9905,16 +9875,14 @@ mod tests {
         store.finish_log_collection("run").unwrap();
         assert!(store.signal_collection_pending("run").unwrap());
         assert_eq!(store.pending_signal_collections(true, 10).unwrap(), ["run"]);
-        store
-            .defer_signal_collection("run", "host unavailable")
-            .unwrap();
+        store.defer_signal_collection("run").unwrap();
         assert!(store
             .pending_signal_collections(true, 10)
             .unwrap()
             .is_empty());
         store.retry_signal_collections_now(Some("run")).unwrap();
         assert_eq!(store.pending_signal_collections(true, 10).unwrap(), ["run"]);
-        store.finish_signal_collection("run", None).unwrap();
+        store.finish_signal_collection("run").unwrap();
         assert!(!store.signal_collection_pending("run").unwrap());
         let directory = store.data_dir.clone();
         drop(store);
@@ -11960,7 +11928,6 @@ mod tests {
             assert_eq!(&state[key], value);
         }
         store.set_run_banner(RunBannerLevel::Line).unwrap();
-        store.set_experiments_grid(true).unwrap();
         drop(store);
         let old = Connection::open(&db).unwrap();
         old.execute("UPDATE ui_state SET preferred_harness = 'codex', preferred_model = 'test', tour_completed = 1 WHERE id = 1", []).unwrap();
@@ -11997,7 +11964,6 @@ mod tests {
                 collapsed_model_sections: Vec::new(),
                 model_sightings: None,
                 run_banner: RunBannerLevel::Strip,
-                experiments_grid: false,
                 run_watching: true,
                 seen_nudges: Vec::new(),
             }
@@ -12060,7 +12026,6 @@ mod tests {
                 collapsed_model_sections: vec!["openai".into()],
                 model_sightings: Some(serde_json::json!({"seen": ["gpt-6"]})),
                 run_banner: RunBannerLevel::Strip,
-                experiments_grid: false,
                 run_watching: true,
                 seen_nudges: vec!["2026-11-12-c081d9e1".into()],
             }

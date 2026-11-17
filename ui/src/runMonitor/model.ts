@@ -166,7 +166,7 @@ export function bindingsOf(monitor: RunMonitor, live: boolean): Record<string, S
   return bindings;
 }
 
-const unsettled = (state: Flag["state"]): state is FlagState => state !== "kept" && state !== "answered" && state !== "stopped";
+const unsettled = (state: Flag["state"]): state is FlagState => state !== "kept" && state !== "stopped";
 
 /**
  * Whether the run's summary is newer than its full monitor, which then states none of the run's facts. Newer is by

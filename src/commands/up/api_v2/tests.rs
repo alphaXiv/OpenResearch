@@ -2751,7 +2751,6 @@ async fn a_stop_keeps_who_asked_and_why() {
     let agent = store().run_stop("agent").unwrap().unwrap();
     assert_eq!(agent.by, crate::store::StopBy::Agent);
     assert_eq!(agent.reason.as_deref(), Some("Loss went NaN at step 410."));
-    assert_eq!(agent.chat_session_id.as_deref(), Some("chat-1"));
     assert_eq!(
         store().get_run("agent").unwrap().unwrap().cancel_reason.as_deref(),
         Some("Cancel requested by agent session chat-1 with `orx exp cancel`: Loss went NaN at step 410.")
@@ -3223,21 +3222,20 @@ async fn a_flag_is_settled_once_by_whoever_chooses_first() {
         .prepare_watch_look(
             "chat-1",
             "change",
-            "Claude Haiku",
             "a test",
             &[("live", "r1", "subject"), ("other", "r2", "subject")],
             1,
         )
         .unwrap();
-    let raise = |run: &str, id: &str, group: Option<String>| {
+    let raise = |run: &str, id: &str, look_id: Option<String>| {
         let run = f.api.run(run).unwrap();
-        let body = json!({"id": id, "source": "look", "group": group, "at": 1, "template": "Loss **{loss}**.",
-            "detail": "Loss **{loss}**.", "text": "Loss **2.1**.", "evidence": null, "whole": 0.5});
+        let body = json!({"id": id, "source": "look", "lookId": look_id, "at": 1, "template": "Loss **{loss}**.",
+            "text": "Loss **2.1**.", "evidence": null, "whole": 0.5});
         let flag = crate::engine::flags::new_flag(&store(), &run, body, true).unwrap();
         store().raise_flags(&[flag], 1).unwrap();
     };
-    raise("live", "f1", Some(format!("look:{look}")));
-    raise("other", "f2", Some(format!("look:{look}")));
+    raise("live", "f1", Some(look.to_string()));
+    raise("other", "f2", Some(look.to_string()));
     raise("stop", "f3", None);
     raise("done", "f4", None);
     store().set_run_status("done", "done");

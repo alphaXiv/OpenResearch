@@ -6870,7 +6870,6 @@ struct SetUiStateReq {
     collapsed_model_sections: Option<Vec<String>>,
     model_sightings: Option<Value>,
     run_banner: Option<String>,
-    experiments_grid: Option<bool>,
     run_watching: Option<bool>,
     seen_nudges: Option<Vec<String>>,
 }
@@ -7059,9 +7058,6 @@ async fn set_ui_state(
         }
         if let Some(level) = run_banner {
             store.set_run_banner(level)?;
-        }
-        if let Some(grid) = req.experiments_grid {
-            store.set_experiments_grid(grid)?;
         }
         if let Some(on) = req.run_watching {
             store.set_run_watching(on)?;
@@ -11670,7 +11666,6 @@ mod tests {
             collapsed_model_sections: Vec::new(),
             model_sightings: None,
             run_banner: crate::store::RunBannerLevel::Strip,
-            experiments_grid: false,
             run_watching: true,
             seen_nudges: Vec::new(),
             preferred_agent: Some(StoredAgentSelection {
@@ -11714,7 +11709,6 @@ mod tests {
             collapsed_model_sections: Vec::new(),
             model_sightings: None,
             run_banner: crate::store::RunBannerLevel::Strip,
-            experiments_grid: false,
             run_watching: true,
             seen_nudges: Vec::new(),
         };
@@ -11774,7 +11768,6 @@ mod tests {
             collapsed_model_sections: Vec::new(),
             model_sightings: None,
             run_banner: crate::store::RunBannerLevel::Strip,
-            experiments_grid: false,
             run_watching: true,
             seen_nudges: Vec::new(),
         };
@@ -12045,7 +12038,6 @@ mod tests {
                 collapsed_model_sections: None,
                 model_sightings: None,
                 run_banner: None,
-                experiments_grid: None,
                 run_watching: None,
                 seen_nudges: None,
             }),

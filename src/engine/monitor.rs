@@ -1495,7 +1495,6 @@ struct Published {
     fold_rev: u64,
     rev: u64,
     series_rev: u64,
-    as_of: i64,
     hash: String,
     summary: Value,
 }
@@ -1503,24 +1502,24 @@ struct Published {
 impl Published {
     /// Whatever of a pointer can be read; the counters only grow from what was stored.
     fn read(value: &Value) -> Option<Self> {
+        let summary = &value["summary"];
         value.is_object().then(|| Self {
-            generation: value["generation"].as_str().unwrap_or_default().to_owned(),
+            generation: summary["generation"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
             fold_rev: value["foldRev"].as_u64().unwrap_or_default(),
-            rev: value["rev"].as_u64().unwrap_or_default(),
+            rev: summary["rev"].as_u64().unwrap_or_default(),
             series_rev: value["seriesRev"].as_u64().unwrap_or_default(),
-            as_of: value["asOf"].as_i64().unwrap_or_default(),
             hash: value["hash"].as_str().unwrap_or_default().to_owned(),
-            summary: value["summary"].clone(),
+            summary: summary.clone(),
         })
     }
 
     fn json(&self) -> Value {
         json!({
-            "generation": self.generation,
             "foldRev": self.fold_rev,
-            "rev": self.rev,
             "seriesRev": self.series_rev,
-            "asOf": self.as_of,
             "hash": self.hash,
             "summary": self.summary,
         })
@@ -2171,7 +2170,6 @@ fn publish(
         fold_rev: 0,
         rev: 0,
         series_rev: 0,
-        as_of: 0,
         hash: String::new(),
         summary: Value::Null,
     });
@@ -2297,7 +2295,6 @@ fn project(
                 fold_rev: 0,
                 rev: 0,
                 series_rev: 0,
-                as_of: 0,
                 hash: String::new(),
                 summary: Value::Null,
             });
@@ -2348,7 +2345,6 @@ fn project(
                 fold_rev,
                 rev,
                 series_rev,
-                as_of: body["asOf"].as_i64().unwrap_or(now),
                 hash: hash.clone(),
                 summary: summary.clone(),
             };
@@ -2357,7 +2353,7 @@ fn project(
                 "runId": run.id,
                 "rev": published.rev,
                 "generation": generation,
-                "asOf": published.as_of,
+                "asOf": summary["asOf"],
                 "seriesRev": published.series_rev,
                 "appendFrom": base.series_rev,
                 "append": append.unwrap_or_else(|| json!({})),
@@ -3690,7 +3686,7 @@ mod tests {
         assert_eq!(event.unwrap()["reset"], true);
         assert!(repaired["seriesRev"].as_u64() > ticked["seriesRev"].as_u64());
         let state = f.store.run_monitor_state("r1").unwrap().unwrap();
-        assert_eq!(state["published"]["rev"], 3);
+        assert_eq!(state["published"]["summary"]["rev"], 3);
         assert_eq!(state["published"]["foldRev"], snapshot.rev);
     }
 
@@ -5118,12 +5114,12 @@ mod tests {
         let run = f.run("running", local());
         f.store.put_run_monitor_state(
             "r1",
-            &json!({"published": {"rev": 1}, "schedule": {"nextAt": 5}}),
+            &json!({"published": {"summary": {"rev": 1}}, "schedule": {"nextAt": 5}}),
         );
         publish(&f.store, &run, T0, None).unwrap();
         let stored = f.store.run_monitor_state("r1").unwrap().unwrap();
         assert_eq!(
-            stored["published"]["rev"], 2,
+            stored["published"]["summary"]["rev"], 2,
             "an unreadable pointer still only grows"
         );
         assert_eq!(stored["schedule"], json!({"nextAt": 5}));
@@ -6965,7 +6961,7 @@ mod tests {
         advance(&f.store, &run, T0).unwrap();
         assert_eq!(tone(), "stopped");
         f.store.put_chat_turn("chat", "turn", "running", T0);
-        f.store.record_revision("r1", "chat", "turn").unwrap();
+        f.store.record_revision("r1", "turn").unwrap();
         let watched = watch(&f.store, Some("r1".into()), BTreeSet::new(), None).unwrap();
         assert!(watched.contains("r1"));
         assert_eq!(tone(), "revising");
@@ -7964,8 +7960,8 @@ mod tests {
         f.collect(&folded(&declared(0..=20, 400)));
         f.collected(T0 + 20_000);
         let row = f.store.get_run("r1").unwrap().unwrap();
-        let body = json!({"id": "f1", "source": "look", "group": "look:7", "lookId": "7", "at": T0 + 19_000,
-            "whole": 0.05, "template": "Loss **{loss}** rose at step 18.", "detail": "Loss **{loss}** rose at step 18.",
+        let body = json!({"id": "f1", "source": "look", "lookId": "7", "at": T0 + 19_000,
+            "whole": 0.05, "template": "Loss **{loss}** rose at step 18.",
             "text": "Loss **2.31** rose at step 18.",
             "evidence": {"lines": ["step 18 loss 2.31"], "from": 19, "to": 19, "ident": "1-7", "byteFrom": 812, "byteTo": 830}});
         let flag = super::super::flags::new_flag(&f.store, &row, body, true).unwrap();

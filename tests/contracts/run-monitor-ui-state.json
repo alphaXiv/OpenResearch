@@ -1,4 +1,4 @@
 {
-  "defaults": {"runBanner": "strip", "experimentsGrid": false},
-  "saved": {"runBanner": "line", "experimentsGrid": true}
+  "defaults": {"runBanner": "strip"},
+  "saved": {"runBanner": "line"}
 }

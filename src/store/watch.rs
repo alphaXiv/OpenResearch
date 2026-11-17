@@ -11,12 +11,9 @@ pub(crate) struct WatchLook {
     pub kind: String,
     /// `prepared`, `sent`, `done`, `interrupted` or `error`.
     pub state: String,
-    /// The watching model as the user reads its name.
-    pub model: String,
     /// What made the look due, in words.
     pub reason: String,
     pub created_at: i64,
-    pub sent_at: Option<i64>,
     pub done_at: Option<i64>,
     pub summary_template: Option<String>,
     pub summary_text: Option<String>,
@@ -27,7 +24,6 @@ pub(crate) struct WatchLook {
 /// What one look did for one of its runs.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct WatchLookRun {
-    pub look_id: i64,
     pub run_id: String,
     /// The run's name in the look's digest and reply: `r1`, `r2`, …
     pub key: String,
@@ -44,7 +40,6 @@ pub(crate) struct WatchLookRun {
     pub basis: Value,
     /// How far the look read the run's log, and the kinds of warning it had seen.
     pub cursor: Value,
-    pub evidence: Value,
 }
 
 /// What a finished look wrote for one run.
@@ -56,17 +51,13 @@ pub(crate) struct LookResult {
     pub whole: Option<f64>,
     pub basis: Value,
     pub cursor: Value,
-    pub evidence: Value,
 }
 
 /// How many times a run's last look is taken before its failure stands.
 const TERMINAL_TRIES: i64 = 2;
 
-const SELECT_LOOK: &str =
-    "SELECT id, chat_session_id, kind, state, model, reason, created_at, sent_at, done_at,
+const SELECT_LOOK: &str = "SELECT id, chat_session_id, kind, state, reason, created_at, done_at,
         summary_template, summary_text, usage_json, error FROM watch_looks";
-const SELECT_LOOK_RUN: &str = "SELECT look_id, run_id, key, role, result, template, text, whole,
-        basis_json, cursor_json, evidence_json FROM watch_look_runs";
 
 fn row_to_look(row: &rusqlite::Row) -> rusqlite::Result<WatchLook> {
     Ok(WatchLook {
@@ -74,39 +65,35 @@ fn row_to_look(row: &rusqlite::Row) -> rusqlite::Result<WatchLook> {
         chat_session_id: row.get(1)?,
         kind: row.get(2)?,
         state: row.get(3)?,
-        model: row.get(4)?,
-        reason: row.get(5)?,
-        created_at: row.get(6)?,
-        sent_at: row.get(7)?,
-        done_at: row.get(8)?,
-        summary_template: row.get(9)?,
-        summary_text: row.get(10)?,
+        reason: row.get(4)?,
+        created_at: row.get(5)?,
+        done_at: row.get(6)?,
+        summary_template: row.get(7)?,
+        summary_text: row.get(8)?,
         usage: row
-            .get::<_, Option<String>>(11)?
+            .get::<_, Option<String>>(9)?
             .and_then(|json| serde_json::from_str(&json).ok()),
-        error: row.get(12)?,
+        error: row.get(10)?,
     })
 }
 
-fn row_to_look_run(row: &rusqlite::Row) -> rusqlite::Result<WatchLookRun> {
+fn row_to_look_run(row: &rusqlite::Row, start: usize) -> rusqlite::Result<WatchLookRun> {
     let json = |index| -> rusqlite::Result<Value> {
         Ok(row
-            .get::<_, Option<String>>(index)?
+            .get::<_, Option<String>>(start + index)?
             .and_then(|json| serde_json::from_str(&json).ok())
             .unwrap_or(Value::Null))
     };
     Ok(WatchLookRun {
-        look_id: row.get(0)?,
-        run_id: row.get(1)?,
-        key: row.get(2)?,
-        role: row.get(3)?,
-        result: row.get(4)?,
-        template: row.get(5)?,
-        text: row.get(6)?,
-        whole: row.get(7)?,
-        basis: json(8)?,
-        cursor: json(9)?,
-        evidence: json(10)?,
+        run_id: row.get(start)?,
+        key: row.get(start + 1)?,
+        role: row.get(start + 2)?,
+        result: row.get(start + 3)?,
+        template: row.get(start + 4)?,
+        text: row.get(start + 5)?,
+        whole: row.get(start + 6)?,
+        basis: json(7)?,
+        cursor: json(8)?,
     })
 }
 
@@ -116,16 +103,15 @@ impl Store {
         &self,
         chat_session_id: &str,
         kind: &str,
-        model: &str,
         reason: &str,
         runs: &[(&str, &str, &str)],
         now: i64,
     ) -> Result<i64> {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
-            "INSERT INTO watch_looks (chat_session_id, kind, state, model, reason, created_at)
-             VALUES (?1, ?2, 'prepared', ?3, ?4, ?5)",
-            params![chat_session_id, kind, model, reason, now],
+            "INSERT INTO watch_looks (chat_session_id, kind, state, reason, created_at)
+             VALUES (?1, ?2, 'prepared', ?3, ?4)",
+            params![chat_session_id, kind, reason, now],
         )?;
         let id = tx.last_insert_rowid();
         for (run_id, key, role) in runs {
@@ -139,10 +125,10 @@ impl Store {
     }
 
     /// Marks a prepared look as handed to its model; false when it was no longer prepared.
-    pub(crate) fn watch_look_sent(&self, id: i64, now: i64) -> Result<bool> {
+    pub(crate) fn watch_look_sent(&self, id: i64) -> Result<bool> {
         Ok(self.conn.execute(
-            "UPDATE watch_looks SET state = 'sent', sent_at = ?2 WHERE id = ?1 AND state = 'prepared'",
-            params![id, now],
+            "UPDATE watch_looks SET state = 'sent' WHERE id = ?1 AND state = 'prepared'",
+            [id],
         )? > 0)
     }
 
@@ -173,9 +159,12 @@ impl Store {
                 continue;
             }
             let events = self.run_flag_events(&flag.run_id)?;
-            let open = super::flags::open_flag(&events);
-            let mut body = flag.body.clone();
-            body["flagId"] = serde_json::json!(open);
+            let body = serde_json::json!({
+                "flagId": super::flags::open_flag(&events),
+                "lookId": flag.body["lookId"],
+                "text": flag.body["text"],
+                "evidence": flag.body["evidence"],
+            });
             tx.execute(
                 "INSERT INTO run_monitor_events (run_id, seq, kind, created_at, body_json)
                  VALUES (?1, (SELECT COALESCE(MAX(seq), 0) + 1 FROM run_monitor_events WHERE run_id = ?1),
@@ -205,7 +194,7 @@ impl Store {
         for result in results {
             tx.execute(
                 "UPDATE watch_look_runs SET result = ?3, template = ?4, text = ?5, whole = ?6,
-                        basis_json = ?7, cursor_json = ?8, evidence_json = ?9
+                        basis_json = ?7, cursor_json = ?8
                  WHERE look_id = ?1 AND run_id = ?2",
                 params![
                     id,
@@ -219,7 +208,6 @@ impl Store {
                     result.whole,
                     serde_json::to_string(&result.basis)?,
                     serde_json::to_string(&result.cursor)?,
-                    serde_json::to_string(&result.evidence)?,
                 ],
             )?;
         }
@@ -274,10 +262,11 @@ impl Store {
     }
 
     pub(crate) fn watch_look_runs(&self, look_id: i64) -> Result<Vec<WatchLookRun>> {
-        let mut stmt = self.conn.prepare(&format!(
-            "{SELECT_LOOK_RUN} WHERE look_id = ?1 ORDER BY key"
-        ))?;
-        let rows = stmt.query_map([look_id], row_to_look_run)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT run_id, key, role, result, template, text, whole, basis_json, cursor_json
+             FROM watch_look_runs WHERE look_id = ?1 ORDER BY key",
+        )?;
+        let rows = stmt.query_map([look_id], |row| row_to_look_run(row, 0))?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
@@ -288,35 +277,15 @@ impl Store {
         limit: usize,
     ) -> Result<Vec<(WatchLook, WatchLookRun)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT l.id, l.chat_session_id, l.kind, l.state, l.model, l.reason, l.created_at,
-                    l.sent_at, l.done_at, l.summary_template, l.summary_text, l.usage_json, l.error,
-                    r.look_id, r.run_id, r.key, r.role, r.result, r.template, r.text, r.whole,
-                    r.basis_json, r.cursor_json, r.evidence_json
+            "SELECT l.id, l.chat_session_id, l.kind, l.state, l.reason, l.created_at,
+                    l.done_at, l.summary_template, l.summary_text, l.usage_json, l.error,
+                    r.run_id, r.key, r.role, r.result, r.template, r.text, r.whole,
+                    r.basis_json, r.cursor_json
              FROM watch_look_runs r JOIN watch_looks l ON l.id = r.look_id
              WHERE r.run_id = ?1 ORDER BY l.id DESC LIMIT ?2",
         )?;
         let rows = stmt.query_map(params![run_id, limit as i64], |row| {
-            let look = row_to_look(row)?;
-            let json = |index| -> rusqlite::Result<Value> {
-                Ok(row
-                    .get::<_, Option<String>>(index)?
-                    .and_then(|json| serde_json::from_str(&json).ok())
-                    .unwrap_or(Value::Null))
-            };
-            let run = WatchLookRun {
-                look_id: row.get(13)?,
-                run_id: row.get(14)?,
-                key: row.get(15)?,
-                role: row.get(16)?,
-                result: row.get(17)?,
-                template: row.get(18)?,
-                text: row.get(19)?,
-                whole: row.get(20)?,
-                basis: json(21)?,
-                cursor: json(22)?,
-                evidence: json(23)?,
-            };
-            Ok((look, run))
+            Ok((row_to_look(row)?, row_to_look_run(row, 11)?))
         })?;
         let mut looks = rows.collect::<std::result::Result<Vec<_>, _>>()?;
         looks.reverse();

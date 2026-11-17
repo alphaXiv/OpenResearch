@@ -392,7 +392,6 @@ pub(super) async fn check(seen: &mut Seen, run: &Now, now: i64) {
             "at": now,
             "whole": run.summary["whole"],
             "template": tripped.template,
-            "detail": tripped.template,
             "text": tripped.text,
             "evidence": evidence,
         });

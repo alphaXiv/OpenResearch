@@ -55,10 +55,7 @@ fn settles(event: &FlagEvent) -> bool {
 
 /// Whether a flag's state is one no one has to act on any more.
 pub(crate) fn settled(flag: &Value) -> bool {
-    matches!(
-        flag["state"].as_str(),
-        Some("kept" | "stopped" | "answered")
-    )
+    matches!(flag["state"].as_str(), Some("kept" | "stopped"))
 }
 
 /// Where a notice that carries a flag got to: `asked` when the user's Ask sent it.
@@ -149,6 +146,10 @@ pub(crate) fn read(store: &Store, run: &StoredRun) -> Result<Vec<Value>> {
             },
         };
         let mut flag = event.body.clone();
+        flag["detail"] = flag["template"].clone();
+        if let Some(look) = flag["lookId"].as_str() {
+            flag["group"] = json!(format!("look:{look}"));
+        }
         let noted: Vec<Value> = events
             .iter()
             .filter(|e| e.kind == "noted" && e.body["flagId"] == id)
@@ -271,7 +272,7 @@ pub(crate) fn wake(run: &StoredRun, flag: &Value, asked: bool) -> String {
     let at = super::monitor::clock_text(flag["at"].as_i64().unwrap_or_default());
     let text = flag["text"]
         .as_str()
-        .or(flag["detail"].as_str())
+        .or(flag["template"].as_str())
         .unwrap_or_default()
         .replace("**", "");
     let head = if asked {
@@ -337,9 +338,8 @@ pub(crate) fn batch_text<'a>(bodies: impl Iterator<Item = &'a str>) -> String {
 
 /// The line `orx exp status` prints for the run's newest flag, filled by `fill`.
 pub(crate) fn status_line(flag: &Value, fill: impl Fn(&str) -> String) -> String {
-    let detail = flag["detail"]
+    let detail = flag["template"]
         .as_str()
-        .or(flag["template"].as_str())
         .map(|template| fill(template).replace("**", ""))
         .unwrap_or_default();
     let lines = match (

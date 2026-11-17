@@ -104,14 +104,7 @@ fn look(store: &Store, chat: &str, kind: &str, runs: &[(&str, &str)]) -> i64 {
         .map(|(id, key)| (*id, *key, "subject"))
         .collect();
     store
-        .prepare_watch_look(
-            chat,
-            kind,
-            "Claude Haiku",
-            "a test asked",
-            &rows,
-            crate::store::now_ms(),
-        )
+        .prepare_watch_look(chat, kind, "a test asked", &rows, crate::store::now_ms())
         .unwrap()
 }
 
@@ -183,7 +176,6 @@ async fn one_look_writes_each_runs_sentence_and_the_summary_through_the_agent_cl
         results[1].text.as_deref(),
         Some("Prints depth **4** though its title says 8.")
     );
-    assert_eq!(results[1].evidence, json!([{"from": 26, "to": 69}]));
     assert_eq!(
         (
             store.watch_counts("a").unwrap()[0].0.as_str(),
@@ -540,7 +532,7 @@ fn a_look_orx_stopped_after_sending_is_interrupted_and_never_sent_again() {
     let store = Store::open_at(dir).unwrap();
     let sent = look(&store, "chat", "ceiling", &[("a", "r1"), ("b", "r2")]);
     let waiting = look(&store, "chat", "manual", &[("a", "r1")]);
-    assert!(store.watch_look_sent(sent, 5).unwrap());
+    assert!(store.watch_look_sent(sent).unwrap());
 
     let prepared = store.recover_watch_looks(10).unwrap();
 
@@ -558,7 +550,7 @@ fn a_look_orx_stopped_after_sending_is_interrupted_and_never_sent_again() {
         .iter()
         .all(|run| run.result.as_deref() == Some("interrupted")));
     assert!(
-        !store.watch_look_sent(sent, 11).unwrap(),
+        !store.watch_look_sent(sent).unwrap(),
         "an interrupted look is not sent again"
     );
 }
@@ -694,7 +686,7 @@ fn a_last_look_that_failed_is_taken_once_more_and_then_its_failure_stands() {
             store.run_watch_terminal_done("a").unwrap(),
             "one is under way"
         );
-        store.watch_look_sent(id, 1).unwrap();
+        store.watch_look_sent(id).unwrap();
         let results = unanswered(&store.watch_look_runs(id).unwrap(), result);
         store
             .finish_watch_look(id, "error", 2, None, Some("timed out"), None, &results, &[])
@@ -712,7 +704,6 @@ fn a_last_look_that_failed_is_taken_once_more_and_then_its_failure_stands() {
     store.upsert_run(&ended).unwrap();
     let owned = Owned {
         chat: store.get_chat_session("chat").unwrap().unwrap(),
-        model: "Claude Haiku".into(),
         runs: vec![(Now::read(&store, &ended).unwrap(), Vec::new())],
     };
     let planned = |now: i64| {
@@ -740,7 +731,7 @@ fn a_last_look_that_failed_is_taken_once_more_and_then_its_failure_stands() {
 
     run(&store, "b", "Depth 8", "chat", LOG);
     let id = look(&store, "chat", "terminal", &[("b", "r1")]);
-    store.watch_look_sent(id, 1).unwrap();
+    store.watch_look_sent(id).unwrap();
     let mut results = unanswered(&store.watch_look_runs(id).unwrap(), "same");
     results[0].template = Some("Done.".into());
     store
@@ -1195,7 +1186,7 @@ async fn a_change_in_real_output_asks_for_a_look_before_the_first_and_after_a_se
         "a healthy start asks nothing"
     );
     let id = look(&store, "chat", "ceiling", &[("seed-5", "r1")]);
-    store.watch_look_sent(id, 1).unwrap();
+    store.watch_look_sent(id).unwrap();
     let template = "Training, **8** of 150 epochs in.";
     let result = LookResult {
         run_id: "seed-5".into(),
@@ -1205,7 +1196,6 @@ async fn a_change_in_real_output_asks_for_a_look_before_the_first_and_after_a_se
         whole: None,
         basis: basis_of(&now, Some(template), &Map::new(), false),
         cursor: Value::Null,
-        evidence: json!([]),
     };
     store
         .finish_watch_look(id, "done", 2, None, None, None, &[result], &[])
@@ -1349,7 +1339,7 @@ fn the_question_leads_until_the_current_stages_chart_can_answer_it() {
     assert_eq!(bound_signals(&body, &summary), ["val_bpb", "loss"]);
 
     for state in ["raised", "waiting", "asking"] {
-        body["flag"] = json!({"state": state, "detail": "Tokens/s **{tok_per_sec}** fell."});
+        body["flag"] = json!({"state": state, "template": "Tokens/s **{tok_per_sec}** fell."});
         assert_eq!(
             bound_signals(&body, &summary),
             ["val_bpb", "loss", "tok_per_sec"]
@@ -1389,7 +1379,7 @@ async fn side_stats_wake_only_for_far_worse_parent_comparisons() {
     assert!(basis["signals"].get("tok_per_sec").is_none());
     assert!(basis["parent"].get("tok_per_sec").is_some());
     let id = look(&store, "chat", "ceiling", &[("seed", "r1")]);
-    store.watch_look_sent(id, 1).unwrap();
+    store.watch_look_sent(id).unwrap();
     store
         .finish_watch_look(
             id,
@@ -1406,7 +1396,6 @@ async fn side_stats_wake_only_for_far_worse_parent_comparisons() {
                 whole: None,
                 basis,
                 cursor: Value::Null,
-                evidence: json!([]),
             }],
             &[],
         )
@@ -1674,7 +1663,7 @@ fn an_open_flags_signal_stays_bound_when_three_headlines_have_values() {
     let mut body = json!({
         "view": {"headline": ["loss", "accuracy", "val_bpb"]},
         "latest": {"loss": 2.0, "accuracy": 0.9, "val_bpb": 1.5, "tok_per_sec": 1000},
-        "flag": {"state": "raised", "detail": "Throughput **{tok_per_sec}** fell."}
+        "flag": {"state": "raised", "template": "Throughput **{tok_per_sec}** fell."}
     });
     for state in ["raised", "waiting", "asked"] {
         body["flag"]["state"] = json!(state);

@@ -776,7 +776,6 @@ pub(crate) fn flag(trip: &Trip, whole: Value, now: i64) -> Value {
         "at": now,
         "whole": whole,
         "template": format!("Rule **{name}** asks: {}.", plain(&trip.evidence)),
-        "detail": format!("Rule **{name}** asks: {}.", plain(&trip.evidence)),
         "text": format!("{}.", trip.evidence),
         "evidence": null,
     })

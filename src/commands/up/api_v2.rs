@@ -691,7 +691,7 @@ async fn revise(
             format!("Chat {chat} has no turn going, so nothing would be revising run {id}."),
         ));
     };
-    store.record_revision(&id, chat, &turn)?;
+    store.record_revision(&id, &turn)?;
     // Projected now so this answer and every list says Revising; the monitor task then follows
     // the run until its revision ends.
     crate::engine::monitor::advance(&store, &run, crate::store::now_ms())?;
@@ -888,7 +888,6 @@ fn plan_choice(
             "by": if chat.is_some() { "agent" } else { "user" },
             "reason": request.reason.as_deref().map(str::trim),
             "requestId": request.request_id,
-            "chatSessionId": chat,
         })
     };
     let mut choices = vec![crate::store::FlagChoice {
@@ -900,14 +899,9 @@ fn plan_choice(
     if choice == "ask" && chat.is_none() {
         // Ask covers every open flag the same look raised, so the agent weighs them together.
         let mut asked = vec![(run.clone(), flag.clone())];
-        if let Some(look) = flag["group"]
-            .as_str()
-            .and_then(|group| group.strip_prefix("look:"))
-        {
-            let rows = look
-                .parse()
-                .map_or(Ok(Vec::new()), |look| store.watch_look_runs(look));
-            for row in rows
+        if let Some(look) = flag["lookId"].as_str().and_then(|look| look.parse().ok()) {
+            for row in store
+                .watch_look_runs(look)
                 .map_err(failed)?
                 .into_iter()
                 .filter(|row| row.run_id != id)
@@ -918,7 +912,7 @@ fn plan_choice(
                 let theirs = flags::read(store, &other).map_err(failed)?;
                 if let Some(open) = theirs
                     .iter()
-                    .find(|f| f["group"] == flag["group"] && !flags::settled(f))
+                    .find(|f| f["lookId"] == flag["lookId"] && !flags::settled(f))
                 {
                     choices.push(crate::store::FlagChoice {
                         run_id: other.id.clone(),

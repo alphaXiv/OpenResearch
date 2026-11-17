@@ -376,8 +376,6 @@ impl Scan {
 /// One chat's runs at one pass, and why each might need a look.
 struct Owned {
     chat: StoredChatSession,
-    /// The watching model's name.
-    model: String,
     runs: Vec<(Now, Vec<(String, String)>)>,
 }
 
@@ -716,7 +714,7 @@ async fn pass(state: &mut State) -> Result<()> {
                 }
             }
             let watched = match found {
-                Ok((chat, Watching::Selected { label, .. })) => Some((chat, label)),
+                Ok((chat, Watching::Selected { .. })) => Some(chat),
                 _ => None,
             };
             let watched = if !live && store.run_watch_terminal_done(&run.id)? {
@@ -731,7 +729,7 @@ async fn pass(state: &mut State) -> Result<()> {
                     continue;
                 }
             };
-            let Some((chat, label)) = watched else {
+            let Some(chat) = watched else {
                 unwatched.push(now_run);
                 continue;
             };
@@ -739,7 +737,6 @@ async fn pass(state: &mut State) -> Result<()> {
                 .entry(chat.id.clone())
                 .or_insert_with(|| Owned {
                     chat,
-                    model: label,
                     runs: Vec::new(),
                 })
                 .runs
@@ -813,14 +810,7 @@ async fn pass(state: &mut State) -> Result<()> {
                     .iter()
                     .map(|(run, key, role)| (run.as_str(), key.as_str(), *role))
                     .collect();
-                store.prepare_watch_look(
-                    &chat_id,
-                    planned.kind,
-                    &owned.model,
-                    &planned.reason,
-                    &rows,
-                    now,
-                )?;
+                store.prepare_watch_look(&chat_id, planned.kind, &planned.reason, &rows, now)?;
             }
         }
         start.push(chat_id);
@@ -1364,7 +1354,7 @@ fn bound_signals(body: &Value, summary: &Value) -> Vec<String> {
     let mut retained = Vec::new();
     let flag = &body["flag"];
     if flag.is_object() && !super::flags::settled(flag) {
-        let flagged = flag["template"].as_str().or(flag["detail"].as_str());
+        let flagged = flag["template"].as_str();
         for (_, token) in flagged
             .and_then(|text| reply::tokens(text, false).ok())
             .unwrap_or_default()
@@ -1819,7 +1809,7 @@ pub(crate) fn look_now(store: &Store, run: &StoredRun) -> std::result::Result<Va
         Ok(found) => found,
         Err(watching) => return Err(LookNow::NotWatched(not_watched(&watching))),
     };
-    let Watching::Selected { label, .. } = &watching else {
+    let Watching::Selected { .. } = &watching else {
         return Err(LookNow::NotWatched(not_watched(&watching)));
     };
     let now = crate::store::now_ms();
@@ -1861,14 +1851,7 @@ pub(crate) fn look_now(store: &Store, run: &StoredRun) -> std::result::Result<Va
         .map(|(id, key)| (id.as_str(), key.as_str(), "subject"))
         .collect();
     let id = store
-        .prepare_watch_look(
-            &chat.id,
-            "manual",
-            label,
-            "You asked for a look",
-            &rows,
-            now,
-        )
+        .prepare_watch_look(&chat.id, "manual", "You asked for a look", &rows, now)
         .map_err(LookNow::Failed)?;
     wake().notify_one();
     Ok(json!({"lookId": id, "state": "prepared"}))
@@ -2328,7 +2311,7 @@ async fn take(id: i64) -> Result<()> {
 
     {
         let store = Store::open()?;
-        if !store.watch_look_sent(id, crate::store::now_ms())? {
+        if !store.watch_look_sent(id)? {
             return Ok(());
         }
     }
@@ -2459,13 +2442,6 @@ async fn take(id: i64) -> Result<()> {
                 mult.insert(check.to_owned(), json!(was * 2.0));
             }
         }
-        let evidence = match read.runs.get(&row.key) {
-            Some(reply::Answer::Line { evidence, .. }) => json!(evidence
-                .iter()
-                .map(|(from, to)| json!({"from": from, "to": to}))
-                .collect::<Vec<_>>()),
-            _ => json!([]),
-        };
         let cursor = match (result, read_log) {
             ("error", _) | (_, Err(_)) => last.map_or(Value::Null, |(_, row)| row.cursor.clone()),
             (_, Ok(read)) => {
@@ -2555,12 +2531,10 @@ async fn take(id: i64) -> Result<()> {
             let body = json!({
                 "id": super::flags::new_id(),
                 "source": "look",
-                "group": format!("look:{id}"),
                 "lookId": id.to_string(),
                 "at": now,
                 "whole": whole,
                 "template": template,
-                "detail": template,
                 "text": text,
                 "evidence": cited,
             });
@@ -2584,7 +2558,6 @@ async fn take(id: i64) -> Result<()> {
             text,
             whole,
             cursor,
-            evidence,
         });
     }
     if let Some(reply::Answer::Line { template, .. }) = &read.summary {
@@ -2659,7 +2632,7 @@ fn kept_after(store: &Store, run: &str) -> Result<Vec<Value>> {
                 .find(|event| event.kind == "flag" && event.body["id"] == choice.body["flagId"])?;
             let said = flag.body["text"]
                 .as_str()
-                .or(flag.body["detail"].as_str())?;
+                .or(flag.body["template"].as_str())?;
             Some(json!({
                 "flagged": said.replace("**", ""),
                 "keptBy": choice.body["by"],
@@ -2696,7 +2669,6 @@ fn unanswered(rows: &[WatchLookRun], result: &str) -> Vec<LookResult> {
             whole: None,
             basis: Value::Null,
             cursor: Value::Null,
-            evidence: json!([]),
         })
         .collect()
 }

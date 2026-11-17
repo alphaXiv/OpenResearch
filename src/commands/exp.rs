@@ -669,7 +669,6 @@ pub(crate) fn exp_cancel_stop(
     };
     let stop = crate::store::StopContext {
         reason: reason.map(str::to_owned),
-        chat_session_id: chat_session_id.map(str::to_owned),
         ..crate::store::StopContext::by(by)
     };
     Ok((words, stop))

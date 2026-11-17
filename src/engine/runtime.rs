@@ -862,7 +862,7 @@ impl Runtime {
         };
         let collected = async {
             let Some(handle) = handle_of(&run) else {
-                self.store()?.finish_signal_collection(run_id, None)?;
+                self.store()?.finish_signal_collection(run_id)?;
                 return self.store()?.finish_log_collection(run_id);
             };
             let data_as_of = run.ended_at.unwrap_or(self.engine.clock.wall_ms());
@@ -1054,7 +1054,7 @@ impl Runtime {
             }
             SignalNext::Settle(None) => {
                 super::adapters::signals::availability(&self.data_dir, &run.id, "cached", None)?;
-                self.store()?.finish_signal_collection(&run.id, None)?;
+                self.store()?.finish_signal_collection(&run.id)?;
             }
             SignalNext::Settle(Some(cause)) => {
                 let cause = cause.trim_end_matches(['.', ' ']);
@@ -1072,8 +1072,7 @@ impl Runtime {
                         run.id, run.id
                     ),
                 )?;
-                self.store()?
-                    .finish_signal_collection(&run.id, Some(cause))?;
+                self.store()?.finish_signal_collection(&run.id)?;
             }
             SignalNext::Retry(cause) => bail!("{cause}"),
             SignalNext::Release => {
@@ -1085,7 +1084,7 @@ impl Runtime {
 
     /// Keeps the signal debt open; like the log debt, its seventh failure tells the chat once.
     fn defer_signals(&self, run: &WatchedRun, cause: &str) -> Result<()> {
-        if self.store()?.defer_signal_collection(&run.id, cause)? {
+        if self.store()?.defer_signal_collection(&run.id)? {
             let host = match Key::of_handle(&run.handle) {
                 Ok(Key::Ssh { host, .. } | Key::Slurm { host, .. }) => host,
                 Ok(Key::Local) => "this computer".into(),
@@ -4237,9 +4236,7 @@ mod tests {
         keep(dir.path(), &[(0, &log, true)]);
         {
             let store = runtime.store().unwrap();
-            store
-                .defer_signal_collection("run", "an earlier failure")
-                .unwrap();
+            store.defer_signal_collection("run").unwrap();
             assert!(store
                 .pending_signal_collections(true, 10)
                 .unwrap()

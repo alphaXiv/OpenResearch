@@ -151,7 +151,7 @@ export interface Flag {
   template: string;
   detail: string;
   evidence: Evidence | null;
-  state: FlagState | "kept" | "answered" | "stopped";
+  state: FlagState | "kept" | "stopped";
   mode: FlagMode;
   /** The choice that settled it, or the last that sent it to someone; absent from an older server. */
   choice?: {
