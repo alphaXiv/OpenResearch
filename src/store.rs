@@ -6438,12 +6438,33 @@ impl Store {
         events: &[serde_json::Value],
         flags: &[NewFlag],
         stop: Option<(&str, &StopContext)>,
+        fresh: impl FnOnce(&Self) -> Result<bool>,
     ) -> Result<Option<i64>> {
         let mut lock = stop
             .map(|_| open_lifecycle_lock_at(&self.run_lock_path(CANCEL_LOCK, run_id)?))
             .transpose()?;
         let _guard = lock.as_mut().map(|lock| lock.write()).transpose()?;
         let tx = self.begin_immediate()?;
+        let contact = tx
+            .query_row(
+                "SELECT contact FROM runs WHERE id = ?1 AND status = 'running'
+             AND cancel_requested = 0 AND cancel_accepted_at IS NULL",
+                [run_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?;
+        let Some(contact) = contact else {
+            return Ok(None);
+        };
+        if contact
+            .as_deref()
+            .map(serde_json::from_str::<Contact>)
+            .transpose()?
+            .is_some_and(|contact| contact != Contact::Live)
+            || !fresh(self)?
+        {
+            return Ok(None);
+        }
         let now = now_ms();
         let accepted = match stop {
             Some((reason, stop)) => {

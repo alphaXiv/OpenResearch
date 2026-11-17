@@ -116,6 +116,23 @@ pub struct Detectors {
     pub extra: BTreeMap<String, Value>,
 }
 
+pub const MAX_RULE_REPORTS: u64 = 256;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MetricReport {
+    pub x: Option<f64>,
+    pub value: Option<f64>,
+    pub non_finite: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MetricReports {
+    /// Total in this epoch, including reports that have fallen out of the tail.
+    pub seen: u64,
+    pub tail: std::collections::VecDeque<MetricReport>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
@@ -127,6 +144,11 @@ pub struct Snapshot {
     pub coverage: Coverage,
     pub latest: Signals,
     pub series: BTreeMap<String, Vec<Point>>,
+    /// Byte offset of the last discontinuity in the report stream.
+    #[serde(default)]
+    pub report_epoch: u64,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metric_reports: BTreeMap<String, MetricReports>,
     pub rows: BTreeMap<String, Vec<Signals>>,
     pub row_order: Vec<String>,
     pub row_columns: BTreeMap<String, Vec<String>>,
@@ -278,6 +300,8 @@ impl Snapshot {
             coverage: Coverage::default(),
             latest: BTreeMap::new(),
             series: BTreeMap::new(),
+            report_epoch: 0,
+            metric_reports: BTreeMap::new(),
             rows: BTreeMap::new(),
             row_order: Vec::new(),
             row_columns: BTreeMap::new(),
@@ -399,6 +423,9 @@ impl Snapshot {
             .map_err(|e| e.to_string())?
             .len();
         let before = self.cursor.offset;
+        if self.coverage.ranges.last().is_some_and(|r| r.1 != before) {
+            self.reset_reports();
+        }
         let was_terminal = self
             .extra
             .get("terminal")
@@ -653,6 +680,15 @@ impl Snapshot {
             self.timing.payload_t = time;
         }
         if duplicate && !origin {
+            // Separate log frames can report the same point without adding it to the chart.
+            if let Some(metrics) = record.get("m").and_then(Value::as_object) {
+                let x = self.progress().and_then(|phase| phase.done);
+                for (name, value) in metrics {
+                    if self.latest.get(name) == Some(value) {
+                        self.record_metric(name, x, value);
+                    }
+                }
+            }
             return;
         }
         let phase = record
@@ -716,6 +752,9 @@ impl Snapshot {
                     self.bad_field("step_regression");
                     out_of_order = true;
                 } else {
+                    if step < old && restated {
+                        self.reset_reports();
+                    }
                     if step != old || origin {
                         self.coordinate_report.clear();
                     }
@@ -841,6 +880,7 @@ impl Snapshot {
                         self.signal_order.push(name.clone());
                     }
                     self.latest.insert(name.clone(), value.clone());
+                    self.record_metric(name, x, value);
                     let Some(x) = x else {
                         continue;
                     };
@@ -940,6 +980,25 @@ impl Snapshot {
         }
     }
 
+    fn reset_reports(&mut self) {
+        self.report_epoch = self.cursor.frame_start;
+        self.metric_reports.clear();
+    }
+
+    fn record_metric(&mut self, name: &str, x: Option<f64>, value: &Value) {
+        let reports = self.metric_reports.entry(name.to_owned()).or_default();
+        // A plateau window also needs a report before it.
+        if reports.tail.len() as u64 > MAX_RULE_REPORTS {
+            reports.tail.pop_front();
+        }
+        reports.seen += 1;
+        reports.tail.push_back(MetricReport {
+            x,
+            value: value.as_f64(),
+            non_finite: matches!(value.as_str(), Some("NaN" | "Infinity" | "-Infinity")),
+        });
+    }
+
     /// A relaunch that kept its total redoes the steps after `step`: the points the old stretch
     /// plotted there go, so each step shows once. Points of an earlier phase end below them.
     fn redo_after(&mut self, step: f64, high: f64) {
@@ -960,6 +1019,7 @@ impl Snapshot {
     /// points before it. The report says where the run is: its step and total replace what was
     /// known, even a lower step, which is out-of-order noise in any other report.
     fn new_origin(&mut self, source: &str, phase: Option<&str>, unexpected: bool) {
+        self.reset_reports();
         if unexpected {
             self.diagnose(
                 "t_origin",
@@ -1045,6 +1105,7 @@ impl Snapshot {
     }
 
     fn begin_phase(&mut self, name: &str, source: &str, now: i64, observed: bool) {
+        self.reset_reports();
         let occurrence = self
             .phases
             .last()

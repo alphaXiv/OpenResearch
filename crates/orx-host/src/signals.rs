@@ -178,6 +178,15 @@ pub fn load(path: &Path) -> io::Result<Option<Snapshot>> {
         || snapshot.phases.len() > 64
         || snapshot.series.values().any(|p| p.len() > 2048)
         || snapshot
+            .metric_reports
+            .keys()
+            .any(|name| !snapshot.latest.contains_key(name))
+        || snapshot.metric_reports.values().any(|reports| {
+            let retained = reports.tail.len() as u64;
+            retained > orx_signals::MAX_RULE_REPORTS + 1 || retained > reports.seen
+        })
+        || snapshot.report_epoch > snapshot.cursor.offset
+        || snapshot
             .series_widths
             .values()
             .any(|width| !width.is_finite() || *width <= 0.0)

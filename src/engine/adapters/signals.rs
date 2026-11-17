@@ -278,14 +278,7 @@ async fn collect_from(
             bail!("{reason}");
         }
         let clock = clock.filter(|_| accepted);
-        collected(
-            data,
-            &run.id,
-            now,
-            snapshot.source_complete(),
-            changed,
-            clock,
-        )?;
+        collected(data, &snapshot, now, changed, clock, accepted)?;
         return Ok(complete);
     }
     let held = previous;
@@ -459,17 +452,8 @@ async fn collect_from(
         }
         apply_incomplete(data, &run.id, &mut snapshot)?;
         let changed = !resume || snapshot.rev != before_rev || snapshot.coverage != before_coverage;
-        if changed {
-            publish(&path, &snapshot)?;
-        }
-        collected(
-            data,
-            &run.id,
-            now,
-            snapshot.source_complete(),
-            changed,
-            None,
-        )?;
+        let accepted = !changed || publish(&path, &snapshot)?;
+        collected(data, &snapshot, now, changed, None, accepted)?;
         if stop {
             break;
         }
@@ -515,25 +499,37 @@ pub(crate) fn availability(
 /// new rewrites at most once a minute, so the time never trails the data it brought.
 fn collected(
     data: &Path,
-    run: &str,
+    snapshot: &Snapshot,
     now: i64,
-    complete: bool,
     changed: bool,
     clock: Option<(i64, i64)>,
+    accepted: bool,
 ) -> Result<()> {
+    let run = &snapshot.run_id;
     let previous = read_availability(data, run)?.unwrap_or_else(|| serde_json::json!({}));
     let mut status = previous.clone();
-    if status["state"] != "incomplete" || complete {
+    if status["state"] != "incomplete" || snapshot.source_complete() {
         status["state"] = serde_json::json!("cached");
         status["reason"] = serde_json::Value::Null;
     }
+    let checkpoint = if accepted {
+        serde_json::json!([snapshot.generation, snapshot.rev])
+    } else {
+        serde_json::Value::Null
+    };
     let recent = previous["lastCollectedAt"]
         .as_i64()
         .is_some_and(|at| (0..60_000).contains(&(now - at)));
-    if status == previous && recent && !changed {
+    if status == previous && recent && !changed && status["sample"]["checkpoint"] == checkpoint {
         return Ok(());
     }
     status["lastCollectedAt"] = serde_json::json!(now);
+    if accepted {
+        let at = clock.map_or(now, |(_, laptop)| laptop);
+        status["sample"] = serde_json::json!({"checkpoint": checkpoint, "at": at});
+    } else if let Some(status) = status.as_object_mut() {
+        status.remove("sample");
+    }
     if let Some(clock) = clock {
         status["clock"] = serde_json::json!(clock);
     }
@@ -900,11 +896,11 @@ mod collection_tests {
         publish(&path, &held).unwrap();
         collected(
             data.path(),
-            "run",
+            &held,
             5000,
-            false,
             true,
             Some((5000 + DAY, 5000)),
+            true,
         )
         .unwrap();
         let run = WatchedRun {
@@ -1318,14 +1314,14 @@ mod collection_tests {
         snapshot.updated_at = 123;
         snapshot.latest.insert("loss".into(), serde_json::json!(2));
         publish(&path, &snapshot).unwrap();
-        collected(data.path(), "r1", 500, false, true, Some((123, 500))).unwrap();
+        collected(data.path(), &snapshot, 500, true, Some((123, 500)), true).unwrap();
         availability(data.path(), "r1", "stale", Some("host disconnected")).unwrap();
         let (cached, status) = cached(data.path(), "r1");
         assert_eq!(cached.unwrap().latest["loss"], 2);
         assert_eq!(status["lastCollectedAt"], 500);
         assert_eq!(clock(data.path(), "r1").unwrap(), Some((123, 500)));
         assert_eq!(status["state"], "stale");
-        collected(data.path(), "r1", 90_000, false, false, None).unwrap();
+        collected(data.path(), &snapshot, 90_000, false, None, true).unwrap();
         let (_, status) = super::cached(data.path(), "r1");
         assert_eq!(status["lastCollectedAt"], 90_000);
         assert_eq!(
@@ -1554,11 +1550,11 @@ mod collection_tests {
             .unwrap();
         collected(
             data.path(),
-            "r1",
+            &load(&path).unwrap().unwrap(),
             1000,
-            false,
             true,
             Some((1000 + DAY, 1000)),
+            true,
         )
         .unwrap();
         backend
@@ -1750,6 +1746,22 @@ mod collection_tests {
         assert_eq!(
             clock(data.path(), "r1").unwrap(),
             Some((host(after_outage), after_outage))
+        );
+
+        let delivered_at = after_outage + 120_000;
+        answers
+            .0
+            .lock()
+            .unwrap()
+            .push_back(Ok((folded, after_outage)));
+        collect(data.path(), &answers, &run, false, delivered_at)
+            .await
+            .unwrap();
+        let status = read_availability(data.path(), "r1").unwrap().unwrap();
+        assert_eq!(status["lastCollectedAt"], delivered_at);
+        assert_eq!(
+            status["sample"]["at"], after_outage,
+            "transfer took two minutes"
         );
     }
 

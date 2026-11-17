@@ -1,13 +1,13 @@
 //! Stop rules: conditions an agent declares on an experiment, frozen on each run at launch and
 //! checked by `orx up` on each report the run makes, with no model involved.
 
+use orx_signals::{MetricReport, MAX_RULE_REPORTS};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 const MAX_RULES: usize = 32;
 const MAX_NAME: usize = 64;
 const MAX_TEXT: usize = 280;
-const MAX_REPORTS: u64 = 256;
 const MAX_SECONDS: u64 = 30 * 24 * 3600;
 const KINDS: &str =
     "nonFinite, compare, noImprovement, worseThanParent, noProgress, costAbove, projectedFinishPastLimit";
@@ -381,9 +381,9 @@ fn parse_when(when: &Map<String, Value>) -> Result<When, String> {
 fn count(value: &Value, name: &str) -> Result<u64, String> {
     value
         .as_u64()
-        .filter(|count| (1..=MAX_REPORTS).contains(count))
+        .filter(|count| (1..=MAX_RULE_REPORTS).contains(count))
         .ok_or(format!(
-            "\"{name}\" must be a whole number from 1 to {MAX_REPORTS}"
+            "\"{name}\" must be a whole number from 1 to {MAX_RULE_REPORTS}"
         ))
 }
 
@@ -415,7 +415,13 @@ pub(crate) fn freeze(
     let mut rules = stored(experiment, settings)?;
     if let Some(usd) = budget_usd {
         rules.retain(|rule| rule.name != BUDGET);
-        rules.push(budget(usd).map_err(|why| crate::error::anyhow!("{why}"))?);
+        let budget = budget(usd).map_err(|why| crate::error::anyhow!("{why}"))?;
+        if rules.len() == MAX_RULES {
+            crate::error::bail!(
+                "Experiment {experiment} already has {MAX_RULES} rules. Remove a rule with `orx exp view set {experiment} --config PATH` or launch without `--budget`."
+            );
+        }
+        rules.push(budget);
     }
     Ok((!rules.is_empty())
         .then(|| json!({"rules": rules.iter().map(Rule::json).collect::<Vec<_>>()}).to_string()))
@@ -437,9 +443,9 @@ pub(crate) fn frozen(run: &str, config: Option<&str>) -> crate::error::Result<Ve
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Count {
-    /// Where on the signal's axis the last report this rule counted was.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    after: Option<f64>,
+    /// How many reports of this signal have been read in the epoch.
+    #[serde(default)]
+    after: u64,
     /// The checkpoint revision a rule on the estimate last counted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     rev: Option<u64>,
@@ -450,7 +456,7 @@ struct Count {
     since: Option<f64>,
     /// No improvement: the reports in its window, and the best before them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    window: Vec<(f64, Option<f64>)>,
+    window: Vec<(Option<f64>, Option<f64>)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     best: Option<f64>,
     /// The rule acted; it never acts again on this run.
@@ -492,13 +498,20 @@ const REVISIONS_BEFORE_PROJECTING: u64 = 2;
 /// Counts the reports the run made since the rules last looked, and trips each rule whose
 /// condition holds once they are counted, so a value that has already recovered stops nothing.
 /// `counts` is what the run's monitor state kept. `None` when nothing changed.
-pub(crate) fn check(rules: &[Rule], counts: Option<&Value>, facts: &Facts) -> Option<Checked> {
-    let mut kept: Map<String, Value> = counts
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
+pub(crate) fn check(rules: &[Rule], state: Option<&Value>, facts: &Facts) -> Option<Checked> {
+    let mut state = match state {
+        Some(state) => state.as_object()?.clone(),
+        None => Map::new(),
+    };
+    let mut kept = match state.remove("counts") {
+        Some(Value::Object(counts)) => counts,
+        Some(_) => return None,
+        None => Map::new(),
+    };
+    let basis = json!([facts.snapshot.generation, facts.snapshot.report_epoch]);
+    let reset = state.get("basis") != Some(&basis);
     let mut trips = Vec::new();
-    let mut changed = false;
+    let mut changed = reset;
     for rule in rules {
         // A count this orx cannot read is left as it is: acting on it could stop a run twice.
         let was: Count = match kept.get(&rule.name).map(Count::deserialize) {
@@ -509,7 +522,14 @@ pub(crate) fn check(rules: &[Rule], counts: Option<&Value>, facts: &Facts) -> Op
         if was.tripped {
             continue;
         }
-        let mut count = was.clone();
+        let mut count = if reset {
+            Count {
+                extra: was.extra.clone(),
+                ..Count::default()
+            }
+        } else {
+            was.clone()
+        };
         if let Some(evidence) = step(rule, &mut count, facts) {
             count.tripped = true;
             trips.push(Trip {
@@ -522,9 +542,13 @@ pub(crate) fn check(rules: &[Rule], counts: Option<&Value>, facts: &Facts) -> Op
             kept.insert(rule.name.clone(), json!(count));
         }
     }
-    changed.then(|| Checked {
-        counts: Value::Object(kept),
-        trips,
+    changed.then(|| {
+        state.insert("basis".into(), basis);
+        state.insert("counts".into(), Value::Object(kept));
+        Checked {
+            counts: Value::Object(state),
+            trips,
+        }
     })
 }
 
@@ -535,27 +559,36 @@ fn step(rule: &Rule, count: &mut Count, facts: &Facts) -> Option<String> {
         Some("step") => format!("step {}", super::monitor::number(x)),
         _ => format!("{} in", super::monitor::short((x * 1000.0) as i64)),
     };
-    let span = |count: &Count, last: f64| match count.since {
-        Some(since) if count.held > 1 => format!(
-            "on {} reports in a row, {} to {}",
-            count.held,
-            at(since),
-            at(last).trim_start_matches("step ")
-        ),
-        _ => format!("at {}", at(last)),
+    let span = |count: &Count, last: Option<f64>| {
+        if count.held > 1 {
+            let streak = format!("on {} reports in a row", count.held);
+            return match count.since.zip(last) {
+                Some((first, last)) => {
+                    format!(
+                        "{streak}, {} to {}",
+                        at(first),
+                        at(last).trim_start_matches("step ")
+                    )
+                }
+                None => streak,
+            };
+        }
+        last.map_or_else(
+            || "on its latest report".into(),
+            |last| format!("at {}", at(last)),
+        )
     };
     let value = |value: f64| super::monitor::measure(value, &Value::Null);
     match &rule.when {
         When::NonFinite { signal, reports } => {
-            let fresh = fresh(facts, signal, count);
-            let last = fresh.last()?.0;
-            for (x, y) in fresh {
-                held(count, x, y.is_none());
+            let (last, fresh) = fresh(facts, signal, count)?;
+            for report in fresh {
+                held(count, report.x, report.non_finite);
             }
             let word = facts.snapshot.latest[signal.as_str()]
                 .as_str()
                 .unwrap_or("not a finite number");
-            (count.held >= *reports).then(|| format!("{signal} was {word} {}", span(count, last)))
+            (count.held >= *reports).then(|| format!("{signal} was {word} {}", span(count, last.x)))
         }
         When::Compare {
             signal,
@@ -563,16 +596,15 @@ fn step(rule: &Rule, count: &mut Count, facts: &Facts) -> Option<String> {
             value: bound,
             reports,
         } => {
-            let fresh = fresh(facts, signal, count);
-            let (last, newest) = *fresh.last()?;
-            for (x, y) in fresh {
-                let holds = y.is_some_and(|y| match op {
+            let (last, fresh) = fresh(facts, signal, count)?;
+            for report in fresh {
+                let holds = report.value.is_some_and(|y| match op {
                     Op::Lt => y < *bound,
                     Op::Le => y <= *bound,
                     Op::Gt => y > *bound,
                     Op::Ge => y >= *bound,
                 });
-                held(count, x, holds);
+                held(count, report.x, holds);
             }
             let word = match op {
                 Op::Lt => "below",
@@ -583,9 +615,9 @@ fn step(rule: &Rule, count: &mut Count, facts: &Facts) -> Option<String> {
             (count.held >= *reports).then(|| {
                 format!(
                     "{signal} was {} ({word} {}) {}",
-                    newest.map_or("not a number".into(), value),
+                    last.value.map_or("not a number".into(), value),
                     value(*bound),
-                    span(count, last)
+                    span(count, last.x)
                 )
             })
         }
@@ -599,21 +631,23 @@ fn step(rule: &Rule, count: &mut Count, facts: &Facts) -> Option<String> {
                 .parent
                 .filter(|parent| super::monitor::same_stage(facts.snapshot, parent, signal))
                 .and_then(|parent| parent.series.get(signal));
-            let fresh = fresh(facts, signal, count);
-            let last = fresh.last()?.0;
+            let (last, fresh) = fresh(facts, signal, count)?;
             let mut seen = None;
-            for (x, y) in fresh {
+            for report in fresh {
                 // Where the parent has no value at this step, the report counts neither way.
-                let Some((mine, parent)) =
-                    y.zip(theirs.and_then(|theirs| super::monitor::parent_at(theirs, x)))
-                else {
+                let paired = report
+                    .x
+                    .zip(theirs)
+                    .and_then(|(x, theirs)| report.value.zip(super::monitor::parent_at(theirs, x)));
+                let Some((mine, parent)) = paired else {
+                    seen = None;
                     continue;
                 };
                 let worse = match better {
                     Better::Lower => mine - parent,
                     Better::Higher => parent - mine,
                 };
-                held(count, x, worse > *by);
+                held(count, report.x, worse > *by);
                 seen = Some((mine, parent, worse));
             }
             let (mine, parent, worse) = seen?;
@@ -623,7 +657,7 @@ fn step(rule: &Rule, count: &mut Count, facts: &Facts) -> Option<String> {
                     value(worse),
                     value(mine),
                     value(parent),
-                    span(count, last)
+                    span(count, last.x)
                 )
             })
         }
@@ -633,14 +667,13 @@ fn step(rule: &Rule, count: &mut Count, facts: &Facts) -> Option<String> {
             reports,
             better,
         } => {
-            let fresh = fresh(facts, signal, count);
-            let last = fresh.last()?.0;
+            let (last, fresh) = fresh(facts, signal, count)?;
             let best = |values: &mut dyn Iterator<Item = f64>| match better {
                 Better::Lower => values.filter(|v| v.is_finite()).min_by(f64::total_cmp),
                 Better::Higher => values.filter(|v| v.is_finite()).max_by(f64::total_cmp),
             };
-            for point in fresh {
-                count.window.push(point);
+            for report in fresh {
+                count.window.push((report.x, report.value));
                 if count.window.len() as u64 > *reports {
                     let (_, left) = count.window.remove(0);
                     count.best = best(&mut count.best.into_iter().chain(left));
@@ -655,12 +688,20 @@ fn step(rule: &Rule, count: &mut Count, facts: &Facts) -> Option<String> {
                 Better::Lower => before - since,
                 Better::Higher => since - before,
             });
+            let range = count.window[0]
+                .0
+                .zip(last.x)
+                .map_or_else(String::new, |(first, last)| {
+                    format!(
+                        ", {} to {}",
+                        at(first),
+                        at(last).trim_start_matches("step ")
+                    )
+                });
             (gained < *min).then(|| {
                 format!(
-                    "{signal} improved by {} over its last {reports} reports, {} to {}, on its best of {} before them; the rule needs {}",
+                    "{signal} improved by {} over its last {reports} reports{range}, on its best of {} before them; the rule needs {}",
                     value(gained.max(0.0)),
-                    at(count.window[0].0),
-                    at(last).trim_start_matches("step "),
                     value(before),
                     value(*min)
                 )
@@ -718,36 +759,38 @@ fn step(rule: &Rule, count: &mut Count, facts: &Facts) -> Option<String> {
 }
 
 /// Counts one report toward a run of reports in a row, or ends the run when it does not hold.
-fn held(count: &mut Count, x: f64, holds: bool) {
+fn held(count: &mut Count, x: Option<f64>, holds: bool) {
     if !holds {
         count.held = 0;
         count.since = None;
         return;
     }
     if count.held == 0 {
-        count.since = Some(x);
+        count.since = x;
     }
     count.held += 1;
 }
 
-/// The run's reports of `signal` that `count` has not counted, which it now has. A run that
-/// went back to an earlier step, as a relaunch from a checkpoint does, counts its newest report.
-fn fresh(facts: &Facts, signal: &str, count: &mut Count) -> Vec<(f64, Option<f64>)> {
-    let Some(points) = facts.snapshot.series.get(signal) else {
-        return Vec::new();
-    };
-    let Some(&last) = points.last() else {
-        return Vec::new();
-    };
-    let fresh: Vec<_> = match count.after {
-        Some(after) if last.0 < after => vec![last],
-        Some(after) => points.iter().copied().filter(|p| p.0 > after).collect(),
-        None => points.clone(),
-    };
-    if !fresh.is_empty() {
-        count.after = Some(last.0);
+fn fresh<'a>(
+    facts: &Facts<'a>,
+    signal: &str,
+    count: &mut Count,
+) -> Option<(&'a MetricReport, impl Iterator<Item = &'a MetricReport>)> {
+    let reports = facts.snapshot.metric_reports.get(signal)?;
+    if count.after >= reports.seen {
+        return None;
     }
-    fresh
+    let first = reports.seen.checked_sub(reports.tail.len() as u64)?;
+    let skip = count.after.saturating_sub(first) as usize;
+    if count.after < first {
+        // The missing reports could have broken the streak or changed the plateau baseline.
+        count.held = 0;
+        count.since = None;
+        count.window.clear();
+        count.best = None;
+    }
+    count.after = reports.seen;
+    Some((reports.tail.back()?, reports.tail.iter().skip(skip)))
 }
 
 /// Whether an estimate rule acts: `holds` on this revision and the one before it, over a pace
@@ -897,6 +940,30 @@ mod tests {
         assert_eq!(rules[1].shown()["budgetUsd"], 5.0);
         assert_eq!(freeze("exp", None, None).unwrap(), None);
         assert_eq!(frozen("run", None).unwrap(), vec![]);
+    }
+
+    #[test]
+    fn a_budget_cannot_push_a_launch_over_the_rule_limit() {
+        let mut rules: Vec<_> = (0..MAX_RULES)
+            .map(|i| {
+                json!({"name": format!("rule-{i}"), "text": "Check loss.", "does": "stop",
+                "when": {"nonFinite": "loss"}})
+            })
+            .collect();
+        let settings = json!({"rules": rules}).to_string();
+        assert!(freeze("exp", Some(&settings), None).is_ok());
+        assert!(freeze("exp", Some(&settings), Some(5.0))
+            .unwrap_err()
+            .to_string()
+            .contains("--budget"));
+
+        rules[0]["name"] = json!("budget");
+        let settings = json!({"rules": rules}).to_string();
+        let frozen_rules = freeze("exp", Some(&settings), Some(5.0)).unwrap();
+        assert_eq!(
+            frozen("run", frozen_rules.as_deref()).unwrap().len(),
+            MAX_RULES
+        );
     }
 
     #[test]

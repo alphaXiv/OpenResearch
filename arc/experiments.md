@@ -345,15 +345,14 @@ An agent declares rules beside an experiment's stage plan (`orx exp view set
 reports, never an expression, and stops the run or raises a flag. A child
 experiment starts with a copy, and a run freezes the rules it was launched with,
 so editing them changes only later runs; `--budget` adds one. Only `orx up`
-checks them, in the projection's pass, and only on a running run whose contact
-and data are live and whose stop is not already under way: what it cannot see
-stops nothing. Each pass counts the reports a run made since the last, by where
-they fall on the signal's axis, and a rule acts only if its condition holds once
-they are counted, so a value that already recovered, as in history read after a
-sleep, stops nothing. What each rule counted, and that it acted, is kept with
-the run's monitor state in the transaction that records the event, the flag
-an `ask` raises and a `stop`'s cancel, so a restart neither counts a report twice
-nor acts twice. A rule on the estimate (cost or the time limit) acts only on a
+checks them, in the projection's pass, while the run is running, contact is
+live and collection confirms a current, caught-up checkpoint. Each pass counts the
+new reports in the fold's contiguous tail. A new generation, stage, relaunch
+or gap starts a fresh count. A rule acts only if its condition still holds
+after counting the new reports. What each rule counted, and that it acted, is
+kept with the run's monitor state in the same transaction as any flag or
+cancel, so a restart neither counts a report twice nor acts twice. A rule on
+the estimate (cost or the time limit) acts only on a
 pace measured over four slices and seen on two revisions; spend already past a
 budget stops at once. A stop goes through the engine's cancel, the first stop
 wins, and the run is Auto-stopped by that rule, with no model involved.

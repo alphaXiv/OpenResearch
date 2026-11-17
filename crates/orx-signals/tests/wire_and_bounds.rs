@@ -305,8 +305,24 @@ fn current_bounds_fit_without_a_snapshot_reduction_pass() {
             .latest
             .insert(name.clone(), json!("\0".repeat(1024)));
         snapshot.series.insert(
-            name,
+            name.clone(),
             vec![(1.2345678901234567e-200, Some(1.2345678901234567e200)); 2048],
+        );
+        let retained = orx_signals::MAX_RULE_REPORTS + 1;
+        snapshot.metric_reports.insert(
+            name,
+            orx_signals::MetricReports {
+                seen: retained,
+                tail: std::iter::repeat_n(
+                    orx_signals::MetricReport {
+                        x: Some(1.2345678901234567e-200),
+                        value: Some(1.2345678901234567e200),
+                        non_finite: false,
+                    },
+                    retained as usize,
+                )
+                .collect(),
+            },
         );
     }
     for table in 0..16 {

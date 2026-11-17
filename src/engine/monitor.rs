@@ -150,6 +150,7 @@ fn fold_status(data: &Path, run: &str, present: bool, error: Option<String>) -> 
         "reason": status["reason"],
         "lastCollectedAt": status["lastCollectedAt"],
         "clock": status["clock"],
+        "sample": status["sample"],
     })
 }
 
@@ -1945,7 +1946,7 @@ fn watch(
         let now = crate::store::now_ms();
         let advanced = advance(store, &run, now);
         if let Ok(projection) = &advanced {
-            let checked = check_rules(store, engine, &run, projection, now);
+            let checked = check_rules(store, engine, &run, projection, crate::store::now_ms());
             let mut failing = rule_errors().lock().unwrap_or_else(PoisonError::into_inner);
             match checked {
                 Ok(()) => {
@@ -1988,7 +1989,7 @@ fn check_rules(
     store: &Store,
     engine: Option<&super::Engine>,
     run: &StoredRun,
-    projection: &Projection,
+    projection: &Arc<Projection>,
     now: i64,
 ) -> Result<()> {
     use super::rules::{Does, Facts};
@@ -2004,6 +2005,40 @@ fn check_rules(
     }
     let rules = super::rules::frozen(&run.id, store.run_monitor_config(&run.id)?.as_deref())?;
     if rules.is_empty() {
+        return Ok(());
+    }
+    let Some(held) = slot(store, &run.id)?
+        .held()?
+        .filter(|held| Arc::ptr_eq(&held.projection, projection))
+    else {
+        return Ok(());
+    };
+    let sample = &held.fold.status["sample"];
+    let Some(sample_at) = sample["at"].as_i64() else {
+        return Ok(());
+    };
+    if held.fold.status["state"] != "cached"
+        || sample["checkpoint"][0].as_str() != Some(snapshot.generation.as_str())
+        || sample["checkpoint"][1].as_u64() != Some(snapshot.rev)
+        || snapshot
+            .coverage
+            .reasons
+            .iter()
+            .any(|reason| reason != "truncated")
+    {
+        return Ok(());
+    }
+    let paths = signal_paths(store.data_dir(), &run.id);
+    let checked_at = crate::store::now_ms();
+    let current = || {
+        let at = now.saturating_add(crate::store::now_ms().saturating_sub(checked_at));
+        (0..=STALE_AFTER_MS).contains(&at.saturating_sub(sample_at))
+            && paths
+                .iter()
+                .zip(held.stamps)
+                .all(|(path, stamp)| stamp_of(path) == stamp)
+    };
+    if !current() {
         return Ok(());
     }
     let Some(state) = store
@@ -2022,7 +2057,7 @@ fn check_rules(
         body,
         slices: projection.slices,
         started_at: state.started_at.unwrap_or(run.created_at),
-        now,
+        now: sample_at,
     };
     let counts = store
         .run_monitor_state(&run.id)?
@@ -2071,6 +2106,12 @@ fn check_rules(
             &flags,
             stop.as_ref()
                 .map(|(reason, context)| (reason.as_str(), context)),
+            |store| {
+                let experiment = &run.experiment_id;
+                let settings = store.run_monitor_json(experiment)?;
+                let patterns = super::view::stored_patterns(experiment, settings.as_deref())?;
+                Ok(patterns.hash() == snapshot.config_hash && current())
+            },
         )
     };
     match engine {
@@ -3379,6 +3420,19 @@ mod tests {
 
         fn collected(&self, at: i64) {
             self.status(json!({"state": "cached", "reason": null, "lastCollectedAt": at}));
+        }
+
+        fn confirmed(&self, id: &str, at: i64) {
+            let [checkpoint, status] = signal_paths(self.dir.path(), id);
+            let mut value = json!({"state": "cached", "reason": null, "lastCollectedAt": at});
+            if let Some(snapshot) =
+                super::super::adapters::local::signals::load(&checkpoint).unwrap()
+            {
+                value["sample"] =
+                    json!({"checkpoint": [snapshot.generation, snapshot.rev], "at": at});
+            }
+            std::fs::create_dir_all(status.parent().unwrap()).unwrap();
+            std::fs::write(status, value.to_string()).unwrap();
         }
 
         /// The store refuses to save `run`'s monitor, as a full disk would.
@@ -5227,6 +5281,7 @@ mod tests {
             run_id: id.into(),
             ..folded(&lines)
         });
+        f.confirmed(id, lines.last().unwrap().0);
         run
     }
 
@@ -6564,6 +6619,168 @@ mod tests {
     }
 
     #[test]
+    fn a_new_stage_or_generation_starts_a_new_rule_streak() {
+        for reset in ["stage", "generation"] {
+            let f = Fixture::new("orx-rule-reset");
+            ruled(
+                &f,
+                "r1",
+                "exp",
+                local(),
+                json!([{"name": "nan", "text": "t", "does": "stop",
+                    "when": {"nonFinite": "loss", "reports": 2}}]),
+            );
+            let bad = |step| format!("::orx:: {{\"step\":{step},\"m\":{{\"loss\":\"NaN\"}}}}\n");
+            let mut snapshot = Snapshot::new("r1", "1-1", "g1");
+            snapshot.feed(bad(100).as_bytes(), false, T0, true).unwrap();
+            f.collect(&snapshot);
+            f.confirmed("r1", T0);
+            rules_at(&f, "r1", T0 + 1_000);
+
+            if reset == "stage" {
+                snapshot
+                    .feed(b"::orx:: {\"phase\":\"eval\"}\n", false, T0 + 2_000, true)
+                    .unwrap();
+            } else {
+                snapshot = Snapshot::new("r1", "2-2", "g2");
+                snapshot
+                    .feed(b"new log\n", false, T0 + 2_000, true)
+                    .unwrap();
+            }
+            snapshot
+                .feed(bad(10).as_bytes(), false, T0 + 2_000, true)
+                .unwrap();
+            f.collect(&snapshot);
+            f.confirmed("r1", T0 + 2_000);
+            rules_at(&f, "r1", T0 + 3_000);
+            assert_eq!(stopped_by(&f, "r1"), None, "one bad report after {reset}");
+
+            snapshot
+                .feed(bad(20).as_bytes(), false, T0 + 4_000, true)
+                .unwrap();
+            f.collect(&snapshot);
+            f.confirmed("r1", T0 + 4_000);
+            rules_at(&f, "r1", T0 + 5_000);
+            assert!(
+                stopped_by(&f, "r1").is_some(),
+                "two bad reports after {reset}"
+            );
+        }
+    }
+
+    #[test]
+    fn same_step_reports_count_and_recovery_breaks_the_streak() {
+        let f = Fixture::new("orx-rule-same-step");
+        ruled(
+            &f,
+            "r1",
+            "exp",
+            local(),
+            json!([{"name": "nan", "text": "t", "does": "stop",
+                "when": {"nonFinite": "loss", "reports": 2}}]),
+        );
+        let mut snapshot = Snapshot::new("r1", "1-1", "g1");
+        for (i, loss) in ["\"NaN\"", "1.0", "\"NaN\"", "\"NaN\""]
+            .into_iter()
+            .enumerate()
+        {
+            let at = T0 + i as i64 * 2_000;
+            let report = format!("::orx:: {{\"step\":5,\"t\":{i},\"m\":{{\"loss\":{loss}}}}}\n");
+            snapshot.feed(report.as_bytes(), false, at, true).unwrap();
+            f.collect(&snapshot);
+            f.confirmed("r1", at);
+            rules_at(&f, "r1", at + 1_000);
+            assert_eq!(stopped_by(&f, "r1").is_some(), i == 3, "report {i}");
+        }
+    }
+
+    #[test]
+    fn a_rule_counts_the_contiguous_tail_after_chart_compaction() {
+        let f = Fixture::new("orx-rule-compaction");
+        ruled(
+            &f,
+            "r1",
+            "exp",
+            local(),
+            json!([{"name": "nan", "text": "t", "does": "stop",
+                "when": {"nonFinite": "loss", "reports": 256}}]),
+        );
+        reported(&f, "r1", "loss", &vec!["NaN"; 255], 3000);
+        rules_at(&f, "r1", T0 + 255_000);
+        assert_eq!(stopped_by(&f, "r1"), None);
+
+        let mut losses = vec!["NaN"; 2049];
+        losses.push("\"warmup\"");
+        losses.extend(["NaN"; 255]);
+        reported(&f, "r1", "loss", &losses, 3000);
+        rules_at(&f, "r1", T0 + losses.len() as i64 * 1_000);
+        assert_eq!(stopped_by(&f, "r1"), None, "warmup breaks the streak");
+
+        losses.push("NaN");
+        reported(&f, "r1", "loss", &losses, 3000);
+        rules_at(&f, "r1", T0 + losses.len() as i64 * 1_000);
+        assert!(stopped_by(&f, "r1").is_some());
+    }
+
+    #[test]
+    fn a_rule_needs_a_current_collection_of_the_checkpoint() {
+        let f = Fixture::new("orx-rule-confirmed");
+        let run = ruled(
+            &f,
+            "r1",
+            "exp",
+            local(),
+            json!([{"name": "nan", "text": "t", "does": "stop",
+                "when": {"nonFinite": "loss"}}]),
+        );
+        let mut snapshot = Snapshot::new("r1", "1-1", "g1");
+        snapshot
+            .feed(
+                b"::orx:: {\"step\":1,\"m\":{\"loss\":\"NaN\"}}\n",
+                false,
+                T0,
+                true,
+            )
+            .unwrap();
+        f.collect(&snapshot);
+        rules_at(&f, "r1", T0 + 1_000);
+        assert_eq!(
+            stopped_by(&f, "r1"),
+            None,
+            "published without a collection status"
+        );
+
+        f.confirmed("r1", T0 + 2_000);
+        let (old, _) = publish(&f.store, &run, T0 + 2_000, None).unwrap();
+        check_rules(&f.store, None, &run, &old, T0 + 110_000).unwrap();
+        assert_eq!(stopped_by(&f, "r1"), None, "cached across freshness expiry");
+
+        snapshot.coverage.add_reason("rebuilding");
+        f.collect(&snapshot);
+        check_rules(&f.store, None, &run, &old, T0 + 3_000).unwrap();
+        assert_eq!(stopped_by(&f, "r1"), None, "rebuild began after evaluation");
+
+        snapshot.remove_reason("rebuilding");
+        snapshot
+            .feed(b"another line\n", false, T0 + 5_000, true)
+            .unwrap();
+        f.collect(&snapshot);
+        rules_at(&f, "r1", T0 + 6_000);
+        assert_eq!(
+            stopped_by(&f, "r1"),
+            None,
+            "a new revision and the old heartbeat"
+        );
+
+        f.confirmed("r1", T0 + 112_000);
+        rules_at(&f, "r1", T0 + 113_000);
+        assert!(
+            stopped_by(&f, "r1").is_some(),
+            "confirmed by a current scan"
+        );
+    }
+
+    #[test]
     fn a_rule_stops_a_run_at_the_report_that_meets_it_and_never_twice() {
         let f = Fixture::new("orx-rules-stop");
         ruled(
@@ -6614,7 +6831,7 @@ mod tests {
         );
         f.store.put_run_monitor_state(
             "unread",
-            &json!({"ruleState": {"nan-loss": {"held": "three"}}}),
+            &json!({"ruleState": {"basis": ["g1", 0], "counts": {"nan-loss": {"held": "three"}}}}),
         );
         reported(&f, "unread", "loss", &["NaN"], 600);
         rules_at(&f, "unread", T0 + 2_000);
@@ -6652,8 +6869,9 @@ mod tests {
         assert_eq!(stopped_by(&f, "r1"), None);
         assert!(rule_events(&f, "r1").is_empty());
         assert_eq!(
-            f.store.run_monitor_state("r1").unwrap().unwrap()["ruleState"]["nan-loss"]["after"],
-            60.0,
+            f.store.run_monitor_state("r1").unwrap().unwrap()["ruleState"]["counts"]["nan-loss"]
+                ["after"],
+            7,
             "the reports are counted"
         );
     }
@@ -6807,6 +7025,7 @@ mod tests {
             run_id: "r1".into(),
             ..folded(&staged(&[("pretrain", 6.0)]))
         });
+        f.confirmed("r1", T0 + 7_000);
         rules_at(&f, "r1", T0 + 10_000);
         assert_eq!(
             stopped_by(&f, "r1"),
@@ -6850,10 +7069,10 @@ mod tests {
             json!([{"name": "stuck", "text": "t", "does": "stop", "when": {"noProgress": {"seconds": 600}}}]),
         );
         reported(&f, "r1", "loss", &["2.0", "1.9"], 600);
-        f.collected(T0 + 500_000);
+        f.confirmed("r1", T0 + 500_000);
         rules_at(&f, "r1", T0 + 500_000);
         assert_eq!(stopped_by(&f, "r1"), None);
-        f.collected(T0 + 602_000);
+        f.confirmed("r1", T0 + 602_000);
         rules_at(&f, "r1", T0 + 602_000);
         assert_eq!(
             stopped_by(&f, "r1").unwrap().reason.as_deref(),
@@ -6872,6 +7091,7 @@ mod tests {
             run_id: "spent".into(),
             ..folded(&lines)
         });
+        f.confirmed("spent", T0);
         rules_at(&f, "spent", T0 + 1_000);
         assert_eq!(
             stopped_by(&f, "spent").unwrap().reason.as_deref(),
@@ -6902,8 +7122,31 @@ mod tests {
             None,
             "the same revision counts once"
         );
-        reported(&f, "slow", "loss", &values(81), 6000);
-        rules_at(&f, "slow", T0 + 81_500);
+        let [path, _] = signal_paths(f.dir.path(), "slow");
+        let mut rebuilt = crate::engine::adapters::local::signals::load(&path)
+            .unwrap()
+            .unwrap();
+        rebuilt.generation = "rebuilt".into();
+        rebuilt.rev = 1;
+        f.collect(&rebuilt);
+        f.confirmed("slow", T0 + 82_000);
+        rules_at(&f, "slow", T0 + 82_000);
+        assert_eq!(
+            stopped_by(&f, "slow"),
+            None,
+            "a new generation needs its own two votes"
+        );
+
+        fold(
+            &mut rebuilt,
+            &[(
+                T0 + 83_000,
+                r#"::orx:: {"step":800,"of":6000,"t":80,"m":{"loss":1}}"#.into(),
+            )],
+        );
+        f.collect(&rebuilt);
+        f.confirmed("slow", T0 + 83_000);
+        rules_at(&f, "slow", T0 + 83_000);
         let reason = stopped_by(&f, "slow").unwrap().reason.unwrap();
         assert!(reason.starts_with("it would finish up to "), "{reason}");
         assert!(reason.ends_with(" past its time limit"), "{reason}");
@@ -6917,7 +7160,7 @@ mod tests {
         ruled(&f, "r1", "exp", local(), nan.clone());
         reported(&f, "r1", "loss", &["NaN"], 600);
         // Collection stopped two minutes ago: what the run is doing now is unknown.
-        f.collected(T0);
+        f.confirmed("r1", T0);
         rules_at(&f, "r1", T0 + 120_000);
         assert_eq!(stopped_by(&f, "r1"), None);
         assert!(f
@@ -6927,7 +7170,7 @@ mod tests {
             .unwrap()
             .get("ruleState")
             .is_none());
-        f.collected(T0 + 120_000);
+        f.confirmed("r1", T0 + 120_000);
         f.store
             .set_run_contact(
                 "r1",

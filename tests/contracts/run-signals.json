@@ -10,6 +10,22 @@
     "pendingBase64": "",
     "dropping": false
   },
+  "reportEpoch": 0,
+  "metricReports": {
+    "bad": {
+      "seen": 1,
+      "tail": [
+        {"x": 3000.0, "value": null, "nonFinite": true}
+      ]
+    },
+    "loss": {
+      "seen": 2,
+      "tail": [
+        {"x": 3000.0, "value": 2.5, "nonFinite": false},
+        {"x": 3100.0, "value": 2.0, "nonFinite": false}
+      ]
+    }
+  },
   "coverage": {
     "ranges": [
       [
