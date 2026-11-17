@@ -240,19 +240,21 @@ export function QuestionDock({
             })}
           </div>
         )}
-        <div className="mt-1 flex items-center gap-2 ps-2.5">
-          <Pencil size={14} className="shrink-0 text-subtext" aria-hidden="true" />
-          <input
-            className="min-w-0 flex-1 rounded-none border-0 bg-transparent px-0 py-1.5 text-sm text-text outline-none placeholder:text-subtext"
+        <div className="mt-1 flex items-end gap-2 ps-2.5">
+          <Pencil size={14} className="mb-2 shrink-0 text-subtext" aria-hidden="true" />
+          <textarea
+            dir="auto"
+            rows={1}
+            className="max-h-40 min-w-0 flex-1 resize-none rounded-none border-0 bg-transparent px-0 py-1.5 text-sm text-text outline-none field-sizing-content placeholder:text-subtext"
             value={answer.note}
             placeholder={placeholder}
             aria-label={placeholder}
             readOnly={inactive}
             onChange={(event) => questions.setNote(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+              if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
               event.preventDefault();
-              questions.next();
+              if (!inactive) questions.next();
             }}
           />
           <Button type="button" size="small" disabled={inactive} onClick={questions.skip}>

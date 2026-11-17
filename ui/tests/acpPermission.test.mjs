@@ -50,9 +50,9 @@ async function asked(prompts, respond = () => ({ ok: true })) {
     option: (label) => [...box().querySelectorAll("button[aria-pressed]")].find((element) => element.textContent.includes(label)),
     control: (label) => button(box(), label),
     /** The card's own answer field. */
-    field: () => box().querySelector(".chat-prompt-questions input"),
-    type: async (text) => type(box().querySelector(".chat-prompt-questions input"), text),
-    enter: () => press("Enter", box().querySelector(".chat-prompt-questions input")),
+    field: () => box().querySelector(".chat-prompt-questions textarea"),
+    type: async (text) => type(box().querySelector(".chat-prompt-questions textarea"), text),
+    enter: () => press("Enter", box().querySelector(".chat-prompt-questions textarea")),
     leave: () => chat.navigate("/projects/p/tasks/other"),
     deliveries: () => chat.requests.filter(({ request }) => request === "POST /api/chat/sessions/s/respond").map(({ body }) => body),
   };
@@ -89,6 +89,8 @@ test("a typed answer goes out on Enter and survives a failed delivery", async ()
   let delivery;
   const view = await asked([{ question: "Can you free space?" }], () => { delivery = deferred(); return delivery.promise; });
   await view.type("What is using memory?");
+  await press("Enter", view.field(), { shiftKey: true });
+  await press("Enter", view.field(), { keyCode: 229 });
   assert.deepEqual(view.deliveries(), []);
   await view.enter();
   assert.deepEqual(view.deliveries(), [{ promptId: "q1", answers: [], note: "What is using memory?" }]);
@@ -248,15 +250,19 @@ test("question choices are disabled while the remote host reconnects", async () 
     kind: "ssh", version: "test", buildChannel: "stable", dashboardProtocol: 1,
     session: { id: "one", host: "gpu", user: "me", status, version: "test", dashboardProtocol: 1, gatewayUrl: "http://localhost:4910/", error: null, repairCommand: null, installPaths: null, uiPreferences: { theme: null, locale: null }, canStartNewHost: true },
   });
-  await renderChat("/projects/p/tasks/s", {
+  const chat = await renderChat("/projects/p/tasks/s", {
     remote: true,
     transcripts: { s: [userMessage("u1", "free some space"), assistantMessage("a1", [part], "u1")] },
     routes: { "GET /_orx/runtime": runtime },
   });
   const option = () => [...document.querySelectorAll(".composer button[aria-pressed]")].find((element) => element.textContent.includes("Yes"));
+  const field = () => document.querySelector(".chat-prompt-questions textarea");
   assert.equal(option().disabled, false);
+  await type(field(), "Not yet");
   status = "reconnecting";
   await act(async () => { for (const client of clients) void client.invalidateQueries({ predicate: (query) => query.queryKey[2] === "getRuntime" }); });
   await settle();
   assert.equal(option().disabled, true);
+  await press("Enter", field());
+  assert.deepEqual(chat.requests.filter(({ request }) => request.endsWith("/respond")), []);
 });
