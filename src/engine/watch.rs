@@ -1262,8 +1262,24 @@ fn series(body: &Value, name: &str) -> Vec<(f64, f64)> {
         .collect()
 }
 
+fn in_setup(body: &Value) -> bool {
+    body["view"]["headline"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .chain(
+            body["view"]["blocks"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .flat_map(|block| block["chart"].as_array().into_iter().flatten()),
+        )
+        .filter_map(Value::as_str)
+        .all(|name| body["series"][name].as_array().is_none_or(Vec::is_empty))
+}
+
 /// The run's question leads; an open flag keeps its sentence's evidence in view.
-fn bound_signals(template: Option<&str>, body: &Value, summary: &Value) -> Vec<String> {
+fn bound_signals(body: &Value, summary: &Value) -> Vec<String> {
     let view = &body["view"];
     let headline: Vec<String> = view["headline"]
         .as_array()
@@ -1294,39 +1310,48 @@ fn bound_signals(template: Option<&str>, body: &Value, summary: &Value) -> Vec<S
         names = headline;
     }
 
+    let mut retained = Vec::new();
     let flag = &body["flag"];
     if flag.is_object() && !super::flags::settled(flag) {
-        let flagged = flag["detail"].as_str().or(flag["template"].as_str());
-        let flagged = flagged
-            .and_then(|text| reply::tokens(text, false).ok())
-            .unwrap_or_default();
-        for (_, token) in template
+        let flagged = flag["template"].as_str().or(flag["detail"].as_str());
+        for (_, token) in flagged
             .and_then(|text| reply::tokens(text, false).ok())
             .unwrap_or_default()
         {
             if let reply::Token::Signal(_, name) | reply::Token::Versus(_, name) = token {
-                let about = flagged.iter().any(|(_, token)| matches!(token,
-                    reply::Token::Signal(_, signal) | reply::Token::Versus(_, signal) if signal == &name));
-                if about && !names.contains(&name) {
-                    names.push(name);
+                if !retained.contains(&name) {
+                    retained.push(name);
                 }
             }
         }
     }
-    names.truncate(digest::BOUND_SIGNALS);
+    retained.truncate(digest::BOUND_SIGNALS);
+    let mut room = digest::BOUND_SIGNALS - retained.len();
+    names.retain(|name| {
+        if retained.contains(name) {
+            return true;
+        }
+        let keep = room > 0;
+        room = room.saturating_sub(1);
+        keep
+    });
+    for name in retained {
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
     names
 }
 
-/// What a sentence stands on, kept with it and checked on every new point. With no sentence yet,
+/// What a look stands on, kept with it and checked on every new point. Before its first look,
 /// what a run's first look is due for: every point of its main numbers, any stage that ends, and
 /// a parent comparison that turns far worse.
-fn basis_of(run: &Now, template: Option<&str>, mult: &Map<String, Value>) -> Value {
-    let first = template.is_none();
+fn basis_of(run: &Now, template: Option<&str>, mult: &Map<String, Value>, first: bool) -> Value {
     let mut signals = Map::new();
     let mut parent = Map::new();
     let mut counts = Map::new();
     let specs = &run.body["view"]["signals"];
-    for name in bound_signals(template, &run.body, &run.summary) {
+    for name in bound_signals(&run.body, &run.summary) {
         let last = series(&run.body, &name).last().map(|(x, _)| *x);
         if first || last.is_some() {
             signals.insert(name.clone(), json!({"x": last.filter(|_| !first)}));
@@ -1408,7 +1433,7 @@ fn changes(seen: &mut Seen, run: &Now, now: i64) -> Vec<(String, String)> {
     let basis = match run.answered() {
         Some((_, last)) => &last.basis,
         None => {
-            first = basis_of(run, None, &Map::new());
+            first = basis_of(run, None, &Map::new(), true);
             &first
         }
     };
@@ -1421,10 +1446,7 @@ fn changes(seen: &mut Seen, run: &Now, now: i64) -> Vec<(String, String)> {
     }
     let signals = &run.body["view"]["signals"];
     let label = |name: &str| signals[name]["label"].as_str().unwrap_or(name).to_owned();
-    let template = run
-        .answered()
-        .and_then(|(_, last)| last.template.as_deref());
-    let bound = bound_signals(template, &run.body, &run.summary);
+    let bound = bound_signals(&run.body, &run.summary);
     // Each point since the look against the points just before it.
     for name in &bound {
         let kept = &basis["signals"][name];
@@ -1994,6 +2016,9 @@ async fn take(id: i64) -> Result<()> {
                 .iter()
                 .filter(|(_, row)| matches!(row.result.as_deref(), Some("line" | "flag")))
             {
+                if row.template.is_none() {
+                    said.clear();
+                }
                 if let (Some(template), Some(text)) = (&row.template, &row.text) {
                     said.push((template.clone(), text.clone()));
                 }
@@ -2011,7 +2036,7 @@ async fn take(id: i64) -> Result<()> {
             ))
         })
         .collect();
-    let parents: BTreeMap<String, Value> = {
+    let mut parents: BTreeMap<String, Value> = {
         let store = Store::open()?;
         runs.iter()
             .filter_map(|run| {
@@ -2035,6 +2060,37 @@ async fn take(id: i64) -> Result<()> {
             })
             .collect()
     };
+    for run in &runs {
+        let Some(parent) = run.body["parent"]["runId"].as_str() else {
+            continue;
+        };
+        let Some(said) = parents.get_mut(&run.run.id) else {
+            continue;
+        };
+        let cursor = Store::open()?
+            .run_watch_looks(parent, JOURNAL)?
+            .into_iter()
+            .rev()
+            .find(|(_, row)| matches!(row.result.as_deref(), Some("line" | "same" | "flag")))
+            .map_or(Value::Null, |(_, row)| row.cursor);
+        match bounded(log_since(parent, &cursor)).await {
+            Ok(read) => {
+                let mut kinds = read.families;
+                kinds.extend(
+                    read.head
+                        .iter()
+                        .chain(&read.lines)
+                        .filter_map(|line| digest::family(&line.text)),
+                );
+                said["warningKinds"] = json!(kinds.into_iter().take(FAMILIES).collect::<Vec<_>>());
+                said["warningLogUnreadBytes"] = json!(read.unread);
+            }
+            Err(error) => {
+                said["warningKinds"] = cursor["families"].clone();
+                said["warningLogUnavailable"] = json!(format!("{error:#}"));
+            }
+        }
+    }
     let counts: BTreeMap<String, BTreeMap<String, u64>> = runs
         .iter()
         .map(|run| {
@@ -2188,10 +2244,6 @@ async fn take(id: i64) -> Result<()> {
         .map(|(key, run)| (key.as_str(), moving(run)))
         .collect();
     let no_excerpts = Vec::new();
-    let has: BTreeMap<&str, bool> = keyed
-        .iter()
-        .map(|(key, run)| (key.as_str(), !previous[&run.run.id].is_empty()))
-        .collect();
     let bindable: Vec<reply::Bindable> = keyed
         .iter()
         .map(|(key, run)| reply::Bindable {
@@ -2202,11 +2254,17 @@ async fn take(id: i64) -> Result<()> {
             moving: &movings[key.as_str()],
             step: run.summary["stage"]["done"].as_f64().filter(|_| run.live()),
             excerpts: digest.excerpts.get(key).unwrap_or(&no_excerpts),
-            has_sentence: has[key.as_str()],
+            sentence: previous[&run.run.id]
+                .last()
+                .map(|(template, _)| template.as_str()),
+            setup: in_setup(&run.body),
         })
         .collect();
     let summary_bounds = reply::SummaryBounds {
-        has_sentence: !summary_previous.is_empty(),
+        sentence: summary_previous
+            .last()
+            .map(|(template, _)| template.as_str()),
+        setup: runs.iter().all(|run| in_setup(&run.body)),
     };
     let renderer = |key: Option<&str>, token: &reply::Token| {
         key.and_then(|key| keyed.get(key))
@@ -2289,7 +2347,9 @@ async fn take(id: i64) -> Result<()> {
             );
             for (key, answer) in retried.runs {
                 // A flag kept from the first reply stands unless the retry writes a sentence.
-                if answer == reply::Answer::Same && read.salvaged.contains(&key) {
+                if matches!(answer, reply::Answer::Same | reply::Answer::Silent)
+                    && read.salvaged.contains(&key)
+                {
                     continue;
                 }
                 if !retried.salvaged.contains(&key) {
@@ -2332,6 +2392,7 @@ async fn take(id: i64) -> Result<()> {
                 (if *flag { "flag" } else { "line" }, Some(template.clone()))
             }
             Some(reply::Answer::Same) => ("same", last_template.clone()),
+            Some(reply::Answer::Silent) => ("line", None),
             None => ("error", None),
         };
         let mut mult = kept_mult;
@@ -2456,7 +2517,7 @@ async fn take(id: i64) -> Result<()> {
         let basis = if result == "error" {
             last.map_or(Value::Null, |(_, row)| row.basis.clone())
         } else {
-            basis_of(run, template.as_deref(), &mult)
+            basis_of(run, template.as_deref(), &mult, false)
         };
         results.push(LookResult {
             basis,
@@ -2488,7 +2549,7 @@ async fn take(id: i64) -> Result<()> {
         Some(reply::Answer::Same) => summary_previous
             .last()
             .map(|(template, _)| (template.clone(), fill(template, &keyed, None))),
-        None => None,
+        None | Some(reply::Answer::Silent) => None,
     };
     let error = (!read.errors.is_empty()).then(|| {
         format!(
@@ -2810,10 +2871,10 @@ fn read_facts(store: &Store, run: &StoredRun) -> Result<Value> {
             Some(_) => "error",
             None => continue,
         };
-        if let Some(template) = &row.template {
-            previous = Some(template.clone());
-            sentence = Some(
-                json!({"template": template, "t": look.done_at.unwrap_or(look.created_at), "lookId": look.id.to_string()}),
+        if matches!(row.result.as_deref(), Some("line" | "same" | "flag")) {
+            previous = row.template.clone();
+            sentence = row.template.as_ref().map(|template|
+                json!({"template": template, "t": look.done_at.unwrap_or(look.created_at), "lookId": look.id.to_string()})
             );
         }
         error = match said {
@@ -2913,9 +2974,11 @@ pub(crate) fn status_lines(
                 .unwrap_or_default();
             lines.push(format!("said     {filled} ({model}, look {looks} at {at})"));
         }
-        None if watch["state"] == "on" => lines.push(format!(
-            "watch    {model} watches this run; it has not looked yet."
-        )),
+        None if watch["state"] == "on" => lines.push(if looks == 0 {
+            format!("watch    {model} watches this run; it has not looked yet.")
+        } else {
+            format!("watch    {model} watches this run; its latest look has no sentence.")
+        }),
         None => {}
     }
     if let Some(why) = watch["why"].as_str() {

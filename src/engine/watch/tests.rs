@@ -1194,7 +1194,7 @@ async fn a_change_in_real_output_asks_for_a_look_before_the_first_and_after_a_se
         template: Some(template.into()),
         text: Some(template.into()),
         whole: None,
-        basis: basis_of(&now, Some(template), &Map::new()),
+        basis: basis_of(&now, Some(template), &Map::new(), false),
         cursor: Value::Null,
         evidence: json!([]),
     };
@@ -1302,7 +1302,8 @@ fn a_row_that_falls_to_zero_asks_for_a_look_and_its_sentence_may_say_so() {
         moving: &moving,
         step: None,
         excerpts: &[],
-        has_sentence: false,
+        sentence: None,
+        setup: false,
     };
     let render = |_: Option<&str>, _: &reply::Token| String::new();
     let read = reply::read(
@@ -1336,30 +1337,23 @@ fn the_question_leads_until_the_current_stages_chart_can_answer_it() {
         "latest": {"val_bpb": 2.1, "loss": 3.2, "tok_per_sec": 7200}
     });
     let summary = json!({"stage": {"name": "train"}});
-    let sentence = Some("Tokens/s **{tok_per_sec}**, {tok_per_sec.vs}.");
-    assert_eq!(
-        bound_signals(sentence, &body, &summary),
-        ["val_bpb", "loss"]
-    );
+    assert_eq!(bound_signals(&body, &summary), ["val_bpb", "loss"]);
 
     for state in ["raised", "waiting", "asking"] {
         body["flag"] = json!({"state": state, "detail": "Tokens/s **{tok_per_sec}** fell."});
         assert_eq!(
-            bound_signals(sentence, &body, &summary),
+            bound_signals(&body, &summary),
             ["val_bpb", "loss", "tok_per_sec"]
         );
     }
     body["flag"]["state"] = json!("kept");
-    assert_eq!(
-        bound_signals(sentence, &body, &summary),
-        ["val_bpb", "loss"]
-    );
+    assert_eq!(bound_signals(&body, &summary), ["val_bpb", "loss"]);
 
     body["latest"]["sft_bpb"] = json!(1.5);
-    assert_eq!(bound_signals(sentence, &body, &summary), ["sft_bpb"]);
+    assert_eq!(bound_signals(&body, &summary), ["sft_bpb"]);
     body["latest"] = json!({});
     assert_eq!(
-        bound_signals(sentence, &body, &json!({"stage": {"name": "install"}})),
+        bound_signals(&body, &json!({"stage": {"name": "install"}})),
         ["sft_bpb", "repeat_frac"]
     );
 }
@@ -1382,7 +1376,7 @@ async fn side_stats_wake_only_for_far_worse_parent_comparisons() {
     now.body["versus"] =
         json!({"step": {"tok_per_sec": {"d": 1000, "parent": 8000, "good": true}}});
     let template = "Tokens/s **{tok_per_sec}** recovered.";
-    let basis = basis_of(&now, Some(template), &Map::new());
+    let basis = basis_of(&now, Some(template), &Map::new(), false);
     assert!(basis["signals"].get("tok_per_sec").is_none());
     assert!(basis["parent"].get("tok_per_sec").is_some());
     let id = look(&store, "chat", "ceiling", &[("seed", "r1")]);
@@ -1587,4 +1581,120 @@ async fn instrumentation_waits_for_a_view_changed_during_the_pass() {
         "{}",
         after.body
     );
+}
+
+#[test]
+fn an_open_flags_signal_stays_bound_when_three_headlines_have_values() {
+    let mut body = json!({
+        "view": {"headline": ["loss", "accuracy", "val_bpb"]},
+        "latest": {"loss": 2.0, "accuracy": 0.9, "val_bpb": 1.5, "tok_per_sec": 1000},
+        "flag": {"state": "raised", "detail": "Throughput **{tok_per_sec}** fell."}
+    });
+    for state in ["raised", "waiting", "asked"] {
+        body["flag"]["state"] = json!(state);
+        let bound = bound_signals(&body, &json!({}));
+        assert_eq!(bound.len(), digest::BOUND_SIGNALS);
+        assert!(bound.iter().any(|name| name == "tok_per_sec"), "{bound:?}");
+        assert!(bound.iter().any(|name| name == "loss"), "{bound:?}");
+    }
+    body["flag"]["state"] = json!("kept");
+    assert_eq!(
+        bound_signals(&body, &json!({})),
+        ["loss", "accuracy", "val_bpb"]
+    );
+}
+
+#[tokio::test]
+async fn a_childs_digest_includes_warning_kinds_printed_by_its_parent() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let store = Store::open().unwrap();
+    chat(&store, "chat", "claude-code");
+    let parent = classifier_run(&store, "parent", None, "done", "chat");
+    epochs(&store, &parent, &HEALTHY);
+    let warning = "WARNING: Flash Attention is unavailable; using fallback\n";
+    keep_log(&store, "parent", warning);
+    let child = classifier_run(&store, "child", Some("parent"), "running", "chat");
+    epochs(&store, &child, &HEALTHY);
+    keep_log(&store, "child", warning);
+    let calls_dir = crate::config::home_dir().unwrap().join("claude-calls");
+    fake_claude(
+        &calls_dir,
+        &[r#"{"runs":{"r1":{"status":"ok","line":"Loss **{loss}** tracks the parent."}}}"#; 3],
+    );
+    let id = look(&store, "chat", "manual", &[("child", "r1")]);
+    take(id).await.unwrap();
+    let prompt = std::fs::read_to_string(calls_dir.join("prompt-1")).unwrap();
+    let sent: Value = serde_json::from_str(prompt.strip_prefix(DIGEST_PREAMBLE).unwrap()).unwrap();
+    assert_eq!(
+        sent["parents"][0]["run"]["warningKinds"],
+        json!([digest::family(warning).unwrap()])
+    );
+
+    let id = look(&store, "chat", "manual", &[("parent", "r1")]);
+    take(id).await.unwrap();
+    std::fs::remove_file(store.data_dir().join("run-logs/parent.log")).unwrap();
+    let id = look(&store, "chat", "manual", &[("child", "r1")]);
+    take(id).await.unwrap();
+    let prompt = std::fs::read_to_string(calls_dir.join("prompt-3")).unwrap();
+    let sent: Value = serde_json::from_str(prompt.strip_prefix(DIGEST_PREAMBLE).unwrap()).unwrap();
+    assert_eq!(
+        sent["parents"][0]["run"]["warningKinds"],
+        json!([digest::family(warning).unwrap()])
+    );
+    assert!(sent["parents"][0]["run"]["warningLogUnavailable"].is_string());
+}
+
+#[tokio::test]
+async fn a_setup_look_defaults_to_no_sentence_and_can_clear_a_previous_one() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let store = Store::open().unwrap();
+    chat(&store, "chat", "claude-code");
+    let row = run(&store, "setup", "Setup", "chat", "Downloading data\n");
+    let calls_dir = crate::config::home_dir().unwrap().join("claude-calls");
+    fake_claude(
+        &calls_dir,
+        &[
+            r#"{"runs":{}}"#,
+            r#"{"runs":{"r1":{"status":"ok","line":"Cache miss adds **4** minutes."}}}"#,
+            r#"{"runs":{"r1":{"status":"ok","line":null}}}"#,
+        ],
+    );
+    for (index, has_sentence) in [false, true, false].into_iter().enumerate() {
+        let id = look(&store, "chat", "manual", &[("setup", "r1")]);
+        take(id).await.unwrap();
+        let results = store.watch_look_runs(id).unwrap();
+        assert_ne!(results[0].result.as_deref(), Some("error"));
+        assert_eq!(results[0].template.is_some(), has_sentence);
+        assert_eq!(results[0].text.is_some(), has_sentence);
+        let facts = run_facts(&store, &row).unwrap();
+        assert_eq!(facts["sentence"].is_object(), has_sentence);
+        assert!(facts["error"].is_null(), "{facts}");
+        let prompt =
+            std::fs::read_to_string(calls_dir.join(format!("prompt-{}", index + 1))).unwrap();
+        let sent: Value =
+            serde_json::from_str(prompt.strip_prefix(DIGEST_PREAMBLE).unwrap()).unwrap();
+        assert_eq!(sent["runs"][0]["setup"], true);
+    }
+    assert_eq!(calls(&calls_dir), 3);
+}
+
+#[test]
+fn setup_ends_on_the_first_headlined_or_charted_point() {
+    let mut body = json!({
+        "phases": [{"name": ""}],
+        "view": {"headline": ["accuracy"], "blocks": [
+            {"chart": ["loss"], "phase": "train"}, {"stats": ["tok_per_sec"]}
+        ]},
+        "series": {"tok_per_sec": [[1, 1000]]}
+    });
+    assert!(in_setup(&body));
+    body["series"]["loss"] = json!([[1, 2.0]]);
+    assert!(!in_setup(&body));
+    body["series"]["loss"] = json!([]);
+    body["series"]["accuracy"] = json!([[1, 0.8]]);
+    assert!(!in_setup(&body));
 }

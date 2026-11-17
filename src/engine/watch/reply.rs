@@ -14,6 +14,7 @@ const MAX_PATTERN: usize = 200;
 const MAX_EVIDENCE: usize = 12;
 const MAX_EVIDENCE_BYTES: u64 = 3 * 1024;
 const MAX_NOTES: usize = 1024;
+const LIVE: char = '\u{fffc}';
 
 /// What one run's tokens can bind in this look.
 pub(super) struct Bindable<'a> {
@@ -31,7 +32,8 @@ pub(super) struct Bindable<'a> {
     /// Byte ranges of the log excerpts the digest showed.
     pub excerpts: &'a [(u64, u64)],
     /// Whether the run has a sentence a `same` can keep.
-    pub has_sentence: bool,
+    pub sentence: Option<&'a str>,
+    pub setup: bool,
 }
 
 /// One run's accepted answer.
@@ -43,6 +45,7 @@ pub(super) enum Answer {
         evidence: Vec<(u64, u64)>,
     },
     Same,
+    Silent,
 }
 
 /// What a reply settled, and what it got wrong, in words its model is shown on a retry.
@@ -194,23 +197,16 @@ pub(super) fn read(
     }
     let mut new_counts = 0;
     for run in runs {
-        let Some(answer) = given.and_then(|given| given.get(run.key)) else {
-            // Kept as it was: a run with nothing to add is the same.
-            if run.has_sentence {
-                read.runs.insert(run.key.to_owned(), Answer::Same);
-            } else {
-                read.errors
-                    .push(format!("{}: write its first sentence", run.key));
-            }
-            continue;
-        };
+        let answer = given.and_then(|given| given.get(run.key));
         // A run's own sentence may name the run as the summary does; it reads the same without.
-        let mut answer = answer.clone();
-        if let Some(line) = answer.get("line").and_then(Value::as_str) {
-            answer["line"] = Value::from(line.replace(&format!("{{{}:", run.key), "{"));
+        let mut answer = answer.cloned();
+        if let Some(answer) = answer.as_mut() {
+            if let Some(line) = answer.get("line").and_then(Value::as_str) {
+                answer["line"] = Value::from(line.replace(&format!("{{{}:", run.key), "{"));
+            }
         }
         let mut line_valid = false;
-        match answer_of(&answer, run.has_sentence, &mut |template| {
+        match answer_of(answer.as_ref(), run.sentence, run.setup, &mut |template| {
             let checked = check_line(template, false, runs, Some(run), render)?;
             let fresh = checked
                 .iter()
@@ -242,14 +238,20 @@ pub(super) fn read(
                 }
                 Err(error) => read.errors.push(format!("{}: {error}", run.key)),
             },
-            Ok(Answer::Same) => {
-                read.runs.insert(run.key.to_owned(), Answer::Same);
+            Ok(answer @ (Answer::Same | Answer::Silent)) => {
+                read.runs.insert(run.key.to_owned(), answer);
             }
             Err(error) => read.errors.push(format!("{}: {error}", run.key)),
         }
         let refused = !read.runs.contains_key(run.key);
-        let flagged = answer["status"] == "flag";
-        if let Some(line) = answer["line"].as_str().filter(|_| refused && flagged) {
+        let flagged = answer
+            .as_ref()
+            .is_some_and(|answer| answer["status"] == "flag");
+        if let Some(line) = answer
+            .as_ref()
+            .and_then(|answer| answer["line"].as_str())
+            .filter(|_| refused && flagged)
+        {
             let kept = if line_valid {
                 line.to_owned()
             } else {
@@ -266,29 +268,25 @@ pub(super) fn read(
             read.salvaged.insert(run.key.to_owned());
         }
     }
-    match (summary, object.get("summary")) {
-        // A summary nobody asked for is left unread.
-        (None, Some(_)) => {}
-        (Some(bounds), None) if !bounds.has_sentence => read
-            .errors
-            .push("summary: write the summary sentence".into()),
-        (Some(_), None) => read.summary = Some(Answer::Same),
-        (Some(bounds), Some(answer)) => {
-            match answer_of(answer, bounds.has_sentence, &mut |template| {
-                check_line(template, true, runs, None, render).map(|_| ())
-            }) {
-                Ok(answer) => read.summary = Some(answer),
-                Err(error) => read.errors.push(format!("summary: {error}")),
-            }
+    if let Some(bounds) = summary {
+        match answer_of(
+            object.get("summary"),
+            bounds.sentence,
+            bounds.setup,
+            &mut |template| check_line(template, true, runs, None, render).map(|_| ()),
+        ) {
+            Ok(answer) => read.summary = Some(answer),
+            Err(error) => read.errors.push(format!("summary: {error}")),
         }
-        (None, None) => {}
     }
+
     read
 }
 
 /// The summary's own state: whether it has a sentence to keep.
-pub(super) struct SummaryBounds {
-    pub has_sentence: bool,
+pub(super) struct SummaryBounds<'a> {
+    pub sentence: Option<&'a str>,
+    pub setup: bool,
 }
 
 /// The reply as JSON. A model that fences it in a code block still means the JSON inside.
@@ -306,11 +304,16 @@ fn parse(reply: &str) -> Result<Value, String> {
 }
 
 fn answer_of(
-    value: &Value,
-    has_sentence: bool,
+    value: Option<&Value>,
+    previous: Option<&str>,
+    setup: bool,
     check: &mut dyn FnMut(&str) -> Result<(), String>,
 ) -> Result<Answer, String> {
-    let object = value.as_object().ok_or("give an object")?;
+    if value.is_none() && setup {
+        return Ok(Answer::Silent);
+    }
+    let same = serde_json::json!({"same": true});
+    let object = value.unwrap_or(&same).as_object().ok_or("give an object")?;
     if object.get("same") == Some(&Value::Bool(true)) {
         if let Some(key) = object
             .keys()
@@ -318,11 +321,9 @@ fn answer_of(
         {
             return Err(format!("\"same\" takes no \"{key}\""));
         }
-        return if has_sentence {
-            Ok(Answer::Same)
-        } else {
-            Err("there is no sentence yet to keep; write one".into())
-        };
+        let previous = previous.ok_or("there is no sentence yet to keep; write one")?;
+        check(previous)?;
+        return Ok(Answer::Same);
     }
     if let Some(key) = object
         .keys()
@@ -337,6 +338,9 @@ fn answer_of(
         Some("flag") => true,
         _ => return Err("status is \"ok\" or \"flag\"".into()),
     };
+    if !flag && object.get("line") == Some(&Value::Null) {
+        return Ok(Answer::Silent);
+    }
     let template = object
         .get("line")
         .and_then(Value::as_str)
@@ -476,13 +480,48 @@ fn check_line(
     for (range, token) in &found {
         rendered.push_str(&template[at..range.start]);
         literal.push_str(&template[at..range.start]);
-        literal.push(' ');
+        let bound = token
+            .run()
+            .and_then(|key| runs.iter().find(|run| run.key == key))
+            .or(own);
+        let live =
+            !matches!(token, Token::Label(_)) && bound.is_some_and(|run| !run.moving.is_empty());
+        literal.push(if live { LIVE } else { ' ' });
         let run = token.run().or(own.map(|run| run.key));
         rendered.push_str(&render(run, token));
         at = range.end;
     }
     rendered.push_str(&template[at..]);
     literal.push_str(&template[at..]);
+    if literal.contains(LIVE) {
+        static PINNED: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        let pinned = PINNED.get_or_init(|| regex::Regex::new(
+            r"\b(?:step|epoch|round)\s+\d[\d.,]*|\bat\s+(?:time\s+\d[\d.,]*|\d+(?::\d+)+|\d+(?:[.,]\d+)?\s*(?:ms|s|seconds?|minutes?|hours?)\b)|\b(?:first|last|initial|final)\s+reading\b"
+        ).expect("fixed timing pattern"));
+        let literal = literal.to_lowercase();
+        for place in pinned.find_iter(&literal) {
+            let before = literal[..place.start()]
+                .rsplit(';')
+                .next()
+                .unwrap_or_default();
+            let after = literal[place.end()..].split(';').next().unwrap_or_default();
+            let trend = before
+                .split_whitespace()
+                .last()
+                .is_some_and(|word| ["since", "from", "after", "before"].contains(&word));
+            if trend {
+                continue;
+            }
+            let figure = before
+                .chars()
+                .rev()
+                .find(|c| c.is_numeric() || *c == LIVE)
+                .or_else(|| after.chars().find(|c| c.is_numeric() || *c == LIVE));
+            if figure == Some(LIVE) {
+                return Err("a live token describes now, a comparison or a trend; a fixed step, time or reading needs a fixed value".into());
+            }
+        }
+    }
     let shown = rendered.replace("**", "").graphemes(true).count();
     let limit = if summary { 90 } else { MAX_GRAPHEMES };
     if shown > limit {
@@ -608,7 +647,8 @@ mod tests {
             moving: &run.moving,
             step: run.moving.last().copied(),
             excerpts: &run.excerpts,
-            has_sentence,
+            sentence: has_sentence.then_some("Loss **{loss}**."),
+            setup: false,
         }
     }
 
@@ -624,7 +664,7 @@ mod tests {
     fn a_sentence_with_tokens_and_one_bold_figure_is_kept() {
         let run = run();
         let read = read(
-            r#"{"runs": {"r1": {"status": "ok", "line": "Val loss **{val_loss}**, {val_loss.vs} the parent at step 300."}}}"#,
+            r#"{"runs": {"r1": {"status": "ok", "line": "Val loss **{val_loss}**, {val_loss.vs}."}}}"#,
             &[bind("r1", &run, false)],
             None,
             &render,
@@ -748,7 +788,10 @@ mod tests {
         let read = read(
             r#"{"runs": {"r1": {"status": "ok", "line": "Loss **{loss}**, behind Depth 6 at 1.21."}, "r2": {"same": true}}}"#,
             &[bind("r1", &first, false), bind("r2", &second, true)],
-            Some(&SummaryBounds { has_sentence: true }),
+            Some(&SummaryBounds {
+                sentence: Some("{r1} loss **{r1:loss}**."),
+                setup: false,
+            }),
             &render,
         );
         assert!(
@@ -760,7 +803,7 @@ mod tests {
     }
 
     #[test]
-    fn a_step_written_as_a_place_in_the_run_is_refused_only_when_it_is_the_step_now() {
+    fn a_step_can_anchor_a_trend_without_pinning_a_live_value() {
         let mut run = run();
         run.moving = vec![2.3104, 20.0, 340.0];
         let line = |text: &str| {
@@ -769,7 +812,7 @@ mod tests {
         };
         assert!(line("Loss **{loss}**, climbing since step 20.").is_empty());
         assert!(line("Loss **{loss}** with 20 warnings.")[0].contains("\"20\""));
-        assert!(line("Loss **{loss}** at step 340.")[0].contains("\"340\""));
+        assert!(!line("Loss **{loss}** at step 340.").is_empty());
     }
 
     #[test]
@@ -830,7 +873,8 @@ mod tests {
         let b = run();
         let runs = [bind("r1", &a, true), bind("r2", &b, true)];
         let bounds = SummaryBounds {
-            has_sentence: false,
+            sentence: None,
+            setup: false,
         };
         let good = read(
             r#"{"summary": {"status": "ok", "line": "{r2} leads at val loss **{r2:val_loss}**; {r1} is close."}}"#,
@@ -877,5 +921,44 @@ mod tests {
             "{:?}",
             many.errors
         );
+    }
+
+    #[test]
+    fn live_values_cannot_be_pinned_to_a_fixed_reading_or_kept_that_way() {
+        let run = run();
+        for line in [
+            "Loss **{loss}** at step 0.",
+            "Step 0: loss **{loss}**.",
+            "Loss **{loss}**, the first reading.",
+            "Loss **{loss}** at 00:00.",
+        ] {
+            let answer = serde_json::json!({"runs": {"r1": {"status": "ok", "line": line}}});
+            let read_line = read(
+                &answer.to_string(),
+                &[bind("r1", &run, false)],
+                None,
+                &render,
+            );
+            assert!(!read_line.errors.is_empty(), "{line}");
+            let mut bound = bind("r1", &run, true);
+            bound.sentence = Some(line);
+            let kept = read(r#"{"runs":{"r1":{"same":true}}}"#, &[bound], None, &render);
+            assert!(!kept.errors.is_empty(), "{line}");
+        }
+        for line in [
+            "Loss **1.75** at step 0.",
+            "Loss **{loss}** now.",
+            "Loss **{loss}** lower since step 0.",
+            "Loss **1.75** at step 0; now {loss}.",
+        ] {
+            let answer = serde_json::json!({"runs": {"r1": {"status": "ok", "line": line}}});
+            let read = read(
+                &answer.to_string(),
+                &[bind("r1", &run, false)],
+                None,
+                &render,
+            );
+            assert!(read.errors.is_empty(), "{line}: {:?}", read.errors);
+        }
     }
 }
