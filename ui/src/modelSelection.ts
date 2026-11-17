@@ -1,5 +1,8 @@
 import { reconcileReasoning, reconcileServiceTier, type AgentSelection, type Harness, type HarnessModel } from "./api";
 import { groupModelLines } from "./modelLines.ts";
+import { fmtNumber } from "./i18n";
+import { m } from "./paraglide/messages.js";
+import { getLocale } from "./paraglide/runtime.js";
 
 /** The entry a selection or chat runs on: its agent, and the account when it names one. */
 export function selectionHarness(harnesses: Harness[], selection: Pick<AgentSelection, "harness" | "profile"> | null | undefined): Harness | undefined {
@@ -16,9 +19,15 @@ export function keptInstall(h: Harness): boolean {
   return Boolean(h.managed && !h.profile && !["claude-code", "codex", "opencode"].includes(h.id));
 }
 
+/** "1 model available", "3 models available". */
+export function modelsAvailable(count: number) {
+  const message = new Intl.PluralRules(getLocale()).select(count) === "one" ? m.settings_models_available_one : m.settings_models_available;
+  return message({ count: fmtNumber(count) });
+}
+
 /** An agent's models as the picker lists them: one line per model, older versions last. */
 export function agentModelLines(harness: string, models: HarnessModel[]) {
-  const lines = groupModelLines(models.map((model) => ({ tile: harness, model })));
+  const lines = groupModelLines(models.filter((model) => !model.parsed.superseded).map((model) => ({ tile: harness, model })));
   return [...lines.filter((line) => !line.older), ...lines.filter((line) => line.older)];
 }
 

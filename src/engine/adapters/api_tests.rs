@@ -1750,6 +1750,11 @@ async fn legacy_box(root: PathBuf, initial_stage: &str) {
             engine,
             runtime,
             Box::new(|_| Ok(Box::new(()))),
+            Arc::new(crate::local::chat::ChatHost::new(
+                Arc::new(crate::local::opencode::AgentHost::new(None)),
+                Arc::new(crate::local::codex::CodexHost::new()),
+                Arc::new(crate::local::claude::ClaudeHost::new()),
+            )),
             root.join("store"),
         )
         .unwrap();

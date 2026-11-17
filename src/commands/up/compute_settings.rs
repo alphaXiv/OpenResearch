@@ -685,29 +685,62 @@ fn ssh_user_home(user: &str) -> Option<std::path::PathBuf> {
     }
 }
 
+/// OpenSSH resolves the account SID's ProfileImagePath, not a guessed folder.
 #[cfg(windows)]
 fn ssh_user_home(user: &str) -> Option<std::path::PathBuf> {
-    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::Foundation::{LocalFree, ERROR_INSUFFICIENT_BUFFER};
+    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows_sys::Win32::Security::LookupAccountNameW;
+    use windows_sys::Win32::System::Registry::HKEY_LOCAL_MACHINE;
 
-    // OpenSSH resolves the account SID's ProfileImagePath, not a guessed folder.
-    let script = r#"
-$ErrorActionPreference = 'Stop'
-[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
-$sid = [Security.Principal.NTAccount]::new($env:ORX_SSH_CONFIG_USER).Translate([Security.Principal.SecurityIdentifier]).Value
-$path = [Microsoft.Win32.Registry]::GetValue('HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\' + $sid, 'ProfileImagePath', $null)
-if (!$path) { $path = $env:SystemRoot }
-[Environment]::ExpandEnvironmentVariables($path)
-"#;
-    let output = crate::process::command("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .env("ORX_SSH_CONFIG_USER", user)
-        .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
-        .output()
-        .ok()?;
-    if !output.status.success() {
+    let name: Vec<u16> = user.encode_utf16().chain(Some(0)).collect();
+    let (mut sid, mut domain) = (Vec::<u8>::new(), Vec::<u16>::new());
+    // The first call reports the sizes the second needs.
+    loop {
+        let (mut sid_bytes, mut domain_chars, mut kind) =
+            (sid.len() as u32, domain.len() as u32, 0);
+        // SAFETY: the name is NUL-terminated and each length is its buffer's size.
+        let found = unsafe {
+            LookupAccountNameW(
+                std::ptr::null(),
+                name.as_ptr(),
+                sid.as_mut_ptr().cast(),
+                &mut sid_bytes,
+                domain.as_mut_ptr(),
+                &mut domain_chars,
+                &mut kind,
+            )
+        };
+        if found != 0 {
+            break;
+        }
+        if std::io::Error::last_os_error().raw_os_error() != Some(ERROR_INSUFFICIENT_BUFFER as i32)
+        {
+            return None;
+        }
+        sid.resize(sid.len().max(sid_bytes as usize), 0);
+        domain.resize(domain.len().max(domain_chars as usize), 0);
+    }
+
+    let mut text = std::ptr::null_mut();
+    // SAFETY: `sid` holds the SID just looked up; `text` is freed below.
+    if unsafe { ConvertSidToStringSidW(sid.as_mut_ptr().cast(), &mut text) } == 0 {
         return None;
     }
-    let path = std::str::from_utf8(&output.stdout).ok()?.trim();
+    // SAFETY: the conversion returned a NUL-terminated string, read before it is freed.
+    let sid_text = unsafe {
+        let length = (0..).take_while(|&i| *text.add(i) != 0).count();
+        let sid_text = String::from_utf16_lossy(std::slice::from_raw_parts(text, length));
+        LocalFree(text.cast());
+        sid_text
+    };
+
+    let path = crate::local::shell_env::registry_string(
+        HKEY_LOCAL_MACHINE,
+        &format!(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\{sid_text}"),
+        "ProfileImagePath",
+    )
+    .or_else(|| std::env::var_os("SystemRoot"))?;
     (!path.is_empty()).then(|| path.into())
 }
 
@@ -1413,6 +1446,19 @@ pub(super) async fn trackio_project_runs(
         runs.dashboard_url = None;
     }
     Ok(Json(json!(runs)))
+}
+
+/// What one run logged to Trackio, each metric with a short series for a sparkline.
+pub(super) async fn trackio_run_metrics(
+    State(state): State<AppState>,
+    Path((id, run)): Path<(String, String)>,
+) -> ApiResult {
+    let project = Store::open()?
+        .get_local_project(&id)?
+        .ok_or_else(|| not_found("project"))?;
+    let project = crate::local::trackio::project_for(&project.slug);
+    let metrics = crate::local::trackio::run_metrics(&state.trackio, project, run, &[], 48).await;
+    Ok(Json(json!(metrics)))
 }
 
 /// Live check of the saved Trackio Space or server and its write access.

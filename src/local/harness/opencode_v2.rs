@@ -624,6 +624,12 @@ pub(super) async fn reply(
         .await;
     }
     let (form_id, field_key): (String, String) = serde_json::from_str(id)?;
+    // A form field holds one value of its own type, with no room for a note.
+    if !answer.answers.is_empty() && answer.note.as_deref().is_some_and(|n| !n.trim().is_empty()) {
+        return Err(anyhow!(
+            "This question takes a choice or a typed answer, not both. Remove one and submit again."
+        ));
+    }
     let submitted = submitted_answers(&answer.answers, answer.note.as_ref());
     if !answer.approve || submitted.is_empty() {
         if !endpoint.legacy_v2_api {
@@ -656,7 +662,7 @@ pub(super) async fn reply(
         .iter()
         .find(|field| field["key"].as_str() == Some(&field_key))
         .ok_or_else(|| anyhow!("OpenCode form field no longer exists"))?;
-    values.insert(field_key, field_answer(field, submitted)?);
+    values.insert(field_key, field_answer(field, &submitted)?);
     let active: Vec<_> = fields
         .iter()
         .filter(|field| field_active(field, &values))
@@ -708,7 +714,7 @@ fn saved_form_answers(
             .iter()
             .find(|field| field["key"].as_str() == Some(&key))
         {
-            answers.insert(key, field_answer(field, submitted)?);
+            answers.insert(key, field_answer(field, &submitted)?);
         }
     }
     Ok(())
@@ -947,6 +953,11 @@ async fn discover_models_within(
             post(endpoint, "/api/plugin/await-activation", &json!({})).await?;
         }
         loop {
+            if !endpoint.legacy_v2_api && !endpoint.plugins_active().await? {
+                plugins_pending = true;
+                tokio::time::sleep(retry).await;
+                continue;
+            }
             let models = catalog_get(endpoint, "/api/model").await?;
             plugins_pending = models.is_none();
             if let Some(models) = models {
@@ -1427,12 +1438,15 @@ mod tests {
         let note = "a custom answer".to_string();
         let submitted = submitted_answers(&[], Some(&note));
         assert_eq!(
-            field_answer(&json!({"type":"string"}), submitted).unwrap(),
+            field_answer(&json!({"type":"string"}), &submitted).unwrap(),
             json!(note)
         );
         assert!(submitted_answers(&[], Some(&"  ".to_string())).is_empty());
         let chosen = vec!["Selected option".to_string()];
-        assert_eq!(submitted_answers(&chosen, Some(&note)), chosen);
+        assert_eq!(
+            submitted_answers(&chosen, Some(&note)),
+            [chosen[0].clone(), note.clone()]
+        );
 
         let fields = vec![
             json!({"key":"count","type":"integer"}),

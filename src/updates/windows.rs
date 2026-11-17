@@ -1,9 +1,9 @@
-//! Self-update on Windows. The PowerShell installer does the download and the
-//! unpacking, as the shell installer does elsewhere; this module supplies the
-//! two things Windows makes the binary do for itself.
+//! Self-update on Windows. Where the shell installer updates other platforms,
+//! orx unpacks the release archive itself, then does the two things Windows
+//! makes the binary do for itself.
 //!
 //! Windows refuses to overwrite a mapped executable but allows renaming it. So
-//! the installer unpacks into a staging directory, and only then is the
+//! the release is unpacked into a staging directory, and only then is the
 //! installed `orx.exe` renamed aside and the new one renamed into its place —
 //! two renames, with no window in which `orx.exe` is half-written. The retired
 //! copy is deleted by a later start, once every process that mapped it has
@@ -126,9 +126,10 @@ const STAGED_DIR: &str = ".orx-staged";
 /// Defender and SmartScreen scan an executable on its first run, which can take a while.
 const LAUNCH_TIMEOUT: Duration = Duration::from_secs(120);
 
-pub(crate) fn install(installed: &Path, script: &[u8], quiet: bool) -> Result<()> {
+/// Install the `orx.exe` in a verified release `archive` at `installed`.
+pub(crate) fn install(installed: &Path, archive: &[u8]) -> Result<()> {
     with_scratch(installed, |scratch| {
-        run_installer(scratch, script, quiet)?;
+        unpack(scratch, archive)?;
         swap_staged(installed, &scratch.join("orx.exe"))
     })
 }
@@ -138,16 +139,13 @@ pub(crate) fn staged_dir(installed: &Path) -> PathBuf {
     installed.with_file_name(STAGED_DIR)
 }
 
-/// Unpack `release` with the PowerShell installer and stage it for `installed`.
-pub(crate) fn stage_installer(
+/// Unpack `release` from its verified `archive` and stage it for `installed`.
+pub(crate) fn stage_archive(
     installed: &Path,
     release: &LatestRelease,
-    script: &[u8],
-    quiet: bool,
+    archive: &[u8],
 ) -> Result<()> {
-    stage(installed, release, |scratch| {
-        run_installer(scratch, script, quiet)
-    })
+    stage(installed, release, |scratch| unpack(scratch, archive))
 }
 
 /// Stage a desktop `orx.exe` for `release` after checking it is signed by the
@@ -159,11 +157,7 @@ pub(crate) fn stage_binary(installed: &Path, release: &LatestRelease, bytes: &[u
     stage(installed, release, |scratch| {
         let staged = scratch.join("orx.exe");
         std::fs::write(&staged, bytes)?;
-        let status = crate::process::command(powershell())
-            .args(["-NoProfile", "-NonInteractive", "-Command", "$s = Get-AuthenticodeSignature -LiteralPath $env:ORX_UPDATE_FILE; if ($s.Status -ne 'Valid' -or $s.SignerCertificate.GetNameInfo('SimpleName', $false) -ne 'alphaXiv Inc.' -or -not $s.TimeStamperCertificate) { exit 1 }"])
-            .env("ORX_UPDATE_FILE", &staged)
-            .status()?;
-        if !status.success() {
+        if signer(&staged).as_deref() != Some("alphaXiv Inc.") {
             return Err(anyhow!(
                 "The downloaded app is not signed by the expected publisher."
             ));
@@ -249,45 +243,16 @@ pub(crate) fn install_staged(installed: &Path) -> Result<()> {
     Ok(())
 }
 
-fn run_installer(scratch: &Path, script: &[u8], quiet: bool) -> Result<()> {
-    let script_path = scratch.join("installer.ps1");
-    std::fs::write(&script_path, script)?;
-    let mut cmd = crate::process::command(powershell());
-    cmd.args([
-        "-NoProfile",
-        "-NonInteractive",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-    ])
-    .arg(&script_path)
-    // A flat unpack into the staging dir, with no receipt naming that dir as
-    // the install prefix (UNMANAGED_INSTALL implies it; DISABLE_UPDATE makes sure).
-    .env("OPENRESEARCH_CLI_UNMANAGED_INSTALL", scratch)
-    .env("OPENRESEARCH_CLI_DISABLE_UPDATE", "1")
-    // Both outrank UNMANAGED_INSTALL in the installer; a user's shell may export them.
-    .env_remove("OPENRESEARCH_CLI_INSTALL_DIR")
-    .env_remove("CARGO_DIST_FORCE_INSTALL_DIR");
-    if quiet {
-        cmd.stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-    }
-    let status = cmd
-        .status()
-        .map_err(|err| anyhow!("Could not run PowerShell: {}", err))?;
-    if !status.success() {
-        return Err(anyhow!(
-            "The installer exited with {}. The previous orx is untouched.",
-            status
-        ));
-    }
+fn unpack(scratch: &Path, archive: &[u8]) -> Result<()> {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(archive))
+        .map_err(|e| anyhow!("The downloaded orx archive could not be read: {e}"))?;
+    let mut exe = archive
+        .by_name("orx.exe")
+        .map_err(|e| anyhow!("The downloaded orx archive has no orx.exe: {e}"))?;
     let staged = scratch.join("orx.exe");
-    if !staged.exists() {
-        return Err(anyhow!(
-            "The installer did not produce {}. The previous orx is untouched.",
-            staged.display()
-        ));
-    }
+    std::fs::File::create(&staged)
+        .and_then(|mut file| std::io::copy(&mut exe, &mut file))
+        .map_err(|e| anyhow!("Could not unpack the new orx to {}: {e}", staged.display()))?;
     Ok(())
 }
 
@@ -317,18 +282,115 @@ fn swap_staged(installed: &Path, staged: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Windows PowerShell by its fixed path, so a PATH without it (or with another
-/// `powershell` first) cannot break updates.
-fn powershell() -> PathBuf {
-    match std::env::var_os("SystemRoot") {
-        Some(root) => Path::new(&root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe"),
-        None => "powershell.exe".into(),
-    }
+/// The subject of `file`'s Authenticode signature when Windows trusts it and it
+/// is timestamped, so it stays valid after the certificate expires.
+fn signer(file: &Path) -> Option<String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Security::Cryptography::{
+        CertGetNameStringW, CERT_NAME_SIMPLE_DISPLAY_TYPE,
+    };
+    use windows_sys::Win32::Security::WinTrust::{
+        WTHelperGetProvSignerFromChain, WTHelperProvDataFromStateData, WinVerifyTrust,
+        WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_DATA_0, WINTRUST_FILE_INFO,
+        WTD_CHOICE_FILE, WTD_REVOKE_NONE, WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY,
+        WTD_UI_NONE,
+    };
+
+    let path: Vec<u16> = file.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut file_info = WINTRUST_FILE_INFO {
+        cbStruct: std::mem::size_of::<WINTRUST_FILE_INFO>() as u32,
+        pcwszFilePath: path.as_ptr(),
+        ..Default::default()
+    };
+    let mut data = WINTRUST_DATA {
+        cbStruct: std::mem::size_of::<WINTRUST_DATA>() as u32,
+        dwUIChoice: WTD_UI_NONE,
+        fdwRevocationChecks: WTD_REVOKE_NONE,
+        dwUnionChoice: WTD_CHOICE_FILE,
+        Anonymous: WINTRUST_DATA_0 {
+            pFile: &mut file_info,
+        },
+        dwStateAction: WTD_STATEACTION_VERIFY,
+        ..Default::default()
+    };
+    let mut action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+    let mut verify = |data: &mut WINTRUST_DATA| {
+        // SAFETY: `data` and the file info it points to outlive the call.
+        unsafe {
+            WinVerifyTrust(
+                INVALID_HANDLE_VALUE.cast(),
+                &mut action,
+                (data as *mut WINTRUST_DATA).cast(),
+            )
+        }
+    };
+
+    let trusted = verify(&mut data) == 0;
+    // SAFETY: the verify left its state open until the close below, and a
+    // signer with a chain points at that many certificates.
+    let name = trusted.then(|| unsafe {
+        let provider = WTHelperProvDataFromStateData(data.hWVTStateData);
+        let signer = WTHelperGetProvSignerFromChain(provider, 0, 0, 0);
+        let timestamper = WTHelperGetProvSignerFromChain(provider, 0, 1, 0);
+        if signer.is_null() || (*signer).csCertChain == 0 {
+            return None;
+        }
+        if timestamper.is_null() || (*timestamper).csCertChain == 0 {
+            return None;
+        }
+        let mut name = [0u16; 256];
+        let length = CertGetNameStringW(
+            (*(*signer).pasCertChain).pCert,
+            CERT_NAME_SIMPLE_DISPLAY_TYPE,
+            0,
+            std::ptr::null(),
+            name.as_mut_ptr(),
+            name.len() as u32,
+        );
+        // The length counts the terminator.
+        Some(String::from_utf16_lossy(
+            &name[..length.saturating_sub(1) as usize],
+        ))
+    });
+    data.dwStateAction = WTD_STATEACTION_CLOSE;
+    verify(&mut data);
+    name.flatten()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_an_archive_with_orx_exe_replaces_the_installed_binary() {
+        fn archive(name: &str) -> Vec<u8> {
+            use std::io::Write as _;
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            zip.start_file::<_, ()>(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(b"new").unwrap();
+            zip.finish().unwrap().into_inner()
+        }
+        let dir = std::env::temp_dir().join(format!("orx-archive-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let installed = dir.join("orx.exe");
+        std::fs::write(&installed, "old").unwrap();
+
+        assert!(install(&installed, b"not a zip").is_err());
+        assert!(install(&installed, &archive("README.md")).is_err());
+        assert_eq!(std::fs::read_to_string(&installed).unwrap(), "old");
+
+        install(&installed, &archive("orx.exe")).unwrap();
+        assert_eq!(std::fs::read_to_string(&installed).unwrap(), "new");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_unsigned_binary_has_no_trusted_signer() {
+        assert_eq!(signer(&std::env::current_exe().unwrap()), None);
+    }
 
     #[test]
     fn a_restart_swaps_the_staged_exe_in_and_clears_the_stage() {

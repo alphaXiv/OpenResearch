@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
   type ButtonHTMLAttributes,
+  type CSSProperties,
   type ReactNode,
   type RefObject,
 } from "react";
@@ -19,17 +20,20 @@ import { Popover } from "@base-ui/react/popover";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
 
 import { m } from "../paraglide/messages.js";
-import { Bot, Brain, Check, ChevronDown, ChevronRight, Handshake, ListChecks, Lock, LockOpen, Pencil, Plus, Ruler, Settings, ShieldCheck, Workflow, Zap, type LucideIcon } from "lucide-react";
+import { getLocale } from "../paraglide/runtime.js";
+import { Bot, Brain, Check, ChevronDown, ChevronRight, Handshake, ListChecks, Lock, LockOpen, Minus, Pencil, Plus, Rocket, Ruler, Settings, ShieldCheck, Turtle, Workflow, Zap, type LucideIcon } from "lucide-react";
 import {
   modelLabel,
   reasoningFor,
   reconcileReasoning,
   reconcileServiceTier,
   REASONING_DEFAULT_ID,
+  SERVICE_TIER_DEFAULT_ID,
   serviceTiersFor,
   type Harness,
   type HarnessId,
   type LocalModelConnection,
+  type ModelNudge,
   type ModelVariant,
   type OpenCodeProvider,
   type OptionChoice,
@@ -38,15 +42,15 @@ import {
   DEFAULT_AUTONOMY,
 } from "../api";
 import type { NativeOption } from "../acp";
-import { HarnessLogo, ModelMark } from "./HarnessLogo";
+import { HarnessLogo, LABS, ModelGlyph, ModelMark } from "./HarnessLogo";
 
 import { IconButton, MenuItem, SwitchIndicator, Tooltip } from "./ui";
 import { cn } from "./ui/cn";
 
 import { harnessKey, selectionHarness } from "../modelSelection";
-import { defaultOffer, groupModelLines, NEW_FOR, sight, VARIANT_EFFORTS, variantOffer } from "../modelLines";
+import { defaultOffer, localDay, newLines, VARIANT_EFFORTS, variantOffer } from "../modelLines";
 import { AgentIconTile } from "./AgentIcon";
-import { lineName, ModelList, offerOn, type PickerLine } from "./ModelList";
+import { feedLine, lineLab, lineName, lineSection, ModelList, offerOn, type PickedFrom, type PickerLine } from "./ModelList";
 import { pickerLines, type PickerAgent } from "./pickerAgents";
 
 const MODEL_GROUP_CLASS_NAME = [
@@ -193,6 +197,25 @@ function DescribedRadioItem({ choice, icon, isDefault }: { choice: OptionChoice;
   );
 }
 
+/** Speed tiers slowest first, as the Speed control offers them; null is the standard tier. */
+const SPEEDS = ["flex", null, "fast", "ultrafast"] as const;
+const SPEED_ICONS: Record<string, LucideIcon> = { flex: Turtle, fast: Zap, ultrafast: Rocket };
+
+function speedName(speed: string | null) {
+  return speed === "fast" ? m.model_picker_speed_fast()
+    : speed === "ultrafast" ? m.model_picker_speed_ultrafast()
+      : speed === "flex" ? m.model_picker_speed_flex()
+        : speed ?? m.service_tier_standard();
+}
+
+function SpeedIcon({ speed }: { speed: string | null }) {
+  const Icon = speed ? SPEED_ICONS[speed] ?? Zap : Minus;
+  return <Icon size={14} aria-hidden="true" className={cn("shrink-0", speed && "text-accent-amber")} />;
+}
+
+const SPEED_SEGMENT =
+  "inline-flex h-6 w-7 cursor-default items-center justify-center rounded-sm text-subtext outline-none transition-[background,color] duration-120 ease-standard data-[highlighted]:text-text data-[checked]:bg-background data-[checked]:text-text data-[checked]:shadow-segment focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus";
+
 const SETTINGS_ROW =
   "flex min-h-8 w-full items-center justify-between gap-2 rounded-sm px-2 py-1.5 text-start text-sm text-text outline-none transition-[background,color] duration-120 ease-standard data-[highlighted]:bg-surface data-[popup-open]:bg-surface focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:outline-offset-2";
 
@@ -294,6 +317,7 @@ export function ModelPicker({
   nativeOptions = [],
   onSelectNativeOption,
   onStartHarness,
+  canNudge = false,
 }: {
   value: ModelSelection | null;
   onSelect: (value: ModelSelection) => void;
@@ -314,20 +338,23 @@ export function ModelPicker({
   nativeOptions?: NativeOption[];
   onSelectNativeOption?: (optionId: string, value: string) => void;
   onStartHarness?: (harness: Harness, model: string) => void;
+  /** Whether this composer shows the model feed's nudge: the open chat's does. */
+  canNudge?: boolean;
 }) {
   const { portalContainer } = useContext(WorkspaceDomContext);
 
   const workspace = useWorkspace();
-  const { getHarnessesQuery, getOpenCodeProvidersQuery, getLocalModelsQuery, getUiStateQuery } = workspace.queries;
+  const { getHarnessesQuery, getOpenCodeProvidersQuery, getLocalModelsQuery, getUiStateQuery, getModelFeedQuery } = workspace.queries;
 
   const { data: catalog = EMPTY_HARNESSES, isPending: catalogLoading } = useQuery(getHarnessesQuery());
   const { data: providers = EMPTY_PROVIDERS } = useQuery(getOpenCodeProvidersQuery());
   const { data: endpoints = EMPTY_ENDPOINTS } = useQuery(getLocalModelsQuery());
   const { data: uiState } = useQuery(getUiStateQuery());
+  const { data: feed } = useQuery(getModelFeedQuery());
   const pickedHarness = value?.harness;
   const pickedProfile = value?.profile;
   const pickedModel = value?.model;
-  const { harnesses, agents, offers, selectedHarness, selectedModel, selectedAgent, lines, selectedLine } = useMemo(
+  const { harnesses, agents, selectedHarness, selectedModel, selectedAgent, lines, selectedLine } = useMemo(
     () => pickerLines(
       { catalog, providers, endpoints, hiddenModels: uiState?.hiddenModels ?? EMPTY_IDS },
       pickedHarness ? { harness: pickedHarness, profile: pickedProfile, model: pickedModel ?? null } : null,
@@ -336,10 +363,9 @@ export function ModelPicker({
     [catalog, providers, endpoints, uiState?.hiddenModels, pickedHarness, pickedProfile, pickedModel, sessionHarness],
   );
   const favorites = useMemo(() => new Set(uiState?.favoriteModels ?? []), [uiState]);
-  const sightings = uiState?.modelSightings ?? null;
-  const fresh = useMemo(() => new Set(Object.entries(sightings?.models ?? {}).filter(([, at]) => at > Date.now() - NEW_FOR).map(([key]) => key)), [sightings]);
-  // Models that came out since the picker was last opened.
-  const unseen = lines.filter((line) => !line.older && (sightings?.models[line.key] ?? 0) > (sightings?.openedAt ?? Infinity));
+  const releases = feed?.releases ?? NO_RELEASES;
+  // Not memoized: a model stops being new as time passes, with nothing else changing.
+  const released = newLines(lines, releases, Date.now());
   const [menu, setMenu] = useState<"model" | "effort" | "permissions" | null>(null);
   const [filter, setFilter] = useState("");
   const modelTriggerRef = useRef<HTMLButtonElement>(null);
@@ -349,16 +375,86 @@ export function ModelPicker({
   const close = () => {
     setMenu(null);
     setFilter("");
+    setPointAt(undefined);
     modelTriggerRef.current?.focus();
+  };
+
+  // The open chat's model button points at one model at a time, once each: the newest release an agent offers, then
+  // the feed's nudge toward a free model while free models are on. After one is dismissed, the next waits for a reload.
+  const nudge = feed?.nudge;
+  const nudgeLine = nudge && uiState?.opencodeFreeModels ? feedLine(lines, nudge.model) : undefined;
+  const nudgeText = nudge && nudgeLine && nudgeMessage(nudge);
+  const release = released.find((line) => !line.offers[0].model.free && FRONTIER_LABS.includes(lineLab(line) as never));
+  const callouts: Callout[] = [
+    ...(release ? [{
+      kind: "release" as const,
+      id: `release:${release.key}`.slice(0, 64),
+      line: release,
+      text: releaseText(release, releases[release.key]),
+      colors: releaseColors(release),
+      mark: <ModelMark model={release.offers[0].model} harness={release.offers[0].tile.harness.id} size={24} />,
+    }] : []),
+    ...(nudge && nudgeLine && nudgeText ? [{
+      kind: "free" as const,
+      id: nudge.id,
+      line: nudgeLine,
+      text: nudgeText,
+      colors: nudge.colors,
+      mark: <span className="contents" style={{ color: nudge.colors.icon }}><ModelGlyph model={nudgeLine.offers[0].model} size={24} /></span>,
+    }] : []),
+  ];
+  const seenNudges = uiState?.seenNudges;
+  const callout = canNudge && !disabled && seenNudges && !calledOut.has(workspace) ? callouts.find(({ id, line }) => !seenNudges.includes(id) && line !== selectedLine) : undefined;
+  const leaving = useRef<number>(undefined);
+  useEffect(() => () => clearTimeout(leaving.current), []);
+
+  /** Records the callout as seen, keeping the newest ids since only a recent one returns; `expand` also opens the picker section it points into. */
+  const dismissCallout = (expand = false) => {
+    clearTimeout(leaving.current);
+    if (!callout || !seenNudges) return;
+    calledOut.add(workspace);
+    reportCallout(callout, expand ? "opened" : "dismissed");
+    const collapsed = uiState?.collapsedModelSections ?? EMPTY_IDS;
+    const section = lineSection(callout.line);
+    mutUpdateUiState.run(workspace, {
+      seenNudges: [...seenNudges, callout.id].slice(-20),
+      ...(expand && collapsed.includes(section) && { collapsedModelSections: collapsed.filter((id) => id !== section) }),
+    });
+  };
+  const reportCallout = ({ kind, line }: Callout, action: "shown" | "opened" | "dismissed") => {
+    const [offer] = line.offers;
+    workspace.api.captureUiEvent({ name: "model_callout", kind, action, model: offer.model.id, harness: offer.tile.harness.id });
+  };
+  const showing = callout && menu === null ? callout : undefined;
+  useEffect(() => {
+    if (!showing || shownCallouts.has(showing.id)) return;
+    shownCallouts.add(showing.id);
+    reportCallout(showing, "shown");
+  }, [showing?.id]);
+
+  // Moving from the button to the callout crosses a gap, so leaving either waits before dismissing.
+  const calloutHover = { onMouseEnter: () => clearTimeout(leaving.current), onMouseLeave: () => { leaving.current = window.setTimeout(dismissCallout, 200); } };
+
+  const openModels = () => {
+    setFilter("");
+    setMenu("model");
+    searchRef.current?.focus();
+  };
+
+  // The picker opens on the model a callout pointed at, else on the newest release; typing still searches.
+  const [pointAt, setPointAt] = useState<string>();
+  const landOn = () => {
+    const key = pointAt ?? released[0]?.key;
+    const row = key && searchRef.current?.closest(".model-menu")?.querySelector<HTMLElement>(`[data-row="${CSS.escape(key)}"] [data-nav]`);
+    return row || searchRef.current;
   };
 
   useEffect(() => {
     if (openRequest === handledOpenRequest.current) return;
     handledOpenRequest.current = openRequest;
     if (disabled) return;
-    setFilter("");
-    setMenu("model");
-    searchRef.current?.focus();
+    dismissCallout();
+    openModels();
   }, [openRequest, disabled]);
 
   const selectedOffer = offerOn(selectedLine, selectedAgent, selectedModel);
@@ -392,25 +488,22 @@ export function ModelPicker({
     } else pick(agent.harness, model);
   };
 
-  const pickLine = (line: PickerLine, agent: PickerAgent) => {
+  const pickLine = (line: PickerLine, agent: PickerAgent, from: PickedFrom) => {
     const offer = (line === selectedLine && agent === selectedAgent && selectedOffer) || defaultOffer(line.offers.filter((offer) => offer.tile === agent));
-    if (offer) run(agent, offer.model.id);
+    if (!offer) return;
+    workspace.api.captureUiEvent({
+      name: "model_picked",
+      section: from,
+      model: offer.model.id,
+      harness: agent.harness.id,
+      new: released.includes(line),
+      free: Boolean(offer.model.free),
+    });
+    run(agent, offer.model.id);
   };
 
   const toggleFavorite = (family: string) =>
     mutUpdateUiState.run(workspace, { favoriteModels: favorites.has(family) ? [...favorites].filter((item) => item !== family) : [...favorites, family] });
-
-  // Every model is seen before it's hidden, so turning one back on later doesn't make it new. A write that
-  // failed isn't retried until the picker mounts again, and a server too old to keep sightings gets none.
-  const sighting = useRef(false);
-  useEffect(() => {
-    if (!uiState || !("modelSightings" in uiState) || sighting.current) return;
-    const all = groupModelLines(offers);
-    const next = sight(uiState.modelSightings, all, Date.now());
-    if (next === uiState.modelSightings || !all.length) return;
-    sighting.current = true;
-    mutUpdateUiState.runWithOptions(workspace, { modelSightings: next }, { onSettled: ({ status }) => { sighting.current = status !== "success"; } });
-  }, [uiState, offers]);
 
   // A saved model keeps its name while its agent's models load; once they have, only a listed one does.
   const loading = catalogLoading || Boolean(selectedHarness?.catalogPending);
@@ -423,7 +516,7 @@ export function ModelPicker({
   const agentShown = selectedAgent && new Set(selectedLine?.offers.map((offer) => offer.tile)).size > 1 ? selectedAgent : undefined;
   const hint = agentShown ? `${label} — ${agentShown.name}` : label;
 
-  // Cursor and Antigravity list each effort, speed and thinking mode as a model, and Claude
+  // Catalogs list speed and thinking tiers as models, Cursor and Antigravity each effort too, and Claude
   // Code its long context: the Effort menu moves between the siblings of the picked one.
   const siblings = selectedLine?.offers.filter((offer) => offer.tile === selectedAgent) ?? [];
   const variant = selectedOffer?.model.parsed.variant;
@@ -437,7 +530,8 @@ export function ModelPicker({
     if (!offer || !value || !selectedHarness) return;
     onSelect({ ...value, model: offer.model.id, reasoningLevel: reconcileReasoning(selectedHarness, offer.model.id, value.reasoningLevel) });
   };
-  const variantSwitches = Boolean(variant && (varies("fast") || varies("thinking") || variantContext));
+  const variantSpeeds = varies("speed") ? SPEEDS.filter((speed) => siblings.some((offer) => offer.model.parsed.variant.speed === speed)) : [];
+  const variantSwitches = Boolean(variant && (variantSpeeds.length || varies("thinking") || variantContext));
   const hasVariants = Boolean(variant && (variantEfforts.length || variantSwitches));
 
   const effectiveReasoningId = value?.reasoningLevel ?? defaultReasoningId ?? reasoningChoices[0]?.id;
@@ -450,7 +544,16 @@ export function ModelPicker({
   const effectiveServiceTier = reconcileServiceTier(selectedHarness, value?.model, value?.serviceTier);
   const fastChoice = serviceTiersFor(selectedHarness, value?.model).find((choice) => choice.id === "priority");
   const effortLabel = variant && variantEfforts.length ? effortName(variant.effort) : reasoningLabel;
-  const fastOn = effectiveServiceTier === "priority" || Boolean(variant?.fast);
+  // Codex's Fast is a service tier of the same model; elsewhere each speed is a sibling model.
+  const speeds: (string | null)[] = variantSpeeds.length ? variantSpeeds : fastChoice ? [null, "fast"] : [];
+  const speed = variant?.speed ?? (fastChoice && effectiveServiceTier === fastChoice.id ? "fast" : null);
+  const pickSpeed = (next: string | null) => {
+    if (variantSpeeds.length) pickVariant({ speed: next });
+    else if (value && fastChoice) onSelect({ ...value, serviceTier: next ? fastChoice.id : SERVICE_TIER_DEFAULT_ID });
+  };
+  // One tier beside the standard one is a switch; more are a choice.
+  const switchTier = speeds.length === 2 && speeds.includes(null) ? speeds.find((tier) => tier !== null) : undefined;
+  const speedLabel = (tier: string) => (tier === "fast" ? m.model_picker_fast_mode() : speedName(tier));
   const autonomyChoices: (OptionChoice & { id: Autonomy; icon: ReactNode })[] = [
     {
       id: "agentic",
@@ -510,22 +613,24 @@ export function ModelPicker({
           onOpenChange={(open) => {
             setFilter("");
             setMenu((current) => (open ? "model" : current === "model" ? null : current));
-            if (open && sightings && unseen.length) mutUpdateUiState.run(workspace, { modelSightings: { ...sightings, openedAt: Date.now() } });
+            if (!open) setPointAt(undefined);
+            if (open) dismissCallout();
           }}
         >
-          <Tooltip interactive content={hint} className="min-w-0 max-w-full rounded-md">
+          <Tooltip interactive disabled={Boolean(callout)} content={hint} className="min-w-0 max-w-full rounded-md">
             <Popover.Trigger
               ref={modelTriggerRef}
               type="button"
               disabled={disabled}
               className={cn(PILL, "max-w-full", className)}
-              aria-label={[m.a11y_chat_model({ label: hint }), unseen.length ? m.model_picker_new_model() : null].filter(Boolean).join(", ")}
+              aria-label={m.a11y_chat_model({ label: hint })}
+              aria-description={callout ? `${lineName(callout.line)}, ${callout.text}` : undefined}
+              {...(callout && calloutHover)}
               onKeyDown={(event) => {
                 if (event.key === "ArrowDown") {
                   event.preventDefault();
-                  setFilter("");
-                  setMenu("model");
-                  searchRef.current?.focus();
+                  dismissCallout();
+                  openModels();
                 }
               }}
             >
@@ -538,7 +643,6 @@ export function ModelPicker({
               <span className="model-picker-label min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
                 {label}
               </span>
-              {unseen.length > 0 && <span className="shrink-0 rounded-sm bg-accent-blue-subtle px-1 text-xs leading-4 text-accent-blue-strong">{m.model_picker_new_model()}</span>}
               <ChevronDown size={14} className="shrink-0 text-muted" />
             </Popover.Trigger>
           </Tooltip>
@@ -553,13 +657,13 @@ export function ModelPicker({
               positionMethod="fixed"
             >
               <Popover.Popup
-                initialFocus={searchRef}
+                initialFocus={landOn}
                 onKeyDown={moveFocus}
                 aria-label={m.model_picker_model()}
                 className="model-menu group/picker flex flex-col overflow-hidden rounded-lg border border-border bg-background shadow-dropdown outline-none"
                 style={{
                   width: "min(440px, calc(100vw - 16px))",
-                  maxHeight: "min(280px, var(--available-height))",
+                  maxHeight: "min(340px, var(--available-height))",
                 }}
               >
                 <div className="flex shrink-0 items-center border-b border-border-variant pe-1.5">
@@ -595,7 +699,9 @@ export function ModelPicker({
                   filter={filter}
                   onClearFilter={() => setFilter("")}
                   favorites={favorites}
-                  fresh={fresh}
+                  released={released}
+                  pointedAt={pointAt}
+                  featured={feed?.featured.map(({ model }) => model) ?? EMPTY_IDS}
                   order={uiState?.modelSectionOrder ?? EMPTY_IDS}
                   collapsed={uiState?.collapsedModelSections ?? EMPTY_IDS}
                   onCollapse={(collapsedModelSections) => mutUpdateUiState.run(workspace, { collapsedModelSections })}
@@ -613,6 +719,49 @@ export function ModelPicker({
             </Popover.Positioner>
           </Popover.Portal>
         </Popover.Root>
+        <Popover.Root
+          open={Boolean(callout) && menu === null}
+          onOpenChange={(open, { reason }) => {
+            if (!open && reason === "escape-key") dismissCallout();
+          }}
+        >
+          <Popover.Portal container={portalContainer}>
+            <Popover.Positioner
+              className="z-50"
+              anchor={modelTriggerRef}
+              side="top"
+              sideOffset={10}
+              collisionPadding={8}
+              collisionAvoidance={{ side: "none" }}
+              positionMethod="fixed"
+            >
+              <Popover.Popup
+                initialFocus={false}
+                finalFocus={false}
+                {...calloutHover}
+                className="outline-none motion-safe:transition-opacity motion-safe:duration-150 motion-safe:ease-standard data-ending-style:opacity-0 data-starting-style:opacity-0"
+                style={callout && ({ "--nudge-from": callout.colors.from, "--nudge-to": callout.colors.to } as CSSProperties)}
+              >
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (callout) setPointAt(callout.line.key);
+                    dismissCallout(true);
+                    openModels();
+                  }}
+                  className="flex w-max max-w-72 items-center gap-2.5 rounded-lg border border-nudge-edge bg-linear-165 from-nudge-start via-nudge-middle via-50% to-background to-88% py-2 ps-3 pe-3.5 text-start shadow-nudge outline-none focus-visible:outline-2 focus-visible:outline-focus"
+                >
+                  {callout?.mark}
+                  <span className="min-w-0">
+                    <span className="block text-sm leading-5 font-semibold">{callout && lineName(callout.line)}</span>
+                    <span key={callout?.id} ref={fitBalanced} className="block text-xs leading-4 text-balance text-subtext">{callout?.text}</span>
+                  </span>
+                </button>
+                <Popover.Arrow className="-bottom-[5px] size-2 rotate-45 border-r border-b border-nudge-edge bg-background" />
+              </Popover.Popup>
+            </Popover.Positioner>
+          </Popover.Portal>
+        </Popover.Root>
         {(reasoningChoices.length > 0 || nativeOptions.length > 0 || fastChoice || hasVariants) && (
           <Menu.Root
             open={!disabled && menu === "effort"}
@@ -625,10 +774,10 @@ export function ModelPicker({
                 className={PILL}
                 aria-label={[
                   effortLabel ? `${m.model_picker_effort()}: ${effortLabel}` : m.model_picker_effort(),
-                  fastOn ? m.model_picker_fast_mode() : null,
+                  speed ? speedLabel(speed) : null,
                 ].filter(Boolean).join(" · ")}
               >
-                {fastOn && <Zap size={14} fill="currentColor" aria-hidden="true" className="shrink-0 text-accent-amber" />}
+                {speed && <SpeedIcon speed={speed} />}
                 {effortLabel ? (
                   <>
                     <EffortIcon id={variantEfforts.length ? variant?.effort : effectiveReasoningId} />
@@ -700,7 +849,7 @@ export function ModelPicker({
                       onSelect={(id) => onSelectNativeOption?.(option.id, id)}
                     />
                   ))}
-                  {(ultracodeChoice || fastChoice || variantSwitches) && (effortChoices.length > 0 || variantEfforts.length > 0 || nativeOptions.length > 0) && (
+                  {(ultracodeChoice || speeds.length > 0 || variantSwitches) && (effortChoices.length > 0 || variantEfforts.length > 0 || nativeOptions.length > 0) && (
                     <Menu.Separator className="m-1 h-px bg-border-variant" />
                   )}
                   {ultracodeChoice && (
@@ -718,29 +867,35 @@ export function ModelPicker({
                       </Menu.CheckboxItem>
                     </Tooltip>
                   )}
-                  {fastChoice && (
-                    <Menu.CheckboxItem
-                      className={SETTINGS_ROW}
-                      checked={effectiveServiceTier === fastChoice.id}
-                      onCheckedChange={(checked) => {
-                        if (value) onSelect({ ...value, serviceTier: checked ? fastChoice.id : "default" });
-                      }}
-                    >
+                  {switchTier && (
+                    <Menu.CheckboxItem className={SETTINGS_ROW} checked={speed === switchTier} onCheckedChange={(checked) => pickSpeed(checked ? switchTier : null)}>
                       <span className="inline-flex items-center gap-2">
-                        <Zap size={14} aria-hidden="true" className="text-accent-amber" />
-                        {m.model_picker_fast_mode()}
+                        <SpeedIcon speed={switchTier} />
+                        {speedLabel(switchTier)}
                       </span>
-                      <SwitchIndicator checked={effectiveServiceTier === fastChoice.id} aria-hidden="true" />
+                      <SwitchIndicator checked={speed === switchTier} aria-hidden="true" />
                     </Menu.CheckboxItem>
                   )}
-                  {variant && varies("fast") && (
-                    <Menu.CheckboxItem className={SETTINGS_ROW} checked={variant.fast} onCheckedChange={(checked) => pickVariant({ fast: checked })}>
-                      <span className="inline-flex items-center gap-2">
-                        <Zap size={14} aria-hidden="true" className="text-accent-amber" />
-                        {m.model_picker_fast_mode()}
-                      </span>
-                      <SwitchIndicator checked={variant.fast} aria-hidden="true" />
-                    </Menu.CheckboxItem>
+                  {speeds.length > 1 && !switchTier && (
+                    <Menu.Group className="flex min-h-8 items-center justify-between gap-3 px-2 py-1">
+                      <Menu.GroupLabel className="inline-flex min-w-0 items-baseline gap-2 text-sm text-text">
+                        {m.model_picker_speed()}
+                        <span className="truncate text-muted">{speedName(speed)}</span>
+                      </Menu.GroupLabel>
+                      <Menu.RadioGroup
+                        value={speed ?? ""}
+                        onValueChange={(next) => { if (typeof next === "string") pickSpeed(next || null); }}
+                        className="inline-flex shrink-0 items-center gap-0.5 rounded-md bg-hover-subtle p-0.5"
+                      >
+                        {speeds.map((tier) => (
+                          <Tooltip key={tier ?? ""} interactive content={speedName(tier)} className="flex rounded-sm">
+                            <Menu.RadioItem value={tier ?? ""} closeOnClick={false} label={speedName(tier)} aria-label={speedName(tier)} className={SPEED_SEGMENT}>
+                              <SpeedIcon speed={tier} />
+                            </Menu.RadioItem>
+                          </Tooltip>
+                        ))}
+                      </Menu.RadioGroup>
+                    </Menu.Group>
                   )}
                   {variant && varies("thinking") && (
                     <Menu.CheckboxItem className={SETTINGS_ROW} checked={variant.thinking} onCheckedChange={(checked) => pickVariant({ thinking: checked })}>
@@ -1094,6 +1249,78 @@ const EMPTY_HARNESSES: Harness[] = [];
 const EMPTY_PROVIDERS: OpenCodeProvider[] = [];
 const EMPTY_ENDPOINTS: LocalModelConnection[] = [];
 const EMPTY_IDS: string[] = [];
+
+/** What the model button points at: a model, the line under its name, and its look. */
+interface Callout {
+  kind: "release" | "free";
+  /** What dismissing it records. */
+  id: string;
+  line: PickerLine;
+  text: string;
+  /** CSS colors its gradient runs between. */
+  colors: { from: string; to: string };
+  mark: ReactNode;
+}
+
+/** The labs whose releases the model button points at. */
+const FRONTIER_LABS = ["claude", "openai", "gemini"] as const;
+
+/**
+ * Each lab's colors: Claude's orange, Gemini's blue to violet. OpenAI's tiers are named for the sky, so each takes
+ * its own: Sol the sun, Luna the moon, Terra the earth, Astra the stars; any other is neutral.
+ */
+function releaseColors(line: PickerLine) {
+  const lab = lineLab(line);
+  const words = line.family.split(" ");
+  const pair = (from: string, to: string) => ({ from: `var(--accent-${from})`, to: `var(--accent-${to})` });
+  if (lab === "claude") return pair("orange", "amber");
+  if (lab === "gemini") return pair("blue", "purple");
+  if (words.includes("sol")) return pair("amber", "orange");
+  if (words.includes("luna")) return pair("indigo", "blue");
+  if (words.includes("terra")) return pair("green", "teal");
+  if (words.includes("astra")) return pair("purple", "indigo");
+  return { from: "var(--muted)", to: "var(--border)" };
+}
+
+/** Narrows balanced text to its widest line, which `text-wrap: balance` leaves at the width it had unbalanced. */
+function fitBalanced(text: HTMLElement | null) {
+  if (!text) return;
+  text.style.width = "";
+  const range = document.createRange();
+  range.selectNodeContents(text);
+  const lines = [...range.getClientRects()];
+  if (lines.length > 1) text.style.width = `${Math.ceil(Math.max(...lines.map((line) => line.width)))}px`;
+}
+
+/** The workspaces whose model button dismissed a callout since the app loaded. */
+const calledOut = new WeakSet<object>();
+/** The callouts reported shown since the app loaded. */
+const shownCallouts = new Set<string>();
+
+const NO_RELEASES: Record<string, string> = {};
+
+const shortDay = (day: Date) => new Intl.DateTimeFormat(getLocale(), { month: "short", day: "numeric" }).format(day);
+
+/** What the nudge says under its model's name; nothing once its free days are over, or for a kind this version doesn't know. */
+function nudgeMessage({ kind, until, message }: ModelNudge) {
+  if (kind !== "new" && kind !== "trial") return undefined;
+  const last = until ? localDay(until) : undefined;
+  if (last && Date.now() >= new Date(last.getFullYear(), last.getMonth(), last.getDate() + 1).getTime()) return undefined;
+  if (message) return message;
+  if (kind === "new") return m.model_picker_nudge_new();
+  if (!last) return m.model_picker_nudge_trial();
+  return m.model_picker_nudge_trial_until({ date: shortDay(last) });
+}
+
+/** What the release callout says under its model's name: who made it and when, within the week it's new. */
+function releaseText(line: PickerLine, day: string) {
+  const lab = LABS.find((entry) => entry.lab === lineLab(line))!.name;
+  const today = new Date();
+  const days = Math.round((new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime() - localDay(day).getTime()) / 86_400_000);
+  if (days === 0) return m.model_picker_released_today({ lab });
+  if (days === 1) return m.model_picker_released_yesterday({ lab });
+  return m.model_picker_released_this_week({ lab });
+}
 
 const EFFORT_NAMES: Record<string, () => string> = {
   none: m.model_picker_effort_none,

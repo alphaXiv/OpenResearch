@@ -221,15 +221,11 @@ enum CloseAnswer {
     Cancel,
 }
 
-/// The native alert's text, for when the page cannot ask. `None` is work that could not be counted.
+/// The native alert's text, for when the page cannot ask.
 #[cfg_attr(not(desktop_app), allow(dead_code))]
-fn close_alert_description(pending: Option<&crate::store::PendingWork>) -> String {
+fn close_alert_description(work: &crate::store::PendingWork) -> String {
     use crate::store::AfterQuit;
 
-    let Some(work) = pending else {
-        return "OpenResearch couldn't check for running agents and experiments. Quitting stops any agent that is working."
-            .into();
-    };
     let mut lines = Vec::new();
     if work.blocks_quit() {
         lines.push("Force Quit stops the experiments that need OpenResearch open.".to_string());
@@ -1089,7 +1085,7 @@ mod imp {
                         }
                         let _ = lifecycle.send_event(UserEvent::EngineBusy(true));
                     }
-                    let busy = crate::commands::up::api_v2::busy().unwrap_or(true);
+                    let busy = crate::commands::up::api_v2::busy().await.unwrap_or(true);
                     if lifecycle.send_event(UserEvent::EngineBusy(busy)).is_err() {
                         return;
                     }
@@ -1816,8 +1812,7 @@ mod imp {
                 reason
             })
             .map(|reason| reason.enumCodeValue());
-        let pending = reason.is_none()
-            && !crate::commands::up::api_v2::pending_work().is_ok_and(|work| work.is_empty());
+        let pending = reason.is_none() && pending_work().is_some();
         if !super::native_quit_needs_confirmation(pending, reason) {
             return NSApplicationTerminateReply::TerminateNow;
         }
@@ -1826,6 +1821,18 @@ mod imp {
             NSApplicationTerminateReply::TerminateCancel
         } else {
             NSApplicationTerminateReply::TerminateNow
+        }
+    }
+
+    /// The work a quit would interrupt; none when it can't be read, which a developer has to fix.
+    fn pending_work() -> Option<crate::store::PendingWork> {
+        match crate::commands::up::api_v2::pending_work() {
+            Ok(work) if work.is_empty() => None,
+            Ok(work) => Some(work),
+            Err(error) => {
+                eprintln!("openresearch app: could not check for pending work: {error:#}");
+                None
+            }
         }
     }
 
@@ -1847,16 +1854,9 @@ mod imp {
             return;
         }
 
-        let pending = match crate::commands::up::api_v2::pending_work() {
-            Ok(work) if work.is_empty() => {
-                begin_quit(quit, window, webview, control_flow);
-                return;
-            }
-            Ok(work) => Some(work),
-            Err(error) => {
-                eprintln!("openresearch app: could not check for pending work: {error:#}");
-                None
-            }
+        let Some(pending) = pending_work() else {
+            begin_quit(quit, window, webview, control_flow);
+            return;
         };
 
         // Only the page can list the work, so a hidden window comes back to ask once it loads.
@@ -1869,7 +1869,7 @@ mod imp {
         }
         if !page_ready {
             *ask = Ask::No;
-            let answer = ask_natively(window, pending.as_ref());
+            let answer = ask_natively(window, &pending);
             answer_close(answer, quit, window, webview, control_flow);
             return;
         }
@@ -1937,10 +1937,7 @@ mod imp {
             .contains(NSWindowStyleMask::FullScreen)
     }
 
-    fn ask_natively(
-        window: &Window,
-        pending: Option<&crate::store::PendingWork>,
-    ) -> super::CloseAnswer {
+    fn ask_natively(window: &Window, pending: &crate::store::PendingWork) -> super::CloseAnswer {
         let title = "Work is still running";
         let description = super::close_alert_description(pending);
         let background = if cfg!(target_os = "macos") {
@@ -1950,7 +1947,7 @@ mod imp {
         };
         // A hidden window is already running in the background.
         let background = (!super::windowless()).then_some(background);
-        let quit = if pending.is_some_and(crate::store::PendingWork::blocks_quit) {
+        let quit = if pending.blocks_quit() {
             "Force Quit"
         } else {
             "Quit"
@@ -2486,27 +2483,25 @@ mod tests {
             title: Some("Tune the schedule".into()),
         };
 
-        let remote = super::close_alert_description(Some(&PendingWork {
+        let remote = super::close_alert_description(&PendingWork {
             agents: vec![agent],
             runs: vec![run("lr-sweep", "modal_job", AfterQuit::Continues)],
-        }));
+        });
         assert!(remote.contains("Tune the schedule (Scaling laws)") && remote.contains("lr-sweep"));
         assert!(!remote.contains("Force Quit") && !remote.contains("Finished"));
 
-        let blocked = super::close_alert_description(Some(&PendingWork {
+        let blocked = super::close_alert_description(&PendingWork {
             agents: vec![],
             runs: vec![
                 run("eval", "tinker_job", AfterQuit::NeedsApp),
                 run("probe", "vercel_job", AfterQuit::NeedsApp),
             ],
-        }));
+        });
         assert!(blocked.starts_with("Force Quit stops"));
         assert!(
             blocked.contains("eval: runs on this computer") && blocked.contains("probe: without")
         );
         assert!(!blocked.contains("Agents"));
-
-        assert!(super::close_alert_description(None).contains("couldn't check"));
     }
 
     #[test]

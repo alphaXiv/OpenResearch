@@ -661,28 +661,14 @@ async fn wait(state: &AppState, caller: &StoredChatSession, args: &Value) -> Res
 
 async fn models(state: &AppState, requested: Option<&str>) -> Result<Vec<model_routes::Model>> {
     let preferences = Store::open()?.ui_state()?;
-    let owned_providers: Vec<String> =
-        if preferences.hidden_agents.iter().any(|id| id == "opencode") {
-            crate::local::local_models::providers()?
-                .into_keys()
-                .chain(crate::local::local_models::read()?.into_keys())
-                .collect()
-        } else {
-            Vec::new()
-        };
     let query = HarnessQuery {
         refresh: None,
         retry: None,
         harness: None,
     };
     let mut catalog = harnesses_payload(state, &query).await;
-    model_routes::filter_agents(
-        &mut catalog,
-        &preferences.hidden_agents,
-        &owned_providers,
-        requested,
-    )
-    .map_err(|error| anyhow!(error))?;
+    model_routes::filter_agents(&mut catalog, &preferences.hidden_agents, requested)
+        .map_err(|error| anyhow!(error))?;
     Ok(model_routes::models(&catalog, &preferences.hidden_models))
 }
 

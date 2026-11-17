@@ -314,6 +314,13 @@ fn is_readonly_orx(tokens: &[&str], stage: &str) -> bool {
                     })))
                 )
         }
+        "agents" => matches!(
+            <crate::Cli as clap::Parser>::try_parse_from(tokens).map(|cli| cli.command),
+            Ok(Some(crate::Command::Agents(crate::AgentsArgs {
+                command: None,
+                ..
+            })))
+        ),
         // Verbs with a write subcommand: allow only the read-only subcommand(s).
         "project" => matches!(subcommand(&mut rest), Some("view")),
         "exp" => match subcommand(&mut rest) {
@@ -555,6 +562,18 @@ mod tests {
     }
 
     #[test]
+    fn agents_lists_freely_and_gates_its_changes() {
+        assert!(allowed("orx agents"));
+        assert!(allowed("orx agents --json | head -20"));
+        assert!(!allowed(
+            "orx agents label opencode:tinker --logo thinkingmachines"
+        ));
+        assert!(!allowed(
+            "orx agents add-endpoint --name Box --url http://127.0.0.1:1/v1 --model m"
+        ));
+    }
+
+    #[test]
     fn unknown_verb_is_gated() {
         // Allowlist-only: a future verb we haven't classified defaults to gated.
         assert!(!allowed("orx teleport e-1"));
@@ -770,7 +789,7 @@ mod tests {
             );
         }
         // The verbs with mixed read/write subcommands must also be real.
-        for verb in ["project", "exp"] {
+        for verb in ["project", "exp", "agents"] {
             assert!(real.contains(verb), "`{verb}` is not a real orx command");
         }
     }

@@ -74,15 +74,43 @@ Custom endpoints stay in `local-models.json` in the data directory. OpenCode 2
 browser sign-ins use its integration API and orx's isolated database. Each
 attempt holds a server child and database lease until completion, cancellation,
 failure or expiry, capped at ten minutes; removing its provider signs it out.
-OpenCode's free models remain available until switched off.
+OpenCode's free models remain available until switched off. The picker lists
+them under Free, the ones openresearch.sh's model feed features first, and marks
+New for a week the models models.dev dates as released. The open chat's model
+button points once at the newest release from Anthropic, OpenAI or Google, then
+at the free model the feed nudges toward while free models are on, one a launch.
+Claude Code lists only the models its build knew of but runs any, so orx adds an
+Anthropic release it doesn't list beside the older version it does.
 
-Found agents can be turned off in Settings. Their models leave the picker and
-sub-agent routes; their OpenResearch profiles stay available. Turning off found
-OpenCode sign-ins keeps OpenResearch's provider records, endpoints and free
-models. Removable managed installs ignore hidden-agent settings; they offer
-Remove instead of a switch. Naming a turned-off route explicitly refuses the
+Settings → Agents is one list, and every row has a switch: an agent, an
+account, an OpenCode provider OpenResearch keeps, an endpoint, and each provider
+set up in the user's own OpenCode, which gets a row of its own. A row turned off
+leaves the picker and sub-agent routes; the others stay. The switches share one
+list of keys in the UI state: an agent's id, an account's id, or `opencode:` and
+a provider's id. An older dashboard's single `opencode` key still turns off every
+provider found in OpenCode. Naming a turned-off route explicitly refuses the
 delegation. The server alone applies this rule: delegation filters by it, and
-each `/api/harnesses` entry carries its answer for the picker.
+each `/api/harnesses` entry carries its answer for the picker, OpenCode's as the
+providers it turned off.
+
+**A provider found in OpenCode presents as what it is.** Detection reports each
+provider the user's OpenCode can run that no record or endpoint stands for: its
+id and the name, address, package and key variables its config gives it, and
+whether it came from a sign-in, the config, the environment or only OpenCode's
+catalog. The dashboard names and marks it from those, in order: what the user or
+an agent pinned, a tile OpenResearch offers, then the id, the address's host,
+the package, the key variable and the configured name. One no logo knows wears a
+glyph and colour derived from its id. Any row can pin a name, an icon and a logo;
+the pins live in `agent-labels.json` beside what the row's own record keeps, so
+an older orx reading the records sees nothing new. `orx agents` lists the rows,
+`orx agents label` pins them and `orx agents add-endpoint` adds an endpoint, so
+an agent the user asks can set one up and make it present right.
+
+Remove on a provider found in OpenCode deletes it from the user's OpenCode: its
+entry in OpenCode's `auth.json` and its block in the config file that defines
+it. A config with comments, or one only an environment variable provides, is
+left alone with a message naming what to remove. The user's own Claude Code,
+Codex, Cursor and Antigravity installs have no Remove.
 
 Remove deletes all OpenResearch-managed releases of Cursor, Antigravity or an
 ACP preset, including its npm prefix. Pi's adapter also removes its managed Pi
@@ -96,7 +124,9 @@ OpenCode cannot be removed here because their copies also back accounts and
 providers.
 
 Adding an agent commits on its last step. Profiles, providers and endpoints
-saved on the way can be removed again when the add dialog is discarded.
+saved on the way can be removed again when the add dialog is discarded, and
+Settings lists them only once it finishes. An account or an agent OpenResearch
+installed lists only while it is signed in; Add agent signs it in again.
 
 The providers differ in shape, and the interface absorbs three:
 
@@ -106,7 +136,7 @@ The providers differ in shape, and the interface absorbs three:
 | resident server per chat | OpenCode | posts to `opencode serve` in the chat's worktree; 1.x and 2.x have separate adapters |
 | child per turn | Cursor, older Codex (`codex exec`) | a print-mode process resuming the native session by id |
 
-A resident agent restarts with its native session resumed when a setting it started with changes or when it crashes. Resident children also restart after an interrupt or a switch to another fork, and idle ones are released (`src/local/agent_lifecycle.rs`); the next message resumes them. A child with background work still running is not idle: Claude Code resumes on its own when a background task finishes, and orx records what it writes then as a turn with no user message; until then orx refuses to switch, retry or edit a fork, which would stop the child and land its reply on the wrong branch. An ACP agent counts as busy while a command it runs in a terminal orx opened for it, or one it started in a session of its own as agy does, has not exited, since agents report no end to a command between turns; a switch to another fork still restarts it and stops those commands. A task that never ends, such as a dev server, keeps its child until the chat stops or restarts it, on low-memory machines too. Stopping a resident child also stops the commands it started in their own sessions, sparing experiment supervisors. Windows has no sessions to tell those commands apart, so there an ACP agent's own commands keep nothing and releasing it stops them.
+A resident agent restarts with its native session resumed when a setting it started with changes or when it crashes. Resident children also restart after an interrupt or a switch to another fork, and idle ones are released (`src/local/agent_lifecycle.rs`); the next message resumes them. A child with background work still running is not idle: Claude Code resumes on its own when a background task finishes, and orx records what it writes then as a turn with no user message; until then orx refuses to switch, retry or edit a fork, which would stop the child and land its reply on the wrong branch. An ACP agent counts as busy while a command it runs in a terminal orx opened for it, or one it started in a session of its own as agy does, has not exited, since agents report no end to a command between turns; a switch to another fork still restarts it and stops those commands. A task that never ends, such as a dev server, keeps its child until the chat stops or restarts it, on low-memory machines too. Stopping a resident child also stops the commands it started in their own sessions. Windows has no sessions to tell those commands apart, so there an ACP agent's own commands keep nothing and releasing it stops them.
 
 Antigravity speaks ACP (`agy acp`) but finishes background work in turns of its own that no client sees, so its `Stop` hook holds the turn open until agy's inbox reports the command, timer or subagent back, then lets agy continue; a daemon never reports, so it holds nothing. agy ends a turn it gave up on as a normal end of turn, so the turn fails with the error the hook saw, or with the network failure in agy's log when agy never reached Google.
 
@@ -146,7 +176,7 @@ an unreadable rollout fails that attempt without pinning a fallback model.
 
 ## Isolation
 
-An agent runs in the chat's worktree. **orx never edits the user's agent configuration.** What it adds (hooks, an MCP server, sandbox roots) goes through the agent's command line or a settings file of orx's own. One exception stands: starting OpenCode rewrites the `orx` skill shim in the user's OpenCode skills directory. orx's worktree files are Git-excluded, and a project's tracked agent config wins: OpenCode's config moves aside for a tracked `opencode.json`, and an Antigravity turn fails on a tracked `.agents/hooks.json`.
+An agent runs in the chat's worktree. **orx never edits the user's agent configuration.** What it adds (hooks, an MCP server, sandbox roots) goes through the agent's command line or a settings file of orx's own. Two exceptions stand: starting OpenCode rewrites the `orx` skill shim in the user's OpenCode skills directory, and removing a provider found in OpenCode deletes it from the user's OpenCode, as the user asked. orx's worktree files are Git-excluded, and a project's tracked agent config wins: OpenCode's config moves aside for a tracked `opencode.json`, and an Antigravity turn fails on a tracked `.agents/hooks.json`.
 
 Homes (`src/local/native_store.rs`) let an agent behave as the user set it up while its sessions stay out of the user's own:
 
@@ -187,6 +217,14 @@ OpenCode runs local inference over connections to OpenAI-compatible servers (`sr
 ## Permissions
 
 Each agent keeps its own permission modes, and orx exposes those the harness advertises. A tool call needing approval becomes a prompt part:
+
+User-configured ACP agents also have a client approval setting: Ask (the default) or Auto-approve.
+Auto-approve answers only the agent's offered `allow_once` choice. Requests that offer only a
+persistent grant, or explicitly switch agent modes, still ask. It does not change the agent's
+sandbox, replace its native configuration or override a denied action. The choice is stored with
+the chat, survives restarts and removal of its launch configuration, and is checked for each request; switching it while a request waits
+takes effect on the next status tick. Stop cancels pending requests before they can be approved.
+A completed prompt takes priority over queued approval events, cancelling requests that arrive late.
 
 | Agents | How a request waits |
 | --- | --- |

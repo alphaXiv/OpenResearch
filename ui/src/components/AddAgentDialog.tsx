@@ -23,10 +23,10 @@ import { copyToClipboard } from "../clipboard";
 import { fmtNumber, ltr } from "../i18n";
 
 import { m } from "../paraglide/messages.js";
-import { agentModelLines } from "../modelSelection";
+import { agentModelLines, modelsAvailable } from "../modelSelection";
 import { AcpAuth } from "./AcpAuthDialog";
 import { AgentIconButton, BRAND_ICON } from "./AgentIcon";
-import { BrandMark, HarnessLogo, ModelMark, type Brand } from "./HarnessLogo";
+import { BrandMark, HarnessLogo, logoMark, ModelMark, type Brand } from "./HarnessLogo";
 import { HarnessSetup, SignInSteps } from "./HarnessSetupDialog";
 import { EndpointMark, LocalModelGuide, useLocalModelForm } from "./LocalModelSetup";
 import { renderNote } from "./agentNote";
@@ -67,7 +67,7 @@ type OAuthSignIn = { kind: "oauth"; integration: string; method?: string; plan?:
 type SignIn =
   | KeySignIn
   | OAuthSignIn
-  | { kind: "opencode"; id: string }
+  | { kind: "opencode"; id: string; keyUrl?: string }
   | { kind: "profile"; harness: "claude-code" | "codex" }
   | { kind: "agent"; harness: HarnessId; plan?: string; via?: string }
   | { kind: "native"; logo: string; key?: true }
@@ -145,25 +145,29 @@ const OPENROUTER: AgentTile = {
   id: "openrouter", name: "OpenRouter", mark: { brand: "openrouter" }, blurb: m.add_agent_openrouter_blurb,
   methods: [{ kind: "key", id: "openrouter", platform: "OpenRouter", keyUrl: "https://openrouter.ai/keys" }],
 };
-/** A provider from OpenCode's list, by its id there. */
-const listedTile = (id: string, name: string, mark: AgentTile["mark"]): AgentTile => ({ id, name, mark, methods: [{ kind: "opencode", id }] });
+/** A provider from OpenCode's list, by its id there, with where to get a key when OpenCode takes one. */
+const listedTile = (id: string, name: string, mark: AgentTile["mark"], keyUrl?: string): AgentTile => ({ id, name, mark, methods: [{ kind: "opencode", id, keyUrl }] });
 /** Providers people look for by name, in the order offered; search finds the rest of OpenCode's list. */
 const MORE_PROVIDERS = [
   listedTile("github-copilot", "GitHub Copilot", { brand: "github-copilot" }),
-  listedTile("openai", "OpenAI", { harness: "codex" }),
-  listedTile("anthropic", "Anthropic", { brand: "anthropic" }),
-  listedTile("huggingface", "Hugging Face", { brand: "huggingface" }),
-  listedTile("amazon-bedrock", "Amazon Bedrock", { brand: "bedrock" }),
-  listedTile("groq", "Groq", { brand: "groq" }),
-  listedTile("cerebras", "Cerebras", { brand: "cerebras" }),
-  listedTile("togetherai", "Together AI", { brand: "together" }),
-  listedTile("fireworks-ai", "Fireworks AI", { brand: "fireworks" }),
-  listedTile("mistral", "Mistral", { brand: "mistral" }),
-  listedTile("nvidia", "NVIDIA", { brand: "nvidia" }),
-  listedTile("vercel", "Vercel AI Gateway", { brand: "vercel" }),
-  listedTile("ollama-cloud", "Ollama Cloud", { brand: "ollama" }),
-  listedTile("deepinfra", "DeepInfra", { brand: "deepinfra" }),
-  listedTile("baseten", "Baseten", { brand: "baseten" }),
+  listedTile("openai", "OpenAI", { harness: "codex" }, "https://platform.openai.com/api-keys"),
+  listedTile("anthropic", "Anthropic", { brand: "anthropic" }, "https://platform.claude.com/settings/keys"),
+  listedTile("huggingface", "Hugging Face", { brand: "huggingface" }, "https://huggingface.co/settings/tokens"),
+  listedTile("amazon-bedrock", "Amazon Bedrock", { brand: "bedrock" }, "https://console.aws.amazon.com/bedrock/home#/api-keys"),
+  listedTile("groq", "Groq", { brand: "groq" }, "https://console.groq.com/keys"),
+  listedTile("cerebras", "Cerebras", { brand: "cerebras" }, "https://cloud.cerebras.ai"),
+  listedTile("togetherai", "Together AI", { brand: "together" }, "https://api.together.ai/settings/api-keys"),
+  listedTile("fireworks-ai", "Fireworks AI", { brand: "fireworks" }, "https://app.fireworks.ai/settings/users/api-keys"),
+  listedTile("mistral", "Mistral", { brand: "mistral" }, "https://console.mistral.ai/api-keys"),
+  listedTile("nvidia", "NVIDIA", { brand: "nvidia" }, "https://build.nvidia.com/settings/api-keys"),
+  listedTile("vercel", "Vercel AI Gateway", { brand: "vercel" }, "https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai%2Fapi-keys"),
+  listedTile("ollama-cloud", "Ollama Cloud", { brand: "ollama" }, "https://ollama.com/settings/keys"),
+  listedTile("deepinfra", "DeepInfra", { brand: "deepinfra" }, "https://deepinfra.com/dash/keys"),
+  listedTile("baseten", "Baseten", { brand: "baseten" }, "https://app.baseten.co/settings/api_keys"),
+  {
+    id: "thinkingmachines", name: "Thinking Machines", mark: { brand: "thinkingmachines" },
+    methods: [{ kind: "key", id: "thinkingmachines", platform: "Tinker", keyUrl: "https://tinker-console.thinkingmachines.ai/keys" }],
+  } satisfies AgentTile,
 ];
 const PROVIDER_TILES = [OPENCODE_GO, ...LABS, OPENROUTER, ...MORE_PROVIDERS];
 /** What the wizard recommends first. */
@@ -188,7 +192,10 @@ export function providerTile(provider: Pick<OpenCodeProvider, "id" | "canonical"
     const variant = Object.entries(PROVIDER_MARKS).find(([base]) => id === base || id.startsWith(`${base}-`));
     return { tile: listedTile(id, provider.name, variant?.[1] ?? { letter: provider.name.slice(0, 1).toUpperCase() }) };
   }
-  return { tile, key: provider.kind === "key" ? tile.methods.find((method): method is KeySignIn => method.kind === "key" && method.id === id) : undefined };
+  if (provider.kind !== "key") return { tile };
+  const signIn = tile.methods.find((method) => (method.kind === "key" || method.kind === "opencode") && method.id === id);
+  if (signIn?.kind === "opencode") return { tile, key: { kind: "key", id, platform: tile.name, keyUrl: signIn.keyUrl } };
+  return { tile, key: signIn?.kind === "key" ? signIn : undefined };
 }
 
 /** Where saved providers sort: the order the add dialog offers them. */
@@ -261,7 +268,7 @@ type Saved =
 /** Which agent the wizard added; Claude Code and Codex name the account, OpenCode the provider of the models it added. */
 export type AddedAgent = { harness: HarnessId; profile?: string; provider?: string };
 
-export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = false, confirm, cancel, isDisabled, onCustomAcp, onEditAcp }: DialogContentProps<AddedAgent> & {
+export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = false, confirm, cancel, isDisabled, onCustomAcp, onEditAcp, onAdding }: DialogContentProps<AddedAgent> & {
   remote: boolean;
   /** A recommended tile's id, or `endpoint`, whose sign-in the wizard opens on. */
   tile?: string;
@@ -271,6 +278,8 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
   host?: string;
   onCustomAcp: () => void;
   onEditAcp: (definition: AcpDefinition) => void;
+  /** The Settings row this dialog is setting up, keyed as `hiddenAgents` is, or null; Settings lists it once the dialog finishes. */
+  onAdding?: (key: string | null) => void;
 }) {
   const workspace = useWorkspace();
   const { getHarnessesQuery, getHarnessSetupCommandsQuery, getOpenCodeProvidersQuery, getLocalModelsQuery, getUiStateQuery, listAcpHarnessesQuery, refreshHarness } = workspace.queries;
@@ -299,6 +308,7 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
   const [name, setName] = useState("");
   /** Null until the user picks one: the tile's mark on its colour. */
   const [icon, setIcon] = useState<AgentIcon | null>(null);
+  const [pinnedLogo, setPinnedLogo] = useState<string | null>(null);
   const [hideFreeModels, setHideFreeModels] = useState(true);
   const [checking, setChecking] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -331,7 +341,7 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
   // How OpenCode signs in to a provider from its list, sign-ins before keys.
   const ways: (OAuthSignIn | KeySignIn)[] = entry && tile ? [
     ...entry.methods.flatMap((item): OAuthSignIn[] => item.type === "oauth" && !item.label.endsWith("(legacy)") ? [{ kind: "oauth", integration: entry.id, method: item.id, label: item.label }] : []),
-    ...entry.methods.flatMap((item): KeySignIn[] => item.type === "key" ? [{ kind: "key", id: entry.id, platform: tile.name }] : []),
+    ...entry.methods.flatMap((item): KeySignIn[] => item.type === "key" ? [{ kind: "key", id: entry.id, platform: tile.name, keyUrl: listing?.keyUrl }] : []),
   ] : [];
 
   const harnessFor = (signIn: SignIn) =>
@@ -357,6 +367,14 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
   const customAcp: AgentTile = { id: "custom-acp", name: m.harness_custom_acp(), mark: { icon: "custom" }, methods: [] };
 
   const methodHarness = method ? harnessFor(method) : undefined;
+  // An agent already working when its sign-in began stays listed; one this dialog signs in waits for it to finish.
+  const workingAtStart = useRef(new Map<string, boolean>());
+  if (methodHarness && !workingAtStart.current.has(methodHarness.id)) workingAtStart.current.set(methodHarness.id, methodHarness.agentReady && !methodHarness.authCheckFailed);
+  const adding = saved?.kind === "profile" ? saved.id
+    : saved && !saved.replaced ? `opencode:${saved.id}`
+    : (method?.kind === "agent" || method?.kind === "native") && methodHarness && !workingAtStart.current.get(methodHarness.id) ? methodHarness.id : null;
+  useEffect(() => onAdding?.(adding), [adding]);
+  useEffect(() => () => onAdding?.(null), []);
   const backedByOpenCode = method?.kind === "key" || method?.kind === "oauth" || method?.kind === "opencode" || method?.kind === "endpoint";
   const profileEntry = saved?.kind === "profile" ? harnesses.find((h) => h.profile?.id === saved.id) : undefined;
   const modelsReady = !checking && (backedByOpenCode ? opencodeReady && !opencode?.catalogPending : Boolean((profileEntry ?? methodHarness)?.agentReady));
@@ -373,8 +391,9 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
     target?.focus();
   }, [step, method, ways.length, needsOpenCode2]);
 
-  // Saved keys and endpoints reach OpenCode's catalog only once it re-checks.
-  useEffect(() => {
+  // Saved keys and endpoints reach OpenCode's catalog only once it re-checks. Before paint, so the step never
+  // shows the catalog from before the sign-in.
+  useLayoutEffect(() => {
     if (step !== "name" || !backedByOpenCode || !opencodeReady) return;
     let current = true;
     setChecking(true);
@@ -462,6 +481,8 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
     if (saved?.kind === "endpoint" && !saved.replaced) await api.removeLocalModel(saved.id, saved.model);
     setSaved(null);
     setOauth(null);
+    setIcon(null);
+    setPinnedLogo(null);
   };
   const discards = (target: Step | "choices" | "close") => target !== "name" && target !== "signin";
   const go = async (target: Step | "choices" | "close") => {
@@ -515,8 +536,8 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
   });
   const finish = () => run(async () => {
     const trimmed = name.trim();
-    if (saved && (trimmed !== saved.name || icon)) {
-      const changes = { ...(trimmed !== saved.name ? { name: trimmed } : {}), ...(icon ? { icon } : {}) };
+    if (saved && (trimmed !== saved.name || icon || pinnedLogo)) {
+      const changes = { ...(trimmed !== saved.name ? { name: trimmed } : {}), ...(icon ? { icon } : {}), ...(pinnedLogo ? { logo: pinnedLogo } : {}) };
       await api.updateAgent(saved.kind === "profile" ? saved.id : `opencode:${saved.id}`, changes);
     }
     const hiddenAgents = uiState.data?.hiddenAgents ?? [];
@@ -772,7 +793,16 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
     body = <div className="space-y-5">
       {saved && (
         <div className="flex items-end gap-3">
-          <AgentIconButton value={icon ?? BRAND_ICON} brand={logo} onChange={setIcon} disabled={disabled} />
+          <AgentIconButton
+            value={icon ?? BRAND_ICON}
+            brand={logoMark(pinnedLogo ?? undefined) ?? logo}
+            logo={pinnedLogo ?? undefined}
+            onChange={(next, nextLogo) => {
+              setIcon(next);
+              if (nextLogo !== undefined) setPinnedLogo(nextLogo);
+            }}
+            disabled={disabled}
+          />
           <label className="grid flex-1 gap-1 text-sm text-subtext">
             <span>{m.agent_name()}</span>
             <Input value={name} disabled={disabled} maxLength={80} onChange={(event) => setName(event.target.value)} />
@@ -1191,7 +1221,7 @@ function ModelList({ models, harness, owner }: { models: HarnessModel[]; harness
   }
   const shown = lines.slice(0, 10);
   return <div>
-    <p className="m-0 mb-2 flex items-center gap-2 text-sm"><CircleCheck size={16} className="text-accent-green" />{m.settings_models_available({ count: fmtNumber(lines.length) })}</p>
+    <p className="m-0 mb-2 flex items-center gap-2 text-sm"><CircleCheck size={16} className="text-accent-green" />{modelsAvailable(lines.length)}</p>
     <ul className="m-0 grid list-none grid-cols-2 gap-x-6 gap-y-1.5 rounded-lg border border-border bg-surface px-4 py-3 text-sm text-subtext">
       {shown.map((line) => <li key={line.key} className="flex min-w-0 items-center gap-2 wrap-anywhere"><ModelMark model={line.offers[0].model} harness={harness} size={14} />{tidyModelName(line.label)}</li>)}
     </ul>
