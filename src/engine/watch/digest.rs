@@ -108,7 +108,7 @@ After setup, give the headline/chart value and parent comparison when present:
 Every changing number is {signal}, {signal.vs} (reads better/worse/level with the parent), or
 {count:"regex"} (matching log lines since launch). Tokens bind "signals", never "alsoLogged".
 Fixed numbers, zero, a check's 0 or 1, and values unchanged since first reported may be literal.
-Exactly one figure is **bold**; place {signal.vs} beside its value. Live tokens mean now,
+In each run sentence, exactly one figure is **bold**; place {signal.vs} beside its value. Live tokens mean now,
 a comparison or a trend: never pin one to a fixed step/time or first/last reading.
 A fixed step/time needs a fixed value.
 Labels, units and "better" explain signals. Claim only what the digest shows: never invent
@@ -123,7 +123,9 @@ the brief says this run should differ.
 "keptGoingAfter": do not reflag a settled finding unless clearly worse. "notedWhileFlagOpen":
 reflag each finding noted under a since-kept flag, with bytes, unless shown resolved.
 Write "summary" only if requested in the digest: at most 90 displayed characters, runs as {r1},
-values as {r1:signal}. When all runs are in setup, its default silence and exceptions apply.
+values as {r1:signal}. Bold is optional in the summary. Never copy a live value as a literal.
+Example: {r2} leads at Val bpb {r2:val_bpb}. Write run counts in words ("all three").
+When all runs are in setup, its default silence and exceptions apply.
 "notes" remembers context for the next look, at most a few lines."#;
 
 /// One line of a run's log the digest can show, with where it sits.

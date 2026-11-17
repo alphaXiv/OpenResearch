@@ -462,17 +462,19 @@ fn check_line(
         }
     }
     let bold: Vec<_> = template.match_indices("**").collect();
-    if bold.len() != 2 {
+    if bold.len() != 2 && !(summary && bold.is_empty()) {
         return Err("mark exactly one figure in **bold**".into());
     }
-    let inside = &template[bold[0].0 + 2..bold[1].0];
-    let in_bold =
-        |range: &std::ops::Range<usize>| range.start >= bold[0].0 + 2 && range.end <= bold[1].0;
-    if inside.trim().is_empty()
-        || !(inside.chars().any(|c| c.is_numeric())
-            || found.iter().any(|(range, _)| in_bold(range)))
-    {
-        return Err("the **bold** part is the figure that matters: a number or a token".into());
+    if !bold.is_empty() {
+        let inside = &template[bold[0].0 + 2..bold[1].0];
+        let in_bold =
+            |range: &std::ops::Range<usize>| range.start >= bold[0].0 + 2 && range.end <= bold[1].0;
+        if inside.trim().is_empty()
+            || !(inside.chars().any(|c| c.is_numeric())
+                || found.iter().any(|(range, _)| in_bold(range)))
+        {
+            return Err("the **bold** part is the figure that matters: a number or a token".into());
+        }
     }
     let mut rendered = String::new();
     let mut literal = String::new();
@@ -865,6 +867,30 @@ mod tests {
             !matches_moving("0", &[0.0]),
             "zero is a resting point, said in words"
         );
+    }
+
+    #[test]
+    fn summary_allows_plain_tokens_but_rejects_live_literals() {
+        let a = run();
+        let runs = [bind("r1", &a, true)];
+        let bounds = SummaryBounds {
+            sentence: None,
+            setup: false,
+        };
+        let good = read(
+            r#"{"summary":{"status":"ok","line":"{r1} leads at {r1:val_loss}."}}"#,
+            &runs,
+            Some(&bounds),
+            &render,
+        );
+        assert!(good.errors.is_empty(), "{:?}", good.errors);
+        let bad = read(
+            r#"{"summary":{"status":"ok","line":"{r1} leads at 2.31."}}"#,
+            &runs,
+            Some(&bounds),
+            &render,
+        );
+        assert!(!bad.errors.is_empty());
     }
 
     #[test]

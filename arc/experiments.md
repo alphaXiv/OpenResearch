@@ -409,8 +409,8 @@ journal says what each look left out, and by how much it was still over. Each fi
 sharing's credential scan as written, before it is clipped or encoded; one that
 matches is left out, saying so, and the journal tells the user once where it is.
 A retry's reply is scanned before it goes back. A reply is strict JSON: each number that can
-move is a token orx fills, exactly one figure is bold, a sentence reads at most
-90 characters filled, and a number written as the value it reads now is refused.
+move is a token orx fills, a run sentence has one bold figure (optional in the
+group summary), a sentence reads at most 90 characters filled, and a number written as the value it reads now is refused.
 One retry carries what was wrong; a run whose answer stays wrong keeps its last
 sentence. Each look is a row written before it is sent and settled in one
 transaction; a look `orx up` stopped after sending is recorded as interrupted and
