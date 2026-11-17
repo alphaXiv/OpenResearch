@@ -188,7 +188,8 @@ pub struct CodexClient {
     job: Option<std::os::windows::io::OwnedHandle>,
     /// Once set, the group id may be reused — never signal it again.
     terminated: AtomicBool,
-    stdin: Mutex<ChildStdin>,
+    /// Closes only to stop the child: stdin EOF ends the app-server.
+    stdin: Mutex<Option<ChildStdin>>,
     next_id: AtomicI64,
     /// Our outstanding requests. Sync mutex: touched from the reader task and
     /// from `request()`, held only for map ops, never across an await.
@@ -355,14 +356,40 @@ impl CodexClient {
         }
     }
 
-    /// Kill the child's whole process group and reap it; an orphaned native
-    /// app-server would keep the thread's writer lock.
-    async fn terminate(&self) {
+    /// Let the child exit on its own, then kill its whole process group and reap
+    /// it; an orphaned native app-server would keep the thread's writer lock.
+    async fn terminate(self: &Arc<Self>) {
+        self.end(false).await;
+    }
+
+    /// With `interrupt`, a child whose turn orx ended without telling it gets SIGTERM at
+    /// once. Detached, so a caller that gives up never leaves a child no stop can reach.
+    async fn end(self: &Arc<Self>, interrupt: bool) {
+        let client = self.clone();
+        let ended = tokio::spawn(async move { client.end_detached(interrupt).await });
+        if let Err(error) = ended.await {
+            eprintln!("orx up: stopping a codex app-server failed: {error}");
+        }
+    }
+
+    async fn end_detached(&self, interrupt: bool) {
         // Locked first so a racing caller returns only after the reap.
         let mut child = self.child.lock().await;
         if self.terminated.swap(true, Ordering::AcqRel) {
             return;
         }
+        #[cfg(unix)]
+        let group = Some(self.process_group_id);
+        #[cfg(not(unix))]
+        let group = None;
+        // A writer blocked on a wedged child holds stdin; that child gets SIGTERM instead.
+        let input_closed = self.stdin.try_lock().map(|mut stdin| stdin.take()).is_ok();
+        if input_closed && !interrupt {
+            crate::process::let_agent_exit(&mut child, group).await;
+        } else {
+            crate::process::ask_agent_to_stop(&mut child, group).await;
+        }
+        // Also reaps what the app-server left behind: the npm wrapper's native child, tool shells.
         #[cfg(unix)]
         if let Ok(process_group_id) = i32::try_from(self.process_group_id) {
             // SAFETY: spawn assigns the child its own process group before this id is captured.
@@ -397,6 +424,9 @@ impl CodexClient {
 
     async fn write_line(&self, msg: &Value) -> Result<()> {
         let mut stdin = self.stdin.lock().await;
+        let stdin = stdin
+            .as_mut()
+            .ok_or_else(|| anyhow!("codex app-server stdin: closed to stop Codex"))?;
         stdin
             .write_all(format!("{msg}\n").as_bytes())
             .await
@@ -785,7 +815,7 @@ fn spawn_client(
         #[cfg(windows)]
         job,
         terminated: AtomicBool::new(false),
-        stdin: Mutex::new(stdin),
+        stdin: Mutex::new(Some(stdin)),
         next_id: AtomicI64::new(1),
         pending: std::sync::Mutex::new(HashMap::new()),
         turn: std::sync::Mutex::new(None),
@@ -945,11 +975,9 @@ impl CodexHost {
                 let _ = ready_tx.send(Ok(existing));
                 return;
             }
-            {
-                let mut guard = host.inner.lock().await;
-                if let Some(stale) = guard.remove(&session) {
-                    stale.terminate().await;
-                }
+            let stale = host.inner.lock().await.remove(&session);
+            if let Some(stale) = stale {
+                stale.terminate().await;
             }
             if ready_tx.is_closed() {
                 return;
@@ -1157,6 +1185,8 @@ impl CodexHost {
             doomed.push((session_id, client, idle_since, reason));
         }
         for (session_id, client, idle_since, reason) in doomed {
+            // A replacement waits for the exit: two app-servers on one thread race its writer lock.
+            let _spawning = self.spawn_lock.lock().await;
             let removed = {
                 // Atomic with the touch in `ensure`/`client_for`: a child handed out since
                 // the snapshot is spared.
@@ -1179,16 +1209,20 @@ impl CodexHost {
 
     /// Kill and reap one session's child (on session delete).
     pub async fn kill_session(&self, session_id: &str) {
-        if let Some(client) = self.inner.lock().await.remove(session_id) {
+        // A replacement waits for the exit: two app-servers on one thread race its writer lock.
+        let _spawning = self.spawn_lock.lock().await;
+        // Released before the stop, which can take seconds, so other chats' turns go on.
+        let client = self.inner.lock().await.remove(session_id);
+        if let Some(client) = client {
             client.terminate().await;
         }
     }
 
-    /// Kill and reap every child's process group.
+    /// Kill and reap every child's process group. The shutdown already ended their
+    /// turns without telling them.
     pub async fn shutdown(&self) {
-        for (_, client) in self.inner.lock().await.drain() {
-            client.terminate().await;
-        }
+        let clients = self.inner.lock().await.drain().collect::<Vec<_>>();
+        futures::future::join_all(clients.iter().map(|(_, client)| client.end(true))).await;
     }
 }
 
@@ -1388,7 +1422,7 @@ pub(crate) mod tests {
             child: Mutex::new(child),
             job,
             terminated: AtomicBool::new(false),
-            stdin: Mutex::new(stdin),
+            stdin: Mutex::new(Some(stdin)),
             next_id: AtomicI64::new(1),
             pending: std::sync::Mutex::new(HashMap::new()),
             turn: std::sync::Mutex::new(None),
@@ -1409,7 +1443,21 @@ pub(crate) mod tests {
 
     #[cfg(unix)]
     fn idle_test_client(last_active: Instant) -> Arc<CodexClient> {
-        test_client_running("sleep 600", last_active)
+        test_client_running("cat >/dev/null", last_active)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stopping_an_app_server_lets_codex_finish_saving_its_sign_in() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-codex-stop").unwrap();
+        let saved = dir.path().join("auth.json");
+        // Like Codex, the fake app-server exits only once its input closes.
+        let shell = format!("cat >/dev/null; echo refreshed > '{}'", saved.display());
+        let client = test_client_running(&shell, Instant::now());
+
+        client.terminate().await;
+
+        assert_eq!(std::fs::read_to_string(&saved).unwrap(), "refreshed\n");
     }
 
     #[cfg(unix)]
@@ -1443,7 +1491,7 @@ pub(crate) mod tests {
             child: Mutex::new(child),
             process_group_id,
             terminated: AtomicBool::new(false),
-            stdin: Mutex::new(stdin),
+            stdin: Mutex::new(Some(stdin)),
             next_id: AtomicI64::new(1),
             pending: std::sync::Mutex::new(HashMap::new()),
             turn: std::sync::Mutex::new(None),
@@ -1467,7 +1515,7 @@ pub(crate) mod tests {
     }
 
     #[cfg(unix)]
-    pub(crate) async fn stop_test_client(client: &CodexClient) {
+    pub(crate) async fn stop_test_client(client: &Arc<CodexClient>) {
         client.terminate().await;
     }
 
@@ -1590,7 +1638,7 @@ pub(crate) mod tests {
         let host = CodexHost::new();
         let result = r#"{"rateLimits":{"limitId":"codex","primary":{"usedPercent":2,"windowDurationMins":10080,"resetsAt":1795202690},"planType":"pro"}}"#;
         let client = rpc_test_client(&format!(
-            r#"IFS= read -r request; case "$request" in *account/rateLimits/read*) printf '%s\n' '{{"id":1,"result":{result}}}' ;; esac; sleep 600"#
+            r#"IFS= read -r request; case "$request" in *account/rateLimits/read*) printf '%s\n' '{{"id":1,"result":{result}}}' ;; esac; cat >/dev/null"#
         ));
         host.inner.lock().await.insert("chat".into(), client);
         // No binary to spawn: an answer can only come from the live child.
@@ -1617,7 +1665,7 @@ pub(crate) mod tests {
         host.inner
             .lock()
             .await
-            .insert("chat".into(), rpc_test_client("sleep 600"));
+            .insert("chat".into(), rpc_test_client("cat >/dev/null"));
         assert!(
             host.live_client(None).now_or_never().is_none(),
             "waits for the handshake"
@@ -1632,7 +1680,7 @@ pub(crate) mod tests {
     async fn initialized_bring_up_hands_off_a_reusable_client() {
         let host = Arc::new(CodexHost::new());
         let client = rpc_test_client(
-            r#"IFS= read -r request; printf '%s\n' '{"id":1,"result":{}}'; sleep 600"#,
+            r#"IFS= read -r request; printf '%s\n' '{"id":1,"result":{}}'; cat >/dev/null"#,
         );
         let spawned = client.clone();
         let ensured = tokio::time::timeout(
@@ -1824,11 +1872,11 @@ pub(crate) mod tests {
         let mut stdout = BufReader::new(child.stdout.take().unwrap());
         let mut native_pid = String::new();
         stdout.read_line(&mut native_pid).await.unwrap();
-        let client = CodexClient {
+        let client = Arc::new(CodexClient {
             child: Mutex::new(child),
             process_group_id,
             terminated: AtomicBool::new(false),
-            stdin: Mutex::new(stdin),
+            stdin: Mutex::new(Some(stdin)),
             next_id: AtomicI64::new(1),
             pending: std::sync::Mutex::new(HashMap::new()),
             turn: std::sync::Mutex::new(None),
@@ -1844,7 +1892,7 @@ pub(crate) mod tests {
             session_id: String::new(),
             turn_models: std::sync::Mutex::new(HashMap::new()),
             last_active: std::sync::Mutex::new(Instant::now()),
-        };
+        });
 
         client.terminate().await;
         // A second call must not signal the (possibly reused) group again.

@@ -93,16 +93,21 @@ pub(crate) async fn detect_spawn_output_timed(
     mut cmd: tokio::process::Command,
     within: Duration,
 ) -> Option<std::io::Result<std::process::Output>> {
-    let permit = detect_spawn_permit().await;
-    // `Command::output` implied these; `spawn` leaves them inherited.
-    cmd.stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    tokio::time::timeout(within, async move {
-        let (child, _permit) = spawn_with_permit(cmd, permit).await?;
-        child.wait_with_output().await
+    // Detached with its lane: a caller that gives up neither kills the child nor frees the lane.
+    tokio::spawn(async move {
+        let permit = detect_spawn_permit().await;
+        let deadline = tokio::time::Instant::now() + within;
+        // `Command::output` implied these; `spawn` leaves them inherited.
+        cmd.stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        match tokio::time::timeout_at(deadline, spawn_with_permit(cmd, permit)).await {
+            Ok(Ok((child, _permit))) => crate::process::agent_output_by(child, deadline).await,
+            Ok(Err(error)) => Some(Err(error)),
+            Err(_) => None,
+        }
     })
     .await
-    .ok()
+    .unwrap_or_else(|error| Some(Err(std::io::Error::other(error))))
 }
 
 /// Same reasoning as [`spawn_with_permit`], for callers that drive the

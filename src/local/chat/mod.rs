@@ -1405,8 +1405,34 @@ pub(crate) fn stored_to_wire(m: &StoredChatMessage) -> WireMessage {
         completed_at: m.completed_at,
         parent_id: m.parent_id.clone(),
     };
+    for part in &mut message.parts {
+        if part.id == "turn-recovery" {
+            classify_turn_failure(part);
+        }
+    }
     cap_tool_parts(&mut message.parts);
     message
+}
+
+fn classify_turn_failure(part: &mut WirePart) {
+    let Some(state) = part.state.as_mut() else {
+        return;
+    };
+    let Some((input, message)) = state
+        .input
+        .as_mut()
+        .and_then(Value::as_object_mut)
+        .zip(state.error.as_deref())
+    else {
+        return;
+    };
+    if input.contains_key("cause") {
+        return;
+    }
+    let kind = input.get("errorKind").and_then(Value::as_str);
+    if let Some(cause) = crate::local::harness::failure_cause(kind.unwrap_or_default(), message) {
+        input.insert("cause".into(), json!(cause));
+    }
 }
 
 fn is_initial_chat_message(transcript_text: Option<&str>, has_messages: bool) -> bool {
@@ -7104,7 +7130,7 @@ impl ChatHost {
                         } else if session.harness == "codex" {
                             return host.codex.interrupt_session(&session_id).await;
                         } else if session.harness == "claude-code" {
-                            host.claude.kill_session(&session_id).await;
+                            host.claude.interrupt_session(&session_id).await;
                         } else if crate::local::harness::runs_on_acp_host(&session.harness) {
                             host.acp.stop(&session_id).await;
                         }
@@ -8841,8 +8867,11 @@ impl TurnCtx {
                 "turnId": self.turn_id,
                 "errorKind": kind,
                 "recoveryAction": recovery_action,
+                "harness": self.harness,
+                "profile": self.profile,
             }));
         }
+        classify_turn_failure(&mut part);
         self.upsert_part_raw(part);
     }
 
@@ -14987,6 +15016,27 @@ mod transcript_tree_tests {
 
     fn ids(path: Vec<&StoredChatMessage>) -> Vec<&str> {
         path.iter().map(|m| m.id.as_str()).collect()
+    }
+
+    #[test]
+    fn replay_classifies_a_sign_out_saved_without_a_cause() {
+        let mut stored = msg("a1", "assistant", Some("u1"));
+        stored.parts_json = json!([{
+            "id": "turn-recovery",
+            "type": "tool",
+            "tool": "error",
+            "state": {
+                "status": "error",
+                "error": "Not logged in. Please run /login.",
+                "input": { "errorKind": "claude_terminal", "recoveryAction": "retry" },
+            },
+        }])
+        .to_string();
+
+        let wire = serde_json::to_value(stored_to_wire(&stored)).unwrap();
+        let input = &wire["parts"][0]["state"]["input"];
+        assert_eq!(input["cause"], "sign_in");
+        assert_eq!(input["recoveryAction"], "retry");
     }
 
     #[test]

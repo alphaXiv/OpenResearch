@@ -3753,6 +3753,18 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// Each agent and account (`profile_id`) a chat on this machine ran a turn on. Seeded
+    /// chats, such as the demo's, never ran one.
+    pub fn chat_agents_used(&self) -> Result<Vec<(String, Option<String>)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT harness, profile_id FROM chat_sessions AS s
+             WHERE native_session_id IS NOT NULL
+                OR EXISTS (SELECT 1 FROM chat_turns WHERE session_id = s.id)",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     /// Project totals include archived sessions so the agent count reflects
     /// every agent that has worked on the project, not only the visible rail.
     pub fn list_project_activity_summaries(&self) -> Result<Vec<ProjectActivitySummary>> {
@@ -10834,6 +10846,36 @@ mod tests {
             created_at: 1,
             updated_at: 1,
         }
+    }
+
+    #[test]
+    fn an_agent_counts_as_used_only_once_a_chat_ran_a_turn_on_it() {
+        let dir = std::env::temp_dir().join(format!("orx-agents-used-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        // Seeded like the demo's: messages, but no turn and no native session.
+        store
+            .create_chat_session(&chat_session_fixture("seeded"))
+            .unwrap();
+        let mut resumed = chat_session_fixture("resumed");
+        resumed.harness = "codex".into();
+        resumed.native_session_id = Some("thread-1".into());
+        store.create_chat_session(&resumed).unwrap();
+        let mut account = chat_session_fixture("account");
+        account.profile_id = Some("claude-work".into());
+        store.create_chat_session(&account).unwrap();
+        store.conn.execute("INSERT INTO chat_turns (id, session_id, assistant_message_id, client_turn_id, request_hash, prepared_input, settings_json, state, delivery_state, created_at, updated_at) VALUES ('turn', 'account', 'assistant', 'ct', 'hash', 'task', '{}', 'failed', 'not_sent', 1, 1)", []).unwrap();
+
+        let mut used = store.chat_agents_used().unwrap();
+        used.sort();
+        assert_eq!(
+            used,
+            [
+                ("claude-code".to_string(), Some("claude-work".to_string())),
+                ("codex".to_string(), None),
+            ]
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
