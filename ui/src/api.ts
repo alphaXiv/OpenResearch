@@ -580,6 +580,8 @@ export interface PendingAgent {
   sideParentId: string | null;
   harness: HarnessId;
   title: string | null;
+  /** Its turn goes on after a restart into an update; quitting still stops it. */
+  resumesAfterRestart: boolean;
 }
 
 export interface PendingRun {

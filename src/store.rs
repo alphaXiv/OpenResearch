@@ -552,6 +552,8 @@ pub(crate) struct PendingAgent {
     pub side_parent_id: Option<String>,
     pub harness: String,
     pub title: Option<String>,
+    /// Its kept agent goes on with the turn after a restart into an update; a quit still stops it.
+    pub resumes_after_restart: bool,
 }
 
 #[derive(Debug, PartialEq, Serialize)]
@@ -1971,6 +1973,7 @@ impl Store {
                     side_parent_id: row.get(3)?,
                     harness: row.get(4)?,
                     title: row.get(5)?,
+                    resumes_after_restart: false,
                 })
             })?
             .collect::<std::result::Result<_, _>>()?;
@@ -7733,6 +7736,7 @@ mod tests {
                     side_parent_id: Some("chat".into()),
                     harness: "claude-code".into(),
                     title: None,
+                    resumes_after_restart: false,
                 },
                 PendingAgent {
                     project_id: "project".into(),
@@ -7741,6 +7745,7 @@ mod tests {
                     side_parent_id: None,
                     harness: "codex".into(),
                     title: Some("Tune the schedule".into()),
+                    resumes_after_restart: false,
                 },
             ]
         );

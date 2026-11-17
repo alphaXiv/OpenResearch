@@ -19,9 +19,9 @@
 //! matter — `initialize`, `tools/list`, `tools/call` — so it's hand-rolled
 //! rather than pulling in an MCP crate.
 //!
-//! Failure posture: never hang the agent and never allow by accident. Any
-//! transport or orx-side error answers `deny` (or a tool error) with the
-//! reason; unknown methods get a JSON-RPC error; a missing env contract exits
+//! Failure posture: never hang the agent and never allow by accident. A
+//! restarting `orx up` is waited out for a bounded time; then any transport or
+//! orx-side error answers `deny` (or a tool error) with the reason; unknown methods get a JSON-RPC error; a missing env contract exits
 //! nonzero (the harness reports the server as failed).
 
 use std::collections::HashMap;
@@ -136,7 +136,7 @@ pub async fn run() -> Result<()> {
                 // An unreachable `orx up` leaves only `approve`: the agent
                 // keeps working without orchestration rather than failing.
                 if let Some(body) = env.agent_request("tools/list", json!({})) {
-                    if let Ok(listed) = relay(&http, &tools_url, body).await {
+                    if let Ok(listed) = relay(&http, &tools_url, body, Repeat::Never).await {
                         tools.extend(listed["tools"].as_array().cloned().unwrap_or_default());
                     }
                 }
@@ -160,12 +160,15 @@ pub async fn run() -> Result<()> {
                 let http = http.clone();
                 let out = out_tx.clone();
                 tokio::spawn(async move {
-                    let decision = relay(&http, &url, body).await.unwrap_or_else(|e| {
-                        json!({
-                            "behavior": "deny",
-                            "message": format!("orx approval bridge unavailable: {e}"),
-                        })
-                    });
+                    let decision =
+                        relay(&http, &url, body, Repeat::Safe)
+                            .await
+                            .unwrap_or_else(|e| {
+                                json!({
+                                    "behavior": "deny",
+                                    "message": format!("orx approval bridge unavailable: {e}"),
+                                })
+                            });
                     // The permission-prompt-tool contract: the decision rides
                     // JSON-*stringified* inside an MCP text content block.
                     let _ = out.send(reply(
@@ -176,6 +179,7 @@ pub async fn run() -> Result<()> {
             }
             Some("tools/call") => {
                 let params = msg.get("params").cloned().unwrap_or_else(|| json!({}));
+                let repeat = tool_repeat(&params);
                 let body = env.agent_request("tools/call", params);
                 let http = http.clone();
                 let url = tools_url.clone();
@@ -185,7 +189,7 @@ pub async fn run() -> Result<()> {
                 let finished = key.clone();
                 let call = tokio::spawn(async move {
                     let result = match body {
-                        Some(body) => relay(&http, &url, body).await,
+                        Some(body) => relay(&http, &url, body, repeat).await,
                         None => Err(anyhow!("orx tools are unavailable in this session")),
                     };
                     let result = result.unwrap_or_else(|e| {
@@ -230,22 +234,76 @@ fn reply(id: Option<Value>, result: Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id.unwrap_or(Value::Null), "result": result })
 }
 
-/// POST one request to `orx up` and return its JSON body; an error status
-/// carries the server's `error` text.
-async fn relay(http: &reqwest::Client, url: &str, body: Value) -> Result<Value> {
-    let resp = http
-        .post(url)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| anyhow!("{e}"))?;
-    let status = resp.status();
-    let body = resp.json::<Value>().await.map_err(|e| anyhow!("{e}"))?;
-    if !status.is_success() {
-        let reason = body["error"].as_str().unwrap_or("no reason given");
-        return Err(anyhow!("orx up answered {status}: {reason}"));
+/// Whether a call may go to `orx up` again after its connection failed, which during a restart
+/// it does until the next server answers.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Repeat {
+    /// Doing it twice is harmless: reads, long polls, approvals, calls keyed by a request id.
+    Safe,
+    /// Only a connection refused before the request went out: `orx up` may have acted on it.
+    Unsent,
+    /// Not at all: an agent starting up waits on the answer.
+    Never,
+}
+
+/// How a `tools/call` of the orchestration tools may repeat; see `up::agent_tools`.
+fn tool_repeat(params: &Value) -> Repeat {
+    let keyed = params
+        .pointer("/arguments/clientRequestId")
+        .and_then(Value::as_str)
+        .is_some_and(|key| !key.is_empty());
+    match params.get("name").and_then(Value::as_str) {
+        Some("models" | "subscribe" | "unsubscribe" | "wait" | "status" | "read" | "cancel") => {
+            Repeat::Safe
+        }
+        Some("delegate" | "send") if keyed => Repeat::Safe,
+        _ => Repeat::Unsent,
     }
-    Ok(body)
+}
+
+/// The longest a call waits for `orx up` to come back, past any restart.
+const RESTART_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// POST one request to `orx up` and return its JSON body; an error status
+/// carries the server's `error` text. A server that is restarting is waited
+/// out, as `repeat` allows.
+async fn relay(http: &reqwest::Client, url: &str, body: Value, repeat: Repeat) -> Result<Value> {
+    let mut backoff = std::time::Duration::from_millis(250);
+    let mut waited = std::time::Duration::ZERO;
+    loop {
+        let failure = match http.post(url).json(&body).send().await {
+            Ok(resp) if resp.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE => {
+                anyhow!("orx up answered {}", resp.status())
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                match resp.json::<Value>().await {
+                    Ok(body) if status.is_success() => return Ok(body),
+                    Ok(body) => {
+                        let reason = body["error"].as_str().unwrap_or("no reason given");
+                        return Err(anyhow!("orx up answered {status}: {reason}"));
+                    }
+                    Err(error) if error.is_body() && repeat == Repeat::Safe => anyhow!("{error}"),
+                    Err(error) => return Err(anyhow!("{error}")),
+                }
+            }
+            Err(error) if error.is_connect() && repeat != Repeat::Never => anyhow!("{error}"),
+            Err(error) if error.is_request() && repeat == Repeat::Safe => anyhow!("{error}"),
+            Err(error) => return Err(anyhow!("{error}")),
+        };
+        if repeat == Repeat::Never {
+            return Err(failure);
+        }
+        if waited >= RESTART_WAIT {
+            return Err(anyhow!(
+                "orx up did not answer for {} seconds: {failure}",
+                RESTART_WAIT.as_secs()
+            ));
+        }
+        tokio::time::sleep(backoff).await;
+        waited += backoff;
+        backoff = (backoff * 2).min(std::time::Duration::from_secs(5));
+    }
 }
 
 /// agy's workspace hooks (see `crate::local::harness::antigravity`), told apart by
@@ -714,5 +772,99 @@ mod antigravity_tests {
         );
         assert_eq!(invocation_key(&payload, "c", 5), None);
         std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod relay_tests {
+    use super::*;
+    use tokio::io::AsyncReadExt as _;
+    use tokio::net::TcpListener;
+
+    /// Serves `listener`: drops the first `drops` connections once their request has arrived,
+    /// then answers. Returns how many connections it took.
+    fn serve(listener: TcpListener, drops: usize) -> Arc<std::sync::atomic::AtomicUsize> {
+        let taken = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = taken.clone();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut request = [0; 4096];
+                let _ = stream.read(&mut request).await;
+                let seen = counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if seen < drops {
+                    continue;
+                }
+                let body = r#"{"answered":true}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        });
+        taken
+    }
+
+    async fn free_port() -> u16 {
+        TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    #[tokio::test]
+    async fn a_call_refused_while_orx_up_restarts_waits_for_the_next_server() {
+        let port = free_port().await;
+        let url = format!("http://127.0.0.1:{port}/api/internal/mcp");
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+            serve(TcpListener::bind(("127.0.0.1", port)).await.unwrap(), 0);
+        });
+        let http = crate::net::loopback_client().build().unwrap();
+        let answer = relay(&http, &url, json!({}), Repeat::Unsent).await.unwrap();
+        assert_eq!(answer, json!({ "answered": true }));
+    }
+
+    #[tokio::test]
+    async fn a_dropped_call_is_repeated_only_when_repeating_is_harmless() {
+        let http = crate::net::loopback_client().build().unwrap();
+        for (repeat, answered, connections) in [(Repeat::Unsent, false, 1), (Repeat::Safe, true, 2)]
+        {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/api/internal/mcp", listener.local_addr().unwrap());
+            let taken = serve(listener, 1);
+            let result = relay(&http, &url, json!({}), repeat).await;
+            assert_eq!(result.is_ok(), answered, "{repeat:?}: {result:?}");
+            assert_eq!(taken.load(std::sync::atomic::Ordering::SeqCst), connections);
+        }
+    }
+
+    #[tokio::test]
+    async fn listing_tools_never_waits() {
+        let url = format!("http://127.0.0.1:{}/api/internal/mcp", free_port().await);
+        let started = std::time::Instant::now();
+        let http = crate::net::loopback_client().build().unwrap();
+        assert!(relay(&http, &url, json!({}), Repeat::Never).await.is_err());
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[test]
+    fn only_reads_waits_and_keyed_calls_repeat_after_a_drop() {
+        let call = |name: &str, arguments: Value| json!({ "name": name, "arguments": arguments });
+        for name in ["wait", "status", "read", "models", "subscribe", "cancel"] {
+            assert_eq!(tool_repeat(&call(name, json!({}))), Repeat::Safe, "{name}");
+        }
+        for name in ["send", "delegate", "answer"] {
+            assert_eq!(
+                tool_repeat(&call(name, json!({}))),
+                Repeat::Unsent,
+                "{name}"
+            );
+        }
+        let keyed = json!({ "clientRequestId": "k1" });
+        assert_eq!(tool_repeat(&call("send", keyed.clone())), Repeat::Safe);
+        assert_eq!(tool_repeat(&call("answer", keyed)), Repeat::Unsent);
     }
 }

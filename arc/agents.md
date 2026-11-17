@@ -242,7 +242,7 @@ Where an agent offers a hook or plugin, it stamps each shell command with the is
 
 A turn is a row with a state and a **delivery state**: its prompt was never sent, rejected, accepted, or of unknown fate. A running turn holds a per-chat lease with a heartbeat, which keeps one turn per chat and exposes a turn whose process died ([storage](storage.md)).
 
-When a dashboard starts or a lease expires, every turn still marked running has no process behind it, and a turn that finds its own lease gone stops. Each becomes a failed turn with a recovery action chosen by its delivery state:
+When a dashboard starts or a lease expires, every turn still marked running has no process behind it, and a turn that finds its own lease gone stops. A turn whose agent was kept and taken back resumes from its checkpoint instead, once no other process holds its lease ([restarts](restarts.md)). Every other becomes a failed turn with a recovery action chosen by its delivery state, and its kept agent, if any, is stopped, so recovery starts on a fresh one:
 
 | Delivery state | Action | Effect |
 | --- | --- | --- |
@@ -251,11 +251,11 @@ When a dashboard starts or a lease expires, every turn still marked running has 
 
 **Nothing is replayed without the user.** An adapter retries on its own only before the prompt is accepted, within a bounded budget. A continued turn resumes the native session; if that session is gone, the agent gets a bounded snapshot of orx's transcript with instructions not to repeat completed tool actions. An ACP agent's session is gone when the agent says so or no longer lists it.
 
-Queued messages are persisted before they are acknowledged and run in order as each turn ends, so a restart loses none; Stop clears the queue. A quitting dashboard starts no turn, queued ones included, and gives up its leases on the way out, so the next start recovers its turns at once. Adapters that read a child's output interrupt a turn silent past a generous watchdog, which waits while an ACP agent reports a command running; OpenCode's adapters have none.
+Queued messages are persisted before they are acknowledged and run in order as each turn ends, so a restart loses none; Stop clears the queue. A quitting or restarting dashboard starts no turn, queued ones included, and gives up its leases on the way out, so the next start resumes or recovers its turns at once. Adapters that read a child's output interrupt a turn silent past a generous watchdog, which waits while an ACP agent reports a command running; OpenCode's adapters have none.
 
 ## Sub-agents and new chats
 
-Every agent whose harness takes an MCP server gets `orx mcp` (`src/commands/mcp.rs`, tools in `src/commands/up/agent_tools.rs`). It speaks stdio, the one transport every harness accepts, and relays to the owning dashboard, which knows the calling chat by a token derived from a key that lives only in that dashboard's process.
+Every agent whose harness takes an MCP server gets `orx mcp` (`src/commands/mcp.rs`, tools in `src/commands/up/agent_tools.rs`). It speaks stdio, the one transport every harness accepts, and relays to the owning dashboard, which knows the calling chat by a token derived from a key the dashboard keeps for as long as an agent it started survives. A call waits out a restart: one refused before it was sent is sent again until the next dashboard answers, and one cut off after is repeated only when repeating it is harmless, such as a read, a `wait`, an approval or a call keyed by a request id.
 
 Through it an agent delegates (`src/local/chat/delegation.rs`). It names a versioned model, and orx picks a route unless the agent names one: the vendor's own agent first, then flat-rate plans, direct APIs, and resellers last. Every agent and provider spells a model differently, so routes join on a canonical id derived from each spelling (`src/local/model_routes.rs`). A model the user turns off in Settings, or just its free tier, offers delegates no route.
 

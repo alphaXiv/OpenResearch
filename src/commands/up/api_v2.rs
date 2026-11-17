@@ -218,7 +218,12 @@ impl Api {
     /// Agents are the chats the sidebar shows working, so a quit lists exactly those.
     pub(crate) async fn pending_work(&self) -> Result<crate::store::PendingWork> {
         let working = self.chat.busy_sessions().await;
-        self.store().pending_work(&working)
+        let stopped = self.chat.stopped_by_restart().await;
+        let mut work = self.store().pending_work(&working)?;
+        for agent in &mut work.agents {
+            agent.resumes_after_restart = !stopped.contains(&agent.session_id);
+        }
+        Ok(work)
     }
 
     pub(super) async fn busy(&self) -> Result<bool> {

@@ -8,10 +8,13 @@
 //! normalized parts into the per-turn assistant message; every flush persists
 //! the message and broadcasts it as a `chat.message` SSE event.
 
+mod adoption;
 pub mod delegation;
 pub(crate) mod handoff;
 pub mod news;
 pub(crate) mod subagent;
+
+pub use adoption::{adopt_kept_work, stop_kept};
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -2977,6 +2980,9 @@ pub struct ChatHost {
     /// Sink for mid-turn steering text, present only while a capable harness is running.
     steering: std::sync::Mutex<HashMap<String, SteerSink>>,
     queue_dispatch_in_flight: std::sync::Mutex<HashMap<String, String>>,
+    /// Running turns a previous server left whose kept agent was taken back to resume them,
+    /// by session; each resumes once its predecessor's lease is gone.
+    resumable: std::sync::Mutex<HashMap<String, adoption::Resumable>>,
 }
 
 struct PendingClientTurnGuard {
@@ -3912,6 +3918,7 @@ impl ChatHost {
             queue_cancellation_held: std::sync::Mutex::new(HashSet::new()),
             steering: std::sync::Mutex::new(HashMap::new()),
             queue_dispatch_in_flight: std::sync::Mutex::new(HashMap::new()),
+            resumable: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -3950,6 +3957,25 @@ impl ChatHost {
             },
         );
         token
+    }
+
+    /// Puts back the bridge token and Plan policy a kept child was spawned with, when its
+    /// harness takes it back from a previous server.
+    pub fn restore_gate_token(
+        &self,
+        session_id: &str,
+        token: String,
+        plan_mode: bool,
+        bypass: bool,
+    ) {
+        self.gate_tokens.lock().unwrap().insert(
+            session_id.to_string(),
+            GateToken {
+                value: token,
+                plan_mode,
+                bypass,
+            },
+        );
     }
 
     /// Whether this session's running turn surfaced a bridge card — and clear
@@ -4335,16 +4361,74 @@ impl ChatHost {
         f()
     }
 
-    /// Stop admitting turns if none is running, queued, or awaiting an answer. Every
-    /// admission claims under the turn map's lock, so none can slip in after this check.
-    pub async fn stop_admitting_if_idle(&self) -> bool {
+    /// Stop admitting turns for a restart into an update unless it would stop work
+    /// ([`Self::stopped_by_restart`]). Every admission claims under the turn map's lock, so
+    /// none can slip in after this check.
+    pub async fn stop_admitting_unless_restart_stops(&self) -> bool {
         let turns = self.turns.lock().await;
-        let idle =
-            turns.is_empty() && self.queued_count() == 0 && self.pending_permission_count() == 0;
+        let idle = self.restart_stops(&turns).is_empty();
         if idle {
             self.stop_admitting();
         }
         idle
+    }
+
+    /// The chats whose work a restart into an update would cut short.
+    pub async fn stopped_by_restart(&self) -> HashSet<String> {
+        let turns = self.turns.lock().await;
+        self.restart_stops(&turns)
+    }
+
+    /// Chats with a turn, a queued message or an approval, save those whose work the next
+    /// server resumes on their kept agent.
+    fn restart_stops(&self, turns: &HashMap<String, TurnState>) -> HashSet<String> {
+        let mut sessions: HashSet<String> = turns.keys().cloned().collect();
+        sessions.extend(
+            self.queued
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(_, queue)| !queue.is_empty())
+                .map(|(session_id, _)| session_id.clone()),
+        );
+        sessions.extend(
+            self.pending_permissions
+                .lock()
+                .unwrap()
+                .values()
+                .map(|pending| pending.session_id.clone()),
+        );
+        let survivors = adoption::Survivors::now();
+        sessions.retain(|session_id| !survivors.resume(session_id, turns.get(session_id)));
+        sessions
+    }
+
+    /// Leaves the turns that resume to the next server, which goes on from each one's last
+    /// checkpoint, so nothing more is recorded about them; the rest stop as for a shutdown. No
+    /// kept child stops from here on.
+    pub async fn hand_off(self: &Arc<Self>) {
+        crate::keep::hand_off();
+        self.stop_admitting();
+        let stopped = {
+            let mut turns = self.turns.lock().await;
+            let stopped = self.restart_stops(&turns);
+            turns.retain(|session_id, state| {
+                if stopped.contains(session_id) {
+                    return true;
+                }
+                if let TurnState::Active(active) = state {
+                    active.handle.abort();
+                }
+                false
+            });
+            stopped
+        };
+        let stops = stopped.iter().map(|session_id| async move {
+            if let Err(error) = self.stop_turn(session_id, StopMode::Shutdown).await {
+                eprintln!("orx up: failed to stop turn {session_id} for a restart: {error}");
+            }
+        });
+        futures::future::join_all(stops).await;
     }
 
     /// Stop admitting turns, including the next queued message of a turn that ends from here on.
@@ -4594,12 +4678,13 @@ impl ChatHost {
             .collect()
     }
 
-    pub fn reconcile_expired_turn_leases(self: &Arc<Self>) -> Result<()> {
-        let store = Store::open()?;
-        let turns = store.reconcile_expired_unfinished_chat_turns(&self.held_turn_leases())?;
-        for (session_id, message) in materialize_unfinished_turns(&store, turns)? {
-            self.emit("chat.message", message_json(&message, &session_id));
+    /// Resumes or recovers the turns whose server is gone, once their lease expires. A
+    /// handing-off server leaves them to its successor.
+    pub async fn reconcile_expired_turn_leases(self: &Arc<Self>) -> Result<()> {
+        if crate::keep::handing_off() {
+            return Ok(());
         }
+        adoption::resume_turns(self, false).await?;
         self.resume_persisted_queues();
         Ok(())
     }
@@ -6689,9 +6774,25 @@ impl ChatHost {
         let harness = ctx.harness.clone();
         let model = ctx.model.clone();
         let profile = ctx.profile.clone();
-        let (target_path, target_event_offset) = target_event_start(&sid, &ctx.assistant.id);
-        ctx.target_event_path = Some(target_path);
-        ctx.target_event_offset = target_event_offset;
+        // A resumed turn goes on with its execution, attempt and target events from its checkpoint.
+        let resumed = ctx.resume.is_some();
+        if resumed {
+            let path = target_event_path(&sid, &ctx.assistant.id);
+            if let Err(error) = std::fs::write(
+                target_event_pointer(&sid),
+                path.to_string_lossy().as_bytes(),
+            ) {
+                eprintln!(
+                    "orx up: could not point chat {sid}'s tools at {}: {error}",
+                    path.display()
+                );
+            }
+            ctx.target_event_path = Some(path);
+        } else {
+            let (target_path, target_event_offset) = target_event_start(&sid, &ctx.assistant.id);
+            ctx.target_event_path = Some(target_path);
+            ctx.target_event_offset = target_event_offset;
+        }
         let message_id = ctx.assistant.id.clone();
         let active_turn_id = turn_id.clone();
         let steer_route = crate::local::harness::supports_steering(&ctx.harness).then(|| {
@@ -6699,13 +6800,17 @@ impl ChatHost {
             ctx.steering = Some(rx);
             self.register_steering(&sid, tx, TurnSettings::of(&ctx))
         });
-        Store::open()?.begin_usage_execution(
-            &ctx.usage_execution_id,
-            &ctx.turn_id,
-            &ctx.harness,
-        )?;
+        if !resumed {
+            Store::open()?.begin_usage_execution(
+                &ctx.usage_execution_id,
+                &ctx.turn_id,
+                &ctx.harness,
+            )?;
+        }
         let task = tokio::spawn(async move {
-            ctx.attempt_count = 1;
+            if !resumed {
+                ctx.attempt_count = 1;
+            }
             let _ = Store::open().and_then(|store| {
                 store.update_chat_turn_progress(
                     &ctx.turn_id,
@@ -9759,10 +9864,6 @@ pub fn list_messages(session_id: &str) -> Result<Vec<WireMessage>> {
 
 /// Materialize restart recovery on the assistant message linked to every turn
 /// the store just converted from in-flight to failed. Nothing is replayed.
-pub fn reconcile_unfinished_turns(store: &Store) -> Result<()> {
-    materialize_unfinished_turns(store, store.reconcile_unfinished_chat_turns()?).map(|_| ())
-}
-
 fn materialize_unfinished_turns(
     store: &Store,
     turns: Vec<StoredChatTurn>,
@@ -10107,7 +10208,7 @@ async fn stop_turns_whose_lease_was_lost(chat: &Arc<ChatHost>) {
     if lost.is_empty() {
         return;
     }
-    if let Err(error) = chat.reconcile_expired_turn_leases() {
+    if let Err(error) = chat.reconcile_expired_turn_leases().await {
         eprintln!("orx up: could not reconcile chat turns whose lease was lost: {error}");
     }
 }
@@ -11690,9 +11791,9 @@ mod bridge_tests {
             .lock()
             .await
             .insert("busy".into(), TurnState::Reserved { turn_id: None });
-        assert!(!host.stop_admitting_if_idle().await);
+        assert!(!host.stop_admitting_unless_restart_stops().await);
         host.turns.lock().await.clear();
-        assert!(host.stop_admitting_if_idle().await);
+        assert!(host.stop_admitting_unless_restart_stops().await);
         assert!(!host.claim_durable_turn("next"));
     }
 
@@ -14865,7 +14966,7 @@ done
             assert!(!host.is_busy(session_id).await);
             assert!(!store.chat_turn_leased(session_id).unwrap());
 
-            reconcile_unfinished_turns(&store).unwrap();
+            adopt_kept_work(&host, true).await.unwrap();
             let stored = store.get_chat_turn(session_id, &turn.id).unwrap().unwrap();
             assert_eq!(stored.state, "failed");
             assert_eq!(stored.recovery_action.as_deref(), Some("continue"));
@@ -14960,7 +15061,7 @@ done
             assert!(host.renew_turn_leases().is_empty());
 
             stall();
-            host.reconcile_expired_turn_leases().unwrap();
+            host.reconcile_expired_turn_leases().await.unwrap();
             assert!(host.renew_turn_leases().is_empty());
 
             stall();

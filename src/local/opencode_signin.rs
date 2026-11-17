@@ -381,6 +381,16 @@ impl SignIns {
         )
     }
 
+    /// Whether a sign-in is waiting on the user, which a restart would cut off.
+    pub fn in_progress(&self) -> bool {
+        self.attempts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .flat_map(|attempts| attempts.values())
+            .any(|attempt| !attempt.commands.is_closed())
+    }
+
     pub fn status(&self, id: &str) -> Option<Value> {
         self.attempts
             .lock()

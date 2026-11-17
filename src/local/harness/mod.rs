@@ -183,7 +183,6 @@ pub enum ResumeAction {
     Nothing,
 }
 
-/// One coding-agent integration. See the module docs for the capability model.
 /// One chat's kept agent, as a starting server found it.
 #[derive(Debug, Clone)]
 pub struct Adoption {
@@ -199,6 +198,7 @@ pub struct Adoption {
     pub commands: Vec<(String, String, serde_json::Value)>,
 }
 
+/// One coding-agent integration. See the module docs for the capability model.
 #[async_trait]
 // async-trait marks its boxed futures `#[must_use]`; clippy 1.99 flags that generated code.
 #[allow(clippy::double_must_use)]
@@ -595,7 +595,24 @@ pub fn runs_on_acp_host(id: &str) -> bool {
     id.starts_with("acp:") || id == "antigravity"
 }
 
+/// Harnesses a test registers by id, which `session_harness` serves before the registry's.
+#[cfg(test)]
+pub(crate) static TEST_HARNESSES: std::sync::Mutex<Vec<(&str, TestHarness)>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(crate) type TestHarness = fn() -> Box<dyn Harness>;
+
 pub fn session_harness(id: &str, session_id: &str) -> Option<Box<dyn Harness>> {
+    #[cfg(test)]
+    if let Some((_, harness)) = TEST_HARNESSES
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(test, _)| *test == id)
+    {
+        return Some(harness());
+    }
     if id.starts_with("acp:") {
         let state = Store::open()
             .ok()?

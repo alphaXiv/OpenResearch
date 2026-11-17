@@ -3,6 +3,7 @@
 use std::time::{Duration, Instant};
 
 use super::{CreateExperimentSpec, DescInput, ProjectEdit, Run, RunListing};
+use crate::commands::remote_host::RELAUNCH_WAIT;
 use crate::error::{anyhow, Result};
 use crate::local::model::{LocalExperiment, LocalProject};
 use crate::store::Store;
@@ -554,32 +555,62 @@ impl ApiClient {
             .bearer_auth(&self.server.token)
     }
 
+    /// Sends a request, waiting out a restarting server: a request refused before it was sent,
+    /// or turned away by a server on its way out, goes to whichever server answers next, for up
+    /// to [`RELAUNCH_WAIT`]. One the connection dropped after sending is sent again only when
+    /// `repeatable`, since the server may have acted on it.
+    async fn send_waiting(
+        &self,
+        repeatable: bool,
+        request: impl Fn(&Self) -> reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response> {
+        let deadline = Instant::now() + RELAUNCH_WAIT;
+        let mut backoff = Duration::from_millis(250);
+        let mut client = self.clone();
+        loop {
+            let response = request(&client).send().await;
+            let retry = match &response {
+                Ok(response) => response.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                Err(error) => error.is_connect() || repeatable && error.is_request(),
+            };
+            if !retry {
+                return Ok(response?);
+            }
+            if Instant::now() + backoff > deadline {
+                let port = client.server.port;
+                let seconds = RELAUNCH_WAIT.as_secs();
+                return Err(match response {
+                    Ok(response) => anyhow!(
+                        "The OpenResearch server on port {port} still answered {} after {seconds} seconds. Ask the user to check that OpenResearch is running.",
+                        response.status()
+                    ),
+                    Err(error) => anyhow!(
+                        "Could not reach the OpenResearch server on port {port} for {seconds} seconds ({error}). Ask the user to check that OpenResearch is running."
+                    ),
+                });
+            }
+            drop(response);
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(Duration::from_secs(5));
+            client = Self::discover().await?;
+        }
+    }
+
     pub async fn json(
         &self,
         method: reqwest::Method,
         path: &str,
         body: Option<&serde_json::Value>,
     ) -> Result<serde_json::Value> {
-        let request = |client: &Self| {
-            let mut request = client.request(method.clone(), path);
-            if let Some(body) = body {
-                request = request.json(body);
-            }
-            request
-        };
-        let response = request(self).send().await;
-        let retry = match &response {
-            Ok(response) => response.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE,
-            Err(error) => {
-                error.is_connect() || method == reqwest::Method::GET && error.is_request()
-            }
-        };
-        let response = if retry {
-            drop(response);
-            request(&Self::discover().await?).send().await?
-        } else {
-            response?
-        };
+        let response = self
+            .send_waiting(method == reqwest::Method::GET, |client| {
+                let mut request = client.request(method.clone(), path);
+                if let Some(body) = body {
+                    request = request.json(body);
+                }
+                request
+            })
+            .await?;
         if !response.status().is_success() {
             return Err(anyhow!("{}", response.text().await?));
         }
@@ -838,25 +869,10 @@ impl ApiClient {
     ) -> Result<impl futures::Stream<Item = Result<serde_json::Value>>> {
         use futures::{StreamExt, TryStreamExt};
         let response = self
-            .request(reqwest::Method::GET, "events")
-            .query(filter)
-            .send()
-            .await;
-        let retry = match &response {
-            Ok(response) => response.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE,
-            Err(error) => error.is_connect() || error.is_request(),
-        };
-        let response = if retry {
-            drop(response);
-            Self::discover()
-                .await?
-                .request(reqwest::Method::GET, "events")
-                .query(filter)
-                .send()
-                .await?
-        } else {
-            response?
-        };
+            .send_waiting(true, |client| {
+                client.request(reqwest::Method::GET, "events").query(filter)
+            })
+            .await?;
         if !response.status().is_success() {
             return Err(anyhow!("{}", response.text().await?));
         }

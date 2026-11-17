@@ -1,7 +1,7 @@
 import { useWorkspace } from "../workspace";
 import { useQuery } from "@tanstack/react-query";
 import { useRouter } from "@tanstack/react-router";
-import { askBeforeRestarting } from "../closeDialog";
+import { askBeforeRestarting, stoppedByRestart } from "../closeDialog";
 
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
@@ -86,9 +86,9 @@ export function useRestartApp(status: UpdateStatus | null): RestartState {
     const retired = () => unmounted.current || !isCurrentScope(options.queryKey);
     asking.current = true;
     void (async () => {
-      // Uncounted work restarts plainly, and the server refuses while an agent is working.
+      // Uncounted work restarts plainly, and the server refuses while an agent it would stop is working.
       const work = await queryClient.fetchQuery({ ...getPendingWorkQuery(), staleTime: 0 }).catch(() => null);
-      const agents = work?.agents ?? [];
+      const agents = stoppedByRestart(work?.agents ?? []);
       const open = (href: string) => void router.navigate({ href });
       const agreed = agents.length === 0 || (await askBeforeRestarting(dialogs, agents, { machine: workspace, open }));
       asking.current = false;

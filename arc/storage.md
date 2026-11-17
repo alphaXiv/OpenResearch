@@ -7,7 +7,7 @@ orx keeps a researcher's work on their own machine. Projects, experiments, runs,
 | Directory | Location | Holds |
 | --- | --- | --- |
 | config | `$XDG_CONFIG_HOME/openresearch`, else `~/.config/openresearch` | `settings.json`, credentials for openresearch.sh, alphaXiv and Overleaf, the SSH hosts saved in orx (`ssh/`), the telemetry outbox, the locks that cover the data directory as a whole |
-| data | resolved below | `orx.db`, `repos/`, `worktrees/`, `agents/`, `run-logs/`, `files/`, `chat-attachments/`, per-run state |
+| data | resolved below | `orx.db`, `repos/`, `worktrees/`, `agents/`, `run-logs/`, `files/`, `chat-attachments/`, `keep/`, per-run state |
 | cache | `ORX_CACHE_DIR`, the `cacheDir` setting, else `~/.cache/openresearch` | orx's managed agent copies, the model price list, the last model feed, and the legacy repository root, which [migrations](#migrations-follow-paths) empty |
 
 **The data directory is one relocatable unit.** Its location resolves, most to least authoritative, from `ORX_DATA_DIR`, the `dataDir` in `settings.json`, `$XDG_DATA_HOME/openresearch`, and `~/.local/share/openresearch`. The setting is read fresh on every resolution, so a process opening the store after a move sees the new place. The directory is owner-only because the store holds scoped compute capabilities. The desktop app imports these overrides from the login shell, or it and a terminal `orx` would open different databases ([desktop](desktop.md)).
@@ -15,6 +15,8 @@ orx keeps a researcher's work on their own machine. Projects, experiments, runs,
 **The config directory never moves**, because the setting that points at the data directory lives there and a lock inside the data directory could not guard a move of it. `settings.json` has one writer, the locked read-modify-write in `src/telemetry.rs`, and every save keeps the fields a newer orx wrote; a second writer would clobber them.
 
 OpenCode provider records (`opencode-providers.json`, including API keys) stay in config. Custom endpoint records, names and icons live in the data directory's `local-models.json`; OpenCode OAuth credentials live in its isolated database.
+
+**`keep/` holds what outlives a server** ([restarts](restarts.md)): a directory per keeper, and `lineage.json`, the bearer, `orx mcp` key and port that kept agents' environments name. Both are owner-only. A starting server reuses the lineage while a kept agent survives to call it, and draws a fresh one otherwise.
 
 Saved SSH passwords and key passphrases sit in the system's credential store (Keychain, Credential Manager, the Secret Service), one item per host alias, never in a file ([remote](remote.md#saved-hosts)).
 
@@ -100,13 +102,13 @@ Narrower locks: `settings.lock` and `alphaxiv.lock` in config serialize settings
 
 Leases are rows in the store:
 
-- `chat_turn_leases`: one live turn per chat, renewed by heartbeat, expired by a TTL.
+- `chat_turn_leases`: one live turn per chat, renewed by heartbeat, expired by a TTL. A running turn's `chat_turn_checkpoints` row commits with each transcript flush and goes once the turn ends.
 - `chat_subscriptions` claims: one sweep delivering an update, expired by a TTL.
 - `data_dir_move_lease`: a move in progress. New turns, orphan sweeps and deletions check it; the next process to find the move lock free clears a lease whose owner died.
 
 ## Moving the data directory
 
-**A move never destroys the old tree before the new one is proven.** Only the dashboard moves it (`src/local/datadir.rs`), and only while nothing is active: it refuses under `ORX_DATA_DIR` or while any turn, run or project operation runs, then holds the move lock and lease so none starts. Idle agents stop first, because their homes under `agents/` hold live SQLite files ([agents](agents.md)).
+**A move never destroys the old tree before the new one is proven.** Only the dashboard moves it (`src/local/datadir.rs`), and only while nothing is active: it refuses under `ORX_DATA_DIR` or while any turn, run, project operation or project terminal runs, then holds the move lock and lease so none starts. Idle agents stop first, kept ones through their keepers, because their homes under `agents/` hold live SQLite files ([agents](agents.md)) and a keeper's directory cannot move under it.
 
 The tree is renamed on the same filesystem, or copied and verified. Every absolute path recorded inside it is then rewritten (Git worktree links and remotes, project paths, OpenCode session directories; `src/local/storage.rs`), and the move fails if any reference to the old location survives. Only then does the persisted path swap. A failed rename renames back. A copy keeps the old tree and reports it instead of deleting it, because a detached supervisor or a request that resolved the old path just before the swap may still be writing there.
 

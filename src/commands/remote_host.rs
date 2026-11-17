@@ -1446,6 +1446,10 @@ impl ServerDescriptor {
             &serde_json::to_vec(self)?,
             Some(0o600),
         )?;
+        match std::fs::remove_file(runtime_path(data_dir, "relaunch.json")?) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
+            _ => {}
+        }
         if let Some(mut file) = READY_PIPE.lock().unwrap().take() {
             std::io::Write::write_all(&mut file, &[1])?;
         }
@@ -1456,6 +1460,35 @@ impl ServerDescriptor {
     pub(crate) fn withdraw(data_dir: &Path) -> Result<()> {
         std::fs::remove_file(runtime_path(data_dir, "server.json")?)?;
         Ok(())
+    }
+
+    /// Tells discovery a successor is on its way, for up to [`RELAUNCH_WAIT`], so the CLI waits
+    /// for it instead of starting a server of its own; the successor's [`Self::publish`] ends it.
+    pub(crate) fn announce_relaunch(data_dir: &Path) -> Result<()> {
+        let until = crate::store::now_ms() + RELAUNCH_WAIT.as_millis() as i64;
+        crate::local::git::atomic_write_with_mode(
+            &runtime_path(data_dir, "relaunch.json")?,
+            &serde_json::to_vec(&serde_json::json!({ "until": until }))?,
+            Some(0o600),
+        )
+    }
+
+    /// The successor a relaunching server announced, once it is live; `None` once the
+    /// announcement ends without one.
+    async fn relaunched(data_dir: &Path) -> Result<Option<Self>> {
+        loop {
+            let announced = std::fs::read(runtime_path(data_dir, "relaunch.json")?)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|announcement| announcement["until"].as_i64());
+            if announced.is_none_or(|until| until <= crate::store::now_ms()) {
+                return Ok(None);
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            if let Some(descriptor) = Self::live(data_dir).await? {
+                return Ok(Some(descriptor));
+            }
+        }
     }
 
     pub(crate) async fn live(data_dir: &Path) -> Result<Option<Self>> {
@@ -1650,8 +1683,14 @@ pub(crate) async fn discover() -> Result<ServerDescriptor> {
     discover_at(canonical_data_dir()?).await
 }
 
+/// The longest a restart keeps callers waiting for the server that follows.
+pub(crate) const RELAUNCH_WAIT: Duration = Duration::from_secs(120);
+
 async fn discover_at(data_dir: PathBuf) -> Result<ServerDescriptor> {
     if let Some(descriptor) = ServerDescriptor::live(&data_dir).await? {
+        return Ok(descriptor);
+    }
+    if let Some(descriptor) = ServerDescriptor::relaunched(&data_dir).await? {
         return Ok(descriptor);
     }
     ensure_started(
@@ -1816,6 +1855,47 @@ mod discovery_tests {
         let error = discover_at(directory.clone()).await.err().unwrap();
         assert!(error.to_string().contains("not ready"));
         assert!(!shared_path(&directory, "start.lock").unwrap().exists());
+        std::fs::remove_file(runtime_path(&directory, "server.json").unwrap()).unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn discovery_waits_out_an_announced_relaunch_without_spawning() {
+        let directory =
+            std::env::temp_dir().join(format!("orx-relaunch-discovery-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        ServerDescriptor::announce_relaunch(&directory).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let descriptor = ServerDescriptor {
+            instance: "successor".into(),
+            pid: std::process::id(),
+            starttime: crate::engine::process::identity(std::process::id())
+                .unwrap()
+                .starttime,
+            port: listener.local_addr().unwrap().port(),
+            version: "test".into(),
+            proto: 2,
+            token: "secret".into(),
+        };
+        let app = axum::Router::new().route("/api/v2/hello", axum::routing::get(|axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>| async move {
+            axum::Json(serde_json::json!({"instance":"successor", "proto":2, "proof":hello_proof("secret", "successor", &query["nonce"])}))
+        }));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let successor = descriptor.clone();
+        let published = directory.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            successor.publish(&published).unwrap();
+        });
+
+        let found = discover_at(directory.clone()).await.unwrap();
+        assert_eq!(found.instance, "successor");
+        assert!(!shared_path(&directory, "start.lock").unwrap().exists());
+        assert!(!runtime_path(&directory, "relaunch.json").unwrap().exists());
+        server.abort();
+        let _ = server.await;
         std::fs::remove_file(runtime_path(&directory, "server.json").unwrap()).unwrap();
         std::fs::remove_dir_all(directory).unwrap();
     }

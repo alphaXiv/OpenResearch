@@ -364,14 +364,16 @@ pub async fn run() {
             return;
         }
     }
-    // After an update relaunch, keep the previous port. Otherwise a fixed port,
-    // since the window's localStorage is keyed by origin, falling back to an
-    // ephemeral one when a terminal `orx up` or another app holds it.
+    // After an update relaunch, keep the previous port, as after a crash the port the
+    // agents it left running call. Otherwise a fixed port, since the window's
+    // localStorage is keyed by origin, falling back to an ephemeral one when a
+    // terminal `orx up` or another app holds it.
     let port_is_free = |port: &u16| std::net::TcpListener::bind(("127.0.0.1", *port)).is_ok();
     let port = std::env::var(crate::updates::APP_RELAUNCH_PORT_ENV)
         .ok()
         .and_then(|port| port.parse::<u16>().ok())
         .filter(port_is_free)
+        .or_else(|| crate::commands::up::kept_agents_port().filter(port_is_free))
         .or_else(|| Some(APP_PORT).filter(port_is_free))
         .unwrap_or_else(|| {
             std::net::TcpListener::bind(("127.0.0.1", 0))
@@ -2481,6 +2483,7 @@ mod tests {
             side_parent_id: None,
             harness: "codex".into(),
             title: Some("Tune the schedule".into()),
+            resumes_after_restart: false,
         };
 
         let remote = super::close_alert_description(&PendingWork {

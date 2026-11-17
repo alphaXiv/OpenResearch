@@ -92,10 +92,6 @@ pub async fn run(args: UpArgs) -> Result<()> {
     updates::note_startup_image();
     let port = args.port;
     let persistent_host = args.remote_host;
-    // Agent sessions and the CLI present this bearer to the server's API.
-    let token = format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
-    local::chat::set_up_auth_token(token.clone());
-    let remote_auth = persistent_host.then(|| RemoteAuth::new(&token));
     let data_dir = crate::commands::remote_host::canonical_data_dir()?;
     // The engine lock: one engine per data directory.
     let dashboard_lock = DashboardLock::acquire(&data_dir)?;
@@ -117,20 +113,52 @@ pub async fn run(args: UpArgs) -> Result<()> {
         let err = updates::relaunch(port);
         return Err(anyhow!("orx up: could not restart: {err}"));
     }
-    let listener = tokio::net::TcpListener::bind((args.host, port))
-        .await
-        .map_err(|error| {
-            anyhow!(
-                "Could not bind {}: {}",
-                SocketAddr::new(args.host, port),
-                error
-            )
-        })?;
+    let inherited = Lineage::inherited();
+    // The desktop app chose its port already, preferring this one.
+    let recorded = inherited
+        .as_ref()
+        .map(|lineage| lineage.port)
+        .filter(|recorded| *recorded != port && !args.desktop_app);
+    let taken_back = match recorded {
+        Some(recorded) => {
+            match tokio::net::TcpListener::bind((args.host, recorded)).await {
+                Ok(listener) => Some(listener),
+                Err(error) => {
+                    eprintln!("orx up: could not take back port {recorded}, which kept agents call: {error}");
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+    let listener = match taken_back {
+        Some(listener) => listener,
+        None => tokio::net::TcpListener::bind((args.host, port))
+            .await
+            .map_err(|error| {
+                anyhow!(
+                    "Could not bind {}: {}",
+                    SocketAddr::new(args.host, port),
+                    error
+                )
+            })?,
+    };
     let actual_port = listener.local_addr()?.port();
+    // Kept agents call the port and bearer in their environment, so only their own lineage reaches them.
+    let inherited = inherited.filter(|lineage| lineage.port == actual_port);
+    let reachable = inherited.is_some();
+    let lineage = inherited.unwrap_or_else(|| Lineage::fresh(actual_port));
+    if let Err(error) = lineage.record() {
+        eprintln!("orx up: agents started now will not survive a restart: {error:#}");
+    }
+    // Agent sessions and the CLI present this bearer to the server's API.
+    let token = lineage.token.clone();
+    local::chat::set_up_auth_token(token.clone());
+    local::chat::delegation::set_agent_key(lineage.agent_key);
+    let remote_auth = persistent_host.then(|| RemoteAuth::new(&token));
     // Open early so the schema exists before any request or agent spawn.
     {
         let store = Store::open()?;
-        local::chat::reconcile_unfinished_turns(&store)?;
         // Under the engine lock, before any notice can be produced.
         store.migrate_run_wakeups()?;
     }
@@ -197,6 +225,8 @@ pub async fn run(args: UpArgs) -> Result<()> {
     };
     // Plan-mode turns hand this port to the `orx mcp` permission bridge.
     state.chat.set_up_port(actual_port);
+    // Before serving: agents' calls must find their chats and turns taken back.
+    local::chat::adopt_kept_work(&state.chat, reachable).await?;
     state.chat.resume_persisted_queues();
     {
         let chat = state.chat.clone();
@@ -214,7 +244,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
                 if moving.load(std::sync::atomic::Ordering::SeqCst) {
                     continue;
                 }
-                if let Err(err) = chat.reconcile_expired_turn_leases() {
+                if let Err(err) = chat.reconcile_expired_turn_leases().await {
                     eprintln!("orx up: could not reconcile expired chat turns: {err}");
                 }
             }
@@ -358,6 +388,8 @@ pub async fn run(args: UpArgs) -> Result<()> {
     // remote server would leak, staying bound to its port after the tunnel dies.
     let restart = state.restart.clone();
     let mut restarting = false;
+    // A development rebuild hands off like an update, then exits for the next build to start.
+    let mut rebuilding = false;
     let explicit_stop = if persistent_host {
         tokio::select! {
             r = axum::serve(listener, app) => {
@@ -372,31 +404,47 @@ pub async fn run(args: UpArgs) -> Result<()> {
         tokio::select! {
             r = axum::serve(listener, app) => r.map_err(|e| anyhow!("orx up: server error: {e}"))?,
             _ = restart.notified() => restarting = true,
+            _ = hand_off_signal() => rebuilding = true,
             _ = shutdown_signal() => eprintln!("orx up: shutting down"),
         }
         false
     };
+    // Reopening into another data directory leaves no successor to take its children back.
+    let hand_off = rebuilding || restarting && !state.reopen.load(Ordering::SeqCst);
     if persistent_host {
         stopping.store(true, std::sync::atomic::Ordering::SeqCst);
     }
     // Before agents go down: a turn their shutdown ends must not start the next queued message.
     state.chat.stop_admitting();
-    if explicit_stop {
+    if hand_off {
+        state.chat.hand_off().await;
+    } else if explicit_stop {
         state.chat.interrupt_all().await;
     } else {
         state.chat.stop_for_shutdown().await;
     }
     state.opencode_signins.shutdown().await;
     state.remote_sessions.shutdown().await;
-    agent.shutdown().await;
-    codex.shutdown().await;
-    claude.shutdown().await;
-    state.chat.acp.shutdown().await;
+    if !hand_off {
+        agent.shutdown().await;
+        codex.shutdown().await;
+        claude.shutdown().await;
+        state.chat.acp.shutdown().await;
+        local::chat::stop_kept(|_| true, "orx up stopped").await;
+    }
+    // At once, so the next server resumes the turns this one let go.
     state.chat.release_turn_leases();
     if let Some(server) = control_server {
         server.shutdown().await;
     }
     state.dashboard_lock.lock().unwrap().take();
+    if hand_off {
+        if let Err(error) =
+            crate::commands::remote_host::ServerDescriptor::announce_relaunch(&data_dir)
+        {
+            eprintln!("orx up: the CLI will not wait out this restart: {error:#}");
+        }
+    }
     if restarting {
         drop(backend_lock);
         if let Err(error) = crate::commands::remote_host::ServerDescriptor::withdraw(&data_dir) {
@@ -424,6 +472,83 @@ pub async fn run(args: UpArgs) -> Result<()> {
         return Err(anyhow!("orx up: could not restart: {err}"));
     }
     Ok(())
+}
+
+/// What a server's agents carry in their environment to call it, kept per data directory
+/// beside its keepers so the successor that takes the agents back is the server they name.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Lineage {
+    token: String,
+    /// What `orx mcp` tokens derive from (`delegation::agent_token`).
+    agent_key: String,
+    port: u16,
+}
+
+impl Lineage {
+    fn path() -> std::path::PathBuf {
+        crate::keep::root().join("lineage.json")
+    }
+
+    fn fresh(port: u16) -> Self {
+        let secret = || format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        Self {
+            token: secret(),
+            agent_key: secret(),
+            port,
+        }
+    }
+
+    /// The lineage the kept agents still running were started under, if any runs.
+    fn inherited() -> Option<Self> {
+        let survives = crate::keep::entries().into_iter().any(|entry| {
+            entry.alive
+                && matches!(
+                    entry.owner,
+                    Some(
+                        crate::keep::Owner::Agent { .. } | crate::keep::Owner::AgentCommand { .. }
+                    )
+                )
+        });
+        if !survives {
+            return None;
+        }
+        let path = Self::path();
+        let read = std::fs::read(&path)
+            .map_err(|error| anyhow!("{error}"))
+            .and_then(|bytes| serde_json::from_slice(&bytes).map_err(|error| anyhow!("{error}")));
+        match read {
+            Ok(lineage) => Some(lineage),
+            Err(error) => {
+                eprintln!(
+                    "orx up: could not read {}, so the agents kept running cannot call this server: {error:#}",
+                    path.display()
+                );
+                None
+            }
+        }
+    }
+
+    fn record(&self) -> Result<()> {
+        let path = Self::path();
+        let dir = crate::keep::root();
+        std::fs::create_dir_all(&dir)
+            .map_err(|error| anyhow!("Could not create {}: {error}", dir.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+                .map_err(|error| anyhow!("Could not restrict {}: {error}", dir.display()))?;
+        }
+        crate::local::git::atomic_write_with_mode(&path, &serde_json::to_vec(self)?, Some(0o600))
+            .map_err(|error| anyhow!("Could not write {}: {error:#}", path.display()))
+    }
+}
+
+/// The port kept agents call, for the desktop app to serve on while any survives.
+#[cfg(desktop_app)]
+pub(crate) fn kept_agents_port() -> Option<u16> {
+    Lineage::inherited().map(|lineage| lineage.port)
 }
 
 /// The desktop app's quit. A stored permit covers a quit that lands before the
@@ -472,6 +597,19 @@ async fn os_shutdown_signal() {
     {
         let _ = tokio::signal::ctrl_c().await;
     }
+}
+
+/// `node dev.ts restart` asks with SIGUSR2 for its next build to take this server's work back.
+async fn hand_off_signal() {
+    #[cfg(unix)]
+    if let Ok(mut signal) =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined2())
+    {
+        signal.recv().await;
+        eprintln!("orx up: handing off to the next build");
+        return;
+    }
+    std::future::pending::<()>().await
 }
 
 async fn persistent_shutdown_signal() {
@@ -5615,7 +5753,7 @@ fn spawn_restart_when_idle(state: AppState) {
             {
                 continue;
             }
-            if begin_restart(&state, 0, false).await {
+            if begin_restart(&state, 0, false).await.is_ok() {
                 state.restart.notify_one();
                 return;
             }
@@ -5626,32 +5764,46 @@ fn spawn_restart_when_idle(state: AppState) {
 /// Serializes restart attempts; true once one committed, after which nothing reopens admission.
 static RESTART_COMMITTED: tokio::sync::Mutex<bool> = tokio::sync::Mutex::const_new(false);
 
-/// Stop admitting work and commit to a restart if nothing is in flight beyond
-/// `own_requests` (the caller's), save for chat turns when `stop_agents`. Returns false, and admits again, otherwise.
-async fn begin_restart(state: &AppState, own_requests: usize, stop_agents: bool) -> bool {
+/// Stop admitting work and commit to a restart if nothing it would cut off is in flight
+/// beyond `own_requests` (the caller's), save for chat turns when `stop_agents`. Turns the next
+/// server resumes, terminals and remote sessions carry over. Otherwise admits again and says
+/// what holds the restart back.
+async fn begin_restart(
+    state: &AppState,
+    own_requests: usize,
+    stop_agents: bool,
+) -> std::result::Result<(), &'static str> {
     let mut committed = RESTART_COMMITTED.lock().await;
     if *committed {
-        return true;
+        return Ok(());
     }
     DRAINING.store(true, Ordering::SeqCst);
-    if ACTIVE.load(Ordering::SeqCst) <= own_requests
-        && !state.data_dir_move_in_progress.load(Ordering::SeqCst)
-        && state.remote_sessions.list().await.iter().all(|session| {
-            matches!(
-                session.status,
-                RemoteSessionStatus::Disconnected
-                    | RemoteSessionStatus::NeedsInstall
-                    | RemoteSessionStatus::NeedsUpdate
-            )
-        })
-        && (stop_agents || state.chat.stop_admitting_if_idle().await)
+    let blocked = if ACTIVE.load(Ordering::SeqCst) > own_requests {
+        Some("a request, a sign-in, a terminal or an import is still in progress.")
+    } else if state.data_dir_move_in_progress.load(Ordering::SeqCst) {
+        Some("the data directory is moving.")
+    } else if state.opencode_signins.in_progress() {
+        Some("an OpenCode sign-in is still open.")
+    } else if state
+        .remote_sessions
+        .list()
+        .await
+        .iter()
+        .any(|session| session.status == RemoteSessionStatus::Applying)
     {
-        state.chat.stop_admitting();
-        *committed = true;
-        return true;
+        Some("OpenResearch is installing on a remote machine.")
+    } else if !stop_agents && !state.chat.stop_admitting_unless_restart_stops().await {
+        Some("an agent is working that a restart would stop.")
+    } else {
+        None
+    };
+    if let Some(blocked) = blocked {
+        DRAINING.store(false, Ordering::SeqCst);
+        return Err(blocked);
     }
-    DRAINING.store(false, Ordering::SeqCst);
-    false
+    state.chat.stop_admitting();
+    *committed = true;
+    Ok(())
 }
 
 /// Once a day, keep each agent orx can install current: through the user's own
@@ -6136,6 +6288,26 @@ async fn move_data_dir(State(state): State<AppState>, Json(req): Json<DataDirReq
         .into_response();
     }
 
+    // A terminal's keeper lives in the data directory; moving it would cut the shell off.
+    let terminals = crate::keep::entries()
+        .into_iter()
+        .filter(|entry| {
+            entry.alive && matches!(entry.owner, Some(crate::keep::Owner::Terminal { .. }))
+        })
+        .count();
+    if terminals > 0 {
+        release_move_claim(&move_token);
+        release(&state);
+        return ApiError(
+            StatusCode::CONFLICT,
+            format!(
+                "Can't move while project terminals are open ({terminals} open). \
+                 Close them, then retry."
+            ),
+        )
+        .into_response();
+    }
+
     // Validate before kicking off the background move.
     let vpath = path.clone();
     let validated = tokio::task::spawn_blocking(move || {
@@ -6177,6 +6349,11 @@ async fn move_data_dir(State(state): State<AppState>, Json(req): Json<DataDirReq
     // Provider-native SQLite/session stores now live inside this directory.
     // Close every idle harness child before the filesystem begins moving it.
     chat.shutdown_harnesses().await;
+    local::chat::stop_kept(
+        |owner| !matches!(owner, Some(crate::keep::Owner::Terminal { .. })),
+        "the data directory moved",
+    )
+    .await;
 
     // Spawn the move on a blocking task (it does synchronous FS work); forward
     // throttled progress onto the SSE broadcast, clear the flag when done.
@@ -6637,20 +6814,18 @@ async fn restart_after_update(
         ));
     };
     // A dashboard poll landing alongside the click is not work worth refusing over.
-    let mut began = false;
+    let mut began = Err("");
     for _ in 0..10 {
         began = begin_restart(&state, 1, stop_agents).await;
-        if began {
+        if began.is_ok() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    if !began {
+    if let Err(blocked) = began {
         return Err(ApiError(
             StatusCode::CONFLICT,
-            "OpenResearch is busy: a chat turn, queued message, approval, open terminal, \
-             remote session, or request is still in progress. Try again once it finishes."
-                .into(),
+            format!("OpenResearch can't restart yet: {blocked} Try again once it finishes."),
         ));
     }
     let restart = state.restart.clone();
@@ -11098,6 +11273,62 @@ pub(crate) async fn spa(uri: Uri) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_servers_secrets_and_port_outlive_it_only_while_a_kept_agent_does() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let first = Lineage::fresh(4321);
+            first.record().unwrap();
+            assert!(Lineage::inherited().is_none());
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                let mode = std::fs::metadata(Lineage::path())
+                    .unwrap()
+                    .permissions()
+                    .mode();
+                assert_eq!(mode & 0o777, 0o600);
+            }
+
+            let command = crate::process::command("cat");
+            let kept = crate::keep::spawn(crate::keep::Keep {
+                command: &command,
+                io: crate::keep::Io::Pipes { stderr: None },
+                retain: crate::keep::LOSSLESS,
+                owner: crate::keep::Owner::Agent {
+                    harness: "codex".into(),
+                    session_id: "chat".into(),
+                    state: Value::Null,
+                }
+                .to_value(),
+            })
+            .await
+            .unwrap();
+            let inherited = Lineage::inherited().unwrap();
+            assert_eq!(
+                (inherited.token, inherited.agent_key, inherited.port),
+                (first.token, first.agent_key, 4321)
+            );
+
+            kept.handle().stop(Duration::from_secs(10)).await.unwrap();
+            let id = kept.handle().id().to_string();
+            let stopped = async {
+                while crate::keep::entries()
+                    .iter()
+                    .any(|entry| entry.id == id && entry.alive)
+                {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            };
+            tokio::time::timeout(Duration::from_secs(10), stopped)
+                .await
+                .unwrap();
+            assert!(Lineage::inherited().is_none());
+        });
+    }
 
     async fn event_text(events: Vec<Event>) -> String {
         let stream = futures::stream::iter(events.into_iter().map(Ok::<_, Infallible>));
