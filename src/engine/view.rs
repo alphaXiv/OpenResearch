@@ -1382,6 +1382,12 @@ fn experiment_of(
         .ok_or_else(|| Refusal::Missing(format!("Experiment {id} not found.")))
 }
 
+/// The raw settings' version, even when this orx cannot describe the saved view.
+pub(crate) fn raw_etag(store: &crate::store::Store, id: &str) -> Result<String, Refusal> {
+    experiment_of(store, id)?;
+    Ok(etag(store.run_monitor_json(id)?.as_deref()))
+}
+
 /// `GET /api/experiments/:id/view`: the saved markup and its tree, or the default orx draws
 /// from the newest run's first signal.
 pub(crate) fn described(store: &crate::store::Store, id: &str) -> Result<Value, Refusal> {
@@ -1456,7 +1462,11 @@ pub(crate) fn set(
     let mut pending = Vec::new();
     if let Some(markup) = markup {
         let compiled = compile(markup).map_err(|problem| {
-            Refusal::Invalid(problem.text(source.name(), &check_fix(source.flag())))
+            let fix = match source.file {
+                Some(_) => check_fix(source.flag()),
+                None => format!("Run `orx exp view set {id} --stdin`."),
+            };
+            Refusal::Invalid(problem.text(source.name(), &fix))
         })?;
         pending = compiled.check(&seen).map_err(|problem| {
             Refusal::Invalid(problem.text(
@@ -1559,7 +1569,10 @@ pub(crate) fn check(
         Some(markup) => (
             Some(markup.to_owned()),
             source.name().to_owned(),
-            format!("Run `orx exp view check {run} {}`.", source.flag()),
+            match source.file {
+                Some(_) => format!("Run `orx exp view check {run} {}`.", source.flag()),
+                None => format!("Run `orx exp view set {experiment} --stdin`."),
+            },
         ),
         None => (
             saved,

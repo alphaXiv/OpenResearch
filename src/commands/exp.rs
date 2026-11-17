@@ -155,12 +155,20 @@ async fn view(command: ViewCommand) -> Result<()> {
     };
     let json_file = |kind: &str, file: &std::path::Path, fix: &str| -> Result<serde_json::Value> {
         let text = read(kind, file, fix)?;
-        serde_json::from_str(&text).map_err(|error| {
+        let value: serde_json::Value = serde_json::from_str(&text).map_err(|error| {
             anyhow!(
                 "{kind} {} is not JSON: {error}. Fix it, then run `{fix}`.",
                 file.display()
             )
-        })
+        })?;
+        if value.is_null() {
+            return Err(anyhow!(
+                "{kind} {} contains JSON null. Supply a JSON {} and run `{fix}`.",
+                file.display(),
+                if kind == "Pattern" { "list" } else { "object" },
+            ));
+        }
+        Ok(value)
     };
     let patterns = |file: &std::path::Path, fix: &str| json_file("Pattern", file, fix);
     let shown = |file: &Option<std::path::PathBuf>| file.as_ref().map(|f| f.display().to_string());
@@ -472,8 +480,17 @@ fn checked(report: &serde_json::Value) -> String {
 async fn set_view(exp_id: &str, body: serde_json::Value) -> Result<serde_json::Value> {
     let client = crate::plane::local_plane::ApiClient::discover().await?;
     let path = format!("experiments/{}/view", urlencoding::encode(exp_id));
-    let current = answer(client.request(reqwest::Method::GET, &path)).await?;
-    let etag = current["etag"].as_str().unwrap_or_default();
+    let current = client.request(reqwest::Method::HEAD, &path).send().await?;
+    if current.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err(anyhow!("Experiment {exp_id} not found."));
+    }
+    let current = current.error_for_status()?;
+    let etag = current
+        .headers()
+        .get(reqwest::header::ETAG)
+        .ok_or_else(|| {
+            anyhow!("orx up did not return an ETag for experiment {exp_id}'s run view.")
+        })?;
     let request = client
         .request(reqwest::Method::PUT, &path)
         .header(reqwest::header::IF_MATCH, etag)

@@ -7995,8 +7995,18 @@ mod tests {
         };
         assert_eq!(
             invalid(check(&f.store, "r1", Some("<view><chart y=\"lr\" /></view>"), None, &stdin)),
-            "View <stdin>:1:7: blocks[0].chart[0]: no signal \"lr\"; seen: loss. Run `orx exp view check r1 --stdin`."
+            "View <stdin>:1:7: blocks[0].chart[0]: no signal \"lr\"; seen: loss. Run `orx exp view set exp --stdin`."
         );
+        let error = invalid(set(
+            &f.store,
+            "exp",
+            &etag(None),
+            Some("<view><html/></view>"),
+            None,
+            None,
+            &stdin,
+        ));
+        assert!(error.contains("orx exp view set exp --stdin"), "{error}");
         let report = check(&f.store, "r1", None, None, &file).unwrap();
         assert_eq!(report["markup"], Value::Null);
         assert_eq!(report["seen"]["signals"], json!(["loss"]));

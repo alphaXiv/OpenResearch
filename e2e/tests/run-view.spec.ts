@@ -109,6 +109,31 @@ for (let step = 1; step <= 20; step++) {
     expect(readFileSync(path.join(dir, 'check.txt'), 'utf8')).toContain(
       `typo.xml:3:3: blocks[0].chart[0]: no signal "los"; seen: loss. Run \`orx exp view check ${run} --file ${dir}/typo.xml\`.`,
     )
+    const experiment = runs.find((shown: { experimentName: string }) => shown.experimentName === 'Child').run.experimentId
+    writeFileSync(path.join(dir, 'null.json'), 'null')
+    writeFileSync(path.join(dir, 'empty-patterns.json'), '[]')
+    agent.script('Check invalid inputs.', [
+      { run: [
+        'set -e',
+        `orx exp view get ${experiment} --json > ${dir}/before-invalid.json`,
+        `if orx exp view set ${experiment} --config ${dir}/null.json > ${dir}/config-error.txt 2>&1; then exit 1; fi`,
+        `if orx exp view set ${experiment} --pattern ${dir}/null.json > ${dir}/pattern-error.txt 2>&1; then exit 1; fi`,
+        `if orx exp view check ${run} --pattern ${dir}/null.json > ${dir}/check-pattern-error.txt 2>&1; then exit 1; fi`,
+        `if orx exp view set ${experiment} --pattern ${dir}/empty-patterns.json --config ${dir}/null.json > ${dir}/combined-error.txt 2>&1; then exit 1; fi`,
+        `if printf '<view><bad/></view>' | orx exp view set ${experiment} --stdin > ${dir}/stdin-error.txt 2>&1; then exit 1; fi`,
+        `orx exp view get ${experiment} --json > ${dir}/after-invalid.json`,
+      ].join('\n') },
+      { say: 'Checked invalid inputs.' },
+    ])
+    await send(page, 'Check invalid inputs.')
+    await expect(page.getByText('Checked invalid inputs.', { exact: true })).toBeVisible()
+    for (const error of ['config-error.txt', 'pattern-error.txt', 'check-pattern-error.txt', 'combined-error.txt']) {
+      const message = readFileSync(path.join(dir, error), 'utf8')
+      expect(message).toContain(`${dir}/null.json`)
+      expect(message).toContain('null')
+    }
+    expect(readFileSync(path.join(dir, 'stdin-error.txt'), 'utf8')).toContain(`orx exp view set ${experiment} --stdin`)
+    expect(readFileSync(path.join(dir, 'after-invalid.json'), 'utf8')).toBe(readFileSync(path.join(dir, 'before-invalid.json'), 'utf8'))
     agent.script('finished with status **done**', [{ say: 'Child finished.' }])
     await writeFile(path.join(dir, 'half'), 'go\n')
     await expect(page.getByText('Child finished.', { exact: true })).toBeVisible()

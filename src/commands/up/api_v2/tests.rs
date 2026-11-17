@@ -3198,6 +3198,57 @@ async fn the_monitor_route_serves_one_rev_and_says_what_it_cannot() {
     assert_eq!(dashboard.status(), StatusCode::OK);
 }
 
+#[tokio::test]
+async fn an_unreadable_view_can_be_replaced_conditionally() {
+    use crate::engine::view::etag;
+    let f = Fixture::new().await;
+    let store = f.api.store();
+    let raw = json!({"view": "<view><future/></view>", "futureField": 19}).to_string();
+    store
+        .patch_run_monitor_json("exp", &etag(None), |_| Ok(raw.clone()))
+        .unwrap()
+        .unwrap();
+    let path = "experiments/exp/view";
+    assert!(f
+        .client
+        .json(reqwest::Method::GET, path, None)
+        .await
+        .is_err());
+
+    let head = f
+        .client
+        .request(reqwest::Method::HEAD, path)
+        .send()
+        .await
+        .unwrap();
+    assert!(head.status().is_success(), "{}", head.status());
+    let current = head.headers().get(reqwest::header::ETAG).unwrap();
+    let save = |etag: &reqwest::header::HeaderValue| {
+        f.client
+            .request(reqwest::Method::PUT, path)
+            .header(reqwest::header::IF_MATCH, etag)
+            .json(&json!({"markup": "<view/>"}))
+    };
+    assert_eq!(
+        save(&reqwest::header::HeaderValue::from_str(&etag(None)).unwrap())
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    assert!(save(current).send().await.unwrap().status().is_success());
+    let saved = f
+        .client
+        .json(reqwest::Method::GET, path, None)
+        .await
+        .unwrap();
+    assert_eq!(saved["markup"], "<view/>");
+    let stored: Value =
+        serde_json::from_str(&store.run_monitor_json("exp").unwrap().unwrap()).unwrap();
+    assert_eq!(stored["futureField"], 19);
+}
+
 /// A flag's choice: the user keeps it going or stops the run, the agent hands it to the user, a
 /// repeated request answers as the first did, a settled flag or a stop of an ended run is refused
 /// in the words `orx exp flag` prints.

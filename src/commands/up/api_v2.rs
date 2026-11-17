@@ -456,7 +456,10 @@ fn routes(api: Arc<Api>) -> Router {
         .route("/api/v2/runs/{id}/monitor", get(monitor))
         .route("/api/v2/runs/{id}/view/check", post(check_view))
         .route("/api/v2/runs/{id}/view/show", get(show_view))
-        .route("/api/v2/experiments/{id}/view", get(view).put(set_view))
+        .route(
+            "/api/v2/experiments/{id}/view",
+            get(view).head(view_etag).put(set_view),
+        )
         .route("/api/v2/events", get(events))
         .route("/api/v2/compute/{action}", post(compute))
         .route_layer(middleware::from_fn_with_state(api.clone(), authenticate))
@@ -1381,6 +1384,14 @@ async fn blocking_view(
 /// `GET /api/experiments/:id/view`: the experiment's saved view, or the default its runs draw.
 async fn view(State(api): State<Arc<Api>>, Path(id): Path<String>) -> Response {
     blocking_view(move || crate::engine::view::described(&api.store(), &id)).await
+}
+
+async fn view_etag(State(api): State<Arc<Api>>, Path(id): Path<String>) -> Response {
+    blocking_view(move || {
+        let etag = crate::engine::view::raw_etag(&api.store(), &id)?;
+        Ok(json!({"etag": etag}))
+    })
+    .await
 }
 
 #[derive(Deserialize)]
