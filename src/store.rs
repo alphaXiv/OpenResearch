@@ -648,17 +648,16 @@ pub struct ReadyChatSubscription {
 const CHAT_SUBSCRIPTION_CLAIM_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Each subscription with its target's latest turn and whether the target is
-/// idle after it: done, and with nothing queued unless a stop held the queue.
+/// idle after it: done, with nothing queued.
 const LATEST_SUBSCRIBED_TURNS: &str = "subscribed AS (
     SELECT s.subscriber_session_id, s.target_session_id, s.paused, s.told_turn_id,
            s.told_prompt_id, s.claim_token, s.claimed_at, s.created_at,
            t.id AS turn_id, t.state,
            t.assistant_message_id, t.updated_at,
-           t.state = 'interrupted'
-               OR (t.state IN ('completed', 'failed') AND NOT EXISTS (
-                   SELECT 1 FROM chat_queued_messages q
-                   WHERE q.session_id = s.target_session_id
-               )) AS idle
+           t.state IN ('completed', 'failed', 'interrupted') AND NOT EXISTS (
+               SELECT 1 FROM chat_queued_messages q
+               WHERE q.session_id = s.target_session_id
+           ) AS idle
     FROM chat_subscriptions s
     LEFT JOIN chat_turns t ON t.id = (
         SELECT id FROM chat_turns WHERE session_id = s.target_session_id
