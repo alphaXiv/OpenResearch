@@ -5448,7 +5448,7 @@ mod tests {
         assert_eq!(before["viewFrom"]["isDefault"], true);
         assert_eq!(
             before["viewFrom"]["markup"],
-            "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" ghost=\"parent\" />\n</view>\n",
+            "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" ghost=\"parent\" />\n</view>\n",
             "a default view is shown as the markup that draws it"
         );
 

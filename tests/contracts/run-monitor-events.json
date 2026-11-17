@@ -10,7 +10,7 @@
     },
     "viewFrom": {
       "experimentId": "exp",
-      "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" ghost=\"parent\" />\n</view>\n",
+      "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" ghost=\"parent\" />\n</view>\n",
       "isDefault": true
     },
     "source": "declared",
@@ -109,7 +109,7 @@
     },
     "viewFrom": {
       "experimentId": "exp",
-      "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" ghost=\"parent\" />\n</view>\n",
+      "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" ghost=\"parent\" />\n</view>\n",
       "isDefault": true
     },
     "source": "declared",

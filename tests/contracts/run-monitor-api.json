@@ -35,14 +35,13 @@
               "chart": [
                 "loss"
               ],
-              "x": "step",
               "ghost": "parent"
             }
           ]
         },
         "viewFrom": {
           "experimentId": "exp",
-          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" ghost=\"parent\" />\n</view>\n",
+          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" ghost=\"parent\" />\n</view>\n",
           "isDefault": true
         },
         "source": "declared",
@@ -300,14 +299,13 @@
               "chart": [
                 "loss"
               ],
-              "x": "step",
               "ghost": "parent"
             }
           ]
         },
         "viewFrom": {
           "experimentId": "exp",
-          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" ghost=\"parent\" />\n</view>\n",
+          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" ghost=\"parent\" />\n</view>\n",
           "isDefault": true
         },
         "source": "declared",
@@ -505,14 +503,13 @@
               "chart": [
                 "loss"
               ],
-              "x": "step",
               "ghost": "parent"
             }
           ]
         },
         "viewFrom": {
           "experimentId": "exp",
-          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" ghost=\"parent\" />\n</view>\n",
+          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" ghost=\"parent\" />\n</view>\n",
           "isDefault": true
         },
         "source": "declared",
@@ -732,14 +729,13 @@
               "chart": [
                 "loss"
               ],
-              "x": "step",
               "ghost": "parent"
             }
           ]
         },
         "viewFrom": {
           "experimentId": "exp",
-          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" ghost=\"parent\" />\n</view>\n",
+          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" ghost=\"parent\" />\n</view>\n",
           "isDefault": true
         },
         "source": "declared",
@@ -904,14 +900,13 @@
               "chart": [
                 "loss"
               ],
-              "x": "step",
               "ghost": "parent"
             }
           ]
         },
         "viewFrom": {
           "experimentId": "exp",
-          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" ghost=\"parent\" />\n</view>\n",
+          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" ghost=\"parent\" />\n</view>\n",
           "isDefault": true
         },
         "source": "declared",
@@ -1084,14 +1079,13 @@
               "chart": [
                 "loss"
               ],
-              "x": "step",
               "ghost": "parent"
             }
           ]
         },
         "viewFrom": {
           "experimentId": "exp",
-          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" ghost=\"parent\" />\n</view>\n",
+          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" ghost=\"parent\" />\n</view>\n",
           "isDefault": true
         },
         "source": "declared",
@@ -1398,14 +1392,13 @@
               "chart": [
                 "loss"
               ],
-              "x": "step",
               "ghost": "parent"
             }
           ]
         },
         "viewFrom": {
           "experimentId": "exp",
-          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" ghost=\"parent\" />\n</view>\n",
+          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" ghost=\"parent\" />\n</view>\n",
           "isDefault": true
         },
         "source": "declared",
@@ -1798,14 +1791,13 @@
               "chart": [
                 "loss"
               ],
-              "x": "elapsed",
               "ghost": "parent"
             }
           ]
         },
         "viewFrom": {
           "experimentId": "exp",
-          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"elapsed\" ghost=\"parent\" />\n</view>\n",
+          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" ghost=\"parent\" />\n</view>\n",
           "isDefault": true
         },
         "source": "declared",
@@ -1978,7 +1970,6 @@
               "chart": [
                 "lr"
               ],
-              "x": "step",
               "ghost": "parent"
             },
             {
@@ -2004,7 +1995,7 @@
         },
         "viewFrom": {
           "experimentId": "exp",
-          "markup": "<signal name=\"round\" />\n<signal name=\"win_rate\" />\n<signal name=\"elo\" />\n<signal name=\"game_len\" />\n<signal name=\"lr\" />\n<signal name=\"lr_min\" />\n<signal name=\"loss\" />\n<signal name=\"ratio\" />\n<signal name=\"drift\" />\n<signal name=\"tokens\" />\n<signal name=\"flops\" />\n<view headline=\"lr\">\n  <chart y=\"lr\" x=\"step\" ghost=\"parent\" />\n  <table name=\"rounds\" columns=\"round win_rate elo game_len\" />\n  <stats of=\"lr_min loss ratio drift tokens flops\" />\n</view>\n",
+          "markup": "<signal name=\"round\" />\n<signal name=\"win_rate\" />\n<signal name=\"elo\" />\n<signal name=\"game_len\" />\n<signal name=\"lr\" />\n<signal name=\"lr_min\" />\n<signal name=\"loss\" />\n<signal name=\"ratio\" />\n<signal name=\"drift\" />\n<signal name=\"tokens\" />\n<signal name=\"flops\" />\n<view headline=\"lr\">\n  <chart y=\"lr\" ghost=\"parent\" />\n  <table name=\"rounds\" columns=\"round win_rate elo game_len\" />\n  <stats of=\"lr_min loss ratio drift tokens flops\" />\n</view>\n",
           "isDefault": true
         },
         "source": "declared",
@@ -2904,14 +2895,13 @@
               "chart": [
                 "loss"
               ],
-              "x": "step",
               "ghost": "parent"
             }
           ]
         },
         "viewFrom": {
           "experimentId": "exp",
-          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" ghost=\"parent\" />\n</view>\n",
+          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" ghost=\"parent\" />\n</view>\n",
           "isDefault": true
         },
         "source": "declared",
@@ -3302,14 +3292,13 @@
               "chart": [
                 "loss"
               ],
-              "x": "step",
               "ghost": "parent"
             }
           ]
         },
         "viewFrom": {
           "experimentId": "exp",
-          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" ghost=\"parent\" />\n</view>\n",
+          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" ghost=\"parent\" />\n</view>\n",
           "isDefault": true
         },
         "source": "declared",
@@ -3679,14 +3668,13 @@
               "chart": [
                 "loss"
               ],
-              "x": "step",
               "ghost": "parent"
             }
           ]
         },
         "viewFrom": {
           "experimentId": "exp",
-          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" ghost=\"parent\" />\n</view>\n",
+          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" ghost=\"parent\" />\n</view>\n",
           "isDefault": true
         },
         "source": "declared",
@@ -4299,14 +4287,13 @@
               "chart": [
                 "loss"
               ],
-              "x": "step",
               "ghost": "parent"
             }
           ]
         },
         "viewFrom": {
           "experimentId": "exp",
-          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"step\" ghost=\"parent\" />\n</view>\n",
+          "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" ghost=\"parent\" />\n</view>\n",
           "isDefault": true
         },
         "source": "declared",
@@ -4402,8 +4389,7 @@
             },
             "detail": "Loss **{loss}** rose at step 18.",
             "group": "look:7",
-            "state": "waiting",
-            "mode": "copilot"
+            "state": "waiting"
           }
         ],
         "setup": null,
@@ -4543,8 +4529,7 @@
         "limitEndsAt": null,
         "flag": {
           "id": "f1",
-          "state": "waiting",
-          "mode": "copilot"
+          "state": "waiting"
         },
         "setup": null,
         "generation": "g1",
