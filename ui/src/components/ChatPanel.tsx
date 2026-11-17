@@ -8243,7 +8243,7 @@ export function ChatPanel({
 
         {/* Docked while a plan awaits a decision, so the approval controls never
           scroll away. Actions mirror the (now compact) inline card's wire. */}
-        <div inert={contentLoading || Boolean(contentError) || historyLoading} className="composer px-3 pb-3 shrink-0 relative z-4 bg-background w-full max-w-readable my-0 mx-auto">
+        <div inert={contentLoading || Boolean(contentError) || historyLoading} className="composer px-3 pb-3 flex min-h-0 flex-col relative z-4 bg-background w-full max-w-readable my-0 mx-auto">
           {threadMounted && (
             <Tooltip interactive content={m.chat_scroll_to_bottom()} className={`absolute bottom-full left-1/2 z-5 mb-6 -translate-x-1/2 transition-opacity duration-150 ease-standard ${transcriptAtBottom ? "pointer-events-none opacity-0" : "opacity-100"}`}>
               <IconButton
@@ -8392,8 +8392,8 @@ export function ChatPanel({
             />
           )}
           <RemoteConnectionStrip />
-          <div inert={connection !== null} className={`composer-frame flex flex-col rounded-xl bg-surface${connection ? " opacity-60" : ""}`} data-onboarding="composer">
-            <div className={`composer-box relative flex flex-col rounded-xl border ${bashMode && !asking ? "border-accent-amber" : "border-border"} bg-background shadow-control-subtle`}>
+          <div inert={connection !== null} className={`composer-frame flex min-h-0 flex-col rounded-xl bg-surface${connection ? " opacity-60" : ""}`} data-onboarding="composer">
+            <div className={`composer-box relative flex min-h-0 flex-col rounded-xl border ${bashMode && !asking ? "border-accent-amber" : "border-border"} bg-background shadow-control-subtle`}>
               {unconfirmedSend !== null && (
                 <div id={unconfirmedSendId} role="alert" className="flex items-start gap-2 pt-2 px-3 text-sm text-text">
                   <span className="flex-1" dir="auto">{m.chat_send_unconfirmed({ error: ltr(unconfirmedSend) })}</span>

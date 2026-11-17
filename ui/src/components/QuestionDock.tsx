@@ -166,7 +166,7 @@ export function QuestionDock({
   }, [hotkeys, disabled]);
 
   return (
-    <div ref={root} className="chat-prompt-questions max-h-96 overflow-y-auto border-b border-b-border-variant">
+    <div ref={root} className="chat-prompt-questions min-h-0 overflow-y-auto border-b border-b-border-variant">
       <div
         className="flex flex-col px-1.5 pt-3 pb-1.5 outline-none"
         role="group"
