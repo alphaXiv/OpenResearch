@@ -6419,7 +6419,7 @@ mod tests {
             "Config config.json: give a JSON object with plan, rules, brief and watch. Run `orx exp view set exp --config config.json`."
         );
         assert_eq!(
-            invalid(raw(json!({"rules": [{"name": "nan", "text": "Stop at NaN.", "does": "halt", "when": {"nonFinite": "loss"}}]}))),
+            invalid(raw(json!({"rules": [{"name": "nan", "text": "Stop at NaN.", "does": "halt", "when": {"kind": "nonFinite", "signal": "loss"}}]}))),
             "Config config.json: rules[0] (nan): \"does\" must be \"stop\" or \"ask\". Run `orx exp view set exp --config config.json`."
         );
         for (config, said) in [
@@ -6505,9 +6505,9 @@ mod tests {
             .unwrap()
         };
         let nan = json!({"name": "nan-loss", "text": "Stop when the loss is NaN on 3 reports in a row.",
-            "does": "stop", "when": {"nonFinite": "loss", "reports": 3}});
+            "does": "stop", "when": {"kind": "nonFinite", "signal": "loss", "reports": 3}});
         let plateau = json!({"name": "plateau", "text": "Ask when val loss stops improving.", "does": "ask",
-            "when": {"noImprovement": {"signal": "val_loss", "min": 0.01, "reports": 4, "better": "lower"}}});
+            "when": {"kind": "noImprovement", "signal": "val_loss", "min": 0.01, "reports": 4, "better": "lower"}});
         let saved = configure("exp", json!({"rules": [nan, plateau]}));
         assert_eq!(saved["rules"], json!([nan, plateau]));
         assert_eq!(saved["plan"], json!([]));
@@ -6547,7 +6547,7 @@ mod tests {
         f.run_in("r3", "child", "running", local());
         f.store.set_run_monitor_config(
             "r3",
-            Some(&json!({"rules": [{"name": "r", "text": "t", "does": "stop", "when": {"lossAbove": 1}}]}).to_string()),
+            Some(&json!({"rules": [{"name": "r", "text": "t", "does": "stop", "when": {"kind": "lossAbove", "value": 1}}]}).to_string()),
         );
         let (_, newer) =
             super::monitor(&f.store, &f.store.get_run("r3").unwrap().unwrap()).unwrap();
@@ -6609,7 +6609,7 @@ mod tests {
                 "exp",
                 local(),
                 json!([{"name": "nan", "text": "t", "does": "stop",
-                    "when": {"nonFinite": "loss", "reports": 2}}]),
+                    "when": {"kind": "nonFinite", "signal": "loss", "reports": 2}}]),
             );
             let bad = |step| format!("::orx:: {{\"step\":{step},\"m\":{{\"loss\":\"NaN\"}}}}\n");
             let mut snapshot = Snapshot::new("r1", "1-1", "g1");
@@ -6658,7 +6658,7 @@ mod tests {
             "exp",
             local(),
             json!([{"name": "nan", "text": "t", "does": "stop",
-                "when": {"nonFinite": "loss", "reports": 2}}]),
+                "when": {"kind": "nonFinite", "signal": "loss", "reports": 2}}]),
         );
         let mut snapshot = Snapshot::new("r1", "1-1", "g1");
         for (i, loss) in ["\"NaN\"", "1.0", "\"NaN\"", "\"NaN\""]
@@ -6684,7 +6684,7 @@ mod tests {
             "exp",
             local(),
             json!([{"name": "nan", "text": "t", "does": "stop",
-                "when": {"nonFinite": "loss", "reports": 256}}]),
+                "when": {"kind": "nonFinite", "signal": "loss", "reports": 256}}]),
         );
         reported(&f, "r1", "loss", &vec!["NaN"; 255], 3000);
         rules_at(&f, "r1", T0 + 255_000);
@@ -6712,7 +6712,7 @@ mod tests {
             "exp",
             local(),
             json!([{"name": "nan", "text": "t", "does": "stop",
-                "when": {"nonFinite": "loss"}}]),
+                "when": {"kind": "nonFinite", "signal": "loss"}}]),
         );
         let mut snapshot = Snapshot::new("r1", "1-1", "g1");
         snapshot
@@ -6771,11 +6771,11 @@ mod tests {
             local(),
             json!([
                 {"name": "nan-loss", "text": "Stop when the loss is NaN on 3 reports in a row.",
-                    "does": "stop", "when": {"nonFinite": "loss", "reports": 3}},
+                    "does": "stop", "when": {"kind": "nonFinite", "signal": "loss", "reports": 3}},
                 {"name": "also-stop", "text": "Check the same reports.",
-                    "does": "stop", "when": {"nonFinite": "loss", "reports": 3}},
+                    "does": "stop", "when": {"kind": "nonFinite", "signal": "loss", "reports": 3}},
                 {"name": "also-ask", "text": "Review the same reports.",
-                    "does": "ask", "when": {"nonFinite": "loss", "reports": 3}}
+                    "does": "ask", "when": {"kind": "nonFinite", "signal": "loss", "reports": 3}}
             ]),
         );
         let mut losses = vec!["2.5", "2.4", "NaN", "2.3", "NaN", "NaN"];
@@ -6787,7 +6787,9 @@ mod tests {
         rules_at(&f, "r1", T0 + 7_000);
         let stop = stopped_by(&f, "r1").expect("the third NaN in a row stops it");
         assert_eq!(stop.by, crate::store::StopBy::Rule);
-        assert_eq!(stop.rule.as_ref().unwrap()["name"], "nan-loss");
+        let config = f.store.run_monitor_config("r1").unwrap().unwrap();
+        let frozen: Value = serde_json::from_str(&config).unwrap();
+        assert_eq!(stop.rule.as_ref(), Some(&frozen["rules"][0]));
         assert_eq!(
             stop.reason.as_deref(),
             Some("loss was NaN on 3 reports in a row, step 40 to 60")
@@ -6807,7 +6809,7 @@ mod tests {
             "unread",
             "exp",
             local(),
-            json!([{"name": "nan-loss", "text": "t", "does": "stop", "when": {"nonFinite": "loss"}}]),
+            json!([{"name": "nan-loss", "text": "t", "does": "stop", "when": {"kind": "nonFinite", "signal": "loss"}}]),
         );
         f.store.put_run_monitor_state(
             "unread",
@@ -6864,9 +6866,9 @@ mod tests {
             "r1",
             "exp",
             local(),
-            json!([{"name": "nan-loss", "text": "t", "does": "stop", "when": {"nonFinite": "loss", "reports": 3}},
+            json!([{"name": "nan-loss", "text": "t", "does": "stop", "when": {"kind": "nonFinite", "signal": "loss", "reports": 3}},
                    {"name": "low-eval", "text": "t", "does": "stop",
-                    "when": {"compare": {"signal": "loss", "op": "gt", "value": 9}, "reports": 2}}]),
+                    "when": {"kind": "compare", "signal": "loss", "op": "gt", "value": 9, "reports": 2}}]),
         );
         // Read at once, as after a sleep: the NaNs and the spike are history the run left behind.
         reported(
@@ -6895,7 +6897,7 @@ mod tests {
             "exp",
             local(),
             json!([{"name": "eval-zero", "text": "Ask when the eval score falls below 0.1.", "does": "ask",
-                "when": {"compare": {"signal": "eval_score", "op": "lt", "value": 0.1}}}]),
+                "when": {"kind": "compare", "signal": "eval_score", "op": "lt", "value": 0.1}}]),
         );
         f.store.put_chat_session("chat-1", "claude-code", None);
         f.store
@@ -6969,7 +6971,7 @@ mod tests {
             "child",
             local(),
             json!([{"name": "diverging", "text": "Stop when the loss is 1 worse than the parent's.",
-                "does": "stop", "when": {"worseThanParent": {"signal": "loss", "by": 1, "better": "lower"}, "reports": 3}}]),
+                "does": "stop", "when": {"kind": "worseThanParent", "signal": "loss", "by": 1, "better": "lower", "reports": 3}}]),
         );
         // The parent's loss at step 10i is 3/(i+1): 3, 1.5, 1, 0.75, 0.6.
         reported(&f, "r1", "loss", &["3", "2.4", "2.0"], 400);
@@ -7028,7 +7030,7 @@ mod tests {
             "child",
             local(),
             json!([{"name": "diverging", "text": "Stop when the loss is 1 worse than the parent's.",
-                "does": "stop", "when": {"worseThanParent": {"signal": "loss", "by": 1, "better": "lower"}, "reports": 3}}]),
+                "does": "stop", "when": {"kind": "worseThanParent", "signal": "loss", "by": 1, "better": "lower", "reports": 3}}]),
         );
         f.collect(&Snapshot {
             run_id: "r1".into(),
@@ -7052,7 +7054,7 @@ mod tests {
             "exp",
             local(),
             json!([{"name": "plateau", "text": "t", "does": "stop",
-                "when": {"noImprovement": {"signal": "val_loss", "min": 0.05, "reports": 3, "better": "lower"}}}]),
+                "when": {"kind": "noImprovement", "signal": "val_loss", "min": 0.05, "reports": 3, "better": "lower"}}]),
         );
         let mut losses = vec!["3.0", "2.0", "1.5", "1.49", "1.48"];
         reported(&f, "r1", "val_loss", &losses, 600);
@@ -7075,7 +7077,7 @@ mod tests {
             "r1",
             "exp",
             local(),
-            json!([{"name": "stuck", "text": "t", "does": "stop", "when": {"noProgress": {"seconds": 600}}}]),
+            json!([{"name": "stuck", "text": "t", "does": "stop", "when": {"kind": "noProgress", "seconds": 600}}]),
         );
         reported(&f, "r1", "loss", &["2.0", "1.9"], 600);
         f.confirmed("r1", T0 + 500_000);
@@ -7093,7 +7095,7 @@ mod tests {
             "spent",
             "exp",
             local(),
-            json!([{"name": "budget", "does": "stop", "when": {"costAbove": {"usd": 5}}}]),
+            json!([{"name": "budget", "does": "stop", "when": {"kind": "costAbove", "usd": 5}}]),
         );
         let lines = [(T0, r#"::orx:: {"step":1,"of":100,"spend":5.25}"#.to_owned())];
         f.collect(&Snapshot {
@@ -7113,7 +7115,7 @@ mod tests {
             "slow",
             "exp",
             limited,
-            json!([{"name": "too-slow", "text": "t", "does": "stop", "when": {"projectedFinishPastLimit": true}}]),
+            json!([{"name": "too-slow", "text": "t", "does": "stop", "when": {"kind": "projectedFinishPastLimit"}}]),
         );
         let values = |n: usize| vec!["1.0"; n];
         // Ten steps a second of 6,000 end long after the 2m limit, but a slice or two is no pace.
@@ -7164,8 +7166,7 @@ mod tests {
     #[test]
     fn rules_act_only_on_a_live_run_seen_live() {
         let f = Fixture::new("orx-rules-live");
-        let nan =
-            json!([{"name": "nan", "text": "t", "does": "stop", "when": {"nonFinite": "loss"}}]);
+        let nan = json!([{"name": "nan", "text": "t", "does": "stop", "when": {"kind": "nonFinite", "signal": "loss"}}]);
         ruled(&f, "r1", "exp", local(), nan.clone());
         reported(&f, "r1", "loss", &["NaN"], 600);
         // Collection stopped two minutes ago: what the run is doing now is unknown.
@@ -7376,7 +7377,7 @@ mod tests {
         keep(watched);
         let described = configure(
             json!({"rules": [{"name": "stuck", "text": "Stop after 10 minutes without progress.",
-            "does": "stop", "when": {"noProgress": {"seconds": 600}}}]}),
+            "does": "stop", "when": {"kind": "noProgress", "seconds": 600}}]}),
         );
         assert_eq!(described["brief"], stored["brief"], "rules keep the brief");
         assert_eq!(described["watch"], stored["watch"], "rules keep the gaps");

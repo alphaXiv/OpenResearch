@@ -303,25 +303,27 @@ run from an odd one.
 ```json
 {"rules": [
   {"name": "nan-loss", "text": "Stop when the loss is NaN on 3 reports in a row.",
-   "does": "stop", "when": {"nonFinite": "loss", "reports": 3}},
+   "does": "stop", "when": {"kind": "nonFinite", "signal": "loss", "reports": 3}},
   {"name": "diverging", "text": "Stop when the loss is 1 above the parent's at the same step, 3 reports running.",
-   "does": "stop", "when": {"worseThanParent": {"signal": "loss", "by": 1, "better": "lower"}, "reports": 3}},
+   "does": "stop", "when": {"kind": "worseThanParent", "signal": "loss", "by": 1, "better": "lower", "reports": 3}},
   {"name": "plateau", "text": "Ask when val loss improves by less than 0.01 over 4 evals.",
-   "does": "ask", "when": {"noImprovement": {"signal": "val_loss", "min": 0.01, "reports": 4, "better": "lower"}}}
+   "does": "ask", "when": {"kind": "noImprovement", "signal": "val_loss", "min": 0.01, "reports": 4, "better": "lower"}}
 ]}
 ```
 
-A rule checks one condition; `reports` counts reports in a row (1 when left out):
+The `kind` field names the condition. For `nonFinite`, `compare`, and
+`worseThanParent`, `reports` counts matches in a row and defaults to 1.
+`noImprovement` requires `reports` to set the size of its window.
 
 | `when` | Trips when |
 | --- | --- |
-| `{"nonFinite": "loss"}` | the measure is NaN or infinite |
-| `{"compare": {"signal": "eval_score", "op": "lt", "value": 0.1}}` | it is below (`lt`, `le`) or above (`gt`, `ge`) a value |
-| `{"worseThanParent": {"signal": …, "by": 1, "better": "lower"}}` | it is worse than the parent's run at the same step by more than `by` |
-| `{"noImprovement": {"signal": …, "min": 0.01, "reports": 4, "better": "lower"}}` | its best of the last `reports` beats the best before them by less than `min` |
-| `{"noProgress": {"seconds": 600}}` | no step was reported for that long |
-| `{"costAbove": {"usd": 5}}` | spend passed it, or the estimate says it will |
-| `{"projectedFinishPastLimit": true}` | the estimate says the run ends after its time limit |
+| `{"kind": "nonFinite", "signal": "loss"}` | the measure is NaN or infinite |
+| `{"kind": "compare", "signal": "eval_score", "op": "lt", "value": 0.1}` | it is below (`lt`, `le`) or above (`gt`, `ge`) a value |
+| `{"kind": "worseThanParent", "signal": "loss", "by": 1, "better": "lower"}` | it is worse than the parent's run at the same step by more than `by` |
+| `{"kind": "noImprovement", "signal": "val_loss", "min": 0.01, "reports": 4, "better": "lower"}` | its best of the last `reports` beats the best before them by less than `min` |
+| `{"kind": "noProgress", "seconds": 600}` | no step was reported for that long |
+| `{"kind": "costAbove", "usd": 5}` | spend passed it, or the estimate says it will |
+| `{"kind": "projectedFinishPastLimit"}` | the estimate says the run ends after its time limit |
 
 `"stop"` cancels the run, which shows as Auto-stopped by that rule, and you
 are woken with what orx saw; `"ask"` raises a flag (§10) and the run goes on. `text` is

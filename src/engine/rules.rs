@@ -81,14 +81,19 @@ impl Rule {
     /// The rule as it is stored and read back.
     pub(crate) fn json(&self) -> Value {
         let mut when = match &self.when {
-            When::NonFinite { signal, reports } => json!({"nonFinite": signal, "reports": reports}),
+            When::NonFinite { signal, reports } => json!({
+                "kind": "nonFinite", "signal": signal, "reports": reports,
+            }),
             When::Compare {
                 signal,
                 op,
                 value,
                 reports,
             } => json!({
-                "compare": {"signal": signal, "op": op_name(*op), "value": value},
+                "kind": "compare",
+                "signal": signal,
+                "op": op_name(*op),
+                "value": value,
                 "reports": reports,
             }),
             When::NoImprovement {
@@ -96,24 +101,32 @@ impl Rule {
                 min,
                 reports,
                 better,
-            } => json!({"noImprovement": {
+            } => json!({
+                "kind": "noImprovement",
                 "signal": signal, "min": min, "reports": reports, "better": better_name(*better),
-            }}),
+            }),
             When::WorseThanParent {
                 signal,
                 by,
                 better,
                 reports,
             } => json!({
-                "worseThanParent": {"signal": signal, "by": by, "better": better_name(*better)},
+                "kind": "worseThanParent",
+                "signal": signal,
+                "by": by,
+                "better": better_name(*better),
                 "reports": reports,
             }),
-            When::NoProgress { seconds } => json!({"noProgress": {"seconds": seconds}}),
-            When::CostAbove { usd } => json!({"costAbove": {"usd": usd}}),
-            When::FinishPastLimit => json!({"projectedFinishPastLimit": true}),
+            When::NoProgress { seconds } => json!({"kind": "noProgress", "seconds": seconds}),
+            When::CostAbove { usd } => json!({"kind": "costAbove", "usd": usd}),
+            When::FinishPastLimit => json!({"kind": "projectedFinishPastLimit"}),
         };
         if let Value::Object(when) = &mut when {
-            when.retain(|key, value| key != "reports" || *value != json!(1));
+            when.retain(|key, value| {
+                key != "reports"
+                    || value.as_u64() != Some(1)
+                    || matches!(self.when, When::NoImprovement { .. })
+            });
         }
         let mut rule = json!({
             "name": self.name,
@@ -238,7 +251,7 @@ fn parse_rule(value: &Value) -> Result<Rule, String> {
     let when = rule
         .get("when")
         .and_then(Value::as_object)
-        .ok_or(format!("\"when\" must be an object with one of {KINDS}"))?;
+        .ok_or("\"when\" must be an object with a \"kind\" field")?;
     Ok(Rule {
         name: name.to_owned(),
         text,
@@ -248,70 +261,59 @@ fn parse_rule(value: &Value) -> Result<Rule, String> {
 }
 
 fn parse_when(when: &Map<String, Value>) -> Result<When, String> {
-    let kinds: Vec<&String> = when.keys().filter(|key| *key != "reports").collect();
-    let kind = match kinds.as_slice() {
-        [kind] => kind.as_str(),
-        [] => return Err(format!("\"when\" must have one of {KINDS}")),
-        [first, second, ..] => {
-            return Err(format!(
-                "\"when\" has both \"{first}\" and \"{second}\"; a rule checks one condition"
-            ))
-        }
-    };
-    let condition = &when[kind];
-    let reports = match when.get("reports") {
-        None => None,
-        Some(reports) => Some(count(reports, "reports")?),
-    };
-    let counted = |reports: Option<u64>| reports.unwrap_or(1);
-    let alone = |reports: Option<u64>| match reports {
-        Some(_) => Err(format!("\"{kind}\" takes no \"reports\"")),
-        None => Ok(()),
-    };
+    let kind = when
+        .get("kind")
+        .ok_or("\"when\" needs a \"kind\" field")?
+        .as_str()
+        .ok_or("\"when.kind\" must be text")?;
+
     let field = |name: &str| {
-        condition
-            .get(name)
-            .ok_or(format!("\"{kind}\" needs \"{name}\""))
+        when.get(name)
+            .ok_or_else(|| format!("\"{kind}\" needs \"{name}\""))
     };
     let fields = |allowed: &[&str]| {
-        let object = condition
-            .as_object()
-            .ok_or(format!("\"{kind}\" must be an object"))?;
-        match object.keys().find(|key| !allowed.contains(&key.as_str())) {
-            Some(key) => Err(format!(
-                "\"{kind}\" takes {}, not \"{key}\"",
-                allowed.join(", ")
-            )),
+        let unexpected = when
+            .keys()
+            .find(|key| key.as_str() != "kind" && !allowed.contains(&key.as_str()));
+        match unexpected {
+            Some(key) => Err(format!("\"{kind}\" has an unexpected field \"{key}\"")),
             None => Ok(()),
         }
     };
-    let signal = |value: &Value| {
-        value
+    let streak = || {
+        when.get("reports")
+            .map_or(Ok(1), |value| count(value, "reports"))
+    };
+    let signal = || {
+        field("signal")?
             .as_str()
             .filter(|name| orx_signals::identifier(name))
             .map(str::to_owned)
             .ok_or_else(|| format!("\"{kind}\" must name a signal the run reports"))
     };
-    let finite = |value: &Value, name: &str| {
-        value
+    let finite = |name: &str| {
+        field(name)?
             .as_f64()
             .filter(|value| value.is_finite())
             .ok_or_else(|| format!("\"{name}\" must be a finite number"))
     };
-    let better = |value: &Value| match value.as_str() {
+    let better = || match field("better")?.as_str() {
         Some("lower") => Ok(Better::Lower),
         Some("higher") => Ok(Better::Higher),
         _ => Err("\"better\" must be \"lower\" or \"higher\"".to_owned()),
     };
     Ok(match kind {
-        "nonFinite" => When::NonFinite {
-            signal: signal(condition)?,
-            reports: counted(reports),
-        },
+        "nonFinite" => {
+            fields(&["signal", "reports"])?;
+            When::NonFinite {
+                signal: signal()?,
+                reports: streak()?,
+            }
+        }
         "compare" => {
-            fields(&["signal", "op", "value"])?;
+            fields(&["signal", "op", "value", "reports"])?;
             When::Compare {
-                signal: signal(field("signal")?)?,
+                signal: signal()?,
                 op: match field("op")?.as_str() {
                     Some("lt") => Op::Lt,
                     Some("le") => Op::Le,
@@ -319,31 +321,29 @@ fn parse_when(when: &Map<String, Value>) -> Result<When, String> {
                     Some("ge") => Op::Ge,
                     _ => return Err("\"op\" must be \"lt\", \"le\", \"gt\" or \"ge\"".into()),
                 },
-                value: finite(field("value")?, "value")?,
-                reports: counted(reports),
+                value: finite("value")?,
+                reports: streak()?,
             }
         }
         "noImprovement" => {
-            alone(reports)?;
             fields(&["signal", "min", "reports", "better"])?;
             When::NoImprovement {
-                signal: signal(field("signal")?)?,
-                min: finite(field("min")?, "min")?.max(0.0),
+                signal: signal()?,
+                min: finite("min")?.max(0.0),
                 reports: count(field("reports")?, "reports")?,
-                better: better(field("better")?)?,
+                better: better()?,
             }
         }
         "worseThanParent" => {
-            fields(&["signal", "by", "better"])?;
+            fields(&["signal", "by", "better", "reports"])?;
             When::WorseThanParent {
-                signal: signal(field("signal")?)?,
-                by: finite(field("by")?, "by")?.max(0.0),
-                better: better(field("better")?)?,
-                reports: counted(reports),
+                signal: signal()?,
+                by: finite("by")?.max(0.0),
+                better: better()?,
+                reports: streak()?,
             }
         }
         "noProgress" => {
-            alone(reports)?;
             fields(&["seconds"])?;
             When::NoProgress {
                 seconds: field("seconds")?
@@ -355,26 +355,18 @@ fn parse_when(when: &Map<String, Value>) -> Result<When, String> {
             }
         }
         "costAbove" => {
-            alone(reports)?;
             fields(&["usd"])?;
-            let usd = finite(field("usd")?, "usd")?;
+            let usd = finite("usd")?;
             if usd <= 0.0 {
                 return Err("\"usd\" must be greater than zero".into());
             }
             When::CostAbove { usd }
         }
         "projectedFinishPastLimit" => {
-            alone(reports)?;
-            if condition != &Value::Bool(true) {
-                return Err("\"projectedFinishPastLimit\" must be true".into());
-            }
+            fields(&[])?;
             When::FinishPastLimit
         }
-        other => {
-            return Err(format!(
-                "unknown condition \"{other}\"; this orx checks {KINDS}"
-            ))
-        }
+        other => return Err(format!("unknown condition \"{other}\". Use one of {KINDS}")),
     })
 }
 
@@ -844,19 +836,33 @@ mod tests {
     #[test]
     fn each_condition_reads_back_as_it_was_written() {
         for when in [
-            json!({"nonFinite": "loss", "reports": 3}),
-            json!({"nonFinite": "loss"}),
-            json!({"compare": {"signal": "eval_score", "op": "lt", "value": 0.1}}),
-            json!({"compare": {"signal": "acc", "op": "ge", "value": 0.9}, "reports": 2}),
-            json!({"noImprovement": {"signal": "val_loss", "min": 0.01, "reports": 4, "better": "lower"}}),
-            json!({"worseThanParent": {"signal": "loss", "by": 1.0, "better": "lower"}, "reports": 3}),
-            json!({"noProgress": {"seconds": 600}}),
-            json!({"costAbove": {"usd": 5.0}}),
-            json!({"projectedFinishPastLimit": true}),
+            json!({"kind": "nonFinite", "signal": "loss", "reports": 3}),
+            json!({"kind": "compare", "signal": "acc", "op": "ge", "value": 0.9, "reports": 2}),
+            json!({"kind": "noImprovement", "signal": "val_loss", "min": 0.01, "reports": 4, "better": "lower"}),
+            json!({"kind": "noImprovement", "signal": "val_loss", "min": 0.01, "reports": 1, "better": "lower"}),
+            json!({"kind": "worseThanParent", "signal": "loss", "by": 1.0, "better": "lower", "reports": 3}),
+            json!({"kind": "noProgress", "seconds": 600}),
+            json!({"kind": "costAbove", "usd": 5.0}),
+            json!({"kind": "projectedFinishPastLimit"}),
         ] {
             let rule = one(when.clone()).unwrap();
             assert_eq!(rule.json()["when"], when, "{when}");
             assert_eq!(parse(&json!([rule.json()])).unwrap(), vec![rule]);
+        }
+    }
+
+    #[test]
+    fn streak_rules_write_one_report_as_the_default() {
+        for when in [
+            json!({"kind": "nonFinite", "signal": "loss"}),
+            json!({"kind": "compare", "signal": "eval_score", "op": "lt", "value": 0.1}),
+            json!({"kind": "worseThanParent", "signal": "loss", "by": 1.0, "better": "lower"}),
+        ] {
+            let mut explicit = when.clone();
+            explicit["reports"] = json!(1);
+            let rule = one(when.clone()).unwrap();
+            assert_eq!(one(explicit).unwrap(), rule);
+            assert_eq!(rule.json()["when"], when);
         }
     }
 
@@ -866,14 +872,13 @@ mod tests {
         let when = |when: Value| one(when).unwrap_err();
         assert_eq!(refused(json!({})), "\"rules\" must be a list of rules");
         assert!(refused(json!(vec![json!({"name": "r"}); 33])).contains("at most 32"));
-        let rule =
-            json!({"name": "nan", "text": "t", "does": "stop", "when": {"nonFinite": "loss"}});
+        let rule = json!({"name": "nan", "text": "t", "does": "stop", "when": {"kind": "nonFinite", "signal": "loss"}});
         assert_eq!(
             refused(json!([rule, rule])),
             "rules[1]: another rule is already named \"nan\""
         );
         assert!(
-            refused(json!([{"name": "nan", "does": "stop", "when": {"nonFinite": "loss"}}]))
+            refused(json!([{"name": "nan", "does": "stop", "when": {"kind": "nonFinite", "signal": "loss"}}]))
                 .starts_with("rules[0] (nan): \"text\" must say")
         );
         assert!(
@@ -888,37 +893,56 @@ mod tests {
             refused(json!([{"name": "n", "text": "t", "does": "stop", "when": {}, "if": 1}]))
                 .contains("\"if\" is not part of a rule")
         );
-        assert!(when(json!({"lossAbove": 3}))
-            .contains("unknown condition \"lossAbove\"; this orx checks nonFinite"));
-        assert!(when(json!({})).contains("must have one of"));
+        assert!(when(json!({"kind": "lossAbove", "value": 3}))
+            .contains("unknown condition \"lossAbove\""));
+        assert!(when(json!({"nonFinite": "loss"})).contains("needs a \"kind\" field"));
+        assert!(when(json!({"kind": true})).contains("\"when.kind\" must be text"));
         assert!(
-            when(json!({"nonFinite": "loss", "noProgress": {"seconds": 1}}))
-                .contains("checks one condition")
+            when(json!({"kind": "nonFinite", "signal": "loss", "noProgress": {"seconds": 1}}))
+                .contains("unexpected field \"noProgress\"")
         );
-        assert!(when(json!({"nonFinite": "a b"})).contains("must name a signal"));
-        assert!(when(json!({"nonFinite": "loss", "reports": 0})).contains("from 1 to 256"));
-        assert!(when(json!({"nonFinite": "loss", "reports": 257})).contains("from 1 to 256"));
+        assert!(when(json!({"kind": "nonFinite", "signal": "a b"})).contains("must name a signal"));
         assert!(
-            when(json!({"compare": {"signal": "a", "op": "eq", "value": 1}}))
+            when(json!({"kind": "nonFinite", "signal": "loss", "reports": 0}))
+                .contains("from 1 to 256")
+        );
+        assert!(
+            when(json!({"kind": "nonFinite", "signal": "loss", "reports": 257}))
+                .contains("from 1 to 256")
+        );
+        assert!(
+            when(json!({"kind": "compare", "signal": "a", "op": "eq", "value": 1}))
                 .contains("\"op\" must be")
         );
-        assert!(when(json!({"compare": {"signal": "a", "op": "lt"}})).contains("needs \"value\""));
         assert!(
-            when(json!({"compare": {"signal": "a", "op": "lt", "value": "NaN"}}))
+            when(json!({"kind": "compare", "signal": "a", "op": "lt"})).contains("needs \"value\"")
+        );
+        assert!(
+            when(json!({"kind": "compare", "signal": "a", "op": "lt", "value": "NaN"}))
                 .contains("finite number")
         );
         assert!(
-            when(json!({"compare": {"signal": "a", "op": "lt", "value": 1, "x": 1}}))
-                .contains("not \"x\"")
+            when(json!({"kind": "compare", "signal": "a", "op": "lt", "value": 1, "x": 1}))
+                .contains("unexpected field \"x\"")
         );
         assert!(when(
-            json!({"noImprovement": {"signal": "a", "min": 0, "reports": 3, "better": "up"}})
+            json!({"kind": "noImprovement", "signal": "a", "min": 0, "reports": 3, "better": "up"})
         )
         .contains("\"better\""));
-        assert!(when(json!({"noImprovement": {"signal": "a", "min": 0, "reports": 3, "better": "lower"}, "reports": 2})).contains("takes no \"reports\""));
-        assert!(when(json!({"noProgress": {"seconds": 0}})).contains("\"seconds\" must be"));
-        assert!(when(json!({"costAbove": {"usd": 0}})).contains("greater than zero"));
-        assert!(when(json!({"projectedFinishPastLimit": false})).contains("must be true"));
+        assert!(
+            when(json!({"kind": "noImprovement", "signal": "a", "min": 0, "better": "lower"}))
+                .contains("needs \"reports\"")
+        );
+        assert!(when(json!({"kind": "noProgress", "seconds": 0})).contains("\"seconds\" must be"));
+        assert!(when(json!({"kind": "costAbove", "usd": 0})).contains("greater than zero"));
+        for mut when_with_reports in [
+            json!({"kind": "noProgress", "seconds": 600}),
+            json!({"kind": "costAbove", "usd": 5}),
+            json!({"kind": "projectedFinishPastLimit"}),
+        ] {
+            when_with_reports["reports"] = json!(1);
+            assert!(when(when_with_reports).contains("unexpected field \"reports\""));
+        }
     }
 
     #[test]
@@ -929,8 +953,8 @@ mod tests {
         );
         assert!(budget(0.0).unwrap_err().contains("(got 0)"));
         let settings = json!({"rules": [
-            {"name": "nan", "text": "Stop at NaN.", "does": "stop", "when": {"nonFinite": "loss"}},
-            {"name": "budget", "text": "Old.", "does": "ask", "when": {"costAbove": {"usd": 1}}},
+            {"name": "nan", "text": "Stop at NaN.", "does": "stop", "when": {"kind": "nonFinite", "signal": "loss"}},
+            {"name": "budget", "text": "Old.", "does": "ask", "when": {"kind": "costAbove", "usd": 1}},
         ]})
         .to_string();
         let frozen_rules = freeze("exp", Some(&settings), Some(5.0)).unwrap().unwrap();
@@ -947,7 +971,7 @@ mod tests {
         let mut rules: Vec<_> = (0..MAX_RULES)
             .map(|i| {
                 json!({"name": format!("rule-{i}"), "text": "Check loss.", "does": "stop",
-                "when": {"nonFinite": "loss"}})
+                "when": {"kind": "nonFinite", "signal": "loss"}})
             })
             .collect();
         let settings = json!({"rules": rules}).to_string();
@@ -968,7 +992,7 @@ mod tests {
 
     #[test]
     fn a_rule_a_newer_orx_declared_stops_a_launch_with_what_to_do() {
-        let settings = json!({"rules": [{"name": "r", "text": "t", "does": "stop", "when": {"lossAbove": 3}}]});
+        let settings = json!({"rules": [{"name": "r", "text": "t", "does": "stop", "when": {"kind": "lossAbove", "value": 3}}]});
         let error = freeze("exp", Some(&settings.to_string()), None)
             .unwrap_err()
             .to_string();

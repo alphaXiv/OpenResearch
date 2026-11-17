@@ -692,7 +692,7 @@ for (let step = 1; step <= 400; step++) {
   process.stdout.write('::orx:: {"step":' + step + ',"m":{"loss":' + (step >= 10 ? 'NaN' : (2 / step).toFixed(4)) + '}}\\n')
 }`)
   const rules = path.join(orx.root, `rules-${project.id}.json`)
-  writeFileSync(rules, JSON.stringify({ rules: [{ name: 'nan-loss', text: 'Stop when the loss is NaN on 3 reports in a row.', does: 'stop', when: { nonFinite: 'loss', reports: 3 } }] }))
+  writeFileSync(rules, JSON.stringify({ rules: [{ name: 'nan-loss', text: 'Stop when the loss is NaN on 3 reports in a row.', does: 'stop', when: { kind: 'nonFinite', signal: 'loss', reports: 3 } }] }))
   agent.script('Launch Ruled.', [
     { run: [
       'set -e',
