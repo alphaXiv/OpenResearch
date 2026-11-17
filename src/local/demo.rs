@@ -42,7 +42,8 @@ fn probe_uv() -> String {
         "curl -LsSf https://astral.sh/uv/install.sh | sh"
     };
     format!(
-        "export NANOCHAT_BASE_DIR=\"$PWD/.cache/nanochat\" UV_CACHE_DIR=\"${{ORX_CACHE_DIR:-$HOME/.cache/openresearch}}/uv\" \
+        "printf '::orx:: %s\\n' '{{\"phase\":\"install\",\"step\":0,\"of\":1,\"unit\":\"environments\"}}' \
+         && export NANOCHAT_BASE_DIR=\"$PWD/.cache/nanochat\" UV_CACHE_DIR=\"${{ORX_CACHE_DIR:-$HOME/.cache/openresearch}}/uv\" \
          && mkdir -p \"$NANOCHAT_BASE_DIR\" \"$UV_CACHE_DIR\" \
          && {{ command -v uv >/dev/null || {{ {install_uv} && export PATH=\"$HOME/.local/bin:$PATH\"; }}; }}"
     )
@@ -52,14 +53,17 @@ fn probe_setup() -> String {
     format!(
         "{} && ([ -d .venv ] || uv venv) && uv sync --extra cpu \
          && {{ . .venv/bin/activate 2>/dev/null || . .venv/Scripts/activate; }} \
-         && python -m nanochat.dataset -n 8",
+         && printf '::orx:: %s\\n' '{{\"step\":1}}' \
+         && SHARDS=8 \
+         && printf '::orx:: {{\"phase\":\"download\",\"step\":0,\"of\":%s,\"unit\":\"shards\"}}\\n' \"$((SHARDS + 1))\" \
+         && python -m nanochat.dataset -n \"$SHARDS\"",
         probe_uv()
     )
 }
 
 // --warmdown-ratio=0 keeps the LR schedule identical to the baseline's first 200 steps.
-const PROBE_TRAIN: &str = "python -m scripts.base_train --depth=6 --head-dim=64 --window-pattern=L --max-seq-len=512 --device-batch-size=32 --total-batch-size=16384 --eval-every=50 --eval-tokens=524288 --core-metric-every=-1 --sample-every=-1 --num-iterations=200 --warmdown-ratio=0";
-const PROBE_TOK_TRAIN: &str = "python -m scripts.tok_train --max-chars=2000000000";
+const PROBE_TRAIN: &str = "printf '::orx:: %s\\n' '{\"phase\":\"train\"}' && python -m scripts.base_train --depth=6 --head-dim=64 --window-pattern=L --max-seq-len=512 --device-batch-size=32 --total-batch-size=16384 --eval-every=50 --eval-tokens=524288 --core-metric-every=-1 --sample-every=-1 --num-iterations=200 --warmdown-ratio=0";
+const PROBE_TOK_TRAIN: &str = "printf '::orx:: %s\\n' '{\"phase\":\"tokenizer\",\"step\":0,\"of\":1,\"unit\":\"commands\"}' && python -m scripts.tok_train --max-chars=2000000000";
 const BASELINE_SHA: &str = "96098ad3f3708748f693c28194520ae13afb9c69";
 const EXPERIMENT_SHA: &str = "3f761f37fff37b1f94fc497f8671def22372cc9f";
 // Earlier baseline trees, newest first: before it reported its stages, and before
@@ -528,7 +532,7 @@ fn seed_at(
                     .into(),
             ),
             run_command: format!(
-                "{} && {PROBE_TOK_TRAIN} --vocab-size=8192 && {PROBE_TRAIN}",
+                "{} && {PROBE_TOK_TRAIN} --vocab-size=8192 && printf '::orx:: %s\\n' '{{\"step\":1}}' && {PROBE_TRAIN}",
                 probe_setup()
             ),
             agent_status: "idle".into(),
@@ -2166,6 +2170,39 @@ mod tests {
         seed_at(&store, &data, &repo, selection).unwrap();
 
         let run = store.get_run(RUN_ID).unwrap().unwrap();
+        let child = StoredRun {
+            id: "demo-child".into(),
+            experiment_id: VOCAB_PROBE_EXPERIMENT_ID.into(),
+            status: "running".into(),
+            ended_at: None,
+            exit_code: None,
+            ..run.clone()
+        };
+        store.upsert_run(&child).unwrap();
+        let mut snapshot = orx_signals::Snapshot::new(&child.id, "1-1", "child");
+        let reports = concat!(
+            "::orx:: {\"phase\":\"train\",\"step\":0,\"of\":200,\"m\":{\"val_bpb\":3.2}}\n",
+            "::orx:: {\"step\":1,\"m\":{\"loss\":9.0}}\n",
+        );
+        snapshot
+            .feed(reports.as_bytes(), true, now_ms(), false)
+            .unwrap();
+        crate::engine::adapters::local::signals::publish(
+            &data.join("run-signals/demo-child.json"),
+            &snapshot,
+        )
+        .unwrap();
+        let monitor = crate::engine::monitor::offline(&store, &child, now_ms()).unwrap();
+        assert_eq!(monitor["parent"]["runId"], RUN_ID);
+        assert!(monitor["phases"][0]["priorMs"].as_f64().unwrap() > 0.0);
+        assert_eq!(
+            monitor["parent"]["series"]["val_bpb"]
+                .as_array()
+                .unwrap()
+                .len(),
+            51
+        );
+
         let monitor = crate::engine::monitor::offline(&store, &run, now_ms()).unwrap();
         assert_eq!(monitor["viewFrom"]["markup"], BASELINE_VIEW);
         assert_eq!(monitor["viewFrom"]["isDefault"], false);

@@ -23,8 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import orx_run
 
-orx_run.plan(["setup", "train", "results"])
-setup = orx_run.progress(total=1, unit="models", phase="setup")
+orx_run.progress(total=1, unit="environments", phase="install", start=1)
 
 import torch
 from nanochat.gpt import GPT, GPTConfig
@@ -42,6 +41,14 @@ def plot(rows, output):
 
 
 def main():
+    steps = 20
+    orx_run.plan([
+        {"phase": "install", "of": 1, "unit": "environments"},
+        {"phase": "tokenizer", "of": 1, "unit": "models"},
+        {"phase": "train", "of": steps, "unit": "steps"},
+        {"phase": "eval", "of": 1, "unit": "reports"},
+    ])
+    setup = orx_run.progress(total=1, unit="models", phase="tokenizer")
     logging.getLogger("rustbpe").setLevel(logging.WARNING)
     torch.set_num_threads(2)
     torch.manual_seed(42)
@@ -70,7 +77,6 @@ def main():
     rows = []
     setup.step(1)
     setup.flush()
-    steps = 20
     progress = orx_run.progress(total=steps, unit="steps", phase="train")
     training_started = time.perf_counter()
     for step in range(steps + 1):
@@ -101,7 +107,7 @@ def main():
                     metrics[f"{name}_lr_{arm}"] = row[name]
         progress.step(step, **metrics)
     progress.flush()
-    results = orx_run.progress(total=1, unit="reports", phase="results")
+    results = orx_run.progress(total=1, unit="reports", phase="eval")
     assert rows[0]["val_loss"] == rows[1]["val_loss"], "Comparison must start from identical weights"
     output = Path("artifacts")
     output.mkdir(exist_ok=True)
