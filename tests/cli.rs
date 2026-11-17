@@ -22,3 +22,31 @@ mod logs_cli;
 mod up_auto_restart;
 #[path = "cli/up_sign_in.rs"]
 mod up_sign_in;
+
+#[test]
+fn unknown_commands_show_real_commands_and_scoped_help() {
+    for (args, help, real) in [
+        (vec!["exp", "list"], "orx exp --help", "status"),
+        (vec!["exp", "veiw"], "orx exp --help", "view"),
+        (
+            vec!["exp", "view", "missing"],
+            "orx exp view --help",
+            "check",
+        ),
+        (vec!["missing"], "orx --help", "projects"),
+    ] {
+        let root = std::env::temp_dir().join(format!("orx-command-hint-{}", uuid::Uuid::new_v4()));
+        let output = home::isolate_home(
+            &mut std::process::Command::new(env!("CARGO_BIN_EXE_orx")),
+            &root,
+        )
+        .args(args)
+        .output()
+        .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(error.contains(help), "{error}");
+        assert!(error.contains(real), "{error}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+}

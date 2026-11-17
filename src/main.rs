@@ -1294,7 +1294,44 @@ async fn run_cli() {
         return;
     }
 
-    let cli = Cli::parse();
+    let cli = Cli::try_parse().unwrap_or_else(|mut error| {
+        if error.kind() == clap::error::ErrorKind::InvalidSubcommand {
+            use clap::error::{ContextKind, ContextValue};
+            use clap::CommandFactory;
+
+            let root = Cli::command();
+            let mut command = &root;
+            let mut path = invocation::orx().to_owned();
+            for argument in std::env::args_os().skip(1) {
+                let Some(argument) = argument.to_str() else {
+                    break;
+                };
+                if argument.starts_with('-') {
+                    continue;
+                }
+                let Some(child) = command.find_subcommand(argument) else {
+                    break;
+                };
+                path.push(' ');
+                path.push_str(child.get_name());
+                command = child;
+            }
+            let commands = command
+                .get_subcommands()
+                .filter(|command| !command.is_hide_set())
+                .map(|command| command.get_name())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let hint = format!("Available commands: {commands}. Run `{path} --help` for usage.");
+            let mut hints = match error.remove(ContextKind::Suggested) {
+                Some(ContextValue::StyledStrs(hints)) => hints,
+                _ => Vec::new(),
+            };
+            hints.push(hint.into());
+            error.insert(ContextKind::Suggested, ContextValue::StyledStrs(hints));
+        }
+        error.exit()
+    });
     // Double-clicked from Explorer: open the desktop app instead of a console session.
     #[cfg(windows)]
     if cli.command.is_none() && owns_its_console() {
