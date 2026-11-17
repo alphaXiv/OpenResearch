@@ -80,7 +80,7 @@ test("a run nobody watches says why in place of a journal", async () => {
 
 test("the journal says who settled a flag and how, under the look that raised it, and orx's own flags stand as rows", async () => {
   const looks = [look("1", now - 50_000, "Loss **{loss}**, falling."), look("2", now - 30_000, "Loss jumped to **{loss}**.", { said: "flag" })];
-  const flag = (extra) => ({ at: now - 30_000, whole: 0.2, template: "x", detail: "x", evidence: null, mode: "copilot", ...extra });
+  const flag = (extra) => ({ at: now - 30_000, whole: 0.2, template: "x", detail: "x", evidence: null, ...extra });
   serveApp({});
   const view = await render(createElement(Watch, {
     monitor: {

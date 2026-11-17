@@ -781,7 +781,7 @@ for (let step = 1; step <= 40; step++) {
 
 /** The shell an agent runs to settle the open flag of `run` the way `choice` says. */
 const settle = (exp: string, run: string, choice: string, reason: string) =>
-  `f=$(orx exp status ${exp} --run ${run} | sed -n 's/.*(flag \\(f[0-9a-f]*\\),.*/\\1/p'); orx exp flag ${run} --flag "$f" --${choice} --reason '${reason}'`
+  `f=$(orx exp status ${exp} --run ${run} --json | ${process.execPath} -e 'const status = JSON.parse(require("node:fs").readFileSync(0, "utf8")); console.log(status.flags.findLast((flag) => !["kept", "stopped"].includes(flag.state)).id)') && orx exp flag ${run} --flag "$f" --${choice} --reason '${reason}'`
 
 test('an error flags the run and wakes its Agentic agent once, which confirms it and keeps the run going', async ({ page, project, agent, orx }, info) => {
   test.slow()

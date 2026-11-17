@@ -78,7 +78,7 @@ fn carried(notice: &FlagNotice, asked: bool) -> &'static str {
     }
 }
 
-/// The run's flags, oldest first, each with what became of it: its `state`, `mode` and the
+/// The run's flags, oldest first, each with what became of it: its `state` and the
 /// `choice` that settled or routed it.
 pub(crate) fn read(store: &Store, run: &StoredRun) -> Result<Vec<Value>> {
     let events = store.run_flag_events(&run.id)?;
@@ -105,10 +105,7 @@ pub(crate) fn read(store: &Store, run: &StoredRun) -> Result<Vec<Value>> {
     } else {
         None
     };
-    let mode = home
-        .as_ref()
-        .filter(|chat| agentic(chat))
-        .map_or("copilot", |_| "agentic");
+    let autonomous = home.as_ref().is_some_and(agentic);
     let notice = |dedupe: &str| {
         notices.iter().find(|notice| {
             notice.dedupe == dedupe
@@ -141,7 +138,7 @@ pub(crate) fn read(store: &Store, run: &StoredRun) -> Result<Vec<Value>> {
             }
             (None, None) => match notice(&format!("{WATCH_FLAG}:{id}")) {
                 Some(notice) => carried(notice, false),
-                None if mode == "agentic" && live => "raised",
+                None if autonomous && live => "raised",
                 None => "waiting",
             },
         };
@@ -159,8 +156,6 @@ pub(crate) fn read(store: &Store, run: &StoredRun) -> Result<Vec<Value>> {
             flag["noted"] = json!(noted);
         }
         flag["state"] = json!(state);
-        // A flag that waits for the user is the user's to settle, whatever the chat's autonomy.
-        flag["mode"] = json!(if state == "waiting" { "copilot" } else { mode });
         match (settle.or(routed), &stopped) {
             (Some(choice), _) if settle.is_some() || stopped.is_none() => {
                 flag["choice"] = json!({

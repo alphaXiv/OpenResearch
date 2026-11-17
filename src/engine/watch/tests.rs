@@ -299,10 +299,6 @@ fn a_flag_falls_to_the_user_when_the_agent_it_woke_settles_nothing() {
     assert_eq!(state(), "agent_looking");
     store.conn_execute_for_tests("UPDATE chat_turns SET state = 'completed' WHERE id = 't1'");
     assert_eq!(state(), "waiting");
-    assert_eq!(
-        super::super::flags::read(&store, &row).unwrap()[0]["mode"],
-        "copilot"
-    );
 
     let again = json!({"id": "f2", "fingerprint": "stall:train:300", "source": "tripwire"});
     assert_eq!(

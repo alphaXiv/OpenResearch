@@ -5,7 +5,7 @@ import { autoDir, fmtNumber, ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
 import { runActive, runApiProvider, runConnectHost, runDisplay, runNotice, runStoppable, type RunNotice } from "../runDisplay";
 import { fillSentence, fmtMagnitude, fmtSignal, fmtUsd, plainSentence, tokensOf } from "./format";
-import type { Bindings, Flag, FlagMode, FlagState, RunMonitor, RunMonitorSummary, RunRule, ShownRun, SignalSpec, SignalValue, Signals, Versus, VersusBy } from "./types";
+import type { Bindings, Flag, FlagState, RunMonitor, RunMonitorSummary, RunRule, ShownRun, SignalSpec, SignalValue, Signals, Versus, VersusBy } from "./types";
 import { tickText } from "./journal";
 import { stagePosition } from "./stages";
 import { capitalized, captionProgress, clockText, costWords, durationText, estimateWords, progressWords } from "./words";
@@ -72,7 +72,7 @@ export interface RunModel {
   bar: { segments: { weight: number; fill: number | null }[]; whole: number | null; frozen: boolean; label: string };
   ticks: { id: string; at: number; flag: boolean; text: string }[];
   /** The unsettled flag as the newest source states it; `record` is its evidence and words, once a monitor has them. */
-  flag: { id: string; state: FlagState; mode: FlagMode; record: Flag | null } | null;
+  flag: { id: string; state: FlagState; record: Flag | null } | null;
   /** What the watcher found, in full, while the flag is unsettled; the strip says it in place of the sentence. */
   flagDetail: string | null;
   /** A Copilot flag waits on the user; the strip opens by itself. */
@@ -184,7 +184,7 @@ export const namedStages = (monitor: RunMonitor) => monitor.phases.length > 1 &&
 export function statedFlag(run: Run, fetched: RunMonitor | null): RunMonitorSummary["flag"] {
   if (!fetched || monitorBehind(run.monitor, fetched)) return run.monitor?.flag ?? null;
   const flag = fetched.flags?.find((flag) => flag.id === fetched.flagId);
-  return flag && unsettled(flag.state) ? { id: flag.id, state: flag.state, mode: flag.mode } : null;
+  return flag && unsettled(flag.state) ? { id: flag.id, state: flag.state } : null;
 }
 
 /** A run's tone from its newest source: the full monitor when it is that, else what every `Run` carries. */
@@ -267,8 +267,8 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
 
   const stated = statedFlag(run, fetched);
   // A flag's words and evidence never change, so a lagging monitor still supplies them for the same flag.
-  const flag = stated && { id: stated.id, state: stated.state, mode: stated.mode, record: fetched?.flags?.find((flag) => flag.id === stated.id) ?? null };
-  const needsChoice = flag?.state === "waiting" && flag.mode === "copilot";
+  const flag = stated && { id: stated.id, state: stated.state, record: fetched?.flags?.find((flag) => flag.id === stated.id) ?? null };
+  const needsChoice = flag?.state === "waiting";
   const looking = flag?.state === "waking" || flag?.state === "agent_looking" || flag?.state === "asking";
 
   const position = stagePosition(order, setup !== null);
@@ -481,7 +481,7 @@ export type SessionRunMark = "waiting" | "flagged" | "running" | null;
 export function sessionRunMark(runs: ShownRun[], sessionId: string): SessionRunMark {
   const own = runs.filter((item) => item.sessionId === sessionId);
   const flags = own.flatMap((item) => item.run.monitor?.flag ? [item.run.monitor.flag] : []);
-  if (flags.some((flag) => flag.mode === "copilot" && flag.state === "waiting")) return "waiting";
+  if (flags.some((flag) => flag.state === "waiting")) return "waiting";
   if (flags.length > 0) return "flagged";
   return own.some((item) => runActive(item.run.status)) ? "running" : null;
 }

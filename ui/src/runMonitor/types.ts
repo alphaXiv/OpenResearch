@@ -6,7 +6,6 @@ export type Point = [number, number | null];
 export type Bindings = Record<string, SignalValue | Versus>;
 
 export type FlagState = "raised" | "waking" | "agent_looking" | "waiting" | "asking";
-export type FlagMode = "agentic" | "copilot";
 
 /** How a run's signal compares with its parent's; `mag` is already rounded to the signal's digits. */
 export interface Versus {
@@ -151,8 +150,7 @@ export interface Flag {
   detail: string;
   evidence: Evidence | null;
   state: FlagState | "kept" | "stopped";
-  mode: FlagMode;
-  /** The choice that settled it, or the last that sent it to someone; absent from an older server. */
+  /** The choice that settled it, or the last that sent it to someone. */
   choice?: {
     /** Null when a stop came from an orx that kept no record of who asked. */
     by: "user" | "agent" | "rule" | null;
@@ -211,9 +209,9 @@ export interface RunMonitorSummary {
   /** When the run's time limit ends; lets a line count down to it without the full monitor. */
   limitEndsAt: number | null;
   /** The unsettled flag only. */
-  flag: { id: string; state: FlagState; mode: FlagMode } | null;
-  /** Present until a headline or chart signal has its first point; absent from an older server. */
-  setup?: Setup | null;
+  flag: { id: string; state: FlagState } | null;
+  /** Present until a headline or chart signal has its first point. */
+  setup: Setup | null;
   /** For a failed run that recorded no message, the line in its log that says why. */
   logError?: string | null;
   rev: number;

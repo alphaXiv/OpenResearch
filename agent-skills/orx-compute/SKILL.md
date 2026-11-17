@@ -21,8 +21,8 @@ orx exp cancel <expId> --reason '…'    # cancel the in-flight run, saying why
 A baseline reports its stages and measures and has a view before its first
 launch; children inherit them. How to write and change them: `orx-experiment-runs`.
 
-`orx exp status <expId>` shows a run's stage, estimate and measures; `--run
-<runId> --json` gives the stored checkpoint with its coverage and diagnostics.
+`orx exp status <expId>` shows a run's stage, estimate and measures.
+For scripts, see the status JSON fields in `orx-experiment-runs`.
 Signals are advisory: confirm trouble in the raw log before changing the
 experiment.
 

@@ -3346,13 +3346,7 @@ async fn a_flag_is_settled_once_by_whoever_chooses_first() {
     )
     .await
     .unwrap();
-    assert_eq!(
-        (
-            handed["flag"]["state"].as_str(),
-            handed["flag"]["mode"].as_str()
-        ),
-        (Some("waiting"), Some("copilot"))
-    );
+    assert_eq!(handed["flag"]["state"], "waiting");
     let kept = choose(
         "other",
         json!({"flagId": "f2", "choice": "keep", "requestId": "q2", "reason": "Warm-up noise."}),

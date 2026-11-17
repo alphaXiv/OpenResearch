@@ -157,26 +157,56 @@ impl LocalPlane {
             None => None,
         };
         if json {
-            let state = selected
-                .map(|row| -> Result<_> {
-                    let run = Run::from_store(store, row)?;
-                    Ok(serde_json::json!({
-                        "contact":run.contact,
-                        "cancelling":run.cancelling,
-                        "cancelUnconfirmed":run.cancel_unconfirmed,
-                        "displayStatus":run.display_status(),
-                    }))
+            use serde_json::{json, Value};
+
+            let monitor = monitor.as_ref().unwrap_or(&Value::Null);
+            if let Some(run) =
+                selected.filter(|_| monitor["availability"]["state"] == "unavailable")
+            {
+                let reason = monitor["availability"]["reason"]
+                    .as_str()
+                    .unwrap_or("The monitor is unavailable.");
+                return Err(anyhow!("Run {}: {reason}", run.id));
+            }
+            let progress = &monitor["progress"];
+            let stage =
+                monitor["phases"]
+                    .as_array()
+                    .and_then(|phases| match progress["phase"].as_u64() {
+                        Some(index) => phases.get(index as usize),
+                        None => phases.last(),
+                    });
+            let progress = progress.is_object().then(|| {
+                json!({
+                    "done": progress["done"],
+                    "of": stage.and_then(|stage| stage.get("of")),
+                    "unit": stage.and_then(|stage| stage.get("unit")),
+                    "whole": progress["whole"],
                 })
-                .transpose()?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "experiment":exp,
-                    "run":selected,
-                    "state":state,
-                    "monitor":monitor,
-                }))?
-            );
+            });
+            let estimate = &monitor["estimate"];
+            let estimate = estimate.is_object().then(|| json!({
+                "loMs": estimate["loMs"], "midMs": estimate["midMs"], "hiMs": estimate["hiMs"],
+                "at": estimate["at"], "pending": estimate["pending"], "floor": estimate["floor"],
+                "untimed": estimate["untimed"].as_array().map_or(&[][..], Vec::as_slice),
+            }));
+            let flags: Vec<_> = monitor["flags"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|flag| json!({"id": flag["id"], "state": flag["state"], "text": flag["text"]}))
+                .collect();
+            let status = json!({
+                "experimentId": exp.id,
+                "runId": selected.map(|run| &run.id),
+                "status": selected.map(|run| &run.status),
+                "stage": stage.and_then(|stage| stage["name"].as_str()).filter(|name| !name.is_empty()),
+                "progress": progress,
+                "latest": monitor["latest"].as_object().cloned().unwrap_or_default(),
+                "estimate": estimate,
+                "flags": flags,
+            });
+            println!("{}", serde_json::to_string_pretty(&status)?);
             return Ok(());
         }
         // The run's own line below says its state; an experiment's `agent_status` is never set.

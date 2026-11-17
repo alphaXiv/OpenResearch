@@ -267,6 +267,16 @@ beneath its chip and stays live while the run runs. Use `label="…"` to name
 the cited result. Reuse that figure instead of plotting the same data again.
 A run with no view or no data yet shows only its chip.
 
+For scripts, `orx exp status EXP --run RUN --json` returns `experimentId`,
+`runId`, `status`, the current `stage` name, `progress` (`done`, `of`, `unit`,
+`whole` as a fraction), `latest` signal values by name, `estimate`, and
+`flags` in raise order (`id`, `state`, `text`). The estimate has remaining
+milliseconds (`loMs`, `midMs`, `hiMs`), the Unix timestamp in milliseconds
+when it was measured (`at`), `pending`, `floor`, and `untimed` stage names.
+Unknown fields are null, latest values and flags are empty before data arrives.
+Use a flag's `id` with `orx exp flag RUN --flag ID`. A flag in `kept` or `stopped`
+state is settled.
+
 ## 8. Change it while it runs
 
 The user may ask mid-run to chart something else or to compare differently,

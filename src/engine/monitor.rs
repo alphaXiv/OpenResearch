@@ -1355,7 +1355,7 @@ fn evaluate(
         "signals": view["signals"],
         "estimate": summary_estimate,
         "limitEndsAt": life.ends_at(),
-        "flag": open.map(|flag| json!({"id": flag["id"], "state": flag["state"], "mode": flag["mode"]})),
+        "flag": open.map(|flag| json!({"id": flag["id"], "state": flag["state"]})),
 
         "setup": setup,
         "generation": generation,
@@ -6500,10 +6500,7 @@ mod tests {
         let (monitor, _) = monitor_at(&f, &run, T0 + 31_000);
         let summary = current(&f.store, &row).unwrap().unwrap().summary().clone();
         assert_eq!(summary["tone"], "flag");
-        assert_eq!(
-            summary["flag"],
-            json!({"id": "f1", "state": "waiting", "mode": "copilot"})
-        );
+        assert_eq!(summary["flag"], json!({"id": "f1", "state": "waiting"}));
         assert_eq!(monitor["flagId"], monitor["flags"][0]["id"]);
         assert_eq!(monitor["flags"][0]["state"], "waiting");
     }
@@ -7090,10 +7087,7 @@ mod tests {
             .summary()
             .clone();
         assert_eq!(summary["tone"], "flag");
-        assert_eq!(
-            summary["flag"],
-            json!({"id": id, "state": "raised", "mode": "agentic"})
-        );
+        assert_eq!(summary["flag"], json!({"id": id, "state": "raised"}));
     }
 
     #[test]

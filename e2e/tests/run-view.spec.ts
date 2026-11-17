@@ -122,6 +122,7 @@ for (let step = 1; step <= 20; step++) {
         `if orx exp view set ${experiment} --pattern ${dir}/empty-patterns.json --config ${dir}/null.json > ${dir}/combined-error.txt 2>&1; then exit 1; fi`,
         `if printf '<view><bad/></view>' | orx exp view set ${experiment} --stdin > ${dir}/stdin-error.txt 2>&1; then exit 1; fi`,
         `orx exp view get ${experiment} --json > ${dir}/after-invalid.json`,
+        `orx exp status ${experiment} --run ${run} --json > ${dir}/status.json`,
       ].join('\n') },
       { say: 'Checked invalid inputs.' },
     ])
@@ -134,6 +135,9 @@ for (let step = 1; step <= 20; step++) {
     }
     expect(readFileSync(path.join(dir, 'stdin-error.txt'), 'utf8')).toContain(`orx exp view set ${experiment} --stdin`)
     expect(readFileSync(path.join(dir, 'after-invalid.json'), 'utf8')).toBe(readFileSync(path.join(dir, 'before-invalid.json'), 'utf8'))
+    const status = JSON.parse(readFileSync(path.join(dir, 'status.json'), 'utf8'))
+    expect(status).toMatchObject({ experimentId: experiment, runId: run, status: 'running', stage: 'train', progress: { done: 10, of: 20 }, latest: { loss: 0.16 }, flags: [] })
+    expect(Object.keys(status).sort()).toEqual(['estimate', 'experimentId', 'flags', 'latest', 'progress', 'runId', 'stage', 'status'])
     agent.script('finished with status **done**', [{ say: 'Child finished.' }])
     await writeFile(path.join(dir, 'half'), 'go\n')
     await expect(page.getByText('Child finished.', { exact: true })).toBeVisible()

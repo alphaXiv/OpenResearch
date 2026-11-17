@@ -537,7 +537,7 @@ pub enum ExpCommand {
         /// Inspect a particular run belonging to this experiment.
         #[arg(long)]
         run: Option<String>,
-        /// Print stored experiment, run and signal checkpoint as JSON.
+        /// Print the run's stage, progress, signals, estimate and flags as JSON.
         #[arg(long)]
         json: bool,
     },
