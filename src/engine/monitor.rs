@@ -5281,7 +5281,6 @@ mod tests {
             run_id: id.into(),
             ..folded(&lines)
         });
-        f.confirmed(id, lines.last().unwrap().0);
         run
     }
 
@@ -6596,6 +6595,7 @@ mod tests {
             run_id: id.into(),
             ..folded(&lines)
         });
+        f.confirmed(id, lines.last().unwrap().0);
     }
 
     /// One pass of the rules over the run at `now`, as `orx up` makes each second.

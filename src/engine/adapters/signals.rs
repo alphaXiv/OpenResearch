@@ -520,13 +520,22 @@ fn collected(
     let recent = previous["lastCollectedAt"]
         .as_i64()
         .is_some_and(|at| (0..60_000).contains(&(now - at)));
-    if status == previous && recent && !changed && status["sample"]["checkpoint"] == checkpoint {
+    let sample_at = clock.map_or(now, |(_, laptop)| laptop);
+    let sample_due = accepted
+        && previous["sample"]["at"]
+            .as_i64()
+            .is_none_or(|at| sample_at.saturating_sub(at) >= 60_000);
+    if status == previous
+        && recent
+        && !changed
+        && !sample_due
+        && status["sample"]["checkpoint"] == checkpoint
+    {
         return Ok(());
     }
     status["lastCollectedAt"] = serde_json::json!(now);
     if accepted {
-        let at = clock.map_or(now, |(_, laptop)| laptop);
-        status["sample"] = serde_json::json!({"checkpoint": checkpoint, "at": at});
+        status["sample"] = serde_json::json!({"checkpoint": checkpoint, "at": sample_at});
     } else if let Some(status) = status.as_object_mut() {
         status.remove("sample");
     }
@@ -1753,7 +1762,7 @@ mod collection_tests {
             .0
             .lock()
             .unwrap()
-            .push_back(Ok((folded, after_outage)));
+            .push_back(Ok((folded.clone(), after_outage)));
         collect(data.path(), &answers, &run, false, delivered_at)
             .await
             .unwrap();
@@ -1763,6 +1772,9 @@ mod collection_tests {
             status["sample"]["at"], after_outage,
             "transfer took two minutes"
         );
+        ask(delivered_at + 1_000, Ok(folded)).await.unwrap();
+        let status = read_availability(data.path(), "r1").unwrap().unwrap();
+        assert_eq!(status["sample"]["at"], delivered_at + 1_000);
     }
 
     fn run_facts() -> crate::engine::estimate::Run {
