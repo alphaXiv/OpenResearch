@@ -4,10 +4,10 @@ description: "Make a run followable from launch to result: declare its stages, r
 ---
 
 Before launching, follow sections 1–6 in order; after launching, follow section 7.
-Children inherit the view, patterns, plan and rules, but changed arguments
-must still report their actual totals. After removing or adding commands in
-a child, update its reported stage plan to match before launch. Use sections
-8–10 only when changing a live view or handling rules and flags.
+Children inherit the run command, view, patterns, plan and rules. Keep the
+command fixed. When a child's code or configuration changes its workload,
+update its stage plan to match. Use sections 8–10 when changing a live view
+or handling rules and flags.
 
 Before sizing a child, read its parent's measured runtime:
 
@@ -61,14 +61,11 @@ When the user names a duration, run:
 orx exp run <expId> --estimate
 ```
 
-Resize up as well as down, then re-estimate until the total falls inside the
-user's range. Below the lower bound is as wrong as above the upper bound.
-Never state a total the estimate did not print; with untimed stages, say the
-floor and that the rest is unknown, or calibrate first.
-
-Before launching, say the estimated number and hardware assumption in one line. When any stage is untimed,
-tell the user the total is unknown or run a short calibration before promising
-a duration.
+Resize the workload in the child's code or configuration and update its
+stage plan. Re-estimate until the total falls inside the user's range.
+If the estimate says "at least," report the floor and calibrate the untimed
+stages before promising a duration. Before launching, give the estimate and
+its hardware assumption in one line.
 
 ## 3. Report progress and measures
 

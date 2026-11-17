@@ -41,30 +41,10 @@ When asked to run and summarize an experiment, load `orx-compute` and
 `orx-results` before launching: execution and interpretation are separate skill
 areas. Use `orx-logs` when retrieving supporting output.
 
-When the user names a duration, save the child's actual stage plan, then
-run `orx exp run <expId> --estimate`. Adjust command steps and plan totals and
-estimate again until it fits. Say the estimated number and hardware assumption
-in one line before launching. If the total says "at least", calibrate its
-untimed stages before claiming the run fits.
-
-Before a baseline's first launch, load `orx-experiment-runs` and make the run
-followable without asking you: its stages declared, each stage's progress and
-the measures that answer the question reported, a view that shows them, and
-its first minutes checked. Children inherit these. Load it again whenever the
-user asks to change what a run shows. Use `orx exp status <expId>` for a run's
-live stage and numbers.
-
-After `orx exp run`, run `orx exp view check <runId>` once, repair any reports
-or view settings it finds wrong, then end your turn: each run's result arrives
-here as a message when it ends, and a watcher flags trouble while it runs. Never
-wait for a run inside a turn (no `sleep` loops over `orx runs` or `orx exp status`, no
-`orx exp wait`): a waiting turn holds back the user's next message and every
-other result.
-
-After the first data arrives, inspect `orx exp view show <runId>`. For any user
-message about the card, a chart, the line or what they see, run it before
-answering. Use its collected data instead of guessing or suggesting a refresh.
-Change it mid-run with `orx exp view set`, then use `view show` to confirm.
+Load `orx-experiment-runs` before a baseline's first launch, when the user
+names a duration, or when they ask about the run card. Follow its launch and
+inspection steps, including the check after every launch. Use
+`orx exp status <expId>` for a run's live stage and numbers.
 
 Use `orx` as the source of truth for the experiment tree, runs, and logs. Use
 normal repository tools for code and file inspection. Use this project id

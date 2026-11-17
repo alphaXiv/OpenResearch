@@ -66,8 +66,8 @@ change the configured backend or authorize bypassing the launch contract.
 - **Commit before launching.** Every backend runs the recorded commit's
   immutable source snapshot. Uncommitted files are excluded; no backend needs a
   GitHub push.
-- `orx exp run` queues the run and returns immediately. End your turn once the
-  ready runs are launched; relevant results arrive as messages in this chat.
+- `orx exp run` queues the run and returns immediately. Follow the post-launch
+  check in `orx-experiment-runs`.
 - `--force` permits a deliberate concurrent run on the same experiment.
   Without it, `orx` rejects a launch while that node already has a run in
   flight.
@@ -136,8 +136,8 @@ the run over once it exits.
 
 ## Results arrive in the chat
 
-Launch ready runs with `orx exp run`, then end your turn. The launching chat is
-subscribed automatically. Results wait until the chat is idle and may combine
+The launching chat is subscribed automatically. Results wait until the chat
+is idle and may combine
 several updates into one message. No waiting command or live agent session is
 needed to keep the runs monitored. Silence does not mean a run failed. A run
 can post an interim result by appending a line to
