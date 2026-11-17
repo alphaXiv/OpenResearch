@@ -399,13 +399,14 @@ struct Seen {
     stage: Option<((String, usize), i64)>,
     /// Its comparisons with the parent in the current stage, by signal.
     compared: HashMap<String, trip::Compared>,
-    /// Patterns already checked in this log generation and stage.
-    patterns_checked: Option<(String, String, usize)>,
+    /// Patterns checked for this generation, view and stage readiness.
+    patterns_checked: Option<(String, String, Vec<bool>)>,
 }
 
 async fn instrumentation(seen: &mut Seen, run: &Now, now: i64) -> Result<Option<String>> {
     const NOTICE: &str = "instrumentation";
-    if run.run.status != "running" || run.body["availability"]["state"] != "live" {
+    let ended = super::Phase::parse(&run.run.status).is_some_and(super::Phase::is_terminal);
+    if !ended && (run.run.status != "running" || run.body["availability"]["state"] != "live") {
         return Ok(None);
     }
     // Step zero may be validation before the first training loss.
@@ -427,17 +428,18 @@ async fn instrumentation(seen: &mut Seen, run: &Now, now: i64) -> Result<Option<
         });
     let store = Store::open()?;
     let state = store.engine_run_state(&run.run.id)?;
-    if run.run.cancel_requested
-        || state
-            .as_ref()
-            .is_some_and(|state| state.cancel_accepted_at.is_some())
+    if !ended
+        && (run.run.cancel_requested
+            || state
+                .as_ref()
+                .is_some_and(|state| state.cancel_accepted_at.is_some()))
     {
         return Ok(None);
     }
     let started = state
         .and_then(|state| state.started_at)
         .unwrap_or(run.run.created_at);
-    if !data && now.saturating_sub(started) < 120_000 {
+    if !ended && !data && now.saturating_sub(started) < 120_000 {
         return Ok(None);
     }
     if store.last_notice_at(&run.run.id, NOTICE)?.is_some() {
@@ -482,10 +484,23 @@ async fn instrumentation(seen: &mut Seen, run: &Now, now: i64) -> Result<Option<
     {
         return Ok(None);
     }
+    let at = run.body["asOf"].as_i64().unwrap_or(now);
     let key = (
         hash,
-        run.body["generation"].to_string(),
-        snapshot.as_ref().map_or(0, |s| s.phases.len()),
+        format!("{}:{}", run.body["generation"], run.body["view"]),
+        std::iter::once(ended)
+            .chain(
+                run.body["phases"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|phase| {
+                        phase["startedAt"]
+                            .as_i64()
+                            .is_some_and(|start| at.saturating_sub(start) >= 120_000)
+                    }),
+            )
+            .collect(),
     );
     let replay = if !patterns.patterns.is_empty() && seen.patterns_checked.as_ref() != Some(&key) {
         let compiled = orx_signals::Patterns::compile(&patterns)
@@ -516,8 +531,13 @@ async fn instrumentation(seen: &mut Seen, run: &Now, now: i64) -> Result<Option<
     } else {
         None
     };
-    let problems =
-        super::view::instrumentation(&run.body, snapshot.as_deref(), &patterns, replay.as_ref());
+    let problems = super::view::instrumentation(
+        &run.body,
+        snapshot.as_deref(),
+        &patterns,
+        replay.as_ref(),
+        ended,
+    );
     if problems.is_empty() {
         if replay.is_some() {
             seen.patterns_checked = Some(key);
@@ -699,13 +719,11 @@ async fn pass(state: &mut State) -> Result<()> {
                 Ok((chat, Watching::Selected { label, .. })) => Some((chat, label)),
                 _ => None,
             };
-            // Tripwires watch every live run; a model watches the runs a chat can watch.
-            if watched.is_none() && !live {
-                continue;
-            }
-            if watched.is_some() && !live && store.run_watch_terminal_done(&run.id)? {
-                continue;
-            }
+            let watched = if !live && store.run_watch_terminal_done(&run.id)? {
+                None
+            } else {
+                watched
+            };
             let now_run = match Now::read(&store, &run) {
                 Ok(now_run) => now_run,
                 Err(error) => {
@@ -730,7 +748,6 @@ async fn pass(state: &mut State) -> Result<()> {
         (chats, unwatched, codex)
     };
     refresh_catalogs(codex).await;
-    // What a pass remembers of a run lasts while the run is still read: live, or its last look due.
     let read: HashSet<String> = owned
         .values()
         .flat_map(|owned| owned.runs.iter().map(|(run, _)| run.run.id.clone()))
@@ -744,17 +761,16 @@ async fn pass(state: &mut State) -> Result<()> {
         .into_iter()
         .collect();
     // Each run is read on its own, so one slow machine holds up no other run's reads.
-    let live: Vec<&Now> = unwatched
+    let runs: Vec<&Now> = unwatched
         .iter()
         .chain(
             owned
                 .values()
                 .flat_map(|owned| owned.runs.iter().map(|(run, _)| run)),
         )
-        .filter(|run| run.live())
         .collect();
     let mut reads = Vec::new();
-    for run in live {
+    for run in runs {
         let mut seen = state.runs.remove(&run.run.id).unwrap_or_default();
         reads.push(async move {
             scan(&mut seen, run).await;

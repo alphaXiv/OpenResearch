@@ -1536,6 +1536,79 @@ async fn instrumentation_waits_for_data_or_two_minutes_and_ignores_queued_runs()
 }
 
 #[tokio::test]
+async fn instrumentation_rechecks_a_deferred_pattern_when_its_stage_matures_or_run_ends() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let store = Store::open().unwrap();
+    for ended in [false, true] {
+        let id = if ended {
+            "pattern-ended"
+        } else {
+            "pattern-mature"
+        };
+        chat(&store, id, "claude-code");
+        let log = concat!(
+            "::orx:: {\"phase\":\"train\",\"step\":1,\"of\":10,\"m\":{\"loss\":2}}\n",
+            "::orx:: {\"step\":2,\"m\":{\"loss\":1}}\n",
+            "::orx:: {\"phase\":\"summary\",\"step\":0,\"of\":1}\n"
+        );
+        let mut row = run(&store, id, "Pattern", id, log);
+        let raw = store.run_monitor_json(&row.experiment_id).unwrap();
+        let patterns = json!([{ "regex": "^summary (?P<score>\\d+)$" }]);
+        super::super::view::set(&store, &row.experiment_id, &super::super::view::etag(raw.as_deref()),
+            Some("<view headline=\"loss\"><chart y=\"loss\" phase=\"train\"/><chart y=\"score\" phase=\"summary\"/></view>"), Some(&patterns), None,
+            &super::super::view::Source { file: None, patterns: None, config: None }).unwrap();
+        let config = super::super::view::stored_patterns(
+            &row.experiment_id,
+            store
+                .run_monitor_json(&row.experiment_id)
+                .unwrap()
+                .as_deref(),
+        )
+        .unwrap();
+        let now = crate::store::now_ms();
+        let mut snapshot = orx_signals::Snapshot::new(id, "1-7", "g1");
+        snapshot.configure(Some(std::sync::Arc::new(
+            orx_signals::Patterns::compile(&config).unwrap(),
+        )));
+        snapshot.feed(log.as_bytes(), true, now, true).unwrap();
+        let path = store
+            .data_dir()
+            .join("run-signals")
+            .join(format!("{id}.json"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        crate::engine::adapters::signals::publish(&path, &snapshot).unwrap();
+        let mut current = Now::read(&store, &row).unwrap();
+        let mut seen = Seen::default();
+        assert!(instrumentation(&mut seen, &current, now)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(seen.patterns_checked.is_some());
+        let later = if ended { now + 1000 } else { now + 120_000 };
+        if ended {
+            row.status = "cancelled".into();
+            row.cancel_requested = true;
+            store.upsert_run(&row).unwrap();
+            current = Now::read(&store, &row).unwrap();
+        }
+        current.body["asOf"] = json!(later);
+        assert_eq!(
+            instrumentation(&mut seen, &current, later)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(id)
+        );
+        let notice = store.run_notice_batch(id).unwrap();
+        assert!(notice
+            .iter()
+            .any(|notice| notice.run_id == id && notice.body.contains("Pattern 1")));
+    }
+}
+
+#[tokio::test]
 async fn instrumentation_waits_for_a_view_changed_during_the_pass() {
     if !crate::config::in_test_child(&[]) {
         return;

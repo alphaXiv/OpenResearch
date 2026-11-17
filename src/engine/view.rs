@@ -2141,28 +2141,12 @@ pub(crate) fn instrumentation(
     snapshot: Option<&orx_signals::Snapshot>,
     patterns: &orx_signals::Config,
     replay: Option<&orx_signals::Snapshot>,
+    ended: bool,
 ) -> Vec<String> {
     let mut problems = Vec::new();
     let seen = snapshot.map(Seen::of).unwrap_or_default();
     let phases = snapshot.map_or(&[][..], |s| s.phases.as_slice());
     let started = |name: &str| phases.iter().any(|phase| phase.name == name);
-    if let Some(replay) = replay {
-        // A live writer can advance beyond the fold whose view is being checked.
-        let complete = replay.coverage.complete
-            || (snapshot.is_some_and(|known| replay.cursor.offset >= known.cursor.offset)
-                && replay
-                    .coverage
-                    .reasons
-                    .iter()
-                    .all(|reason| reason == "check_limit"));
-        if let Some(tally) = replay.tally.as_ref().filter(|_| complete) {
-            for (index, (pattern, hit)) in patterns.patterns.iter().zip(&tally.hits).enumerate() {
-                if hit.matched == 0 && pattern.phase.as_deref().is_none_or(started) {
-                    problems.push(format!("Pattern {} matched no lines in the checked log. Correct its regex or phase with `orx exp view set EXP --pattern PATH`.", index + 1));
-                }
-            }
-        }
-    }
     let view = &monitor["view"];
     let ready = |phase: Option<&str>| {
         let Some(now) = monitor["asOf"].as_i64() else {
@@ -2185,6 +2169,75 @@ pub(crate) fn instrumentation(
             .next_back()
             .is_some_and(|start| now.saturating_sub(start) >= 120_000)
     };
+    if let Some(replay) = replay {
+        // A live writer can advance beyond the fold whose view is being checked.
+        let complete = replay.coverage.complete
+            || (snapshot.is_some_and(|known| replay.cursor.offset >= known.cursor.offset)
+                && replay
+                    .coverage
+                    .reasons
+                    .iter()
+                    .all(|reason| reason == "check_limit"));
+        if let Some(tally) = replay.tally.as_ref().filter(|_| complete) {
+            for (index, (pattern, hit)) in patterns.patterns.iter().zip(&tally.hits).enumerate() {
+                let regex = regex::Regex::new(&pattern.regex).expect("stored patterns are checked");
+                let captures: Vec<_> = regex.capture_names().flatten().collect();
+                let mut required = Vec::new();
+                if let Some(phase) = pattern.phase.as_deref() {
+                    required.push(phase);
+                } else {
+                    for block in view["blocks"].as_array().into_iter().flatten() {
+                        let used = block["chart"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .chain(block["stats"].as_array().into_iter().flatten())
+                            .filter_map(Value::as_str)
+                            .chain(
+                                block["series"]
+                                    .as_array()
+                                    .into_iter()
+                                    .flatten()
+                                    .filter_map(|series| series["y"].as_str()),
+                            );
+                        if pattern
+                            .row
+                            .as_deref()
+                            .is_some_and(|row| block["from"] == row || block["table"] == row)
+                            || used.into_iter().any(|name| captures.contains(&name))
+                        {
+                            if let Some(phase) = block["phase"].as_str() {
+                                required.push(phase);
+                            }
+                        }
+                    }
+                    if required.is_empty() {
+                        if let Some(phase) = monitor["phases"]
+                            .as_array()
+                            .and_then(|phases| phases.last())
+                            .and_then(|stage| stage["name"].as_str())
+                        {
+                            required.push(phase);
+                        }
+                    }
+                }
+                let due = ended
+                    || if required.is_empty() {
+                        ready(None)
+                    } else {
+                        required
+                            .into_iter()
+                            .any(|phase| started(phase) && ready(Some(phase)))
+                    };
+                if hit.matched == 0 && due {
+                    problems.push(format!("Pattern {} matched no lines in the checked log. Correct its regex or phase with `orx exp view set EXP --pattern PATH`.", index + 1));
+                }
+            }
+        }
+    }
+    if ended {
+        return problems;
+    }
     let headline: Vec<&str> = view["headline"]
         .as_array()
         .into_iter()
@@ -2574,31 +2627,79 @@ mod tests {
         let view = compile(r#"<signal name="loss"/><signal name="val_bpb"/><view headline="val_bpb"><chart y="val_bpb" phase="train"/></view>"#).unwrap().tree;
         let mut monitor =
             json!({"view":view,"asOf":1000,"phases":[{"name":"train","of":10,"startedAt":1000}]});
-        assert!(instrumentation(&monitor, Some(&snapshot), &config, None).is_empty());
+        assert!(instrumentation(&monitor, Some(&snapshot), &config, None, false).is_empty());
         monitor["asOf"] = json!(121000);
-        let problems = instrumentation(&monitor, Some(&snapshot), &config, None);
+        let problems = instrumentation(&monitor, Some(&snapshot), &config, None, false);
         assert!(problems.iter().any(|p| p.contains("val_bpb")));
         monitor["phases"]
             .as_array_mut()
             .unwrap()
             .push(json!({"name":"train","of":10,"startedAt":121000}));
-        assert!(instrumentation(&monitor, Some(&snapshot), &config, None).is_empty());
+        assert!(instrumentation(&monitor, Some(&snapshot), &config, None, false).is_empty());
         monitor["phases"].as_array_mut().unwrap().truncate(1);
         monitor["view"]["blocks"][0]
             .as_object_mut()
             .unwrap()
             .remove("phase");
         monitor["asOf"] = json!(120999);
-        assert!(instrumentation(&monitor, Some(&snapshot), &config, None).is_empty());
+        assert!(instrumentation(&monitor, Some(&snapshot), &config, None, false).is_empty());
         monitor["asOf"] = json!(121000);
-        assert!(!instrumentation(&monitor, Some(&snapshot), &config, None).is_empty());
+        assert!(!instrumentation(&monitor, Some(&snapshot), &config, None, false).is_empty());
         let setup = check_snapshot(
             "::orx:: {\"phase\":\"download\",\"step\":1,\"of\":9}\n",
             &config,
         );
         monitor["phases"] = json!([{"name":"download","of":9,"startedAt":0}]);
         monitor["asOf"] = json!(600000);
-        assert!(instrumentation(&monitor, Some(&setup), &config, None).is_empty());
+        assert!(instrumentation(&monitor, Some(&setup), &config, None, false).is_empty());
+    }
+
+    #[test]
+    fn instrumentation_waits_for_patterns_view_phase_and_stage_grace() {
+        let config: orx_signals::Config = serde_json::from_value(json!({"patterns":[
+            {"regex":"^summary (?P<accuracy>\\d+)$","row":"summary"}
+        ]}))
+        .unwrap();
+        for markup in [
+            r#"<view headline="loss"><chart y="loss" phase="train"/><chart y="accuracy" phase="summary"/></view>"#,
+            r#"<view headline="loss"><chart y="loss" phase="train"/><table name="summary" columns="accuracy" phase="summary"/></view>"#,
+        ] {
+            let mut snapshot = check_snapshot(
+                "::orx:: {\"phase\":\"train\",\"step\":1,\"of\":10,\"m\":{\"loss\":2}}\n",
+                &config,
+            );
+            let view = compile(markup).unwrap().tree;
+            let mut monitor = json!({"view":view,"asOf":600000,"phases":[{"name":"train","startedAt":1000,"of":10},{"name":"summary"},{"name":"export"}]});
+            assert!(
+                instrumentation(&monitor, Some(&snapshot), &config, Some(&snapshot), false)
+                    .is_empty()
+            );
+            snapshot = check_snapshot(
+                concat!(
+                    "::orx:: {\"phase\":\"train\",\"step\":1,\"of\":10,\"m\":{\"loss\":2}}\n",
+                    "::orx:: {\"phase\":\"summary\",\"step\":0,\"of\":1}\n"
+                ),
+                &config,
+            );
+            monitor["phases"][1]["startedAt"] = json!(599000);
+            assert!(
+                instrumentation(&monitor, Some(&snapshot), &config, Some(&snapshot), false)
+                    .is_empty()
+            );
+            monitor["asOf"] = json!(719000);
+            assert!(
+                instrumentation(&monitor, Some(&snapshot), &config, Some(&snapshot), false)
+                    .iter()
+                    .any(|p| p.contains("Pattern 1"))
+            );
+            monitor["asOf"] = json!(600000);
+
+            assert!(
+                instrumentation(&monitor, Some(&snapshot), &config, Some(&snapshot), true)
+                    .iter()
+                    .any(|p| p.contains("Pattern 1"))
+            );
+        }
     }
 
     #[test]
@@ -2615,7 +2716,7 @@ mod tests {
         let view = compile(r#"<signal name="accuracy"/><signal name="missing"/><view headline="accuracy"><chart y="missing"/></view>"#).unwrap().tree;
         let monitor =
             json!({"view":view,"asOf":121000,"phases":[{"name":"train","startedAt":1000}]});
-        let problems = instrumentation(&monitor, Some(&snapshot), &config, Some(&snapshot));
+        let problems = instrumentation(&monitor, Some(&snapshot), &config, Some(&snapshot), false);
         assert_eq!(problems.len(), 4, "{problems:?}");
         assert!(problems.iter().any(|p| p.contains("--pattern PATH")));
         assert!(problems
@@ -2642,7 +2743,9 @@ mod tests {
         );
         let view = compile(r#"<signal name="accuracy"/><signal name="loss"/><view headline="accuracy loss"><chart y="loss" phase="train"/><chart y="accuracy" phase="eval"/></view>"#).unwrap().tree;
         let monitor = json!({"view":view,"asOf":121000,"phases":[{"name":"train","startedAt":1000,"of":10},{"name":"eval","startedAt":1000,"of":5}]});
-        assert!(instrumentation(&monitor, Some(&snapshot), &config, Some(&snapshot)).is_empty());
+        assert!(
+            instrumentation(&monitor, Some(&snapshot), &config, Some(&snapshot), false).is_empty()
+        );
     }
 
     #[tokio::test]
@@ -2674,12 +2777,18 @@ mod tests {
         assert_eq!(snapshot.tally.as_ref().unwrap().hits[0].matched, 1);
         let view = compile(r#"<view headline="loss"><chart y="loss" phase="train"/><chart y="accuracy" phase="eval"/></view>"#).unwrap().tree;
         let monitor = json!({"view":view,"asOf":121000,"phases":[{"name":"train","startedAt":1000},{"name":"eval","startedAt":1000}]});
-        let problems = instrumentation(&monitor, Some(&snapshot), &config, Some(&replay));
+        let problems = instrumentation(&monitor, Some(&snapshot), &config, Some(&replay), false);
         assert!(problems.is_empty(), "{problems:?}");
 
         let mut missing_total = snapshot.clone();
         missing_total.phases.last_mut().unwrap().of = None;
-        let problems = instrumentation(&monitor, Some(&missing_total), &config, Some(&replay));
+        let problems = instrumentation(
+            &monitor,
+            Some(&missing_total),
+            &config,
+            Some(&replay),
+            false,
+        );
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(problems[0].contains("eval") && problems[0].contains("total="));
     }
@@ -2693,7 +2802,7 @@ mod tests {
             compile(r#"<view headline="accuracy"><chart y="accuracy"/><chart from="scores" x="item" y="accuracy"/></view>"#).unwrap().tree,
         ] {
             let monitor = json!({"view":view,"asOf":121000,"phases":[{"name":"eval","startedAt":1000}]});
-            assert!(instrumentation(&monitor, Some(&snapshot), &config, None).is_empty());
+            assert!(instrumentation(&monitor, Some(&snapshot), &config, None, false).is_empty());
         }
     }
 
@@ -2709,7 +2818,7 @@ mod tests {
             .unwrap()
             .tree;
         let monitor = json!({"view":view,"asOf":121000,"phases":[{"name":"train","startedAt":1000,"of":10},{"name":"eval","startedAt":1000,"of":1},{"name":"train","startedAt":1000}]});
-        let problems = instrumentation(&monitor, Some(&snapshot), &config, None);
+        let problems = instrumentation(&monitor, Some(&snapshot), &config, None, false);
         assert_eq!(problems.len(), 2, "{problems:?}");
         assert!(problems.iter().any(|p| p.contains("scores.accuracy")));
         assert!(problems.iter().any(|p| p.contains("scores.arm")));
@@ -2723,9 +2832,9 @@ mod tests {
         let config = orx_signals::Config::default();
         let snapshot = check_snapshot("::orx:: {\"plan\":[{\"phase\":\"train\",\"of\":5}],\"phase\":\"train\",\"step\":1,\"m\":{\"loss\":2}}\n", &config);
         let monitor = json!({"view":compile("<view><chart y=\"loss\"/></view>").unwrap().tree,"asOf":121000,"phases":[{"name":"train","startedAt":1000,"of":10}]});
-        assert!(instrumentation(&monitor, Some(&snapshot), &config, None).is_empty());
+        assert!(instrumentation(&monitor, Some(&snapshot), &config, None, false).is_empty());
         let snapshot = check_snapshot("::orx:: {\"plan\":[{\"phase\":\"train\"}],\"phase\":\"train\",\"step\":1,\"m\":{\"loss\":2}}\n", &config);
-        let problems = instrumentation(&monitor, Some(&snapshot), &config, None);
+        let problems = instrumentation(&monitor, Some(&snapshot), &config, None, false);
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(problems[0].contains("total="));
     }
