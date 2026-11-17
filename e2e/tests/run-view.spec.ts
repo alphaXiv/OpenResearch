@@ -9,7 +9,7 @@ const expect = baseExpect.configure({ timeout: 30_000 })
 
 const VIEW = `<signal name="loss" label="Training loss" digits="3" better="lower" />
 <view headline="loss">
-  <chart y="loss" ghost="parent" />
+  <chart y="loss" ghost="parent" phase="train" />
 </view>
 `
 

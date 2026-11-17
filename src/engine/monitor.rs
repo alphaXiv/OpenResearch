@@ -297,7 +297,7 @@ impl Lifecycle {
 }
 
 /// The parent experiment's run a run is compared with: its latest that finished with signals,
-/// else its newest with signals. Whether a run has signals is what its last summary bound.
+/// else its newest with signals, including a checkpoint not yet projected into a summary.
 fn parent_run(store: &Store, experiment: &str) -> Result<Option<StoredRun>> {
     let mut newest = None;
     for run in store
@@ -305,14 +305,15 @@ fn parent_run(store: &Store, experiment: &str) -> Result<Option<StoredRun>> {
         .into_iter()
         .take(32)
     {
-        let bound = store
+        let published = store
             .run_monitor_state(&run.id)?
-            .and_then(|state| Published::read(&state["published"]))
-            .is_some_and(|p| {
-                p.summary["bindings"]
-                    .as_object()
-                    .is_some_and(|b| b.values().any(|v| !v.is_null()))
-            });
+            .and_then(|state| Published::read(&state["published"]));
+        let bound = match published {
+            Some(p) => p.summary["bindings"]
+                .as_object()
+                .is_some_and(|b| b.values().any(|v| !v.is_null())),
+            None => checkpoint(store, &run.id)?.is_some_and(|s| s.has_signals()),
+        };
         if !bound {
             continue;
         }
@@ -590,7 +591,9 @@ pub(super) fn series_stage(run: &Snapshot, name: &str) -> Option<(String, usize)
 /// Whether the parent's series `name` is of the same stage as the run's, so their steps can be
 /// compared: the fold restarts a series at each stage, so a finished parent holds its last.
 pub(super) fn same_stage(run: &Snapshot, parent: &Snapshot, name: &str) -> bool {
-    series_stage(run, name) == series_stage(parent, name)
+    series_stage(run, name)
+        .zip(series_stage(parent, name))
+        .is_none_or(|(mine, theirs)| mine.0.is_empty() || theirs.0.is_empty() || mine == theirs)
 }
 
 pub(super) fn parent_at(points: &[orx_signals::Point], x: f64) -> Option<f64> {
@@ -969,7 +972,16 @@ fn evaluate(
                 .collect()
         })
     };
-    let (view, view_from, view_problem) = view_of(life, snapshot);
+    let (mut view, view_from, view_problem) = view_of(life, snapshot);
+    if !snapshot.is_some_and(|s| s.phases.iter().any(|p| !p.name.is_empty())) {
+        if let Some(blocks) = view["blocks"].as_array_mut() {
+            for block in blocks {
+                if let Some(block) = block.as_object_mut() {
+                    block.remove("phase");
+                }
+            }
+        }
+    }
     let parent_ended = life
         .parent
         .as_ref()
@@ -1023,13 +1035,8 @@ fn evaluate(
             .collect();
         // On the step axis a line is one stage's: the parent's goes under the child's of the same
         // stage, and under any while either has none to say.
-        let shown = |name: &str| {
-            x_name != "step"
-                || snapshot
-                    .and_then(|s| series_stage(s, name))
-                    .zip(series_stage(parent, name))
-                    .is_none_or(|(mine, theirs)| mine == theirs)
-        };
+        let shown =
+            |name: &str| x_name != "step" || snapshot.is_none_or(|s| same_stage(s, parent, name));
         let series: serde_json::Map<String, Value> = parent
             .series
             .iter()
@@ -6636,6 +6643,57 @@ mod tests {
             "with no plan a run shows as it did"
         );
         assert_eq!(monitor["progress"]["segments"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_child_finds_an_unpublished_parent_curve() {
+        let f = Fixture::new("orx-monitor-unpublished-parent");
+        f.view("exp", VIEW);
+        f.run_in("p1", "exp", "done", local());
+        let mut parent = Snapshot::new("p1", "1-1", "g1");
+        fold(&mut parent, &[(T0, "::orx:: {\"phase\":\"train\"}".into())]);
+        fold(&mut parent, &declared(0..=20, 400));
+        f.signals(&parent);
+        f.child("child", "exp");
+        let child = loss_run(&f, "c1", "child", "running", 10, 1.0);
+        let (monitor, _) = monitor_at(&f, &child, T0 + 10_500);
+        assert_eq!(monitor["parent"]["runId"], "p1");
+        assert!(
+            monitor["parent"]["series"]["loss"]
+                .as_array()
+                .unwrap()
+                .len()
+                > 1
+        );
+
+        let mut child_signals = Snapshot::new("c1", "1-1", "g2");
+        fold(
+            &mut child_signals,
+            &[(T0, "::orx:: {\"phase\":\"eval\"}".into())],
+        );
+        fold(&mut child_signals, &declared(0..=2, 100));
+        f.signals(&child_signals);
+        let (monitor, _) = monitor_at(&f, &child, T0 + 12_500);
+        assert!(monitor["parent"]["series"].as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn phase_gates_wait_for_a_named_phase() {
+        let f = Fixture::new("orx-monitor-unknown-phase");
+        f.view("exp", "<view><chart y=\"loss\" phase=\"train\" /></view>");
+        let run = f.run("running", local());
+        let mut snapshot = folded(&declared(0..=2, 100));
+        f.signals(&snapshot);
+        let (monitor, _) = monitor_at(&f, &run, T0 + 2_500);
+        assert!(monitor["view"]["blocks"][0].get("phase").is_none());
+
+        fold(
+            &mut snapshot,
+            &[(T0 + 3_000, "::orx:: {\"phase\":\"eval\"}".into())],
+        );
+        f.signals(&snapshot);
+        let (monitor, _) = monitor_at(&f, &run, T0 + 3_500);
+        assert_eq!(monitor["view"]["blocks"][0]["phase"], "train");
     }
 
     #[test]
