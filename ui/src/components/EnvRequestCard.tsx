@@ -1,4 +1,4 @@
-import { useContext, useId, useState } from "react";
+import { useContext, useEffect, useId, useState } from "react";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { Menu } from "@base-ui/react/menu";
 import { useQuery } from "@tanstack/react-query";
@@ -17,16 +17,6 @@ const SCOPE_LABELS = {
   project: { inline: m.chat_env_this_project, menu: m.chat_env_save_to_project },
   global: { inline: m.chat_env_all_projects, menu: m.chat_env_save_for_all_projects },
 };
-
-/** Whether `value` fails the agent's pattern. A pattern this browser can't compile never warns. */
-function mismatches(pattern: string | undefined, value: string): boolean {
-  if (!pattern || !value) return false;
-  try {
-    return !new RegExp(pattern).test(value);
-  } catch {
-    return false;
-  }
-}
 
 /** The card an agent's `request_env` call shows: one field per variable, saved straight to the environment. */
 export function EnvRequestCard({
@@ -61,17 +51,50 @@ function EnvRequestForm({
   const headingId = useId();
 
   const [values, setValues] = useState<Record<string, string>>({});
+  const [validation, setValidation] = useState<{ values: typeof values; variables: EnvRequestVar[]; mismatches: string[] }>();
   const [selectedScope, setScope] = useState<EnvScope>("project");
   const [menuOpen, setMenuOpen] = useState(false);
+
+  useEffect(() => {
+    if (done) return;
+    const fields = variables.flatMap(({ name, pattern }) => {
+      const value = values[name]?.trim();
+      return pattern && value ? [{ name, pattern, value }] : [];
+    });
+    if (!fields.length) return;
+
+    let worker: Worker;
+    try {
+      worker = new Worker(new URL("../envPattern.worker.ts", import.meta.url), { type: "module" });
+    } catch {
+      return;
+    }
+    const timeout = window.setTimeout(() => stop(), 1000);
+    function stop() {
+      window.clearTimeout(timeout);
+      worker.onmessage = null;
+      worker.onerror = null;
+      worker.terminate();
+    }
+    worker.onmessage = ({ data }: MessageEvent<string[]>) => {
+      setValidation({ values, variables, mismatches: data });
+      stop();
+    };
+    worker.onerror = stop;
+    worker.postMessage(fields);
+    return stop;
+  }, [done, values, variables]);
+
   const scope = projectId ? selectedScope : "global";
   const scopeLabel = SCOPE_LABELS[scope].inline();
   const [beforeScope, afterScope] = m.chat_env_footer({ scope: "\0" }).split("\0");
   const savedVars = scope === "project" ? saved?.projectVars : saved?.vars;
+  const mismatches = validation?.values === values && validation.variables === variables ? validation.mismatches : [];
   const answers: EnvAnswer[] = variables
     .filter((variable) => values[variable.name]?.trim())
     .map((variable) => {
       const value = values[variable.name].trim();
-      return { name: variable.name, value, scope, mismatched: mismatches(variable.pattern, value) };
+      return { name: variable.name, value, scope, mismatched: mismatches.includes(variable.name) };
     });
 
   const save = () => { if (answers.length) void respond({ approve: true, env: answers }); };
@@ -95,7 +118,7 @@ function EnvRequestForm({
           const warningId = `${headingId}-${index}-warning`;
           const current = savedVars?.find((entry) => entry.key === variable.name);
           const value = values[variable.name] ?? "";
-          const mismatched = mismatches(variable.pattern, value.trim());
+          const mismatched = mismatches.includes(variable.name);
           return (
             <div key={variable.name} className="flex flex-col gap-1.5">
               <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">

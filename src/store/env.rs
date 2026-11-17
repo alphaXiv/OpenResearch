@@ -179,8 +179,24 @@ mod tests {
             .set_project_env(&run.project_id, &key, "project")
             .unwrap();
 
-        let env = crate::config::run_env(&run.id);
+        let env = crate::config::saved_run_env(&run).unwrap();
         assert_eq!(env[&key], "project");
         assert_eq!(env[&other], "global");
+    }
+
+    #[test]
+    fn an_unreadable_project_store_stops_run_environment_resolution() {
+        if !crate::config::in_test_child(&["ORX_DATA_DIR"]) {
+            return;
+        }
+        crate::config::write_synced_env_var("ORX_TEST_RUN_ENV", "global").unwrap();
+        let file = crate::config::test_home().join("not-a-directory");
+        std::fs::write(&file, "").unwrap();
+        std::env::set_var("ORX_DATA_DIR", file.join("data"));
+        let run = super::super::tests::run_fixture("run_unreadable_env", "running", None);
+
+        let error = crate::config::launch_env(&run).unwrap_err();
+        assert!(error.to_string().contains(&run.id), "{error:#}");
+        assert!(error.to_string().contains(&run.project_id), "{error:#}");
     }
 }

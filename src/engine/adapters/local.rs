@@ -182,7 +182,7 @@ impl Local {
                     }
                 }
             };
-            let mut env = crate::config::launch_env(&intent.run.id);
+            let mut env = crate::config::launch_env(&intent.run)?;
             env.insert(
                 crate::compute::TENSORBOARD_LOGDIR.into(),
                 dir.join("tensorboard").to_string_lossy().into_owned(),

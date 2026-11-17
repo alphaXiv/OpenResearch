@@ -34,7 +34,21 @@ async function waiting(card, saved = { vars: [], projectVars: [] }) {
 
 const click = (element) => act(async () => element.click());
 
-test("an env card saves to this project by default and warns on a mismatch without blocking", async () => {
+test("an env card saves to this project by default and warns on a mismatch without blocking", async (t) => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, "Worker");
+  let reportValidation;
+  Object.defineProperty(globalThis, "Worker", {
+    configurable: true,
+    value: class {
+      postMessage() { reportValidation = (names) => this.onmessage?.({ data: names }); }
+      terminate() {}
+    },
+  });
+  t.after(() => {
+    if (original) Object.defineProperty(globalThis, "Worker", original);
+    else delete globalThis.Worker;
+  });
+
   const view = await waiting(request([
     { name: "WANDB_API_KEY", description: "From wandb.ai/authorize", secret: true, pattern: "^[0-9a-f]{40}$", example: "40 hex characters" },
     { name: "WANDB_PROJECT", secret: false },
@@ -47,7 +61,11 @@ test("an env card saves to this project by default and warns on a mismatch witho
   assert.equal(view.button(m.common_save()).disabled, true);
 
   await type(view.field("WANDB_API_KEY"), "not-hex");
-  assert.ok(view.form().textContent.includes(m.chat_env_mismatch_example({ example: ltr("40 hex characters") })));
+  assert.equal(view.button(m.common_save()).disabled, false);
+  const warning = m.chat_env_mismatch_example({ example: ltr("40 hex characters") });
+  assert.ok(!view.form().textContent.includes(warning));
+  await act(async () => reportValidation(["WANDB_API_KEY"]));
+  assert.ok(view.form().textContent.includes(warning));
   assert.equal(view.button(m.common_save()).disabled, false);
 
   const scope = m.chat_env_this_project();

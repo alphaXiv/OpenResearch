@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
-use crate::error::Result;
+use crate::error::{Context, Result};
 
 /// Base URL of the API. Defaults to prod (`https://api.openresearch.sh`), so a
 /// plain `orx login` just works. Override per-invocation with `--api-url` (handled
@@ -738,46 +738,34 @@ pub fn list_synced_env() -> Vec<(String, String)> {
 /// Names the run inside its job, e.g. as a metric tracker's run name.
 pub const RUN_ID_ENV: &str = "ORX_RUN_ID";
 
-/// A run's environment: [`saved_run_env`] plus what the run knows about itself.
-pub fn run_env(run_id: &str) -> std::collections::HashMap<String, String> {
-    let mut env = saved_run_env(run_id);
-    env.extend(run_context_env(run_id));
-    env
-}
-
 /// The saved variables a run gets: the synced env file, with its project's own over it.
-pub fn saved_run_env(run_id: &str) -> std::collections::HashMap<String, String> {
-    let mut env: std::collections::HashMap<String, String> =
-        list_synced_env().into_iter().collect();
-    match run_project_env(run_id) {
-        Ok(vars) => env.extend(vars),
-        Err(error) => {
-            eprintln!("warning: could not read run {run_id}'s project variables: {error:#}")
-        }
-    }
-    env
+pub fn saved_run_env(
+    run: &crate::store::StoredRun,
+) -> Result<std::collections::HashMap<String, String>> {
+    let project_vars = crate::store::Store::open()
+        .and_then(|store| store.project_env(&run.project_id))
+        .with_context(|| {
+            format!(
+                "Couldn't read project {}'s environment for run {}.",
+                run.project_id, run.id
+            )
+        })?;
+    let mut env: std::collections::HashMap<_, _> = list_synced_env().into_iter().collect();
+    env.extend(project_vars.into_iter().map(|var| (var.key, var.value)));
+    Ok(env)
 }
 
-fn run_project_env(run_id: &str) -> Result<Vec<(String, String)>> {
-    let store = crate::store::Store::open()?;
-    let Some(run) = store.get_run(run_id)? else {
-        return Ok(Vec::new());
-    };
-    Ok(store
-        .project_env(&run.project_id)?
-        .into_iter()
-        .map(|var| (var.key, var.value))
-        .collect())
-}
-
-/// What a launched job sees: [`run_env`] plus a configured Hugging Face token. Resolved at
+/// What a launched job sees: saved variables, run context and a configured Hugging Face token. Resolved at
 /// launch, so secrets never enter a stored launch intent.
-pub fn launch_env(run_id: &str) -> std::collections::HashMap<String, String> {
-    let mut env = run_env(run_id);
+pub fn launch_env(
+    run: &crate::store::StoredRun,
+) -> Result<std::collections::HashMap<String, String>> {
+    let mut env = saved_run_env(run)?;
+    env.extend(run_context_env(&run.id));
     if let Ok(token) = crate::jobs::huggingface::resolve_token() {
         env.entry("HF_TOKEN".to_string()).or_insert(token);
     }
-    env
+    Ok(env)
 }
 
 const EXPERIMENT_ENV: &str = "ORX_EXPERIMENT";

@@ -1,0 +1,172 @@
+{
+ "data": {
+  "info": {
+   "id": "ses_e152a94deffeNyM1JU4dbSfrCL",
+   "projectID": "6d45423e77ccdf035350b1057a8082b48eeee680",
+   "agent": "build",
+   "model": {
+    "id": "inkling-2-small-free",
+    "providerID": "opencode",
+    "variant": "default"
+   },
+   "cost": 0,
+   "tokens": {
+    "input": 15324,
+    "output": 73,
+    "reasoning": 140,
+    "cache": {
+     "read": 14592,
+     "write": 0
+    }
+   },
+   "outcome": "succeeded",
+   "time": {
+    "created": 1794941217571,
+    "updated": 1794941220811,
+    "busy": 1794941218078,
+    "idle": 1794941220813
+   },
+   "title": "echo hello command test",
+   "subpath": "../project",
+   "location": {
+    "directory": "/tmp/project"
+   }
+  },
+  "messages": [
+   {
+    "id": "msg_c1794941218",
+    "time": {
+     "created": 1794941218080
+    },
+    "text": "Think briefly, say one sentence, run the shell command 'echo hello' with your tool, then reply with two sentences about the output.",
+    "type": "user"
+   },
+   {
+    "id": "msg_1ead56d26001ix2VHCEtEI1jzF",
+    "time": {
+     "created": 1794941218088,
+     "firstToken": 1794941218764,
+     "streamed": 1794941219676,
+     "completed": 1794941219687
+    },
+    "type": "assistant",
+    "agent": "build",
+    "model": {
+     "id": "inkling-2-small-free",
+     "providerID": "opencode",
+     "variant": "default"
+    },
+    "content": [
+     {
+      "type": "reasoning",
+      "text": "The user asked a compound question. They want: think briefly, say one sentence, run echo hello, reply with two sentences about output. Need use tool. Now I need produce one sentence? The user explicitly wants one sentence before tool, then after tool two sentences. We can do brief. Use shell tool.",
+      "native": {
+       "reasoningField": "reasoning_content"
+      },
+      "time": {
+       "created": 1794941218765,
+       "completed": 1794941219673
+      }
+     },
+     {
+      "type": "text",
+      "text": "I\u2019ll keep this short and check the command output directly."
+     },
+     {
+      "type": "tool",
+      "id": "functions.shell:0",
+      "name": "shell",
+      "executed": false,
+      "state": {
+       "status": "completed",
+       "input": {
+        "command": "echo hello"
+       },
+       "content": [
+        {
+         "type": "text",
+         "text": "hello\n"
+        }
+       ],
+       "metadata": {
+        "status": "completed",
+        "truncated": false,
+        "exit": 0
+       }
+      },
+      "time": {
+       "created": 1794941219671,
+       "ran": 1794941219675,
+       "completed": 1794941219685
+      }
+     }
+    ],
+    "finish": "tool-calls",
+    "rawFinish": "tool_calls",
+    "cost": 0,
+    "tokens": {
+     "input": 14644,
+     "output": 45,
+     "reasoning": 66,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    }
+   },
+   {
+    "id": "msg_1ead5736b001XwB5CXsKPcC6X8",
+    "time": {
+     "created": 1794941219693,
+     "firstToken": 1794941220158,
+     "streamed": 1794941220810,
+     "completed": 1794941220811
+    },
+    "type": "assistant",
+    "agent": "build",
+    "model": {
+     "id": "inkling-2-small-free",
+     "providerID": "opencode",
+     "variant": "default"
+    },
+    "content": [
+     {
+      "type": "reasoning",
+      "text": "We need final reply with two sentences about output. Ensure exactly two sentences. Avoid extra. Need mention output is hello and exit? We only know stdout hello. Two sentences.",
+      "native": {
+       "reasoningField": "reasoning_content"
+      },
+      "time": {
+       "created": 1794941220158,
+       "completed": 1794941220809
+      }
+     },
+     {
+      "type": "text",
+      "text": "The command printed `hello`. It produced that single line on standard output."
+     }
+    ],
+    "finish": "stop",
+    "rawFinish": "stop",
+    "cost": 0,
+    "tokens": {
+     "input": 168,
+     "output": 20,
+     "reasoning": 38,
+     "cache": {
+      "read": 14592,
+      "write": 0
+     }
+    }
+   },
+   {
+    "id": "msg_1ead577cd0010A8wtulYpq8Xk7",
+    "time": {
+     "created": 1794941220813
+    },
+    "type": "idle",
+    "outcome": "succeeded"
+   }
+  ]
+ }
+}

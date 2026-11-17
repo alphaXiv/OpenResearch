@@ -2830,7 +2830,8 @@ impl PermissionDecision {
 /// claude turn behind it).
 struct PendingPermission {
     session_id: String,
-    tx: tokio::sync::oneshot::Sender<PermissionDecision>,
+    // A save takes the sender before writing and keeps its place until it records the result.
+    tx: Option<tokio::sync::oneshot::Sender<PermissionDecision>>,
 }
 
 /// The card-less tier of plan-mode permission policy: `Some(decision)` where
@@ -2883,11 +2884,16 @@ struct PendingGuard {
 
 impl Drop for PendingGuard {
     fn drop(&mut self) {
-        self.host
+        let saving = self
+            .host
             .pending_permissions
             .lock()
             .unwrap()
-            .remove(&self.prompt_id);
+            .remove(&self.prompt_id)
+            .is_some_and(|pending| pending.tx.is_none());
+        if saving {
+            return;
+        }
         if let Ok(Some(msg)) = mark_prompt_resolved(
             &self.host.msg_write,
             &self.session_id,
@@ -2914,13 +2920,30 @@ struct HeldPermission {
 
 impl HeldPermission {
     async fn decision(self) -> PermissionDecision {
-        tokio::select! {
-            d = self.rx => d.unwrap_or_else(|_| PermissionDecision::deny("the approval was cancelled")),
-            _ = tokio::time::sleep(BRIDGE_ANSWER_TIMEOUT) => PermissionDecision::deny(
+        self.wait(BRIDGE_ANSWER_TIMEOUT).await.unwrap_or_else(|| {
+            PermissionDecision::deny(
                 "No one answered this approval within 55 minutes; treat it as denied \
                  and wrap up the turn cleanly.",
-            ),
-        }
+            )
+        })
+    }
+
+    async fn wait(mut self, timeout: std::time::Duration) -> Option<PermissionDecision> {
+        let result = match tokio::time::timeout(timeout, &mut self.rx).await {
+            Ok(result) => result,
+            Err(_) => {
+                if self
+                    ._guard
+                    .host
+                    .take_pending_permission(&self._guard.prompt_id)
+                    .is_some()
+                {
+                    return None;
+                }
+                self.rx.await
+            }
+        };
+        Some(result.unwrap_or_else(|_| PermissionDecision::deny("the approval was cancelled")))
     }
 }
 
@@ -2966,6 +2989,8 @@ pub struct ChatHost {
     /// no real contention) makes each RMW atomic. Sync because `flush` is sync;
     /// never held across an `.await`.
     msg_write: std::sync::Mutex<()>,
+    /// The session id of each prompt card answered, for a running turn waiting on a local answer.
+    pub(crate) prompt_answered: tokio::sync::broadcast::Sender<String>,
     /// Outstanding permission-bridge requests, keyed by the prompt part id the
     /// card was surfaced under. Sync mutex, never held across an await.
     pending_permissions: std::sync::Mutex<HashMap<String, PendingPermission>>,
@@ -3964,6 +3989,7 @@ impl ChatHost {
             deleting_sessions: Arc::new(std::sync::Mutex::new(HashSet::new())),
             respond_locks: Mutex::new(HashMap::new()),
             msg_write: std::sync::Mutex::new(()),
+            prompt_answered: tokio::sync::broadcast::channel(16).0,
             pending_permissions: std::sync::Mutex::new(HashMap::new()),
             permission_review_locks: Mutex::new(HashMap::new()),
             recovery_locks: Mutex::new(HashMap::new()),
@@ -4228,40 +4254,46 @@ impl ChatHost {
             result_native_message_id: None,
             native_harness: None,
         })?;
-        self.emit("chat.message", message_json(&msg, session_id));
-        self.emit_session(Store::open()?.get_chat_session(session_id)?)
-            .await;
-
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.pending_permissions.lock().unwrap().insert(
             prompt_id.clone(),
             PendingPermission {
                 session_id: session_id.to_string(),
-                tx,
+                tx: Some(tx),
             },
         );
-        Ok(HeldPermission {
+        let held = HeldPermission {
             rx,
             _guard: PendingGuard {
                 host: self.clone(),
                 session_id: session_id.to_string(),
                 prompt_id,
             },
-        })
+        };
+        self.emit("chat.message", message_json(&msg, session_id));
+        self.emit_session(Store::open()?.get_chat_session(session_id)?)
+            .await;
+        Ok(held)
+    }
+
+    fn take_pending_permission(
+        &self,
+        prompt_id: &str,
+    ) -> Option<tokio::sync::oneshot::Sender<PermissionDecision>> {
+        let mut pending = self.pending_permissions.lock().unwrap();
+        pending.get(prompt_id)?.tx.as_ref()?;
+        pending.remove(prompt_id)?.tx
     }
 
     /// Settle a pending bridge request with the user's decision (the native
     /// resume path). Err if it's no longer pending — a stale card.
     pub fn settle_permission(&self, prompt_id: &str, decision: PermissionDecision) -> Result<()> {
-        let pending = self
-            .pending_permissions
-            .lock()
-            .unwrap()
-            .remove(prompt_id)
+        let tx = self
+            .take_pending_permission(prompt_id)
             .ok_or_else(|| anyhow!("this approval is no longer pending"))?;
         // A dropped receiver means the request handler already died; its guard
         // is cleaning the card up, so a lost send is fine.
-        let _ = pending.tx.send(decision);
+        let _ = tx.send(decision);
         Ok(())
     }
 
@@ -4281,19 +4313,19 @@ impl ChatHost {
     /// its turn ends or is interrupted: the bridge child dies with the turn,
     /// and a card left pending would strand its long-poll forever.
     fn cancel_pending_permissions(&self, session_id: &str) {
-        let drained: Vec<PendingPermission> = {
+        let drained: Vec<_> = {
             let mut map = self.pending_permissions.lock().unwrap();
             let ids: Vec<String> = map
                 .iter()
-                .filter(|(_, p)| p.session_id == session_id)
+                .filter(|(_, p)| p.session_id == session_id && p.tx.is_some())
                 .map(|(id, _)| id.clone())
                 .collect();
-            ids.into_iter().filter_map(|id| map.remove(&id)).collect()
+            ids.into_iter()
+                .filter_map(|id| map.remove(&id)?.tx)
+                .collect()
         };
-        for pending in drained {
-            let _ = pending
-                .tx
-                .send(PermissionDecision::deny("the turn was interrupted"));
+        for tx in drained {
+            let _ = tx.send(PermissionDecision::deny("the turn was interrupted"));
         }
     }
 
@@ -7324,7 +7356,7 @@ impl ChatHost {
             return Ok(());
         };
         if prompt.kind == "env" {
-            return self.answer_env_request(&session, &prompt, req).await;
+            return self.answer_env_request(session, prompt, req).await;
         }
         if prompt.kind == "permission"
             && first_unresolved_permission_id(&req.session_id)?.as_deref()
@@ -7507,6 +7539,7 @@ impl ChatHost {
             Ok(msg) => self.emit("chat.message", message_json(&msg, &req.session_id)),
             Err(e) => eprintln!("orx up: answered prompt not marked resolved: {e}"),
         }
+        let _ = self.prompt_answered.send(req.session_id.clone());
         // A delegate's card stops showing the question; the answered turn goes on.
         if let Ok(Some(session)) =
             Store::open().and_then(|store| store.get_chat_session(&req.session_id))

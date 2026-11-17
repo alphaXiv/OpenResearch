@@ -11,7 +11,7 @@ use super::{
     default_true, mark_prompt_resolved, message_json, ChatHost, PermissionDecision, PromptAnswer,
     WirePrompt,
 };
-use crate::error::{anyhow, bail, Result};
+use crate::error::{anyhow, bail, Context, Result};
 use crate::store::{Store, StoredChatSession};
 
 /// Where a variable is saved.
@@ -91,12 +91,12 @@ impl ChatHost {
             ..Default::default()
         };
         let held = self.post_held_card(session_id, prompt_id, prompt).await?;
-        match tokio::time::timeout(timeout, held.decision()).await {
-            Ok(PermissionDecision::Allow { updated_input }) => Ok(updated_input
+        match held.wait(timeout).await {
+            Some(PermissionDecision::Allow { updated_input }) => Ok(updated_input
                 .and_then(|told| told["text"].as_str().map(str::to_string))
                 .unwrap_or_default()),
-            Ok(PermissionDecision::Deny { message }) => bail!("{message}"),
-            Err(_) => Ok(format!(
+            Some(PermissionDecision::Deny { message }) => bail!("{message}"),
+            None => Ok(format!(
                 "The user did not answer within {} minutes, so the request for {names} was withdrawn and nothing was saved. Ask again when you need them, or go on without.",
                 timeout.as_secs() / 60
             )),
@@ -106,20 +106,12 @@ impl ChatHost {
     /// Saves what the user answered on an env card and tells the waiting agent.
     pub(super) async fn answer_env_request(
         self: &Arc<Self>,
-        session: &StoredChatSession,
-        prompt: &WirePrompt,
+        session: StoredChatSession,
+        prompt: WirePrompt,
         mut req: PromptAnswer,
     ) -> Result<()> {
         if req.from.is_some() {
             bail!("Only the user can set variables.");
-        }
-        if !self
-            .pending_permissions
-            .lock()
-            .unwrap()
-            .contains_key(&req.prompt_id)
-        {
-            bail!("This request has ended; the agent can ask again.");
         }
         if !req.approve {
             req.env.clear();
@@ -133,25 +125,38 @@ impl ChatHost {
             bail!("{} was not requested.", stray.name);
         }
 
-        let told = save(session, prompt, &req)?;
-        let settled = self.settle_permission(
-            &req.prompt_id,
-            PermissionDecision::Allow {
-                updated_input: Some(json!({ "text": told })),
-            },
-        );
-        if let Err(error) = settled {
-            eprintln!(
-                "orx up: env request {} saved, but its agent stopped waiting: {error:#}",
-                req.prompt_id
-            );
-        }
-        match mark_prompt_resolved(&self.msg_write, &session.id, &req.prompt_id, Some(&req)) {
-            Ok(Some(msg)) => self.emit("chat.message", message_json(&msg, &session.id)),
-            Ok(None) => {}
-            Err(error) => eprintln!("orx up: answered env request not marked resolved: {error:#}"),
-        }
-        Ok(())
+        let host = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let tx = host.pending_permissions.lock().unwrap()
+                .get_mut(&req.prompt_id)
+                .and_then(|pending| pending.tx.take())
+                .ok_or_else(|| anyhow!("This request has ended. The agent can ask again."))?;
+
+            let result = save(&session, &prompt, &req);
+            let decision = match &result {
+                Ok(told) => PermissionDecision::Allow {
+                    updated_input: Some(json!({ "text": told })),
+                },
+                Err(error) => PermissionDecision::deny(format!(
+                    "Couldn't finish saving the requested variables. Check Environment settings before asking again. {error:#}"
+                )),
+            };
+            match mark_prompt_resolved(
+                &host.msg_write,
+                &session.id,
+                &req.prompt_id,
+                result.is_ok().then_some(&req),
+            ) {
+                Ok(Some(msg)) => host.emit("chat.message", message_json(&msg, &session.id)),
+                Ok(None) => {}
+                Err(error) => eprintln!("orx up: env request {} could not be marked resolved: {error:#}", req.prompt_id),
+            }
+            // The agent can disconnect after the user commits the save.
+            let _ = tx.send(decision);
+            result.map(|_| ())
+        })
+        .await
+        .context("Couldn't finish the environment request")?
     }
 }
 
@@ -500,5 +505,34 @@ mod tests {
             parsed[0].secret,
             "a variable is secret unless the agent says otherwise"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_claimed_env_save_keeps_its_reply_after_timeout_and_interrupt() {
+        let host = host();
+        let session = running_chat(&host).await;
+        let (prompt_id, call) =
+            ask(&host, &session, vec![var("ORX_TEST_PENDING", true, None)]).await;
+        let tx = host
+            .pending_permissions
+            .lock()
+            .unwrap()
+            .get_mut(&prompt_id)
+            .unwrap()
+            .tx
+            .take()
+            .unwrap();
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(601)).await;
+        host.cancel_pending_permissions(&session.id);
+        tokio::task::yield_now().await;
+        assert!(!call.is_finished());
+
+        tx.send(PermissionDecision::Allow {
+            updated_input: Some(json!({"text": "Saved ORX_TEST_PENDING."})),
+        })
+        .unwrap();
+        assert_eq!(call.await.unwrap().unwrap(), "Saved ORX_TEST_PENDING.");
     }
 }

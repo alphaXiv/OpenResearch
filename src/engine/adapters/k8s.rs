@@ -54,7 +54,7 @@ impl K8sAccount {
     fn spec(&self, intent: &RunIntent) -> Result<k8s::ManifestSpec> {
         let mut spec: k8s::ManifestSpec = serde_json::from_value(intent.launch.options.clone())?;
         spec.labels.insert("or_run".into(), intent.run.id.clone());
-        spec.env.extend(crate::config::saved_run_env(&intent.run.id));
+        spec.env.extend(crate::config::saved_run_env(&intent.run)?);
         if let Ok(token) = crate::jobs::huggingface::resolve_token() {
             spec.env.entry("HF_TOKEN".into()).or_insert(token);
         }
