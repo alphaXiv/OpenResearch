@@ -286,7 +286,11 @@ export function splitResponseParts(messages: ChatMessage[], streaming: boolean, 
     && part.prompt?.kind === "question" && part.prompt.resolved
     && ((part.prompt.answers?.length ?? 0) > 0 || Boolean(part.prompt.note) || part.prompt.approved === false));
   return {
-    answer: [...work.flatMap((turn) => turn.parts.filter(answeredQuestion)), ...(current?.answer ?? [])],
+    // In the order asked: a question answered after `current` follows it.
+    answer: turns.flatMap((turn, index) => [
+      ...work[index].parts.filter(answeredQuestion),
+      ...(turn === current ? turn.answer : []),
+    ]),
     answerMessageId: current?.message.id,
     work: work.map((turn) => ({
       ...turn,

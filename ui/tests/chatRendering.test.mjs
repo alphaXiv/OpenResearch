@@ -476,6 +476,18 @@ test("answered questions stay visible when Claude continues with a final respons
   assert.deepEqual(response.work, [{ id: "last", parts: [tool] }]);
 });
 
+test("questions answered together stay in the order asked while the turn resumes", async () => {
+  const { splitResponseParts } = await import("../src/chatRendering.ts");
+  const question = (id) => ({ id, type: "prompt", prompt: { kind: "question", resolved: true, question: `${id}?`, answers: ["Yes"] } });
+  const [color, shape, size] = ["color", "shape", "size"].map(question);
+  const response = splitResponseParts([
+    { ...message(color), id: "first" },
+    { ...message(shape), id: "second" },
+    { ...message(size), id: "last" },
+  ], true);
+  assert.deepEqual(response.answer, [color, shape, size]);
+});
+
 test("explicitly skipped questions stay visible without treating stale cleanup as a skip", async () => {
   const { splitResponseParts } = await import("../src/chatRendering.ts");
   const skipped = { id: "skipped", type: "prompt", prompt: { kind: "question", resolved: true, question: "Color?", approved: false } };
