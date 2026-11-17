@@ -2453,50 +2453,20 @@ fn project(
                 ));
                 return Ok(None);
             }
-            let mut event = json!({
-                "runId": run.id,
-                "rev": published.rev,
-                "generation": generation,
-                "asOf": summary["asOf"],
-                "seriesRev": published.series_rev,
-                "appendFrom": base.series_rev,
-                "append": append.unwrap_or_else(|| json!({})),
-                "appendRows": append_rows.unwrap_or_else(|| json!({})),
-                "dropRows": drop_rows,
-                "latest": body["latest"],
-                "counts": body["counts"],
-                "progress": body["progress"],
-                "estimate": body["estimate"],
-                "cost": body["cost"],
-                "sentence": body["sentence"],
-                "watch": body["watch"],
-                "flag": body["flag"],
-                "patch": {
-                    "availability": body["availability"],
-                    "phases": body["phases"],
-                    "x": body["x"],
-                    "limit": body["limit"],
-                    "before": body["before"],
-                    "setup": body["setup"],
-                    "source": body["source"],
-                    "statusText": body["statusText"],
-                    "versus": body["versus"],
-                    "headline": body["headline"],
-                    "pace": body["pace"],
-                    "logError": body["logError"],
-                    "revising": body["revising"],
-                    "flags": body["flags"],
-                },
-            });
-            if let Some(best) = body.get("best") {
-                event["patch"]["best"] = best.clone();
-            }
-            if basis
-                .as_ref()
-                .is_some_and(|(held, _)| held.projection.body["groups"] != body["groups"])
-            {
-                event["patch"]["groups"] = body["groups"].clone();
-            }
+            let fields = body.as_object().expect("monitor body is an object");
+            let mut event = Value::Object(
+                fields
+                    .iter()
+                    .filter(|(name, _)| !matches!(name.as_str(), "view" | "parent" | "rows"))
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .collect(),
+            );
+            event["rev"] = json!(rev);
+            event["seriesRev"] = json!(series_rev);
+            event["appendFrom"] = json!(base.series_rev);
+            event["append"] = append.unwrap_or_else(|| json!({}));
+            event["appendRows"] = append_rows.unwrap_or_else(|| json!({}));
+            event["dropRows"] = json!(drop_rows);
             if basis.is_none() {
                 event["reset"] = json!(true);
             }
@@ -3871,6 +3841,33 @@ mod tests {
     }
 
     #[test]
+    fn a_same_view_stage_change_reaches_the_open_monitor() {
+        let f = Fixture::new("orx-monitor-stage-event");
+        let run = f.run("running", local());
+        f.view("exp", VIEW);
+        let mut snapshot = folded(&[(
+            T0,
+            "::orx:: {\"phase\":\"train\",\"step\":1,\"m\":{\"loss\":2}}".into(),
+        )]);
+        f.signals(&snapshot);
+        f.collected(T0);
+        let (before, _) = monitor_at(&f, &run, T0);
+
+        fold(
+            &mut snapshot,
+            &[(T0 + 1000, "::orx:: {\"phase\":\"eval\",\"step\":0}".into())],
+        );
+        f.signals(&snapshot);
+        f.collected(T0 + 1000);
+        let (after, event) = monitor_at(&f, &run, T0 + 1000);
+        let event = event.unwrap();
+        assert_eq!(before["view"], after["view"]);
+        assert_ne!(before["stageOrder"], after["stageOrder"]);
+        assert_eq!(event.get("reset"), None);
+        assert_eq!(event["stageOrder"], after["stageOrder"]);
+    }
+
+    #[test]
     fn time_the_laptop_did_not_watch_is_unknown() {
         let f = Fixture::new("orx-monitor-stale");
         let run = f.run("running", local());
@@ -4821,7 +4818,7 @@ mod tests {
             event["appendRows"]["items"],
             json!(snapshot.rows["items"][2047..])
         );
-        assert_eq!(event["patch"]["groups"], next["groups"]);
+        assert_eq!(event["groups"], next["groups"]);
         assert_eq!(
             next["groups"]["items"]["category"][1],
             json!({"key":"proofs", "ok":0, "n":2046})
@@ -4879,7 +4876,7 @@ mod tests {
             event["appendRows"]["eval"],
             json!(snapshot.rows["eval"][3..])
         );
-        assert_eq!(event["patch"].get("rows"), None);
+        assert_eq!(event.get("rows"), None);
         assert!(event["seriesRev"].as_u64() > first["seriesRev"].as_u64());
 
         // A row that plots nothing still moves `seriesRev`, which the page's next append follows.

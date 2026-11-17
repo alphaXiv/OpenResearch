@@ -385,30 +385,16 @@ export interface RunMonitor {
   statusText: string;
 }
 
-/** The `run.monitor` event: scalars replace, `append` extends series that share the cached basis. */
-export interface RunMonitorEvent {
-  runId: string;
-  rev: number;
-  generation: string;
-  asOf: number;
-  seriesRev: number;
-  appendFrom: number;
-  append: Record<string, Point[]>;
-  /** Rows each of the view's tables gained, on the same basis as `append`. */
-  appendRows?: Record<string, Record<string, SignalValue>[]>;
-  /** How many rows left the front of each table, before `appendRows` are added. */
-  dropRows?: Record<string, number>;
-  latest: Record<string, SignalValue>;
-  counts: Record<string, number>;
-  progress: Progress | null;
-  estimate: Estimate | null;
-  cost: Cost | null;
-  sentence: Sentence | null;
-  watch?: Watch;
-  flag?: Flag | null;
-  reset?: true;
-  patch?: Partial<RunMonitor>;
-}
+/** A reset rereads the monitor. Otherwise only the series and table histories need merging. */
+export type RunMonitorEvent =
+  | (Pick<RunMonitor, "runId" | "rev" | "generation"> & { reset: true; watch?: Watch })
+  | (Omit<RunMonitor, "view" | "parent" | "series" | "rows"> & {
+    reset?: never;
+    appendFrom: number;
+    append: RunMonitor["series"];
+    appendRows: RunMonitor["rows"];
+    dropRows: Record<string, number>;
+  });
 
 /** `GET /api/chat/shown-runs`: each chat's runs above its composer, ended ones until the agent has said what came of them. */
 export interface ChatShownRun extends ChatActiveRun {

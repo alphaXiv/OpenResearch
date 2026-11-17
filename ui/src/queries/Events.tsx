@@ -13,35 +13,18 @@ import { artifactFamilies } from "./invalidation";
 export function applyMonitorEvent(cached: RunMonitor, event: RunMonitorEvent): RunMonitor | null {
   if (event.reset || event.generation !== cached.generation) return null;
   if (event.rev <= cached.rev) return cached;
-  const appends = Object.entries(event.append ?? {}).filter(([, points]) => points.length > 0);
-  const rowAppends = Object.entries(event.appendRows ?? {}).filter(([, rows]) => rows.length > 0);
-  // Past the fold's row cap a table's oldest rows leave as new ones come.
-  const rowDrops = Object.entries(event.dropRows ?? {}).filter(([, left]) => left > 0);
+  const { appendFrom, append, appendRows, dropRows, ...body } = event;
+  const appends = Object.entries(append);
+  const rowAppends = Object.entries(appendRows);
+  const rowDrops = Object.entries(dropRows);
   const grew = appends.length > 0 || rowAppends.length > 0 || rowDrops.length > 0;
-  if (grew && event.appendFrom !== cached.seriesRev) return null;
-  if (!grew && event.seriesRev !== cached.seriesRev) return null;
-  const base = { ...cached, ...event.patch };
-  const series = { ...base.series };
+  if ((grew ? appendFrom : body.seriesRev) !== cached.seriesRev) return null;
+  const series = { ...cached.series };
   for (const [name, points] of appends) series[name] = [...(series[name] ?? []), ...points];
-  const rows = { ...base.rows };
+  const rows = { ...cached.rows };
   for (const [name, left] of rowDrops) if (rows[name]) rows[name] = rows[name].slice(left);
   for (const [name, added] of rowAppends) rows[name] = [...(rows[name] ?? []), ...added];
-  return {
-    ...base,
-    rev: event.rev,
-    asOf: event.asOf,
-    seriesRev: event.seriesRev,
-    series,
-    rows,
-    latest: event.latest,
-    counts: event.counts,
-    progress: event.progress,
-    estimate: event.estimate,
-    cost: event.cost,
-    sentence: event.sentence,
-    ...(event.watch === undefined ? {} : { watch: event.watch }),
-    ...(event.flag === undefined ? {} : { flag: event.flag }),
-  };
+  return { ...body, view: cached.view, parent: cached.parent, series, rows };
 }
 
 function upsert<T extends { id: string; updatedAt: number }>(rows: T[] | undefined, next: T) {

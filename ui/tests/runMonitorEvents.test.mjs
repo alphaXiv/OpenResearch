@@ -18,9 +18,11 @@ async function reply(replies, body) {
   });
 }
 const emit = (type, data) => act(async () => streams[0].dispatchEvent(new MessageEvent(type, { data: JSON.stringify(data) })));
+const { view, parent, series, rows, ...body } = running;
 const event = (extra = {}) => ({
+  ...body,
   runId: "r1", rev: running.rev + 1, generation: running.generation, asOf: running.asOf + 1000, seriesRev: running.seriesRev + 1, appendFrom: running.seriesRev,
-  append: { loss: [[1250, 2.3]] }, latest: { loss: 2.3 }, counts: {}, progress: running.progress, estimate: running.estimate, cost: null, sentence: running.sentence, ...extra,
+  append: { loss: [[1250, 2.3]] }, appendRows: {}, dropRows: {}, latest: { loss: 2.3 }, ...extra,
 });
 
 /** A page with the event stream open and run r1's monitor read once. */
@@ -49,8 +51,23 @@ test("a monitor event extends the chart in place and ignores a repeat", async ()
 test("a monitor event carries the newest line of a run still setting up", async () => {
   const { read } = await page();
   const setup = { line: "Computing initial pair counts", stage: null, startsAt: running.asOf + 60_000 };
-  await emit("run.monitor", event({ append: {}, seriesRev: running.seriesRev, patch: { setup } }));
+  await emit("run.monitor", event({ append: {}, seriesRev: running.seriesRev, setup }));
   assert.deepEqual(read().setup, setup);
+});
+
+test("a same-view stage change applied as an event equals a fresh GET", async () => {
+  const { read, invalidated } = await page();
+  const fresh = {
+    ...running,
+    rev: running.rev + 1,
+    phases: [...running.phases, { name: "eval", of: null }],
+    stageOrder: { index: 1, count: 2, first: 0 },
+    progress: { ...running.progress, phase: 1, done: 0 },
+  };
+  const { view, parent, series, rows, ...body } = fresh;
+  await emit("run.monitor", { ...body, appendFrom: fresh.seriesRev, append: {}, appendRows: {}, dropRows: {} });
+  assert.deepEqual(read(), fresh);
+  assert.equal(invalidated(), false);
 });
 
 test("rows a table gained extend it in place, and a whole table never arrives in an event", async () => {
@@ -68,14 +85,14 @@ test("outcome counts are replaced on the same revision that slides the cells win
   await emit("run.monitor", event({
     append: {},
     appendRows: { items: original },
-    patch: { groups: { items: { category: [{ key: "algebra", ok: 1, n: 1 }] } } },
+    groups: { items: { category: [{ key: "algebra", ok: 1, n: 1 }] } },
   }));
   const rows = [{ outcome: "error", category: "proofs" }];
   const groups = { items: { category: [{ key: "proofs", ok: 0, n: 1 }] } };
   await emit("run.monitor", event({
     rev: running.rev + 2, seriesRev: running.seriesRev + 2, appendFrom: running.seriesRev + 1,
     append: {}, dropRows: { items: 1 }, appendRows: { items: rows },
-    patch: { groups },
+    groups,
   }));
   assert.deepEqual(read().rows.items, rows);
   assert.deepEqual(read().groups, groups);
