@@ -1460,11 +1460,13 @@ fn retain_timing(points: &mut Vec<(usize, f64, f64)>, occurrence: usize, total: 
         .collect();
     rates.sort_by(|a, b| a.1.total_cmp(&b.1));
     if let Some((_, typical)) = rates.get(rates.len() / 2) {
+        let typical = *typical;
+        // Early pauses preserve cadence when later evaluation durations vary.
+        rates.sort_by_key(|(index, _)| *index);
         for (i, _) in rates
             .iter()
-            .rev()
-            .take(4)
             .filter(|(_, rate)| *rate > 4.0 * typical)
+            .take(4)
         {
             keep[*i] = true;
             keep[*i + 1] = true;
