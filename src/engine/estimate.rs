@@ -169,6 +169,8 @@ pub(crate) struct Input {
     pub contact_lost: bool,
     pub phases: Vec<Phase>,
     pub current: usize,
+    /// A phase may have started even when its start time is unknown.
+    pub current_started: bool,
     /// Observed reports only, including resumed counts; never insert a phase origin.
     pub points: Vec<Point>,
     /// Whether `points` are placed in time. Unplaced points keep their durations, so a range
@@ -222,16 +224,9 @@ pub(crate) struct Cost {
 pub(crate) struct Output {
     pub phase_fraction: Option<f64>,
     pub segments: Vec<Segment>,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Weights are all estimated until priors")
-    )]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub weights_estimated: bool,
     pub whole: Option<f64>,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Equal to `estimate` until priors")
-    )]
     pub current_phase: Option<Eta>,
     pub estimate: Option<Eta>,
     pub completed_slices: usize,
@@ -256,13 +251,17 @@ fn deviation(values: &[f64], center: f64, floor: f64) -> f64 {
     (median(&residuals) * 1.4826).max(floor)
 }
 
-fn phase_range(phase: &Phase, points: &[Point]) -> (Option<Range>, usize) {
-    let Some(total) = phase.total else {
+fn phase_range(
+    total: Option<f64>,
+    prior: Option<Range>,
+    points: &[Point],
+) -> (Option<Range>, usize) {
+    let Some(total) = total else {
         return (None, 0);
     };
     let done = points.last().map_or(0.0, |p| p.done);
     let remaining = (1.0 - done / total).max(0.0);
-    let prior = phase.prior.map(|r| Range {
+    let prior = prior.map(|r| Range {
         lo_ms: (r.mid_ms * 0.75).min(r.lo_ms) * remaining,
         mid_ms: r.mid_ms * remaining,
         hi_ms: (r.mid_ms * 1.3).max(r.hi_ms) * remaining,
@@ -314,25 +313,21 @@ fn phase_range(phase: &Phase, points: &[Point]) -> (Option<Range>, usize) {
             n,
         );
     }
-    // The partial first slice is absent; the first observed full slice is warm-up.
-    let usable = &durations[1.min(n)..];
-    if usable.is_empty() {
-        if prior.is_some() {
-            return (prior, n);
-        }
-        let last = points.last().unwrap();
-        if done <= first.done || last.at <= first.at {
-            return (None, n);
-        }
-        let mid_ms = (total - done) * (last.at - first.at) / (done - first.done);
-        return (
-            Some(Range {
+    let live = points
+        .last()
+        .filter(|last| done > first.done && last.at > first.at)
+        .map(|last| {
+            let mid_ms = (total - done) * (last.at - first.at) / (done - first.done);
+            Range {
                 lo_ms: mid_ms * 0.5,
                 mid_ms,
                 hi_ms: mid_ms * 1.6,
-            }),
-            n,
-        );
+            }
+        });
+    // The partial first slice is absent; the first observed full slice is warm-up.
+    let usable = &durations[1.min(n)..];
+    if usable.is_empty() {
+        return (live.or(prior), n);
     }
     let window = &usable[usable.len().saturating_sub(14)..];
     let center = median(window);
@@ -343,7 +338,7 @@ fn phase_range(phase: &Phase, points: &[Point]) -> (Option<Range>, usize) {
         .sum::<f64>()
         / window.len() as f64;
     if level <= 0.0 {
-        return (prior, n);
+        return (live.or(prior), n);
     }
     let mut slope = 0.0;
     let mut last_level = level;
@@ -381,25 +376,13 @@ fn phase_range(phase: &Phase, points: &[Point]) -> (Option<Range>, usize) {
             (1.0 - (done - orx_signals::slice_boundary(total, last_bin)) / width).clamp(0.0, 1.0);
         partial * predict(last_bin) + ((last_bin + 1)..bins).map(predict).sum::<f64>()
     };
-    let mut mid_ms = sum(slope);
+    let mid_ms = sum(slope);
     let half = sum(slope / 2.0);
     let relative =
         (0.03 + 1.3 * (noise / level) / (window.len() as f64).sqrt() + 0.35 / (n + 1) as f64)
             .clamp(0.04, 0.60);
-    let mut lo_ms = mid_ms.min(half) * (1.0 - relative);
-    let mut hi_ms = mid_ms.max(half) * (1.0 + relative);
-    if let Some(prior) = prior.filter(|_| n < 4) {
-        let blend = (4 - n) as f64 / 4.0;
-        mid_ms = mid_ms * (1.0 - blend) + prior.mid_ms * blend;
-        lo_ms = lo_ms.min(mid_ms * 0.75);
-        if let Some(r) = phase.prior.filter(|r| r.lo_ms < r.mid_ms * 0.75) {
-            lo_ms = lo_ms.min(r.lo_ms * remaining);
-        }
-        hi_ms = hi_ms.max(mid_ms * 1.3);
-        if let Some(r) = phase.prior.filter(|r| r.hi_ms > r.mid_ms * 1.3) {
-            hi_ms = hi_ms.max(r.hi_ms * remaining);
-        }
-    }
+    let lo_ms = mid_ms.min(half) * (1.0 - relative);
+    let hi_ms = mid_ms.max(half) * (1.0 + relative);
     (
         Some(Range {
             lo_ms,
@@ -623,14 +606,8 @@ pub(crate) fn estimate(input: &Input) -> Result<Output, InputError> {
     let prior_fill = phase
         .prior
         .zip(phase_started_at)
-        .filter(|_| input.planned && open)
-        .map(|(prior, start)| {
-            if prior.mid_ms > 0.0 {
-                ((at - start) / prior.mid_ms).clamp(0.0, 1.0)
-            } else {
-                1.0
-            }
-        });
+        .filter(|(prior, start)| input.planned && open && at - start < prior.mid_ms)
+        .map(|(prior, start)| ((at - start) / prior.mid_ms).clamp(0.0, 1.0));
     let open_fill = if input.planned && phases.len() > 1 {
         prior_fill
     } else {
@@ -726,19 +703,19 @@ pub(crate) fn estimate(input: &Input) -> Result<Output, InputError> {
         .iter()
         .rposition(|p| Some(p.at) == last_progress)
         .map_or(0, |i| i + 1)];
+    let unstarted_prior = phase.prior.filter(|_| !input.current_started);
     let (current_range, completed_slices) = if points_valid {
-        phase_range(phase, timed)
+        phase_range(phase.total, unstarted_prior, timed)
     } else {
         (None, 0)
     };
-    // A planned stage with no total is expected to last as long as its prior.
+    // A stage not yet started can be timed from the earlier run.
     let current_range = current_range.or_else(|| {
-        let prior = phase.prior.filter(|_| input.planned && open)?;
-        let spent = phase_started_at.map_or(0.0, |start| (at - start).max(0.0));
+        let prior = unstarted_prior.filter(|_| input.planned && open)?;
         Some(Range {
-            lo_ms: (prior.lo_ms.min(prior.mid_ms * 0.85) - spent).max(0.0),
-            mid_ms: (prior.mid_ms - spent).max(0.0),
-            hi_ms: (prior.hi_ms.max(prior.mid_ms * 1.2) - spent).max(0.0),
+            lo_ms: prior.lo_ms.min(prior.mid_ms * 0.85),
+            mid_ms: prior.mid_ms,
+            hi_ms: prior.hi_ms.max(prior.mid_ms * 1.2),
         })
     });
     let estimate_at = if timed.is_empty() || !points_valid || !input.placed {
@@ -765,7 +742,6 @@ pub(crate) fn estimate(input: &Input) -> Result<Output, InputError> {
     // A plan's stage with no prior is left out, so what is left is at least the rest.
     let mut floor = false;
     if input.planned {
-        // A stage in progress with neither a total nor a prior is unknown too.
         if current_range.is_none() && open {
             floor = true;
             total_range = Some(Range {
@@ -877,11 +853,11 @@ pub(crate) fn estimate(input: &Input) -> Result<Output, InputError> {
         phase_fraction: fraction,
         segments,
         weights_estimated,
-        whole,
+        whole: whole.filter(|_| !floor),
         current_phase: input.phases[input.current]
             .total
             .map(|_| eta(current_range, false)),
-        estimate: if input.planned {
+        estimate: if input.planned && !(input.current_started && open) {
             match total_range {
                 Some(_) => Some(eta(total_range, floor)),
                 // Pending only while the stage's own pace is still being learned.
@@ -932,10 +908,10 @@ pub(crate) struct Stage {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Prior {
+    /// Scaled to this stage's total when both runs declared one.
     pub ms: f64,
     pub by: TimedBy,
-    /// How far the earlier run counted in the stage, when it counted.
-    pub done: Option<f64>,
+    pub per_unit_ms: Option<f64>,
 }
 
 /// The run a stage's expected length comes from.
@@ -1016,6 +992,7 @@ pub(crate) fn stages(
                         phase.name.as_str(),
                         took.filter(|ms| *ms >= 0.0),
                         phase.done,
+                        phase.of,
                     )
                 })
                 .collect()
@@ -1028,11 +1005,17 @@ pub(crate) fn stages(
             took.iter()
                 .filter(|(name, ..)| *name == stage.name)
                 .nth(*count)
-                .and_then(|&(_, took, done)| {
+                .and_then(|&(_, took, done, of)| {
+                    let ms = took?;
+                    let scale = stage
+                        .of
+                        .zip(of)
+                        .filter(|(mine, theirs)| *mine > 0.0 && *theirs > 0.0)
+                        .map_or(1.0, |(mine, theirs)| mine / theirs);
                     Some(Prior {
-                        ms: took?,
+                        ms: ms * scale,
                         by: *by,
-                        done,
+                        per_unit_ms: done.filter(|done| *done > 0.0).map(|done| ms / done),
                     })
                 })
         });
@@ -1105,6 +1088,7 @@ pub(crate) fn with_signals(
             spend: None,
         }],
         current: 0,
+        current_started: false,
         points: Vec::new(),
         placed: true,
         ends_at: run.ends_at.map(host),
@@ -1148,6 +1132,8 @@ pub(crate) fn with_signals(
         }
         return input;
     };
+
+    input.current_started = true;
 
     // `t` gives only differences; the anchor's read time is what places them.
     let offset = if phase.timing_source == "observed" {
@@ -1246,6 +1232,7 @@ mod tests {
                 spend: None,
             }],
             current: 0,
+            current_started: true,
             points: (1..=10)
                 .map(|step| Point {
                     at: step as f64 * 10_000.0,
@@ -1421,6 +1408,68 @@ mod tests {
     }
 
     #[test]
+    fn a_live_rate_replaces_the_parent_from_its_first_measured_advance() {
+        let mut i = input(Some(5000.0));
+        i.phases[0].prior = Some(Range {
+            lo_ms: 8_000_000.0,
+            mid_ms: 8_400_000.0,
+            hi_ms: 9_000_000.0,
+        });
+        i.points = vec![Point { at: 0.0, done: 0.0 }];
+        for done in [1.0, 120.0, 250.0, 375.0, 500.0] {
+            i.points.push(Point {
+                at: done * 500.0,
+                done,
+            });
+            i.now = done * 500.0;
+            i.as_of = i.now;
+            let output = estimate(&i).unwrap();
+            let range = output.estimate.unwrap().range.unwrap();
+            let remaining = (5000.0 - done) * 500.0;
+            close(range.mid_ms, remaining);
+            assert!(range.lo_ms <= remaining && range.hi_ms >= remaining);
+        }
+    }
+
+    #[test]
+    fn a_started_stage_with_an_unknown_clock_cannot_use_a_future_stage_prior() {
+        let mut i = input(Some(5000.0));
+        i.points.clear();
+        i.phase_started_at = None;
+        i.phases[0].prior = Some(Range {
+            lo_ms: 8_000_000.0,
+            mid_ms: 8_400_000.0,
+            hi_ms: 9_000_000.0,
+        });
+        assert!(estimate(&i).unwrap().estimate.unwrap().pending);
+    }
+
+    #[test]
+    fn an_open_stage_outliving_its_prior_does_not_claim_completion() {
+        let mut i = input(None);
+        i.planned = true;
+        i.phase_started_at = Some(0.0);
+        i.phases[0].prior = Some(Range {
+            lo_ms: 8_000.0,
+            mid_ms: 10_000.0,
+            hi_ms: 15_000.0,
+        });
+        i.points = vec![
+            Point { at: 0.0, done: 0.0 },
+            Point {
+                at: 20_000.0,
+                done: 6.0,
+            },
+        ];
+        i.now = 20_000.0;
+        i.as_of = i.now;
+        let output = estimate(&i).unwrap();
+        assert!(output.estimate.is_none());
+        assert_eq!(output.whole, None);
+        assert_eq!(output.segments[0].fill, None);
+    }
+
+    #[test]
     fn no_reports_use_the_phase_start_only_for_prior_silence() {
         let mut i = input(Some(3.0));
         i.points.clear();
@@ -1493,7 +1542,7 @@ mod tests {
         });
         let prior = estimate(&i).unwrap();
         assert_eq!(prior.completed_slices, 1);
-        assert!(prior.estimate.unwrap().range.unwrap().mid_ms > r.mid_ms);
+        close(prior.estimate.unwrap().range.unwrap().mid_ms, r.mid_ms);
         for seconds in [270, 395] {
             i.points = (0..=seconds)
                 .map(|k| Point {
@@ -1507,10 +1556,7 @@ mod tests {
             let n = out.completed_slices;
             assert!(n < 4);
             let remaining = (5000.0 - i.points.last().unwrap().done) * 1000.0;
-            close(
-                out.estimate.unwrap().range.unwrap().mid_ms,
-                remaining * (1.0 + (4 - n) as f64 / 4.0),
-            );
+            close(out.estimate.unwrap().range.unwrap().mid_ms, remaining);
         }
     }
 
@@ -1598,7 +1644,7 @@ mod tests {
             mid_ms: 200.0,
             hi_ms: 400.0,
         });
-        assert!(!estimate(&i).unwrap().estimate.unwrap().pending);
+        assert!(estimate(&i).unwrap().estimate.unwrap().pending);
     }
 
     #[test]
@@ -1805,9 +1851,11 @@ mod tests {
     }
 
     #[test]
-    fn narrow_prior_is_widened_without_reports() {
+    fn narrow_prior_is_widened_before_the_stage_starts() {
         let mut i = input(Some(40.0));
         i.points.clear();
+        i.current_started = false;
+        i.phase_started_at = None;
         i.phases[0].prior = Some(Range {
             lo_ms: 90_000.0,
             mid_ms: 100_000.0,
@@ -2142,11 +2190,16 @@ mod tests {
             let a = estimate(&with_zero).unwrap();
             let b = estimate(&without_zero).unwrap();
             assert_eq!(a.completed_slices, b.completed_slices + 1);
+            if step == 1 {
+                close(a.estimate.unwrap().range.unwrap().mid_ms, 7_800_000.0);
+                assert!(b.estimate.unwrap().pending);
+                continue;
+            }
             let a = a.estimate.unwrap().range.unwrap();
             let b = b.estimate.unwrap().range.unwrap();
             if step == 2 {
-                close(a.mid_ms, 2_090_000.0);
-                close(b.mid_ms, 380_000.0);
+                close(a.mid_ms, 3_800_000.0);
+                close(b.mid_ms, 3_800_000.0);
             }
             if step >= 17 {
                 close(a.mid_ms, (40 - step) as f64 * 10_000.0);

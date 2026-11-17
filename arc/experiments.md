@@ -239,6 +239,9 @@ the estimator and its lifecycle: the summary every `Run` carries, the whole
 monitor `GET /api/runs/:id/monitor` serves, and the text `orx exp status`
 prints, all at one `rev`. The estimate is evaluated once on the server, from
 the collection's clock pair, and stamped with when; pages only count down.
+An active stage with a total is timed from its own advancing reports. Earlier
+run timings cover stages not yet started, scaled by the ratio of their
+declared totals when both are known.
 A run with no total fills against its time limit, and so does one that drew
 several progress bars, since how many are still to come is unknown: its bar is
 one segment, never a row of finished ones. The estimate is left out only when
