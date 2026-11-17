@@ -1,7 +1,11 @@
 import { Popover } from "@base-ui/react/popover";
 import { ArrowUpRight, RefreshCw } from "lucide-react";
 import { useContext, useRef, useState, type KeyboardEvent } from "react";
-import type { Run } from "../../api";
+import { useQuery } from "@tanstack/react-query";
+import { backendDetail, backendKind, type Run } from "../../api";
+import { localMachineSummary } from "../../localMachine";
+import { useWorkspace } from "../../workspace";
+import { BackendLogo, backendName } from "../BackendLogos";
 import { autoDir } from "../../i18n";
 import { m } from "../../paraglide/messages.js";
 import { plainSentence } from "../../runMonitor/format";
@@ -26,6 +30,12 @@ export function RunStatus({ model, label, descriptionId, onOpenRunPage }: {
   const { portalContainer } = useContext(WorkspaceDomContext);
   const [open, setOpen] = useState(false);
   const trigger = useRef<HTMLButtonElement>(null);
+  const { getLocalMachineQuery } = useWorkspace().queries;
+  const kind = backendKind(model.run.backend);
+  const local = useQuery({ ...getLocalMachineQuery(), enabled: open && kind === "local_job", subscribed: open && kind === "local_job" });
+  const detail = backendDetail(model.run.backend);
+  const hardware = kind === "local_job" && local.data && !local.isError ? localMachineSummary(local.data) : null;
+  const compute = [...new Set([kind === "ssh_job" || kind === "slurm_job" ? model.run.host : null, detail, hardware].filter(Boolean))].map((part) => autoDir(String(part))).join(" · ");
   const monitor = useRunMonitors([model.run], () => open)[0];
   const data = monitor && monitor.status !== "loading" ? monitor.data : null;
   const behind = data && monitorBehind(model.run.monitor, data);
@@ -80,7 +90,10 @@ export function RunStatus({ model, label, descriptionId, onOpenRunPage }: {
                   {...tabOpenGestureHandlers<HTMLButtonElement>((intent) => { close(); onOpenRunPage(model.run, intent); })}
                 >{autoDir(model.name)}<ArrowUpRight size={13} className="shrink-0" aria-hidden="true" /></Button> : autoDir(model.name)}
               </Popover.Title>
-              {model.where && <Popover.Description className="m-0 mt-1.5 text-xs text-ink-subtext">{model.where}</Popover.Description>}
+              {kind && <Popover.Description className="m-0 mt-1.5 flex items-start gap-2 text-xs text-ink-subtext">
+                <span className="shrink-0"><BackendLogo kind={kind} size={14} /></span>
+                <span>{backendName(kind)}{compute && <> · {compute}</>}</span>
+              </Popover.Description>}
               {monitor?.status === "error" ? <div className="mt-2.5 text-xs text-ink-subtext" role="alert">
                 {m.run_monitor_load_failed()} <Button size="small" variant="ghost" onClick={monitor.retry}><RefreshCw size={13} />{m.app_retry()}</Button>
               </div> : monitor?.status === "loading" || behind ? <p className="m-0 mt-2.5 text-xs text-ink-subtext" role="status">{m.common_loading()}</p> : data && stages && <>

@@ -1,5 +1,4 @@
-import { backendDetail, backendKind, type Run, type RunStatus } from "../api";
-import { backendName } from "../components/BackendLogos";
+import type { Run, RunStatus } from "../api";
 import { runNoticeCopy } from "../components/RunContactNotice";
 import { statusLabel } from "../components/StatusBadge";
 import { autoDir, fmtNumber, ltr } from "../i18n";
@@ -26,8 +25,6 @@ export interface RunModel {
   sessionId: string;
   /** The experiment's title, else its slug. */
   name: string;
-  /** Backend and machine: "Modal · A10G". */
-  where: string;
   tone: Tone;
   live: boolean;
   /** Submitted and not yet running. */
@@ -149,12 +146,6 @@ function quoted(line: string): string {
 function barLabel(parts: string[]): string {
   const text = parts.map((part) => plainSentence(part).trim().replace(/[.。۔]$/u, "")).filter(Boolean).join(", ");
   return text && `${text}.`;
-}
-
-function where(run: Run): string {
-  const kind = backendKind(run.backend);
-  const detail = backendDetail(run.backend) || run.host;
-  return [kind ? backendName(kind) : null, detail].filter(Boolean).map((part) => autoDir(String(part))).join(" · ");
 }
 
 /**
@@ -433,7 +424,6 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     run,
     sessionId: item.sessionId,
     name: item.experimentName ?? item.experimentSlug ?? run.experimentId,
-    where: where(run),
     tone,
     live,
     pre,
