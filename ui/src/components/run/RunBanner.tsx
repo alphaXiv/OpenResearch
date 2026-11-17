@@ -195,7 +195,7 @@ export function RunBanner({ sessionId, agent, onOpenRun, onOpenRunPage }: {
       {runs.length === 0 ? null : single ? (
         strip(models[0], 0)
       ) : (
-        <div className="@container relative mb-2.5 overflow-hidden rounded-lg border border-border bg-surface text-sm text-text">
+        <div data-run-frame="" className="@container relative mb-2.5 overflow-hidden rounded-lg border border-border bg-surface text-sm text-text">
           <RunSummary models={models} context={context} {...summarize(models, named, runs[0].watch, now)} open={rows} onToggle={toggleRows} />
           {rows && (
             <ul role="list" className="m-0 list-none p-0">

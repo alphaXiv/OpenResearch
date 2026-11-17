@@ -56,7 +56,7 @@ export function RunLine({ model, agent, label, onToggle, onOpenRunPage, expanded
     : null;
   const { text, title } = label ?? { text: model.name, title: model.name };
   return (
-    <div role="group" aria-label={title} className={label ? cn("relative", model.needsChoice && "bg-accent-amber-subtle") : runFrame(model)}>
+    <div data-run-frame={label ? undefined : ""} role="group" aria-label={title} className={label ? cn("relative", model.needsChoice && "bg-accent-amber-subtle") : runFrame(model)}>
       <div className="flex min-h-9 min-w-0 items-center gap-x-2 py-1 ps-3 pe-1.5">
         <Mark tone={model.tone} live={model.live} label={model.status} />
         <RunStatus model={model} label={label ? text : undefined} descriptionId={time?.why ? whyId : undefined} onOpenRunPage={onOpenRunPage} />

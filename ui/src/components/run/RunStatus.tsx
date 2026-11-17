@@ -33,6 +33,9 @@ export function RunStatus({ model, label, descriptionId, onOpenRunPage }: {
   const progress = data?.progress;
   const count = data && progress?.done != null ? plainSentence(capitalized(progressWords(data.phases[progress.phase], progress.done))) : "";
   const time = [model.eta, model.etaDetail].filter(Boolean).join(" · ") || (!model.live ? model.sentence.text : "");
+  const untimed = [...(data?.estimate?.untimed ?? model.run.monitor?.etaUntimed ?? [])].sort((a, b) => b.length - a.length);
+  const footer = model.settingUp || !model.live ? time : m.run_whole_time({ time });
+  const footerNames = untimed.length ? new RegExp(`(${untimed.map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`, "g") : null;
   const stage = model.sentence.stage;
   const status = plainSentence([label, model.lead, model.sentence.text].filter(Boolean).join(" · "));
 
@@ -68,26 +71,26 @@ export function RunStatus({ model, label, descriptionId, onOpenRunPage }: {
           </> : <span className="min-w-0 truncate"><Sentence text={model.sentence.text} tone={model.tone} /></span>}
         </Popover.Trigger>
         <Popover.Portal container={portalContainer}>
-          <Popover.Positioner side="top" align="start" sideOffset={7} collisionPadding={12} className="z-50">
+          <Popover.Positioner side="top" align="start" anchor={() => trigger.current?.closest<HTMLElement>("[data-run-frame]") ?? trigger.current} sideOffset={6} collisionPadding={12} className="z-50">
             <Popover.Popup initialFocus={false} finalFocus={false} onKeyDown={onKeyDown}
-              className="w-80 max-w-[calc(100vw-1.5rem)] max-h-(--available-height) overflow-y-auto rounded-lg border border-border bg-background p-3.5 text-text shadow-menu outline-none"
+              className="w-80 max-w-[calc(100vw-1.5rem)] max-h-(--available-height) overflow-y-auto rounded-lg border border-border bg-background px-4 py-3.5 text-text shadow-menu outline-none"
             >
               <Popover.Title className="m-0 text-sm font-medium">
                 {onOpenRunPage ? <Button variant="ghost" role="link" className="tool-target min-h-6 w-full justify-start gap-1 whitespace-normal p-0 text-start text-sm font-medium"
                   {...tabOpenGestureHandlers<HTMLButtonElement>((intent) => { close(); onOpenRunPage(model.run, intent); })}
                 >{autoDir(model.name)}<ArrowUpRight size={13} className="shrink-0" aria-hidden="true" /></Button> : autoDir(model.name)}
               </Popover.Title>
-              {model.where && <Popover.Description className="m-0 mt-1 text-xs text-ink-subtext">{model.where}</Popover.Description>}
-              {monitor?.status === "error" ? <div className="mt-3 text-xs text-ink-subtext" role="alert">
+              {model.where && <Popover.Description className="m-0 mt-1.5 text-xs text-ink-subtext">{model.where}</Popover.Description>}
+              {monitor?.status === "error" ? <div className="mt-2.5 text-xs text-ink-subtext" role="alert">
                 {m.run_monitor_load_failed()} <Button size="small" variant="ghost" onClick={monitor.retry}><RefreshCw size={13} />{m.app_retry()}</Button>
-              </div> : monitor?.status === "loading" || behind ? <p className="m-0 mt-3 text-xs text-ink-subtext" role="status">{m.common_loading()}</p> : data && stages && <>
-                {data.availability.state !== "live" && <p className="m-0 mt-3 text-xs text-ink-subtext">{data.availability.reason ?? m.run_view_stale()}</p>}
-                {(data.availability.state !== "unavailable" && (data.phases.length > 0 || data.setup != null || data.stageOrder.first === null)) && <div className="mt-3">
+              </div> : monitor?.status === "loading" || behind ? <p className="m-0 mt-2.5 text-xs text-ink-subtext" role="status">{m.common_loading()}</p> : data && stages && <>
+                {data.availability.state !== "live" && <p className="m-0 mt-2.5 text-xs text-ink-subtext">{data.availability.reason ?? m.run_view_stale()}</p>}
+                {(data.availability.state !== "unavailable" && (data.phases.length > 0 || data.setup != null || data.stageOrder.first === null)) && <div className="mt-2.5 border-t border-border-variant pt-2.5">
                   <Phases model={model} phases={stages.phases} current={stages.current} progress={count} setupNames={stages.names} className="flex-col gap-y-2" />
                 </div>}
               </>}
-              {model.sentence.watcher && <p className="m-0 mt-3 break-words text-sm"><Sentence text={autoDir(model.sentence.watcher)} tone={model.tone} /></p>}
-              {time && <p className="m-0 mt-3 border-t border-border pt-3 text-xs text-ink-subtext">{model.settingUp || !model.live ? time : m.run_whole_time({ time })}</p>}
+              {model.sentence.watcher && <p className="m-0 mt-2.5 break-words text-sm"><Sentence text={autoDir(model.sentence.watcher)} tone={model.tone} /></p>}
+              {time && <p className="m-0 mt-2.5 border-t border-border-variant pt-2.5 text-xs text-ink-subtext">{footerNames ? footer.split(footerNames).map((part, index) => untimed.includes(part) ? <span key={index} className="whitespace-nowrap">{part}</span> : part) : footer}</p>}
             </Popover.Popup>
           </Popover.Positioner>
         </Popover.Portal>

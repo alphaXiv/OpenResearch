@@ -18,10 +18,10 @@ export function Phases({ model, phases, current, progress, setupNames, className
         const expected = model.live && !past && !now && phase.priorMs !== null ? m.run_eta_about({ duration: durationText(phase.priorMs) }) : "";
         const note = [skipped ? m.run_stage_skipped() : now ? progress : past ? took : expected, phase.planned === false ? m.run_stage_unplanned() : ""].filter(Boolean).join(" · ");
         return (
-          <li key={`${phase.name}-${index}`} aria-current={now ? "step" : undefined} className={cn("inline-flex items-center gap-1.5", now ? "font-medium text-text" : "text-ink-subtext")}>
-            {past ? <Check size={12} role="img" aria-label={m.status_done()} />
-              : skipped ? <Minus size={12} aria-hidden="true" />
-              : <i aria-hidden="true" className={cn("mx-[2.5px] size-[7px] rounded-full", now ? cn(TONE_BG[model.tone], model.live && !model.bar.frozen && "motion-safe:animate-[or-pulse_1.2s_ease-in-out_infinite]") : "border-[1.5px] border-current")} />}
+          <li key={`${phase.name}-${index}`} aria-current={now ? "step" : undefined} className={cn("inline-flex items-baseline gap-1.5", now ? "font-medium text-text" : "text-ink-subtext")}>
+            {past ? <Check size={12} className="shrink-0 self-start mt-0.5" role="img" aria-label={m.status_done()} />
+              : skipped ? <Minus size={12} className="shrink-0 self-start mt-0.5" aria-hidden="true" />
+              : <i aria-hidden="true" className={cn("mx-[2.5px] mt-1 size-[7px] shrink-0 self-start rounded-full", now ? cn(TONE_BG[model.tone], model.live && !model.bar.frozen && "motion-safe:animate-[or-pulse_1.2s_ease-in-out_infinite]") : "border-[1.5px] border-current")} />}
             <span className="min-w-0">{autoDir(phase.name)}
               {index === 0 && setupNames && setupNames.length > 0 && <span className="mt-0.5 block font-normal text-ink-subtext">{setupNames.map(autoDir).join(" · ")}</span>}
             </span>
