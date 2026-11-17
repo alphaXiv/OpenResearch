@@ -42,9 +42,12 @@ test("an install queued behind another says so until it starts", async () => {
 test("an update queued behind another says so while its terminal stays folded away", async () => {
   const sockets = fakeSockets();
   const harness = { id: "opencode", name: "OpenCode", installed: true, installBroken: false, authState: "ready", needsConfigRepair: false, version: "1.19.5" };
-  const { container } = await render(createElement(HarnessSetup, { harness, commands, action: "upgrade" }));
+  const { container } = await render(createElement(HarnessSetup, { harness, commands, action: "update" }));
+  const run = [...container.querySelectorAll("button")].find((button) => button.textContent === m.harness_setup_approve_run());
+  await act(async () => run.click());
+  await settle();
   const [socket] = sockets;
-  assert.equal(new URL(socket.url).searchParams.get("action"), "upgrade");
+  assert.equal(new URL(socket.url).searchParams.get("action"), "update");
   assert.equal(container.querySelector("button[aria-expanded]").getAttribute("aria-expanded"), "false");
   await act(() => socket.onopen());
 
