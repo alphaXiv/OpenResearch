@@ -10028,6 +10028,7 @@ pub fn prepare_env(cmd: &mut tokio::process::Command) {
     // orx updates Claude Code itself (`harness::managed`), so a managed copy
     // never runs the CLI's own updater against the user's install location.
     cmd.env("DISABLE_AUTOUPDATER", "1");
+    cmd.env_remove("ORX_INVOCATION_CONTEXT");
 }
 
 /// Env var carrying the launching chat session's id into a harness child. The
@@ -10178,7 +10179,6 @@ pub fn set_chat_session_env(
 ) -> crate::error::Result<()> {
     cmd.env(CHAT_SESSION_ENV, session_id);
     cmd.env(CHAT_HARNESS_ENV, harness);
-    cmd.env_remove("ORX_INVOCATION_CONTEXT");
     // The agent's `orx` opens the store this dashboard serves, whatever a synced
     // `ORX_DATA_DIR` or the agent's own home would resolve.
     let data_dir = crate::commands::remote_host::canonical_data_dir().map_err(|error| {
@@ -10393,7 +10393,7 @@ mod session_env_tests {
     }
 
     #[test]
-    fn each_harness_clears_the_outer_invocation_context() {
+    fn each_harness_keeps_its_native_invocation_context() {
         for harness in [
             "claude-code",
             "codex",
@@ -10404,12 +10404,25 @@ mod session_env_tests {
         ] {
             let mut cmd = crate::process::tokio_command("agent");
             cmd.env("ORX_INVOCATION_CONTEXT", "outer-agent");
+            super::prepare_env(&mut cmd);
             super::set_chat_session_env(&mut cmd, "session", harness, None).unwrap();
             let context = cmd
                 .as_std()
                 .get_envs()
                 .find(|(key, _)| *key == "ORX_INVOCATION_CONTEXT");
             assert_eq!(context.map(|(_, value)| value), Some(None));
+
+            let native =
+                serde_json::json!({"harness":harness,"model":"native-model","provider":null})
+                    .to_string();
+            cmd.env("ORX_INVOCATION_CONTEXT", &native);
+            super::set_chat_session_env(&mut cmd, "session", harness, None).unwrap();
+            let context = cmd
+                .as_std()
+                .get_envs()
+                .find(|(key, _)| *key == "ORX_INVOCATION_CONTEXT")
+                .and_then(|(_, value)| value);
+            assert_eq!(context, Some(std::ffi::OsStr::new(&native)));
         }
     }
 

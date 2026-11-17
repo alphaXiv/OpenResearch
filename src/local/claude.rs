@@ -662,10 +662,7 @@ async fn read_loop(client: Arc<ClaudeClient>, stdout: tokio::process::ChildStdou
                         }
                     }
                 }
-                // Route to the live turn. With none listening, a segment the
-                // child starts itself is held for a turn to record; any other
-                // line (an aborted turn's tail) is dropped once its tool
-                // identities are recorded.
+                // A segment the child starts itself is held for a turn to record.
                 let mut turn = client.turn.lock().unwrap();
                 turn.track_background(&value, Instant::now());
                 if let Some(tx) = turn.sender.as_ref() {
