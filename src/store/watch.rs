@@ -100,14 +100,13 @@ fn row_to_look_run(row: &rusqlite::Row, start: usize) -> rusqlite::Result<WatchL
 impl Store {
     /// Records a look before it is taken: its runs, each under its key, are fixed from here on.
     pub(crate) fn prepare_watch_look(
-        &self,
+        tx: &rusqlite::Transaction<'_>,
         chat_session_id: &str,
         kind: &str,
         reason: &str,
         runs: &[(&str, &str, &str)],
         now: i64,
     ) -> Result<i64> {
-        let tx = self.conn.unchecked_transaction()?;
         tx.execute(
             "INSERT INTO watch_looks (chat_session_id, kind, state, reason, created_at)
              VALUES (?1, ?2, 'prepared', ?3, ?4)",
@@ -120,14 +119,15 @@ impl Store {
                 params![id, run_id, key, role],
             )?;
         }
-        tx.commit()?;
         Ok(id)
     }
 
-    /// Marks a prepared look as handed to its model; false when it was no longer prepared.
+    /// Claims the first send only while the look is prepared and watching is enabled.
     pub(crate) fn watch_look_sent(&self, id: i64) -> Result<bool> {
         Ok(self.conn.execute(
-            "UPDATE watch_looks SET state = 'sent' WHERE id = ?1 AND state = 'prepared'",
+            "UPDATE watch_looks SET state = 'sent'
+             WHERE id = ?1 AND state = 'prepared'
+               AND EXISTS (SELECT 1 FROM ui_state WHERE id = 1 AND run_watching)",
             [id],
         )? > 0)
     }
@@ -316,14 +316,15 @@ impl Store {
         )?)
     }
 
-    /// The chat's looks from `since` on, oldest first: what the per-chat bounds count.
+    /// The chat's pending looks and those from `since` on, oldest first.
     pub(crate) fn chat_watch_looks(
         &self,
         chat_session_id: &str,
         since: i64,
     ) -> Result<Vec<WatchLook>> {
         let mut stmt = self.conn.prepare(&format!(
-            "{SELECT_LOOK} WHERE chat_session_id = ?1 AND created_at >= ?2 ORDER BY id"
+            "{SELECT_LOOK} WHERE chat_session_id = ?1
+               AND (created_at >= ?2 OR state IN ('prepared', 'sent')) ORDER BY id"
         ))?;
         let rows = stmt.query_map(params![chat_session_id, since], row_to_look)?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)

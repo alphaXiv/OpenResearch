@@ -804,13 +804,28 @@ async fn pass(state: &mut State) -> Result<()> {
         }
         if !waiting.contains(&chat_id) {
             let store = Store::open()?;
-            for planned in due(state, &owned, now, &mut next)? {
-                let rows: Vec<(&str, &str, &str)> = planned
-                    .runs
-                    .iter()
-                    .map(|(run, key, role)| (run.as_str(), key.as_str(), *role))
-                    .collect();
-                store.prepare_watch_look(&chat_id, planned.kind, &planned.reason, &rows, now)?;
+            let plans = due(&store, state, &owned, now, &mut next)?;
+            if !plans.is_empty() {
+                let tx = store.begin_immediate()?;
+                // A manual look admitted during log reads invalidates this pass's run history.
+                if store.chat_watch_looks(&chat_id, now)?.is_empty() {
+                    for planned in plans {
+                        let rows: Vec<(&str, &str, &str)> = planned
+                            .runs
+                            .iter()
+                            .map(|(run, key, role)| (run.as_str(), key.as_str(), *role))
+                            .collect();
+                        Store::prepare_watch_look(
+                            &tx,
+                            &chat_id,
+                            planned.kind,
+                            &planned.reason,
+                            &rows,
+                            now,
+                        )?;
+                    }
+                }
+                tx.commit()?;
             }
         }
         start.push(chat_id);
@@ -1617,12 +1632,12 @@ struct Planned {
 /// The looks a chat's runs need now: none, a terminal look for runs that ended, or one look in
 /// calls of six runs, at most four, the runs a change is about and those looked at least lately first.
 fn due(
+    store: &Store,
     state: &State,
     owned: &Owned,
     now: i64,
     next: &mut HashMap<String, i64>,
 ) -> Result<Vec<Planned>> {
-    let store = Store::open()?;
     let earliest = owned
         .runs
         .iter()
@@ -1812,25 +1827,6 @@ pub(crate) fn look_now(store: &Store, run: &StoredRun) -> std::result::Result<Va
     let Watching::Selected { .. } = &watching else {
         return Err(LookNow::NotWatched(not_watched(&watching)));
     };
-    let now = crate::store::now_ms();
-    let settings = store
-        .run_monitor_json(&run.experiment_id)
-        .map_err(LookNow::Failed)?
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or(Value::Null);
-    let (min_gap, _) = gaps(&settings);
-    let looks = store
-        .chat_watch_looks(&chat.id, now - min_gap)
-        .map_err(LookNow::Failed)?;
-    if let Some(look) = looks
-        .iter()
-        .find(|look| matches!(look.state.as_str(), "prepared" | "sent"))
-    {
-        return Ok(json!({"lookId": look.id, "state": look.state}));
-    }
-    if let Some(last) = looks.last() {
-        return Err(LookNow::TooSoon(last.created_at + min_gap));
-    }
     let mut runs = vec![run.clone()];
     for other in store.list_active_runs().map_err(LookNow::Failed)? {
         if other.id != run.id && runs.len() < RUNS_PER_LOOK {
@@ -1850,9 +1846,34 @@ pub(crate) fn look_now(store: &Store, run: &StoredRun) -> std::result::Result<Va
         .iter()
         .map(|(id, key)| (id.as_str(), key.as_str(), "subject"))
         .collect();
-    let id = store
-        .prepare_watch_look(&chat.id, "manual", "You asked for a look", &rows, now)
+    let tx = store.begin_immediate().map_err(LookNow::Failed)?;
+    let settings = store
+        .run_monitor_json(&run.experiment_id)
+        .map_err(LookNow::Failed)?
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or(Value::Null);
+    let (min_gap, _) = gaps(&settings);
+    let now = crate::store::now_ms();
+    let looks = store
+        .chat_watch_looks(&chat.id, now - min_gap)
         .map_err(LookNow::Failed)?;
+    for look in &looks {
+        if matches!(look.state.as_str(), "prepared" | "sent")
+            && store
+                .watch_look_runs(look.id)
+                .map_err(LookNow::Failed)?
+                .iter()
+                .any(|row| row.run_id == run.id)
+        {
+            return Ok(json!({"lookId": look.id, "state": look.state}));
+        }
+    }
+    if let Some(last) = looks.last() {
+        return Err(LookNow::TooSoon(last.created_at + min_gap));
+    }
+    let id = Store::prepare_watch_look(&tx, &chat.id, "manual", "You asked for a look", &rows, now)
+        .map_err(LookNow::Failed)?;
+    tx.commit().map_err(|error| LookNow::Failed(error.into()))?;
     wake().notify_one();
     Ok(json!({"lookId": id, "state": "prepared"}))
 }
@@ -2229,41 +2250,8 @@ async fn take(id: i64) -> Result<()> {
         notes: kept_notes.as_deref(),
         summary: summary_wanted.then_some(&summary_previous[..]),
     };
-    let room = digest::room(digest::SYSTEM.len() + DIGEST_PREAMBLE.len());
-    let digest = digest::build(&shared, &digest_runs, room);
-    let prompt = format!("{DIGEST_PREAMBLE}{}", digest.text);
-    let mut told: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for run in &runs {
-        let Some(key) = rows
-            .iter()
-            .find(|row| row.run_id == run.run.id)
-            .map(|row| &row.key)
-        else {
-            continue;
-        };
-        told.insert(
-            run.run.id.clone(),
-            withheld_notes(run, key, &digest.withheld, &logs[&run.run.id]).await,
-        );
-    }
-
     let agent = crate::local::harness::chat_harness(harness)
         .ok_or_else(|| anyhow!("{harness} is not an agent this orx knows"))?;
-    fn request<'a>(
-        prompt: &'a str,
-        profile: Option<&'a str>,
-        model: Option<&'a str>,
-    ) -> OneShot<'a> {
-        OneShot {
-            profile,
-            system: digest::SYSTEM,
-            prompt,
-            quality: OneShotQuality::Cheap,
-            model,
-            timeout: LOOK_TIMEOUT,
-        }
-    }
-    let empty_set = BTreeSet::new();
     let versus: BTreeMap<&str, BTreeSet<String>> = keyed
         .iter()
         .map(|(key, run)| {
@@ -2281,23 +2269,6 @@ async fn take(id: i64) -> Result<()> {
         .iter()
         .map(|(key, run)| (key.as_str(), moving(run)))
         .collect();
-    let no_excerpts = Vec::new();
-    let bindable: Vec<reply::Bindable> = keyed
-        .iter()
-        .map(|(key, run)| reply::Bindable {
-            key,
-            signals: &run.body["view"]["signals"],
-            versus: versus.get(key.as_str()).unwrap_or(&empty_set),
-            counts: counted.get(key.as_str()).unwrap_or(&empty_set),
-            moving: &movings[key.as_str()],
-            step: run.summary["stage"]["done"].as_f64().filter(|_| run.live()),
-            excerpts: digest.excerpts.get(key).unwrap_or(&no_excerpts),
-            sentence: previous[&run.run.id]
-                .last()
-                .map(|(template, _)| template.as_str()),
-            setup: in_setup(&run.body),
-        })
-        .collect();
     let summary_bounds = reply::SummaryBounds {
         sentence: summary_previous
             .last()
@@ -2309,103 +2280,146 @@ async fn take(id: i64) -> Result<()> {
             .map_or_else(|| "—".to_owned(), |run| render(run, token))
     };
 
-    {
-        let store = Store::open()?;
-        if !store.watch_look_sent(id)? {
-            return Ok(());
-        }
-    }
-    let mut usage = OneShotUsage::default();
+    let mut usage: Option<OneShotUsage> = None;
     let mut priced = true;
-    let mut add = |used: Option<OneShotUsage>| match used {
-        Some(used) => {
-            usage.input_tokens += used.input_tokens;
-            usage.output_tokens += used.output_tokens;
-            usage.cost_usd = match (usage.cost_usd, used.cost_usd) {
-                (_, None) => {
-                    priced = false;
-                    None
-                }
-                (sum, Some(cost)) => Some(sum.unwrap_or(0.0) + cost),
-            };
+    let mut read = reply::Read::default();
+    let mut correction = String::new();
+    let mut sent = Vec::new();
+    let mut failure = None;
+    for attempt in ["look", "retry"] {
+        let fixed = digest::SYSTEM.len() + DIGEST_PREAMBLE.len() + correction.len();
+        let digest = digest::build(&shared, &digest_runs, digest::room(fixed));
+        let prompt = format!("{DIGEST_PREAMBLE}{}{correction}", digest.text);
+        if digest::SYSTEM.len() + prompt.len() > digest::room(0) {
+            failure = Some(format!(
+                "The {attempt} exceeded the watcher's {}-token request budget.",
+                digest::MAX_TOKENS,
+            ));
+            break;
         }
-        None => priced = false,
-    };
-    let first = agent
-        .one_shot_without_tools(request(&prompt, profile.as_deref(), model.as_deref()))
-        .await;
-    let first = match first {
-        Ok(reply) => reply,
-        Err(error) => {
+        let allowed = {
             let store = Store::open()?;
-            let error = format!("{} could not take this look: {error:#}", agent.name());
-            let results = unanswered(&rows, "error");
-            store.finish_watch_look(
-                id,
-                "error",
-                crate::store::now_ms(),
-                None,
-                Some(&error),
-                None,
-                &results,
-                &[],
-            )?;
-            return Ok(());
+            let tx = store.begin_immediate()?;
+            let allowed = if sent.is_empty() {
+                store.watch_look_sent(id)?
+            } else {
+                store.ui_state()?.run_watching
+            };
+            if !allowed && sent.is_empty() && store.ui_state()?.run_watching {
+                return Ok(());
+            }
+            tx.commit()?;
+            allowed
+        };
+        if !allowed {
+            failure = Some(not_watched(&Watching::Off));
+            break;
         }
-    };
-    add(first.usage);
-    let mut read = reply::read(
-        &first.text,
-        &bindable,
-        summary_wanted.then_some(&summary_bounds),
-        &renderer,
-    );
-    // The reply goes back with the prompt, so what the model wrote is scanned too.
-    let echoed =
-        crate::local::share::find_secret(&format!("{}\n{}", first.text, read.errors.join("\n")));
-    if !read.errors.is_empty() && echoed.is_none() {
-        let asked = format!(
-            "\n\nYour last reply was:\n{}\nIt was not accepted: {}.\nFix the reported errors; shorten labels or clauses to meet the displayed-character limit, keeping tokens and required bold. Reply again with the whole JSON.",
-            first.text,
-            read.errors.join("; ")
+        let answer = agent
+            .one_shot_without_tools(OneShot {
+                profile: profile.as_deref(),
+                system: digest::SYSTEM,
+                prompt: &prompt,
+                quality: OneShotQuality::Cheap,
+                model: model.as_deref(),
+                timeout: LOOK_TIMEOUT,
+            })
+            .await;
+        sent.push(digest);
+        let answer = match answer {
+            Ok(answer) => answer,
+            Err(error) => {
+                failure = Some(format!(
+                    "{} could not take this {attempt}: {error:#}",
+                    agent.name()
+                ));
+                break;
+            }
+        };
+        let total = usage.get_or_insert_with(OneShotUsage::default);
+        if let Some(used) = answer.usage {
+            total.input_tokens += used.input_tokens;
+            total.output_tokens += used.output_tokens;
+            if let Some(cost) = used.cost_usd {
+                *total.cost_usd.get_or_insert(0.0) += cost;
+            } else {
+                priced = false;
+            }
+        } else {
+            priced = false;
+        }
+        let digest = sent.last().expect("the request's digest was just recorded");
+        let bindable: Vec<reply::Bindable> = keyed
+            .iter()
+            .map(|(key, run)| reply::Bindable {
+                key,
+                signals: &run.body["view"]["signals"],
+                versus: &versus[key.as_str()],
+                counts: &counted[key.as_str()],
+                moving: &movings[key.as_str()],
+                step: run.summary["stage"]["done"].as_f64().filter(|_| run.live()),
+                excerpts: digest.excerpts.get(key).map_or(&[][..], Vec::as_slice),
+                sentence: previous[&run.run.id]
+                    .last()
+                    .map(|(template, _)| template.as_str()),
+                setup: in_setup(&run.body),
+            })
+            .collect();
+        let checked = reply::read(
+            &answer.text,
+            &bindable,
+            summary_wanted.then_some(&summary_bounds),
+            &renderer,
         );
-        // The retry holds to the same budget as the first request, with the reply in it.
-        let refit = digest::build(&shared, &digest_runs, room.saturating_sub(asked.len()));
-        let again = format!("{DIGEST_PREAMBLE}{}{asked}", refit.text);
-        if let Ok(second) = agent
-            .one_shot_without_tools(request(&again, profile.as_deref(), model.as_deref()))
-            .await
-        {
-            add(second.usage);
-            let retried = reply::read(
-                &second.text,
-                &bindable,
-                summary_wanted.then_some(&summary_bounds),
-                &renderer,
+        if attempt == "look" {
+            read = checked;
+            if read.errors.is_empty() {
+                break;
+            }
+            let errors = read.errors.join("; ");
+            // The retry echoes the reply and the errors, so scan both before sending either.
+            if crate::local::share::find_secret(&format!("{}\n{errors}", answer.text)).is_some() {
+                break;
+            }
+            correction = format!(
+                "\n\nYour last reply was:\n{}\nIt was not accepted: {errors}.\nFix the reported errors; shorten labels or clauses to meet the displayed-character limit, keeping tokens and required bold. Reply again with the whole JSON.",
+                answer.text,
             );
-            for (key, answer) in retried.runs {
-                // A flag kept from the first reply stands unless the retry writes a sentence.
-                if matches!(answer, reply::Answer::Same | reply::Answer::Silent)
-                    && read.salvaged.contains(&key)
-                {
-                    continue;
-                }
-                if !retried.salvaged.contains(&key) {
-                    read.salvaged.remove(&key);
-                }
-                read.runs.insert(key, answer);
+            continue;
+        }
+        for (key, answer) in checked.runs {
+            // A flag kept from the first reply stands unless the retry writes a sentence.
+            if matches!(answer, reply::Answer::Same | reply::Answer::Silent)
+                && read.salvaged.contains(&key)
+            {
+                continue;
             }
-            if retried.summary.is_some() {
-                read.summary = retried.summary;
-            }
-            read.notes = retried.notes.or(read.notes);
-            read.errors = retried.errors;
+            read.runs.insert(key, answer);
+        }
+        if checked.summary.is_some() {
+            read.summary = checked.summary;
+        }
+        read.notes = checked.notes.or(read.notes);
+        read.errors = checked.errors;
+    }
+    if !priced {
+        if let Some(total) = &mut usage {
+            total.cost_usd = None;
         }
     }
-    let usage = Some(OneShotUsage {
-        cost_usd: usage.cost_usd.filter(|_| priced),
-        ..usage
-    });
+    if usage.is_none() {
+        let store = Store::open()?;
+        return store.finish_watch_look(
+            id,
+            "error",
+            crate::store::now_ms(),
+            None,
+            failure.as_deref(),
+            None,
+            &unanswered(&rows, "error"),
+            &[],
+        );
+    }
 
     let now = crate::store::now_ms();
     let mut results = Vec::new();
@@ -2453,7 +2467,8 @@ async fn take(id: i64) -> Result<()> {
                         }
                     }
                 }
-                let head_shown = read.head_shown || digest.heads.contains(&row.key);
+                let head_shown =
+                    read.head_shown || sent.iter().any(|digest| digest.heads.contains(&row.key));
                 json!({"ident": read.ident, "to": read.to, "families": families, "headShown": head_shown})
             }
         };
@@ -2462,22 +2477,24 @@ async fn take(id: i64) -> Result<()> {
             cursor.remove("withheld");
             cursor.remove("omitted");
         }
-        if let Some(notes) = told.get(&run.run.id).filter(|notes| !notes.is_empty()) {
+        let notes = withheld_notes(run, &row.key, &sent, read_log).await;
+        if !notes.is_empty() {
             cursor["withheld"] = json!(notes);
         }
-        let over = (digest.over > 0).then(|| {
-            format!(
-                " It still went about {} tokens over.",
-                digest.over.div_ceil(digest::BYTES_PER_TOKEN)
-            )
-        });
-        if let Some(cut) = digest.omitted.get(&row.key) {
-            cursor["omitted"] = json!(format!(
-                "To keep this look within {} tokens it left out {}.{}",
-                digest::MAX_TOKENS,
-                cut.join("; "),
-                over.unwrap_or_default()
-            ));
+        let cuts: Vec<String> = sent
+            .iter()
+            .zip(["this look", "the retry"])
+            .filter_map(|(digest, attempt)| {
+                let cut = digest.omitted.get(&row.key)?;
+                Some(format!(
+                    "To keep {attempt} within {} tokens it left out {}.",
+                    digest::MAX_TOKENS,
+                    cut.join("; "),
+                ))
+            })
+            .collect();
+        if !cuts.is_empty() {
+            cursor["omitted"] = json!(cuts.join(" "));
         }
         // A new count is counted from the log's start before its sentence is kept, so the
         // sentence never reads a count that is not there yet.
@@ -2581,12 +2598,16 @@ async fn take(id: i64) -> Result<()> {
             .map(|(template, _)| (template.clone(), fill(template, &keyed, None))),
         None | Some(reply::Answer::Silent) => None,
     };
-    let error = (!read.errors.is_empty()).then(|| {
+    let rejected = (!read.errors.is_empty()).then(|| {
         format!(
             "The watcher's reply was not accepted: {}",
             read.errors.join("; ")
         )
     });
+    let error = match (failure, rejected) {
+        (Some(failure), Some(rejected)) => Some(format!("{failure} {rejected}")),
+        (failure, rejected) => failure.or(rejected),
+    };
     let state = if results.iter().all(|r| r.result == "error") {
         "error"
     } else {
@@ -2684,11 +2705,12 @@ fn notes() -> &'static Mutex<HashMap<String, String>> {
 async fn withheld_notes(
     run: &Now,
     key: &str,
-    withheld: &[digest::Withheld],
+    sent: &[digest::Digest],
     log: &Result<digest::LogRead>,
 ) -> Vec<String> {
-    let mine: Vec<&digest::Withheld> = withheld
+    let mine: Vec<&digest::Withheld> = sent
         .iter()
+        .flat_map(|digest| &digest.withheld)
         .filter(|w| w.key.as_deref().is_none_or(|k| k == key))
         .collect();
     let (from, ident) = match log {

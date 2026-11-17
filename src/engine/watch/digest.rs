@@ -155,8 +155,8 @@ struct Trim {
 /// what frames the digest.
 pub(super) fn room(fixed: usize) -> usize {
     (MAX_TOKENS * BYTES_PER_TOKEN)
-        .saturating_sub(fixed)
         .min(MAX_BYTES)
+        .saturating_sub(fixed)
 }
 
 /// What a look read of one run's log since the last look.
@@ -222,8 +222,6 @@ pub(super) struct Digest {
     pub omitted: BTreeMap<String, Vec<String>>,
     /// The runs whose log's first lines this digest showed, or held, by key.
     pub heads: BTreeSet<String>,
-    /// Bytes the digest is past `room` even cut as far as it goes.
-    pub over: usize,
 }
 
 pub(super) struct Withheld {
@@ -663,7 +661,6 @@ fn brief_within(brief: &Map<String, Value>, max: usize) -> Map<String, Value> {
 /// lines. The log lines go first to the runs this look is about, a run's first lines only once
 /// every run's new ones are in, and only to a look that has not shown them.
 pub(super) fn build(shared: &Shared, runs: &[Run], room: usize) -> Digest {
-    let budget = room;
     let mut withheld = Vec::new();
     // Scanned before anything is cut, so a cut never leaves part of a credential to send.
     let mut scrubbed = |mut value: Value, place: &'static str| {
@@ -975,7 +972,6 @@ pub(super) fn build(shared: &Shared, runs: &[Run], room: usize) -> Digest {
     }
     let text = serde_json::to_string(&digest).unwrap_or_default();
     Digest {
-        over: text.len().saturating_sub(budget),
         text,
         excerpts,
         withheld,
@@ -1286,7 +1282,7 @@ mod tests {
         );
         let request = SYSTEM.len() + digest.text.len();
         assert!(
-            request <= MAX_TOKENS * BYTES_PER_TOKEN && digest.over == 0,
+            request <= MAX_TOKENS * BYTES_PER_TOKEN,
             "{request} bytes is past {MAX_TOKENS} tokens"
         );
         let sent: Value = serde_json::from_str(&digest.text).unwrap();

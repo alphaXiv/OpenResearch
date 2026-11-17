@@ -407,9 +407,10 @@ for them once every run's new lines are in, and to no later one. When it is too
 long, older points go first, then earlier sentences, values no signal names, the
 watcher's notes past 512 bytes, each brief past 1 KiB (its least needed labels
 first), the signals no sentence reads, and then notes and briefs again; the
-journal says what each look left out, and by how much it was still over. Each field and log line passes
-sharing's credential scan as written, before it is clipped or encoded; one that
-matches is left out, saying so, and the journal tells the user once where it is.
+journal says what each request left out. A request that still exceeds the budget
+is skipped and recorded. Each field and log line passes sharing's credential
+scan as written, before it is clipped or encoded. A match is left out, saying so,
+and the journal tells the user once where it is.
 A retry's reply is scanned before it goes back. A reply is strict JSON: each number that can
 move is a token orx fills, a sentence with figures marks one bold (optional in the
 group summary), a run sentence reads at most 48 characters filled (90 for the summary),

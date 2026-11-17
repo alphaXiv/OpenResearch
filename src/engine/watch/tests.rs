@@ -22,6 +22,10 @@ n=$(cat "$dir/calls" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$dir/calls"
 printf '%s\n' "$@" > "$dir/args-$n"
 printf '%s' "$2" > "$dir/prompt-$n"
 ls -A "$CLAUDE_CONFIG_DIR" > "$dir/home-$n"
+if [ "$n" = 1 ] && [ -p "$dir/ready" ]; then
+    printf 'ready\n' > "$dir/ready"
+    read -r resume < "$dir/resume"
+fi
 reply=$(cat "$dir/reply-$n")
 printf '{{"type":"result","is_error":false,"result":%s,"total_cost_usd":0.002,"usage":{{"input_tokens":3000,"output_tokens":60}}}}' "$reply"
 "#,
@@ -103,9 +107,18 @@ fn look(store: &Store, chat: &str, kind: &str, runs: &[(&str, &str)]) -> i64 {
         .iter()
         .map(|(id, key)| (*id, *key, "subject"))
         .collect();
-    store
-        .prepare_watch_look(chat, kind, "a test asked", &rows, crate::store::now_ms())
-        .unwrap()
+    let tx = store.begin_immediate().unwrap();
+    let id = Store::prepare_watch_look(
+        &tx,
+        chat,
+        kind,
+        "a test asked",
+        &rows,
+        crate::store::now_ms(),
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    id
 }
 
 const LOG: &str = "config: depth=4 width=512\nWARNING --depth 8 overrides DEPTH; using 4\nstep 100 loss 2.1\nretrying shard 3 (timed out)\nretrying shard 4 (timed out)\n";
@@ -407,6 +420,118 @@ async fn a_reply_that_breaks_the_contract_is_asked_for_once_more_with_why() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn switching_watching_off_while_the_model_answers_blocks_the_retry() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let calls_dir = crate::config::home_dir().unwrap().join("claude-calls");
+    let rejected = r#"{"runs":{"r1":{"status":"ok","line":37}}}"#;
+    fake_claude(&calls_dir, &[rejected, rejected]);
+    let ready = calls_dir.join("ready");
+    let resume = calls_dir.join("resume");
+    assert!(crate::process::command("mkfifo")
+        .args([&ready, &resume])
+        .status()
+        .unwrap()
+        .success());
+    let store = Store::open().unwrap();
+    chat(&store, "chat", "claude-code");
+    run(&store, "a", "Depth 6", "chat", LOG);
+    let id = look(&store, "chat", "ceiling", &[("a", "r1")]);
+
+    let turn_off = async {
+        let signal = tokio::time::timeout(
+            Duration::from_secs(15),
+            crate::process::tokio_command("cat")
+                .arg(ready)
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(signal.status.success());
+        store.set_run_watching(false).unwrap();
+        std::fs::write(resume, b"resume\n").unwrap();
+    };
+    let (result, ()) = tokio::join!(take(id), turn_off);
+    result.unwrap();
+
+    assert_eq!(calls(&calls_dir), 1);
+    let missed = store.watch_look(id).unwrap().unwrap();
+    assert_eq!(missed.state, "error");
+    assert_eq!(missed.usage.unwrap().cost_usd, Some(0.002));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_oversized_digest_or_repair_never_reaches_the_provider() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let calls_dir = crate::config::home_dir().unwrap().join("claude-calls");
+    let too_long = json!({"notes": "x".repeat(digest::MAX_BYTES)}).to_string();
+    fake_claude(&calls_dir, &[&too_long, &too_long]);
+    let store = Store::open().unwrap();
+    chat(&store, "chat", "claude-code");
+    run(&store, "a", &"é".repeat(digest::MAX_BYTES), "chat", LOG);
+    let oversized = look(&store, "chat", "ceiling", &[("a", "r1")]);
+
+    take(oversized).await.unwrap();
+
+    assert_eq!(calls(&calls_dir), 0);
+    let missed = store.watch_look(oversized).unwrap().unwrap();
+    assert_eq!(missed.state, "error");
+    assert!(missed.error.unwrap().contains("budget"));
+
+    run(&store, "b", "Depth 6", "chat", LOG);
+    let retry = look(&store, "chat", "ceiling", &[("b", "r1")]);
+    take(retry).await.unwrap();
+
+    assert_eq!(calls(&calls_dir), 1);
+    let missed = store.watch_look(retry).unwrap().unwrap();
+    assert!(missed.error.unwrap().contains("budget"));
+    assert_eq!(missed.usage.unwrap().cost_usd, Some(0.002));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_retry_cannot_cite_an_excerpt_trimmed_from_its_request() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let calls_dir = crate::config::home_dir().unwrap().join("claude-calls");
+    let room = digest::room(digest::SYSTEM.len() + DIGEST_PREAMBLE.len());
+    let first = json!({
+        "notes": "x".repeat(room - 1000),
+        "runs": {"r1": {"status": "ok", "line": 37}}
+    })
+    .to_string();
+    let second = r#"{"runs":{"r1":{"status":"ok","line":"Training continues.","evidence":[{"from":0,"to":25}]}}}"#;
+    fake_claude(&calls_dir, &[&first, second]);
+    let store = Store::open().unwrap();
+    chat(&store, "chat", "claude-code");
+    run(&store, "a", "Depth 6", "chat", LOG);
+    let id = look(&store, "chat", "ceiling", &[("a", "r1")]);
+
+    take(id).await.unwrap();
+
+    assert_eq!(calls(&calls_dir), 2);
+    let prompt = |i| std::fs::read_to_string(calls_dir.join(format!("prompt-{i}"))).unwrap();
+    assert!(prompt(1).contains("config: depth=4 width=512"));
+    assert!(!prompt(2).contains("config: depth=4 width=512"));
+    let missed = store.watch_look(id).unwrap().unwrap();
+    assert_eq!(missed.state, "error");
+    assert!(missed.error.unwrap().contains("not a log excerpt"));
+    let row = &store.watch_look_runs(id).unwrap()[0];
+    assert!(row.cursor["omitted"]
+        .as_str()
+        .unwrap()
+        .contains("new log lines"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn a_reply_still_wrong_after_its_retry_keeps_the_last_sentence_and_says_why() {
     if !crate::config::in_test_child(&[]) {
         return;
@@ -553,6 +678,61 @@ fn a_look_orx_stopped_after_sending_is_interrupted_and_never_sent_again() {
         !store.watch_look_sent(sent).unwrap(),
         "an interrupted look is not sent again"
     );
+}
+
+#[test]
+fn the_send_claim_checks_that_watching_is_still_on() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let store = Store::open().unwrap();
+    let id = look(&store, "chat", "ceiling", &[("a", "r1")]);
+    store.set_run_watching(false).unwrap();
+
+    assert!(!store.watch_look_sent(id).unwrap());
+    assert_eq!(store.watch_look(id).unwrap().unwrap().state, "prepared");
+}
+
+#[test]
+fn look_now_does_not_claim_another_runs_pending_look() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let store = Store::open().unwrap();
+    chat(&store, "chat", "claude-code");
+    let a = run(&store, "a", "Depth 6", "chat", LOG);
+    run(&store, "b", "Depth 8", "chat", LOG);
+    let id = look(&store, "chat", "ceiling", &[("b", "r1")]);
+
+    assert!(matches!(look_now(&store, &a), Err(LookNow::TooSoon(_))));
+    let pending = store.prepared_watch_looks("chat").unwrap();
+    assert_eq!(pending.iter().map(|look| look.id).collect::<Vec<_>>(), [id]);
+}
+
+#[test]
+fn concurrent_look_now_requests_share_one_look() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let store = Store::open().unwrap();
+    chat(&store, "chat", "claude-code");
+    let a = run(&store, "a", "Depth 6", "chat", LOG);
+    let b = run(&store, "b", "Depth 8", "chat", LOG);
+    let barrier = std::sync::Barrier::new(2);
+
+    let (first, second) = std::thread::scope(|scope| {
+        let ask = |run: &StoredRun| {
+            let store = Store::open().unwrap();
+            barrier.wait();
+            look_now(&store, run).ok().expect("the run shares the look")
+        };
+        let first = scope.spawn(move || ask(&a));
+        let second = ask(&b);
+        (first.join().unwrap(), second)
+    });
+
+    assert_eq!(first, second);
+    assert_eq!(store.prepared_watch_looks("chat").unwrap().len(), 1);
 }
 
 #[test]
@@ -707,7 +887,7 @@ fn a_last_look_that_failed_is_taken_once_more_and_then_its_failure_stands() {
         runs: vec![(Now::read(&store, &ended).unwrap(), Vec::new())],
     };
     let planned = |now: i64| {
-        due(&State::default(), &owned, now, &mut HashMap::new())
+        due(&store, &State::default(), &owned, now, &mut HashMap::new())
             .unwrap()
             .len()
     };

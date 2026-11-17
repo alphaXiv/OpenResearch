@@ -3218,8 +3218,11 @@ async fn a_flag_is_settled_once_by_whoever_chooses_first() {
         f.insert(id, "exp", "project", "running");
         store().subscribe_run(id, "chat-1", 1).unwrap();
     }
-    let look = store()
-        .prepare_watch_look(
+    let look = {
+        let store = store();
+        let tx = store.begin_immediate().unwrap();
+        let id = Store::prepare_watch_look(
+            &tx,
             "chat-1",
             "change",
             "a test",
@@ -3227,6 +3230,9 @@ async fn a_flag_is_settled_once_by_whoever_chooses_first() {
             1,
         )
         .unwrap();
+        tx.commit().unwrap();
+        id
+    };
     let raise = |run: &str, id: &str, look_id: Option<String>| {
         let run = f.api.run(run).unwrap();
         let body = json!({"id": id, "source": "look", "lookId": look_id, "at": 1, "template": "Loss **{loss}**.",
