@@ -181,6 +181,16 @@ fn conditions(
     if let Some(stall) = run.body["progress"]["stallMs"]
         .as_i64()
         .filter(|ms| *ms > 0)
+        .filter(|_| {
+            run.body["phases"]
+                .as_array()
+                .and_then(|phases| phases.get(run.body["progress"]["phase"].as_u64()? as usize))
+                .is_none_or(|phase| phase["endedAt"].is_null())
+        })
+        .filter(|stall| {
+            scan.and_then(|scan| scan.progress.as_ref())
+                .is_none_or(|(stage, _, at)| *stage != run.stage() || now - at >= stall / 2)
+        })
     {
         // The last progress and the last line land moments apart: half the stall is silence.
         let log = if silent_for.is_some_and(|silent| silent >= stall / 2) {
@@ -464,6 +474,67 @@ mod tests {
 
     fn far(seen: &Seen, of: f64) -> bool {
         seen.compared["loss"].far_worse(true, Some(of))
+    }
+
+    #[test]
+    fn advancing_log_counters_defer_a_stall_but_repeated_or_old_ones_do_not() {
+        let mut seen = Seen {
+            scan: Some(Scan::default()),
+            ..Seen::default()
+        };
+        let mut run = at(("tokenizer", 0), 2.0, 0.0, 0.0, 0.0);
+        run.body["progress"] = json!({"phase": 0, "stallMs": 120_000});
+        let stalled = |seen: &Seen, run: &Now, now| {
+            conditions(seen, run, &BTreeSet::new(), now)
+                .iter()
+                .any(|c| c.kind == "stall")
+        };
+        let scan = seen.scan.as_mut().unwrap();
+        scan.observe_progress(
+            &run.stage(),
+            "INFO - Progress: 99% (7848/7927 merges)",
+            110_000,
+        );
+        scan.observe_progress(
+            &run.stage(),
+            "INFO - Progress: 100% (7927/7927 merges)",
+            120_000,
+        );
+        scan.observe_progress(
+            &run.stage(),
+            "INFO - Finished training: 7927 merges completed",
+            120_001,
+        );
+        assert!(!stalled(&seen, &run, 120_001));
+        seen.scan.as_mut().unwrap().observe_progress(
+            &run.stage(),
+            "INFO - Progress: 100% (7927/7927 merges)",
+            240_000,
+        );
+        assert!(stalled(&seen, &run, 240_000));
+        seen.scan.as_mut().unwrap().observe_progress(
+            &run.stage(),
+            "Progress: 10% (10/100 batches)",
+            240_000,
+        );
+        assert!(!stalled(&seen, &run, 240_001));
+        run.summary["stage"]["name"] = json!("train");
+        assert!(stalled(&seen, &run, 120_001));
+    }
+
+    #[test]
+    fn an_ended_stage_is_never_stalled() {
+        let seen = Seen::default();
+        let mut run = at(("tokenizer", 0), 2.0, 0.0, 0.0, 0.0);
+        run.body["progress"] = json!({"phase": 0, "stallMs": 120_000});
+        run.body["phases"][0]["endedAt"] = json!(1);
+        run.body["phases"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"name":"train","endedAt":null}));
+        assert!(conditions(&seen, &run, &BTreeSet::new(), 120_000)
+            .iter()
+            .all(|c| c.kind != "stall"));
     }
 
     #[test]

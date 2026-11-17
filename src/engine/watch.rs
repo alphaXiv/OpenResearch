@@ -348,6 +348,29 @@ struct Scan {
     /// The log's length when last read, and when this orx last saw it grow.
     len: Option<u64>,
     grew_at: i64,
+    progress: Option<((String, usize), f64, i64)>,
+}
+
+impl Scan {
+    fn observe_progress(&mut self, stage: &(String, usize), line: &str, now: i64) {
+        static PROGRESS: OnceLock<regex::Regex> = OnceLock::new();
+        let pattern = PROGRESS
+            .get_or_init(|| regex::Regex::new(r"\b[Pp]rogress:\s*(\d+(?:\.\d+)?)%").unwrap());
+        let Some(percent) = pattern
+            .captures(line)
+            .and_then(|c| c[1].parse::<f64>().ok())
+            .filter(|p| *p <= 100.0)
+        else {
+            return;
+        };
+        if self
+            .progress
+            .as_ref()
+            .is_none_or(|(previous, value, _)| previous != stage || percent != *value)
+        {
+            self.progress = Some((stage.clone(), percent, now));
+        }
+    }
 }
 
 /// One chat's runs at one pass, and why each might need a look.
@@ -822,6 +845,7 @@ async fn scan(seen: &mut Seen, run: &Now) {
             firsts: std::mem::take(&mut entry.firsts),
             len: entry.len,
             grew_at: entry.grew_at.max(run.run.created_at),
+            progress: entry.progress.take(),
         };
     }
     let families: BTreeSet<String> = cursor["families"]
@@ -850,6 +874,7 @@ async fn scan(seen: &mut Seen, run: &Now) {
                 entry.lines = 0;
                 entry.novel.clear();
                 entry.firsts.clear();
+                entry.progress = None;
             }
             // Growth is the log's length moving, not this scan catching up after a look.
             let grew = match len {
@@ -862,7 +887,9 @@ async fn scan(seen: &mut Seen, run: &Now) {
             entry.len = len.or(entry.len);
             entry.ident = Some(ident.clone());
             entry.offset = to;
+            let stage = run.stage();
             for line in &lines {
+                entry.observe_progress(&stage, &line.text, crate::store::now_ms());
                 if line.text.trim_start().starts_with("::orx::") {
                     continue;
                 }
