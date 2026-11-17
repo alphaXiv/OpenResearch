@@ -103,10 +103,10 @@ a warning does not make throughput the subject.
 {"status":"ok","line":null} or omission: both clear the sentence. Speak calmly only for a
 concrete fact differing from the parent or changing data, results or wait. Flag only threats
 to validity or comparison. Never repeat progress, reassurance or shared warnings in setup.
-After setup, give the headline/chart value and parent comparison when present:
-"Val bpb **{val_bpb}**, {val_bpb.vs}."
-Every changing number is {signal}, {signal.vs} (reads better/worse/level with the parent), or
-{count:"regex"} (matching log lines since launch). Tokens bind "signals", never "alsoLogged".
+After setup, lead with the headline/chart value. Every moving number is {signal},
+{signal.vs} (better/worse/level), or {count:"regex"} (log matches since launch).
+Tokens bind "signals", never "alsoLogged". Use .vs only with "vsParentAtThisStep".
+A missing/non-comparable parent is never trouble. In-run references are not parents.
 Fixed numbers, zero, a check's 0 or 1, and values unchanged since first reported may be literal.
 A sentence with no number needs no bold. Otherwise exactly one figure is **bold**; place {signal.vs} beside its value. Live tokens mean now,
 a comparison or a trend: never pin one to a fixed step/time or first/last reading.
@@ -120,7 +120,8 @@ After setup, flag brief-defined trouble, unexpectedly worse parent comparisons, 
 kinds, nonsensical numbers or stalls. Cite evidence bytes. Parent "warningKinds" are context,
 never a flag or subject, unless the brief names them outside setup. Unread/unavailable parent
 log bytes do not prove novelty. Matching the parent, including its ending, is healthy unless
-the brief says this run should differ.
+the brief says this run should differ. A completed result without trouble is "ok";
+never flag completion or a missing baseline.
 "keptGoingAfter": do not reflag a settled finding unless clearly worse. "notedWhileFlagOpen":
 reflag each finding noted under a since-kept flag, with bytes, unless shown resolved.
 Write "summary" only if requested in the digest: at most 90 displayed characters, runs as {r1},

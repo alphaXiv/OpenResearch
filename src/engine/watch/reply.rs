@@ -206,7 +206,13 @@ pub(super) fn read(
             }
         }
         let mut line_valid = false;
+        let mut unsupported_comparison = false;
         match answer_of(answer.as_ref(), run.sentence, run.setup, &mut |template| {
+            unsupported_comparison = tokens(template, false).is_ok_and(|tokens| {
+                tokens.iter().any(|(_, token)| {
+                    matches!(token, Token::Versus(_, name) if !run.versus.contains(name))
+                })
+            });
             let checked = check_line(template, false, runs, Some(run), render)?;
             let fresh = checked
                 .iter()
@@ -250,7 +256,7 @@ pub(super) fn read(
         if let Some(line) = answer
             .as_ref()
             .and_then(|answer| answer["line"].as_str())
-            .filter(|_| refused && flagged)
+            .filter(|_| refused && flagged && !unsupported_comparison)
         {
             let kept = if line_valid {
                 line.to_owned()
@@ -685,6 +691,28 @@ mod tests {
                 .errors
                 .is_empty());
         }
+    }
+
+    #[test]
+    fn an_unavailable_parent_comparison_is_never_salvaged_as_a_flag() {
+        let mut run = run();
+        run.versus.clear();
+        for status in ["ok", "flag"] {
+            let reply = json!({"runs": {"r1": {"status": status,
+                "line": "Val loss **{val_loss}**, {val_loss.vs}."}}})
+            .to_string();
+            let result = read(&reply, &[bind("r1", &run, false)], None, &render);
+            assert!(!result.errors.is_empty());
+            assert!(result.runs.is_empty(), "{:?}", result.runs);
+            assert!(result.salvaged.is_empty());
+        }
+        let result = read(
+            r#"{"runs":{"r1":{"status":"ok","line":"Val loss **{val_loss}**."}}}"#,
+            &[bind("r1", &run, false)],
+            None,
+            &render,
+        );
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
     }
 
     #[test]

@@ -1776,3 +1776,58 @@ fn a_flag_prepared_before_cancel_cannot_wake_after_cancel() {
     assert!(store.run_flag_events("a").unwrap().is_empty());
     assert!(store.run_flag_notices("a").unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn a_completed_result_without_a_parent_retries_an_unsupported_comparison() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let store = Store::open().unwrap();
+    chat(&store, "chat", "claude-code");
+    let mut row = run(
+        &store,
+        "audit",
+        "Tokenizer audit",
+        "chat",
+        "::orx:: {\"step\":1,\"of\":1,\"m\":{\"evaluated_cases\":10596}}\n",
+    );
+    let mut snapshot = orx_signals::Snapshot::new(&row.id, "1-7", "g1");
+    snapshot
+        .feed(
+            b"::orx:: {\"step\":1,\"of\":1,\"m\":{\"evaluated_cases\":10596}}\n",
+            true,
+            row.updated_at,
+            false,
+        )
+        .unwrap();
+    snapshot.reached_end(row.updated_at);
+    let path = store
+        .data_dir()
+        .join("run-signals")
+        .join(format!("{}.json", row.id));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    crate::engine::adapters::signals::publish(&path, &snapshot).unwrap();
+    super::super::monitor::advance(&store, &row, row.updated_at).unwrap();
+    row.status = "done".into();
+    row.exit_code = Some(0);
+    row.ended_at = Some(crate::store::now_ms());
+    store.upsert_run(&row).unwrap();
+    let calls_dir = crate::config::home_dir().unwrap().join("claude-calls");
+    fake_claude(
+        &calls_dir,
+        &[
+            r#"{"runs":{"r1":{"status":"flag","line":"Cases **{evaluated_cases}**, {evaluated_cases.vs}."}}}"#,
+            r#"{"runs":{"r1":{"status":"ok","line":"Evaluated **{evaluated_cases}** cases."}}}"#,
+        ],
+    );
+    let id = look(&store, "chat", "terminal", &[("audit", "r1")]);
+    take(id).await.unwrap();
+    let results = store.watch_look_runs(id).unwrap();
+    assert_eq!(results[0].result.as_deref(), Some("line"));
+    assert!(super::super::flags::read(&store, &row).unwrap().is_empty());
+    assert_eq!(calls(&calls_dir), 2);
+    let prompt = std::fs::read_to_string(calls_dir.join("prompt-1")).unwrap();
+    let sent: Value = serde_json::from_str(prompt.strip_prefix(DIGEST_PREAMBLE).unwrap()).unwrap();
+    assert!(sent["parents"].is_null());
+    assert!(sent["runs"][0]["signals"]["evaluated_cases"]["vsParentAtThisStep"].is_null());
+}
