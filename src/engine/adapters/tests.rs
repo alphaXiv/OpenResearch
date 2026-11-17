@@ -3740,7 +3740,7 @@ async fn an_old_host_supplies_log_pages_for_local_patterns() {
         .await
         .unwrap();
     let snapshot = super::local::signals::load(&path).unwrap().unwrap();
-    assert_eq!(snapshot.latest["loss"], 2);
+    assert_eq!(snapshot.latest["loss"], 2.0);
 
     fs::OpenOptions::new()
         .append(true)
@@ -3754,7 +3754,7 @@ async fn an_old_host_supplies_log_pages_for_local_patterns() {
             .unwrap()
     );
     let snapshot = super::local::signals::load(&path).unwrap().unwrap();
-    assert_eq!(snapshot.latest["loss"], 1);
+    assert_eq!(snapshot.latest["loss"], 1.0);
     assert!(snapshot.source_complete());
     assert_eq!(f.ssh.conn.state().borrow().status, Status::Live);
 }
