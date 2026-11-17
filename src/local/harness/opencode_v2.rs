@@ -312,7 +312,7 @@ impl LiveStep {
         }
         let key = format!(
             "{block}:{}",
-            &data[if block == "tool" { "id" } else { "ordinal" }]
+            data[if block == "tool" { "id" } else { "ordinal" }]
         );
         let blocks = self.blocks.entry(message.to_owned()).or_default();
         let index = blocks.iter().position(|k| *k == key).unwrap_or_else(|| {
