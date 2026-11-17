@@ -184,6 +184,21 @@ pub enum ResumeAction {
 }
 
 /// One coding-agent integration. See the module docs for the capability model.
+/// One chat's kept agent, as a starting server found it.
+#[derive(Debug, Clone)]
+pub struct Adoption {
+    pub keep_id: String,
+    pub session_id: String,
+    /// The owner record's `state`, as this harness wrote it.
+    pub state: serde_json::Value,
+    /// The checkpoint offset of the chat's running turn, which resumes on this agent next.
+    /// Output before it was applied; output after it belongs to that turn, so nothing may
+    /// consume it first. `None` when no turn resumes: unacknowledged output is new.
+    pub resume_at: Option<u64>,
+    /// Commands kept for this agent (`keep::Owner::AgentCommand`): keep id, command id, state.
+    pub commands: Vec<(String, String, serde_json::Value)>,
+}
+
 #[async_trait]
 // async-trait marks its boxed futures `#[must_use]`; clippy 1.99 flags that generated code.
 #[allow(clippy::double_must_use)]
@@ -246,6 +261,16 @@ pub trait Harness: Send + Sync {
     /// A harness that cannot is never handed a resume; its turns recover as failed instead.
     fn supports_resume(&self) -> bool {
         false
+    }
+
+    /// Takes back an agent a previous server kept for this harness (`crate::keep`), before
+    /// any turn resumes on it. An error stops the kept agent and its commands.
+    async fn adopt(
+        &self,
+        _chat: &Arc<crate::local::chat::ChatHost>,
+        _adoption: Adoption,
+    ) -> Result<()> {
+        Err(anyhow!("{} cannot take back a kept agent", self.name()))
     }
 
     /// Whether native compaction or the shared summarize-and-reseed path is supported.

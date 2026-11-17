@@ -66,7 +66,11 @@ pub struct Keep<'a> {
 /// `owner.json`: whose child a keeper holds, for the next server to give it back. Read by
 /// every later version, so variants and fields only grow; `state` belongs to the owner.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum Owner {
     /// A chat's agent process: a resident child, a server, or one turn's child.
     Agent {
