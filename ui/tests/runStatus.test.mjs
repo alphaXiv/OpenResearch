@@ -118,21 +118,25 @@ test("the row keeps the count separate from the watcher while its accessible nam
   assert.ok(!count.textContent.includes(watcher));
 });
 
-test("local compute uses workspace hardware and keeps the provider when hardware fails", async () => {
+test("local compute shows each hardware fact under its own label and keeps the provider when hardware fails", async () => {
   const hardware = { chip: "Apple M3 Max", os: "macos", arch: "aarch64", cpuCount: 16, memBytes: 64 * 1024 ** 3, gpus: [] };
   const view = await status(null, {}, { run: { backend: { kind: "local_job" }, host: null }, hardware });
-  assert.ok(find('[role="dialog"]', "Apple M3 Max"));
-  assert.ok(find('[role="dialog"]', "64"));
+  const card = find('[role="dialog"]');
+  const facts = Object.fromEntries([...card.querySelectorAll("dt")].map((dt) => [dt.textContent, bare(dt.nextElementSibling.textContent)]));
+  assert.deepEqual(facts, { [m.run_card_processor()]: "Apple M3 Max", [m.run_card_cores()]: "16", [m.run_card_memory()]: "64 GB", [m.run_card_started()]: facts[m.run_card_started()] });
+  assert.ok(!card.textContent.includes(" · Apple"), "no dot-joined hardware list");
   await view.unmount();
   await status(null, {}, { run: { backend: { kind: "local_job" }, host: null } });
   assert.ok(find('[role="dialog"]', m.compute_target_local()));
   assert.equal(find('[role="dialog"]', "Apple M3 Max"), null);
+  assert.equal(find('[role="dialog"]', m.run_card_processor()), null);
 });
 
 test("lineage names the parent and reports a failed diff without claiming zero changes", async () => {
   await status(null, {}, { run: { commitSha: "abc" }, experiments: [{ id: "e", parentExperimentId: "parent" }, { id: "parent", slug: "baseline" }] });
-  assert.ok(find('[role="dialog"]', "baseline"));
-  assert.ok(find('[role="dialog"]', "Changes could not be read."));
+  const changes = [...find('[role="dialog"]').querySelectorAll("dt")].find((dt) => dt.textContent === m.run_card_changes());
+  assert.equal(bare(changes.previousElementSibling.textContent), "baseline");
+  assert.equal(changes.nextElementSibling.textContent, "Changes could not be read.");
 });
 
 test("the footer wraps around whole hyphenated stage names", async () => {
@@ -153,5 +157,6 @@ test("lineage shares committed diff counts and uses the run start time", async (
   assert.ok(card.textContent.includes("+2"));
   assert.ok(card.textContent.includes("−1"));
   assert.ok(card.textContent.includes(m.hover_one_file()));
-  assert.ok(bare(card.textContent).includes(bare(m.history_started({ time: fmtClock(startedAt) }))));
+  const started = [...card.querySelectorAll("dt")].find((dt) => dt.textContent === m.run_card_started());
+  assert.equal(bare(started.nextElementSibling.textContent), fmtClock(startedAt));
 });

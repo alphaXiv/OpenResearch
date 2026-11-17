@@ -1,9 +1,9 @@
 import { Popover } from "@base-ui/react/popover";
 import { ArrowUpRight, RefreshCw } from "lucide-react";
-import { useContext, useRef, useState, type KeyboardEvent } from "react";
+import { useContext, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { backendDetail, backendKind, type Run } from "../../api";
-import { localMachineSummary } from "../../localMachine";
+import { backendDetail, backendKind, fmtNumber, type Run } from "../../api";
+import { localMachineFacts } from "../../localMachine";
 import { useWorkspace } from "../../workspace";
 import { BackendLogo, backendName } from "../BackendLogos";
 import { autoDir, fmtClock, ltr } from "../../i18n";
@@ -40,8 +40,9 @@ export function RunStatus({ model, label, descriptionId, onOpenRunPage, expanded
   const experiment = experiments.data?.find((item) => item.id === model.run.experimentId);
   const parent = experiments.data?.find((item) => item.id === experiment?.parentExperimentId);
   const detail = backendDetail(model.run.backend);
-  const hardware = kind === "local_job" && local.data && !local.isError ? localMachineSummary(local.data) : null;
-  const compute = [...new Set([kind === "ssh_job" || kind === "slurm_job" ? model.run.host : null, detail, hardware].filter(Boolean))].map((part) => autoDir(String(part))).join(" · ");
+  const facts = kind === "local_job" && local.data && !local.isError ? localMachineFacts(local.data) : null;
+  const host = kind === "ssh_job" || kind === "slurm_job" ? model.run.host : null;
+  const diffRunId = experiment?.parentExperimentId && model.run.commitSha ? model.run.id : null;
   const monitor = useRunMonitors([model.run], () => open)[0];
   const data = monitor && monitor.status !== "loading" ? monitor.data : null;
   const behind = data && monitorBehind(model.run.monitor, data);
@@ -97,15 +98,25 @@ export function RunStatus({ model, label, descriptionId, onOpenRunPage, expanded
                   {...tabOpenGestureHandlers<HTMLButtonElement>((intent) => { close(); onOpenRunPage(model.run, intent); })}
                 >{autoDir(model.name)}<ArrowUpRight size={13} className="shrink-0" aria-hidden="true" /></Button> : autoDir(model.name)}
               </Popover.Title>
-              {kind && <Popover.Description className="m-0 mt-1.5 flex items-start gap-2 text-xs text-ink-subtext">
-                <span className="shrink-0"><BackendLogo kind={kind} size={14} /></span>
-                <span>{backendName(kind)}{compute && <> · {compute}</>}</span>
+              {kind && <Popover.Description className="m-0 mt-2.5 flex min-w-0 items-center gap-2 text-xs">
+                <BackendLogo kind={kind} size={14} />
+                <span className="shrink-0 font-medium">{backendName(kind)}</span>
+                {detail && <span title={detail} className="min-w-0 truncate text-ink-subtext">{autoDir(detail)}</span>}
               </Popover.Description>}
-              {(parent || model.run.startedAt != null || experiment?.parentExperimentId && model.run.commitSha) && <div className="mt-1.5 flex flex-wrap items-baseline gap-x-1 gap-y-1 text-xs text-ink-subtext [&>*+*]:before:me-1 [&>*+*]:before:content-['·']">
-                {parent && <span>{m.exp_hover_card_from()} {autoDir(parent.slug)}</span>}
-                <RunDiffStat runId={experiment?.parentExperimentId && model.run.commitSha ? model.run.id : null} parentSlug={parent?.slug ?? null} />
-                {model.run.startedAt != null && <span>{m.history_started({ time: ltr(fmtClock(model.run.startedAt)) })}</span>}
-              </div>}
+              <dl className="m-0 mt-1.5 grid grid-cols-[5.25rem_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs empty:hidden">
+                {host && <Fact label={m.run_card_host()} title={host}>{autoDir(host)}</Fact>}
+                {facts && <>
+                  <Fact label={m.run_card_processor()} title={facts.processor}>{autoDir(facts.processor)}</Fact>
+                  {facts.cores !== null && <Fact label={m.run_card_cores()}>{fmtNumber(facts.cores)}</Fact>}
+                  {facts.memory && <Fact label={m.run_card_memory()}>{facts.memory}</Fact>}
+                  {facts.gpus > 0 && <Fact label={m.run_card_gpus()}>{fmtNumber(facts.gpus)}</Fact>}
+                </>}
+              </dl>
+              <dl className="m-0 mt-2.5 grid grid-cols-[5.25rem_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs empty:hidden">
+                {parent && <Fact label={m.run_card_from()} title={parent.slug}>{autoDir(parent.slug)}</Fact>}
+                <RunDiffStat runId={diffRunId} parentSlug={parent?.slug ?? null} wrap={(stat) => <Fact label={m.run_card_changes()}>{stat}</Fact>} />
+                {model.run.startedAt != null && <Fact label={m.run_card_started()}>{ltr(fmtClock(model.run.startedAt))}</Fact>}
+              </dl>
               {monitor?.status === "error" ? <div className="mt-2.5 text-xs text-ink-subtext" role="alert">
                 {m.run_monitor_load_failed()} <Button size="small" variant="ghost" onClick={monitor.retry}><RefreshCw size={13} />{m.app_retry()}</Button>
               </div> : monitor?.status === "loading" || behind ? <p className="m-0 mt-2.5 text-xs text-ink-subtext" role="status">{m.common_loading()}</p> : data && <>
@@ -122,4 +133,11 @@ export function RunStatus({ model, label, descriptionId, onOpenRunPage, expanded
       </Popover.Root>
     </EscapeScope>
   );
+}
+
+function Fact({ label, title, children }: { label: string; title?: string; children: ReactNode }) {
+  return <>
+    <dt className="text-ink-subtext">{label}</dt>
+    <dd title={title} className="m-0 truncate text-text">{children}</dd>
+  </>;
 }

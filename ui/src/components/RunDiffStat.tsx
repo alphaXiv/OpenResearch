@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { parseDiff, type FileData } from "react-diff-view";
 import { fmtNumber } from "../api";
@@ -7,7 +7,7 @@ import { m } from "../paraglide/messages.js";
 import { useWorkspace } from "../workspace";
 import { countChanges } from "./GitDiff";
 
-export function RunDiffStat({ runId, parentSlug }: { runId: string | null; parentSlug: string | null }) {
+export function RunDiffStat({ runId, parentSlug, wrap = (stat) => stat }: { runId: string | null; parentSlug: string | null; wrap?: (stat: ReactNode) => ReactNode }) {
   const { getRunDiffQuery } = useWorkspace().queries;
   const { data: diff, error } = useQuery({ ...getRunDiffQuery(runId ?? ""), enabled: Boolean(runId), subscribed: Boolean(runId) });
   const diffStat = useMemo(() => {
@@ -40,20 +40,21 @@ export function RunDiffStat({ runId, parentSlug }: { runId: string | null; paren
   }, [diff]);
 
   if (!runId) return null;
-  if (error) return <span>{error.message}</span>;
-  if (diff && !diffStat) return <span>{m.git_diff_parse_failed()}</span>;
+  if (error) return wrap(<span>{error.message}</span>);
+  if (diff && !diffStat) return wrap(<span>{m.git_diff_parse_failed()}</span>);
   if (!diffStat || diffStat.fileCount === 0) return null;
-  return (
+  return wrap(
     <span title={diffStat.truncated
       ? m.a11y_committed_changes_truncated({ parent: ltr(parentSlug ?? "parent") })
       : m.a11y_committed_changes({ parent: ltr(parentSlug ?? "parent") })}>
       {diffStat.truncated && "≥ "}
       <span className="diff-stat-add text-accent-green">+{fmtNumber(diffStat.additions)}</span>{" "}
       <span className="diff-stat-del text-accent-red">−{fmtNumber(diffStat.deletions)}</span>
-      {" · "}
-      {diffStat.fileCount === 1 && !diffStat.truncated
-        ? m.hover_one_file()
-        : diffStat.truncated ? m.hover_files_at_least({ count: fmtNumber(diffStat.fileCount) }) : m.hover_file_count({ count: fmtNumber(diffStat.fileCount) })}
-    </span>
+      <span className="ms-2 text-ink-subtext">
+        {diffStat.fileCount === 1 && !diffStat.truncated
+          ? m.hover_one_file()
+          : diffStat.truncated ? m.hover_files_at_least({ count: fmtNumber(diffStat.fileCount) }) : m.hover_file_count({ count: fmtNumber(diffStat.fileCount) })}
+      </span>
+    </span>,
   );
 }
