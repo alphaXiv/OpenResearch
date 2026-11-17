@@ -2872,7 +2872,7 @@ fn eta_text(life: &Lifecycle, snapshot: Option<&Snapshot>, facts: &StatusFacts) 
             let left = if floor {
                 format!("At least {lo} left")
             } else {
-                format!("{} left", left("midMs"))
+                format!("{} left", short((mid - gone).max(1_000)))
             };
             if detail.is_empty() {
                 left
@@ -5705,7 +5705,7 @@ mod tests {
         monitor_at(&f, &parent, T0 + 6_000);
         f.child("child", "exp");
 
-        let child = staged(&f, "c1", "child", "running", &pipeline, 2);
+        let child = staged(&f, "r1", "child", "running", &pipeline, 2);
         let (monitor, _) = monitor_at(&f, &child, T0 + 2_500);
         assert_eq!(monitor["phases"][1]["priorMs"], 2_000);
         assert!(
@@ -5714,7 +5714,7 @@ mod tests {
             monitor["estimate"]
         );
 
-        let child = staged(&f, "c1", "child", "running", &pipeline, 3);
+        let child = staged(&f, "r1", "child", "running", &pipeline, 3);
         let (monitor, _) = monitor_at(&f, &child, T0 + 3_500);
         assert_eq!(monitor["phases"][1]["priorMs"], 2_000);
         assert!(
@@ -5722,6 +5722,13 @@ mod tests {
             "{}",
             monitor["estimate"]
         );
+
+        f.collected(T0 + 4_500);
+        let (monitor, _) = monitor_at(&f, &child, T0 + 4_500);
+        assert_eq!(monitor["estimate"]["midMs"], 2_000);
+        assert_eq!(monitor["estimate"]["at"], T0 + 3_000);
+        let text = monitor["statusText"].as_str().unwrap();
+        assert!(text.contains("eta      1s left"), "{text}");
     }
 
     #[test]
