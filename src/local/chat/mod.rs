@@ -4341,7 +4341,7 @@ impl ChatHost {
         }
     }
 
-    fn renew_turn_leases(&self) -> Vec<String> {
+    fn renew_turn_leases(&self) -> Vec<(String, String)> {
         let claims = self.durable_turns.lock().unwrap().clone();
         let Ok(store) = Store::open() else {
             return Vec::new();
@@ -4349,7 +4349,7 @@ impl ChatHost {
         let mut lost = Vec::new();
         for (session_id, token) in claims {
             if matches!(store.renew_chat_turn(&session_id, &token), Ok(false)) {
-                lost.push(session_id);
+                lost.push((session_id, token));
             }
         }
         lost
@@ -6935,6 +6935,11 @@ impl ChatHost {
         let cancel = mode == StopMode::Cancel;
         let active = {
             let mut turns = self.turns.lock().await;
+            if let StopMode::LeaseLost(token) = &mode {
+                if self.durable_turns.lock().unwrap().get(session_id) != Some(token) {
+                    return Ok(false);
+                }
+            }
             let Some(state) = turns.get_mut(session_id) else {
                 return Ok(false);
             };
@@ -9848,12 +9853,12 @@ pub async fn keep_turn_leases(
 }
 
 /// How [`ChatHost::stop_turn`] leaves a turn.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 enum StopMode {
     /// Stopped on purpose: the stored turn is recorded as interrupted.
     Cancel,
     /// Cut short: the stored turn is left for lease reconciliation, which offers Continue.
-    LeaseLost,
+    LeaseLost(String),
     /// Cut short like `LeaseLost`, without waiting on the agent: shutdown kills it next.
     Shutdown,
 }
@@ -9862,8 +9867,10 @@ enum StopMode {
 /// short, with a way to continue.
 async fn stop_turns_whose_lease_was_lost(chat: &Arc<ChatHost>) {
     let lost = chat.renew_turn_leases();
-    for session_id in &lost {
-        let _ = chat.stop_turn(session_id, StopMode::LeaseLost).await;
+    for (session_id, token) in &lost {
+        let _ = chat
+            .stop_turn(session_id, StopMode::LeaseLost(token.clone()))
+            .await;
     }
     if lost.is_empty() {
         return;
@@ -14588,6 +14595,34 @@ done
         });
     }
 
+    #[test]
+    fn a_stale_lease_loss_keeps_the_successor_turn() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let store = Store::open().unwrap();
+            session(&store, "chat");
+            let host = Arc::new(ChatHost::new(
+                Arc::new(crate::local::opencode::AgentHost::new(None)),
+                Arc::new(crate::local::codex::CodexHost::new()),
+                Arc::new(crate::local::claude::ClaudeHost::new()),
+            ));
+            let mut first = TurnGuard::claim(&host, "chat", None).await.unwrap();
+            let old_token = host.durable_turns.lock().unwrap()["chat"].clone();
+            first.release().await;
+            let mut successor = TurnGuard::claim(&host, "chat", None).await.unwrap();
+            assert_ne!(host.durable_turns.lock().unwrap()["chat"], old_token);
+            assert!(!store.renew_chat_turn("chat", &old_token).unwrap());
+            assert!(!host
+                .stop_turn("chat", StopMode::LeaseLost(old_token))
+                .await
+                .unwrap());
+            assert!(host.is_busy("chat").await);
+            successor.release().await;
+        });
+    }
+
     #[cfg(unix)]
     #[test]
     fn shutdown_stops_leave_the_agent_to_host_shutdown_but_lost_leases_interrupt_it() {
@@ -14623,7 +14658,14 @@ done
                 .set_chat_session_native_id("chat", Some("native"))
                 .unwrap();
 
-            for (mode, expected) in [(StopMode::Shutdown, 0), (StopMode::LeaseLost, 1)] {
+            for (mode, expected) in [
+                (StopMode::Shutdown, 0),
+                (StopMode::LeaseLost("lease".into()), 1),
+            ] {
+                host.durable_turns
+                    .lock()
+                    .unwrap()
+                    .insert("chat".into(), "lease".into());
                 host.turns.lock().await.insert(
                     "chat".into(),
                     TurnState::Active(ActiveTurn {

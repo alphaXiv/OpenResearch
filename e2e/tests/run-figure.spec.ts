@@ -26,5 +26,5 @@ test('an agent cites a completed run with its first block', async ({ page, proje
   await expect(message.getByRole('img', { name: /loss/i })).toBeVisible()
   await expect(message.getByRole('button', { name: 'Loss result' })).toBeVisible()
   await message.getByRole('button', { name: 'Loss result' }).click()
-  await expect(page.getByRole('tab', { name: /Figure example/ })).toBeVisible()
+  await expect(page.getByRole('region', { name: /^Figure example/ })).toBeVisible()
 })
