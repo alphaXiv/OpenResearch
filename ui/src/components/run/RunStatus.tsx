@@ -6,7 +6,7 @@ import { backendDetail, backendKind, type Run } from "../../api";
 import { localMachineSummary } from "../../localMachine";
 import { useWorkspace } from "../../workspace";
 import { BackendLogo, backendName } from "../BackendLogos";
-import { autoDir } from "../../i18n";
+import { autoDir, fmtClock, ltr } from "../../i18n";
 import { m } from "../../paraglide/messages.js";
 import { plainSentence } from "../../runMonitor/format";
 import { monitorBehind, type RunModel } from "../../runMonitor/model";
@@ -14,6 +14,7 @@ import { foldedStages } from "../../runMonitor/stages";
 import { capitalized, progressWords } from "../../runMonitor/words";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../../tabPreview";
 import { WorkspaceDomContext } from "../../WorkspaceDom";
+import { RunDiffStat } from "../RunDiffStat";
 import { EscapeScope } from "../EscapeScope";
 import { Button } from "../ui";
 import { Phases } from "./blocks/Phases";
@@ -30,9 +31,12 @@ export function RunStatus({ model, label, descriptionId, onOpenRunPage }: {
   const { portalContainer } = useContext(WorkspaceDomContext);
   const [open, setOpen] = useState(false);
   const trigger = useRef<HTMLButtonElement>(null);
-  const { getLocalMachineQuery } = useWorkspace().queries;
+  const { getLocalMachineQuery, listExperimentsQuery } = useWorkspace().queries;
   const kind = backendKind(model.run.backend);
   const local = useQuery({ ...getLocalMachineQuery(), enabled: open && kind === "local_job", subscribed: open && kind === "local_job" });
+  const experiments = useQuery({ ...listExperimentsQuery(model.run.projectId), enabled: open, subscribed: open });
+  const experiment = experiments.data?.find((item) => item.id === model.run.experimentId);
+  const parent = experiments.data?.find((item) => item.id === experiment?.parentExperimentId);
   const detail = backendDetail(model.run.backend);
   const hardware = kind === "local_job" && local.data && !local.isError ? localMachineSummary(local.data) : null;
   const compute = [...new Set([kind === "ssh_job" || kind === "slurm_job" ? model.run.host : null, detail, hardware].filter(Boolean))].map((part) => autoDir(String(part))).join(" · ");
@@ -94,6 +98,11 @@ export function RunStatus({ model, label, descriptionId, onOpenRunPage }: {
                 <span className="shrink-0"><BackendLogo kind={kind} size={14} /></span>
                 <span>{backendName(kind)}{compute && <> · {compute}</>}</span>
               </Popover.Description>}
+              {(parent || model.run.startedAt != null || experiment?.parentExperimentId && model.run.commitSha) && <div className="mt-1.5 flex flex-wrap items-baseline gap-x-1.5 gap-y-1 text-xs text-ink-subtext [&>*+*]:before:me-1.5 [&>*+*]:before:content-['·']">
+                {parent && <span>{m.exp_hover_card_from()} {autoDir(parent.slug)}</span>}
+                <RunDiffStat runId={experiment?.parentExperimentId && model.run.commitSha ? model.run.id : null} parentSlug={parent?.slug ?? null} />
+                {model.run.startedAt != null && <span>{m.history_started({ time: ltr(fmtClock(model.run.startedAt)) })}</span>}
+              </div>}
               {monitor?.status === "error" ? <div className="mt-2.5 text-xs text-ink-subtext" role="alert">
                 {m.run_monitor_load_failed()} <Button size="small" variant="ghost" onClick={monitor.retry}><RefreshCw size={13} />{m.app_retry()}</Button>
               </div> : monitor?.status === "loading" || behind ? <p className="m-0 mt-2.5 text-xs text-ink-subtext" role="status">{m.common_loading()}</p> : data && stages && <>

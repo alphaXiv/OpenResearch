@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { act, createElement } from "react";
 import { RunStatus } from "../src/components/run/RunStatus.tsx";
-import { autoDir } from "../src/i18n.ts";
+import { autoDir, fmtClock } from "../src/i18n.ts";
 import { setLocale } from "../src/locale.ts";
 import { m } from "../src/paraglide/messages.js";
 import { runModel } from "../src/runMonitor/model.ts";
@@ -14,12 +14,18 @@ const base = JSON.parse(readFileSync(new URL("./fixtures/runMonitor/pipeline.jso
 const now = Date.now();
 const bare = (text) => text.replace(/[⁦-⁩]/g, "");
 
-async function status(answer, extra = {}) {
+async function status(answer, extra = {}, options = {}) {
   const watcher = "The held-out score keeps improving. " + "The remaining checks cover the run's question. ".repeat(15);
   const data = { ...base, ...extra, sentence: { template: watcher, t: now } };
   const run = { id: data.runId, projectId: "p", experimentId: "e", status: "running", createdAt: now - 60_000, startedAt: now - 60_000, updatedAt: now, contact: null, cancelling: false, host: "lab-a40", backend: { kind: "slurm_job" }, monitor: { rev: data.rev, generation: data.generation, asOf: data.asOf } };
+  Object.assign(run, options.run);
   const model = runModel({ item: { sessionId: "s", experimentName: "Distil to six layers", run }, monitor: data, shown: true, agent: "Claude", now, nextRetryMs: null });
-  serve(() => answer ? answer(data) : data);
+  serve((url) => {
+    if (url.includes("/experiments")) return { experiments: options.experiments ?? [] };
+    if (url.includes("/settings/local")) return options.hardware ?? new Response(JSON.stringify({ error: "Hardware unavailable." }), { status: 500 });
+    if (url.includes("/diff")) return options.diff ?? new Response(JSON.stringify({ error: "Changes could not be read." }), { status: 500 });
+    return answer ? answer(data) : data;
+  });
   const workspace = createWorkspace("test");
   workspace.queryClient.setDefaultOptions({ queries: { retry: false } });
   const opened = [];
@@ -110,4 +116,42 @@ test("the row keeps the count separate from the watcher while its accessible nam
   assert.ok(count, "the count has its own layout slot");
   assert.equal(bare(count.textContent), "Step 2,280 of 4,200");
   assert.ok(!count.textContent.includes(watcher));
+});
+
+test("local compute uses workspace hardware and keeps the provider when hardware fails", async () => {
+  const hardware = { chip: "Apple M3 Max", os: "macos", arch: "aarch64", cpuCount: 16, memBytes: 64 * 1024 ** 3, gpus: [] };
+  const view = await status(null, {}, { run: { backend: { kind: "local_job" }, host: null }, hardware });
+  assert.ok(find('[role="dialog"]', "Apple M3 Max"));
+  assert.ok(find('[role="dialog"]', "64"));
+  await view.unmount();
+  await status(null, {}, { run: { backend: { kind: "local_job" }, host: null } });
+  assert.ok(find('[role="dialog"]', m.compute_target_local()));
+  assert.equal(find('[role="dialog"]', "Apple M3 Max"), null);
+});
+
+test("lineage names the parent and reports a failed diff without claiming zero changes", async () => {
+  await status(null, {}, { run: { commitSha: "abc" }, experiments: [{ id: "e", parentExperimentId: "parent" }, { id: "parent", slug: "baseline" }] });
+  assert.ok(find('[role="dialog"]', "baseline"));
+  assert.ok(find('[role="dialog"]', "Changes could not be read."));
+});
+
+test("the footer wraps around whole hyphenated stage names", async () => {
+  await status(null, { estimate: { loMs: 3_840_000, midMs: 3_900_000, hiMs: 4_000_000, at: now, pending: false, pastLimitMs: null, floor: true, untimed: ["sft", "train-finalize", "sft-finalize"] } });
+  const names = [...find('[role="dialog"]').querySelectorAll('p:last-child span')].map((span) => span.textContent);
+  assert.deepEqual(names, ["sft", "train-finalize", "sft-finalize"]);
+});
+
+
+test("lineage shares committed diff counts and uses the run start time", async () => {
+  const startedAt = now - 3_600_000;
+  await status(null, {}, {
+    run: { commitSha: "abc", startedAt },
+    experiments: [{ id: "e", parentExperimentId: "parent" }, { id: "parent", slug: "baseline" }],
+    diff: { diff: "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1,2 @@\n-old\n+new\n+extra\n", truncated: false },
+  });
+  const card = find('[role="dialog"]');
+  assert.ok(card.textContent.includes("+2"));
+  assert.ok(card.textContent.includes("−1"));
+  assert.ok(card.textContent.includes(m.hover_one_file()));
+  assert.ok(bare(card.textContent).includes(bare(m.history_started({ time: fmtClock(startedAt) }))));
 });
