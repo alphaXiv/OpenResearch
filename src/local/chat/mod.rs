@@ -13410,8 +13410,7 @@ mod run_wakeup_tests {
         settle_run_notices(&restarted, &moving).await.unwrap();
 
         store.upsert_run(&run("done")).unwrap();
-        notice_harness(&store);
-        let mut launch = store.acp_session_state("other").unwrap().unwrap().launch;
+        let mut launch = crate::local::acp::presets().remove(0).launch;
         launch.executable = crate::local::acp::fake_agent_interpreter("python3");
         launch.arguments = vec![
             "-u".into(),
@@ -13439,9 +13438,19 @@ for line in sys.stdin:
 "#
             .into(),
         ];
+        let mut custom = launch.clone();
+        custom.id = format!("acp:{}", uuid::Uuid::new_v4());
+        crate::local::acp::save(custom, true).unwrap();
+
         let tx = store.begin().unwrap();
         tx.execute(
-            "UPDATE acp_sessions SET launch_json = ?1 WHERE session_id = 'other'",
+            "UPDATE chat_sessions SET harness = ?1, model = 'fixture-model' WHERE id = 'other'",
+            [&launch.id],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO acp_sessions (session_id, launch_json, configuration_json)
+             VALUES ('other', ?1, '[]')",
             [serde_json::to_string(&launch).unwrap()],
         )
         .unwrap();
@@ -13640,7 +13649,6 @@ for line in sys.stdin:
             )
             .unwrap();
         assert_eq!(reason, "Chat harness is no longer configured");
-        notice_harness(&store);
         let saved = store.acp_session_state("other").unwrap().unwrap();
         let mut absent = saved.launch.clone();
         absent.executable = crate::store::data_dir()
@@ -13648,6 +13656,11 @@ for line in sys.stdin:
             .to_string_lossy()
             .into_owned();
         let tx = store.begin().unwrap();
+        tx.execute(
+            "UPDATE chat_sessions SET harness = ?1 WHERE id = 'other'",
+            [&launch.id],
+        )
+        .unwrap();
         tx.execute(
             "UPDATE acp_sessions SET launch_json = ?1 WHERE session_id = 'other'",
             [serde_json::to_string(&absent).unwrap()],
