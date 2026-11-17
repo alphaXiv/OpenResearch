@@ -22,7 +22,7 @@ const text = (element) => element.textContent.replace(/[⁦-⁩]/g, "");
 const pipeline = () => ({ ...fixture("pipeline"), runId: "r2", asOf: now, estimate: { ...fixture("pipeline").estimate, at: now }, statusText: "distil-glue-6l  running  50%\nsignals  loss 0.47" });
 const summary = (monitor, extra = {}) => ({
   tone: "running", whole: monitor.progress?.whole ?? null, stage: null, headline: null, sentence: null, bindings: {}, signals: monitor.view.signals,
-  etaMs: null, limitEndsAt: null, flag: null, rev: monitor.rev, generation: monitor.generation, asOf: monitor.asOf, ...extra,
+  estimate: null, limitEndsAt: null, flag: null, rev: monitor.rev, generation: monitor.generation, asOf: monitor.asOf, ...extra,
 });
 const run = (id, extra = {}) => ({
   id, experimentId: "e1", projectId: "p", status: "running", createdAt: now - 600_000, startedAt: now - 600_000, updatedAt: now,
@@ -245,7 +245,7 @@ test("run history says what each run finished with or where it stopped", async (
   });
   const done = run("r0", {
     status: "done", endedAt: now - 950_000, createdAt: now - 990_000,
-    monitor: summary(monitor, { tone: "done", headline: { name: "loss", label: "Train loss", value: 0.41, vs: null } }),
+    monitor: summary(monitor, { tone: "done", headline: { name: "loss", label: "Train loss", value: 0.41 } }),
   });
   const { container } = await overview([run("r2", { monitor: summary(monitor) }), stopped, done]);
   const rows = [...container.querySelectorAll(".experiment-run-history button")].map(text);
@@ -255,7 +255,7 @@ test("run history says what each run finished with or where it stopped", async (
 
 test("a flagged run offers to ask the chat's agent by name, and the agent in general when no chat is known", async () => {
   const flagged = fixture("flagged");
-  const waiting = { ...flagged, runId: "r2", asOf: now, flag: { ...flagged.flag, state: "waiting", mode: "copilot" } };
+  const waiting = { ...flagged, runId: "r2", asOf: now, flags: [{ ...flagged.flags[0], state: "waiting", mode: "copilot" }] };
   const flaggedRun = () => run("r2", { monitor: summary(waiting, { tone: "flag", sentence: flagged.sentence, flag: { id: "f1", state: "waiting", mode: "copilot" } }) });
   const asks = (container) => [...container.querySelectorAll("button")].map(text);
 

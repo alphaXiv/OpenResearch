@@ -225,7 +225,8 @@
     "error": null
   },
   "sentence": null,
-  "flag": null,
+  "flagId": null,
+  "flags": [],
   "revising": false,
   "rules": [],
   "statusText": "lr-batch-sweep  running  93%  14 of 15 configs",

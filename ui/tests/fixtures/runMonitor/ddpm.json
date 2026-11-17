@@ -119,7 +119,8 @@
     "error": null
   },
   "sentence": null,
-  "flag": null,
+  "flagId": null,
+  "flags": [],
   "revising": false,
   "rules": [],
   "statusText": "ddpm-cifar-cosine  running  55%",

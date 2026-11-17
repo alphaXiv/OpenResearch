@@ -291,7 +291,8 @@
     "error": null
   },
   "sentence": null,
-  "flag": null,
+  "flagId": null,
+  "flags": [],
   "revising": false,
   "rules": [],
   "statusText": "wider-match-window  done  100%",

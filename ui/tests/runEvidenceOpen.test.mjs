@@ -6,10 +6,10 @@ import { renderChat } from "./chat.mjs";
 import { clients, find, navigate, settle } from "./render.mjs";
 
 const flagged = JSON.parse(readFileSync(new URL("./fixtures/runMonitor/flagged.json", import.meta.url), "utf8"));
-const { evidence } = flagged.flag;
+const { evidence } = flagged.flags[0];
 const run = {
   id: "r1", experimentId: "e1", projectId: "p", status: "running", createdAt: 1, startedAt: 1, updatedAt: 10, contact: null, cancelling: false, host: null, backend: { kind: "local_job" },
-  monitor: { tone: "flag", whole: 0.25, headline: null, sentence: flagged.sentence, bindings: { loss: "NaN" }, signals: flagged.view.signals, etaMs: null, flag: { id: "f1", state: "waiting", mode: "copilot" }, rev: flagged.rev, generation: flagged.generation, asOf: flagged.asOf },
+  monitor: { tone: "flag", whole: 0.25, headline: null, sentence: flagged.sentence, bindings: { loss: "NaN" }, signals: flagged.view.signals, estimate: null, flag: { id: "f1", state: "waiting", mode: "copilot" }, rev: flagged.rev, generation: flagged.generation, asOf: flagged.asOf },
 };
 const experiment = { id: "e1", projectId: "p", slug: "lr", createdAt: 1, updatedAt: 1 };
 const pane = (value) => `/projects/p/tasks/s?pane=${encodeURIComponent(JSON.stringify(value))}`;
@@ -79,13 +79,13 @@ test("evidence on the log already open moves it to the cited bytes", async () =>
 });
 
 test("what a look flagged while the flag was open is shown with the flag's evidence", async () => {
-  flagged.flag.noted = [{ at: flagged.flag.at + 60_000, text: "Checkpoint write failed at step **450**.", lookId: "7" }];
+  flagged.flags[0].noted = [{ at: flagged.flags[0].at + 60_000, text: "Checkpoint write failed at step **450**.", lookId: "7" }];
   try {
     await page(() => [experiment]);
     await settle();
     const said = document.body.textContent.replace(/[⁦-⁩]/g, "");
     assert.match(said, /Also noted at .+: Checkpoint write failed at step 450\./, said.slice(0, 2000));
   } finally {
-    delete flagged.flag.noted;
+    delete flagged.flags[0].noted;
   }
 });

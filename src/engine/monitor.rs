@@ -1321,7 +1321,6 @@ fn evaluate(
             "name": name,
             "label": view["signals"][name]["label"].as_str().unwrap_or(name),
             "value": latest.get(name),
-            "vs": versus.get(name),
         })
     });
     let mut referenced: serde_json::Map<String, Value> = view["signals"]
@@ -1332,8 +1331,8 @@ fn evaluate(
         .collect();
     for (name, spec) in view["signals"].as_object().into_iter().flatten() {
         if spec.get("better").is_some() {
-            let d = versus.get(name).map_or(Value::Null, |vs| vs["d"].clone());
-            referenced.insert(format!("{name}.vs"), d);
+            let comparison = versus.get(name).cloned().unwrap_or(Value::Null);
+            referenced.insert(format!("{name}.vs"), comparison);
         }
     }
     let counts = life.watch["counts"]
@@ -1351,15 +1350,14 @@ fn evaluate(
         watch["sentence"] = Value::Null;
     }
     let sentence = watch["sentence"].clone();
-    let eta_ms = estimate
+    let summary_estimate = estimate
         .as_ref()
-        .filter(|e| e["pending"] == false)
-        .map(|e| json!({"lo": e["loMs"], "mid": e["midMs"], "hi": e["hiMs"], "at": e["at"]}));
-    let eta_floor = eta_ms.is_some()
-        && estimate
-            .as_ref()
-            .is_some_and(|estimate| estimate["floor"] == true);
-    let pending = estimate.as_ref().is_some_and(|e| e["pending"] == true);
+        .and_then(Value::as_object)
+        .map(|estimate| {
+            let mut estimate = estimate.clone();
+            estimate.remove("pastLimitMs");
+            estimate
+        });
     // A flag no one settled waits after the run ends too; it colours a run that finished.
     let open = super::flags::open(&life.flags);
     let flagged = open.is_some() && (life.live() || life.phase == Some(Phase::Done));
@@ -1380,9 +1378,7 @@ fn evaluate(
         "sentence": sentence,
         "bindings": referenced,
         "signals": view["signals"],
-        "etaMs": eta_ms,
-        "etaFloor": eta_floor,
-        "pending": pending,
+        "estimate": summary_estimate,
         "limitEndsAt": life.ends_at(),
         "flag": open.map(|flag| json!({"id": flag["id"], "state": flag["state"], "mode": flag["mode"]})),
 
@@ -1392,9 +1388,6 @@ fn evaluate(
     });
     if fold.error.is_some() {
         summary["unavailable"] = json!(SIGNALS_UNREADABLE);
-    }
-    if let Some(untimed) = estimate.as_ref().and_then(|e| e.get("untimed")) {
-        summary["etaUntimed"] = untimed.clone();
     }
     // A plan's stages, so a line's underline is segmented without the full monitor.
     if started && (planned && stages.len() > 1 || whole.is_none()) {
@@ -1456,7 +1449,7 @@ fn evaluate(
         "cost": cost,
         "watch": watch_body(&watch),
         "sentence": sentence,
-        "flag": open.or(life.flags.last()),
+        "flagId": open.map(|flag| &flag["id"]),
         "flags": life.flags,
         "setup": setup,
         "disagrees": disagrees,
@@ -2245,8 +2238,7 @@ fn publish(
             })
         });
     summary["tone"] = json!(tone(Phase::parse(&run.status)));
-    summary["etaMs"] = Value::Null;
-    summary["pending"] = json!(false);
+    summary["estimate"] = Value::Null;
     summary["unavailable"] = json!(MONITOR_FAILED);
     let mut body = held
         .as_ref()
@@ -3573,7 +3565,7 @@ mod tests {
         assert_eq!(summary["tone"], "running");
         assert_eq!(summary["whole"], 0.5);
         assert_eq!(summary["headline"]["name"], "loss");
-        assert_eq!(summary["etaMs"]["mid"], estimate["midMs"]);
+        assert_eq!(summary["estimate"]["midMs"], estimate["midMs"]);
         assert_eq!(summary["rev"], monitor["rev"]);
     }
 
@@ -3956,7 +3948,7 @@ mod tests {
         );
         let summary = current(&f.store, &run).unwrap().unwrap().summary().clone();
         assert_eq!(summary["limitEndsAt"], T0 + 3_600_000);
-        assert_eq!(summary["etaMs"], Value::Null);
+        assert_eq!(summary["estimate"], Value::Null);
     }
 
     #[test]
@@ -4139,7 +4131,7 @@ mod tests {
         let (_, event) = monitor_at(&f, &run, T0 + 4000);
 
         assert_eq!(
-            event.unwrap()["patch"]["setup"],
+            event.unwrap()["setup"],
             json!({"line": "Computing initial pair counts", "stage": null, "startsAt": null})
         );
     }
@@ -4178,8 +4170,7 @@ mod tests {
                 let (monitor, _) = monitor_at(&f, &run, T0 + after);
                 assert_eq!(monitor["estimate"], Value::Null, "{name} {after}");
                 let summary = current(&f.store, &run).unwrap().unwrap().summary().clone();
-                assert_eq!(summary["pending"], false, "{name} {after}");
-                assert_eq!(summary["etaMs"], Value::Null, "{name} {after}");
+                assert_eq!(summary["estimate"], Value::Null, "{name} {after}");
                 let left = short(3_600_000 - after);
                 let said = if limited {
                     format!("eta      {left} to the limit (ends by 01:45 UTC)")
@@ -4201,7 +4192,7 @@ mod tests {
         assert_eq!(monitor["estimate"]["pending"], true);
         assert_eq!(eta(&monitor), "eta      Estimating… (needs timed progress)");
         assert_eq!(
-            current(&f.store, &run).unwrap().unwrap().summary()["pending"],
+            current(&f.store, &run).unwrap().unwrap().summary()["estimate"]["pending"],
             true
         );
     }
@@ -4481,7 +4472,7 @@ mod tests {
         let (monitor, _) = monitor_at(&f, &run, T0 + 700_000);
         assert_eq!(
             monitor["progress"]["segments"],
-            json!([{"name": "", "weight": 1.0, "fill": 1.0}]),
+            json!([{"weight": 1.0, "fill": 1.0}]),
             "a finished run did all it had to"
         );
         assert_eq!(monitor["progress"]["whole"], 1.0);
@@ -5029,7 +5020,7 @@ mod tests {
             );
             let summary = current(&f.store, &run).unwrap().unwrap().summary().clone();
             assert_eq!(summary["whole"], Value::Null, "{after}");
-            assert_eq!(summary["etaMs"], Value::Null, "{after}");
+            assert_eq!(summary["estimate"], Value::Null, "{after}");
         }
 
         // A run that failed on its last bar got that far, and no further bar is to come.
@@ -5057,7 +5048,7 @@ mod tests {
         let run = f.run("done", local());
         let listed = current(&f.store, &run).unwrap().unwrap();
         assert_eq!(listed.summary()["tone"], "done");
-        assert_eq!(listed.summary()["etaMs"], Value::Null);
+        assert_eq!(listed.summary()["estimate"], Value::Null);
     }
 
     /// A projection that panics poisons nothing: until one succeeds, readers are told the
@@ -5073,8 +5064,7 @@ mod tests {
 
     fn assert_failing(summary: &Value) {
         assert_eq!(summary["unavailable"], MONITOR_FAILED, "{summary}");
-        assert_eq!(summary["etaMs"], Value::Null, "{summary}");
-        assert_eq!(summary["pending"], false, "{summary}");
+        assert_eq!(summary["estimate"], Value::Null, "{summary}");
     }
 
     #[test]
@@ -5135,7 +5125,7 @@ mod tests {
         f.collect(&snapshot);
         f.collected(T0 + 10_000);
         let (good, _) = publish(&f.store, &run, T0 + 10_000, None).unwrap();
-        assert!(good.summary()["etaMs"].is_object(), "{}", good.summary());
+        assert!(good.summary()["estimate"].is_object(), "{}", good.summary());
         let rev = good.published.rev;
 
         f.failing("r1", true);
@@ -5519,7 +5509,7 @@ mod tests {
         let summary = current(&f.store, &run).unwrap().unwrap().summary().clone();
         assert_eq!(
             summary["headline"],
-            json!({"name": "loss", "label": "Loss", "value": 3.0 / 21.0, "vs": null}),
+            json!({"name": "loss", "label": "Loss", "value": 3.0 / 21.0}),
             "the first headline with a value"
         );
         assert_eq!(
@@ -5558,7 +5548,7 @@ mod tests {
         let summary = current(&f.store, &run).unwrap().unwrap().summary().clone();
         assert_eq!(
             summary["headline"],
-            json!({"name": "valid", "label": "Bit-exact", "value": 1, "vs": null}),
+            json!({"name": "valid", "label": "Bit-exact", "value": 1}),
             "the page words the raw value with the same labels"
         );
         assert_eq!(summary["signals"]["valid"]["labels"]["1"], "valid");
@@ -6543,7 +6533,8 @@ mod tests {
             summary["flag"],
             json!({"id": "f1", "state": "waiting", "mode": "copilot"})
         );
-        assert_eq!(monitor["flag"]["state"], "waiting");
+        assert_eq!(monitor["flagId"], monitor["flags"][0]["id"]);
+        assert_eq!(monitor["flags"][0]["state"], "waiting");
     }
 
     #[test]
@@ -7688,10 +7679,9 @@ mod tests {
             .summary()
             .clone();
         assert_eq!(
-            summary["headline"]["vs"], *vs,
+            summary["bindings"]["loss.vs"], *vs,
             "a running child meets the same step"
         );
-        assert_eq!(summary["bindings"]["loss.vs"], vs["d"]);
         assert_eq!(summary["bindings"]["val_loss.vs"], Value::Null);
 
         // Past the parent's last step there is nothing to compare with: no comparison, not level.
@@ -7762,7 +7752,7 @@ mod tests {
             (&json!(false), &json!(0.669), None),
             "{last}"
         );
-        assert_eq!(event.unwrap()["patch"]["versus"], monitor["versus"]);
+        assert_eq!(event.unwrap()["versus"], monitor["versus"]);
         let text = monitor["statusText"].as_str().unwrap();
         assert!(
             text.contains("Loss 0.675 (0.075 better than parent at step 30)"),

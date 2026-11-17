@@ -7,7 +7,7 @@ import { LogTerminal } from "../src/components/LogTerminal.tsx";
 import { m } from "../src/paraglide/messages.js";
 import { find, render, serve, settle } from "./render.mjs";
 
-const { evidence } = JSON.parse(readFileSync(new URL("./fixtures/runMonitor/flagged.json", import.meta.url), "utf8")).flag;
+const { evidence } = JSON.parse(readFileSync(new URL("./fixtures/runMonitor/flagged.json", import.meta.url), "utf8")).flags[0];
 const filler = (n, bytes) => Array.from({ length: n }, (_, i) => `step ${i + 1} ok`.padEnd(bytes - 1, ".")).join("\n") + "\n";
 // A short log whose line 91 starts at the evidence's first byte.
 const width = Math.floor(evidence.byteFrom / (evidence.from - 1));

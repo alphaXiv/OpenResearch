@@ -47,7 +47,7 @@ export function RunStatus({ model, label, descriptionId, onOpenRunPage }: {
   const progress = data?.progress;
   const count = data && progress?.done != null ? plainSentence(capitalized(progressWords(data.phases[progress.phase], progress.done))) : "";
   const time = [model.eta, model.etaDetail].filter(Boolean).join(" · ") || (!model.live ? model.sentence.text : "");
-  const untimed = [...(data?.estimate?.untimed ?? model.run.monitor?.etaUntimed ?? [])].sort((a, b) => b.length - a.length);
+  const untimed = [...(data?.estimate?.untimed ?? model.run.monitor?.estimate?.untimed ?? [])].sort((a, b) => b.length - a.length);
   const footer = model.settingUp || !model.live ? time : m.run_whole_time({ time });
   const footerNames = untimed.length ? new RegExp(`(${untimed.map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`, "g") : null;
   const stage = model.sentence.stage;

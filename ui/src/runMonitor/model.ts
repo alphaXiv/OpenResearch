@@ -5,7 +5,7 @@ import { autoDir, fmtNumber, ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
 import { runActive, runApiProvider, runConnectHost, runDisplay, runNotice, runStoppable, type RunNotice } from "../runDisplay";
 import { fillSentence, fmtMagnitude, fmtSignal, fmtUsd, plainSentence, tokensOf } from "./format";
-import type { Flag, FlagMode, FlagState, RunMonitor, RunMonitorSummary, RunRule, ShownRun, SignalSpec, SignalValue, Signals, Versus, VersusBy } from "./types";
+import type { Bindings, Flag, FlagMode, FlagState, RunMonitor, RunMonitorSummary, RunRule, ShownRun, SignalSpec, SignalValue, Signals, Versus, VersusBy } from "./types";
 import { tickText } from "./journal";
 import { stagePosition } from "./stages";
 import { capitalized, captionProgress, clockText, costWords, durationText, estimateWords, progressWords } from "./words";
@@ -155,12 +155,12 @@ function barLabel(parts: string[]): string {
 export const versusOf = (monitor: RunMonitor, name: string, live: boolean, by?: VersusBy): Versus | null =>
   monitor.versus[by ?? monitor.view.signals[name]?.vs ?? (live ? "step" : "final")][name] ?? null;
 
-/** What a sentence's tokens read from a full monitor: each signal, `signal.vs` as the raw difference, and counts. */
-export function bindingsOf(monitor: RunMonitor, live: boolean): Record<string, SignalValue> {
-  const bindings: Record<string, SignalValue> = { ...monitor.latest };
+/** What a sentence's tokens read from a full monitor: each signal, `signal.vs` as the parent comparison, and counts. */
+export function bindingsOf(monitor: RunMonitor, live: boolean): Bindings {
+  const bindings: Bindings = { ...monitor.latest };
   for (const name of Object.keys(monitor.view.signals)) {
     const vs = versusOf(monitor, name, live);
-    if (vs) bindings[`${name}.vs`] = vs.d;
+    if (vs) bindings[`${name}.vs`] = vs;
   }
   for (const [pattern, count] of Object.entries(monitor.counts)) bindings[`count:${JSON.stringify(pattern)}`] = count;
   return bindings;
@@ -183,7 +183,7 @@ export const namedStages = (monitor: RunMonitor) => monitor.phases.length > 1 &&
 /** The unsettled flag as the newer of the summary and the monitor states it. */
 export function statedFlag(run: Run, fetched: RunMonitor | null): RunMonitorSummary["flag"] {
   if (!fetched || monitorBehind(run.monitor, fetched)) return run.monitor?.flag ?? null;
-  const { flag } = fetched;
+  const flag = fetched.flags?.find((flag) => flag.id === fetched.flagId);
   return flag && unsettled(flag.state) ? { id: flag.id, state: flag.state, mode: flag.mode } : null;
 }
 
@@ -194,7 +194,7 @@ export function runTone(run: Run, monitor: RunMonitor | null = null): Tone {
   if (monitor) {
     if (!live && monitor.revising && run.status === "cancelled") return "revising";
     // A flag no one settled outlasts the run, and colours one that finished.
-    const flagged = monitor.flag && unsettled(monitor.flag.state) && (live || run.status === "done");
+    const flagged = monitor.flagId !== null && (live || run.status === "done");
     return flagged ? "flag" : STATUS_TONE[run.status];
   }
   // The server reprojects an ended run whose summary still says it is going before it lists it.
@@ -256,7 +256,8 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   const stagePhase = progress ? phases[progress.phase] : stage ? { ...stage, priorMs: null, startedAt: null, endedAt: null }
     : order?.index != null ? phases[order.index] : undefined;
   // The server leaves a live run's estimate out exactly when how much of it remains is unknown.
-  const open = live && !pre && (monitor ? monitor.estimate === null : summary !== null && summary.etaMs === null && !summary.pending);
+  const estimate = monitor ? monitor.estimate : summary?.estimate ?? null;
+  const open = live && !pre && (monitor !== null || summary !== null) && estimate === null;
   const limitEndsAt = monitor ? limit?.endsAt ?? null : summary?.limitEndsAt ?? null;
   const noEstimate = !stagePhase ? m.run_eta_no_progress() : stagePhase.of == null ? m.run_eta_no_total() : m.run_eta_unknown_left();
   const setup = (monitor ? monitor.setup : summary?.setup) ?? null;
@@ -266,7 +267,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
 
   const stated = statedFlag(run, fetched);
   // A flag's words and evidence never change, so a lagging monitor still supplies them for the same flag.
-  const flag = stated && { id: stated.id, state: stated.state, mode: stated.mode, record: fetched?.flag?.id === stated.id ? fetched.flag : null };
+  const flag = stated && { id: stated.id, state: stated.state, mode: stated.mode, record: fetched?.flags?.find((flag) => flag.id === stated.id) ?? null };
   const needsChoice = flag?.state === "waiting" && flag.mode === "copilot";
   const looking = flag?.state === "waking" || flag?.state === "agent_looking" || flag?.state === "asking";
 
@@ -320,7 +321,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   let eta = "";
   let etaDetail = "";
   let etaStrong = false;
-  const etaFloor = monitor?.estimate?.floor ?? summary?.etaFloor ?? false;
+  const etaFloor = Boolean(estimate?.floor && (monitor || !estimate.pending));
   let leftMs: RunModel["leftMs"] = null;
   // Time since the run started, where it has no time left to show, said as that.
   let etaElapsed = false;
@@ -339,9 +340,6 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     eta = monitor ? m.run_eta_none() : m.run_elapsed({ duration: durationText(now - run.createdAt) });
   } else if (settingUp) {
     eta = setup?.startsAt != null && setup.startsAt > now ? m.run_setup_starts_in({ duration: durationText(setup.startsAt - now) }) : "";
-  } else if (etaFloor) {
-    const estimate = monitor?.estimate ?? (summary?.etaMs ? { loMs: summary.etaMs.lo, midMs: summary.etaMs.mid, hiMs: summary.etaMs.hi, at: summary.etaMs.at, pending: false, pastLimitMs: null } : null);
-    if (estimate) ({ eta, detail: etaDetail, strong: etaStrong, leftMs } = estimateWords({ ...estimate, floor: true, untimed: monitor?.estimate?.untimed ?? summary?.etaUntimed }, now, null, 0));
   } else if (open && limitEndsAt !== null) {
     eta = m.run_eta_to_limit({ duration: durationText(limitEndsAt - now) });
     etaDetail = monitor?.rules.length ? m.run_eta_ends_by_rules({ clock: clockText(limitEndsAt) }) : m.run_eta_ends_by({ clock: clockText(limitEndsAt) });
@@ -349,14 +347,8 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     eta = m.run_elapsed({ duration: durationText(elapsed) });
     etaElapsed = true;
     etaDetail = settingUp || stagePhase?.of == null && stageDone !== null ? "" : noEstimate;
-  } else if (monitor?.estimate) {
-    ({ eta, detail: etaDetail, strong: etaStrong, leftMs } = estimateWords(monitor.estimate, now, limit, progress?.stallMs ?? 0));
-  } else if (summary?.etaMs) {
-    const { lo, mid, hi, at } = summary.etaMs;
-    ({ eta, detail: etaDetail, strong: etaStrong, leftMs } = estimateWords({ loMs: lo, midMs: mid, hiMs: hi, at, pending: false, pastLimitMs: null, floor: false }, now, null, 0));
-  } else if (summary?.pending) {
-    eta = m.run_eta_estimating();
-    etaDetail = m.run_eta_needs_steps();
+  } else if (estimate) {
+    ({ eta, detail: etaDetail, strong: etaStrong, leftMs } = estimateWords({ ...estimate, floor: etaFloor }, now, limit, progress?.stallMs ?? 0));
   } else {
     // A server that sends no monitor at all.
     eta = m.run_elapsed({ duration: durationText(elapsed) });
@@ -367,12 +359,12 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     eta = "";
   }
 
-  const headline = headlineOf(monitor, summary?.headline ?? null, signals, speaking, live);
+  const headline = headlineOf(monitor, summary?.headline ?? null, bindings, signals, speaking, live);
 
   let segments = progress?.segments.map(({ weight, fill }) => ({ weight, fill: pre ? 0 : fill }))
     ?? summary?.segments?.map(({ weight, fill }) => ({ weight, fill: pre ? 0 : fill }))
     ?? [{ weight: 1, fill: pre ? 0 : summary?.whole ?? (tone === "done" ? 1 : null) }];
-  const whole = (monitor?.estimate?.floor ?? summary?.etaFloor) ? null : progress?.whole ?? summary?.whole ?? null;
+  const whole = etaFloor ? null : progress?.whole ?? summary?.whole ?? null;
   if (whole === null && segments.length > 1) {
     const fill = stageDone !== null && stagePhase?.of ? Math.min(1, stageDone / stagePhase.of) : null;
     segments = [{ weight: 1, fill }];
@@ -452,7 +444,7 @@ export function ruleText(rule: RunRule): string {
   return rule.text !== null ? autoDir(rule.text) : m.run_rule_budget({ budget: ltr(fmtUsd(rule.budgetUsd ?? 0)) });
 }
 
-function headlineOf(monitor: RunMonitor | null, summary: NonNullable<Run["monitor"]>["headline"], signals: Signals, sentenceTemplate: string | null, live: boolean): RunModel["headline"] {
+function headlineOf(monitor: RunMonitor | null, summary: NonNullable<Run["monitor"]>["headline"], bindings: Bindings, signals: Signals, sentenceTemplate: string | null, live: boolean): RunModel["headline"] {
   let name: string;
   let label: string;
   let value: SignalValue;
@@ -465,7 +457,9 @@ function headlineOf(monitor: RunMonitor | null, summary: NonNullable<Run["monito
     value = monitor.latest[name] ?? null;
     vs = versusOf(monitor, name, live);
   } else if (summary) {
-    ({ name, label, value, vs } = summary);
+    ({ name, label, value } = summary);
+    const comparison = bindings[`${name}.vs`];
+    vs = comparison !== null && typeof comparison === "object" ? comparison : null;
   } else return null;
   const said = tokensOf(sentenceTemplate ?? "");
   return {

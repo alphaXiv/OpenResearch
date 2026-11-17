@@ -129,7 +129,8 @@
     "error": null
   },
   "sentence": null,
-  "flag": null,
+  "flagId": null,
+  "flags": [],
   "revising": false,
   "rules": [],
   "statusText": "selfplay-pool-64  running  60%",

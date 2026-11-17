@@ -71,7 +71,7 @@ export function estimateWords(estimate: Estimate, now: number, limit: { endsAt: 
   }
   const eta = m.run_eta_left({ duration: remainingText(mid) });
   if (stalled) return { eta, detail: stalled, strong: true, leftMs: mid };
-  if (estimate.pastLimitMs !== null && limit) {
+  if (estimate.pastLimitMs != null && limit) {
     return { eta, detail: m.run_eta_past_limit({ duration: durationText(estimate.pastLimitMs), limit: durationText(limit.ms) }), strong: true, leftMs: mid };
   }
   const done = m.run_eta_done_about({ clock: clockText(now + mid) });

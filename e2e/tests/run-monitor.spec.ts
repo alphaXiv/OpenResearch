@@ -881,7 +881,7 @@ gate('finish')`)
       await banner.getByRole('button', { name: 'Keep going', exact: true }).click()
       await expect(banner.getByRole('button', { name: 'Keep going', exact: true })).toHaveCount(0)
       await expect(page.getByRole('img', { name: 'A run needs your attention' })).toHaveCount(0)
-      const { flag } = await (await page.request.get(`${orx.url}/api/runs/${runId}/monitor`)).json()
+      const { flags: [flag] } = await (await page.request.get(`${orx.url}/api/runs/${runId}/monitor`)).json()
       expect([flag.state, flag.choice.by, flag.choice.c]).toEqual(['kept', 'user', 'keep'])
     })
 

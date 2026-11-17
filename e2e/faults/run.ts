@@ -186,7 +186,8 @@ async function runScenario(scenario: Scenario) {
       say(`strip  ${strip}`)
       if (charts.length) say(`charts ${charts.map(plain).join(' · ')}`)
       say(`status ${plain(String(monitor.statusText).replace(/^signals +(Last collected|Data as of).*$/gm, ''))}`)
-      say(`state  run=${run?.run.status ?? 'gone'} tone=${run?.run.monitor?.tone ?? '-'} outcome=${JSON.stringify(run?.run.outcome ?? null)} flag=${monitor.flag ? `${monitor.flag.source}/${monitor.flag.state} ${JSON.stringify(plain(monitor.flag.detail.replaceAll('**', '')))}` : null} flags=${monitor.flags?.length ?? 0} sentence=${JSON.stringify(monitor.sentence)} watch=${monitor.watch?.state}/${monitor.watch?.looks?.length ?? 0} looks rules=${monitor.rules?.length ?? 0} setup=${JSON.stringify(monitor.setup)} parent=${monitor.parent ? 'yes' : 'no'} versus=${JSON.stringify(monitor.versus)}`)
+      const flag = monitor.flags.find((flag: { id: string }) => flag.id === monitor.flagId) ?? monitor.flags.at(-1)
+      say(`state  run=${run?.run.status ?? 'gone'} tone=${run?.run.monitor?.tone ?? '-'} outcome=${JSON.stringify(run?.run.outcome ?? null)} flag=${flag ? `${flag.source}/${flag.state} ${JSON.stringify(plain(flag.detail.replaceAll('**', '')))}` : null} flags=${monitor.flags?.length ?? 0} sentence=${JSON.stringify(monitor.sentence)} watch=${monitor.watch?.state}/${monitor.watch?.looks?.length ?? 0} looks rules=${monitor.rules?.length ?? 0} setup=${JSON.stringify(monitor.setup)} parent=${monitor.parent ? 'yes' : 'no'} versus=${JSON.stringify(monitor.versus)}`)
     }
 
     const ended = async () => !(await banner.getByRole('button', { name: 'Stop the run', exact: true }).count())

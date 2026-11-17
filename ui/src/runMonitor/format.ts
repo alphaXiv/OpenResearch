@@ -2,7 +2,7 @@ import { fmtDuration } from "../api";
 import { ltr } from "../i18n";
 import { getLocale } from "../paraglide/runtime.js";
 import { m } from "../paraglide/messages.js";
-import type { SignalSpec, SignalValue, Signals, Versus } from "./types";
+import type { Bindings, SignalSpec, SignalValue, Signals, Versus } from "./types";
 
 const number = (digits: number | undefined, options: Intl.NumberFormatOptions = {}) =>
   new Intl.NumberFormat(getLocale(), digits === undefined ? options : { minimumFractionDigits: digits, maximumFractionDigits: digits, ...options });
@@ -47,13 +47,13 @@ export function fmtSignal(spec: SignalSpec | undefined, value: SignalValue | und
 export const fmtMagnitude = (spec: SignalSpec | undefined, magnitude: number) =>
   spec?.digits === undefined ? fmtMeasure(magnitude) : number(spec.digits).format(magnitude);
 
-/** The comparison a `{signal.vs}` token reads, from the raw difference the server binds. */
 type Comparison = Pick<Versus, "d" | "good" | "flat" | "mag">;
 
 export function versusOf(spec: SignalSpec | undefined, d: number): Comparison | null {
   if (!spec?.better) return null;
   const size = Math.abs(d * (spec.scale ?? 1));
-  const mag = spec.digits === undefined ? size : Number(size.toFixed(spec.digits));
+  const unit = 10 ** (spec.digits ?? 0);
+  const mag = spec.digits === undefined ? size : Math.round(size * unit) / unit;
   return { d, good: spec.better === "lower" ? d < 0 : d > 0, flat: mag === 0, mag };
 }
 
@@ -64,23 +64,20 @@ const TOKEN = /\{([^{}]+)\}/g;
 export const tokensOf = (template: string) => new Set([...template.matchAll(TOKEN)].map((match) => match[1]));
 
 /** A watcher's sentence with each token filled from the live values; `**` marks stay for the renderer. */
-export function fillSentence(template: string, bindings: Record<string, SignalValue>, signals: Signals): string {
+export function fillSentence(template: string, bindings: Bindings, signals: Signals): string {
   return template.replace(TOKEN, (_token, key: string) => {
     if (!Object.hasOwn(bindings, key)) return "—";
-    if (key.startsWith("count:")) {
-      const count = bindings[key];
-      return typeof count === "number" ? ltr(number(0).format(count)) : "—";
-    }
+    const value = bindings[key];
+    if (key.startsWith("count:")) return typeof value === "number" ? ltr(number(0).format(value)) : "—";
     if (key.endsWith(".vs")) {
       const name = key.slice(0, -3);
-      const d = bindings[key];
-      const vs = typeof d === "number" ? versusOf(signals[name], d) : null;
-      if (!vs) return "—";
+      const vs = value;
+      if (vs === null || typeof vs !== "object") return "—";
       if (vs.flat) return m.run_vs_token_level();
       const delta = ltr(fmtMagnitude(signals[name], vs.mag));
       return vs.good ? m.run_vs_token_better({ delta }) : m.run_vs_token_worse({ delta });
     }
-    return ltr(fmtSignal(signals[key], bindings[key]));
+    return ltr(fmtSignal(signals[key], typeof value === "object" ? null : value));
   });
 }
 

@@ -15,8 +15,8 @@ const running = fixture("running");
 const flagged = fixture("flagged");
 const now = Date.now();
 const summary = (extra = {}) => ({
-  tone: "running", whole: 0.248, headline: { name: "loss", label: "Loss", value: 2.31, vs: null }, sentence: running.sentence,
-  bindings: { loss: 2.31 }, signals: running.view.signals, etaMs: null, flag: null, rev: 1, generation: "g1", asOf: now, ...extra,
+  tone: "running", whole: 0.248, headline: { name: "loss", label: "Loss", value: 2.31 }, sentence: running.sentence,
+  bindings: { loss: 2.31 }, signals: running.view.signals, estimate: null, flag: null, rev: 1, generation: "g1", asOf: now, ...extra,
 });
 const run = (id, extra = {}) => ({
   id, experimentId: `e-${id}`, projectId: "p", status: "running", createdAt: now - 60_000, startedAt: now - 60_000, updatedAt: now,
@@ -36,7 +36,7 @@ function backend({ uiState = { onboardingCompleted: true }, monitors = { r1: run
     const monitor = /^GET \/api\/runs\/([^/]+)\/monitor$/.exec(request);
     if (monitor) return monitors[monitor[1]];
     if (/^POST \/api\/runs\/[^/]+\/cancel$/.test(request)) return { ok: true };
-    if (/^POST \/api\/runs\/[^/]+\/flag$/.test(request)) return { flag: { ...flagged.flag, state: "kept" }, run: run("r1") };
+    if (/^POST \/api\/runs\/[^/]+\/flag$/.test(request)) return { flag: { ...flagged.flags[0], state: "kept" }, run: run("r1") };
     if (/^POST \/api\/chat\/sessions\/s\/shown-runs\/[^/]+\/dismiss$/.test(request)) return { dismissed: true };
   });
   return requests;
@@ -316,7 +316,7 @@ test("lost contact puts the contact words on the line, Connect beside them, and 
 });
 
 test("a flag's detail keeps its counts live in the strip", async () => {
-  const counted = { ...flagged, counts: { "ERR 429": 43 }, flag: { ...flagged.flag, detail: '{count:"ERR 429"} items came back HTTP 429.' } };
+  const counted = { ...flagged, counts: { "ERR 429": 43 }, flags: [{ ...flagged.flags[0], detail: '{count:"ERR 429"} items came back HTTP 429.' }] };
   backend({ monitors: { r1: counted } });
   await banner([run("r1", { monitor: summary({ tone: "flag", flag: { id: "f1", state: "waiting", mode: "copilot" } }) })]);
   await settle();
@@ -359,7 +359,7 @@ test("a flag choice is sent once, and trying it again after a failure is the sam
   assert.equal(choices.length, 2);
   assert.equal(choices[1].requestId, choices[0].requestId);
   assert.equal(choices[1].choice, "ask");
-  await answer({ flag: { ...flagged.flag, state: "asking" }, run: waitingRun() });
+  await answer({ flag: { ...flagged.flags[0], state: "asking" }, run: waitingRun() });
   await settle();
 });
 
@@ -385,10 +385,10 @@ test("a choice's answer settles only its own flag: a newer flag keeps its choice
   await banner([waitingRun()], { workspace });
   await settle();
   await click(named(m.run_flag_keep_going()));
-  await act(async () => workspace.queryClient.setQueryData(queryKey, { ...flagged, rev: flagged.rev + 2, flag: { ...flagged.flag, id: "f2" } }));
-  await answer({ flag: { ...flagged.flag, state: "kept" }, run: waitingRun() });
+  await act(async () => workspace.queryClient.setQueryData(queryKey, { ...flagged, rev: flagged.rev + 2, flagId: "f2", flags: [{ ...flagged.flags[0], id: "f2" }] }));
+  await answer({ flag: { ...flagged.flags[0], state: "kept" }, run: waitingRun() });
   await settle();
-  assert.equal(workspace.queryClient.getQueryData(queryKey).flag.id, "f2");
+  assert.equal(workspace.queryClient.getQueryData(queryKey).flagId, "f2");
   assert.ok(named(m.run_flag_keep_going()), "the newer flag still asks");
 });
 
@@ -402,7 +402,7 @@ test("a choice on its way is never forgotten, however long its answer takes, and
   await keep();
   await act(async () => t.mock.timers.tick(2 * 3_600_000));
   await keep();
-  await answer({ flag: { ...flagged.flag, state: "kept" }, run: waitingRun() });
+  await answer({ flag: { ...flagged.flags[0], state: "kept" }, run: waitingRun() });
   await settle();
   assert.equal(choices.length, 1, "nothing on screen, and still one request");
   await act(async () => t.mock.timers.tick(2 * 3_600_000));
@@ -443,7 +443,7 @@ test("a run whose view was rebuilt reads its monitor again, and shows none of th
   const requests = backend();
   const view = await banner([run("r1")]);
   await settle();
-  await view.update([run("r1", { monitor: summary({ generation: "g2", rev: 1, asOf: running.asOf + 1000, bindings: { loss: 1.5 }, headline: { name: "loss", label: "Loss", value: 1.5, vs: null } }) })]);
+  await view.update([run("r1", { monitor: summary({ generation: "g2", rev: 1, asOf: running.asOf + 1000, bindings: { loss: 1.5 }, headline: { name: "loss", label: "Loss", value: 1.5 } }) })]);
   await settle();
   assert.equal(requests.filter((r) => r.request === "GET /api/runs/r1/monitor").length, 2);
   const text = plain(view.container.textContent);
@@ -479,7 +479,7 @@ test("the evidence's log lines ask to open the run's log at the cited bytes of t
   await banner([waitingRun()], { props: { onOpenRun: (...args) => opened.push(args) } });
   await settle();
   await click(find("button", "91"));
-  const { byteFrom, ident } = flagged.flag.evidence;
+  const { byteFrom, ident } = flagged.flags[0].evidence;
   assert.deepEqual(opened, [["r1", "preview", { at: byteFrom, ident }]]);
 });
 
@@ -494,7 +494,7 @@ test("a choice belongs to its flag: collapsing and reopening the strip neither s
   await click(named(m.run_flag_keep_going()));
   await reopen();
   await act(async () => { named(m.run_flag_keep_going()).click(); named(m.experiments_stop_run()).click(); });
-  await answer({ flag: flagged.flag, run: waitingRun() });
+  await answer({ flag: flagged.flags[0], run: waitingRun() });
   await settle();
   assert.equal(choices.length, 1, "presses while the answer was on its way sent nothing, before or after it came back");
 
@@ -506,7 +506,7 @@ test("a choice belongs to its flag: collapsing and reopening the strip neither s
   assert.ok(find('[role="alert"]', "This flag was already answered."), "the refusal outlives the strip that pressed it");
   await click(named(m.run_flag_keep_going()));
   assert.equal(choices[2].requestId, choices[0].requestId, "trying again is the same request");
-  await answer({ flag: { ...flagged.flag, state: "kept" }, run: waitingRun() });
+  await answer({ flag: { ...flagged.flags[0], state: "kept" }, run: waitingRun() });
   await settle();
 });
 
@@ -517,7 +517,7 @@ test("summaries faster than the catch-up keep the chart and read the monitor aga
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const reads = () => requests.filter((r) => r.request === "GET /api/runs/r1/monitor").length;
   for (let step = 1; step <= 4; step++) {
-    await view.update([run("r1", { monitor: summary({ rev: running.rev + step, bindings: { loss: 2.3 - step / 10 }, headline: { name: "loss", label: "Loss", value: 2.3 - step / 10, vs: null } }) })]);
+    await view.update([run("r1", { monitor: summary({ rev: running.rev + step, bindings: { loss: 2.3 - step / 10 }, headline: { name: "loss", label: "Loss", value: 2.3 - step / 10 } }) })]);
     await act(async () => t.mock.timers.tick(700));
     await settle();
     assert.ok(view.container.querySelector('[role="img"][aria-label*="Loss"]'), `the chart keeps drawing at step ${step}`);
@@ -594,7 +594,7 @@ test("a shown active run without a summary ignores cached monitor data and draws
 });
 
 test("an unresolved flag stays visible after completion and announces that the run ended", async () => {
-  const ended = { ...flagged, flag: { ...flagged.flag, state: "waiting", mode: "copilot" } };
+  const ended = { ...flagged, flags: [{ ...flagged.flags[0], state: "waiting", mode: "copilot" }] };
   const requests = backend({ monitors: { r1: ended } });
   const done = run("r1", { status: "done", endedAt: now, monitor: summary({ tone: "flag", sentence: flagged.sentence, flag: { id: "f1", state: "waiting", mode: "copilot" }, rev: flagged.rev }) });
   const view = await banner([{ ...done, status: "running", endedAt: null }]);

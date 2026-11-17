@@ -49,10 +49,10 @@ const now = running.asOf;
 const bare = (text) => text.replace(/[⁦-⁩]/g, "");
 const signals = { val_bpb: { label: "val bpb", digits: 2, better: "lower" } };
 const summary = (extra = {}) => ({
-  tone: "running", whole: 0.4, headline: null, sentence: null, bindings: {}, signals: {}, etaMs: null, pending: false, flag: null,
+  tone: "running", whole: 0.4, headline: null, sentence: null, bindings: {}, signals: {}, estimate: null, flag: null,
   rev: 1, generation: "g1", asOf: now, limitEndsAt: null, ...extra,
 });
-const scored = (value, extra = {}) => summary({ headline: { name: "val_bpb", label: "val bpb", value, vs: null }, signals, ...extra });
+const scored = (value, extra = {}) => summary({ headline: { name: "val_bpb", label: "val bpb", value }, signals, ...extra });
 const model = (id, monitor, extra = {}) => runModel({
   item: { sessionId: "s", experimentName: id, run: { id, experimentId: id, projectId: "p", status: "running", createdAt: now - 600_000, startedAt: now - 600_000, updatedAt: now, contact: null, cancelling: false, host: null, backend: { kind: "local_job" }, monitor, ...extra } },
   monitor: null, shown: true, agent: "Claude", now, nextRetryMs: null,
@@ -68,7 +68,7 @@ test("runs that differ by one setting and share a headline that says which way i
   const models = [model("a", scored(1.31)), model("b", scored(1.21)), model("c", scored(1.27))];
   assert.equal(said(models, depths(4, 6, 8)).text, "6 leads at val bpb **1.21**");
   const higher = { acc: { label: "accuracy", digits: 2, better: "higher" } };
-  const accurate = (value) => summary({ headline: { name: "acc", label: "accuracy", value, vs: null }, signals: higher });
+  const accurate = (value) => summary({ headline: { name: "acc", label: "accuracy", value }, signals: higher });
   assert.equal(said([model("a", accurate(0.5)), model("b", accurate(0.75))], ["LR 3e-4 on SQuAD", "LR 1e-3 on SQuAD"]).text, "1e-3 leads at accuracy **0.75**");
 });
 
@@ -95,7 +95,7 @@ test("no leader without a declared direction, a shared headline, or two numbers"
   const undeclared = { val_bpb: { label: "val bpb", digits: 2 } };
   const progress = bare(m.run_summary_running({ count: "**2**" }));
   assert.equal(said([model("a", scored(1.3, { signals: undeclared })), model("b", scored(1.2, { signals: undeclared }))], depths(4, 6)).text, progress);
-  const other = summary({ headline: { name: "loss", label: "loss", value: 2, vs: null }, signals: { loss: { label: "loss", better: "lower" } } });
+  const other = summary({ headline: { name: "loss", label: "loss", value: 2 }, signals: { loss: { label: "loss", better: "lower" } } });
   assert.equal(said([model("a", scored(1.3)), model("b", other)], depths(4, 6)).text, progress);
   assert.equal(said([model("a", scored(1.3)), model("b", scored("NaN"))], depths(4, 6)).text, progress);
   // A run with no headline yet neither leads nor stops the others from leading.
@@ -118,7 +118,7 @@ test("who needs attention comes first, before any leader", () => {
 });
 
 test("otherwise the summary counts the runs in each state and, in the same sentence, when the next should finish", () => {
-  const eta = (mid, floor = false) => summary({ etaMs: { lo: mid - 60_000, mid, hi: mid + 60_000, at: now }, etaFloor: floor });
+  const eta = (mid, floor = false) => summary({ estimate: { loMs: mid - 60_000, midMs: mid, hiMs: mid + 60_000, at: now, pending: false, floor } });
   const models = [model("a", eta(29 * 60_000)), model("b", eta(40 * 60_000)), model("c", summary({ tone: "starting" }), { status: "starting" }), model("d", summary({ tone: "done" }), { status: "done", endedAt: now })];
   const { text, firstDone } = said(models);
   assert.equal(text, [
@@ -141,7 +141,7 @@ test("the watcher's summary stands for the runs its look covered, with names and
 });
 
 test("a summary's subsecond time left stays positive", () => {
-  const line = model("one", summary({ etaMs: { lo: 500, mid: 500, hi: 500, at: now } }));
+  const line = model("one", summary({ estimate: { loMs: 500, midMs: 500, hiMs: 500, at: now, pending: false, floor: false } }));
   const { text } = said([line]);
   const expected = m.run_summary_first_done({ duration: `**${m.duration_seconds({ value: "1" })}**` });
   assert.ok(text.includes(bare(expected)), text);

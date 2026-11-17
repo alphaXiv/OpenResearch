@@ -172,7 +172,8 @@
     "error": null
   },
   "sentence": null,
-  "flag": null,
+  "flagId": null,
+  "flags": [],
   "revising": false,
   "rules": [],
   "statusText": "loadtest-v3  done  100%",

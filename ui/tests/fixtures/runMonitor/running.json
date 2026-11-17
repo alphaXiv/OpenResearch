@@ -117,7 +117,8 @@
     "template": "Loss **{loss}**, falling steadily.",
     "t": 1794445500000
   },
-  "flag": null,
+  "flagId": null,
+  "flags": [],
   "revising": false,
   "brief": [],
   "rules": [],

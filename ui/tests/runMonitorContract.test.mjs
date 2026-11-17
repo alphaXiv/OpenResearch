@@ -239,7 +239,7 @@ test("the line and the strip say the same whether the estimate waits on its pace
 
 test("a run whose projection fails or whose signals can't be read is drawn as last seen, never counting down, wherever it is listed", async () => {
   const { summary, now } = states.failing;
-  assert.equal(summary.etaMs, null);
+  assert.equal(summary.estimate, null);
   assert.notEqual(states.unreadable.summary.unavailable, summary.unavailable, "each cause in its own words");
   for (const name of ["failing", "unreadable"]) {
     const { summary, now } = states[name];
@@ -369,7 +369,7 @@ test("beside the headline, better or worse is said in words on the line and the 
     [{ d: -0.1123, good: true, flat: false, mag: 0.1123, parent: 1 }, m.run_vs_better({ delta: "0.112" })],
     [{ d: 0.00004, good: false, flat: false, mag: 0.00004, parent: 1 }, m.run_vs_worse({ delta: "4e-5" })],
   ]) {
-    const compared = { ...state, monitor: { ...state.monitor, versus: { step: { [name]: vs }, final: { [name]: vs } } }, summary: { ...state.summary, headline: { ...state.summary.headline, vs } } };
+    const compared = { ...state, monitor: { ...state.monitor, versus: { step: { [name]: vs }, final: { [name]: vs } } }, summary: { ...state.summary, bindings: { ...state.summary.bindings, [`${name}.vs`]: vs } } };
     for (const level of ["line", "strip"]) {
       const { container } = await banner("running", level, compared);
       for (const hidden of container.querySelectorAll(".sr-only")) hidden.remove();
@@ -377,6 +377,19 @@ test("beside the headline, better or worse is said in words on the line and the 
       assert.ok(shown.includes(`${bare(words)} ${m.run_than_parent()}`), `${level}: ${shown}`);
     }
   }
+});
+
+test("the watcher and headline use the same rounded parent delta", () => {
+  const { monitor, now } = states.running;
+  const vs = { d: 2.55, good: false, flat: false, mag: 2.6, parent: 1 };
+  const view = model("running", true, {
+    ...monitor,
+    view: { ...monitor.view, signals: { loss: { ...monitor.view.signals.loss, better: "lower", digits: 1 } } },
+    versus: { step: { loss: vs }, final: {} },
+    sentence: { template: "Loss **{loss}**, {loss.vs}.", t: now },
+  });
+  assert.equal(bare(view.headline.delta.magnitude), "2.6");
+  assert.ok(bare(view.sentence.watcher).includes("2.6 worse than the parent"), view.sentence.watcher);
 });
 
 test("a run compared with its parent says by how much, as `orx exp status` says it", () => {

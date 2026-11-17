@@ -3,6 +3,7 @@ import type { ChatActiveRun } from "../api";
 /** A measurement as the server keeps it; JSON can't carry NaN, so it arrives as "NaN", "Infinity" or "-Infinity". */
 export type SignalValue = number | string | null;
 export type Point = [number, number | null];
+export type Bindings = Record<string, SignalValue | Versus>;
 
 export type FlagState = "raised" | "waking" | "agent_looking" | "waiting" | "asking";
 export type FlagMode = "agentic" | "copilot";
@@ -117,7 +118,7 @@ export interface Look {
   text: string;
   template: string | null;
   /** What the template's tokens read at the look, so a row says the numbers of its moment. */
-  bindings: Record<string, SignalValue> | null;
+  bindings: Bindings | null;
   /** The other runs this look covered, by name. */
   with: string[];
   /** What made it due, in English, for the record. */
@@ -197,19 +198,14 @@ export interface RunMonitorSummary {
   /** Where the run stands in its current stage, so a line can say it without the full monitor; absent from an older server. */
   stage?: { name: string; done: number | null; of: number | null; unit: string | null } | null;
   stageOrder?: StageOrder;
-  headline: { name: string; label: string; value: SignalValue; vs: Versus | null } | null;
+  headline: { name: string; label: string; value: SignalValue } | null;
   sentence: Sentence | null;
-  /** Each referenced signal, `signal.vs` as the raw difference, and `count:"pattern"` keys. */
-  bindings: Record<string, SignalValue>;
+  /** Each referenced signal, `signal.vs` as the parent comparison, and `count:"pattern"` keys. */
+  bindings: Bindings;
   signals: Signals;
-  etaMs: { lo: number; mid: number; hi: number; at: number } | null;
-  /** `etaMs` omits untimed stages or only times work inferred from the log. */
-  etaFloor?: boolean;
-  etaUntimed?: string[];
+  estimate: Omit<Estimate, "pastLimitMs"> | null;
   /** Timed stages of the whole run, or one current-stage fill when its share is unknown. */
-  segments?: { weight: number; fill: number | null }[];
-  /** The estimate waits on more progress; with no `etaMs` and not pending, how much is left is unknown. */
-  pending: boolean;
+  segments?: Progress["segments"];
   /** Why this summary stopped updating, while the run's projection fails. */
   unavailable?: string;
   /** When the run's time limit ends; lets a line count down to it without the full monitor. */
@@ -265,7 +261,7 @@ export interface Estimate {
   hiMs: number | null;
   at: number;
   pending: boolean;
-  pastLimitMs: number | null;
+  pastLimitMs?: number | null;
   /** Times only known stages, so more of the run may follow it. */
   floor: boolean;
   untimed?: string[];
@@ -351,7 +347,7 @@ export interface RunMonitor {
   cost: Cost | null;
   watch: Watch;
   sentence: Sentence | null;
-  flag: Flag | null;
+  flagId: string | null;
   /** Every flag raised on the run, oldest first, with what became of it; absent from an older server. */
   flags?: Flag[];
   setup?: Setup | null;

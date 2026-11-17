@@ -16,8 +16,8 @@ const run = (extra = {}) => ({
   contact: null, cancelling: false, lostReason: null, host: null, backend: { kind: "modal_job", flavor: "A10G" }, ...extra,
 });
 const summary = (extra = {}) => ({
-  tone: "running", whole: 0.248, headline: { name: "loss", label: "Loss", value: 2.31, vs: null }, sentence: { ...running.sentence, t: now },
-  bindings: { loss: 2.31 }, signals: running.view.signals, etaMs: { lo: 4_800_000, mid: 5_400_000, hi: 6_000_000, at: now }, pending: false, flag: null, rev: 1, generation: "g1", asOf: now, ...extra,
+  tone: "running", whole: 0.248, headline: { name: "loss", label: "Loss", value: 2.31 }, sentence: { ...running.sentence, t: now },
+  bindings: { loss: 2.31 }, signals: running.view.signals, estimate: { loMs: 4_800_000, midMs: 5_400_000, hiMs: 6_000_000, at: now, pending: false, floor: false }, flag: null, rev: 1, generation: "g1", asOf: now, ...extra,
 });
 const model = (value, { monitor = null, shown = true, at = now, retry = null } = {}) => {
   const shaped = runModel({ item: { sessionId: "s", run: value, experimentName: "Rank 16", experimentSlug: "lr-3e-4" }, monitor, shown, agent: "Claude", now: at, nextRetryMs: retry });
@@ -51,7 +51,7 @@ test("a watched run fills the watcher's words and counts down from the server's 
 
 test("a run with no total and a time limit counts to the limit", () => {
   const open = { ...running, phases: [{ ...running.phases[0], of: null }], estimate: null, limit: { endsAt: now + 3_600_000 }, rules: [{ id: "r", name: "plateau", text: "", does: "stop" }] };
-  const line = model(run({ monitor: summary({ etaMs: null }) }), { monitor: open });
+  const line = model(run({ monitor: summary({ estimate: null }) }), { monitor: open });
   assert.equal(line.eta, m.run_eta_to_limit({ duration: fmtDuration(3_600_000) }));
   assert.equal(line.etaDetail, m.run_eta_ends_by_rules({ clock: fmtClock(now + 3_600_000) }));
 });
@@ -74,7 +74,7 @@ test("a flag waiting on the user opens the choice; one the agent handles says it
 });
 
 test("an ended run leads with how it ended and offers Dismiss", () => {
-  const ended = (extra, monitorTone) => model(run({ status: "cancelled", endedAt: now, ...extra, monitor: monitorTone ? summary({ tone: monitorTone, sentence: null, etaMs: null }) : null }), { monitor: { ...running, revising: monitorTone === "revising" } });
+  const ended = (extra, monitorTone) => model(run({ status: "cancelled", endedAt: now, ...extra, monitor: monitorTone ? summary({ tone: monitorTone, sentence: null, estimate: null }) : null }), { monitor: { ...running, revising: monitorTone === "revising" } });
   const rule = { id: "nan", name: "nan-loss", text: "Loss is NaN.", does: "stop" };
   const auto = ended({ outcome: { by: "rule", rule, at: now } }, "stopped");
   assert.equal(auto.lead, m.status_auto_stopped());
@@ -141,7 +141,7 @@ test("a chat's sidebar row warns while a flag is unsettled, else shows the flask
 test("a summary newer than the monitor speaks alone, never beside the older revision's numbers", () => {
   const ahead = summary({
     rev: running.rev + 1, whole: 0.3, sentence: { template: "Loss **{loss}**, still falling.", t: now }, bindings: { loss: 1 },
-    headline: { name: "loss", label: "Loss", value: 1, vs: null }, etaMs: { lo: 60_000, mid: 120_000, hi: 180_000, at: now },
+    headline: { name: "loss", label: "Loss", value: 1 }, estimate: { loMs: 60_000, midMs: 120_000, hiMs: 180_000, at: now, pending: false, floor: false },
   });
   const line = model(run({ monitor: ahead }), { monitor: running });
   assert.equal(line.text, "Running. Loss **1.00**, still falling.");
@@ -150,14 +150,14 @@ test("a summary newer than the monitor speaks alone, never beside the older revi
   assert.equal(line.progress, "", "progress waits for the monitor of this revision");
   assert.deepEqual([line.bar.whole, line.ticks.length, line.cost], [0.3, 0, ""]);
 
-  const rebuilt = model(run({ monitor: summary({ rev: 1, generation: "g2", asOf: now + 1000, bindings: { loss: 1.5 }, headline: { name: "loss", label: "Loss", value: 1.5, vs: null } }) }), { monitor: running });
+  const rebuilt = model(run({ monitor: summary({ rev: 1, generation: "g2", asOf: now + 1000, bindings: { loss: 1.5 }, headline: { name: "loss", label: "Loss", value: 1.5 } }) }), { monitor: running });
   assert.equal(rebuilt.text, "Running. Loss **1.50**, falling steadily.", "another generation is never mixed in either");
   assert.equal(bare(rebuilt.headline.value), "1.50");
   assert.equal(rebuilt.progress, "");
 });
 
 test("a monitor newer than the summary states every fact, the flag and the tone included", () => {
-  const kept = { ...flagged, flag: { ...flagged.flag, state: "kept" } };
+  const kept = { ...flagged, flagId: null, flags: [{ ...flagged.flags[0], state: "kept" }] };
   const older = summary({ rev: kept.rev - 1, tone: "flag", sentence: flagged.sentence, bindings: { loss: "NaN" }, flag: { id: "f1", state: "waiting", mode: "copilot" } });
   const line = model(run({ monitor: older }), { monitor: kept });
   assert.equal(line.needsChoice, false, "the kept flag needs no choice");
@@ -166,7 +166,7 @@ test("a monitor newer than the summary states every fact, the flag and the tone 
 
   const waiting = model(run({ monitor: older }), { monitor: { ...flagged, rev: kept.rev } });
   assert.ok(waiting.needsChoice && waiting.tone === "flag");
-  assert.equal(waiting.flag.record.evidence.byteFrom, flagged.flag.evidence.byteFrom);
+  assert.equal(waiting.flag.record.evidence.byteFrom, flagged.flags[0].evidence.byteFrom);
 
   const otherFlag = model(run({ monitor: summary({ rev: kept.rev + 1, tone: "flag", flag: { id: "f2", state: "waiting", mode: "copilot" } }) }), { monitor: flagged });
   assert.equal(otherFlag.flag.id, "f2");
@@ -206,7 +206,7 @@ test("a run with no total and no limit shows elapsed time, says why there is no 
 });
 
 test("a line without its monitor counts down to the time limit the summary carries", () => {
-  const line = model(run({ monitor: summary({ etaMs: null, limitEndsAt: now + 3 * 3_600_000 }) }));
+  const line = model(run({ monitor: summary({ estimate: null, limitEndsAt: now + 3 * 3_600_000 }) }));
   assert.equal(line.eta, m.run_eta_to_limit({ duration: fmtDuration(3 * 3_600_000) }));
 });
 

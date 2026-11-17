@@ -1368,8 +1368,8 @@ fn bound_signals(body: &Value, summary: &Value) -> Vec<String> {
     }
 
     let mut retained = Vec::new();
-    let flag = &body["flag"];
-    if flag.is_object() && !super::flags::settled(flag) {
+    let flags = body["flags"].as_array().map_or(&[][..], Vec::as_slice);
+    if let Some(flag) = super::flags::open(flags) {
         let flagged = flag["template"].as_str();
         for (_, token) in flagged
             .and_then(|text| reply::tokens(text, false).ok())
@@ -1463,7 +1463,7 @@ fn count_of(run: &Now, pattern: &str) -> Option<u64> {
 fn bindings(run: &Now) -> Value {
     let mut bindings = run.body["latest"].as_object().cloned().unwrap_or_default();
     for (name, vs) in run.body["versus"]["step"].as_object().into_iter().flatten() {
-        bindings.insert(format!("{name}.vs"), vs["d"].clone());
+        bindings.insert(format!("{name}.vs"), vs.clone());
     }
     for (pattern, count) in run.body["counts"].as_object().into_iter().flatten() {
         bindings.insert(
@@ -2071,7 +2071,12 @@ async fn take(id: i64) -> Result<()> {
                 });
                 let live = matches!(summary["tone"].as_str(), Some("running" | "starting"));
                 said[if live { "valuesNow" } else { "valuesAtItsEnd" }] =
-                    summary["bindings"].clone();
+                    json!(summary["bindings"].as_object().map(|bindings| {
+                        bindings
+                            .iter()
+                            .map(|(name, value)| (name, value.get("d").unwrap_or(value)))
+                            .collect::<BTreeMap<_, _>>()
+                    }));
                 Some((run.run.id.clone(), said))
             })
             .collect()

@@ -1818,36 +1818,36 @@ pub(crate) fn shown(
     } else {
         lines.push("Stage: none reported yet.".into());
     }
-    let eta = &summary["etaMs"];
+    let eta = &summary["estimate"];
     let duration = |key: &str| {
         eta[key]
             .as_f64()
             .map(|ms| value_text(&json!(ms / 1000.0), &json!({"as":"duration"})))
             .unwrap_or_else(|| "unknown".into())
     };
-    lines.push(if eta.is_object() {
+    lines.push(if eta["pending"] == true {
+        "Time left: estimating.".into()
+    } else if eta.is_object() {
         format!(
             "Time left: {}{} ({} .. {}; estimate at {}).",
-            if summary["etaFloor"] == true {
+            if eta["floor"] == true {
                 "at least "
             } else {
                 ""
             },
-            duration("mid"),
-            duration("lo"),
-            duration("hi"),
+            duration("midMs"),
+            duration("loMs"),
+            duration("hiMs"),
             eta["at"]
                 .as_i64()
                 .map(crate::telemetry::iso8601_utc)
                 .unwrap_or_else(|| "unknown".into())
         )
-    } else if summary["pending"] == true {
-        "Time left: estimating.".into()
     } else {
         "Time left: unknown (summary has no estimate).".into()
     });
-    if !summary["etaUntimed"].is_null() {
-        lines.push(format!("Untimed work: {}", summary["etaUntimed"]));
+    if !eta["untimed"].is_null() {
+        lines.push(format!("Untimed work: {}", eta["untimed"]));
     }
     if let Some(at) = summary["limitEndsAt"].as_i64() {
         lines.push(format!(
@@ -2730,7 +2730,7 @@ mod tests {
             "parent":{"series":{"loss":[[0,3],[20,1]]}},
             "flags":[{"id":"f1","state":"waking","detail":"Loss **{loss}** needs review."}],
         });
-        let summary = json!({"stage":{"name":"train","done":10,"of":20,"unit":"steps"},"etaMs":{"lo":5000,"mid":10000,"hi":15000,"at":1000},"sentence":{"template":"Loss **{loss}**."},"bindings":{"loss":1.25}});
+        let summary = json!({"stage":{"name":"train","done":10,"of":20,"unit":"steps"},"estimate":{"loMs":5000,"midMs":10000,"hiMs":15000,"at":1000,"pending":false,"floor":false},"sentence":{"template":"Loss **{loss}**."},"bindings":{"loss":1.25}});
         let plan = orx_signals::plan(
             &json!([{"phase":"setup","of":1},{"phase":"train","of":20},{"phase":"eval","of":1}]),
             true,

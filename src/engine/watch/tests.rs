@@ -1577,13 +1577,13 @@ fn the_question_leads_until_the_current_stages_chart_can_answer_it() {
     assert_eq!(bound_signals(&body, &summary), ["val_bpb", "loss"]);
 
     for state in ["raised", "waiting", "asking"] {
-        body["flag"] = json!({"state": state, "template": "Tokens/s **{tok_per_sec}** fell."});
+        body["flags"] = json!([{"state": state, "template": "Tokens/s **{tok_per_sec}** fell."}]);
         assert_eq!(
             bound_signals(&body, &summary),
             ["val_bpb", "loss", "tok_per_sec"]
         );
     }
-    body["flag"]["state"] = json!("kept");
+    body["flags"][0]["state"] = json!("kept");
     assert_eq!(bound_signals(&body, &summary), ["val_bpb", "loss"]);
 
     body["latest"]["sft_bpb"] = json!(1.5);
@@ -1901,16 +1901,16 @@ fn an_open_flags_signal_stays_bound_when_three_headlines_have_values() {
     let mut body = json!({
         "view": {"headline": ["loss", "accuracy", "val_bpb"]},
         "latest": {"loss": 2.0, "accuracy": 0.9, "val_bpb": 1.5, "tok_per_sec": 1000},
-        "flag": {"state": "raised", "template": "Throughput **{tok_per_sec}** fell."}
+        "flags": [{"state": "raised", "template": "Throughput **{tok_per_sec}** fell."}]
     });
     for state in ["raised", "waiting", "asked"] {
-        body["flag"]["state"] = json!(state);
+        body["flags"][0]["state"] = json!(state);
         let bound = bound_signals(&body, &json!({}));
         assert_eq!(bound.len(), digest::BOUND_SIGNALS);
         assert!(bound.iter().any(|name| name == "tok_per_sec"), "{bound:?}");
         assert!(bound.iter().any(|name| name == "loss"), "{bound:?}");
     }
-    body["flag"]["state"] = json!("kept");
+    body["flags"][0]["state"] = json!("kept");
     assert_eq!(
         bound_signals(&body, &json!({})),
         ["loss", "accuracy", "val_bpb"]

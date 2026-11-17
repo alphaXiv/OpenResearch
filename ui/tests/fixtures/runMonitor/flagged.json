@@ -133,25 +133,28 @@
     "template": "Loss is **{loss}**.",
     "t": 1794446160000
   },
-  "flag": {
-    "id": "f1",
-    "at": 1794446160000,
-    "whole": 0.25,
-    "template": "Loss is **{loss}**.",
-    "detail": "A non-finite loss was reported.",
-    "evidence": {
-      "lines": [
-        "::orx:: {\"step\":1250,\"m\":{\"loss\":NaN}}"
-      ],
-      "from": 91,
-      "to": 91,
-      "ident": "1-100",
-      "byteFrom": 7800,
-      "byteTo": 7839
-    },
-    "state": "waiting",
-    "mode": "copilot"
-  },
+  "flagId": "f1",
+  "flags": [
+    {
+      "id": "f1",
+      "at": 1794446160000,
+      "whole": 0.25,
+      "template": "Loss is **{loss}**.",
+      "detail": "A non-finite loss was reported.",
+      "evidence": {
+        "lines": [
+          "::orx:: {\"step\":1250,\"m\":{\"loss\":NaN}}"
+        ],
+        "from": 91,
+        "to": 91,
+        "ident": "1-100",
+        "byteFrom": 7800,
+        "byteTo": 7839
+      },
+      "state": "waiting",
+      "mode": "copilot"
+    }
+  ],
   "revising": false,
   "brief": [],
   "rules": [],

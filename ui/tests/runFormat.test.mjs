@@ -7,14 +7,14 @@ const bare = (text) => text.replace(/[⁦-⁩]/g, "");
 const signals = { val_loss: { label: "Val loss", digits: 2, better: "lower" }, acc: { label: "Accuracy", digits: 1, unit: "%" }, elo: { label: "Elo", digits: 0, sign: true, better: "higher" } };
 
 test("a sentence fills its signals, comparisons and counts and keeps its bold figure", () => {
-  const bindings = { val_loss: 2.3147, "val_loss.vs": -0.112, 'count:"ERR 429"': 1234, elo: 832 };
+  const bindings = { val_loss: 2.3147, "val_loss.vs": { d: -0.112, mag: 0.11, good: true, flat: false, parent: 1 }, 'count:"ERR 429"': 1234, elo: 832 };
   assert.equal(
     bare(fillSentence('Val loss **{val_loss}**, {val_loss.vs}; {count:"ERR 429"} rate limits; Elo {elo}.', bindings, signals)),
     "Val loss **2.31**, 0.11 better than the parent; 1,234 rate limits; Elo +832.",
   );
   // A comparison reads whole, so a sentence in any language need not finish it.
-  assert.equal(bare(fillSentence("{val_loss.vs}", { "val_loss.vs": 0.2 }, signals)), "0.20 worse than the parent");
-  assert.equal(bare(fillSentence("{val_loss.vs}", { "val_loss.vs": 0.001 }, signals)), "level with the parent");
+  assert.equal(bare(fillSentence("{val_loss.vs}", { "val_loss.vs": { d: 0.2, mag: 0.2, good: false, flat: false, parent: 1 } }, signals)), "0.20 worse than the parent");
+  assert.equal(bare(fillSentence("{val_loss.vs}", { "val_loss.vs": { d: 0.001, mag: 0, good: false, flat: true, parent: 1 } }, signals)), "level with the parent");
 });
 
 test("a value the server can't give as a number reads as it is, and an unknown one as a dash", () => {

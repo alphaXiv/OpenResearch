@@ -66,7 +66,6 @@
           "done": 200.0,
           "segments": [
             {
-              "name": "",
               "weight": 1.0,
               "fill": 0.5
             }
@@ -92,7 +91,6 @@
         },
         "rows": {},
         "groups": {},
-        "cells": {},
         "media": {},
         "counts": {},
         "estimate": {
@@ -102,13 +100,10 @@
           "at": 1794444320000,
           "pending": false,
           "pastLimitMs": null,
-          "floor": false,
-          "reasons": []
+          "floor": false
         },
         "limit": null,
         "cost": null,
-        "quote": null,
-        "before": null,
         "watch": {
           "state": "none",
           "model": null,
@@ -116,13 +111,12 @@
           "looks": [],
           "spentUsd": null,
           "tokens": 0,
-          "nextAt": null,
           "floorUntil": null,
           "error": null,
           "with": null
         },
         "sentence": null,
-        "flag": null,
+        "flagId": null,
         "flags": [],
         "setup": null,
         "disagrees": null,
@@ -238,8 +232,7 @@
         "headline": {
           "name": "loss",
           "label": "loss",
-          "value": 0.14285714285714285,
-          "vs": null
+          "value": 0.14285714285714285
         },
         "logError": null,
         "sentence": null,
@@ -251,14 +244,14 @@
             "label": "loss"
           }
         },
-        "etaMs": {
-          "lo": 18997,
-          "mid": 20000,
-          "hi": 21003,
-          "at": 1794444320000
+        "estimate": {
+          "loMs": 18997,
+          "midMs": 20000,
+          "hiMs": 21003,
+          "at": 1794444320000,
+          "pending": false,
+          "floor": false
         },
-        "etaFloor": false,
-        "pending": false,
         "limitEndsAt": null,
         "flag": null,
         "setup": null,
@@ -338,7 +331,6 @@
           "done": 50.0,
           "segments": [
             {
-              "name": "",
               "weight": 1.0,
               "fill": 0.125
             }
@@ -364,7 +356,6 @@
         },
         "rows": {},
         "groups": {},
-        "cells": {},
         "media": {},
         "counts": {},
         "estimate": {
@@ -374,13 +365,10 @@
           "at": 1794444305000,
           "pending": false,
           "pastLimitMs": null,
-          "floor": false,
-          "reasons": []
+          "floor": false
         },
         "limit": null,
         "cost": null,
-        "quote": null,
-        "before": null,
         "watch": {
           "state": "none",
           "model": null,
@@ -388,13 +376,12 @@
           "looks": [],
           "spentUsd": null,
           "tokens": 0,
-          "nextAt": null,
           "floorUntil": null,
           "error": null,
           "with": null
         },
         "sentence": null,
-        "flag": null,
+        "flagId": null,
         "flags": [],
         "setup": null,
         "disagrees": null,
@@ -450,8 +437,7 @@
         "headline": {
           "name": "loss",
           "label": "loss",
-          "value": "NaN",
-          "vs": null
+          "value": "NaN"
         },
         "logError": null,
         "sentence": null,
@@ -463,14 +449,14 @@
             "label": "loss"
           }
         },
-        "etaMs": {
-          "lo": 31681,
-          "mid": 35000,
-          "hi": 38319,
-          "at": 1794444305000
+        "estimate": {
+          "loMs": 31681,
+          "midMs": 35000,
+          "hiMs": 38319,
+          "at": 1794444305000,
+          "pending": false,
+          "floor": false
         },
-        "etaFloor": false,
-        "pending": false,
         "limitEndsAt": null,
         "flag": null,
         "setup": null,
@@ -550,7 +536,6 @@
           "done": 100.0,
           "segments": [
             {
-              "name": "",
               "weight": 1.0,
               "fill": 0.25
             }
@@ -576,7 +561,6 @@
         },
         "rows": {},
         "groups": {},
-        "cells": {},
         "media": {},
         "counts": {},
         "estimate": {
@@ -586,13 +570,10 @@
           "at": 1794444310000,
           "pending": false,
           "pastLimitMs": null,
-          "floor": false,
-          "reasons": []
+          "floor": false
         },
         "limit": null,
         "cost": null,
-        "quote": null,
-        "before": null,
         "watch": {
           "state": "none",
           "model": null,
@@ -600,13 +581,12 @@
           "looks": [],
           "spentUsd": null,
           "tokens": 0,
-          "nextAt": null,
           "floorUntil": null,
           "error": null,
           "with": null
         },
         "sentence": null,
-        "flag": null,
+        "flagId": null,
         "flags": [],
         "setup": null,
         "disagrees": null,
@@ -682,8 +662,7 @@
         "headline": {
           "name": "loss",
           "label": "loss",
-          "value": 0.2727272727272727,
-          "vs": null
+          "value": 0.2727272727272727
         },
         "logError": null,
         "sentence": null,
@@ -695,14 +674,14 @@
             "label": "loss"
           }
         },
-        "etaMs": {
-          "lo": 28015,
-          "mid": 30000,
-          "hi": 31985,
-          "at": 1794444310000
+        "estimate": {
+          "loMs": 28015,
+          "midMs": 30000,
+          "hiMs": 31985,
+          "at": 1794444310000,
+          "pending": false,
+          "floor": false
         },
-        "etaFloor": false,
-        "pending": false,
         "limitEndsAt": null,
         "flag": null,
         "setup": null,
@@ -784,7 +763,6 @@
           "done": 5.0,
           "segments": [
             {
-              "name": "",
               "weight": 1.0,
               "fill": 0.25
             }
@@ -810,7 +788,6 @@
         },
         "rows": {},
         "groups": {},
-        "cells": {},
         "media": {},
         "counts": {},
         "estimate": null,
@@ -818,8 +795,6 @@
           "endsAt": 1794447900000
         },
         "cost": null,
-        "quote": null,
-        "before": null,
         "watch": {
           "state": "none",
           "model": null,
@@ -827,13 +802,12 @@
           "looks": [],
           "spentUsd": null,
           "tokens": 0,
-          "nextAt": null,
           "floorUntil": null,
           "error": null,
           "with": null
         },
         "sentence": null,
-        "flag": null,
+        "flagId": null,
         "flags": [],
         "setup": null,
         "disagrees": null,
@@ -869,8 +843,7 @@
         "headline": {
           "name": "loss",
           "label": "loss",
-          "value": 2,
-          "vs": null
+          "value": 2
         },
         "logError": null,
         "sentence": null,
@@ -882,9 +855,7 @@
             "label": "loss"
           }
         },
-        "etaMs": null,
-        "etaFloor": false,
-        "pending": false,
+        "estimate": null,
         "limitEndsAt": 1794447900000,
         "flag": null,
         "setup": null,
@@ -964,7 +935,6 @@
           "done": 24.0,
           "segments": [
             {
-              "name": "",
               "weight": 1.0,
               "fill": null
             }
@@ -990,14 +960,11 @@
         },
         "rows": {},
         "groups": {},
-        "cells": {},
         "media": {},
         "counts": {},
         "estimate": null,
         "limit": null,
         "cost": null,
-        "quote": null,
-        "before": null,
         "watch": {
           "state": "none",
           "model": null,
@@ -1005,13 +972,12 @@
           "looks": [],
           "spentUsd": null,
           "tokens": 0,
-          "nextAt": null,
           "floorUntil": null,
           "error": null,
           "with": null
         },
         "sentence": null,
-        "flag": null,
+        "flagId": null,
         "flags": [],
         "setup": null,
         "disagrees": null,
@@ -1051,8 +1017,7 @@
         "headline": {
           "name": "loss",
           "label": "loss",
-          "value": 1.9,
-          "vs": null
+          "value": 1.9
         },
         "logError": null,
         "sentence": null,
@@ -1064,9 +1029,7 @@
             "label": "loss"
           }
         },
-        "etaMs": null,
-        "etaFloor": false,
-        "pending": false,
+        "estimate": null,
         "limitEndsAt": null,
         "flag": null,
         "setup": null,
@@ -1152,7 +1115,6 @@
           "done": 100.0,
           "segments": [
             {
-              "name": "",
               "weight": 1.0,
               "fill": 1.0
             }
@@ -1178,14 +1140,11 @@
         },
         "rows": {},
         "groups": {},
-        "cells": {},
         "media": {},
         "counts": {},
         "estimate": null,
         "limit": null,
         "cost": null,
-        "quote": null,
-        "before": null,
         "watch": {
           "state": "none",
           "model": null,
@@ -1193,13 +1152,12 @@
           "looks": [],
           "spentUsd": null,
           "tokens": 0,
-          "nextAt": null,
           "floorUntil": null,
           "error": null,
           "with": null
         },
         "sentence": null,
-        "flag": null,
+        "flagId": null,
         "flags": [],
         "setup": null,
         "disagrees": null,
@@ -1228,8 +1186,7 @@
         "headline": {
           "name": "loss",
           "label": "loss",
-          "value": 0.2727272727272727,
-          "vs": null
+          "value": 0.2727272727272727
         },
         "logError": null,
         "sentence": null,
@@ -1241,9 +1198,7 @@
             "label": "loss"
           }
         },
-        "etaMs": null,
-        "etaFloor": false,
-        "pending": false,
+        "estimate": null,
         "limitEndsAt": null,
         "flag": null,
         "setup": null,
@@ -1309,7 +1264,6 @@
           "done": 4.0,
           "segments": [
             {
-              "name": "",
               "weight": 1.0,
               "fill": 1.0
             }
@@ -1333,14 +1287,11 @@
         },
         "rows": {},
         "groups": {},
-        "cells": {},
         "media": {},
         "counts": {},
         "estimate": null,
         "limit": null,
         "cost": null,
-        "quote": null,
-        "before": null,
         "watch": {
           "state": "none",
           "model": null,
@@ -1348,13 +1299,12 @@
           "looks": [],
           "spentUsd": null,
           "tokens": 0,
-          "nextAt": null,
           "floorUntil": null,
           "error": null,
           "with": null
         },
         "sentence": null,
-        "flag": null,
+        "flagId": null,
         "flags": [],
         "setup": {
           "line": "train: 100%| 4/4 [00:04<00:00, 1.00it/s]",
@@ -1389,9 +1339,7 @@
         "sentence": null,
         "bindings": {},
         "signals": {},
-        "etaMs": null,
-        "etaFloor": false,
-        "pending": false,
+        "estimate": null,
         "limitEndsAt": null,
         "flag": null,
         "setup": {
@@ -1481,7 +1429,6 @@
           "done": 100.0,
           "segments": [
             {
-              "name": "",
               "weight": 1.0,
               "fill": 0.0001
             }
@@ -1507,7 +1454,6 @@
         },
         "rows": {},
         "groups": {},
-        "cells": {},
         "media": {},
         "counts": {},
         "estimate": {
@@ -1517,13 +1463,10 @@
           "at": 1794444310000,
           "pending": false,
           "pastLimitMs": null,
-          "floor": false,
-          "reasons": []
+          "floor": false
         },
         "limit": null,
         "cost": null,
-        "quote": null,
-        "before": null,
         "watch": {
           "state": "none",
           "model": null,
@@ -1531,13 +1474,12 @@
           "looks": [],
           "spentUsd": null,
           "tokens": 0,
-          "nextAt": null,
           "floorUntil": null,
           "error": null,
           "with": null
         },
         "sentence": null,
-        "flag": null,
+        "flagId": null,
         "flags": [],
         "setup": null,
         "disagrees": null,
@@ -1613,8 +1555,7 @@
         "headline": {
           "name": "loss",
           "label": "loss",
-          "value": 0.2727272727272727,
-          "vs": null
+          "value": 0.2727272727272727
         },
         "logError": null,
         "sentence": null,
@@ -1626,14 +1567,14 @@
             "label": "loss"
           }
         },
-        "etaMs": {
-          "lo": 49995000,
-          "mid": 99990000,
-          "hi": 159984000,
-          "at": 1794444310000
+        "estimate": {
+          "loMs": 49995000,
+          "midMs": 99990000,
+          "hiMs": 159984000,
+          "at": 1794444310000,
+          "pending": false,
+          "floor": false
         },
-        "etaFloor": false,
-        "pending": false,
         "limitEndsAt": null,
         "flag": null,
         "setup": null,
@@ -1723,7 +1664,6 @@
           "done": 1.0,
           "segments": [
             {
-              "name": "",
               "weight": 1.0,
               "fill": 0.25
             }
@@ -1747,14 +1687,11 @@
         },
         "rows": {},
         "groups": {},
-        "cells": {},
         "media": {},
         "counts": {},
         "estimate": null,
         "limit": null,
         "cost": null,
-        "quote": null,
-        "before": null,
         "watch": {
           "state": "none",
           "model": null,
@@ -1762,13 +1699,12 @@
           "looks": [],
           "spentUsd": null,
           "tokens": 0,
-          "nextAt": null,
           "floorUntil": null,
           "error": null,
           "with": null
         },
         "sentence": null,
-        "flag": null,
+        "flagId": null,
         "flags": [],
         "setup": {
           "line": null,
@@ -1803,9 +1739,7 @@
         "sentence": null,
         "bindings": {},
         "signals": {},
-        "etaMs": null,
-        "etaFloor": false,
-        "pending": false,
+        "estimate": null,
         "limitEndsAt": null,
         "flag": null,
         "setup": {
@@ -1899,14 +1833,11 @@
         },
         "rows": {},
         "groups": {},
-        "cells": {},
         "media": {},
         "counts": {},
         "estimate": null,
         "limit": null,
         "cost": null,
-        "quote": null,
-        "before": null,
         "watch": {
           "state": "none",
           "model": null,
@@ -1914,13 +1845,12 @@
           "looks": [],
           "spentUsd": null,
           "tokens": 0,
-          "nextAt": null,
           "floorUntil": null,
           "error": null,
           "with": null
         },
         "sentence": null,
-        "flag": null,
+        "flagId": null,
         "flags": [],
         "setup": null,
         "disagrees": null,
@@ -1951,8 +1881,7 @@
         "headline": {
           "name": "loss",
           "label": "loss",
-          "value": 2.5,
-          "vs": null
+          "value": 2.5
         },
         "logError": null,
         "sentence": null,
@@ -1964,9 +1893,7 @@
             "label": "loss"
           }
         },
-        "etaMs": null,
-        "etaFloor": false,
-        "pending": false,
+        "estimate": null,
         "limitEndsAt": null,
         "flag": null,
         "setup": null,
@@ -2101,7 +2028,6 @@
           "done": 14.0,
           "segments": [
             {
-              "name": "round",
               "weight": 1.0,
               "fill": 0.5833333333333334
             }
@@ -2146,7 +2072,6 @@
           ]
         },
         "groups": {},
-        "cells": {},
         "media": {},
         "counts": {},
         "estimate": {
@@ -2156,13 +2081,10 @@
           "at": 1794444301000,
           "pending": true,
           "pastLimitMs": null,
-          "floor": true,
-          "reasons": []
+          "floor": true
         },
         "limit": null,
         "cost": null,
-        "quote": null,
-        "before": null,
         "watch": {
           "state": "none",
           "model": null,
@@ -2170,13 +2092,12 @@
           "looks": [],
           "spentUsd": null,
           "tokens": 0,
-          "nextAt": null,
           "floorUntil": null,
           "error": null,
           "with": null
         },
         "sentence": null,
-        "flag": null,
+        "flagId": null,
         "flags": [],
         "setup": null,
         "disagrees": null,
@@ -2272,8 +2193,7 @@
         "headline": {
           "name": "lr",
           "label": "lr",
-          "value": 0.0003,
-          "vs": null
+          "value": 0.0003
         },
         "logError": null,
         "sentence": null,
@@ -2325,9 +2245,14 @@
             "label": "flops"
           }
         },
-        "etaMs": null,
-        "etaFloor": false,
-        "pending": true,
+        "estimate": {
+          "loMs": null,
+          "midMs": null,
+          "hiMs": null,
+          "at": 1794444301000,
+          "pending": true,
+          "floor": true
+        },
         "limitEndsAt": null,
         "flag": null,
         "setup": null,
@@ -2582,14 +2507,11 @@
         },
         "rows": {},
         "groups": {},
-        "cells": {},
         "media": {},
         "counts": {},
         "estimate": null,
         "limit": null,
         "cost": null,
-        "quote": null,
-        "before": null,
         "watch": {
           "state": "none",
           "model": null,
@@ -2597,13 +2519,12 @@
           "looks": [],
           "spentUsd": null,
           "tokens": 0,
-          "nextAt": null,
           "floorUntil": null,
           "error": null,
           "with": null
         },
         "sentence": null,
-        "flag": null,
+        "flagId": null,
         "flags": [],
         "setup": {
           "line": null,
@@ -2638,9 +2559,7 @@
         "sentence": null,
         "bindings": {},
         "signals": {},
-        "etaMs": null,
-        "etaFloor": false,
-        "pending": false,
+        "estimate": null,
         "limitEndsAt": null,
         "flag": null,
         "setup": {
@@ -2718,14 +2637,11 @@
         },
         "rows": {},
         "groups": {},
-        "cells": {},
         "media": {},
         "counts": {},
         "estimate": null,
         "limit": null,
         "cost": null,
-        "quote": null,
-        "before": null,
         "watch": {
           "state": "none",
           "model": null,
@@ -2733,13 +2649,12 @@
           "looks": [],
           "spentUsd": null,
           "tokens": 0,
-          "nextAt": null,
           "floorUntil": null,
           "error": null,
           "with": null
         },
         "sentence": null,
-        "flag": null,
+        "flagId": null,
         "flags": [],
         "setup": {
           "line": "Successfully downloaded shard_00001.parquet",
@@ -2769,9 +2684,7 @@
         "sentence": null,
         "bindings": {},
         "signals": {},
-        "etaMs": null,
-        "etaFloor": false,
-        "pending": false,
+        "estimate": null,
         "limitEndsAt": null,
         "flag": null,
         "setup": {
@@ -2847,7 +2760,6 @@
           "done": 3.0,
           "segments": [
             {
-              "name": "",
               "weight": 1.0,
               "fill": 0.3
             }
@@ -2871,7 +2783,6 @@
         },
         "rows": {},
         "groups": {},
-        "cells": {},
         "media": {},
         "counts": {},
         "estimate": {
@@ -2881,13 +2792,10 @@
           "at": 1794444318000,
           "pending": false,
           "pastLimitMs": null,
-          "floor": true,
-          "reasons": []
+          "floor": true
         },
         "limit": null,
         "cost": null,
-        "quote": null,
-        "before": null,
         "watch": {
           "state": "none",
           "model": null,
@@ -2895,13 +2803,12 @@
           "looks": [],
           "spentUsd": null,
           "tokens": 0,
-          "nextAt": null,
           "floorUntil": null,
           "error": null,
           "with": null
         },
         "sentence": null,
-        "flag": null,
+        "flagId": null,
         "flags": [],
         "setup": {
           "line": "chunk 3/10 done, 372s",
@@ -2936,14 +2843,14 @@
         "sentence": null,
         "bindings": {},
         "signals": {},
-        "etaMs": {
-          "lo": 21000,
-          "mid": 42000,
-          "hi": 67200,
-          "at": 1794444318000
+        "estimate": {
+          "loMs": 21000,
+          "midMs": 42000,
+          "hiMs": 67200,
+          "at": 1794444318000,
+          "pending": false,
+          "floor": true
         },
-        "etaFloor": true,
-        "pending": false,
         "limitEndsAt": null,
         "flag": null,
         "setup": {
@@ -3047,7 +2954,6 @@
           "done": 5.0,
           "segments": [
             {
-              "name": "train",
               "weight": 1.0,
               "fill": 0.5
             }
@@ -3073,7 +2979,6 @@
         },
         "rows": {},
         "groups": {},
-        "cells": {},
         "media": {},
         "counts": {},
         "estimate": {
@@ -3084,15 +2989,12 @@
           "pending": false,
           "pastLimitMs": null,
           "floor": true,
-          "reasons": [],
           "untimed": [
             "eval"
           ]
         },
         "limit": null,
         "cost": null,
-        "quote": null,
-        "before": null,
         "watch": {
           "state": "none",
           "model": null,
@@ -3100,13 +3002,12 @@
           "looks": [],
           "spentUsd": null,
           "tokens": 0,
-          "nextAt": null,
           "floorUntil": null,
           "error": null,
           "with": null
         },
         "sentence": null,
-        "flag": null,
+        "flagId": null,
         "flags": [],
         "setup": null,
         "disagrees": null,
@@ -3162,8 +3063,7 @@
         "headline": {
           "name": "loss",
           "label": "loss",
-          "value": 0.5,
-          "vs": null
+          "value": 0.5
         },
         "logError": null,
         "sentence": null,
@@ -3175,22 +3075,22 @@
             "label": "loss"
           }
         },
-        "etaMs": {
-          "lo": 4526,
-          "mid": 5000,
-          "hi": 5474,
-          "at": 1794444309000
+        "estimate": {
+          "loMs": 4526,
+          "midMs": 5000,
+          "hiMs": 5474,
+          "at": 1794444309000,
+          "pending": false,
+          "untimed": [
+            "eval"
+          ],
+          "floor": true
         },
-        "etaFloor": true,
-        "pending": false,
         "limitEndsAt": null,
         "flag": null,
         "setup": null,
         "generation": "g1",
         "asOf": 1794444309000,
-        "etaUntimed": [
-          "eval"
-        ],
         "segments": [
           {
             "weight": 1.0,
@@ -3258,7 +3158,6 @@
           "done": 2280.0,
           "segments": [
             {
-              "name": "train",
               "weight": 1.0,
               "fill": 0.5428571428571428
             }
@@ -3282,7 +3181,6 @@
         },
         "rows": {},
         "groups": {},
-        "cells": {},
         "media": {},
         "counts": {},
         "estimate": {
@@ -3292,13 +3190,10 @@
           "at": 1794444301000,
           "pending": true,
           "pastLimitMs": null,
-          "floor": true,
-          "reasons": []
+          "floor": true
         },
         "limit": null,
         "cost": null,
-        "quote": null,
-        "before": null,
         "watch": {
           "state": "none",
           "model": null,
@@ -3306,13 +3201,12 @@
           "looks": [],
           "spentUsd": null,
           "tokens": 0,
-          "nextAt": null,
           "floorUntil": null,
           "error": null,
           "with": null
         },
         "sentence": null,
-        "flag": null,
+        "flagId": null,
         "flags": [],
         "setup": {
           "line": null,
@@ -3347,9 +3241,14 @@
         "sentence": null,
         "bindings": {},
         "signals": {},
-        "etaMs": null,
-        "etaFloor": false,
-        "pending": true,
+        "estimate": {
+          "loMs": null,
+          "midMs": null,
+          "hiMs": null,
+          "at": 1794444301000,
+          "pending": true,
+          "floor": true
+        },
         "limitEndsAt": null,
         "flag": null,
         "setup": {
@@ -3434,7 +3333,6 @@
           "done": 200.0,
           "segments": [
             {
-              "name": "",
               "weight": 1.0,
               "fill": 0.5
             }
@@ -3460,7 +3358,6 @@
         },
         "rows": {},
         "groups": {},
-        "cells": {},
         "media": {},
         "counts": {},
         "estimate": {
@@ -3470,13 +3367,10 @@
           "at": 1794444320000,
           "pending": false,
           "pastLimitMs": null,
-          "floor": false,
-          "reasons": []
+          "floor": false
         },
         "limit": null,
         "cost": null,
-        "quote": null,
-        "before": null,
         "watch": {
           "state": "none",
           "model": null,
@@ -3484,13 +3378,12 @@
           "looks": [],
           "spentUsd": null,
           "tokens": 0,
-          "nextAt": null,
           "floorUntil": null,
           "error": null,
           "with": null
         },
         "sentence": null,
-        "flag": null,
+        "flagId": null,
         "flags": [],
         "setup": null,
         "disagrees": null,
@@ -3606,8 +3499,7 @@
         "headline": {
           "name": "loss",
           "label": "loss",
-          "value": 0.14285714285714285,
-          "vs": null
+          "value": 0.14285714285714285
         },
         "logError": null,
         "sentence": null,
@@ -3619,9 +3511,7 @@
             "label": "loss"
           }
         },
-        "etaMs": null,
-        "etaFloor": false,
-        "pending": false,
+        "estimate": null,
         "limitEndsAt": null,
         "flag": null,
         "setup": null,
@@ -3690,14 +3580,11 @@
         },
         "rows": {},
         "groups": {},
-        "cells": {},
         "media": {},
         "counts": {},
         "estimate": null,
         "limit": null,
         "cost": null,
-        "quote": null,
-        "before": null,
         "watch": {
           "state": "none",
           "model": null,
@@ -3705,13 +3592,12 @@
           "looks": [],
           "spentUsd": null,
           "tokens": 0,
-          "nextAt": null,
           "floorUntil": null,
           "error": null,
           "with": null
         },
         "sentence": null,
-        "flag": null,
+        "flagId": null,
         "flags": [],
         "setup": null,
         "disagrees": null,
@@ -3737,9 +3623,7 @@
         "sentence": null,
         "bindings": {},
         "signals": {},
-        "etaMs": null,
-        "etaFloor": false,
-        "pending": false,
+        "estimate": null,
         "limitEndsAt": null,
         "flag": null,
         "setup": null,
@@ -3826,7 +3710,6 @@
           "done": 200.0,
           "segments": [
             {
-              "name": "",
               "weight": 1.0,
               "fill": 0.5
             }
@@ -3852,7 +3735,6 @@
         },
         "rows": {},
         "groups": {},
-        "cells": {},
         "media": {},
         "counts": {},
         "estimate": {
@@ -3862,13 +3744,10 @@
           "at": 1794444320000,
           "pending": false,
           "pastLimitMs": null,
-          "floor": false,
-          "reasons": []
+          "floor": false
         },
         "limit": null,
         "cost": null,
-        "quote": null,
-        "before": null,
         "watch": {
           "state": "none",
           "model": null,
@@ -3876,13 +3755,12 @@
           "looks": [],
           "spentUsd": null,
           "tokens": 0,
-          "nextAt": null,
           "floorUntil": null,
           "error": null,
           "with": null
         },
         "sentence": null,
-        "flag": null,
+        "flagId": null,
         "flags": [],
         "setup": null,
         "disagrees": null,
@@ -3998,8 +3876,7 @@
         "headline": {
           "name": "loss",
           "label": "loss",
-          "value": 0.14285714285714285,
-          "vs": null
+          "value": 0.14285714285714285
         },
         "logError": null,
         "sentence": null,
@@ -4011,9 +3888,7 @@
             "label": "loss"
           }
         },
-        "etaMs": null,
-        "etaFloor": false,
-        "pending": false,
+        "estimate": null,
         "limitEndsAt": null,
         "flag": null,
         "setup": null,
@@ -4105,7 +3980,6 @@
           "done": 100.0,
           "segments": [
             {
-              "name": "",
               "weight": 1.0,
               "fill": 0.25
             }
@@ -4240,7 +4114,6 @@
         },
         "rows": {},
         "groups": {},
-        "cells": {},
         "media": {},
         "counts": {},
         "estimate": {
@@ -4250,13 +4123,10 @@
           "at": 1794444310000,
           "pending": false,
           "pastLimitMs": null,
-          "floor": false,
-          "reasons": []
+          "floor": false
         },
         "limit": null,
         "cost": null,
-        "quote": null,
-        "before": null,
         "watch": {
           "state": "none",
           "model": null,
@@ -4264,13 +4134,12 @@
           "looks": [],
           "spentUsd": null,
           "tokens": 0,
-          "nextAt": null,
           "floorUntil": null,
           "error": null,
           "with": null
         },
         "sentence": null,
-        "flag": null,
+        "flagId": null,
         "flags": [],
         "setup": null,
         "disagrees": null,
@@ -4346,21 +4215,20 @@
         "headline": {
           "name": "loss",
           "label": "Loss",
-          "value": 0.2272727272727273,
-          "vs": {
+          "value": 0.2272727272727273
+        },
+        "logError": null,
+        "sentence": null,
+        "bindings": {
+          "loss": 0.2272727272727273,
+          "loss.vs": {
             "d": -0.045454545454545414,
             "good": true,
             "flat": false,
             "mag": 0.045,
             "parent": 0.2727272727272727,
             "step": 100.0
-          }
-        },
-        "logError": null,
-        "sentence": null,
-        "bindings": {
-          "loss": 0.2272727272727273,
-          "loss.vs": -0.045454545454545414,
+          },
           "val_loss.vs": null
         },
         "signals": {
@@ -4374,14 +4242,14 @@
             "better": "lower"
           }
         },
-        "etaMs": {
-          "lo": 28015,
-          "mid": 30000,
-          "hi": 31985,
-          "at": 1794444310000
+        "estimate": {
+          "loMs": 28015,
+          "midMs": 30000,
+          "hiMs": 31985,
+          "at": 1794444310000,
+          "pending": false,
+          "floor": false
         },
-        "etaFloor": false,
-        "pending": false,
         "limitEndsAt": null,
         "flag": null,
         "setup": null,
@@ -4462,7 +4330,6 @@
           "done": 200.0,
           "segments": [
             {
-              "name": "",
               "weight": 1.0,
               "fill": 0.5
             }
@@ -4488,7 +4355,6 @@
         },
         "rows": {},
         "groups": {},
-        "cells": {},
         "media": {},
         "counts": {},
         "estimate": {
@@ -4498,13 +4364,10 @@
           "at": 1794444320000,
           "pending": false,
           "pastLimitMs": null,
-          "floor": false,
-          "reasons": []
+          "floor": false
         },
         "limit": null,
         "cost": null,
-        "quote": null,
-        "before": null,
         "watch": {
           "state": "on",
           "model": "Claude Haiku",
@@ -4512,45 +4375,20 @@
           "looks": [],
           "spentUsd": null,
           "tokens": 0,
-          "nextAt": null,
           "floorUntil": null,
           "error": null,
           "with": null
         },
         "sentence": null,
-        "flag": {
-          "id": "f1",
-          "source": "look",
-          "group": "look:7",
-          "lookId": "7",
-          "at": 1794444319000,
-          "whole": 0.05,
-          "template": "Loss **{loss}** rose at step 18.",
-          "detail": "Loss **{loss}** rose at step 18.",
-          "text": "Loss **2.31** rose at step 18.",
-          "evidence": {
-            "lines": [
-              "step 18 loss 2.31"
-            ],
-            "from": 19,
-            "to": 19,
-            "ident": "1-7",
-            "byteFrom": 812,
-            "byteTo": 830
-          },
-          "state": "waiting",
-          "mode": "copilot"
-        },
+        "flagId": "f1",
         "flags": [
           {
             "id": "f1",
             "source": "look",
-            "group": "look:7",
             "lookId": "7",
             "at": 1794444319000,
             "whole": 0.05,
             "template": "Loss **{loss}** rose at step 18.",
-            "detail": "Loss **{loss}** rose at step 18.",
             "text": "Loss **2.31** rose at step 18.",
             "evidence": {
               "lines": [
@@ -4562,6 +4400,8 @@
               "byteFrom": 812,
               "byteTo": 830
             },
+            "detail": "Loss **{loss}** rose at step 18.",
+            "group": "look:7",
             "state": "waiting",
             "mode": "copilot"
           }
@@ -4680,8 +4520,7 @@
         "headline": {
           "name": "loss",
           "label": "loss",
-          "value": 0.14285714285714285,
-          "vs": null
+          "value": 0.14285714285714285
         },
         "logError": null,
         "sentence": null,
@@ -4693,14 +4532,14 @@
             "label": "loss"
           }
         },
-        "etaMs": {
-          "lo": 18997,
-          "mid": 20000,
-          "hi": 21003,
-          "at": 1794444320000
+        "estimate": {
+          "loMs": 18997,
+          "midMs": 20000,
+          "hiMs": 21003,
+          "at": 1794444320000,
+          "pending": false,
+          "floor": false
         },
-        "etaFloor": false,
-        "pending": false,
         "limitEndsAt": null,
         "flag": {
           "id": "f1",

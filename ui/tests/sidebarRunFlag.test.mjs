@@ -5,7 +5,7 @@ import { renderChat, session } from "./chat.mjs";
 
 const run = (id, monitor) => ({
   id, experimentId: `e-${id}`, projectId: "p", status: "running", createdAt: 1, updatedAt: 1, contact: null, cancelling: false, lostReason: null, host: null, backend: null,
-  monitor: monitor && { tone: "flag", whole: 0.4, headline: null, sentence: null, bindings: {}, signals: {}, etaMs: null, flag: monitor, rev: 1, generation: "g", asOf: 1 },
+  monitor: monitor && { tone: "flag", whole: 0.4, headline: null, sentence: null, bindings: {}, signals: {}, estimate: null, flag: monitor, rev: 1, generation: "g", asOf: 1 },
 });
 const row = (title) => [...document.querySelectorAll(".session-row")].find((element) => element.textContent.includes(title));
 const marks = (title) => [...row(title).querySelectorAll('[role="img"]')].map((mark) => mark.getAttribute("aria-label"));

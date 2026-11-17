@@ -52,7 +52,7 @@ test("an unknown first-data stage or an undeclared plan claims no stage total", 
 });
 
 test("a flag leads with its warning while normal watcher text follows the stage", () => {
-  const data = { ...monitor(), latest: { loss: "NaN" }, flag: { ...flagged.flag, at: now } };
+  const data = { ...monitor(), latest: { loss: "NaN" }, flagId: flagged.flagId, flags: [{ ...flagged.flags[0], at: now }] };
   const row = model(data);
   assert.ok(plain(row.sentence.text).startsWith("Loss"));
   assert.ok(!row.sentence.text.includes("Train (2/5)"));

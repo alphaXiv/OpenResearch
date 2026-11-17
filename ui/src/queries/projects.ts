@@ -313,7 +313,11 @@ const mutFlagChoice = mutations.define({
     const shown = ws.queries.listChatShownRunsQuery();
     onSuccess(({ flag, run: saved }) => {
       // A newer flag stands: the answer settles only the flag it was for.
-      ws.setScopedQueryData(monitor.queryKey, (current) => current?.flag?.id === flag.id ? { ...current, flag } : current);
+      ws.setScopedQueryData(monitor.queryKey, (current) => {
+        if (!current || current.flagId !== flag.id) return current;
+        const flags = current.flags?.map((record) => record.id === flag.id ? flag : record);
+        return { ...current, flagId: saved.monitor?.flag?.id ?? null, flags };
+      });
       ws.setScopedQueryData(shown.queryKey, (current) => current && { ...current, runs: current.runs.map((item) => item.run.id === saved.id && item.run.updatedAt <= saved.updatedAt ? { ...item, run: saved } : item) });
     });
   },
