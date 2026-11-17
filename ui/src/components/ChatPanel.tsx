@@ -7555,7 +7555,6 @@ export function ChatPanel({
   );
 
   const questions = useQuestions(activeId, pendingQuestions, respond);
-  const asking = questions.part !== null;
   const showQuestion = questions.show;
   const searchedPartId = focusedMessage?.sessionId === activeId ? focusedMessage.partId : undefined;
   useEffect(() => {
@@ -8394,19 +8393,15 @@ export function ChatPanel({
           <RemoteConnectionStrip />
           {questions.part && (
             <QuestionDock
-              part={questions.part}
-              index={questions.index}
-              total={questions.total}
-              picked={questions.answer.picked}
-              disabled={questions.busy || connection !== null}
+              questions={{ ...questions, part: questions.part }}
+              disabled={connection !== null}
               hotkeys={mainView === "chat" && !contentInert && !contentLoading && !contentError && !historyLoading && connection === null
                 && (embedded ? searchRegion === "right" : searchRegion !== "right")}
               searchTarget={focusedMessage?.partId === questions.part.id}
-              onPick={questions.pick}
             />
           )}
           <div inert={connection !== null} className={`composer-frame flex flex-col rounded-xl bg-surface${connection ? " opacity-60" : ""}`} data-onboarding="composer">
-            <div className={`composer-box relative flex flex-col rounded-xl border ${bashMode && !asking ? "border-accent-amber" : "border-border"} bg-background shadow-control-subtle`}>
+            <div className={`composer-box relative flex flex-col rounded-xl border ${bashMode ? "border-accent-amber" : "border-border"} bg-background shadow-control-subtle`}>
               {unconfirmedSend !== null && (
                 <div id={unconfirmedSendId} role="alert" className="flex items-start gap-2 pt-2 px-3 text-sm text-text">
                   <span className="flex-1" dir="auto">{m.chat_send_unconfirmed({ error: ltr(unconfirmedSend) })}</span>
@@ -8439,7 +8434,7 @@ export function ChatPanel({
                   )}
                 </div>
               )}
-              {skillMenuOpen && !asking && (
+              {skillMenuOpen && (
                 <SkillMenu
                   skills={skillMatches}
                   activeIndex={activeSkillIdx}
@@ -8447,7 +8442,7 @@ export function ChatPanel({
                   onHover={setSkillIdx}
                 />
               )}
-              {mentionMenuOpen && !asking && (
+              {mentionMenuOpen && (
                 <MentionMenu
                   matches={mentionMatches}
                   activeIndex={activeMentionIdx}
@@ -8455,7 +8450,7 @@ export function ChatPanel({
                   onHover={setMentionIdx}
                 />
               )}
-              {annotations.length > 0 && !asking && (
+              {annotations.length > 0 && (
                 <ComposerAnnotations
                   annotations={annotations}
                   onClear={() => {
@@ -8481,20 +8476,13 @@ export function ChatPanel({
                   {settingsError}
                 </div>
               )}
-              {/* The answer lines up with the question's text above it. */}
-              <div className={`composer-input flex min-w-0 items-end ${asking ? "[--composer-pad-x:1rem]" : ""}`}>
+              <div className="composer-input flex min-w-0 items-end">
                 <ComposerEditor
                   ref={composerRef}
-                  value={questions.part ? questions.answer.note : draft}
+                  value={draft}
                   describedBy={[demoHintVisible && demoHintId, unconfirmedSend !== null && unconfirmedSendId].filter(Boolean).join(" ") || undefined}
                   placeholder={
-                    asking
-                      ? questions.answer.picked.length > 0
-                        ? m.chat_question_add_note()
-                        : questions.part?.prompt?.options?.length
-                          ? m.chat_question_custom_response()
-                          : m.chat_question_your_answer()
-                      : steering && activeHarness
+                    steering && activeHarness
                       ? m.chat_steer_placeholder({ harness: ltr(activeHarness.name), shortcut: ltr(queueChord) })
                       : composerSelection
                         ? activeHarness?.agentReady
@@ -8502,19 +8490,14 @@ export function ChatPanel({
                           : m.chat_harness_unavailable({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
                         : m.chat_ask_agent_placeholder()
                   }
-                  plain={bashMode && !asking}
-                  readOnly={questions.busy}
+                  plain={bashMode}
                   chipSource={chipSource}
                   projectId={projectId}
-                  draftKey={questions.part ? `question:${questions.part.id}` : stashKey}
+                  draftKey={stashKey}
                   resizeKey={embedded ? "orx:composer-height:side" : "orx:composer-height"}
-                  onFiles={asking ? () => {} : addFiles}
-                  onPaste={asking ? () => {} : onComposerPaste}
+                  onFiles={addFiles}
+                  onPaste={onComposerPaste}
                   onChange={(v, cursor, typed) => {
-                    if (asking) {
-                      if (v !== questions.answer.note) questions.setNote(v);
-                      return;
-                    }
                     setComposerCursor(cursor);
                     if (v === draft) return;
                     // Composer commands run rather than send: each fires the moment
@@ -8540,7 +8523,6 @@ export function ChatPanel({
                     setSkillMenuDismissed(false);
                   }}
                   onKeyDown={(e) => {
-                    if (asking) return;
                     if (skillMenuOpen) {
                       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
                         e.preventDefault();
@@ -8590,8 +8572,7 @@ export function ChatPanel({
                     }
                   }}
                   onSubmit={(e) => {
-                    if (asking) questions.next();
-                    else if (bashMode) void runShell();
+                    if (bashMode) void runShell();
                     else void send({ queue: matchesKeyboardEvent(e, "Mod+Enter") });
                   }}
                 />
@@ -8607,38 +8588,17 @@ export function ChatPanel({
                       e.target.value = ""; // let the same file be re-picked
                     }}
                   />
-                  {!asking && (
-                    <Tooltip interactive content={m.chat_panel_attach_a_pdf_or_image()}>
-                      <IconButton
-                        type="button"
-                        className="composer-attach"
-                        aria-label={m.chat_panel_attach_a_pdf_or_image()}
-                        onClick={() => fileInputRef.current?.click()}
-                      >
-                        <Paperclip size={16} />
-                      </IconButton>
-                    </Tooltip>
-                  )}
-                  {asking ? (
-                    <>
-                      <Tooltip interactive content={m.chat_question_skip()}>
-                        <IconButton type="button" variant="filled" aria-label={m.chat_question_skip()} disabled={questions.busy} onClick={questions.skip}>
-                          <X size={16} />
-                        </IconButton>
-                      </Tooltip>
-                      {/* Stays put on the first question: Skip must not slide under a second click. */}
-                      {questions.total > 1 && (
-                        <Tooltip interactive content={m.chat_question_back()}>
-                          <IconButton type="button" variant="filled" aria-label={m.chat_question_back()} disabled={questions.busy || questions.index === 0} onClick={questions.back}>
-                            <ChevronLeft size={16} className="rtl:rotate-180" />
-                          </IconButton>
-                        </Tooltip>
-                      )}
-                      <Button type="button" variant="primary" className="min-w-20" disabled={questions.busy || !questions.answered} onClick={questions.next}>
-                        {questions.last ? m.chat_panel_submit() : m.chat_question_next()}
-                      </Button>
-                    </>
-                  ) : busy ? (
+                  <Tooltip interactive content={m.chat_panel_attach_a_pdf_or_image()}>
+                    <IconButton
+                      type="button"
+                      className="composer-attach"
+                      aria-label={m.chat_panel_attach_a_pdf_or_image()}
+                      onClick={() => fileInputRef.current?.click()}
+                    >
+                      <Paperclip size={16} />
+                    </IconButton>
+                  </Tooltip>
+                  {busy ? (
                     <Tooltip interactive content={m.chat_panel_stop()}>
                       <IconButton className="send-btn" variant="filled" aria-label={m.chat_panel_stop()} onClick={stop}>
                         <X size={16} />
@@ -8810,7 +8770,7 @@ export function ChatPanel({
         </div>
       </section>
       <EscapeScope enabled={dataSources.open} onEscape={() => dataSources.setOpen(false)} />
-      <EscapeScope enabled={!asking && (skillMenuOpen || mentionMenuOpen)} onEscape={() => setSkillMenuDismissed(true)} />
+      <EscapeScope enabled={skillMenuOpen || mentionMenuOpen} onEscape={() => setSkillMenuDismissed(true)} />
     </>
   );
 }

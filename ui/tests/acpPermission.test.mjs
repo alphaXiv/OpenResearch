@@ -5,7 +5,7 @@ import { questionReplies } from "../src/chatRendering.ts";
 import { Message } from "../src/components/ChatPanel.tsx";
 import { m } from "../src/paraglide/messages.js";
 import { assistantMessage, composer, deferred, press, renderChat, session, settle, userMessage } from "./chat.mjs";
-import { clients, render } from "./render.mjs";
+import { clients, render, type } from "./render.mjs";
 
 /** Renders `part` as an assistant reply; `answer`, when given, is the user's reply that follows it. */
 async function card(part, { onRespond, answer } = {}) {
@@ -35,7 +35,7 @@ test("native permission cards render exact agent labels in their original order"
   assert.equal((await card({ ...part, prompt: { ...part.prompt, resolved: true } })).querySelector('[role="group"]')?.outerHTML, undefined);
 });
 
-/** Chat `s` waiting on `prompts` (`q1`, `q2`, …); the composer answers them through `respond`. */
+/** Chat `s` waiting on `prompts` (`q1`, `q2`, …); the question card answers them through `respond`. */
 async function asked(prompts, respond = () => ({ ok: true })) {
   const parts = prompts.map((prompt, index) => ({ id: `q${index + 1}`, type: "prompt", prompt: { kind: "question", ...prompt } }));
   const chat = await renderChat("/projects/p/tasks/s", {
@@ -47,8 +47,12 @@ async function asked(prompts, respond = () => ({ ok: true })) {
   return {
     /** The open question's text, or undefined once none is open. */
     question: () => box().querySelector('[role="group"] [id]')?.textContent,
-    option: (label) => [...box().querySelectorAll("button[aria-pressed]")].find((element) => element.textContent.startsWith(label)),
+    option: (label) => [...box().querySelectorAll("button[aria-pressed]")].find((element) => element.textContent.includes(label)),
     control: (label) => button(box(), label),
+    /** The card's own answer field. */
+    field: () => box().querySelector(".chat-prompt-questions input"),
+    type: async (text) => type(box().querySelector(".chat-prompt-questions input"), text),
+    enter: () => press("Enter", box().querySelector(".chat-prompt-questions input")),
     leave: () => chat.navigate("/projects/p/tasks/other"),
     deliveries: () => chat.requests.filter(({ request }) => request === "POST /api/chat/sessions/s/respond").map(({ body }) => body),
   };
@@ -57,15 +61,16 @@ async function asked(prompts, respond = () => ({ ok: true })) {
 /** Lets a single choice land and move the question on. */
 const land = () => act(async () => new Promise((resolve) => setTimeout(resolve, 250)));
 
-test("an open question turns the composer into its answer field", async () => {
+test("an open question is answered in its own card and leaves the composer for chat", async () => {
   const view = await asked([{ question: "Can you free space?" }]);
   assert.equal(view.question(), "Can you free space?");
-  assert.equal(composer().field().getAttribute("aria-label"), m.chat_question_your_answer());
-  assert.equal(view.control(m.chat_panel_stop()), undefined);
+  assert.equal(view.field().getAttribute("aria-label"), m.chat_question_your_answer());
+  assert.notEqual(composer().field().getAttribute("aria-label"), m.chat_question_your_answer());
+  assert.ok(view.control(m.chat_panel_send()));
   assert.equal(view.control(m.chat_panel_submit()).disabled, true);
-  assert.equal(view.control(m.chat_panel_send()), undefined);
-  await composer().type("Yes");
+  await view.type("Yes");
   assert.equal(view.control(m.chat_panel_submit()).disabled, false);
+  assert.equal(composer().draft, "");
   const transcript = await card({ id: "q1", type: "prompt", prompt: { kind: "question", question: "Can you free space?" } });
   assert.equal(transcript.textContent.includes("Can you free space?"), false);
 });
@@ -83,28 +88,25 @@ test("answered questions show the agent question followed by one quoted answer",
 test("a typed answer goes out on Enter and survives a failed delivery", async () => {
   let delivery;
   const view = await asked([{ question: "Can you free space?" }], () => { delivery = deferred(); return delivery.promise; });
-  await composer().type("What is using memory?");
+  await view.type("What is using memory?");
   assert.deepEqual(view.deliveries(), []);
-  await composer().send();
+  await view.enter();
   assert.deepEqual(view.deliveries(), [{ promptId: "q1", answers: [], note: "What is using memory?" }]);
   assert.equal(view.control(m.chat_panel_submit()).disabled, true);
-  assert.equal(composer().field().getAttribute("aria-readonly"), "true");
-  await composer().type(" More");
-  assert.equal(composer().draft, "What is using memory?");
+  assert.equal(view.field().readOnly, true);
   await delivery.resolve(Response.json({ error: "agent gone" }, { status: 409 }));
-  assert.equal(composer().field().getAttribute("aria-readonly"), null);
-  assert.equal(composer().draft, "What is using memory?");
+  assert.equal(view.field().readOnly, false);
+  assert.equal(view.field().value, "What is using memory?");
   assert.equal(view.control(m.chat_panel_submit()).disabled, false);
-  await composer().send();
+  await view.enter();
   await delivery.resolve({ ok: true });
   assert.equal(view.question(), undefined);
-  assert.equal(composer().draft, "");
 });
 
 test("one choice answers a single-select question, with the note typed before it", async () => {
   const view = await asked([{ question: "Which one?", options: [{ label: "First" }, { label: "Second" }] }]);
-  assert.equal(composer().field().getAttribute("aria-label"), m.chat_question_custom_response());
-  await composer().type("but keep the logs");
+  assert.equal(view.field().getAttribute("aria-label"), m.chat_question_custom_response());
+  await view.type("but keep the logs");
   await click(view.option("Second"));
   assert.equal(view.option("Second").getAttribute("aria-pressed"), "true");
   assert.deepEqual(view.deliveries(), []);
@@ -167,14 +169,14 @@ test("a delivery that fails partway keeps the answers that did not go out", asyn
   );
   await click(view.option("First"));
   await land();
-  await composer().type("Because");
-  await composer().send();
+  await view.type("Because");
+  await view.enter();
   await settle();
   assert.equal(view.deliveries().length, 2);
   assert.equal(view.question(), "Why?");
-  assert.equal(composer().draft, "Because");
+  assert.equal(view.field().value, "Because");
   assert.equal(view.control(m.chat_question_back()), undefined);
-  await composer().send();
+  await view.enter();
   await settle();
   assert.deepEqual(view.deliveries().at(-1), { promptId: "q2", answers: [], note: "Because" });
 });
@@ -187,8 +189,8 @@ test("answers on their way still go out when the chat is left", async () => {
   );
   await click(view.option("First"));
   await land();
-  await composer().type("Because");
-  await composer().send();
+  await view.type("Because");
+  await view.enter();
   await view.leave();
   await delivery.resolve({ ok: true });
   assert.deepEqual(view.deliveries().at(-1), { promptId: "q2", answers: [], note: "Because" });
@@ -197,6 +199,8 @@ test("answers on their way still go out when the chat is left", async () => {
 
 test("number keys choose an option unless a text field has focus", async () => {
   const view = await asked([{ question: "Which ones?", multiSelect: true, options: [{ label: "First" }, { label: "Second" }] }]);
+  await press("2", view.field());
+  assert.equal(view.option("Second").getAttribute("aria-pressed"), "false");
   await press("2", composer().field());
   assert.equal(view.option("Second").getAttribute("aria-pressed"), "false");
   await press("2", document.body);
@@ -204,6 +208,25 @@ test("number keys choose an option unless a text field has focus", async () => {
   await press("3", document.body);
   await press("2", document.body, { metaKey: true });
   assert.equal(view.option("Second").getAttribute("aria-pressed"), "true");
+});
+
+test("the arrows browse questions and dismissing skips every one still open", async () => {
+  const view = await asked([
+    { question: "Which one?", options: [{ label: "First" }] },
+    { question: "Why?" },
+    { question: "Anything else?" },
+  ]);
+  await click(view.control(m.chat_question_forward()));
+  assert.equal(view.question(), "Why?");
+  await view.type("Because");
+  await click(view.control(m.chat_question_dismiss()));
+  await settle();
+  assert.deepEqual(view.deliveries(), [
+    { promptId: "q1", approve: false },
+    { promptId: "q2", approve: false },
+    { promptId: "q3", approve: false },
+  ]);
+  assert.equal(view.question(), undefined);
 });
 
 test("skipped questions show their outcome while preserving historical answer text", async () => {
@@ -230,7 +253,7 @@ test("question choices are disabled while the remote host reconnects", async () 
     transcripts: { s: [userMessage("u1", "free some space"), assistantMessage("a1", [part], "u1")] },
     routes: { "GET /_orx/runtime": runtime },
   });
-  const option = () => [...document.querySelectorAll(".composer button[aria-pressed]")].find((element) => element.textContent.startsWith("Yes"));
+  const option = () => [...document.querySelectorAll(".composer button[aria-pressed]")].find((element) => element.textContent.includes("Yes"));
   assert.equal(option().disabled, false);
   status = "reconnecting";
   await act(async () => { for (const client of clients) void client.invalidateQueries({ predicate: (query) => query.queryKey[2] === "getRuntime" }); });
