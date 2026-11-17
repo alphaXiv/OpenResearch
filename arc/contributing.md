@@ -40,5 +40,5 @@
 ## Comments
 
 - For maintainers (alphaXiv employees), present comments to the user before submitting them, unless they said to "post" them without mentioning "draft" or "prepare".
-- On issues and pull requests, open each comment with a badge naming the model that wrote it: `![comment written by Claude Opus 5](https://img.shields.io/badge/comment_written_by-Claude_Opus_5-8a63d2?style=flat-square)`. Use the model's user-facing name, like `GPT-6 Astra` or `Claude Sonnet 4.5`, never its ID. In the badge URL, a space becomes `_`, `-` becomes `--` and `_` becomes `__`.
+- On issues and pull requests, open each comment with a badge naming the model that wrote it: `![comment written by Claude Opus 5](https://img.shields.io/badge/comment_written_by-Claude_Opus_5-8a63d2?style=flat-square)`. Use the model's user-facing name, like `GPT-6 Astra` or `Claude Sonnet 4.5`, never its ID. In the badge URL, a space becomes `_`, `-` becomes `--` and `_` becomes `__`. Put the comment's first line directly under the badge, with no blank line, so GitHub renders the two in one paragraph.
 - Say exactly what was tested, and ask a bug reporter about their environment rather than assuming it.
