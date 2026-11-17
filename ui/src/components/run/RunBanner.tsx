@@ -38,9 +38,10 @@ function useAnnouncement(models: RunModel[], names: string[] | null): string {
       const stale = model.stale?.state ?? null;
       // A finished run's own words already say it finished.
       const change = model.sentence.key === "end:done" ? "" : `${model.status}. `;
-      if (!first && (!before || before.tone !== model.tone)) news.push(`${prefix}${change}${plainSentence(model.sentence.text)}`);
-      else if (!first && before.stale !== stale) news.push(prefix + (model.stale ? `${model.stale.why}. ${model.stale.age}.` : plainSentence(model.sentence.text)));
-      else if (!first && before.words !== model.sentence.key) news.push(prefix + plainSentence(model.sentence.text));
+      const text = plainSentence([model.sentence.text, !model.live && model.sentence.watcher ? model.eta : ""].filter(Boolean).join(" · "));
+      if (!first && (!before || before.tone !== model.tone)) news.push(`${prefix}${change}${text}`);
+      else if (!first && before.stale !== stale) news.push(prefix + (model.stale ? `${model.stale.why}. ${model.stale.age}.` : text));
+      else if (!first && before.words !== model.sentence.key) news.push(prefix + text);
     }
     seen.current = new Map(models.map((model) => [model.run.id, { tone: model.tone, words: model.sentence.key, stale: model.stale?.state ?? null }]));
     const left = [...previous.keys()].some((id) => !seen.current?.has(id));

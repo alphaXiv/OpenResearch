@@ -291,7 +291,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   const stageKey = `${settingUp ? "setup" : "stage"}:${order?.index ?? rawName}:${order?.first ?? ""}:${order?.count ?? ""}`;
   const recorded = monitor ? monitor.sentence : summary?.sentence ?? null;
   const watched = live && recorded && now - recorded.t <= 3 * 60_000 ? recorded : null;
-  const warning = live && flag ? flag.record?.template ?? recorded?.template ?? null : null;
+  const warning = (live || run.status === "done") && flag ? flag.record?.template ?? recorded?.template ?? null : null;
   let speaking: string | null = null;
   let sentence: RunModel["sentence"];
   if (notice) {
@@ -304,7 +304,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   } else if (warning) {
     speaking = warning;
     const text = fillSentence(warning, bindings, signals);
-    sentence = { text, watcher: text, key: `flag:${flag?.id}:${warning}`, at: flag?.record?.at ?? recorded?.t ?? null };
+    sentence = { text, watcher: text, key: `flag:${flag?.id}:${run.status}:${warning}`, at: flag?.record?.at ?? recorded?.t ?? null };
   } else if (!live) {
     const text = !progressText || tone === "done" ? ""
       : outcome?.by === "user" ? m.run_auto_by_you({ progress: autoDir(progressText) })

@@ -592,12 +592,17 @@ test("a shown active run without a summary ignores cached monitor data and draws
   assert.equal(requests.filter((r) => r.request.includes("/monitor")).length, 0);
 });
 
-test("a flag the run's last look raised after it ended opens the strip with what can still be chosen", async () => {
+test("an unresolved flag stays visible after completion and announces that the run ended", async () => {
   const ended = { ...flagged, flag: { ...flagged.flag, state: "waiting", mode: "copilot" } };
   const requests = backend({ monitors: { r1: ended } });
   const done = run("r1", { status: "done", endedAt: now, monitor: summary({ tone: "flag", sentence: flagged.sentence, flag: { id: "f1", state: "waiting", mode: "copilot" }, rev: flagged.rev }) });
-  const { container } = await banner([done]);
+  const view = await banner([{ ...done, status: "running", endedAt: null }]);
   await settle();
+  await view.update([done]);
+  await settle();
+  const { container } = view;
+  assert.ok(plain(status()).includes("Loss is NaN"));
+  assert.ok(plain(status()).includes(m.run_done_in({ duration: "1m" })));
   const text = container.textContent.replace(/[⁦-⁩]/g, "");
   assert.ok(text.includes(m.run_flag_ended_choose({ agent: "Claude" })), text);
   assert.ok(![...container.querySelectorAll("button")].some((b) => b.textContent.includes(m.experiments_stop_run())), "an ended run has nothing to stop");
