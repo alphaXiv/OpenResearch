@@ -661,3 +661,11 @@ test("a single run opens its stage card from the raw status and links the run fr
   await press("Enter", document.querySelector('[role="dialog"] [role="link"]'));
   assert.deepEqual(opens.map(([run, intent]) => [run.id, intent]), [["r1", "preview"], ["r1", "keepOpen"]]);
 });
+
+test("a terminal lead keeps a visible separator before its sentence", async () => {
+  backend();
+  const { container } = await banner([run("r1", { status: "cancelled", endedAt: now, outcome: { by: "user" } })]);
+  await settle();
+  const line = container.querySelector('button[aria-haspopup="dialog"]');
+  assert.ok(line.textContent.includes(`${m.run_lead_stopped()}\u00a0`), line.textContent);
+});
