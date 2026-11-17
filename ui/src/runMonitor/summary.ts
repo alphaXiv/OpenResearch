@@ -3,7 +3,7 @@ import { m } from "../paraglide/messages.js";
 import { fillSentence } from "./format";
 import type { RunModel, Tone } from "./model";
 import type { ChatWatch } from "./types";
-import { durationText } from "./words";
+import { remainingText } from "./words";
 
 /** Title tokens keep a number's sign and exponent. */
 function wordsOf(title: string) {
@@ -169,13 +169,13 @@ export function summarize(models: RunModel[], { labels, groups }: { labels: stri
   // Once one has ended, the soonest of the rest is the next done, not the first.
   const after = models.some((model) => !model.live);
   const firstDone = (duration: string) => (floor ? after ? m.run_summary_next_floor : m.run_summary_first_floor : after ? m.run_summary_next_done : m.run_summary_first_done)({ duration });
-  if (parts) return { parts, firstDone: soonest !== undefined ? firstDone(durationText(soonest)) : null };
+  if (parts) return { parts, firstDone: soonest !== undefined ? firstDone(remainingText(soonest)) : null };
 
   // The common case: the counts, then when the first finishes, all one sentence.
   const counts = PROGRESS.flatMap(({ tone, words }) => {
     const count = models.filter((model) => model.tone === tone).length;
     return count > 0 ? [{ tone, text: words(`**${ltr(fmtNumber(count))}**`) }] : [];
   });
-  const first = soonest !== undefined ? firstDone(`**${durationText(soonest)}**`) : null;
+  const first = soonest !== undefined ? firstDone(`**${remainingText(soonest)}**`) : null;
   return { parts: first ? [...counts, { tone: "running", text: first }] : counts, firstDone: null };
 }

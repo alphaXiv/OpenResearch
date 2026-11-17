@@ -298,3 +298,10 @@ test("an unresolved flag keeps its warning when the run ends, even after ordinar
   assert.equal(bare(ended.sentence.watcher), bare(ended.text));
   assert.equal(ended.eta, m.run_done_in({ duration: fmtDuration(1_800_000) }));
 });
+
+test("a live run's subsecond estimate never reads zero seconds left", () => {
+  const estimate = { ...running.estimate, loMs: 500, midMs: 500, hiMs: 500, at: now, pending: false, floor: false };
+  const line = model(run(), { monitor: { ...running, estimate } });
+  assert.equal(line.eta, bare(m.run_eta_left({ duration: fmtDuration(1000) })));
+  assert.equal(line.leftMs, 500);
+});

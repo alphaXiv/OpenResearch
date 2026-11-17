@@ -126,6 +126,71 @@ const steps = async (page: Page, orx: Orx, runId: string) => {
   return { monitor, x: (monitor.series.loss ?? []).map(([x]: [number]) => x) as number[] }
 }
 
+test('planned finalization keeps completed training from claiming zero time left', async ({ page, project, agent, orx }, info) => {
+  test.slow()
+  const run = payload(orx, 'finalization', ['validation', 'checkpoint', 'save'], `
+console.log('::orx:: {"plan":[{"phase":"train","of":2,"unit":"steps"},{"phase":"train-finalize","of":2,"unit":"tasks"}]}')
+console.log('::orx:: {"phase":"train","step":0,"of":2,"unit":"steps"}')
+console.log('::orx:: {"step":2,"m":{"val_bpb":1.8}}')
+gate('validation')
+console.log('::orx:: {"phase":"train-finalize","step":0,"of":2,"unit":"tasks"}')
+gate('checkpoint')
+console.log('::orx:: {"step":1}')
+gate('save')
+console.log('::orx:: {"step":2}')
+`)
+  try {
+    const hold = `finalization-result-${project.id}`
+    agent.script('finished with status **done**', [{ hold }, { say: 'Finalization finished.' }])
+    const banner = await launch(page, agent, project, 'Finalization', run.command)
+    const { experimentId } = (await (await page.request.get(`${orx.url}/api/chat/shown-runs`)).json())[0].run
+    await expect(banner).toContainText(said('2 of 2'))
+    await expect(banner).not.toContainText(said('0s left'))
+    await run.open('validation')
+    await expect(banner).toContainText(said('0 of 2'))
+    await expect(banner).toContainText('tasks')
+    await expect(banner).not.toContainText(said('0s left'))
+    console.log('Finalization line:', await banner.innerText())
+    await themes(page, banner, info, 'finalization-unknown-duration')
+    await run.open('checkpoint')
+    await run.open('save')
+    await agent.reached(hold)
+    await expect(banner).toContainText('Done in')
+    agent.release(hold)
+    await expect(page.getByText('Finalization finished.', { exact: true })).toBeVisible()
+
+    const repeated = `finalization-repeated-${project.id}`
+    agent.script('Repeat Finalization.', [
+      { run: `orx exp run ${experimentId} --backend local` },
+      { say: 'Repeated Finalization.' },
+    ])
+    agent.script('finished with status **done**', [{ hold: repeated }, { say: 'Repeated finalization finished.' }])
+    await send(page, 'Repeat Finalization.')
+    await expect(banner.getByRole('button', { name: 'Stop the run', exact: true })).toBeVisible()
+    await run.open('validation')
+    await expect(banner).toContainText(said('0 of 2'))
+    await run.open('checkpoint')
+    await expect(banner).toContainText(said('1 of 2'))
+    await expect(banner).toContainText(/1s[⁦-⁩]* left/)
+    await expect(banner).not.toContainText(/0s[⁦-⁩]* left/)
+    console.log('Finalization with prior:', await banner.innerText())
+    await themes(page, banner, info, 'finalization-with-prior')
+    await run.open('save')
+    await agent.reached(repeated)
+    await expect(banner).toContainText('Done in')
+    agent.release(repeated)
+  } finally {
+    const { runs } = await (await page.request.get(`${orx.url}/api/projects/${project.id}/runs`)).json()
+    for (const run of runs) {
+      await page.request.post(`${orx.url}/api/runs/${run.id}/cancel`, { headers: { origin: orx.url } })
+      await expect.poll(async () => {
+        const { run: current } = await (await page.request.get(`${orx.url}/api/runs/${run.id}`)).json()
+        return current.status
+      }).toMatch(/^(done|failed|cancelled)$/)
+    }
+  }
+})
+
 test('a declared run shows its step, a growing bar, time left and its curve, through a restart to done', async ({ page, agent, launchOrx }, info) => {
   // Two theme passes and the run itself outlast the default budget on a busy machine.
   test.slow()

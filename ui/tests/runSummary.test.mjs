@@ -139,3 +139,10 @@ test("the watcher's summary stands for the runs its look covered, with names and
   const failed = [models[0], model("b", scored(1.2, { tone: "failed" }), { status: "failed", endedAt: now })];
   assert.match(bare(summarize(failed, shortLabels(depths(4, 6)), watch, now).parts[0].who ?? ""), /6/);
 });
+
+test("a summary's subsecond time left stays positive", () => {
+  const line = model("one", summary({ etaMs: { lo: 500, mid: 500, hi: 500, at: now } }));
+  const { text } = said([line]);
+  const expected = m.run_summary_first_done({ duration: `**${m.duration_seconds({ value: "1" })}**` });
+  assert.ok(text.includes(bare(expected)), text);
+});

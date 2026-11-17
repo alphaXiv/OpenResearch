@@ -5725,6 +5725,34 @@ mod tests {
     }
 
     #[test]
+    fn a_zero_duration_parent_does_not_finish_an_unfinished_finalization() {
+        let f = Fixture::new("orx-monitor-instant-finalization");
+        plan(
+            &f,
+            "exp",
+            json!([
+                {"phase": "train", "of": 2},
+                {"phase": "train-finalize", "of": 1}
+            ]),
+        )
+        .unwrap();
+        let pipeline = [("train", 3, Some(2)), ("train-finalize", 1, Some(1))];
+        let parent = staged(&f, "p1", "exp", "done", &pipeline, 10);
+        monitor_at(&f, &parent, T0 + 6_000);
+        f.child("child", "exp");
+        let child = staged(&f, "c1", "child", "running", &pipeline, 3);
+        let (monitor, _) = monitor_at(&f, &child, T0 + 3_500);
+        assert!(
+            monitor["estimate"]["pending"] == true
+                || monitor["estimate"]["midMs"]
+                    .as_i64()
+                    .is_some_and(|ms| ms > 0),
+            "{}",
+            monitor["estimate"]
+        );
+    }
+
+    #[test]
     fn finalization_keeps_step_comparisons_with_an_older_training_only_parent() {
         let f = Fixture::new("orx-monitor-finalization-comparison");
         f.view("exp", VIEW);

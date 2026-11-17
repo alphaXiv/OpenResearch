@@ -7,6 +7,7 @@ import type { Cost, Estimate, Phase, Progress, Quote } from "./types";
 
 /** Durations, times and prices formatted for the locale and isolated, so words in the other direction keep them whole. */
 export const durationText = (ms: number) => autoDir(fmtDuration(ms));
+export const remainingText = (ms: number) => durationText(Math.max(1000, ms));
 export const clockText = (ms: number) => autoDir(fmtClock(ms));
 const usdText = (value: number) => autoDir(fmtUsd(value));
 
@@ -75,7 +76,7 @@ export function estimateWords(estimate: Estimate, now: number, limit: { endsAt: 
     const left = remaining(estimate.loMs ?? estimate.midMs ?? 0);
     const stages = estimate.untimed ?? [];
     return {
-      eta: left > 0 ? m.run_eta_floor({ duration: durationText(left) }) : "",
+      eta: left > 0 ? m.run_eta_floor({ duration: remainingText(left) }) : "",
       detail: stages.length ? m.run_eta_untimed({ stages: autoDir(stages.join(", ")) }) : "",
       strong: left > 0,
       leftMs: left > 0 ? left : null,
@@ -88,7 +89,7 @@ export function estimateWords(estimate: Estimate, now: number, limit: { endsAt: 
   if (estimate.midMs > 0 && mid === 0) {
     return { eta: m.run_eta_silent_for({ duration: durationText(now - estimate.at) }), detail: m.run_eta_was_due({ clock: clockText(estimate.at + estimate.midMs) }), strong: true, leftMs: null };
   }
-  const eta = m.run_eta_left({ duration: durationText(mid) });
+  const eta = m.run_eta_left({ duration: remainingText(mid) });
   if (stalled) return { eta, detail: stalled, strong: true, leftMs: mid };
   if (estimate.pastLimitMs !== null && limit) {
     return { eta, detail: m.run_eta_past_limit({ duration: durationText(estimate.pastLimitMs), limit: durationText(limit.ms) }), strong: true, leftMs: mid };

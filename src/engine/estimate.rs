@@ -990,7 +990,7 @@ pub(crate) fn stages(
                         .map(|(start, end)| (end - start) as f64);
                     (
                         phase.name.as_str(),
-                        took.filter(|ms| *ms >= 0.0),
+                        took.filter(|ms| *ms > 0.0),
                         phase.done,
                         phase.of,
                     )
