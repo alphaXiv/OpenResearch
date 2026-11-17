@@ -8607,18 +8607,6 @@ impl TurnCtx {
         }
     }
 
-    pub(crate) fn begin_native_usage_attempt(&self, prefix: &str) -> Result<()> {
-        if !self.durable {
-            return Ok(());
-        }
-        Store::open()?.begin_native_usage_attempt(
-            &self.usage_execution_id,
-            prefix,
-            &self.harness,
-            self.native_session_id.as_deref(),
-        )
-    }
-
     pub(crate) fn record_native_aggregate(
         &self,
         prefix: &str,

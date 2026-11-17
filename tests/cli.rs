@@ -28,11 +28,7 @@ fn unknown_commands_show_real_commands_and_scoped_help() {
     for (args, help, real) in [
         (vec!["exp", "list"], " exp --help`", "status"),
         (vec!["exp", "veiw"], " exp --help`", "view"),
-        (
-            vec!["exp", "view", "missing"],
-            " exp view --help`",
-            "check",
-        ),
+        (vec!["exp", "view", "missing"], " exp view --help`", "check"),
         (vec!["missing"], " --help`", "projects"),
     ] {
         let root = std::env::temp_dir().join(format!("orx-command-hint-{}", uuid::Uuid::new_v4()));

@@ -2972,7 +2972,14 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
     let client = route.client();
     let auth_generation = client.auth_generation();
     let bridge_active = client.config().bridge_active;
-    ctx.begin_native_usage_attempt(&format!("claude-{}:", ctx.attempt_count_for_usage()))?;
+    if let Some(execution) = ctx.usage_execution_id() {
+        client.begin_usage_attempt(
+            &crate::store::Store::open()?,
+            execution,
+            &format!("claude-{}:", ctx.attempt_count_for_usage()),
+            ctx.native_session_id.as_deref(),
+        )?;
+    }
     if !resumed_alone {
         ctx.persist_delivery(DeliveryState::Unknown)?;
         if let Err(e) = client.send_user_message(&ctx.text).await {
