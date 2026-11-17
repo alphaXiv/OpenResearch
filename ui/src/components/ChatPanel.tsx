@@ -5405,6 +5405,62 @@ function SessionRow({
   );
 }
 
+interface SidebarActions {
+  toggleProjectCollapsed: (project: Project) => void;
+  pinProject: (project: Project) => void;
+  projectRemoved: (project: Project) => void;
+  newProjectChat: (project: Project) => void;
+  openSession: (session: ChatSession, project: Project) => void;
+  openExperiment: (session: ChatSession, projectId: string, experimentId: string) => void;
+  rename: (session: ChatSession, title: string) => void;
+  setArchived: (session: ChatSession, archived: boolean) => void;
+  remove: (session: ChatSession) => void;
+}
+
+// Sidebar rows skip the panel's per-keystroke renders: `actions` is a stable ref
+// the panel refreshes every render, so handlers still reach its current state.
+const SidebarProjectCard = memo(function SidebarProjectCard({
+  actions,
+  project,
+  ...card
+}: Omit<React.ComponentProps<typeof ProjectInfoCard>, "onToggleCollapsed" | "onPin" | "onRemoved" | "onNewChat"> & {
+  actions: React.RefObject<SidebarActions>;
+}) {
+  useLocale();
+  return (
+    <ProjectInfoCard
+      {...card}
+      project={project}
+      onToggleCollapsed={() => actions.current.toggleProjectCollapsed(project)}
+      onPin={() => actions.current.pinProject(project)}
+      onRemoved={() => actions.current.projectRemoved(project)}
+      onNewChat={() => actions.current.newProjectChat(project)}
+    />
+  );
+});
+
+const SidebarSessionRow = memo(function SidebarSessionRow({
+  actions,
+  project,
+  ...row
+}: Omit<React.ComponentProps<typeof SessionRow>, "onOpen" | "onOpenExperiment" | "onRename" | "onSetArchived" | "onDelete"> & {
+  actions: React.RefObject<SidebarActions>;
+  project: Project;
+}) {
+  useLocale();
+  const { session } = row;
+  return (
+    <SessionRow
+      {...row}
+      onOpen={() => actions.current.openSession(session, project)}
+      onOpenExperiment={(projectId, experimentId) => actions.current.openExperiment(session, projectId, experimentId)}
+      onRename={(title) => actions.current.rename(session, title)}
+      onSetArchived={(archived) => actions.current.setArchived(session, archived)}
+      onDelete={() => actions.current.remove(session)}
+    />
+  );
+});
+
 // --- panel -------------------------------------------------------------------
 
 // The four starter prompts progress starting point → gap → baseline → experiment.
@@ -7724,6 +7780,50 @@ export function ChatPanel({
       void flatSessions.fetchNextPage();
     }
   }, [sidebarGrouping, railOpen, embedded, lastVisibleIndex, sidebarRows.length, flatSessions.hasNextPage, flatSessions.isFetching, flatSessions.isError, flatSessions.fetchNextPage]);
+  const sidebarActions = useRef<SidebarActions>(null!);
+  sidebarActions.current = {
+    toggleProjectCollapsed: (project) => {
+      const next = collapsedProjects.includes(project.id) ? collapsedProjects.filter((id) => id !== project.id) : [...collapsedProjects, project.id];
+      setCollapsedProjects(next);
+      try { localStorage.setItem(collapsedProjectsKey, JSON.stringify(next)); } catch {}
+    },
+    pinProject: (project) => {
+      const next = pinnedProjects.includes(project.id) ? pinnedProjects.filter((id) => id !== project.id) : [...pinnedProjects, project.id];
+      setPinnedProjects(next);
+      try { localStorage.setItem(pinnedProjectsKey, JSON.stringify(next)); } catch {}
+    },
+    projectRemoved: (project) => { if (project.id === projectId) void navigate({ to: "/projects" }); },
+    newProjectChat: (project) => {
+      if (project.id === projectId) startProjectTask();
+      else void navigate({ to: "/projects/$projectId/tasks/new", params: { projectId: project.id } });
+    },
+    openSession: (s, project) => {
+      onActiveSessionChange(s.id, { projectId: project.id });
+      if (project.id === DEMO_PROJECT_ID) {
+        markDemoSessionRead(s.id);
+        const experiment = DEMO_EXPERIMENT_LABELS[s.id];
+        if (experiment) {
+          captureUiEvent({
+            name: "demo_experiment_started",
+            kind: "curated",
+            experiment,
+          });
+          captureUiEvent({
+            name: "first_action",
+            surface: "demo",
+            action: "open_experiment",
+          });
+        }
+      }
+    },
+    openExperiment: (s, targetProjectId, experimentId) => {
+      void navigate({ href: taskLocation(targetProjectId, targetProjectId === s.projectId ? s.id : null, { kind: "experiment", experimentId, view: "overview" }) });
+    },
+    rename,
+    setArchived,
+    remove: (s) => void removeSession(s),
+  };
+  const openRuntimeDetails = useCallback(() => onSelectMainView("openresearch"), [onSelectMainView]);
 
   const rail = (
     <aside style={mobileRail ? undefined : { width: railWidth }} className="session-rail relative shrink-0 flex flex-col bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:pt-0 [&_.rail-body]:pb-0 [&_.rail-body]:ps-2 [&_.rail-body]:pe-1 border-e border-e-border overflow-visible">
@@ -7848,33 +7948,21 @@ export function ChatPanel({
               >
                 {row.kind === "project" ? (
                   <div className="group h-9 flex items-end gap-1 rounded-md px-2.5 text-text">
-                    <ProjectInfoCard
+                    <SidebarProjectCard
+                      actions={sidebarActions}
                       project={project}
                       chatCount={projectActivity.find((activity) => activity.projectId === project.id)?.totalAgents}
                       collapsed={row.collapsed}
                       busy={row.busy}
-                      onToggleCollapsed={() => {
-                        const next = collapsedProjects.includes(project.id) ? collapsedProjects.filter((id) => id !== project.id) : [...collapsedProjects, project.id];
-                        setCollapsedProjects(next);
-                        try { localStorage.setItem(collapsedProjectsKey, JSON.stringify(next)); } catch {}
-                      }}
                       pinned={pinnedProjects.includes(project.id)}
-                      onPin={() => {
-                        const next = pinnedProjects.includes(project.id) ? pinnedProjects.filter((id) => id !== project.id) : [...pinnedProjects, project.id];
-                        setPinnedProjects(next);
-                        try { localStorage.setItem(pinnedProjectsKey, JSON.stringify(next)); } catch {}
-                      }}
-                      onRemoved={() => { if (project.id === projectId) void navigate({ to: "/projects" }); }}
-                      onNewChat={() => {
-                        if (project.id === projectId) startProjectTask();
-                        else void navigate({ to: "/projects/$projectId/tasks/new", params: { projectId: project.id } });
-                      }}
                     />
                   </div>
                 ) : s ? (
                   <div className={sidebarGrouping === "projects" ? "ms-5.5" : undefined}>
-                    <SessionRow
+                    <SidebarSessionRow
                       key={s.id}
+                      actions={sidebarActions}
+                      project={project}
                       session={s}
                       cardWarmUntil={cardWarmUntil}
                       projectName={sidebarGrouping === "list" ? project.name : undefined}
@@ -7886,31 +7974,6 @@ export function ChatPanel({
                       waiting={sessionWaiting(s)}
                       experimentRunning={activeRuns.some((item) => item.sessionId === s.id)}
                       revealTitle={titleReveals.get(s.id)}
-                      onOpenExperiment={(targetProjectId, experimentId) => {
-                        void navigate({ href: taskLocation(targetProjectId, targetProjectId === s.projectId ? s.id : null, { kind: "experiment", experimentId, view: "overview" }) });
-                      }}
-                      onOpen={() => {
-                        onActiveSessionChange(s.id, { projectId: project.id });
-                        if (project.id === DEMO_PROJECT_ID) {
-                          markDemoSessionRead(s.id);
-                          const experiment = DEMO_EXPERIMENT_LABELS[s.id];
-                          if (experiment) {
-                            captureUiEvent({
-                              name: "demo_experiment_started",
-                              kind: "curated",
-                              experiment,
-                            });
-                            captureUiEvent({
-                              name: "first_action",
-                              surface: "demo",
-                              action: "open_experiment",
-                            });
-                          }
-                        }
-                      }}
-                      onRename={(title) => rename(s, title)}
-                      onSetArchived={(archived) => setArchived(s, archived)}
-                      onDelete={() => void removeSession(s)}
                     />
                   </div>
                 ) : row.kind === "more" ? (
@@ -7952,7 +8015,7 @@ export function ChatPanel({
         </div>
       </div>
       </div>
-      <StatusStrip runtime={runtime} onDetails={() => onSelectMainView("openresearch")} />
+      <StatusStrip runtime={runtime} onDetails={openRuntimeDetails} />
     </aside>
   );
 
