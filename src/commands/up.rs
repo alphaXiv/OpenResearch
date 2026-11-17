@@ -189,7 +189,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
         remote_sessions: crate::commands::up_remote::RemoteSessionManager::new(),
         remote_instance_id: remote_instance_id.clone(),
         stopping: stopping.clone(),
-        dashboard_lock: Arc::new(std::sync::Mutex::new(Some(dashboard_lock))),
+        dashboard_locks: Arc::new(std::sync::Mutex::new(vec![dashboard_lock])),
         restart: Arc::new(tokio::sync::Notify::new()),
         reopen: Arc::default(),
         trackio: Arc::default(),
@@ -247,8 +247,6 @@ pub async fn run(args: UpArgs) -> Result<()> {
         state.data_dir_gate.clone(),
     ));
     runtime.start();
-    tokio::spawn(crate::engine::monitor::keep_current(engine.clone()));
-    tokio::spawn(crate::engine::watch::keep_watching());
     tokio::spawn(reclaim_orphaned_run_artifacts(
         state.data_dir_move_in_progress.clone(),
         state.data_dir_gate.clone(),
@@ -359,30 +357,38 @@ pub async fn run(args: UpArgs) -> Result<()> {
     // delivers SIGHUP here as the channel tears down — without handling it the
     // remote server would leak, staying bound to its port after the tunnel dies.
     let restart = state.restart.clone();
+    let (stop_monitoring, stop) = tokio::sync::watch::channel(());
+    let monitor = tokio::spawn(crate::engine::monitor::keep_current(engine, stop.clone()));
+    let watcher = tokio::spawn(crate::engine::watch::keep_watching(stop));
     let mut restarting = false;
-    let explicit_stop = if persistent_host {
-        tokio::select! {
-            r = axum::serve(listener, app) => {
-                r.map_err(|e| anyhow!("orx up: server error: {e}"))?;
-                false
+    let mut explicit_stop = false;
+    let served = tokio::select! {
+        result = axum::serve(listener, app) => result,
+        changed = stop_rx.changed(), if persistent_host => {
+            explicit_stop = changed.is_ok() && *stop_rx.borrow();
+            Ok(())
+        }
+        _ = restart.notified() => { restarting = true; Ok(()) }
+        _ = async {
+            if persistent_host {
+                persistent_shutdown_signal().await;
+            } else {
+                shutdown_signal().await;
+                eprintln!("orx up: shutting down");
             }
-            changed = stop_rx.changed() => changed.is_ok() && *stop_rx.borrow(),
-            _ = restart.notified() => { restarting = true; false }
-            _ = persistent_shutdown_signal() => false,
-        }
-    } else {
-        tokio::select! {
-            r = axum::serve(listener, app) => r.map_err(|e| anyhow!("orx up: server error: {e}"))?,
-            _ = restart.notified() => restarting = true,
-            _ = shutdown_signal() => eprintln!("orx up: shutting down"),
-        }
-        false
+        } => Ok(()),
     };
     if persistent_host {
         stopping.store(true, std::sync::atomic::Ordering::SeqCst);
     }
     // Before agents go down: a turn their shutdown ends must not start the next queued message.
     state.chat.stop_admitting();
+    drop(stop_monitoring);
+    for (name, task) in [("run monitor", monitor), ("watcher", watcher)] {
+        if let Err(error) = task.await {
+            eprintln!("orx up: shutting down the {name}: {error}");
+        }
+    }
     if explicit_stop {
         state.chat.interrupt_all().await;
     } else {
@@ -398,7 +404,8 @@ pub async fn run(args: UpArgs) -> Result<()> {
     if let Some(server) = control_server {
         server.shutdown().await;
     }
-    state.dashboard_lock.lock().unwrap().take();
+    state.dashboard_locks.lock().unwrap().clear();
+    served.map_err(|error| anyhow!("orx up: server error: {error}"))?;
     if restarting {
         drop(backend_lock);
         if let Err(error) = crate::commands::remote_host::ServerDescriptor::withdraw(&data_dir) {
@@ -525,7 +532,8 @@ struct AppState {
     remote_sessions: crate::commands::up_remote::RemoteSessionManager,
     remote_instance_id: Option<String>,
     stopping: Arc<AtomicBool>,
-    dashboard_lock: Arc<std::sync::Mutex<Option<DashboardLock>>>,
+    /// Both directories stay locked through the worker shutdown after a switch.
+    dashboard_locks: Arc<std::sync::Mutex<Vec<DashboardLock>>>,
     /// Fired by `POST /api/update/restart`; the serve loop relaunches on it.
     restart: Arc<tokio::sync::Notify>,
     /// Set with `restart` when the data directory changed: the engine reopens there, and no
@@ -6084,7 +6092,7 @@ async fn set_data_dir(State(state): State<AppState>, Json(req): Json<DataDirReq>
     tokio::task::spawn_blocking(move || crate::config::set_settings_data_dir(Some(path)))
         .await
         .map_err(|e| ApiError::from(anyhow!("settings task failed: {e}")))??;
-    *state.dashboard_lock.lock().unwrap() = Some(next_lock);
+    state.dashboard_locks.lock().unwrap().push(next_lock);
     state.chat.shutdown_harnesses().await;
     state.reopen.store(true, Ordering::SeqCst);
     state.restart.notify_one();
@@ -6245,7 +6253,7 @@ async fn move_data_dir(State(state): State<AppState>, Json(req): Json<DataDirReq
     // Spawn the move on a blocking task (it does synchronous FS work); forward
     // throttled progress onto the SSE broadcast, clear the flag when done.
     let flag = state.data_dir_move_in_progress.clone();
-    let dashboard_lock = state.dashboard_lock.clone();
+    let dashboard_locks = state.dashboard_locks.clone();
     let (restart, reopen) = (state.restart.clone(), state.reopen.clone());
     let target = std::path::PathBuf::from(path);
     tokio::spawn(async move {
@@ -6274,7 +6282,7 @@ async fn move_data_dir(State(state): State<AppState>, Json(req): Json<DataDirReq
 
         match result {
             Ok(Ok(outcome)) => {
-                *dashboard_lock.lock().unwrap() = Some(next_lock);
+                dashboard_locks.lock().unwrap().push(next_lock);
                 // Close any child spawned while a cross-filesystem copy ran.
                 chat.shutdown_harnesses().await;
                 chat.emit_event("datadir.move.done", json!(outcome));
@@ -12897,7 +12905,7 @@ mod tests {
             remote_sessions: crate::commands::up_remote::RemoteSessionManager::new(),
             remote_instance_id: None,
             stopping: Default::default(),
-            dashboard_lock: Default::default(),
+            dashboard_locks: Default::default(),
             restart: Default::default(),
             reopen: Default::default(),
             trackio: Default::default(),

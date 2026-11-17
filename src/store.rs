@@ -3436,17 +3436,28 @@ impl Store {
         .transpose()
     }
 
-    /// Replaces the `published` pointer, keeping every other key a newer orx stored.
+    /// Advances the published pointer by one revision, preserving the other monitor state.
     pub(crate) fn set_run_monitor_published(
         &self,
         run_id: &str,
         published: &serde_json::Value,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let tx = self.begin_immediate()?;
         let mut state = match self.run_monitor_state(run_id)? {
             Some(serde_json::Value::Object(state)) => state,
             _ => serde_json::Map::new(),
         };
+        let rev = state
+            .get("published")
+            .and_then(|pointer| pointer["summary"]["rev"].as_u64())
+            .unwrap_or_default();
+        let predecessor = published["summary"]["rev"]
+            .as_u64()
+            .and_then(|rev| rev.checked_sub(1));
+        if predecessor != Some(rev) {
+            return Ok(false);
+        }
+
         state.insert("published".into(), published.clone());
         tx.execute(
             "INSERT INTO run_monitor_state (run_id, state_json) VALUES (?1, ?2)
@@ -3454,7 +3465,7 @@ impl Store {
             params![run_id, serde_json::Value::Object(state).to_string()],
         )?;
         tx.commit()?;
-        Ok(())
+        Ok(true)
     }
 
     /// When an open signal debt is next attempted; `None` once it is settled.
@@ -11871,11 +11882,29 @@ mod tests {
     }
 
     #[test]
+    fn a_monitor_publication_cannot_replace_a_newer_pointer() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-monitor-predecessor").unwrap();
+        let first = Store::open_at(dir.path().to_path_buf()).unwrap();
+        let second = Store::open_at(dir.path().to_path_buf()).unwrap();
+        let initial = serde_json::json!({"summary": {"rev": 1}});
+        let old = serde_json::json!({"summary": {"rev": 2}, "hash": "old"});
+        let new = serde_json::json!({"summary": {"rev": 2}, "hash": "new"});
+        assert!(first.set_run_monitor_published("run", &initial).unwrap());
+        assert!(second.set_run_monitor_published("run", &new).unwrap());
+
+        assert!(!first.set_run_monitor_published("run", &old).unwrap());
+        assert_eq!(
+            first.run_monitor_state("run").unwrap().unwrap()["published"],
+            new
+        );
+    }
+
+    #[test]
     fn run_monitor_state_goes_with_its_run() {
         let dir = std::env::temp_dir().join(format!("orx-store-monitor-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
         store
-            .set_run_monitor_published("gone", &serde_json::json!({"rev": 1}))
+            .set_run_monitor_published("gone", &serde_json::json!({"summary": {"rev": 1}}))
             .unwrap();
         // An old orx's delete knows nothing of monitors.
         store

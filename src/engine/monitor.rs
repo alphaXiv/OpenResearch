@@ -1751,19 +1751,30 @@ fn remember(store: &Store, run: &str, live: bool) -> Result<()> {
     }
     cache.ended.push_back(key);
     while cache.ended.len() > ENDED_HELD {
-        if let Some(oldest) = cache.ended.pop_front() {
-            cache.slots.remove(&oldest);
-        }
+        let unused = cache
+            .ended
+            .iter()
+            .position(|key| Arc::strong_count(&cache.slots[key]) == 1);
+        let Some(oldest) = unused.and_then(|i| cache.ended.remove(i)) else {
+            break;
+        };
+        cache.slots.remove(&oldest);
     }
     Ok(())
 }
 
-/// Drops a deleted run from the cache.
+/// Drops a deleted run's slot once nobody is using it.
 fn forget(store: &Store, run: &str) -> Result<()> {
     let key = key(store, run);
     let mut cache = cache()?;
-    cache.slots.remove(&key);
     cache.ended.retain(|held| *held != key);
+    if let Some(slot) = cache.slots.get(&key) {
+        if Arc::strong_count(slot) == 1 {
+            cache.slots.remove(&key);
+        } else {
+            cache.ended.push_front(key);
+        }
+    }
     Ok(())
 }
 
@@ -1883,7 +1894,10 @@ fn reprojected(store: &Store, run: &StoredRun, now: i64) -> Result<Arc<Projectio
 
 /// Keeps every live run's monitor current: projected each second, and at once when its lifecycle
 /// changes. A run stays watched after it ends until its last signals are collected and projected.
-pub(crate) async fn keep_current(engine: Arc<super::Engine>) {
+pub(crate) async fn keep_current(
+    engine: Arc<super::Engine>,
+    mut stop: tokio::sync::watch::Receiver<()>,
+) {
     use super::bus::RunEvent;
     use tokio::sync::broadcast::error::RecvError;
     let sink = engine.clone();
@@ -1894,6 +1908,7 @@ pub(crate) async fn keep_current(engine: Arc<super::Engine>) {
     let mut watched = BTreeSet::new();
     loop {
         let changed = tokio::select! {
+            _ = stop.changed() => return,
             _ = tick.tick() => None,
             event = events.recv() => match event {
                 Ok(RunEvent::Changed { run_id, .. } | RunEvent::LogCollection { run_id }) => Some(run_id),
@@ -2146,12 +2161,13 @@ fn publish(
     }));
     let was = held.as_ref().and_then(|held| held.failed.clone());
     let cause = match projected {
-        Ok(Ok(projected)) => {
+        Ok(Ok(Some(projected))) => {
             if was.is_some() {
                 log(format_args!("run {} monitor recovered", run.id));
             }
             return Ok(projected);
         }
+        Ok(Ok(None)) => return Err(anyhow!(MONITOR_UNREAD)),
         Ok(Err(error)) => format!("{error:#}"),
         Err(panic) => panic
             .downcast_ref::<&str>()
@@ -2249,14 +2265,14 @@ fn publish(
     Err(anyhow!(MONITOR_FAILED))
 }
 
-/// One projection of the run, under its turn.
+/// One projection under the run's turn, or `None` if another publisher advanced its revision.
 fn project(
     store: &Store,
     run: &StoredRun,
     now: i64,
     sink: Option<&Sink>,
     slot: &Slot,
-) -> Result<(Arc<Projection>, Option<Value>)> {
+) -> Result<Option<(Arc<Projection>, Option<Value>)>> {
     let poisoned = || anyhow!("Run {}'s monitor is poisoned", run.id);
     let held = slot.held()?;
     #[cfg(test)]
@@ -2274,7 +2290,7 @@ fn project(
         let idle = !life.live() || now - held.evaluated_at < interval(10);
         // A live run's changes wait for the next second; an ended run's last ones are few.
         if held.stamps == stamps && (recent || idle) || recent && life.live() {
-            return Ok((held.projection.clone(), None));
+            return Ok(Some((held.projection.clone(), None)));
         }
     }
     // The status file was rewritten with nothing the projection reads changed: checked without
@@ -2293,7 +2309,7 @@ fn project(
             stamps,
             ..Entry::clone(held)
         }));
-        return Ok((held.projection.clone(), None));
+        return Ok(Some((held.projection.clone(), None)));
     }
     let fold = fold_at(store.data_dir(), &run.id, stamps[0], held.as_deref());
     let [parent, earlier] = related_checkpoints(store, &life);
@@ -2379,7 +2395,14 @@ fn project(
                 hash: hash.clone(),
                 summary: summary.clone(),
             };
-            store.set_run_monitor_published(&run.id, &published.json())?;
+            if !store.set_run_monitor_published(&run.id, &published.json())? {
+                *slot.held.lock().map_err(|_| poisoned())? = None;
+                log(format_args!(
+                    "run {} monitor revision {} changed before publication",
+                    run.id, base.rev
+                ));
+                return Ok(None);
+            }
             let mut event = json!({
                 "runId": run.id,
                 "rev": published.rev,
@@ -2456,7 +2479,7 @@ fn project(
     if let (Some(event), Some(sink)) = (event.as_ref(), sink) {
         sink(run.id.clone(), Arc::new(event.clone()));
     }
-    Ok((projection, event))
+    Ok(Some((projection, event)))
 }
 
 /// The run's whole monitor at its current `rev`, with series read again for an ended run.
@@ -4656,6 +4679,43 @@ mod tests {
             answer.expect("a reader waited on the projection under way"),
             (first["rev"].clone(), first["rev"].clone(), None)
         );
+    }
+
+    #[test]
+    fn eviction_keeps_an_ended_runs_publisher_until_its_event_leaves() {
+        let f = Fixture::new("orx-monitor-eviction");
+        let run = f.run("done", local());
+
+        let (rev, changed) = std::thread::scope(|scope| {
+            let (entered, publishing) = std::sync::mpsc::sync_channel(0);
+            let (release, resume) = std::sync::mpsc::channel();
+            let resume = Mutex::new(resume);
+            let data = f.dir.path().to_path_buf();
+            let initial = run.clone();
+            scope.spawn(move || {
+                let store = Store::open_at(data).unwrap();
+                let sink: Sink = Box::new(move |_, event| {
+                    entered.send(event["rev"].clone()).unwrap();
+                    let _ = resume.lock().unwrap().recv();
+                });
+                publish(&store, &initial, T0 + 700_000, Some(&sink)).unwrap();
+            });
+            let first = publishing.recv_timeout(Duration::from_secs(10)).unwrap();
+            for n in 0..ENDED_HELD {
+                let other = f.run_named(&format!("other-{n}"), "done", local());
+                publish(&f.store, &other, T0 + 700_000, None).unwrap();
+            }
+            f.store.set_run_status(&run.id, "failed");
+            let changed = f.store.get_run(&run.id).unwrap().unwrap();
+            let (projection, event) = publish(&f.store, &changed, T0 + 701_000, None).unwrap();
+            assert_eq!(projection.body["rev"], first);
+            assert!(event.is_none());
+            release.send(()).unwrap();
+            (first, changed)
+        });
+
+        let (_, next) = publish(&f.store, &changed, T0 + 701_000, None).unwrap();
+        assert_eq!(next.unwrap()["rev"], rev.as_u64().unwrap() + 1);
     }
 
     /// An event carries the rows a table gained, never the table.

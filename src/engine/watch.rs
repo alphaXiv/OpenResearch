@@ -6,7 +6,7 @@ mod digest;
 mod reply;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -377,10 +377,11 @@ struct Owned {
     runs: Vec<(Now, Vec<String>)>,
 }
 
-/// What the passes remember of each run they read, by run.
 #[derive(Default)]
 struct State {
     runs: HashMap<String, Seen>,
+    looking: Arc<Mutex<BTreeSet<String>>>,
+    looks: tokio::task::JoinSet<()>,
 }
 
 /// What the passes remember of one run.
@@ -559,19 +560,13 @@ async fn instrumentation(seen: &mut Seen, run: &Now, now: i64) -> Result<Option<
     Ok(queued.then_some(chat))
 }
 
-/// The chats whose looks are being taken now, one task a chat.
-fn looking() -> &'static Mutex<BTreeSet<String>> {
-    static LOOKING: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
-    LOOKING.get_or_init(Default::default)
-}
-
 fn wake() -> &'static tokio::sync::Notify {
     static WAKE: OnceLock<tokio::sync::Notify> = OnceLock::new();
     WAKE.get_or_init(tokio::sync::Notify::new)
 }
 
 /// Keeps every watched chat's runs looked at, from `orx up`.
-pub(crate) async fn keep_watching() {
+pub(crate) async fn keep_watching(mut stop: tokio::sync::watch::Receiver<()>) {
     let now = crate::store::now_ms();
     let prepared = match Store::open().and_then(|store| store.recover_watch_looks(now)) {
         Ok(prepared) => prepared,
@@ -591,18 +586,32 @@ pub(crate) async fn keep_watching() {
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
+            biased;
+            _ = stop.changed() => break,
+            result = state.looks.join_next(), if !state.looks.is_empty() => {
+                if let Some(Err(error)) = result {
+                    eprintln!("orx up: watcher: look task: {error}");
+                }
+                continue;
+            }
             _ = tick.tick() => {}
             () = wake().notified() => {}
         }
-        if let Err(error) = pass(&mut state).await {
-            eprintln!("orx up: watcher: {error:#}");
+        tokio::select! {
+            biased;
+            _ = stop.changed() => break,
+            result = pass(&mut state) => if let Err(error) = result {
+                eprintln!("orx up: watcher: {error:#}");
+            },
         }
     }
+    state.looks.shutdown().await;
 }
 
 /// Takes a chat's prepared looks one after another, oldest first.
-fn spawn_looks(chat: String) {
-    tokio::spawn(async move {
+fn spawn_looks(state: &mut State, chat: String) {
+    let looking = state.looking.clone();
+    state.looks.spawn(async move {
         loop {
             let next = Store::open().and_then(|store| store.prepared_watch_looks(&chat));
             let id = match next {
@@ -637,7 +646,7 @@ fn spawn_looks(chat: String) {
             }
             published(id);
         }
-        looking()
+        looking
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&chat);
@@ -786,7 +795,8 @@ async fn pass(state: &mut State) -> Result<()> {
                 *why = changes(state.runs.entry(run.run.id.clone()).or_default(), run, now);
             }
         }
-        if looking()
+        if state
+            .looking
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .contains(&chat_id)
@@ -826,12 +836,13 @@ async fn pass(state: &mut State) -> Result<()> {
     for chat in start {
         let has = Store::open()?.prepared_watch_looks(&chat)?;
         let fresh = !has.is_empty()
-            && looking()
+            && state
+                .looking
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .insert(chat.clone());
         if fresh {
-            spawn_looks(chat);
+            spawn_looks(state, chat);
         }
     }
     Ok(())
