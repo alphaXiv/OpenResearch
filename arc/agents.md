@@ -232,7 +232,7 @@ A completed prompt takes priority over queued approval events, cancelling reques
 | Claude Code | headless, so a bridge relays to the owning dashboard and blocks: Claude's `approve` tool on `orx mcp` |
 | Cursor, `codex exec` | nothing waits: print mode cannot prompt, so the mode maps to CLI flags |
 
-The bridge endpoint grants permissions, so it takes a per-child token that each respawn replaces. Plan mode puts a small policy in front of the bridge: read-only commands and web lookups pass, file edits are refused, and anything else asks. The read-only check is an allowlist (`src/local/harness/plan_gate.rs`), so a new read-only `orx` verb stays gated until added there.
+The bridge endpoint grants permissions, so it takes a per-child token that each respawn replaces. A Claude Code child the next server adopts keeps its token, and an approval it posts again after a restart, keyed by its tool call, takes over the card it already showed, waiting briefly for the turn to resume. Plan mode puts a small policy in front of the bridge: read-only commands and web lookups pass, file edits are refused, and anything else asks. The read-only check is an allowlist (`src/local/harness/plan_gate.rs`), so a new read-only `orx` verb stays gated until added there.
 
 **A held request never allows by accident.** A request outliving its turn is denied, an interrupted turn denies everything it was waiting on, a transport error denies, and the bridge denies an unanswered request after a long timeout. The no-output watchdog ignores a turn blocked on the user, whose thinking time is unbounded.
 

@@ -10652,7 +10652,13 @@ async fn bridge_permission(
 ) -> ApiResult {
     let decision = state
         .chat
-        .request_permission(&req.session_id, &req.token, &req.tool_name, req.tool_input)
+        .request_permission(
+            &req.session_id,
+            &req.token,
+            &req.tool_name,
+            req.tool_input,
+            req.tool_use_id.as_deref(),
+        )
         .await
         .map_err(bad_request)?;
     Ok(Json(serde_json::to_value(decision).map_err(bad_request)?))
@@ -10666,6 +10672,8 @@ struct BridgePermissionReq {
     tool_name: String,
     #[serde(default)]
     tool_input: Value,
+    #[serde(default)]
+    tool_use_id: Option<String>,
 }
 
 // --- agent ----------------------------------------------------------------
