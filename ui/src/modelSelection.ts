@@ -31,10 +31,11 @@ export function agentModelLines(harness: string, models: HarnessModel[]) {
   return [...lines.filter((line) => !line.older), ...lines.filter((line) => line.older)];
 }
 
-/** OpenCode's Auto names who reviews: the chat's own model, or the one picked in Settings. */
-export function withAutoReviewer(choices: OptionChoice[], harness: Harness | undefined, reviewModel: string | null | undefined): OptionChoice[] {
+/** OpenCode's Auto names who reviews: the chat's own model, or the one picked in Settings. A chat on a local model
+ * (one a local server was connected for) always reviews with its own. */
+export function withAutoReviewer(choices: OptionChoice[], harness: Harness | undefined, reviewModel: string | null | undefined, chatModel: string | null | undefined): OptionChoice[] {
   if (harness?.id !== "opencode") return choices;
-  const named = reviewModel && tidyModelName(harness.models.find((model) => model.id === reviewModel)?.displayName ?? modelLabel(reviewModel));
+  const named = reviewModel && !chatModel?.startsWith("orx-local-") && tidyModelName(harness.models.find((model) => model.id === reviewModel)?.displayName ?? modelLabel(reviewModel));
   return choices.map((choice) => choice.id !== "auto" ? choice : { ...choice, description: named ? m.opencode_auto_model({ model: named }) : m.opencode_auto_same_model() });
 }
 

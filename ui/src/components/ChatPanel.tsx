@@ -8814,7 +8814,7 @@ export function ChatPanel({
                   onSelect={selectModel}
                   onStartHarness={startHarness}
                   onOpenSettings={() => onSelectMainView("harnesses")}
-                  permissionChoices={activeHarness?.agentReady ? withAutoReviewer(opts?.permissionModes ?? [], activeHarness, uiState?.opencodeReviewModel) : []}
+                  permissionChoices={activeHarness?.agentReady ? withAutoReviewer(opts?.permissionModes ?? [], activeHarness, uiState?.opencodeReviewModel, composerSelection?.model) : []}
                   defaultPermissionId={opts?.defaultPermissionMode ?? null}
                   onSelectPermission={setPermissionMode}
                   reasoningChoices={activeHarness?.agentReady ? reasoning.choices : []}
