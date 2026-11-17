@@ -1785,6 +1785,10 @@ fn setup_ends_on_the_first_headlined_or_charted_point() {
     body["series"]["loss"] = json!([]);
     body["series"]["accuracy"] = json!([[1, 0.8]]);
     assert!(!in_setup(&body));
+    body["series"]["accuracy"] = json!([]);
+    body["view"]["blocks"] = json!([{ "series": [{"y": "loss"}], "phase": "train" }]);
+    body["series"]["loss"] = json!([[1, 2.0]]);
+    assert!(!in_setup(&body));
 }
 
 #[cfg(unix)]
@@ -1903,4 +1907,94 @@ async fn a_completed_result_without_a_parent_retries_an_unsupported_comparison()
     let sent: Value = serde_json::from_str(prompt.strip_prefix(DIGEST_PREAMBLE).unwrap()).unwrap();
     assert!(sent["parents"].is_null());
     assert!(sent["runs"][0]["signals"]["evaluated_cases"]["vsParentAtThisStep"].is_null());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_overlong_sentence_gets_one_retry_with_the_exact_error() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let calls_dir = crate::config::home_dir().unwrap().join("claude-calls");
+    fake_claude(
+        &calls_dir,
+        &[
+            r#"{"runs":{"r1":{"status":"ok","line":"The run is going smoothly and all results track the parent."}}}"#,
+            r#"{"runs":{"r1":{"status":"ok","line":"Loss tracks the parent."}}}"#,
+        ],
+    );
+    let store = Store::open().unwrap();
+    chat(&store, "chat", "claude-code");
+    let row = run(&store, "a", "Depth 6", "chat", LOG);
+    let id = look(&store, "chat", "ceiling", &[("a", "r1")]);
+    take(id).await.unwrap();
+    assert_eq!(calls(&calls_dir), 2);
+    let again = std::fs::read_to_string(calls_dir.join("prompt-2")).unwrap();
+    assert!(
+        again.contains("the sentence reads 59 characters with its numbers filled; keep it to 48"),
+        "{again}"
+    );
+    assert_eq!(
+        run_facts(&store, &row).unwrap()["sentence"]["template"],
+        "Loss tracks the parent."
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_setup_sentence_expires_on_the_first_research_point() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let store = Store::open().unwrap();
+    chat(&store, "chat", "claude-code");
+    let row = run(&store, "setup", "Setup", "chat", "Downloading data\n");
+    let calls_dir = crate::config::home_dir().unwrap().join("claude-calls");
+    fake_claude(
+        &calls_dir,
+        &[
+            r#"{"runs":{"r1":{"status":"ok","line":"Waiting for data."}}}"#,
+            r#"{"runs":{"r1":{"same":true}}}"#,
+            r#"{"runs":{"r1":{"status":"ok","line":"Loss tracks the parent."}}}"#,
+        ],
+    );
+    let id = look(&store, "chat", "manual", &[("setup", "r1")]);
+    take(id).await.unwrap();
+    published(id);
+    let monitor = super::super::monitor::current(&store, &row)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        monitor.summary()["sentence"]["template"],
+        "Waiting for data."
+    );
+    epochs(&store, &row, &[(2.1, 0.5)]);
+    let monitor = super::super::monitor::current(&store, &row)
+        .unwrap()
+        .unwrap();
+    assert!(
+        monitor.summary()["sentence"].is_null(),
+        "{}",
+        monitor.summary()
+    );
+    assert!(!monitor.monitor()["statusText"]
+        .as_str()
+        .unwrap()
+        .contains("Waiting for data."));
+    assert_eq!(
+        run_facts(&store, &row).unwrap()["looks"][0]["template"],
+        "Waiting for data."
+    );
+    take(look(&store, "chat", "manual", &[("setup", "r1")]))
+        .await
+        .unwrap();
+    assert_eq!(
+        calls(&calls_dir),
+        3,
+        "same cannot revive the expired setup sentence"
+    );
+    assert_eq!(
+        run_facts(&store, &row).unwrap()["sentence"]["template"],
+        "Loss tracks the parent."
+    );
 }

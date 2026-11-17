@@ -1315,7 +1315,15 @@ fn in_setup(body: &Value) -> bool {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .flat_map(|block| block["chart"].as_array().into_iter().flatten()),
+                .flat_map(|block| {
+                    block["chart"].as_array().into_iter().flatten().chain(
+                        block["series"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|series| series.get("y")),
+                    )
+                }),
         )
         .filter_map(Value::as_str)
         .all(|name| body["series"][name].as_array().is_none_or(Vec::is_empty))
@@ -1426,6 +1434,7 @@ fn basis_of(run: &Now, template: Option<&str>, mult: &Map<String, Value>, first:
     };
     json!({
         "signals": signals,
+        "setup": in_setup(&run.body),
         "parent": parent,
         "counts": counts,
         "stage": stage,
@@ -2062,6 +2071,9 @@ async fn take(id: i64) -> Result<()> {
                 if row.template.is_none() {
                     said.clear();
                 }
+                if row.basis["setup"] == true && !in_setup(&run.body) {
+                    continue;
+                }
                 if let (Some(template), Some(text)) = (&row.template, &row.text) {
                     said.push((template.clone(), text.clone()));
                 }
@@ -2370,7 +2382,7 @@ async fn take(id: i64) -> Result<()> {
         crate::local::share::find_secret(&format!("{}\n{}", first.text, read.errors.join("\n")));
     if !read.errors.is_empty() && echoed.is_none() {
         let asked = format!(
-            "\n\nYour last reply was:\n{}\nIt was not accepted: {}.\nReply again with the whole JSON.",
+            "\n\nYour last reply was:\n{}\nIt was not accepted: {}.\nFix the reported errors; shorten labels or clauses to meet the displayed-character limit, keeping tokens and required bold. Reply again with the whole JSON.",
             first.text,
             read.errors.join("; ")
         );
@@ -2421,7 +2433,9 @@ async fn take(id: i64) -> Result<()> {
         };
         let read_log = &logs[&run.run.id];
         let last = run.answered();
-        let last_template = last.and_then(|(_, row)| row.template.clone());
+        let last_template = previous[&run.run.id]
+            .last()
+            .map(|(template, _)| template.clone());
         let kept_mult = last.map_or_else(Map::new, |(_, row)| {
             row.basis["mult"].as_object().cloned().unwrap_or_default()
         });
@@ -2917,7 +2931,7 @@ fn read_facts(store: &Store, run: &StoredRun) -> Result<Value> {
         if matches!(row.result.as_deref(), Some("line" | "same" | "flag")) {
             previous = row.template.clone();
             sentence = row.template.as_ref().map(|template|
-                json!({"template": template, "t": look.done_at.unwrap_or(look.created_at), "lookId": look.id.to_string()})
+                json!({"template": template, "t": look.done_at.unwrap_or(look.created_at), "lookId": look.id.to_string(), "setup": row.basis["setup"]})
             );
         }
         error = match said {
@@ -3020,7 +3034,7 @@ pub(crate) fn status_lines(
         None if watch["state"] == "on" => lines.push(if looks == 0 {
             format!("watch    {model} watches this run; it has not looked yet.")
         } else {
-            format!("watch    {model} watches this run; its latest look has no sentence.")
+            format!("watch    {model} watches this run; it has no current sentence.")
         }),
         None => {}
     }

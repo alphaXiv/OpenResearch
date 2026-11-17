@@ -430,7 +430,7 @@ fn check_line(
         return Err(format!("use at most {MAX_TOKENS} tokens"));
     }
     let mut patterns = Vec::new();
-    for (_, token) in &found {
+    for (range, token) in &found {
         let run = match token.run() {
             Some(key) => runs
                 .iter()
@@ -454,6 +454,15 @@ fn check_line(
                 }
             }
             Token::Versus(_, name) => {
+                let after = template[range.end..]
+                    .trim_start_matches('*')
+                    .trim_start()
+                    .to_lowercase();
+                if after.starts_with("the parent") || after.starts_with("than the parent") {
+                    return Err(format!(
+                        "{{{name}.vs}} already includes 'the parent'; remove the parent suffix"
+                    ));
+                }
                 if !run.versus.contains(name) {
                     return Err(format!(
                         "{{{name}.vs}} compares with the parent, which {} has no comparison for",
@@ -713,6 +722,25 @@ mod tests {
             &render,
         );
         assert!(result.errors.is_empty(), "{:?}", result.errors);
+    }
+
+    #[test]
+    fn comparison_tokens_reject_a_repeated_parent_suffix() {
+        let run = run();
+        for line in [
+            "Loss **{val_loss}**, {val_loss.vs} the parent.",
+            "Loss **{val_loss}**, {val_loss.vs} than the parent.",
+            "Loss {val_loss}, **{val_loss.vs}** the parent.",
+            "Loss **{val_loss}**, {val_loss.vs} THE PARENT.",
+        ] {
+            let reply = json!({"runs":{"r1":{"status":"ok","line":line}}}).to_string();
+            let result = read(&reply, &[bind("r1", &run, false)], None, &render);
+            assert!(
+                result.errors.iter().any(|e| e.contains("already includes")),
+                "{line}: {:?}",
+                result.errors
+            );
+        }
     }
 
     #[test]

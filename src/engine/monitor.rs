@@ -1331,7 +1331,11 @@ fn evaluate(
             count.clone(),
         );
     }
-    let sentence = life.watch["sentence"].clone();
+    let mut watch = life.watch.clone();
+    if has_point && watch["sentence"]["setup"] == true {
+        watch["sentence"] = Value::Null;
+    }
+    let sentence = watch["sentence"].clone();
     let eta_ms = estimate
         .as_ref()
         .filter(|e| e["pending"] == false)
@@ -1387,6 +1391,7 @@ fn evaluate(
     let text = status_text(
         life,
         fold,
+        &watch,
         &StatusFacts {
             signals: &view["signals"],
             whole,
@@ -1436,7 +1441,7 @@ fn evaluate(
         "cost": cost,
         "quote": null,
         "before": before,
-        "watch": watch_body(&life.watch),
+        "watch": watch_body(&watch),
         "sentence": sentence,
         "flag": open.or(life.flags.last()),
         "flags": life.flags,
@@ -2547,7 +2552,7 @@ struct StatusFacts<'a> {
     bindings: &'a Value,
 }
 
-fn status_text(life: &Lifecycle, fold: &Fold, facts: &StatusFacts) -> String {
+fn status_text(life: &Lifecycle, fold: &Fold, watch: &Value, facts: &StatusFacts) -> String {
     let snapshot = fold.snapshot.as_deref();
     let mut lines = Vec::new();
     let mut first = format!("{}  {}", life.slug, life.state);
@@ -2571,7 +2576,7 @@ fn status_text(life: &Lifecycle, fold: &Fold, facts: &StatusFacts) -> String {
         lines.push("revising The agent is repairing this experiment and will run it again.".into());
     }
     lines.extend(super::watch::status_lines(
-        &life.watch,
+        watch,
         facts.bindings,
         facts.signals,
         facts.versus,
