@@ -24,6 +24,14 @@ export interface PickerAgent {
 }
 
 const FREE_PROVIDER = "opencode";
+/** The prefix of the providers openresearch.sh's model feed hosts, whose models are free like OpenCode's own. */
+const HOSTED_PREFIX = "openresearch-";
+
+/** The OpenCode provider whose agent runs `model`: Free Models for the feed's hosted ones. */
+const modelProvider = (model: string) => {
+  const provider = model.split("/")[0];
+  return provider.startsWith(HOSTED_PREFIX) ? FREE_PROVIDER : provider;
+};
 
 /** The icon a row of Settings → Agents shows, and the logo its brand icon draws. */
 interface AgentMark {
@@ -64,11 +72,11 @@ export function foundProviderMark(provider: FoundProvider): AgentMark & { name: 
  * stands behind its providers.
  */
 export function pickerAgents(harnesses: Harness[], providers: OpenCodeProvider[], endpoints: LocalModelConnection[], kept?: Picked | null): PickerAgent[] {
-  const keptProvider = kept?.harness === "opencode" ? kept.model?.split("/")[0] : undefined;
+  const keptProvider = kept?.harness === "opencode" ? kept.model && modelProvider(kept.model) : undefined;
   const off = (h: Harness) => h.off && !(kept && h.id === kept.harness && (h.profile?.id ?? null) === (kept.profile ?? null));
   return sortHarnesses(harnesses).filter((h) => h.agentReady && (h.id === "opencode" || !off(h))).flatMap((h) => {
     if (h.id !== "opencode") return [{ key: harnessKey(h), name: h.profile?.name ?? harnessDisplayName(h), ...harnessMark(h), harness: h }];
-    const used = new Set(h.models.map((model) => model.id.split("/")[0]));
+    const used = new Set(h.models.map((model) => modelProvider(model.id)));
     const named = new Set([...providers.map((provider) => provider.id), ...endpoints.map((connection) => connection.id), FREE_PROVIDER]);
     // A server from before found providers names them only in its model ids.
     const found = h.foundProviders ?? [...used].filter((provider) => !named.has(provider)).map((id): FoundProvider => ({ id, sources: ["catalog"], removable: false }));
@@ -89,7 +97,7 @@ export function pickerAgents(harnesses: Harness[], providers: OpenCodeProvider[]
 /** Which of `agents` runs `model` on harness entry `h`. */
 export function agentFor(agents: PickerAgent[], h: Harness, model: string | null): PickerAgent | undefined {
   if (h.id !== "opencode") return agents.find((agent) => agent.key === harnessKey(h));
-  const provider = model?.split("/")[0];
+  const provider = model && modelProvider(model);
   return agents.find((agent) => agent.harness.id === "opencode" && agent.provider === provider);
 }
 
@@ -97,7 +105,7 @@ export function agentFor(agents: PickerAgent[], h: Harness, model: string | null
  * each offer their own. */
 export function agentOffers(agent: PickerAgent, kept?: string | null): ModelOffer<PickerAgent>[] {
   const h = agent.harness;
-  const models = agent.provider ? h.models.filter((model) => model.id.startsWith(`${agent.provider}/`)) : h.models;
+  const models = agent.provider ? h.models.filter((model) => modelProvider(model.id) === agent.provider) : h.models;
   return models.filter((model) => !model.parsed.superseded || model.id === kept).map((model) => ({ tile: agent, model }));
 }
 

@@ -75,7 +75,9 @@ browser sign-ins use its integration API and orx's isolated database. Each
 attempt holds a server child and database lease until completion, cancellation,
 failure or expiry, capped at ten minutes; removing its provider signs it out.
 OpenCode's free models remain available until switched off. The picker lists
-them under Free, the ones openresearch.sh's model feed features first, and marks
+them under Free, the ones openresearch.sh's model feed features first, with the
+models of the endpoints the feed hosts (`src/local/local_models.rs` gives OpenCode
+each as an `openresearch-` provider, so they are free by their id), and marks
 New for a week the models models.dev dates as released. The open chat's model
 button points once at the newest release from Anthropic, OpenAI or Google, then
 at the free model the feed nudges toward while free models are on, one a launch.
