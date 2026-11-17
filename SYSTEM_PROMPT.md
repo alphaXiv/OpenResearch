@@ -41,7 +41,7 @@ When asked to run and summarize an experiment, load `orx-compute` and
 `orx-results` before launching: execution and interpretation are separate skill
 areas. Use `orx-logs` when retrieving supporting output.
 
-When the user names a duration, declare the child's actual stage totals, then
+When the user names a duration, save the child's actual stage plan, then
 run `orx exp run <expId> --estimate`. Adjust command steps and plan totals and
 estimate again until it fits. Say the estimated number and hardware assumption
 in one line before launching. If the total says "at least", calibrate its

@@ -3,32 +3,17 @@ name: orx-experiment-runs
 description: "Make a run followable from launch to result: declare its stages, report progress and the measures that answer its question, write its view against the parent, read a log you can't edit with patterns, brief the watcher and settle its flags. Use before a baseline's first launch, when a run's progress or chart misleads, when a flag wakes you, and when the user asks to change what a run shows."
 ---
 
-Before launching, follow sections 1–7 in order. Children inherit the view,
-patterns, plan and rules, but changed arguments must still report their actual
-totals. After removing or adding commands in a child, update its reported stage
-plan to match before launch. Use sections 8–10 only when changing a live view
-or handling rules and flags.
+Before launching, follow sections 1–6 in order; after launching, follow section 7.
+Children inherit the view, patterns, plan and rules, but changed arguments
+must still report their actual totals. After removing or adding commands in
+a child, update its reported stage plan to match before launch. Use sections
+8–10 only when changing a live view or handling rules and flags.
 
 Before sizing a child, read its parent's measured runtime:
 
 ```sh
 orx exp status <parentExpId>
 ```
-
-When the user names a duration, declare this child's actual stage totals (§2), then run:
-
-```sh
-orx exp run <expId> --estimate
-```
-
-Adjust the command's steps and the plan totals, then estimate again until the
-total fits the requested range. Before launching, say the estimated number
-and hardware assumption in one line. A total that says "at least" leaves
-stages untimed: calibrate them before claiming the run fits. Never replace
-missing timings with a guess. `--command '…'` previews explicit nanochat
-`--num-iterations` counts without saving the command. Before launching, use
-that command when creating the child (`--run-command`) and save its matching
-plan.
 
 ## 1. Read the entry point
 
@@ -63,6 +48,24 @@ A stage that recurs is listed again where it recurs, never twice in a row.
 The bar times each stage by the parent's run of it. A stage the run reaches
 outside the plan shows as unplanned, and a planned stage it ends without shows
 as skipped: both mean the plan is wrong, so fix it.
+
+Save the plan in `plan.json`, omitting totals that only the run can know:
+
+```sh
+orx exp view set <expId> --config plan.json
+```
+
+When the user names a duration, run:
+
+```sh
+orx exp run <expId> --estimate
+```
+
+Adjust the command's steps and plan totals, save the plan, then estimate
+again until the total fits the requested range. Before launching, say the
+estimated number and hardware assumption in one line. A total that says
+"at least" leaves stages untimed: calibrate them before claiming the run fits. Never replace
+missing timings with a guess.
 
 ## 3. Report progress and measures
 
@@ -205,8 +208,9 @@ orx exp view show <runId>
 Read this instead of guessing from the view you wrote. It describes the
 collected stage and plan, watcher and flag, time left, charts and parent
 ghosts, stats, and names or patterns not reported yet. It reads the card's
-stored data, not the user's screen. Fix its view with `orx exp view set`
-while the run continues, then run `view show` again to confirm the change.
+stored data, not the user's screen. Fix missing or unused charts now with
+`orx exp view set`; its changes apply while the run continues. Never defer a
+view fix to the next relaunch. Then run `view show` again to confirm the change.
 
 `view check` folds the real log and names missing reports, unmatched patterns
 and disagreements with the plan. If the log is still empty, check once more
