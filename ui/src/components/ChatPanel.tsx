@@ -8392,8 +8392,21 @@ export function ChatPanel({
             />
           )}
           <RemoteConnectionStrip />
-          <div inert={connection !== null} className={`composer-frame flex min-h-0 flex-col rounded-xl bg-surface${connection ? " opacity-60" : ""}`} data-onboarding="composer">
-            <div className={`composer-box relative flex min-h-0 flex-col rounded-xl border ${bashMode && !asking ? "border-accent-amber" : "border-border"} bg-background shadow-control-subtle`}>
+          {questions.part && (
+            <QuestionDock
+              part={questions.part}
+              index={questions.index}
+              total={questions.total}
+              picked={questions.answer.picked}
+              disabled={questions.busy}
+              hotkeys={mainView === "chat" && !contentInert && !contentLoading && !contentError && !historyLoading && connection === null
+                && (embedded ? searchRegion === "right" : searchRegion !== "right")}
+              searchTarget={focusedMessage?.partId === questions.part.id}
+              onPick={questions.pick}
+            />
+          )}
+          <div inert={connection !== null} className={`composer-frame flex flex-col rounded-xl bg-surface${connection ? " opacity-60" : ""}`} data-onboarding="composer">
+            <div className={`composer-box relative flex flex-col rounded-xl border ${bashMode && !asking ? "border-accent-amber" : "border-border"} bg-background shadow-control-subtle`}>
               {unconfirmedSend !== null && (
                 <div id={unconfirmedSendId} role="alert" className="flex items-start gap-2 pt-2 px-3 text-sm text-text">
                   <span className="flex-1" dir="auto">{m.chat_send_unconfirmed({ error: ltr(unconfirmedSend) })}</span>
@@ -8467,19 +8480,6 @@ export function ChatPanel({
                 <div className="composer-settings-error pt-1.5 px-3 pb-0 text-sm text-accent-red" role="alert">
                   {settingsError}
                 </div>
-              )}
-              {questions.part && (
-                <QuestionDock
-                  part={questions.part}
-                  index={questions.index}
-                  total={questions.total}
-                  picked={questions.answer.picked}
-                  disabled={questions.busy}
-                  hotkeys={mainView === "chat" && !contentInert && !contentLoading && !contentError && !historyLoading && connection === null
-                    && (embedded ? searchRegion === "right" : searchRegion !== "right")}
-                  searchTarget={focusedMessage?.partId === questions.part.id}
-                  onPick={questions.pick}
-                />
               )}
               {/* The answer lines up with the question's text above it. */}
               <div className={`composer-input flex min-w-0 items-end ${asking ? "[--composer-pad-x:1rem]" : ""}`}>

@@ -43,7 +43,7 @@ async function asked(prompts, respond = () => ({ ok: true })) {
     transcripts: { s: [userMessage("u1", "free some space"), assistantMessage("a1", parts, "u1")] },
     routes: { "POST /api/chat/sessions/s/respond": respond },
   });
-  const box = () => document.querySelector('[data-onboarding="composer"]');
+  const box = () => document.querySelector(".composer");
   return {
     /** The open question's text, or undefined once none is open. */
     question: () => box().querySelector('[role="group"] [id]')?.textContent,
