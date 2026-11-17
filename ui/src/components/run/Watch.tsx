@@ -41,7 +41,7 @@ export function Watch({ monitor, runId, agent, tone, live, now }: { monitor: Pic
   const { watch } = monitor;
   const signals = monitor.view.signals;
   const looks = watch.looks.filter((look) => look.said !== "error" && look.said !== "interrupted");
-  const flags = monitor.flags ?? [];
+  const flags = monitor.flags;
   // A flag a tripwire or a rule raised stands in the journal beside the looks, in time order.
   const rows = journalRows([...watch.looks, ...flags.filter((flag) => !flag.lookId).map(flagLook)].sort((a, b) => a.at - b.at));
   const lastLook = watch.looks.at(-1)?.id;
@@ -94,7 +94,7 @@ export function Watch({ monitor, runId, agent, tone, live, now }: { monitor: Pic
                   {row.look.omitted && (
                     <span className="block text-xs text-ink-subtext">{autoDir(row.look.omitted)}</span>
                   )}
-                  {row.look.withheld?.map((note) => (
+                  {row.look.withheld.map((note) => (
                     <span key={note} className={cn("block text-xs", TONE_INK.flag)}>{autoDir(note)}</span>
                   ))}
                   {row.since && (

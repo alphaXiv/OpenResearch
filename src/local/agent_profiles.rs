@@ -943,22 +943,15 @@ mod tests {
         let home = prepare(&claude, "claude-code").unwrap();
         std::fs::write(home.join(".credentials.json"), "work-secret").unwrap();
         std::fs::write(home.join(".claude.json"), br#"{"primaryApiKey":"work"}"#).unwrap();
-        // A data directory from an earlier build linked the account's files into the home.
         let one_shot = crate::store::data_dir()
             .join("agents/one-shot")
             .join(&claude);
-        std::fs::create_dir_all(&one_shot).unwrap();
-        for file in [".claude.json", ".credentials.json"] {
-            native_store::create_symlink(&home.join(file), &one_shot.join(file)).unwrap();
-            std::fs::write(one_shot.join(format!("{file}.orx-managed-link")), "").unwrap();
-        }
         assert_eq!(
             native_store::prepare_claude_one_shot(&home, &claude).unwrap(),
             one_shot
         );
         login_env(&claude).unwrap();
         assert!(!one_shot.join(".credentials.json").exists());
-        assert!(!one_shot.join(".claude.json.orx-managed-link").exists());
         assert_eq!(
             std::fs::read(home.join(".credentials.json")).unwrap(),
             b"work-secret"

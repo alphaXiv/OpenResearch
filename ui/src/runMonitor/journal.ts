@@ -30,7 +30,7 @@ export interface JournalRow {
 }
 
 /** A look that says something beyond its words: where it left a credential out, or the flag it was noted under. */
-const ownRow = (look: Look) => Boolean(look.withheld?.length || look.notedUnder);
+const ownRow = (look: Look) => Boolean(look.withheld.length || look.notedUnder);
 
 /**
  * The journal lists changes, not looks, newest first: looks that kept the words before them fold into that row,
@@ -56,7 +56,7 @@ export function journalRows(looks: Look[]): JournalRow[] {
 
 /** A flag no look raised, a tripwire's or a rule's, as a row of the journal. */
 export function flagLook(flag: Flag): Look {
-  return { id: `flag:${flag.id}`, at: flag.at, kind: "change", whole: flag.whole, said: "flag", text: flag.detail, template: null, bindings: null, with: [], why: "" };
+  return { id: `flag:${flag.id}`, at: flag.at, kind: "change", whole: flag.whole, said: "flag", text: flag.detail, template: null, bindings: null, with: [], why: "", stage: null, withheld: [] };
 }
 
 /** The row a flag stands under: its look's, or its own. */

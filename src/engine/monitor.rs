@@ -2208,7 +2208,9 @@ fn publish(
         .unwrap_or_else(|| {
             json!({
                 "whole": null, "stage": null, "headline": null, "sentence": null,
+                "stageOrder": {"index": null, "count": null, "first": null},
                 "bindings": {}, "signals": {}, "limitEndsAt": null, "flag": null,
+                "etaFloor": false, "setup": null, "logError": null,
                 "generation": "", "asOf": run.updated_at, "rev": 0,
             })
         });
@@ -4518,13 +4520,7 @@ mod tests {
             ..folded(&declared(0..=10, 100))
         });
         super::monitor(&f.store, &template).unwrap();
-        let mut stored = f.store.run_monitor_state("r0").unwrap().unwrap();
-        // What an older orx published: another hash, and no field it did not know.
-        stored["published"]["hash"] = json!("older");
-        stored["published"]["summary"]
-            .as_object_mut()
-            .unwrap()
-            .remove("stage");
+        let stored = f.store.run_monitor_state("r0").unwrap().unwrap();
         let checkpoint = folded(&declared(0..=10, 100));
         let history = f.store.begin().unwrap();
         let runs: Vec<StoredRun> = (1..=2000)
@@ -4547,13 +4543,12 @@ mod tests {
         for run in &runs {
             let listed = current(&f.store, run).unwrap().unwrap();
             assert_eq!(listed.summary()["tone"], "done");
-            assert_eq!(listed.summary().get("stage"), None, "kept as it was stored");
         }
         assert_eq!(CHECKPOINT_READS.with(std::cell::Cell::get), reads);
         assert_eq!(
             f.store.run_monitor_state("r2000").unwrap().unwrap(),
             stored,
-            "an upgrade rewrites no ended run"
+            "listing rewrites no ended run"
         );
 
         for run in &runs[..100] {

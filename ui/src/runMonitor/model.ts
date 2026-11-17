@@ -183,7 +183,7 @@ export const namedStages = (monitor: RunMonitor) => monitor.phases.length > 1 &&
 /** The unsettled flag as the newer of the summary and the monitor states it. */
 export function statedFlag(run: Run, fetched: RunMonitor | null): RunMonitorSummary["flag"] {
   if (!fetched || monitorBehind(run.monitor, fetched)) return run.monitor?.flag ?? null;
-  const flag = fetched.flags?.find((flag) => flag.id === fetched.flagId);
+  const flag = fetched.flags.find((flag) => flag.id === fetched.flagId);
   return flag && unsettled(flag.state) ? { id: flag.id, state: flag.state } : null;
 }
 
@@ -267,7 +267,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
 
   const stated = statedFlag(run, fetched);
   // A flag's words and evidence never change, so a lagging monitor still supplies them for the same flag.
-  const flag = stated && { id: stated.id, state: stated.state, record: fetched?.flags?.find((flag) => flag.id === stated.id) ?? null };
+  const flag = stated && { id: stated.id, state: stated.state, record: fetched?.flags.find((flag) => flag.id === stated.id) ?? null };
   const needsChoice = flag?.state === "waiting";
   const looking = flag?.state === "waking" || flag?.state === "agent_looking" || flag?.state === "asking";
 

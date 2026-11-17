@@ -111,6 +111,8 @@
         "kind": "ceiling",
         "bindings": { "loss": 2.6 },
         "with": [],
+        "stage": null,
+        "withheld": [],
         "why": "Loss: new output since the last look"
       },
       {
@@ -123,6 +125,8 @@
         "kind": "change",
         "bindings": { "loss": "NaN" },
         "with": [],
+        "stage": null,
+        "withheld": [],
         "why": "Loss: Loss is no longer a number at 1400"
       }
     ],
@@ -152,7 +156,8 @@
         "byteTo": 7839
       },
       "state": "waiting",
-      "mode": "copilot"
+      "source": "look",
+      "lookId": "l2"
     }
   ],
   "revising": false,

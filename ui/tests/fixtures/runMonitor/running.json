@@ -107,6 +107,8 @@
         "kind": "ceiling",
         "bindings": { "loss": 2.6 },
         "with": [],
+        "stage": null,
+        "withheld": [],
         "why": "Loss: new output since the last look"
       }
     ],

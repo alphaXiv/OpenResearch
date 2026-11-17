@@ -123,9 +123,9 @@ export interface Look {
   /** What made it due, in English, for the record. */
   why: string;
   /** The stage the run was in, whose bar `whole` is a share of when the run has no plan. */
-  stage?: string | null;
-  /** Where this look first left out what looks like a credential, in English; absent from an older server. */
-  withheld?: string[];
+  stage: string | null;
+  /** Where this look first left out what looks like a credential, in English. */
+  withheld: string[];
   /** What this look left out to keep within its token budget, in English; absent when it left nothing out. */
   omitted?: string | null;
   /** When the flag was raised that was open as this look flagged, which noted it instead; absent when none was. */
@@ -162,8 +162,8 @@ export interface Flag {
     /** The run was stopped some other way, so this flag had nothing left to choose. */
     moot?: boolean;
   };
-  /** What raised it: a look of the watcher, a check orx makes itself, or a rule that asks; absent from an older server. */
-  source?: "look" | "tripwire" | "rule";
+  /** What raised it: a look of the watcher, a check orx makes itself, or a rule that asks. */
+  source: "look" | "tripwire" | "rule";
   /** The look that raised it, which the journal shows it under. */
   lookId?: string;
   /** What later looks flagged while this one was open, oldest first; absent when none did. */
@@ -193,9 +193,9 @@ export interface StageOrder {
 export interface RunMonitorSummary {
   tone: "starting" | "running" | "flag" | "done" | "failed" | "stopped" | "revising";
   whole: number | null;
-  /** Where the run stands in its current stage, so a line can say it without the full monitor; absent from an older server. */
-  stage?: { name: string; done: number | null; of: number | null; unit: string | null } | null;
-  stageOrder?: StageOrder;
+  /** Where the run stands in its current stage, so a line can say it without the full monitor. */
+  stage: { name: string; done: number | null; of: number | null; unit: string | null } | null;
+  stageOrder: StageOrder;
   headline: { name: string; label: string; value: SignalValue } | null;
   sentence: Sentence | null;
   /** Each referenced signal, `signal.vs` as the parent comparison, and `count:"pattern"` keys. */
@@ -213,7 +213,7 @@ export interface RunMonitorSummary {
   /** Present until a headline or chart signal has its first point. */
   setup: Setup | null;
   /** For a failed run that recorded no message, the line in its log that says why. */
-  logError?: string | null;
+  logError: string | null;
   rev: number;
   generation: string;
   asOf: number;
@@ -328,7 +328,7 @@ export interface RunMonitor {
   /** `rows` holds the parent's tables a table with `vs` compares with, matched by their first column. */
   parent: { runId: string; phase: string | null; series: Record<string, Point[]>; rows?: Record<string, Record<string, SignalValue>[]> } | null;
   /** For a failed run that recorded no message, the line in its log that says why. */
-  logError?: string | null;
+  logError: string | null;
   /** A stage whose steps take at least twice as long as those of the run that timed it: how many times, against which run. */
   pace?: { times: number; than: "parent" | "earlier" } | null;
   /** A plan that counts work the run reports only as rows, with no step for its bar to move by. */
@@ -344,13 +344,13 @@ export interface RunMonitor {
   watch: Watch;
   sentence: Sentence | null;
   flagId: string | null;
-  /** Every flag raised on the run, oldest first, with what became of it; absent from an older server. */
-  flags?: Flag[];
-  setup?: Setup | null;
+  /** Every flag raised on the run, oldest first, with what became of it. */
+  flags: Flag[];
+  setup: Setup | null;
   /** The chat's agent is repairing the experiment after this stopped run. */
   revising: boolean;
   /** What the watcher is told of the experiment, label by label. */
-  brief?: { label: BriefLabel; text: string }[];
+  brief: { label: BriefLabel; text: string }[];
   rules: RunRule[];
   /** Exactly what `orx exp status` prints for the run. */
   statusText: string;
