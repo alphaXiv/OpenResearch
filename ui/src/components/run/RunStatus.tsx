@@ -87,7 +87,7 @@ export function RunStatus({ model, label, descriptionId, onOpenRunPage }: {
         <Popover.Portal container={portalContainer}>
           <Popover.Positioner side="top" align="start" anchor={() => trigger.current?.closest<HTMLElement>("[data-run-frame]") ?? trigger.current} sideOffset={6} collisionPadding={12} className="z-50">
             <Popover.Popup initialFocus={false} finalFocus={false} onKeyDown={onKeyDown}
-              className="w-80 max-w-[calc(100vw-1.5rem)] max-h-(--available-height) overflow-y-auto rounded-lg border border-border bg-background px-4 py-3.5 text-text shadow-menu outline-none"
+              className="w-96 max-w-[calc(100vw-1.5rem)] max-h-(--available-height) overflow-y-auto rounded-lg border border-border bg-background px-4 py-3.5 text-text shadow-menu outline-none"
             >
               <Popover.Title className="m-0 text-sm font-medium">
                 {onOpenRunPage ? <Button variant="ghost" role="link" className="tool-target min-h-6 w-full justify-start gap-1 whitespace-normal p-0 text-start text-sm font-medium"
@@ -98,7 +98,7 @@ export function RunStatus({ model, label, descriptionId, onOpenRunPage }: {
                 <span className="shrink-0"><BackendLogo kind={kind} size={14} /></span>
                 <span>{backendName(kind)}{compute && <> · {compute}</>}</span>
               </Popover.Description>}
-              {(parent || model.run.startedAt != null || experiment?.parentExperimentId && model.run.commitSha) && <div className="mt-1.5 flex flex-wrap items-baseline gap-x-1.5 gap-y-1 text-xs text-ink-subtext [&>*+*]:before:me-1.5 [&>*+*]:before:content-['·']">
+              {(parent || model.run.startedAt != null || experiment?.parentExperimentId && model.run.commitSha) && <div className="mt-1.5 flex flex-wrap items-baseline gap-x-1 gap-y-1 text-xs text-ink-subtext [&>*+*]:before:me-1 [&>*+*]:before:content-['·']">
                 {parent && <span>{m.exp_hover_card_from()} {autoDir(parent.slug)}</span>}
                 <RunDiffStat runId={experiment?.parentExperimentId && model.run.commitSha ? model.run.id : null} parentSlug={parent?.slug ?? null} />
                 {model.run.startedAt != null && <span>{m.history_started({ time: ltr(fmtClock(model.run.startedAt)) })}</span>}
