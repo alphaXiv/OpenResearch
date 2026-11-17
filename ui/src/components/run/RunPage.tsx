@@ -90,7 +90,7 @@ export function RunPage({ run, name, chatSessionId, now }: { run: Run; name: str
       {!model.pre && (
         <div className={cn("mt-7 flex flex-col gap-8", !data && "min-h-40")} aria-busy={monitor.status === "loading"}>
           {!data && monitor.status === "loading" && <HeadlineStat model={model} />}
-          {data && blocks.map((block, index) => <Block key={index} monitor={data} block={block} size="page" projectId={run.projectId} tone={model.tone} live={model.live} />)}
+          {data && blocks.map((block, index) => <Block key={index} monitor={data} block={block} size="page" tone={model.tone} live={model.live} />)}
           {empty && <p className="m-0 text-sm text-ink-subtext">{empty}</p>}
         </div>
       )}

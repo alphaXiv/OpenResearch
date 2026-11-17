@@ -2172,6 +2172,9 @@ export function createApi(
       `/api/projects/${projectId}/files/file?path=${encodeURIComponent(path)}`,
     );
 
+  const runImageUrl = (runId: string, path: string, version: string) =>
+    url(`/api/runs/${encodeURIComponent(runId)}/media?path=${encodeURIComponent(path)}&v=${encodeURIComponent(version)}`);
+
   /** Image parts store a server-minted file name; this is where it's served. */
   const chatAttachmentUrl = (name: string) =>
     url(`/api/chat/attachments/${encodeURIComponent(name)}`);
@@ -3255,6 +3258,7 @@ export function createApi(
     overleafUploadUrl,
     trackioRunUrl,
     artifactUrl,
+    runImageUrl,
     chatAttachmentUrl,
     listProjects,
     listProjectActivity,

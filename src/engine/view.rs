@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 /// The elements this orx draws; grows as the slices that feed new blocks land.
 pub(crate) const ELEMENTS: &[&str] = &[
-    "signal", "view", "chart", "series", "stats", "table", "text", "cells", "bars",
+    "signal", "view", "chart", "series", "stats", "table", "text", "cells", "bars", "media",
 ];
 
 const MAX_BYTES: usize = 64 * 1024;
@@ -491,6 +491,11 @@ impl Parser<'_> {
                 .chain(BLOCK.iter())
                 .copied()
                 .collect(),
+            "media" => ["glob", "last"]
+                .iter()
+                .chain(BLOCK.iter())
+                .copied()
+                .collect(),
             "signal" => return Err(self.problem(
                 node,
                 "<signal> goes before <view>, not inside it: move it above <view> and keep it, \
@@ -500,7 +505,7 @@ impl Parser<'_> {
             _ => {
                 return Err(self.problem(
                     node,
-                    format!("<{kind}> is not a block; a view holds chart, stats, table, text, cells or bars"),
+                    format!("<{kind}> is not a block; a view holds chart, stats, table, text, cells, bars or media"),
                 ))
             }
         };
@@ -585,6 +590,31 @@ impl Parser<'_> {
                     block.insert("by".into(), json!(column));
                 }
                 block.insert(kind.into(), json!(table));
+            }
+            "media" => {
+                let glob = attributes.get("glob").ok_or_else(|| {
+                    self.problem(
+                        node,
+                        "<media> needs glob=\"samples/*.png\" relative to the run's artifacts",
+                    )
+                })?;
+                if !super::media::valid_glob(glob.value()) {
+                    return Err(self.attribute_problem(
+                        glob,
+                        format!(
+                            "glob needs a run-relative path up to {} bytes with one * in the filename",
+                            super::media::MAX_PATH
+                        ),
+                    ));
+                }
+                let limit = super::media::LAST as u64;
+                let last = attributes
+                    .get("last")
+                    .map(|last| self.integer(last, 1..=limit))
+                    .transpose()?
+                    .unwrap_or(limit);
+                block.insert("media".into(), json!(glob.value()));
+                block.insert("last".into(), json!(last));
             }
             _ => {
                 let Some(name) = attributes.get("name") else {
@@ -948,6 +978,17 @@ pub(crate) fn compile(markup: &str) -> Result<Compiled, Problem> {
         return Err(parser.problem(
             blocks[MAX_BLOCKS],
             format!("a view holds at most {MAX_BLOCKS} blocks"),
+        ));
+    }
+    let media_limit = super::media::BLOCKS;
+    if let Some(extra) = blocks
+        .iter()
+        .filter(|node| node.has_tag_name("media"))
+        .nth(media_limit)
+    {
+        return Err(parser.problem(
+            *extra,
+            format!("a view holds at most {media_limit} media blocks"),
         ));
     }
     let blocks = blocks
@@ -1602,13 +1643,25 @@ pub(crate) fn check(
             .map(|p| json!({"name": p.name, "done": p.done, "of": p.of, "unit": p.unit, "source": p.source}))
             .collect();
     }
-    report["disagrees"] = super::monitor::monitor(store, &row)?.1["disagrees"].take();
+    let mut monitor = super::monitor::monitor(store, &row)?.1;
+    report["disagrees"] = monitor["disagrees"].take();
     if let Some(markup) = report["markup"].as_str().map(str::to_owned) {
         let compiled =
             compile(&markup).map_err(|problem| Refusal::Invalid(problem.text(&name, &fix)))?;
         let pending = compiled
             .check(&seen)
             .map_err(|problem| Refusal::Invalid(problem.text(&name, &fix)))?;
+        if compiled.tree["blocks"]
+            .as_array()
+            .is_some_and(|blocks| blocks.iter().any(|block| block["media"].is_string()))
+        {
+            report["media"] = if compiled.tree == monitor["view"] {
+                monitor["media"].take()
+            } else {
+                let backend = super::media::backend(store, &row)?;
+                super::media::project(store, &row, &backend, &compiled.tree)
+            };
+        }
         report["tree"] = compiled.tree;
         report["pending"] = json!(pending);
     }
@@ -2071,13 +2124,16 @@ pub(crate) fn shown(
                 )
             })
             .unwrap_or_default();
-        for kind in ["table", "media"] {
-            if block.get(kind).is_some() {
-                lines.push(format!("{kind}{scope}: {block}"));
-                if let Some(table) = block[kind].as_str().filter(|_| kind == "table") {
-                    lines.push(format!("  rows: {}", monitor["rows"][table]));
-                }
-            }
+        if let Some(glob) = block["media"].as_str() {
+            let last = block["last"].as_u64().unwrap_or_default() as usize;
+            let active = !super::Phase::parse(&run.status).is_some_and(super::Phase::is_terminal);
+            let shown =
+                super::media::describe(glob, &monitor["media"][glob], last, active, &run.id);
+            lines.push(format!("media{scope} {glob}: {shown}"));
+        }
+        if let Some(table) = block["table"].as_str() {
+            lines.push(format!("table{scope}: {block}"));
+            lines.push(format!("  rows: {}", monitor["rows"][table]));
         }
         if let Some(template) = block["text"].as_str() {
             let text =
@@ -2645,6 +2701,37 @@ mod tests {
     }
 
     #[test]
+    fn media_globs_are_run_relative_and_bounded() {
+        let compiled = compile(r#"<view><media glob="samples/*.png" last="6" /></view>"#).unwrap();
+        assert_eq!(
+            compiled.tree["blocks"][0],
+            json!({"media": "samples/*.png", "last": 6})
+        );
+        for glob in [
+            "/samples/*.png",
+            "../*.png",
+            "samples/../*.png",
+            "*/sample.png",
+            "samples/**.png",
+            "samples/?.png",
+            "samples/[ab].png",
+            "C:/*.png",
+            "samples//*.png",
+            "samples/image.png",
+        ] {
+            let problem = compile(&format!(r#"<view><media glob="{glob}" /></view>"#)).unwrap_err();
+            assert!(problem.message.contains("glob"), "{glob}: {problem:?}");
+        }
+        for last in ["0", "7"] {
+            let problem = compile(&format!(
+                r#"<view><media glob="*.png" last="{last}" /></view>"#
+            ))
+            .unwrap_err();
+            assert!(problem.message.contains("last"), "{problem:?}");
+        }
+    }
+
+    #[test]
     fn charts_draw_the_parent_unless_the_view_turns_it_off() {
         let default = compile(r#"<view><chart y="loss"/></view>"#).unwrap().tree;
         assert_eq!(default["blocks"][0]["ghost"], "parent");
@@ -3160,6 +3247,12 @@ mod tests {
 
     #[test]
     fn each_mistake_says_where_and_what() {
+        let unknown = problem("<view><html/></view>");
+        assert_eq!((unknown.line, unknown.column), (1, 7));
+        assert!(unknown
+            .message
+            .starts_with("unknown element \"html\"; allowed: "));
+
         let cases = [
             ("<view>\n  <chart y=\"loss\" scale=\"log\"/>\n</view>", 2, 19, "unknown attribute \"scale\" on <chart>; allowed: y, x, from, by, x-scale, y-scale, x-range, mark, ghost, phase, title"),
             ("<signal name=\"loss\" digits=\"13\"/><view/>", 1, 21, "digits=\"13\" must be a whole number from 0 to 12"),

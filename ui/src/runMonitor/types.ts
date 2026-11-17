@@ -91,7 +91,7 @@ export type ViewBlock = { phase?: string; title?: string } & (
   | { table: string; columns: string[]; last?: number; vs?: "parent" | VersusBy }
   | { bars: string; by: string }
   | { cells: string }
-  | { media: string; last?: number; columns?: number; size?: "s" | "m" | "l"; caption?: string }
+  | { media: string; last: number }
   | { text: string }
 );
 
@@ -288,12 +288,17 @@ export interface Watch {
   error: { code: string; message: string } | null;
 }
 
-/** A file under the project's artifacts that a media block shows, newest last. */
 export interface MediaItem {
   path: string;
-  kind: "image" | "video" | "audio";
-  at: number;
-  caption?: string;
+  version: string;
+}
+
+export interface MediaGallery {
+  /** Run-relative previews, newest first. */
+  items: MediaItem[];
+  skipped?: number;
+  truncated?: boolean;
+  error?: { kind: "unsupported"; backend: string } | { kind: "unreadable"; detail: string };
 }
 
 /** `GET /api/runs/:id/monitor`: the whole live state of one run. */
@@ -324,7 +329,7 @@ export interface RunMonitor {
   rows: Record<string, Record<string, SignalValue>[]>;
   /** A bars block's retained outcome counts, keyed by table and grouping column. */
   groups: Record<string, Record<string, { key: string; ok: number; n: number }[]>>;
-  media: Record<string, MediaItem[]>;
+  media: Record<string, MediaGallery>;
   /** `rows` holds the parent's tables a table with `vs` compares with, matched by their first column. */
   parent: { runId: string; phase: string | null; series: Record<string, Point[]>; rows?: Record<string, Record<string, SignalValue>[]> } | null;
   /** For a failed run that recorded no message, the line in its log that says why. */

@@ -1417,7 +1417,6 @@ fn evaluate(
         "versus": {"step": at_step, "final": at_end},
         "rows": rows,
         "groups": groups,
-        "media": {},
         "counts": counts,
         "estimate": estimate,
         "limit": limit,
@@ -2296,8 +2295,13 @@ fn project(
     let [checkpoint, status] = signal_paths(store.data_dir(), &run.id);
     let stamps = [stamp_of(&checkpoint), stamp_of(&status)];
     // What a failed projection showed is never kept as if nothing changed.
-    let good = held.as_ref().filter(|held| held.failed.is_none());
-    if let Some(held) = good.filter(|held| held.life_key == life_key) {
+    let same_life = held
+        .as_ref()
+        .filter(|held| held.failed.is_none() && held.life_key == life_key);
+    let media = same_life
+        .map(|held| super::media::project(store, run, &life.kind, &held.projection.body["view"]));
+    let same_media = same_life.filter(|held| media.as_ref() == held.projection.body.get("media"));
+    if let Some(held) = same_media {
         let recent = now - held.evaluated_at < interval(1);
         let idle = !life.live() || now - held.evaluated_at < interval(10);
         // A live run's changes wait for the next second; an ended run's last ones are few.
@@ -2307,10 +2311,9 @@ fn project(
     }
     // The status file was rewritten with nothing the projection reads changed: checked without
     // reading the checkpoint, which an ended run no longer holds.
-    let rewritten = good.filter(|held| {
+    let rewritten = same_media.filter(|held| {
         // Only a checkpoint gives a projection its generation; without one there is none to read.
         !held.projection.published.generation.is_empty()
-            && held.life_key == life_key
             && held.stamps[0] == stamps[0]
             && (!life.live() || now - held.evaluated_at < interval(10))
             && held.fold.status
@@ -2325,7 +2328,9 @@ fn project(
     }
     let fold = fold_at(store.data_dir(), &run.id, stamps[0], held.as_deref());
     let [parent, earlier] = related_checkpoints(store, &life);
-    let evaluated = evaluate(&fold, &life, parent.as_deref(), earlier.as_deref(), now);
+    let mut evaluated = evaluate(&fold, &life, parent.as_deref(), earlier.as_deref(), now);
+    evaluated.body["media"] = media
+        .unwrap_or_else(|| super::media::project(store, run, &life.kind, &evaluated.body["view"]));
     let snapshot = fold.snapshot.as_deref();
     let hash = hash(&evaluated, snapshot);
     let previous = match held.as_ref() {
@@ -2505,6 +2510,7 @@ pub(crate) fn offline(store: &Store, run: &StoredRun, now: i64) -> Result<Value>
         .run_monitor_state(&run.id)?
         .and_then(|state| Published::read(&state["published"]));
     let mut monitor = evaluated.body;
+    monitor["media"] = super::media::project(store, run, &life.kind, &monitor["view"]);
     monitor["rev"] = json!(published.as_ref().map_or(0, |p| p.rev));
     monitor["seriesRev"] = json!(published.as_ref().map_or(0, |p| p.series_rev));
     monitor["series"] = series_json(fold.snapshot.as_deref(), None);
@@ -3448,6 +3454,105 @@ mod tests {
 
     fn local() -> Value {
         json!({"kind": "local_job"})
+    }
+
+    #[test]
+    fn media_files_advance_a_run_without_a_lifecycle_or_log_change() {
+        use crate::local::{files, model::LocalProject};
+        use base64::Engine as _;
+        use std::time::UNIX_EPOCH;
+
+        let f = Fixture::new("media");
+        let project = LocalProject {
+            id: "project".into(),
+            name: "Media".into(),
+            slug: format!("media-{}", uuid::Uuid::new_v4()),
+            repo_path: f.dir.path().to_string_lossy().into_owned(),
+            github_owner: String::new(),
+            github_repo: String::new(),
+            github_sync_enabled: false,
+            baseline_branch: "main".into(),
+            run_command: None,
+            paper_id: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        f.store.create_local_project(&project).unwrap();
+        let run = f.run("done", local());
+        let saved = r#"<view><media glob="samples/*.png" last="1" /></view>"#;
+        f.view("exp", saved);
+        let base = files::files_dir(&project);
+        let samples = base.join("runs/r1/samples");
+        let glob = "samples/*.png";
+        let first = publish(&f.store, &run, T0, None).unwrap().0;
+        assert_eq!(first.body["media"][glob]["items"], json!([]));
+        assert_eq!(first.body["media"][glob]["error"], Value::Null);
+
+        std::fs::create_dir_all(&samples).unwrap();
+        let file = samples.join("sample.png");
+        let pic = base64::engine::general_purpose::STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAIAAAADCAIAAAA2iEnWAAAAC0lEQVR4nGNgwAIAABUAAapll8QAAAAASUVORK5CYII=").unwrap();
+        std::fs::write(&file, &pic).unwrap();
+        let stamp = std::fs::File::options().write(true).open(&file).unwrap();
+        stamp
+            .set_modified(UNIX_EPOCH + Duration::from_secs(123))
+            .unwrap();
+        let (ready, event) = publish(&f.store, &run, T0, None).unwrap();
+        let media = &ready.body["media"];
+        let contract: Value =
+            serde_json::from_str(include_str!("../../tests/contracts/run-media.json")).unwrap();
+        assert_eq!(media, &contract);
+        assert_eq!(event.unwrap()["media"], *media);
+        assert_eq!(first.published.series_rev, ready.published.series_rev);
+        assert!(publish(&f.store, &run, T0, None).unwrap().1.is_none());
+
+        let version = media[glob]["items"][0]["version"].as_str().unwrap();
+        let path = "samples/sample.png";
+        let opened = super::super::media::open_preview(&f.store, &run, path, version).unwrap();
+        assert_eq!(
+            opened
+                .as_ref()
+                .map(|(mime, bytes)| (*mime, bytes.as_slice())),
+            Some(("image/png", pic.as_slice()))
+        );
+        let artifact_stamp = files::fingerprint(&project);
+        stamp
+            .set_modified(UNIX_EPOCH + Duration::from_micros(123_000_500))
+            .unwrap();
+        assert_ne!(files::fingerprint(&project), artifact_stamp);
+        assert!(
+            super::super::media::open_preview(&f.store, &run, path, version)
+                .unwrap()
+                .is_none()
+        );
+
+        let changed = publish(&f.store, &run, T0, None).unwrap().0;
+        assert!(changed.published.rev > ready.published.rev);
+        assert_ne!(changed.body["media"], *media);
+        drop(stamp);
+        std::fs::remove_file(file).unwrap();
+        let deleted = publish(&f.store, &run, T0, None).unwrap().0;
+        assert_eq!(deleted.body["media"], first.body["media"]);
+
+        for kind in ["ssh_job", "slurm_job", "modal_job"] {
+            let remote = f.run_named(kind, "done", json!({"kind": kind}));
+            let remote = publish(&f.store, &remote, T0, None).unwrap().0;
+            assert_eq!(
+                remote.body["media"][glob]["error"],
+                json!({"kind": "unsupported", "backend": kind})
+            );
+        }
+        std::fs::write(samples.join("not-a-directory.png"), b"example").unwrap();
+        f.view(
+            "exp",
+            r#"<view><media glob="samples/not-a-directory.png/*.png" /></view>"#,
+        );
+        let unreadable = publish(&f.store, &run, T0, None).unwrap().0;
+        assert_eq!(
+            unreadable.body["media"]["samples/not-a-directory.png/*.png"]["error"]["kind"],
+            "unreadable"
+        );
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     /// A payload declaring `of` steps, one report a second from `T0`, loss falling, a NaN at 50.

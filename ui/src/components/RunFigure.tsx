@@ -21,7 +21,7 @@ function hasData(block: ViewBlock, monitor: RunMonitor): boolean {
     return Array.isArray(groups) && groups.length > 0;
   }
   if ("cells" in block) return Object.hasOwn(monitor.rows, block.cells) && !!monitor.rows[block.cells].length;
-  if ("media" in block) return !!monitor.media[block.media]?.length;
+  if ("media" in block) return true;
   return "text" in block && !!block.text;
 }
 
@@ -51,7 +51,7 @@ export function RunFigure({ id, children }: { id: string; children: ReactNode })
       ) : run && data && block && drawsAt(block, "page") && hasData(block, data) ? (
         <div className="mt-2 min-w-0 rounded-md border border-border p-4">
           {data.availability.state !== "live" && <p className="m-0 mb-2 text-xs text-ink-subtext">{data.availability.reason ?? m.run_monitor_load_failed()} · {timeAgo(data.asOf)}</p>}
-          <Block monitor={data} block={block} size="page" projectId={run.projectId} tone={runTone(run, data)} live={runActive(run.status) && data.availability.state === "live"} />
+          <Block monitor={data} block={block} size="page" tone={runTone(run, data)} live={runActive(run.status) && data.availability.state === "live"} />
         </div>
       ) : null}
     </div>

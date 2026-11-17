@@ -271,6 +271,7 @@ fn dashboard_routes(api: Arc<Api>) -> Router {
     Router::new()
         .route("/api/runs/{id}/log", get(log))
         .route("/api/runs/{id}/monitor", get(monitor))
+        .route("/api/runs/{id}/media", get(run_image))
         .route("/api/runs/{id}/look", post(look_now))
         .route("/api/runs/{id}/flag", post(dashboard_choose_flag))
         .route("/api/experiments/{id}/view", get(view).put(set_view))
@@ -280,6 +281,37 @@ fn dashboard_routes(api: Arc<Api>) -> Router {
         .route("/api/compute/hosts", get(hosts))
         .route("/api/compute/hosts/{alias}/retry", post(retry_host))
         .with_state(api)
+}
+
+#[derive(Deserialize)]
+struct RunImageQuery {
+    path: String,
+    v: String,
+}
+
+async fn run_image(
+    Path(id): Path<String>,
+    Query(query): Query<RunImageQuery>,
+) -> std::result::Result<Response, super::ApiError> {
+    let preview = tokio::task::spawn_blocking(move || {
+        let store = Store::open()?;
+        let Some(run) = store.get_run(&id)? else {
+            return Ok(None);
+        };
+        crate::engine::media::open_preview(&store, &run, &query.path, &query.v)
+    })
+    .await
+    .context("Couldn't read the run image")??;
+    let (mime, bytes) = preview.ok_or_else(|| super::not_found("Run image"))?;
+    Ok((
+        [
+            ("content-type", mime),
+            ("x-content-type-options", "nosniff"),
+            ("cache-control", "private, no-store"),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 
 /// The run's log in `range`, read the way the page's log view reads it: the laptop's kept copy,

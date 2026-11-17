@@ -15,7 +15,7 @@ for (const size of ["clientHeight", "clientWidth", "offsetHeight", "offsetWidth"
 
 /** What a reader sees, without the marks that keep numbers and names whole in either direction. */
 const text = (element) => element.textContent.replace(/[⁦-⁩]/g, "");
-const props = (monitor, block, size, live) => ({ monitor, block, size, projectId: "p", tone: live ? "running" : "done", live });
+const props = (monitor, block, size, live) => ({ monitor, block, size, tone: live ? "running" : "done", live });
 
 async function draw(monitor, block, size, { live = true } = {}) {
   serveApp();
@@ -292,14 +292,14 @@ test("cells with no items say so instead of an empty picture", async () => {
 test("media shows the newest files under their names, each at its version, and says when none match or one can't be opened", async () => {
   const monitor = fixture("ddpm");
   const block = blockOf(monitor, "media");
-  const files = monitor.media[block.media];
+  const files = monitor.media[block.media].items;
   const page = await draw(monitor, block, "page");
   const images = [...page.querySelectorAll("img")];
-  assert.deepEqual(images.map((image) => image.alt), files.slice(-block.last).reverse().map((file) => file.caption));
+  assert.deepEqual(images.map((image) => image.alt), files.map((file) => file.path.split("/").at(-1)));
   const url = new URL(images[0].src);
-  assert.equal(url.pathname, "/api/projects/p/files/file");
+  assert.equal(url.pathname, `/api/runs/${monitor.runId}/media`);
   assert.equal(url.searchParams.get("path"), "samples/step-80k.png");
-  assert.equal(url.searchParams.get("v"), String(files.at(-1).at), "a file written again in place is read again");
+  assert.equal(url.searchParams.get("v"), files[0].version, "a file written again in place is read again");
 
   await act(async () => images[0].dispatchEvent(new Event("error")));
   assert.ok(text(page).includes("Couldn't open step-80k.png"));
@@ -308,8 +308,14 @@ test("media shows the newest files under their names, each at its version, and s
   assert.equal(strip.querySelectorAll("img").length, 3);
 
   const none = { ...monitor, media: {} };
-  assert.ok(text(await draw(none, block, "page")).includes("No files match artifacts/samples/*.png yet"));
-  assert.ok(text(await draw(none, block, "page", { live: false })).includes("No files matched artifacts/samples/*.png"));
+  assert.ok(text(await draw(none, block, "page")).includes("No files match samples/*.png yet"));
+  assert.ok(text(await draw(none, block, "page", { live: false })).includes("No files matched samples/*.png"));
+  const ssh = { ...monitor, media: { [block.media]: { items: [], error: { kind: "unsupported", backend: "ssh_job" } } } };
+  assert.ok(text(await draw(ssh, block, "page")).includes("Image previews aren't available for runs on SSH yet."));
+  const capped = { ...monitor, media: { [block.media]: { items: [], truncated: true, skipped: 1 } } };
+  const status = (await draw(capped, block, "page")).querySelector('[role="status"]');
+  assert.ok(text(status).includes(m.run_media_truncated()));
+  assert.ok(text(status).includes(m.run_media_skipped()));
 });
 
 test("text shows a dash until its latest value arrives and keeps the author's bold treatment", async () => {
@@ -330,9 +336,6 @@ test("a block, an attribute or a value from a newer server is skipped and breaks
   for (const size of ["page", "strip"]) assert.equal((await draw(monitor, { heatmap: "loss", title: "Loss by layer" }, size)).textContent, "");
   const banded = await draw(monitor, { chart: ["loss"], band: "p90" }, "page");
   assert.ok(banded.querySelector('svg[role="img"]').getAttribute("aria-label").startsWith("Train loss"));
-  const media = fixture("ddpm");
-  const huge = await draw(media, { media: "artifacts/samples/*.png", size: "xxl" }, "page");
-  assert.ok(huge.querySelector("ul").style.gridTemplateColumns.includes("5.5rem"));
   assert.equal(failed.mock.callCount(), 0);
 });
 

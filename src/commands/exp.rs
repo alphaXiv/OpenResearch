@@ -466,9 +466,24 @@ fn checked(report: &serde_json::Value) -> String {
         ));
         return lines.join("\n");
     }
+    let status = report["status"].as_str().unwrap_or_default();
+    let active =
+        !crate::engine::Phase::parse(status).is_some_and(crate::engine::Phase::is_terminal);
+    for block in report["tree"]["blocks"].as_array().into_iter().flatten() {
+        if let Some(glob) = block["media"].as_str() {
+            let last = block["last"].as_u64().unwrap_or_default() as usize;
+            let shown =
+                crate::engine::media::describe(glob, &report["media"][glob], last, active, run);
+            lines.push(format!("media {glob}: {shown}"));
+        }
+    }
     let pending = names(&report["pending"]);
     lines.push(if pending.is_empty() {
-        "The view draws only what the run reported.".to_owned()
+        if report["media"].is_object() {
+            "The view is valid.".to_owned()
+        } else {
+            "The view draws only what the run reported.".to_owned()
+        }
     } else {
         format!("The view is valid. Not reported yet, so not drawn yet: {pending}.")
     });

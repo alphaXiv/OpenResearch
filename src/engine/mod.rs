@@ -6,6 +6,7 @@ pub(crate) mod flags;
 pub mod handle;
 pub mod legacy;
 pub mod locks;
+pub(crate) mod media;
 pub(crate) mod monitor;
 pub mod notify;
 pub mod process;

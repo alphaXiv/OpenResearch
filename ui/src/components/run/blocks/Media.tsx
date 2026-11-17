@@ -1,65 +1,77 @@
-import { AudioLines, ImageOff } from "lucide-react";
-import { useState } from "react";
-import { autoDir, ltr } from "../../../i18n";
+import { ImageOff } from "lucide-react";
+import { useRef, useState } from "react";
+import { ltr } from "../../../i18n";
 import { m } from "../../../paraglide/messages.js";
-import type { MediaItem } from "../../../runMonitor/types";
+import type { MediaGallery, MediaItem } from "../../../runMonitor/types";
 import { useWorkspace } from "../../../workspace";
-import { cn } from "../../ui/cn";
+import { backendName } from "../../BackendLogos";
+import { ImageModal } from "../../ImageModal";
+import { Button } from "../../ui";
 
-type MediaBlock = { media: string; last?: number; columns?: number; size?: string };
-
-const SIZES: Record<string, string> = { s: "4rem", m: "5.5rem", l: "9rem" };
-
-const fileName = (path: string) => path.slice(path.lastIndexOf("/") + 1);
-
-/** One file: an image opens at full size, video and audio play in place on a page. */
-function Item({ item, url, page }: { item: MediaItem; url: string; page: boolean }) {
-  const [missing, setMissing] = useState(false);
-  const name = item.caption ?? fileName(item.path);
-  const frame = "block aspect-square w-full overflow-hidden rounded-sm bg-panel";
-  if (missing) {
+function Thumbnail({ item, url }: { item: MediaItem; url: string }) {
+  const trigger = useRef<HTMLButtonElement>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [failedUrl, setFailedUrl] = useState<string>();
+  const name = item.path.slice(item.path.lastIndexOf("/") + 1);
+  const missing = () => {
+    setFailedUrl(url);
+    setExpanded(false);
+  };
+  if (failedUrl === url) {
     return (
-      <span className={cn(frame, "flex flex-col items-center justify-center gap-1 p-1 text-center text-xs text-ink-subtext")} title={item.path}>
+      <span role="status" className="flex aspect-square flex-col items-center justify-center gap-1 rounded-sm bg-panel p-1 text-center text-xs text-ink-subtext">
         <ImageOff size={14} aria-hidden="true" />
-        {page && <span className="line-clamp-2 break-all">{m.run_media_missing({ name: ltr(fileName(item.path)) })}</span>}
-        {!page && <span className="sr-only">{m.run_media_missing({ name: ltr(fileName(item.path)) })}</span>}
+        <span className="line-clamp-2 break-all">{m.run_media_missing({ name: ltr(name) })}</span>
       </span>
     );
   }
-  if (item.kind === "image") {
-    return (
-      <a href={url} target="_blank" rel="noreferrer" className={cn(frame, "focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus")}>
-        <img src={url} alt={name} loading="lazy" className="size-full object-cover" onError={() => setMissing(true)} />
-      </a>
-    );
-  }
-  if (item.kind === "video") {
-    return <video src={url} aria-label={name} controls={page} muted={!page} preload="metadata" className={cn(frame, "object-cover")} onError={() => setMissing(true)} />;
-  }
-  if (!page) return <span className={cn(frame, "flex items-center justify-center text-ink-subtext")} title={name}><AudioLines size={16} role="img" aria-label={name} /></span>;
-  return <audio src={url} aria-label={name} controls preload="metadata" className="w-full" onError={() => setMissing(true)} />;
+
+  return (
+    <>
+      <Button
+        ref={trigger}
+        type="button"
+        aria-label={m.run_media_open({ name: ltr(name) })}
+        aria-haspopup="dialog"
+        className="aspect-square h-auto w-full overflow-hidden rounded-sm bg-panel p-0"
+        onClick={() => setExpanded(true)}
+      >
+        <img src={url} alt={name} loading="lazy" className="size-full object-cover" onError={missing} />
+      </Button>
+      {expanded && <ImageModal key={url} src={url} alt={name} name={name} onError={missing} onClose={() => {
+        setExpanded(false);
+        requestAnimationFrame(() => trigger.current?.focus());
+      }} />}
+    </>
+  );
 }
 
-/** The newest files a glob under the run's artifacts matches. A strip shows three; a page the view's `last`. */
-export function Media({ items, block, projectId, size, live }: { items: MediaItem[]; block: MediaBlock; projectId: string; size: "strip" | "page"; live: boolean }) {
-  const { artifactUrl } = useWorkspace().api;
-  const page = size === "page";
-  if (items.length === 0) {
-    const glob = ltr(block.media);
-    return <p className="m-0 text-xs text-ink-subtext">{live ? m.run_media_none({ glob }) : m.run_media_none_ended({ glob })}</p>;
-  }
-  const shown = items.slice(-(page ? block.last ?? 6 : 3)).reverse();
-  const track = page
-    ? block.columns ? `repeat(${block.columns}, minmax(0, 1fr))` : `repeat(auto-fill, minmax(${SIZES[block.size ?? "m"] ?? SIZES.m}, 1fr))`
-    : "repeat(3, 4rem)";
+export function Media({ gallery, glob, last, runId, live, page }: {
+  gallery: MediaGallery | undefined; glob: string; last: number; runId: string; live: boolean; page: boolean;
+}) {
+  const { runImageUrl } = useWorkspace().api;
+  const items = gallery?.items.slice(0, page ? last : Math.min(last, 3)) ?? [];
+  const pattern = ltr(glob);
+  const error = gallery?.error;
   return (
-    <ul className="m-0 grid list-none gap-1.5 p-0" style={{ gridTemplateColumns: track }}>
-      {shown.map((item) => (
-        <li key={`${item.path}@${item.at}`} className={cn("min-w-0", item.kind === "audio" && page && "col-span-full")}>
-          <Item item={item} url={`${artifactUrl(projectId, item.path)}&v=${item.at}`} page={page} />
-          {page && <span className="mt-1 block truncate text-xs text-ink-subtext">{autoDir(item.caption ?? fileName(item.path))}</span>}
-        </li>
-      ))}
-    </ul>
+    <>
+      {items.length > 0 && (
+        <ul className="m-0 grid list-none grid-cols-[repeat(auto-fill,minmax(5.5rem,1fr))] gap-1.5 p-0">
+          {items.map((item) => {
+            const url = runImageUrl(runId, item.path, item.version);
+            return <li key={item.path} className="min-w-0 max-w-32"><Thumbnail item={item} url={url} /></li>;
+          })}
+        </ul>
+      )}
+      <div role="status" className="space-y-1 text-xs text-ink-subtext">
+        {error?.kind === "unsupported" && <p className="m-0">{m.run_media_unsupported({ backend: backendName(error.backend) })}</p>}
+        {error?.kind === "unreadable" && <p className="m-0">{m.run_media_unreadable({ glob: pattern })}</p>}
+        {!error && items.length === 0 && !gallery?.skipped && !gallery?.truncated && (
+          <p className="m-0">{live ? m.run_media_none({ glob: pattern }) : m.run_media_none_ended({ glob: pattern })}</p>
+        )}
+        {!!gallery?.skipped && <p className="m-0">{m.run_media_skipped()}</p>}
+        {gallery?.truncated && <p className="m-0">{m.run_media_truncated()}</p>}
+      </div>
+    </>
   );
 }

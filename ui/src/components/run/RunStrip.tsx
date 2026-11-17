@@ -31,7 +31,7 @@ function Hero({ model, monitor, block }: { model: RunModel; monitor: RunMonitor 
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         {drawn.length > 0 && <div className={cn("truncate text-xs text-ink-subtext", legend && "@2xl:hidden")}>{drawn.map(autoDir).join(" · ")}</div>}
         <div className="min-h-0 flex-1">
-          {monitor && block && <Block monitor={monitor} block={block} size="strip" projectId={model.run.projectId} tone={model.tone} live={model.live} />}
+          {monitor && block && <Block monitor={monitor} block={block} size="strip" tone={model.tone} live={model.live} />}
         </div>
       </div>
       {legend && <div className="hidden w-24 shrink-0 flex-col justify-center @2xl:flex"><Legend series={series} /></div>}

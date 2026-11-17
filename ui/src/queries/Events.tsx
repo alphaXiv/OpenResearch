@@ -127,6 +127,18 @@ export function QueryEvents() {
       if (!isCurrentScope(scope)) return;
       invalidateFamilies(artifactFamilies, scope, (query) => query.queryKey[3] === projectId);
       invalidateFamilies(["resolvedFile"], scope, (query) => query.queryKey[3] === projectId && query.queryKey[5] === "artifacts");
+      const projectRuns = queryClient.getQueryData(listRunsQuery(projectId).queryKey) ?? [];
+      const shownRuns = queryClient.getQueryData(listChatShownRunsQuery().queryKey)?.runs ?? [];
+      const runIds = new Set(projectRuns.map((run) => run.id));
+      for (const { run } of shownRuns) if (run.projectId === projectId) runIds.add(run.id);
+      for (const id of runIds) {
+        const { queryKey } = getRunMonitorQuery(id);
+        const state = queryClient.getQueryState(queryKey);
+        const media = state?.data?.media ?? {};
+        if (state?.fetchStatus !== "fetching" && !Object.values(media).some((gallery) => gallery.error?.kind !== "unsupported")) continue;
+        markLiveUpdate(queryClient, queryKey);
+        void queryClient.invalidateQueries({ queryKey, exact: true });
+      }
     },
     onUsageChanged() {
       invalidateFamilies(["getUsage"], scope);

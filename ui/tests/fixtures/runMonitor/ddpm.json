@@ -16,14 +16,14 @@
     },
     "headline": ["fid"],
     "blocks": [
-      {"last": 6, "media": "artifacts/samples/*.png"},
+      {"last": 6, "media": "samples/*.png"},
       {"chart": ["fid"], "x": "step", "ghost": "parent"},
       {"stats": ["fid", "step", "steps_per_s"]}
     ]
   },
   "viewFrom": {
     "experimentId": "e-oe",
-    "markup": "<signal name=\"fid\" label=\"FID\" digits=\"1\" better=\"lower\" pick=\"best\" />\n<signal name=\"step\" label=\"Steps\" as=\"compact\" />\n<signal name=\"steps_per_s\" label=\"Speed\" unit=\"steps/s\" digits=\"1\" />\n<view headline=\"fid\">\n  <media glob=\"artifacts/samples/*.png\" last=\"6\" />\n  <chart y=\"fid\" x=\"step\" ghost=\"parent\" />\n  <stats of=\"fid step steps_per_s\" />\n</view>",
+    "markup": "<signal name=\"fid\" label=\"FID\" digits=\"1\" better=\"lower\" pick=\"best\" />\n<signal name=\"step\" label=\"Steps\" as=\"compact\" />\n<signal name=\"steps_per_s\" label=\"Speed\" unit=\"steps/s\" digits=\"1\" />\n<view headline=\"fid\">\n  <media glob=\"samples/*.png\" last=\"6\" />\n  <chart y=\"fid\" x=\"step\" ghost=\"parent\" />\n  <stats of=\"fid step steps_per_s\" />\n</view>",
     "isDefault": false
   },
   "source": "detected",
@@ -56,16 +56,16 @@
   "rows": {},
   "groups": {},
   "media": {
-    "artifacts/samples/*.png": [
-      {"path": "samples/step-10k.png", "kind": "image", "at": 1794399480000, "caption": "10k steps"},
-      {"path": "samples/step-20k.png", "kind": "image", "at": 1794400080000, "caption": "20k steps"},
-      {"path": "samples/step-30k.png", "kind": "image", "at": 1794400680000, "caption": "30k steps"},
-      {"path": "samples/step-40k.png", "kind": "image", "at": 1794401280000, "caption": "40k steps"},
-      {"path": "samples/step-50k.png", "kind": "image", "at": 1794401880000, "caption": "50k steps"},
-      {"path": "samples/step-60k.png", "kind": "image", "at": 1794402480000, "caption": "60k steps"},
-      {"path": "samples/step-70k.png", "kind": "image", "at": 1794403080000, "caption": "70k steps"},
-      {"path": "samples/step-80k.png", "kind": "image", "at": 1794403680000, "caption": "80k steps"}
-    ]
+    "samples/*.png": {
+      "items": [
+        {"path": "samples/step-80k.png", "version": "128-80000"},
+        {"path": "samples/step-70k.png", "version": "128-70000"},
+        {"path": "samples/step-60k.png", "version": "128-60000"},
+        {"path": "samples/step-50k.png", "version": "128-50000"},
+        {"path": "samples/step-40k.png", "version": "128-40000"},
+        {"path": "samples/step-30k.png", "version": "128-30000"}
+      ]
+    }
   },
   "parent": {
     "runId": "p-oe",

@@ -15,7 +15,7 @@ import { Table } from "./Table";
 import { Text } from "./Text";
 
 type BlockSize = "strip" | "page";
-type BlockProps = { monitor: RunMonitor; block: ViewBlock; size: BlockSize; projectId: string; tone: Tone; live: boolean };
+type BlockProps = { monitor: RunMonitor; block: ViewBlock; size: BlockSize; tone: Tone; live: boolean };
 
 const KINDS = ["chart", "stats", "table", "bars", "cells", "media", "text"] as const;
 
@@ -67,14 +67,14 @@ export function drawsAt(block: ViewBlock, size: BlockSize): boolean {
   return kind !== null && (size === "page" || (kind !== "stats" && kind !== "text"));
 }
 
-function Body({ monitor, block, size, projectId, tone, live, title }: BlockProps & { title: string }) {
+function Body({ monitor, block, size, tone, live, title }: BlockProps & { title: string }) {
   if ("chart" in block) {
     return <Chart monitor={monitor} block={block} size={size} live={live} height={block.chart.length > 1 || block.from !== undefined ? 200 : 160} />;
   }
   if ("table" in block) return <Table monitor={monitor} block={block} size={size} live={live} title={title} />;
   if ("bars" in block) return <Bars monitor={monitor} block={block} size={size} live={live} />;
   if ("cells" in block) return <Cells rows={Object.hasOwn(monitor.rows, block.cells) ? monitor.rows[block.cells] : []} size={size} live={live} />;
-  if ("media" in block) return <Media items={monitor.media[block.media] ?? []} block={block} projectId={projectId} size={size} live={live} />;
+  if ("media" in block) return <Media gallery={monitor.media[block.media]} glob={block.media} last={block.last} runId={monitor.runId} live={live} page={size === "page"} />;
   if ("stats" in block) return <Stats monitor={monitor} names={block.stats} vs={block.vs} live={live} />;
   return <Text monitor={monitor} template={block.text} tone={tone} />;
 }

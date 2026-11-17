@@ -148,6 +148,7 @@ orx exp view set <expId> --file view.xml
 | `text` | Plain text with optional `{signal}` tokens and `**bold**`, up to 2,048 bytes |
 | `cells` | `from="table"`, newest 256 retained outcome rows in completion order |
 | `bars` | `from="table"`, `by="column"`, correct share by category over retained outcome rows |
+| `media` | `glob="samples/*.png"`, `last="6"` (1–6, default 6) |
 
 A chart over signals uses reported steps when available and elapsed time otherwise.
 Every block also takes `phase` (shown only during that stage) and `title`.
@@ -200,6 +201,18 @@ How a run meets its parent is yours to choose, per experiment:
 - **`x-range`** on a chart over steps: `run` (the default) spans this run's
   total and cuts the parent off at the edge; `parent` spans the parent's run
   too, for a child that stops early or runs longer.
+
+For a local run, use `<media glob="samples/*.png" last="6" />` inside the
+view to inspect generated images on the run page and in a result citation when
+it is the first block. Put the files under `runs/$ORX_RUN_ID/samples/` in
+the project's Artifacts directory on the machine running `orx up`, including
+when the workspace itself is remote. Pass that directory to the job explicitly.
+Write temporary files, then rename each completed image into place with a
+unique name. Use PNG, JPEG or WebP, up to 4 MiB and 4,096 pixels per side.
+A view can hold up to four media blocks, each with one `*` in the filename
+and literal folders. Previews show the newest matches among up to 2,048
+entries per folder. Use `orx exp view check RUN` to check the glob and placement
+if no images appear. SSH, Slurm and cloud jobs do not have image previews yet.
 
 ## 6. A log you can't edit
 
