@@ -32,16 +32,16 @@ export function Stats({ monitor, names, vs: by, live }: { monitor: RunMonitor; n
               {unit && <span className="text-xs text-ink-subtext">{unit}</span>}
               <span className="ms-auto"><Spark points={monitor.series[name] ?? []} /></span>
             </dd>
-            <div className="mt-1 min-h-4 text-xs text-ink-subtext">
-              {vs && <dd className="m-0">
+            {vs && (
+              <dd className="m-0 mt-1 text-xs text-ink-subtext">
                 {vs.flat ? m.run_level_with_parent() : (
                   <>
                     <Delta delta={{ down: vs.d < 0, good: vs.good, flat: false, magnitude: ltr(fmtMagnitude(spec, vs.mag)) }} said />
                     {" "}{vs.step === undefined ? m.run_than_parent_ended() : m.run_than_parent_at_step({ step: ltr(fmtNumber(vs.step)) })}
                   </>
                 )}
-              </dd>}
-            </div>
+              </dd>
+            )}
           </div>
         );
       })}
