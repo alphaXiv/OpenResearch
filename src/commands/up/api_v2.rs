@@ -766,6 +766,7 @@ async fn choose(
         .map_err(failed)?;
     match chosen {
         crate::store::Chosen::Settled => {
+            let run = api.run(id).map_err(failed)?;
             let flag = reread(&api.store(), &run)?;
             return Err((StatusCode::CONFLICT, settled(&run, &flag)));
         }

@@ -888,6 +888,10 @@ gate('finish')`)
     await test.step('a new kind of error flags it again, and Ask wakes the agent, who stops the run', async () => {
       const asked = `asked-${project.id}`
       agent.script('The user asked you to look at a flag', [
+        { run: settle(experimentId, runId, 'ask', 'This choice needs the user.') },
+        { say: 'The flag is back with you.' },
+      ])
+      agent.script('The user asked you to look at a flag', [
         { hold: asked },
         { run: settle(experimentId, runId, 'stop', 'Shard 3 is corrupt; the rest of this run would train on garbage.') },
         { say: 'Shard 3 is corrupt, so I stopped the run. Shall I rebuild the shard and relaunch?' },
@@ -895,6 +899,9 @@ gate('finish')`)
       agent.script('finished with status', [{ say: 'Copiloted stopped.' }])
       await run.open('shard')
       await expect(banner.locator('pre')).toHaveText('ValueError: shard 3 of the training set is corrupt (bad header)')
+      await banner.getByRole('button', { name: /^Ask / }).click()
+      await expect(page.getByText('The flag is back with you.', { exact: true })).toBeVisible()
+      await expect(banner.getByRole('button', { name: /^Ask / })).toBeEnabled()
       await banner.getByRole('button', { name: /^Ask / }).click()
       await agent.reached(asked)
       await expect(banner.getByRole('button', { name: /^Ask / })).toHaveCount(0)

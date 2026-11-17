@@ -3451,6 +3451,20 @@ async fn a_stop_and_a_keep_that_race_leave_one_winner() {
             "{choice}"
         );
     }
+    // The choice was planned before the cancel reached the store.
+    let ask = crate::store::FlagChoice {
+        run_id: "cancelled".into(),
+        body: json!({"flagId": "f2", "c": "ask", "by": "user", "requestId": "late"}),
+        wakes: vec![("chat-1".into(), "Look at f2.".into())],
+    };
+    assert!(matches!(
+        store().record_flag_choices(&[ask], None, 2).unwrap(),
+        crate::store::Chosen::Settled
+    ));
+    assert!(store()
+        .run_notices_for_tests("cancelled")
+        .iter()
+        .all(|(_, kind, _)| kind != "watch_flag"));
     assert_eq!(
         store().run_stop("cancelled").unwrap().unwrap().by,
         crate::store::StopBy::Agent,

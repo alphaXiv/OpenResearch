@@ -344,7 +344,11 @@ export function chooseFlag(ws: Workspace, run: Pick<api.Run, "id">, flagId: stri
       ws.setScopedQueryData(queryKey, { sending: null, requestIds, error: error instanceof Error ? error.message : String(error) });
       onRefused();
     },
-    onSuccessData: () => ws.setScopedQueryData(queryKey, { sending: null, requestIds, error: null }),
+    onSuccessData: () => {
+      const remaining = { ...requestIds };
+      delete remaining[choice];
+      ws.setScopedQueryData(queryKey, { sending: null, requestIds: remaining, error: null });
+    },
     onSettled: release,
   });
 }

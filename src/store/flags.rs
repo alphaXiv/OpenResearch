@@ -212,7 +212,7 @@ impl Store {
     /// with the notices each wakes chats with, in one transaction, so they wake as one turn.
     /// The first choice is the one asked for: nothing is kept when another choice settled its
     /// flag first, the run's stop was accepted first, or this request was kept already; a flag
-    /// taken along that is settled is left. A Stop's `stop` accepts the run's cancel with who
+    /// taken along is skipped if settled or stopping. A Stop's `stop` accepts the run's cancel with who
     /// asked in the same transaction, so the choice and the stop's words are one winner's.
     pub(crate) fn record_flag_choices(
         &self,
@@ -233,36 +233,33 @@ impl Store {
             let events = self.run_flag_events(&choice.run_id)?;
             let mine = |event: &&FlagEvent| event.kind == "choice" && event.body["flagId"] == flag;
             let request = choice.body["requestId"].as_str();
-            if index == 0 {
-                if request.is_some()
-                    && events
-                        .iter()
-                        .filter(mine)
-                        .any(|event| event.body["requestId"].as_str() == request)
-                {
-                    return Ok(Chosen::Repeated);
-                }
-                if events.iter().filter(mine).any(settles) {
+            if index == 0
+                && request.is_some()
+                && events
+                    .iter()
+                    .filter(mine)
+                    .any(|event| event.body["requestId"].as_str() == request)
+            {
+                return Ok(Chosen::Repeated);
+            }
+            let stopping: bool = self.conn.query_row(
+                "SELECT cancel_requested = 1 OR cancel_accepted_at IS NOT NULL FROM runs WHERE id = ?1",
+                [&choice.run_id],
+                |row| row.get(0),
+            )?;
+            if stopping || events.iter().filter(mine).any(settles) {
+                if index == 0 {
                     return Ok(Chosen::Settled);
                 }
-                let stopping: bool = self.conn.query_row(
-                    "SELECT cancel_requested = 1 OR cancel_accepted_at IS NOT NULL FROM runs WHERE id = ?1",
-                    [&choice.run_id],
-                    |row| row.get(0),
-                )?;
-                if stopping && matches!(choice.body["c"].as_str(), Some("keep" | "stop")) {
-                    return Ok(Chosen::Settled);
-                }
-                if let Some((reason, stop)) = stop {
-                    if self
-                        .accept_run_stop_locked(&choice.run_id, Some(reason), Some(stop))?
-                        .is_none()
-                    {
-                        return Ok(Chosen::Settled);
-                    }
-                }
-            } else if events.iter().filter(mine).any(settles) {
                 continue;
+            }
+            if let Some((reason, stop)) = stop.filter(|_| index == 0) {
+                if self
+                    .accept_run_stop_locked(&choice.run_id, Some(reason), Some(stop))?
+                    .is_none()
+                {
+                    return Ok(Chosen::Settled);
+                }
             }
             self.conn.execute(
                 "INSERT INTO run_monitor_events (run_id, seq, kind, created_at, body_json)

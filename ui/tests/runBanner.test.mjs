@@ -345,9 +345,10 @@ function heldFlag() {
   return { choices, answer };
 }
 
-test("a flag choice is sent once, and trying it again after a failure is the same request", async () => {
+test("Ask retries reuse the request id and a new Ask after handback gets a new id", async () => {
   const { choices, answer } = heldFlag();
-  await banner([waitingRun()]);
+  const workspace = createWorkspace("test");
+  await banner([waitingRun()], { workspace });
   await settle();
   const ask = named(m.run_flag_ask({ agent: "Claude" }));
   await act(async () => { ask.click(); ask.click(); });
@@ -359,6 +360,15 @@ test("a flag choice is sent once, and trying it again after a failure is the sam
   assert.equal(choices.length, 2);
   assert.equal(choices[1].requestId, choices[0].requestId);
   assert.equal(choices[1].choice, "ask");
+  await answer({ flag: { ...flagged.flags[0], state: "asking" }, run: waitingRun() });
+  await settle();
+  assert.equal(named(m.run_flag_ask({ agent: "Claude" })), null);
+  const { queryKey } = workspace.queries.getRunMonitorQuery("r1");
+  await act(async () => workspace.queryClient.setQueryData(queryKey, { ...flagged, rev: flagged.rev + 1 }));
+  await settle();
+  await click(named(m.run_flag_ask({ agent: "Claude" })));
+  assert.equal(choices.length, 3);
+  assert.notEqual(choices[2].requestId, choices[1].requestId, "a new Ask after the handback wakes the agent again");
   await answer({ flag: { ...flagged.flags[0], state: "asking" }, run: waitingRun() });
   await settle();
 });
@@ -499,13 +509,13 @@ test("a choice belongs to its flag: collapsing and reopening the strip neither s
   assert.equal(choices.length, 1, "presses while the answer was on its way sent nothing, before or after it came back");
 
   await click(named(m.run_flag_keep_going()));
-  assert.equal(choices[1].requestId, choices[0].requestId, "the same choice is the same request");
+  assert.notEqual(choices[1].requestId, choices[0].requestId, "the acknowledged choice gets a new request");
   await answer({ error: "This flag was already answered." }, 409);
   await settle();
   await reopen();
   assert.ok(find('[role="alert"]', "This flag was already answered."), "the refusal outlives the strip that pressed it");
   await click(named(m.run_flag_keep_going()));
-  assert.equal(choices[2].requestId, choices[0].requestId, "trying again is the same request");
+  assert.equal(choices[2].requestId, choices[1].requestId, "trying again is the same request");
   await answer({ flag: { ...flagged.flags[0], state: "kept" }, run: waitingRun() });
   await settle();
 });

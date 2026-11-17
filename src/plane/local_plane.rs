@@ -792,16 +792,13 @@ impl ApiClient {
             "requestId": uuid::Uuid::new_v4().to_string(),
         });
         let path = format!("runs/{}/flag", urlencoding::encode(run));
-        self.json(reqwest::Method::POST, &path, Some(&request))
+        let accepted = self
+            .json(reqwest::Method::POST, &path, Some(&request))
             .await?;
-        println!(
-            "{}",
-            match choice {
-                "keep" => format!("\u{2713} Flag {flag} on run {run} settled: it keeps going. The watcher's next look reads why."),
-                "stop" => format!("\u{2713} Flag {flag} settled: run {run} is stopping."),
-                _ => format!("\u{2713} Flag {flag} on run {run} now waits for the user, who sees it with Stop run and Keep going."),
-            }
-        );
+        let state = accepted["flag"]["state"].as_str().ok_or_else(|| {
+            anyhow!("orx up did not return a state for flag {flag} on run {run}.")
+        })?;
+        println!("✓ Flag {flag} on run {run}: {state}.");
         Ok(())
     }
 
