@@ -69,7 +69,7 @@ fn estimate_reads_parent_counts_without_launching_or_changing_the_command() {
         "{stdout}"
     );
     assert!(
-        stdout.contains("600 steps; the parent took 10 min for 200"),
+        stdout.contains("600 steps; the parent took 3 s each"),
         "{stdout}"
     );
     assert!(stdout.contains("Total: about 31 min"), "{stdout}");

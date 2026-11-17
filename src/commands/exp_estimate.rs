@@ -149,18 +149,14 @@ fn report(plan: &[orx_signals::Stage], parent: Option<&orx_signals::Snapshot>) -
             }
             let (ms, explanation) = match stage.of {
                 Some(of) => {
-                    let done = prior
-                        .done
-                        .filter(|done| *done > 0.0)
+                    let each = prior
+                        .per_unit_ms
+                        .filter(|each| *each > 0.0)
                         .ok_or("no completed parent count to scale")?;
-                    let ms = prior.ms * of / done;
                     let unit = unit.or(parent_unit).unwrap_or("units");
                     (
-                        ms,
-                        format!(
-                            "{of} {unit}; the parent took {} for {done}",
-                            duration(prior.ms)
-                        ),
+                        each * of,
+                        format!("{of} {unit}; the parent took {} each", duration(each)),
                     )
                 }
                 None => (prior.ms, "(as the parent)".into()),
@@ -233,7 +229,7 @@ mod tests {
         .unwrap();
         let text = report(&plan, Some(&parent()));
         assert!(
-            text.contains("600 steps; the parent took 10 min for 200"),
+            text.contains("600 steps; the parent took 3 s each"),
             "{text}"
         );
         assert!(text.contains("download: about 1 min"), "{text}");
