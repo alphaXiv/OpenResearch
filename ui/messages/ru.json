@@ -1021,6 +1021,7 @@
   "chat_continue": "Продолжить",
   "chat_turn_incomplete": "Этот ход не завершился.",
   "chat_starting": "Запуск…",
+  "chat_setting_up_worktree": "Подготовка рабочего дерева…",
   "chat_collapse_tool_activity": "Свернуть действия инструментов",
   "chat_expand_tool_activity": "Развернуть действия инструментов",
   "chat_plan": "План",

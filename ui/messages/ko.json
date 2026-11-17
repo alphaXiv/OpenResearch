@@ -1021,6 +1021,7 @@
   "chat_continue": "계속",
   "chat_turn_incomplete": "이 턴이 완료되지 않았습니다.",
   "chat_starting": "시작 중…",
+  "chat_setting_up_worktree": "워크트리 준비 중…",
   "chat_collapse_tool_activity": "도구 활동 접기",
   "chat_expand_tool_activity": "도구 활동 펼치기",
   "chat_plan": "계획",

@@ -1015,6 +1015,7 @@
   "chat_continue": "ادامه",
   "chat_turn_incomplete": "این نوبت کامل نشد.",
   "chat_starting": "در حال شروع…",
+  "chat_setting_up_worktree": "در حال آماده‌سازی درخت کاری…",
   "chat_collapse_tool_activity": "بستن فعالیت ابزارها",
   "chat_expand_tool_activity": "باز کردن فعالیت ابزارها",
   "chat_plan": "طرح",

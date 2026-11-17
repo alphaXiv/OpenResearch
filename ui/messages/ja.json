@@ -1021,6 +1021,7 @@
   "chat_continue": "続行",
   "chat_turn_incomplete": "このターンは完了しませんでした。",
   "chat_starting": "開始中…",
+  "chat_setting_up_worktree": "ワークツリーを準備中…",
   "chat_collapse_tool_activity": "ツールのアクティビティを折りたたむ",
   "chat_expand_tool_activity": "ツールのアクティビティを展開",
   "chat_plan": "計画",

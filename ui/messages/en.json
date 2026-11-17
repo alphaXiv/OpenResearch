@@ -1021,6 +1021,7 @@
   "chat_continue": "Continue",
   "chat_turn_incomplete": "This turn did not finish.",
   "chat_starting": "Starting…",
+  "chat_setting_up_worktree": "Setting up the worktree…",
   "chat_collapse_tool_activity": "Collapse tool activity",
   "chat_expand_tool_activity": "Expand tool activity",
   "chat_plan": "Plan",

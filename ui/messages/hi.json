@@ -1021,6 +1021,7 @@
   "chat_continue": "जारी रखें",
   "chat_turn_incomplete": "यह टर्न पूरा नहीं हुआ।",
   "chat_starting": "शुरू हो रहा है…",
+  "chat_setting_up_worktree": "वर्कट्री तैयार हो रही है…",
   "chat_collapse_tool_activity": "टूल गतिविधि समेटें",
   "chat_expand_tool_activity": "टूल गतिविधि फैलाएं",
   "chat_plan": "प्लान",

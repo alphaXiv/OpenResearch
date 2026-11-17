@@ -1047,6 +1047,7 @@
   "chat_continue": "Devam et",
   "chat_turn_incomplete": "Bu tur tamamlanmadı.",
   "chat_starting": "Başlıyor…",
+  "chat_setting_up_worktree": "Worktree hazırlanıyor…",
   "chat_collapse_tool_activity": "Araç etkinliğini daralt",
   "chat_expand_tool_activity": "Araç etkinliğini genişlet",
   "chat_plan": "Plan",

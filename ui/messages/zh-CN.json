@@ -1015,6 +1015,7 @@
   "chat_continue": "继续",
   "chat_turn_incomplete": "本轮未完成。",
   "chat_starting": "正在启动…",
+  "chat_setting_up_worktree": "正在准备工作树…",
   "chat_collapse_tool_activity": "折叠工具活动",
   "chat_expand_tool_activity": "展开工具活动",
   "chat_plan": "计划",
