@@ -80,6 +80,8 @@ async function contrast(region: Locator): Promise<string[]> {
       const text = node.textContent!.replace(/[⁦-⁩]/g, '').trim()
       if (!text || element.closest('[hidden]') || element.getClientRects().length === 0) continue
       const style = getComputedStyle(element)
+      // Shimmering text paints through its background gradient, which this check can't read.
+      if (style.backgroundClip === 'text' || style.webkitBackgroundClip === 'text') continue
       const ink = over(rgba(style.color).map((v, i) => i === 3 ? v * Number(style.opacity) : v), behind(element))
       const value = ratio(ink, behind(element))
       if (value < 4.5) failures.push(`text "${text}" ${value.toFixed(2)}:1`)

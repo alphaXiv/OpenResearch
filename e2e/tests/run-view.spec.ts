@@ -76,7 +76,7 @@ for (let step = 1; step <= 20; step++) {
     await expect(child.locator('svg path[stroke-dasharray]')).toHaveCount(1)
     const shots = path.resolve(import.meta.dirname, '../../.shots/k1')
     mkdirSync(shots, { recursive: true })
-    await page.getByRole('button', { name: 'Close panel', exact: true }).click()
+    await expect(page.locator('.right-pane')).toHaveCount(0)
     for (const width of [1440, 420]) {
       await page.setViewportSize({ width, height: 1000 })
       for (const colorScheme of ['light', 'dark'] as const) {
@@ -362,7 +362,7 @@ readFileSync(${JSON.stringify(gate)})
   await expect(banner).not.toContainText('window_pattern')
   const shots = path.resolve(import.meta.dirname, '../../.shots/q2')
   mkdirSync(shots, { recursive: true })
-  await page.getByRole('button', { name: 'Close panel', exact: true }).click()
+  await expect(page.locator('.right-pane')).toHaveCount(0)
   await page.getByText('Timed floor launched.', { exact: true }).click()
   await page.keyboard.press('Escape')
   for (const width of [1440, 420]) {
