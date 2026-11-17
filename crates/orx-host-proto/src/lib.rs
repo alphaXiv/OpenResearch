@@ -135,12 +135,8 @@ pub enum Response {
     },
     ReadSignals {
         page: SignalsPage,
-        /// The host's clock when it answered, in ms since the epoch.
-        answered_at: i64,
     },
-    ConfigureSignals {
-        changed: bool,
-    },
+    ConfigureSignals,
     ReadLog {
         page: LogPage,
     },
@@ -405,11 +401,6 @@ pub struct Summary {
 pub struct SignalsSummary {
     pub generation: String,
     pub revision: u64,
-    pub cursor: u64,
-    pub coverage: serde_json::Value,
-    pub latest: serde_json::Value,
-    pub progress: serde_json::Value,
-    pub diagnostics: BTreeMap<String, u64>,
     pub error: Option<String>,
 }
 
@@ -417,7 +408,9 @@ pub struct SignalsSummary {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SignalsPage {
     Reset {
-        summary: Box<SignalsSummary>,
+        summary: SignalsSummary,
+        /// The host's clock when it answered, in ms since the epoch.
+        answered_at: i64,
     },
     Data {
         generation: String,

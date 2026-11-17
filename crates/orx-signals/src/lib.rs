@@ -11,6 +11,10 @@ pub use patterns::{Config, Hit, Pattern, PatternError, Patterns, Tally};
 
 pub const MAX_FRAME: usize = 64 * 1024;
 pub const MAX_SNAPSHOT: usize = 16 * 1024 * 1024;
+pub const MAX_TABLES: usize = 16;
+pub const MAX_ROW_COLUMNS: usize = 64;
+pub const MAX_ROWS: usize = 2048;
+pub const MAX_ROW_BYTES: usize = 2 * 1024 * 1024;
 const MAX_LAST_LINE: usize = 200;
 pub const DEFAULT_CONFIG_HASH: &str =
     "sha256:e0a0979e1bb38721b7d263d196d05600e66e5eccadbd3168aebff4073b121a22";
@@ -106,7 +110,6 @@ pub struct Timing {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Detectors {
     pub candidate: Option<String>,
-    pub confirmations: u32,
     pub selected: Option<String>,
     pub previous: Option<(f64, Option<f64>)>,
     #[serde(flatten)]
@@ -125,38 +128,24 @@ pub struct Snapshot {
     pub latest: Signals,
     pub series: BTreeMap<String, Vec<Point>>,
     pub rows: BTreeMap<String, Vec<Signals>>,
-    #[serde(default)]
     pub row_order: Vec<String>,
-    #[serde(default)]
     pub row_columns: BTreeMap<String, Vec<String>>,
-    pub groups: BTreeMap<String, Value>,
-    pub cells: BTreeMap<String, Value>,
-    pub counts: BTreeMap<String, u64>,
     pub phases: Vec<Phase>,
     pub timing: Timing,
-    pub reducers: BTreeMap<String, Value>,
     pub detectors: Detectors,
     pub diagnostics: Diagnostics,
     pub updated_at: i64,
-    #[serde(default)]
     pub signal_order: Vec<String>,
-    #[serde(default)]
     pub omitted: BTreeMap<String, u64>,
-    #[serde(default)]
     pub series_rev: u64,
-    #[serde(default)]
     pub series_widths: BTreeMap<String, f64>,
     /// The phase occurrence each series on the step axis was plotted in: a series holds one
     /// stage's points, since each stage counts its steps from its own start.
-    #[serde(default)]
     pub series_stages: BTreeMap<String, usize>,
     /// The first point's stage for each signal; None when the point preceded every stage.
     pub first_series_stages: BTreeMap<String, Option<usize>>,
-    #[serde(default)]
     pub spend: Option<f64>,
-    #[serde(default)]
     pub coordinate_report: Signals,
-    #[serde(default)]
     pub last_canonical: Option<Value>,
     /// The newest log line that says something since the current stage began, past its logging
     /// prefix: what a run nobody instrumented, or a stage with no step yet, is doing.
@@ -292,12 +281,8 @@ impl Snapshot {
             rows: BTreeMap::new(),
             row_order: Vec::new(),
             row_columns: BTreeMap::new(),
-            groups: BTreeMap::new(),
-            cells: BTreeMap::new(),
-            counts: BTreeMap::new(),
             phases: Vec::new(),
             timing: Timing::default(),
-            reducers: BTreeMap::new(),
             detectors: Detectors::default(),
             diagnostics: Diagnostics::default(),
             updated_at: 0,
@@ -346,12 +331,12 @@ impl Snapshot {
         self.phases.last().filter(|phase| phase.done.is_some())
     }
 
-    /// Whether the payload reported anything: a measurement, progress or a row.
+    /// Whether the fold kept a measurement, progress, a row or spend.
     pub fn has_signals(&self) -> bool {
-        !(self.latest.is_empty()
-            && self.phases.is_empty()
-            && self.rows.is_empty()
-            && self.counts.is_empty())
+        self.spend.is_some()
+            || !self.latest.is_empty()
+            || !self.phases.is_empty()
+            || !self.rows.is_empty()
     }
 
     /// A detected bar that restarted: the run has several bars, so how much of the whole run
@@ -906,7 +891,7 @@ impl Snapshot {
         }
         if let Some(row) = record.get("row") {
             if let Some(row) = row.as_str().filter(|r| identifier(r)) {
-                if !self.rows.contains_key(row) && self.rows.len() == 16 {
+                if !self.rows.contains_key(row) && self.rows.len() == MAX_TABLES {
                     self.truncate("tables");
                 } else {
                     let columns = self.row_columns.entry(row.into()).or_default();
@@ -915,7 +900,7 @@ impl Snapshot {
                         if columns.contains(name) {
                             return true;
                         }
-                        if columns.len() == 64 {
+                        if columns.len() == MAX_ROW_COLUMNS {
                             omitted += 1;
                             return false;
                         }
@@ -938,9 +923,7 @@ impl Snapshot {
                         .or_default()
                         .push(cells.into_iter().collect());
                     self.row_order.push(row.into());
-                    while self.rows.values().map(Vec::len).sum::<usize>() > 2048
-                        || *row_bytes > 2 * 1024 * 1024
-                    {
+                    while self.row_order.len() > MAX_ROWS || *row_bytes > MAX_ROW_BYTES {
                         let name = self.row_order.remove(0);
                         let rows = self.rows.get_mut(&name).unwrap();
                         let removed = rows.remove(0);
@@ -1164,7 +1147,6 @@ impl Snapshot {
                 self.detectors.selected = None;
                 self.detectors.candidate = None;
                 self.detectors.previous = None;
-                self.detectors.confirmations = 0;
             } else if done == old {
                 return;
             }
@@ -1174,14 +1156,9 @@ impl Snapshot {
                 .detectors
                 .previous
                 .is_some_and(|(old, of)| of == total && done >= old);
-        self.detectors.confirmations = if compatible {
-            self.detectors.confirmations + 1
-        } else {
-            1
-        };
         self.detectors.candidate = Some(key.clone());
         self.detectors.previous = Some((done, total));
-        if self.detectors.confirmations < 2 {
+        if !compatible {
             return;
         }
         if self.detectors.selected.is_none()

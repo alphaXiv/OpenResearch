@@ -9,11 +9,6 @@ fn old_summaries_are_accepted_and_new_signals_stay_advisory() {
     summary.signals = Some(SignalsSummary {
         generation: "g1".into(),
         revision: 1,
-        cursor: 4,
-        coverage: json!({"complete":false}),
-        latest: json!({"loss":"NaN"}),
-        progress: json!({"done":100,"of":100}),
-        diagnostics: Default::default(),
         error: None,
     });
     let value = serde_json::to_value(&summary).unwrap();
@@ -41,22 +36,16 @@ fn signal_rpc_pages_obey_binary_frame_contract() {
                 total: 3,
                 bytes: vec![1, 2, 3],
             },
-            answered_at: 1_794_000_000_000,
         },
         Response::ReadSignals {
             page: SignalsPage::Reset {
-                summary: Box::new(SignalsSummary {
+                summary: SignalsSummary {
                     generation: "g2".into(),
                     revision: 0,
-                    cursor: 0,
-                    coverage: json!({}),
-                    latest: json!({}),
-                    progress: serde_json::Value::Null,
-                    diagnostics: Default::default(),
                     error: None,
-                }),
+                },
+                answered_at: 1_794_000_000_000,
             },
-            answered_at: 1_794_000_000_000,
         },
     ] {
         let mut wire = Vec::new();
@@ -85,8 +74,7 @@ fn approved_signal_fixtures_roundtrip() {
     );
 }
 
-/// Every answer that carries signals carries the host's clock; an older host's answer has none,
-/// and an older reader ignores it.
+/// A feed or reset gives the host's clock. An older host omits it and an older reader ignores it.
 #[test]
 fn signal_answers_carry_the_hosts_clock_both_ways() {
     let fixture: serde_json::Value =
@@ -107,14 +95,20 @@ fn signal_answers_carry_the_hosts_clock_both_ways() {
         assert_eq!(at, answered_at, "{name}");
         assert_eq!(serde_json::to_value(&response).unwrap(), fixture[name]);
     }
-    let response: Response = serde_json::from_value(fixture["readSignalsAnswer"].clone()).unwrap();
+    let response: Response = serde_json::from_value(fixture["readSignalsReset"].clone()).unwrap();
     assert!(matches!(
         response,
         Response::ReadSignals {
-            answered_at: 1_794_000_000_000,
-            ..
+            page: SignalsPage::Reset {
+                answered_at: 1_794_000_000_000,
+                ..
+            },
         }
     ));
+    assert_eq!(
+        serde_json::to_value(&response).unwrap(),
+        fixture["readSignalsReset"]
+    );
 
     #[derive(serde::Deserialize)]
     #[serde(tag = "op", rename_all = "snake_case")]

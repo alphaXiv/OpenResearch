@@ -855,7 +855,7 @@ impl Backend for Ssh {
             config: serde_json::to_string(config)?,
         };
         match self.request(request).await? {
-            Response::ConfigureSignals { .. } => Ok(()),
+            Response::ConfigureSignals => Ok(()),
             response => bail!("Unexpected signals configuration: {response:?}"),
         }
     }
@@ -949,7 +949,6 @@ impl Backend for Ssh {
                             total,
                             bytes: page,
                         },
-                    ..
                 } => {
                     if generation != signals.generation
                         || revision != signals.revision
@@ -978,8 +977,11 @@ impl Backend for Ssh {
                     }
                 }
                 Response::ReadSignals {
-                    page: SignalsPage::Reset { summary },
-                    answered_at,
+                    page:
+                        SignalsPage::Reset {
+                            summary,
+                            answered_at,
+                        },
                 } => {
                     *clock = Some((answered_at, crate::store::now_ms()));
                     if resets == 2 {
@@ -988,7 +990,7 @@ impl Backend for Ssh {
                             run.id
                         );
                     }
-                    *signals = *summary;
+                    *signals = summary;
                     if let Some(error) = &signals.error {
                         bail!("Run {} host signals: {error}", run.id);
                     }

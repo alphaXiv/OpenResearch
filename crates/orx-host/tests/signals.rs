@@ -206,6 +206,42 @@ fn terminal_checkpoint_outlives_the_raw_log_and_missing_live_log_is_explicit() {
 }
 
 #[test]
+fn checkpoint_loading_enforces_the_folds_row_caps() {
+    use orx_signals::{Snapshot, MAX_ROWS, MAX_ROW_COLUMNS, MAX_TABLES};
+    use std::collections::BTreeMap;
+
+    let f = Fixture::new();
+    let path = f.snapshot();
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    for (label, tables, columns, rows) in [
+        ("tables", MAX_TABLES + 1, 1, 1),
+        ("columns", 1, MAX_ROW_COLUMNS + 1, 1),
+        ("rows", 1, 1, MAX_ROWS + 1),
+    ] {
+        let mut snapshot = Snapshot::new("r1", "1-1", "g1");
+        let cells: BTreeMap<_, _> = (0..columns)
+            .map(|index| (format!("c{index}"), serde_json::json!(index)))
+            .collect();
+        for index in 0..tables {
+            let table = format!("t{index}");
+            snapshot
+                .row_order
+                .extend(std::iter::repeat_n(table.clone(), rows));
+            snapshot
+                .row_columns
+                .insert(table.clone(), cells.keys().cloned().collect());
+            snapshot.rows.insert(table, vec![cells.clone(); rows]);
+        }
+        signals::publish(&path, &snapshot).unwrap();
+        assert_eq!(
+            signals::load(&path).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData,
+            "{label}"
+        );
+    }
+}
+
+#[test]
 fn populated_host_checkpoint_matches_the_disk_contract_both_ways() {
     let f = Fixture::new();
     f.append(include_bytes!(
@@ -301,10 +337,14 @@ fn new_patterns_fold_the_same_log_again_and_replace_nothing() {
         {"regex": "^METRIC (?P<name>\\w+) (?P<value>\\S+)$"},
     ]}))
     .unwrap();
-    assert!(signals::configure(&f.snapshot(), &config).unwrap());
-    assert!(
-        !signals::configure(&f.snapshot(), &config).unwrap(),
-        "already that"
+    signals::configure(&f.snapshot(), &config).unwrap();
+    let config_file = f.snapshot().with_extension("config.json");
+    touch(&config_file, 1000);
+    let modified = fs::metadata(&config_file).unwrap().modified().unwrap();
+    signals::configure(&f.snapshot(), &config).unwrap();
+    assert_eq!(
+        fs::metadata(&config_file).unwrap().modified().unwrap(),
+        modified
     );
     let after = f.scan(true);
     assert_ne!(after.generation, before.generation);

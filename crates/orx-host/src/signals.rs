@@ -1,7 +1,9 @@
 use super::log;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use orx_host_proto::{ByteRange, FileIdent, LogPage};
-use orx_signals::{Config, Patterns, Snapshot, MAX_SNAPSHOT};
+use orx_signals::{
+    Config, Patterns, Snapshot, MAX_ROWS, MAX_ROW_BYTES, MAX_ROW_COLUMNS, MAX_SNAPSHOT, MAX_TABLES,
+};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::Path;
@@ -99,8 +101,8 @@ pub fn configured(path: &Path) -> io::Result<(Config, Option<Arc<Patterns>>)> {
 }
 
 /// Saves the configuration the log of the checkpoint at `path` is folded with, unless it is
-/// already that; the next scan folds with it. Whether it changed.
-pub fn configure(path: &Path, config: &Config) -> io::Result<bool> {
+/// already that; the next scan folds with it.
+pub fn configure(path: &Path, config: &Config) -> io::Result<()> {
     let Some(parent) = path.parent() else {
         return Err(io::Error::other("missing signals directory"));
     };
@@ -113,12 +115,11 @@ pub fn configure(path: &Path, config: &Config) -> io::Result<bool> {
     let file = path.with_extension("config.json");
     let bytes = serde_json::to_vec(config)?;
     match fs::read(&file) {
-        Ok(old) if old == bytes => return Ok(false),
+        Ok(old) if old == bytes => return Ok(()),
         Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
         _ => {}
     }
-    publish_bytes(&file, &bytes)?;
-    Ok(true)
+    publish_bytes(&file, &bytes)
 }
 
 pub fn load(path: &Path) -> io::Result<Option<Snapshot>> {
@@ -165,7 +166,14 @@ pub fn load(path: &Path) -> io::Result<Option<Snapshot>> {
         || snapshot.cursor.frame_start > snapshot.cursor.offset
         || snapshot.rev >= 9_007_199_254_740_991
         || !row_links_valid
-        || serde_json::to_vec(&snapshot.rows)?.len() > 2 * 1024 * 1024
+        || snapshot.rows.len() > MAX_TABLES
+        || snapshot.row_columns.len() > MAX_TABLES
+        || snapshot
+            .row_columns
+            .values()
+            .any(|columns| columns.len() > MAX_ROW_COLUMNS)
+        || snapshot.row_order.len() > MAX_ROWS
+        || serde_json::to_vec(&snapshot.rows)?.len() > MAX_ROW_BYTES
         || snapshot.latest.len() > 64
         || snapshot.phases.len() > 64
         || snapshot.series.values().any(|p| p.len() > 2048)

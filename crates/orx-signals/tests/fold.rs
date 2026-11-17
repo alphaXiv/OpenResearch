@@ -475,7 +475,7 @@ fn prototype_scenarios_replay_through_public_interface() {
 }
 
 #[test]
-fn shipped_checkpoint_and_payload_contracts_round_trip_with_future_fields() {
+fn checkpoint_and_payload_contracts_round_trip_with_future_fields() {
     let mut raw: serde_json::Value =
         serde_json::from_str(include_str!("../../../tests/contracts/run-signals.json")).unwrap();
     raw["future"] = json!({"x":1});

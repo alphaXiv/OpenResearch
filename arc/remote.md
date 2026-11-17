@@ -125,13 +125,11 @@ in the host root's `run-signals/` and uses a nonblocking per-run lock: a competi
 A summary with a `signals` field advertises snapshot support for that connection.
 The workspace waits for that advertisement before sending configuration or
 fetching changed revisions in pages of at most 1 MiB under one generation and
-revision, then publishes the verified checkpoint locally. Every answer that carries signals
-also carries the host's clock (`answered_at`), changed or not, so the
-workspace knows what the data is current as of and how far apart the two
-clocks are. An older serve without that field uses the frozen byte-page log
-API with a bounded replay budget, folding on the workspace's clock, as before
-the host's clock travelled. Missing support
-never means that the run has no measurements. No watcher or stop rule runs on
-the host.
+revision, then publishes the verified checkpoint locally. Inspection, change
+feeds and page resets carry the host's clock (`answered_at`), so the workspace
+knows how current the data is and how far apart the two clocks are. An older
+serve without `signals` uses the frozen byte-page log API with a bounded
+replay budget and folds patterns on the workspace's clock. Watchers and stop
+rules run on the workspace.
 
 A terminal checkpoint remains readable after its raw log is gone. Native support with no log and no checkpoint reports unavailable; absent support remains the older-peer fallback. Host cleanup removes the run's signal checkpoint, lock and abandoned generations along with the run directory.

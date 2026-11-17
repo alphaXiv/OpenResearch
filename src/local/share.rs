@@ -84,8 +84,6 @@ pub struct SharedRun {
     pub chat_id: Option<String>,
     #[serde(default)]
     pub log: bool,
-    #[serde(default)]
-    pub signals: bool,
     pub created_at: i64,
     pub ended_at: Option<i64>,
 }
@@ -262,30 +260,25 @@ fn stage(
                     &format!("logs/{}.log", run.id),
                     &mut skipped,
                 )?;
-            let signals = if options.logs {
+            if options.logs {
+                let relative = format!("signals/{}.json", run.id);
                 let source = data_root
                     .join("run-signals")
                     .join(format!("{}.json", run.id));
                 crate::engine::adapters::local::signals::validate_run(&run.id)?;
                 match crate::engine::adapters::local::signals::load(&source) {
-                    Ok(Some(_)) => copy_capped(
-                        &source,
-                        out,
-                        &format!("signals/{}.json", run.id),
-                        &mut skipped,
-                    )?,
-                    Ok(None) => false,
+                    Ok(Some(_)) => {
+                        copy_capped(&source, out, &relative, &mut skipped)?;
+                    }
+                    Ok(None) => {}
                     Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
-                        skipped.push(format!("signals/{}.json: {error}", run.id));
-                        false
+                        skipped.push(format!("{relative}: {error}"));
                     }
                     Err(error) => {
                         return Err(anyhow!("Read share source {}: {error}", source.display()))
                     }
                 }
-            } else {
-                false
-            };
+            }
             let backend = crate::jobs::BackendDescriptor::parse(&run.backend_json).ok();
             Ok(SharedRun {
                 backend: backend.as_ref().map(|b| b.kind.clone()),
@@ -299,7 +292,6 @@ fn stage(
                 result_markdown: run.result_markdown,
                 exit_code: run.exit_code,
                 log,
-                signals,
                 created_at: run.created_at,
                 ended_at: run.ended_at,
             })
@@ -1051,26 +1043,24 @@ fn move_shared_files(
             placed.push(to);
         }
     }
-    for run in manifest.runs.iter().filter(|run| run.signals) {
+    for run in &manifest.runs {
         let (Some(id), Some(name)) = (run_ids.get(run.id.as_str()), safe_name(&run.id)) else {
             continue;
         };
         let from = staging.join(format!("signals/{name}.json"));
-        if from.is_file() {
-            let loaded = crate::engine::adapters::local::signals::load(&from);
-            if let Err(error) = &loaded {
-                eprintln!(
-                    "Imported run {id}: signal checkpoint {} is unavailable: {error}",
-                    from.display()
-                );
-            }
-            if let Ok(Some(mut snapshot)) = loaded {
+        match crate::engine::adapters::local::signals::load(&from) {
+            Ok(Some(mut snapshot)) => {
                 snapshot.run_id = id.clone();
                 let to = data_root.join("run-signals").join(format!("{id}.json"));
                 std::fs::create_dir_all(to.parent().unwrap())?;
                 crate::engine::adapters::local::signals::publish(&to, &snapshot)?;
                 placed.push(to);
             }
+            Ok(None) => {}
+            Err(error) => eprintln!(
+                "Imported run {id}: signal checkpoint {} is unavailable: {error}",
+                from.display()
+            ),
         }
     }
     Ok(())
@@ -1174,20 +1164,6 @@ mod tests {
             created_at: 1,
             updated_at: 1,
         }
-    }
-
-    #[test]
-    fn signal_manifest_extends_old_archives_without_requiring_it() {
-        let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../tests/contracts/shared-run-signals.json"
-        ))
-        .unwrap();
-        let old: SharedRun = serde_json::from_value(fixture["old"].clone()).unwrap();
-        let new: SharedRun = serde_json::from_value(fixture["new"].clone()).unwrap();
-        assert!(!old.signals);
-        assert!(old.log);
-        assert!(new.signals);
-        assert_eq!(serde_json::to_value(new).unwrap()["signals"], true);
     }
 
     #[test]
@@ -1467,7 +1443,6 @@ mod tests {
         let manifest =
             export_from(&store, &sharer_data, &artifacts, &project, &options, &file).unwrap();
         assert_eq!(manifest.runs.len(), 1, "a live run is not shared");
-        assert!(manifest.runs[0].signals);
         assert_eq!(manifest.chats.len(), 1, "unselected chats stay private");
         assert!(file.is_file());
         assert!(

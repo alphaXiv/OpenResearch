@@ -273,27 +273,9 @@ fn populated_disk_contract_is_written_and_read() {
     fixture.as_object_mut().unwrap().remove("anchorBase64");
     assert_eq!(serde_json::to_value(&snapshot).unwrap(), fixture);
     assert_eq!(
-        serde_json::from_value::<Snapshot>(fixture.clone()).unwrap(),
+        serde_json::from_value::<Snapshot>(fixture).unwrap(),
         snapshot
     );
-    let mut older = fixture;
-    older["timing"]
-        .as_object_mut()
-        .unwrap()
-        .remove("lastAdvance");
-    older.as_object_mut().unwrap().remove("seriesStages");
-    let older: Snapshot = serde_json::from_value(older).unwrap();
-    assert!(
-        older.series_stages.is_empty(),
-        "a checkpoint before it reads, its stages unknown"
-    );
-    assert_eq!(
-        older.timing.last_advance, None,
-        "a checkpoint before it reads"
-    );
-    assert_eq!(older.timing.anchor, snapshot.timing.anchor);
-    assert_eq!(older.last_line, "", "a checkpoint before it reads");
-
     let mut newer = serde_json::to_value(&snapshot).unwrap();
     newer["lastLine"] = json!("Downloading shard_00001.parquet...");
     let newer: Snapshot = serde_json::from_value(newer).unwrap();
@@ -302,6 +284,16 @@ fn populated_disk_contract_is_written_and_read() {
         serde_json::to_value(&newer).unwrap()["lastLine"],
         "Downloading shard_00001.parquet..."
     );
+}
+
+#[test]
+fn a_spend_only_report_counts_as_a_signal() {
+    let mut snapshot = fresh();
+    assert!(!snapshot.has_signals());
+    snapshot
+        .feed(b"::orx:: {\"spend\":0}\n", false, 1000, false)
+        .unwrap();
+    assert!(snapshot.has_signals());
 }
 
 #[test]

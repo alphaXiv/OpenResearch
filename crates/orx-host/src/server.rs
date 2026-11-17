@@ -246,9 +246,8 @@ impl Host {
                     return invalid(&format!("pattern {}: {}", error.index + 1, error.reason));
                 }
                 let path = self.root.join("run-signals").join(format!("{run}.json"));
-                Ok(Response::ConfigureSignals {
-                    changed: crate::signals::configure(&path, &config)?,
-                })
+                crate::signals::configure(&path, &config)?;
+                Ok(Response::ConfigureSignals)
             }
             Request::ReadSignals {
                 terminal,
@@ -263,14 +262,13 @@ impl Host {
                     crate::signals_rpc::inspect(&self.root, &run, true, answered_at)?;
                 }
                 Ok(Response::ReadSignals {
-                    answered_at,
                     page: self.signal_pages.read(
                         &self.root,
                         &run,
-                        &generation,
-                        revision,
+                        (&generation, revision),
                         offset,
                         length,
+                        answered_at,
                     )?,
                 })
             }
@@ -495,25 +493,15 @@ impl Host {
 
     fn summary(&self, run: &str, follow: bool, repair: bool) -> io::Result<Summary> {
         let mut summary = self.lifecycle_summary(run, follow, repair)?;
-        if summary.signals.is_some() {
-            return Ok(summary);
-        }
-        match crate::signals_rpc::inspect(&self.root, run, false, wall_ms()) {
-            Ok(signals) => summary.signals = signals,
-            Err(error) => {
-                eprintln!("run {run}: signals: {error}");
-                summary.signals = Some(SignalsSummary {
-                    generation: String::new(),
-                    revision: 0,
-                    cursor: 0,
-                    coverage: serde_json::Value::Null,
-                    latest: serde_json::Value::Null,
-                    progress: serde_json::Value::Null,
-                    diagnostics: BTreeMap::new(),
-                    error: Some(error.to_string()),
-                });
-            }
-        }
+        summary.signals = Some(
+            match crate::signals_rpc::inspect(&self.root, run, false, wall_ms()) {
+                Ok(signals) => signals,
+                Err(error) => {
+                    eprintln!("run {run}: signals: {error}");
+                    crate::signals_rpc::unavailable(error.to_string())
+                }
+            },
+        );
         Ok(summary)
     }
 
@@ -1398,28 +1386,14 @@ fn slurm_summary(dir: &Path, old: Option<&SlurmLegacyRun>, fallback: RunState) -
             cleanup: wrapper::cleanup_result(dir)?,
         })
     })();
-    let mut summary = result.unwrap_or_else(|error| Summary {
+    result.unwrap_or_else(|error| Summary {
         signals: None,
         started_at: None,
         state: wrapper::read_error(error),
         log_len: None,
         notify_len: 0,
         cleanup: None,
-    });
-    if old.is_none() {
-        if let (Some(root), Some(run)) = (
-            dir.parent().and_then(Path::parent),
-            dir.file_name().and_then(|n| n.to_str()),
-        ) {
-            match crate::signals_rpc::inspect(root, run, false, wall_ms()) {
-                Ok(signals) => summary.signals = signals,
-                Err(error) => {
-                    summary.signals = Some(crate::signals_rpc::unavailable(&error.to_string()))
-                }
-            }
-        }
-    }
-    summary
+    })
 }
 
 fn scheduler_state(state: &str, elapsed: Duration) -> RunState {

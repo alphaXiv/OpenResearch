@@ -245,10 +245,11 @@ fn change_feed_follows_signals_without_log_subscription_and_obeys_wait() {
     };
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].1.log_len, None);
-    assert_eq!(
-        runs[0].1.signals.as_ref().unwrap().progress["done"].as_f64(),
-        Some(1.0)
-    );
+    let snapshot = orx_host::signals::load(&dir.0.join("run-signals/r1.json"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(runs[0].1.signals.as_ref().unwrap().revision, snapshot.rev);
+    assert_eq!(snapshot.progress().unwrap().done, Some(1.0));
     let start = Instant::now();
     let asked = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -773,12 +774,31 @@ fn live_inspection_keeps_partial_frames_until_final_collection_requests_eof() {
     else {
         panic!();
     };
-    assert!(summary
-        .signals
-        .unwrap()
+    let read = |terminal, signals: &SignalsSummary| {
+        host.handle(Request::ReadSignals {
+            terminal,
+            run: "r1".into(),
+            generation: if terminal {
+                String::new()
+            } else {
+                signals.generation.clone()
+            },
+            revision: signals.revision,
+            offset: 0,
+            length: MAX_PAGE_LEN,
+        })
+    };
+    let snapshot = |response| {
+        let Response::ReadSignals {
+            page: SignalsPage::Data { bytes, .. },
+        } = response
+        else {
+            panic!("expected a checkpoint page: {response:?}");
+        };
+        serde_json::from_slice::<orx_signals::Snapshot>(&bytes).unwrap()
+    };
+    assert!(snapshot(read(false, &summary.signals.unwrap()))
         .latest
-        .as_object()
-        .unwrap()
         .is_empty());
     let mut log = OpenOptions::new()
         .append(true)
@@ -791,31 +811,17 @@ fn live_inspection_keeps_partial_frames_until_final_collection_requests_eof() {
         panic!();
     };
     let signals = summary.signals.unwrap();
-    assert_eq!(signals.latest["loss"], 2);
-    let read = |terminal, signals: &SignalsSummary| Request::ReadSignals {
-        terminal,
-        run: "r1".into(),
-        generation: signals.generation.clone(),
-        revision: signals.revision,
-        offset: 0,
-        length: MAX_PAGE_LEN,
-    };
+    assert_eq!(snapshot(read(false, &signals)).latest["loss"], 2);
     let Response::ReadSignals {
-        page: SignalsPage::Reset { summary: signals },
-        ..
-    } = host.handle(read(true, &signals))
+        page: SignalsPage::Reset {
+            summary: signals, ..
+        },
+    } = read(true, &signals)
     else {
         panic!();
     };
-    assert_eq!(signals.latest["loss"], 1);
-    let Response::ReadSignals {
-        page: SignalsPage::Data { bytes, .. },
-        ..
-    } = host.handle(read(false, &signals))
-    else {
-        panic!();
-    };
-    let snapshot: orx_signals::Snapshot = serde_json::from_slice(&bytes).unwrap();
+    let snapshot = snapshot(read(false, &signals));
+    assert_eq!(snapshot.latest["loss"], 1);
     assert_eq!(snapshot.extra["terminal"], true);
     assert!(snapshot.cursor.pending_base64.is_empty());
     let Response::Inspect { summary, .. } = host.handle(Request::Inspect { run: "r1".into() })
@@ -855,7 +861,11 @@ fn slurm_summary_scans_only_one_bounded_page_batch() {
     }) else {
         panic!("inspect")
     };
-    assert_eq!(summary.signals.unwrap().cursor, 4 * 1024 * 1024);
+    let snapshot = orx_host::signals::load(&dir.0.join("run-signals/slurm.json"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(summary.signals.unwrap().revision, snapshot.rev);
+    assert_eq!(snapshot.cursor.offset, 4 * 1024 * 1024);
 }
 
 #[test]
@@ -879,8 +889,7 @@ fn signal_pages_keep_their_identity_while_the_checkpoint_advances() {
         length: 64,
     };
     let Response::ReadSignals {
-        page: SignalsPage::Reset { summary },
-        ..
+        page: SignalsPage::Reset { summary, .. },
     } = host.handle(Request::ReadSignals {
         terminal: false,
         run: "r1".into(),

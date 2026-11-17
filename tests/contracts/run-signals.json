@@ -59,9 +59,6 @@
       "bad"
     ]
   },
-  "groups": {},
-  "cells": {},
-  "counts": {},
   "phases": [
     {
       "name": "train",
@@ -106,10 +103,8 @@
     "payloadT": 2.0,
     "startedMs": 500
   },
-  "reducers": {},
   "detectors": {
     "candidate": null,
-    "confirmations": 0,
     "selected": null,
     "previous": null
   },

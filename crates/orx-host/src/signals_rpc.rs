@@ -15,11 +15,6 @@ fn summary(snapshot: &Snapshot) -> orx_host_proto::SignalsSummary {
     orx_host_proto::SignalsSummary {
         generation: snapshot.generation.clone(),
         revision: snapshot.rev,
-        cursor: snapshot.cursor.offset,
-        coverage: serde_json::to_value(&snapshot.coverage).expect("finite coverage"),
-        latest: serde_json::to_value(&snapshot.latest).expect("JSON values"),
-        progress: serde_json::to_value(snapshot.progress()).expect("finite progress"),
-        diagnostics: snapshot.diagnostics.counts.clone(),
         error: snapshot
             .coverage
             .reasons
@@ -39,7 +34,7 @@ pub(crate) fn inspect(
     run: &str,
     terminal: bool,
     now: i64,
-) -> io::Result<Option<orx_host_proto::SignalsSummary>> {
+) -> io::Result<orx_host_proto::SignalsSummary> {
     validate_run(run)?;
     let dir = root.join("runs").join(run);
     scan(
@@ -51,22 +46,17 @@ pub(crate) fn inspect(
         crate::wrapper::started_at(&dir),
     )
     .map(|s| {
-        Some(s.as_ref().map(summary).unwrap_or_else(|| {
-            unavailable(&format!("No log or signal checkpoint exists for run {run}"))
-        }))
+        s.as_ref().map(summary).unwrap_or_else(|| {
+            unavailable(format!("No log or signal checkpoint exists for run {run}"))
+        })
     })
 }
 
-pub(crate) fn unavailable(error: &str) -> orx_host_proto::SignalsSummary {
+pub(crate) fn unavailable(error: String) -> orx_host_proto::SignalsSummary {
     orx_host_proto::SignalsSummary {
         generation: String::new(),
         revision: 0,
-        cursor: 0,
-        coverage: serde_json::Value::Null,
-        latest: serde_json::Value::Null,
-        progress: serde_json::Value::Null,
-        diagnostics: Default::default(),
-        error: Some(error.into()),
+        error: Some(error),
     }
 }
 
@@ -75,11 +65,12 @@ impl Pages {
         &self,
         root: &Path,
         run: &str,
-        generation: &str,
-        revision: u64,
+        version: (&str, u64),
         offset: u64,
         length: u64,
+        answered_at: i64,
     ) -> io::Result<orx_host_proto::SignalsPage> {
+        let (generation, revision) = version;
         validate_run(run)?;
         if length == 0 || length > 1024 * 1024 {
             return Err(io::Error::new(
@@ -118,7 +109,8 @@ impl Pages {
         let page = if pinned.summary.generation != generation || pinned.summary.revision != revision
         {
             orx_host_proto::SignalsPage::Reset {
-                summary: Box::new(pinned.summary.clone()),
+                summary: pinned.summary.clone(),
+                answered_at,
             }
         } else {
             let start = usize::try_from(offset).map_err(|_| {

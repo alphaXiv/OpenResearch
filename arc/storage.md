@@ -182,8 +182,8 @@ receipt. It carries the checkpoint's host times onto the laptop's clock and
 moves at most once a minute while nothing changes; a run folded on the laptop
 has none.
 
-Sharing includes `signals/<run>.json` with `SharedRun.signals` when logs are
-selected, after the credential scan. Import rewrites the local run ID.
+Sharing can include `signals/<run>.json` when logs are selected, after the
+credential scan. Import rewrites the local run ID when the file is present.
 No folded research data is sent to a service or model provider.
 
 Component bounds keep current snapshots below the 16 MiB publication cap.

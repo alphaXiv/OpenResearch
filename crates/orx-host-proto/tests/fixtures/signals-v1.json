@@ -2,18 +2,6 @@
   "signalsSummary": {
     "generation": "g1",
     "revision": 1,
-    "cursor": 4,
-    "coverage": {
-      "complete": false
-    },
-    "latest": {
-      "loss": "NaN"
-    },
-    "progress": {
-      "done": 100,
-      "of": 100
-    },
-    "diagnostics": {},
     "error": null
   },
   "readSignals": {
@@ -80,16 +68,16 @@
       "cleanup": null
     }
   },
-  "readSignalsAnswer": {
+  "readSignalsReset": {
     "op": "read_signals",
     "page": {
-      "kind": "data",
-      "generation": "g1",
-      "revision": 1,
-      "offset": 0,
-      "total": 3,
-      "bytes": "AQID"
-    },
-    "answered_at": 1794000000000
+      "kind": "reset",
+      "summary": {
+        "generation": "g1",
+        "revision": 1,
+        "error": null
+      },
+      "answered_at": 1794000000000
+    }
   }
 }
