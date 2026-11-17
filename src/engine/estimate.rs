@@ -313,21 +313,25 @@ fn phase_range(
             n,
         );
     }
-    let live = points
-        .last()
-        .filter(|last| done > first.done && last.at > first.at)
-        .map(|last| {
-            let mid_ms = (total - done) * (last.at - first.at) / (done - first.done);
-            Range {
-                lo_ms: mid_ms * 0.5,
-                mid_ms,
-                hi_ms: mid_ms * 1.6,
-            }
-        });
+    let rates: Vec<_> = points
+        .windows(2)
+        .filter(|pair| pair[1].done > pair[0].done && pair[1].at > pair[0].at)
+        .rev()
+        .take(12)
+        .map(|pair| (pair[1].at - pair[0].at) / (pair[1].done - pair[0].done))
+        .collect();
+    let live = (!rates.is_empty()).then(|| {
+        let mid_ms = (total - done) * median(&rates);
+        Range {
+            lo_ms: mid_ms * 0.5,
+            mid_ms,
+            hi_ms: mid_ms * 1.6,
+        }
+    });
     // The partial first slice is absent; the first observed full slice is warm-up.
     let usable = &durations[1.min(n)..];
     if usable.is_empty() {
-        return (live.or(prior), n);
+        return (prior.filter(|_| rates.len() < 4).or(live).or(prior), n);
     }
     let window = &usable[usable.len().saturating_sub(14)..];
     let center = median(window);
@@ -704,8 +708,14 @@ pub(crate) fn estimate(input: &Input) -> Result<Output, InputError> {
         .rposition(|p| Some(p.at) == last_progress)
         .map_or(0, |i| i + 1)];
     let unstarted_prior = phase.prior.filter(|_| !input.current_started);
+    let timing_prior = phase.prior.filter(|_| {
+        !input.current_started
+            || timed
+                .windows(2)
+                .any(|pair| pair[1].done > pair[0].done && pair[1].at > pair[0].at)
+    });
     let (current_range, completed_slices) = if points_valid {
-        phase_range(phase.total, unstarted_prior, timed)
+        phase_range(phase.total, timing_prior, timed)
     } else {
         (None, 0)
     };
@@ -1236,6 +1246,56 @@ mod tests {
         assert_eq!(prior.per_unit_ms, None);
     }
 
+    #[test]
+    fn early_training_sheds_compile_time_and_prefers_a_prior_until_settled() {
+        let mut input = input(Some(3000.0));
+        input.phases[0].prior = Some(Range {
+            lo_ms: 5_199_034.0,
+            mid_ms: 5_199_034.0,
+            hi_ms: 5_199_034.0,
+        });
+        for step in [3, 27, 59, 136] {
+            input.points = (0..=step)
+                .map(|n| Point {
+                    at: if n == 0 {
+                        0.0
+                    } else {
+                        18_000.0 + n as f64 * 800.0
+                    },
+                    done: n as f64,
+                })
+                .collect();
+            input.now = input.points.last().unwrap().at;
+            input.as_of = input.now;
+            let mid = estimate(&input)
+                .unwrap()
+                .current_phase
+                .unwrap()
+                .range
+                .unwrap()
+                .mid_ms;
+            let expected = if step == 3 {
+                5_199_034.0 * (1.0 - step as f64 / 3000.0)
+            } else {
+                (3000 - step) as f64 * 800.0
+            };
+            close(mid, expected);
+            input.phases[0].prior = None;
+            let live = estimate(&input)
+                .unwrap()
+                .current_phase
+                .unwrap()
+                .range
+                .unwrap();
+            close(live.mid_ms, (3000 - step) as f64 * 800.0);
+            input.phases[0].prior = Some(Range {
+                lo_ms: 5_199_034.0,
+                mid_ms: 5_199_034.0,
+                hi_ms: 5_199_034.0,
+            });
+        }
+    }
+
     fn close(actual: f64, expected: f64) {
         let tolerance = 1e-5_f64.max(expected.abs() * 1e-9);
         assert!(
@@ -1442,7 +1502,7 @@ mod tests {
     }
 
     #[test]
-    fn a_live_rate_replaces_the_parent_from_its_first_measured_advance() {
+    fn a_live_rate_replaces_the_parent_after_warmup() {
         let mut i = input(Some(5000.0));
         i.phases[0].prior = Some(Range {
             lo_ms: 8_000_000.0,
@@ -1459,7 +1519,11 @@ mod tests {
             i.as_of = i.now;
             let output = estimate(&i).unwrap();
             let range = output.estimate.unwrap().range.unwrap();
-            let remaining = (5000.0 - done) * 500.0;
+            let remaining = if output.completed_slices < 2 && i.points.len() < 5 {
+                8_400_000.0 * (1.0 - done / 5000.0)
+            } else {
+                (5000.0 - done) * 500.0
+            };
             close(range.mid_ms, remaining);
             assert!(range.lo_ms <= remaining && range.hi_ms >= remaining);
         }
@@ -2225,7 +2289,7 @@ mod tests {
             let b = estimate(&without_zero).unwrap();
             assert_eq!(a.completed_slices, b.completed_slices + 1);
             if step == 1 {
-                close(a.estimate.unwrap().range.unwrap().mid_ms, 7_800_000.0);
+                close(a.estimate.unwrap().range.unwrap().mid_ms, 390_000.0);
                 assert!(b.estimate.unwrap().pending);
                 continue;
             }
@@ -2233,7 +2297,7 @@ mod tests {
             let b = b.estimate.unwrap().range.unwrap();
             if step == 2 {
                 close(a.mid_ms, 3_800_000.0);
-                close(b.mid_ms, 3_800_000.0);
+                close(b.mid_ms, 380_000.0);
             }
             if step >= 17 {
                 close(a.mid_ms, (40 - step) as f64 * 10_000.0);

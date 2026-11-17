@@ -5581,7 +5581,7 @@ mod tests {
         let (training, _) = monitor_at(&f, &child, T0 + 15_100);
         assert_eq!(training["setup"], Value::Null);
         assert_eq!(training["estimate"]["floor"], false);
-        assert_eq!(training["estimate"]["midMs"], 29_900);
+        assert_eq!(training["estimate"]["midMs"], 119_000);
     }
 
     #[test]
