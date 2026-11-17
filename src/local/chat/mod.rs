@@ -9896,13 +9896,20 @@ async fn process_run_notices(
                             &notices[0].client_turn_id,
                             now_ms(),
                         )?;
-                    } else if turn.state == "failed" && turn.delivery_state == "unknown" {
+                    } else if turn.state == "interrupted"
+                        || (turn.state == "failed" && turn.delivery_state == "unknown")
+                    {
+                        let reason = if turn.state == "interrupted" {
+                            "Notice delivery was interrupted before confirmation"
+                        } else {
+                            turn.error_message
+                                .as_deref()
+                                .unwrap_or("Notice delivery could not be confirmed")
+                        };
                         store.record_run_notice_failure(
                             &session_id,
                             &notices[0].client_turn_id,
-                            turn.error_message
-                                .as_deref()
-                                .unwrap_or("Notice delivery could not be confirmed"),
+                            reason,
                             true,
                             now_ms(),
                         )?;
@@ -13348,35 +13355,68 @@ mod run_wakeup_tests {
             frozen
         );
         restarted.interrupt("owner").await.unwrap();
-        let tx = store.begin().unwrap();
-        tx.execute(
-            "UPDATE chat_turns SET state = 'failed', delivery_state = 'unknown', error_message = 'Delivery could not be confirmed' WHERE id = ?1",
-            [&first.id],
-        )
-        .unwrap();
-        tx.execute("DELETE FROM chat_turn_leases", []).unwrap();
-        tx.execute("UPDATE run_notices SET next_delivery_at = 0", [])
-            .unwrap();
-        tx.commit().unwrap();
-        let restarted = notice_host();
-        process_run_notices(&restarted, Store::open().unwrap(), &moving)
-            .await
-            .unwrap();
-        let retired: (Option<i64>, Option<i64>) = store
-            .begin()
-            .unwrap()
-            .query_row(
-                "SELECT delivered_at, retired_at FROM run_notices WHERE id = ?1",
-                [frozen[0].id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+        for (state, delivery) in [
+            ("failed", "unknown"),
+            ("interrupted", "not_sent"),
+            ("interrupted", "unknown"),
+            ("interrupted", "rejected"),
+            ("interrupted", "accepted"),
+        ] {
+            let tx = store.begin().unwrap();
+            tx.execute(
+                "UPDATE chat_turns SET state = 'running', delivery_state = ?2, error_message = NULL WHERE id = ?1",
+                rusqlite::params![first.id, delivery],
             )
             .unwrap();
-        assert!(retired.0.is_none());
-        assert!(retired.1.is_some());
-        assert_eq!(
-            store.run_notice_error("run_x").unwrap().as_deref(),
-            Some("Delivery could not be confirmed")
-        );
+            tx.execute("DELETE FROM chat_turn_leases", []).unwrap();
+            tx.execute(
+                "UPDATE run_notices SET delivered_at = NULL, retired_at = NULL, next_delivery_at = 0,
+                     delivery_error = NULL WHERE client_turn_id = ?1",
+                [&first.client_turn_id],
+            )
+            .unwrap();
+            tx.commit().unwrap();
+            if state == "interrupted" {
+                store.interrupt_chat_turn(&first.id).unwrap();
+            } else {
+                store
+                    .fail_chat_turn(
+                        &first.id,
+                        delivery,
+                        "delivery",
+                        "Delivery could not be confirmed",
+                        None,
+                    )
+                    .unwrap();
+            }
+            let restarted = notice_host();
+            process_run_notices(&restarted, Store::open().unwrap(), &moving)
+                .await
+                .unwrap();
+            let (delivered, retired): (Option<i64>, Option<i64>) = store
+                .begin()
+                .unwrap()
+                .query_row(
+                    "SELECT delivered_at, retired_at FROM run_notices WHERE id = ?1",
+                    [frozen[0].id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                delivered.is_some(),
+                delivery == "accepted",
+                "{state}/{delivery}"
+            );
+            assert_eq!(
+                retired.is_some(),
+                delivery != "accepted",
+                "{state}/{delivery}"
+            );
+            if delivery != "accepted" {
+                assert!(store.run_notice_error("run_x").unwrap().is_some());
+            }
+            assert_eq!(count_turns(), 1, "{state}/{delivery} must not be replayed");
+        }
         let next = store.run_notice_batch("owner").unwrap();
         assert_eq!(next.len(), 1);
         assert_eq!(next[0].body, "later arrival");

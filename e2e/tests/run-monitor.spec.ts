@@ -775,6 +775,28 @@ test('a Copilot flag opens the strip with its evidence and waits: Keep going set
     const banner = await launch(page, agent, project, 'Copiloted', run.command)
     const shown = (await (await page.request.get(`${orx.url}/api/chat/shown-runs`)).json()).find((item: { run: { projectId: string } }) => item.run.projectId === project.id)
     const { id: runId, experimentId } = shown.run
+    await test.step('an interrupted earlier result leaves the chat idle before the next flag', async () => {
+      const prior = payload(orx, `prior-${project.id}`, ['finish'], `
+process.stdout.write('::orx:: {"step":0,"of":1}\\n')
+gate('finish')`)
+      const interrupted = `interrupted-result-${project.id}`
+      agent.script('Launch a prior result.', [
+        { run: [
+          'set -e',
+          `id=$(orx create-experiment ${project.id} --title PriorResult --run-command '${prior.command}' | sed -n 's/^ *id: *//p')`,
+          'orx exp run "$id" --backend local',
+          'orx exp wake "$id"',
+        ].join('\n') },
+        { say: 'Prior result launched.' },
+      ])
+      agent.script('finished with status', [{ hold: interrupted, onCancel: 'exit' }])
+      await send(page, 'Launch a prior result.')
+      await expect(page.getByText('Prior result launched.', { exact: true })).toBeVisible({ timeout: 60_000 })
+      await prior.open('finish')
+      await agent.reached(interrupted)
+      await page.getByLabel('Stop', { exact: true }).click()
+      await expect(page.getByLabel('Stop', { exact: true })).toBeHidden()
+    })
     await run.open('err')
 
     await test.step('the strip opens by itself with the evidence and three choices; the sidebar row turns amber', async () => {
@@ -807,7 +829,9 @@ test('a Copilot flag opens the strip with its evidence and waits: Keep going set
       await expect(banner.locator('pre')).toHaveText('ValueError: shard 3 of the training set is corrupt (bad header)')
       await banner.getByRole('button', { name: /^Ask / }).click()
       await agent.reached(asked)
-      await expect(banner).toContainText('is reading the evidence')
+      await expect(banner.getByRole('button', { name: /^Ask / })).toHaveCount(0)
+      await themes(page, banner, info, 'strip-copilot-asked')
+      await keep(page, banner, 'copilot-asked')
       agent.release(asked)
       await expect(page.getByText('Shard 3 is corrupt, so I stopped the run. Shall I rebuild the shard and relaunch?', { exact: true })).toBeVisible()
       await expect(banner).toContainText('Auto-stopped')
@@ -815,6 +839,7 @@ test('a Copilot flag opens the strip with its evidence and waits: Keep going set
       const { flags } = await (await page.request.get(`${orx.url}/api/runs/${runId}/monitor`)).json()
       expect(flags.map((flag: { state: string; choice: { by: string } }) => [flag.state, flag.choice.by])).toEqual([['kept', 'user'], ['stopped', 'agent']])
       await expect(page.getByText('Copiloted stopped.', { exact: true })).toBeVisible()
+      await keep(page, page, 'copilot-answered')
     })
   } finally {
     await autonomy('agentic')
