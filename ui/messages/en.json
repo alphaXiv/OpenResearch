@@ -2287,6 +2287,7 @@
   "run_view_as_text": "What an agent reads in place of the log",
   "run_chart_against": "{y} against {x}",
   "run_chart_log": "log",
+  "run_chart_scrub": "Chart. Left and right arrow keys read each value.",
   "run_chart_by_value": "{label} {value}",
   "run_chart_by_measure": "{value}, {label}",
   "run_chart_at": "{value} at {x}",

@@ -2287,6 +2287,7 @@
   "run_view_as_text": "代理代替日志读取的内容",
   "run_chart_against": "{y} 与 {x} 的关系",
   "run_chart_log": "对数",
+  "run_chart_scrub": "图表。用左右方向键读取每个值。",
   "run_chart_by_value": "{label} {value}",
   "run_chart_by_measure": "{value}，{label}",
   "run_chart_at": "{x} 时为 {value}",

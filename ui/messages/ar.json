@@ -2287,6 +2287,7 @@
   "run_view_as_text": "ما يقرؤه الوكيل بدلًا من السجل",
   "run_chart_against": "{y} مقابل {x}",
   "run_chart_log": "لوغاريتمي",
+  "run_chart_scrub": "مخطط. مفتاحا السهم الأيسر والأيمن يقرآن كل قيمة.",
   "run_chart_by_value": "{label} {value}",
   "run_chart_by_measure": "{value}، {label}",
   "run_chart_at": "{value} عند {x}",

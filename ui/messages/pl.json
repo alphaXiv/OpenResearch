@@ -2287,6 +2287,7 @@
   "run_view_as_text": "Co agent czyta zamiast logu",
   "run_chart_against": "{y} względem {x}",
   "run_chart_log": "log",
+  "run_chart_scrub": "Wykres. Strzałki w lewo i w prawo odczytują kolejne wartości.",
   "run_chart_by_value": "{label} {value}",
   "run_chart_by_measure": "{value}, {label}",
   "run_chart_at": "{value} przy {x}",

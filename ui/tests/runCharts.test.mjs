@@ -81,6 +81,44 @@ test("the readout under the pointer gives each series its value, and its own x w
   assert.match(said, /Reference build[\d.]+( KB)? at [\d.]+/, said);
 });
 
+test("a strip's chart reads out under the pointer, and steps through its points by arrow key", async () => {
+  const monitor = fixture("sweep");
+  const block = monitor.view.blocks[0];
+  const strip = await draw(monitor, block, "strip");
+  const box = chartOf(strip).parentElement;
+
+  await act(async () => box.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX: 400 })));
+  const said = text(box.querySelector("[popover]"));
+  assert.match(said, /^Learning rate [\d.]+/, said);
+  assert.match(said, /Batch \d+.*[\d.]+/, "a value for each line beside the pointer");
+  await act(async () => box.dispatchEvent(new MouseEvent("mouseout", { bubbles: true })));
+  assert.ok(!box.querySelector("[popover]"), "it goes with the pointer");
+
+  const key = (name) => act(async () => box.dispatchEvent(new KeyboardEvent("keydown", { key: name, bubbles: true, cancelable: true })));
+  await key("ArrowLeft");
+  const first = text(box.querySelector("[popover]"));
+  assert.match(text(box.querySelector('[role="status"]')), /^Learning rate [\d.]+: Batch 32 Val loss [\d.]+, Batch 64 Val loss [\d.]+/, "a keyboard reader hears what it shows");
+  await key("Home");
+  assert.notEqual(text(box.querySelector("[popover]")), first, "Home reads the first point, not the last");
+  await key("Escape");
+  assert.ok(!box.querySelector("[popover]"));
+  assert.equal(text(box.querySelector('[role="status"]')), "");
+});
+
+test("a readout stays under the pointer while the run adds points", async () => {
+  const monitor = fixture("finetune");
+  const block = monitor.view.blocks[0];
+  serveApp();
+  const view = await render(createElement(Block, { monitor, block, size: "strip", projectId: "p", tone: "running", live: true }));
+  const box = chartOf(view.container).parentElement;
+  await act(async () => box.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX: 300 })));
+  assert.ok(box.querySelector("[popover]"));
+  const loss = monitor.series.loss;
+  const grown = { ...monitor, series: { ...monitor.series, loss: [...loss, [loss.at(-1)[0] + 1, loss.at(-1)[1]]] } };
+  await view.rerender(createElement(Block, { monitor: grown, block, size: "strip", projectId: "p", tone: "running", live: true }));
+  assert.ok(box.querySelector("[popover]"), "a new point doesn't close it");
+});
+
 test("one line per value of a column, and a cell that isn't a number is counted under the chart, never dropped silently", async () => {
   const monitor = fixture("sweep");
   const block = monitor.view.blocks[0];

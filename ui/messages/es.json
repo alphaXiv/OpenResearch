@@ -2287,6 +2287,7 @@
   "run_view_as_text": "Lo que lee un agente en lugar del registro",
   "run_chart_against": "{y} frente a {x}",
   "run_chart_log": "log",
+  "run_chart_scrub": "Gráfico. Las flechas izquierda y derecha leen cada valor.",
   "run_chart_by_value": "{label} {value}",
   "run_chart_by_measure": "{value}, {label}",
   "run_chart_at": "{value} en {x}",
