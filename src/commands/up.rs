@@ -2876,11 +2876,12 @@ async fn open_project(Path(id): Path<String>) -> ApiResult {
 }
 
 /// Present-vs-absent for PATCH fields: absent = leave, null = clear.
-fn double_option<'de, D>(d: D) -> std::result::Result<Option<Option<String>>, D::Error>
+fn double_option<'de, T, D>(d: D) -> std::result::Result<Option<Option<T>>, D::Error>
 where
+    T: Deserialize<'de>,
     D: serde::Deserializer<'de>,
 {
-    Option::<String>::deserialize(d).map(Some)
+    Option::<T>::deserialize(d).map(Some)
 }
 
 #[derive(Deserialize)]
@@ -2889,6 +2890,33 @@ struct UpdateProjectReq {
     name: Option<String>,
     #[serde(default, deserialize_with = "double_option")]
     run_command: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
+    icon: Option<Option<Value>>,
+}
+
+/// An agent's kinds of icon, where `brand` is the project's initials, or an image in its repository.
+fn validate_project_icon(icon: &Value) -> std::result::Result<(), ApiError> {
+    let Some(file) = icon.get("file") else {
+        return local::agent_profiles::validate_icon(icon).map_err(bad_request);
+    };
+    let path = file
+        .as_str()
+        .ok_or_else(|| bad_request("Choose an image in the project"))?;
+    let (_, rel_path) = validated_project_file_path(path)?;
+    let image = rel_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            ["png", "jpg", "jpeg", "gif", "webp", "svg", "ico"]
+                .contains(&ext.to_ascii_lowercase().as_str())
+        });
+    let fields = icon.as_object().map_or(0, |object| object.len());
+    if !image || fields != 1 + usize::from(icon.get("color").is_some()) {
+        return Err(bad_request(
+            "Choose a PNG, JPEG, GIF, WebP, SVG or ICO image in the project",
+        ));
+    }
+    Ok(())
 }
 
 async fn update_project(
@@ -2902,10 +2930,13 @@ async fn update_project(
         .admit(&id)
         .ok_or_else(|| bad_request("project deletion is in progress"))?;
     reject_if_moving(&state)?;
-    if req.name.is_none() && req.run_command.is_none() {
+    if req.name.is_none() && req.run_command.is_none() && req.icon.is_none() {
         return Err(bad_request(
-            "nothing to update: pass name and/or runCommand",
+            "nothing to update: pass name, runCommand or icon",
         ));
+    }
+    if let Some(Some(icon)) = &req.icon {
+        validate_project_icon(icon)?;
     }
     let store = Store::open()?;
     let mut project = store
@@ -2919,6 +2950,9 @@ async fn update_project(
     }
     if let Some(cmd) = req.run_command {
         project.run_command = cmd.filter(|c| !c.trim().is_empty());
+    }
+    if let Some(icon) = req.icon {
+        project.icon = icon;
     }
     store.update_local_project(&project)?;
     // Re-read: update bumps updated_at, which is also what fires the SSE
@@ -9555,11 +9589,19 @@ fn sidebar_session_json(
     store: &Store,
     session: &StoredChatSession,
     busy: bool,
+    background: Option<&Value>,
     catalog: &Value,
 ) -> Result<Value> {
     let mut value = local::chat::session_json_with(Some(store), session, busy);
+    value["background"] = background.cloned().unwrap_or(Value::Null);
     local::chat::project_model(&mut value, session, catalog);
     value["awaitingInput"] = json!(store.chat_session_awaiting_input(&session.id, busy)?);
+    value["lastTurn"] = json!(store.latest_chat_turn(&session.id)?.map(|turn| json!({
+        "state": turn.state,
+        "startedAt": turn.created_at,
+        "errorKind": turn.error_kind,
+        "error": turn.error_message,
+    })));
     Ok(value)
 }
 
@@ -9607,11 +9649,25 @@ async fn list_chat_sessions(
             .last()
             .filter(|_| has_more)
             .map(|session| json!({ "updatedAt": session.updated_at, "id": session.id }));
+        if before.is_none() {
+            for session in store.sidebar_chat_sessions_with_active_runs(q.archived)? {
+                if !sessions.iter().any(|listed| listed.id == session.id) {
+                    sessions.push(session);
+                }
+            }
+        }
         let busy = state.chat.busy_sessions().await;
+        let background = state.chat.waiting_on().await?;
         let sessions: Vec<Value> = sessions
             .iter()
             .map(|session| {
-                sidebar_session_json(&store, session, busy.contains(&session.id), &catalog)
+                sidebar_session_json(
+                    &store,
+                    session,
+                    busy.contains(&session.id),
+                    background.get(&session.id),
+                    &catalog,
+                )
             })
             .collect::<Result<_>>()?;
         return Ok(Json(json!({ "sessions": sessions, "next": next })));
@@ -9622,9 +9678,18 @@ async fn list_chat_sessions(
         (None, _) => return Err(bad_request("projectId or scope=all is required")),
     };
     let busy = state.chat.busy_sessions().await;
+    let background = state.chat.waiting_on().await?;
     let sessions: Vec<Value> = sessions
         .iter()
-        .map(|s| sidebar_session_json(&store, s, busy.contains(&s.id), &catalog))
+        .map(|s| {
+            sidebar_session_json(
+                &store,
+                s,
+                busy.contains(&s.id),
+                background.get(&s.id),
+                &catalog,
+            )
+        })
         .collect::<Result<_>>()?;
     Ok(Json(json!({ "sessions": sessions })))
 }
@@ -12654,6 +12719,28 @@ mod tests {
     }
 
     #[test]
+    fn project_icons_take_agent_icons_or_an_image_inside_the_repository() {
+        for icon in [
+            json!({ "brand": true }),
+            json!({ "glyph": "rocket", "color": "teal" }),
+            json!({ "file": "assets/Logo.PNG" }),
+            json!({ "file": "docs/icon.svg", "color": "gray" }),
+        ] {
+            validate_project_icon(&icon).unwrap();
+        }
+        for icon in [
+            json!({ "file": "../outside.png" }),
+            json!({ "file": "/etc/logo.png" }),
+            json!({ "file": "notes.txt" }),
+            json!({ "file": "logo.png", "extra": 1 }),
+            json!({ "file": 7 }),
+            json!({ "glyph": "rocket", "color": "plaid" }),
+        ] {
+            assert!(validate_project_icon(&icon).is_err(), "{icon}");
+        }
+    }
+
+    #[test]
     fn project_json_exposes_artifacts_dir_with_legacy_alias() {
         let project = local::model::LocalProject {
             id: "p1".into(),
@@ -12666,6 +12753,7 @@ mod tests {
             repo_path: "/tmp/r".into(),
             run_command: None,
             paper_id: None,
+            icon: None,
             created_at: 0,
             updated_at: 0,
         };

@@ -140,6 +140,8 @@ The `evidence/` directory contains the real checkpoint metadata, trained tokeniz
 "#;
 
 const RUN_LOG: &str = include_str!("../../demo/nanochat/run-output.txt");
+/// The leading "n" of nanochat's wordmark, cropped square.
+const PROJECT_ICON: &[u8] = include_bytes!("../../demo/nanochat/icon.png");
 // The log's own timestamps run 10:51:52 -> 14:33:21; the seeded run must span them.
 const RUN_LOG_SPAN_MIN: i64 = 222;
 
@@ -457,6 +459,10 @@ fn seed_at(
         repo_path: repo.to_string_lossy().into_owned(),
         run_command: Some("bash runs/runcpu.sh".into()),
         paper_id: None,
+        icon: Some(serde_json::json!({ "image": {
+            "type": "image/png",
+            "data": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, PROJECT_ICON),
+        } })),
         created_at: ago(seeded_at, 250, 0),
         updated_at: ago(seeded_at, 6, 0),
     };
@@ -2263,6 +2269,7 @@ mod tests {
                 repo_path: root.join("user-nanochat").to_string_lossy().into_owned(),
                 run_command: None,
                 paper_id: None,
+                icon: None,
                 created_at: 1,
                 updated_at: 1,
             })

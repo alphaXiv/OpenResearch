@@ -359,19 +359,26 @@ export function transcriptFileName(title: string): string {
   return `${slug || "chat"}.md`;
 }
 
+const isModelAccessLimit = (error: string) =>
+  /^(?:(?:ActionRequiredError:\s*)?Named models unavailable\b|ZCode turn failed:\s*1113\b)/i.test(error.trim());
+
+// Older Claude transcripts stored the synthetic quota notice as text and errors.
+const isClaudeQuotaNotice = (text: string) =>
+  (/^(?:claude: )?you(?:'ve| have) reached your .+ limit\./i.test(text.trim()) && text.includes("claude.ai/settings/usage"))
+  || /^(?:claude: )?you(?:'ve| have) hit your session limit · resets /i.test(text.trim());
+
 export function isModelAccessLimitPart(part: ChatPart): boolean {
-  return part.type === "tool" && part.tool === "error"
-    && /^(?:(?:ActionRequiredError:\s*)?Named models unavailable\b|ZCode turn failed:\s*1113\b)/i.test(part.state?.error?.trim() ?? "");
+  return part.type === "tool" && part.tool === "error" && isModelAccessLimit(part.state?.error ?? "");
+}
+
+/** Whether a turn's failure means the account ran out of usage or model access. */
+export function isUsageLimitError(errorKind: unknown, error: string): boolean {
+  return errorKind === "claude_usage_limit" || isModelAccessLimit(error) || isClaudeQuotaNotice(error)
+    || /usageLimitExceeded|rateLimitExceeded|insufficient_quota|(?:usage|rate|session) limit|(?:exceeded|exhausted) (?:your |the |current )*quota|insufficient (?:credits|balance)|(?:credit|quota)[ _-](?:exhausted|exceeded)/i.test(error);
 }
 
 export function isUsageLimitPart(part: ChatPart): boolean {
-  if (isModelAccessLimitPart(part)) return true;
+  if (part.type === "tool" && part.tool === "error") return isUsageLimitError(part.state?.input?.errorKind, part.state?.error ?? "");
   if (part.state?.input?.errorKind === "claude_usage_limit") return true;
-  const text = part.type === "text" ? part.text : part.tool === "error" ? part.state?.error : null;
-  if (part.type === "tool" && part.tool === "error" && text
-    && /usageLimitExceeded|rateLimitExceeded|insufficient_quota|(?:usage|rate|session) limit|(?:exceeded|exhausted) (?:your |the |current )*quota|insufficient (?:credits|balance)|(?:credit|quota)[ _-](?:exhausted|exceeded)/i.test(text)) return true;
-  // Older Claude transcripts stored the synthetic quota notice as text and errors.
-  return Boolean(text && ((/^(?:claude: )?you(?:'ve| have) reached your .+ limit\./i.test(text.trim())
-    && text.includes("claude.ai/settings/usage"))
-    || /^(?:claude: )?you(?:'ve| have) hit your session limit · resets /i.test(text.trim())));
+  return part.type === "text" && Boolean(part.text && isClaudeQuotaNotice(part.text));
 }
