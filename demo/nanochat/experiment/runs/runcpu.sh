@@ -15,15 +15,6 @@ set -euo pipefail
 # Each stage reports itself to OpenResearch as an `::orx::` line; the Python scripts
 # report their steps and measures inside it through orx_run.py.
 report() { printf '::orx:: %s\n' "$1"; }
-relay() {
-    local n=0 line
-    while IFS= read -r line; do
-        printf '%s\n' "$line"
-        [[ $line =~ $1 ]] || continue
-        n=$((n + 1))
-        report "{\"step\":$n}"
-    done
-}
 
 # all the setup stuff
 # Shards, tokenizers and uv's cache are identical for every run, so runs share them and
@@ -66,8 +57,7 @@ if [ -z "${WANDB_RUN:-}" ]; then
     WANDB_RUN=dummy
 fi
 
-report "{\"phase\":\"download\",\"step\":0,\"of\":$((SHARDS + 1)),\"unit\":\"shards\"}"
-NANOCHAT_BASE_DIR="$DATA" python -m nanochat.dataset -n "$SHARDS" 2>&1 | relay '^Successfully downloaded |^Skipping '
+NANOCHAT_BASE_DIR="$DATA" python -m nanochat.dataset -n "$SHARDS"
 # Git Bash's ln -s copies, which is slower but just as correct.
 [ -e "$NANOCHAT_BASE_DIR/base_data_climbmix" ] || ln -s "$DATA/base_data_climbmix" "$NANOCHAT_BASE_DIR/base_data_climbmix"
 

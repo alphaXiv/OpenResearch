@@ -34,20 +34,28 @@ const LR_PROBE_EXPERIMENT_ID: &str = "demo_nanochat_lr_probe_v1";
 const LR_PROBE_BRANCH: &str = "orx/tiny-learning-rate-probe-interactive";
 const VOCAB_PROBE_EXPERIMENT_ID: &str = "demo_nanochat_vocab_probe_v1";
 const VOCAB_PROBE_BRANCH: &str = "orx/vocab-8192-probe";
-// Git Bash venvs keep their scripts in `Scripts/`, not `bin/`.
-const PROBE_UV: &str = "printf '::orx:: %s\\n' '{\"phase\":\"install\",\"step\":0,\"of\":1,\"unit\":\"environments\"}' \
-     && export NANOCHAT_BASE_DIR=\"$PWD/.cache/nanochat\" UV_CACHE_DIR=\"${ORX_CACHE_DIR:-$HOME/.cache/openresearch}/uv\" \
-     && mkdir -p \"$NANOCHAT_BASE_DIR\" \"$UV_CACHE_DIR\" \
-     && { command -v uv >/dev/null || { curl -LsSf https://astral.sh/uv/install.sh | sh && export PATH=\"$HOME/.local/bin:$PATH\"; }; }";
+// Git Bash: uv has no shell installer there, and venvs may use `Scripts/` not `bin/`.
+fn probe_uv() -> String {
+    let install_uv = if cfg!(windows) {
+        "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm https://astral.sh/uv/install.ps1 | iex\""
+    } else {
+        "curl -LsSf https://astral.sh/uv/install.sh | sh"
+    };
+    format!(
+        "printf '::orx:: %s\\n' '{{\"phase\":\"install\",\"step\":0,\"of\":1,\"unit\":\"environments\"}}' \
+         && export NANOCHAT_BASE_DIR=\"$PWD/.cache/nanochat\" UV_CACHE_DIR=\"${{ORX_CACHE_DIR:-$HOME/.cache/openresearch}}/uv\" PYTHONUNBUFFERED=1 \
+         && mkdir -p \"$NANOCHAT_BASE_DIR\" \"$UV_CACHE_DIR\" \
+         && {{ command -v uv >/dev/null || {{ {install_uv} && export PATH=\"$HOME/.local/bin:$PATH\"; }}; }}"
+    )
+}
 
 fn probe_setup() -> String {
     format!(
-        "{PROBE_UV} && ([ -d .venv ] || uv venv) && uv sync --extra cpu \
+        "{} && ([ -d .venv ] || uv venv) && uv sync --extra cpu \
          && {{ . .venv/bin/activate 2>/dev/null || . .venv/Scripts/activate; }} \
          && printf '::orx:: %s\\n' '{{\"step\":1}}' \
-         && SHARDS=8 \
-         && printf '::orx:: {{\"phase\":\"download\",\"step\":0,\"of\":%s,\"unit\":\"shards\"}}\\n' \"$((SHARDS + 1))\" \
-         && python -m nanochat.dataset -n \"$SHARDS\""
+         && python -m nanochat.dataset -n 8",
+        probe_uv()
     )
 }
 
@@ -55,7 +63,7 @@ fn probe_setup() -> String {
 const PROBE_TRAIN: &str = "printf '::orx:: %s\\n' '{\"phase\":\"train\"}' && python -m scripts.base_train --depth=6 --head-dim=64 --window-pattern=L --max-seq-len=512 --device-batch-size=32 --total-batch-size=16384 --eval-every=50 --eval-tokens=524288 --core-metric-every=-1 --sample-every=-1 --num-iterations=200 --warmdown-ratio=0";
 const PROBE_TOK_TRAIN: &str = "printf '::orx:: %s\\n' '{\"phase\":\"tokenizer\",\"step\":0,\"of\":1,\"unit\":\"commands\"}' && python -m scripts.tok_train --max-chars=2000000000";
 const BASELINE_SHA: &str = "96098ad3f3708748f693c28194520ae13afb9c69";
-const EXPERIMENT_SHA: &str = "3f761f37fff37b1f94fc497f8671def22372cc9f";
+const EXPERIMENT_SHA: &str = "f7e3361e2318e8ffb932160e71cf62b9cbffcf8e";
 // Earlier baseline trees, newest first: before it reported its stages, and before
 // `runs/runcpu.sh` learned Windows. An install seeded at one keeps it, since every session
 // worktree it has was cut from it.
@@ -150,6 +158,7 @@ The `evidence/` directory contains the real checkpoint metadata, trained tokeniz
 
 const RUN_LOG: &str = include_str!("../../demo/nanochat/run-output.txt");
 const BASELINE_VIEW: &str = include_str!("../../demo/nanochat/baseline-view.xml");
+const VOCAB_PROBE_VIEW: &str = include_str!("../../demo/nanochat/vocab-probe-view.xml");
 const PROBE_VIEW: &str = include_str!("../../demo/nanochat/probe-view.xml");
 // The log's own timestamps run 10:51:52 -> 14:33:21; the seeded run must span them.
 const RUN_LOG_SPAN_MIN: i64 = 222;
@@ -500,7 +509,7 @@ fn seed_at(
                 "Train a real 0.8M-parameter nanochat model for 20 steps per arm on bundled text, comparing AdamW LR 0.001 with 0.002 from identical initialization and batches. Saves training/held-out validation loss, an interactive HTML loss chart, and raw metrics. No dataset download or full tokenizer training. Demonstrates early optimization, not coherent generation; results are separate from the recorded 73.5M baseline. First use prepares Python dependencies."
                     .into(),
             ),
-            run_command: format!("{PROBE_UV} && uv run --script scripts/demo_probe.py"),
+            run_command: format!("{} && uv run --script scripts/demo_probe.py", probe_uv()),
             agent_status: "idle".into(),
             created_at: ago(seeded_at, 8, 0),
             updated_at: ago(seeded_at, 8, 0),
@@ -802,13 +811,13 @@ fn draw_run(store: &Store, data_root: &Path, ended_at: i64) -> Result<()> {
     for (experiment, markup) in [
         (EXPERIMENT_ID, BASELINE_VIEW),
         (LR_PROBE_EXPERIMENT_ID, PROBE_VIEW),
-        (VOCAB_PROBE_EXPERIMENT_ID, BASELINE_VIEW),
+        (VOCAB_PROBE_EXPERIMENT_ID, VOCAB_PROBE_VIEW),
     ] {
         let source = Source {
-            file: Some(if experiment == LR_PROBE_EXPERIMENT_ID {
-                "probe-view.xml"
-            } else {
-                "baseline-view.xml"
+            file: Some(match experiment {
+                LR_PROBE_EXPERIMENT_ID => "probe-view.xml",
+                VOCAB_PROBE_EXPERIMENT_ID => "vocab-probe-view.xml",
+                _ => "baseline-view.xml",
             }),
             patterns: None,
             config: None,
@@ -2230,9 +2239,12 @@ mod tests {
             let expected = if probe == LR_PROBE_EXPERIMENT_ID {
                 PROBE_VIEW
             } else {
-                BASELINE_VIEW
+                VOCAB_PROBE_VIEW
             };
             assert_eq!(saved["markup"], expected, "{probe}");
+            if probe == VOCAB_PROBE_EXPERIMENT_ID {
+                assert!(!saved["markup"].as_str().unwrap().contains("sft"));
+            }
         }
     }
 

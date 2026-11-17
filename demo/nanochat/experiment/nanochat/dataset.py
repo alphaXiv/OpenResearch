@@ -8,6 +8,7 @@ For details of how the dataset was prepared, see `repackage_data_reference.py`.
 """
 
 import os
+import json
 import argparse
 import time
 import requests
@@ -97,12 +98,12 @@ def download_single_file(index):
 
     # Download with retries
     max_attempts = 5
+    temp_path = filepath + f".{os.getpid()}.tmp"
     for attempt in range(1, max_attempts + 1):
         try:
             response = requests.get(url, stream=True, timeout=30)
             response.raise_for_status()
             # Write to a temporary file of this process's own, since runs share the data directory
-            temp_path = filepath + f".{os.getpid()}.tmp"
             with open(temp_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=1024 * 1024):  # 1MB chunks
                     if chunk:
@@ -151,9 +152,17 @@ if __name__ == "__main__":
     print(f"Downloading {len(ids_to_download)} shards using {args.num_workers} workers...")
     print(f"Target directory: {DATA_DIR}")
     print()
+    total = len(ids_to_download)
+    successful = 0
+    print('::orx:: ' + json.dumps(dict(phase="download", step=0, of=total, unit="shards")), flush=True)
     with Pool(processes=args.num_workers) as pool:
-        results = pool.map(download_single_file, ids_to_download)
+        for success in pool.imap_unordered(download_single_file, ids_to_download):
+            if success:
+                successful += 1
+                print('::orx:: ' + json.dumps(dict(phase="download", step=successful, of=total, unit="shards")), flush=True)
 
     # Report results
-    successful = sum(1 for success in results if success)
     print(f"Done! Downloaded: {successful}/{len(ids_to_download)} shards to {DATA_DIR}")
+
+    if successful != total:
+        raise SystemExit(1)
