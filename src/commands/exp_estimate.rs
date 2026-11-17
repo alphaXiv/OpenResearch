@@ -60,7 +60,6 @@ pub(super) fn run(store: &Store, args: &crate::ExpRunArgs) -> Result<()> {
             parent.as_ref().map(|(_, _, snapshot)| snapshot.as_ref())
         )
     );
-    println!("Not included: queueing, provisioning, and changes in hardware or per-step work.");
     Ok(())
 }
 
@@ -182,6 +181,9 @@ fn report(plan: &[orx_signals::Stage], parent: Option<&orx_signals::Snapshot>) -
             }
         }
     }
+    lines.push(
+        "Not included: queueing, provisioning, and changes in hardware or per-step work.".into(),
+    );
     if unknown.is_empty() {
         lines.push(format!("Total: about {}", duration(total)));
     } else {
@@ -190,6 +192,7 @@ fn report(plan: &[orx_signals::Stage], parent: Option<&orx_signals::Snapshot>) -
             duration(total),
             unknown.join(", ")
         ));
+        lines.push(format!("This is a floor: {} are not timed. Tell the user the total is unknown or run a short calibration before promising a duration.", unknown.join(", ")));
     }
     lines.join("\n")
 }
@@ -233,6 +236,12 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("download: about 1 min"), "{text}");
+        assert!(text
+            .lines()
+            .last()
+            .unwrap()
+            .contains("This is a floor: eval are not timed."));
+        assert!(text.lines().last().unwrap().contains("total is unknown"));
         assert!(
             text.contains("Total: at least 31 min (eval not timed)"),
             "{text}"

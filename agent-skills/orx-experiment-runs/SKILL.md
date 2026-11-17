@@ -63,9 +63,9 @@ orx exp run <expId> --estimate
 
 Adjust the command's steps and plan totals, save the plan, then estimate
 again until the total fits the requested range. Before launching, say the
-estimated number and hardware assumption in one line. A total that says
-"at least" leaves stages untimed: calibrate them before claiming the run fits. Never replace
-missing timings with a guess.
+estimated number and hardware assumption in one line. When any stage is untimed,
+tell the user the total is unknown or run a short calibration before promising
+a duration.
 
 ## 3. Report progress and measures
 
