@@ -322,6 +322,11 @@
   "settings_page_agent_models": "Agent models",
   "settings_nested_subagents": "Allow nested sub-agents",
   "settings_nested_subagents_description": "Let sub-agents start sub-agents of their own. Agents can still change this for each task.",
+  "settings_auto_reviewer": "Auto reviewer",
+  "settings_auto_reviewer_description": "The model that reviews OpenCode's commands in Auto. A smaller one keeps reviews cheap and quick. A chat on a local model always reviews with its own model.",
+  "settings_auto_reviewer_same": "Same model as the chat",
+  "opencode_auto_same_model": "Uses the same model to review each command, and asks you when unsure",
+  "opencode_auto_model": "Uses {model} to review each command, and asks you when unsure",
   "settings_models": "Models",
   "settings_models_description": "Models you turn off leave the model picker, and agents can't delegate to them. Drag to reorder its sections.",
   "settings_models_off": "{count} off",
@@ -1726,9 +1731,6 @@
   "add_agent_providers_failed": "Couldn't load OpenCode's providers.",
   "add_agent_provider_missing": "OpenCode doesn't list {name}. Choose another provider.",
   "agent_name": "Name",
-  "opencode_update_title": "OpenCode needs an update",
-  "opencode_update_description": "You have OpenCode {version}, and OpenResearch needs OpenCode 2. Updating moves yours to OpenCode 2, or downloads a copy just for OpenResearch if yours can't update itself.",
-  "opencode_update": "Update to OpenCode 2",
   "provider_key_replace_title": "Replace {name} key",
   "provider_key_get": "Get a key",
   "provider_key_label": "{name} API key",
@@ -1741,7 +1743,6 @@
   "settings_remove_agent_title": "Remove {name}?",
   "settings_remove_agent": "Remove {name}",
   "settings_remove_agent_description": "Chats that use it will need another agent.",
-  "settings_opencode_update_needed": "Update to add providers",
   "settings_free_models": "Free Models",
   "settings_free_models_locked": "Sign in with another provider to disable the free models",
   "settings_free_models_description": "A set of models provided by OpenCode to get you started without paying.",
@@ -2140,6 +2141,6 @@
   "usage_reset_none_left": "No resets left.",
   "acp_approval_ask": "Ask",
   "acp_approval_ask_description": "Ask before actions that need approval",
-  "acp_approval_auto": "Auto-approve",
-  "acp_approval_auto_description": "Approve individual requests automatically. The agent's access restrictions still apply."
+  "acp_approval_auto": "Full access",
+  "acp_approval_auto_description": "Approve each request without asking, except ones that can only be allowed permanently"
 }

@@ -56,7 +56,7 @@ import {
 import { useMutate } from "@clo/react-mutation";
 
 import { nativeOptions, sessionAcpHarness } from "../acp";
-import { deriveComposerSelection, selectionHarness } from "../modelSelection";
+import { deriveComposerSelection, selectionHarness, withAutoReviewer } from "../modelSelection";
 
 import { RemoteConnectionStrip, useRemoteConnection } from "../RemoteRuntime";
 
@@ -5630,6 +5630,7 @@ export function ChatPanel({
     listSidebarChatSessionsQuery,
     listChatActiveRunsQuery,
     getHarnessesQuery,
+    getUiStateQuery,
     getSkillsQuery,
     getHarnessSetupCommandsQuery,
     getCodeTreeQuery,
@@ -6099,6 +6100,7 @@ export function ChatPanel({
       ? { ...savedSelection, ...sessionOverride }
       : null;
   const { data: skills = EMPTY_SKILLS } = useQuery(getSkillsQuery(rawSelection?.harness, projectId));
+  const { data: uiState } = useQuery(getUiStateQuery());
   const catalogHarness = selectionHarness(harnesses, rawSelection);
   const activeHarness = sessionAcpHarness(openSession, catalogHarness);
   const acpOptions = nativeOptions(openSession?.nativeConfiguration, { model: m.model_picker_model(), mode: m.model_picker_mode() });
@@ -8812,7 +8814,7 @@ export function ChatPanel({
                   onSelect={selectModel}
                   onStartHarness={startHarness}
                   onOpenSettings={() => onSelectMainView("harnesses")}
-                  permissionChoices={activeHarness?.agentReady ? (opts?.permissionModes ?? []) : []}
+                  permissionChoices={activeHarness?.agentReady ? withAutoReviewer(opts?.permissionModes ?? [], activeHarness, uiState?.opencodeReviewModel, composerSelection?.model) : []}
                   defaultPermissionId={opts?.defaultPermissionMode ?? null}
                   onSelectPermission={setPermissionMode}
                   reasoningChoices={activeHarness?.agentReady ? reasoning.choices : []}

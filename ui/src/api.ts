@@ -139,9 +139,6 @@ export interface Run {
 
 export class RejectedResponseError extends Error {}
 
-/** OpenCode 1 can't do this; updating it or using OpenResearch's copy can. */
-export class OpenCode1Error extends RejectedResponseError {}
-
 /** Why a model server listed no models: nothing answered, it wants an API key, or it has no models. */
 export class UnlistedError extends RejectedResponseError {
   constructor(message: string, readonly code: "unreachable" | "needsKey" | "noModels") {
@@ -189,6 +186,8 @@ export interface UiState {
   nestedDelegation: boolean;
   /** Whether OpenCode's free models are offered beside the user's own. */
   opencodeFreeModels: boolean;
+  /** The `provider/model` that reviews OpenCode's Auto requests; null is the chat's own. */
+  opencodeReviewModel: string | null;
   /** The model families the picker lists first. */
   favoriteModels: string[];
   /** Models turned off in Settings, by {@link ModelName.key}: the picker hides them and agents can't delegate to them. */
@@ -2067,7 +2066,6 @@ export function createApi(
                 : null;
             throw new FileChangedError(message, currentVersion, parsed.exists);
           }
-          if (res.status === 409 && "code" in parsed && parsed.code === "opencode1") throw new OpenCode1Error(message);
           if (res.status === 400 && "code" in parsed && (parsed.code === "unreachable" || parsed.code === "needsKey" || parsed.code === "noModels"))
             throw new UnlistedError(message, parsed.code);
           if (res.status === 400 && "fields" in parsed && typeof parsed.fields === "object" && parsed.fields !== null)
@@ -2190,6 +2188,8 @@ export function createApi(
     preferredAutonomy?: Autonomy;
     nestedDelegation?: boolean;
     opencodeFreeModels?: boolean;
+    /** Empty for the chat's own. */
+    opencodeReviewModel?: string;
     favoriteModels?: string[];
     hiddenModels?: string[];
     hiddenAgents?: string[];

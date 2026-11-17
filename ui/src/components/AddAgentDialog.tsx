@@ -4,7 +4,6 @@ import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, ty
 import { useQuery, type QueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Check, ChevronDown, CircleCheck, Copy, CreditCard, KeyRound, Laptop, Link2, Plus, RefreshCw, Search, TriangleAlert } from "lucide-react";
 import {
-  OpenCode1Error,
   harnessModelLabel,
   tidyModelName,
   type AcpDefinition,
@@ -303,8 +302,6 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
   /** What OpenCode asks before a sign-in starts, such as GitHub's deployment type. */
   const [questions, setQuestions] = useState<{ signIn: OAuthSignIn; from: AgentTile; fields: OpenCodeFormField[] } | null>(null);
   const [answers, setAnswers] = useState<Record<string, OpenCodeAnswer>>({});
-  /** A request OpenCode 1 refused, until it's updated. */
-  const [refused, setRefused] = useState(false);
   const [name, setName] = useState("");
   /** Null until the user picks one: the tile's mark on its colour. */
   const [icon, setIcon] = useState<AgentIcon | null>(null);
@@ -335,7 +332,6 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
     enabled: opencodeReady && (expanded || method?.kind === "opencode" || method?.kind === "oauth"),
     staleTime: 60_000,
   });
-  const needsOpenCode2 = refused || opencodeMajor(opencode) === 1 || integrations.error instanceof OpenCode1Error;
   const listing = tile?.methods.find((signIn) => signIn.kind === "opencode");
   const entry = listing && integrations.data?.find((item) => item.id === listing.id);
   // How OpenCode signs in to a provider from its list, sign-ins before keys.
@@ -389,7 +385,7 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
   useEffect(() => {
     const target = bodyRef.current?.querySelector<HTMLElement>("input:not([type=hidden]), [data-autofocus]") ?? bodyRef.current;
     target?.focus();
-  }, [step, method, ways.length, needsOpenCode2]);
+  }, [step, method, ways.length]);
 
   // Saved keys and endpoints reach OpenCode's catalog only once it re-checks. Before paint, so the step never
   // shows the catalog from before the sign-in.
@@ -406,8 +402,7 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
     setError(null);
     try { await action(); }
     catch (cause) {
-      if (cause instanceof OpenCode1Error) setRefused(true);
-      else setError(cause instanceof Error ? cause.message : String(cause));
+      setError(cause instanceof Error ? cause.message : String(cause));
     }
     finally { setBusy(false); }
   };
@@ -438,7 +433,7 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
     setName(recordName);
   });
   /** What a sign-in does first, once OpenCode can take it. */
-  const begin = (signIn: SignIn | null, from: AgentTile, canSignIn = opencodeReady && !needsOpenCode2) => {
+  const begin = (signIn: SignIn | null, from: AgentTile, canSignIn = opencodeReady) => {
     if (signIn?.kind === "profile" && !remote) {
       const create = () => createProfile(signIn, from);
       void (signIn.harness === "claude-code" ? warnFirst(create, () => leave("provider")) : create());
@@ -595,13 +590,12 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
         : m.add_agent_sign_in_title({ name: tile.name });
   const logo = (size: number) => tile?.id === "endpoint" || (tile?.id === "local" && localFound) ? <EndpointMark server={endpoint.server} size={size} /> : tile && <TileMark tile={tile} size={size} />;
 
-  /** OpenCode 2 is there to sign in with, or what it takes to get it. */
+  /** OpenCode is there to sign in with, or what it takes to get it. */
   const opencodeGate = (): ReactNode => {
-    if (opencodeReady && !needsOpenCode2) return null;
+    if (opencodeReady) return null;
     const commands = setupCommands.data?.opencode;
     if (remote || !opencode || !commands) return <p className="m-0 text-sm text-subtext">{m.settings_needs_opencode()}</p>;
-    const ready = () => { setRefused(false); if (tile) begin(method, tile, true); };
-    if (needsOpenCode2) return <OpenCodeUpdate key="opencode-update" opencode={opencode} commands={commands} disabled={isDisabled} onReady={ready} />;
+    const ready = () => { if (tile) begin(method, tile, true); };
     return <HarnessSetup key="opencode-install" harness={opencode} commands={commands} action="install" disabled={isDisabled} onReady={ready} />;
   };
 
@@ -1155,22 +1149,6 @@ export function OpenCodeSignInDialog({ name, first, start, confirm, cancel, isDi
       <Button onClick={() => { void cancelOpenCodeSignIn(signIn.attempt).catch(() => {}); cancel(); }} disabled={isDisabled}>{m.settings_page_cancel()}</Button>
     </div>
   </DialogContent>;
-}
-
-/** OpenCode 1 can't add providers. */
-function OpenCodeUpdate({ opencode, commands, disabled, onReady }: {
-  opencode: Harness;
-  commands: HarnessSetupCommands;
-  disabled: boolean;
-  onReady: () => void;
-}) {
-  const [updating, setUpdating] = useState(false);
-  if (updating) return <HarnessSetup harness={opencode} commands={commands} action="upgrade" disabled={disabled} onReady={onReady} />;
-  return <form className="space-y-3" onSubmit={(event) => { event.preventDefault(); setUpdating(true); }}>
-    <p className="m-0 text-sm font-medium">{m.opencode_update_title()}</p>
-    <p className="m-0 text-sm text-subtext">{m.opencode_update_description({ version: opencodeVersion(opencode) ?? "1" })}</p>
-    <Button type="submit" variant="primary" data-autofocus disabled={disabled}>{m.opencode_update()}</Button>
-  </form>;
 }
 
 /** An agent's own setup: install, then its sign-in; or what blocks it here. */

@@ -322,6 +322,11 @@
   "settings_page_agent_models": "एजेंट मॉडल",
   "settings_nested_subagents": "नेस्टेड सब-एजेंट की अनुमति दें",
   "settings_nested_subagents_description": "सब-एजेंट को अपने सब-एजेंट शुरू करने दें। एजेंट हर काम के लिए इसे अब भी बदल सकते हैं।",
+  "settings_auto_reviewer": "Auto समीक्षक",
+  "settings_auto_reviewer_description": "वह मॉडल जो Auto में OpenCode के कमांड की समीक्षा करता है। छोटा मॉडल समीक्षा को सस्ता और तेज़ रखता है। लोकल मॉडल वाली चैट हमेशा अपने ही मॉडल से समीक्षा करती है।",
+  "settings_auto_reviewer_same": "चैट वाला ही मॉडल",
+  "opencode_auto_same_model": "हर कमांड की समीक्षा के लिए वही मॉडल इस्तेमाल करता है और भरोसा न होने पर आपसे पूछता है",
+  "opencode_auto_model": "हर कमांड की समीक्षा के लिए {model} इस्तेमाल करता है और भरोसा न होने पर आपसे पूछता है",
   "settings_models": "मॉडल",
   "settings_models_description": "जिन मॉडलों को आप बंद करते हैं, वे मॉडल पिकर से हट जाते हैं और एजेंट उन्हें काम नहीं सौंप सकते। इसके सेक्शन का क्रम बदलने के लिए खींचें।",
   "settings_models_off": "{count} बंद",
@@ -1726,9 +1731,6 @@
   "add_agent_providers_failed": "OpenCode के प्रोवाइडर लोड नहीं हो सके।",
   "add_agent_provider_missing": "OpenCode की सूची में {name} नहीं है। कोई दूसरा प्रोवाइडर चुनें।",
   "agent_name": "नाम",
-  "opencode_update_title": "OpenCode को अपडेट करना होगा",
-  "opencode_update_description": "आपके पास OpenCode {version} है, और OpenResearch को OpenCode 2 चाहिए। अपडेट करने से आपका OpenCode 2 पर चला जाता है, या अगर वह खुद अपडेट नहीं हो पाता तो सिर्फ़ OpenResearch के लिए एक कॉपी डाउनलोड होती है।",
-  "opencode_update": "OpenCode 2 पर अपडेट करें",
   "provider_key_replace_title": "{name} की बदलें",
   "provider_key_get": "की पाएं",
   "provider_key_label": "{name} API की",
@@ -1741,7 +1743,6 @@
   "settings_remove_agent_title": "{name} हटाएं?",
   "settings_remove_agent": "{name} हटाएँ",
   "settings_remove_agent_description": "इसका इस्तेमाल करने वाली चैट को दूसरा एजेंट चाहिए होगा।",
-  "settings_opencode_update_needed": "प्रोवाइडर जोड़ने के लिए अपडेट करें",
   "settings_free_models": "मुफ़्त मॉडल",
   "settings_free_models_locked": "मुफ़्त मॉडल बंद करने के लिए किसी दूसरे प्रोवाइडर से साइन इन करें",
   "settings_free_models_description": "OpenCode के दिए मॉडल, ताकि आप बिना भुगतान के शुरू कर सकें।",
@@ -2140,6 +2141,6 @@
   "usage_reset_none_left": "कोई रीसेट बाकी नहीं।",
   "acp_approval_ask": "हर बार पूछें",
   "acp_approval_ask_description": "अनुमति की ज़रूरत वाले कामों से पहले पूछें",
-  "acp_approval_auto": "अपने आप अनुमति दें",
-  "acp_approval_auto_description": "अलग-अलग कामों के अनुरोध अपने आप मंज़ूर करें। एजेंट के अपने ऐक्सेस प्रतिबंध लागू रहेंगे।"
+  "acp_approval_auto": "पूर्ण पहुँच",
+  "acp_approval_auto_description": "हर अनुरोध को बिना पूछे मंज़ूर करता है, उन अनुरोधों को छोड़कर जिन्हें केवल स्थायी रूप से अनुमति दी जा सकती है"
 }

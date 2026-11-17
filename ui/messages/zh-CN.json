@@ -322,6 +322,11 @@
   "settings_page_agent_models": "智能体模型",
   "settings_nested_subagents": "允许嵌套子智能体",
   "settings_nested_subagents_description": "允许子智能体启动自己的子智能体。智能体仍可针对每个任务更改此设置。",
+  "settings_auto_reviewer": "Auto 审查模型",
+  "settings_auto_reviewer_description": "在 Auto 模式下审查 OpenCode 命令的模型。选用较小的模型可让审查更省钱、更快。使用本地模型的聊天始终用自己的模型审查。",
+  "settings_auto_reviewer_same": "与聊天相同的模型",
+  "opencode_auto_same_model": "使用同一个模型审查每条命令，拿不准时会询问你",
+  "opencode_auto_model": "使用 {model} 审查每条命令，拿不准时会询问你",
   "settings_models": "模型",
   "settings_models_description": "关闭的模型会从模型选择器中移除，智能体也无法把任务委派给它们。拖动可调整分区顺序。",
   "settings_models_off": "已关闭 {count} 个",
@@ -1726,9 +1731,6 @@
   "add_agent_providers_failed": "无法加载 OpenCode 的提供商。",
   "add_agent_provider_missing": "OpenCode 未列出 {name}。请选择其他提供商。",
   "agent_name": "名称",
-  "opencode_update_title": "OpenCode 需要更新",
-  "opencode_update_description": "你的 OpenCode 版本是 {version}，而 OpenResearch 需要 OpenCode 2。更新会把你的 OpenCode 升级到 2；如果它无法自行更新，就下载一份仅供 OpenResearch 使用的副本。",
-  "opencode_update": "更新到 OpenCode 2",
   "provider_key_replace_title": "替换 {name} 密钥",
   "provider_key_get": "获取密钥",
   "provider_key_label": "{name} API 密钥",
@@ -1741,7 +1743,6 @@
   "settings_remove_agent_title": "移除 {name}？",
   "settings_remove_agent": "移除 {name}",
   "settings_remove_agent_description": "使用它的对话需要换用其他智能体。",
-  "settings_opencode_update_needed": "更新后才能添加提供商",
   "settings_free_models": "免费模型",
   "settings_free_models_locked": "使用其他提供商登录后才能关闭免费模型",
   "settings_free_models_description": "OpenCode 提供的一组模型，无需付费即可上手。",
@@ -2140,6 +2141,6 @@
   "usage_reset_none_left": "没有剩余的重置。",
   "acp_approval_ask": "逐次询问",
   "acp_approval_ask_description": "执行需要授权的操作前询问",
-  "acp_approval_auto": "自动批准",
-  "acp_approval_auto_description": "自动批准单次操作请求，代理自身的访问限制仍然有效。"
+  "acp_approval_auto": "完全访问",
+  "acp_approval_auto_description": "不询问即批准每个请求，但只能永久允许的请求除外"
 }

@@ -165,7 +165,7 @@ const PERMISSION_ICONS: Record<string, { icon: LucideIcon; tone: string }> = {
   plan: { icon: ListChecks, tone: "text-accent-teal" },
   auto: { icon: ShieldCheck, tone: "text-accent-blue" },
   "approve-for-me": { icon: ShieldCheck, tone: "text-accent-blue" },
-  "auto-approve": { icon: ShieldCheck, tone: "text-accent-blue" },
+  "auto-approve": { icon: LockOpen, tone: "text-accent-red" },
   bypass: { icon: LockOpen, tone: "text-accent-red" },
   bypassPermissions: { icon: LockOpen, tone: "text-accent-red" },
   "full-access": { icon: LockOpen, tone: "text-accent-red" },

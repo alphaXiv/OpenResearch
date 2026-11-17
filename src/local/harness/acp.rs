@@ -33,8 +33,9 @@ pub fn approval_options() -> HarnessOptions {
         permission_modes: vec![
             OptionChoice::described("ask", "Ask", "Ask before actions that need approval"),
             OptionChoice::described(
-                "auto-approve", "Auto-approve",
-                "Approve individual requests automatically. The agent's access restrictions still apply.",
+                "auto-approve",
+                "Full access",
+                "Approve each request without asking, except ones that can only be allowed permanently",
             ),
         ],
         default_permission_mode: Some("ask"),

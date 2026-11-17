@@ -322,6 +322,11 @@
   "settings_page_agent_models": "Modelos de los agentes",
   "settings_nested_subagents": "Permitir subagentes anidados",
   "settings_nested_subagents_description": "Permite que los subagentes inicien sus propios subagentes. Los agentes pueden cambiarlo en cada tarea.",
+  "settings_auto_reviewer": "Revisor de Auto",
+  "settings_auto_reviewer_description": "El modelo que revisa los comandos de OpenCode en Auto. Uno más pequeño mantiene las revisiones baratas y rápidas. Un chat con un modelo local siempre revisa con el suyo.",
+  "settings_auto_reviewer_same": "El mismo modelo que el chat",
+  "opencode_auto_same_model": "Usa el mismo modelo para revisar cada comando y te pregunta cuando no está seguro",
+  "opencode_auto_model": "Usa {model} para revisar cada comando y te pregunta cuando no está seguro",
   "settings_models": "Modelos",
   "settings_models_description": "Los modelos que desactives salen del selector de modelos y los agentes no pueden delegarles tareas. Arrastra para reordenar sus secciones.",
   "settings_models_off": "{count} desactivados",
@@ -1726,9 +1731,6 @@
   "add_agent_providers_failed": "No se pudieron cargar los proveedores de OpenCode.",
   "add_agent_provider_missing": "OpenCode no incluye {name}. Elige otro proveedor.",
   "agent_name": "Nombre",
-  "opencode_update_title": "OpenCode necesita una actualización",
-  "opencode_update_description": "Tienes OpenCode {version} y OpenResearch necesita OpenCode 2. Al actualizar, el tuyo pasa a OpenCode 2, o se descarga una copia solo para OpenResearch si el tuyo no puede actualizarse.",
-  "opencode_update": "Actualizar a OpenCode 2",
   "provider_key_replace_title": "Reemplazar la clave de {name}",
   "provider_key_get": "Obtener una clave",
   "provider_key_label": "Clave de API de {name}",
@@ -1741,7 +1743,6 @@
   "settings_remove_agent_title": "¿Quitar {name}?",
   "settings_remove_agent": "Quitar {name}",
   "settings_remove_agent_description": "Los chats que lo usan necesitarán otro agente.",
-  "settings_opencode_update_needed": "Actualiza para añadir proveedores",
   "settings_free_models": "Modelos gratuitos",
   "settings_free_models_locked": "Inicia sesión con otro proveedor para desactivar los modelos gratuitos",
   "settings_free_models_description": "Un conjunto de modelos que ofrece OpenCode para empezar sin pagar.",
@@ -2140,6 +2141,6 @@
   "usage_reset_none_left": "No quedan reinicios.",
   "acp_approval_ask": "Preguntar",
   "acp_approval_ask_description": "Preguntar antes de las acciones que requieren aprobación",
-  "acp_approval_auto": "Aprobar automáticamente",
-  "acp_approval_auto_description": "Aprueba automáticamente las solicitudes individuales. Se mantienen las restricciones de acceso del agente."
+  "acp_approval_auto": "Acceso total",
+  "acp_approval_auto_description": "Aprueba cada solicitud sin preguntar, salvo las que solo se pueden permitir de forma permanente"
 }

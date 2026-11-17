@@ -603,11 +603,7 @@ pub fn remove(id: &str, model: Option<&str>) -> Result<()> {
     crate::local::agent_profiles::forget(&format!("opencode:{id}"))
 }
 
-pub fn prepare_env(
-    cmd: &mut tokio::process::Command,
-    model: Option<&str>,
-    protocol: crate::local::opencode::Protocol,
-) -> Result<()> {
+pub fn prepare_env(cmd: &mut tokio::process::Command, model: Option<&str>) -> Result<()> {
     crate::local::chat::prepare_env(cmd);
     let connections = read()?;
     let records = providers()?;
@@ -617,7 +613,7 @@ pub fn prepare_env(
     }
     let mut config = inline_config(cmd)?;
     merge_config(&mut config, &connections, model)?;
-    merge_providers(&mut config, &records, protocol)?;
+    merge_providers(&mut config, &records)?;
     merge_hosted(
         &mut config,
         &hosted,
@@ -673,11 +669,7 @@ fn merge_hosted(
     Ok(())
 }
 
-fn merge_providers(
-    config: &mut Value,
-    records: &BTreeMap<String, Provider>,
-    protocol: crate::local::opencode::Protocol,
-) -> Result<()> {
+fn merge_providers(config: &mut Value, records: &BTreeMap<String, Provider>) -> Result<()> {
     let config = config
         .as_object_mut()
         .ok_or_else(|| anyhow!("OpenCode inline config must be a JSON object."))?;
@@ -691,9 +683,6 @@ fn merge_providers(
             continue;
         };
         if let Some(canonical) = canonical {
-            if protocol == crate::local::opencode::Protocol::V1 {
-                continue;
-            }
             let providers = config
                 .entry("providers")
                 .or_insert_with(|| json!({}))
@@ -743,7 +732,7 @@ pub(crate) fn prepare_provider_probe(
     base: &str,
     key: &str,
 ) -> Result<()> {
-    prepare_env(cmd, None, crate::local::opencode::Protocol::V2)?;
+    prepare_env(cmd, None)?;
     let mut config = inline_config(cmd)?;
     let root = config
         .as_object_mut()
@@ -782,41 +771,66 @@ fn inline_config(cmd: &tokio::process::Command) -> Result<Value> {
     }
 }
 
-pub(crate) fn prepare_generation_env(
+/// Makes `actions` ask, leaving a deny the user set standing: a scalar one, or the
+/// patterns of an object, whose other commands then ask (an `allow` for every
+/// command included; one for a particular pattern stays the user's). The inline
+/// config belongs to this one server, and it loads after the config file, which
+/// side chats and delegates in the worktree share.
+pub(crate) fn merge_permission_asks(
     cmd: &mut tokio::process::Command,
-    model: Option<&str>,
-    protocol: crate::local::opencode::Protocol,
+    actions: &[&str],
 ) -> Result<()> {
-    prepare_env(cmd, model, protocol)?;
-    let Some(model) = model.filter(|model| !model.trim().is_empty()) else {
+    if actions.is_empty() {
         return Ok(());
-    };
+    }
     let mut config = inline_config(cmd)?;
-    merge_generation_models(&mut config, model, protocol)?;
+    let rules = config
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("OpenCode inline config must be a JSON object."))?
+        .entry("permission")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("OpenCode permission config must be a JSON object."))?;
+    for action in actions {
+        match rules.get_mut(*action) {
+            Some(Value::String(rule)) if rule == "deny" => {}
+            Some(Value::Object(patterns)) => {
+                if patterns.get("*").is_none_or(|rule| rule == "allow") {
+                    patterns.insert("*".into(), json!("ask"));
+                }
+            }
+            _ => {
+                rules.insert((*action).into(), json!("ask"));
+            }
+        }
+    }
     cmd.env("OPENCODE_CONFIG_CONTENT", serde_json::to_string(&config)?);
     Ok(())
 }
 
-fn merge_generation_models(
-    config: &mut Value,
-    model: &str,
-    protocol: crate::local::opencode::Protocol,
+pub(crate) fn prepare_generation_env(
+    cmd: &mut tokio::process::Command,
+    model: Option<&str>,
 ) -> Result<()> {
+    prepare_env(cmd, model)?;
+    let Some(model) = model.filter(|model| !model.trim().is_empty()) else {
+        return Ok(());
+    };
+    let mut config = inline_config(cmd)?;
+    merge_generation_models(&mut config, model)?;
+    cmd.env("OPENCODE_CONFIG_CONTENT", serde_json::to_string(&config)?);
+    Ok(())
+}
+
+fn merge_generation_models(config: &mut Value, model: &str) -> Result<()> {
     let config = config
         .as_object_mut()
         .ok_or_else(|| anyhow!("OpenCode inline config must be a JSON object."))?;
-    let agents_key = match protocol {
-        crate::local::opencode::Protocol::V1 => {
-            config.insert("small_model".into(), json!(model));
-            "agent"
-        }
-        crate::local::opencode::Protocol::V2 => "agents",
-    };
     let agents = config
-        .entry(agents_key)
+        .entry("agents")
         .or_insert_with(|| json!({}))
         .as_object_mut()
-        .ok_or_else(|| anyhow!("OpenCode {agents_key} config must be a JSON object."))?;
+        .ok_or_else(|| anyhow!("OpenCode agents config must be a JSON object."))?;
     for name in ["title", "compaction"] {
         agents
             .entry(name)
@@ -929,46 +943,70 @@ mod tests {
 
     #[test]
     fn generation_pins_auxiliary_models_and_preserves_unrelated_config() {
-        use crate::local::opencode::Protocol;
-        for (protocol, key) in [(Protocol::V1, "agent"), (Protocol::V2, "agents")] {
-            for model in [
-                "orx-local-test/qwen",
-                "openrouter/anthropic/claude",
-                "custom/model",
-            ] {
-                let mut config = json!({"model":"global/default","permission":{"bash":"ask"},
-                    "small_model":"global/small",key:{"title":{"model":"global/title","hidden":true},
-                    "compaction":{"model":"global/compact","description":"Keep this"},
-                    "build":{"model":"global/build"}}});
-                merge_generation_models(&mut config, model, protocol).unwrap();
-                assert_eq!(config[key]["title"]["model"], model);
-                assert_eq!(config[key]["compaction"]["model"], model);
-                assert_eq!(config[key]["title"]["hidden"], true);
-                assert_eq!(config[key]["compaction"]["description"], "Keep this");
-                assert_eq!(config[key]["build"]["model"], "global/build");
-                assert_eq!(config["model"], "global/default");
-                assert_eq!(config["permission"]["bash"], "ask");
-                assert_eq!(
-                    config["small_model"],
-                    if protocol == Protocol::V1 {
-                        model
-                    } else {
-                        "global/small"
-                    }
-                );
-            }
+        for model in [
+            "orx-local-test/qwen",
+            "openrouter/anthropic/claude",
+            "custom/model",
+        ] {
+            let mut config = json!({"model":"global/default","permission":{"bash":"ask"},
+                "small_model":"global/small","agents":{"title":{"model":"global/title","hidden":true},
+                "compaction":{"model":"global/compact","description":"Keep this"},
+                "build":{"model":"global/build"}}});
+            merge_generation_models(&mut config, model).unwrap();
+            assert_eq!(config["agents"]["title"]["model"], model);
+            assert_eq!(config["agents"]["compaction"]["model"], model);
+            assert_eq!(config["agents"]["title"]["hidden"], true);
+            assert_eq!(config["agents"]["compaction"]["description"], "Keep this");
+            assert_eq!(config["agents"]["build"]["model"], "global/build");
+            assert_eq!(config["model"], "global/default");
+            assert_eq!(config["permission"]["bash"], "ask");
+            assert_eq!(config["small_model"], "global/small");
         }
+    }
+
+    #[test]
+    fn asks_join_the_inline_config_without_replacing_it() {
+        let mut cmd = crate::process::tokio_command("opencode");
+        cmd.env(
+            "OPENCODE_CONFIG_CONTENT",
+            json!({"model":"a/b","permission":{
+                "edit":"deny", "webfetch":"allow", "bash":{"git push *":"deny"},
+                "external_directory":{"*":"allow","/data/*":"allow"}
+            }})
+            .to_string(),
+        );
+        merge_permission_asks(
+            &mut cmd,
+            &[
+                "bash",
+                "edit",
+                "webfetch",
+                "websearch",
+                "external_directory",
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            inline_config(&cmd).unwrap(),
+            json!({"model":"a/b","permission":{
+                "edit":"deny", "webfetch":"ask", "websearch":"ask",
+                "bash":{"git push *":"deny", "*":"ask"},
+                "external_directory":{"*":"ask","/data/*":"allow"}
+            }})
+        );
+        let mut untouched = crate::process::tokio_command("opencode");
+        let before = format!("{:?}", untouched.as_std().get_envs().collect::<Vec<_>>());
+        merge_permission_asks(&mut untouched, &[]).unwrap();
+        assert_eq!(
+            format!("{:?}", untouched.as_std().get_envs().collect::<Vec<_>>()),
+            before
+        );
     }
 
     #[test]
     fn malformed_agent_overrides_fail_without_replacing_them() {
         let mut config = json!({"agents":{"title":"invalid"}});
-        assert!(merge_generation_models(
-            &mut config,
-            "custom/model",
-            crate::local::opencode::Protocol::V2
-        )
-        .is_err());
+        assert!(merge_generation_models(&mut config, "custom/model").is_err());
         assert_eq!(config["agents"]["title"], "invalid");
     }
 
@@ -1174,7 +1212,7 @@ mod tests {
         );
         let mut config =
             json!({"provider":{"openai":{"options":{"baseURL":"https://proxy.example/v1"}}}});
-        merge_providers(&mut config, &records, crate::local::opencode::Protocol::V2).unwrap();
+        merge_providers(&mut config, &records).unwrap();
         assert_eq!(config["provider"]["openai"]["options"]["apiKey"], "sk-base");
         assert_eq!(
             config["provider"]["openai"]["options"]["baseURL"],
@@ -1264,14 +1302,5 @@ mod tests {
             .is_err());
             assert_eq!(config, before);
         }
-    }
-
-    #[test]
-    fn v1_config_omits_aliases() {
-        let records = serde_json::from_value(json!({"openai":{"kind":"key","key":"sk-base","name":"Personal"},"openai-abc123":{"kind":"key","key":"sk-work","canonical":"openai","models":["gpt-4.1"],"name":"Work"}})).unwrap();
-        let mut config = json!({});
-        merge_providers(&mut config, &records, crate::local::opencode::Protocol::V1).unwrap();
-        assert!(config.get("providers").is_none());
-        assert_eq!(config["provider"]["openai"]["options"]["apiKey"], "sk-base");
     }
 }

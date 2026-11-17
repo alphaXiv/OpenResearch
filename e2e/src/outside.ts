@@ -12,7 +12,7 @@ export type Outside = Awaited<ReturnType<typeof startOutside>>
 
 const MODEL_FEED = '/models/feed'
 
-/** Traffic arc/storage.md's "What leaves the machine" lists for what the specs do: the release check, the onboarding's OpenCode install, the daily price list and the model feed. */
+/** Traffic arc/storage.md's "What leaves the machine" lists for what the specs do: the release check, `orx up`'s OpenCode install, the daily price list and the model feed. */
 export function listedEgress({ service, method, target }: Request) {
   return (
     (method === 'CONNECT' && ['github.com:443', 'registry.npmjs.org:443', 'models.dev:443'].includes(target)) ||
