@@ -1958,19 +1958,7 @@ pub(crate) fn instrumentation(
                     .reasons
                     .iter()
                     .all(|reason| reason == "check_limit"));
-        if !complete {
-            let cause = if replay
-                .coverage
-                .reasons
-                .iter()
-                .any(|reason| reason == "check_limit")
-            {
-                "the checked prefix reached the read limit"
-            } else {
-                "some log bytes are missing"
-            };
-            problems.push(format!("Pattern matches could not be checked through the whole log: {cause}. Inspect the full log before changing patterns."));
-        } else if let Some(tally) = replay.tally.as_ref() {
+        if let Some(tally) = replay.tally.as_ref().filter(|_| complete) {
             for (index, (pattern, hit)) in patterns.patterns.iter().zip(&tally.hits).enumerate() {
                 if hit.matched == 0 && pattern.phase.as_deref().is_none_or(started) {
                     problems.push(format!("Pattern {} matched no lines in the checked log. Correct its regex or phase with `orx exp view set EXP --pattern PATH`.", index + 1));
@@ -2280,6 +2268,45 @@ mod tests {
         let monitor =
             json!({"view":view,"phases":[{"name":"train","of":10},{"name":"eval","of":5}]});
         assert!(instrumentation(&monitor, Some(&snapshot), &config, Some(&snapshot)).is_empty());
+    }
+
+    #[tokio::test]
+    async fn instrumentation_does_not_spend_warning_on_a_capped_replay() {
+        let config: orx_signals::Config = serde_json::from_value(json!({"patterns":[
+            {"regex":"^accuracy (?P<accuracy>\\d+) of (?P<of>\\d+)$","phase":"eval"}
+        ]}))
+        .unwrap();
+        let mut log =
+            "::orx:: {\"phase\":\"train\",\"step\":1,\"of\":2,\"m\":{\"loss\":2}}\n".to_owned();
+        log.push_str(&"training output\n".repeat(80_000));
+        log.push_str("::orx:: {\"phase\":\"eval\",\"step\":1,\"of\":2}\naccuracy 1 of 2\n");
+        let snapshot = check_snapshot(&log, &config);
+        let patterns = std::sync::Arc::new(orx_signals::Patterns::compile(&config).unwrap());
+        let replay = fold_for_check("check", patterns, 1024 * 1024, |range, _| {
+            let end = (range.end as usize).min(log.len());
+            std::future::ready(Ok(super::super::LogPage::Data {
+                len: Some(log.len() as u64),
+                ident: super::super::FileIdent { dev: 1, ino: 7 },
+                start: range.start,
+                bytes: log.as_bytes()[range.start as usize..end].to_vec(),
+                eof: end == log.len(),
+            }))
+        })
+        .await
+        .unwrap();
+        assert!(replay.cursor.offset < snapshot.cursor.offset);
+        assert_eq!(replay.tally.as_ref().unwrap().hits[0].matched, 0);
+        assert_eq!(snapshot.tally.as_ref().unwrap().hits[0].matched, 1);
+        let view = compile(r#"<view headline="loss"><chart y="loss" phase="train"/><chart y="accuracy" phase="eval"/></view>"#).unwrap().tree;
+        let monitor = json!({"view":view});
+        let problems = instrumentation(&monitor, Some(&snapshot), &config, Some(&replay));
+        assert!(problems.is_empty(), "{problems:?}");
+
+        let mut missing_total = snapshot.clone();
+        missing_total.phases.last_mut().unwrap().of = None;
+        let problems = instrumentation(&monitor, Some(&missing_total), &config, Some(&replay));
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("eval") && problems[0].contains("total="));
     }
 
     #[test]
