@@ -3717,6 +3717,49 @@ async fn staging_stops_at_an_accepted_cancel() {
 }
 
 #[tokio::test]
+async fn an_old_host_supplies_log_pages_for_local_patterns() {
+    let f = Fixture::with_host_env("export ORX_TEST_NO_SIGNAL_RPCS=1").await;
+    let id = "old-host";
+    let dir = f.dir(id);
+    fs::create_dir_all(&dir).unwrap();
+    let log = dir.join("log");
+    fs::write(&log, b"loss=2\n").unwrap();
+    let data = f.server.directory().join("laptop");
+    let path = data.join(format!("run-signals/{id}.json"));
+    let config = serde_json::from_value(json!({
+        "patterns": [{"regex": "loss=(?<loss>[0-9]+)"}]
+    }))
+    .unwrap();
+    super::local::signals::configure(&path, &config).unwrap();
+    let run = WatchedRun {
+        id: id.into(),
+        handle: f.ssh.handle(),
+    };
+
+    super::signals::collect(&data, f.ssh.as_ref(), &run, false, 1)
+        .await
+        .unwrap();
+    let snapshot = super::local::signals::load(&path).unwrap().unwrap();
+    assert_eq!(snapshot.latest["loss"], 2);
+
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&log)
+        .unwrap()
+        .write_all(b"loss=1")
+        .unwrap();
+    assert!(
+        super::signals::collect(&data, f.ssh.as_ref(), &run, true, 2)
+            .await
+            .unwrap()
+    );
+    let snapshot = super::local::signals::load(&path).unwrap().unwrap();
+    assert_eq!(snapshot.latest["loss"], 1);
+    assert!(snapshot.source_complete());
+    assert_eq!(f.ssh.conn.state().borrow().status, Status::Live);
+}
+
+#[tokio::test]
 async fn unchanged_signal_revision_never_downloads_the_snapshot_again() {
     let f = Fixture::new().await;
     let id = "signals";

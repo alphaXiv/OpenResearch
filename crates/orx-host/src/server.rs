@@ -1578,6 +1578,8 @@ pub fn serve(root: PathBuf, binary: PathBuf) -> io::Result<()> {
         running: usize,
     }
 
+    let old_peer = cfg!(all(feature = "test-hooks", debug_assertions))
+        && std::env::var_os("ORX_TEST_NO_SIGNAL_RPCS").is_some();
     let host = Arc::new(Host::new(root, binary)?);
     let output = Arc::new(Mutex::new(io::stdout()));
     let inflight = Arc::new(Mutex::new(InFlight::default()));
@@ -1585,6 +1587,17 @@ pub fn serve(root: PathBuf, binary: PathBuf) -> io::Result<()> {
     let mut input = io::stdin().lock();
     let result = (|| -> io::Result<()> {
         while let Some(message) = read_frame::<Message<Request>>(&mut input)? {
+            if old_peer
+                && matches!(
+                    message.body,
+                    Request::ConfigureSignals { .. } | Request::ReadSignals { .. }
+                )
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "unknown signal request",
+                ));
+            }
             let mut active = inflight
                 .lock()
                 .map_err(|_| io::Error::other("request set poisoned"))?;
@@ -1612,9 +1625,28 @@ pub fn serve(root: PathBuf, binary: PathBuf) -> io::Result<()> {
                 finished.clone(),
             );
             std::thread::spawn(move || {
+                let mut body = host.handle(message.body);
+                if old_peer {
+                    match &mut body {
+                        Response::Inspect {
+                            summary,
+                            answered_at,
+                        } => {
+                            summary.signals = None;
+                            *answered_at = None;
+                        }
+                        Response::Changes { runs, answered_at } => {
+                            for (_, summary) in runs {
+                                summary.signals = None;
+                            }
+                            *answered_at = None;
+                        }
+                        _ => {}
+                    }
+                }
                 let response = Message {
                     id: message.id,
-                    body: host.handle(message.body),
+                    body,
                 };
                 if let Ok(mut active) = inflight.lock() {
                     active.running -= 1;

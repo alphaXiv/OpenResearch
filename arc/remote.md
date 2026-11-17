@@ -122,9 +122,10 @@ Native `serve` scans declared `::orx::` records and detected progress from each
 watched run's log, including Slurm jobs on the shared filesystem. Local runs
 use that scanner directly without a local serve process. The checkpoint lives
 in the host root's `run-signals/` and uses a nonblocking per-run lock: a competing scanner gets WouldBlock.
-A summary with a `signals` field advertises snapshot support; the workspace
-fetches changed revisions in pages of at most 1 MiB under one generation and revision, then publishes
-the complete verified checkpoint locally. Every answer that carries signals
+A summary with a `signals` field advertises snapshot support for that connection.
+The workspace waits for that advertisement before sending configuration or
+fetching changed revisions in pages of at most 1 MiB under one generation and
+revision, then publishes the verified checkpoint locally. Every answer that carries signals
 also carries the host's clock (`answered_at`), changed or not, so the
 workspace knows what the data is current as of and how far apart the two
 clocks are. An older serve without that field uses the frozen byte-page log

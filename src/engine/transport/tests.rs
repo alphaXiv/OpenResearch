@@ -793,6 +793,7 @@ fn jittered_cadence_is_persisted_and_capped_at_fifteen_minutes() {
         publish,
         incoming,
         unsupported: None,
+        signals_advertised: Arc::new(AtomicBool::new(false)),
     };
     actor.classify(HostClass::Key);
     let mut since = None;
@@ -2040,6 +2041,11 @@ async fn pending_signal_pages_leave_capacity_for_cancel() {
     let server = Sshd::start().unwrap();
     let conn = start(&server, TestClock::new());
     status(&conn, Status::Live).await;
+    let inspected = conn
+        .request(Request::Inspect { run: "r1".into() })
+        .await
+        .unwrap();
+    assert!(matches!(inspected, Response::Inspect { summary, .. } if summary.signals.is_some()));
     let directory = server.home().join("engine-root/run-signals");
     fs::create_dir_all(&directory).unwrap();
     let paths: Vec<_> = (0..32)

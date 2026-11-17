@@ -396,6 +396,22 @@ impl Ssh {
         }
     }
 
+    async fn inspect_signals(
+        &self,
+        run: &str,
+    ) -> Result<(Option<SignalsSummary>, Option<(i64, i64)>)> {
+        match self.request(Request::Inspect { run: run.into() }).await? {
+            Response::Inspect {
+                summary,
+                answered_at,
+            } => Ok((
+                summary.signals,
+                answered_at.map(|at| (at, crate::store::now_ms())),
+            )),
+            response => bail!("Unexpected signal inspection: {response:?}"),
+        }
+    }
+
     #[cfg(test)]
     pub async fn summary(&self, run: &str) -> Option<Summary> {
         self.feed.lock().await.summaries.get(run).cloned()
@@ -831,6 +847,9 @@ impl Backend for Ssh {
         if matches!(run.handle, Handle::Legacy { .. }) {
             return Ok(());
         }
+        if !self.conn.advertises_signals() && self.inspect_signals(&run.id).await?.0.is_none() {
+            return Ok(());
+        }
         let request = Request::ConfigureSignals {
             run: run.id.clone(),
             config: serde_json::to_string(config)?,
@@ -859,33 +878,27 @@ impl Backend for Ssh {
             .or_default()
             .clone();
         let mut transfer = transfer.lock().await;
+        // The feed and partial transfers can outlive the connection that advertised signals.
+        let advertised = self.conn.advertises_signals();
+        if !advertised {
+            *transfer = None;
+        }
         if transfer.is_none() {
             // A final read never trusts a summary from the live feed, which may hold an old error.
-            let cached = if terminal {
+            let cached = if terminal || !advertised {
                 None
             } else {
                 let feed = self.feed.lock().await;
                 feed.summaries
                     .get(&run.id)
-                    .cloned()
+                    .and_then(|summary| summary.signals.clone())
                     .zip(feed.clocks.get(&run.id).copied())
             };
-            let (summary, clock) = match cached {
-                Some((summary, clock)) => (summary, Some(clock)),
-                None => match self
-                    .request(Request::Inspect {
-                        run: run.id.clone(),
-                    })
-                    .await?
-                {
-                    Response::Inspect {
-                        summary,
-                        answered_at,
-                    } => (summary, answered_at.map(|at| (at, crate::store::now_ms()))),
-                    response => bail!("Unexpected signal inspection: {response:?}"),
-                },
+            let (signals, clock) = match cached {
+                Some((signals, clock)) => (Some(signals), Some(clock)),
+                None => self.inspect_signals(&run.id).await?,
             };
-            let Some(mut signals) = summary.signals else {
+            let Some(mut signals) = signals else {
                 return Ok(None);
             };
             if let Some(error) = &signals.error {
@@ -983,10 +996,6 @@ impl Backend for Ssh {
                     finalize = false;
                     resets += 1;
                 }
-                Response::Error {
-                    code: ErrorCode::Unsupported,
-                    ..
-                } => return Ok(None),
                 response => bail!("Unexpected signals reply: {response:?}"),
             }
         }
