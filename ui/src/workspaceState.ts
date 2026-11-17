@@ -20,6 +20,8 @@ export interface TaskWorkspace {
   panelMax: boolean;
   /** Last React Flow viewport for the experiments tree, if it was opened. */
   treeViewport?: { x: number; y: number; zoom: number } | null;
+  /** The terminal tab's shell on the server, so a reload returns to it. */
+  terminalId?: string;
 }
 
 export interface ProjectWorkspace {

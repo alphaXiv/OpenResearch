@@ -56,6 +56,7 @@ mod harness_setup;
 mod model_feed;
 mod network;
 mod search;
+mod terminals;
 mod usage;
 use compute_settings::*;
 
@@ -194,7 +195,9 @@ pub async fn run(args: UpArgs) -> Result<()> {
         reopen: Arc::default(),
         trackio: Arc::default(),
         opencode_signins: Arc::default(),
+        terminals: Arc::default(),
     };
+    state.terminals.adopt(crate::keep::entries()).await;
     // Plan-mode turns hand this port to the `orx mcp` permission bridge.
     state.chat.set_up_port(actual_port);
     state.chat.resume_persisted_queues();
@@ -388,6 +391,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     }
     state.opencode_signins.shutdown().await;
     state.remote_sessions.shutdown().await;
+    state.terminals.shutdown().await;
     agent.shutdown().await;
     codex.shutdown().await;
     claude.shutdown().await;
@@ -531,6 +535,7 @@ struct AppState {
     reopen: Arc<AtomicBool>,
     trackio: Arc<crate::local::trackio::LocalServer>,
     opencode_signins: Arc<local::opencode_signin::SignIns>,
+    terminals: Arc<terminals::Terminals>,
 }
 
 async fn project_publication_lock(
@@ -792,6 +797,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
             post(reveal_artifact_file),
         )
         .route("/api/projects/{id}/terminal", get(project_terminal))
+        .route(
+            "/api/projects/{id}/terminals/{terminal_id}",
+            axum::routing::delete(close_project_terminal),
+        )
         .route("/api/events", get(events))
         .route(
             "/api/settings/run-engine",
@@ -2934,6 +2943,10 @@ async fn delete_project_inner(state: AppState, id: String, query: DeleteProjectQ
                 .ok_or_else(|| bad_request("a chat session deletion is already in progress"))?,
         );
     }
+    state
+        .terminals
+        .close_where(|project, _| project == id)
+        .await;
     for session in &sessions {
         state.chat.clear_queue(&session.id)?;
         let _ = state.chat.interrupt(&session.id).await;
@@ -7193,15 +7206,12 @@ fn start_pty_with_env(
         command.env("PATH", path);
     }
     local::shell_env::export_to(|key, value| command.env(key, value));
-    for (key, value) in local::shell_env::host_gui_env() {
+    for (key, value) in terminal_env() {
         match value {
             Some(value) => command.env(key, value),
             None => command.env_remove(key),
         }
     }
-    command.env("TERM", "xterm-256color");
-    command.env_remove("NO_COLOR");
-    command.env_remove("FORCE_COLOR");
     if let Some(cwd) = cwd {
         command.cwd(cwd);
     }
@@ -7292,6 +7302,17 @@ fn start_pty_with_env(
         events: event_rx,
         kill: kill_tx,
     })
+}
+
+/// What a terminal's child sees beyond orx's own environment.
+fn terminal_env() -> Vec<(&'static str, Option<std::ffi::OsString>)> {
+    let mut env = local::shell_env::host_gui_env();
+    env.extend([
+        ("TERM", Some("xterm-256color".into())),
+        ("NO_COLOR", None),
+        ("FORCE_COLOR", None),
+    ]);
+    env
 }
 
 /// The dashboard's Connect: the engine logs in through its own connection, and each
@@ -7602,9 +7623,13 @@ async fn relay_pty(
 #[serde(rename_all = "camelCase")]
 struct ProjectTerminalReq {
     session_id: Option<String>,
+    /// The page's id for a terminal that outlives its socket; without one (an older page), the
+    /// shell ends with the socket.
+    terminal_id: Option<String>,
 }
 
 async fn project_terminal(
+    State(state): State<AppState>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
     Path(id): Path<String>,
@@ -7612,6 +7637,22 @@ async fn project_terminal(
 ) -> Response {
     if let Some(rejected) = reject_cross_origin(&headers) {
         return rejected;
+    }
+    if let Some(terminal_id) = req.terminal_id {
+        if !crate::workspace_state::valid_terminal_id(&terminal_id) {
+            return bad_request(format!("{terminal_id:?} is not a terminal id")).into_response();
+        }
+        let session_id = req
+            .session_id
+            .map(|session| session.trim().to_string())
+            .filter(|session| !session.is_empty());
+        return ws.on_upgrade(move |socket| async move {
+            let shell = interactive_shell();
+            state
+                .terminals
+                .serve(socket, id, session_id, terminal_id, shell)
+                .await
+        });
     }
     let active = Active::new();
     ws.on_upgrade(move |mut socket| async move {
@@ -7644,6 +7685,16 @@ async fn project_terminal(
             Err(error) => send_terminal_error(&mut socket, anyhow!(error)).await,
         }
     })
+}
+
+async fn close_project_terminal(
+    State(state): State<AppState>,
+    Path((project_id, terminal_id)): Path<(String, String)>,
+) -> ApiResult {
+    if !state.terminals.close(&project_id, &terminal_id).await {
+        return Err(not_found("terminal"));
+    }
+    Ok(Json(json!({ "ok": true })))
 }
 
 /// The session worktree or, without a session, the project clone.
@@ -9841,6 +9892,10 @@ async fn open_side_chat(State(state): State<AppState>, Path(id): Path<String>) -
 
 async fn delete_chat_session(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
     reject_if_moving(&state)?;
+    state
+        .terminals
+        .close_where(|_, session| session == Some(id.as_str()))
+        .await;
     // Detached so a canceled request cannot stop between the native purge and the row delete.
     let chat = state.chat.clone();
     tokio::spawn(async move { chat.delete_session(&id).await })
@@ -12527,7 +12582,7 @@ mod tests {
         }
     }
 
-    fn test_state() -> AppState {
+    pub(super) fn test_state() -> AppState {
         let agent = Arc::new(AgentHost::new(None));
         let codex = Arc::new(local::codex::CodexHost::new());
         let claude = Arc::new(local::claude::ClaudeHost::new());
@@ -12553,6 +12608,7 @@ mod tests {
             reopen: Default::default(),
             trackio: Default::default(),
             opencode_signins: Arc::default(),
+            terminals: Arc::default(),
         }
     }
 
