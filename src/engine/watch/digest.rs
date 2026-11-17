@@ -108,7 +108,7 @@ After setup, give the headline/chart value and parent comparison when present:
 Every changing number is {signal}, {signal.vs} (reads better/worse/level with the parent), or
 {count:"regex"} (matching log lines since launch). Tokens bind "signals", never "alsoLogged".
 Fixed numbers, zero, a check's 0 or 1, and values unchanged since first reported may be literal.
-In each run sentence, exactly one figure is **bold**; place {signal.vs} beside its value. Live tokens mean now,
+A sentence with no number needs no bold. Otherwise exactly one figure is **bold**; place {signal.vs} beside its value. Live tokens mean now,
 a comparison or a trend: never pin one to a fixed step/time or first/last reading.
 A fixed step/time needs a fixed value.
 Labels, units and "better" explain signals. Claim only what the digest shows: never invent

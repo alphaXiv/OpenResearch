@@ -462,7 +462,11 @@ fn check_line(
         }
     }
     let bold: Vec<_> = template.match_indices("**").collect();
-    if bold.len() != 2 && !(summary && bold.is_empty()) {
+    let has_figure = template.chars().any(|c| c.is_numeric())
+        || found
+            .iter()
+            .any(|(_, token)| !matches!(token, Token::Label(_)));
+    if bold.len() != 2 && !(bold.is_empty() && (summary || !has_figure)) {
         return Err("mark exactly one figure in **bold**".into());
     }
     if !bold.is_empty() {
@@ -659,6 +663,27 @@ mod tests {
             Token::Label(key) => format!("Depth {key}"),
             Token::Count(..) => "12".into(),
             _ => "2.31".into(),
+        }
+    }
+
+    #[test]
+    fn numberless_sentences_and_setup_silence_pass() {
+        let run = run();
+        for setup in [false, true] {
+            for line in [Value::Null, json!("Loss tracks the parent.")] {
+                let mut binding = bind("r1", &run, false);
+                binding.setup = setup;
+                let reply = json!({"runs":{"r1":{"status":"ok","line":line}}}).to_string();
+                let read = read(&reply, &[binding], None, &render);
+                assert!(read.errors.is_empty(), "{:?}", read.errors);
+                assert!(read.runs.contains_key("r1"));
+            }
+        }
+        for line in ["Loss {loss}.", "There are 2 warnings."] {
+            let reply = json!({"runs":{"r1":{"status":"ok","line":line}}}).to_string();
+            assert!(!read(&reply, &[bind("r1", &run, false)], None, &render)
+                .errors
+                .is_empty());
         }
     }
 
