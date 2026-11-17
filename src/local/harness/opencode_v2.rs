@@ -1,6 +1,7 @@
 //! V2 admits prompts before execution finishes; reconcile its durable projection.
 use super::*;
 use crate::local::opencode::AgentEndpoint;
+use std::collections::HashMap;
 
 async fn get(endpoint: &AgentEndpoint, path: &str) -> Result<Value> {
     Ok(endpoint
@@ -134,6 +135,7 @@ pub(super) async fn run_turn(
         .iter()
         .filter_map(|m| m["id"].as_str().map(str::to_owned))
         .collect();
+    let mut live = LiveStep::open(&endpoint, &native_id).await;
     let prompt_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
     ctx.persist_delivery(DeliveryState::Unknown)?;
     // A transport failure can follow durable admission. Never replay this POST.
@@ -154,6 +156,7 @@ pub(super) async fn run_turn(
         let projection = get(&endpoint, &endpoint.v2_export_path(&native_id)).await?;
         let current = messages(&projection)?;
         let delivered = current.iter().any(|m| m["id"].as_str() == Some(&prompt_id));
+        live.settle(ctx, current);
         merge_projection(
             ctx,
             &endpoint,
@@ -185,6 +188,7 @@ pub(super) async fn run_turn(
                 || final_messages
                     .iter()
                     .any(|m| m["id"].as_str() == Some(&prompt_id));
+            live.settle(ctx, final_messages);
             let answered = merge_projection(
                 ctx,
                 &endpoint,
@@ -218,7 +222,144 @@ pub(super) async fn run_turn(
             ));
         }
         ctx.flush()?;
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        live.follow(ctx, Duration::from_millis(300)).await;
+    }
+}
+
+/// A step as OpenCode streams it, text and reasoning by the token: its export lists a step only once that
+/// step has streamed, and stays the source of truth from then on.
+struct LiveStep {
+    native_id: String,
+    events: Option<reqwest::Response>,
+    buffer: Vec<u8>,
+    /// Each message's blocks in the order they started, which is their index in the export.
+    blocks: HashMap<String, Vec<String>>,
+    exported: HashSet<String>,
+}
+
+impl LiveStep {
+    async fn open(endpoint: &AgentEndpoint, native_id: &str) -> Self {
+        let events = endpoint
+            .client
+            .get(format!("{}/api/event", endpoint.base_url))
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            .map_err(|error| Self::lost(&error))
+            .ok();
+        Self {
+            native_id: native_id.to_owned(),
+            events,
+            buffer: Vec::new(),
+            blocks: HashMap::new(),
+            exported: HashSet::new(),
+        }
+    }
+
+    fn lost(error: &dyn std::fmt::Display) {
+        eprintln!("orx up: OpenCode's event stream is unavailable, so each step's reply shows when the step ends: {error:#}");
+    }
+
+    /// Applies events for `wait`, the pause between two reads of the export.
+    async fn follow(&mut self, ctx: &mut TurnCtx, wait: Duration) {
+        let until = tokio::time::Instant::now() + wait;
+        loop {
+            let Some(events) = self.events.as_mut() else {
+                return tokio::time::sleep_until(until).await;
+            };
+            match tokio::time::timeout_at(until, events.chunk()).await {
+                Err(_) => return,
+                Ok(Ok(Some(chunk))) => {
+                    self.buffer.extend_from_slice(&chunk);
+                    while let Some(end) = self.buffer.iter().position(|byte| *byte == b'\n') {
+                        let line: Vec<u8> = self.buffer.drain(..=end).collect();
+                        if let Some(event) = line
+                            .strip_prefix(b"data:")
+                            .and_then(|data| serde_json::from_slice(data).ok())
+                        {
+                            self.apply(ctx, &event);
+                        }
+                    }
+                    ctx.maybe_flush();
+                }
+                Ok(Ok(None)) => {
+                    Self::lost(&"it closed");
+                    self.events = None;
+                }
+                Ok(Err(error)) => {
+                    Self::lost(&error);
+                    self.events = None;
+                }
+            }
+        }
+    }
+
+    fn apply(&mut self, ctx: &mut TurnCtx, event: &Value) {
+        let data = &event["data"];
+        let (Some(message), Some(block)) = (
+            data["assistantMessageID"].as_str(),
+            match event["type"].as_str() {
+                Some("session.text.started" | "session.text.delta") => Some("text"),
+                Some("session.reasoning.started" | "session.reasoning.delta") => Some("reasoning"),
+                Some("session.tool.input.started") => Some("tool"),
+                _ => None,
+            },
+        ) else {
+            return;
+        };
+        if data["sessionID"] != self.native_id.as_str() || self.exported.contains(message) {
+            return;
+        }
+        let key = format!(
+            "{block}:{}",
+            &data[if block == "tool" { "id" } else { "ordinal" }]
+        );
+        let blocks = self.blocks.entry(message.to_owned()).or_default();
+        let index = blocks.iter().position(|k| *k == key).unwrap_or_else(|| {
+            blocks.push(key);
+            blocks.len() - 1
+        });
+        let id = format!("{message}:{index}");
+        if block == "tool" {
+            // Holds the tool's place among parts a later step streams before the export lists this one.
+            if let Some(part) = to_wire_part(&json!({"id":id,"type":"tool","tool":data["name"]})) {
+                ctx.upsert_part(part);
+            }
+            return;
+        }
+        // An empty part renders nothing and still splits a run of tools.
+        let Some(delta) = data["delta"].as_str().filter(|delta| !delta.is_empty()) else {
+            return;
+        };
+        if !ctx.assistant.parts.iter().any(|part| part.id == id) {
+            ctx.upsert_part(if block == "reasoning" {
+                WirePart::reasoning(&id, "")
+            } else {
+                WirePart::text(&id, "")
+            });
+        }
+        ctx.append_part_text(&id, delta);
+    }
+
+    /// Hands each message the export now lists over to it, whose parts replace the streamed ones in place.
+    fn settle(&mut self, ctx: &mut TurnCtx, messages: &[Value]) {
+        for message in messages {
+            let Some(id) = message["id"].as_str() else {
+                continue;
+            };
+            if let Some(blocks) = self.blocks.remove(id) {
+                let listed = message["content"].as_array().map_or(0, Vec::len);
+                let unlisted: Vec<_> = (listed..blocks.len())
+                    .map(|index| format!("{id}:{index}"))
+                    .collect();
+                ctx.assistant
+                    .parts
+                    .retain(|part| !unlisted.contains(&part.id));
+            }
+            if !self.exported.contains(id) {
+                self.exported.insert(id.to_owned());
+            }
+        }
     }
 }
 
@@ -1198,6 +1339,131 @@ mod tests {
         assert!(!is_interrupted_step(&json!({
             "type":"aborted", "message":"Unexpected execution error"
         })));
+    }
+
+    #[tokio::test]
+    async fn a_step_streams_before_the_export_lists_it_and_keeps_its_place_after() {
+        use axum::{routing::get, Router};
+        let event = |kind: &str, session: &str, data: Value| {
+            let mut data = data;
+            data["sessionID"] = json!(session);
+            format!("data: {}\n\n", json!({"type":kind,"data":data}))
+        };
+        let stream = [
+            event(
+                "session.reasoning.started",
+                "ses",
+                json!({"assistantMessageID":"msg_a","ordinal":0}),
+            ),
+            event(
+                "session.reasoning.delta",
+                "ses",
+                json!({"assistantMessageID":"msg_a","ordinal":0,"delta":"hm"}),
+            ),
+            event(
+                "session.text.started",
+                "ses",
+                json!({"assistantMessageID":"msg_a","ordinal":0}),
+            ),
+            event(
+                "session.text.delta",
+                "ses",
+                json!({"assistantMessageID":"msg_a","ordinal":0,"delta":"Let "}),
+            ),
+            event(
+                "session.text.delta",
+                "other",
+                json!({"assistantMessageID":"msg_x","ordinal":0,"delta":"child"}),
+            ),
+            event(
+                "session.text.delta",
+                "ses",
+                json!({"assistantMessageID":"msg_a","ordinal":0,"delta":"me"}),
+            ),
+            event(
+                "session.tool.input.started",
+                "ses",
+                json!({"assistantMessageID":"msg_a","id":"call_1","name":"shell"}),
+            ),
+            event(
+                "session.text.started",
+                "ses",
+                json!({"assistantMessageID":"msg_b","ordinal":0}),
+            ),
+            event(
+                "session.text.delta",
+                "ses",
+                json!({"assistantMessageID":"msg_b","ordinal":0,"delta":"Riv"}),
+            ),
+        ]
+        .concat();
+        let app = Router::new().route("/api/event", get(move || async move { stream }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = AgentEndpoint {
+            base_url: format!("http://{}", listener.local_addr().unwrap()),
+            client: crate::net::loopback_client().build().unwrap(),
+            legacy_v2_api: false,
+        };
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut ctx = TurnCtx::test_stub();
+        let mut live = LiveStep::open(&endpoint, "ses").await;
+        live.follow(&mut ctx, Duration::from_millis(200)).await;
+        let shown = |ctx: &TurnCtx| -> Vec<(String, String)> {
+            ctx.assistant
+                .parts
+                .iter()
+                .map(|part| {
+                    let status = part.state.as_ref().map(|state| state.status.clone());
+                    (
+                        part.id.clone(),
+                        part.text.clone().or(status).unwrap_or_default(),
+                    )
+                })
+                .collect()
+        };
+        let pair = |id: &str, shown: &str| (id.to_owned(), shown.to_owned());
+        assert_eq!(
+            shown(&ctx),
+            [
+                pair("msg_a:0", "hm"),
+                pair("msg_a:1", "Let me"),
+                pair("msg_a:2", "running"),
+                pair("msg_b:0", "Riv")
+            ]
+        );
+
+        let exported = [
+            json!({"id":"msg_a","type":"assistant","time":{"completed":1},"content":[
+                {"type":"reasoning","text":"hm."},
+                {"type":"text","text":"Let me check."},
+                {"type":"tool","id":"call_1","name":"shell","state":{"status":"completed","input":{},"content":[]}}
+            ]}),
+        ];
+        live.settle(&mut ctx, &exported);
+        merge_projection(
+            &mut ctx,
+            &endpoint,
+            "ses",
+            &exported,
+            &HashSet::new(),
+            &mut HashSet::new(),
+        )
+        .await
+        .unwrap();
+        live.apply(
+            &mut ctx,
+            &json!({"type":"session.text.delta","data":{"sessionID":"ses","assistantMessageID":"msg_a","ordinal":0,"delta":" late"}}),
+        );
+        assert_eq!(
+            shown(&ctx),
+            [
+                pair("msg_a:0", "hm."),
+                pair("msg_a:1", "Let me check."),
+                pair("msg_a:2", "completed"),
+                pair("msg_b:0", "Riv")
+            ]
+        );
+        server.abort();
     }
 
     #[tokio::test]
