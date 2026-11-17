@@ -63,6 +63,8 @@ orx exp run <expId> --estimate
 
 Resize up as well as down, then re-estimate until the total falls inside the
 user's range. Below the lower bound is as wrong as above the upper bound.
+Never state a total the estimate did not print; with untimed stages, say the
+floor and that the rest is unknown, or calibrate first.
 
 Before launching, say the estimated number and hardware assumption in one line. When any stage is untimed,
 tell the user the total is unknown or run a short calibration before promising
