@@ -111,6 +111,7 @@ import {
   NotebookText,
   Paperclip,
   Pencil,
+  Plus,
   ScrollText,
   Search,
   SlidersHorizontal,
@@ -7838,6 +7839,11 @@ export function ChatPanel({
           {sidebarGrouping === "projects" ? m.projects_home_projects() : m.chat_all_sessions()}
         </div>
         <div className="rail-section-actions flex items-center gap-1">
+          {sidebarGrouping === "list" && <Tooltip interactive content={m.chat_panel_new_chat()} className="rounded-sm">
+            <IconButton size="small" className="text-subtext" aria-label={m.chat_panel_new_chat()} onClick={startNewTask}>
+              <Plus size={16} aria-hidden="true" />
+            </IconButton>
+          </Tooltip>}
           {onNewProject && <Tooltip interactive content={m.projects_home_new_project()} className="rounded-sm">
             <IconButton size="small" className="text-subtext" aria-label={m.projects_home_new_project()} onClick={onNewProject}>
               <FolderPlus size={16} className="text-subtext" />

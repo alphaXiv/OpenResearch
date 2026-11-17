@@ -43,6 +43,23 @@ test("links saved by earlier versions open the section that replaced them", asyn
   }
 });
 
+test("the sidebar's chat list can start a chat in the most recently active project", async () => {
+  serveApp({
+    "GET /api/projects": () => ({ projects: [{ id: "p", name: "Project" }, { id: "recent", name: "Recent project" }] }),
+    "GET /api/projects/activity": () => ({ activity: [{ projectId: "recent", lastActivityAt: 2 }] }),
+  });
+  await renderApp("/projects/p/settings/settings");
+
+  try {
+    await click(document.querySelector(`button[aria-label="${m.chat_panel_filter_sessions()}"]`));
+    await click(find("button", m.sidebar_one_list()));
+    await click(document.querySelector(`button[aria-label="${m.chat_panel_new_chat()}"]`));
+    assert.equal(location.pathname, "/projects/recent/tasks/new");
+  } finally {
+    localStorage.removeItem("sidebar-grouping");
+  }
+});
+
 test("a project's settings page renames it and has no global settings tabs", async () => {
   const project = { id: "p", name: "Project", repoPath: "/work/project" };
   const renamed = [];
