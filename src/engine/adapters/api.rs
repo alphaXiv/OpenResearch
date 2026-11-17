@@ -259,19 +259,19 @@ impl<A: Api + 'static> Adapter<A> {
             Some(kept) => kept,
             None => {
                 let mut options = std::fs::OpenOptions::new();
-                options.create_new(true).write(true);
+                options.create(true).truncate(true).write(true);
                 #[cfg(unix)]
                 std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-                // A fresh inode, so pages kept from the spool it replaces never match this one.
-                for stale in [checkpoint_path(&path), path.clone()] {
-                    match std::fs::remove_file(stale) {
-                        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
-                            return Err(error.into())
-                        }
-                        _ => {}
+                match std::fs::remove_file(checkpoint_path(&path)) {
+                    Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                        return Err(error.into())
                     }
+                    _ => {}
                 }
-                let file = options.open(&path)?;
+                // Create before replacing the old spool so its inode cannot be reused.
+                let part = path.with_extension("log.part");
+                let file = options.open(&part)?;
+                std::fs::rename(&part, &path)?;
                 save_checkpoint::<A::Cursor>(&path, None)?;
                 (file, 0, A::Cursor::default())
             }
