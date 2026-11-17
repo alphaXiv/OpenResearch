@@ -4525,6 +4525,7 @@ else: raise Exception(a)
         };
         let provider = super::api::provider(kind).unwrap();
         let mut text = String::new();
+        let desired = || Ok(orx_signals::Config::default());
         for step in 1..=3 {
             text.push_str(&format!(
                 "::orx:: {}\n",
@@ -4535,7 +4536,7 @@ else: raise Exception(a)
                 (provider.build)(&account, Arc::new(TestClock::new()), data.join("run-logs"))
                     .unwrap();
             backend.drain_log(&run).await.unwrap();
-            super::signals::collect(&data, backend.as_ref(), &run, true, 123)
+            super::signals::collect(&data, backend.as_ref(), &run, true, 123, desired)
                 .await
                 .unwrap();
             let snapshot =
@@ -4584,7 +4585,7 @@ else: raise Exception(a)
                 )
                 .await
                 .unwrap();
-            super::signals::collect(&data, backend.as_ref(), &run, false, 124)
+            super::signals::collect(&data, backend.as_ref(), &run, false, 124, desired)
                 .await
                 .unwrap();
             let snapshot =

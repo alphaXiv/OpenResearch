@@ -46,6 +46,7 @@ pub(crate) trait Commands: Send + Sync {
     ) -> Result<Value>;
     /// Keeps the host feed following this run and publishing `RunEvent::Grew` until drop.
     fn follow_log(&self, run: &str) -> Result<Box<dyn Send>>;
+    fn collect_signals_now(&self);
     fn host_states(&self, alias: &str) -> Vec<(String, crate::engine::transport::HostState)>;
     async fn retry_host(&self, alias: &str);
     /// Commands on this target run over the engine's connection to the host.
@@ -108,16 +109,7 @@ impl Api {
         crate::local::apply_compute_default(&mut args.backend, &mut args.flavor);
         args.backend.get_or_insert_with(|| "local".into());
         super::require_caller_settings(&args, &super::absolute_config_dir()).await?;
-        let experiment = args.exp_id.clone();
-        let id = self.commands.run(args, admission).await?;
-        // Its first collection may fold before this lands; the next folds again with the patterns.
-        let store = self.store();
-        let raw = store.run_monitor_json(&experiment)?;
-        let config = crate::engine::view::stored_patterns(&experiment, raw.as_deref())?;
-        if let Some(run) = store.get_run(&id)? {
-            crate::engine::view::configure_run(&store, &run, &config)?;
-        }
-        Ok(id)
+        self.commands.run(args, admission).await
     }
 
     fn run(&self, id: &str) -> Result<StoredRun> {
@@ -1427,8 +1419,6 @@ async fn set_view(
         )
             .into_response();
     };
-    let refold = api.clone();
-    let repatterned = body.patterns.is_some();
     let answer = tokio::task::spawn_blocking(move || {
         let store = api.store();
         let source = crate::engine::view::Source {
@@ -1445,76 +1435,20 @@ async fn set_view(
             body.config.as_ref(),
             &source,
         )?;
-        let runs = if repatterned {
-            crate::engine::view::configure_runs(&store, &id)?
-        } else {
-            store.list_runs_by_experiment(&id).map_err(Refusal::from)?
-        };
+        if body.patterns.is_some() {
+            api.commands.collect_signals_now();
+        }
         let now = crate::store::now_ms();
-        for run in &runs {
-            if let Err(error) = crate::engine::monitor::advance(&store, run, now) {
+        for run in store.list_runs_by_experiment(&id)? {
+            if let Err(error) = crate::engine::monitor::advance(&store, &run, now) {
                 eprintln!("orx up: run {} after its view changed: {error:#}", run.id);
             }
         }
-        let ended = runs
-            .into_iter()
-            .filter(|run| repatterned && Phase::parse(&run.status).is_some_and(Phase::is_terminal))
-            .collect::<Vec<_>>();
-        Ok((saved, ended))
+        Ok(saved)
     })
     .await
     .unwrap_or_else(|cause| Err(Refusal::Failed(cause.to_string())));
-    let (saved, ended) = match answer {
-        Ok(answer) => answer,
-        Err(refusal) => return view_answer(Err(refusal)),
-    };
-    tokio::spawn(async move {
-        for run in ended {
-            refold_kept(&refold, &run).await;
-        }
-    });
-    view_answer(Ok(saved))
-}
-
-/// Reads an ended run's kept log again with its patterns, a few seconds a pass, and draws it.
-async fn refold_kept(api: &Api, run: &StoredRun) {
-    let Some(handle) = handle_of(run) else {
-        return;
-    };
-    let watched = WatchedRun {
-        id: run.id.clone(),
-        handle,
-    };
-    let as_of = run.ended_at.unwrap_or(run.updated_at);
-    for _ in 0..1000 {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        let now = crate::store::now_ms();
-        match crate::engine::adapters::signals::collect_kept(
-            &api.data_dir,
-            &watched,
-            now,
-            as_of,
-            deadline,
-        )
-        .await
-        {
-            Ok(false) => continue,
-            Ok(true) => break,
-            Err(error) => {
-                eprintln!(
-                    "orx up: run {} could not be read again with its patterns: {error:#}",
-                    run.id
-                );
-                break;
-            }
-        }
-    }
-    if let Err(error) = crate::engine::monitor::advance(&api.store(), run, crate::store::now_ms()) {
-        eprintln!(
-            "orx up: run {} after its patterns changed: {error:#}",
-            run.id
-        );
-    }
+    view_answer(answer)
 }
 
 #[derive(Default, Deserialize)]

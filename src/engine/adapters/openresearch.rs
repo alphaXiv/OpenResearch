@@ -840,8 +840,14 @@ impl Backend for OpenResearch {
                     .await;
                 }
                 let data = transport.log_dir.parent().unwrap();
-                let signals =
-                    super::signals::collect(data, self, run, false, self.engine.clock.wall_ms());
+                let signals = super::signals::collect(
+                    data,
+                    self,
+                    run,
+                    false,
+                    self.engine.clock.wall_ms(),
+                    || self.engine.store().run_patterns(&run.id),
+                );
                 match tokio::time::timeout(Duration::from_secs(3), signals).await {
                     Ok(Ok(_)) => {}
                     outcome => {

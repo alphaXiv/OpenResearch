@@ -1429,6 +1429,7 @@ impl Store {
             CREATE TABLE IF NOT EXISTS signal_collections (
                 run_id TEXT PRIMARY KEY,
                 done INTEGER NOT NULL DEFAULT 0,
+                refold INTEGER NOT NULL DEFAULT 0,
                 attempts INTEGER NOT NULL DEFAULT 0,
                 next_attempt_at INTEGER NOT NULL DEFAULT 0
             );
@@ -3396,6 +3397,24 @@ impl Store {
             .flatten())
     }
 
+    pub(crate) fn run_patterns(&self, run: &str) -> Result<orx_signals::Config> {
+        let settings: Option<(String, Option<String>)> = self
+            .conn
+            .query_row(
+                "SELECT r.experiment_id, e.run_monitor_json FROM runs r
+                 LEFT JOIN local_experiments e ON e.id = r.experiment_id WHERE r.id = ?1",
+                [run],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        match settings {
+            Some((experiment, raw)) => {
+                crate::engine::view::stored_patterns(&experiment, raw.as_deref())
+            }
+            None => Ok(orx_signals::Config::default()),
+        }
+    }
+
     /// Rewrites the experiment's run monitor settings with `patch` under the write lock, unless
     /// they changed since the writer read them as `expected`. Returns what is stored now, or
     /// `None` on such a change.
@@ -3415,8 +3434,47 @@ impl Store {
             "UPDATE local_experiments SET run_monitor_json = ?2, updated_at = MAX(updated_at + 1, ?3) WHERE id = ?1",
             params![experiment, next, now_ms()],
         )?;
+        let desired = crate::engine::view::stored_patterns(experiment, Some(&next))?;
+        if !crate::engine::view::stored_patterns(experiment, current.as_deref())
+            .is_ok_and(|old| old == desired)
+        {
+            tx.execute(
+                "INSERT INTO signal_collections (run_id, done, refold)
+                 SELECT id, 1, 1 FROM runs WHERE experiment_id = ?1
+                   AND status IN ('done', 'failed', 'cancelled', 'lost')
+                   AND json_type(CASE WHEN json_valid(backend_json) THEN backend_json END, '$.jobId') = 'text'
+                 ON CONFLICT(run_id) DO UPDATE SET refold = 1, attempts = 0, next_attempt_at = 0",
+                [experiment],
+            )?;
+        }
         tx.commit()?;
         Ok(Some(next))
+    }
+
+    pub(crate) fn signal_refold_ready(&self, run: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM signal_collections WHERE run_id = ?1 AND refold = 1)
+             AND NOT EXISTS(SELECT 1 FROM log_collections
+                 WHERE run_id = ?1 AND done = 0 AND next_attempt_at <= ?2)",
+            params![run, now_ms()],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub(crate) fn finish_signal_refold(
+        &self,
+        run: &str,
+        config: &orx_signals::Config,
+    ) -> Result<()> {
+        let tx = self.begin_immediate()?;
+        if self.run_patterns(run)? == *config {
+            tx.execute(
+                "UPDATE signal_collections SET refold = 0 WHERE run_id = ?1",
+                [run],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// The run's monitor state as stored: `None` when nothing was published yet.
@@ -3473,7 +3531,7 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                "SELECT next_attempt_at FROM signal_collections WHERE run_id=?1 AND done=0",
+                "SELECT next_attempt_at FROM signal_collections WHERE run_id=?1 AND (done=0 OR refold=1)",
                 [run_id],
                 |r| r.get(0),
             )
@@ -3487,10 +3545,10 @@ impl Store {
     ) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
             "SELECT run_id FROM signal_collections
-             WHERE done = 0 AND (?1 = 0 OR (next_attempt_at <= ?2 AND NOT EXISTS (
+             WHERE (done = 0 OR refold = 1) AND (?1 = 0 OR (next_attempt_at <= ?2 AND (refold = 1 OR NOT EXISTS (
                  SELECT 1 FROM log_collections l WHERE l.run_id = signal_collections.run_id
                  AND l.done = 0 AND l.collected = 0
-             )))
+             ))))
              ORDER BY next_attempt_at LIMIT ?3",
         )?;
         let rows = stmt.query_map(params![due, now_ms(), limit as i64], |r| r.get(0))?;
@@ -3500,7 +3558,7 @@ impl Store {
     pub(crate) fn retry_signal_collections_now(&self, run_id: Option<&str>) -> Result<()> {
         self.conn.execute(
             "UPDATE signal_collections SET next_attempt_at = 0
-             WHERE done = 0 AND (?1 IS NULL OR run_id = ?1)",
+             WHERE (done = 0 OR refold = 1) AND (?1 IS NULL OR run_id = ?1)",
             [run_id],
         )?;
         Ok(())

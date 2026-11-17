@@ -7872,7 +7872,7 @@ mod tests {
     /// A frozen benchmark harness, read by patterns saved beside the experiment's view.
     #[test]
     fn patterns_saved_on_an_experiment_reach_its_runs_and_its_check() {
-        use crate::engine::view::{check, configure_runs, etag, set, Source};
+        use crate::engine::view::{check, etag, set, Source};
         let f = Fixture::new("orx-monitor-patterns");
         let run = f.run("running", local());
         let list = json!([
@@ -7898,14 +7898,14 @@ mod tests {
         .unwrap();
         assert_eq!(saved["patterns"], list);
         assert_eq!(saved["markup"], Value::Null, "the view is kept as it was");
-        configure_runs(&f.store, "exp").unwrap();
-        let [path, _] = signal_paths(f.dir.path(), &run.id);
-        let (config, patterns) = super::super::adapters::local::signals::configured(&path).unwrap();
+        let config = f.store.run_patterns(&run.id).unwrap();
         assert_eq!(json!(config.patterns), list);
 
         let mut folded = Snapshot::new(&run.id, "1-1", "check");
         folded.tally = Some(Default::default());
-        folded.configure(patterns);
+        folded.configure(Some(Arc::new(
+            orx_signals::Patterns::compile(&config).unwrap(),
+        )));
         let log = std::fs::read(
             Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("crates/orx-signals/tests/fixtures/codec.out"),

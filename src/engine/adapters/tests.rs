@@ -3726,17 +3726,17 @@ async fn an_old_host_supplies_log_pages_for_local_patterns() {
     fs::write(&log, b"loss=2\n").unwrap();
     let data = f.server.directory().join("laptop");
     let path = data.join(format!("run-signals/{id}.json"));
-    let config = serde_json::from_value(json!({
+    let config: orx_signals::Config = serde_json::from_value(json!({
         "patterns": [{"regex": "loss=(?<loss>[0-9]+)"}]
     }))
     .unwrap();
-    super::local::signals::configure(&path, &config).unwrap();
+    let desired = || Ok(config.clone());
     let run = WatchedRun {
         id: id.into(),
         handle: f.ssh.handle(),
     };
 
-    super::signals::collect(&data, f.ssh.as_ref(), &run, false, 1)
+    super::signals::collect(&data, f.ssh.as_ref(), &run, false, 1, desired)
         .await
         .unwrap();
     let snapshot = super::local::signals::load(&path).unwrap().unwrap();
@@ -3749,7 +3749,7 @@ async fn an_old_host_supplies_log_pages_for_local_patterns() {
         .write_all(b"loss=1")
         .unwrap();
     assert!(
-        super::signals::collect(&data, f.ssh.as_ref(), &run, true, 2)
+        super::signals::collect(&data, f.ssh.as_ref(), &run, true, 2, desired)
             .await
             .unwrap()
     );

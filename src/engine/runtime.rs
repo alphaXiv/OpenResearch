@@ -66,7 +66,7 @@ fn box_of(run: &StoredRun) -> Option<String> {
 
 /// What one adapter instance serves.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum Key {
+pub(super) enum Key {
     Ssh {
         host: String,
         root: String,
@@ -125,7 +125,7 @@ impl Key {
         Self::of_kind(&launch.kind, launch.target.clone(), root.into(), context)
     }
 
-    fn of_handle(handle: &Handle) -> Result<Self> {
+    pub(super) fn of_handle(handle: &Handle) -> Result<Self> {
         Ok(match handle {
             Handle::OpenResearch { descriptor } => Self::OpenResearch {
                 rental: descriptor.job_id.clone(),
@@ -750,6 +750,7 @@ impl Runtime {
                 run,
                 false,
                 self.engine.clock.wall_ms(),
+                || self.store()?.run_patterns(&run.id),
             );
             let collected = if remaining.is_zero() {
                 None
@@ -860,13 +861,23 @@ impl Runtime {
         let Some(run) = self.store()?.get_run(run_id)? else {
             return Ok(());
         };
+        let refold = self.store()?.signal_refold_ready(run_id)?;
         let collected = async {
             let Some(handle) = handle_of(&run) else {
-                self.store()?.finish_signal_collection(run_id)?;
-                return self.store()?.finish_log_collection(run_id);
+                let store = self.store()?;
+                store.finish_signal_collection(run_id)?;
+                store.finish_log_collection(run_id)?;
+                if store.signal_refold_ready(run_id)? {
+                    store.finish_signal_refold(run_id, &store.run_patterns(run_id)?)?;
+                }
+                return Ok(());
             };
             let data_as_of = run.ended_at.unwrap_or(self.engine.clock.wall_ms());
+            let kept_as_of = run.ended_at.unwrap_or(run.updated_at);
             let run = WatchedRun { id: run.id, handle };
+            if refold {
+                return self.refold_signals(&run, kept_as_of).await;
+            }
             let backend = self.backend_for(&Key::of_handle(&run.handle)?)?;
             if !self.store()?.log_output_collected(run_id)? {
                 if !self
@@ -923,7 +934,8 @@ impl Runtime {
         .await;
         if let Err(error) = &collected {
             let error = format!("{error:#}");
-            if self.store()?.log_collection_pending(run_id)?
+            if !refold
+                && self.store()?.log_collection_pending(run_id)?
                 && self.store()?.defer_log_collection(run_id, &error)?
             {
                 let body = format!(
@@ -932,12 +944,53 @@ impl Runtime {
                 self.engine.attention(run_id, "log-collection", &body)?;
             }
         }
+        if !refold && self.store()?.signal_refold_ready(run_id)? {
+            self.store()?.retry_signal_collections_now(Some(run_id))?;
+            self.collect_now.notify_one();
+        }
         self.engine
             .bus
             .publish(super::bus::RunEvent::LogCollection {
                 run_id: run_id.into(),
             });
         collected
+    }
+
+    async fn refold_signals(&self, run: &WatchedRun, as_of: i64) -> Result<()> {
+        let desired = || self.store()?.run_patterns(&run.id);
+        let config = desired()?;
+        let pass = async {
+            if crate::commands::up::api_v2::kept_log(&self.data_dir, &run.id)?.is_empty() {
+                return Ok(true);
+            }
+            super::adapters::signals::collect_kept(
+                &self.data_dir,
+                run,
+                self.engine.clock.wall_ms(),
+                as_of,
+                tokio::time::Instant::now() + crate::config::paced(Duration::from_secs(2)),
+                desired,
+            )
+            .await
+        };
+        match pass.await {
+            Ok(true) => self.store()?.finish_signal_refold(&run.id, &config)?,
+            Ok(false) => self.store()?.retry_signal_collections_now(Some(&run.id))?,
+            Err(error) => {
+                eprintln!(
+                    "orx up: run {} could not be read again with its patterns: {error:#}",
+                    run.id
+                );
+                if missing_file(&error) {
+                    self.store()?.finish_signal_refold(&run.id, &config)?;
+                } else {
+                    self.store()?.defer_signal_collection(&run.id)?;
+                    return Ok(());
+                }
+            }
+        }
+        self.collect_now.notify_one();
+        Ok(())
     }
 
     /// Runs the end-of-run decision for a run's signals until it asks for something other than
@@ -963,9 +1016,19 @@ impl Runtime {
                 held.as_ref().map(Option::as_ref).map_err(String::as_str),
                 &kept,
             );
+            let before = self.signal_progress(&run.id);
+            let desired = || self.store()?.run_patterns(&run.id);
             let read = match next {
                 SignalNext::AskHost => {
-                    super::adapters::signals::collect(&self.data_dir, backend, run, true, now).await
+                    super::adapters::signals::collect(
+                        &self.data_dir,
+                        backend,
+                        run,
+                        true,
+                        now,
+                        desired,
+                    )
+                    .await
                 }
                 SignalNext::FoldKept => {
                     let pass = super::adapters::signals::collect_kept(
@@ -974,6 +1037,7 @@ impl Runtime {
                         now,
                         data_as_of,
                         deadline,
+                        desired,
                     );
                     match pass.await {
                         Ok(false) => return Ok(SignalNext::FoldKept),
@@ -1007,8 +1071,7 @@ impl Runtime {
                 tokio::time::sleep(crate::config::paced(Duration::from_millis(200))).await;
                 continue;
             }
-            let before = held.ok().flatten().map(|s| (s.generation, s.rev));
-            if self.signals_revision(&run.id) == before {
+            if self.signal_progress(&run.id) == before {
                 bail!("Reading run {}'s signals made no progress", run.id);
             }
         }
@@ -1021,7 +1084,7 @@ impl Runtime {
         run: &WatchedRun,
         data_as_of: i64,
     ) -> Result<()> {
-        let before = self.signals_revision(&run.id);
+        let before = self.signal_progress(&run.id);
         let host = if matches!(
             Key::of_handle(&run.handle),
             Ok(Key::OpenResearch { .. } | Key::Api { .. })
@@ -1043,7 +1106,7 @@ impl Runtime {
         let driven = self.drive_signals(backend, run, true, &host, data_as_of, deadline);
         let next = match tokio::time::timeout(budget, driven).await {
             Ok(next) => next?,
-            Err(_) if self.signals_revision(&run.id) != before => SignalNext::AskHost,
+            Err(_) if self.signal_progress(&run.id) != before => SignalNext::AskHost,
             Err(_) => bail!("Reading run {}'s signals made no progress in time", run.id),
         };
         match next {
@@ -1059,7 +1122,7 @@ impl Runtime {
             SignalNext::Settle(Some(cause)) => {
                 let cause = cause.trim_end_matches(['.', ' ']);
                 super::adapters::signals::settle_incomplete(&self.data_dir, &run.id, cause)?;
-                let kept = if self.signals_revision(&run.id).is_some() {
+                let kept = if self.held_signals(&run.id).is_ok_and(|s| s.is_some()) {
                     "The signals read before then are kept."
                 } else {
                     "No signals were kept."
@@ -1133,11 +1196,14 @@ impl Runtime {
         }
     }
 
-    fn signals_revision(&self, run: &str) -> Option<(String, u64)> {
-        super::adapters::local::signals::load(&self.signals_path(run))
-            .ok()
-            .flatten()
-            .map(|s| (s.generation, s.rev))
+    fn signal_progress(&self, run: &str) -> [Option<(String, u64)>; 2] {
+        let path = self.signals_path(run);
+        [path.with_extension("replay"), path].map(|path| {
+            super::adapters::local::signals::load(&path)
+                .ok()
+                .flatten()
+                .map(|s| (s.generation, s.rev))
+        })
     }
 
     fn host_returned(&self, alias: &str, root: &str) -> Result<()> {
@@ -1609,6 +1675,10 @@ impl Commands for Runtime {
             Key::Ssh { .. } | Key::Slurm { .. } => Box::new(self.ssh(&key)?.follow_logs(run)),
             _ => Box::new(()),
         })
+    }
+
+    fn collect_signals_now(&self) {
+        self.collect_now.notify_one();
     }
 }
 
@@ -3622,6 +3692,168 @@ mod tests {
             .unwrap());
     }
 
+    #[tokio::test]
+    async fn final_signal_collection_can_advance_a_staged_rebuild() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-final-rebuild").unwrap();
+        let runtime = ended_signal_run(dir.path());
+        let backend = Arc::new(Host::default());
+        let mut log = b"::orx:: {\"m\":{\"score\":1}}\n".to_vec();
+        log.resize(2 * 1024 * 1024, b'\n');
+        let mut held = orx_signals::Snapshot::new("run", "1-1", "old");
+        held.feed(&log, false, 1, true).unwrap();
+        let path = runtime.signals_path("run");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        super::super::adapters::local::signals::publish(&path, &held).unwrap();
+
+        let mut replacement = b"::orx:: {\"m\":{\"score\":2}}\n".to_vec();
+        replacement.resize(3 * 1024 * 1024, b'\n');
+        let len = replacement.len() as u64;
+        *backend.log.log.lock().unwrap() = HostFile {
+            bytes: replacement,
+            ino: 2,
+        };
+        lock(&runtime.backends).insert(Key::Local, backend);
+        {
+            let store = runtime.store().unwrap();
+            store.checkpoint_log_collection("run").unwrap();
+            store.finish_log_collection("run").unwrap();
+        }
+        for _ in 0..8 {
+            runtime.collect_finished("run").await.unwrap();
+            if settled(&runtime) {
+                break;
+            }
+            assert_eq!(
+                runtime
+                    .store()
+                    .unwrap()
+                    .pending_signal_collections(true, 10)
+                    .unwrap(),
+                ["run"]
+            );
+        }
+
+        let snapshot = runtime.held_signals("run").unwrap().unwrap();
+        assert_eq!(snapshot.cursor.offset, len);
+        assert_eq!(snapshot.latest["score"], 2);
+        assert!(settled(&runtime));
+    }
+
+    #[tokio::test]
+    async fn saving_patterns_reopens_collection_for_an_ended_run_across_restart() {
+        use crate::engine::view::{etag, set, Source};
+
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        std::env::set_var("ORX_TEST_SPEEDUP", "1000000");
+        let dir = crate::local::git::TemporaryDirectory::new("orx-pattern-restart").unwrap();
+        let runtime = gone_host(dir.path());
+        let mut log = b"::orx:: {\"m\":{\"existing\":1}}\n".to_vec();
+        log.resize(768 * 1024, b'\n');
+        log.extend_from_slice(b"METRIC score 42\n");
+        keep(dir.path(), &[(0, &log, true)]);
+        for _ in 0..8 {
+            if settled(&runtime) {
+                break;
+            }
+            runtime.collect_finished("run").await.unwrap();
+        }
+        assert!(settled(&runtime));
+        let save = |store: &Store, patterns: &serde_json::Value| {
+            let raw = store.run_monitor_json("exp").unwrap();
+            set(
+                store,
+                "exp",
+                &etag(raw.as_deref()),
+                None,
+                Some(patterns),
+                None,
+                &Source {
+                    file: None,
+                    patterns: None,
+                    config: None,
+                },
+            )
+            .unwrap();
+        };
+        {
+            let store = runtime.store().unwrap();
+            store
+                .create_local_experiment(&crate::local::model::LocalExperiment {
+                    id: "exp".into(),
+                    project_id: "project".into(),
+                    parent_experiment_id: None,
+                    slug: "exp".into(),
+                    branch_name: "orx/exp".into(),
+                    title: None,
+                    description: None,
+                    run_command: "train".into(),
+                    agent_status: "idle".into(),
+                    created_at: 1,
+                    updated_at: 1,
+                    chat_session_id: None,
+                    archived: false,
+                })
+                .unwrap();
+            save(
+                &store,
+                &json!([{"regex": "^METRIC (?P<name>\\w+) (?P<value>\\d+)$"}]),
+            );
+        }
+        assert_eq!(
+            runtime
+                .store()
+                .unwrap()
+                .pending_signal_collections(true, 10)
+                .unwrap(),
+            ["run"]
+        );
+        runtime.collect_finished("run").await.unwrap();
+        let stage = runtime.signals_path("run").with_extension("replay");
+        let load_stage = || {
+            super::super::adapters::local::signals::load(&stage)
+                .unwrap()
+                .unwrap()
+        };
+        let before = load_stage();
+        assert!(before.cursor.offset < log.len() as u64);
+        drop(runtime);
+
+        let runtime = collector(dir.path());
+        runtime.collect_finished("run").await.unwrap();
+        let after = load_stage();
+        assert_eq!(after.generation, before.generation);
+        assert!(after.cursor.offset > before.cursor.offset);
+        for _ in 0..8 {
+            if settled(&runtime) {
+                break;
+            }
+            runtime.collect_finished("run").await.unwrap();
+        }
+        let snapshot = runtime.held_signals("run").unwrap().unwrap();
+        assert_eq!(snapshot.latest["score"].as_f64(), Some(42.0));
+        assert!(settled(&runtime));
+
+        {
+            let store = runtime.store().unwrap();
+            let superseded = store.run_patterns("run").unwrap();
+            save(&store, &json!([]));
+            store.finish_signal_refold("run", &superseded).unwrap();
+        }
+        assert!(!settled(&runtime));
+        for _ in 0..8 {
+            if settled(&runtime) {
+                break;
+            }
+            runtime.collect_finished("run").await.unwrap();
+        }
+        let snapshot = runtime.held_signals("run").unwrap().unwrap();
+        assert!(!snapshot.latest.contains_key("score"));
+        assert_eq!(snapshot.latest["existing"], 1);
+        assert!(settled(&runtime));
+    }
+
     /// A cancel that cannot reach the host leaves the run unfinished and owes nothing; once the
     /// stop lands (survivors, then a receipt that they stopped) or the job is proven gone, the last signals
     /// are read once, after the run is settled, and never again.
@@ -3876,7 +4108,14 @@ mod tests {
         let backend = Arc::new(Host::default());
         let run = local_run();
         let live = |now| {
-            super::super::adapters::signals::collect(dir.path(), backend.as_ref(), &run, false, now)
+            super::super::adapters::signals::collect(
+                dir.path(),
+                backend.as_ref(),
+                &run,
+                false,
+                now,
+                || runtime.store()?.run_patterns(&run.id),
+            )
         };
         live(4000).await.unwrap();
         backend.log.log.lock().unwrap().bytes =
@@ -3932,6 +4171,7 @@ mod tests {
             6000,
             6000,
             tokio::time::Instant::now(),
+            || Ok(orx_signals::Config::default()),
         )
         .await
         .unwrap());

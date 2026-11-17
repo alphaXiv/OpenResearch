@@ -275,13 +275,13 @@ A log an agent cannot change is read with patterns saved beside the view
 (`orx exp view set --pattern`): each line the first matching regex fits
 becomes a record, as if the run had printed it, with fixed or captured
 step, total, stage, unit and table row, and `name`/`value` groups naming a
-signal. The fold applies them where it runs, on the host or this machine,
-from a configuration file beside the run's checkpoint that orx keeps in step
-with the experiment and sends to a host at its next collection. New patterns
-fold each run's log again from its start into a new generation, which
-replaces the old one only once it has read as far: a live run at its next
-collection, an ended one from the log kept here. A counter read by a pattern
-promises only itself, as a detected one does. `orx exp view check` folds the
+signal. Each collection reads the experiment's saved patterns and sends them
+to the host if it folds the log there. A pattern edit folds each run's log
+from its start into a new generation, which replaces the old one once it
+covers the same bytes. A live run refolds at its next collection. Saving the
+edit queues a refold over each ended run's kept log in the same transaction,
+so the work resumes after a restart. A counter read by a pattern promises
+only itself, as a detected one does. `orx exp view check` folds the
 run's log as it reads now with the patterns and says what each one matched.
 
 `orx exp view show RUN` describes the collected run view in plain text. It

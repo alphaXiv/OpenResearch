@@ -1212,39 +1212,6 @@ pub(crate) fn patterns(
     Ok((config, compiled))
 }
 
-/// Has every run of the experiment folded with its patterns from now on: the laptop's copy of
-/// each run's configuration, which a host is sent at its next collection. Returns the runs.
-pub(crate) fn configure_runs(
-    store: &crate::store::Store,
-    experiment: &str,
-) -> crate::error::Result<Vec<crate::store::StoredRun>> {
-    let config = stored_patterns(experiment, store.run_monitor_json(experiment)?.as_deref())?;
-    let runs = store.list_runs_by_experiment(experiment)?;
-    for run in &runs {
-        configure_run(store, run, &config)?;
-    }
-    Ok(runs)
-}
-
-/// Writes the run's configuration beside its checkpoint, when it has patterns or had them.
-pub(crate) fn configure_run(
-    store: &crate::store::Store,
-    run: &crate::store::StoredRun,
-    config: &orx_signals::Config,
-) -> crate::error::Result<()> {
-    let path = store
-        .data_dir()
-        .join("run-signals")
-        .join(format!("{}.json", run.id));
-    if config.patterns.is_empty() && !path.with_extension("config.json").exists() {
-        return Ok(());
-    }
-    super::adapters::local::signals::configure(&path, config).map_err(|error| {
-        crate::error::anyhow!("Run {}'s patterns could not be saved: {error}", run.id)
-    })?;
-    Ok(())
-}
-
 /// Why a view request was refused, each with the status the API answers it with.
 #[derive(Debug)]
 pub(crate) enum Refusal {

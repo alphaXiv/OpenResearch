@@ -110,6 +110,8 @@ impl Backend for Fake {
 struct Services(Arc<Fake>, Arc<Engine>, PathBuf);
 #[async_trait]
 impl Commands for Services {
+    fn collect_signals_now(&self) {}
+
     async fn run(&self, args: crate::ExpRunArgs, admission: Box<dyn Send>) -> Result<String> {
         assert_eq!(self.0.admitted.load(Ordering::SeqCst), 1);
         self.1.insert(SubmittingRun {

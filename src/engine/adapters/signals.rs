@@ -1,9 +1,10 @@
 use super::local::signals::{
-    configured, load, note_replaced, publish as publish_snapshot, validate_run,
+    configure, load, note_replaced, publish as publish_snapshot, validate_run,
 };
+use crate::engine::runtime::Key;
 use crate::engine::{Backend, ByteRange, FileIdent, LogFile, LogPage, WatchedRun};
 use crate::error::{anyhow, bail, Result};
-use orx_signals::Snapshot;
+use orx_signals::{Config, Patterns, Snapshot};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -115,8 +116,9 @@ pub(crate) async fn collect(
     run: &WatchedRun,
     terminal: bool,
     now: i64,
+    desired: impl Fn() -> Result<Config>,
 ) -> Result<bool> {
-    collect_from(data, Some(backend), run, terminal, now, None).await
+    collect_from(data, Some(backend), run, terminal, now, None, desired).await
 }
 
 /// One pass over the kept log: it reads until `deadline`, at least one page, and publishes once.
@@ -126,8 +128,9 @@ pub(crate) async fn collect_kept(
     now: i64,
     as_of: i64,
     deadline: tokio::time::Instant,
+    desired: impl Fn() -> Result<Config>,
 ) -> Result<bool> {
-    collect_from(data, None, run, true, now, Some((as_of, deadline))).await
+    collect_from(data, None, run, true, now, Some((as_of, deadline)), desired).await
 }
 
 async fn page(
@@ -223,6 +226,7 @@ async fn collect_from(
     terminal: bool,
     now: i64,
     kept: Option<(i64, tokio::time::Instant)>,
+    desired: impl Fn() -> Result<Config>,
 ) -> Result<bool> {
     validate_run(&run.id)?;
     let directory = data.join("run-signals");
@@ -245,21 +249,41 @@ async fn collect_from(
         .as_ref()
         .and_then(|s| s.extra.get("collectionError"))
         .cloned();
-    let (config, patterns) = configured(&path)?;
+    let config = desired()?;
     let hash = config.hash();
     // A host folds with the patterns it was given; one folded under others is given these.
     let reconfigured = previous
         .as_ref()
-        .map_or(patterns.is_some(), |p| p.config_hash != hash);
+        .map_or(!config.patterns.is_empty(), |p| p.config_hash != hash);
     let native = if let Some(backend) = backend {
+        if matches!(
+            Key::of_handle(&run.handle),
+            Ok(Key::Local | Key::Api { .. })
+        ) && (!config.patterns.is_empty() || path.with_extension("config.json").try_exists()?)
+        {
+            // The shared scanner reads the applied config beside its checkpoint.
+            configure(&path, &config)?;
+        }
         if reconfigured {
             backend.configure_signals(run, &config).await?;
         }
-        backend.signals(run, terminal, previous.as_ref()).await?
+        backend
+            .signals(run, terminal, previous.as_ref())
+            .await?
+            .map(|snapshot| (backend, snapshot))
     } else {
         None
     };
-    if let Some((mut snapshot, clock)) = native {
+    if let Some((backend, (mut snapshot, clock))) = native {
+        if desired()? != config {
+            return Ok(false);
+        }
+        if snapshot.config_hash != hash {
+            if !reconfigured {
+                backend.configure_signals(run, &config).await?;
+            }
+            return Ok(false);
+        }
         let complete = finished(&snapshot);
         apply_incomplete(data, &run.id, &mut snapshot)?;
         let changed = previous.as_ref().is_none_or(|p| p != &snapshot);
@@ -312,6 +336,9 @@ async fn collect_from(
         !resume && !reconfigured && kept.is_some() && held.has_signals() && !rebuilding(held)
     }) {
         // The kept bytes are not the log the held checkpoint read: it stands, read no further.
+        if desired()? != config {
+            return Ok(false);
+        }
         if set_aside(&mut held, true) {
             publish(&path, &held)?;
         }
@@ -343,7 +370,18 @@ async fn collect_from(
     if !resume && !reconfigured && held.as_ref().is_some_and(Snapshot::has_signals) {
         note_replaced(&mut snapshot, len.unwrap_or(0));
     }
-    snapshot.configure(patterns);
+    let patterns = (!config.patterns.is_empty())
+        .then(|| Patterns::compile(&config))
+        .transpose()
+        .map_err(|error| {
+            anyhow!(
+                "Run {} pattern {}: {}",
+                run.id,
+                error.index + 1,
+                error.reason
+            )
+        })?;
+    snapshot.configure(patterns.map(Arc::new));
     if !resume {
         snapshot.updated_at = folded_at;
         if let Some(cause) = previous_error {
@@ -452,6 +490,9 @@ async fn collect_from(
         }
         apply_incomplete(data, &run.id, &mut snapshot)?;
         let changed = !resume || snapshot.rev != before_rev || snapshot.coverage != before_coverage;
+        if desired()? != config {
+            return Ok(false);
+        }
         let accepted = !changed || publish(&path, &snapshot)?;
         collected(data, &snapshot, now, changed, None, accepted)?;
         if stop {
@@ -704,7 +745,7 @@ pub(crate) fn decide(
     kept: &[crate::commands::up::api_v2::KeptRange],
 ) -> Next {
     let snapshot = held.ok().flatten();
-    let finished = snapshot.filter(|s| finished(s));
+    let finished = snapshot.filter(|s| finished(s) && !rebuilding(s));
     if !released {
         return if finished.is_none() && *host == Host::Has {
             Next::AskHost
@@ -811,6 +852,26 @@ pub(crate) fn cached_status(
 #[cfg(test)]
 mod collection_tests {
     use super::*;
+
+    async fn collect(
+        data: &Path,
+        backend: &dyn Backend,
+        run: &WatchedRun,
+        terminal: bool,
+        now: i64,
+    ) -> Result<bool> {
+        super::collect(data, backend, run, terminal, now, || Ok(Config::default())).await
+    }
+
+    async fn collect_kept(
+        data: &Path,
+        run: &WatchedRun,
+        now: i64,
+        as_of: i64,
+        deadline: tokio::time::Instant,
+    ) -> Result<bool> {
+        super::collect_kept(data, run, now, as_of, deadline, || Ok(Config::default())).await
+    }
 
     #[test]
     fn the_first_recorded_cause_is_the_one_settled_and_reading_stops_being_said() {

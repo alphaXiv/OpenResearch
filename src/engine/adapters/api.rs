@@ -1320,7 +1320,8 @@ mod tests {
             }
         };
         let backend = restart().await;
-        while !crate::engine::adapters::signals::collect(&root, &backend, &run, true, 1)
+        let desired = || Ok(orx_signals::Config::default());
+        while !crate::engine::adapters::signals::collect(&root, &backend, &run, true, 1, desired)
             .await
             .unwrap()
         {}
@@ -1335,7 +1336,7 @@ mod tests {
         for more in [12_000..12_100, 12_100..12_200] {
             account.text.lock().unwrap().extend(lines(more));
             let backend = restart().await;
-            crate::engine::adapters::signals::collect(&root, &backend, &run, false, 2)
+            crate::engine::adapters::signals::collect(&root, &backend, &run, false, 2, desired)
                 .await
                 .unwrap();
             published.push(
@@ -1351,7 +1352,7 @@ mod tests {
         }
         let backend = restart().await;
         for _ in 0..4 {
-            crate::engine::adapters::signals::collect(&root, &backend, &run, false, 3)
+            crate::engine::adapters::signals::collect(&root, &backend, &run, false, 3, desired)
                 .await
                 .unwrap();
         }
@@ -1442,8 +1443,15 @@ mod tests {
         }
 
         async fn collect(&self, backend: &Adapter<Arc<Fake>>, terminal: bool) -> Result<bool> {
-            crate::engine::adapters::signals::collect(&self.root, backend, &self.run, terminal, 1)
-                .await
+            crate::engine::adapters::signals::collect(
+                &self.root,
+                backend,
+                &self.run,
+                terminal,
+                1,
+                || Ok(orx_signals::Config::default()),
+            )
+            .await
         }
 
         fn held(&self) -> orx_signals::Snapshot {
