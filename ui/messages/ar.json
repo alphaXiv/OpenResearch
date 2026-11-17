@@ -2146,5 +2146,7 @@
   "acp_approval_ask": "السؤال كل مرة",
   "acp_approval_ask_description": "السؤال قبل الإجراءات التي تتطلب موافقة",
   "acp_approval_auto": "وصول كامل",
-  "acp_approval_auto_description": "يوافق على كل طلب دون سؤال، باستثناء الطلبات التي لا يمكن السماح بها إلا بشكل دائم"
+  "acp_approval_auto_description": "يوافق على كل طلب دون سؤال، باستثناء الطلبات التي لا يمكن السماح بها إلا بشكل دائم",
+  "media_preview_install_runtime": "الصوت والفيديو غير متاحين. ثبّت حزم الوسائط أدناه، ثم أعد فتح OpenResearch.",
+  "media_preview_install_commands": "أوامر التثبيت"
 }

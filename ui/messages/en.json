@@ -2146,5 +2146,7 @@
   "acp_approval_ask": "Ask",
   "acp_approval_ask_description": "Ask before actions that need approval",
   "acp_approval_auto": "Full access",
-  "acp_approval_auto_description": "Approve each request without asking, except ones that can only be allowed permanently"
+  "acp_approval_auto_description": "Approve each request without asking, except ones that can only be allowed permanently",
+  "media_preview_install_runtime": "Audio and video are unavailable. Install the media packages below, then reopen OpenResearch.",
+  "media_preview_install_commands": "Installation commands"
 }

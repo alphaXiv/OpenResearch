@@ -2146,5 +2146,7 @@
   "acp_approval_ask": "逐次询问",
   "acp_approval_ask_description": "执行需要授权的操作前询问",
   "acp_approval_auto": "完全访问",
-  "acp_approval_auto_description": "不询问即批准每个请求，但只能永久允许的请求除外"
+  "acp_approval_auto_description": "不询问即批准每个请求，但只能永久允许的请求除外",
+  "media_preview_install_runtime": "音视频暂不可用。请安装下列媒体组件，然后重新打开 OpenResearch。",
+  "media_preview_install_commands": "安装命令"
 }

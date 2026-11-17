@@ -2,9 +2,13 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { isExternalMarkdownTarget } from "../markdownTarget";
+import { MediaUnavailable, mediaUnavailable } from "./MediaUnavailable";
 import { Spinner } from "./ui";
 import { OptionPicker } from "./ModelPicker";
 import { inlineHtmlHeight } from "../htmlPreviewSizing";
+
+/** What WebKit refuses to play once the desktop app disables media. */
+const MEDIA_MARKUP = /<(video|audio)\b|\bnew Audio\b|createElement\(\s*["'`](video|audio)\b|AudioContext|MediaSource/i;
 
 /** Elements whose relative URLs name a project file, each with the response
  * types it may legitimately be. The gate is the security boundary: the parent
@@ -276,32 +280,38 @@ export function HtmlPreview({
     );
   }
 
+  const blockedMedia = mediaUnavailable() && MEDIA_MARKUP.test(page.source);
+
   return (
-    <div ref={viewport} className={fitContent ? "relative flex flex-col" : "flex h-full min-h-0 flex-col"}>
+    <div ref={viewport} className={fitContent ? "flex flex-col" : "flex h-full min-h-0 flex-col"}>
+      {blockedMedia && <MediaUnavailable />}
       {page.partial && (
         <div className="file-view-note shrink-0 border-b border-b-border-variant py-2 px-4 text-sm text-muted">
           {m.file_viewer_html_partial()}
         </div>
       )}
-      {metricPicker && metricPicker.choices.length > 1 && <div className="absolute z-10" style={{ left: metricPicker.left, top: metricPicker.top, width: metricPicker.width }}>
-        <OptionPicker choices={metricPicker.choices} value={metricPicker.value} variant="field" floating dropDown
-          onSelect={(value) => frame.current?.contentWindow?.postMessage({ type: "orx-chart-metric", value }, "*")} />
-      </div>}
-      <iframe
-        ref={frame}
-        style={fitContent ? { height } : undefined}
-        // White-backed: an unstyled document assumes the browser default, and
-        // the pane's dark ground would leave its black text unreadable.
-        className={`block min-h-0 w-full border-0 bg-white ${fitContent ? "shrink-0" : "flex-1"}`}
-        title={m.file_viewer_html_preview({ name: ltr(name) })}
-        // Never allow-same-origin: it would hand a repo's or an agent's HTML
-        // this page's origin and the unauthenticated loopback API. Popups so a
-        // report's links open (they inherit the sandbox, having no
-        // allow-popups-to-escape-sandbox), downloads so plot toolbars save.
-        sandbox="allow-scripts allow-popups allow-downloads"
-        referrerPolicy="no-referrer"
-        srcDoc={page.source}
-     />
+      {/* The picker's coordinates come from inside the frame, so it shares the frame's box. */}
+      <div className={fitContent ? "relative flex flex-col" : "relative flex min-h-0 flex-1 flex-col"}>
+        {metricPicker && metricPicker.choices.length > 1 && <div className="absolute z-10" style={{ left: metricPicker.left, top: metricPicker.top, width: metricPicker.width }}>
+          <OptionPicker choices={metricPicker.choices} value={metricPicker.value} variant="field" floating dropDown
+            onSelect={(value) => frame.current?.contentWindow?.postMessage({ type: "orx-chart-metric", value }, "*")} />
+        </div>}
+        <iframe
+          ref={frame}
+          style={fitContent ? { height } : undefined}
+          // White-backed: an unstyled document assumes the browser default, and
+          // the pane's dark ground would leave its black text unreadable.
+          className={`block min-h-0 w-full border-0 bg-white ${fitContent ? "shrink-0" : "flex-1"}`}
+          title={m.file_viewer_html_preview({ name: ltr(name) })}
+          // Never allow-same-origin: it would hand a repo's or an agent's HTML
+          // this page's origin and the unauthenticated loopback API. Popups so a
+          // report's links open (they inherit the sandbox, having no
+          // allow-popups-to-escape-sandbox), downloads so plot toolbars save.
+          sandbox="allow-scripts allow-popups allow-downloads"
+          referrerPolicy="no-referrer"
+          srcDoc={page.source}
+       />
+      </div>
     </div>
   );
 }

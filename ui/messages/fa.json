@@ -2146,5 +2146,7 @@
   "acp_approval_ask": "هر بار بپرس",
   "acp_approval_ask_description": "پیش از اقداماتی که به تأیید نیاز دارند بپرس",
   "acp_approval_auto": "دسترسی کامل",
-  "acp_approval_auto_description": "هر درخواست را بدون پرسش تأیید می‌کند، به جز درخواست‌هایی که فقط به‌صورت دائمی می‌توان اجازه‌شان داد"
+  "acp_approval_auto_description": "هر درخواست را بدون پرسش تأیید می‌کند، به جز درخواست‌هایی که فقط به‌صورت دائمی می‌توان اجازه‌شان داد",
+  "media_preview_install_runtime": "صدا و ویدئو در دسترس نیستند. بسته‌های رسانه‌ای زیر را نصب کنید، سپس OpenResearch را دوباره باز کنید.",
+  "media_preview_install_commands": "دستورهای نصب"
 }

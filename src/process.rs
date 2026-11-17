@@ -22,6 +22,16 @@ pub fn command(program: impl AsRef<OsStr>) -> std::process::Command {
     shell_env::export_to(|key, value| {
         command.env(key, value);
     });
+    // AppRun's loader path belongs to its webview, not host executables.
+    if let Some((var, value)) = shell_env::host_gui_env()
+        .into_iter()
+        .find(|(var, _)| *var == "LD_LIBRARY_PATH")
+    {
+        match value {
+            Some(value) => command.env(var, value),
+            None => command.env_remove(var),
+        };
+    }
     #[cfg(test)]
     {
         command.env(crate::config::PARENT_TEST_ROOT, crate::config::test_root());

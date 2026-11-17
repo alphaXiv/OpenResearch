@@ -2146,5 +2146,7 @@
   "acp_approval_ask": "Sor",
   "acp_approval_ask_description": "Onay gerektiren işlemlerden önce sor",
   "acp_approval_auto": "Tam erişim",
-  "acp_approval_auto_description": "Her isteği sormadan onaylar; yalnızca kalıcı olarak izin verilebilenler hariç"
+  "acp_approval_auto_description": "Her isteği sormadan onaylar; yalnızca kalıcı olarak izin verilebilenler hariç",
+  "media_preview_install_runtime": "Ses ve video kullanılamıyor. Aşağıdaki medya paketlerini yükleyip OpenResearch uygulamasını yeniden açın.",
+  "media_preview_install_commands": "Kurulum komutları"
 }

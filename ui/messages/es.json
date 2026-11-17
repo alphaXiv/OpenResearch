@@ -2146,5 +2146,7 @@
   "acp_approval_ask": "Preguntar",
   "acp_approval_ask_description": "Preguntar antes de las acciones que requieren aprobación",
   "acp_approval_auto": "Acceso total",
-  "acp_approval_auto_description": "Aprueba cada solicitud sin preguntar, salvo las que solo se pueden permitir de forma permanente"
+  "acp_approval_auto_description": "Aprueba cada solicitud sin preguntar, salvo las que solo se pueden permitir de forma permanente",
+  "media_preview_install_runtime": "El audio y el vídeo no están disponibles. Instala los paquetes multimedia indicados y vuelve a abrir OpenResearch.",
+  "media_preview_install_commands": "Comandos de instalación"
 }

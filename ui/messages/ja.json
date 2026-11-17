@@ -2146,5 +2146,7 @@
   "acp_approval_ask": "毎回確認",
   "acp_approval_ask_description": "承認が必要な操作の前に確認します",
   "acp_approval_auto": "フルアクセス",
-  "acp_approval_auto_description": "確認せずに各リクエストを承認します。永続的にしか許可できないものは除きます"
+  "acp_approval_auto_description": "確認せずに各リクエストを承認します。永続的にしか許可できないものは除きます",
+  "media_preview_install_runtime": "音声と動画を利用できません。以下のメディアパッケージをインストールし、OpenResearch を開き直してください。",
+  "media_preview_install_commands": "インストールコマンド"
 }
