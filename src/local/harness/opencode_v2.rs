@@ -1407,7 +1407,11 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let mut ctx = TurnCtx::test_stub();
         let mut live = LiveStep::open(&endpoint, "ses").await;
-        live.follow(&mut ctx, Duration::from_millis(200)).await;
+        // Reads to the end of the served stream without waiting on the clock.
+        while live.events.is_some() {
+            live.follow(&mut ctx, Duration::ZERO).await;
+            tokio::task::yield_now().await;
+        }
         let shown = |ctx: &TurnCtx| -> Vec<(String, String)> {
             ctx.assistant
                 .parts
