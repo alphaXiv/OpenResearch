@@ -207,6 +207,7 @@ export interface RunMonitorSummary {
   etaMs: { lo: number; mid: number; hi: number; at: number } | null;
   /** `etaMs` omits untimed stages or only times work inferred from the log. */
   etaFloor?: boolean;
+  etaUntimed?: string[];
   /** Timed stages of the whole run, or one current-stage fill when its share is unknown. */
   segments?: { weight: number; fill: number | null }[];
   /** The estimate waits on more progress; with no `etaMs` and not pending, how much is left is unknown. */
@@ -271,6 +272,7 @@ export interface Estimate {
   floor: boolean;
   /** Why parts of the estimate could not be computed. */
   reasons?: string[];
+  untimed?: string[];
 }
 
 export interface Cost {

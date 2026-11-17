@@ -32,7 +32,7 @@ export function RunStatus({ model, label, descriptionId, onOpenRunPage }: {
   const stages = data && !behind ? foldedStages(data, model) : null;
   const progress = data?.progress;
   const count = data && progress?.done != null ? plainSentence(capitalized(progressWords(data.phases[progress.phase], progress.done))) : "";
-  const time = model.eta ? [model.eta, model.etaDetail].filter(Boolean).join(" · ") : !model.live ? model.sentence.text : "";
+  const time = [model.eta, model.etaDetail].filter(Boolean).join(" · ") || (!model.live ? model.sentence.text : "");
   const status = plainSentence([label, model.lead, model.sentence.text].filter(Boolean).join(" · "));
 
   // Focus returns before closing so it cannot reopen the focus-triggered popover.

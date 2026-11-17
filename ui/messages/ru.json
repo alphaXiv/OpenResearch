@@ -2375,5 +2375,9 @@
   "acp_approval_ask": "Спрашивать",
   "acp_approval_ask_description": "Спрашивать перед действиями, требующими разрешения",
   "acp_approval_auto": "Полный доступ",
-  "acp_approval_auto_description": "Одобряет каждый запрос без вопросов, кроме тех, которые можно разрешить только навсегда"
+  "acp_approval_auto_description": "Одобряет каждый запрос без вопросов, кроме тех, которые можно разрешить только навсегда",
+  "run_eta_floor": "Осталось не менее {duration}",
+  "run_eta_untimed": "{stages}: время неизвестно",
+  "run_summary_first_floor": "первое завершение не ранее чем через {duration}",
+  "run_summary_next_floor": "следующее завершение не ранее чем через {duration}"
 }

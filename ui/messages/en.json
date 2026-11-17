@@ -2375,5 +2375,9 @@
   "acp_approval_ask": "Ask",
   "acp_approval_ask_description": "Ask before actions that need approval",
   "acp_approval_auto": "Full access",
-  "acp_approval_auto_description": "Approve each request without asking, except ones that can only be allowed permanently"
+  "acp_approval_auto_description": "Approve each request without asking, except ones that can only be allowed permanently",
+  "run_eta_floor": "At least {duration} left",
+  "run_eta_untimed": "{stages} not timed",
+  "run_summary_first_floor": "first done in at least {duration}",
+  "run_summary_next_floor": "next done in at least {duration}"
 }

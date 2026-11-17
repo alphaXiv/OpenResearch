@@ -14,9 +14,9 @@ const base = JSON.parse(readFileSync(new URL("./fixtures/runMonitor/pipeline.jso
 const now = Date.now();
 const bare = (text) => text.replace(/[⁦-⁩]/g, "");
 
-async function status(answer) {
+async function status(answer, extra = {}) {
   const watcher = "The held-out score keeps improving. " + "The remaining checks cover the run's question. ".repeat(15);
-  const data = { ...base, sentence: { template: watcher, t: now } };
+  const data = { ...base, ...extra, sentence: { template: watcher, t: now } };
   const run = { id: data.runId, projectId: "p", experimentId: "e", status: "running", createdAt: now - 60_000, startedAt: now - 60_000, updatedAt: now, contact: null, cancelling: false, host: "lab-a40", backend: { kind: "slurm_job" }, monitor: { rev: data.rev, generation: data.generation, asOf: data.asOf } };
   const model = runModel({ item: { sessionId: "s", experimentName: "Distil to six layers", run }, monitor: data, shown: true, agent: "Claude", now, nextRetryMs: null });
   serve(() => answer ? answer(data) : data);
@@ -84,4 +84,11 @@ test("an unfinished stage read says it is loading", async () => {
   await act(async () => release());
   await settle();
   assert.ok(find('[role="dialog"] ol'));
+});
+
+
+test("the whole-run line shows a floor and names stages with no timing", async () => {
+  await status(null, { estimate: { loMs: 3_840_000, midMs: 3_900_000, hiMs: 4_000_000, at: now, pending: false, pastLimitMs: null, floor: true, untimed: ["sweep"] } });
+  const card = find('[role="dialog"]');
+  assert.match(bare(card.textContent), /Whole run: At least 1h 4m left.*sweep not timed/);
 });

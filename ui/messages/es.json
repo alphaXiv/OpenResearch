@@ -2375,5 +2375,9 @@
   "acp_approval_ask": "Preguntar",
   "acp_approval_ask_description": "Preguntar antes de las acciones que requieren aprobación",
   "acp_approval_auto": "Acceso total",
-  "acp_approval_auto_description": "Aprueba cada solicitud sin preguntar, salvo las que solo se pueden permitir de forma permanente"
+  "acp_approval_auto_description": "Aprueba cada solicitud sin preguntar, salvo las que solo se pueden permitir de forma permanente",
+  "run_eta_floor": "Quedan al menos {duration}",
+  "run_eta_untimed": "{stages} sin duración estimada",
+  "run_summary_first_floor": "primero termina en al menos {duration}",
+  "run_summary_next_floor": "siguiente termina en al menos {duration}"
 }

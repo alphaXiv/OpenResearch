@@ -2375,5 +2375,9 @@
   "acp_approval_ask": "هر بار بپرس",
   "acp_approval_ask_description": "پیش از اقداماتی که به تأیید نیاز دارند بپرس",
   "acp_approval_auto": "دسترسی کامل",
-  "acp_approval_auto_description": "هر درخواست را بدون پرسش تأیید می‌کند، به جز درخواست‌هایی که فقط به‌صورت دائمی می‌توان اجازه‌شان داد"
+  "acp_approval_auto_description": "هر درخواست را بدون پرسش تأیید می‌کند، به جز درخواست‌هایی که فقط به‌صورت دائمی می‌توان اجازه‌شان داد",
+  "run_eta_floor": "حداقل {duration} باقی مانده",
+  "run_eta_untimed": "زمان {stages} مشخص نیست",
+  "run_summary_first_floor": "اولین پایان پس از حداقل {duration}",
+  "run_summary_next_floor": "پایان بعدی پس از حداقل {duration}"
 }

@@ -415,16 +415,17 @@ test("a floor counted down to nothing reads as no estimate, naming the stages no
       item: { sessionId: "s", run: runOf("planned"), experimentName: null, experimentSlug: "baseline" },
       monitor: full ? monitor : null, shown: true, agent: "Claude", now: now + monitor.estimate.loMs + 500, nextRetryMs: null,
     });
-    assert.equal(later.etaDetail, "", `full: ${full}`);
+    assert.match(bare(later.etaDetail), /eval.*not timed/, `full: ${full}`);
     assert.equal(later.leftMs, null, `full: ${full}`);
   }
 });
 
-test("an untimed stage leaves one stage-local bar with no whole-run ETA", async () => {
+test("a timed floor names untimed stages and leaves one stage-local bar", async () => {
   for (const full of [true, false]) {
     const view = model("planned", full);
-    assert.equal(view.leftMs, null);
-    assert.equal(view.etaDetail, "");
+    assert.ok(view.leftMs > 0);
+    assert.match(bare(view.eta), /At least .* left/);
+    assert.match(bare(view.etaDetail), /eval.*not timed/);
     assert.equal(view.bar.segments.length, 1);
     assert.equal(view.bar.whole, null);
   }

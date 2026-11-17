@@ -2375,5 +2375,9 @@
   "acp_approval_ask": "Sor",
   "acp_approval_ask_description": "Onay gerektiren işlemlerden önce sor",
   "acp_approval_auto": "Tam erişim",
-  "acp_approval_auto_description": "Her isteği sormadan onaylar; yalnızca kalıcı olarak izin verilebilenler hariç"
+  "acp_approval_auto_description": "Her isteği sormadan onaylar; yalnızca kalıcı olarak izin verilebilenler hariç",
+  "run_eta_floor": "En az {duration} kaldı",
+  "run_eta_untimed": "{stages} süresi bilinmiyor",
+  "run_summary_first_floor": "ilki en az {duration} sonra biter",
+  "run_summary_next_floor": "sıradaki en az {duration} sonra biter"
 }

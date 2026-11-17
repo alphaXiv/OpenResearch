@@ -2375,5 +2375,9 @@
   "acp_approval_ask": "السؤال كل مرة",
   "acp_approval_ask_description": "السؤال قبل الإجراءات التي تتطلب موافقة",
   "acp_approval_auto": "وصول كامل",
-  "acp_approval_auto_description": "يوافق على كل طلب دون سؤال، باستثناء الطلبات التي لا يمكن السماح بها إلا بشكل دائم"
+  "acp_approval_auto_description": "يوافق على كل طلب دون سؤال، باستثناء الطلبات التي لا يمكن السماح بها إلا بشكل دائم",
+  "run_eta_floor": "متبقٍ {duration} على الأقل",
+  "run_eta_untimed": "لم تُقدّر مدة {stages}",
+  "run_summary_first_floor": "الأول ينتهي بعد {duration} على الأقل",
+  "run_summary_next_floor": "التالي ينتهي بعد {duration} على الأقل"
 }

@@ -2375,5 +2375,9 @@
   "acp_approval_ask": "Pytaj",
   "acp_approval_ask_description": "Pytaj przed działaniami wymagającymi zgody",
   "acp_approval_auto": "Pełny dostęp",
-  "acp_approval_auto_description": "Zatwierdza każde żądanie bez pytania, z wyjątkiem tych, na które można zezwolić tylko na stałe"
+  "acp_approval_auto_description": "Zatwierdza każde żądanie bez pytania, z wyjątkiem tych, na które można zezwolić tylko na stałe",
+  "run_eta_floor": "Pozostało co najmniej {duration}",
+  "run_eta_untimed": "{stages}: czas nieznany",
+  "run_summary_first_floor": "pierwsze zakończenie za co najmniej {duration}",
+  "run_summary_next_floor": "następne zakończenie za co najmniej {duration}"
 }

@@ -162,10 +162,13 @@ export function summarize(models: RunModel[], { labels, groups }: { labels: stri
     }]
     : null;
 
-  const soonest = models.flatMap((model) => model.live && model.leftMs !== null ? [model.leftMs] : []).sort((a, b) => a - b)[0];
+  const live = models.filter((model) => model.live);
+  const floor = live.some((model) => model.etaFloor);
+  const timed = live.flatMap((model) => model.leftMs !== null ? [model.leftMs] : []);
+  const soonest = floor && timed.length !== live.length ? undefined : timed.sort((a, b) => a - b)[0];
   // Once one has ended, the soonest of the rest is the next done, not the first.
   const after = models.some((model) => !model.live);
-  const firstDone = (duration: string) => (after ? m.run_summary_next_done : m.run_summary_first_done)({ duration });
+  const firstDone = (duration: string) => (floor ? after ? m.run_summary_next_floor : m.run_summary_first_floor : after ? m.run_summary_next_done : m.run_summary_first_done)({ duration });
   if (parts) return { parts, firstDone: soonest !== undefined ? firstDone(durationText(soonest)) : null };
 
   // The common case: the counts, then when the first finishes, all one sentence.

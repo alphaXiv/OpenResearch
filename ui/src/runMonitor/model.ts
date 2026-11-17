@@ -63,6 +63,7 @@ export interface RunModel {
   eta: string;
   /** Time left for the whole run, when known. */
   leftMs: number | null;
+  etaFloor: boolean;
   etaDetail: string;
   /** Whether `eta` is a live countdown, drawn heavier in the strip. */
   etaStrong: boolean;
@@ -328,6 +329,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   let eta = "";
   let etaDetail = "";
   let etaStrong = false;
+  const etaFloor = monitor?.estimate?.floor ?? summary?.etaFloor ?? false;
   let leftMs: RunModel["leftMs"] = null;
   // Time since the run started, where it has no time left to show, said as that.
   let etaElapsed = false;
@@ -349,9 +351,9 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     cost = quote?.cost ?? "";
   } else if (settingUp) {
     eta = setup?.startsAt != null && setup.startsAt > now ? m.run_setup_starts_in({ duration: durationText(setup.startsAt - now) }) : "";
-  } else if (monitor?.estimate?.floor ?? summary?.etaFloor) {
-    eta = m.run_elapsed({ duration: durationText(elapsed) });
-    etaElapsed = true;
+  } else if (etaFloor) {
+    const estimate = monitor?.estimate ?? (summary?.etaMs ? { loMs: summary.etaMs.lo, midMs: summary.etaMs.mid, hiMs: summary.etaMs.hi, at: summary.etaMs.at, pending: false, pastLimitMs: null } : null);
+    if (estimate) ({ eta, detail: etaDetail, strong: etaStrong, leftMs } = estimateWords({ ...estimate, floor: true, untimed: monitor?.estimate?.untimed ?? summary?.etaUntimed }, now, null, 0));
   } else if (open && limitEndsAt !== null) {
     eta = m.run_eta_to_limit({ duration: durationText(limitEndsAt - now) });
     etaDetail = monitor?.rules.length ? m.run_eta_ends_by_rules({ clock: clockText(limitEndsAt) }) : m.run_eta_ends_by({ clock: clockText(limitEndsAt) });
@@ -363,7 +365,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     ({ eta, detail: etaDetail, strong: etaStrong, leftMs } = estimateWords(monitor.estimate, now, limit, progress?.stallMs ?? 0));
   } else if (summary?.etaMs) {
     const { lo, mid, hi, at } = summary.etaMs;
-    ({ eta, detail: etaDetail, strong: etaStrong, leftMs } = estimateWords({ loMs: lo, midMs: mid, hiMs: hi, at, pending: false, pastLimitMs: null }, now, null, 0));
+    ({ eta, detail: etaDetail, strong: etaStrong, leftMs } = estimateWords({ loMs: lo, midMs: mid, hiMs: hi, at, pending: false, pastLimitMs: null, floor: false }, now, null, 0));
   } else if (summary?.pending) {
     eta = m.run_eta_estimating();
     etaDetail = m.run_eta_needs_steps();
@@ -441,6 +443,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     headline,
     eta,
     leftMs,
+    etaFloor,
     etaDetail,
     etaStrong: etaStrong && !lastSeen,
     progress: caption,

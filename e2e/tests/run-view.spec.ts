@@ -280,3 +280,55 @@ process.stdout.write('::orx:: {"step":3,"m":{"loss":0.5}}\\n')
   await writeFile(gate, 'go\n')
   await expect(page.getByText('Reporting smoke test finished.', { exact: true })).toBeVisible()
 })
+
+test('a timed floor names the untimed stage above the chat', async ({ page, project, agent, orx }, info) => {
+  test.slow()
+  const dir = path.join(orx.root, `floor-${project.id}`)
+  mkdirSync(dir)
+  const gate = path.join(dir, 'finish')
+  expect(spawnSync('mkfifo', [gate]).status).toBe(0)
+  const script = path.join(dir, 'train.mjs')
+  writeFileSync(script, `import { readFileSync } from 'node:fs'
+process.stdout.write('::orx:: {"plan":[{"phase":"train","of":1000},{"phase":"sweep"}]}\\n')
+for (let step = 0; step <= 100; step += 10) {
+  process.stdout.write('::orx:: ' + JSON.stringify({phase:'train', step, of:1000, t:step*4.3, m:{loss:2-step/100}}) + '\\n')
+}
+readFileSync(${JSON.stringify(gate)})
+`)
+  agent.script('Launch timed floor.', [
+    { run: [
+      'set -e',
+      `id=$(orx create-experiment ${project.id} --title 'Timed floor' --run-command '${process.execPath} ${script}' | sed -n 's/^ *id: *//p')`,
+      'orx exp run "$id" --backend local',
+      'orx exp wake "$id"',
+    ].join('\n') },
+    { say: 'Timed floor launched.' },
+  ])
+  const hold = `floor-result-${project.id}`
+  agent.script('finished with status **done**', [{ hold }, { say: 'Timed floor finished.' }])
+  await project.open(page)
+  await send(page, 'Launch timed floor.')
+  const banner = page.getByRole('region', { name: 'Runs in this chat' })
+  await expect(banner).toContainText(/At least .* left/)
+  await expect(banner.getByRole('img')).toBeVisible()
+  const shots = path.resolve(import.meta.dirname, '../../.shots/k1')
+  mkdirSync(shots, { recursive: true })
+  for (const width of [1440, 420]) {
+    await page.setViewportSize({ width, height: 1000 })
+    for (const colorScheme of ['light', 'dark'] as const) {
+      await page.emulateMedia({ colorScheme, reducedMotion: 'reduce' })
+      await expect(page.locator('html')).toHaveAttribute('data-theme', colorScheme)
+      await page.screenshot({ path: path.join(shots, `floor-${colorScheme}-${width}.png`) })
+      await banner.getByRole('button', { name: /Timed floor/, exact: false }).first().click()
+      const card = page.getByRole('dialog')
+      await expect(card).toContainText(/Whole run: At least .* left.*sweep.*not timed/)
+      await page.screenshot({ path: path.join(shots, `floor-card-${colorScheme}-${width}.png`) })
+      await page.keyboard.press('Escape')
+      await expect(card).not.toBeVisible()
+    }
+  }
+  await writeFile(gate, 'go\n')
+  await agent.reached(hold)
+  agent.release(hold)
+  await expect(page.getByText('Timed floor finished.', { exact: true })).toBeVisible()
+})

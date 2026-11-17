@@ -2375,5 +2375,9 @@
   "acp_approval_ask": "매번 확인",
   "acp_approval_ask_description": "승인이 필요한 작업 전에 확인합니다",
   "acp_approval_auto": "전체 액세스",
-  "acp_approval_auto_description": "묻지 않고 각 요청을 승인합니다. 영구적으로만 허용할 수 있는 요청은 제외합니다"
+  "acp_approval_auto_description": "묻지 않고 각 요청을 승인합니다. 영구적으로만 허용할 수 있는 요청은 제외합니다",
+  "run_eta_floor": "최소 {duration} 남음",
+  "run_eta_untimed": "{stages} 소요 시간 미정",
+  "run_summary_first_floor": "첫 완료까지 최소 {duration}",
+  "run_summary_next_floor": "다음 완료까지 최소 {duration}"
 }

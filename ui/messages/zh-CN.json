@@ -2375,5 +2375,9 @@
   "acp_approval_ask": "逐次询问",
   "acp_approval_ask_description": "执行需要授权的操作前询问",
   "acp_approval_auto": "完全访问",
-  "acp_approval_auto_description": "不询问即批准每个请求，但只能永久允许的请求除外"
+  "acp_approval_auto_description": "不询问即批准每个请求，但只能永久允许的请求除外",
+  "run_eta_floor": "至少还需 {duration}",
+  "run_eta_untimed": "{stages} 耗时未知",
+  "run_summary_first_floor": "首个至少还需 {duration} 完成",
+  "run_summary_next_floor": "下一个至少还需 {duration} 完成"
 }
