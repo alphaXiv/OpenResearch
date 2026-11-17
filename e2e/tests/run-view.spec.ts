@@ -215,6 +215,29 @@ for (let step = 1; step <= 20; step++) {
     expect(before).not.toContain('y=acc')
     expect(after).toContain('y=acc; x=step; observed x=1 .. 8; total=20')
     expect(after).toContain('finite retained points=8')
+    const [compact, runPage] = after.split('On the run page')
+    expect(compact).toContain('Above the chat')
+    expect(compact).toContain('Card headline: Eval accuracy (acc) = 0.58')
+    expect(compact).toContain('Card chart: Eval accuracy (acc)')
+    expect(compact).toContain('8 points: step 1 = 0.51')
+    expect(compact).not.toContain('Stats:')
+    expect(runPage).toContain('Stats: Eval accuracy')
+    const shots = path.resolve(import.meta.dirname, '../../.shots/k2')
+    mkdirSync(shots, { recursive: true })
+    writeFileSync(path.join(shots, 'view-show.txt'), after)
+    for (const width of [1440, 420]) {
+      await page.setViewportSize({ width, height: 1000 })
+      if (width === 420) {
+        await page.getByTitle(/^Close tab/).click()
+        await expect(banner).toBeVisible()
+      }
+      for (const colorScheme of ['light', 'dark'] as const) {
+        await page.emulateMedia({ colorScheme })
+        await expect(page.locator('html')).toHaveAttribute('data-theme', colorScheme)
+        await expect.poll(() => banner.evaluate((root) => root.getAnimations({ subtree: true }).filter((a) => a instanceof CSSTransition).length)).toBe(0)
+        await page.screenshot({ path: path.join(shots, `card-${colorScheme}-${width}.png`) })
+      }
+    }
     expect(after).toContain('Stats: Eval accuracy (acc) = 0.58; Training loss (loss) = 0.250')
     expect(after).toContain('8 matches')
     await info.attach('view-show-before', { body: before, contentType: 'text/plain' })

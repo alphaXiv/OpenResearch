@@ -1597,6 +1597,33 @@ pub(crate) fn shown(
         }
     }
 
+    fn chart_series<'a>(block: &'a Value, default_x: &'a str) -> Vec<(&'a str, &'a str, bool)> {
+        let mut series: Vec<_> = block["series"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|one| {
+                Some((
+                    one["x"].as_str()?,
+                    one["y"].as_str()?,
+                    one["ghost"] != false,
+                ))
+            })
+            .collect();
+        if series.is_empty() {
+            let x = if block["from"].is_string() {
+                block["x"].as_str().unwrap_or("step")
+            } else {
+                default_x
+            };
+            series = names(&block["chart"])
+                .into_iter()
+                .map(|y| (x, y, true))
+                .collect();
+        }
+        series
+    }
+
     let number = |value: &Value| {
         value
             .as_f64()
@@ -1668,7 +1695,40 @@ pub(crate) fn shown(
     if let Some(reason) = monitor["availability"]["reason"].as_str() {
         lines.push(format!("Availability: {reason}"));
     }
+    lines.push("Above the chat".into());
+    lines.push(format!("Line parts: lifecycle={}; stage/count, whole-run time, watcher sentence and open flag follow.", run.status));
     let stage = &summary["stage"];
+    let order = &monitor["stageOrder"];
+    let first = order["first"].as_u64();
+    let index = order["index"].as_u64();
+    let setup = monitor["setup"].is_object();
+    let position = index.zip(first).map(|(index, first)| {
+        if setup || index < first {
+            1
+        } else {
+            index - first + 2
+        }
+    });
+    let count = order["count"]
+        .as_u64()
+        .zip(first)
+        .map(|(count, first)| count.saturating_sub(first) + 1);
+    lines.push(format!(
+        "Line stage: {}; position={}; stages={}.",
+        if setup {
+            "Setup"
+        } else {
+            stage["name"]
+                .as_str()
+                .filter(|name| !name.is_empty())
+                .unwrap_or(&run.status)
+        },
+        position
+            .filter(|_| count.is_some())
+            .map_or_else(|| "unknown".into(), |n| n.to_string()),
+        count.map_or_else(|| "unknown".into(), |n| n.to_string())
+    ));
+
     if stage.is_object() {
         let field = |name: &str| {
             if stage[name].is_null() {
@@ -1690,38 +1750,6 @@ pub(crate) fn shown(
     } else {
         lines.push("Stage: none reported yet.".into());
     }
-    let plan: Vec<_> = declared
-        .iter()
-        .enumerate()
-        .map(|(index, phase)| {
-            format!(
-                "{}{} {} (of={})",
-                if monitor["progress"]["phase"] == json!(index) && stage["name"] == phase.phase {
-                    "* "
-                } else {
-                    ""
-                },
-                index + 1,
-                phase.phase,
-                phase
-                    .of
-                    .as_ref()
-                    .map_or_else(|| "unknown".into(), ToString::to_string)
-            )
-        })
-        .collect();
-    lines.push(format!(
-        "Declared plan (* current): {}",
-        if plan.is_empty() {
-            "none".into()
-        } else {
-            plan.join("; ")
-        }
-    ));
-    lines.push(
-        "The UI folds stages before its first real point into Setup and numbers stages from there."
-            .into(),
-    );
     let eta = &summary["etaMs"];
     let duration = |key: &str| {
         eta[key]
@@ -1797,6 +1825,159 @@ pub(crate) fn shown(
         Some(flag) => format!("Open {}", super::flags::status_line(flag, fill)),
         None => "Open flag: none.".into(),
     });
+    let phase = monitor["progress"]["phase"]
+        .as_u64()
+        .and_then(|index| monitor["phases"].get(index as usize))
+        .and_then(|phase| phase["name"].as_str());
+    let chart = monitor["view"]["blocks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|block| {
+            !terminal
+                && block["chart"].is_array()
+                && block["phase"]
+                    .as_str()
+                    .is_none_or(|name| Some(name) == phase)
+                && chart_series(block, monitor["x"]["name"].as_str().unwrap_or("step"))
+                    .iter()
+                    .any(|(x, y, _)| {
+                        let from = block["from"].as_str();
+                        if let (Some(table), Some(by)) = (
+                            from,
+                            block["by"]
+                                .as_str()
+                                .filter(|_| block["series"].as_array().is_none_or(Vec::is_empty)),
+                        ) {
+                            let mut groups = std::collections::BTreeMap::<String, usize>::new();
+                            for row in monitor["rows"][table].as_array().into_iter().flatten() {
+                                if number(&row[y]).is_some()
+                                    && (number(&row[x]).is_some()
+                                        || (block["mark"] == "bars" && !row[x].is_null()))
+                                {
+                                    let count = groups.entry(row[by].to_string()).or_default();
+                                    *count += 1;
+                                    if *count >= 2 {
+                                        return true;
+                                    }
+                                }
+                            }
+                            false
+                        } else {
+                            points(pairs(monitor, from, x, y), block).0 >= 2
+                        }
+                    })
+        });
+    let open_flag = super::flags::open(flags);
+    if open_flag.is_some() {
+        lines.push("Open card: flag evidence and actions.".into());
+    } else if let Some(block) = chart {
+        lines.push("Open card: headline and one chart.".into());
+        lines.push(
+            match monitor["headline"]
+                .as_str()
+                .filter(|name| !monitor["latest"][name].is_null())
+            {
+                Some(name) => format!("Card headline: {}", value(name, false)),
+                None => "Card headline: none.".into(),
+            },
+        );
+        lines.push(format!(
+            "Card chart: {}; parent ghost={}",
+            names(&block["chart"])
+                .iter()
+                .map(|name| format!(
+                    "{} ({name})",
+                    signals[name]["label"].as_str().unwrap_or(name)
+                ))
+                .collect::<Vec<_>>()
+                .join(", "),
+            if block["ghost"] == "parent" {
+                "on"
+            } else {
+                "off"
+            }
+        ));
+        for (x, y, _) in chart_series(block, monitor["x"]["name"].as_str().unwrap_or("step")) {
+            let from = block["from"].as_str();
+            if !signals[y]["smooth"].is_null() {
+                lines.push(format!(
+                    "  {y}: retained readings before smoothing {}.",
+                    signals[y]["smooth"]
+                ));
+            }
+            let retained: Vec<_> = pairs(monitor, from, x, y)
+                .into_iter()
+                .filter(|(x, y)| {
+                    number(y).is_some()
+                        && (number(x).is_some() || (block["mark"] == "bars" && !x.is_null()))
+                })
+                .collect();
+            let values = retained
+                .iter()
+                .enumerate()
+                .filter_map(|(index, (at, raw))| {
+                    if retained.len() > 12 && index >= 6 && index < retained.len() - 6 {
+                        return (index == 6)
+                            .then(|| format!("… {} points omitted …", retained.len() - 12));
+                    }
+                    Some(format!(
+                        "{x} {} = {}",
+                        value_text(at, &Value::Null),
+                        value_text(raw, &signals[y])
+                    ))
+                })
+                .collect::<Vec<_>>();
+            lines.push(format!(
+                "  {y}: {} points: {}",
+                retained.len(),
+                values.join(", ")
+            ));
+        }
+    } else {
+        lines.push(
+            if terminal {
+                "Card chart: none (run ended)."
+            } else {
+                "Card chart: none (no active chart has two points)."
+            }
+            .into(),
+        );
+    }
+    lines.push("On the run page".into());
+    let plan: Vec<_> = declared
+        .iter()
+        .enumerate()
+        .map(|(index, phase)| {
+            format!(
+                "{}{} {} (of={})",
+                if monitor["progress"]["phase"] == json!(index) && stage["name"] == phase.phase {
+                    "* "
+                } else {
+                    ""
+                },
+                index + 1,
+                phase.phase,
+                phase
+                    .of
+                    .as_ref()
+                    .map_or_else(|| "unknown".into(), ToString::to_string)
+            )
+        })
+        .collect();
+    lines.push(format!(
+        "Declared plan (* current): {}",
+        if plan.is_empty() {
+            "none".into()
+        } else {
+            plan.join("; ")
+        }
+    ));
+    lines.push(
+        "The UI folds stages before its first real point into Setup and numbers stages from there."
+            .into(),
+    );
+
     let headline = names(&monitor["view"]["headline"]);
     if !headline.is_empty() {
         lines.push(format!(
@@ -1830,32 +2011,18 @@ pub(crate) fn shown(
                 )
             })
             .unwrap_or_default();
+        for kind in ["table", "bars", "cells", "media", "text"] {
+            if block.get(kind).is_some() {
+                lines.push(format!("{kind}{scope}: {block}"));
+                if let Some(table) = block[kind].as_str().filter(|_| kind == "table") {
+                    lines.push(format!("  rows: {}", monitor["rows"][table]));
+                }
+            }
+        }
         if block["chart"].is_array() {
             chart += 1;
             let from = block["from"].as_str();
-            let mut series: Vec<(&str, &str, bool)> = block["series"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|one| {
-                    Some((
-                        one["x"].as_str()?,
-                        one["y"].as_str()?,
-                        one["ghost"] != false,
-                    ))
-                })
-                .collect();
-            if series.is_empty() {
-                let x = if from.is_some() {
-                    block["x"].as_str().unwrap_or("step")
-                } else {
-                    monitor["x"]["name"].as_str().unwrap_or("step")
-                };
-                series = names(&block["chart"])
-                    .into_iter()
-                    .map(|y| (x, y, true))
-                    .collect();
-            }
+            let series = chart_series(block, monitor["x"]["name"].as_str().unwrap_or("step"));
             for (x, y, ghost) in series {
                 let (count, range) = points(pairs(monitor, from, x, y), block);
                 let (parent_count, parent_range) =
@@ -2220,6 +2387,35 @@ mod tests {
     }
 
     #[test]
+    fn view_show_separates_the_compact_card_from_the_run_page() {
+        let view = compile(r#"<signal name="val_bpb" label="Base val bpb" digits="3"/><view headline="val_bpb"><chart y="val_bpb" phase="train"/><chart y="loss" phase="train"/><stats of="loss"/></view>"#).unwrap().tree;
+        let mut monitor = json!({
+            "view":view, "headline":"val_bpb", "latest":{"val_bpb":1.941,"loss":2},
+            "progress":{"phase":0}, "phases":[{"name":"train"}],
+            "series":{"val_bpb":[[0,3.196],[100,1.941]],"loss":[[0,3],[100,2]]}
+        });
+        let summary = json!({"stage":{"name":"train","done":100,"of":1000}});
+        let text = shown(&shown_run(), &monitor, &summary, &[], None, None);
+        let (above, page) = text.split_once("On the run page").unwrap();
+        assert!(above.contains("Above the chat"));
+        assert!(above.contains("Card headline: Base val bpb (val_bpb) = 1.941"));
+        assert!(
+            above.contains("2 points: step 0 = 3.196, step 100 = 1.941"),
+            "{above}"
+        );
+        assert!(!above.contains("Chart 2"));
+        assert!(!above.contains("Declared plan"));
+        assert!(page.contains("Chart 2"));
+        monitor["series"]["val_bpb"] = json!([[0, 3.196]]);
+        let text = shown(&shown_run(), &monitor, &summary, &[], None, None);
+        let (above, _) = text.split_once("On the run page").unwrap();
+        assert!(above.contains("Card chart: loss (loss)"));
+        monitor["series"]["loss"] = json!([]);
+        let text = shown(&shown_run(), &monitor, &summary, &[], None, None);
+        assert!(text.contains("Card chart: none (no active chart has two points)"));
+    }
+
+    #[test]
     fn view_show_reads_summary_parts_chart_data_flags_stats_and_missing_patterns() {
         let config: orx_signals::Config =
             serde_json::from_value(json!({"patterns":[{"regex":"^never (?P<missing>\\d+)$"}]}))
@@ -2296,6 +2492,38 @@ mod tests {
         assert!(
             ended_text.contains("Stats comparison: loss; vs=step; parent=3.00; step=10"),
             "{ended_text}"
+        );
+    }
+
+    #[test]
+    fn compact_table_chart_needs_two_points_in_one_line_and_reads_explicit_axes() {
+        let view =
+            compile(r#"<view><chart from="scores" x="width" y="score" by="method"/></view>"#)
+                .unwrap()
+                .tree;
+        let mut monitor = json!({"view":view,"rows":{"scores":[
+            {"width":1,"score":0.8,"method":"a"}, {"width":2,"score":0.7,"method":"b"}
+        ]}});
+        let text = shown(&shown_run(), &monitor, &json!({}), &[], None, None);
+        assert!(text
+            .split("On the run page")
+            .next()
+            .unwrap()
+            .contains("Card chart: none"));
+        monitor["rows"]["scores"][1]["method"] = json!("a");
+        let text = shown(&shown_run(), &monitor, &json!({}), &[], None, None);
+        assert!(
+            text.contains("2 points: width 1 = 0.8, width 2 = 0.7"),
+            "{text}"
+        );
+        monitor["view"] =
+            compile(r#"<view><chart from="scores"><series x="width" y="score"/></chart></view>"#)
+                .unwrap()
+                .tree;
+        let text = shown(&shown_run(), &monitor, &json!({}), &[], None, None);
+        assert!(
+            text.contains("2 points: width 1 = 0.8, width 2 = 0.7"),
+            "{text}"
         );
     }
 
