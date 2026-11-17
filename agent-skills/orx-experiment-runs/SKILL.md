@@ -145,13 +145,14 @@ orx exp view set <expId> --file view.xml
 | --- | --- |
 | `signal` | `name`, `label`, `unit`, `digits` (0–12), `better="lower\|higher"`, `smooth` (above 0, at most 1; noisy curves only), `as="duration\|compact"`, `scale` (a factor, `100` for percent), `sign="true"`, `pick="latest\|best"` (`best` needs `better`), `vs`, `labels='{"1":"valid","0":"invalid"}'` |
 | `view` | `headline="a b"`: the first with a number is shown |
-| `chart` | `y="a b"`, `x` (`step`, the default, or `elapsed`), `ghost="parent\|false"` (default `parent`), `x-range="run\|parent"`, `x-scale="log"`, `y-scale="log"`, `mark="line\|points\|bars"`; with `from="table"`, `x`/`y` are its columns, `by="column"` draws a series per value, and `<series x= y= label= ghost=/>` children give each series its own columns |
+| `chart` | `y="a b"`, `ghost="parent\|false"` (default `parent`), `x-range="run\|parent"`, `x-scale="log"`, `y-scale="log"`, `mark="line\|points\|bars"`; with `from="table"`, `x`/`y` are its columns, `by="column"` draws a series per value, and `<series x= y= label= ghost=/>` children give each series its own columns |
 | `stats` | `of="a b"`, `vs` |
 | `table` | `name`, `columns="a b"`, `last="5"`, `vs="parent\|step\|final"` |
 | `text` | Plain text with optional `{signal}` tokens and `**bold**`, up to 2,048 bytes |
 | `cells` | `from="table"`, newest 256 retained outcome rows in completion order |
 | `bars` | `from="table"`, `by="column"`, correct share by category over retained outcome rows |
 
+A chart over signals uses reported steps when available and elapsed time otherwise.
 Every block also takes `phase` (shown only during that stage) and `title`.
 Declare a `signal` for every measure the view names and every column the user
 should read by a label. One chart answers one question: measures on different

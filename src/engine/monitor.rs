@@ -392,14 +392,9 @@ pub(crate) fn default_view(snapshot: Option<&Snapshot>) -> Value {
         .iter()
         .map(|name| (name.clone(), json!({"label": name})))
         .collect();
-    let x = if snapshot.phases.iter().any(|p| p.done.is_some()) {
-        "step"
-    } else {
-        "elapsed"
-    };
     let mut blocks = Vec::new();
     if let Some(headline) = &own_headline {
-        blocks.push(json!({"chart": [headline], "x": x, "ghost": "parent"}));
+        blocks.push(json!({"chart": [headline], "ghost": "parent"}));
         let first_seen = |columns: &Vec<String>| {
             columns
                 .iter()
@@ -432,7 +427,7 @@ pub(crate) fn default_view(snapshot: Option<&Snapshot>) -> Value {
     if let Some((name, columns)) = table {
         blocks.push(json!({"table": name, "columns": columns}));
     } else if let Some(headline) = &headline {
-        blocks.push(json!({"chart": [headline], "x": x, "ghost": "parent"}));
+        blocks.push(json!({"chart": [headline], "ghost": "parent"}));
     }
     let rest: Vec<&String> = order
         .iter()
@@ -3511,7 +3506,7 @@ mod tests {
         assert_eq!(monitor["view"]["headline"], json!(["loss"]));
         assert_eq!(
             monitor["view"]["blocks"][0],
-            json!({"chart": ["loss"], "x": "step", "ghost": "parent"})
+            json!({"chart": ["loss"], "ghost": "parent"})
         );
         assert_eq!(monitor["viewFrom"]["isDefault"], true);
         let estimate = &monitor["estimate"];
@@ -3555,7 +3550,7 @@ mod tests {
         assert_eq!(view["headline"], json!(["loss"]));
         assert_eq!(
             view["blocks"],
-            json!([{"chart": ["loss"], "x": "elapsed", "ghost": "parent"}, {"stats": ["note"]}])
+            json!([{"chart": ["loss"], "ghost": "parent"}, {"stats": ["note"]}])
         );
         assert_eq!(snapshot.latest["loss"], "NaN");
 
@@ -3624,7 +3619,7 @@ mod tests {
             (
                 json!(["loss"]),
                 json!([
-                    {"chart": ["loss"], "x": "step", "ghost": "parent"},
+                    {"chart": ["loss"], "ghost": "parent"},
                     {"table": "evals", "columns": ["epoch", "val_loss", "val_acc"]},
                 ])
             )
@@ -3641,7 +3636,7 @@ mod tests {
             (
                 json!(["mean_score"]),
                 json!([
-                    {"chart": ["mean_score"], "x": "elapsed", "ghost": "parent"},
+                    {"chart": ["mean_score"], "ghost": "parent"},
                     {"table": "tasks", "columns": ["task", "score"]},
                     {"table": "eval", "columns": ["split", "acc"]},
                     {"stats": ["done_tasks"]},
@@ -3669,7 +3664,7 @@ mod tests {
             )]),
             (
                 json!(["loss"]),
-                json!([{"chart": ["loss"], "x": "step", "ghost": "parent"}, {"stats": ["round"]}])
+                json!([{"chart": ["loss"], "ghost": "parent"}, {"stats": ["round"]}])
             )
         );
 

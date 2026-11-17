@@ -17,9 +17,8 @@ const MAX_DEPTH: usize = 4;
 const MAX_TEXT: usize = 2048;
 const CELLS_WINDOW: usize = 256;
 
-const SIGNAL: [&str; 12] = [
-    "name", "label", "unit", "digits", "better", "smooth", "as", "scale", "sign", "pick", "values",
-    "vs",
+const SIGNAL: [&str; 11] = [
+    "name", "label", "unit", "digits", "better", "smooth", "as", "scale", "sign", "pick", "vs",
 ];
 const LABELS: &str = "labels";
 const BLOCK: [&str; 2] = ["phase", "title"];
@@ -465,22 +464,6 @@ impl Parser<'_> {
                 "sign" => json!(self.choice(attribute, &["true", "false"])? == "true"),
                 "pick" => json!(self.choice(attribute, &["latest", "best"])?),
                 "vs" => json!(self.choice(attribute, &VS)?),
-                "values" => {
-                    let values = self.object(attribute)?;
-                    let outcomes = ["correct", "wrong", "error"];
-                    if let Some((raw, word)) = values
-                        .iter()
-                        .find(|(_, word)| !outcomes.contains(&word.as_str().unwrap_or_default()))
-                    {
-                        return Err(self.attribute_problem(
-                            attribute,
-                            format!(
-                                "values maps \"{raw}\" to {word}, but values says which outcome each value is: correct, wrong or error; to show a word for a value, use labels"
-                            ),
-                        ));
-                    }
-                    Value::Object(values)
-                }
                 _ => Value::Object(self.object(attribute)?),
             };
             spec.insert(key.into(), value);
@@ -687,13 +670,10 @@ impl Parser<'_> {
         }
         block.insert("chart".into(), json!(y.unwrap_or_default()));
         if let Some(x) = attributes.get("x") {
-            let name = self.name(x)?;
-            if from.is_none() && !matches!(name.as_str(), "step" | "elapsed") {
+            if from.is_none() {
                 return Err(self.attribute_problem(
                     x,
-                    format!(
-                        "x=\"{name}\" is not the run's step: a chart over another x draws from a table, so add from=\"TABLE\"; or leave x out to draw over the run's steps"
-                    ),
+                    "x names a table column: add from=\"TABLE\" or leave x out to use the run's reported steps or elapsed time".into(),
                 ));
             }
             if !children.is_empty() {
@@ -702,9 +682,8 @@ impl Parser<'_> {
                     "each <series> names its own x, so the chart takes none".into(),
                 ));
             }
-            if from.is_some() {
-                self.refer(node, format!("{path}.x"), column(&from), &name);
-            }
+            let name = self.name(x)?;
+            self.refer(node, format!("{path}.x"), column(&from), &name);
             block.insert("x".into(), json!(name));
         } else if from.is_some() && children.is_empty() {
             return Err(self.problem(
@@ -3192,14 +3171,14 @@ mod tests {
             ("<view><signal name=\"a\"/><chart y=\"a\"/></view>", 1, 7, "<signal> goes before <view>, not inside it: move it above <view> and keep it, since its label, unit and better reach every block"),
             ("<view><series x=\"a\" y=\"b\"/></view>", 1, 7, "<series> goes inside a <chart>"),
             ("<view><chart/></view>", 1, 7, "<chart> needs y=\"…\", the signals it draws, or <series x=\"…\" y=\"…\"/> inside it"),
-            ("<view><chart y=\"loss\" x=\"epoch\"/></view>", 1, 23, "x=\"epoch\" is not the run's step: a chart over another x draws from a table, so add from=\"TABLE\"; or leave x out to draw over the run's steps"),
+            ("<view><chart y=\"loss\" x=\"step\"/></view>", 1, 23, "x names a table column: add from=\"TABLE\" or leave x out to use the run's reported steps or elapsed time"),
             ("<view><chart from=\"t\" y=\"a\"/></view>", 1, 7, "a chart from a table needs x=\"COLUMN\", the column across the bottom"),
             ("<view><chart y=\"a b c d e f g h i\"/></view>", 1, 14, "y names 9 signals; at most 8"),
             ("<view><chart y=\"val-loss\"/></view>", 1, 14, "\"val-loss\" in y is not a name: use letters, digits and _, starting with a letter or _ (at most 64)"),
             ("<view>loss</view>", 1, 7, "text is not allowed in a view; put words in label=\"…\" or title=\"…\""),
             ("<view><chart y=\"a\"></view>", 1, 20, "the markup is not well formed: expected 'chart' tag, not 'view'"),
             ("<!DOCTYPE x [<!ENTITY a \"b\">]><view/>", 1, 1, "a view has no XML declaration, DTD or entities"),
-            ("<signal name=\"v\" values='{\"1\":\"valid\"}'/><view/>", 1, 18, "values maps \"1\" to \"valid\", but values says which outcome each value is: correct, wrong or error; to show a word for a value, use labels"),
+            ("<signal name=\"v\" values='{\"1\":\"valid\"}'/><view/>", 1, 18, "unknown attribute \"values\" on <signal>; allowed: name, label, unit, digits, better, smooth, as, scale, sign, pick, vs, labels"),
             ("<signal name=\"v\" pick=\"best\"/><view/>", 1, 1, "signal \"v\" picks its best value but declares no better=\"lower|higher\""),
             ("<view><chart y=\"a\"><series x=\"b\" y=\"c\"/></chart></view>", 1, 7, "a chart takes y=\"…\" or <series> inside it, not both"),
             ("<view><chart><series x=\"b\" y=\"c\"/></chart></view>", 1, 14, "<series> draws columns of a table: add from=\"TABLE\" to the chart"),
@@ -3278,12 +3257,12 @@ mod tests {
         let default = json!({
             "signals": {"loss": {"label": "loss"}, "lr": {"label": "lr"}},
             "headline": ["loss"],
-            "blocks": [{"chart": ["loss"], "x": "elapsed", "ghost": "parent"}, {"table": "eval", "columns": ["task", "score"]}, {"stats": ["lr"]}],
+            "blocks": [{"chart": ["loss"], "ghost": "parent"}, {"table": "eval", "columns": ["task", "score"]}, {"stats": ["lr"]}],
         });
         let text = markup(&default);
         assert_eq!(
             text,
-            "<signal name=\"loss\" />\n<signal name=\"lr\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"elapsed\" ghost=\"parent\" />\n  <table name=\"eval\" columns=\"task score\" />\n  <stats of=\"lr\" />\n</view>\n"
+            "<signal name=\"loss\" />\n<signal name=\"lr\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" ghost=\"parent\" />\n  <table name=\"eval\" columns=\"task score\" />\n  <stats of=\"lr\" />\n</view>\n"
         );
         assert_eq!(compile(&text).unwrap().tree, default);
     }
