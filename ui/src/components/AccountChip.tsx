@@ -13,7 +13,6 @@ import { mutSignOutOpenResearch } from "../queries/settings";
 import { accountErrorMessage, OpenResearchAccount } from "./OpenResearchAccount";
 
 import { Button, DialogContent, DialogTitle, MenuItem, Spinner } from "./ui";
-import { cn } from "./ui/cn";
 
 /**
  * A browser on another machine than the server opens alphaXiv itself, in a tab
@@ -56,8 +55,8 @@ export function useSignIn() {
   };
 }
 
-/** The status strip's account segment: the avatar, and the first name while `showName`; hidden, the name stays measurable as `[data-account-ruler]`. */
-export function AccountChip({ onDetails, showName = true }: { onDetails: () => void; showName?: boolean }) {
+/** The status strip's account segment: the avatar and your first name, which pushes the usage segment to the end. */
+export function AccountChip({ onDetails }: { onDetails: () => void }) {
   const workspace = useWorkspace();
   const { owner } = useMachines();
   const { useOpenResearchAccount, useAlphaXivFolders } = owner.queries;
@@ -81,13 +80,10 @@ export function AccountChip({ onDetails, showName = true }: { onDetails: () => v
   const stateLabel = accountQuery.error instanceof OpenResearchAccountError && accountQuery.error.kind === "offline" ? m.account_offline_label() : m.account_error_label();
   const label = user ? name : reason ? stateLabel : accountQuery.isLoading ? m.common_checking() : m.settings_sign_in();
   const shownName = user ? user.firstName || name : label;
-  // First in the status strip, in the window's corner (app.css, --strip-corner).
-  const chipClass = cn("flex h-7 items-center gap-1.5 rounded-md rounded-es-(--strip-corner) ps-1 text-start hover:bg-surface data-popup-open:bg-surface focus-visible:outline-2 focus-visible:outline-focus", showName ? "min-w-0 shrink-[20] pe-2" : "shrink-0 pe-1");
+  const chipClass = "flex h-9 min-w-0 flex-1 items-center gap-2 rounded-md ps-1.5 pe-2 text-start hover:bg-surface data-popup-open:bg-surface focus-visible:outline-2 focus-visible:outline-focus";
   const contents = <>
     <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-panel text-2xs font-medium text-text" aria-hidden="true">{user ? name.trim().charAt(0).toLocaleUpperCase() : <UserRound size={13} />}</span>
-    {showName
-      ? <span data-account-name dir="auto" className="truncate text-sm text-text">{shownName}</span>
-      : <span data-account-ruler aria-hidden="true" className="pointer-events-none invisible absolute whitespace-nowrap text-sm">{shownName}</span>}
+    <span dir="auto" className="truncate text-sm text-text">{shownName}</span>
   </>;
 
   return user || reason ? <Menu.Root modal={false} loopFocus>
@@ -101,7 +97,7 @@ export function AccountChip({ onDetails, showName = true }: { onDetails: () => v
           {user && <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={() => confirmOpenResearchSignOut(workspace.dialogs, () => mutSignOutOpenResearch.runAsHeadlessPromise(owner, {}))}>{m.settings_openresearch_sign_out()}</Menu.Item>}
         </Menu.Popup>
       </Menu.Positioner></Menu.Portal>
-    </Menu.Root> : <button ref={chipRef} type="button" aria-label={showName ? undefined : label} className={chipClass} disabled={accountQuery.isLoading} onClick={() => signIn(false)}>{contents}</button>;
+    </Menu.Root> : <button ref={chipRef} type="button" className={chipClass} disabled={accountQuery.isLoading} onClick={() => signIn(false)}>{contents}</button>;
 }
 
 /** sysexits' EX_TEMPFAIL, which `orx login` exits with when OpenResearch couldn't reach alphaXiv. */

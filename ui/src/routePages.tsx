@@ -115,7 +115,7 @@ export function ProjectsPage() {
               preferredAgent={state.preferredAgent}
               onCreated={(project, publicationError) => {
                 void navigate({
-                  href: `/projects/${encodeURIComponent(project.id)}${publicationError ? "/settings/projects" : ""}`,
+                  href: `/projects/${encodeURIComponent(project.id)}${publicationError ? "/settings/integrations" : ""}`,
                 });
                 if (publicationError) showAlert(publicationError, "error");
               }}

@@ -5,6 +5,7 @@ import {
   useContext,
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useRef,
   useState,
@@ -15,6 +16,10 @@ import { useWorkspace } from "../workspace";
 import { cn } from "./ui/cn";
 import { type DialogContentProps } from "../dialog";
 import { DialogContent, DialogTitle } from "./ui";
+import { SkillsTab } from "./SkillsTab";
+import { confirmDeleteProject } from "./ProjectInfoCard";
+import { useFileManagerLabel } from "./useFileManagerLabel";
+import { mutUpdateProject } from "../queries/projects";
 import { formatAcpCommand } from "../acp";
 import { TARGET_LABELS } from "../computeTargets";
 import { AcpAuthDialog } from "./AcpAuthDialog";
@@ -59,13 +64,13 @@ import {
 import { mutDeleteOverleafSession, mutDeleteOverleafToken, mutSaveOverleafSession, mutSaveOverleafToken } from "../queries/overleaf";
 
 import { worstPerAlias } from "../engineHosts";
+import { navigateKeyboardRow } from "../keyboardNavigation";
 import { runActive, runDisplay } from "../runDisplay";
 
 import {
   ArrowLeft,
   ArrowRight,
   ChevronDown,
-  Cpu,
   ExternalLink,
   Info,
   Link2,
@@ -402,7 +407,6 @@ export function harnessSetupPath(h: Harness, setup: HarnessSetupCommands | undef
 function AgentsTab({ remote }: { remote: boolean }) {
   return (
     <>
-      <h2>{m.settings_page_harnesses()}</h2>
       <AgentList remote={remote} />
       <NestedDelegationRow />
       <AutoReviewerRow />
@@ -2985,7 +2989,7 @@ function BackendDetailPage({
           <span className="flex h-10 w-10 flex-none items-center justify-center">
             <BackendLogo kind={TARGET_KIND[target.id]} size={36} />
           </span>
-          <h1 className="m-0 min-w-0 text-2xl">{TARGET_LABELS[target.id]()}</h1>
+          <h2 className="m-0 min-w-0 text-2xl">{TARGET_LABELS[target.id]()}</h2>
         </div>
         {isDefault && (
           <Badge className="flex-none">
@@ -3144,7 +3148,6 @@ function ComputeTab({
 
   return (
     <>
-      <h1 tabIndex={-1}>{m.settings_page_compute()}</h1>
       <p className="settings-sub mt-0 mx-0 mb-4.5 text-base leading-relaxed text-text">
         {m.settings_page_connect_compute_backends_and_choose_where_new_runs()}
       </p>
@@ -4181,17 +4184,11 @@ function InstallCliRow({
 function GithubSettings({ remote }: { remote: boolean }) {
   const workspace = useWorkspace();
   const {
-    listProjectsQuery,
     getProjectDefaultsQuery,
     githubAccountQuery,
     githubOrganizationsQuery,
-    getProjectGitStatusQuery,
   } = workspace.queries;
   const { queryClient } = workspace;
-
-  const projectsQuery = useQuery(listProjectsQuery());
-  const [selectedProjectId, setSelectedProjectId] = useState("");
-  const selectedProject = projectsQuery.data?.find((project) => project.id === selectedProjectId);
 
   const settingsQuery = useQuery(getProjectDefaultsQuery());
   const settings = settingsQuery.data ?? null;
@@ -4203,7 +4200,6 @@ function GithubSettings({ remote }: { remote: boolean }) {
 
   const load = async () => {
     await settingsQuery.refetch({ cancelRefetch: false });
-    if (selectedProjectId) await queryClient.invalidateQueries(getProjectGitStatusQuery(selectedProjectId));
     await Promise.all([
       queryClient.invalidateQueries(githubAccountQuery()),
       queryClient.invalidateQueries(githubOrganizationsQuery()),
@@ -4261,27 +4257,6 @@ function GithubSettings({ remote }: { remote: boolean }) {
           )}
           <CommandRunTerminal run={gh.run} onComplete={() => void load()} onClose={gh.clear} />
           {error && <div className="error">{error}</div>}
-          <div className="mt-6">
-            <div className="mb-2 text-sm font-medium">{m.settings_github_manage_project()}</div>
-            <OptionPicker
-              variant="field"
-              dropDown
-              title={m.settings_github_manage_project()}
-              value={selectedProjectId}
-              choices={[
-                { id: "", label: m.settings_github_choose_project() },
-                ...(projectsQuery.data ?? []).map((project) => ({ id: project.id, label: project.name })),
-              ]}
-              onSelect={setSelectedProjectId}
-            />
-            {projectsQuery.error && (
-              <div className="mt-2 text-sm text-text">
-                <p className="m-0">{projectsQuery.error.message}</p>
-                <Button size="small" onClick={() => void projectsQuery.refetch()}>{m.app_retry()}</Button>
-              </div>
-            )}
-            {selectedProject && <GitTab key={selectedProject.id} project={selectedProject} />}
-          </div>
         </div>
       )}
     </>
@@ -4411,7 +4386,7 @@ function OverleafCard() {
 
 // --- git -----------------------------------------------------------------------
 
-export function GitTab({ project }: { project: Project | null }) {
+export function GitTab({ project }: { project: Project }) {
   const { portalContainer } = useContext(WorkspaceDomContext);
 
   const workspace = useWorkspace();
@@ -4422,7 +4397,7 @@ export function GitTab({ project }: { project: Project | null }) {
     githubOrganizationsQuery,
   } = workspace.queries;
 
-  const statusQuery = useQuery({ ...getProjectGitStatusQuery(project?.id ?? ""), enabled: Boolean(project) });
+  const statusQuery = useQuery(getProjectGitStatusQuery(project.id));
   const status = statusQuery.data ?? null;
   const [saving, setSaving] = useState(false);
   const [actionError, setError] = useState<string | null>(null);
@@ -4463,7 +4438,6 @@ export function GitTab({ project }: { project: Project | null }) {
 
   const enableSync = (owner?: string) => {
     setOwnerMenuOpen(false);
-    if (!project) return;
     setSaving(true);
     setError(null);
     mutEnableProjectGithub.runWithOptions(workspace, project.id, owner === githubLogin ? undefined : owner, {
@@ -4474,9 +4448,7 @@ export function GitTab({ project }: { project: Project | null }) {
 
   return (
     <>
-      {!project ? (
-        <div className={SETTINGS_CARD_CLASS_NAME}><p className={SETTINGS_NOTE_CLASS_NAME}>{m.settings_page_open_a_project_to_inspect_its_repository_and()}</p></div>
-      ) : error && !status ? (
+      {error && !status ? (
         <div className="error">{error}</div>
       ) : !status ? (
         <div className="mt-4 min-h-22" role="status" aria-label={m.settings_page_loading()} aria-busy="true">
@@ -4921,8 +4893,8 @@ function InstanceHistory({ projectId, onBack }: { projectId?: string; onBack: ()
       <button type="button" className="settings-back inline-flex items-center gap-1.5 mt-0 mx-0 mb-4.5 text-subtext text-sm font-medium [&:hover]:text-text" onClick={onBack}>
         <ArrowLeft size={14} /> {m.settings_page_back_to_compute()}
       </button>
-      <div className="settings-head-row flex items-center justify-between gap-2.5 [&_h1]:m-0">
-        <h1>{m.settings_page_instance_history()}</h1>
+      <div className="settings-head-row flex items-center justify-between gap-2.5 [&_h2]:m-0">
+        <h2>{m.settings_page_instance_history()}</h2>
         <Button size="small" onClick={load} disabled={refreshing}>
           <RefreshCw size={12} className={refreshing ? "animate-[spin_0.9s_linear_infinite]" : ""} /> {m.settings_page_refresh()}
         </Button>
@@ -4939,34 +4911,123 @@ function InstanceHistory({ projectId, onBack }: { projectId?: string; onBack: ()
 
 // --- embedded view -----------------------------------------------------------
 
-type SettingsNavItem = {
+type SettingsTabItem = {
   id: Tab;
   label: () => string;
-  icon: React.ReactNode;
   activeTabs: Tab[];
 };
 
-const SETTINGS_SECTIONS: Tab[] = ["projects", "harnesses", "storage"];
-
-/** Primary rail entries. Configuration sections share the Settings entry. */
-export const SETTINGS_NAV: SettingsNavItem[] = [
-  {
-    id: "compute",
-    label: m.settings_page_compute,
-    icon: <Cpu size={16} />,
-    activeTabs: ["compute", "openresearch", "instances"],
-  },
-  { id: "environment", label: m.settings_page_environment, icon: <SquareTerminal size={16} />, activeTabs: ["environment"] },
-  {
-    id: "settings",
-    label: m.settings_page_settings,
-    icon: <Settings size={16} />,
-    activeTabs: ["settings", ...SETTINGS_SECTIONS],
-  },
+const SETTINGS_TABS: SettingsTabItem[] = [
+  { id: "settings", label: m.settings_page_settings, activeTabs: ["settings", "storage"] },
+  { id: "agents", label: m.settings_page_harnesses, activeTabs: ["agents"] },
+  { id: "compute", label: m.settings_page_compute, activeTabs: ["compute", "openresearch", "instances"] },
+  { id: "integrations", label: m.settings_page_integrations, activeTabs: ["integrations"] },
+  { id: "environment", label: m.settings_page_environment, activeTabs: ["environment"] },
 ];
 
-function isSettingsSection(tab: Tab): boolean {
-  return SETTINGS_SECTIONS.includes(tab);
+export function SettingsHeader({ active, onSelect, leading }: { active: Tab; onSelect: (tab: Tab) => void; leading: ReactNode }) {
+  return (
+    <header className="mx-auto flex w-full max-w-readable shrink-0 flex-col gap-2 px-8 pt-2">
+      <div className="flex items-center gap-2">
+        {leading}
+        <h1 tabIndex={-1} className="m-0 text-3xl font-semibold text-text">{m.settings_page_settings()}</h1>
+      </div>
+      <div
+        role="tablist"
+        aria-label={m.settings_page_settings()}
+        className="flex items-center gap-1 overflow-x-auto border-b border-border py-1 [scrollbar-width:none]"
+        onKeyDown={navigateKeyboardRow}
+      >
+        {SETTINGS_TABS.map((item) => {
+          const selected = item.activeTabs.includes(active);
+          return (
+            <button
+              key={item.id}
+              type="button"
+              role="tab"
+              aria-selected={selected}
+              tabIndex={selected ? 0 : -1}
+              data-keyboard-horizontal-item
+              className={cn("relative inline-flex h-9 shrink-0 items-center whitespace-nowrap rounded-md px-3 text-sm hover:text-text focus-visible:outline-2 focus-visible:outline-focus focus-visible:-outline-offset-2", selected ? "font-medium text-text after:absolute after:inset-x-3 after:-bottom-1.25 after:h-0.5 after:bg-text" : "text-subtext")}
+              onClick={() => onSelect(item.id)}
+            >
+              {item.label()}
+            </button>
+          );
+        })}
+      </div>
+    </header>
+  );
+}
+
+/** One project's name, folder, GitHub publishing and deletion. */
+function ProjectSettings({ project, onRemoved }: { project: Project; onRemoved: () => void }) {
+  const workspace = useWorkspace();
+  const revealLabel = useFileManagerLabel();
+  const nameId = useId();
+  const deleteRef = useRef<HTMLButtonElement>(null);
+
+  const [draft, setDraft] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const name = draft ?? project.name;
+  const trimmed = name.trim();
+  const changed = trimmed !== "" && trimmed !== project.name;
+
+  const rename = () => {
+    if (!changed || saving) return;
+    setSaving(true);
+    setError(null);
+    mutUpdateProject.runWithOptions(workspace, project.id, { name: trimmed }, {
+      onSuccessUi: () => setDraft(null),
+      onError: (err) => setError(err instanceof Error ? err.message : String(err)),
+      onSettled: () => setSaving(false),
+    });
+  };
+  const reveal = () => {
+    void workspace.api.revealFileInManager(project.id, ".").catch((err: unknown) => showAlert(err instanceof Error ? err.message : String(err), "error"));
+  };
+
+  return (
+    <>
+      <h1 tabIndex={-1}>{m.sidebar_project_settings()}</h1>
+      <div className="settings-stack mt-4.5">
+        <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+          <div className={SETTINGS_CARD_CLASS_NAME}>
+            <form className={`${PROJECT_DEFAULT_ROW_CLASS_NAME} flex-wrap gap-y-2`} onSubmit={(event) => { event.preventDefault(); rename(); }}>
+              <label htmlFor={nameId} className="project-default-title text-base font-medium">{m.new_project_form_project_name()}</label>
+              <div className="flex min-w-0 flex-1 justify-end gap-2">
+                <Input id={nameId} value={name} disabled={saving} onChange={(event) => setDraft(event.target.value)} className="w-72 min-w-0" />
+                <Button type="submit" disabled={!changed || saving}>{saving && <Spinner />}{m.common_save()}</Button>
+              </div>
+            </form>
+            {error && <p role="alert" className="mt-2 mb-0 text-sm text-accent-red">{error}</p>}
+            <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
+              <div className="min-w-0">
+                <div className="project-default-title text-base font-medium">{m.sidebar_source_folder()}</div>
+                <p dir="auto" className="break-all">{project.repoPath}</p>
+              </div>
+              <Button type="button" className="shrink-0" onClick={reveal}>{revealLabel}</Button>
+            </div>
+          </div>
+        </section>
+        <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+          <h2>{m.settings_page_git_hub_publishing()}</h2>
+          <div className={cn(SETTINGS_CARD_CLASS_NAME, "mt-3 [&>:first-child]:mt-0")}><GitTab project={project} /></div>
+        </section>
+        <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+          <div className={SETTINGS_CARD_CLASS_NAME}>
+            <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
+              <div className="project-default-title text-base font-medium">{m.projects_home_delete_project_action()}</div>
+              <Button type="button" variant="danger" ref={deleteRef} className="shrink-0" onClick={() => confirmDeleteProject(workspace, project, deleteRef, onRemoved)}>
+                {m.projects_home_delete_project_action()}
+              </Button>
+            </div>
+          </div>
+        </section>
+      </div>
+    </>
+  );
 }
 
 /** One settings section's content, shown in the middle pane in place of chat. */
@@ -4974,14 +5035,16 @@ export function SettingsView({
   tab,
   project,
   onSelectTab,
+  onProjectRemoved,
   remote = false,
 }: {
   tab: Tab;
   project: Project | null;
   onSelectTab: (tab: Tab) => void;
+  onProjectRemoved: () => void;
   remote?: boolean;
 }) {
-  const showsSettings = tab === "settings" || isSettingsSection(tab);
+  const showsSettings = tab === "settings" || tab === "storage";
   const sectionRef = useRef<HTMLElement>(null);
   useLayoutEffect(() => {
     const section = sectionRef.current;
@@ -5002,36 +5065,53 @@ export function SettingsView({
   }, [tab, project?.id]);
 
   return (
-    <div className="settings-view max-w-readable my-0 mx-auto pt-6 px-8 pb-15 [&_h1]:mt-0 [&_h1]:mx-0 [&_h1]:mb-1.5 [&_h1]:text-3xl [&_>_.error]:text-accent-red [&_>_.error]:text-base [&_>_.error]:whitespace-pre-wrap [&_>_.error]:mt-0 [&_>_.error]:mx-0 [&_>_.error]:mb-3">
+    <div className="settings-view max-w-readable my-0 mx-auto pt-4 px-8 pb-15 [&_h1]:mt-0 [&_h1]:mx-0 [&_h1]:mb-1.5 [&_h1]:text-3xl [&_>_.error]:text-accent-red [&_>_.error]:text-base [&_>_.error]:whitespace-pre-wrap [&_>_.error]:mt-0 [&_>_.error]:mx-0 [&_>_.error]:mb-3">
       {showsSettings && (
+        <div className="settings-stack">
+          <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+            <AppearanceTab />
+          </section>
+          {!remote && (
+            <section ref={tab === "storage" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+              <StorageTab />
+            </section>
+          )}
+          <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+            <TelemetryTab />
+          </section>
+          {!remote && (
+            <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+              <UpdatesTab />
+            </section>
+          )}
+        </div>
+      )}
+      {tab === "project" && project && <ProjectSettings key={project.id} project={project} onRemoved={onProjectRemoved} />}
+      {tab === "agents" && (
         <>
-          <h1 tabIndex={-1}>{m.settings_page_settings()}</h1>
+          <p className="mt-0 mx-0 mb-5 text-base leading-relaxed text-text">{m.settings_agents_intro()}</p>
           <div className="settings-stack mt-4.5">
             <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-              <AppearanceTab />
-            </section>
-            <section ref={tab === "projects" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-              <GithubSettings remote={remote} />
-            </section>
-            <section ref={tab === "harnesses" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
               <AgentsTab remote={remote} />
+            </section>
+            <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+              <h2>{m.skills_tab_customize()}</h2>
+              <p className="mt-0 mx-0 mb-5 text-base leading-relaxed text-text">{m.skills_overview_description()}</p>
+              <SkillsTab />
+            </section>
+          </div>
+        </>
+      )}
+      {tab === "integrations" && (
+        <>
+          <p className="mt-0 mx-0 mb-5 text-base leading-relaxed text-text">{m.settings_integrations_intro()}</p>
+          <div className="settings-stack mt-4.5">
+            <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+              <GithubSettings remote={remote} />
             </section>
             <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
               <OverleafCard />
             </section>
-            {!remote && (
-              <section ref={tab === "storage" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-                <StorageTab />
-              </section>
-            )}
-            <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-              <TelemetryTab />
-            </section>
-            {!remote && (
-              <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-                <UpdatesTab />
-              </section>
-            )}
           </div>
         </>
       )}
@@ -5046,19 +5126,14 @@ export function SettingsView({
       {tab === "openresearch" && (
         <>
           <button type="button" className="settings-back mb-6 inline-flex items-center gap-2 text-sm font-medium text-subtext hover:text-text" onClick={() => onSelectTab("compute")}><ArrowLeft size={16} /> {m.settings_page_back_to_compute()}</button>
-          <h1>OpenResearch</h1>
+          <h2>OpenResearch</h2>
           <div className="mt-6 font-sans text-base text-text"><OpenResearchSection remote={remote} /></div>
         </>
       )}
       {tab === "instances" && (
         <InstanceHistory projectId={project?.id} onBack={() => onSelectTab("compute")} />
       )}
-      {tab === "environment" && (
-        <>
-          <h1>{m.settings_page_environment()}</h1>
-          <EnvVarsSection />
-        </>
-      )}
+      {tab === "environment" && <EnvVarsSection />}
     </div>
   );
 }

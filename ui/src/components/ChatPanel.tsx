@@ -73,19 +73,17 @@ import {
   paperToken,
 } from "../fileMentions";
 import { m } from "../paraglide/messages.js";
-import { formatForDisplay, matchesKeyboardEvent, useAppHotkeys, useHotkey } from "@tanstack/react-hotkeys";
+import { formatForDisplay, matchesKeyboardEvent, useHotkey } from "@tanstack/react-hotkeys";
 import { appHotkeys } from "../hotkeys";
 import { copyToClipboard } from "../clipboard";
 import { readClipboardImage } from "../clipboardImage";
 import { autoDir, fmtBytes, ltr } from "../i18n";
-import { navigateKeyboardList } from "../keyboardNavigation";
 import { useLocale } from "../locale";
 import {
   ArrowDown,
   ArrowRightLeft,
   ArrowUpRight,
   Bell,
-  Blocks,
   BookMarked,
   BookOpen,
   ChartSpline,
@@ -113,7 +111,6 @@ import {
   NotebookText,
   Paperclip,
   Pencil,
-  Plus,
   ScrollText,
   Search,
   SlidersHorizontal,
@@ -225,7 +222,7 @@ import { CITED_ID, messageRef } from "../agentMessages";
 import { PlanStrip } from "./PlanStrip";
 import { useComposerFocus } from "./useComposerFocus";
 import { ExperimentRunBanner } from "./ExperimentRunBanner";
-import { SETTINGS_NAV, harnessSetupPath, type SettingsTab } from "./SettingsPage";
+import { SettingsHeader, harnessSetupPath, type SettingsTab } from "./SettingsPage";
 import { SkillMenu } from "./SkillMenu";
 import { MentionMenu, type MentionMatch } from "./MentionMenu";
 import { useDebouncedValue } from "./NewProjectForm";
@@ -5410,6 +5407,7 @@ interface SidebarActions {
   pinProject: (project: Project) => void;
   projectRemoved: (project: Project) => void;
   newProjectChat: (project: Project) => void;
+  openProjectSettings: (project: Project) => void;
   openSession: (session: ChatSession, project: Project) => void;
   openExperiment: (session: ChatSession, projectId: string, experimentId: string) => void;
   rename: (session: ChatSession, title: string) => void;
@@ -5423,7 +5421,7 @@ const SidebarProjectCard = memo(function SidebarProjectCard({
   actions,
   project,
   ...card
-}: Omit<React.ComponentProps<typeof ProjectInfoCard>, "onToggleCollapsed" | "onPin" | "onRemoved" | "onNewChat"> & {
+}: Omit<React.ComponentProps<typeof ProjectInfoCard>, "onToggleCollapsed" | "onPin" | "onRemoved" | "onNewChat" | "onOpenSettings"> & {
   actions: React.RefObject<SidebarActions>;
 }) {
   useLocale();
@@ -5435,6 +5433,7 @@ const SidebarProjectCard = memo(function SidebarProjectCard({
       onPin={() => actions.current.pinProject(project)}
       onRemoved={() => actions.current.projectRemoved(project)}
       onNewChat={() => actions.current.newProjectChat(project)}
+      onOpenSettings={() => actions.current.openProjectSettings(project)}
     />
   );
 });
@@ -5548,8 +5547,8 @@ export function ChatPanel({
   /** Run a harness setup command (`path` is its setup route) in the right panel's terminal tab. */
   onRunSetup?: (command: string, path: string) => void;
   /** Settings sections replace chat; Artifacts remains a right-panel tool. */
-  mainView: "chat" | "skills" | SettingsTab;
-  onSelectMainView: (view: "chat" | "skills" | SettingsTab) => void;
+  mainView: "chat" | SettingsTab;
+  onSelectMainView: (view: "chat" | SettingsTab) => void;
   /** Open a project file in the right pane (chat tool rows are clickable).
    * `sessionId` is the chat session the click came from, so relative paths
    * can resolve against that session's worktree. */
@@ -7657,8 +7656,6 @@ export function ChatPanel({
     });
   }
 
-  const newTaskHotkey = useAppHotkeys()["task.new"].hotkey;
-  const newTaskShortcut = newTaskHotkey ? formatForDisplay(newTaskHotkey) : undefined;
   const queueChord = formatForDisplay("Mod+Enter");
   const startProjectTask = useCallback(() => {
     setSessionFilter("active");
@@ -7795,6 +7792,7 @@ export function ChatPanel({
       try { localStorage.setItem(pinnedProjectsKey, JSON.stringify(next)); } catch {}
     },
     projectRemoved: (project) => { if (project.id === projectId) void navigate({ to: "/projects" }); },
+    openProjectSettings: (project) => void navigate({ href: `/projects/${encodeURIComponent(project.id)}/settings/project` }),
     newProjectChat: (project) => {
       if (project.id === projectId) startProjectTask();
       else void navigate({ to: "/projects/$projectId/tasks/new", params: { projectId: project.id } });
@@ -7826,6 +7824,7 @@ export function ChatPanel({
     remove: (s) => void removeSession(s),
   };
   const openRuntimeDetails = useCallback(() => onSelectMainView("openresearch"), [onSelectMainView]);
+  const openSettings = useCallback(() => onSelectMainView("settings"), [onSelectMainView]);
 
   const rail = (
     <aside style={mobileRail ? undefined : { width: railWidth }} className="session-rail relative shrink-0 flex flex-col bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:pt-0 [&_.rail-body]:pb-0 [&_.rail-body]:ps-2 [&_.rail-body]:pe-1 border-e border-e-border overflow-visible">
@@ -7834,49 +7833,6 @@ export function ChatPanel({
         onPointerDown={onResizeRail}
       />}
       {railHeader}
-      <nav data-keyboard-list onKeyDown={navigateKeyboardList} className="rail-nav flex flex-col gap-0.5 p-2 shrink-0 [&_[data-tip]::after]:left-[calc(100%_+_6px)] [&_[data-tip]::after]:top-1/2 [&_[data-tip]::after]:translate-x-0 [&_[data-tip]::after]:-translate-y-1/2">
-        <button
-          className="rail-nav-item flex items-center gap-2.5 py-2 px-2.5 text-base text-text rounded-md text-start hover:bg-surface"
-          data-onboarding="new-session"
-          data-keyboard-item
-          data-tip={newTaskShortcut}
-          aria-label={m.chat_panel_new_chat()}
-          aria-keyshortcuts="Meta+N Control+N Meta+Shift+Enter Control+Shift+Enter"
-          onClick={startNewTask}
-        >
-          <Plus size={16} />
-          {m.chat_panel_new_chat()}
-        </button>
-        <button
-          data-keyboard-item
-          className={`rail-nav-item flex items-center gap-2.5 py-2 px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${mainView === "skills" ? "active" : ""}`}
-          aria-current={mainView === "skills" ? "page" : undefined}
-          onClick={() => onSelectMainView("skills")}
-        >
-          <Blocks size={16} />
-          {m.chat_panel_customize()}
-        </button>
-        {SETTINGS_NAV.map((item) => {
-          const active = mainView !== "chat" && mainView !== "skills" && item.activeTabs.includes(mainView);
-          const shortcut = item.id === "settings" ? appHotkeys["settings.open"].hotkey : item.id === "compute" ? appHotkeys["compute.open"].hotkey : null;
-          return (
-            <button
-              key={item.id}
-              data-keyboard-item
-              className={`rail-nav-item flex items-center gap-2.5 py-2 px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${active ? "active" : ""}`}
-              aria-current={active ? "page" : undefined}
-              data-onboarding={item.id === "compute" ? "nav-compute" : undefined}
-              data-tip={shortcut ? formatForDisplay(shortcut) : undefined}
-              aria-label={item.label()}
-              aria-keyshortcuts={item.id === "settings" ? "Meta+, Control+," : item.id === "compute" ? "Meta+Alt+C Control+Alt+C" : undefined}
-              onClick={() => onSelectMainView(item.id)}
-            >
-              {item.icon}
-              {item.label()}
-            </button>
-          );
-        })}
-      </nav>
       <div className="rail-section-head flex items-center justify-between shrink-0 pt-3.5 pe-3.5 pb-0 ps-4.5">
         <div className="rail-section-label p-0 text-sm font-medium text-subtext">
           {sidebarGrouping === "projects" ? m.projects_home_projects() : m.chat_all_sessions()}
@@ -8017,7 +7973,7 @@ export function ChatPanel({
         </div>
       </div>
       </div>
-      <StatusStrip runtime={runtime} onDetails={openRuntimeDetails} />
+      <StatusStrip runtime={runtime} onDetails={openRuntimeDetails} settingsOpen={mainView !== "chat" && mainView !== "project"} onSettings={openSettings} />
     </aside>
   );
 
@@ -8040,7 +7996,8 @@ export function ChatPanel({
       <>
         {displayedRail}
         <section inert={contentInert} className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0">
-          {(!railOpen || mobileRail) && <div className="mac-titlebar-spacer flex h-12 mac-titlebar:h-titlebar shrink-0 items-center">{railReopen}</div>}
+          {mainView === "project" && (!railOpen || mobileRail) && <div className="mac-titlebar-spacer flex h-12 mac-titlebar:h-titlebar shrink-0 items-center">{railReopen}</div>}
+          {mainView !== "project" && <SettingsHeader active={mainView} onSelect={onSelectMainView} leading={railReopen} />}
           {/* Keyed per view so no tab inherits the chat thread's or another tab's scroll offset. */}
           <div key={mainView} className="settings-view-scroll flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges]">
             {contentError ? <div role="alert" className="p-6 text-subtext">{contentError}<Button onClick={onRetryContent}>{m.app_retry()}</Button></div>
@@ -8813,7 +8770,7 @@ export function ChatPanel({
                   value={composerSelection}
                   onSelect={selectModel}
                   onStartHarness={startHarness}
-                  onOpenSettings={() => onSelectMainView("harnesses")}
+                  onOpenSettings={() => onSelectMainView("agents")}
                   permissionChoices={activeHarness?.agentReady ? withAutoReviewer(opts?.permissionModes ?? [], activeHarness, uiState?.opencodeReviewModel, composerSelection?.model) : []}
                   defaultPermissionId={opts?.defaultPermissionMode ?? null}
                   onSelectPermission={setPermissionMode}
