@@ -143,7 +143,7 @@ fn report(plan: &[orx_signals::Stage], parent: Option<&orx_signals::Snapshot>) -
             let prior = stage.prior.ok_or("no recorded parent duration")?;
             let parent_unit = previous.and_then(|p| p.unit.as_deref());
             let unit = stage.unit.as_deref();
-            if parent_unit.zip(unit).is_some_and(|(a, b)| a != b) && stage.of.is_some() {
+            if !estimate::compatible_units(unit, parent_unit) && stage.of.is_some() {
                 return Err("the parent counted a different unit");
             }
             let (ms, explanation) = match stage.of {

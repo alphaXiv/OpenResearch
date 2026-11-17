@@ -922,6 +922,10 @@ pub(crate) enum TimedBy {
     Parent,
 }
 
+pub(crate) fn compatible_units(mine: Option<&str>, theirs: Option<&str>) -> bool {
+    mine.zip(theirs).is_none_or(|(mine, theirs)| mine == theirs)
+}
+
 /// Lays a run's phase occurrences over its plan, in order. An occurrence is the next planned stage
 /// of its name, and the planned stages it passed over were skipped; one the plan does not name is
 /// unplanned, and the plan grows by it there; with no plan, every occurrence is unplanned. A run
@@ -993,6 +997,7 @@ pub(crate) fn stages(
                         took.filter(|ms| *ms > 0.0),
                         phase.done,
                         phase.of,
+                        phase.unit.as_deref(),
                     )
                 })
                 .collect()
@@ -1005,17 +1010,20 @@ pub(crate) fn stages(
             took.iter()
                 .filter(|(name, ..)| *name == stage.name)
                 .nth(*count)
-                .and_then(|&(_, took, done, of)| {
+                .and_then(|&(_, took, done, of, unit)| {
+                    let compatible = compatible_units(stage.unit.as_deref(), unit);
                     let ms = took?;
                     let scale = stage
                         .of
                         .zip(of)
-                        .filter(|(mine, theirs)| *mine > 0.0 && *theirs > 0.0)
+                        .filter(|(mine, theirs)| compatible && *mine > 0.0 && *theirs > 0.0)
                         .map_or(1.0, |(mine, theirs)| mine / theirs);
                     Some(Prior {
                         ms: ms * scale,
                         by: *by,
-                        per_unit_ms: done.filter(|done| *done > 0.0).map(|done| ms / done),
+                        per_unit_ms: done
+                            .filter(|done| compatible && *done > 0.0)
+                            .map(|done| ms / done),
                     })
                 })
         });
@@ -1201,6 +1209,32 @@ pub(crate) fn with_signals(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn different_stage_units_keep_the_parent_duration() {
+        let mut parent = orx_signals::Snapshot::new("parent", "", "");
+        parent
+            .feed(
+                b"::orx:: {\"phase\":\"tokenizer\",\"step\":0,\"of\":32503,\"unit\":\"merges\"}\n",
+                false,
+                1000,
+                true,
+            )
+            .unwrap();
+        parent
+            .feed(b"::orx:: {\"step\":32503}\n", false, 51000, true)
+            .unwrap();
+        parent.feed(b"", true, 51000, true).unwrap();
+        let plan = orx_signals::plan(
+            &serde_json::json!([{ "phase": "tokenizer", "of": 2, "unit": "commands" }]),
+            false,
+        )
+        .unwrap();
+        let stages = stages(&plan, None, false, &[(&parent, true, TimedBy::Parent)]);
+        let prior = stages[0].prior.unwrap();
+        close(prior.ms, 50_000.0);
+        assert_eq!(prior.per_unit_ms, None);
+    }
 
     fn close(actual: f64, expected: f64) {
         let tolerance = 1e-5_f64.max(expected.abs() * 1e-9);
