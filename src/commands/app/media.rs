@@ -2,6 +2,8 @@ use crate::error::{anyhow, Result};
 use std::process::Stdio;
 use std::time::Duration;
 
+const SLOW_SCAN_GRACE: Duration = Duration::from_secs(30);
+
 pub fn check() -> Result<()> {
     gstreamer::init()?;
     for name in [
@@ -49,7 +51,14 @@ pub async fn available() -> bool {
                 Ok(())
             }
             Err(_) => {
-                child.kill().await?;
+                // Only a finished scan saves GStreamer's registry, so a slow first scan
+                // gets time to enable media next launch.
+                tokio::spawn(async move {
+                    let scanned = tokio::time::timeout(SLOW_SCAN_GRACE, child.wait()).await;
+                    if scanned.is_err() {
+                        let _ = child.kill().await;
+                    }
+                });
                 Err(anyhow!("Media check timed out"))
             }
         }

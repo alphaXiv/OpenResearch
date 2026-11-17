@@ -23,15 +23,18 @@ test("a missing desktop media runtime leaves downloads and installation instruct
     assert.equal(view.container.querySelector('[role="status"]'), null);
   } finally { delete window.__ORX_MEDIA_DISABLED__; }
 });
-test("HTML remains readable and sandboxed when desktop media is disabled", async () => {
+test("HTML stays readable when desktop media is disabled, with the note only on pages that use media", async () => {
   window.__ORX_MEDIA_DISABLED__ = true;
   try {
-    const view=await render(createElement(HtmlPreview,{html:"<h1>Report remains available</h1>",truncated:false,url:"/report.html",name:"Report",resolveSrc:()=>null}));
-    await settle();
-    assert.ok(view.container.querySelector('[role="status"]'));
-    const frame=view.container.querySelector("iframe");
-    assert.ok(frame.getAttribute("srcdoc").includes("Report remains available"));
-    assert.equal(frame.getAttribute("sandbox"),"allow-scripts allow-popups allow-downloads");
+    for (const [html, notice] of [["<h1>Report remains available</h1>", false], ["<h1>Report remains available</h1><video src=clip.mp4></video>", true], ["<h1>Report remains available</h1><script>new Audio(\"beep.wav\")</script>", true]]) {
+      const view=await render(createElement(HtmlPreview,{html,truncated:false,url:"/report.html",name:"Report",resolveSrc:()=>null}));
+      await settle();
+      assert.equal(Boolean(view.container.querySelector('[role="status"]')), notice);
+      const frame=view.container.querySelector("iframe");
+      assert.ok(frame.getAttribute("srcdoc").includes("Report remains available"));
+      assert.equal(frame.getAttribute("sandbox"),"allow-scripts allow-popups allow-downloads");
+      await view.unmount();
+    }
   } finally { delete window.__ORX_MEDIA_DISABLED__; }
 });
 test("a browser retains its normal media controls", async () => {

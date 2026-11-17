@@ -141,6 +141,9 @@ try:
         assert process.poll() is None, 'App exited while opening HTML'
         time.sleep(0.2)
     assert windows, 'Native window not visible'
+    if fault == 'hang':
+        hung = re.search(r'ORX fault fixture: pid=(\d+) mode=hang', (state/'app.log').read_text(errors='replace'))
+        assert hung and Path('/proc', hung[1]).exists(), 'Timed-out media check was not given time to finish scanning'
     screenshot = state/'native.png'
     green_pixels = 0
     for _ in range(100):
@@ -159,6 +162,12 @@ try:
     if fault:
         initialized = re.search(r'ORX fault fixture: pid=(\d+) mode='+fault, text)
         assert initialized, 'Fault plugin was not initialized'
+        if fault == 'hang':
+            # The app opens first; the check keeps scanning for SLOW_SCAN_GRACE (media.rs).
+            for _ in range(200):
+                if not Path('/proc', initialized[1]).exists():
+                    break
+                time.sleep(0.2)
         assert not Path('/proc', initialized[1]).exists(), 'Media-check child was not reaped'
         assert ('signal: 6' if fault == 'abort' else 'Media check timed out') in text, text[-4000:]
     assert blue_pixels > 100, 'HTML report did not render'
