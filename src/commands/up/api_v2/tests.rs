@@ -3202,9 +3202,9 @@ async fn the_monitor_route_serves_one_rev_and_says_what_it_cannot() {
 async fn an_unreadable_view_can_be_replaced_conditionally() {
     use crate::engine::view::etag;
     let f = Fixture::new().await;
-    let store = f.api.store();
     let raw = json!({"view": "<view><future/></view>", "futureField": 19}).to_string();
-    store
+    f.api
+        .store()
         .patch_run_monitor_json("exp", &etag(None), |_| Ok(raw.clone()))
         .unwrap()
         .unwrap();
@@ -3245,7 +3245,7 @@ async fn an_unreadable_view_can_be_replaced_conditionally() {
         .unwrap();
     assert_eq!(saved["markup"], "<view/>");
     let stored: Value =
-        serde_json::from_str(&store.run_monitor_json("exp").unwrap().unwrap()).unwrap();
+        serde_json::from_str(&f.api.store().run_monitor_json("exp").unwrap().unwrap()).unwrap();
     assert_eq!(stored["futureField"], 19);
 }
 
