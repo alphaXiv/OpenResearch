@@ -1564,6 +1564,8 @@ export interface ChatToolState {
     harness?: HarnessId;
     profile?: string | null;
     recoveryAction?: "retry" | "continue";
+    /** Epoch ms when a usage limit that failed the turn resets, if known. */
+    resetAt?: number | null;
     [k: string]: unknown;
   };
   output?: string;

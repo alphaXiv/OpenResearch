@@ -1477,6 +1477,8 @@
   "local_models_guide_install_rapid_mlx": "Rapid-MLX इंस्टॉल करें:",
   "local_models_guide_serve_rapid_mlx": "एक मॉडल डाउनलोड करें और सर्वर शुरू करें, उदाहरण के लिए:",
   "chat_session_limit_reached": "सेशन सीमा पूरी हो गई",
+  "chat_try_again": "फिर से कोशिश करें",
+  "chat_usage_resets_in": "{time} में रीसेट होगा",
   "chat_model_unavailable": "मॉडल उपलब्ध नहीं",
   "chat_failure_signed_out": "{name} से साइन आउट हो गया है।",
   "chat_failure_credits": "इस खाते के क्रेडिट खत्म हो गए हैं।",
