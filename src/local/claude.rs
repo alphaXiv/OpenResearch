@@ -770,6 +770,7 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
         // the harness ignores events until the echo arrives.
         "--replay-user-messages",
         "--verbose",
+        "--allow-dangerously-skip-permissions",
         "--permission-mode",
         claude_permission_mode(spec.config.permission_mode),
     ])
