@@ -79,7 +79,7 @@ function pdfjsAssets(): Plugin {
 const run = promisify(execFile);
 
 /** Skips jj's empty, undescribed working-copy commit so the line names the work, not a placeholder. */
-const JJ_REVSET = 'heads(::@ ~ (empty() & description(exact:"")))';
+const JJ_REVSET = 'latest(heads(::@ ~ (empty() & description(exact:""))))';
 const JJ_TEMPLATE = 'change_id.shortest(8) ++ "\\0" ++ bookmarks.join(" ") ++ "\\0" ++ description';
 
 type ExecError = Error & { code?: unknown; stderr?: string };
