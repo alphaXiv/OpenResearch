@@ -55,7 +55,7 @@ export function ReproducePage({ paperId }: { paperId: string | null }) {
             seedComposer(project.id, m.reproduce_paper_prompt({ title, source }));
           }
           void navigate({
-            href: `/projects/${encodeURIComponent(project.id)}${publicationError ? "/settings/projects" : ""}`,
+            href: `/projects/${encodeURIComponent(project.id)}${publicationError ? "/settings/project" : ""}`,
             replace: true,
           });
           if (publicationError) showAlert(publicationError, "error");

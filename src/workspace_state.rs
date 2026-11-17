@@ -290,6 +290,8 @@ fn valid_location(location: &str) -> bool {
                     matches!(
                         tab.as_ref(),
                         "settings"
+                            | "agents"
+                            | "integrations"
                             | "harnesses"
                             | "projects"
                             | "compute"
@@ -297,6 +299,7 @@ fn valid_location(location: &str) -> bool {
                             | "instances"
                             | "environment"
                             | "git"
+                            | "project"
                             | "storage"
                     )
                 })

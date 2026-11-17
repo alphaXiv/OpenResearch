@@ -1,13 +1,15 @@
-import { memo, useContext, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { memo, useContext, useState, type ReactNode } from "react";
 import { useMutate } from "@clo/react-mutation";
 import { useQuery } from "@tanstack/react-query";
 import { Popover } from "@base-ui/react/popover";
-import { RotateCw } from "lucide-react";
+import { formatForDisplay } from "@tanstack/react-hotkeys";
+import { RotateCw, Settings } from "lucide-react";
 import type { Harness, PlanUsage, RuntimeInfo, UsageReport } from "../api";
 import { timeAgo } from "../api";
 import { autoDir, fmtClock } from "../i18n";
 import { m } from "../paraglide/messages.js";
 import { getLocale } from "../paraglide/runtime.js";
+import { appHotkeys } from "../hotkeys";
 import { mutRefreshUsage } from "../queries/settings";
 import { useWorkspace } from "../workspace";
 import { WorkspaceDomContext } from "../WorkspaceDom";
@@ -19,8 +21,8 @@ import { fmtEstimate, fmtMoney, leftTone, lowestWindow, LOW_PERCENT, PLAN_GRID, 
 import { useMachineState, WorkspaceConnection } from "./WorkspaceConnection";
 import { useLocale } from "../locale";
 
-/** The sidebar's footer: you, your agents' plans, then the machine, which grows into what's left. */
-export const StatusStrip = memo(function StatusStrip({ runtime, onDetails }: { runtime: RuntimeInfo; onDetails: () => void }) {
+/** The sidebar's footer: you and your agents' plans, then the machine and Settings. */
+export const StatusStrip = memo(function StatusStrip({ runtime, onDetails, settingsOpen, onSettings }: { runtime: RuntimeInfo; onDetails: () => void; settingsOpen: boolean; onSettings: () => void }) {
   useLocale();
   const { current, live } = useMachineState(runtime);
   const usage = useQuery(useWorkspace().queries.getUsageQuery());
@@ -28,42 +30,11 @@ export const StatusStrip = memo(function StatusStrip({ runtime, onDetails }: { r
   const hasUsage = report ? report.plans === null || report.plans.length > 0 || spendSeries(report, String).length > 0 || spendSeries(report).length > 0 : false;
   // Failing to read usage is not having none, so the segment stays to say so; an older `orx up` has no route.
   const shown = usage.error != null || hasUsage;
-  const machineFilled = current !== null && live && current.state !== "disconnected";
 
-  const stripRef = useRef<HTMLDivElement>(null);
-  const [showName, setShowName] = useState(true);
-
-  // The name shows only whole, and gives way before the machine's name does.
-  useLayoutEffect(() => {
-    const strip = stripRef.current;
-    const machine = strip?.querySelector<HTMLElement>("[data-machine-name]");
-    if (!strip || !machine) return;
-
-    const fit = () => {
-      const parts = [...machine.children].map((child) => child.getBoundingClientRect());
-      const used = parts.length ? Math.max(...parts.map((part) => part.right)) - Math.min(...parts.map((part) => part.left)) : 0;
-      const slack = machine.getBoundingClientRect().width - used;
-      const label = machine.firstElementChild;
-      const name = strip.querySelector("[data-account-name]");
-      const ruler = strip.querySelector<HTMLElement>("[data-account-ruler]");
-      const clipped = (element: Element | null) => !!element && element.scrollWidth > element.clientWidth + 0.5;
-      if (name) {
-        if (clipped(name) || clipped(label)) setShowName(false);
-      } else if (ruler && slack >= ruler.offsetWidth + 14) setShowName(true);
-    };
-
-    fit();
-    const observer = new ResizeObserver(fit);
-    observer.observe(strip);
-    observer.observe(machine);
-    return () => observer.disconnect();
-  }, [showName, !!shown]);
-
-  return <div ref={stripRef} className="@container relative flex shrink-0 items-center gap-0.5 overflow-hidden border-t border-border p-1">
-    <AccountChip showName={showName} onDetails={onDetails} />
-    {shown && <>
-      <Separator />
-      <UsageSegment
+  return <div className="@container flex shrink-0 flex-col gap-0.5 border-t border-border p-1">
+    <div className="flex min-w-0 items-center gap-1">
+      <AccountChip onDetails={onDetails} />
+      {shown && <UsageSegment
         report={report ?? undefined}
         error={usage.error}
         onOpen={() => void usage.refetch()}
@@ -71,16 +42,25 @@ export const StatusStrip = memo(function StatusStrip({ runtime, onDetails }: { r
         remote={runtime.kind === "ssh"}
         stale={!live || (current !== null && current.state !== "connected")}
         fetchedAt={usage.dataUpdatedAt}
-      />
-    </>}
-    {!machineFilled && <Separator />}
-    <WorkspaceConnection runtime={runtime} />
+      />}
+    </div>
+    <div className="flex min-w-0 items-center gap-1">
+      <WorkspaceConnection runtime={runtime} />
+      <Tooltip interactive content={`${m.settings_page_settings()} (${formatForDisplay(appHotkeys["settings.open"].hotkey ?? [])})`} className="shrink-0">
+        <IconButton
+          className="size-9"
+          active={settingsOpen}
+          aria-label={m.settings_page_settings()}
+          aria-current={settingsOpen ? "page" : undefined}
+          aria-keyshortcuts="Meta+, Control+,"
+          onClick={onSettings}
+        >
+          <Settings size={17} aria-hidden="true" />
+        </IconButton>
+      </Tooltip>
+    </div>
   </div>;
 });
-
-function Separator() {
-  return <span className="mx-0.5 h-3.5 w-px shrink-0 bg-border @max-[230px]:hidden" aria-hidden="true" />;
-}
 
 function UsageSegment({ report, error, onOpen, machine, remote, stale, fetchedAt }: {
   /** The last report read, if any. */
@@ -106,7 +86,7 @@ function UsageSegment({ report, error, onOpen, machine, remote, stale, fetchedAt
     <Tooltip interactive content={m.usage_title()} className="shrink-0">
       <Popover.Trigger
         aria-label={label}
-        className={cn("flex h-7 shrink-0 items-center gap-1.5 rounded-md px-1.5 text-sm text-subtext hover:bg-surface hover:text-text data-popup-open:bg-surface data-popup-open:text-text focus-visible:outline-2 focus-visible:outline-focus", (stale || failed) && "opacity-50")}
+        className={cn("flex h-9 min-w-9 shrink-0 items-center justify-center gap-1.5 rounded-md px-2 text-sm text-subtext hover:bg-surface hover:text-text data-popup-open:bg-surface data-popup-open:text-text focus-visible:outline-2 focus-visible:outline-focus", (stale || failed) && "opacity-50")}
       >
         {plans.length > 0 ? <PlanRings plans={plans} planAgent={planAgent} /> : <>
           <UsageGauge />
