@@ -2069,18 +2069,9 @@ fn check_rules(
         .trips
         .iter()
         .find(|trip| trip.rule.does == Does::Stop);
-    let mut events = Vec::new();
     let mut flags = Vec::new();
-    for trip in &checked.trips {
-        let does = match trip.rule.does {
-            Does::Stop => "stop",
-            Does::Ask => "ask",
-        };
-        events.push(
-            json!({"rule": trip.rule.name, "does": does, "evidence": trip.evidence, "at": now}),
-        );
-        // A run that stops now has nothing left to ask about.
-        if trip.rule.does == Does::Ask && stop.is_none() {
+    if stop.is_none() {
+        for trip in &checked.trips {
             let flag = super::rules::flag(trip, projection.summary["whole"].clone(), now);
             flags.push(super::flags::new_flag(store, run, flag, false)?);
         }
@@ -2102,7 +2093,6 @@ fn check_rules(
         store.record_rules(
             &run.id,
             &checked.counts,
-            &events,
             &flags,
             stop.as_ref()
                 .map(|(reason, context)| (reason.as_str(), context)),
@@ -6605,15 +6595,6 @@ mod tests {
         check_rules(&f.store, None, &run, &projection, now).unwrap();
     }
 
-    fn rule_events(f: &Fixture, id: &str) -> Vec<Value> {
-        f.store
-            .run_monitor_events_for_tests(id)
-            .into_iter()
-            .filter(|(kind, _)| kind == "rule")
-            .map(|(_, body)| body)
-            .collect()
-    }
-
     fn stopped_by(f: &Fixture, id: &str) -> Option<crate::store::StopContext> {
         f.store.run_stop(id).unwrap()
     }
@@ -6788,8 +6769,14 @@ mod tests {
             "r1",
             "exp",
             local(),
-            json!([{"name": "nan-loss", "text": "Stop when the loss is NaN on 3 reports in a row.",
-                "does": "stop", "when": {"nonFinite": "loss", "reports": 3}}]),
+            json!([
+                {"name": "nan-loss", "text": "Stop when the loss is NaN on 3 reports in a row.",
+                    "does": "stop", "when": {"nonFinite": "loss", "reports": 3}},
+                {"name": "also-stop", "text": "Check the same reports.",
+                    "does": "stop", "when": {"nonFinite": "loss", "reports": 3}},
+                {"name": "also-ask", "text": "Review the same reports.",
+                    "does": "ask", "when": {"nonFinite": "loss", "reports": 3}}
+            ]),
         );
         let mut losses = vec!["2.5", "2.4", "NaN", "2.3", "NaN", "NaN"];
         reported(&f, "r1", "loss", &losses, 600);
@@ -6810,16 +6797,9 @@ mod tests {
             run.cancel_reason.as_deref(),
             Some("Stopped by rule nan-loss: loss was NaN on 3 reports in a row, step 40 to 60. No model was involved.")
         );
-        let events = rule_events(&f, "r1");
-        assert_eq!(events.len(), 1);
-        assert_eq!(
-            (
-                &events[0]["rule"],
-                &events[0]["does"],
-                &events[0]["stopped"]
-            ),
-            (&json!("nan-loss"), &json!("stop"), &json!(true))
-        );
+        assert!(super::super::flags::read(&f.store, &run)
+            .unwrap()
+            .is_empty());
 
         // A count this orx cannot read is never taken for none.
         ruled(
@@ -6839,10 +6819,41 @@ mod tests {
 
         // A restart forgets nothing it counted: the same reports never stop it again.
         f.restart();
-        f.store
-            .conn_execute_for_tests("UPDATE runs SET cancel_accepted_at = NULL WHERE id = 'r1'");
+        f.store.conn_execute_for_tests(
+            "UPDATE runs SET cancel_accepted_at = NULL, stop_context_json = NULL WHERE id = 'r1'",
+        );
         rules_at(&f, "r1", T0 + 8_000);
-        assert_eq!(rule_events(&f, "r1").len(), 1);
+        assert_eq!(stopped_by(&f, "r1"), None);
+    }
+
+    #[test]
+    fn a_user_cancel_accepted_before_recording_wins_over_a_rule() {
+        use crate::store::{StopBy, StopContext};
+
+        let f = Fixture::new("orx-rule-cancel");
+        f.run("running", local());
+        f.store
+            .accept_run_stop(
+                "r1",
+                Some("User stopped it."),
+                Some(&StopContext::by(StopBy::User)),
+            )
+            .unwrap()
+            .unwrap();
+
+        let accepted = f
+            .store
+            .record_rules(
+                "r1",
+                &json!({}),
+                &[],
+                Some(("Rule stopped it.", &StopContext::by(StopBy::Rule))),
+                |_| Ok(true),
+            )
+            .unwrap();
+        assert_eq!(accepted, None);
+        assert_eq!(stopped_by(&f, "r1").unwrap().by, StopBy::User);
+        assert_eq!(f.store.run_monitor_state("r1").unwrap(), None);
     }
 
     #[test]
@@ -6867,7 +6878,6 @@ mod tests {
         );
         rules_at(&f, "r1", T0 + 7_000);
         assert_eq!(stopped_by(&f, "r1"), None);
-        assert!(rule_events(&f, "r1").is_empty());
         assert_eq!(
             f.store.run_monitor_state("r1").unwrap().unwrap()["ruleState"]["counts"]["nan-loss"]
                 ["after"],
@@ -6945,7 +6955,6 @@ mod tests {
             summary["flag"],
             json!({"id": id, "state": "raised", "mode": "agentic"})
         );
-        assert_eq!(rule_events(&f, "r1")[0]["does"], "ask");
     }
 
     #[test]

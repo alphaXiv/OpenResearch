@@ -6428,14 +6428,12 @@ impl Store {
         ).optional()?)
     }
 
-    /// Keeps what the run's rules counted and what they did, in one transaction: an event for
-    /// each rule that tripped, the flag an `ask` raises, and a `stop`'s cancel with who asked
-    /// for it, under the run's cancel lock. Returns when the run's cancel was accepted.
+    /// Records the rule counts with any Ask flags or the winning Stop under the run's
+    /// cancel lock. Returns when the rule's cancel was accepted.
     pub(crate) fn record_rules(
         &self,
         run_id: &str,
         counts: &serde_json::Value,
-        events: &[serde_json::Value],
         flags: &[NewFlag],
         stop: Option<(&str, &StopContext)>,
         fresh: impl FnOnce(&Self) -> Result<bool>,
@@ -6482,18 +6480,6 @@ impl Store {
              ON CONFLICT(run_id) DO UPDATE SET state_json = excluded.state_json",
             params![run_id, serde_json::Value::Object(state).to_string()],
         )?;
-        for event in events {
-            let mut event = event.clone();
-            if event["does"] == "stop" {
-                event["stopped"] = serde_json::json!(accepted.is_some());
-            }
-            tx.execute(
-                "INSERT INTO run_monitor_events (run_id, seq, kind, created_at, body_json)
-                 VALUES (?1, (SELECT COALESCE(MAX(seq), 0) + 1 FROM run_monitor_events WHERE run_id = ?1),
-                         'rule', ?2, ?3)",
-                params![run_id, now, event.to_string()],
-            )?;
-        }
         self.append_flags(flags, now)?;
         tx.commit()?;
         Ok(accepted)
@@ -11781,28 +11767,6 @@ mod tests {
     }
 
     impl Store {
-        pub(crate) fn run_monitor_events_for_tests(
-            &self,
-            run_id: &str,
-        ) -> Vec<(String, serde_json::Value)> {
-            let mut statement = self
-                .conn
-                .prepare(
-                    "SELECT kind, body_json FROM run_monitor_events WHERE run_id = ?1 ORDER BY seq",
-                )
-                .unwrap();
-            statement
-                .query_map([run_id], |row| {
-                    Ok((
-                        row.get(0)?,
-                        serde_json::from_str(&row.get::<_, String>(1)?).unwrap(),
-                    ))
-                })
-                .unwrap()
-                .collect::<rusqlite::Result<_>>()
-                .unwrap()
-        }
-
         pub(crate) fn run_notices_for_tests(&self, run_id: &str) -> Vec<(String, String, String)> {
             let mut statement = self
                 .conn
