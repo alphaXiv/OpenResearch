@@ -475,6 +475,7 @@
   "settings_page_ready_to_move": "이동 준비됨",
   "settings_page_ready_to_use": "설정됨",
   "settings_page_refresh": "새로 고침",
+  "harness_refresh_complete": "에이전트 확인이 완료되었습니다.",
   "settings_page_remotes": "원격 저장소",
   "settings_page_repository": "저장소",
   "settings_page_restart_to_finish_updating": "업데이트를 완료하려면 다시 시작하세요",

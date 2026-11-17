@@ -475,6 +475,7 @@
   "settings_page_ready_to_move": "Можно переносить",
   "settings_page_ready_to_use": "Настроено",
   "settings_page_refresh": "Обновить",
+  "harness_refresh_complete": "Проверка агентов завершена.",
   "settings_page_remotes": "Удалённые репозитории",
   "settings_page_repository": "Репозиторий",
   "settings_page_restart_to_finish_updating": "Перезапустите, чтобы завершить обновление",

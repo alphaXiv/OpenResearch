@@ -2,7 +2,7 @@ import { useWorkspace } from "../workspace";
 import { mutUpdateUiState } from "../queries/settings";
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from "react";
 import { useQuery, type QueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Check, ChevronDown, CircleCheck, Copy, CreditCard, KeyRound, Laptop, Link2, Plus, RefreshCw, Search, TriangleAlert } from "lucide-react";
+import { ArrowLeft, Check, ChevronDown, CircleCheck, Copy, CreditCard, KeyRound, Laptop, Link2, Plus, Search, TriangleAlert } from "lucide-react";
 import {
   harnessModelLabel,
   tidyModelName,
@@ -29,6 +29,7 @@ import { BrandMark, HarnessLogo, logoMark, ModelMark, type Brand } from "./Harne
 import { HarnessSetup, SignInSteps } from "./HarnessSetupDialog";
 import { EndpointMark, LocalModelGuide, useLocalModelForm } from "./LocalModelSetup";
 import { renderNote } from "./agentNote";
+import { RefreshAgents, useAgentRefresh } from "./RefreshAgents";
 import { Button, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, Input, Spinner, Switch } from "./ui";
 import { cn } from "./ui/cn";
 
@@ -363,6 +364,7 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
   const customAcp: AgentTile = { id: "custom-acp", name: m.harness_custom_acp(), mark: { icon: "custom" }, methods: [] };
 
   const methodHarness = method ? harnessFor(method) : undefined;
+  const recheck = useAgentRefresh(methodHarness?.id ?? "opencode", step);
   // An agent already working when its sign-in began stays listed; one this dialog signs in waits for it to finish.
   const workingAtStart = useRef(new Map<string, boolean>());
   if (methodHarness && !workingAtStart.current.has(methodHarness.id)) workingAtStart.current.set(methodHarness.id, methodHarness.agentReady && !methodHarness.authCheckFailed);
@@ -784,6 +786,8 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
       saved?.kind === "provider" ? opencode?.models.filter((model) => model.id.startsWith(`${saved.id}/`)) ?? []
         : saved?.kind === "endpoint" ? opencode?.models.filter((model) => model.id === `${saved.id}/${saved.model}`) ?? []
           : (profileEntry ?? methodHarness)?.models ?? [];
+    const noModels = modelsReady && listed.length === 0;
+    const recheckLabel = noModels || recheck.isPending || recheck.error ? m.onboarding_re_check() : null;
     body = <div className="space-y-5">
       {saved && (
         <div className="flex items-end gap-3">
@@ -803,20 +807,20 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
           </label>
         </div>
       )}
-      {backedByOpenCode && !opencodeReady ? (
-        <p className="m-0 text-sm text-subtext">{m.settings_needs_opencode()}</p>
-      ) : !modelsReady ? (
-        <p role="status" className="m-0 flex items-center gap-2 text-sm text-subtext"><Spinner />{m.add_agent_models_loading()}</p>
-      ) : listed.length > 0 ? (
-        <ModelList models={listed} harness={methodHarness?.id} owner={saved?.kind === "provider" ? saved.name : undefined} />
-      ) : (
-        <p role="status" className="m-0 text-sm text-accent-amber">
-          {saved?.kind === "endpoint" ? m.local_models_config_restricted() : backedByOpenCode ? m.add_agent_models_none() : m.settings_no_models()}{" "}
-          <Button variant="ghost" size="small" onClick={() => { setChecking(true); void refreshHarness(methodHarness?.id ?? "opencode").catch(() => {}).finally(() => setChecking(false)); }}>
-            <RefreshCw size={14} />{m.onboarding_re_check()}
-          </Button>
-        </p>
-      )}
+      <div className="space-y-2">
+        {backedByOpenCode && !opencodeReady ? (
+          <p className="m-0 text-sm text-subtext">{m.settings_needs_opencode()}</p>
+        ) : !modelsReady ? (
+          <p role="status" className="m-0 flex items-center gap-2 text-sm text-subtext"><Spinner />{m.add_agent_models_loading()}</p>
+        ) : noModels ? (
+          <p role="status" className="m-0 text-sm text-accent-amber">
+            {saved?.kind === "endpoint" ? m.local_models_config_restricted() : backedByOpenCode ? m.add_agent_models_none() : m.settings_no_models()}
+          </p>
+        ) : (
+          <ModelList models={listed} harness={methodHarness?.id} owner={saved?.kind === "provider" ? saved.name : undefined} />
+        )}
+        <RefreshAgents refresh={recheck} disabled={disabled} label={recheckLabel} />
+      </div>
       {tile.id === "opencode-go" && uiState.data?.opencodeFreeModels && (
         <div className="flex items-center gap-3">
           <div className="min-w-0 flex-1">
@@ -829,7 +833,7 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
       {backedByOpenCode && opencodeReady && <p className="m-0 text-xs text-subtext">{m.settings_runs_on_opencode({ version: opencodeVersion(opencode) ?? "2" })}</p>}
     </div>;
     const label = saved ? name.trim() : tile.name;
-    primary = <Button variant="primary" disabled={!modelsReady || !label || disabled} onClick={() => void finish()}>
+    primary = <Button variant="primary" disabled={!modelsReady || !label || disabled || recheck.isPending} onClick={() => void finish()}>
       {busy && <Spinner />}{m.add_agent_finish({ name: label })}
     </Button>;
   }
@@ -1162,9 +1166,8 @@ function AgentSignIn({ harness, commands, remote, disabled, definition, formId, 
   onReady: () => void;
   onEdit: (definition: AcpDefinition) => void;
 }) {
-  const { refreshHarnesses } = useWorkspace().queries;
   const [auth, setAuth] = useState<Harness | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
+  const refresh = useAgentRefresh();
 
   if (auth || (harness.id.startsWith("acp:") && harness.installed && !harness.adapterMissing)) {
     return <AcpAuth harness={auth ?? harness} remote={remote} disabled={disabled} formId={formId} onReady={onReady} />;
@@ -1177,12 +1180,10 @@ function AgentSignIn({ harness, commands, remote, disabled, definition, formId, 
     <p className="m-0 text-sm text-subtext" role="status">
       {needsZCode ? m.harness_zcode_required() : renderNote(harness.agentNote) ?? m.harness_install_help({ name: harness.name })}
     </p>
-    <div className="flex flex-wrap items-center gap-2">
-      <Button onClick={() => { setRefreshing(true); void refreshHarnesses(true, true).catch(() => {}).finally(() => setRefreshing(false)); }} disabled={refreshing}>
-        <RefreshCw size={14} />{m.settings_page_refresh()}
-      </Button>
+    <div className="flex flex-wrap items-start gap-2">
+      <RefreshAgents refresh={refresh} disabled={disabled} />
       {harness.setupUrl && (
-        <a href={needsZCode ? "https://zcode.z.ai/en/docs/install" : harness.setupUrl} target="_blank" rel="noreferrer" className="text-sm text-accent-blue-strong underline">{m.acp_setup_docs()}</a>
+        <a href={needsZCode ? "https://zcode.z.ai/en/docs/install" : harness.setupUrl} target="_blank" rel="noreferrer" className="py-1.5 text-sm text-accent-blue-strong underline">{m.acp_setup_docs()}</a>
       )}
       {definition && !harness.setupUrl && <Button onClick={() => onEdit(definition)}>{m.activity_edit()}</Button>}
     </div>

@@ -475,6 +475,7 @@
   "settings_page_ready_to_move": "स्थानांतरण के लिए तैयार",
   "settings_page_ready_to_use": "कॉन्फ़िगर किया गया",
   "settings_page_refresh": "रीफ़्रेश करें",
+  "harness_refresh_complete": "एजेंट की जाँच पूरी हुई।",
   "settings_page_remotes": "रिमोट",
   "settings_page_repository": "रिपॉज़िटरी",
   "settings_page_restart_to_finish_updating": "अपडेट पूरा करने के लिए फिर से शुरू करें",

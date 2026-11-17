@@ -475,6 +475,7 @@
   "settings_page_ready_to_move": "移動の準備完了",
   "settings_page_ready_to_use": "設定済み",
   "settings_page_refresh": "更新",
+  "harness_refresh_complete": "エージェントの確認が完了しました。",
   "settings_page_remotes": "リモート",
   "settings_page_repository": "リポジトリ",
   "settings_page_restart_to_finish_updating": "更新を完了するには再起動してください",
