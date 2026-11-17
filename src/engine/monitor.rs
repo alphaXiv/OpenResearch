@@ -232,7 +232,7 @@ impl Lifecycle {
             revising: store.run_revising(row)?,
             watch: super::watch::run_facts(store, row).unwrap_or_else(|error| {
                 json!({
-                    "state": "unknown", "model": null, "looks": [], "spentUsd": null, "nextAt": null,
+                    "state": "unknown", "model": null, "looks": [], "spentUsd": null,
                     "error": {"code": "unread", "message": format!("Couldn't read what the watcher said: {error:#}")},
                     "sentence": null, "counts": {},
                 })

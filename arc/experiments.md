@@ -392,8 +392,7 @@ starting aside. Between changes, a ladder from each stage's start (1, 2, 5, 10, 
 minutes, then the experiment's `maxGapS`) bounds the silence while the run keeps
 printing; with nothing new there is no look. Looks a change brings keep the
 chat's `minGapS` between them and never outnumber the ladder's points since the
-oldest run started. A look answered `same` doubles the threshold of the check
-that brought it. A run gets one last look when it ends, shared with siblings
+oldest run started. A run gets one last look when it ends, shared with siblings
 ending within a minute; one that fails or is interrupted is taken once more,
 after the chat's `minGapS`, and a second failure stands in the journal as the
 run's last look.

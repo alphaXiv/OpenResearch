@@ -12,7 +12,7 @@ const running = JSON.parse(readFileSync(new URL("./fixtures/runMonitor/running.j
 const now = running.asOf;
 const text = (element) => element.textContent.replace(/[⁦-⁩]/g, "");
 const look = (id, at, template, extra = {}) => ({ id, at, kind: "ceiling", whole: 0.1, said: "new", text: template, template, bindings: { loss: 2.6 }, with: [], why: "", ...extra });
-const monitor = (watch) => ({ ...running, watch: { state: "on", model: "Claude Haiku", looks: [], spentUsd: null, nextAt: null, floorUntil: null, error: null, ...watch } });
+const monitor = (watch) => ({ ...running, watch: { state: "on", model: "Claude Haiku", looks: [], spentUsd: null, floorUntil: null, error: null, ...watch } });
 
 test("the journal lists changes, not looks: words that held fold into one row that says since when", () => {
   const looks = [

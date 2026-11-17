@@ -771,6 +771,58 @@ fn the_ladder_restarts_with_each_stage_and_never_waits_past_the_longest_gap() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn a_same_reply_keeps_the_sentence_and_leaves_the_change_threshold_alone() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let calls_dir = crate::config::home_dir().unwrap().join("claude-calls");
+    fake_claude(
+        &calls_dir,
+        &[
+            r#"{"runs":{"r1":{"status":"ok","line":"**{count:\"timed out\"}** shards retried."}}}"#,
+            r#"{"runs":{"r1":{"same":true}}}"#,
+        ],
+    );
+    let store = Store::open().unwrap();
+    chat(&store, "chat", "claude-code");
+    let run = run(&store, "a", "Depth 6", "chat", LOG);
+    let first = look(&store, "chat", "ceiling", &[("a", "r1")]);
+    take(first).await.unwrap();
+    store
+        .set_watch_count("a", "timed out", 4, LOG.len() as u64, "1-7")
+        .unwrap();
+
+    let now = crate::store::now_ms();
+    let tx = store.begin_immediate().unwrap();
+    let same = Store::prepare_watch_look(
+        &tx,
+        "chat",
+        "change",
+        "Depth 6: lines matching \"timed out\" went from 2 to 4",
+        &[("a", "r1", "subject")],
+        now,
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    take(same).await.unwrap();
+
+    let answered = store.watch_look_runs(same).unwrap();
+    assert_eq!(answered[0].result.as_deref(), Some("same"));
+    assert_eq!(
+        answered[0].template,
+        store.watch_look_runs(first).unwrap()[0].template
+    );
+    store
+        .set_watch_count("a", "timed out", 8, LOG.len() as u64, "1-7")
+        .unwrap();
+    let current = Now::read(&store, &run).unwrap();
+    assert!(changes(&mut Seen::default(), &current, now)
+        .iter()
+        .any(|reason| reason.contains("went from 4 to 8")));
+}
+
 #[test]
 fn a_number_leaves_its_trend_when_it_turns_but_not_as_a_healthy_curve_bends() {
     // The fault bed's healthy loss, noise and all (e2e/faults/payload.mjs).
@@ -886,11 +938,7 @@ fn a_last_look_that_failed_is_taken_once_more_and_then_its_failure_stands() {
         chat: store.get_chat_session("chat").unwrap().unwrap(),
         runs: vec![(Now::read(&store, &ended).unwrap(), Vec::new())],
     };
-    let planned = |now: i64| {
-        due(&store, &State::default(), &owned, now, &mut HashMap::new())
-            .unwrap()
-            .len()
-    };
+    let planned = |now: i64| due(&store, &State::default(), &owned, now).unwrap().len();
     let (gap, _) = gaps(&Value::Null);
     assert_eq!(
         planned(2 + gap - 1),
@@ -990,7 +1038,7 @@ async fn a_look_that_flags_while_a_flag_is_open_is_noted_under_it() {
     assert_eq!(now.noted.len(), 1);
     assert!(changes(&mut Seen::default(), &now, 0)
         .iter()
-        .any(|(check, _)| check == "noted"));
+        .any(|reason| reason.contains("finding noted")));
     let again = look(&store, "chat", "change", &[("a", "r1")]);
     take(again).await.unwrap();
     assert!(std::fs::read_to_string(calls_dir.join("prompt-2"))
@@ -1348,10 +1396,7 @@ async fn a_change_in_real_output_asks_for_a_look_before_the_first_and_after_a_se
     );
     assert_eq!(
         why,
-        vec![(
-            "parent".to_owned(),
-            "Test accuracy is far worse than the parent".to_owned()
-        )],
+        ["Test accuracy is far worse than the parent"],
         "a collapse at the first report needs no look before it"
     );
 
@@ -1360,9 +1405,8 @@ async fn a_change_in_real_output_asks_for_a_look_before_the_first_and_after_a_se
     epochs(&store, &healthy, &HEALTHY[..8]);
     let now = Now::read(&store, &healthy).unwrap();
     let mut seen = Seen::default();
-    assert_eq!(
-        changes(&mut seen, &now, 0),
-        Vec::new(),
+    assert!(
+        changes(&mut seen, &now, 0).is_empty(),
         "a healthy start asks nothing"
     );
     let id = look(&store, "chat", "ceiling", &[("seed-5", "r1")]);
@@ -1374,7 +1418,7 @@ async fn a_change_in_real_output_asks_for_a_look_before_the_first_and_after_a_se
         template: Some(template.into()),
         text: Some(template.into()),
         whole: None,
-        basis: basis_of(&now, Some(template), &Map::new(), false),
+        basis: basis_of(&now, Some(template), false),
         cursor: Value::Null,
     };
     store
@@ -1383,15 +1427,10 @@ async fn a_change_in_real_output_asks_for_a_look_before_the_first_and_after_a_se
     let mut collapsed = HEALTHY[..8].to_vec();
     collapsed.extend(&FLIPPED[..2]);
     epochs(&store, &healthy, &collapsed);
-    let kinds: Vec<String> = changes(&mut seen, &Now::read(&store, &healthy).unwrap(), 0)
-        .into_iter()
-        .map(|(check, _)| check)
-        .collect();
-    assert_eq!(
-        kinds,
-        ["trend", "parent"],
-        "the view's main number is watched"
-    );
+    let reasons = changes(&mut seen, &Now::read(&store, &healthy).unwrap(), 0);
+    assert_eq!(reasons.len(), 2, "{reasons:?}");
+    assert!(reasons[0].contains("Test accuracy left its trend"));
+    assert!(reasons[1].contains("parent"));
 }
 
 /// The walkthrough's sorting benchmark: one table row a case, no step, `correct` 0 once the
@@ -1453,17 +1492,14 @@ fn a_row_that_falls_to_zero_asks_for_a_look_and_its_sentence_may_say_so() {
     chat(&store, "chat", "claude-code");
     let healthy = bench_run(&store, "baseline", &[CASES[0], CASES[3]]);
     let now = Now::read(&store, &healthy).unwrap();
-    assert_eq!(changes(&mut Seen::default(), &now, 0), Vec::new());
+    assert!(changes(&mut Seen::default(), &now, 0).is_empty());
     assert!(material(None, &now), "rows are new output");
 
     let broken = bench_run(&store, "broken", &CASES[..3]);
     let now = Now::read(&store, &broken).unwrap();
     assert_eq!(
         changes(&mut Seen::default(), &now, 0),
-        vec![(
-            "row".to_owned(),
-            "correct in cases fell to 0 at row 2".to_owned()
-        )],
+        ["correct in cases fell to 0 at row 2"],
     );
 
     let moving = moving(&now);
@@ -1555,7 +1591,7 @@ async fn side_stats_wake_only_for_far_worse_parent_comparisons() {
     now.body["versus"] =
         json!({"step": {"tok_per_sec": {"d": 1000, "parent": 8000, "good": true}}});
     let template = "Tokens/s **{tok_per_sec}** recovered.";
-    let basis = basis_of(&now, Some(template), &Map::new(), false);
+    let basis = basis_of(&now, Some(template), false);
     assert!(basis["signals"].get("tok_per_sec").is_none());
     assert!(basis["parent"].get("tok_per_sec").is_some());
     let id = look(&store, "chat", "ceiling", &[("seed", "r1")]);
@@ -1596,11 +1632,11 @@ async fn side_stats_wake_only_for_far_worse_parent_comparisons() {
     now.body["versus"]["step"]["tok_per_sec"] = json!({"d": -1000, "parent": 8000, "good": false});
     assert!(!changes(&mut Seen::default(), &now, 0)
         .iter()
-        .any(|(kind, _)| kind == "parent" || kind == "trend"));
+        .any(|reason| reason.contains("parent") || reason.contains("trend")));
     now.body["versus"]["step"]["tok_per_sec"] = json!({"d": -5000, "parent": 8000, "good": false});
     assert!(changes(&mut Seen::default(), &now, 0)
         .iter()
-        .any(|(kind, _)| kind == "parent"));
+        .any(|reason| reason.contains("parent")));
 }
 
 #[tokio::test]

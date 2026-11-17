@@ -47,8 +47,6 @@ const JOURNAL: usize = 200;
 /// What a look is shown of what earlier looks noted under a flag since kept going after.
 const NOTED: usize = 3;
 const FAMILIES: usize = 256;
-/// Only a look for one of these is due; a look answering `same` doubles its threshold.
-const CHECKS: [&str; 6] = ["trend", "parent", "count", "stage", "family", "pace"];
 
 /// Which model watches a chat's runs, if any.
 #[derive(Debug, Clone, PartialEq)]
@@ -376,7 +374,7 @@ impl Scan {
 /// One chat's runs at one pass, and why each might need a look.
 struct Owned {
     chat: StoredChatSession,
-    runs: Vec<(Now, Vec<(String, String)>)>,
+    runs: Vec<(Now, Vec<String>)>,
 }
 
 /// What the passes remember of each run they read, by run.
@@ -567,12 +565,6 @@ fn looking() -> &'static Mutex<BTreeSet<String>> {
     LOOKING.get_or_init(Default::default)
 }
 
-/// When each run's next look is due at the latest, for the page.
-fn next_due() -> &'static Mutex<HashMap<String, i64>> {
-    static NEXT: OnceLock<Mutex<HashMap<String, i64>>> = OnceLock::new();
-    NEXT.get_or_init(Default::default)
-}
-
 fn wake() -> &'static tokio::sync::Notify {
     static WAKE: OnceLock<tokio::sync::Notify> = OnceLock::new();
     WAKE.get_or_init(tokio::sync::Notify::new)
@@ -751,7 +743,6 @@ async fn pass(state: &mut State) -> Result<()> {
         .chain(unwatched.iter().map(|run| run.run.id.clone()))
         .collect();
     state.runs.retain(|run, _| read.contains(run));
-    let mut next = HashMap::new();
     let mut start = Vec::new();
     let waiting: BTreeSet<String> = Store::open()?
         .prepared_watch_looks_chats()?
@@ -804,7 +795,7 @@ async fn pass(state: &mut State) -> Result<()> {
         }
         if !waiting.contains(&chat_id) {
             let store = Store::open()?;
-            let plans = due(&store, state, &owned, now, &mut next)?;
+            let plans = due(&store, state, &owned, now)?;
             if !plans.is_empty() {
                 let tx = store.begin_immediate()?;
                 // A manual look admitted during log reads invalidates this pass's run history.
@@ -832,7 +823,6 @@ async fn pass(state: &mut State) -> Result<()> {
     }
     // A look asked for by hand, or left prepared by a restart, in a chat this pass found no run of.
     start.extend(waiting);
-    *next_due().lock().unwrap_or_else(PoisonError::into_inner) = next;
     for chat in start {
         let has = Store::open()?.prepared_watch_looks(&chat)?;
         let fresh = !has.is_empty()
@@ -1402,7 +1392,7 @@ fn bound_signals(body: &Value, summary: &Value) -> Vec<String> {
 /// What a look stands on, kept with it and checked on every new point. Before its first look,
 /// what a run's first look is due for: every point of its main numbers, any stage that ends, and
 /// a parent comparison that turns far worse.
-fn basis_of(run: &Now, template: Option<&str>, mult: &Map<String, Value>, first: bool) -> Value {
+fn basis_of(run: &Now, template: Option<&str>, first: bool) -> Value {
     let mut signals = Map::new();
     let mut parent = Map::new();
     let mut counts = Map::new();
@@ -1450,7 +1440,6 @@ fn basis_of(run: &Now, template: Option<&str>, mult: &Map<String, Value>, first:
             .rows()
             .map(|(name, rows)| (name.clone(), json!(if first { 0 } else { rows.len() })))
             .collect::<Map<String, Value>>(),
-        "mult": mult,
         "bindings": bindings(run),
     })
 }
@@ -1474,13 +1463,8 @@ fn bindings(run: &Now) -> Value {
     Value::Object(bindings)
 }
 
-fn mult(basis: &Value, check: &str) -> f64 {
-    basis["mult"][check].as_f64().unwrap_or(1.0)
-}
-
-/// Why the run needs a look since its last one: each check that tripped, in words, under its
-/// check's name. Thresholds are the basis's, scaled by its multipliers.
-fn changes(seen: &mut Seen, run: &Now, now: i64) -> Vec<(String, String)> {
+/// Why the run needs a look since its last one.
+fn changes(seen: &mut Seen, run: &Now, now: i64) -> Vec<String> {
     let stage = run.stage();
     let since = seen.stage.get_or_insert_with(|| (stage.clone(), now));
     if since.0 != stage {
@@ -1490,16 +1474,13 @@ fn changes(seen: &mut Seen, run: &Now, now: i64) -> Vec<(String, String)> {
     let basis = match run.answered() {
         Some((_, last)) => &last.basis,
         None => {
-            first = basis_of(run, None, &Map::new(), true);
+            first = basis_of(run, None, true);
             &first
         }
     };
     let mut why = Vec::new();
     if !run.noted.is_empty() {
-        why.push((
-            "noted".into(),
-            "a finding noted under a flag someone kept going after".into(),
-        ));
+        why.push("a finding noted under a flag someone kept going after".into());
     }
     let signals = &run.body["view"]["signals"];
     let label = |name: &str| signals[name]["label"].as_str().unwrap_or(name).to_owned();
@@ -1515,7 +1496,7 @@ fn changes(seen: &mut Seen, run: &Now, now: i64) -> Vec<(String, String)> {
             .unwrap_or(points.len());
         let off = (first..points.len()).rev().take(20).find_map(|index| {
             let (x, y) = points[index];
-            let turned = turned(&points, index, 3.0 * mult(basis, "trend"));
+            let turned = turned(&points, index, 3.0);
             (!y.is_finite() || turned).then_some((x, y))
         });
         if let Some((x, y)) = off {
@@ -1524,7 +1505,7 @@ fn changes(seen: &mut Seen, run: &Now, now: i64) -> Vec<(String, String)> {
             } else {
                 "is no longer a number"
             };
-            why.push(("trend".into(), format!("{} {what} at {x}", label(name))));
+            why.push(format!("{} {what} at {x}", label(name)));
         }
     }
     for (name, spec) in signals.as_object().into_iter().flatten() {
@@ -1534,15 +1515,9 @@ fn changes(seen: &mut Seen, run: &Now, now: i64) -> Vec<(String, String)> {
             continue;
         };
         if bound.contains(name) && kept["d"].as_f64().is_some_and(|was| was * d < 0.0) {
-            why.push((
-                "parent".into(),
-                format!("{} crossed the parent", label(name)),
-            ));
+            why.push(format!("{} crossed the parent", label(name)));
         } else if kept["far"] != true && far_worse(vs, spec) {
-            why.push((
-                "parent".into(),
-                format!("{} is far worse than the parent", label(name)),
-            ));
+            why.push(format!("{} is far worse than the parent", label(name)));
         }
     }
     for (pattern, kept) in basis["counts"].as_object().into_iter().flatten() {
@@ -1550,73 +1525,55 @@ fn changes(seen: &mut Seen, run: &Now, now: i64) -> Vec<(String, String)> {
             kept.as_u64().unwrap_or(0),
             count_of(run, pattern).unwrap_or(0),
         );
-        let doubled = was > 0 && now as f64 >= 2.0 * was as f64 * mult(basis, "count");
-        if (was == 0 && now as f64 >= mult(basis, "count")) || doubled {
-            why.push((
-                "count".into(),
-                format!("lines matching \"{pattern}\" went from {was} to {now}"),
+        if now > was && now / 2 >= was {
+            why.push(format!(
+                "lines matching \"{pattern}\" went from {was} to {now}"
             ));
         }
     }
     // A row whose value falls to zero, or stops being a number, in a column that began above it.
     for (table, rows) in run.rows() {
         let from = basis["rows"][table].as_u64().unwrap_or(0) as usize;
-        let collapsed: Vec<(usize, &str)> = rows
-            .iter()
-            .enumerate()
-            .skip(from)
-            .filter_map(|(index, row)| {
-                let column = row.as_object()?.iter().find_map(|(column, value)| {
-                    let fell = value.as_f64() == Some(0.0)
-                        || matches!(value.as_str(), Some("NaN" | "Infinity" | "-Infinity"));
-                    let began = rows[0][column].as_f64().is_some_and(|v| v != 0.0);
-                    (fell && began).then_some(column.as_str())
-                })?;
-                Some((index + 1, column))
-            })
-            .collect();
-        if let Some((row, column)) = collapsed.first() {
-            if collapsed.len() as f64 >= mult(basis, "row") {
-                let value = &rows[row - 1][*column];
-                let value = value.as_f64().map_or_else(
-                    || value.as_str().unwrap_or_default().to_owned(),
-                    |v| v.to_string(),
-                );
-                why.push((
-                    "row".into(),
-                    format!("{} in {table} fell to {value} at row {row}", label(column)),
-                ));
-            }
+        let collapsed = rows.iter().enumerate().skip(from).find_map(|(index, row)| {
+            let column = row.as_object()?.iter().find_map(|(column, value)| {
+                let fell = value.as_f64() == Some(0.0)
+                    || matches!(value.as_str(), Some("NaN" | "Infinity" | "-Infinity"));
+                let began = rows[0][column].as_f64().is_some_and(|v| v != 0.0);
+                (fell && began).then_some(column.as_str())
+            })?;
+            Some((index + 1, column))
+        });
+        if let Some((row, column)) = collapsed {
+            let value = &rows[row - 1][column];
+            let value = value.as_f64().map_or_else(
+                || value.as_str().unwrap_or_default().to_owned(),
+                |v| v.to_string(),
+            );
+            why.push(format!(
+                "{} in {table} fell to {value} at row {row}",
+                label(column)
+            ));
         }
     }
     let (name, ended) = stage;
-    let stage_changes = (ended as i64 - basis["ended"].as_i64().unwrap_or(0)).unsigned_abs() as f64
-        + f64::from(u8::from(basis["stage"].as_str() != Some(name.as_str())));
-    if stage_changes >= mult(basis, "stage") {
-        why.push((
-            "stage".into(),
-            match name.as_str() {
-                "" => "its stage changed".to_owned(),
-                name => format!("stage {name} started, or the one before it ended"),
-            },
-        ));
+    if ended as u64 != basis["ended"].as_u64().unwrap_or(0)
+        || basis["stage"].as_str() != Some(name.as_str())
+    {
+        why.push(match name.as_str() {
+            "" => "its stage changed".to_owned(),
+            name => format!("stage {name} started, or the one before it ended"),
+        });
     }
     if let Some(scan) = &seen.scan {
-        if scan.novel.len() as f64 >= mult(basis, "family") {
+        if !scan.novel.is_empty() {
             let kinds: Vec<&str> = scan.novel.iter().map(String::as_str).take(3).collect();
-            why.push((
-                "family".into(),
-                format!("a new kind of log line: {}", kinds.join("; ")),
-            ));
+            why.push(format!("a new kind of log line: {}", kinds.join("; ")));
         }
     }
     if let Some(times) = run.body["pace"]["times"].as_f64() {
         let was = basis["pace"].as_f64();
-        if was.is_none_or(|was| times >= was + mult(basis, "pace")) {
-            why.push((
-                "pace".into(),
-                format!("{times}× slower than the run it is compared with"),
-            ));
+        if was.is_none_or(|was| times >= was + 1.0) {
+            why.push(format!("{times}× slower than the run it is compared with"));
         }
     }
     why
@@ -1631,13 +1588,7 @@ struct Planned {
 
 /// The looks a chat's runs need now: none, a terminal look for runs that ended, or one look in
 /// calls of six runs, at most four, the runs a change is about and those looked at least lately first.
-fn due(
-    store: &Store,
-    state: &State,
-    owned: &Owned,
-    now: i64,
-    next: &mut HashMap<String, i64>,
-) -> Result<Vec<Planned>> {
+fn due(store: &Store, state: &State, owned: &Owned, now: i64) -> Result<Vec<Planned>> {
     let earliest = owned
         .runs
         .iter()
@@ -1646,8 +1597,7 @@ fn due(
         .unwrap_or(now);
     let looks = store.chat_watch_looks(&owned.chat.id, earliest)?;
     let last_at = looks.iter().map(|look| look.created_at).max();
-    let live: Vec<&(Now, Vec<(String, String)>)> =
-        owned.runs.iter().filter(|(run, _)| run.live()).collect();
+    let live: Vec<&(Now, Vec<String>)> = owned.runs.iter().filter(|(run, _)| run.live()).collect();
     let ended: Vec<&Now> = owned
         .runs
         .iter()
@@ -1728,15 +1678,13 @@ fn due(
         for (run, why) in &live {
             if !why.is_empty() {
                 kind = Some("change");
-                let words: Vec<&str> = why.iter().map(|(_, words)| words.as_str()).collect();
-                reasons.push(format!("{}: {}", run.label, words.join("; ")));
+                reasons.push(format!("{}: {}", run.label, why.join("; ")));
             }
         }
     }
     for (run, _) in &live {
         let seen = state.runs.get(&run.run.id);
         let ceiling = ceiling_at(seen, run, now);
-        next.insert(run.run.id.clone(), ceiling);
         if kind.is_none() && now >= ceiling && material(seen, run) {
             kind = Some("ceiling");
             reasons.push(format!("{}: new output since the last look", run.label));
@@ -1745,7 +1693,7 @@ fn due(
     let Some(kind) = kind else {
         return Ok(Vec::new());
     };
-    let mut ordered: Vec<&(Now, Vec<(String, String)>)> = live;
+    let mut ordered: Vec<&(Now, Vec<String>)> = live;
     ordered.sort_by_key(|(run, why)| (why.is_empty(), run.answered().map(|(look, _)| look.id)));
     let reason = reasons.join(" · ");
     Ok(ordered
@@ -2433,14 +2381,6 @@ async fn take(id: i64) -> Result<()> {
         let last_template = previous[&run.run.id]
             .last()
             .map(|(template, _)| template.clone());
-        let kept_mult = last.map_or_else(Map::new, |(_, row)| {
-            row.basis["mult"].as_object().cloned().unwrap_or_default()
-        });
-        let tripped: Vec<&str> = CHECKS
-            .iter()
-            .copied()
-            .filter(|check| reason_check(&look.reason, &run.label, check))
-            .collect();
         let (result, template) = match read.runs.get(&row.key) {
             Some(reply::Answer::Line { flag, template, .. }) => {
                 (if *flag { "flag" } else { "line" }, Some(template.clone()))
@@ -2449,13 +2389,6 @@ async fn take(id: i64) -> Result<()> {
             Some(reply::Answer::Silent) => ("line", None),
             None => ("error", None),
         };
-        let mut mult = kept_mult;
-        if result == "same" {
-            for check in tripped {
-                let was = mult.get(check).and_then(Value::as_f64).unwrap_or(1.0);
-                mult.insert(check.to_owned(), json!(was * 2.0));
-            }
-        }
         let cursor = match (result, read_log) {
             ("error", _) | (_, Err(_)) => last.map_or(Value::Null, |(_, row)| row.cursor.clone()),
             (_, Ok(read)) => {
@@ -2565,7 +2498,7 @@ async fn take(id: i64) -> Result<()> {
         let basis = if result == "error" {
             last.map_or(Value::Null, |(_, row)| row.basis.clone())
         } else {
-            basis_of(run, template.as_deref(), &mult, false)
+            basis_of(run, template.as_deref(), false)
         };
         results.push(LookResult {
             basis,
@@ -2663,21 +2596,6 @@ fn kept_after(store: &Store, run: &str) -> Result<Vec<Value>> {
         .collect();
     kept.drain(..kept.len().saturating_sub(KEPT));
     Ok(kept)
-}
-
-fn reason_check(reason: &str, label: &str, check: &str) -> bool {
-    let words = match check {
-        "trend" => ["left its trend", "is no longer a number"].as_slice(),
-        "parent" => &["crossed the parent", "far worse than the parent"],
-        "count" => &["lines matching"],
-        "stage" => &["stage", "its stage changed"],
-        "family" => &["a new kind of log line"],
-        _ => &["slower than"],
-    };
-    reason
-        .split(" · ")
-        .filter_map(|part| part.strip_prefix(&format!("{label}: ")))
-        .any(|part| words.iter().any(|word| part.contains(word)))
 }
 
 fn unanswered(rows: &[WatchLookRun], result: &str) -> Vec<LookResult> {
@@ -2849,7 +2767,7 @@ pub(crate) fn run_facts(store: &Store, run: &StoredRun) -> Result<Value> {
         .get(&held)
         .filter(|(version, at, _)| *version == key && fresh(*at))
         .map(|(_, _, facts)| facts.clone());
-    let mut facts = match cached {
+    let facts = match cached {
         Some(facts) => facts,
         None => {
             let read = read_facts(store, run)?;
@@ -2860,11 +2778,6 @@ pub(crate) fn run_facts(store: &Store, run: &StoredRun) -> Result<Value> {
             read
         }
     };
-    facts["nextAt"] = json!(next_due()
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get(&run.id)
-        .copied());
     Ok(facts)
 }
 
@@ -2965,11 +2878,6 @@ fn read_facts(store: &Store, run: &StoredRun) -> Result<Value> {
         Watching::Unfollowed => (None, "none", None),
         other => (None, other.state(), Some(not_watched(other))),
     };
-    let next_at = next_due()
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get(&run.id)
-        .copied();
     let with =
         looks
             .iter()
@@ -2996,7 +2904,6 @@ fn read_facts(store: &Store, run: &StoredRun) -> Result<Value> {
         "looks": entries,
         "spentUsd": spent,
         "tokens": tokens,
-        "nextAt": next_at,
         "floorUntil": floor_until,
         "error": error,
         "with": with,

@@ -46,7 +46,6 @@
       "looks": [],
       "spentUsd": null,
       "tokens": 0,
-      "nextAt": null,
       "floorUntil": null,
       "error": null,
       "with": null
@@ -147,7 +146,6 @@
       "looks": [],
       "spentUsd": null,
       "tokens": 0,
-      "nextAt": null,
       "floorUntil": null,
       "error": null,
       "with": null

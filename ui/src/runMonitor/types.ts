@@ -312,7 +312,6 @@ export interface Watch {
   spentUsd: number | null;
   tokens?: number;
   /** When the next look is due at the latest, while the run keeps printing. */
-  nextAt: number | null;
   /** Look now starts no look before this. */
   floorUntil?: number | null;
   error: { code: string; message: string } | null;
