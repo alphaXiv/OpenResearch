@@ -73,7 +73,7 @@ export function quoteWords(quote: Quote): { eta: string; detail: string; cost: s
 export function estimateWords(estimate: Estimate, now: number, limit: { endsAt: number; ms: number } | null, stallMs: number): { eta: string; detail: string; strong: boolean; leftMs: number | null } {
   const remaining = (ms: number) => Math.max(0, ms - (now - estimate.at));
   if (estimate.floor) {
-    const left = remaining(estimate.loMs ?? estimate.midMs ?? 0);
+    const left = remaining(estimate.midMs ?? 0);
     const stages = estimate.untimed ?? [];
     return {
       eta: left > 0 ? m.run_eta_floor({ duration: remainingText(left) }) : "",

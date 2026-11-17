@@ -413,7 +413,7 @@ test("a floor counted down to nothing reads as no estimate, naming the stages no
   for (const full of [true, false]) {
     const later = runModel({
       item: { sessionId: "s", run: runOf("planned"), experimentName: null, experimentSlug: "baseline" },
-      monitor: full ? monitor : null, shown: true, agent: "Claude", now: now + monitor.estimate.loMs + 500, nextRetryMs: null,
+      monitor: full ? monitor : null, shown: true, agent: "Claude", now: now + monitor.estimate.midMs + 500, nextRetryMs: null,
     });
     assert.match(bare(later.etaDetail), /eval.*not timed/, `full: ${full}`);
     assert.equal(later.leftMs, null, `full: ${full}`);

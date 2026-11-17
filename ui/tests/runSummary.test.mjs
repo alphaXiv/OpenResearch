@@ -125,7 +125,7 @@ test("otherwise the summary counts the runs in each state and, in the same sente
     m.run_summary_starting({ count: "**1**" }), m.run_summary_running({ count: "**2**" }), m.run_summary_done({ count: "**1**" }), m.run_summary_next_done({ duration: "**29m**" }),
   ].map(bare).join(" · "), "once one is done, the soonest of the rest is the next");
   assert.equal(firstDone, null, "said once, in the sentence");
-  assert.match(said([model("a", eta(29 * 60_000, true)), model("b", eta(40 * 60_000))]).text, /at least.*28m/);
+  assert.match(said([model("a", eta(29 * 60_000, true)), model("b", eta(40 * 60_000))]).text, /at least.*29m/);
 });
 
 test("the watcher's summary stands for the runs its look covered, with names and numbers bound to each run", () => {
