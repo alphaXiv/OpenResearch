@@ -197,26 +197,8 @@ test("a view that is stale, rebuilding or unavailable reads like lost contact, e
   assert.ok(!words.has(failed.stale.why));
 });
 
-test("a queued run says what orx quoted: about how long, the range and what it goes by, and the cost", () => {
-  const quoted = {
-    ...running, progress: null, estimate: null, before: { kind: "queued", startsAt: null, text: null },
-    quote: { loMs: 3 * 3_600_000, hiMs: 4 * 3_600_000, usd: [12, 16], spendCap: null, from: { kind: "earlier_run", runNo: 2, hardware: "A100", runId: "r0" } },
-  };
-  const line = model(run({ status: "submitting", host: "lab-a40" }), { monitor: quoted });
-  assert.equal(line.eta, m.run_eta_about({ duration: fmtDuration(3.5 * 3_600_000) }));
-  const source = bare(m.run_quote_from_earlier({ n: "2", hw: "A100" }));
-  assert.equal(bare(line.etaDetail), m.run_quote_range({ lo: fmtDuration(3 * 3_600_000), hi: fmtDuration(4 * 3_600_000), source }));
-  assert.equal(line.cost, m.run_cost_range({ lo: "$12.00", hi: "$16.00" }));
-  assert.equal(line.progress, m.run_not_started());
-
-  const unknown = model(run({ status: "submitting" }), { monitor: { ...quoted, quote: { loMs: null, hiMs: null, usd: null, spendCap: 5, from: { kind: "none" } } } });
-  assert.equal(unknown.eta, m.run_eta_none());
-  assert.equal(unknown.etaDetail, m.run_quote_none());
-  assert.equal(unknown.cost, m.run_quote_spend_cap({ cost: "$5.00" }));
-});
-
 test("a run with no total and no limit shows elapsed time, says why there is no estimate and fills nothing", () => {
-  const open = { ...running, phases: [{ ...running.phases[0], of: null }], estimate: null, limit: null, progress: { ...running.progress, whole: null, segments: [{ name: "train", weight: 1, fill: null }] } };
+  const open = { ...running, phases: [{ ...running.phases[0], of: null }], estimate: null, limit: null, progress: { ...running.progress, whole: null, segments: [{ weight: 1, fill: null }] } };
   const line = model(run(), { monitor: open, at: now });
   assert.equal(line.eta, bare(m.run_elapsed({ duration: fmtDuration(1_800_000) })));
   assert.equal(line.etaDetail, "");
@@ -235,9 +217,9 @@ test("a run whose stop couldn't be confirmed can't be dismissed until it is clea
 });
 
 test("a run that hasn't started says why it waits, in its backend's words, until contact is lost or a stop is sent", () => {
-  const queued = { ...running, progress: null, estimate: null, before: { kind: "queued", startsAt: null, text: null } };
+  const starting = { ...running, progress: null, estimate: null };
   for (const [status, backend, reason, monitor] of [
-    ["starting", { kind: "slurm_job" }, "Resources", queued],
+    ["starting", { kind: "slurm_job" }, "Resources", starting],
     ["starting", { kind: "k8s_job" }, "0/4 nodes are available: 4 Insufficient nvidia.com/gpu.", null],
     ["submitting", { kind: "openresearch_job" }, "Provisioning box", null],
     ["submitting", { kind: "modal_job", flavor: "A10G" }, "Waiting for a GPU", null],
@@ -255,12 +237,11 @@ test("a run that hasn't started says why it waits, in its backend's words, until
     assert.equal(stopping.canStop, false, "the pending cancel is said in Stop's place");
   }
   assert.equal(model(run({ status: "starting", startedAt: null })).text, m.status_starting());
-  const queuedRun = run({ status: "starting", startedAt: null, host: "lab-a40" });
-  assert.equal(model(queuedRun, { monitor: queued }).text, m.run_queued());
-  const scheduled = { ...queued, before: { ...queued.before, startsAt: now + 60_000 } };
-  const waiting = model(queuedRun, { monitor: scheduled });
-  assert.equal(waiting.text, bare(m.run_queued_start_at({ clock: fmtClock(now + 60_000) })));
-  assert.ok(!waiting.text.includes("lab-a40"));
+  const startingRun = run({ status: "starting", startedAt: null, host: "lab-a40" });
+  const waiting = model(startingRun, { monitor: starting });
+  assert.equal(waiting.text, m.status_starting());
+  assert.equal(waiting.eta, m.run_eta_none());
+  assert.equal(waiting.progress, m.run_not_started());
 });
 
 test("a kept flag retains its record and falls through to the pace note", () => {

@@ -111,8 +111,6 @@
     "projectedRange": null,
     "uncertain": false
   },
-  "quote": null,
-  "before": null,
   "watch": {
     "state": "off",
     "model": null,

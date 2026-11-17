@@ -3086,8 +3086,7 @@ async fn abandon_refusals_name_their_cause_and_the_way_forward() {
     assert_eq!(f.api.run("live").unwrap().status, "lost");
 }
 
-/// The monitor route: the whole monitor with its ETag, a 304 for it, one series' history, a
-/// cursor from another basis refused, and an unknown run a 404 in the app's error shape.
+/// The monitor route serves conditional reads, one series' history, and the app's 404 shape.
 #[tokio::test]
 async fn the_monitor_route_serves_one_rev_and_says_what_it_cannot() {
     let f = Fixture::new().await;
@@ -3161,15 +3160,6 @@ async fn the_monitor_route_serves_one_rev_and_says_what_it_cannot() {
     assert_eq!(page["points"].as_array().unwrap().len(), 4);
     assert_eq!(page["points"][0][0], 21.0);
     assert_eq!(page["next"], 24.0);
-
-    let stale = f
-        .client
-        .request(reqwest::Method::GET, "runs/run/monitor?cursor=g0.1.1")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(stale.status(), StatusCode::CONFLICT);
-    assert_eq!(stale.json::<Value>().await.unwrap()["reset"], true);
 
     for path in ["runs/missing/monitor", "runs/run/monitor?series=lr"] {
         let missing = f

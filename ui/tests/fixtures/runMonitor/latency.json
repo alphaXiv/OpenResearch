@@ -164,8 +164,6 @@
   "estimate": null,
   "limit": null,
   "cost": null,
-  "quote": null,
-  "before": null,
   "watch": {
     "state": "off",
     "model": null,

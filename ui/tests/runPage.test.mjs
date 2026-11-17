@@ -119,9 +119,9 @@ test("the rules a run was launched with are listed as checked with no model, the
   assert.ok(![...none.querySelectorAll("summary")].some((summary) => text(summary).includes(m.run_rules_summary_other({ count: "0" }))));
 });
 
-test("a queued run draws none of its view's blocks", async () => {
-  const monitor = { ...pipeline(), before: { kind: "queued", startsAt: null, text: null } };
-  const { container } = await overview([run("r2", { status: "queued", startedAt: null, monitor: summary(monitor, { tone: "starting" }) })], () => monitor);
+test("a starting run draws none of its view's blocks", async () => {
+  const monitor = pipeline();
+  const { container } = await overview([run("r2", { status: "starting", startedAt: null, monitor: summary(monitor, { tone: "starting" }) })], () => monitor);
   assert.equal(container.querySelector("section h3"), null);
   assert.equal(container.querySelector("dl"), null);
 });

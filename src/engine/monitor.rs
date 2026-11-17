@@ -904,11 +904,11 @@ fn evaluate(
                 .map(|fill| fill.clamp(0.0, 1.0))
                 .or(o.phase_fraction);
 
-            return vec![json!({"name": stages.get(current.unwrap_or(0)).map(|s| &s.name), "weight": 1.0, "fill": finished(fill)})];
+            return vec![json!({"weight": 1.0, "fill": finished(fill)})];
         }
         o.segments
             .iter()
-            .map(|s| json!({"name": s.name, "weight": s.weight, "fill": finished(s.fill)}))
+            .map(|s| json!({"weight": s.weight, "fill": finished(s.fill)}))
             .collect()
     });
     let progressed = snapshot.and_then(Snapshot::progress);
@@ -947,7 +947,7 @@ fn evaluate(
     let estimating = || {
         json!({
             "loMs": null, "midMs": null, "hiMs": null, "at": at, "pending": true,
-            "pastLimitMs": null, "floor": floor, "reasons": reasons,
+            "pastLimitMs": null, "floor": floor,
         })
     };
     let estimate = match output.as_ref() {
@@ -964,7 +964,6 @@ fn evaluate(
                     "pending": eta.pending,
                     "pastLimitMs": eta.past_limit_ms.map(|ms| ms.round() as i64),
                     "floor": floor || eta.floor,
-                    "reasons": reasons,
                 });
                 if eta.floor {
                     // The stages, this one or to come, that no earlier run timed.
@@ -1002,10 +1001,7 @@ fn evaluate(
                 "spend": cost.spend,
                 "budget": budget,
                 "gpuHours": cost.gpu_hours,
-                "at": laptop(cost.at),
-                "rate": null,
                 "projectedRange": cost.projected_range,
-                "uncertain": cost.uncertain,
             })
         })
     });
@@ -1184,8 +1180,6 @@ fn evaluate(
             .map(|p| p.source.clone())
             .or_else(|| (!s.latest.is_empty()).then(|| "declared".to_owned()))
     });
-    let before = (!started && life.live())
-        .then(|| json!({"kind": "starting", "startsAt": null, "text": null}));
     let generation = snapshot.map_or("", |s| s.generation.as_str());
     let prior_view = (view_from["isDefault"] == true && blocks.is_empty())
         .then(|| default_view(earlier.or(parent)));
@@ -1417,6 +1411,7 @@ fn evaluate(
             signals: &view["signals"],
             whole,
             estimate: estimate.as_ref(),
+            estimate_reasons: &reasons,
             cost: cost.as_ref(),
             stall_ms: progress.as_ref().and_then(|p| p["stallMs"].as_i64()),
             degraded: state != "live",
@@ -1459,8 +1454,6 @@ fn evaluate(
         "estimate": estimate,
         "limit": limit,
         "cost": cost,
-        "quote": null,
-        "before": before,
         "watch": watch_body(&watch),
         "sentence": sentence,
         "flag": open.or(life.flags.last()),
@@ -2549,14 +2542,16 @@ pub(crate) fn offline(store: &Store, run: &StoredRun, now: i64) -> Result<Value>
     Ok(monitor)
 }
 
-/// Shares `MAX_BODY` fairly among the series, newest points first; the rest is paged by cursor.
-pub(crate) fn bounded(mut monitor: Value, page: usize) -> (Value, Option<usize>) {
+/// Shares `MAX_BODY` fairly among the series, keeping the newest points.
+pub(crate) fn bounded(mut monitor: Value) -> Value {
     let size = monitor.to_string().len();
-    if size <= MAX_BODY && page == 0 {
-        return (monitor, None);
+    if size <= MAX_BODY {
+        return monitor;
     }
     let series = monitor["series"].take();
-    let series = series.as_object().cloned().unwrap_or_default();
+    let Value::Object(mut series) = series else {
+        return monitor;
+    };
     let fixed = monitor.to_string().len();
     let points: usize = series
         .values()
@@ -2564,19 +2559,11 @@ pub(crate) fn bounded(mut monitor: Value, page: usize) -> (Value, Option<usize>)
         .sum();
     let per_point = (size - fixed).max(1) / points.max(1) + 1;
     let share = (MAX_BODY.saturating_sub(fixed) / per_point / series.len().max(1)).max(1);
-    let mut more = false;
-    let paged: serde_json::Map<String, Value> = series
-        .into_iter()
-        .map(|(name, points)| {
-            let points = points.as_array().cloned().unwrap_or_default();
-            let end = points.len().saturating_sub(page * share);
-            let start = end.saturating_sub(share);
-            more |= start > 0;
-            (name, json!(points[start..end]))
-        })
-        .collect();
-    monitor["series"] = Value::Object(paged);
-    (monitor, more.then_some(page + 1))
+    for points in series.values_mut().filter_map(Value::as_array_mut) {
+        points.drain(..points.len().saturating_sub(share));
+    }
+    monitor["series"] = Value::Object(series);
+    monitor
 }
 
 /// Up to `limit` points of one series after `after`, from the run's current checkpoint.
@@ -2610,6 +2597,7 @@ struct StatusFacts<'a> {
     signals: &'a Value,
     whole: Option<f64>,
     estimate: Option<&'a Value>,
+    estimate_reasons: &'a [String],
     cost: Option<&'a Value>,
     stall_ms: Option<i64>,
     degraded: bool,
@@ -2872,11 +2860,10 @@ fn eta_text(life: &Lifecycle, snapshot: Option<&Snapshot>, facts: &StatusFacts) 
                 "phase_started_at",
                 "points",
             ];
-            let why = estimate["reasons"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
+            let why = facts
+                .estimate_reasons
+                .iter()
+                .map(String::as_str)
                 .find(|reason| timing.iter().any(|field| reason.starts_with(field)));
             format!("Estimating… ({})", why.unwrap_or("needs timed progress"))
         }
@@ -8444,11 +8431,11 @@ mod tests {
     }
 
     #[test]
-    fn a_large_monitor_is_paged_fairly_newest_first() {
+    fn a_large_monitor_keeps_the_newest_points_in_each_series() {
         let points: Vec<Value> = (0..500_000).map(|i| json!([i, 1.5])).collect();
         let monitor =
             json!({"rev": 1, "series": {"a": points.clone(), "b": points[..10].to_vec()}});
-        let (first, next) = bounded(monitor.clone(), 0);
+        let first = bounded(monitor);
         assert!(first.to_string().len() <= MAX_BODY);
         assert_eq!(
             first["series"]["b"].as_array().unwrap().len(),
@@ -8458,15 +8445,6 @@ mod tests {
         assert_eq!(
             first["series"]["a"].as_array().unwrap().last(),
             points.last()
-        );
-        let (second, _) = bounded(monitor, next.unwrap());
-        let (a, b) = (
-            first["series"]["a"].as_array().unwrap(),
-            second["series"]["a"].as_array().unwrap(),
-        );
-        assert_eq!(
-            b.last().unwrap()[0].as_i64().unwrap() + 1,
-            a[0][0].as_i64().unwrap()
         );
         let page = series_page(&first, "a", Some(499_990.0), 5).unwrap();
         assert_eq!(

@@ -251,7 +251,7 @@ export interface Progress {
   /** Null while a planned stage has reported no step, or before the run's first stage began. */
   done: number | null;
   /** `fill` is null when the phase has no total and no limit: an empty track, never a zero. */
-  segments: { name: string; weight: number; fill: number | null }[];
+  segments: { weight: number; fill: number | null }[];
   whole: number | null;
   /** When the last report was placed; null when only its duration is known. */
   lastAt: number | null;
@@ -268,8 +268,6 @@ export interface Estimate {
   pastLimitMs: number | null;
   /** Times only known stages, so more of the run may follow it. */
   floor: boolean;
-  /** Why parts of the estimate could not be computed. */
-  reasons?: string[];
   untimed?: string[];
 }
 
@@ -280,23 +278,6 @@ export interface Cost {
   spend: number | null;
   budget: number | null;
   gpuHours: number | null;
-  at: number;
-  projectedRange: [number, number] | null;
-  uncertain: boolean;
-}
-
-type QuoteSource =
-  | { kind: "earlier_run"; runNo: number; hardware: string; runId: string }
-  | { kind: "parent_same_hw" | "parent_other_hw"; hardware: string; runId: string }
-  | { kind: "agent"; explanation: string }
-  | { kind: "none" };
-
-export interface Quote {
-  loMs: number | null;
-  hiMs: number | null;
-  usd: [number, number] | null;
-  spendCap: number | null;
-  from: QuoteSource;
 }
 
 export interface Watch {
@@ -368,8 +349,6 @@ export interface RunMonitor {
   estimate: Estimate | null;
   limit: { endsAt: number } | null;
   cost: Cost | null;
-  quote: Quote | null;
-  before: { kind: "queued" | "starting"; startsAt: number | null; text: Sentence | null } | null;
   watch: Watch;
   sentence: Sentence | null;
   flag: Flag | null;

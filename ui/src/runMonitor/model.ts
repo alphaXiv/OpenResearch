@@ -8,7 +8,7 @@ import { fillSentence, fmtMagnitude, fmtSignal, fmtUsd, plainSentence, tokensOf 
 import type { Flag, FlagMode, FlagState, RunMonitor, RunMonitorSummary, RunRule, ShownRun, SignalSpec, SignalValue, Signals, Versus, VersusBy } from "./types";
 import { tickText } from "./journal";
 import { stagePosition } from "./stages";
-import { capitalized, captionProgress, clockText, costWords, durationText, estimateWords, progressWords, quoteWords } from "./words";
+import { capitalized, captionProgress, clockText, costWords, durationText, estimateWords, progressWords } from "./words";
 
 /** How the headline compares with the parent: the arrow follows the number, the colour whether that is better. */
 export interface Delta {
@@ -228,7 +228,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   const shownAsOf = monitor?.asOf ?? run.monitor?.asOf ?? now;
   const degraded = failing !== null || (monitor !== null && (availability !== "live" || monitorFailed));
   const live = runActive(run.status);
-  const pre = run.status === "submitting" || run.status === "starting" || monitor?.before != null;
+  const pre = run.status === "submitting" || run.status === "starting";
   const display = runDisplay(run);
 
   const pageOnly = runNotice(run);
@@ -307,11 +307,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
       : m.run_auto_at({ progress: autoDir(progressText) });
     sentence = { text, key: `end:${tone}`, at: null };
   } else if (pre) {
-    const before = monitor?.before ?? null;
-    const text = before?.text ? fillSentence(before.text.template, bindings, signals)
-      : before?.kind === "queued" ? (before.startsAt === null ? m.run_queued() : m.run_queued_start_at({ clock: clockText(before.startsAt) }))
-      : m.status_starting();
-    sentence = { text, key: `pre:${before?.kind ?? "starting"}`, at: null };
+    sentence = { text: m.status_starting(), key: "pre:starting", at: null };
   } else if (watched) {
     speaking = watched.template;
     const watcher = fillSentence(watched.template, bindings, signals);
@@ -330,7 +326,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   let etaElapsed = false;
   const lastSeen = tone === "lost" || degraded;
   // What a run has cost only grows, so it keeps showing while the facts wait for the monitor to catch up.
-  let cost = sameGeneration?.cost ? costWords(sameGeneration.cost, live, lastSeen) : "";
+  const cost = !pre && sameGeneration?.cost ? costWords(sameGeneration.cost, live, lastSeen) : "";
   const ended = run.status === "done" ? m.run_done_in({ duration: durationText(elapsed) })
     : tone === "failed" ? m.run_failed_after({ duration: durationText(elapsed) })
     : tone === "stopped" || tone === "revising" ? m.run_eta_stopped_at({ duration: durationText(elapsed) })
@@ -339,11 +335,8 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   else if (notice?.kind === "unreachable") eta = nextRetryMs === null ? "" : m.run_notice_retry_at({ time: clockText(nextRetryMs) });
   else if (notice || degraded) eta = "";
   else if (pre) {
-    const quote = monitor?.quote ? quoteWords(monitor.quote) : null;
-    etaElapsed = !quote && !monitor;
-    eta = quote?.eta ?? (monitor ? m.run_eta_none() : m.run_elapsed({ duration: durationText(now - run.createdAt) }));
-    etaDetail = quote?.detail ?? "";
-    cost = quote?.cost ?? "";
+    etaElapsed = !monitor;
+    eta = monitor ? m.run_eta_none() : m.run_elapsed({ duration: durationText(now - run.createdAt) });
   } else if (settingUp) {
     eta = setup?.startsAt != null && setup.startsAt > now ? m.run_setup_starts_in({ duration: durationText(setup.startsAt - now) }) : "";
   } else if (etaFloor) {

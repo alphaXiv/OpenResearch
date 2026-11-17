@@ -3,7 +3,7 @@ import { autoDir, fmtClock, fmtNumber, ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
 import { getLocale } from "../paraglide/runtime.js";
 import { fmtPercent, fmtUsd } from "./format";
-import type { Cost, Estimate, Phase, Progress, Quote } from "./types";
+import type { Cost, Estimate, Phase, Progress } from "./types";
 
 /** Durations, times and prices formatted for the locale and isolated, so words in the other direction keep them whole. */
 export const durationText = (ms: number) => autoDir(fmtDuration(ms));
@@ -47,26 +47,6 @@ export function captionProgress(progress: Progress, phases: Phase[], openLimitMs
     ? m.run_progress_limit({ elapsed: durationText(elapsedMs), limit: durationText(openLimitMs) })
     : progress.whole === null ? null : fmtPercent(progress.whole);
   return [where, share].filter(Boolean).join(" · ");
-}
-
-/** What orx quoted before launch: about how long, the range and what it goes by, and what it may cost. */
-export function quoteWords(quote: Quote): { eta: string; detail: string; cost: string } {
-  const { from } = quote;
-  const source = from.kind === "earlier_run" ? m.run_quote_from_earlier({ n: ltr(fmtNumber(from.runNo)), hw: ltr(from.hardware) })
-    : from.kind === "parent_same_hw" ? m.run_quote_parent({ hw: ltr(from.hardware) })
-    : from.kind === "parent_other_hw" ? m.run_quote_parent_other({ hw: ltr(from.hardware) })
-    : from.kind === "agent" ? m.run_quote_agent()
-    : m.run_quote_none();
-  const { loMs: lo, hiMs: hi } = quote;
-  const cost = quote.usd ? m.run_cost_range({ lo: usdText(quote.usd[0]), hi: usdText(quote.usd[1]) })
-    : quote.spendCap !== null ? m.run_quote_spend_cap({ cost: usdText(quote.spendCap) })
-    : "";
-  if (lo === null || hi === null) return { eta: m.run_eta_none(), detail: source, cost };
-  return {
-    eta: m.run_eta_about({ duration: durationText((lo + hi) / 2) }),
-    detail: m.run_quote_range({ lo: durationText(lo), hi: durationText(hi), source }),
-    cost,
-  };
 }
 
 /** Time left and its detail, counted down from when the server estimated it. */

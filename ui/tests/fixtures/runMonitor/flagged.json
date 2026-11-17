@@ -97,8 +97,6 @@
   },
   "limit": null,
   "cost": null,
-  "quote": null,
-  "before": null,
   "watch": {
     "state": "on",
     "model": "haiku",

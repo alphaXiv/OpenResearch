@@ -615,7 +615,7 @@ test("an unresolved flag stays visible after completion and announces that the r
 test("the row reserves its headline before chart points and returns to one line when done", async () => {
   const setup = { ...running, sentence: null, setup: { stage: "Download", line: null, startsAt: now + 60_000 }, series: {}, latest: {}, headline: null,
     phases: [{ name: "Download", of: 9, unit: "shards", priorMs: null, startedAt: now, endedAt: null }],
-    progress: { ...running.progress, phase: 0, done: 4, whole: null, segments: [{ name: "Download", weight: 1, fill: 4 / 9 }] } };
+    progress: { ...running.progress, phase: 0, done: 4, whole: null, segments: [{ weight: 1, fill: 4 / 9 }] } };
   backend({ monitors: { r1: setup } });
   const workspace = createWorkspace("test");
   const view = await banner([run("r1")], { workspace });

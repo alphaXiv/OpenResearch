@@ -1541,7 +1541,7 @@ pub(crate) fn set(
     Ok(answer)
 }
 
-/// `POST /api/runs/:id/view/check`: checks `markup`, or the view its experiment saved, against
+/// `POST /api/v2/runs/:id/view/check`: checks `markup`, or the view its experiment saved, against
 /// what the run reported, and says what it reported.
 pub(crate) fn check(
     store: &crate::store::Store,

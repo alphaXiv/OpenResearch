@@ -273,8 +273,6 @@ fn dashboard_routes(api: Arc<Api>) -> Router {
         .route("/api/runs/{id}/monitor", get(monitor))
         .route("/api/runs/{id}/look", post(look_now))
         .route("/api/runs/{id}/flag", post(dashboard_choose_flag))
-        .route("/api/runs/{id}/view/check", post(check_view))
-        .route("/api/runs/{id}/view/show", get(show_view))
         .route("/api/experiments/{id}/view", get(view).put(set_view))
         .route("/api/runs/{id}/abandon", post(dashboard_abandon))
         .route("/api/runs/{id}/cleanup", post(cleanup))
@@ -1463,7 +1461,7 @@ struct CheckBody {
 /// The most of a run's log `orx exp view check` reads with patterns.
 const CHECK_BYTES: u64 = 64 * 1024 * 1024;
 
-/// `POST /api/runs/:id/view/check`: checks a view, or the saved one, against what the run
+/// `POST /api/v2/runs/:id/view/check`: checks a view, or the saved one, against what the run
 /// reported; with patterns, given or saved, against what they read from the run's log now.
 async fn check_view(
     State(api): State<Arc<Api>>,
@@ -1608,14 +1606,12 @@ async fn inspect_view(api: Arc<Api>, id: String, body: CheckBody, show: bool) ->
 
 #[derive(Deserialize)]
 struct MonitorQuery {
-    cursor: Option<String>,
     series: Option<String>,
     after: Option<f64>,
     limit: Option<usize>,
 }
 
-/// `GET /api/runs/:id/monitor`: the run's whole monitor at one `rev`, bounded and paged by
-/// cursor, or one series' history with `?series=`.
+/// `GET /api/runs/:id/monitor`: the run's whole monitor at one `rev`, or one series' history with `?series=`.
 async fn monitor(
     State(api): State<Arc<Api>>,
     Path(id): Path<String>,
@@ -1658,43 +1654,13 @@ async fn monitor(
             ),
         };
     }
-    let basis = format!(
-        "{}.{}",
-        monitor["generation"].as_str().unwrap_or_default(),
-        monitor["seriesRev"]
-    );
-    let page = match query
-        .cursor
-        .as_deref()
-        .map(|cursor| cursor.rsplit_once('.'))
-    {
-        None => 0,
-        Some(Some((pinned, page))) if pinned == basis => page.parse().unwrap_or(0),
-        Some(_) => {
-            return (
-                StatusCode::CONFLICT,
-                Json(json!({
-                    "error": "This run's series changed since the first page; read it again.",
-                    "reset": true,
-                    "generation": monitor["generation"],
-                    "rev": monitor["rev"],
-                })),
-            )
-                .into_response()
-        }
-    };
-    if page == 0
-        && headers
-            .get(axum::http::header::IF_NONE_MATCH)
-            .is_some_and(|tag| tag.as_bytes() == etag.as_bytes())
+    if headers
+        .get(axum::http::header::IF_NONE_MATCH)
+        .is_some_and(|tag| tag.as_bytes() == etag.as_bytes())
     {
         return (StatusCode::NOT_MODIFIED, [(axum::http::header::ETAG, etag)]).into_response();
     }
-    let rev = monitor["rev"].clone();
-    let (mut body, next) = crate::engine::monitor::bounded(monitor, page);
-    if next.is_some() || page > 0 {
-        body["page"] = json!({"next": next.map(|next| format!("{basis}.{next}")), "rev": rev});
-    }
+    let body = crate::engine::monitor::bounded(monitor);
     ([(axum::http::header::ETAG, etag)], Json(body)).into_response()
 }
 
