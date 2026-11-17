@@ -146,9 +146,6 @@ export interface Run {
 
 export class RejectedResponseError extends Error {}
 
-/** OpenCode 1 can't do this; updating it or using OpenResearch's copy can. */
-export class OpenCode1Error extends RejectedResponseError {}
-
 /** Why a model server listed no models: nothing answered, it wants an API key, or it has no models. */
 export class UnlistedError extends RejectedResponseError {
   constructor(message: string, readonly code: "unreachable" | "needsKey" | "noModels") {
@@ -198,6 +195,8 @@ export interface UiState {
   opencodeFreeModels: boolean;
   /** Whether a cheap model looks at runs; absent from an older server, which has no watcher. */
   runWatching?: boolean;
+  /** The `provider/model` that reviews OpenCode's Auto requests; null is the chat's own. */
+  opencodeReviewModel: string | null;
   /** The model families the picker lists first. */
   favoriteModels: string[];
   /** Models turned off in Settings, by {@link ModelName.key}: the picker hides them and agents can't delegate to them. */
@@ -207,19 +206,32 @@ export interface UiState {
   /** The picker's lab sections in the user's order; labs it doesn't name follow in the picker's own. */
   modelSectionOrder: string[];
   collapsedModelSections: string[];
-  modelSightings: ModelSightings | null;
   /** How much of one run shows above the composer; absent from an older server, which doesn't keep it. */
   runBanner?: RunBannerLevel;
+  /** The model feed nudges the user dismissed, by id. Absent from a server too old to keep them. */
+  seenNudges?: string[];
 }
 
-/** What the model picker has seen, to tell a model an agent newly offers from one that came with a newly added agent. */
-export interface ModelSightings {
-  /** The agents whose models were seen, by `PickerAgent.key`. */
-  agents: string[];
-  /** Each model seen, by line key: when it first appeared as new, or 0 for one that was there already. */
-  models: Record<string, number>;
-  /** When the picker was last opened. */
-  openedAt: number;
+/** What openresearch.sh features in the model picker, as `orx up` last fetched it. */
+export interface ModelFeed {
+  /** OpenCode model ids (`provider/model`) the picker's Free section lists first, in this order. */
+  featured: { model: string }[];
+  nudge: ModelNudge | null;
+  /** The day (`YYYY-MM-DD`) each model came out, by line key, for those released lately. Absent from an older `orx up`. */
+  releases?: Record<string, string>;
+}
+
+export interface ModelNudge {
+  /** What dismissing it records. */
+  id: string;
+  model: string;
+  kind: "new" | "trial";
+  /** A trial's last free day, `YYYY-MM-DD`. */
+  until?: string;
+  /** Replaces the line orx writes under the model's name. */
+  message?: string;
+  /** Hex colors of its gradient, and of its model mark; the text color when `icon` is absent. */
+  colors: { from: string; to: string; icon?: string };
 }
 
 export type RunBannerLevel = "line" | "strip";
@@ -272,6 +284,10 @@ export interface PaperHit {
 export interface ResolvedPaper {
   paperId: string;
   title?: string | null;
+  /** Full names in byline order. */
+  authors?: string[];
+  /** First publication, in Unix milliseconds. */
+  publishedAt?: number;
   repoUrl?: string | null;
   repoStars?: number | null;
 }
@@ -855,6 +871,25 @@ export interface TrackioRuns {
   dashboardSign: string | null;
 }
 
+export interface TrackioPoint {
+  step: number;
+  value: number;
+}
+
+export interface TrackioMetric {
+  name: string;
+  first: TrackioPoint;
+  last: TrackioPoint;
+  /** Evenly spaced points, first and last included. */
+  series: TrackioPoint[];
+}
+
+/** What one run logged to Trackio; `errors` holds what could not be read. */
+export interface TrackioRunMetrics {
+  metrics: TrackioMetric[];
+  errors: string[];
+}
+
 export interface TrackioPreflight {
   reachable: boolean;
   version: string | null;
@@ -1085,7 +1120,9 @@ type UiEvent =
   | { name: "onboarding_step_viewed"; step: OnboardingStep }
   | { name: "demo_experiment_started"; kind: "curated" | "run"; experiment: string }
   | { name: "project_starter_clicked"; slot: number }
-  | { name: "first_action"; surface: FirstActionSurface; action: FirstAction };
+  | { name: "first_action"; surface: FirstActionSurface; action: FirstAction }
+  | { name: "model_callout"; kind: "release" | "free"; action: "shown" | "opened" | "dismissed"; model: string; harness: string }
+  | { name: "model_picked"; section: "free" | "favorites" | "lab" | "older" | "search"; model: string; harness: string; new: boolean; free: boolean };
 
 export type HarnessId =
   | "claude-code"
@@ -1119,14 +1156,20 @@ export interface HarnessModel {
   serviceTiers?: OptionChoice[];
   /** Whether the model accepts images; absent when the catalog doesn't say. */
   imageInput?: boolean;
-  /** Its id names a free tier. */
+  /** Its id names a free tier, or a model the feed hosts. */
   free?: boolean;
+  /** The image the model feed gives a model it hosts, in place of the mark matched from its name. */
+  icon?: { type: "image/png" | "image/webp"; data: string };
   parsed: ModelName;
 }
 
-/** What an offer adds to its model: Cursor's and Antigravity's effort, speed and thinking, Claude Code's long context. */
+/** What an offer adds to its model: Cursor's and Antigravity's effort, any catalog's speed and thinking tiers, Claude
+ * Code's long context. */
 export interface ModelVariant {
   effort: string | null;
+  /** `flex`, `fast` or `ultrafast`; null for the standard tier. */
+  speed: string | null;
+  /** `speed` is `fast`, as servers before `speed` say it. */
   fast: boolean;
   thinking: boolean;
   context: string | null;
@@ -1146,6 +1189,8 @@ export interface ModelName {
   variant: ModelVariant;
   /** How far the catalog's name is from its model's plain variant; a tile runs the lowest by default. */
   variantRank: number;
+  /** A moving alias (`mistral-large-latest`) whose catalog also lists the versions it moves between. */
+  superseded?: boolean;
 }
 
 /** Display label for a harness model: the catalog's own name when it has one,
@@ -1292,16 +1337,48 @@ export interface AgentProfile {
   id: string;
   name: string;
   icon?: AgentIcon;
+  /** The logo the user or an agent pinned; without one, the row's own. */
+  logo?: string;
+}
+
+/** A row's name, icon and pinned logo, as the user or an agent set them. */
+export interface AgentLabel {
+  name?: string;
+  icon?: AgentIcon;
+  logo?: string;
+}
+
+/** A provider set up in the user's own OpenCode, which no record of OpenResearch's stands for. */
+export interface FoundProvider {
+  /** OpenCode's provider id, the prefix of its models' ids. */
+  id: string;
+  /** The name its OpenCode config gives it. */
+  name?: string;
+  baseUrl?: string;
+  /** The AI SDK package its config runs it on. */
+  npm?: string;
+  /** Environment variables that hold its key. */
+  env?: string[];
+  sources: ("auth" | "config" | "env" | "catalog")[];
+  /** The OpenCode config file that defines it. */
+  configPath?: string;
+  /** Whether OpenResearch can delete it from the user's OpenCode. */
+  removable: boolean;
+  label?: AgentLabel;
 }
 
 export interface Harness {
   id: HarnessId;
   /** Set on the extra entry for each of OpenResearch's accounts; `id` stays the agent's. */
   profile?: AgentProfile;
-  /** The name and icon the user gave an agent found on this computer; never on a profile's entry. */
-  label?: { name?: string; icon?: AgentIcon };
-  /** The user turned this found agent off in Settings; on OpenCode, only the providers it signed in to itself. */
+  /** The name and icon the user gave an agent found on this computer, and its pinned logo; never on a profile's entry. */
+  label?: AgentLabel;
+  /** The user turned this agent or account off in Settings. On OpenCode, `offProviders` says which providers are. */
   off?: boolean;
+  /** On OpenCode: the providers set up in the user's own OpenCode. */
+  foundProviders?: FoundProvider[];
+  /** On OpenCode: the providers whose models the user turned off. */
+  offProviders?: string[];
   name: string;
   installed: boolean;
   /** On PATH, but `--version` failed — a broken install a reinstall repairs.
@@ -1652,6 +1729,8 @@ export interface ChatSession {
   /** The account the chat runs on, when it's one OpenResearch keeps. */
   profile?: string | null;
   harnessName?: string | null;
+  /** The saved ACP chat's client controls, independent of the current catalog. */
+  harnessOptions?: HarnessOptions | null;
   nativeConfiguration?: unknown;
   /** The models an ACP agent's live configuration offers, when it offers any. */
   nativeModels?: HarnessModel[] | null;
@@ -1862,6 +1941,7 @@ export interface LocalModelConnection {
   id: string;
   name: string;
   icon?: AgentIcon;
+  logo?: string;
   baseUrl: string;
   hasApiKey: boolean;
   models: Record<string, number>;
@@ -1877,6 +1957,7 @@ export interface OpenCodeProvider {
   keyEnding?: string;
   name: string;
   icon?: AgentIcon;
+  logo?: string;
 }
 
 /** A provider OpenCode can sign in to, and how. */
@@ -1998,7 +2079,6 @@ export function createApi(
                 : null;
             throw new FileChangedError(message, currentVersion, parsed.exists);
           }
-          if (res.status === 409 && "code" in parsed && parsed.code === "opencode1") throw new OpenCode1Error(message);
           if (res.status === 400 && "code" in parsed && (parsed.code === "unreachable" || parsed.code === "needsKey" || parsed.code === "noModels"))
             throw new UnlistedError(message, parsed.code);
           if (res.status === 400 && "fields" in parsed && typeof parsed.fields === "object" && parsed.fields !== null)
@@ -2104,6 +2184,8 @@ export function createApi(
 
   const getUiState = (signal?: AbortSignal) => get<UiState>("/api/settings/ui-state", signal);
 
+  const getModelFeed = (signal?: AbortSignal) => get<ModelFeed>("/api/model-feed", signal);
+
   const getProjectUiState = (projectId: string, signal?: AbortSignal) =>
     get<ProjectWorkspace | null>(`/api/projects/${encodeURIComponent(projectId)}/ui-state`, signal);
 
@@ -2119,14 +2201,16 @@ export function createApi(
     preferredAutonomy?: Autonomy;
     nestedDelegation?: boolean;
     opencodeFreeModels?: boolean;
+    /** Empty for the chat's own. */
+    opencodeReviewModel?: string;
     favoriteModels?: string[];
     hiddenModels?: string[];
     hiddenAgents?: string[];
     modelSectionOrder?: string[];
     collapsedModelSections?: string[];
-    modelSightings?: ModelSightings;
     runBanner?: RunBannerLevel;
     runWatching?: boolean;
+    seenNudges?: string[];
   }) => post<UiState>("/api/settings/ui-state", body);
 
   const completeOnboarding = (selection: OnboardingSelection) =>
@@ -2645,6 +2729,9 @@ export function createApi(
   const getTrackioRuns = (projectId: string, signal?: AbortSignal) =>
     get<TrackioRuns>(`/api/trackio/projects/${encodeURIComponent(projectId)}/runs`, signal);
 
+  const getTrackioRunMetrics = (projectId: string, runId: string, signal?: AbortSignal) =>
+    get<TrackioRunMetrics>(`/api/trackio/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(runId)}/metrics`, signal);
+
   const trackioPreflight = () => post<TrackioPreflight>("/api/settings/trackio/preflight", {});
 
   const getComputeSettings = (projectId?: string, signal?: AbortSignal) =>
@@ -2886,7 +2973,11 @@ export function createApi(
     if (retryRejected) params.set("retry", "1");
     if (harness) params.set("harness", harness);
     const query = params.size > 0 ? `?${params.toString()}` : "";
-    return get<{ harnesses: Harness[] }>(`/api/harnesses${query}`, signal).then((r) => r.harnesses);
+    return get<{ harnesses: Harness[] }>(`/api/harnesses${query}`, signal).then((r) => {
+      // A server from before speed tiers says only whether a model is fast.
+      for (const model of r.harnesses.flatMap((h) => h.models)) model.parsed.variant.speed ??= model.parsed.variant.fast ? "fast" : null;
+      return r.harnesses;
+    });
   };
 
   const listAcpHarnesses = () => get<AcpDefinition[]>("/api/harnesses/acp");
@@ -3119,7 +3210,7 @@ export function createApi(
    * Names a row of Settings → Agents, keyed as the picker keys it: an agent's or account's id, or `opencode:` and a
    * provider's or endpoint's id. `null` clears the icon, and a found agent's name back to its own.
    */
-  const updateAgent = (key: string, body: { name?: string | null; icon?: AgentIcon | null }) => patch<unknown>(`/api/agents/${encodeURIComponent(key)}`, body);
+  const updateAgent = (key: string, body: { name?: string | null; icon?: AgentIcon | null; logo?: string | null }) => patch<unknown>(`/api/agents/${encodeURIComponent(key)}`, body);
   const removeAgentProfile = (id: string) => writeResponse(`/api/agent-profiles/${encodeURIComponent(id)}`, { method: "DELETE" }).then((r) => json<unknown>(r));
 
   const getOpenCodeProviders = (signal?: AbortSignal) => get<OpenCodeProvider[]>("/api/opencode/providers", signal);
@@ -3127,6 +3218,8 @@ export function createApi(
   const addOpenCodeProvider = (body: { provider: string; apiKey: string; name: string; icon?: AgentIcon }) => post<{ id: string }>("/api/opencode/providers", body);
   const replaceOpenCodeProviderKey = (id: string, apiKey: string) => put<unknown>(`/api/opencode/providers/${encodeURIComponent(id)}/key`, { apiKey });
   const removeOpenCodeProvider = (id: string) => writeResponse(`/api/opencode/providers/${encodeURIComponent(id)}`, { method: "DELETE" }).then((r) => json<unknown>(r));
+  /** Deletes a provider from the user's own OpenCode: its sign-in and its config entry. */
+  const removeFoundProvider = (id: string) => writeResponse(`/api/opencode/found-providers/${encodeURIComponent(id)}`, { method: "DELETE" }).then((r) => json<unknown>(r));
   const getOpenCodeIntegrations = (signal?: AbortSignal) => get<OpenCodeIntegration[]>("/api/opencode/integrations", signal);
   const startOpenCodeSignIn = (body: { integration: string; method: string; name: string; icon?: AgentIcon; answer?: Record<string, OpenCodeAnswer> }) => post<OpenCodeSignIn>("/api/opencode/sign-in", body);
   const getOpenCodeSignIn = (attempt: string, signal?: AbortSignal) =>
@@ -3281,6 +3374,7 @@ export function createApi(
     saveRaySettings,
     rayPreflight,
     getTrackioRuns,
+    getTrackioRunMetrics,
     trackioPreflight,
     getComputeSettings,
     setComputeDefault,
@@ -3371,9 +3465,11 @@ export function createApi(
     updateAgent,
     removeAgentProfile,
     getOpenCodeProviders,
+    getModelFeed,
     addOpenCodeProvider,
     replaceOpenCodeProviderKey,
     removeOpenCodeProvider,
+    removeFoundProvider,
     getOpenCodeIntegrations,
     startOpenCodeSignIn,
     getOpenCodeSignIn,

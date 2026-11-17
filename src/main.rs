@@ -112,6 +112,10 @@ enum Command {
     /// Operate on one local experiment node.
     Exp(ExpArgs),
 
+    /// List the agents, accounts and model providers OpenResearch offers, name them, pin logos,
+    /// and add OpenAI-compatible endpoints. Runs from an OpenResearch chat.
+    Agents(AgentsArgs),
+
     /// Print CLI usage for agents, or fetch a skill doc.
     Skill(SkillArgs),
 
@@ -378,6 +382,15 @@ pub struct ComputeArgs {
     pub json: bool,
     #[command(flatten)]
     pub catalog: commands::compute::CatalogArgs,
+}
+
+#[derive(Args, Debug)]
+pub struct AgentsArgs {
+    #[command(subcommand)]
+    pub command: Option<commands::agents::AgentsCommand>,
+    /// Machine-readable output.
+    #[arg(long, global = true)]
+    pub json: bool,
 }
 
 #[derive(Args, Debug)]
@@ -1565,6 +1578,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Instance(_) => "instance",
         Command::SshKey(_) => "ssh-key",
         Command::Exp(_) => "exp",
+        Command::Agents(_) => "agents",
         Command::Skill(_) => "skill",
         Command::Skills(_) => "skills",
         Command::Templates(_) => "templates",
@@ -1621,6 +1635,7 @@ async fn dispatch(command: Command) -> error::Result<()> {
             SshKeyCommand::List => commands::ssh_key::list().await,
         },
         Command::Exp(args) => commands::exp::run(args).await,
+        Command::Agents(args) => commands::agents::run(args).await,
         Command::Skill(args) => commands::skill::run(args).await,
         Command::Skills(args) => commands::library::skills(args),
         Command::Templates(args) => commands::library::templates(args),
@@ -1660,6 +1675,7 @@ fn command_uses_lifecycle_lock(command: &Command) -> bool {
         Command::Login(_)
             | Command::Logout
             | Command::Alphaxiv(_)
+            | Command::Agents(_)
             | Command::InstallSkills(_)
             | Command::Discover(_)
             | Command::Paper(_)

@@ -699,17 +699,16 @@ pub struct ReadyChatSubscription {
 const CHAT_SUBSCRIPTION_CLAIM_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Each subscription with its target's latest turn and whether the target is
-/// idle after it: done, and with nothing queued unless a stop held the queue.
+/// idle after it: done, with nothing queued.
 const LATEST_SUBSCRIBED_TURNS: &str = "subscribed AS (
     SELECT s.subscriber_session_id, s.target_session_id, s.paused, s.told_turn_id,
            s.told_prompt_id, s.claim_token, s.claimed_at, s.created_at,
            t.id AS turn_id, t.state,
            t.assistant_message_id, t.updated_at,
-           t.state = 'interrupted'
-               OR (t.state IN ('completed', 'failed') AND NOT EXISTS (
-                   SELECT 1 FROM chat_queued_messages q
-                   WHERE q.session_id = s.target_session_id
-               )) AS idle
+           t.state IN ('completed', 'failed', 'interrupted') AND NOT EXISTS (
+               SELECT 1 FROM chat_queued_messages q
+               WHERE q.session_id = s.target_session_id
+           ) AS idle
     FROM chat_subscriptions s
     LEFT JOIN chat_turns t ON t.id = (
         SELECT id FROM chat_turns WHERE session_id = s.target_session_id
@@ -1540,6 +1539,7 @@ impl Store {
             "ALTER TABLE runs ADD COLUMN notify_cursor TEXT",
             "ALTER TABLE runs ADD COLUMN started_at INTEGER",
             "ALTER TABLE ui_state ADD COLUMN opencode_free_models INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE ui_state ADD COLUMN opencode_review_model TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN profile_id TEXT",
             "ALTER TABLE ui_state ADD COLUMN preferred_profile TEXT",
             "ALTER TABLE ui_state ADD COLUMN favorite_models TEXT",
@@ -1555,6 +1555,7 @@ impl Store {
             "ALTER TABLE chat_usage_samples ADD COLUMN cost_micros INTEGER",
             "ALTER TABLE chat_usage_samples ADD COLUMN cost_currency TEXT",
             "ALTER TABLE chat_usage_samples ADD COLUMN recorded_at INTEGER",
+            "ALTER TABLE ui_state ADD COLUMN seen_nudges TEXT",
         ] {
             let _ = schema.execute(ddl, []);
         }
@@ -1672,7 +1673,7 @@ impl Store {
         );
         let _ = conn.execute(
             "UPDATE chat_sessions
-             SET plan_mode = 1, permission_mode = 'default'
+             SET plan_mode = 1, permission_mode = 'auto-approve'
              WHERE harness = 'opencode' AND permission_mode = 'plan'",
             [],
         );
@@ -1685,11 +1686,11 @@ impl Store {
             ("codex", "bypass", "full-access"),
             ("codex", "accept-edits", "ask"),
             ("codex", "acceptEdits", "ask"),
-            ("opencode", "auto", "default"),
+            ("opencode", "default", "auto-approve"),
             ("opencode", "bypass", "auto-approve"),
-            ("opencode", "ask", "default"),
-            ("opencode", "accept-edits", "default"),
-            ("opencode", "acceptEdits", "default"),
+            ("opencode", "ask", "auto-approve"),
+            ("opencode", "accept-edits", "auto-approve"),
+            ("opencode", "acceptEdits", "auto-approve"),
         ] {
             let _ = conn.execute(
                 "UPDATE chat_sessions SET permission_mode = ?3
@@ -1712,10 +1713,10 @@ impl Store {
             [],
         );
         let _ = conn.execute(
-            "UPDATE chat_sessions SET permission_mode = 'default'
+            "UPDATE chat_sessions SET permission_mode = 'auto-approve'
              WHERE harness = 'opencode'
                AND (permission_mode IS NULL OR permission_mode NOT IN
-                    ('default', 'auto-approve'))",
+                    ('manual', 'auto', 'auto-approve'))",
             [],
         );
         // Seed before normalizing preferences: on the first open of an older
@@ -1744,7 +1745,7 @@ impl Store {
             [],
         );
         let _ = conn.execute(
-            "UPDATE ui_state SET preferred_permission_mode = 'default'
+            "UPDATE ui_state SET preferred_permission_mode = 'auto-approve'
              WHERE preferred_harness = 'opencode' AND preferred_permission_mode = 'plan'",
             [],
         );
@@ -1760,7 +1761,7 @@ impl Store {
             ("claude-code", "bypass", "bypassPermissions"),
             ("codex", "auto", "approve-for-me"),
             ("codex", "bypass", "full-access"),
-            ("opencode", "auto", "default"),
+            ("opencode", "default", "auto-approve"),
             ("opencode", "bypass", "auto-approve"),
         ] {
             let _ = conn.execute(
@@ -1783,9 +1784,9 @@ impl Store {
             [],
         );
         let _ = conn.execute(
-            "UPDATE ui_state SET preferred_permission_mode = 'default'
+            "UPDATE ui_state SET preferred_permission_mode = 'auto-approve'
              WHERE preferred_harness = 'opencode'
-               AND preferred_permission_mode NOT IN ('default', 'auto-approve')",
+               AND preferred_permission_mode NOT IN ('manual', 'auto', 'auto-approve')",
             [],
         );
         // NOTE: `reasoning_level` deliberately has NO migration for issue #123,
@@ -1839,7 +1840,8 @@ impl Store {
                     preferred_autonomy, nested_delegation, opencode_free_models, preferred_profile,
                     favorite_models, hidden_models, model_section_order,
                     collapsed_model_sections, model_sightings, hidden_agents,
-                    run_banner, experiments_grid, run_watching
+                    run_banner, experiments_grid, run_watching, seen_nudges,
+                    opencode_review_model
              FROM ui_state WHERE id = 1",
             [],
             |row| {
@@ -1876,6 +1878,7 @@ impl Store {
                         .and_then(Autonomy::from_id),
                     nested_delegation: row.get(9)?,
                     opencode_free_models: row.get(10)?,
+                    opencode_review_model: row.get(22)?,
                     favorite_models: list(12)?,
                     hidden_models: list(13)?,
                     hidden_agents: list(17)?,
@@ -1888,6 +1891,7 @@ impl Store {
                         .unwrap_or(RunBannerLevel::Strip),
                     experiments_grid: row.get(19)?,
                     run_watching: row.get(20)?,
+                    seen_nudges: list(21)?,
                 })
             },
         )?)
@@ -1974,6 +1978,14 @@ impl Store {
         self.conn.execute(
             &format!("UPDATE ui_state SET {column} = ?1 WHERE id = 1"),
             params![serde_json::to_string(value)?],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_opencode_review_model(&self, model: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE ui_state SET opencode_review_model = ?1 WHERE id = 1",
+            params![model],
         )?;
         Ok(())
     }
@@ -2120,17 +2132,16 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    /// What quitting would interrupt or leave unreported.
-    pub(crate) fn pending_work(&self) -> Result<PendingWork> {
+    /// What quitting would interrupt or leave unreported, given the chats with a turn in this process.
+    pub(crate) fn pending_work(&self, working: &[String]) -> Result<PendingWork> {
         let mut statement = self.conn.prepare(
             "SELECT s.project_id, p.name, s.id, s.side_parent_session_id, s.harness, NULLIF(TRIM(s.title), '')
              FROM chat_sessions s LEFT JOIN local_projects p ON p.id = s.project_id
-             WHERE EXISTS(SELECT 1 FROM chat_turns t WHERE t.session_id = s.id
-                          AND t.state IN ('preparing', 'retrying', 'running'))
+             WHERE s.id IN (SELECT value FROM json_each(?1))
              ORDER BY s.updated_at DESC",
         )?;
         let agents = statement
-            .query_map([], |row| {
+            .query_map([serde_json::to_string(working)?], |row| {
                 Ok(PendingAgent {
                     project_id: row.get(0)?,
                     project: row.get(1)?,
@@ -5754,6 +5765,8 @@ pub struct StoredUiState {
     pub nested_delegation: bool,
     /// Whether OpenCode's free models are offered beside the user's own.
     pub opencode_free_models: bool,
+    /// The `provider/model` that reviews OpenCode's Auto requests; none means the chat's own.
+    pub opencode_review_model: Option<String>,
     /// The model families the picker lists first, by the key the picker gives each.
     pub favorite_models: Vec<String>,
     /// Models turned off in the picker and for delegates: a canonical id, plus `:free` for its free tier.
@@ -5768,6 +5781,8 @@ pub struct StoredUiState {
     pub experiments_grid: bool,
     /// Whether the watcher looks at runs; off, nothing is sent to a model.
     pub run_watching: bool,
+    /// The ids of model feed nudges the user dismissed.
+    pub seen_nudges: Vec<String>,
 }
 
 /// Normalized transcript entry; `parts_json` is the wire-format parts array
@@ -8480,7 +8495,7 @@ mod tests {
             )
             .unwrap();
 
-        let pending = store.pending_work().unwrap();
+        let pending = store.pending_work(&[]).unwrap();
         assert!(pending.agents.is_empty());
         assert!(pending.blocks_quit());
         let fates = pending
@@ -8509,12 +8524,6 @@ mod tests {
                         ('side', 'project', 'claude-code', '  ', 1, 2),
                         ('idle', 'project', 'codex', 'Done', 1, 3);
                  UPDATE chat_sessions SET side_parent_session_id = 'chat' WHERE id = 'side';
-                 INSERT INTO chat_turns (id, session_id, assistant_message_id, client_turn_id, request_hash,
-                                         prepared_input, settings_json, state, delivery_state, created_at, updated_at)
-                 VALUES ('t1', 'chat', 'a1', 'c1', 'h', '', '{}', 'running', 'pending', 1, 1),
-                        ('t2', 'chat', 'a2', 'c2', 'h', '', '{}', 'preparing', 'pending', 1, 1),
-                        ('t3', 'side', 'a3', 'c3', 'h', '', '{}', 'retrying', 'pending', 1, 1),
-                        ('t4', 'idle', 'a4', 'c4', 'h', '', '{}', 'completed', 'delivered', 1, 1);
                  INSERT INTO local_experiments (id, project_id, slug, branch_name, title, run_command,
                                                 created_at, updated_at, chat_session_id)
                  VALUES ('experiment', 'project', 'lr-sweep', 'b', '', 'python train.py', 1, 1, 'chat');
@@ -8523,7 +8532,8 @@ mod tests {
             )
             .unwrap();
 
-        let pending = store.pending_work().unwrap();
+        let working = ["chat".to_string(), "side".to_string()];
+        let pending = store.pending_work(&working).unwrap();
         assert_eq!(
             pending.agents,
             [
@@ -8578,7 +8588,7 @@ mod tests {
         store
             .insert_run_notice("run", "owner", TERMINAL, TERMINAL, "done", 1)
             .unwrap();
-        let pending = store.pending_work().unwrap();
+        let pending = store.pending_work(&[]).unwrap();
         assert_eq!(pending.runs[0].after_quit, AfterQuit::Reports);
         assert!(!pending.blocks_quit());
         assert_eq!(store.run_notice_error("run").unwrap(), None);
@@ -8592,7 +8602,7 @@ mod tests {
                 20,
             )
             .unwrap();
-        assert!(store.pending_work().unwrap().is_empty());
+        assert!(store.pending_work(&[]).unwrap().is_empty());
         assert_eq!(
             store.run_notice_error("run").unwrap().as_deref(),
             Some("harness removed")
@@ -11862,6 +11872,7 @@ mod tests {
                 preferred_autonomy: None,
                 nested_delegation: false,
                 opencode_free_models: true,
+                opencode_review_model: None,
                 favorite_models: Vec::new(),
                 hidden_models: Vec::new(),
                 hidden_agents: Vec::new(),
@@ -11871,6 +11882,7 @@ mod tests {
                 run_banner: RunBannerLevel::Strip,
                 experiments_grid: false,
                 run_watching: true,
+                seen_nudges: Vec::new(),
             }
         );
 
@@ -11886,6 +11898,9 @@ mod tests {
         store.set_tour_completed(true).unwrap();
         store.set_preferred_agent(&selection).unwrap();
         store.set_preferred_autonomy(Autonomy::Copilot).unwrap();
+        store
+            .set_opencode_review_model(Some("openai/gpt-6-mini"))
+            .unwrap();
         store
             .set_ui_json("favorite_models", &["claude opus", "gpt sol"])
             .unwrap();
@@ -11906,6 +11921,9 @@ mod tests {
         store
             .set_ui_json("model_sightings", &serde_json::json!({"seen": ["gpt-6"]}))
             .unwrap();
+        store
+            .set_ui_json("seen_nudges", &["2026-11-12-c081d9e1"])
+            .unwrap();
 
         assert_eq!(
             store.ui_state().unwrap(),
@@ -11917,6 +11935,7 @@ mod tests {
                 preferred_autonomy: Some(Autonomy::Copilot),
                 nested_delegation: false,
                 opencode_free_models: true,
+                opencode_review_model: Some("openai/gpt-6-mini".into()),
                 favorite_models: vec!["claude opus".into(), "gpt sol".into()],
                 hidden_models: vec!["gpt-6".into(), "deepseek-r1:free".into()],
                 hidden_agents: vec!["codex".into()],
@@ -11926,6 +11945,7 @@ mod tests {
                 run_banner: RunBannerLevel::Strip,
                 experiments_grid: false,
                 run_watching: true,
+                seen_nudges: vec!["2026-11-12-c081d9e1".into()],
             }
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -12069,8 +12089,12 @@ mod tests {
                 ("codex_bypass", "codex", "bypass"),
                 ("codex_invalid", "codex", "retired-mode"),
                 ("open_plan", "opencode", "plan"),
+                ("open_default", "opencode", "default"),
+                ("open_ask", "opencode", "ask"),
+                ("open_manual", "opencode", "manual"),
                 ("open_auto", "opencode", "auto"),
                 ("open_bypass", "opencode", "bypass"),
+                ("open_invalid", "opencode", "retired-mode"),
             ] {
                 let mut session = chat_session_fixture(id);
                 session.harness = harness.into();
@@ -12090,9 +12114,13 @@ mod tests {
         assert_eq!(state("codex_auto"), ("approve-for-me".into(), false));
         assert_eq!(state("codex_bypass"), ("full-access".into(), false));
         assert_eq!(state("codex_invalid"), ("approve-for-me".into(), false));
-        assert_eq!(state("open_plan"), ("default".into(), true));
-        assert_eq!(state("open_auto"), ("default".into(), false));
+        assert_eq!(state("open_plan"), ("auto-approve".into(), true));
+        assert_eq!(state("open_default"), ("auto-approve".into(), false));
+        assert_eq!(state("open_ask"), ("auto-approve".into(), false));
+        assert_eq!(state("open_manual"), ("manual".into(), false));
+        assert_eq!(state("open_auto"), ("auto".into(), false));
         assert_eq!(state("open_bypass"), ("auto-approve".into(), false));
+        assert_eq!(state("open_invalid"), ("auto-approve".into(), false));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -190,7 +190,7 @@ export function ExperimentsTable({
                   <Tooltip interactive content={m.experiments_stop_run()}>
                     <IconButton
                       size="small"
-                      variant="stop"
+                      variant="filled"
                       aria-label={m.common_stop()}
                       onClick={() => void requestCancel(liveRun.id)}
                     >

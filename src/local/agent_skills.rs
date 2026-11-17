@@ -216,13 +216,13 @@ const S_CREATE: AgentSkill = AgentSkill {
 };
 const S_REPORTS: AgentSkill = AgentSkill {
     name: "orx-reports",
-    description: "Save and organize durable research outputs in the artifacts directory. Invoke when creating or reorganizing a report, exported dataset, or other deliverable; use `orx-results` for analysis and `orx-figures` when constructing charts.",
+    description: "Write and organize durable outputs in the artifacts directory. Use before creating or organizing artifacts, including reports, summaries, and figures.",
     content: REPORTS,
     resources: &[],
 };
 const S_CUSTOMIZE: AgentSkill = AgentSkill {
     name: "orx-customize",
-    description: "Save reusable skills and LaTeX templates with `orx skills add` and `orx templates add`. Use when the user asks to create, import, or add a skill or template to OpenResearch for use across projects.",
+    description: "Save reusable skills and LaTeX templates with `orx skills add` and `orx templates add`, and add or present agents and model providers with `orx agents`. Use when the user asks to create, import, or add a skill or template to OpenResearch for use across projects, or to add, name or fix how an agent, provider or model endpoint shows in OpenResearch.",
     content: CUSTOMIZE,
     resources: &[],
 };

@@ -4,6 +4,6 @@ export const model = (id, displayName, parsed = {}) => ({
   ...(displayName && { displayName }),
   parsed: {
     key: id, family: id, series: id, version: null, label: displayName ?? id,
-    variant: { effort: null, fast: false, thinking: false, context: null }, variantRank: 0, ...parsed,
+    variant: { effort: null, speed: null, fast: false, thinking: false, context: null }, variantRank: 0, ...parsed,
   },
 });

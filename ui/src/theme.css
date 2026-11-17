@@ -82,6 +82,10 @@
   --color-danger-hover: color-mix(in oklab, var(--accent-red) 8%, transparent);
   --color-danger-active: color-mix(in oklab, var(--accent-red) 14%, transparent);
   --color-plan-caret: color-mix(in oklab, var(--base) 35%, var(--text));
+  /* The model feed's nudge, tinted by the `--nudge-from` and `--nudge-to` colors the feed sets. */
+  --color-nudge-start: color-mix(in oklab, var(--nudge-from) 18%, var(--base));
+  --color-nudge-middle: color-mix(in oklab, var(--nudge-to) 9%, var(--base));
+  --color-nudge-edge: color-mix(in oklab, var(--nudge-from) 32%, var(--border));
   --color-image-backdrop: rgb(23 23 23 / 85%);
   --color-modal-backdrop: rgb(23 23 23 / 42%);
   --color-modal-backdrop-light: rgb(23 23 23 / 40%);
@@ -126,6 +130,7 @@
   --shadow-file-line: inset 2px 0 0 var(--accent-blue);
   --shadow-diff-active: inset 2px 0 0 var(--text);
   --shadow-selected: 0 0 0 1px var(--text);
+  --shadow-nudge: 0 6px 20px -8px color-mix(in oklab, var(--nudge-from) 45%, transparent), 0 1px 2px rgb(0 0 0 / 8%);
 
   --font-sans: var(--sans);
   --font-mono: var(--mono);

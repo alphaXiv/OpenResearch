@@ -4344,7 +4344,9 @@ fn user_input_reply(prompt: &WirePrompt, answer: &PromptAnswer) -> Result<Value>
     }
     let note = answer.note.as_deref().filter(|s| !s.trim().is_empty());
     let mut selected: Vec<String> = if !answer.answers.is_empty() {
-        answer.answers.clone()
+        // Marked so the model does not read the note as one more choice.
+        let noted = note.map(|note| format!("user_note: {note}"));
+        answer.answers.iter().cloned().chain(noted).collect()
     } else if let Some(note) = note {
         vec![note.to_string()]
     } else if !answer.annotations.is_empty() {
@@ -7367,6 +7369,14 @@ requires_openai_auth = false
             serde_json::json!(["red"])
         );
         assert_eq!(reply["answers"]["q2"]["answers"], serde_json::json!([]));
+
+        // A note typed beside a choice travels with it.
+        let reply =
+            user_input_reply(&prompt, &answer(true, None, &["red"], Some("darker"))).unwrap();
+        assert_eq!(
+            reply["answers"]["q1"]["answers"],
+            serde_json::json!(["red", "user_note: darker"])
+        );
 
         // Note-only (freeform) answers the surfaced id.
         let reply = user_input_reply(&prompt, &answer(true, None, &[], Some("teal"))).unwrap();

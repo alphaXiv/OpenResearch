@@ -126,6 +126,14 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, events:
     refetchInterval: live ? 15_000 : false,
   });
 
+  const getTrackioRunMetricsQuery = (projectId: string, runId: string, live: boolean) => queryOptions({
+    // Keyed by liveness too, so a run that just ended reads its final values once.
+    queryKey: workspaceKey("getTrackioRunMetrics", projectId, runId, live),
+    queryFn: ({ signal }) => api.getTrackioRunMetrics(projectId, runId, signal),
+    staleTime: live ? 15_000 : 300_000,
+    refetchInterval: live ? 30_000 : false,
+  });
+
   /** Also refetches once a run ends: Trackio flushes on `finish()`, after the last poll. */
   function useTrackioRuns(projectId: string, live: boolean) {
     const query = useQuery(getTrackioRunsQuery(projectId, live));
@@ -327,6 +335,14 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, events:
     staleTime: 30_000,
   });
 
+  const getModelFeedQuery = () => queryOptions({
+    queryKey: workspaceKey("getModelFeed"),
+    queryFn: ({ signal }) => api.getModelFeed(signal),
+    // `orx up` replaces the feed in the background, the first time before the page may have read it.
+    staleTime: 300_000,
+    refetchInterval: 300_000,
+  });
+
   const reportLocaleQuery = (locale: string) => queryOptions({
     queryKey: workspaceKey("reportLocale", locale),
     queryFn: ({ signal }) => api.reportLocale(locale, signal),
@@ -356,6 +372,7 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, events:
     getEnvVarsQuery,
     getTrackioRunsQuery,
     useTrackioRuns,
+    getTrackioRunMetricsQuery,
     getDataDirQuery,
     getSshSettingsQuery,
     setEngineHost,
@@ -385,6 +402,7 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, events:
     readHarnesses,
     getLocalModelsQuery,
     getOpenCodeProvidersQuery,
+    getModelFeedQuery,
     reportLocaleQuery,
   };
 }

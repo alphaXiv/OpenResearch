@@ -31,7 +31,7 @@ async function requestClose(work, minimizes = false) {
   const sent = [];
   window.ipc = { postMessage: (message) => sent.push(message) };
   pending = work;
-  serveApp({ "GET /api/pending-work": () => pending ?? undefined });
+  serveApp({ "GET /api/pending-work": () => pending });
   await renderApp("/");
   await ask(work, minimizes);
   return sent;
@@ -117,13 +117,6 @@ test("opening a listed item cancels the close and shows it", async () => {
   await settle();
   assert.equal(location.pathname + location.search, taskLocation("project", "chat", { kind: "side", sessionId: "side" }));
   assert.deepEqual(sent.filter((message) => message.startsWith("close:")), ["close:asking", "close:cancel", "close:asking", "close:cancel"]);
-});
-
-test("work that could not be counted says so and still lets the user quit", async () => {
-  const sent = await requestClose(null);
-  assert.ok(dialog().textContent.includes(m.close_pending_uncounted()));
-  await click(m.close_pending_quit());
-  assert.deepEqual(sent, ["close:asking", "close:quit"]);
 });
 
 test("keeping the work running is named for what the window does", async () => {

@@ -398,8 +398,9 @@ impl PendingPrompt {
     }
 }
 
-/// Claude's approval bridge puts each card in an assistant message of its own
-/// beside the turn's, so every message since the turn began is searched.
+/// The oldest open card. Claude's approval bridge puts each card in an
+/// assistant message of its own beside the turn's, so every message since the
+/// turn began is searched.
 pub fn pending_prompt(store: &Store, session_id: &str) -> Result<Option<PendingPrompt>> {
     let Some(turn) = store.latest_chat_turn(session_id)? else {
         return Ok(None);
@@ -408,7 +409,7 @@ pub fn pending_prompt(store: &Store, session_id: &str) -> Result<Option<PendingP
     messages
         .retain(|message| message.role == "assistant" && message.id != turn.assistant_message_id);
     messages.extend(store.get_chat_message(&turn.assistant_message_id)?);
-    Ok(messages.iter().rev().find_map(|message| {
+    Ok(messages.iter().find_map(|message| {
         stored_to_wire(message).parts.into_iter().find_map(|part| {
             let prompt = part.prompt.filter(|prompt| !prompt.resolved)?;
             Some(PendingPrompt {
@@ -768,10 +769,16 @@ mod tests {
         for (parent, mode, child, expected) in [
             ("claude-code", "acceptEdits", "codex", "ask"),
             ("claude-code", "auto", "codex", "approve-for-me"),
-            ("claude-code", "auto", "opencode", "auto-approve"),
+            ("claude-code", "auto", "opencode", "auto"),
+            (
+                "claude-code",
+                "bypassPermissions",
+                "opencode",
+                "auto-approve",
+            ),
             ("claude-code", "plan", "codex", "ask"),
             ("codex", "full-access", "claude-code", "bypassPermissions"),
-            ("opencode", "default", "claude-code", "manual"),
+            ("opencode", "manual", "claude-code", "manual"),
         ] {
             let got = delegate_permission(&chat(parent, mode), child).unwrap();
             assert_eq!(got.as_deref(), Some(expected), "{parent} {mode} → {child}");
@@ -853,7 +860,7 @@ mod tests {
     fn a_released_delegate_stops_telling_its_parent_and_stands_alone() {
         let dir = std::env::temp_dir().join(format!("orx-release-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
-        let child = chat("opencode", "default");
+        let child = chat("opencode", "manual");
         let mut parent = child.clone();
         parent.id = "chat_root".into();
         parent.side_parent_session_id = None;
@@ -879,7 +886,7 @@ mod tests {
     fn a_question_is_news_before_the_turn_that_asked_it() {
         let dir = std::env::temp_dir().join(format!("orx-news-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
-        let child = chat("opencode", "default");
+        let child = chat("opencode", "manual");
         let mut parent = child.clone();
         parent.id = "chat_root".into();
         parent.side_parent_session_id = None;
@@ -952,34 +959,37 @@ mod tests {
         assert!(kinds().is_empty(), "a told question waits for its answer");
         question(true);
         assert_eq!(kinds(), ["answer"]);
-        let mut card = WirePart::text("perm", "");
-        card.kind = "prompt".into();
-        card.prompt = Some(WirePrompt {
-            kind: "question".into(),
-            question: Some("Which dataset?".into()),
-            ..Default::default()
-        });
-        store
-            .upsert_chat_message(&StoredChatMessage {
-                id: "msg_perm".into(),
-                session_id: child.id.clone(),
-                role: "assistant".into(),
-                parts_json: serde_json::to_string(&[card]).unwrap(),
-                created_at: 2,
-                completed_at: None,
-                parent_id: None,
-                base_native_session_id: None,
-                result_native_session_id: None,
-                result_native_message_id: None,
-                native_harness: None,
-            })
-            .unwrap();
+        // Claude's bridge asks from messages of its own, a batch all at once.
+        for (created_at, id) in [(2, "perm"), (3, "perm_next")] {
+            let mut card = WirePart::text(id, "");
+            card.kind = "prompt".into();
+            card.prompt = Some(WirePrompt {
+                kind: "question".into(),
+                question: Some("Which dataset?".into()),
+                ..Default::default()
+            });
+            store
+                .upsert_chat_message(&StoredChatMessage {
+                    id: format!("msg_{id}"),
+                    session_id: child.id.clone(),
+                    role: "assistant".into(),
+                    parts_json: serde_json::to_string(&[card]).unwrap(),
+                    created_at,
+                    completed_at: None,
+                    parent_id: None,
+                    base_native_session_id: None,
+                    result_native_session_id: None,
+                    result_native_message_id: None,
+                    native_harness: None,
+                })
+                .unwrap();
+        }
         assert_eq!(
             pending_prompt(&store, &child.id)
                 .unwrap()
                 .map(|pending| pending.id),
             Some("perm".into()),
-            "Claude's bridge asks from a message of its own"
+            "the questions of a batch are asked in order"
         );
         let plan_exit = WirePrompt {
             kind: "question".into(),

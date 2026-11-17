@@ -34,30 +34,20 @@ const LR_PROBE_EXPERIMENT_ID: &str = "demo_nanochat_lr_probe_v1";
 const LR_PROBE_BRANCH: &str = "orx/tiny-learning-rate-probe-interactive";
 const VOCAB_PROBE_EXPERIMENT_ID: &str = "demo_nanochat_vocab_probe_v1";
 const VOCAB_PROBE_BRANCH: &str = "orx/vocab-8192-probe";
-// Git Bash: uv has no shell installer there, and venvs may use `Scripts/` not `bin/`.
-fn probe_uv() -> String {
-    let install_uv = if cfg!(windows) {
-        "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm https://astral.sh/uv/install.ps1 | iex\""
-    } else {
-        "curl -LsSf https://astral.sh/uv/install.sh | sh"
-    };
-    format!(
-        "printf '::orx:: %s\\n' '{{\"phase\":\"install\",\"step\":0,\"of\":1,\"unit\":\"environments\"}}' \
-         && export NANOCHAT_BASE_DIR=\"$PWD/.cache/nanochat\" UV_CACHE_DIR=\"${{ORX_CACHE_DIR:-$HOME/.cache/openresearch}}/uv\" \
-         && mkdir -p \"$NANOCHAT_BASE_DIR\" \"$UV_CACHE_DIR\" \
-         && {{ command -v uv >/dev/null || {{ {install_uv} && export PATH=\"$HOME/.local/bin:$PATH\"; }}; }}"
-    )
-}
+// Git Bash venvs keep their scripts in `Scripts/`, not `bin/`.
+const PROBE_UV: &str = "printf '::orx:: %s\\n' '{\"phase\":\"install\",\"step\":0,\"of\":1,\"unit\":\"environments\"}' \
+     && export NANOCHAT_BASE_DIR=\"$PWD/.cache/nanochat\" UV_CACHE_DIR=\"${ORX_CACHE_DIR:-$HOME/.cache/openresearch}/uv\" \
+     && mkdir -p \"$NANOCHAT_BASE_DIR\" \"$UV_CACHE_DIR\" \
+     && { command -v uv >/dev/null || { curl -LsSf https://astral.sh/uv/install.sh | sh && export PATH=\"$HOME/.local/bin:$PATH\"; }; }";
 
 fn probe_setup() -> String {
     format!(
-        "{} && ([ -d .venv ] || uv venv) && uv sync --extra cpu \
+        "{PROBE_UV} && ([ -d .venv ] || uv venv) && uv sync --extra cpu \
          && {{ . .venv/bin/activate 2>/dev/null || . .venv/Scripts/activate; }} \
          && printf '::orx:: %s\\n' '{{\"step\":1}}' \
          && SHARDS=8 \
          && printf '::orx:: {{\"phase\":\"download\",\"step\":0,\"of\":%s,\"unit\":\"shards\"}}\\n' \"$((SHARDS + 1))\" \
-         && python -m nanochat.dataset -n \"$SHARDS\"",
-        probe_uv()
+         && python -m nanochat.dataset -n \"$SHARDS\""
     )
 }
 
@@ -510,10 +500,7 @@ fn seed_at(
                 "Train a real 0.8M-parameter nanochat model for 20 steps per arm on bundled text, comparing AdamW LR 0.001 with 0.002 from identical initialization and batches. Saves training/held-out validation loss, an interactive HTML loss chart, and raw metrics. No dataset download or full tokenizer training. Demonstrates early optimization, not coherent generation; results are separate from the recorded 73.5M baseline. First use prepares Python dependencies."
                     .into(),
             ),
-            run_command: format!(
-                "{} && uv run --script scripts/demo_probe.py",
-                probe_uv()
-            ),
+            run_command: format!("{PROBE_UV} && uv run --script scripts/demo_probe.py"),
             agent_status: "idle".into(),
             created_at: ago(seeded_at, 8, 0),
             updated_at: ago(seeded_at, 8, 0),

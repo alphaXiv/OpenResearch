@@ -66,18 +66,17 @@ pub(super) async fn commands() -> Json<Value> {
 pub(super) enum Action {
     Install,
     Login,
+    /// Dashboards that offered OpenCode's move to 2.x sent `upgrade`, which is an update now.
+    #[serde(alias = "upgrade")]
     Update,
-    /// OpenCode only: from 1.x to 2.x, by the user's own updater or else orx's copy.
-    Upgrade,
 }
 
 impl Action {
-    /// The ingestion schema knows three actions; a major upgrade is an update.
     fn label(self) -> &'static str {
         match self {
             Self::Install => "install",
             Self::Login => "login",
-            Self::Update | Self::Upgrade => "update",
+            Self::Update => "update",
         }
     }
 }
@@ -144,9 +143,6 @@ pub(super) async fn connect(
     }
     if !profile_allowed(&request) {
         return bad_request("Unknown agent account").into_response();
-    }
-    if matches!(request.action, Action::Upgrade) && request.harness != "opencode" {
-        return bad_request("Only OpenCode upgrades to a new major version").into_response();
     }
     if request.trigger == Trigger::Automatic
         && (request.harness != "opencode" || !matches!(request.action, Action::Install))
@@ -221,7 +217,7 @@ async fn run(
     // binary where there was none; login/update need no baseline.
     let installed_before = match request.action {
         Action::Install => was_installed(&request.harness).await,
-        Action::Login | Action::Update | Action::Upgrade => true,
+        Action::Login | Action::Update => true,
     };
     if request.trigger == Trigger::Automatic {
         let payload = super::harnesses_payload(
@@ -254,7 +250,7 @@ async fn run(
     if run_command {
         let (program, mut args) = match request.action {
             Action::Install => return Err("Agent installation requires a managed release".into()),
-            Action::Login | Action::Update | Action::Upgrade => {
+            Action::Login | Action::Update => {
                 let Some(harness) = crate::local::harness::detect_harness(&request.harness).await
                 else {
                     attempt.record("failed", "detect", Some("not_installed"), None, None);
@@ -284,9 +280,6 @@ async fn run(
         let lease = if request.harness == "opencode" && matches!(request.action, Action::Login) {
             let prepared = async {
                 let binary = crate::local::opencode::resolve_binary().await?;
-                if binary.protocol != crate::local::opencode::Protocol::V2 {
-                    return Ok::<_, crate::error::Error>(None);
-                }
                 let db = crate::local::native_store::prepare_opencode(
                     crate::local::native_store::NativeStore::Isolated,
                 )?;
@@ -535,52 +528,21 @@ async fn managed_setup(
     follow_up: &mut FollowUp,
     opencode_host: &crate::local::opencode::AgentHost,
 ) -> Result<Option<CommandFailure>, String> {
-    let _setup = managed::lock_installations().map_err(|error| error.to_string())?;
+    let _setup = wait_for_installations(socket).await?;
     let harness = request.harness.as_str();
     let user = managed::user_install(harness).await;
     let copy = managed::installed(harness);
-    // Installing or upgrading OpenCode means OpenCode 2, whichever major the user runs.
-    let major = (harness == "opencode").then(|| match request.action {
-        Action::Install | Action::Upgrade => 2,
-        Action::Login | Action::Update => following_major(
-            user.as_ref().map(|(_, version)| version),
-            copy.as_ref().map(|(_, version)| version),
-        ),
-    });
-    // `opencode upgrade --major` arrived in 1.19; without it, or when it fails, the copy stands in.
-    if let (Action::Upgrade, Some((bin, version))) = (request.action, &user) {
-        if version.major < 2 && *version >= semver::Version::new(1, 19, 0) {
-            let args = vec!["upgrade".to_string(), "--major".to_string()];
-            let (status, output) = run_in_terminal(
-                socket,
-                attempt,
-                size,
-                follow_up,
-                (bin.to_string_lossy().into_owned(), args),
-                Vec::new(),
-                &mut TerminalScreen::default(),
-            )
-            .await?;
-            let moved = managed::user_install(harness)
-                .await
-                .is_some_and(|(_, version)| version.major >= 2);
-            if moved {
-                return Ok(completed_or_failure(attempt, status, output));
-            }
-        }
-    }
-    let release = managed::latest(harness, major).await;
+    let release = managed::latest(harness).await;
     if let (Some((_, version)), Ok(release)) = (&user, &release) {
         if *version >= release.version {
             attempt.record("command_completed", "command", None, Some(0), None);
             return Ok(None);
         }
     }
-    let own_major = |version: &semver::Version| major.is_none_or(|major| version.major == major);
     if let (Action::Update, Some((bin, _))) = (
         request.action,
         user.as_ref()
-            .filter(|(_, version)| own_major(version) && runs_own_updater(harness, version)),
+            .filter(|(_, version)| runs_own_updater(harness, version)),
     ) {
         let (_, args) = update_command(harness).expect("the selected agent has an updater");
         let program = bin.to_string_lossy().into_owned();
@@ -626,16 +588,6 @@ async fn managed_setup(
             attempt.record("interrupted", "command", Some("disconnected"), None, None);
             Err("Terminal disconnected".into())
         }
-    }
-}
-
-/// The major OpenCode's copy follows: a 2.x copy stands in for the user's own 1.x
-/// once they chose it, and is never traded back for it.
-fn following_major(user: Option<&semver::Version>, copy: Option<&semver::Version>) -> u64 {
-    match (user, copy) {
-        (Some(user), Some(copy)) => user.major.max(copy.major),
-        (Some(only), None) | (None, Some(only)) => only.major,
-        (None, None) => 2,
     }
 }
 
@@ -707,6 +659,33 @@ async fn install_with_progress(
     }
 }
 
+/// The installations lock, once another install, removal or background update lets go of it.
+async fn wait_for_installations(
+    socket: &mut WebSocket,
+) -> Result<crate::file_lock::FileLock, String> {
+    let error = |error: crate::error::Error| error.to_string();
+    if let Some(lock) = managed::try_lock_installations().map_err(error)? {
+        return Ok(lock);
+    }
+    write_terminal(socket, "Waiting for another agent install to finish…\r\n")
+        .await
+        .map_err(|error| error.to_string())?;
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep(crate::config::paced(std::time::Duration::from_millis(250))) => {
+                if let Some(lock) = managed::try_lock_installations().map_err(error)? {
+                    return Ok(lock);
+                }
+            }
+            message = socket.recv() => {
+                if matches!(message, None | Some(Err(_)) | Some(Ok(Message::Close(_)))) {
+                    return Err("The install was cancelled.".into());
+                }
+            }
+        }
+    }
+}
+
 /// The same progress as data, for a client that draws a progress bar in place of the terminal.
 async fn write_progress(
     socket: &mut WebSocket,
@@ -745,7 +724,11 @@ pub(super) async fn keep_current(
     }
     let user = managed::user_install(harness).await;
     let copy = managed::installed(harness);
-    if user.is_none() && copy.is_none() && !managed::user_install_broken(harness).await {
+    if harness != "opencode"
+        && user.is_none()
+        && copy.is_none()
+        && !managed::user_install_broken(harness).await
+    {
         return Ok(false);
     }
     // Not even the user's own updater may swap OpenCode under a running turn.
@@ -756,16 +739,7 @@ pub(super) async fn keep_current(
             Err(_) => return Ok(false),
         }
     }
-    let major = (harness == "opencode").then(|| {
-        following_major(
-            user.as_ref().map(|(_, version)| version),
-            copy.as_ref().map(|(_, version)| version),
-        )
-    });
-    let release = managed::latest(harness, major).await?;
-    // The user's own install of another major is theirs to keep; it stands
-    // neither for nor against orx's copy.
-    let user = user.filter(|(_, version)| major.is_none_or(|major| version.major == major));
+    let release = managed::latest(harness).await?;
     if let Some((bin, version)) = &user {
         if *version >= release.version {
             managed::remove_all(harness).await;
@@ -828,7 +802,7 @@ fn runs_own_updater(harness: &str, version: &semver::Version) -> bool {
     }
 }
 
-/// A copy of another major is no stand-in: OpenCode's majors speak different protocols.
+/// A copy of another major is no stand-in for the newest release.
 fn current_copy(copy: &semver::Version, release: &managed::Release) -> bool {
     copy.major == release.version.major && *copy >= release.version
 }
@@ -885,8 +859,8 @@ fn verify_reason(
 }
 
 /// The OS cause of a spawn failure, with the command line stripped. The error
-/// reads `CreateProcessW "powershell.exe …<whole script>…" failed: <cause>`;
-/// only the text after the final `failed:` describes what the OS refused.
+/// reads `CreateProcessW "<program> …<arguments>…" failed: <cause>`; only the
+/// text after the final `failed:` describes what the OS refused.
 fn spawn_failure_cause(error: &str) -> String {
     error
         .rsplit_once("failed:")
@@ -925,11 +899,6 @@ fn setup_verified(
             h.version.is_some()
                 && h.auth_state != crate::local::harness::HarnessAuthState::Unsupported
         }
-        Action::Upgrade => h
-            .version
-            .as_deref()
-            .and_then(managed::parse)
-            .is_some_and(|version| version.major >= 2),
     }
 }
 
@@ -1079,6 +1048,7 @@ mod tests {
             configured_model: None,
             models: Vec::new(),
             options: crate::local::harness::HarnessOptions::none(),
+            found_providers: Vec::new(),
         }
     }
 
@@ -1255,21 +1225,5 @@ mod tests {
         assert!(runs_own_updater("codex", &version("0.126.0")));
         assert!(runs_own_updater("claude-code", &version("2.1.0")));
         assert!(!runs_own_updater("cursor", &version("2026.1.1")));
-    }
-
-    #[test]
-    fn a_chosen_opencode_2_copy_outranks_the_users_own_1() {
-        let version = |text| semver::Version::parse(text).unwrap();
-        assert_eq!(following_major(Some(&version("1.19.5")), None), 1);
-        assert_eq!(
-            following_major(Some(&version("1.19.5")), Some(&version("2.2.5"))),
-            2
-        );
-        assert_eq!(
-            following_major(Some(&version("2.2.5")), Some(&version("1.19.5"))),
-            2
-        );
-        assert_eq!(following_major(None, Some(&version("1.19.4"))), 1);
-        assert_eq!(following_major(None, None), 2);
     }
 }

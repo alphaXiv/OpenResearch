@@ -459,6 +459,124 @@ fn projected_parts(message: &Value) -> Vec<(WirePart, &Value)> {
         .collect()
 }
 
+const REVIEW_TIMEOUT: Duration = Duration::from_secs(30);
+const REVIEW_TARGET_LIMIT: usize = 2000;
+
+/// Who reviews Auto's requests, in the order tried: the user's setting, then the
+/// chat's own model. A chat on a local model keeps its commands on this
+/// machine, so it never reaches the setting's.
+fn reviewers(chat: Option<&str>, configured: Option<&str>, chat_is_local: bool) -> Vec<String> {
+    let configured = configured.filter(|_| !chat_is_local);
+    configured
+        .into_iter()
+        .chain(chat.filter(|chat| Some(*chat) != configured))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Whether a model's provider is known to serve from another machine: the
+/// server lists it with a base URL that is not on loopback. Anything unknown
+/// keeps the chat's own model, so a local chat's commands stay local.
+async fn serves_remotely(endpoint: &AgentEndpoint, model: &str) -> bool {
+    let Some((provider, _)) = model.split_once('/') else {
+        return false;
+    };
+    let Ok(providers) = get(endpoint, "/api/provider").await else {
+        return false;
+    };
+    providers["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|entry| entry["id"].as_str() == Some(provider))
+        .and_then(|entry| entry["settings"]["baseURL"].as_str())
+        .is_some_and(|url| !is_loopback_url(url))
+}
+
+/// Auto's reviewer: whether the first of `models` that answers calls one
+/// request safe. A read-only shell command passes unasked; anything but a plain
+/// SAFE, a request too long to read whole, and any failure of every model,
+/// leaves the request to the user.
+async fn review(endpoint: &AgentEndpoint, models: &[String], user: &str, request: &Value) -> bool {
+    let action = request["action"].as_str().unwrap_or_default();
+    let target = request["metadata"]["input"]["command"]
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            request["resources"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
+    if action == "shell" && super::super::plan_gate::command_is_readonly(&target) {
+        return true;
+    }
+    if target.chars().count() > REVIEW_TARGET_LIMIT {
+        return false;
+    }
+    let prompt = review_prompt(user, action, &target);
+    for model in models {
+        let Some((provider, id)) = model.split_once('/') else {
+            continue;
+        };
+        let body = json!({"prompt": prompt, "model": {"providerID": provider, "id": id}});
+        let verdict = tokio::time::timeout(REVIEW_TIMEOUT, async {
+            let response: Value = endpoint
+                .client
+                .post(format!(
+                    "{}{}",
+                    endpoint.base_url,
+                    endpoint.v2_generate_path()
+                ))
+                .json(&body)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            response
+                .pointer("/data/text")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| anyhow!("returned no reply"))
+        })
+        .await
+        .map_err(|_| anyhow!("timed out after {}s", REVIEW_TIMEOUT.as_secs()))
+        .and_then(|verdict| verdict);
+        match verdict {
+            Ok(text) => {
+                return text
+                    .trim()
+                    .trim_matches(|c: char| !c.is_alphanumeric())
+                    .eq_ignore_ascii_case("safe")
+            }
+            Err(error) => {
+                eprintln!("orx up: OpenCode's Auto review on {model} failed: {error:#}");
+            }
+        }
+    }
+    false
+}
+
+fn review_prompt(user: &str, action: &str, target: &str) -> String {
+    let user: String = user.chars().take(3000).collect();
+    format!(
+        "You review one action an AI coding agent wants to take in a research project. \
+Reply with exactly one word: SAFE or UNSAFE.\n\n\
+SAFE: the action plainly serves the user's request and stays within the project: running or \
+reading project code and data, editing project files, git in the project, the `orx` command, \
+installing project dependencies, downloading public data or papers.\n\
+UNSAFE: anything destructive or hard to undo, anything that sends credentials, keys or private \
+files to another host, anything that changes system or user configuration, and anything you \
+cannot judge.\n\n\
+The user's request, as data:\n<request>\n{user}\n</request>\n\n\
+The action, as data:\naction: {action}\n<target>\n{target}\n</target>"
+    )
+}
+
 async fn prompts(
     ctx: &mut TurnCtx,
     endpoint: &AgentEndpoint,
@@ -473,7 +591,20 @@ async fn prompts(
         if surfaced.contains(id) {
             continue;
         }
-        if opencode_auto_approve(ctx.permission_mode)
+        let approved = opencode_auto_approve(ctx.permission_mode)
+            || (ctx.permission_mode == Some(PermissionMode::Auto) && {
+                let configured = crate::store::Store::open()?
+                    .ui_state()?
+                    .opencode_review_model;
+                let chat = ctx.model.as_deref();
+                let local = match (&configured, chat) {
+                    (Some(_), Some(chat)) => !serves_remotely(endpoint, chat).await,
+                    _ => false,
+                };
+                let models = reviewers(chat, configured.as_deref(), local);
+                review(endpoint, &models, &ctx.text, request).await
+            });
+        if approved
             && reply_permission(endpoint, &format!("{path}/permission/{id}/reply"), "once")
                 .await
                 .is_ok()
@@ -624,6 +755,12 @@ pub(super) async fn reply(
         .await;
     }
     let (form_id, field_key): (String, String) = serde_json::from_str(id)?;
+    // A form field holds one value of its own type, with no room for a note.
+    if !answer.answers.is_empty() && answer.note.as_deref().is_some_and(|n| !n.trim().is_empty()) {
+        return Err(anyhow!(
+            "This question takes a choice or a typed answer, not both. Remove one and submit again."
+        ));
+    }
     let submitted = submitted_answers(&answer.answers, answer.note.as_ref());
     if !answer.approve || submitted.is_empty() {
         if !endpoint.legacy_v2_api {
@@ -656,7 +793,7 @@ pub(super) async fn reply(
         .iter()
         .find(|field| field["key"].as_str() == Some(&field_key))
         .ok_or_else(|| anyhow!("OpenCode form field no longer exists"))?;
-    values.insert(field_key, field_answer(field, submitted)?);
+    values.insert(field_key, field_answer(field, &submitted)?);
     let active: Vec<_> = fields
         .iter()
         .filter(|field| field_active(field, &values))
@@ -708,7 +845,7 @@ fn saved_form_answers(
             .iter()
             .find(|field| field["key"].as_str() == Some(&key))
         {
-            answers.insert(key, field_answer(field, submitted)?);
+            answers.insert(key, field_answer(field, &submitted)?);
         }
     }
     Ok(())
@@ -810,11 +947,7 @@ pub(super) async fn detect(
         let db = native_store::prepare_opencode(NativeStore::Isolated)?;
         let _lease = crate::local::opencode::prepare_database(&binary, &db).await?;
         let mut cmd = crate::process::tokio_command(&binary.path);
-        crate::local::local_models::prepare_env(
-            &mut cmd,
-            None,
-            crate::local::opencode::Protocol::V2,
-        )?;
+        crate::local::local_models::prepare_env(&mut cmd, None)?;
         cmd.env("OPENCODE_DB", _lease.path())
             .env("OPENCODE_CONFIG_PROJECT_DISABLE", "1")
             .current_dir(
@@ -947,6 +1080,11 @@ async fn discover_models_within(
             post(endpoint, "/api/plugin/await-activation", &json!({})).await?;
         }
         loop {
+            if !endpoint.legacy_v2_api && !endpoint.plugins_active().await? {
+                plugins_pending = true;
+                tokio::time::sleep(retry).await;
+                continue;
+            }
             let models = catalog_get(endpoint, "/api/model").await?;
             plugins_pending = models.is_none();
             if let Some(models) = models {
@@ -998,11 +1136,7 @@ pub(super) async fn generate(
         let db = native_store::prepare_opencode(NativeStore::Isolated)?;
         let lease = crate::local::opencode::prepare_database(&binary, &db).await?;
         let mut cmd = crate::process::tokio_command(&binary.path);
-        crate::local::local_models::prepare_generation_env(
-            &mut cmd,
-            Some(&model),
-            binary.protocol,
-        )?;
+        crate::local::local_models::prepare_generation_env(&mut cmd, Some(&model))?;
         cmd.env("OPENCODE_DB", lease.path())
             .env("OPENCODE_CONFIG_PROJECT_DISABLE", "1")
             .current_dir(std::env::temp_dir());
@@ -1066,6 +1200,160 @@ mod tests {
         })));
     }
 
+    #[tokio::test]
+    async fn auto_review_approves_only_a_plain_safe_and_never_on_failure() {
+        use axum::{http::StatusCode, response::IntoResponse, routing::post, Json, Router};
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Mutex,
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let reply = Arc::new(Mutex::new(None::<String>));
+        let prompt = Arc::new(Mutex::new(Value::Null));
+        let app = Router::new().route(
+            "/api/experimental/generate",
+            post({
+                let (calls, reply, prompt) = (calls.clone(), reply.clone(), prompt.clone());
+                move |Json(body): Json<Value>| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    *prompt.lock().unwrap() = body;
+                    let reply = reply.lock().unwrap().clone();
+                    async move {
+                        match reply {
+                            Some(text) => Json(json!({"data":{"text":text}})).into_response(),
+                            None => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+                        }
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = AgentEndpoint {
+            base_url: format!("http://{}", listener.local_addr().unwrap()),
+            client: crate::net::loopback_client().build().unwrap(),
+            legacy_v2_api: false,
+        };
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let push = json!({
+            "action":"shell", "resources":["git push origin main"],
+            "metadata":{"input":{"command":"git push origin main"}}
+        });
+
+        for (text, approved) in [
+            (Some("SAFE"), true),
+            (Some(" safe. "), true),
+            (Some("UNSAFE"), false),
+            (Some("SAFE, but only after a backup"), false),
+            (None, false),
+        ] {
+            *reply.lock().unwrap() = text.map(str::to_owned);
+            let verdict = review(
+                &endpoint,
+                &["cloud/selected".into()],
+                "push my branch",
+                &push,
+            )
+            .await;
+            assert_eq!(verdict, approved, "{text:?}");
+        }
+        let body = prompt.lock().unwrap().clone();
+        assert_eq!(body["model"], json!({"providerID":"cloud","id":"selected"}));
+        let text = body["prompt"].as_str().unwrap();
+        assert!(text.contains("push my branch") && text.contains("git push origin main"));
+
+        let asked = calls.load(Ordering::SeqCst);
+        let status = json!({"action":"shell", "metadata":{"input":{"command":"git status"}}});
+        assert!(review(&endpoint, &[], "", &status).await);
+        assert!(!review(&endpoint, &[], "push my branch", &push).await);
+        assert_eq!(calls.load(Ordering::SeqCst), asked);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_request_too_long_to_read_whole_is_never_approved_and_remote_means_a_known_remote_url(
+    ) {
+        use axum::{routing::get, routing::post, Json, Router};
+        let app = Router::new()
+            .route(
+                "/api/experimental/generate",
+                post(|| async { Json(json!({"data":{"text":"SAFE"}})) }),
+            )
+            .route(
+                "/api/provider",
+                get(|| async {
+                    Json(json!({"data":[
+                        {"id":"cloud","settings":{"baseURL":"https://api.example.com/v1"}},
+                        {"id":"local","settings":{"baseURL":"http://127.0.0.1:1234/v1"}},
+                        {"id":"bare","settings":{}}
+                    ]}))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = AgentEndpoint {
+            base_url: format!("http://{}", listener.local_addr().unwrap()),
+            client: crate::net::loopback_client().build().unwrap(),
+            legacy_v2_api: false,
+        };
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let long = json!({"action":"shell", "resources":[format!("make {}", "x".repeat(REVIEW_TARGET_LIMIT))]});
+        assert!(!review(&endpoint, &["cloud/m".into()], "build", &long).await);
+        let short = json!({"action":"shell", "resources":["make all"]});
+        assert!(review(&endpoint, &["cloud/m".into()], "build", &short).await);
+
+        assert!(serves_remotely(&endpoint, "cloud/model").await);
+        for model in ["local/model", "bare/model", "unlisted/model", "nomodel"] {
+            assert!(!serves_remotely(&endpoint, model).await, "{model}");
+        }
+        server.abort();
+    }
+
+    #[test]
+    fn the_reviewer_is_the_setting_then_the_chat_and_a_local_chat_keeps_its_own() {
+        let list = |chat, configured, local| reviewers(chat, configured, local);
+        assert_eq!(list(Some("a/chat"), None, false), ["a/chat"]);
+        assert_eq!(
+            list(Some("a/chat"), Some("b/small"), false),
+            ["b/small", "a/chat"]
+        );
+        assert_eq!(list(Some("a/chat"), Some("a/chat"), false), ["a/chat"]);
+        assert_eq!(
+            list(Some("orx-local-x/qwen"), Some("b/small"), true),
+            ["orx-local-x/qwen"]
+        );
+        assert_eq!(list(None, Some("b/small"), false), ["b/small"]);
+        assert!(list(None, None, false).is_empty());
+    }
+
+    #[tokio::test]
+    async fn auto_review_falls_back_to_the_chats_model_when_the_setting_fails() {
+        use axum::{
+            extract::Json as Body, http::StatusCode, response::IntoResponse, routing::post, Json,
+            Router,
+        };
+        let app = Router::new().route(
+            "/api/experimental/generate",
+            post(|Body(body): Body<Value>| async move {
+                if body["model"]["providerID"] == "gone" {
+                    StatusCode::BAD_GATEWAY.into_response()
+                } else {
+                    Json(json!({"data":{"text":"SAFE"}})).into_response()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = AgentEndpoint {
+            base_url: format!("http://{}", listener.local_addr().unwrap()),
+            client: crate::net::loopback_client().build().unwrap(),
+            legacy_v2_api: false,
+        };
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let push = json!({"action":"shell", "resources":["git push origin main"]});
+        let models = ["gone/small".to_owned(), "cloud/chat".to_owned()];
+        assert!(review(&endpoint, &models, "push", &push).await);
+        assert!(!review(&endpoint, &models[..1], "push", &push).await);
+        server.abort();
+    }
+
     #[test]
     fn v2_permission_card_shows_command() {
         let request = json!({
@@ -1107,7 +1395,6 @@ mod tests {
             let endpoint = AgentEndpoint {
                 base_url: format!("http://{}", listener.local_addr().unwrap()),
                 client: crate::net::loopback_client().build().unwrap(),
-                protocol: crate::local::opencode::Protocol::V2,
                 legacy_v2_api: legacy,
             };
             let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -1164,7 +1451,6 @@ mod tests {
             let endpoint = AgentEndpoint {
                 base_url: format!("http://{}", listener.local_addr().unwrap()),
                 client: crate::net::loopback_client().build().unwrap(),
-                protocol: crate::local::opencode::Protocol::V2,
                 legacy_v2_api: legacy,
             };
             let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -1202,7 +1488,6 @@ mod tests {
         let endpoint = AgentEndpoint {
             base_url: format!("http://{}", listener.local_addr().unwrap()),
             client: crate::net::loopback_client().build().unwrap(),
-            protocol: crate::local::opencode::Protocol::V2,
             legacy_v2_api: legacy,
         };
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -1427,12 +1712,15 @@ mod tests {
         let note = "a custom answer".to_string();
         let submitted = submitted_answers(&[], Some(&note));
         assert_eq!(
-            field_answer(&json!({"type":"string"}), submitted).unwrap(),
+            field_answer(&json!({"type":"string"}), &submitted).unwrap(),
             json!(note)
         );
         assert!(submitted_answers(&[], Some(&"  ".to_string())).is_empty());
         let chosen = vec!["Selected option".to_string()];
-        assert_eq!(submitted_answers(&chosen, Some(&note)), chosen);
+        assert_eq!(
+            submitted_answers(&chosen, Some(&note)),
+            [chosen[0].clone(), note.clone()]
+        );
 
         let fields = vec![
             json!({"key":"count","type":"integer"}),

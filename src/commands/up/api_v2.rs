@@ -61,6 +61,7 @@ pub(crate) struct Api {
     engine: Arc<Engine>,
     commands: Arc<dyn Commands>,
     admit: Admit,
+    chat: Arc<crate::local::chat::ChatHost>,
     data_dir: PathBuf,
     store: Mutex<Store>,
     clients: AtomicUsize,
@@ -73,6 +74,7 @@ impl Api {
         engine: Arc<Engine>,
         commands: Arc<dyn Commands>,
         admit: Admit,
+        chat: Arc<crate::local::chat::ChatHost>,
         data_dir: PathBuf,
     ) -> Result<Self> {
         let store = Mutex::new(Store::open_at(data_dir.clone())?);
@@ -82,6 +84,7 @@ impl Api {
             engine,
             commands,
             admit,
+            chat,
             data_dir,
             store,
             clients: AtomicUsize::new(0),
@@ -167,7 +170,7 @@ impl Api {
         let mut stops = futures::stream::FuturesUnordered::new();
         let stopping = async {
             loop {
-                let runs = match self.store().pending_work() {
+                let runs = match self.pending_work().await {
                     Ok(work) => work.runs,
                     Err(error) => {
                         eprintln!(
@@ -228,8 +231,14 @@ impl Api {
         }
     }
 
-    pub(super) fn busy(&self) -> Result<bool> {
-        Ok(!self.store().pending_work()?.is_empty() || self.sse_clients() != 0)
+    /// Agents are the chats the sidebar shows working, so a quit lists exactly those.
+    pub(crate) async fn pending_work(&self) -> Result<crate::store::PendingWork> {
+        let working = self.chat.busy_sessions().await;
+        self.store().pending_work(&working)
+    }
+
+    pub(super) async fn busy(&self) -> Result<bool> {
+        Ok(!self.pending_work().await?.is_empty() || self.sse_clients() != 0)
     }
 
     pub fn sse_clients(&self) -> usize {
@@ -277,6 +286,7 @@ fn dashboard_routes(api: Arc<Api>) -> Router {
         .route("/api/experiments/{id}/view", get(view).put(set_view))
         .route("/api/runs/{id}/abandon", post(dashboard_abandon))
         .route("/api/runs/{id}/cleanup", post(cleanup))
+        .route("/api/pending-work", get(dashboard_pending_work))
         .route("/api/compute/hosts", get(hosts))
         .route("/api/compute/hosts/{alias}/retry", post(retry_host))
         .with_state(api)
@@ -376,13 +386,15 @@ fn installed() -> Result<&'static Arc<Api>> {
 }
 
 #[cfg(desktop_app)]
-pub(crate) fn busy() -> Result<bool> {
-    installed()?.busy()
+pub(crate) async fn busy() -> Result<bool> {
+    installed()?.busy().await
 }
 
+/// For the window's event loop, which runs on the thread blocked on the runtime.
 #[cfg(desktop_app)]
 pub(crate) fn pending_work() -> Result<crate::store::PendingWork> {
-    installed()?.store().pending_work()
+    let api = installed()?;
+    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(api.pending_work()))
 }
 
 /// A force quit's stops; the quit goes ahead once all have answered or ten seconds have passed.
@@ -1058,6 +1070,11 @@ pub(crate) fn host_view(
         "connectRequired": connect_required,
         "sinceMs": state.since_ms, "nextRetryMs": state.next_retry_ms, "cause": state.cause,
     }))
+}
+
+/// What a quit would interrupt, for the page's close dialog.
+async fn dashboard_pending_work(State(api): State<Arc<Api>>) -> super::ApiResult {
+    Ok(Json(json!(api.pending_work().await?)))
 }
 
 async fn hosts(State(api): State<Arc<Api>>) -> ApiResult<Json<Value>> {
@@ -2105,10 +2122,10 @@ impl Idle {
         now.saturating_sub(*self.since.get_or_insert(now)) >= Duration::from_secs(600)
     }
 
-    pub fn check(&mut self, api: &Api, now: Duration) -> Result<bool> {
+    pub async fn check(&mut self, api: &Api, now: Duration) -> Result<bool> {
         Ok(self.should_exit(
             now,
-            api.busy()? || super::ACTIVE.load(Ordering::SeqCst) != 0,
+            api.busy().await? || super::ACTIVE.load(Ordering::SeqCst) != 0,
         ))
     }
 }

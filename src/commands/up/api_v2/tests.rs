@@ -280,6 +280,11 @@ impl Fixture {
                 engine.clone(),
                 Arc::new(Services(backend.clone(), engine, data_dir.clone())),
                 admit,
+                Arc::new(crate::local::chat::ChatHost::new(
+                    Arc::new(crate::local::opencode::AgentHost::new(None)),
+                    Arc::new(crate::local::codex::CodexHost::new()),
+                    Arc::new(crate::local::claude::ClaudeHost::new()),
+                )),
                 data_dir,
             )
             .unwrap(),
@@ -705,11 +710,11 @@ async fn idle_requires_ten_uninterrupted_minutes_and_all_blockers_clear() {
     let _serial = crate::commands::up::ACTIVE_TEST_LOCK.lock().await;
     let f = Fixture::new().await;
     let mut idle = Idle::default();
-    assert!(!idle.check(&f.api, Duration::ZERO).unwrap());
-    assert!(idle.check(&f.api, Duration::from_secs(600)).unwrap());
+    assert!(!idle.check(&f.api, Duration::ZERO).await.unwrap());
+    assert!(idle.check(&f.api, Duration::from_secs(600)).await.unwrap());
     f.insert("run", "exp", "project", "running");
-    assert_eq!(f.api.store().pending_work().unwrap().runs.len(), 1);
-    assert!(!idle.check(&f.api, Duration::from_secs(601)).unwrap());
+    assert_eq!(f.api.pending_work().await.unwrap().runs.len(), 1);
+    assert!(!idle.check(&f.api, Duration::from_secs(601)).await.unwrap());
     f.api
         .store()
         .set_engine_phase("run", "running", "lost", Some(1), None, None)
@@ -724,27 +729,33 @@ async fn idle_requires_ten_uninterrupted_minutes_and_all_blockers_clear() {
             },
         )
         .unwrap();
-    assert_eq!(f.api.store().pending_work().unwrap().runs.len(), 0);
-    assert!(!idle.check(&f.api, Duration::from_secs(1201)).unwrap());
+    assert_eq!(f.api.pending_work().await.unwrap().runs.len(), 0);
+    assert!(!idle.check(&f.api, Duration::from_secs(1201)).await.unwrap());
     f.api.store().queue_log_collection("run").unwrap();
-    assert!(idle.check(&f.api, Duration::from_secs(1801)).unwrap());
+    assert!(idle.check(&f.api, Duration::from_secs(1801)).await.unwrap());
     f.api
         .store()
         .set_run_contact("run", &Contact::Live)
         .unwrap();
     let connection = rusqlite::Connection::open(f.api.data_dir.join("orx.db")).unwrap();
     connection.execute("INSERT INTO run_notices(run_id, chat_session_id, kind, dedupe, body, created_at) VALUES ('run','chat','attention','one','body',1)", []).unwrap();
-    assert_eq!(f.api.store().pending_work().unwrap().runs.len(), 1);
-    assert!(!idle.check(&f.api, Duration::from_secs(1801)).unwrap());
+    assert_eq!(f.api.pending_work().await.unwrap().runs.len(), 1);
+    assert!(!idle.check(&f.api, Duration::from_secs(1801)).await.unwrap());
     connection
         .execute("UPDATE run_notices SET delivered_at=1", [])
         .unwrap();
-    connection.execute("INSERT INTO chat_sessions(id,project_id,harness,created_at,updated_at) VALUES ('chat','project','codex',1,1)", []).unwrap();
-    connection.execute("INSERT INTO chat_turns(id,session_id,assistant_message_id,client_turn_id,request_hash,prepared_input,settings_json,state,delivery_state,created_at,updated_at) VALUES ('turn','chat','assistant','client','hash','input','{}','running','pending',1,1)", []).unwrap();
-    let pending = f.api.store().pending_work().unwrap();
+    let chat = format!("chat-{}", uuid::Uuid::new_v4());
+    connection.execute("INSERT INTO chat_sessions(id,project_id,harness,created_at,updated_at) VALUES (?1,'project','codex',1,1)", [&chat]).unwrap();
+    let turn = crate::local::chat::TurnGuard::claim(&f.api.chat, &chat, None)
+        .await
+        .unwrap();
+    let pending = f.api.pending_work().await.unwrap();
     assert_eq!((pending.agents.len(), pending.runs.len()), (1, 0));
-    assert!(!idle.check(&f.api, Duration::from_secs(2401)).unwrap());
-    connection.execute("DELETE FROM chat_turns", []).unwrap();
+    assert!(!idle.check(&f.api, Duration::from_secs(2401)).await.unwrap());
+    drop(turn);
+    while !f.api.chat.busy_sessions().await.is_empty() {
+        tokio::task::yield_now().await;
+    }
     let events = f
         .client
         .events(&Filter {
@@ -755,8 +766,8 @@ async fn idle_requires_ten_uninterrupted_minutes_and_all_blockers_clear() {
         .await
         .unwrap();
     assert_eq!(f.backend.follows.load(Ordering::SeqCst), 1);
-    assert!(f.api.store().pending_work().unwrap().is_empty());
-    assert!(!idle.check(&f.api, Duration::from_secs(3001)).unwrap());
+    assert!(f.api.pending_work().await.unwrap().is_empty());
+    assert!(!idle.check(&f.api, Duration::from_secs(3001)).await.unwrap());
     drop(events);
     f.task.abort();
     tokio::task::yield_now().await;
@@ -1075,16 +1086,16 @@ async fn terminal_nonlive_contacts_do_not_block_idle_exit() {
     ] {
         let mut idle = Idle::default();
         f.api.store().set_run_contact("run", &contact).unwrap();
-        assert!(!idle.check(&f.api, Duration::ZERO).unwrap());
-        assert!(idle.check(&f.api, Duration::from_secs(601)).unwrap());
+        assert!(!idle.check(&f.api, Duration::ZERO).await.unwrap());
+        assert!(idle.check(&f.api, Duration::from_secs(601)).await.unwrap());
     }
     f.api
         .store()
         .set_run_contact("run", &Contact::Live)
         .unwrap();
     let mut idle = Idle::default();
-    assert!(!idle.check(&f.api, Duration::ZERO).unwrap());
-    assert!(idle.check(&f.api, Duration::from_secs(600)).unwrap());
+    assert!(!idle.check(&f.api, Duration::ZERO).await.unwrap());
+    assert!(idle.check(&f.api, Duration::from_secs(600)).await.unwrap());
 }
 
 #[tokio::test]
@@ -2058,6 +2069,11 @@ async fn dashboard_host_lifecycle_child() {
             f.api.engine.clone(),
             runtime.clone(),
             Box::new(|_| Ok(Box::new(()))),
+            Arc::new(crate::local::chat::ChatHost::new(
+                Arc::new(crate::local::opencode::AgentHost::new(None)),
+                Arc::new(crate::local::codex::CodexHost::new()),
+                Arc::new(crate::local::claude::ClaudeHost::new()),
+            )),
             f.api.data_dir.clone(),
         )
         .unwrap(),
@@ -2497,17 +2513,23 @@ async fn idle_closes_admission_then_rechecks_in_flight_requests_and_sse() {
     let f = Fixture::new().await;
     let mut idle = Idle::default();
     let active = crate::commands::up::Active::new();
-    assert!(!idle.check(&f.api, Duration::ZERO).unwrap());
-    assert!(!idle.check(&f.api, Duration::from_secs(600)).unwrap());
-    assert!(!crate::commands::up::stop_admitting_if_idle(&f.api).unwrap());
+    assert!(!idle.check(&f.api, Duration::ZERO).await.unwrap());
+    assert!(!idle.check(&f.api, Duration::from_secs(600)).await.unwrap());
+    assert!(!crate::commands::up::stop_admitting_if_idle(&f.api)
+        .await
+        .unwrap());
     assert!(!crate::commands::up::IDLE_EXIT.load(Ordering::SeqCst));
     drop(active);
-    assert!(!idle.check(&f.api, Duration::from_secs(601)).unwrap());
-    assert!(idle.check(&f.api, Duration::from_secs(1201)).unwrap());
+    assert!(!idle.check(&f.api, Duration::from_secs(601)).await.unwrap());
+    assert!(idle.check(&f.api, Duration::from_secs(1201)).await.unwrap());
     f.api.clients.fetch_add(1, Ordering::SeqCst);
-    assert!(!crate::commands::up::stop_admitting_if_idle(&f.api).unwrap());
+    assert!(!crate::commands::up::stop_admitting_if_idle(&f.api)
+        .await
+        .unwrap());
     f.api.clients.fetch_sub(1, Ordering::SeqCst);
-    assert!(crate::commands::up::stop_admitting_if_idle(&f.api).unwrap());
+    assert!(crate::commands::up::stop_admitting_if_idle(&f.api)
+        .await
+        .unwrap());
     crate::commands::up::IDLE_EXIT.store(false, Ordering::SeqCst);
 }
 

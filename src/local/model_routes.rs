@@ -33,10 +33,19 @@ pub struct Model {
 /// Aggregators resell other providers' models and come last by default.
 const AGGREGATORS: &[&str] = &["openrouter"];
 
-/// Whether a native model id names a free tier (`opencode/…-free`,
-/// OpenRouter's `…:free`).
+/// The prefix openresearch.sh gives every endpoint its model feed hosts, which OpenCode runs as a provider.
+pub const HOSTED_PROVIDER_PREFIX: &str = "openresearch-";
+
+/// Whether a native model id is served by an endpoint the model feed hosts.
+pub fn hosted(id: &str) -> bool {
+    id.split_once('/')
+        .is_some_and(|(provider, _)| provider.starts_with(HOSTED_PROVIDER_PREFIX))
+}
+
+/// Whether a native model id names a free tier (`opencode/…-free`, OpenRouter's `…:free`) or a model the feed
+/// hosts, which are free whatever the endpoint calls them.
 pub fn free(id: &str) -> bool {
-    id.ends_with("-free") || id.ends_with(":free")
+    id.ends_with("-free") || id.ends_with(":free") || hosted(id)
 }
 
 /// The provider-neutral id of a native model id: vendor prefixes, dated
@@ -104,13 +113,35 @@ const TIER_WORDS: &[&str] = &[
     "reasoner",
 ];
 
-/// What an offer adds to its model: Cursor's and Antigravity's effort, speed and thinking, Claude Code's long context.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+/// Speed tiers catalogs list as models of their own, slowest first.
+const SPEEDS: &[&str] = &["flex", "fast", "ultrafast"];
+
+/// What an offer adds to its model: Cursor's and Antigravity's effort, any catalog's speed and thinking tiers, Claude
+/// Code's long context.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Variant {
     pub effort: Option<String>,
-    pub fast: bool,
+    /// One of [`SPEEDS`]; none for the standard tier.
+    pub speed: Option<String>,
     pub thinking: bool,
     pub context: Option<String>,
+}
+
+impl Serialize for Variant {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut variant = serializer.serialize_struct("Variant", 5)?;
+        variant.serialize_field("effort", &self.effort)?;
+        variant.serialize_field("speed", &self.speed)?;
+        // What dashboards from before `speed` read.
+        variant.serialize_field("fast", &(self.speed.as_deref() == Some("fast")))?;
+        variant.serialize_field("thinking", &self.thinking)?;
+        variant.serialize_field("context", &self.context)?;
+        variant.end()
+    }
 }
 
 /// One catalog entry read as a model.
@@ -130,6 +161,9 @@ pub struct ModelName {
     pub variant: Variant,
     /// How far the catalog's name is from its model's plain variant; the lowest runs by default.
     pub variant_rank: usize,
+    /// A moving alias (`mistral-large-latest`) whose catalog also lists the versions it moves between, so pickers
+    /// leave it out.
+    pub superseded: bool,
 }
 
 /// Cursor and Antigravity list each effort, speed and thinking mode as a model of its own.
@@ -212,11 +246,16 @@ fn read(name: &str, spells: bool, variant: &mut Variant) -> Reading {
         let lower = word.to_lowercase();
         if spells
             && (EFFORTS.contains(&lower.as_str())
-                || matches!(lower.as_str(), "extra" | "fast" | "thinking" | "no")
+                || SPEEDS.contains(&lower.as_str())
+                || matches!(lower.as_str(), "extra" | "thinking" | "no")
                 || is_context(&lower))
         {
             if is_context(&lower) {
                 variant.context = Some(lower);
+            } else if SPEEDS.contains(&lower.as_str()) {
+                variant.speed.get_or_insert(lower);
+            } else if lower == "thinking" {
+                variant.thinking = true;
             }
             reading.variant_words += 1;
             continue;
@@ -263,7 +302,9 @@ fn id_variant(harness: &str, id: &str) -> Variant {
     let mut parts: Vec<&str> = lower.split('-').collect();
     while parts.len() > 1 {
         match *parts.last().unwrap() {
-            "fast" => variant.fast = true,
+            speed if SPEEDS.contains(&speed) && variant.speed.is_none() => {
+                variant.speed = Some(speed.to_string())
+            }
             "thinking" => variant.thinking = true,
             effort if EFFORTS.contains(&effort) && variant.effort.is_none() => {
                 let extra = effort == "high" && parts[parts.len() - 2] == "extra";
@@ -322,6 +363,32 @@ fn plain_name(name: &str, free: bool) -> String {
     name
 }
 
+/// `name` less the trailing speed and `thinking` words that make a tier of one model, each recorded on `variant`.
+/// Only words after a version count, so `Grok Code Fast 1` keeps its word.
+fn peel_switches(name: &str, variant: &mut Variant) -> String {
+    let mut name = name.trim_end();
+    // A hyphen separates words only in a slug, so `Flash 1017 Ultra-fast` stays one word.
+    let slug = !name.contains(' ');
+    let separator = |c: char| c == ' ' || slug && matches!(c, '-' | '_' | ':');
+    loop {
+        let start = name.rfind(separator).map_or(0, |index| index + 1);
+        let rest = name[..start].trim_end_matches(separator);
+        if !rest.contains(|c: char| c.is_ascii_digit()) {
+            break;
+        }
+        let word = name[start..].to_ascii_lowercase().replace('-', "");
+        if SPEEDS.contains(&word.as_str()) {
+            variant.speed = Some(word);
+        } else if word == "thinking" {
+            variant.thinking = true;
+        } else {
+            break;
+        }
+        name = rest;
+    }
+    name.to_string()
+}
+
 /// One catalog entry read as a model: its key across catalogs, its version, and its variant. An alias is keyed
 /// by `resolved`, the versioned model it runs.
 pub fn parse(
@@ -340,7 +407,12 @@ pub fn parse(
     let name = display_name
         .filter(|name| !name.is_empty())
         .map_or_else(|| tail(id), str::to_string);
-    let reading = read(&plain_name(&name, free), spells, &mut variant);
+    let mut name = plain_name(&name, free);
+    if !spells {
+        peel_switches(&plain_name(&tail(id), free), &mut variant);
+        name = peel_switches(&name, &mut variant);
+    }
+    let reading = read(&name, spells, &mut variant);
     let resolved_reading = resolved.map(|resolved| {
         read(
             &plain_name(&tail(resolved), false),
@@ -392,8 +464,18 @@ pub fn parse(
         }
         None => family.clone(),
     };
-    let variant_words =
-        reading.variant_words + usize::from(harness == "claude-code" && variant.context.is_some());
+    let variant_words = if spells {
+        reading.variant_words
+    } else {
+        [
+            variant.speed.is_some(),
+            variant.thinking,
+            variant.context.is_some(),
+        ]
+        .into_iter()
+        .filter(|&flag| flag)
+        .count()
+    };
     ModelName {
         key: if free {
             format!("{versioned_key}:free")
@@ -406,19 +488,58 @@ pub fn parse(
         label: reading.kept.join(" "),
         variant_rank: variant_words * 2 + usize::from(variant.effort.as_deref() != Some("medium")),
         variant,
+        superseded: false,
     }
 }
 
 /// Adds each wire model's [`ModelName`] as `parsed`, which the picker groups by and Settings hides by.
 pub fn name_models(harness: &str, models: &mut Value) {
-    for model in models.as_array_mut().into_iter().flatten() {
-        let parsed = parse(
-            harness,
-            model["id"].as_str().unwrap_or_default(),
-            model["displayName"].as_str(),
-            model["resolvedModel"].as_str(),
-        );
-        model["parsed"] = serde_json::json!(parsed);
+    let Some(models) = models.as_array_mut() else {
+        return;
+    };
+    let text = |model: &Value, field: &str| model[field].as_str().map(str::to_owned);
+    let entries: Vec<(String, Option<String>, ModelName)> = models
+        .iter()
+        .map(|model| {
+            let id = text(model, "id").unwrap_or_default();
+            let display = text(model, "displayName");
+            let parsed = parse(
+                harness,
+                &id,
+                display.as_deref(),
+                model["resolvedModel"].as_str(),
+            );
+            (id, display, parsed)
+        })
+        .collect();
+
+    // OpenCode's ids lead with their provider; each provider is a catalog of its own.
+    let catalog = |id: &str| {
+        id.split_once('/')
+            .map_or("", |(catalog, _)| catalog)
+            .to_owned()
+    };
+    let unaliased = |family: &str| {
+        let words: Vec<&str> = family.split(' ').filter(|word| *word != "latest").collect();
+        words.join(" ")
+    };
+    let versioned: std::collections::HashSet<(String, String)> = entries
+        .iter()
+        .filter(|(_, _, name)| name.version.is_some())
+        .map(|(id, _, name)| (catalog(id), unaliased(&name.family)))
+        .collect();
+    let says_latest = |text: &str| {
+        text.to_ascii_lowercase()
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|word| word == "latest")
+    };
+
+    for (model, (id, display, mut name)) in models.iter_mut().zip(entries) {
+        let alias = name.version.is_none()
+            && (says_latest(id.rsplit('/').next().unwrap_or(&id))
+                || display.as_deref().is_some_and(says_latest));
+        name.superseded = alias && versioned.contains(&(catalog(&id), unaliased(&name.family)));
+        model["parsed"] = serde_json::json!(name);
     }
 }
 
@@ -469,22 +590,45 @@ fn harness_route_name(harness: &Value, id: &str, taken: &[String]) -> String {
     }
 }
 
-/// Whether the user turned `harness`, an entry of `/api/harnesses`, off in Settings → Agents. Only
-/// a found agent has a switch; turning OpenCode off drops just the providers it signed in to itself.
+/// Whether the user turned `harness`, an entry of `/api/harnesses`, off in Settings → Agents: an
+/// account by its profile id, any other agent by its own. OpenCode's providers have switches of
+/// their own ([`off_providers`]); its entry's answer is for clients that predate them.
 pub fn turned_off(harness: &Value, hidden: &[String]) -> bool {
-    let id = harness["id"].as_str().unwrap_or_default();
-    let kept_install =
-        harness["managed"] == true && !matches!(id, "claude-code" | "codex" | "opencode");
-    harness["profile"].is_null() && !kept_install && hidden.iter().any(|hidden| hidden == id)
+    let key = harness
+        .pointer("/profile/id")
+        .or_else(|| harness.get("id"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    hidden.iter().any(|hidden| hidden == key)
 }
 
-/// Remove routes belonging to found agents the user turned off, before model deduplication.
+/// The providers whose OpenCode models the user turned off: each `opencode:<id>` switched off,
+/// and every provider found in the user's own OpenCode while OpenCode itself is.
+pub fn off_providers(harness: &Value, hidden: &[String]) -> Vec<String> {
+    let mut off: Vec<String> = hidden
+        .iter()
+        .filter_map(|key| key.strip_prefix("opencode:"))
+        .filter(|id| *id != "opencode")
+        .map(str::to_string)
+        .collect();
+    if hidden.iter().any(|key| key == "opencode") {
+        let found = harness["foundProviders"].as_array().into_iter().flatten();
+        off.extend(found.filter_map(|found| found["id"].as_str().map(str::to_string)));
+    }
+    off.sort();
+    off.dedup();
+    off
+}
+
+/// Remove routes the user turned off, before model deduplication; naming one refuses delegation.
 pub fn filter_agents(
     catalog: &mut Value,
     hidden: &[String],
-    owned_providers: &[String],
     requested: Option<&str>,
 ) -> Result<(), String> {
+    let refusal = |route: &str| {
+        format!("Agent `{route}` is turned off in Settings → Agents. Choose another route or ask the user to turn it on.")
+    };
     let mut names = Vec::new();
     for harness in catalog["harnesses"].as_array_mut().into_iter().flatten() {
         let Some(id) = harness["id"].as_str().map(str::to_string) else {
@@ -494,39 +638,30 @@ pub fn filter_agents(
         if harness["agentReady"] == true {
             names.push(name.clone());
         }
+        if id == "opencode" && harness["profile"].is_null() {
+            let off = off_providers(harness, hidden);
+            if let Some(route) = requested.filter(|route| off.iter().any(|id| id == route)) {
+                return Err(refusal(route));
+            }
+            if let Some(entries) = harness["models"].as_array_mut() {
+                entries.retain(|entry| {
+                    let native = entry["id"].as_str().unwrap_or_default();
+                    let provider = native.split('/').next().unwrap_or(native);
+                    !off.iter().any(|id| id == provider)
+                });
+            }
+            continue;
+        }
         if !turned_off(harness, hidden) {
             continue;
         }
-        let refusal = |route| {
-            format!("Agent `{route}` is turned off in Settings → Agents. Choose another route or ask the user to turn it on.")
-        };
-        if let Some(route) =
-            requested.filter(|route| id != "opencode" && (*route == id || *route == name))
+        let profile = !harness["profile"].is_null();
+        if let Some(route) = requested.filter(|route| *route == name || (!profile && *route == id))
         {
             return Err(refusal(route));
         }
         if let Some(entries) = harness["models"].as_array_mut() {
-            if id != "opencode" {
-                entries.clear();
-                continue;
-            }
-            let is_owned = |entry: &Value| {
-                entry["id"].as_str().is_some_and(|native| {
-                    let provider = native.split('/').next().unwrap_or(native);
-                    provider == "opencode" || owned_providers.iter().any(|id| id == provider)
-                })
-            };
-            if let Some(route) = requested.filter(|route| {
-                entries.iter().any(|entry| {
-                    !is_owned(entry)
-                        && entry["id"]
-                            .as_str()
-                            .is_some_and(|id| id.split('/').next() == Some(*route))
-                })
-            }) {
-                return Err(refusal(route));
-            }
-            entries.retain(is_owned);
+            entries.clear();
         }
     }
     Ok(())
@@ -684,33 +819,43 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn hidden_agents_keep_profiles_and_managed_opencode_providers() {
-        let mut catalog = json!({"harnesses":[
+    fn every_agent_account_and_provider_has_a_switch() {
+        let catalog = json!({"harnesses":[
             {"id":"codex","agentReady":true,"models":[{"id":"gpt-6"}]},
             {"id":"codex","profile":{"id":"codex-work"},"agentReady":true,"models":[{"id":"gpt-6"}]},
-            {"id":"cursor","agentReady":true,"models":[{"id":"gpt-6"}]},
-            {"id":"acp:deepseek","name":"DeepSeek Harness","agentReady":true,"models":[{"id":"deepseek-v4"}]},
-            {"id":"opencode","agentReady":true,"models":[
+            {"id":"codex","profile":{"id":"codex-home"},"agentReady":true,"models":[{"id":"gpt-6"}]},
+            {"id":"cursor","managed":true,"agentReady":true,"models":[{"id":"gpt-6"}]},
+            {"id":"acp:deepseek","name":"DeepSeek Harness","managed":true,"agentReady":true,"models":[{"id":"deepseek-v4"}]},
+            {"id":"opencode","agentReady":true,"foundProviders":[{"id":"external-signin"},{"id":"tinker"}],"models":[
                 {"id":"own-key/gpt-6"}, {"id":"local-endpoint/gpt-6"},
                 {"id":"opencode/gpt-6-free"}, {"id":"opencode/gpt-6"},
-                {"id":"external-signin/gpt-6"}
+                {"id":"external-signin/gpt-6"}, {"id":"tinker/gpt-6"}
             ]}
         ]});
-        let hidden = ["codex", "cursor", "acp:deepseek", "opencode"].map(str::to_string);
-        let owned = ["own-key", "local-endpoint"].map(str::to_string);
+        let hidden = [
+            "codex",
+            "codex-work",
+            "cursor",
+            "acp:deepseek",
+            "opencode:own-key",
+            "opencode:tinker",
+        ]
+        .map(str::to_string);
         for route in [
             "codex",
+            "codex-work",
             "cursor",
             "acp:deepseek",
             "deepseek-harness",
-            "external-signin",
+            "own-key",
+            "tinker",
         ] {
-            let error =
-                filter_agents(&mut catalog.clone(), &hidden, &owned, Some(route)).unwrap_err();
+            let error = filter_agents(&mut catalog.clone(), &hidden, Some(route)).unwrap_err();
             assert_eq!(error, format!("Agent `{route}` is turned off in Settings → Agents. Choose another route or ask the user to turn it on."));
         }
-        filter_agents(&mut catalog, &hidden, &owned, Some("codex-work")).unwrap();
-        let visible = models(&catalog, &[]);
+        let mut filtered = catalog.clone();
+        filter_agents(&mut filtered, &hidden, Some("codex-home")).unwrap();
+        let visible = models(&filtered, &[]);
         let names: Vec<_> = visible[0]
             .routes
             .iter()
@@ -718,35 +863,52 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            ["codex-work", "opencode", "own-key", "local-endpoint"]
+            [
+                "codex-home",
+                "opencode",
+                "local-endpoint",
+                "external-signin"
+            ]
         );
-        assert!(visible[0].routes.iter().all(|route| !route.free));
         assert_eq!(
             resolve(&visible, "gpt-6", None).unwrap().profile.as_deref(),
-            Some("codex-work")
+            Some("codex-home")
         );
-        let free_only = models(&catalog, &["gpt@6".into()]);
+        let free_only = models(&filtered, &["gpt@6".into()]);
         assert_eq!(free_only[0].routes.len(), 1);
         assert!(free_only[0].routes[0].free);
-        filter_agents(&mut catalog, &hidden, &owned, Some("opencode")).unwrap();
-    }
 
-    #[test]
-    fn hidden_agents_keep_removable_managed_installs() {
-        let mut catalog = json!({"harnesses":[
-            {"id":"codex","managed":true,"agentReady":true,"models":[{"id":"gpt-6"}]},
-            {"id":"codex","managed":true,"profile":{"id":"codex-work"},"agentReady":true,"models":[{"id":"gpt-6"}]},
-            {"id":"cursor","managed":true,"agentReady":true,"models":[{"id":"gpt-6"}]},
-            {"id":"acp:dsh","name":"DeepSeek Harness","managed":true,"agentReady":true,"models":[{"id":"deepseek-v4"}]}
-        ]});
-        let hidden = ["codex", "cursor", "acp:dsh"].map(str::to_string);
-        assert!(filter_agents(&mut catalog.clone(), &hidden, &[], Some("codex")).is_err());
-        filter_agents(&mut catalog, &hidden, &[], Some("cursor")).unwrap();
-        let visible = models(&catalog, &[]);
-        assert!(resolve(&visible, "gpt-6", Some("cursor")).is_ok());
-        assert!(resolve(&visible, "gpt-6", Some("codex-work")).is_ok());
-        assert!(resolve(&visible, "gpt-6", Some("codex")).is_err());
-        assert!(resolve(&visible, "deepseek-v4", Some("deepseek-harness")).is_ok());
+        let opencode = &catalog["harnesses"][5];
+        assert!(!turned_off(opencode, &hidden));
+        assert_eq!(off_providers(opencode, &hidden), ["own-key", "tinker"]);
+        let legacy = ["opencode".to_string()];
+        assert!(turned_off(opencode, &legacy));
+        assert_eq!(
+            off_providers(opencode, &legacy),
+            ["external-signin", "tinker"]
+        );
+        let mut filtered = catalog.clone();
+        filter_agents(&mut filtered, &legacy, Some("opencode")).unwrap();
+        let routes: Vec<_> = models(&filtered, &[])
+            .into_iter()
+            .find(|model| model.id == "gpt-6")
+            .unwrap()
+            .routes
+            .iter()
+            .map(|route| route.name.clone())
+            .collect();
+        assert_eq!(
+            routes,
+            [
+                "codex",
+                "codex-work",
+                "codex-home",
+                "opencode",
+                "own-key",
+                "local-endpoint",
+                "cursor"
+            ]
+        );
     }
 
     #[test]
@@ -786,6 +948,8 @@ mod tests {
         assert!(free("openrouter/deepseek/deepseek-r1:free"));
         assert!(free("opencode/deepseek-v4.1-flash-free"));
         assert!(!free("opencode-go/deepseek-v4.1-flash"));
+        assert!(free("openresearch-gw88j0/glm-5.3"));
+        assert!(!free("openresearch/glm-5.3"));
     }
 
     #[test]
@@ -877,6 +1041,11 @@ mod tests {
                 ..Variant::default()
             }
         );
+        let named = parse("cursor", "opaque-id", Some("GPT 5 Flex Thinking"), None);
+        assert_eq!(
+            (named.variant.speed.as_deref(), named.variant.thinking),
+            (Some("flex"), true)
+        );
         let grok = parse(
             "cursor",
             "grok-4.7-low-fast",
@@ -887,9 +1056,9 @@ mod tests {
             (
                 grok.label.as_str(),
                 grok.variant.effort.as_deref(),
-                grok.variant.fast
+                grok.variant.speed.as_deref()
             ),
-            ("Grok 4.7", Some("low"), true)
+            ("Grok 4.7", Some("low"), Some("fast"))
         );
 
         let short = parse("claude-code", "claude-opus-5-5", Some("Opus 5.5"), None);
@@ -905,6 +1074,107 @@ mod tests {
         );
         assert_eq!(long.variant.context.as_deref(), Some("1m"));
         assert!(long.variant_rank > short.variant_rank);
+    }
+
+    #[test]
+    fn any_catalogs_speed_and_thinking_tiers_are_variants_of_one_model() {
+        let name = |id, display: Option<&str>| parse("opencode", id, display, None);
+        let plain = name("anthropic/claude-fable-5-2", Some("Claude Fable 5.2"));
+        let tiers = [
+            name(
+                "anthropic/claude-fable-5-2-fast",
+                Some("Claude Fable 5.2 Fast"),
+            ),
+            name(
+                "vercel/anthropic/claude-fable-5.2-fast",
+                Some("Claude Fable 5.2 (Fast)"),
+            ),
+        ];
+        for tier in &tiers {
+            assert_eq!(
+                (
+                    tier.key.as_str(),
+                    tier.label.as_str(),
+                    tier.variant.speed.as_deref()
+                ),
+                (plain.key.as_str(), "Claude Fable 5.2", Some("fast")),
+                "{tier:?}"
+            );
+            assert!(tier.variant_rank > plain.variant_rank);
+        }
+
+        let unnamed = name("anthropic/claude-fable-5-2-fast", None);
+        assert_eq!(
+            (unnamed.key.as_str(), unnamed.label.as_str()),
+            (plain.key.as_str(), "claude-fable-5-2")
+        );
+
+        let both = name(
+            "vercel/openai/gpt-5.1-thinking-fast",
+            Some("GPT 5.1 Thinking (Fast)"),
+        );
+        assert_eq!(
+            (
+                both.key.as_str(),
+                both.variant.speed.as_deref(),
+                both.variant.thinking
+            ),
+            (
+                name("vercel/openai/gpt-5.1", Some("GPT 5.1")).key.as_str(),
+                Some("fast"),
+                true
+            )
+        );
+
+        let ultra = name(
+            "fireworks-ai/routers/deepseek-v4p1-flash-1017-ultrafast",
+            Some("DeepSeek V4.1 Flash 1017 Ultra-fast"),
+        );
+        assert_eq!(
+            (ultra.variant.speed.as_deref(), ultra.label.as_str()),
+            (Some("ultrafast"), "DeepSeek V4.1 Flash")
+        );
+
+        let named = name("grok-code-fast-1", Some("Grok Code Fast 1"));
+        assert!(named.variant.speed.is_none() && named.label == "Grok Code Fast 1");
+    }
+
+    #[test]
+    fn every_speed_tier_is_a_variant_and_older_dashboards_still_read_fast() {
+        let speed = |id| parse("opencode", id, None, None).variant.speed;
+        assert_eq!(speed("openai/gpt-5-flex").as_deref(), Some("flex"));
+        assert_eq!(
+            speed("openai/gpt-6-astra-ultrafast").as_deref(),
+            Some("ultrafast")
+        );
+        assert_eq!(
+            parse("opencode", "openai/gpt-6-astra-ultrafast", None, None).key,
+            parse("opencode", "openai/gpt-6-astra", None, None).key
+        );
+
+        let wire = |id| serde_json::json!(parse("opencode", id, None, None).variant);
+        assert_eq!(wire("openai/gpt-5.5-fast")["fast"], true);
+        assert_eq!(wire("openai/gpt-5-flex")["fast"], false);
+    }
+
+    #[test]
+    fn a_latest_alias_steps_aside_for_the_versions_its_catalog_lists() {
+        let mut models = serde_json::json!([
+            {"id": "mistral/mistral-large-latest", "displayName": "Mistral Large (latest)"},
+            {"id": "mistral/mistral-large-2512", "displayName": "Mistral Large 3"},
+            {"id": "google/gemini-pro-latest", "displayName": "Gemini Pro Latest"},
+            {"id": "google/gemini-2.5-pro", "displayName": "Gemini 2.5 Pro"},
+            {"id": "openai/chat-latest", "displayName": "Chat Latest"},
+            {"id": "other/gemini-pro-latest", "displayName": "Gemini Pro Latest"},
+        ]);
+        name_models("opencode", &mut models);
+        let superseded: Vec<bool> = models
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|model| model["parsed"]["superseded"].as_bool().unwrap())
+            .collect();
+        assert_eq!(superseded, [true, false, true, false, false, false]);
     }
 
     #[test]
