@@ -5689,7 +5689,7 @@ mod tests {
     }
 
     #[test]
-    fn a_finalization_stage_is_timed_from_its_parents_recorded_duration() {
+    fn finalization_uses_its_parent_until_started_then_its_own_rate() {
         let f = Fixture::new("orx-monitor-finalization");
         plan(
             &f,
@@ -5717,16 +5717,14 @@ mod tests {
         let child = staged(&f, "r1", "child", "running", &pipeline, 3);
         let (monitor, _) = monitor_at(&f, &child, T0 + 3_500);
         assert_eq!(monitor["phases"][1]["priorMs"], 2_000);
-        assert!(
-            monitor["estimate"]["midMs"].as_i64().unwrap() > 0,
-            "{}",
-            monitor["estimate"]
-        );
+        assert_eq!(monitor["estimate"]["pending"], true);
+        assert_eq!(monitor["estimate"]["midMs"], Value::Null);
 
+        let child = staged(&f, "r1", "child", "running", &pipeline, 4);
         f.collected(T0 + 4_500);
         let (monitor, _) = monitor_at(&f, &child, T0 + 4_500);
-        assert_eq!(monitor["estimate"]["midMs"], 2_000);
-        assert_eq!(monitor["estimate"]["at"], T0 + 3_000);
+        assert_eq!(monitor["estimate"]["midMs"], 1_000);
+        assert_eq!(monitor["estimate"]["at"], T0 + 4_000);
         let text = monitor["statusText"].as_str().unwrap();
         assert!(text.contains("eta      1s left"), "{text}");
     }
