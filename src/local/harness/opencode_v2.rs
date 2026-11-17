@@ -1418,6 +1418,7 @@ mod tests {
                     note: None,
                     annotations: Vec::new(),
                     from: None,
+                    env: Vec::new(),
                 };
                 reply(&ctx, &endpoint, &prompt, &answer).await.unwrap();
             }
@@ -1473,6 +1474,7 @@ mod tests {
                 note: Some("Skipped".into()),
                 annotations: Vec::new(),
                 from: None,
+                env: Vec::new(),
             };
             let result = reply(&ctx, &endpoint, &prompt, &answer).await;
             server.abort();

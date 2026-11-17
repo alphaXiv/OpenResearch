@@ -6958,6 +6958,7 @@ requires_openai_auth = false
             note: note.map(str::to_string),
             annotations: Vec::new(),
             from: None,
+            env: Vec::new(),
         }
     }
 

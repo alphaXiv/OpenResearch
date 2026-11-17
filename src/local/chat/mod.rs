@@ -9,6 +9,7 @@
 //! the message and broadcasts it as a `chat.message` SSE event.
 
 pub mod delegation;
+pub mod env_request;
 pub(crate) mod handoff;
 pub mod news;
 pub(crate) mod subagent;
@@ -335,6 +336,34 @@ fn target_event_pointer(session_id: &str) -> PathBuf {
     crate::store::data_dir()
         .join("chat-targets")
         .join(format!("{}.current", safe_session_name(session_id)))
+}
+
+/// Variables the user saved for a chat while its agent ran, in the chat's shell
+/// hook directory. The hooks source it in every tool shell, so a value saved
+/// mid-turn reaches the agent's next command; a spawn clears it.
+const CHAT_SHELL_ENV: &str = "env";
+
+/// Exports `vars` to the shells of `session_id`'s running agent. False when
+/// its agent started without shell hooks, so only its next start sees them.
+pub fn export_to_chat_shell(session_id: &str, vars: &[(&str, &str)]) -> Result<bool> {
+    use std::io::Write;
+
+    let dir = shell_hook_dir(session_id);
+    if !dir.join("bash_env").is_file() {
+        return Ok(false);
+    }
+    let lines: String = vars
+        .iter()
+        .map(|(key, value)| format!("export {key}='{}'\n", value.replace('\'', "'\\''")))
+        .collect();
+    let path = dir.join(CHAT_SHELL_ENV);
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut file| file.write_all(lines.as_bytes()))
+        .map_err(|error| anyhow!("could not write {}: {error}", path.display()))?;
+    Ok(true)
 }
 
 fn shell_hook_dir(session_id: &str) -> PathBuf {
@@ -775,7 +804,7 @@ pub struct WireQuestionOption {
 pub struct WirePrompt {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub native_choices: Vec<NativePermissionChoice>,
-    /// `plan` | `permission` | `question`.
+    /// `plan` | `permission` | `question` | `env`.
     pub kind: String,
     /// Whether this prompt has been answered (resolved permission cards
     /// vanish; resolved plan/question cards collapse to a one-line row).
@@ -832,6 +861,9 @@ pub struct WirePrompt {
     /// The chat whose agent answered for the user, through `answer`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answered_by: Option<String>,
+    /// env: the variables the agent asks the user to set.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variables: Vec<env_request::EnvRequestVar>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -4151,6 +4183,27 @@ impl ChatHost {
         };
 
         let is_question = prompt.kind == "question";
+        let held = self.post_held_card(session_id, prompt_id, prompt).await?;
+        // A question card answered mid-turn is NOT an exit recourse from plan
+        // mode, so it must not count as "saw a prompt" — a turn that asks a
+        // question and then ends with its plan as plain text still needs the
+        // synthesized plan card. Plan/permission cards keep counting.
+        if !is_question {
+            self.bridge_prompted
+                .lock()
+                .unwrap()
+                .insert(session_id.to_string());
+        }
+        Ok(Some(held))
+    }
+
+    /// Shows a card the caller holds a request open on until the user answers it.
+    async fn post_held_card(
+        self: &Arc<Self>,
+        session_id: &str,
+        prompt_id: String,
+        prompt: WirePrompt,
+    ) -> Result<HeldPermission> {
         // The card rides its own assistant message: the running turn owns its
         // in-flight message's parts (a foreign part appended there would be
         // clobbered by the turn's next flush).
@@ -4178,16 +4231,6 @@ impl ChatHost {
         self.emit("chat.message", message_json(&msg, session_id));
         self.emit_session(Store::open()?.get_chat_session(session_id)?)
             .await;
-        // A question card answered mid-turn is NOT an exit recourse from plan
-        // mode, so it must not count as "saw a prompt" — a turn that asks a
-        // question and then ends with its plan as plain text still needs the
-        // synthesized plan card. Plan/permission cards keep counting.
-        if !is_question {
-            self.bridge_prompted
-                .lock()
-                .unwrap()
-                .insert(session_id.to_string());
-        }
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.pending_permissions.lock().unwrap().insert(
@@ -4197,14 +4240,14 @@ impl ChatHost {
                 tx,
             },
         );
-        Ok(Some(HeldPermission {
+        Ok(HeldPermission {
             rx,
             _guard: PendingGuard {
                 host: self.clone(),
                 session_id: session_id.to_string(),
                 prompt_id,
             },
-        }))
+        })
     }
 
     /// Settle a pending bridge request with the user's decision (the native
@@ -7280,6 +7323,9 @@ impl ChatHost {
             }
             return Ok(());
         };
+        if prompt.kind == "env" {
+            return self.answer_env_request(&session, &prompt, req).await;
+        }
         if prompt.kind == "permission"
             && first_unresolved_permission_id(&req.session_id)?.as_deref()
                 != Some(req.prompt_id.as_str())
@@ -7854,6 +7900,9 @@ pub struct PromptAnswer {
     /// The chat whose agent answered for the user, through `answer`.
     #[serde(skip)]
     pub from: Option<String>,
+    /// For env requests: the values the user saved.
+    #[serde(default)]
+    pub env: Vec<env_request::EnvAnswer>,
 }
 
 impl PromptAnswer {
@@ -8005,6 +8054,13 @@ fn stamp_resolved(prompt: &mut WirePrompt, answer: Option<&PromptAnswer>) {
         prompt.note = answer.note.clone().filter(|n| !n.trim().is_empty());
         prompt.annotations = answer.annotations.clone();
         prompt.answered_by = answer.from.clone();
+        for var in &mut prompt.variables {
+            var.saved_to = answer
+                .env
+                .iter()
+                .find(|saved| saved.name == var.name)
+                .map(|saved| saved.scope);
+        }
     }
 }
 
@@ -10087,6 +10143,7 @@ fn zshenv_hook(original_zdotdir: &std::path::Path) -> String {
          [[ -r \"$ZDOTDIR/.zshenv\" ]] && source \"$ZDOTDIR/.zshenv\"\n\
          _ORX_CHAT_USER_ZDOTDIR=$ZDOTDIR\n\
          ZDOTDIR=$_ORX_CHAT_SHIM_ZDOTDIR\n\
+         [[ -r \"$ZDOTDIR/{CHAT_SHELL_ENV}\" ]] && source \"$ZDOTDIR/{CHAT_SHELL_ENV}\"\n\
          export ORX_CHAT_TOOL_SCOPE=\"zsh-$$\"\n\
          export ORX_CHAT_TOOL_COMMAND=\"${{ZSH_EXECUTION_STRING-}}\"\n\
          if [[ -z \"${{ORX_CHAT_TARGET_FILE-}}\" && -r \"${{ORX_CHAT_TARGET_POINTER-}}\" ]]; then\n\
@@ -10111,6 +10168,7 @@ fn bash_env_hook(original: Option<String>) -> String {
         .unwrap_or_default();
     format!(
         "{source}\
+         [[ -r \"${{BASH_ENV%/*}}/{CHAT_SHELL_ENV}\" ]] && source \"${{BASH_ENV%/*}}/{CHAT_SHELL_ENV}\"\n\
          export ORX_CHAT_TOOL_SCOPE=\"bash-$$\"\n\
          export ORX_CHAT_TOOL_COMMAND=\"${{BASH_EXECUTION_STRING-}}\"\n\
          if [[ -z \"${{ORX_CHAT_TARGET_FILE-}}\" && -r \"${{ORX_CHAT_TARGET_POINTER-}}\" ]]; then\n\
@@ -10146,13 +10204,27 @@ pub fn set_chat_session_env(
     harness: &str,
     up_port: Option<u16>,
 ) -> crate::error::Result<()> {
-    cmd.env(CHAT_SESSION_ENV, session_id);
-    cmd.env(CHAT_HARNESS_ENV, harness);
     // The agent's `orx` opens the store this dashboard serves, whatever a synced
     // `ORX_DATA_DIR` or the agent's own home would resolve.
     let data_dir = crate::commands::remote_host::canonical_data_dir().map_err(|error| {
         anyhow!("The agent could not be given this dashboard's data directory: {error:#}")
     })?;
+    // A project's own variables override the synced ones; the user's shell still wins.
+    let project_vars = Store::open()
+        .and_then(|store| match store.get_chat_session(session_id)? {
+            Some(session) => store.project_env(&session.project_id),
+            None => Ok(Vec::new()),
+        })
+        .map_err(|error| {
+            anyhow!("The agent could not be given this project's variables: {error:#}")
+        })?;
+    for var in project_vars {
+        if crate::local::shell_env::var(&var.key).is_none() {
+            cmd.env(var.key, var.value);
+        }
+    }
+    cmd.env(CHAT_SESSION_ENV, session_id);
+    cmd.env(CHAT_HARNESS_ENV, harness);
     cmd.env("ORX_DATA_DIR", data_dir);
     cmd.env(LOCAL_SESSION_ENV, "1");
     cmd.env("ORX_SESSION_ID", session_id);
@@ -10195,6 +10267,16 @@ pub fn set_chat_session_env(
     let shell_dir = shell_hook_dir(session_id);
     if std::fs::create_dir_all(&shell_dir).is_err() {
         return Ok(());
+    }
+    // The spawn's environment already holds every saved value, newer than these.
+    match std::fs::remove_file(shell_dir.join(CHAT_SHELL_ENV)) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            return Err(anyhow!(
+                "could not clear {}: {error}",
+                shell_dir.join(CHAT_SHELL_ENV).display()
+            ))
+        }
+        _ => {}
     }
     let original_zdotdir = child_env_value("ZDOTDIR")
         .map(PathBuf::from)
@@ -10359,6 +10441,65 @@ mod session_env_tests {
             .and_then(|(_, value)| value);
         let served = crate::commands::remote_host::canonical_data_dir().unwrap();
         assert_eq!(pinned, Some(served.as_os_str()));
+    }
+
+    /// A project's variable reaches its agents over the synced one, and a value saved
+    /// mid-turn reaches the agent's next shell until it restarts.
+    #[cfg(unix)]
+    #[test]
+    fn project_variables_reach_the_agent_and_its_shells() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let synced = crate::config::test_home().join(".openresearch/env");
+        std::fs::create_dir_all(synced.parent().unwrap()).unwrap();
+        std::fs::write(&synced, "export ORX_TEST_PROJECT='global'\n").unwrap();
+        let store = crate::store::Store::open().unwrap();
+        let mut session = crate::store::tests::chat_session_fixture("chat_env");
+        session.project_id = "proj_env".into();
+        store.create_chat_session(&session).unwrap();
+        store
+            .set_project_env("proj_env", "ORX_TEST_PROJECT", "own")
+            .unwrap();
+
+        let mut cmd = crate::process::tokio_command("agent");
+        super::prepare_env(&mut cmd);
+        super::set_chat_session_env(&mut cmd, "chat_env", "claude", None).unwrap();
+        let env = |cmd: &tokio::process::Command, key: &str| {
+            cmd.as_std()
+                .get_envs()
+                .filter(|(name, _)| *name == key)
+                .last()
+                .and_then(|(_, value)| value.map(|value| value.to_owned()))
+        };
+        assert_eq!(
+            env(&cmd, "ORX_TEST_PROJECT").as_deref(),
+            Some(std::ffi::OsStr::new("own"))
+        );
+
+        assert!(
+            super::export_to_chat_shell("chat_env", &[("ORX_TEST_SAVED", "it's set")]).unwrap()
+        );
+        let bash_env = env(&cmd, "BASH_ENV").unwrap();
+        let shell = crate::process::command("bash")
+            .args(["-c", "printf %s \"$ORX_TEST_SAVED\""])
+            .env("BASH_ENV", &bash_env)
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&shell.stdout), "it's set");
+
+        let mut respawn = crate::process::tokio_command("agent");
+        super::set_chat_session_env(&mut respawn, "chat_env", "claude", None).unwrap();
+        let shell = crate::process::command("bash")
+            .args(["-c", "printf %s \"${ORX_TEST_SAVED-unset}\""])
+            .env("BASH_ENV", &bash_env)
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&shell.stdout),
+            "unset",
+            "a spawn starts from the saved environment"
+        );
     }
 
     /// An agent left on whatever store its environment names could split from the dashboard.
@@ -11688,6 +11829,7 @@ mod bridge_tests {
                 note: Some("Keep the tests".into()),
                 annotations: Vec::new(),
                 from: None,
+                env: Vec::new(),
             }),
         );
         assert_eq!(plan.approved, Some(true));
@@ -11799,6 +11941,7 @@ mod bridge_tests {
             note: note.map(str::to_string),
             annotations: Vec::new(),
             from: None,
+            env: Vec::new(),
         }
     }
 

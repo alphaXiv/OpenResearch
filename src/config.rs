@@ -738,12 +738,36 @@ pub fn list_synced_env() -> Vec<(String, String)> {
 /// Names the run inside its job, e.g. as a metric tracker's run name.
 pub const RUN_ID_ENV: &str = "ORX_RUN_ID";
 
-/// A run's environment: the synced env file plus what the run knows about itself.
+/// A run's environment: [`saved_run_env`] plus what the run knows about itself.
 pub fn run_env(run_id: &str) -> std::collections::HashMap<String, String> {
-    let mut env: std::collections::HashMap<String, String> =
-        list_synced_env().into_iter().collect();
+    let mut env = saved_run_env(run_id);
     env.extend(run_context_env(run_id));
     env
+}
+
+/// The saved variables a run gets: the synced env file, with its project's own over it.
+pub fn saved_run_env(run_id: &str) -> std::collections::HashMap<String, String> {
+    let mut env: std::collections::HashMap<String, String> =
+        list_synced_env().into_iter().collect();
+    match run_project_env(run_id) {
+        Ok(vars) => env.extend(vars),
+        Err(error) => {
+            eprintln!("warning: could not read run {run_id}'s project variables: {error:#}")
+        }
+    }
+    env
+}
+
+fn run_project_env(run_id: &str) -> Result<Vec<(String, String)>> {
+    let store = crate::store::Store::open()?;
+    let Some(run) = store.get_run(run_id)? else {
+        return Ok(Vec::new());
+    };
+    Ok(store
+        .project_env(&run.project_id)?
+        .into_iter()
+        .map(|var| (var.key, var.value))
+        .collect())
 }
 
 /// What a launched job sees: [`run_env`] plus a configured Hugging Face token. Resolved at

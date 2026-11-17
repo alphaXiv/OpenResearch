@@ -18,7 +18,7 @@ OpenCode provider records (`opencode-providers.json`, including API keys) stay i
 
 Saved SSH passwords and key passphrases sit in the system's credential store (Keychain, Credential Manager, the Secret Service), one item per host alias, never in a file ([remote](remote.md#saved-hosts)).
 
-`~/.openresearch/env` sits outside all three. It holds the variables and compute credentials saved in compute settings and fans out to agents and launched runs (`src/config.rs`), so a secret that must stay on this machine, like Overleaf's, belongs in the config directory.
+`~/.openresearch/env` sits outside all three. It holds the variables and compute credentials saved in compute settings and fans out to agents and launched runs (`src/config.rs`), so a secret that must stay on this machine, like Overleaf's, belongs in the config directory. A project's own variables live in the store and override the file for that project's agents and runs; descriptions of both live in the store too, so the file keeps the one format shells and older versions read.
 
 ## The store
 
