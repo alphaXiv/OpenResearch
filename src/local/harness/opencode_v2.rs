@@ -74,10 +74,10 @@ pub(super) async fn run_turn(
     database: PathBuf,
 ) -> Result<()> {
     ensure_runtime(ctx, store, binary, database).await?;
-    let endpoint = ctx
+    let (endpoint, keeper) = ctx
         .host
         .opencode
-        .endpoint_for(&ctx.session_id)
+        .server_for(&ctx.session_id)
         .await
         .ok_or_else(|| anyhow!("OpenCode stopped during setup"))?;
     let mut model = ctx
@@ -134,61 +134,137 @@ pub(super) async fn run_turn(
         .iter()
         .filter_map(|m| m["id"].as_str().map(str::to_owned))
         .collect();
-    let prompt_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
+    let turn = V2Turn {
+        prompt_id: format!("msg_{}", uuid::Uuid::new_v4().simple()),
+    };
     ctx.persist_delivery(DeliveryState::Unknown)?;
     // A transport failure can follow durable admission. Never replay this POST.
     let admission = post(
         &endpoint,
         &format!("{path}/prompt"),
-        &json!({"id":prompt_id,"text":ctx.text}),
+        &json!({"id":turn.prompt_id,"text":ctx.text}),
     )
     .await;
     if admission.is_ok() {
         ctx.persist_delivery(DeliveryState::Accepted)?;
     }
-    let mut surfaced = HashSet::new();
+    let state = Checkpoint {
+        keeper: &keeper,
+        turn: &turn,
+    };
+    state.commit(ctx);
+    follow(
+        ctx,
+        &endpoint,
+        &native_id,
+        state,
+        previous,
+        HashSet::new(),
+        admission,
+    )
+    .await
+}
+
+/// What a V2 turn checkpoints beside its transcript; the server's durable projection holds the
+/// rest.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct V2Turn {
+    prompt_id: String,
+}
+
+#[derive(Clone, Copy)]
+struct Checkpoint<'a> {
+    keeper: &'a KeptHandle,
+    turn: &'a V2Turn,
+}
+
+impl Checkpoint<'_> {
+    /// Commits the transcript with the turn's checkpoint. The server's own output carries
+    /// nothing a turn applies, so the checkpoint sits where this attachment's output starts.
+    fn commit(self, ctx: &mut TurnCtx) {
+        if let Err(error) = ctx.flush_at(self.keeper, self.keeper.start(), self.turn) {
+            eprintln!("orx up: could not save turn {}: {error:#}", ctx.turn_id);
+        }
+    }
+}
+
+/// Goes on with a turn a previous server left running: its prompt's place in the projection
+/// marks which messages are the turn's, and the transcript's cards are the requests surfaced.
+pub(super) async fn resume_turn(
+    ctx: &mut TurnCtx,
+    resume: Resume,
+    endpoint: &AgentEndpoint,
+    keeper: &KeptHandle,
+    native_id: &str,
+) -> Result<()> {
+    let turn: V2Turn = serde_json::from_value(resume.state)
+        .map_err(|error| anyhow!("This OpenCode turn has an unreadable checkpoint: {error}"))?;
+    let projection = get(endpoint, &endpoint.v2_export_path(native_id)).await?;
+    let previous: HashSet<String> = messages(&projection)?
+        .iter()
+        .filter_map(|m| m["id"].as_str())
+        .take_while(|id| *id != turn.prompt_id)
+        .map(str::to_owned)
+        .collect();
+    let surfaced = ctx
+        .assistant
+        .parts
+        .iter()
+        .filter_map(|part| part.prompt.as_ref()?.native_id.clone())
+        .collect();
+    let state = Checkpoint {
+        keeper,
+        turn: &turn,
+    };
+    follow(ctx, endpoint, native_id, state, previous, surfaced, Ok(())).await
+}
+
+async fn follow(
+    ctx: &mut TurnCtx,
+    endpoint: &AgentEndpoint,
+    native_id: &str,
+    state: Checkpoint<'_>,
+    previous: HashSet<String>,
+    mut surfaced: HashSet<String>,
+    admission: Result<()>,
+) -> Result<()> {
+    let path = format!("/api/session/{native_id}");
+    let prompt_id = state.turn.prompt_id.as_str();
     let mut recorded = HashSet::new();
     let mut was_idle = false;
     loop {
         // ponytail: full projected history polling; switch to paged durable log if long chats make this costly.
-        let projection = get(&endpoint, &endpoint.v2_export_path(&native_id)).await?;
+        let projection = get(endpoint, &endpoint.v2_export_path(native_id)).await?;
         let current = messages(&projection)?;
-        let delivered = current.iter().any(|m| m["id"].as_str() == Some(&prompt_id));
-        merge_projection(
-            ctx,
-            &endpoint,
-            &native_id,
-            current,
-            &previous,
-            &mut recorded,
-        )
-        .await?;
+        let delivered = current.iter().any(|m| m["id"].as_str() == Some(prompt_id));
+        merge_projection(ctx, endpoint, native_id, current, &previous, &mut recorded).await?;
         if delivered && ctx.delivery_state() != DeliveryState::Accepted {
             ctx.persist_delivery(DeliveryState::Accepted)?;
         }
-        prompts(ctx, &endpoint, &path, &mut surfaced).await?;
-        let inbox = get(&endpoint, &format!("{path}/inbox")).await?;
+        prompts(ctx, endpoint, &path, &mut surfaced).await?;
+        let inbox = get(endpoint, &format!("{path}/inbox")).await?;
         let queued = inbox["data"]
             .as_array()
             .ok_or_else(|| anyhow!("OpenCode V2 inbox response is invalid"))?
             .iter()
-            .any(|item| item["id"].as_str() == Some(&prompt_id));
-        let active = get(&endpoint, "/api/session/active").await?;
+            .any(|item| item["id"].as_str() == Some(prompt_id));
+        let active = get(endpoint, "/api/session/active").await?;
         let running = active["data"]
             .as_object()
             .ok_or_else(|| anyhow!("OpenCode V2 active response is invalid"))?
-            .contains_key(&native_id);
+            .contains_key(native_id);
         if observed_idle(&mut was_idle, queued, running) {
-            let final_projection = get(&endpoint, &endpoint.v2_export_path(&native_id)).await?;
+            let final_projection = get(endpoint, &endpoint.v2_export_path(native_id)).await?;
             let final_messages = messages(&final_projection)?;
             let delivered = delivered
                 || final_messages
                     .iter()
-                    .any(|m| m["id"].as_str() == Some(&prompt_id));
+                    .any(|m| m["id"].as_str() == Some(prompt_id));
             let answered = merge_projection(
                 ctx,
-                &endpoint,
-                &native_id,
+                endpoint,
+                native_id,
                 final_messages,
                 &previous,
                 &mut recorded,
@@ -204,7 +280,7 @@ pub(super) async fn run_turn(
             }
             if delivered && outcome == Some("failed") {
                 // Failures before a step (e.g. an unavailable model) leave no assistant message.
-                if let Ok(Some(message)) = execution_failure(&endpoint, &native_id).await {
+                if let Ok(Some(message)) = execution_failure(endpoint, native_id).await {
                     ctx.mark_native_retry_exhausted();
                     ctx.mark_terminal_failure("opencode_terminal", &message);
                     return Err(anyhow!("OpenCode V2: {message}"));
@@ -217,7 +293,7 @@ pub(super) async fn run_turn(
                 "OpenCode V2 became idle without completing this prompt"
             ));
         }
-        ctx.flush()?;
+        state.commit(ctx);
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
 }

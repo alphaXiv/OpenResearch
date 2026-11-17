@@ -3,14 +3,15 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use base64::Engine;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 
 use crate::error::{anyhow, Result};
+use crate::keep::{self, KeptHandle};
 use crate::local::native_store::opencode_database::DatabaseLease;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Protocol {
     V1,
@@ -26,7 +27,7 @@ impl Protocol {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ResolvedBinary {
     pub path: PathBuf,
     pub version: String,
@@ -231,7 +232,7 @@ pub(crate) struct AgentEndpoint {
 }
 
 impl AgentEndpoint {
-    async fn check_health(&mut self) -> Result<bool> {
+    pub(crate) async fn check_health(&mut self) -> Result<bool> {
         if self.protocol == Protocol::V1 {
             return Ok(self
                 .get("/global/health")
@@ -374,6 +375,105 @@ impl Drop for ServerChild {
     }
 }
 
+/// How one `opencode serve` is reached: V1 on a port orx picks, V2 behind a password on a port
+/// it reports on stdout.
+struct Serve {
+    v1_port: Option<u16>,
+    password: Option<String>,
+}
+
+fn serve_command(binary: &ResolvedBinary, cmd: &mut Command) -> Result<Serve> {
+    cmd.env("OPENCODE_DISABLE_AUTOUPDATE", "1").arg("serve");
+    if binary.protocol == Protocol::V1 {
+        let port = super::free_port()?;
+        cmd.args([
+            "--port",
+            &port.to_string(),
+            "--hostname",
+            "127.0.0.1",
+            "--print-logs",
+        ]);
+        return Ok(Serve {
+            v1_port: Some(port),
+            password: None,
+        });
+    }
+    let password = uuid::Uuid::new_v4().to_string();
+    cmd.args(["--stdio", "--port", "0"])
+        .env("OPENCODE_PASSWORD", &password);
+    Ok(Serve {
+        v1_port: None,
+        password: Some(password),
+    })
+}
+
+/// A client for one server, carrying its password when it has one.
+pub(crate) fn server_client(password: Option<&str>) -> Result<reqwest::Client> {
+    let mut headers = reqwest::header::HeaderMap::new();
+    if let Some(password) = password {
+        let auth = base64::engine::general_purpose::STANDARD.encode(format!("opencode:{password}"));
+        let mut value = reqwest::header::HeaderValue::from_str(&format!("Basic {auth}"))?;
+        value.set_sensitive(true);
+        headers.insert(reqwest::header::AUTHORIZATION, value);
+    }
+    Ok(crate::net::loopback_client()
+        .default_headers(headers)
+        .build()?)
+}
+
+/// Waits for a started server to answer: V2's first stdout line names its URL, then both
+/// protocols must pass a health check before `exited` reports the server gone.
+async fn await_ready(
+    binary: &ResolvedBinary,
+    serve: &Serve,
+    first_line: impl std::future::Future<Output = Result<Option<String>>>,
+    mut exited: impl FnMut() -> Result<Option<String>>,
+) -> Result<AgentEndpoint> {
+    let base_url = if let Some(port) = serve.v1_port {
+        format!("http://127.0.0.1:{port}")
+    } else {
+        let first = tokio::time::timeout(super::HEALTH_TIMEOUT, first_line)
+            .await??
+            .ok_or_else(|| anyhow!("OpenCode exited before reporting readiness"))?;
+        let ready: serde_json::Value = serde_json::from_str(&first)?;
+        let url = ready["url"]
+            .as_str()
+            .ok_or_else(|| anyhow!("Invalid OpenCode readiness response"))?
+            .to_string();
+        let parsed = reqwest::Url::parse(&url)?;
+        if parsed.scheme() != "http"
+            || !matches!(parsed.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"))
+        {
+            return Err(anyhow!("OpenCode returned a non-loopback server URL"));
+        }
+        url.trim_end_matches('/').to_string()
+    };
+    let mut endpoint = AgentEndpoint {
+        base_url,
+        client: server_client(serve.password.as_deref())?,
+        protocol: binary.protocol,
+        legacy_v2_api: false,
+    };
+    let deadline = tokio::time::Instant::now() + super::HEALTH_TIMEOUT;
+    loop {
+        if let Some(status) = exited()? {
+            return Err(anyhow!("OpenCode exited during startup ({status})"));
+        }
+        if endpoint.check_health().await.unwrap_or(false) {
+            return Ok(endpoint);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(anyhow!(
+                "OpenCode health check timed out; see {}",
+                super::agent_log_path().display()
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Starts a short-lived server orx's own process holds: discovery, generation, migration and
+/// sign-in, none of which outlive this server.
 pub(crate) async fn start_server(
     binary: &ResolvedBinary,
     mut cmd: Command,
@@ -385,36 +485,12 @@ pub(crate) async fn start_server(
         .create(true)
         .append(true)
         .open(super::agent_log_path())?;
-    let mut headers = reqwest::header::HeaderMap::new();
-    let v1_port = if binary.protocol == Protocol::V1 {
-        Some(super::free_port()?)
+    let serve = serve_command(binary, &mut cmd)?;
+    cmd.kill_on_drop(true).stderr(Stdio::from(log.try_clone()?));
+    if serve.v1_port.is_some() {
+        cmd.stdin(Stdio::null()).stdout(Stdio::from(log));
     } else {
-        None
-    };
-    cmd.env("OPENCODE_DISABLE_AUTOUPDATE", "1")
-        .arg("serve")
-        .kill_on_drop(true)
-        .stderr(Stdio::from(log.try_clone()?));
-    if let Some(port) = v1_port {
-        cmd.args([
-            "--port",
-            &port.to_string(),
-            "--hostname",
-            "127.0.0.1",
-            "--print-logs",
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log));
-    } else {
-        let password = uuid::Uuid::new_v4().to_string();
-        let auth = base64::engine::general_purpose::STANDARD.encode(format!("opencode:{password}"));
-        let mut value = reqwest::header::HeaderValue::from_str(&format!("Basic {auth}"))?;
-        value.set_sensitive(true);
-        headers.insert(reqwest::header::AUTHORIZATION, value);
-        cmd.args(["--stdio", "--port", "0"])
-            .env("OPENCODE_PASSWORD", password)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped());
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped());
     }
     #[cfg(unix)]
     cmd.process_group(0);
@@ -436,59 +512,17 @@ pub(crate) async fn start_server(
     }
     binary.check_unchanged()?;
     let mut child = ServerChild::new(crate::local::harness::spawn_retrying_busy(|| cmd.spawn())?);
-    let client = crate::net::loopback_client()
-        .default_headers(headers)
-        .build()?;
-    let ready = async {
-        let base_url = if let Some(port) = v1_port {
-            format!("http://127.0.0.1:{port}")
-        } else {
-            let stdout = child
-                .child
-                .stdout
-                .take()
-                .ok_or_else(|| anyhow!("OpenCode readiness pipe missing"))?;
-            let mut lines = BufReader::new(stdout).lines();
-            let first = tokio::time::timeout(super::HEALTH_TIMEOUT, lines.next_line())
-                .await??
-                .ok_or_else(|| anyhow!("OpenCode exited before reporting readiness"))?;
-            let ready: serde_json::Value = serde_json::from_str(&first)?;
-            let url = ready["url"]
-                .as_str()
-                .ok_or_else(|| anyhow!("Invalid OpenCode readiness response"))?
-                .to_string();
-            let parsed = reqwest::Url::parse(&url)?;
-            if parsed.scheme() != "http"
-                || !matches!(parsed.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"))
-            {
-                return Err(anyhow!("OpenCode returned a non-loopback server URL"));
-            }
-            tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
-            url.trim_end_matches('/').to_string()
-        };
-        let mut endpoint = AgentEndpoint {
-            base_url,
-            client,
-            protocol: binary.protocol,
-            legacy_v2_api: false,
-        };
-        let deadline = tokio::time::Instant::now() + super::HEALTH_TIMEOUT;
-        loop {
-            if let Some(status) = child.try_wait()? {
-                return Err(anyhow!("OpenCode exited during startup ({status})"));
-            }
-            if endpoint.check_health().await.unwrap_or(false) {
-                return Ok(endpoint);
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(anyhow!(
-                    "OpenCode health check timed out; see {}",
-                    super::agent_log_path().display()
-                ));
-            }
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
-    }
+    let stdout = child.child.stdout.take();
+    let first_line = async move {
+        let stdout = stdout.ok_or_else(|| anyhow!("OpenCode readiness pipe missing"))?;
+        let mut lines = BufReader::new(stdout).lines();
+        let first = lines.next_line().await?;
+        tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
+        Ok(first)
+    };
+    let ready = await_ready(binary, &serve, first_line, || {
+        Ok(child.try_wait()?.map(|status| status.to_string()))
+    })
     .await;
     match ready {
         Ok(endpoint) => Ok((child, endpoint)),
@@ -498,6 +532,74 @@ pub(crate) async fn start_server(
             }
             Err(error)
         }
+    }
+}
+
+/// A chat's resident server, kept so it outlives this server ([`crate::keep`]). Its stdout
+/// carries nothing a turn reads past V2's readiness line, so the keeper only tails it.
+pub(crate) async fn start_kept_server(
+    binary: &ResolvedBinary,
+    mut cmd: Command,
+    owner: &keep::Owner,
+) -> Result<(KeptHandle, AgentEndpoint, Option<String>)> {
+    if let Some(parent) = super::agent_log_path().parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let serve = serve_command(binary, &mut cmd)?;
+    binary.check_unchanged()?;
+    let mut kept = keep::spawn(keep::Keep {
+        command: cmd.as_std(),
+        io: keep::Io::Pipes {
+            stderr: Some(super::agent_log_path()),
+        },
+        retain: keep::Retain::Tail { bytes: 64 << 10 },
+        owner: owner.to_value(),
+    })
+    .await
+    .map_err(|error| anyhow!("Could not start OpenCode: {error}"))?;
+    let keeper = kept.handle();
+    let stdout = kept.take_stdout();
+    let first_line = async move {
+        let mut lines = stdout
+            .ok_or_else(|| anyhow!("OpenCode readiness pipe missing"))?
+            .lines();
+        Ok(lines.next_line().await?.map(|(line, _)| line))
+    };
+    let ready = await_ready(binary, &serve, first_line, || {
+        Ok(keeper.try_wait().as_ref().map(describe_exit))
+    })
+    .await;
+    match ready {
+        Ok(endpoint) => Ok((keeper, endpoint, serve.password)),
+        Err(error) => {
+            if let Err(stop_error) = stop_kept(&keeper).await {
+                eprintln!("orx up: failed to stop OpenCode after startup error: {stop_error}");
+            }
+            Err(error)
+        }
+    }
+}
+
+/// Ends a kept server and everything it started, unless this server hands it to the next.
+pub(crate) async fn stop_kept(keeper: &KeptHandle) -> Result<()> {
+    if keeper.stop(TERMINATION_TIMEOUT).await.is_none() && !keep::handing_off() {
+        return Err(anyhow!(
+            "OpenCode (pid {}) did not stop within {}s",
+            keeper.pid(),
+            TERMINATION_TIMEOUT.as_secs()
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn describe_exit(exit: &keep::Exit) -> String {
+    match (exit.reason.as_deref(), exit.code, exit.signal) {
+        (Some("lost"), _, _) => "its keeper is gone".into(),
+        (Some("orphaned"), _, _) => "ended while no orx server was attached".into(),
+        (Some("stopped"), _, _) => "stopped".into(),
+        (_, Some(code), _) => format!("exit code {code}"),
+        (_, _, Some(signal)) => format!("signal {signal}"),
+        _ => "exit status unknown".into(),
     }
 }
 
@@ -795,6 +897,74 @@ mod tests {
         fake(&copies.join("1.19.5/opencode"), "1.19.5");
         fake(&copies.join("2.3.0/opencode"), "2.3.0");
         assert_eq!(resolve_binary().await.unwrap().version, "2.3.0");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_kept_v2_server_reports_readiness_through_its_keeper() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        use axum::{routing::get, Router};
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let app = Router::new().route(
+                "/api/info",
+                get(|| async { axum::Json(serde_json::json!({"version":"2.0.12"})) }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let fixture = ProbeEnvironment::new().unwrap();
+            let fake = |name: &str, serve: &str| {
+                let path = fixture.0.path().join(name);
+                let script = format!(
+                    "#!/bin/sh\n[ \"$1\" = --version ] && {{ echo 2.0.12; exit 0; }}\n{serve}\n"
+                );
+                orx_test_support::write_executable(&path, &script, 0o700).unwrap();
+                path
+            };
+            let owner = keep::Owner::Agent {
+                harness: "opencode".into(),
+                session_id: "chat".into(),
+                state: serde_json::Value::Null,
+            };
+
+            let path = fake(
+                "opencode",
+                &format!("[ -n \"$OPENCODE_PASSWORD\" ] || exit 3\necho '{{\"url\":\"{url}/\"}}'\nexec sleep 60"),
+            );
+            let binary = resolve_binary_at(path.clone()).await.unwrap();
+            let (keeper, endpoint, password) =
+                start_kept_server(&binary, crate::process::tokio_command(&path), &owner)
+                    .await
+                    .unwrap();
+            assert_eq!(endpoint.base_url, url);
+            assert!(password.is_some());
+            let entry = keep::entries()
+                .into_iter()
+                .find(|entry| entry.id == keeper.id())
+                .unwrap();
+            assert!(entry.alive);
+            assert_eq!(entry.owner, Some(owner.clone()));
+            stop_kept(&keeper).await.unwrap();
+            assert!(keeper.try_wait().is_some());
+
+            let path = fake("crashing", "exit 7");
+            let binary = resolve_binary_at(path.clone()).await.unwrap();
+            let Err(error) =
+                start_kept_server(&binary, crate::process::tokio_command(&path), &owner).await
+            else {
+                panic!("a server that exits is not ready");
+            };
+            assert!(error.to_string().contains("before reporting readiness"), "{error}");
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while keep::entries().iter().any(|entry| entry.alive) {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .expect("a server that never became ready is not left running");
+        });
     }
 
     #[test]

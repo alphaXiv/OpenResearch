@@ -58,6 +58,8 @@ use major 2; an existing major 1 still runs chats and offers an explicit upgrade
 or OpenResearch's own copy before provider changes.
 OpenResearch places a new OpenCode copy only while no chat or compaction is
 mid-turn, and stops the idle OpenCode servers first so none keeps the old binary.
+A server adopted after a restart for a turn that resumes on it counts as mid-turn
+from its adoption.
 Agents orx starts run with Claude Code's updater off, so only this check
 changes an install. Cursor, Antigravity and ACP presets also use cached vendor
 releases; their updates replace orx's copy without invoking vendor installers.
@@ -250,6 +252,8 @@ When a dashboard starts or a lease expires, every turn still marked running has 
 | accepted, unknown | continue | asks the agent to carry on; replaying could repeat work |
 
 **Nothing is replayed without the user.** An adapter retries on its own only before the prompt is accepted, within a bounded budget. A continued turn resumes the native session; if that session is gone, the agent gets a bounded snapshot of orx's transcript with instructions not to repeat completed tool actions. An ACP agent's session is gone when the agent says so or no longer lists it.
+
+**An OpenCode turn resumes from its server.** The server is kept ([restarts](restarts.md)), so a resumed turn reconnects to its events and reads its messages, sub-agents and pending approvals and questions back over the server's API; the transcript is rebuilt from those, and a card still pending stays answerable. A 1.x turn then waits for its session to go idle in place of the request it lost; a message the server never received fails as not sent.
 
 Queued messages are persisted before they are acknowledged and run in order as each turn ends, so a restart loses none; Stop clears the queue. A quitting dashboard starts no turn, queued ones included, and gives up its leases on the way out, so the next start recovers its turns at once. Adapters that read a child's output interrupt a turn silent past a generous watchdog, which waits while an ACP agent reports a command running; OpenCode's adapters have none.
 

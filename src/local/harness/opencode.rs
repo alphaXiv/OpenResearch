@@ -16,6 +16,10 @@
 //! POST. Auto-approve resolves native `ask` requests without a card; Default
 //! surfaces them. Questions always need a human, so they always surface.
 //!
+//! Restarts: the server is kept, so a turn outlives `orx up`. A resumed turn reconnects to the
+//! event stream, reads its messages, sub-agent sessions and pending requests back from the
+//! server, and waits for the session to go idle in place of the POST it lost.
+//!
 //! Detection: opencode's `auth.json` is `{provider: {type}}`; the signed-in
 //! providers are its account line, and `opencode models --verbose` is the model
 //! list plus each model's reasoning `variants` (plain `opencode models` is the
@@ -27,6 +31,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::detect::{read_json, BinProbe, HarnessAuthState, HarnessInfo, ModelInfo};
@@ -34,12 +39,13 @@ use super::options::{
     HarnessOptions, OptionChoice, PermissionMode, PlanActivation, REASONING_DEFAULT_ID,
 };
 use super::{
-    CompactCtx, CompactOutcome, Harness, OneShot, ResumeAction, TurnFailure, TurnOutcome,
+    Adoption, CompactCtx, CompactOutcome, Harness, OneShot, ResumeAction, TurnFailure, TurnOutcome,
     TurnResult, ORX_MAX_ATTEMPTS,
 };
 use crate::error::{anyhow, Result};
+use crate::keep::KeptHandle;
 use crate::local::chat::{
-    ContextUsage, DeliveryState, PromptAnswer, ResumeCtx, TurnCtx, WirePart, WirePrompt,
+    ContextUsage, DeliveryState, PromptAnswer, Resume, ResumeCtx, TurnCtx, WirePart, WirePrompt,
     WireQuestionOption, WireToolState,
 };
 use crate::local::local_models::is_loopback_url;
@@ -386,6 +392,18 @@ impl Harness for OpenCode {
         let mut info = self.detect_at(true).await?;
         info.found_providers = found_providers([]);
         Some(info)
+    }
+
+    fn supports_resume(&self) -> bool {
+        true
+    }
+
+    async fn adopt(
+        &self,
+        chat: &std::sync::Arc<crate::local::chat::ChatHost>,
+        adoption: Adoption,
+    ) -> Result<()> {
+        chat.opencode.adopt(adoption).await
     }
 
     async fn run_turn(&self, ctx: &mut TurnCtx) -> TurnResult {
@@ -1945,6 +1963,10 @@ async fn opencode_pre_accept_setup(
 
 async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     let _in_use = super::managed::OPENCODE_IN_USE.read().await;
+    ctx.host.opencode.release_resume(&ctx.session_id).await;
+    if let Some(resume) = ctx.resume.take() {
+        return resume_turn(ctx, resume).await;
+    }
     // Native permission and question requests die with their turn. Clear any
     // crash/restart leftovers before a new live request can be surfaced.
     ctx.host.resolve_stale_prompts(&ctx.session_id, true)?;
@@ -1976,7 +1998,12 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     }
     let (native_id, base, events) =
         opencode_pre_accept_setup(ctx, store, &binary, &database).await?;
-    let mut stream = events.bytes_stream();
+    let (_, keeper) = ctx
+        .host
+        .opencode
+        .server_for(&ctx.session_id)
+        .await
+        .ok_or_else(|| anyhow!("OpenCode stopped during setup"))?;
 
     let mut body = json!({
         "parts": [{ "type": "text", "text": ctx.text }],
@@ -1997,31 +2024,67 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     if let Some(variant) = opencode_variant(ctx.reasoning_level.as_deref()) {
         body["variant"] = json!(variant);
     }
-    let turn_started_at = crate::store::now_ms();
+    let mut turn = V1Turn {
+        started_at: crate::store::now_ms(),
+        ..V1Turn::default()
+    };
     let send = ctx
         .http()
         .post(format!("{base}/session/{native_id}/message"))
         .json(&body)
         .send();
+    // The turn ends with the POST's response, the final assistant message.
+    let answered = async move { Ok(send.await?.error_for_status()?.json::<Value>().await?) };
     ctx.persist_delivery(DeliveryState::Unknown)?;
-    tokio::pin!(send);
+    commit(ctx, &keeper, &turn);
+    follow(ctx, &keeper, &native_id, &base, events, &mut turn, answered).await
+}
 
-    // Parts are attributed via message.updated role info; a part arriving
-    // before its message would be misfiled, and assistant messages are always
-    // announced before their parts stream.
-    let mut assistant_msgs: HashSet<String> = HashSet::new();
-    // Sub-agent child sessions spawned by a `task` tool this turn: child
-    // sessionID → the task spawn part's id. Their events (a foreign sessionID)
-    // route into that part's `children` instead of being dropped.
-    let mut sub_sessions: HashMap<String, String> = HashMap::new();
-    // Native plan exit is an ordinary `question.asked`; connect it to the
-    // preceding `plan_exit` tool through the question's `tool.callID`.
-    let mut plan_exit_calls: HashSet<String> = HashSet::new();
+/// What a V1 turn checkpoints beside its transcript; the rest a resumed turn reads back from
+/// the server.
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct V1Turn {
+    /// When the prompt was sent, by this machine's clock: the turn's messages are those since.
+    started_at: i64,
+    /// Sub-agent sessions and the `task` row each streams into.
+    sub_sessions: HashMap<String, String>,
+    /// Parts are attributed via message.updated role info; a part arriving
+    /// before its message would be misfiled, and assistant messages are always
+    /// announced before their parts stream.
+    #[serde(skip)]
+    assistant_msgs: HashSet<String>,
+    /// Native plan exit is an ordinary `question.asked`; connect it to the
+    /// preceding `plan_exit` tool through the question's `tool.callID`.
+    #[serde(skip)]
+    plan_exit_calls: HashSet<String>,
+}
+
+/// Commits the transcript with the turn's checkpoint. The server's own output carries nothing a
+/// turn applies, so the checkpoint sits where this attachment's output starts.
+fn commit(ctx: &mut TurnCtx, keeper: &KeptHandle, turn: &V1Turn) {
+    if let Err(error) = ctx.flush_at(keeper, keeper.start(), turn) {
+        eprintln!("orx up: could not save turn {}: {error:#}", ctx.turn_id);
+    }
+}
+
+/// Streams the session's events into the transcript until `answered` yields the turn's final
+/// assistant message.
+async fn follow(
+    ctx: &mut TurnCtx,
+    keeper: &KeptHandle,
+    native_id: &str,
+    base: &str,
+    events: reqwest::Response,
+    turn: &mut V1Turn,
+    answered: impl std::future::Future<Output = Result<Value>>,
+) -> Result<()> {
+    let mut stream = events.bytes_stream();
     let mut buf = String::new();
-
+    tokio::pin!(answered);
     loop {
         tokio::select! {
-            _ = ctx.flush_due() => { let _ = ctx.flush(); }
+            _ = ctx.flush_due() => commit(ctx, keeper, turn),
             chunk = stream.next() => {
                 let Some(chunk) = chunk else {
                     return Err(anyhow!("opencode event stream ended mid-turn"));
@@ -2032,48 +2095,21 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
                     buf.drain(..=pos);
                     let Some(data) = line.strip_prefix("data: ") else { continue };
                     let Ok(event) = serde_json::from_str::<Value>(data) else { continue };
-                    if let Some(part) = event
-                        .get("properties")
-                        .and_then(|props| props.get("part"))
-                        .filter(|part| {
-                            part.get("sessionID").and_then(Value::as_str) == Some(native_id.as_str())
-                                && part.get("type").and_then(Value::as_str) == Some("tool")
-                                && part.get("tool").and_then(Value::as_str) == Some("plan_exit")
-                        })
-                    {
-                        if let Some(call_id) = part.get("callID").and_then(Value::as_str) {
-                            plan_exit_calls.insert(call_id.to_string());
-                        }
-                    }
-                    // Interactive prompts (permission/question) pause the turn and
-                    // are handled async (emit a card, or auto-reply per mode); all
-                    // other events are message/part updates handled synchronously.
-                    if !handle_prompt_event(
-                        ctx,
-                        &native_id,
-                        &base,
-                        &event,
-                        &plan_exit_calls,
-                    )
-                    .await?
-                    {
-                        handle_event(ctx, &native_id, &event, &mut assistant_msgs, &mut sub_sessions);
-                    }
+                    apply_event(ctx, keeper, native_id, base, &event, turn).await?;
                 }
             }
-            resp = &mut send => {
-                // Turn done — the response body is the final assistant message;
-                // merge its parts as the authoritative versions.
-                let resp = resp?.error_for_status()?;
+            message = &mut answered => {
+                // Turn done — the final assistant message's parts are the
+                // authoritative versions.
+                let message = message?;
                 ctx.mark_delivery(DeliveryState::Accepted);
-                let message = resp.json::<Value>().await?;
                 if let Some(error) = opencode_response_error(&message) {
                     ctx.mark_native_retry_exhausted();
                     ctx.mark_terminal_failure("opencode_terminal", error);
                     return Err(anyhow!("{error}"));
                 }
                 ctx.clear_retry_status();
-                if !opencode_response_is_current(&message, turn_started_at) {
+                if !opencode_response_is_current(&message, turn.started_at) {
                     let message = "OpenCode returned an earlier assistant message instead of replying to this turn. Update OpenCode or start a new chat.";
                     ctx.mark_terminal_failure("opencode_stale_response", message);
                     return Err(anyhow!(message));
@@ -2093,6 +2129,265 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
             }
         }
     }
+}
+
+async fn apply_event(
+    ctx: &mut TurnCtx,
+    keeper: &KeptHandle,
+    native_id: &str,
+    base: &str,
+    event: &Value,
+    turn: &mut V1Turn,
+) -> Result<()> {
+    if let Some(part) = event
+        .get("properties")
+        .and_then(|props| props.get("part"))
+        .filter(|part| {
+            part.get("sessionID").and_then(Value::as_str) == Some(native_id)
+                && part.get("type").and_then(Value::as_str) == Some("tool")
+                && part.get("tool").and_then(Value::as_str) == Some("plan_exit")
+        })
+    {
+        if let Some(call_id) = part.get("callID").and_then(Value::as_str) {
+            turn.plan_exit_calls.insert(call_id.to_string());
+        }
+    }
+    // Interactive prompts (permission/question) pause the turn and are
+    // handled async (emit a card, or auto-reply per mode); a card renders at
+    // once, and an auto-reply is checkpointed after it was sent.
+    if handle_prompt_event(ctx, native_id, base, event, &turn.plan_exit_calls).await? {
+        commit(ctx, keeper, turn);
+        return Ok(());
+    }
+    let linked = turn.sub_sessions.len();
+    handle_event(
+        ctx,
+        native_id,
+        event,
+        &mut turn.assistant_msgs,
+        &mut turn.sub_sessions,
+    );
+    if turn.sub_sessions.len() == linked {
+        ctx.maybe_flush_at(keeper, keeper.start(), turn);
+    } else {
+        commit(ctx, keeper, turn);
+    }
+    Ok(())
+}
+
+/// Goes on with a turn a previous server left running on this chat's kept server.
+async fn resume_turn(ctx: &mut TurnCtx, resume: Resume) -> Result<()> {
+    let (endpoint, keeper) = ctx
+        .host
+        .opencode
+        .server_for(&ctx.session_id)
+        .await
+        .filter(|(_, keeper)| keeper.id() == resume.keep_id)
+        .ok_or_else(|| {
+            anyhow!("The OpenCode server this turn ran on stopped while orx restarted")
+        })?;
+    let native_id = ctx
+        .native_session_id
+        .clone()
+        .ok_or_else(|| anyhow!("This OpenCode turn has no session to resume"))?;
+    if endpoint.protocol == crate::local::opencode::Protocol::V2 {
+        return v2::resume_turn(ctx, resume, &endpoint, &keeper, &native_id).await;
+    }
+    let mut turn: V1Turn = serde_json::from_value(resume.state)
+        .map_err(|error| anyhow!("This OpenCode turn has an unreadable checkpoint: {error}"))?;
+    let base = endpoint.base_url;
+    let http = ctx.http().clone();
+    // Subscribed before reading back, so nothing between the two is missed.
+    let events = http
+        .get(format!("{base}/event"))
+        .send()
+        .await?
+        .error_for_status()?;
+    let messages = turn_messages(&http, &base, &native_id, turn.started_at).await?;
+    let received = messages
+        .iter()
+        .any(|message| message.pointer("/info/role").and_then(Value::as_str) == Some("user"));
+    if !received && !session_busy(&http, &base, &native_id).await? {
+        let message = "OpenCode never received this message: orx restarted as it was sent.";
+        ctx.mark_delivery(DeliveryState::NotSent);
+        ctx.mark_terminal_failure("opencode_not_received", message);
+        return Err(anyhow!(message));
+    }
+    for message in &messages {
+        replay(ctx, &keeper, &native_id, &base, &mut turn, message).await?;
+    }
+    for child in sub_sessions(&http, &base, &native_id, turn.started_at).await? {
+        let Some(child_id) = child.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        ctx.native_usage_scopes.insert(child_id.to_string());
+        if !turn.sub_sessions.contains_key(child_id) {
+            let Some(spawn) = oldest_task_part_id(&ctx.assistant.parts, &turn.sub_sessions) else {
+                continue;
+            };
+            turn.sub_sessions.insert(child_id.to_string(), spawn);
+        }
+        for message in turn_messages(&http, &base, child_id, turn.started_at).await? {
+            replay(ctx, &keeper, &native_id, &base, &mut turn, &message).await?;
+        }
+    }
+    for (kind, path) in [
+        ("permission.asked", "/permission"),
+        ("question.asked", "/question"),
+    ] {
+        for request in pending(&http, &base, path).await? {
+            let ours = request.get("sessionID").and_then(Value::as_str) == Some(&native_id);
+            let id = request
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if ours && !surfaced(&ctx.assistant.parts, id) {
+                let event = json!({"type": kind, "properties": request});
+                apply_event(ctx, &keeper, &native_id, &base, &event, &mut turn).await?;
+            }
+        }
+    }
+    commit(ctx, &keeper, &turn);
+    let answered = settled(http, base.clone(), native_id.clone(), turn.started_at);
+    follow(ctx, &keeper, &native_id, &base, events, &mut turn, answered).await
+}
+
+/// Applies a message read back from the server as the events that would have announced it.
+async fn replay(
+    ctx: &mut TurnCtx,
+    keeper: &KeptHandle,
+    native_id: &str,
+    base: &str,
+    turn: &mut V1Turn,
+    message: &Value,
+) -> Result<()> {
+    let info = json!({"type": "message.updated", "properties": {"info": message["info"]}});
+    apply_event(ctx, keeper, native_id, base, &info, turn).await?;
+    for part in message["parts"].as_array().into_iter().flatten() {
+        let event = json!({"type": "message.part.updated", "properties": {"part": part}});
+        apply_event(ctx, keeper, native_id, base, &event, turn).await?;
+    }
+    Ok(())
+}
+
+async fn get_json(http: &reqwest::Client, url: String) -> Result<Value> {
+    Ok(http
+        .get(url)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?)
+}
+
+/// A session's messages created since `started_at`, oldest first.
+async fn turn_messages(
+    http: &reqwest::Client,
+    base: &str,
+    session: &str,
+    started_at: i64,
+) -> Result<Vec<Value>> {
+    let messages = get_json(http, format!("{base}/session/{session}/message")).await?;
+    let messages = messages
+        .as_array()
+        .ok_or_else(|| anyhow!("OpenCode returned unreadable messages for session {session}"))?;
+    Ok(messages
+        .iter()
+        .filter(|message| opencode_response_is_current(message, started_at))
+        .cloned()
+        .collect())
+}
+
+/// The sub-agent sessions this turn spawned, oldest first.
+async fn sub_sessions(
+    http: &reqwest::Client,
+    base: &str,
+    session: &str,
+    started_at: i64,
+) -> Result<Vec<Value>> {
+    let children = get_json(http, format!("{base}/session/{session}/children")).await?;
+    let mut children: Vec<Value> = children
+        .as_array()
+        .ok_or_else(|| anyhow!("OpenCode returned unreadable sub-agents for session {session}"))?
+        .iter()
+        .filter(|child| {
+            child
+                .pointer("/time/created")
+                .and_then(Value::as_i64)
+                .is_some_and(|created| created >= started_at)
+        })
+        .cloned()
+        .collect();
+    children.sort_by_key(|child| child.pointer("/time/created").and_then(Value::as_i64));
+    Ok(children)
+}
+
+/// The server's pending permission or question requests; a version without the list has none
+/// to report.
+async fn pending(http: &reqwest::Client, base: &str, path: &str) -> Result<Vec<Value>> {
+    let response = http
+        .get(format!("{base}{path}"))
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(Vec::new());
+    }
+    let requests: Value = response.error_for_status()?.json().await?;
+    requests
+        .as_array()
+        .cloned()
+        .ok_or_else(|| anyhow!("OpenCode returned an unreadable {path} list"))
+}
+
+async fn session_busy(http: &reqwest::Client, base: &str, session: &str) -> Result<bool> {
+    let statuses = get_json(http, format!("{base}/session/status")).await?;
+    Ok(statuses
+        .pointer(&format!("/{session}/type"))
+        .and_then(Value::as_str)
+        .is_some_and(|status| status != "idle"))
+}
+
+/// Resolves with the turn's final assistant message once its session is idle, standing in for
+/// the POST a previous server was waiting on.
+async fn settled(
+    http: reqwest::Client,
+    base: String,
+    session: String,
+    started_at: i64,
+) -> Result<Value> {
+    while session_busy(&http, &base, &session).await? {
+        tokio::time::sleep(crate::config::paced(Duration::from_secs(1))).await;
+    }
+    turn_messages(&http, &base, &session, started_at)
+        .await?
+        .into_iter()
+        .rfind(|message| message.pointer("/info/role").and_then(Value::as_str) == Some("assistant"))
+        .ok_or_else(|| anyhow!("OpenCode went idle without answering this message"))
+}
+
+/// Whether a card for this request is already in the transcript.
+fn surfaced(parts: &[WirePart], request: &str) -> bool {
+    parts
+        .iter()
+        .filter_map(|part| part.prompt.as_ref()?.native_id.as_deref())
+        .any(|id| {
+            id == request
+                || serde_json::from_str::<(String, usize)>(id).is_ok_and(|(id, _)| id == request)
+        })
+}
+
+/// The oldest `task` row not yet linked to a sub-agent session: sub-agents a turn spawned
+/// while no server was attached link to their rows in order.
+fn oldest_task_part_id(parts: &[WirePart], claimed: &HashMap<String, String>) -> Option<String> {
+    let taken: HashSet<&str> = claimed.values().map(String::as_str).collect();
+    parts
+        .iter()
+        .find(|p| {
+            matches!(p.tool.as_deref(), Some("task" | "subagent")) && !taken.contains(p.id.as_str())
+        })
+        .map(|p| p.id.clone())
 }
 
 fn opencode_response_error(message: &Value) -> Option<&str> {
@@ -2338,7 +2633,6 @@ fn handle_event(
                     if let Some(mut wire) = to_wire_part(part) {
                         wire.id = format!("{spawn}:{}", wire.id);
                         ctx.upsert_child(&spawn, wire);
-                        ctx.maybe_flush();
                     }
                 }
                 return;
@@ -2350,11 +2644,9 @@ fn handle_event(
                 && part.get("reason").and_then(Value::as_str) == Some("stop")
             {
                 ctx.mark_final_text_tail();
-                ctx.maybe_flush();
             }
             if let Some(wire) = to_wire_part(part) {
                 ctx.upsert_part(wire);
-                ctx.maybe_flush();
             }
         }
         Some("message.part.delta") => {
@@ -2379,14 +2671,12 @@ fn handle_event(
                 ctx.append_child_text(&spawn, &child_id, delta, || {
                     WirePart::text(child_id.clone(), "")
                 });
-                ctx.maybe_flush();
                 return;
             }
             if session != Some(native_id) {
                 return;
             }
             ctx.append_part_text(part_id, delta);
-            ctx.maybe_flush();
         }
         Some("session.updated") => {
             // Adopt opencode's auto-generated titles. The creation seed arrives
@@ -2408,9 +2698,9 @@ fn handle_event(
     }
 }
 
-/// Surface a prompt card and flush it so it renders immediately (before the
-/// turn resumes). The card's `native_id` (the reply target) is also its
-/// `WirePart` id, so the user's answer round-trips back to the right request.
+/// Surface a prompt card; the caller flushes it so it renders before the turn
+/// resumes. The card's `native_id` (the reply target) is also its `WirePart`
+/// id, so the user's answer round-trips back to the right request.
 fn surface_card(ctx: &mut TurnCtx, card: WirePrompt) {
     // `native_id` is always set by permission_card/question_card (opencode
     // requires the request id); the fallback id only guards a malformed payload.
@@ -2419,7 +2709,6 @@ fn surface_card(ctx: &mut TurnCtx, card: WirePrompt) {
         .clone()
         .unwrap_or_else(|| format!("prompt-{}", ctx.assistant.parts.len()));
     ctx.upsert_part(WirePart::prompt(part_id, card));
-    let _ = ctx.flush();
 }
 
 /// Handle an interactive-prompt SSE event (`permission.asked` / `question.asked`)
@@ -2451,7 +2740,6 @@ async fn handle_prompt_event(
                 // No request id to reply to — surface it as an error so the turn
                 // isn't silently wedged waiting on an answer no one can give.
                 ctx.push_error("opencode asked for a permission we couldn't parse".into());
-                let _ = ctx.flush();
                 return Ok(true);
             };
             // Auto-approve handles native `ask` requests; Default surfaces them.
@@ -2480,7 +2768,6 @@ async fn handle_prompt_event(
                 }
                 None => {
                     ctx.push_error("opencode asked a question we couldn't parse".into());
-                    let _ = ctx.flush();
                 }
             }
             Ok(true)
@@ -3688,5 +3975,327 @@ opencode/unknown
         );
 
         std::fs::remove_dir_all(script.parent().unwrap()).ok();
+    }
+}
+
+#[cfg(all(test, unix))]
+mod restart_tests {
+    use super::*;
+    use axum::{
+        routing::{get, post},
+        Json, Router,
+    };
+    use std::sync::{Arc, Mutex};
+
+    /// A fake V1 server: `/event` streams what the test sends, the rest answers from `state`.
+    #[derive(Default)]
+    struct Fake {
+        messages: Value,
+        busy: bool,
+        permissions: Value,
+        events: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
+        subscribed: bool,
+        listed: bool,
+        prompted: bool,
+    }
+
+    async fn serve_v1(fake: Arc<Mutex<Fake>>) -> u16 {
+        let state = |fake: &Arc<Mutex<Fake>>| fake.clone();
+        let (events, messages, status, children, permissions, questions, prompt) = (
+            state(&fake),
+            state(&fake),
+            state(&fake),
+            state(&fake),
+            state(&fake),
+            state(&fake),
+            state(&fake),
+        );
+        let app = Router::new()
+            .route(
+                "/event",
+                get(move || {
+                    let mut fake = events.lock().unwrap();
+                    fake.subscribed = true;
+                    let rx = fake.events.take().expect("one event subscription");
+                    let stream = futures::stream::unfold(rx, |mut rx| async move {
+                        let line = rx.recv().await?;
+                        Some((Ok::<_, std::io::Error>(format!("data: {line}\n\n")), rx))
+                    });
+                    async move { axum::body::Body::from_stream(stream) }
+                }),
+            )
+            .route(
+                "/session/native/message",
+                get(move || {
+                    let body = messages.lock().unwrap().messages.clone();
+                    async move { Json(body) }
+                })
+                .post(move || {
+                    prompt.lock().unwrap().prompted = true;
+                    async { Json(json!({})) }
+                }),
+            )
+            .route(
+                "/session/status",
+                get(move || {
+                    let busy = status.lock().unwrap().busy;
+                    async move {
+                        Json(if busy {
+                            json!({"native":{"type":"busy"}})
+                        } else {
+                            json!({})
+                        })
+                    }
+                }),
+            )
+            .route(
+                "/session/native/children",
+                get(move || {
+                    let _ = &children;
+                    async { Json(json!([])) }
+                }),
+            )
+            .route(
+                "/permission",
+                get(move || {
+                    let mut fake = permissions.lock().unwrap();
+                    fake.listed = true;
+                    let body = fake.permissions.clone();
+                    async move { Json(body) }
+                }),
+            )
+            .route(
+                "/question",
+                get(move || {
+                    let _ = &questions;
+                    async { Json(json!([])) }
+                }),
+            )
+            .route("/global/health", get(|| async { "ok" }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        port
+    }
+
+    fn assistant(text: &str, bash: &str) -> Value {
+        json!({"info":{"id":"msg_a","sessionID":"native","role":"assistant","time":{"created":crate::store::now_ms()}},
+        "parts":[
+            {"id":"prt_text","messageID":"msg_a","sessionID":"native","type":"text","text":text},
+            {"id":"prt_bash","messageID":"msg_a","sessionID":"native","type":"tool","tool":"bash",
+                "state":{"status":bash,"input":{"command":"ls"}}}
+        ]})
+    }
+
+    fn permission(id: &str) -> Value {
+        json!({"id":id,"sessionID":"native","permission":"bash","metadata":{"command":"ls"}})
+    }
+
+    async fn until(fake: &Arc<Mutex<Fake>>, ready: impl Fn(&Fake) -> bool) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !ready(&fake.lock().unwrap()) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the resumed turn reached the server");
+    }
+
+    #[test]
+    fn a_resumed_turn_rebuilds_its_parts_and_keeps_pending_permissions() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let started_at = crate::store::now_ms() - 1_000;
+            let (send, events) = tokio::sync::mpsc::unbounded_channel();
+            let fake = Arc::new(Mutex::new(Fake {
+                messages: json!([
+                    {"info":{"id":"msg_u","sessionID":"native","role":"user","time":{"created":started_at + 10}},"parts":[]},
+                    assistant("Hello world", "running"),
+                ]),
+                busy: true,
+                permissions: json!([permission("per_before"), permission("per_gap")]),
+                events: Some(events),
+                ..Fake::default()
+            }));
+            let port = serve_v1(fake.clone()).await;
+            let root = crate::local::git::TemporaryDirectory::new("orx-opencode-resume").unwrap();
+            let mut ctx = TurnCtx::test_stub();
+            ctx.host
+                .opencode
+                .serve_for_test(&ctx.session_id, port, root.path())
+                .await;
+            let (_, keeper) = ctx.host.opencode.server_for(&ctx.session_id).await.unwrap();
+            // What the previous server had streamed and committed before it restarted.
+            ctx.native_session_id = Some("native".into());
+            ctx.upsert_part(WirePart::text("prt_text", "Hello wo"));
+            ctx.upsert_part(WirePart::prompt(
+                "per_before",
+                permission_card(&permission("per_before")).unwrap(),
+            ));
+            ctx.resume = Some(Resume {
+                keep_id: keeper.id().into(),
+                offset: keeper.start(),
+                state: json!({"startedAt": started_at, "subSessions": {}}),
+            });
+
+            let driver = async {
+                until(&fake, |fake| fake.subscribed && fake.listed).await;
+                // The user approves the card; the agent goes on and finishes.
+                fake.lock().unwrap().messages[1] = assistant("Hello world!", "completed");
+                send.send(json!({"type":"message.part.updated","properties":{"part":
+                    assistant("Hello world!", "completed")["parts"][1]}}).to_string())
+                    .unwrap();
+                fake.lock().unwrap().busy = false;
+            };
+            let (result, ()) = tokio::join!(run_turn(&mut ctx), driver);
+            result.unwrap();
+
+            assert!(!fake.lock().unwrap().prompted, "the prompt is never sent again");
+            assert_eq!(ctx.delivery_state(), DeliveryState::Accepted);
+            let ids: Vec<&str> = ctx.assistant.parts.iter().map(|p| p.id.as_str()).collect();
+            assert_eq!(ids, ["prt_text", "per_before", "prt_bash", "per_gap"]);
+            assert_eq!(ctx.assistant.parts[0].text.as_deref(), Some("Hello world!"));
+            assert_eq!(
+                ctx.assistant.parts[2].state.as_ref().unwrap().status,
+                "completed"
+            );
+            for card in [&ctx.assistant.parts[1], &ctx.assistant.parts[3]] {
+                assert!(!card.prompt.as_ref().unwrap().resolved);
+            }
+            let checkpoint = crate::store::Store::open()
+                .unwrap()
+                .chat_turn_checkpoint(&ctx.turn_id)
+                .unwrap()
+                .expect("the resumed turn checkpoints");
+            assert_eq!(checkpoint.keep_id, keeper.id());
+            let state: Value = serde_json::from_str(&checkpoint.state_json).unwrap();
+            assert_eq!(state["harness"]["startedAt"], started_at);
+        });
+    }
+
+    #[test]
+    fn a_message_the_server_never_received_fails_without_being_sent() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let (_send, events) = tokio::sync::mpsc::unbounded_channel();
+            let fake = Arc::new(Mutex::new(Fake {
+                messages: json!([]),
+                permissions: json!([]),
+                events: Some(events),
+                ..Fake::default()
+            }));
+            let port = serve_v1(fake.clone()).await;
+            let root = crate::local::git::TemporaryDirectory::new("orx-opencode-lost").unwrap();
+            let mut ctx = TurnCtx::test_stub();
+            ctx.host
+                .opencode
+                .serve_for_test(&ctx.session_id, port, root.path())
+                .await;
+            let (_, keeper) = ctx.host.opencode.server_for(&ctx.session_id).await.unwrap();
+            ctx.native_session_id = Some("native".into());
+            ctx.mark_delivery(DeliveryState::Unknown);
+            ctx.resume = Some(Resume {
+                keep_id: keeper.id().into(),
+                offset: 0,
+                state: json!({"startedAt": crate::store::now_ms(), "subSessions": {}}),
+            });
+            let error = run_turn(&mut ctx).await.unwrap_err();
+            assert!(error.to_string().contains("never received"), "{error}");
+            assert_eq!(ctx.delivery_state(), DeliveryState::NotSent);
+            assert!(!fake.lock().unwrap().prompted);
+        });
+    }
+
+    #[test]
+    fn a_turn_whose_server_died_in_the_gap_fails_for_recovery() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let mut ctx = TurnCtx::test_stub();
+            ctx.native_session_id = Some("native".into());
+            ctx.resume = Some(Resume {
+                keep_id: "gone".into(),
+                offset: 0,
+                state: json!({"startedAt": 0}),
+            });
+            let error = run_turn(&mut ctx).await.unwrap_err();
+            assert!(
+                error.to_string().contains("stopped while orx restarted"),
+                "{error}"
+            );
+        });
+    }
+
+    #[test]
+    fn a_resumed_v2_turn_finishes_from_the_projection_without_prompting_again() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let prompted = Arc::new(Mutex::new(false));
+            let recorded = prompted.clone();
+            let projection = json!({"data":{"info":{"outcome":"succeeded"},"messages":[
+                {"id":"msg_earlier","type":"assistant","time":{"completed":1},
+                    "content":[{"type":"text","text":"an earlier answer"}]},
+                {"id":"msg_prompt","type":"user"},
+                {"id":"msg_reply","type":"assistant","time":{"completed":2},
+                    "content":[{"type":"text","text":"the answer"}]}
+            ]}});
+            let empty = || async { Json(json!({"data":[]})) };
+            let app = Router::new()
+                .route(
+                    "/api/experimental/session/native/export",
+                    get(move || {
+                        let body = projection.clone();
+                        async move { Json(body) }
+                    }),
+                )
+                .route("/api/session/native/inbox", get(empty))
+                .route("/api/session/native/permission", get(empty))
+                .route("/api/session/native/form", get(empty))
+                .route(
+                    "/api/session/active",
+                    get(|| async { Json(json!({"data":{}})) }),
+                )
+                .route(
+                    "/api/session/native/prompt",
+                    post(move || {
+                        *recorded.lock().unwrap() = true;
+                        async { Json(json!({})) }
+                    }),
+                );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let root =
+                crate::local::git::TemporaryDirectory::new("orx-opencode-v2-resume").unwrap();
+            let mut ctx = TurnCtx::test_stub();
+            ctx.host
+                .opencode
+                .serve_v2_for_test(&ctx.session_id, port, root.path())
+                .await;
+            let (_, keeper) = ctx.host.opencode.server_for(&ctx.session_id).await.unwrap();
+            ctx.native_session_id = Some("native".into());
+            ctx.upsert_part(WirePart::text("msg_reply:0", "the ans"));
+            ctx.resume = Some(Resume {
+                keep_id: keeper.id().into(),
+                offset: keeper.start(),
+                state: json!({"promptId": "msg_prompt"}),
+            });
+            run_turn(&mut ctx).await.unwrap();
+            assert!(!*prompted.lock().unwrap());
+            let texts: Vec<_> = ctx
+                .assistant
+                .parts
+                .iter()
+                .map(|part| part.text.as_deref())
+                .collect();
+            assert_eq!(texts, [Some("the answer")]);
+        });
     }
 }
