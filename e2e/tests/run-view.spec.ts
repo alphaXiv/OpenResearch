@@ -70,7 +70,7 @@ for (let step = 1; step <= 20; step++) {
       { say: 'Launched Child.' },
     ])
     await send(page, 'Launch Child.')
-    const child = banner.filter({ hasText: 'Child' })
+    const child = banner.getByRole('group', { name: 'Child', exact: true })
     await expect(child).toContainText(/Training loss/)
     // At step 10 the child's loss is 0.160 against the parent's 0.200.
     await expect(child).toContainText(/0\.040⁩? better than parent/)
@@ -143,7 +143,8 @@ for (let step = 1; step <= 20; step++) {
     await send(page, 'Launch Eval.')
     await expect(banner).toContainText(/Step [⁦⁨]?8[⁩]? of [⁦⁨]?20[⁩]?/)
     await expect(banner).toContainText('Training loss')
-    await banner.getByRole('button', { name: /^\W?eval\W?$/i }).click()
+    await banner.getByRole('button', { name: /Eval/ }).hover()
+    await page.getByRole('dialog').getByRole('link', { name: /Eval/ }).click()
     await expect(latest.getByRole('heading', { name: /^\W?Training loss\W?$/ })).toBeVisible()
     await info.attach('before', { body: await page.screenshot(), contentType: 'image/png' })
   })
