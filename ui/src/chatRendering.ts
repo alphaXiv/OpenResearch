@@ -250,8 +250,16 @@ export function groupResponseMessages(messages: ChatMessage[], previousGroups: C
 
 export function splitResponseParts(messages: ChatMessage[], streaming: boolean, replies?: QuestionReplies) {
   const questions = messages.flatMap((message) => message.parts.filter((part) => part.prompt?.kind === "question"));
-  const turns = messages.map((original, index) => {
+  // A standalone approval would otherwise displace the answer and collapse the activity above it.
+  const approvals: ChatPart[] = [];
+  const responseMessages = messages.flatMap((original) => {
+    let hasApproval = false;
     const parts = original.parts.filter((part) => {
+      if (part.type === "prompt" && part.prompt?.kind === "permission") {
+        hasApproval = true;
+        if (partIsVisible(part)) approvals.push(part);
+        return false;
+      }
       if (part.type !== "tool" || !["question", "askuserquestion", "request_user_input", "request_user_input_async"].includes(part.tool?.toLowerCase() ?? "")) return true;
       const asked = part.state?.input?.questions;
       if (!Array.isArray(asked) || asked.length === 0) return true;
@@ -262,12 +270,14 @@ export function splitResponseParts(messages: ChatMessage[], streaming: boolean, 
       });
       return !represented || (part.state?.status === "error" && part.state.error !== "The user dismissed this question");
     });
-    const message = { ...original, parts };
-    const active = streaming && index === messages.length - 1;
+    return hasApproval && parts.length === 0 ? [] : [{ ...original, parts }];
+  });
+  const turns = responseMessages.map((message, index) => {
+    const active = streaming && index === responseMessages.length - 1;
     const split = splitTurnParts(message.parts, active);
     // A continuation's commentary belongs to activity until it has an answer.
     // A message the user wrote into it stays visible with what follows.
-    if (messages.length > 1 && active && !message.parts.some((part) =>
+    if (responseMessages.length > 1 && active && !message.parts.some((part) =>
       (part.type === "text" && part.phase === "final_answer" && Boolean(part.text))
       || (part.type === "prompt" && !part.prompt?.resolved))) {
       const steer = message.parts.findIndex((part) => part.type === "steer");
@@ -287,10 +297,13 @@ export function splitResponseParts(messages: ChatMessage[], streaming: boolean, 
     && ((part.prompt.answers?.length ?? 0) > 0 || Boolean(part.prompt.note) || part.prompt.approved === false));
   return {
     // In the order asked: a question answered after `current` follows it.
-    answer: turns.flatMap((turn, index) => [
-      ...work[index].parts.filter(answeredQuestion),
-      ...(turn === current ? turn.answer : []),
-    ]),
+    answer: [
+      ...turns.flatMap((turn, index) => [
+        ...work[index].parts.filter(answeredQuestion),
+        ...(turn === current ? turn.answer : []),
+      ]),
+      ...approvals,
+    ],
     answerMessageId: current?.message.id,
     work: work.map((turn) => ({
       ...turn,
