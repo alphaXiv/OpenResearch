@@ -528,6 +528,22 @@ fn payload_and_observed_clocks_never_mix_in_rate_learning() {
 }
 
 #[test]
+fn repeated_old_steps_have_no_rule_coordinate() {
+    let mut snapshot = fresh();
+    feed(
+        &mut snapshot,
+        concat!(
+            "::orx:: {\"step\":5,\"m\":{\"loss\":1}}\n",
+            "::orx:: {\"step\":4,\"m\":{\"loss\":10}}\n",
+            "::orx:: {\"step\":4,\"m\":{\"loss\":10}}\n",
+        ),
+    );
+    let reports = &snapshot.metric_reports["loss"].tail;
+    let coordinates: Vec<_> = reports.iter().map(|report| report.x).collect();
+    assert_eq!(coordinates, [Some(5.0), None, None]);
+}
+
+#[test]
 fn metric_only_records_do_not_invent_progress_or_historical_time() {
     let mut s = fresh();
     s.feed(b"::orx:: {\"m\":{\"loss\":2}}\n", false, 1000, false)

@@ -145,7 +145,6 @@ pub struct Snapshot {
     pub latest: Signals,
     pub series: BTreeMap<String, Vec<Point>>,
     /// Byte offset of the last discontinuity in the report stream.
-    #[serde(default)]
     pub report_epoch: u64,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metric_reports: BTreeMap<String, MetricReports>,
@@ -682,7 +681,11 @@ impl Snapshot {
         if duplicate && !origin {
             // Separate log frames can report the same point without adding it to the chart.
             if let Some(metrics) = record.get("m").and_then(Value::as_object) {
-                let x = self.progress().and_then(|phase| phase.done);
+                let x = self.progress().and_then(|phase| phase.done).filter(|x| {
+                    record
+                        .get("step")
+                        .is_none_or(|step| step.as_f64() == Some(*x))
+                });
                 for (name, value) in metrics {
                     if self.latest.get(name) == Some(value) {
                         self.record_metric(name, x, value);
