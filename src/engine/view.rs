@@ -1771,6 +1771,27 @@ pub(crate) fn shown(
     let versus = monitor["versus"][if terminal { "final" } else { "step" }]
         .as_object()
         .unwrap_or(&empty);
+    let comparison = |name: &str, by: Option<&str>| {
+        let by = by
+            .or_else(|| signals[name]["vs"].as_str())
+            .unwrap_or(if terminal { "final" } else { "step" });
+        let comparisons = monitor["versus"][by].as_object().unwrap_or(&empty);
+        let Some(vs) = comparisons.get(name) else {
+            return format!("{name}; vs={by}; unavailable");
+        };
+        let parent = value_text(&vs["parent"], &signals[name]);
+        let step = vs["step"]
+            .as_f64()
+            .map(|step| format!("; step={step}"))
+            .unwrap_or_default();
+        let difference = super::watch::fill_values(
+            &format!("{{{name}.vs}}"),
+            &Value::Null,
+            signals,
+            comparisons,
+        );
+        format!("{name}; vs={by}; parent={parent}{step}; difference={difference}")
+    };
     let fill = |text: &str| {
         super::watch::fill_values(text, &summary["bindings"], signals, versus).replace("**", "")
     };
@@ -1859,6 +1880,12 @@ pub(crate) fn shown(
                 let label = signals[y]["label"].as_str().unwrap_or(y);
                 let mode = block["xRange"].as_str().unwrap_or("run");
                 lines.push(format!("Chart {chart}: {label}; {}y={y}; x={x}; observed x={range}; total={total}; range={mode}; finite retained points={count}; parent ghost={ghost}{scope}{}.", from.map(|table| format!("table={table}; ")).unwrap_or_default(), block["by"].as_str().map(|by| format!("; grouped by {by}")).unwrap_or_default()));
+                if from.is_none() && signals[y]["better"].is_string() {
+                    lines.push(format!(
+                        "Chart {chart} comparison: {}.",
+                        comparison(y, None)
+                    ));
+                }
                 for key in ["title", "xScale", "yScale", "mark"] {
                     if let Some(setting) = block[key].as_str() {
                         lines.push(format!("  {key}: {setting}"));
@@ -1891,6 +1918,16 @@ pub(crate) fn shown(
                     .collect::<Vec<_>>()
                     .join("; ")
             ));
+            for name in names(&block["stats"]) {
+                if signals[name]["better"].is_string()
+                    && !(signals[name]["pick"] == "best" && monitor["best"].get(name).is_some())
+                {
+                    lines.push(format!(
+                        "Stats comparison: {}.",
+                        comparison(name, block["vs"].as_str())
+                    ));
+                }
+            }
         }
     }
     if chart == 0 {
@@ -2187,6 +2224,44 @@ mod tests {
         ] {
             assert!(text.contains(expected), "missing {expected:?} in {text}");
         }
+    }
+
+    #[test]
+    fn view_show_reports_parent_comparisons_for_stats_and_charts() {
+        let view = compile(r#"<signal name="loss" digits="2" better="lower" vs="final"/><signal name="rate" better="higher"/><signal name="best" pick="best" better="lower"/><view headline="loss"><chart y="loss rate"/><stats of="loss rate best" vs="step"/><stats of="loss"/></view>"#).unwrap().tree;
+        let monitor = json!({
+            "view": view, "latest":{"loss":2,"rate":10,"best":1}, "best":{"best":0.5},
+            "versus":{
+                "step":{
+                    "loss":{"parent":3,"step":10,"d":-1,"mag":1,"good":true,"flat":false},
+                    "rate":{"parent":10,"step":10,"d":0,"mag":0,"good":false,"flat":true},
+                    "best":{"parent":2,"step":10,"d":-1,"mag":1,"good":true,"flat":false}
+                },
+                "final":{"loss":{"parent":1,"d":1,"mag":1,"good":false,"flat":false}}
+            }
+        });
+        let text = shown(&shown_run(), &monitor, &json!({}), &[], None, None);
+        for expected in [
+            "Chart 1 comparison: loss; vs=final; parent=1.00; difference=1.00 worse than the parent",
+            "Chart 1 comparison: rate; vs=step; parent=10; step=10; difference=level with the parent",
+            "Stats comparison: loss; vs=step; parent=3.00; step=10; difference=1.00 better than the parent",
+            "Stats comparison: loss; vs=final; parent=1.00; difference=1.00 worse than the parent",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in {text}");
+        }
+        assert!(!text.contains("Stats comparison: best"), "{text}");
+
+        let mut ended = shown_run();
+        ended.status = "done".into();
+        let ended_text = shown(&ended, &monitor, &json!({}), &[], None, None);
+        assert!(
+            ended_text.contains("Chart 1 comparison: rate; vs=final; unavailable"),
+            "{ended_text}"
+        );
+        assert!(
+            ended_text.contains("Stats comparison: loss; vs=step; parent=3.00; step=10"),
+            "{ended_text}"
+        );
     }
 
     #[test]
