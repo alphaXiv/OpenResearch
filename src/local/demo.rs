@@ -49,13 +49,12 @@ fn probe_uv() -> String {
     )
 }
 
-fn probe_setup() -> String {
+fn probe_setup(config: &Value) -> String {
     format!(
-        "printf '::orx:: %s\\n' '{}' && {} && ([ -d .venv ] || uv venv) && uv sync --extra cpu \
+        "printf '::orx:: %s\\n' '{config}' && {} && ([ -d .venv ] || uv venv) && uv sync --extra cpu \
          && {{ . .venv/bin/activate 2>/dev/null || . .venv/Scripts/activate; }} \
          && printf '::orx:: %s\\n' '{{\"step\":1}}' \
          && python -m nanochat.dataset -n 8",
-        json!({"plan": [{"phase": "install"}, {"phase": "download"}, {"phase": "tokenizer"}, {"phase": "train"}, {"phase": "train-finalize"}]}),
         probe_uv()
     )
 }
@@ -160,6 +159,7 @@ The `evidence/` directory contains the real checkpoint metadata, trained tokeniz
 const RUN_LOG: &str = include_str!("../../demo/nanochat/run-output.txt");
 const BASELINE_VIEW: &str = include_str!("../../demo/nanochat/baseline-view.xml");
 const VOCAB_PROBE_VIEW: &str = include_str!("../../demo/nanochat/vocab-probe-view.xml");
+const VOCAB_PROBE_CONFIG: &str = include_str!("../../demo/nanochat/vocab-probe-config.json");
 const PROBE_VIEW: &str = include_str!("../../demo/nanochat/probe-view.xml");
 // The log's own timestamps run 10:51:52 -> 14:33:21; the seeded run must span them.
 const RUN_LOG_SPAN_MIN: i64 = 222;
@@ -517,6 +517,8 @@ fn seed_at(
             chat_session_id: None,
             archived: false,
         };
+    let vocab_probe_config: Value = serde_json::from_str(VOCAB_PROBE_CONFIG)
+        .map_err(|error| anyhow!("Could not read the bundled vocabulary probe plan: {error}"))?;
     let vocab_probe = LocalExperiment {
             id: VOCAB_PROBE_EXPERIMENT_ID.into(),
             project_id: PROJECT_ID.into(),
@@ -530,7 +532,7 @@ fn seed_at(
             ),
             run_command: format!(
                 "{} && {PROBE_TOK_TRAIN} --vocab-size=8192 && printf '::orx:: %s\\n' '{{\"step\":1}}' && {PROBE_TRAIN}",
-                probe_setup()
+                probe_setup(&vocab_probe_config)
             ),
             agent_status: "idle".into(),
             created_at: ago(seeded_at, 6, 0),
@@ -749,15 +751,18 @@ fn seed_at(
         ],
     )?;
     if newly_created {
-        draw_run(store, data_root, run_ended_at)?;
+        draw_run(store, data_root, run_ended_at, &vocab_probe_config)?;
     }
     validate_snapshot(store, repo, newly_created)
 }
 
-/// The seeded run's signals, folded once from its bundled log as collection would have read it
-/// live, and the baseline's view, so its page and the experiments it starts draw stages and
-/// curves.
-fn draw_run(store: &Store, data_root: &Path, ended_at: i64) -> Result<()> {
+/// Seeds the recorded run's signals and the experiments' views and plan.
+fn draw_run(
+    store: &Store,
+    data_root: &Path,
+    ended_at: i64,
+    vocab_probe_config: &Value,
+) -> Result<()> {
     // No host wrote the bundled log, so it has no file identity of its own.
     let mut snapshot = orx_signals::Snapshot::new(RUN_ID, "0-0", "demo");
     snapshot
@@ -809,19 +814,20 @@ fn draw_run(store: &Store, data_root: &Path, ended_at: i64) -> Result<()> {
     )?;
 
     use crate::engine::view::{self, Refusal, Source};
-    for (experiment, markup) in [
-        (EXPERIMENT_ID, BASELINE_VIEW),
-        (LR_PROBE_EXPERIMENT_ID, PROBE_VIEW),
-        (VOCAB_PROBE_EXPERIMENT_ID, VOCAB_PROBE_VIEW),
+    for (experiment, file, markup, config) in [
+        (EXPERIMENT_ID, "baseline-view.xml", BASELINE_VIEW, None),
+        (LR_PROBE_EXPERIMENT_ID, "probe-view.xml", PROBE_VIEW, None),
+        (
+            VOCAB_PROBE_EXPERIMENT_ID,
+            "vocab-probe-view.xml",
+            VOCAB_PROBE_VIEW,
+            Some(vocab_probe_config),
+        ),
     ] {
         let source = Source {
-            file: Some(match experiment {
-                LR_PROBE_EXPERIMENT_ID => "probe-view.xml",
-                VOCAB_PROBE_EXPERIMENT_ID => "vocab-probe-view.xml",
-                _ => "baseline-view.xml",
-            }),
+            file: Some(file),
             patterns: None,
-            config: None,
+            config: config.map(|_| "vocab-probe-config.json"),
         };
         view::set(
             store,
@@ -829,7 +835,7 @@ fn draw_run(store: &Store, data_root: &Path, ended_at: i64) -> Result<()> {
             &view::etag(None),
             Some(markup),
             None,
-            None,
+            config,
             &source,
         )
         .map_err(|refusal| match refusal {
@@ -2166,6 +2172,27 @@ mod tests {
         };
         seed_at(&store, &data, &repo, selection).unwrap();
 
+        let settings = store.run_monitor_json(VOCAB_PROBE_EXPERIMENT_ID).unwrap();
+        let plan = crate::engine::view::stored_plan(VOCAB_PROBE_EXPERIMENT_ID, settings.as_deref())
+            .unwrap();
+        let stages: Vec<_> = plan
+            .iter()
+            .map(|stage| {
+                let total = stage.of.as_ref().and_then(serde_json::Number::as_u64);
+                (stage.phase.as_str(), total, stage.unit.as_deref())
+            })
+            .collect();
+        assert_eq!(
+            stages,
+            [
+                ("install", Some(1), Some("environments")),
+                ("download", Some(9), Some("shards")),
+                ("tokenizer", Some(1), Some("commands")),
+                ("train", Some(200), Some("steps")),
+                ("train-finalize", None, None),
+            ]
+        );
+
         let run = store.get_run(RUN_ID).unwrap().unwrap();
         let child = StoredRun {
             id: "demo-child".into(),
@@ -2191,7 +2218,13 @@ mod tests {
         .unwrap();
         let monitor = crate::engine::monitor::offline(&store, &child, now_ms()).unwrap();
         assert_eq!(monitor["parent"]["runId"], RUN_ID);
-        assert!(monitor["phases"][0]["priorMs"].as_f64().unwrap() > 0.0);
+        let train = monitor["phases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|phase| phase["name"] == "train")
+            .unwrap();
+        assert!(train["priorMs"].as_f64().unwrap() > 0.0);
         assert_eq!(
             monitor["parent"]["series"]["val_bpb"]
                 .as_array()
@@ -2555,7 +2588,8 @@ mod tests {
     /// `Scripts/`, and the whole thing is one `&&` chain on a single line.
     #[test]
     fn probe_setup_runs_on_either_venv_layout() {
-        let setup = probe_setup();
+        let config = serde_json::from_str(VOCAB_PROBE_CONFIG).unwrap();
+        let setup = probe_setup(&config);
         assert!(setup.contains(". .venv/bin/activate"), "{setup}");
         assert!(setup.contains(". .venv/Scripts/activate"), "{setup}");
         assert!(!setup.contains('\n'), "{setup}");

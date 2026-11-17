@@ -5,26 +5,20 @@ use crate::store::Store;
 pub(super) fn run(store: &Store, args: &crate::ExpRunArgs) -> Result<()> {
     let experiment = crate::local::resolve::resolve_experiment(store, &args.exp_id)?;
     let settings = store.run_monitor_json(&experiment.id)?;
-    let mut plan = view::stored_plan(&experiment.id, settings.as_deref())?;
+    let plan = view::stored_plan(&experiment.id, settings.as_deref())?;
     let project = store
         .get_local_project(&experiment.project_id)?
         .ok_or_else(|| anyhow!("Project {} not found.", experiment.project_id))?;
-    let command = args
-        .command
-        .as_deref()
-        .or_else(|| {
-            crate::local::experiments::effective_run_command(
-                &experiment,
-                project.run_command.as_deref(),
-            )
-        })
-        .ok_or_else(|| {
-            anyhow!(
-                "{}",
-                crate::invocation::no_run_command(&experiment.project_id)
-            )
-        })?;
-    command_totals(&mut plan, command)?;
+    let command = crate::local::experiments::effective_run_command(
+        &experiment,
+        project.run_command.as_deref(),
+    )
+    .ok_or_else(|| {
+        anyhow!(
+            "{}",
+            crate::invocation::no_run_command(&experiment.project_id)
+        )
+    })?;
     if plan.is_empty() {
         return Err(anyhow!("Experiment {} has no stage plan. Set every stage with `orx exp view set {} --config plan.json`, then estimate again.", experiment.id, experiment.id));
     }
@@ -60,53 +54,6 @@ pub(super) fn run(store: &Store, args: &crate::ExpRunArgs) -> Result<()> {
             parent.as_ref().map(|(_, _, snapshot)| snapshot.as_ref())
         )
     );
-    Ok(())
-}
-
-fn command_totals(plan: &mut [orx_signals::Stage], command: &str) -> Result<()> {
-    let words = shell_words::split(command).map_err(|error| {
-        anyhow!("Run command could not be read: {error}. Correct its quoting, then estimate again.")
-    })?;
-    let mut phase = None;
-    let mut occurrences = std::collections::HashMap::new();
-    for (index, word) in words.iter().enumerate() {
-        match word.as_str() {
-            "&&" | ";" | "||" | "|" => phase = None,
-            "scripts.base_train" | "scripts.chat_sft" => {
-                let name = if word == "scripts.base_train" {
-                    "train"
-                } else {
-                    "sft"
-                };
-                let count = occurrences.entry(name).or_insert(0);
-                phase = Some((name, *count));
-                *count += 1;
-            }
-            _ => {}
-        }
-        let Some((phase, occurrence)) = phase else {
-            continue;
-        };
-        let total = word.strip_prefix("--num-iterations=").or_else(|| {
-            (word == "--num-iterations")
-                .then(|| words.get(index + 1).map(String::as_str))
-                .flatten()
-        });
-        let Some(total) = total else { continue };
-        let steps: i64 = total.parse().map_err(|_| anyhow!("Cannot time {phase}: --num-iterations={total} is not an integer step count. Correct the command, then estimate again."))?;
-        if steps <= 0 {
-            continue;
-        }
-        // Nanochat SFT consumes its first batch before the counted optimization loop.
-        let steps = if phase == "sft" { steps - 1 } else { steps };
-        if steps == 0 {
-            return Err(anyhow!("Cannot time {phase}: its step count must be above zero. Set its computed total in the stage plan."));
-        }
-        let stage = plan.iter_mut().filter(|stage| stage.phase == phase).nth(occurrence)
-            .ok_or_else(|| anyhow!("The command runs {phase}, but its stage is missing from the plan. Declare every stage with `orx exp view set EXP --config plan.json`, then estimate again."))?;
-        stage.of = Some(steps.into());
-        stage.unit = Some("steps".into());
-    }
     Ok(())
 }
 
@@ -271,39 +218,5 @@ mod tests {
         .unwrap();
         assert!(report(&plan, Some(&recorded)).contains("train not timed"));
         assert!(report(&plan, Some(&parent())).contains("Total: about 30 min"));
-    }
-
-    #[test]
-    fn repeated_commands_size_their_own_stage_occurrences() {
-        let mut plan = orx_signals::plan(
-            &json!([
-                {"phase":"train", "of":5000}, {"phase":"eval"}, {"phase":"train", "of":5000}
-            ]),
-            false,
-        )
-        .unwrap();
-        command_totals(&mut plan, "python -m scripts.base_train --num-iterations=200 && python -m scripts.base_train --num-iterations=600").unwrap();
-        assert_eq!(plan[0].of, Some(200.into()));
-        assert_eq!(plan[2].of, Some(600.into()));
-    }
-
-    #[test]
-    fn command_counts_override_the_declared_demo_totals() {
-        let mut plan = orx_signals::plan(
-            &json!([
-                {"phase":"train", "of":5000}, {"phase":"sft", "of":1499}
-            ]),
-            false,
-        )
-        .unwrap();
-        command_totals(&mut plan, "python -m scripts.base_train --num-iterations=600 && python -m scripts.chat_sft --num-iterations 301").unwrap();
-        assert_eq!(plan[0].of, Some(600.into()));
-        assert_eq!(plan[1].of, Some(300.into()));
-        command_totals(
-            &mut plan,
-            "python -m scripts.base_train --num-iterations=-1",
-        )
-        .unwrap();
-        assert_eq!(plan[0].of, Some(600.into()));
     }
 }

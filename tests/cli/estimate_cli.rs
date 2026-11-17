@@ -26,7 +26,7 @@ fn estimate_reads_parent_counts_without_launching_or_changing_the_command() {
          INSERT INTO local_experiments (id, project_id, slug, branch_name, title, run_command, agent_status, created_at, updated_at)
          VALUES ('parent', 'project', 'parent', 'main', 'Measured baseline', 'echo parent', 'idle', 1, 1);
          INSERT INTO local_experiments (id, project_id, parent_experiment_id, slug, branch_name, run_command, agent_status, run_monitor_json, created_at, updated_at)
-         VALUES ('child', 'project', 'parent', 'child', 'child', 'echo child', 'idle', '{\"plan\":[{\"phase\":\"download\"},{\"phase\":\"train\",\"of\":5000,\"unit\":\"steps\"}]}', 1, 1);
+         VALUES ('child', 'project', 'parent', 'child', 'child', 'echo child', 'idle', '{\"plan\":[{\"phase\":\"download\"},{\"phase\":\"train\",\"of\":600,\"unit\":\"steps\"}]}', 1, 1);
          INSERT INTO runs (id, experiment_id, project_id, status, backend_json, command, created_at, updated_at)
          VALUES ('parent-run', 'parent', 'project', 'done', '{}', 'echo parent', 1, 1);"
     ).unwrap();
@@ -49,12 +49,17 @@ fn estimate_reads_parent_counts_without_launching_or_changing_the_command() {
     let checkpoint = data.join("run-signals/parent-run.json");
     std::fs::write(&checkpoint, serde_json::to_vec(&snapshot).unwrap()).unwrap();
     let marker = root.join("should-not-exist");
-    let preview = format!(
-        "python -m scripts.base_train --num-iterations=600 && touch '{}'",
+    let saved_command = format!(
+        "python -m scripts.base_train --num-iterations=200 && touch '{}'",
         marker.display()
     );
+    db.execute(
+        "UPDATE local_experiments SET run_command = ? WHERE id = 'child'",
+        [&saved_command],
+    )
+    .unwrap();
     let output = command()
-        .args(["exp", "run", "child", "--estimate", "--command", &preview])
+        .args(["exp", "run", "child", "--estimate"])
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -63,7 +68,7 @@ fn estimate_reads_parent_counts_without_launching_or_changing_the_command() {
         "{stdout}\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    println!("{stdout}");
+    assert!(stdout.contains(&saved_command), "{stdout}");
     assert!(
         stdout.contains("Measured baseline — parent-run"),
         "{stdout}"
@@ -86,8 +91,22 @@ fn estimate_reads_parent_counts_without_launching_or_changing_the_command() {
             |row| row.get::<_, String>(0)
         )
         .unwrap(),
-        "echo child"
+        saved_command
     );
+
+    let preview = command()
+        .args([
+            "exp",
+            "run",
+            "child",
+            "--estimate",
+            "--command",
+            "echo preview",
+        ])
+        .output()
+        .unwrap();
+    assert!(!preview.status.success());
+    assert!(String::from_utf8_lossy(&preview.stderr).contains("--command"));
 
     db.execute("UPDATE local_experiments SET run_monitor_json = '{\"plan\":[{\"phase\":\"eval\"}]}' WHERE id = 'child'", []).unwrap();
     let output = command()

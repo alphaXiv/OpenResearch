@@ -1199,7 +1199,6 @@ echo ok
     pub(crate) fn tinker_args() -> crate::ExpRunArgs {
         crate::ExpRunArgs {
             estimate: false,
-            command: None,
             exp_id: "exp".into(),
             disk: None,
             provider: None,
