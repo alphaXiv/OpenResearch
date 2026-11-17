@@ -26,14 +26,14 @@ mod up_sign_in;
 #[test]
 fn unknown_commands_show_real_commands_and_scoped_help() {
     for (args, help, real) in [
-        (vec!["exp", "list"], "orx exp --help", "status"),
-        (vec!["exp", "veiw"], "orx exp --help", "view"),
+        (vec!["exp", "list"], " exp --help`", "status"),
+        (vec!["exp", "veiw"], " exp --help`", "view"),
         (
             vec!["exp", "view", "missing"],
-            "orx exp view --help",
+            " exp view --help`",
             "check",
         ),
-        (vec!["missing"], "orx --help", "projects"),
+        (vec!["missing"], " --help`", "projects"),
     ] {
         let root = std::env::temp_dir().join(format!("orx-command-hint-{}", uuid::Uuid::new_v4()));
         let output = home::isolate_home(

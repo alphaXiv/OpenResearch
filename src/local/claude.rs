@@ -328,6 +328,8 @@ pub struct ClaudeClient {
     turn: std::sync::Mutex<TurnSlot>,
     /// What this child was spawned with, used by the reuse/respawn decision.
     config: std::sync::Mutex<SpawnConfig>,
+    /// The inherited model stays fixed even when the catalog resolves its alias differently.
+    invocation_model: Option<String>,
     auth_generation: u64,
     started_at: Instant,
     terminated: AtomicBool,
@@ -719,7 +721,11 @@ async fn stop_client_at(client: Arc<ClaudeClient>, reason: &str, now: Instant) {
 /// wiring: `--input-format stream-json` and, on recovery/respawn,
 /// `--resume <native_id>`. No handshake — the first turn's `system`/`init` line
 /// is the health signal.
-async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<ClaudeClient>> {
+async fn spawn_client(
+    spec: &SpawnSpec,
+    auth_generation: u64,
+    invocation_model: Option<String>,
+) -> Result<Arc<ClaudeClient>> {
     let bin = spec.config.bin.clone().ok_or_else(|| {
         anyhow!("claude not found on PATH — install Claude Code and run `claude` once to sign in")
     })?;
@@ -850,7 +856,7 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
         "claude-code",
         spec.chat.up_port(),
     )?;
-    if let Some(model) = &spec.config.model {
+    if let Some(model) = &invocation_model {
         let identity = crate::store::InvocationIdentity {
             harness: "claude-code".into(),
             model: model.clone(),
@@ -893,6 +899,7 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
         pending: std::sync::Mutex::new(HashMap::new()),
         turn: std::sync::Mutex::new(TurnSlot::new(started_at)),
         config: std::sync::Mutex::new(config),
+        invocation_model,
         auth_generation,
         started_at,
         terminated: AtomicBool::new(false),
@@ -1252,6 +1259,29 @@ impl ClaudeHost {
         spec: SpawnSpec,
         tx: mpsc::UnboundedSender<TurnEvent>,
     ) -> Result<TurnRoute> {
+        let invocation_model = match spec.config.model.as_deref() {
+            Some(selected) => {
+                let catalog = spec.chat.harnesses.lock().await;
+                let entry = catalog.as_ref().and_then(|(_, payload)| {
+                    crate::local::harness::catalog_entry(
+                        payload,
+                        "claude-code",
+                        spec.config.profile.as_deref(),
+                    )
+                });
+                let model = entry
+                    .and_then(|entry| entry["models"].as_array())
+                    .and_then(|models| {
+                        models
+                            .iter()
+                            .find(|model| model["id"].as_str() == Some(selected))
+                    })
+                    .and_then(|model| model["resolvedModel"].as_str())
+                    .unwrap_or(selected);
+                Some(model.to_owned())
+            }
+            None => None,
+        };
         let session = spec.session_id.clone();
         let session_lock = {
             let mut locks = self.spawn_locks.lock().await;
@@ -1311,7 +1341,7 @@ impl ClaudeHost {
             } else if !profile && live.auth_generation() != auth.generation {
                 self.inner.lock().await.remove(&session);
                 stop_client(live, "authentication-changed").await;
-            } else if live.config() == spec.config {
+            } else if live.config() == spec.config && live.invocation_model == invocation_model {
                 let latest = self.auth_snapshot();
                 if profile
                     || (latest.state == HarnessAuthState::Ready
@@ -1339,7 +1369,7 @@ impl ClaudeHost {
             .insert(session.clone(), spawn_epoch);
         let host = self.clone();
         let client = tokio::spawn(async move {
-            let client = spawn_client(&spec, auth.generation).await?;
+            let client = spawn_client(&spec, auth.generation, invocation_model).await?;
             {
                 let mut guard = host.inner.lock().await;
                 let latest = host.auth_snapshot();
@@ -1553,6 +1583,7 @@ pub(crate) mod tests {
             pending: std::sync::Mutex::new(HashMap::new()),
             turn: std::sync::Mutex::new(TurnSlot::new(idle_since)),
             config: std::sync::Mutex::new(cfg(None, None, None, false)),
+            invocation_model: None,
             auth_generation: 0,
             started_at,
             terminated: AtomicBool::new(false),
@@ -1696,8 +1727,20 @@ done
             Arc::new(crate::local::codex::CodexHost::new()),
             host.clone(),
         ));
-        for model in ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-sonnet-5-5"] {
-            let mut config = cfg(Some(PermissionMode::Auto), None, Some(model), false);
+        for (selected, resolved) in [
+            ("haiku", Some("claude-haiku-5-5")),
+            ("sonnet[1m]", Some("claude-sonnet-5-5")),
+            ("sonnet[1m]", Some("claude-sonnet-5-5")),
+            ("sonnet[1m]", Some("claude-sonnet-6-0")),
+            ("custom-model", None),
+        ] {
+            *chat.harnesses.lock().await = Some((
+                Instant::now(),
+                json!({"harnesses":[{
+                    "id":"claude-code", "models":[{"id":selected,"resolvedModel":resolved}]
+                }]}),
+            ));
+            let mut config = cfg(Some(PermissionMode::Auto), None, Some(selected), false);
             config.bin = Some(bin.clone());
             let (tx, mut rx) = mpsc::unbounded_channel();
             let route = host
@@ -1726,7 +1769,8 @@ done
             let identity: crate::store::InvocationIdentity =
                 serde_json::from_value(event["identity"].clone()).unwrap();
             assert_eq!(identity.harness, "claude-code");
-            assert_eq!(identity.model, model);
+            assert_eq!(identity.model, resolved.unwrap_or(selected));
+            assert_eq!(route.client().config().model.as_deref(), Some(selected));
             let settings: Value = serde_json::from_slice(
                 &std::fs::read(write_settings(&repo, false).unwrap()).unwrap(),
             )
