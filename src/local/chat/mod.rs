@@ -2934,6 +2934,8 @@ pub struct ChatHost {
     /// no real contention) makes each RMW atomic. Sync because `flush` is sync;
     /// never held across an `.await`.
     msg_write: std::sync::Mutex<()>,
+    /// The session id of each prompt card answered, for a running turn waiting on a local answer.
+    pub(crate) prompt_answered: tokio::sync::broadcast::Sender<String>,
     /// Outstanding permission-bridge requests, keyed by the prompt part id the
     /// card was surfaced under. Sync mutex, never held across an await.
     pending_permissions: std::sync::Mutex<HashMap<String, PendingPermission>>,
@@ -3932,6 +3934,7 @@ impl ChatHost {
             deleting_sessions: Arc::new(std::sync::Mutex::new(HashSet::new())),
             respond_locks: Mutex::new(HashMap::new()),
             msg_write: std::sync::Mutex::new(()),
+            prompt_answered: tokio::sync::broadcast::channel(16).0,
             pending_permissions: std::sync::Mutex::new(HashMap::new()),
             permission_review_locks: Mutex::new(HashMap::new()),
             recovery_locks: Mutex::new(HashMap::new()),
@@ -7461,6 +7464,7 @@ impl ChatHost {
             Ok(msg) => self.emit("chat.message", message_json(&msg, &req.session_id)),
             Err(e) => eprintln!("orx up: answered prompt not marked resolved: {e}"),
         }
+        let _ = self.prompt_answered.send(req.session_id.clone());
         // A delegate's card stops showing the question; the answered turn goes on.
         if let Ok(Some(session)) =
             Store::open().and_then(|store| store.get_chat_session(&req.session_id))

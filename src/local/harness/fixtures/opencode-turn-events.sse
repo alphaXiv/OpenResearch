@@ -1,0 +1,84 @@
+data: {"type":"server.connected","id":"evt_connected","data":{}}
+
+data: {"id":"evt_1ead56d1c001Pl5FfS66YkSdvv","created":1794941218076,"type":"session.inbox.enqueued","location":{"directory":"/tmp/project"},"data":{"inboxID":"msg_c1794941218","sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL","item":{"type":"user","payload":{"text":"Think briefly, say one sentence, run the shell command 'echo hello' with your tool, then reply with two sentences about the output."},"delivery":"steer"}},"durable":{"aggregateID":"ses_e152a94deffeNyM1JU4dbSfrCL","seq":1,"version":1}}
+
+data: {"id":"evt_1ead56d1e001iw2cK5pryXYa32","created":1794941218078,"type":"session.execution.started","data":{"sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL"},"durable":{"aggregateID":"ses_e152a94deffeNyM1JU4dbSfrCL","seq":2,"version":1}}
+
+data: {"id":"evt_1ead56d20002xtHCTNjOT91y8V","created":1794941218080,"type":"session.inbox.delivered","location":{"directory":"/tmp/project"},"data":{"sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL","inboxID":"msg_c1794941218"},"durable":{"aggregateID":"ses_e152a94deffeNyM1JU4dbSfrCL","seq":4,"version":1}}
+
+data: {"id":"evt_1ead56fcb001VmvOR7aGTN81US","created":1794941218763,"type":"session.step.started","location":{"directory":"/tmp/project"},"data":{"sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL","agent":"build","model":{"id":"inkling-2-small-free","providerID":"opencode","variant":"default"},"assistantMessageID":"msg_1ead56d26001ix2VHCEtEI1jzF","started":1794941218088},"durable":{"aggregateID":"ses_e152a94deffeNyM1JU4dbSfrCL","seq":5,"version":1}}
+
+data: {"id":"evt_1ead56fcc001a1r36B3cYmQyLV","created":1794941218764,"type":"session.step.first-token","location":{"directory":"/tmp/project"},"data":{"sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL","assistantMessageID":"msg_1ead56d26001ix2VHCEtEI1jzF"},"durable":{"aggregateID":"ses_e152a94deffeNyM1JU4dbSfrCL","seq":6,"version":1}}
+
+data: {"id":"evt_1ead56fcd0013JrZv6vP75DbpI","created":1794941218765,"type":"session.reasoning.started","location":{"directory":"/tmp/project"},"data":{"sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL","assistantMessageID":"msg_1ead56d26001ix2VHCEtEI1jzF","ordinal":0,"native":{"reasoningField":"reasoning_content"}},"durable":{"aggregateID":"ses_e152a94deffeNyM1JU4dbSfrCL","seq":7,"version":1}}
+
+data: {"id":"evt_1ead57033001U7yFynkBqGz1FN","created":1794941218867,"type":"session.reasoning.delta","location":{"directory":"/tmp/project"},"data":{"sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL","assistantMessageID":"msg_1ead56d26001ix2VHCEtEI1jzF","ordinal":0,"delta":"The user asked a compound question. They want: think briefly, say one sentence, run echo"}}
+
+data: {"id":"evt_1ead5703b0027T8Ry3Bfma2I0s","created":1794941218875,"type":"session.usage.updated","data":{"sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL","cost":0,"tokens":{"input":512,"output":8,"reasoning":36,"cache":{"read":0,"write":0}}}}
+
+data: {"id":"evt_1ead5703b003b06Pr3Pic7W6pl","created":1794941218875,"type":"session.renamed","location":{"directory":"/tmp/project"},"data":{"sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL","title":"echo hello command test"},"durable":{"aggregateID":"ses_e152a94deffeNyM1JU4dbSfrCL","seq":9,"version":1}}
+
+data: {"id":"evt_1ead570da001QjULlwoGqKTt6A","created":1794941219034,"type":"session.reasoning.delta","location":{"directory":"/tmp/project"},"data":{"sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL","assistantMessageID":"msg_1ead56d26001ix2VHCEtEI1jzF","ordinal":0,"delta":" hello, reply with two sentences about output. Need use tool. Now I need produce one sentence? The user explicitly"}}
+
+data: {"id":"evt_1ead57178001hTNWPL6DTDEDR9","created":1794941219192,"type":"session.reasoning.delta","location":{"directory":"/tmp/project"},"data":{"sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL","assistantMessageID":"msg_1ead56d26001ix2VHCEtEI1jzF","ordinal":0,"delta":" wants one sentence before tool, then after tool two sentences. We can do brief."}}
+
+data: {"id":"evt_1ead57197001m6DFHvroD37m8S","created":1794941219223,"type":"session.reasoning.delta","location":{"directory":"/tmp/project"},"data":{"sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL","assistantMessageID":"msg_1ead56d26001ix2VHCEtEI1jzF","ordinal":0,"delta":" Use shell tool."}}
+
+data: {"id":"evt_1ead57197002nHRfheu970vdMJ","created":1794941219223,"type":"session.text.started","location":{"directory":"/tmp/project"},"data":{"sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL","assistantMessageID":"msg_1ead56d26001ix2VHCEtEI1jzF","ordinal":0},"durable":{"aggregateID":"ses_e152a94deffeNyM1JU4dbSfrCL","seq":10,"version":1}}
+
+data: {"id":"evt_1ead571fd0019DtZl0Qt3OeIiP","created":1794941219325,"type":"session.text.delta","location":{"directory":"/tmp/project"},"data":{"sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL","assistantMessageID":"msg_1ead56d26001ix2VHCEtEI1jzF","ordinal":0,"delta":"I\u2019"}}
+
+data: {"id":"evt_1ead57262001EObs0ZMUCUTqQo","created":1794941219426,"type":"session.text.delta","location":{"directory":"/tmp/project"},"data":{"sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL","assistantMessageID":"msg_1ead56d26001ix2VHCEtEI1jzF","ordinal":0,"delta":"ll keep this short and check the command output directly."}}
+
+data: {"id":"evt_1ead57357001WxKLJsHJ5kpBzt","created":1794941219671,"type":"session.tool.input.started","location":{"directory":"/tmp/project"},"data":{"sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL","assistantMessageID":"msg_1ead56d26001ix2VHCEtEI1jzF","id":"functions.shell:0","name":"shell"},"durable":{"aggregateID":"ses_e152a94deffeNyM1JU4dbSfrCL","seq":11,"version":1}}
+
+data: {"id":"evt_1ead573590014o590LFPnAqFuc","created":1794941219673,"type":"session.reasoning.ended","location":{"directory":"/tmp/project"},"data":{"sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL","assistantMessageID":"msg_1ead56d26001ix2VHCEtEI1jzF","ordinal":0,"text":"The user asked a compound question. They want: think briefly, say one sentence, run echo hello, reply with two sentences about output. Need use tool. Now I need produce one sentence? The user explicitly wants one sentence before tool, then after tool two sentences. We can do brief. Use shell tool.","native":{"reasoningField":"reasoning_content"}},"durable":{"aggregateID":"ses_e152a94deffeNyM1JU4dbSfrCL","seq":12,"version":1}}
+
+data: {"id":"evt_1ead5735b001IgLFIPO27QShQq","created":1794941219675,"type":"session.tool.input.ended","location":{"directory":"/tmp/project"},"data":{"sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL","assistantMessageID":"msg_1ead56d26001ix2VHCEtEI1jzF","id":"functions.shell:0","text":"{\"command\": \"echo hello\"}"},"durable":{"aggregateID":"ses_e152a94deffeNyM1JU4dbSfrCL","seq":13,"version":1}}
+
+data: {"id":"evt_1ead5735b0028sbpVygfxiWhxv","created":1794941219675,"type":"session.tool.called","location":{"directory":"/tmp/project"},"data":{"sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL","assistantMessageID":"msg_1ead56d26001ix2VHCEtEI1jzF","id":"functions.shell:0","input":{"command":"echo hello"},"executed":false},"durable":{"aggregateID":"ses_e152a94deffeNyM1JU4dbSfrCL","seq":14,"version":1}}
+
+data: {"id":"evt_1ead5735c001tIiZah1nnCat6X","created":1794941219676,"type":"session.text.ended","location":{"directory":"/tmp/project"},"data":{"sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL","assistantMessageID":"msg_1ead56d26001ix2VHCEtEI1jzF","ordinal":0,"text":"I\u2019ll keep this short and check the command output directly."},"durable":{"aggregateID":"ses_e152a94deffeNyM1JU4dbSfrCL","seq":15,"version":1}}
+
+data: {"id":"evt_1ead5735c002ZkL7i66Ys3dLAn","created":1794941219676,"type":"session.step.streamed","location":{"directory":"/tmp/project"},"data":{"sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL","assistantMessageID":"msg_1ead56d26001ix2VHCEtEI1jzF"},"durable":{"aggregateID":"ses_e152a94deffeNyM1JU4dbSfrCL","seq":16,"version":1}}
+
+data: {"id":"evt_1ead57361002GGAS6n8e4oNyVg","created":1794941219681,"type":"session.tool.progress","location":{"directory":"/tmp/project"},"data":{"sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL","assistantMessageID":"msg_1ead56d26001ix2VHCEtEI1jzF","id":"functions.shell:0","metadata":{"shellID":"sh_1ead5735e001eJ1qQVsd36BSB7"}}}
+
+data: {"id":"evt_1ead57365002om1fD4SQb9tOTX","created":1794941219685,"type":"session.tool.success","location":{"directory":"/tmp/project"},"data":{"sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL","assistantMessageID":"msg_1ead56d26001ix2VHCEtEI1jzF","id":"functions.shell:0","content":[{"type":"text","text":"hello\n"}],"metadata":{"status":"completed","truncated":false,"exit":0},"executed":false},"durable":{"aggregateID":"ses_e152a94deffeNyM1JU4dbSfrCL","seq":17,"version":2}}
+
+data: {"id":"evt_1ead57367001pIM7DvZ0AHzFpi","created":1794941219687,"type":"session.step.ended","location":{"directory":"/tmp/project"},"data":{"sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL","assistantMessageID":"msg_1ead56d26001ix2VHCEtEI1jzF","finish":"tool-calls","rawFinish":"tool_calls","tokens":{"input":14644,"output":45,"reasoning":66,"cache":{"read":0,"write":0}},"cost":0},"durable":{"aggregateID":"ses_e152a94deffeNyM1JU4dbSfrCL","seq":18,"version":1}}
+
+data: {"id":"evt_1ead57367002zMi2D1a2vgST0r","created":1794941219687,"type":"session.usage.updated","data":{"sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL","cost":0,"tokens":{"input":15156,"output":53,"reasoning":102,"cache":{"read":0,"write":0}}}}
+
+data: {"id":"evt_1ead5753c001X9HKR15e9zlvwk","created":1794941220156,"type":"session.step.started","location":{"directory":"/tmp/project"},"data":{"sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL","agent":"build","model":{"id":"inkling-2-small-free","providerID":"opencode","variant":"default"},"assistantMessageID":"msg_1ead5736b001XwB5CXsKPcC6X8","started":1794941219693},"durable":{"aggregateID":"ses_e152a94deffeNyM1JU4dbSfrCL","seq":19,"version":1}}
+
+data: {"id":"evt_1ead5753e001PlcGNWTMa6hzm0","created":1794941220158,"type":"session.step.first-token","location":{"directory":"/tmp/project"},"data":{"sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL","assistantMessageID":"msg_1ead5736b001XwB5CXsKPcC6X8"},"durable":{"aggregateID":"ses_e152a94deffeNyM1JU4dbSfrCL","seq":20,"version":1}}
+
+data: {"id":"evt_1ead5753e002l3Jv5mTtGGzo2T","created":1794941220158,"type":"session.reasoning.started","location":{"directory":"/tmp/project"},"data":{"sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL","assistantMessageID":"msg_1ead5736b001XwB5CXsKPcC6X8","ordinal":0,"native":{"reasoningField":"reasoning_content"}},"durable":{"aggregateID":"ses_e152a94deffeNyM1JU4dbSfrCL","seq":21,"version":1}}
+
+data: {"id":"evt_1ead575a4001Otx2VyXFrsXfpL","created":1794941220260,"type":"session.reasoning.delta","location":{"directory":"/tmp/project"},"data":{"sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL","assistantMessageID":"msg_1ead5736b001XwB5CXsKPcC6X8","ordinal":0,"delta":"We need final reply with two sentences about output. Ensure exactly two sentences"}}
+
+data: {"id":"evt_1ead5762d001FOnOkfTuivJlsP","created":1794941220397,"type":"session.reasoning.delta","location":{"directory":"/tmp/project"},"data":{"sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL","assistantMessageID":"msg_1ead5736b001XwB5CXsKPcC6X8","ordinal":0,"delta":". Avoid extra. Need mention output"}}
+
+data: {"id":"evt_1ead576d4001RPqNDqNXMmyjqD","created":1794941220564,"type":"session.reasoning.delta","location":{"directory":"/tmp/project"},"data":{"sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL","assistantMessageID":"msg_1ead5736b001XwB5CXsKPcC6X8","ordinal":0,"delta":" is hello and exit? We only know"}}
+
+data: {"id":"evt_1ead5773c001TQC6GbZPOxiJ1c","created":1794941220668,"type":"session.reasoning.delta","location":{"directory":"/tmp/project"},"data":{"sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL","assistantMessageID":"msg_1ead5736b001XwB5CXsKPcC6X8","ordinal":0,"delta":" stdout hello. Two sentences."}}
+
+data: {"id":"evt_1ead5773c002IXBBFciTRBmKD2","created":1794941220669,"type":"session.text.started","location":{"directory":"/tmp/project"},"data":{"sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL","assistantMessageID":"msg_1ead5736b001XwB5CXsKPcC6X8","ordinal":0},"durable":{"aggregateID":"ses_e152a94deffeNyM1JU4dbSfrCL","seq":22,"version":1}}
+
+data: {"id":"evt_1ead577a3001co2CuAH0D1qxxu","created":1794941220771,"type":"session.text.delta","location":{"directory":"/tmp/project"},"data":{"sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL","assistantMessageID":"msg_1ead5736b001XwB5CXsKPcC6X8","ordinal":0,"delta":"The command printed `hello`. It produced"}}
+
+data: {"id":"evt_1ead577c9001MemaYkENKy5WPW","created":1794941220809,"type":"session.reasoning.ended","location":{"directory":"/tmp/project"},"data":{"sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL","assistantMessageID":"msg_1ead5736b001XwB5CXsKPcC6X8","ordinal":0,"text":"We need final reply with two sentences about output. Ensure exactly two sentences. Avoid extra. Need mention output is hello and exit? We only know stdout hello. Two sentences.","native":{"reasoningField":"reasoning_content"}},"durable":{"aggregateID":"ses_e152a94deffeNyM1JU4dbSfrCL","seq":23,"version":1}}
+
+data: {"id":"evt_1ead577ca001Lk6JFoqWjgh300","created":1794941220810,"type":"session.text.delta","location":{"directory":"/tmp/project"},"data":{"sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL","assistantMessageID":"msg_1ead5736b001XwB5CXsKPcC6X8","ordinal":0,"delta":" that single line on standard output."}}
+
+data: {"id":"evt_1ead577ca002RFMBGZgmDAZWQm","created":1794941220810,"type":"session.text.ended","location":{"directory":"/tmp/project"},"data":{"sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL","assistantMessageID":"msg_1ead5736b001XwB5CXsKPcC6X8","ordinal":0,"text":"The command printed `hello`. It produced that single line on standard output."},"durable":{"aggregateID":"ses_e152a94deffeNyM1JU4dbSfrCL","seq":24,"version":1}}
+
+data: {"id":"evt_1ead577ca003oZtB5rSoeFcUi9","created":1794941220810,"type":"session.step.streamed","location":{"directory":"/tmp/project"},"data":{"sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL","assistantMessageID":"msg_1ead5736b001XwB5CXsKPcC6X8"},"durable":{"aggregateID":"ses_e152a94deffeNyM1JU4dbSfrCL","seq":25,"version":1}}
+
+data: {"id":"evt_1ead577cb001vyRp2boUVN3ckO","created":1794941220811,"type":"session.step.ended","location":{"directory":"/tmp/project"},"data":{"sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL","assistantMessageID":"msg_1ead5736b001XwB5CXsKPcC6X8","finish":"stop","rawFinish":"stop","tokens":{"input":168,"output":20,"reasoning":38,"cache":{"read":14592,"write":0}},"cost":0},"durable":{"aggregateID":"ses_e152a94deffeNyM1JU4dbSfrCL","seq":26,"version":1}}
+
+data: {"id":"evt_1ead577cc0010dGDKhrlO3U2vB","created":1794941220812,"type":"session.usage.updated","data":{"sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL","cost":0,"tokens":{"input":15324,"output":73,"reasoning":140,"cache":{"read":14592,"write":0}}}}
+
+data: {"id":"evt_1ead577cd0010A8wtulYpq8Xk7","created":1794941220813,"type":"session.execution.succeeded","data":{"sessionID":"ses_e152a94deffeNyM1JU4dbSfrCL"},"durable":{"aggregateID":"ses_e152a94deffeNyM1JU4dbSfrCL","seq":27,"version":1}}
+
