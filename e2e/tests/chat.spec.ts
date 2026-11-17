@@ -50,22 +50,22 @@ test('a message sent during a turn waits in the queue and runs when the turn end
   await expect(transcript).toContainText(/The loader is done\.[\s\S]*Then add a validation split\.[\s\S]*Added a 10% validation split\./)
 })
 
-test('Stop ends the turn, drops the queue, and the chat takes the next message', async ({ page, project, agent }) => {
+test('Stop ends the turn and the queued messages run next, in order', async ({ page, project, agent }) => {
   agent.script('Train for ten epochs.', [{ say: 'Epoch 1 of 10. ' }, { hold: 'training' }, { say: 'Epoch 2 of 10.' }])
+  agent.script('Plot the loss.', [{ say: 'Plotted the loss.' }])
+  agent.script('Then save a checkpoint.', [{ say: 'Saved the checkpoint.' }])
   await project.open(page)
   await send(page, 'Train for ten epochs.')
   await agent.reached('training')
-  await send(page, 'Plot the loss when it finishes.')
-  await expect(page.getByText('Queued', { exact: true })).toBeVisible()
+  await send(page, 'Plot the loss.')
+  await send(page, 'Then save a checkpoint.')
+  const queued = page.getByText('Queued', { exact: true })
+  await expect(queued).toHaveCount(2)
 
   await page.getByRole('button', { name: 'Stop' }).click()
-  await expect(page.getByRole('button', { name: 'Stop' })).toBeHidden()
-  await expect(page.getByText('Queued', { exact: true })).toBeHidden()
-  await expect(page.getByText('Epoch 1 of 10.')).toBeVisible()
-  await expect(page.getByText('Plot the loss when it finishes.')).toBeHidden()
-
-  agent.script('Train for two epochs instead.', [{ say: 'Trained for two epochs.' }])
-  await send(page, 'Train for two epochs instead.')
-  await expect(page.getByText('Trained for two epochs.')).toBeVisible()
+  await expect(page.getByText('Saved the checkpoint.')).toBeVisible()
+  await expect(queued).toHaveCount(0)
   await expect(page.getByText('Epoch 2 of 10.')).toBeHidden()
+  const transcript = page.getByRole('region', { name: 'Train for ten epochs.' })
+  await expect(transcript).toContainText(/Epoch 1 of 10\.[\s\S]*Plot the loss\.[\s\S]*Plotted the loss\.[\s\S]*Then save a checkpoint\.[\s\S]*Saved the checkpoint\./)
 })
