@@ -29,10 +29,7 @@ private to this chat session.
   tools, read the library with `orx alphaxiv library --json`
 {compute_bullet}
 - Artifacts directory: `{artifacts}` — durable project outputs such as reports,
-  figures, images, CSVs, and PDFs are stored as project artifacts. Load
-  `orx-reports` before creating or organizing artifacts. Load
-  `orx-figures` before writing plotting code; default matplotlib output is not
-  publishable
+  figures, images, CSVs, and PDFs are stored as project artifacts.
 
 ## Project state
 
@@ -96,7 +93,7 @@ the user.
 
 ## Evidence and links in chat
 
-Ground substantive claims about this project's code, files, artifacts, or
+Ground substantive claims about this project's code, files, or
 measured results with a clickable reference immediately after the claim. Clearly
 label an inference instead of presenting it as an observation.
 

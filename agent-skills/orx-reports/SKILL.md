@@ -1,52 +1,31 @@
 ---
 name: orx-reports
-description: "Save and organize durable research outputs in the artifacts directory. Invoke when creating or reorganizing a report, exported dataset, or other deliverable; use `orx-results` for analysis and `orx-figures` when constructing charts."
+description: "Write and organize durable outputs in the artifacts directory. Use before creating or organizing artifacts, including reports, summaries, and figures."
 ---
 
-Write reports, figures, CSVs, PDFs, and other outputs directly into the artifacts
-directory shown in the session playbook. Written files become project artifacts
-immediately.
+An artifact is a project-wide deliverable that a human researcher will read and analyze. This can include reports, figures, and HTML pages, and more. Written files become project artifacts immediately.
 
-Before writing, inspect the existing artifacts directory and follow its
-organization. Reuse the relevant folder for follow-up outputs. Group related
-outputs by research topic or deliverable instead of accumulating files at the
-artifacts root. Add subfolders such as `figures/`, `data/`, or `models/` only
-when they help; do not create empty scaffolding.
+Keep the artifacts directory clean; avoid model checkpoints, rollouts, activations, etc. that are not project-wide that will bloat the artifacts directory.
 
 Use a descriptive filename for each output. For example:
 
 ```text
 <artifacts-dir>/
-  transformer-sweep/
-    transformer-sweep-report.md
-    figures/
-      orx_figstyle.py
-      patch-size.pdf
-      patch-size.svg
-      patch-size.py
-      learning-rate.pdf
-      learning-rate.svg
-      learning-rate.py
-    data/
-      sweep-results.csv
+  research-summary.md
+  literature-review.md
+  learning-rate-study/
+    learning-rate-study.md
+    loss-curves.html
+    final-accuracy.svg
 ```
-
-Keep reproducibility scripts beside their figures. Keep temporary logs and
-scratch files outside the artifacts directory.
-
-Keep already-published outputs at their existing paths. Reorganize other older
-outputs only when requested, updating affected document links and verifying they
-still resolve.
 
 Read the `orx-figures` module before writing any figure; a default
 matplotlib plot does not meet the bar the reports are held to.
 
+Load `orx-results` when the report makes claims derived from run results.
+
 Use relative links within reports, for example
-`![Patch size](figures/patch-size.svg)` from `transformer-sweep-report.md`.
+`![Final accuracy](final-accuracy.svg)` from `learning-rate-study.md`.
 In the chat handoff, link every finished output using the session playbook's
-evidence-and-links contract, including the full nested path, for example
-`<file path="artifacts/transformer-sweep/figures/patch-size.svg" />`.
-When an output is an image, also show it inline in the chat handoff using
-`![Description](artifacts/<relative-path>)`, while keeping its file link. Put related image previews in consecutive
-paragraphs so they render as a carousel, with file links after the group.
-Load `orx-results` when the report requires interpreting or comparing run results.
+evidence-and-links contract, including the full path, for example
+`<file path="artifacts/learning-rate-study/final-accuracy.svg" />`.

@@ -71,6 +71,27 @@ async function prompt(request: Message) {
       else if ('think' in step) update(sessionId, { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: step.think } })
       else if ('hold' in step) await fetch(`${control}/hold/${encodeURIComponent(step.hold)}`, { method: 'POST', signal: abort.signal })
       else if ('run' in step) await run(sessionId, step)
+      else if ('permissionAfterReply' in step) {
+        send({ id: request.id, result: { stopReason: 'end_turn' } })
+        await ask('session/request_permission', {
+          sessionId, toolCall: { toolCallId: 'late-permission', title: step.permissionAfterReply, kind: 'execute' },
+          options: [{ optionId: 'late-allow', name: 'Allow late action', kind: 'allow_once' }],
+        })
+        return
+      }
+      else if ('permission' in step) {
+        const toolCallId = `permission-${nextReverse}`
+        const toolCall = { toolCallId, title: step.permission, kind: step.kind ?? 'execute', status: 'pending' }
+        update(sessionId, { sessionUpdate: 'tool_call', ...toolCall })
+        const grant = step.grant ?? 'allow_once'
+        const options = [
+          ...(grant === 'none' ? [] : [{ optionId: 'opaque-allow', name: 'Allow this action', kind: grant }]),
+          { optionId: 'opaque-reject', name: 'Reject this action', kind: 'reject_once' },
+        ]
+        const response = await ask('session/request_permission', { sessionId, toolCall, options })
+        const selected = response.result?.outcome?.optionId ?? response.result?.outcome?.outcome
+        update(sessionId, { sessionUpdate: 'tool_call_update', toolCallId, status: selected === 'opaque-allow' ? 'completed' : 'failed', rawOutput: selected })
+      }
       else if ('exit' in step) process.exit(step.exit)
     }
     send({ id: request.id, result: { stopReason: 'end_turn' } })

@@ -10,8 +10,8 @@ import type { Workspace } from "./workspace";
 import { taskLocation } from "./workspaceState";
 
 interface CloseRequest {
-  /** What the window found when asked to close; null when it could not count the work. */
-  work: PendingWork | null;
+  /** What the window found when asked to close. */
+  work: PendingWork;
   /** Whether keeping the work running minimizes the window, where no Dock shows a hidden app. */
   minimizes: boolean;
 }
@@ -74,7 +74,7 @@ interface Machine {
 
 function CloseDialogContent({ minimizes, machine, open, confirm, cancel, isDisabled }: DialogContentProps<CloseAnswer> & Omit<CloseRequest, "work"> & Machine) {
   const live = useQuery({ ...machine.queries.getPendingWorkQuery(), gcTime: 0 }, machine.queryClient);
-  const work = live.data ?? null;
+  const work = live.data;
   const quitRef = useRef<HTMLButtonElement>(null);
   const backgroundRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
@@ -86,7 +86,7 @@ function CloseDialogContent({ minimizes, machine, open, confirm, cancel, isDisab
 
   const runs = (fate: AfterQuit) => work?.runs.filter((run) => run.afterQuit === fate) ?? [];
   const blocked = runs("needsApp").length > 0;
-  const finished = work !== null && work.agents.length === 0 && work.runs.length === 0;
+  const finished = work !== undefined && work.agents.length === 0 && work.runs.length === 0;
   // Nothing left to ask about: the close is dropped and the user stays where they were.
   useEffect(() => {
     if (finished) cancel();
@@ -122,9 +122,7 @@ function CloseDialogContent({ minimizes, machine, open, confirm, cancel, isDisab
     <DialogContent initialFocus={blocked ? backgroundRef : quitRef} className="flex max-h-[calc(100vh-2.5rem)] flex-col">
       <DialogHeader>
         <DialogTitle>{m.close_pending_title()}</DialogTitle>
-        {(work === null || blocked) && (
-          <DialogDescription>{work === null ? m.close_pending_uncounted() : m.close_pending_blocked()}</DialogDescription>
-        )}
+        {blocked && <DialogDescription>{m.close_pending_blocked()}</DialogDescription>}
       </DialogHeader>
       {groups.length > 0 && (
         <div className="-mx-3 mt-4 flex min-h-0 flex-col gap-4 overflow-y-auto px-1 pb-1">
@@ -166,8 +164,7 @@ export function askBeforeClosing({ showCustomDialog }: ReturnType<typeof createD
   const { work, minimizes } = detail as CloseRequest;
   // The window's count is newer than any poll still cached.
   const { queryKey } = machine.queries.getPendingWorkQuery();
-  if (work) machine.setScopedQueryData(queryKey, work);
-  else machine.queryClient.removeQueries({ queryKey, exact: true });
+  machine.setScopedQueryData(queryKey, work);
   showCustomDialog({
     component: CloseDialogContent,
     props: { minimizes, machine, open },

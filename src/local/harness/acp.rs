@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use agent_client_protocol::schema::v1::{
@@ -8,7 +8,10 @@ use agent_client_protocol::schema::v1::{
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
-use super::{Harness, HarnessInfo, ResumeAction, TurnFailure, TurnOutcome, TurnResult};
+use super::options::OptionChoice;
+use super::{
+    Harness, HarnessInfo, HarnessOptions, ResumeAction, TurnFailure, TurnOutcome, TurnResult,
+};
 use crate::error::{anyhow, Result};
 use crate::local::acp::{
     host::{Client, Event},
@@ -24,6 +27,21 @@ mod auth;
 pub(crate) const SESSION_SKILLS_DIR: &str = ".agents/skills";
 
 static DISCOVERY_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
+pub fn approval_options() -> HarnessOptions {
+    HarnessOptions {
+        permission_modes: vec![
+            OptionChoice::described("ask", "Ask", "Ask before actions that need approval"),
+            OptionChoice::described(
+                "auto-approve",
+                "Full access",
+                "Approve each request without asking, except ones that can only be allowed permanently",
+            ),
+        ],
+        default_permission_mode: Some("ask"),
+        ..HarnessOptions::none()
+    }
+}
 
 pub struct Acp(pub Definition);
 
@@ -76,6 +94,10 @@ impl Harness for Acp {
     }
     fn supports_chat(&self) -> bool {
         true
+    }
+
+    fn options(&self) -> HarnessOptions {
+        approval_options()
     }
 
     fn session_skills_dir(&self) -> Option<&'static str> {
@@ -508,22 +530,20 @@ pub(crate) async fn prompt_session(ctx: &mut TurnCtx, session: &OpenSession) -> 
     );
     tokio::pin!(response);
     let mut tools = ToolUpdates::default();
+    let mut approved_permissions = HashSet::new();
     let mut watchdog = tokio::time::interval(std::time::Duration::from_secs(5));
     let mut deadline = tokio::time::Instant::now() + super::TURN_WATCHDOG;
     let result = loop {
         tokio::select! {
-            _ = ctx.flush_due() => { let _ = ctx.flush(); }
-            _ = watchdog.tick() => {
-                // A command the agent runs reports nothing until it exits, however long it takes.
-                if client.awaiting_permission() || tools.command_running() {
-                    deadline = tokio::time::Instant::now() + super::TURN_WATCHDOG;
-                } else if tokio::time::Instant::now() >= deadline {
-                    return Err(anyhow!("ACP turn exceeded the response timeout"));
-                }
-            }
+            // A completed turn cancels late permissions before any automatic decision.
+            biased;
             result = &mut response => {
                 let result = result?;
-                while let Ok(event) = events.try_recv() { apply_event(ctx, event, &mut tools)?; }
+                while let Ok(event) = events.try_recv() {
+                    if !matches!(&event, Event::Permission { id, .. } if approved_permissions.remove(id)) {
+                        apply_event(ctx, event, &mut tools)?;
+                    }
+                }
                 ctx.persist_delivery(DeliveryState::Accepted)?;
                 if let (Some(execution), Some(samples)) = (
                     ctx.usage_execution_id(),
@@ -545,16 +565,62 @@ pub(crate) async fn prompt_session(ctx: &mut TurnCtx, session: &OpenSession) -> 
                 if result["stopReason"] == "cancelled" { return Err(anyhow!("Agent turn was cancelled")); }
                 break result;
             }
+            _ = ctx.flush_due() => { let _ = ctx.flush(); }
+            _ = watchdog.tick() => {
+                approved_permissions.extend(approve_permissions(ctx, client)?);
+                // A command the agent runs reports nothing until it exits, however long it takes.
+                if client.awaiting_permission() || tools.command_running() {
+                    deadline = tokio::time::Instant::now() + super::TURN_WATCHDOG;
+                } else if tokio::time::Instant::now() >= deadline {
+                    return Err(anyhow!("ACP turn exceeded the response timeout"));
+                }
+            }
             event = events.recv() => {
                 let event = event.ok_or_else(|| anyhow!("ACP process exited during the turn; the prompt was not replayed"))?;
                 deadline = tokio::time::Instant::now() + super::TURN_WATCHDOG;
                 ctx.mark_delivery(DeliveryState::Accepted);
+                approved_permissions.extend(approve_permissions(ctx, client)?);
+                if matches!(&event, Event::Permission { id, .. } if approved_permissions.remove(id)) {
+                    continue;
+                }
                 apply_event(ctx, event, &mut tools)?;
             }
         }
     };
     ctx.flush()?;
     Ok(result)
+}
+
+fn approve_permissions(ctx: &mut TurnCtx, client: &Client) -> Result<Vec<String>> {
+    if !ctx.harness.starts_with("acp:") || !client.awaiting_permission() {
+        return Ok(Vec::new());
+    }
+    let session = Store::open()?
+        .get_chat_session(&ctx.session_id)?
+        .ok_or_else(|| anyhow!("chat session not found"))?;
+    if session.harness != ctx.harness || session.permission_mode.as_deref() != Some("auto-approve")
+    {
+        return Ok(Vec::new());
+    }
+    let approved = client.approve_pending()?;
+    let mut changed = false;
+    for part in &mut ctx.assistant.parts {
+        if let Some(prompt) = part.prompt.as_mut() {
+            if let Some((_, choice)) = approved
+                .iter()
+                .find(|(id, _)| prompt.native_id.as_ref() == Some(id))
+            {
+                prompt.resolved = true;
+                prompt.approved = Some(true);
+                prompt.answers = vec![choice.clone()];
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        ctx.flush()?;
+    }
+    Ok(approved.into_iter().map(|(id, _)| id).collect())
 }
 
 /// Native counters with input made inclusive of cache; `None` unless they add up to `totalTokens`.

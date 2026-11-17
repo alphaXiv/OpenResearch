@@ -331,6 +331,9 @@ pub struct HarnessInfo {
     pub models: Vec<ModelInfo>,
     /// Composer toggle vocabulary (permission modes, reasoning levels).
     pub options: super::HarnessOptions,
+    /// On OpenCode: the providers set up in the user's own OpenCode.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub found_providers: Vec<super::opencode::FoundProvider>,
 }
 
 impl HarnessInfo {
@@ -370,6 +373,7 @@ impl HarnessInfo {
             configured_model: None,
             models: Vec::new(),
             options: super::HarnessOptions::none(),
+            found_providers: Vec::new(),
         }
     }
 

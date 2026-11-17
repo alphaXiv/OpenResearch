@@ -1,0 +1,49 @@
+[
+  {"featured": [], "nudge": null, "endpoints": []},
+  {
+    "featured": [{"model": "opencode/deepseek-v4.1-flash-free"}, {"model": "opencode/inkling-2-small-free"}],
+    "nudge": {"id": "2026-11-12-5d0c11a2", "model": "opencode/deepseek-v4.1-flash-free", "kind": "new", "colors": {"from": "#3b82f6", "to": "#14b8a6"}},
+    "endpoints": []
+  },
+  {
+    "featured": [{"model": "opencode/deepseek-v4.1-flash-free"}],
+    "nudge": {"id": "2026-11-16-0c1e4f7a", "model": "opencode/deepseek-v4.1-flash-free", "kind": "trial", "colors": {"from": "#3b82f6", "to": "#14b8a6", "icon": "#3b82f6"}},
+    "endpoints": [],
+    "releases": [{"model": "google/gemini-4-hydrogen", "date": "2026-11-12"}, {"model": "anthropic/claude-fable-5-2", "date": "2026-11-09"}]
+  },
+  {
+    "featured": [{"model": "opencode/inkling-2-small-free"}],
+    "nudge": {
+      "id": "2026-11-12-c081d9e1",
+      "kind": "trial",
+      "model": "openresearch-gw88j0/research-1",
+      "until": "2026-11-30",
+      "message": "Our own model, free while it's in preview",
+      "colors": {"from": "#8b5cf6", "to": "#ec4899", "icon": "#ffffff"}
+    },
+    "endpoints": [
+      {
+        "id": "openresearch-gw88j0",
+        "baseURL": "https://opencode.ai/zen/v1",
+        "auth": {"kind": "alphaxiv"},
+        "models": [
+          {"id": "glm-5.3-flash-free", "name": "GLM 5.3 Flash", "context": 128000, "output": 16000},
+          {"id": "research-1", "name": "OpenResearch 1", "context": 128000, "output": 16000, "icon": {"type": "image/webp", "data": "UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA=="}}
+        ]
+      }
+    ]
+  },
+  {
+    "featured": [{"model": "opencode/deepseek-v4.1-flash-free"}],
+    "nudge": null,
+    "endpoints": [
+      {
+        "id": "openresearch-k3v9q2",
+        "baseURL": "https://api.openresearch.sh/v1",
+        "auth": {"kind": "key", "key": "public"},
+        "models": [{"id": "research-1", "name": "OpenResearch 1", "context": 128000, "output": 16000, "icon": {"type": "image/png", "data": "iVBORw0KGgo="}}]
+      }
+    ],
+    "releases": []
+  }
+]

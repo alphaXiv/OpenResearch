@@ -384,12 +384,19 @@ pub trait Harness: Send + Sync {
     }
 }
 
+// ACP approval is a client policy, including for chats whose launch was removed.
+fn permission_options(harness_id: &str) -> Option<HarnessOptions> {
+    if harness_id.starts_with("acp:") {
+        Some(acp::approval_options())
+    } else {
+        Some(chat_harness(harness_id)?.options())
+    }
+}
+
 /// Resolve a provider-owned permission id only when that harness advertises it.
 /// This is the validation boundary for stored and incoming session values.
 pub fn permission_mode_for(harness_id: &str, id: &str) -> Option<PermissionMode> {
-    let harness = chat_harness(harness_id)?;
-    harness
-        .options()
+    permission_options(harness_id)?
         .permission_modes
         .iter()
         .any(|choice| choice.id == id)
@@ -400,8 +407,7 @@ pub fn permission_mode_for(harness_id: &str, id: &str) -> Option<PermissionMode>
 /// The valid wire id to expose for a session. Unknown/stale values fall back to
 /// the harness default instead of leaving the composer on an impossible mode.
 pub fn effective_permission_id(harness_id: &str, stored: Option<&str>) -> Option<String> {
-    let harness = chat_harness(harness_id)?;
-    let options = harness.options();
+    let options = permission_options(harness_id)?;
     if let Some(id) = stored.filter(|id| options.permission_modes.iter().any(|c| c.id == *id)) {
         return Some(id.to_string());
     }
@@ -446,8 +452,7 @@ pub fn supports_command_plan(harness_id: &str) -> bool {
 }
 
 pub fn permission_id_for_mode(harness_id: &str, mode: PermissionMode) -> Option<String> {
-    chat_harness(harness_id)?
-        .options()
+    permission_options(harness_id)?
         .permission_modes
         .into_iter()
         .find(|choice| PermissionMode::from_id(&choice.id) == Some(mode))
@@ -950,8 +955,11 @@ mod tests {
         );
 
         let opencode = options_for("opencode");
-        assert_eq!(permission_ids(&opencode), ["default", "auto-approve"]);
-        assert_eq!(opencode.default_permission_mode, Some("default"));
+        assert_eq!(
+            permission_ids(&opencode),
+            ["manual", "auto", "auto-approve"]
+        );
+        assert_eq!(opencode.default_permission_mode, Some("auto-approve"));
         assert_eq!(opencode.plan_activation, Some(PlanActivation::Command));
         assert!(opencode.reasoning_levels.is_empty());
 
@@ -967,6 +975,28 @@ mod tests {
         assert_eq!(antigravity.plan_activation, Some(PlanActivation::Command));
         assert!(reasoning_ids(&antigravity).is_empty());
         assert!(antigravity.default_reasoning_level.is_none());
+    }
+
+    #[test]
+    fn removed_acp_launches_keep_client_approval_controls() {
+        let id = format!("acp:{}", uuid::Uuid::new_v4());
+        assert!(chat_harness(&id).is_none());
+        assert!(!is_chat_harness(&id));
+        assert_eq!(permission_mode_for(&id, "ask"), Some(PermissionMode::Ask));
+        assert_eq!(
+            permission_mode_for(&id, "auto-approve"),
+            Some(PermissionMode::Bypass)
+        );
+        assert_eq!(permission_mode_for(&id, "full-access"), None);
+        assert_eq!(
+            effective_permission_id(&id, Some("auto-approve")).as_deref(),
+            Some("auto-approve")
+        );
+        assert_eq!(effective_permission_id(&id, None).as_deref(), Some("ask"));
+        assert_eq!(
+            permission_id_for_mode(&id, PermissionMode::Ask).as_deref(),
+            Some("ask")
+        );
     }
 
     /// Every advertised permission-mode id must round-trip through
@@ -991,6 +1021,20 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// OpenCode's "Auto-approve" shipped as the id `auto-approve`; chats saved on it
+    /// are Full access now and must not fall back to asking.
+    #[test]
+    fn a_chat_saved_on_opencodes_auto_approve_stays_on_full_access() {
+        assert_eq!(
+            effective_permission_id("opencode", Some("auto-approve")).as_deref(),
+            Some("auto-approve")
+        );
+        assert_eq!(
+            permission_mode_for("opencode", "auto-approve"),
+            Some(PermissionMode::Bypass)
+        );
     }
 
     #[test]

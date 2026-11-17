@@ -1,6 +1,7 @@
 import { useMachines } from "../machineSelection";
 import { downloadFile } from "../download";
 import {
+  Fragment,
   createContext,
   useContext,
   memo,
@@ -55,7 +56,7 @@ import {
 import { useMutate } from "@clo/react-mutation";
 
 import { nativeOptions, sessionAcpHarness } from "../acp";
-import { deriveComposerSelection, selectionHarness } from "../modelSelection";
+import { deriveComposerSelection, selectionHarness, withAutoReviewer } from "../modelSelection";
 
 import { RemoteConnectionStrip, useRemoteConnection } from "../RemoteRuntime";
 
@@ -85,7 +86,9 @@ import {
   ArrowUpRight,
   Bell,
   Blocks,
+  BookMarked,
   BookOpen,
+  ChartSpline,
   Check,
   ChevronLeft,
   ChevronRight,
@@ -94,6 +97,7 @@ import {
   CornerDownLeft,
   Copy,
   Link,
+  FileCode,
   FileText,
   FlaskConical,
   FolderPlus,
@@ -106,9 +110,11 @@ import {
   MessageSquareQuote,
   MessagesSquare,
   MoreHorizontal,
+  NotebookText,
   Paperclip,
   Pencil,
   Plus,
+  ScrollText,
   Search,
   SlidersHorizontal,
   SquareTerminal,
@@ -138,6 +144,7 @@ import {
   modelLabel,
   type FirstActionSurface,
   type ChatImageAttachment,
+  type ArtifactEntry,
   type ChatMessage,
   type AlphaXivFolder,
   type ChatPart,
@@ -205,8 +212,12 @@ import {
   shellWords,
   shellWrapperBody,
   unwrapShellBody,
+  loopPaperIds,
 } from "../orxCommand";
 import { LitSourceLogo, parseOrxLit, paperUrl } from "./LitSourceLogo";
+import { FileScopeContext } from "./FileReference";
+import { FigureReveal, PaperShelf, pluralMessage, ReportCard, RunCard, SourceStrip, type ShelfPaper } from "./ResearchCards";
+import { discoveredPapers, linkedPapers, paperKey, type CitedPaper, type PaperMeta } from "../researchActivity";
 import { LitSourcesList } from "./LitSourcesPicker";
 import { ChatImageScope, Md } from "./Md";
 import { ChatLinksContext, type ChatLinks } from "./ChatLinks";
@@ -262,7 +273,8 @@ import {
   shouldRecoverLegacyMath,
   tableMarkdown,
 } from "./annotationMarkdown";
-import { Button, IconButton, LoadingRow, MenuItem, showAlert, Spinner, Textarea, Tooltip } from "./ui";
+import { Button, IconButton, LoadingRow, MenuItem, showAlert, Spinner, Tooltip } from "./ui";
+import { QuestionDock, useQuestions } from "./QuestionDock";
 import { PaperTitle } from "./PaperTitle";
 
 const TOOL_LINE_CLASS_NAME = "tool-line flex-1 min-w-0 line-clamp-2 break-words text-base leading-6";
@@ -843,7 +855,35 @@ function nativeOrxSkillPath(tool: string, skillName: string): string | null {
   return null;
 }
 
-type ToolActivityKind = "skill" | "read" | "search" | "edit" | "web" | "agent" | "project" | "command";
+/** What loading each of orx's research guides prepares the agent to do. */
+const GUIDE_LABELS: Record<string, [done: () => string, progress: () => string]> = {
+  "orx-agent-delegation": [m.activity_guide_delegation, m.activity_guide_delegation_progress],
+  "orx-compute": [m.activity_guide_compute, m.activity_guide_compute_progress],
+  "orx-create": [m.activity_guide_create, m.activity_guide_create_progress],
+  "orx-customize": [m.activity_guide_customize, m.activity_guide_customize_progress],
+  "orx-experiment-tree": [m.activity_guide_experiment_tree, m.activity_guide_experiment_tree_progress],
+  "orx-feedback": [m.activity_guide_feedback, m.activity_guide_feedback_progress],
+  "orx-figures": [m.activity_guide_figures, m.activity_guide_figures_progress],
+  "orx-git": [m.activity_guide_git, m.activity_guide_git_progress],
+  "orx-instances": [m.activity_guide_instances, m.activity_guide_instances_progress],
+  "orx-lit-review": [m.activity_guide_lit_review, m.activity_guide_lit_review_progress],
+  "orx-logs": [m.activity_guide_logs, m.activity_guide_logs_progress],
+  "orx-paper": [m.activity_guide_paper, m.activity_guide_paper_progress],
+  "orx-reports": [m.activity_guide_reports, m.activity_guide_reports_progress],
+  "orx-results": [m.activity_guide_results, m.activity_guide_results_progress],
+};
+
+/** orx's own skills are the research guides it gives every agent, each named
+ * for what it prepares the agent to do. */
+function guideFields(skillName: string | null): Partial<Pick<ToolActivity, "guide" | "label" | "progressLabel">> {
+  if (!skillName?.startsWith("orx-")) return {};
+  const labels = GUIDE_LABELS[skillName];
+  return labels
+    ? { guide: true, label: labels[0](), progressLabel: labels[1]() }
+    : { guide: true, progressLabel: m.activity_loading_research_guide() };
+}
+
+type ToolActivityKind = "skill" | "read" | "search" | "edit" | "web" | "agent" | "project" | "run" | "log" | "command";
 
 interface ToolActivity {
   kind: ToolActivityKind;
@@ -856,11 +896,20 @@ interface ToolActivity {
   fileRef?: string;
   labelTarget?: string;
   litCall?: NonNullable<ReturnType<typeof parseOrxLit>>;
+  /** Every paper an `orx paper` call reads, when it reads more than one or reads them in a loop. */
+  paperIds?: string[];
   queries?: string[];
   runIds?: string[];
   experimentIds?: string[];
   /** Chat sessions `orx agent spawn` created in this tool call. */
   spawnedSessionIds?: string[];
+  /** The label naming the experiment of the call's one run, in place of `label` and `progressLabel`. */
+  runLabel?: (experiment: string) => string;
+  runProgressLabel?: (experiment: string) => string;
+  /** A row about the chat itself, such as a compaction, which stays out of the research summary. */
+  aside?: boolean;
+  /** Reads one of orx's research guides. */
+  guide?: boolean;
 }
 
 type OpenTranscriptFile = (
@@ -1319,6 +1368,7 @@ function idsFromToolOutput(output: string | undefined, resource: "runs" | "exper
       new RegExp(`/runs/(${UUID_PATTERN})`, "gi"),
       new RegExp(`\\brun(?:_|\\s+)id:\\s*(${UUID_PATTERN})`, "gi"),
       new RegExp(`^\\s*RUN\\s+(${UUID_PATTERN})\\b`, "gim"),
+      new RegExp(`\\bRun\\s+(${UUID_PATTERN})\\b`, "g"),
       new RegExp(`={3,}\\s*(${UUID_PATTERN})\\s*={3,}`, "gi"),
     ]
     : [
@@ -1556,20 +1606,21 @@ function computeToolActivity(part: ChatPart): ToolActivity {
           ? [commandArgv]
           : shellCommandSegments(normalizeShellBody(wrapperBody)).map((segment) => segment.raw);
       }
-      let litCall: ReturnType<typeof parseOrxLit> = null;
-      for (const input of literatureInputs) {
-        litCall = parseOrxLit(input);
-        if (litCall) break;
-      }
+      const litCalls = literatureInputs.flatMap((input) => parseOrxLit(input) ?? []);
+      const litCall = litCalls[0] ?? null;
       const hasNonLiteratureOrx = literatureInputs.some((input) => {
         const argv = orxArgv(input);
         return argv !== null && argv[0] !== "discover" && argv[0] !== "paper";
       });
       if (litCall && !hasNonLiteratureOrx) {
-        const queries = litCall.kind === "discover" && !litCall.query
-          ? recordedDiscoveryQueries(commandArgv ? shellWrapperBody(commandArgv) ?? command : command, toolOutput ?? "", litCall.strategy)
-          : [];
-        const discoveryLabel = litCall.kind === "discover"
+        const chainedSearches = litCalls.filter((call) => call.kind === "discover");
+        const queries = chainedSearches.length > 1
+          ? chainedSearches.flatMap((call) => call.query ? [call.query] : [])
+          : litCall.kind === "discover" && !litCall.query
+            ? recordedDiscoveryQueries(commandArgv ? shellWrapperBody(commandArgv) ?? command : command, toolOutput ?? "", litCall.strategy)
+            : [];
+        const oneStrategy = new Set(chainedSearches.map((call) => call.strategy)).size <= 1;
+        const discoveryLabel = litCall.kind === "discover" && oneStrategy
           ? {
             keyword: m.activity_searched_alphaxiv_full_text(),
             embedding: m.activity_searched_alphaxiv_semantically(),
@@ -1578,16 +1629,26 @@ function computeToolActivity(part: ChatPart): ToolActivity {
             pubmed: m.activity_searched_pubmed(),
           }[litCall.strategy]
           : null;
-        const label = litCall.kind === "discover"
-          ? litCall.query
-            ? m.activity_for_query({ activity: discoveryLabel ?? m.activity_searched_literature(), query: litCall.query })
-            : queries.length === 1
-              ? m.activity_for_query({ activity: discoveryLabel ?? m.activity_searched_literature(), query: queries[0] })
-              : queries.length > 1
-                ? m.activity_for_queries({ activity: discoveryLabel ?? m.activity_searched_literature(), count: fmtNumber(queries.length) })
-                : discoveryLabel ?? m.activity_searched_literature()
-          : litCall.id ? m.activity_read_target({ target: ltr(litCall.id) }) : m.activity_read_paper();
-        return { kind: litCall.kind === "paper" ? "read" : "search", label, litCall, queries };
+        const literatureCommand = commandArgv ? shellWrapperBody(commandArgv) ?? command : command;
+        const paperIds = [...new Set([
+          ...litCalls.flatMap((call) => call.kind === "paper" && call.id ? [call.id] : []),
+          ...loopPaperIds(literatureCommand),
+        ])];
+        const searched = discoveryLabel ?? m.activity_searched_literature();
+        const query = litCall.kind === "discover" ? litCall.query ?? (queries.length === 1 ? queries[0] : null) : null;
+        const label = litCall.kind === "paper"
+          ? paperIds.length > 1
+            ? m.activity_read_papers({ count: fmtNumber(paperIds.length) })
+            : paperIds[0] ? m.activity_read_target({ target: ltr(paperIds[0]) }) : m.activity_read_paper()
+          : queries.length > 1
+            ? m.activity_for_queries({ activity: searched, count: fmtNumber(queries.length) })
+            : query ? m.activity_for_query({ activity: searched, query }) : searched;
+        const progressLabel = litCall.kind === "paper"
+          ? m.activity_reading_paper()
+          : litCall.query
+            ? m.activity_searching_literature_for({ query: litCall.query })
+            : m.activity_searching_literature();
+        return { kind: litCall.kind === "paper" ? "read" : "search", label, progressLabel, litCall, queries, paperIds: litCall.kind === "paper" ? paperIds : undefined };
       }
 
       if (commandInvokesOrx(command, "agent\\s+spawn")) {
@@ -1614,16 +1675,44 @@ function computeToolActivity(part: ChatPart): ToolActivity {
       if (commandInvokesOrx(command, "logs")) {
         const runIds = commandRunIds(command, toolOutput, resourceRunIds, legacyTargetIds);
         const label = runIds.length === 1 ? m.activity_reviewed_run_log() : m.activity_reviewed_run_logs();
-        return { kind: "project", label, runIds, litCall: litCall ?? undefined };
+        return {
+          kind: "log",
+          label,
+          progressLabel: m.activity_reading_run_log(),
+          runIds,
+          runLabel: (experiment) => m.activity_read_log_of({ experiment }),
+          runProgressLabel: (experiment) => m.activity_reading_log_of({ experiment }),
+          litCall: litCall ?? undefined,
+        };
       }
       if (commandInvokesOrx(command, "exp\\s+run")) {
-        return { kind: "project", label: m.chat_panel_started_an_experiment_run(), litCall: litCall ?? undefined };
+        return {
+          kind: "run",
+          label: m.chat_panel_started_an_experiment_run(),
+          progressLabel: m.activity_launching_experiment(),
+          runIds: idsFromToolOutput(toolOutput, "runs"),
+          runLabel: (experiment) => m.activity_launched_experiment({ experiment }),
+          litCall: litCall ?? undefined,
+        };
       }
       if (commandInvokesOrx(command, "exp\\s+wait")) {
-        return { kind: "project", label: m.chat_panel_waited_for_an_experiment_run(), litCall: litCall ?? undefined };
+        return {
+          kind: "run",
+          label: m.chat_panel_waited_for_an_experiment_run(),
+          progressLabel: m.activity_waiting_on_run(),
+          runIds: idsFromToolOutput(toolOutput, "runs"),
+          runLabel: (experiment) => m.activity_waited_on_experiment({ experiment }),
+          litCall: litCall ?? undefined,
+        };
       }
       if (commandInvokesOrx(command, "exp\\s+cancel")) {
-        return { kind: "project", label: m.chat_panel_requested_an_experiment_stop(), litCall: litCall ?? undefined };
+        return {
+          kind: "run",
+          label: m.chat_panel_requested_an_experiment_stop(),
+          runIds: idsFromToolOutput(toolOutput, "runs"),
+          runLabel: (experiment) => m.activity_stopped_experiment({ experiment }),
+          litCall: litCall ?? undefined,
+        };
       }
       const readsProject = commandInvokesOrx(command, "project\\s+view");
       if (readsProject && readsExperimentStatus && readsExperimentNotes) {
@@ -1677,6 +1766,9 @@ function computeToolActivity(part: ChatPart): ToolActivity {
           litCall: litCall ?? undefined,
         };
       }
+      if (commandInvokesOrx(command, "create-experiment")) {
+        return { kind: "project", label: m.activity_created_an_experiment(), progressLabel: m.activity_creating_an_experiment(), litCall: litCall ?? undefined };
+      }
       if (commandInvokesOrx(command, "runs?")) {
         return { kind: "project", label: m.chat_panel_listed_project_runs(), litCall: litCall ?? undefined };
       }
@@ -1695,6 +1787,7 @@ function computeToolActivity(part: ChatPart): ToolActivity {
         return {
           kind: skillName ? "skill" : "read",
           label: skillName ? m.activity_read_skill({ name: ltr(skillName) }) : m.activity_read_target({ target: ltr(baseName(gitShowTarget.path)) }),
+          ...guideFields(skillName),
           filePath: gitShowTarget.path,
           fileRef: gitShowTarget.ref,
           labelTarget: skillName ? `${skillName} skill` : baseName(gitShowTarget.path),
@@ -1719,6 +1812,7 @@ function computeToolActivity(part: ChatPart): ToolActivity {
         return {
           kind: skillName ? "skill" : "read",
           label: skillName ? m.activity_read_skill({ name: ltr(skillName) }) : m.activity_read_target({ target: ltr(baseName(readTarget)) }),
+          ...guideFields(skillName),
           filePath: readPath,
           labelTarget: skillName ? `${skillName} skill` : baseName(readTarget),
         };
@@ -1772,6 +1866,7 @@ function computeToolActivity(part: ChatPart): ToolActivity {
       return {
         kind: "skill",
         label: skillName ? m.activity_loaded_skill({ name: ltr(skillName) }) : m.activity_loaded_a_skill(),
+        ...guideFields(skillName),
         filePath: filePath ?? undefined,
         labelTarget: filePath && skillName ? `${skillName} skill` : undefined,
       };
@@ -1783,6 +1878,7 @@ function computeToolActivity(part: ChatPart): ToolActivity {
         return {
           kind: "skill",
           label: m.activity_read_skill({ name: ltr(skillName) }),
+          ...guideFields(skillName),
           filePath: filePath ?? undefined,
           labelTarget: `${skillName} skill`,
         };
@@ -1842,7 +1938,7 @@ function computeToolActivity(part: ChatPart): ToolActivity {
     case "error":
       return { kind: "command", label: m.chat_panel_tool_failed() };
     case "importedchat":
-      return { kind: "project", label: m.activity_imported_chat() };
+      return { kind: "project", label: m.activity_imported_chat(), aside: true };
     case "contextcompaction":
       return {
         kind: "command",
@@ -1853,6 +1949,7 @@ function computeToolActivity(part: ChatPart): ToolActivity {
             ? m.activity_compacting_context()
             : m.activity_compacted_context(),
         progressLabel: m.activity_compacting_context(),
+        aside: true,
       };
     default: {
       const detail = description ?? filePath ?? rawCommand ?? part.state?.title ?? "";
@@ -1874,6 +1971,12 @@ function alphaxivActivity(tool: string, input: Record<string, unknown>): ToolAct
     approvalLabel,
     // Paper arguments may be full titles, which have no page to link.
     litCall: { kind: "paper", source: "alphaxiv", id: paper && !/\s/.test(paper) ? paper : undefined },
+    // Saving a paper or reading notes on it does not read it.
+    paperIds: [],
+  });
+  const read = (label: string, paper: string | null): ToolActivity => ({
+    ...row("read", label, paper ?? undefined),
+    paperIds: paper && !/\s/.test(paper) ? [paper] : [],
   });
   const readPaper = (paper: string | null) =>
     paper ? m.activity_read_target({ target: ltr(paper) }) : m.activity_read_paper();
@@ -1915,11 +2018,11 @@ function alphaxivActivity(tool: string, input: Record<string, unknown>): ToolAct
       const label = queries.length > 1
         ? m.activity_for_queries({ activity: readPaper(paper), count: fmtNumber(queries.length) })
         : forQuery(readPaper(paper), queries[0] ?? null);
-      return row("read", label, paper ?? undefined);
+      return read(label, paper);
     }
     case "get_paper_content": {
       const paper = inputString(input, "url");
-      return row("read", readPaper(paper), paper ?? undefined);
+      return read(readPaper(paper), paper);
     }
     case "read_files_from_github_repository": {
       const repository = inputString(input, "githubUrl")
@@ -1932,7 +2035,10 @@ function alphaxivActivity(tool: string, input: Record<string, unknown>): ToolAct
     case "discover_papers": {
       const keywords = exactInputStringArray(input, "keywords") ?? [];
       const query = inputString(input, "question") ?? (keywords.join(", ") || null);
-      return row("search", forQuery(m.activity_searched_alphaxiv(), query));
+      return {
+        ...row("search", forQuery(m.activity_searched_alphaxiv(), query)),
+        progressLabel: query ? m.activity_searching_literature_for({ query }) : m.activity_searching_literature(),
+      };
     }
     case "find_researchers":
       return row("search", forQuery(m.activity_alphaxiv_searched_researchers(), inputString(input, "topic", "query")));
@@ -2079,11 +2185,19 @@ function ToolActivityIcon({ activity, className = "" }: { activity: ToolActivity
   } else {
     switch (activity.kind) {
       case "skill":
-        icon = <Blocks {...props} />;
+        icon = <BookMarked {...props} />;
         break;
       case "read":
+        icon = /\.(?:md|markdown|txt|rst|tex|csv|tsv|log)$/i.test(activity.filePath ?? "")
+          ? <FileText {...props} />
+          : <FileCode {...props} />;
+        break;
       case "project":
-        icon = <BookOpen {...props} />;
+      case "run":
+        icon = <FlaskConical {...props} />;
+        break;
+      case "log":
+        icon = <ScrollText {...props} />;
         break;
       case "search":
         icon = <Search {...props} />;
@@ -2261,6 +2375,21 @@ function ToolActivityLabel({
       </>
     );
   }
+  const onlyRunId = activity.runIds?.length === 1 ? activity.runIds[0] : null;
+  const onlyRunName = onlyRunId && runExperimentName?.(onlyRunId);
+  if (activity.runLabel && onlyRunId && onlyRunName) {
+    const label = activity.runLabel(autoDir(onlyRunName));
+    return onOpenRun ? (
+      <button
+        type="button"
+        className="tool-target text-start"
+        title={m.a11y_open_logs_for_run({ run: ltr(onlyRunId) })}
+        {...tabOpenGestureHandlers<HTMLButtonElement>((intent) => onOpenRun(onlyRunId, intent), { stopPropagation: true })}
+      >
+        {label}
+      </button>
+    ) : label;
+  }
   if (activity.runIds?.length) {
     const runIds = runExperimentName
       ? activity.runIds.filter((runId) => Boolean(runExperimentName(runId)))
@@ -2349,12 +2478,14 @@ function activityInProgress(activity: ToolActivity): ToolActivity {
     read: m.activity_reading(),
     search: m.activity_searching(),
     edit: m.activity_editing(),
-    project: m.activity_reviewing(),
+    project: m.activity_checking_experiments(),
+    run: m.activity_running(),
+    log: m.activity_reading_run_log(),
     web: m.activity_browsing(),
     agent: m.activity_delegating(),
     command: m.activity_running(),
   }[activity.kind];
-  return { ...activity, label };
+  return { ...activity, label, runLabel: activity.runProgressLabel };
 }
 
 function permissionActivityLabel(tool: string | undefined, input: Record<string, unknown> | undefined): string {
@@ -2371,6 +2502,8 @@ function permissionActivityLabel(tool: string | undefined, input: Record<string,
     search: m.activity_search(),
     edit: m.activity_edit(),
     project: m.activity_review(),
+    run: m.activity_run(),
+    log: m.activity_read(),
     web: m.activity_browse(),
     agent: m.activity_delegate(),
     command: m.activity_run(),
@@ -2445,7 +2578,7 @@ function useDelayedToolShimmer(active: boolean): boolean {
 }
 
 function groupIconActivity(activities: ToolActivity[]): ToolActivity {
-  const priority: ToolActivityKind[] = ["skill", "read", "search", "edit", "project", "web", "command", "agent"];
+  const priority: ToolActivityKind[] = ["skill", "read", "search", "edit", "project", "run", "log", "web", "command", "agent"];
   for (const kind of priority) {
     const activity = activities.find((candidate) => candidate.kind === kind);
     if (activity) return activity;
@@ -2571,6 +2704,7 @@ function ToolRow({
   revealPartId,
   activity,
   repeatCount = 1,
+  quiet = false,
   onOpenFile,
   onOpenRun,
   onOpenSpawnedSession,
@@ -2584,6 +2718,8 @@ function ToolRow({
   revealPartId?: string;
   activity: ToolActivity;
   repeatCount?: number;
+  /** Supporting work, such as reading code, drawn a step dimmer than research. */
+  quiet?: boolean;
   onOpenFile?: OpenTranscriptFile;
   onOpenRun?: OpenTranscriptTarget;
   onOpenSpawnedSession?: (sessionId: string) => void;
@@ -2626,7 +2762,7 @@ function ToolRow({
       ) : (
         <ToolActivityIcon activity={activity} className="text-muted" />
       )}
-      <span className={`${TOOL_LINE_CLASS_NAME} ${failed ? "text-accent-red" : "text-subtext"}`}>
+      <span className={`${TOOL_LINE_CLASS_NAME} ${failed ? "text-accent-red" : quiet ? "text-muted" : "text-subtext"}`}>
         <ToolActivityLabel
           activity={activity}
           onOpenFile={onOpenFile}
@@ -2684,6 +2820,8 @@ function ToolGroup({
   revealPartId,
   pendingTail,
   streaming = false,
+  summary,
+  quiet = false,
   onOpenSubagent,
   onOpenFile,
   onOpenRun,
@@ -2698,6 +2836,9 @@ function ToolGroup({
   revealPartId?: string;
   pendingTail?: boolean;
   streaming?: boolean;
+  /** What the closed group says it did; "Used tools" when absent. */
+  summary?: string;
+  quiet?: boolean;
   onOpenSubagent?: OpenSubagent;
   onOpenFile?: OpenTranscriptFile;
   onOpenRun?: OpenTranscriptTarget;
@@ -2741,7 +2882,7 @@ function ToolGroup({
   const iconActivity = pendingActivity ?? groupIconActivity(activities);
   const summaryLabel = pendingActivity
     ? pendingActivity.label
-    : m.chat_panel_used_tools();
+    : summary ?? m.chat_panel_used_tools();
   if (parts.length === 1) {
     if (isSubagentPart(parts[0])) {
       return (
@@ -2782,6 +2923,7 @@ function ToolGroup({
         <ToolRow
           part={parts[0]}
           activity={displayParts[0].activity}
+          quiet={quiet}
           onOpenFile={onOpenFile}
           onOpenRun={onOpenRun}
           onOpenSpawnedSession={onOpenSpawnedSession}
@@ -2795,7 +2937,7 @@ function ToolGroup({
 
   return (
     <div className="tool-group my-3.5 mx-0">
-      <div className="tool-group-summary flex items-start gap-2 w-fit max-w-full py-1 px-1 text-base leading-6 text-subtext text-start">
+      <div className={`tool-group-summary flex items-start gap-2 w-fit max-w-full py-1 px-1 text-base leading-6 text-start ${quiet && !pendingActivity ? "text-muted" : "text-subtext"}`}>
         <ToolActivityIcon activity={iconActivity} className={shimmering ? "tool-running-shimmer-icon" : "text-muted"} />
         {pendingActivity ? (
           <span
@@ -2855,6 +2997,7 @@ function ToolGroup({
                 revealPartId={revealPartId}
                 repeatCount={count}
                 activity={activity}
+                quiet={quiet}
                 onOpenFile={onOpenFile}
                 onOpenRun={onOpenRun}
                 onOpenSpawnedSession={onOpenSpawnedSession}
@@ -2870,9 +3013,230 @@ function ToolGroup({
   );
 }
 
-/** Interactive card for a plan / permission / question prompt. Approving (or
- * answering) resumes the session. Once resolved, cards mirror Claude Code:
- * a permission leaves no trace, a plan collapses to an expandable
+type ToolFacet = "literature" | "runs" | "experiments" | "guides" | "reports" | "code" | "other";
+
+function toolFacet(part: ChatPart, activity: ToolActivity): ToolFacet {
+  if (isSubagentPart(part) || activity.aside) return "other";
+  if (activity.litCall) return "literature";
+  switch (activity.kind) {
+    case "run":
+    case "log":
+      return "runs";
+    case "project":
+      return "experiments";
+    case "skill":
+      return "guides";
+    case "edit":
+      return reportPath(activity) ? "reports" : "code";
+    case "read":
+    case "search":
+    case "command":
+      return "code";
+    default:
+      return "other";
+  }
+}
+
+/** A Markdown file the agent wrote to the artifacts directory. */
+function reportPath(activity: ToolActivity): string | null {
+  const path = activity.kind === "edit" ? activity.filePath : undefined;
+  return path && /(?:^|[\\/])artifacts[\\/].+\.md$/i.test(path) ? path : null;
+}
+
+/** The papers a call finished reading, which the shelf shows in place of its row. */
+function shelvedPapers(part: ChatPart, activity: ToolActivity): ShelfPaper[] {
+  const lit = activity.litCall;
+  if (lit?.kind !== "paper" || part.state?.status !== "completed") return [];
+  const ids = activity.paperIds ?? (lit.id ? [lit.id] : []);
+  return ids.map((id) => ({
+    source: ids.length === 1 ? lit.source : parseOrxLit(["orx", "paper", id])?.source ?? lit.source,
+    id,
+    output: ids.length === 1 ? part.state?.output : undefined,
+  }));
+}
+
+function literatureSearches(activity: ToolActivity): number {
+  return activity.litCall && activity.kind === "search" ? Math.max(1, activity.queries?.length ?? 0) : 0;
+}
+
+/** The runs a call names that this workspace knows. */
+function knownRunIds(activity: ToolActivity, runExperimentName?: (runId: string) => string): string[] {
+  if (activity.kind !== "run" && activity.kind !== "log") return [];
+  return (activity.runIds ?? []).filter((runId) => !runExperimentName || Boolean(runExperimentName(runId)));
+}
+
+/** One line for a stretch of code work: the file it touched, else how much it did. */
+function codeSummary(activities: ToolActivity[]): string {
+  const files = new Map<string, { read: boolean; edited: boolean }>();
+  let commands = 0;
+  for (const activity of activities) {
+    if ((activity.kind === "read" || activity.kind === "edit") && activity.labelTarget) {
+      const file = files.get(activity.labelTarget) ?? { read: false, edited: false };
+      if (activity.kind === "read") file.read = true;
+      else file.edited = true;
+      files.set(activity.labelTarget, file);
+    } else {
+      commands++;
+    }
+  }
+
+  if (files.size === 1) {
+    const [[name, { read, edited }]] = [...files];
+    const target = ltr(name);
+    if (commands > 0) {
+      const [one, other] = edited
+        ? [m.activity_worked_on_and_ran_one, m.activity_worked_on_and_ran_other]
+        : [m.activity_read_and_ran_one, m.activity_read_and_ran_other];
+      return pluralMessage(commands, one, other)({ target, count: fmtNumber(commands) });
+    }
+    if (read && edited) return m.activity_read_and_edited({ target });
+    return edited ? m.activity_edited_target({ target }) : m.activity_read_target({ target });
+  }
+  if (files.size === 0) return pluralMessage(commands, m.activity_ran_commands_one, m.activity_ran_commands_other)({ count: fmtNumber(commands) });
+  return m.activity_worked_on_files({ count: fmtNumber(files.size) });
+}
+
+function reportTitle(parts: ChatPart[], path: string): { title: string; lines: number | null } {
+  for (const part of [...parts].reverse()) {
+    const input = part.state?.input ?? {};
+    const content = typeof input.content === "string" ? input.content : null;
+    if (!content || toolActivity(part).filePath !== path) continue;
+    const heading = /^#\s+(.+)$/m.exec(content)?.[1]?.trim();
+    return { title: heading || baseName(path), lines: content.replace(/\n$/, "").split("\n").length };
+  }
+  return { title: baseName(path), lines: null };
+}
+
+type ToolGroupProps = React.ComponentProps<typeof ToolGroup>;
+
+/** A run of tool calls sorted by what the research did: papers read, runs
+ * launched, reports written, then the code and other work that supported it.
+ * The calls still pending sort last, where the current step shows. */
+function ResearchToolRun({ parts, pendingTail, discovered, ...props }: ToolGroupProps & {
+  /** Papers `orx discover` found earlier in the message, for naming the papers read. */
+  discovered: () => Map<string, PaperMeta>;
+}) {
+  const pendingId = pendingTail ? parts.at(-1)?.id : undefined;
+  const facets = new Map<ToolFacet, ChatPart[]>();
+  for (const part of parts) {
+    const facet = toolFacet(part, toolActivity(part));
+    facets.set(facet, [...(facets.get(facet) ?? []), part]);
+  }
+  const ordered = [...facets].sort(([, a], [, b]) =>
+    Number(a.some((part) => part.id === pendingId)) - Number(b.some((part) => part.id === pendingId)));
+  const group = (groupParts: ChatPart[], extra: Partial<ToolGroupProps> = {}) => (
+    <ToolGroup
+      key={`tg-${groupParts[0].id}`}
+      {...props}
+      {...extra}
+      parts={groupParts}
+      pendingTail={groupParts.some((part) => part.id === pendingId)}
+    />
+  );
+
+  return ordered.map(([facet, facetParts]) => {
+    const activities = facetParts.map(toolActivity);
+    switch (facet) {
+      case "literature": {
+        const shelf = new Map<string, ShelfPaper>();
+        const rows: ChatPart[] = [];
+        for (const part of facetParts) {
+          const papers = shelvedPapers(part, toolActivity(part));
+          for (const paper of papers) {
+            const key = `${paper.source}:${paper.id}`;
+            const shelved = shelf.get(key) ?? { ...paper, partIds: [] };
+            shelved.partIds?.push(part.id);
+            shelf.set(key, shelved);
+          }
+          if (papers.length === 0) rows.push(part);
+        }
+        const searches = rows.reduce((total, part) => total + literatureSearches(toolActivity(part)), 0);
+        const summary = searches > 0
+          ? pluralMessage(searches, m.activity_surveyed_literature_one, m.activity_surveyed_literature_other)({ count: fmtNumber(searches) })
+          : m.activity_checked_literature();
+        return (
+          <Fragment key={`literature-${facetParts[0].id}`}>
+            {rows.length > 0 && group(rows, { summary })}
+            {shelf.size > 0 && <PaperShelf papers={[...shelf.values()]} discovered={discovered()} />}
+          </Fragment>
+        );
+      }
+      case "runs": {
+        const cards = new Map<string, ChatPart[]>();
+        const rows: ChatPart[] = [];
+        for (const part of facetParts) {
+          const runIds = part.state?.status === "error" ? [] : knownRunIds(toolActivity(part), props.runExperimentName);
+          for (const runId of runIds) cards.set(runId, [...(cards.get(runId) ?? []), part]);
+          if (runIds.length === 0) rows.push(part);
+        }
+        return (
+          <Fragment key={`runs-${facetParts[0].id}`}>
+            {rows.length > 0 && group(rows, {
+              quiet: true,
+              summary: rows.every((part) => toolActivity(part).kind === "log") ? m.activity_reviewed_run_logs() : m.activity_checked_experiments(),
+            })}
+            {[...cards].map(([runId, runParts]) => {
+              const part = runParts.at(-1)!;
+              const pending = part.id === pendingId && part.state?.status === "running";
+              const activity = pending ? activityInProgress(toolActivity(part)) : toolActivity(part);
+              const name = props.runExperimentName?.(runId) || m.tree_experiment();
+              return (
+                <RunCard
+                  key={runId}
+                  runId={runId}
+                  label={activity.runLabel?.(autoDir(name)) ?? activity.label}
+                  pending={pending}
+                  partIds={runParts.map((runPart) => runPart.id)}
+                  onOpenRun={props.onOpenRun}
+                />
+              );
+            })}
+          </Fragment>
+        );
+      }
+      case "experiments":
+        return group(facetParts, { quiet: true, summary: m.activity_checked_experiments() });
+      case "guides": {
+        const count = fmtNumber(facetParts.length);
+        const summary = activities.every((activity) => activity.guide)
+          ? pluralMessage(facetParts.length, m.activity_loaded_research_guides_one, m.activity_loaded_research_guides_other)({ count })
+          : pluralMessage(facetParts.length, m.activity_loaded_skills_one, m.activity_loaded_skills_other)({ count });
+        return group(facetParts, { quiet: true, summary });
+      }
+      case "reports": {
+        const reports = new Set<string>();
+        const rows: ChatPart[] = [];
+        for (const part of facetParts) {
+          const path = reportPath(toolActivity(part));
+          if (path && part.state?.status === "completed") reports.add(path);
+          else rows.push(part);
+        }
+        return (
+          <Fragment key={`reports-${facetParts[0].id}`}>
+            {rows.length > 0 && group(rows)}
+            {[...reports].map((path) => (
+              <ReportCard
+                key={path}
+                path={path}
+                {...reportTitle(facetParts, path)}
+                partIds={facetParts.filter((part) => toolActivity(part).filePath === path).map((part) => part.id)}
+                onOpen={props.onOpenFile && ((target, intent) => props.onOpenFile?.(target, undefined, undefined, undefined, intent))}
+              />
+            ))}
+          </Fragment>
+        );
+      }
+      case "code":
+        return group(facetParts, { quiet: true, summary: codeSummary(activities) });
+      case "other":
+        return group(facetParts);
+    }
+  });
+}
+
+/** Interactive card for a plan / permission prompt, and the record of an
+ * answered question. Approving resumes the session. Once resolved, cards
+ * mirror Claude Code: a permission leaves no trace, a plan collapses to an expandable
  * "Proposed plan" row, a question collapses to a compact record of the
  * chosen answer — all inline at the card's chronological position. */
 function PromptCard({
@@ -2892,8 +3256,6 @@ function PromptCard({
 }) {
   const { id: elementId } = useContext(WorkspaceDomContext);
   const p = part.prompt;
-  const [picked, setPicked] = useState<string[]>([]);
-  const [answerText, setAnswerText] = useState("");
   const [submitting, setSubmitting] = useState(false);
   if (!p) return null;
   // Read-only host (no onRespond): actions disabled or hidden, card visible.
@@ -2903,10 +3265,7 @@ function PromptCard({
     if (!onRespond || submitting) return;
     setSubmitting(true);
     try {
-      if (await onRespond({ promptId: part.id, ...answer })) {
-        setAnswerText("");
-        setPicked([]);
-      }
+      await onRespond({ promptId: part.id, ...answer });
     } finally {
       setSubmitting(false);
     }
@@ -3089,77 +3448,8 @@ function PromptCard({
     );
   }
 
-  const toggle = (label: string) => {
-    setAnswerText("");
-    setPicked((cur) => p.multiSelect
-      ? cur.includes(label) ? cur.filter((item) => item !== label) : [...cur, label]
-      : [label]);
-  };
-  const submit = () => {
-    if (!done && (answerText.trim() || picked.length > 0)) {
-      void respond({ answers: picked, note: answerText.trim() || undefined });
-    }
-  };
-  const skip = () => void respond({ approve: false });
-  return (
-    <div className="prompt-card question flex flex-col gap-2 rounded-lg border border-border bg-surface p-3" role="group" aria-labelledby={elementId(`question-${part.id}`)}>
-      <div className="flex items-center gap-2 text-subtext">
-        <HelpCircle size={18} aria-hidden="true" />
-        <span className="flex-1 text-sm">{p.header || m.chat_question()}</span>
-        {onRespond && <IconButton aria-label={m.chat_question_skip()} disabled={done} onClick={skip}><X size={16} /></IconButton>}
-      </div>
-      <div id={elementId(`question-${part.id}`)} className="text-base font-medium leading-snug text-text whitespace-pre-line wrap-anywhere">{p.question?.replace(/\n\s*\n/g, "\n")}</div>
-      {(p.options?.length ?? 0) > 0 && (
-        <div className="prompt-options flex flex-col">
-          {p.options?.map((option, index) => {
-            const selected = picked.includes(option.label);
-            return (
-              <button
-                type="button"
-                key={option.label}
-                aria-pressed={selected}
-                className={`prompt-option flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-start text-text cursor-pointer transition-colors duration-120 ease-standard enabled:hover:bg-highlight focus-visible:bg-highlight focus-visible:outline-2 focus-visible:outline-focus disabled:cursor-default ${selected ? "bg-panel" : ""}`}
-                disabled={done}
-                onClick={() => toggle(option.label)}
-              >
-                <span className={`flex size-6 shrink-0 items-center justify-center rounded-md border text-sm ${selected ? "border-text bg-surface text-text" : "border-border bg-background text-subtext"}`}>{selected ? <Check size={14} /> : index + 1}</span>
-                <span className="min-w-0 text-base">
-                  <span>{option.label}</span>
-                  {option.description && <span className="ms-2 text-sm text-subtext">{option.description}</span>}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      )}
-      {onRespond && (
-        <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => { event.preventDefault(); submit(); }}>
-          <div className="flex min-w-0 basis-48 grow items-start gap-2">
-            <Pencil size={18} className="mt-2 shrink-0 text-subtext" aria-hidden="true" />
-            <Textarea
-              variant="inline"
-              aria-label={m.chat_question_your_answer()}
-              placeholder={m.chat_question_custom_response()}
-              value={answerText}
-              onChange={(event) => { setAnswerText(event.target.value); setPicked([]); }}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) {
-                  event.preventDefault();
-                  submit();
-                }
-              }}
-              disabled={done}
-              rows={1}
-            />
-          </div>
-          <div className="ms-auto flex items-center gap-2">
-            <Button type="button" disabled={done} onClick={skip}>{m.chat_question_skip()}</Button>
-            <Button type="submit" variant="primary" disabled={done || (!answerText.trim() && picked.length === 0)}>{m.chat_panel_send()}</Button>
-          </div>
-        </form>
-      )}
-    </div>
-  );
+  // An open question is answered from the composer (`QuestionDock`).
+  return null;
 }
 
 /** Whether a message renders anything once resolved-permission cards vanish —
@@ -3587,6 +3877,90 @@ export const Message = memo(function Message({
   );
 });
 
+interface ReceiptItem {
+  icon: React.ReactNode;
+  label: string;
+}
+
+/** What a finished turn produced, for its fold line: papers it read (or the
+ * searches, when it read none), runs, reports and figures. */
+function turnReceipt(parts: ChatPart[], figures: number, runExperimentName?: (runId: string) => string): ReceiptItem[] {
+  const papers = new Map<string, ShelfPaper>();
+  const runs = new Set<string>();
+  const reports = new Set<string>();
+  let searches = 0;
+  let searchSource: ShelfPaper["source"] | null = null;
+  for (const part of parts) {
+    if (part.type !== "tool") continue;
+    const activity = toolActivity(part);
+    for (const paper of shelvedPapers(part, activity)) papers.set(`${paper.source}:${paper.id}`, paper);
+    searches += literatureSearches(activity);
+    if (literatureSearches(activity) > 0) searchSource ??= activity.litCall?.source ?? null;
+    if (part.state?.status !== "error") for (const runId of knownRunIds(activity, runExperimentName)) runs.add(runId);
+    const report = reportPath(activity);
+    if (report && part.state?.status === "completed") reports.add(report);
+  }
+
+  const icon = (Icon: typeof FlaskConical) => <Icon size={16} strokeWidth={1.75} aria-hidden="true" className="shrink-0 text-muted" />;
+  const logo = (source: ShelfPaper["source"]) => <LitSourceLogo source={source} size={16} decorative />;
+  const count = (value: number, one: (params: { count: string }) => string, other: (params: { count: string }) => string) =>
+    pluralMessage(value, one, other)({ count: fmtNumber(value) });
+  const items: ReceiptItem[] = [];
+  const firstPaper = papers.values().next().value;
+  if (firstPaper) items.push({ icon: logo(firstPaper.source), label: count(papers.size, m.chat_receipt_papers_one, m.chat_receipt_papers_other) });
+  else if (searches > 0 && searchSource) items.push({ icon: logo(searchSource), label: count(searches, m.chat_receipt_searches_one, m.chat_receipt_searches_other) });
+  if (runs.size > 0) items.push({ icon: icon(FlaskConical), label: count(runs.size, m.chat_receipt_runs_one, m.chat_receipt_runs_other) });
+  if (reports.size > 0) items.push({ icon: icon(NotebookText), label: count(reports.size, m.chat_receipt_reports_one, m.chat_receipt_reports_other) });
+  if (figures > 0) items.push({ icon: icon(ChartSpline), label: count(figures, m.chat_receipt_figures_one, m.chat_receipt_figures_other) });
+  return items;
+}
+
+/** The papers an answer links, each marked with whether the turn fetched it. */
+function answerSources(answer: ChatPart[], turnParts: ChatPart[]): CitedPaper[] {
+  const read = new Map<string, ShelfPaper>();
+  for (const part of turnParts) {
+    if (part.type !== "tool") continue;
+    for (const paper of shelvedPapers(part, toolActivity(part))) read.set(paperKey(paper.source, paper.id), paper);
+  }
+  const text = answer.flatMap((part) => part.type === "text" && part.text ? [part.text] : []).join("\n");
+  return linkedPapers(text).map((paper) => {
+    const fetched = read.get(paperKey(paper.source, paper.id));
+    return { ...paper, read: Boolean(fetched), output: fetched?.output };
+  });
+}
+
+const TURN_FIGURE_PATH = /\bartifacts\/[^\s"'`)<>]+\.(?:svg|png|jpe?g|gif|webp)\b/i;
+
+/** Images in the artifacts directory a finished turn wrote and named: written
+ * while it ran, and mentioned in its calls or its answer. */
+function useTurnFigures(messages: ChatMessage[], finished: boolean): string[] {
+  const projectId = useContext(FileScopeContext)?.projectId ?? "";
+  const text = useMemo(() => finished
+    ? messages.flatMap((message) => message.parts).map((part) => [
+      part.text,
+      part.state?.output,
+      JSON.stringify(part.state?.input ?? ""),
+    ].join("\n")).join("\n")
+    : "", [messages, finished]);
+  const mentioned = TURN_FIGURE_PATH.test(text);
+  const { getArtifactsQuery } = useWorkspace().queries;
+  const artifacts = useQuery({ ...getArtifactsQuery(projectId), enabled: Boolean(projectId) && mentioned }).data;
+  return useMemo(() => {
+    if (!artifacts || !mentioned) return [];
+    const start = messages[0].createdAt - 1_000;
+    const end = (messages.at(-1)?.completedAt ?? Date.now()) + 5_000;
+    const files: string[] = [];
+    const visit = (entries: ArtifactEntry[]) => {
+      for (const entry of entries) {
+        if (entry.children) visit(entry.children);
+        if (!entry.isDir && entry.presentation === "image" && entry.modifiedAt >= start && entry.modifiedAt <= end && text.includes(entry.path)) files.push(entry.path);
+      }
+    };
+    visit(artifacts.entries);
+    return files;
+  }, [artifacts, mentioned, messages, text]);
+}
+
 function AssistantTurn({ messages, response, options }: {
   messages: ChatMessage[];
   response: ReturnType<typeof splitResponseParts>;
@@ -3606,6 +3980,10 @@ function AssistantTurn({ messages, response, options }: {
     setExpanded(true);
   }, [options.revealNonce, options.expansionState, key]);
   const [, tick] = useState(0);
+  const finished = !streaming || message.completedAt != null;
+  const figures = useTurnFigures(messages, finished && work.length > 0);
+  const { artifactUrl } = useWorkspace().api;
+  const projectId = useContext(FileScopeContext)?.projectId;
   useEffect(() => {
     if (!streaming || message.completedAt != null || work.length === 0) return;
     const timer = window.setInterval(() => tick((value) => value + 1), 1000);
@@ -3619,6 +3997,10 @@ function AssistantTurn({ messages, response, options }: {
   const duration = elapsed === null ? null : elapsed < 60_000 || elapsed >= 3_600_000
     ? fmtDuration(elapsed)
     : m.chat_work_duration({ minutes: fmtNumber(Math.floor(elapsed / 60_000)), seconds: fmtNumber(Math.floor(elapsed / 1000) % 60) });
+  const turnParts = [...work.flatMap((turn) => turn.parts), ...answer];
+  const receipt = turnReceipt(work.flatMap((turn) => turn.parts), figures.length, options.runExperimentName);
+  const sources = finished ? answerSources(answer, turnParts) : [];
+  const openFigure = (path: string, intent: TabOpenIntent) => options.onOpenFile?.(`artifacts/${path}`, undefined, undefined, undefined, intent);
   return (
     <>
       <div className="turn-work mb-4">
@@ -3629,7 +4011,18 @@ function AssistantTurn({ messages, response, options }: {
           data-work-toggle
           onClick={() => { setHasOpened(true); options.expansionState?.set(key, !expanded); setExpanded(!expanded); }}
         >
-          <span>{duration === null ? m.chat_work_details() : m.chat_worked_for({ duration })}</span>
+          {receipt.length > 0 ? (
+            <span className="min-w-0">
+              {[...receipt, ...(duration === null ? [] : [{ icon: null, label: duration }])].map((item, index) => (
+                <Fragment key={item.label}>
+                  {index > 0 && <span className="text-muted"> · </span>}
+                  <span className="inline-flex items-center gap-1.5 align-top">{item.icon}{item.label}</span>
+                </Fragment>
+              ))}
+            </span>
+          ) : (
+            <span>{duration === null ? m.chat_work_details() : m.chat_worked_for({ duration })}</span>
+          )}
           <ChevronRight size={16} className={`shrink-0 text-muted transition-transform duration-200 ease-standard motion-reduce:transition-none ${expanded ? "rotate-90" : ""}`} />
         </button>
         <div className={`tool-group-disclosure ${expanded ? "open" : ""}`} aria-hidden={!expanded} inert={!expanded}>
@@ -3638,11 +4031,28 @@ function AssistantTurn({ messages, response, options }: {
               {hasOpened && work.map((turn) => (
                 <div key={turn.id}>{renderParts(turn.parts, { ...options, predictTextTail: false, pendingTailToolId: turn.id === message.id ? options.pendingTailToolId : null })}</div>
               ))}
+              {hasOpened && projectId && figures.length > 0 && (
+                <FigureReveal
+                  figures={figures}
+                  src={(path) => artifactUrl(projectId, path)}
+                  onOpen={options.onOpenFile && openFigure}
+                  expansionState={options.expansionState}
+                  expansionKey={`figures:${key}`}
+                />
+              )}
             </div>
           </div>
         </div>
       </div>
-      <div className="turn-answer">{renderParts(answer, answerOptions)}</div>
+      <div className="turn-answer">
+        {renderParts(answer, answerOptions)}
+        {sources.length > 0 && (
+          <SourceStrip
+            papers={sources}
+            discovered={discoveredPapers(turnParts.flatMap((part) => part.type === "tool" && part.state?.output ? [part.state.output] : []))}
+          />
+        )}
+      </div>
     </>
   );
 }
@@ -3742,12 +4152,17 @@ function renderParts(
     .at(-1);
   const rendered: React.ReactNode[] = [];
   let toolRun: ChatPart[] = [];
+  let discoveredCache: Map<string, PaperMeta> | null = null;
+  const discovered = () => discoveredCache ??= discoveredPapers(
+    parts.flatMap((part) => part.type === "tool" && part.state?.output ? [part.state.output] : []),
+  );
   const flushTools = () => {
     if (toolRun.length === 0) return;
     rendered.push(
-      <ToolGroup
+      <ResearchToolRun
         key={`tg-${toolRun[0].id}`}
         parts={toolRun}
+        discovered={discovered}
         expansionState={expansionState}
         revealNonce={revealNonce}
         revealPartId={revealPartId}
@@ -4990,6 +5405,62 @@ function SessionRow({
   );
 }
 
+interface SidebarActions {
+  toggleProjectCollapsed: (project: Project) => void;
+  pinProject: (project: Project) => void;
+  projectRemoved: (project: Project) => void;
+  newProjectChat: (project: Project) => void;
+  openSession: (session: ChatSession, project: Project) => void;
+  openExperiment: (session: ChatSession, projectId: string, experimentId: string) => void;
+  rename: (session: ChatSession, title: string) => void;
+  setArchived: (session: ChatSession, archived: boolean) => void;
+  remove: (session: ChatSession) => void;
+}
+
+// Sidebar rows skip the panel's per-keystroke renders: `actions` is a stable ref
+// the panel refreshes every render, so handlers still reach its current state.
+const SidebarProjectCard = memo(function SidebarProjectCard({
+  actions,
+  project,
+  ...card
+}: Omit<React.ComponentProps<typeof ProjectInfoCard>, "onToggleCollapsed" | "onPin" | "onRemoved" | "onNewChat"> & {
+  actions: React.RefObject<SidebarActions>;
+}) {
+  useLocale();
+  return (
+    <ProjectInfoCard
+      {...card}
+      project={project}
+      onToggleCollapsed={() => actions.current.toggleProjectCollapsed(project)}
+      onPin={() => actions.current.pinProject(project)}
+      onRemoved={() => actions.current.projectRemoved(project)}
+      onNewChat={() => actions.current.newProjectChat(project)}
+    />
+  );
+});
+
+const SidebarSessionRow = memo(function SidebarSessionRow({
+  actions,
+  project,
+  ...row
+}: Omit<React.ComponentProps<typeof SessionRow>, "onOpen" | "onOpenExperiment" | "onRename" | "onSetArchived" | "onDelete"> & {
+  actions: React.RefObject<SidebarActions>;
+  project: Project;
+}) {
+  useLocale();
+  const { session } = row;
+  return (
+    <SessionRow
+      {...row}
+      onOpen={() => actions.current.openSession(session, project)}
+      onOpenExperiment={(projectId, experimentId) => actions.current.openExperiment(session, projectId, experimentId)}
+      onRename={(title) => actions.current.rename(session, title)}
+      onSetArchived={(archived) => actions.current.setArchived(session, archived)}
+      onDelete={() => actions.current.remove(session)}
+    />
+  );
+});
+
 // --- panel -------------------------------------------------------------------
 
 // The four starter prompts progress starting point → gap → baseline → experiment.
@@ -5159,6 +5630,7 @@ export function ChatPanel({
     listSidebarChatSessionsQuery,
     listChatActiveRunsQuery,
     getHarnessesQuery,
+    getUiStateQuery,
     getSkillsQuery,
     getHarnessSetupCommandsQuery,
     getCodeTreeQuery,
@@ -5628,6 +6100,7 @@ export function ChatPanel({
       ? { ...savedSelection, ...sessionOverride }
       : null;
   const { data: skills = EMPTY_SKILLS } = useQuery(getSkillsQuery(rawSelection?.harness, projectId));
+  const { data: uiState } = useQuery(getUiStateQuery());
   const catalogHarness = selectionHarness(harnesses, rawSelection);
   const activeHarness = sessionAcpHarness(openSession, catalogHarness);
   const acpOptions = nativeOptions(openSession?.nativeConfiguration, { model: m.model_picker_model(), mode: m.model_picker_mode() });
@@ -7067,6 +7540,28 @@ export function ChatPanel({
     const message = allMessages.find((message) => message.id === focusedMessage.messageId);
     return message && findPartById(message.parts, focusedMessage.partId);
   }, [focusedMessage, activeId, allMessages]);
+  /** Deliver a card answer; resolves `false` when delivery failed (so a
+   * caller can e.g. restore a consumed draft). Stable per session so the
+   * memoized Message rows don't re-render on unrelated state changes. */
+  const respond = useCallback(
+    (answer: PromptAnswer): Promise<boolean> => {
+      if (!activeId) return Promise.resolve(false);
+      return mutRespondChat.runAsHeadlessPromise(workspace, { id: activeId, projectId }, answer, {}).then(() => true, (error: unknown) => {
+        showAlert(error instanceof Error ? error.message : String(error), "error");
+        return false;
+      });
+    },
+    [workspace, activeId, projectId],
+  );
+
+  const questions = useQuestions(activeId, pendingQuestions, respond);
+  const asking = questions.part !== null;
+  const showQuestion = questions.show;
+  const searchedPartId = focusedMessage?.sessionId === activeId ? focusedMessage.partId : undefined;
+  useEffect(() => {
+    if (searchedPartId) showQuestion(searchedPartId);
+  }, [searchedPartId, showQuestion]);
+
   useEffect(() => {
     if (contentLoading || historyLoading || !focusedMessage?.query || focusedMessage.sessionId !== activeId || openedSearchNonce === focusedMessage.nonce) return;
     const message = messages.find((message) => message.id === focusedMessage.messageId);
@@ -7086,7 +7581,7 @@ export function ChatPanel({
     CSS.highlights.set(name, highlight);
     root.scrollIntoView({ block: "nearest" });
     return () => { if (CSS.highlights.get(name) === highlight) CSS.highlights.delete(name); };
-  }, [focusedMessage, activeId, pendingQuestions, embedded]);
+  }, [focusedMessage, activeId, questions.part, embedded]);
 
   function cancelQueued(itemId: string) {
     if (!activeId) return;
@@ -7161,20 +7656,6 @@ export function ChatPanel({
       },
     });
   }
-
-  /** Deliver a card answer; resolves `false` when delivery failed (so a
-   * caller can e.g. restore a consumed draft). Stable per session so the
-   * memoized Message rows don't re-render on unrelated state changes. */
-  const respond = useCallback(
-    (answer: PromptAnswer): Promise<boolean> => {
-      if (!activeId) return Promise.resolve(false);
-      return mutRespondChat.runAsHeadlessPromise(workspace, { id: activeId, projectId }, answer, {}).then(() => true, (error: unknown) => {
-        showAlert(error instanceof Error ? error.message : String(error), "error");
-        return false;
-      });
-    },
-    [workspace, activeId, projectId],
-  );
 
   const newTaskHotkey = useAppHotkeys()["task.new"].hotkey;
   const newTaskShortcut = newTaskHotkey ? formatForDisplay(newTaskHotkey) : undefined;
@@ -7273,6 +7754,9 @@ export function ChatPanel({
     getItemKey: (index) => sidebarRowKey(sidebarRows[index]),
     estimateSize: (index) => sidebarRowHeight(sidebarRows[index]),
     overscan: 5,
+    // Keeps a row scrolled into view clear of the rail's 0.75rem edge fades.
+    scrollPaddingStart: 12,
+    scrollPaddingEnd: 12,
     rangeExtractor: (range) => {
       const indexes = defaultRangeExtractor(range);
       const focused = sidebarRows.findIndex((row) => sidebarRowKey(row) === focusedSidebarRow);
@@ -7298,6 +7782,50 @@ export function ChatPanel({
       void flatSessions.fetchNextPage();
     }
   }, [sidebarGrouping, railOpen, embedded, lastVisibleIndex, sidebarRows.length, flatSessions.hasNextPage, flatSessions.isFetching, flatSessions.isError, flatSessions.fetchNextPage]);
+  const sidebarActions = useRef<SidebarActions>(null!);
+  sidebarActions.current = {
+    toggleProjectCollapsed: (project) => {
+      const next = collapsedProjects.includes(project.id) ? collapsedProjects.filter((id) => id !== project.id) : [...collapsedProjects, project.id];
+      setCollapsedProjects(next);
+      try { localStorage.setItem(collapsedProjectsKey, JSON.stringify(next)); } catch {}
+    },
+    pinProject: (project) => {
+      const next = pinnedProjects.includes(project.id) ? pinnedProjects.filter((id) => id !== project.id) : [...pinnedProjects, project.id];
+      setPinnedProjects(next);
+      try { localStorage.setItem(pinnedProjectsKey, JSON.stringify(next)); } catch {}
+    },
+    projectRemoved: (project) => { if (project.id === projectId) void navigate({ to: "/projects" }); },
+    newProjectChat: (project) => {
+      if (project.id === projectId) startProjectTask();
+      else void navigate({ to: "/projects/$projectId/tasks/new", params: { projectId: project.id } });
+    },
+    openSession: (s, project) => {
+      onActiveSessionChange(s.id, { projectId: project.id });
+      if (project.id === DEMO_PROJECT_ID) {
+        markDemoSessionRead(s.id);
+        const experiment = DEMO_EXPERIMENT_LABELS[s.id];
+        if (experiment) {
+          captureUiEvent({
+            name: "demo_experiment_started",
+            kind: "curated",
+            experiment,
+          });
+          captureUiEvent({
+            name: "first_action",
+            surface: "demo",
+            action: "open_experiment",
+          });
+        }
+      }
+    },
+    openExperiment: (s, targetProjectId, experimentId) => {
+      void navigate({ href: taskLocation(targetProjectId, targetProjectId === s.projectId ? s.id : null, { kind: "experiment", experimentId, view: "overview" }) });
+    },
+    rename,
+    setArchived,
+    remove: (s) => void removeSession(s),
+  };
+  const openRuntimeDetails = useCallback(() => onSelectMainView("openresearch"), [onSelectMainView]);
 
   const rail = (
     <aside style={mobileRail ? undefined : { width: railWidth }} className="session-rail relative shrink-0 flex flex-col bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:pt-0 [&_.rail-body]:pb-0 [&_.rail-body]:ps-2 [&_.rail-body]:pe-1 border-e border-e-border overflow-visible">
@@ -7369,7 +7897,7 @@ export function ChatPanel({
         </div>
       </div>
       <div className="relative flex-1 min-h-0">
-      <div ref={setRailBody} tabIndex={-1} className={`rail-body h-full overflow-x-hidden ${sidebarScrollable ? "overflow-y-auto" : "overflow-y-hidden"}`}
+      <div ref={setRailBody} tabIndex={-1} className={`rail-body h-full overflow-x-hidden ${!sidebarScrollable ? "overflow-y-hidden" : (sidebarVirtualizer.scrollOffset ?? 0) > 0 ? "overflow-y-auto mask-y-from-[calc(100%-0.75rem)]" : "overflow-y-auto mask-b-from-[calc(100%-0.75rem)]"}`}
         onKeyDown={(event) => {
           if (event.defaultPrevented || event.nativeEvent.isComposing || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
           const target = event.target;
@@ -7422,33 +7950,21 @@ export function ChatPanel({
               >
                 {row.kind === "project" ? (
                   <div className="group h-9 flex items-end gap-1 rounded-md px-2.5 text-text">
-                    <ProjectInfoCard
+                    <SidebarProjectCard
+                      actions={sidebarActions}
                       project={project}
                       chatCount={projectActivity.find((activity) => activity.projectId === project.id)?.totalAgents}
                       collapsed={row.collapsed}
                       busy={row.busy}
-                      onToggleCollapsed={() => {
-                        const next = collapsedProjects.includes(project.id) ? collapsedProjects.filter((id) => id !== project.id) : [...collapsedProjects, project.id];
-                        setCollapsedProjects(next);
-                        try { localStorage.setItem(collapsedProjectsKey, JSON.stringify(next)); } catch {}
-                      }}
                       pinned={pinnedProjects.includes(project.id)}
-                      onPin={() => {
-                        const next = pinnedProjects.includes(project.id) ? pinnedProjects.filter((id) => id !== project.id) : [...pinnedProjects, project.id];
-                        setPinnedProjects(next);
-                        try { localStorage.setItem(pinnedProjectsKey, JSON.stringify(next)); } catch {}
-                      }}
-                      onRemoved={() => { if (project.id === projectId) void navigate({ to: "/projects" }); }}
-                      onNewChat={() => {
-                        if (project.id === projectId) startProjectTask();
-                        else void navigate({ to: "/projects/$projectId/tasks/new", params: { projectId: project.id } });
-                      }}
                     />
                   </div>
                 ) : s ? (
                   <div className={sidebarGrouping === "projects" ? "ms-5.5" : undefined}>
-                    <SessionRow
+                    <SidebarSessionRow
                       key={s.id}
+                      actions={sidebarActions}
+                      project={project}
                       session={s}
                       cardWarmUntil={cardWarmUntil}
                       projectName={sidebarGrouping === "list" ? project.name : undefined}
@@ -7460,31 +7976,6 @@ export function ChatPanel({
                       waiting={sessionWaiting(s)}
                       experimentRunning={activeRuns.some((item) => item.sessionId === s.id)}
                       revealTitle={titleReveals.get(s.id)}
-                      onOpenExperiment={(targetProjectId, experimentId) => {
-                        void navigate({ href: taskLocation(targetProjectId, targetProjectId === s.projectId ? s.id : null, { kind: "experiment", experimentId, view: "overview" }) });
-                      }}
-                      onOpen={() => {
-                        onActiveSessionChange(s.id, { projectId: project.id });
-                        if (project.id === DEMO_PROJECT_ID) {
-                          markDemoSessionRead(s.id);
-                          const experiment = DEMO_EXPERIMENT_LABELS[s.id];
-                          if (experiment) {
-                            captureUiEvent({
-                              name: "demo_experiment_started",
-                              kind: "curated",
-                              experiment,
-                            });
-                            captureUiEvent({
-                              name: "first_action",
-                              surface: "demo",
-                              action: "open_experiment",
-                            });
-                          }
-                        }
-                      }}
-                      onRename={(title) => rename(s, title)}
-                      onSetArchived={(archived) => setArchived(s, archived)}
-                      onDelete={() => void removeSession(s)}
                     />
                   </div>
                 ) : row.kind === "more" ? (
@@ -7525,12 +8016,8 @@ export function ChatPanel({
           )}
         </div>
       </div>
-      {sidebarScrollable && <>
-        {(sidebarVirtualizer.scrollOffset ?? 0) > 0 && <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 top-0 z-5 h-3 bg-linear-to-b from-background to-transparent" />}
-        <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 bottom-0 z-5 h-3 bg-linear-to-t from-background to-transparent" />
-      </>}
       </div>
-      <StatusStrip runtime={runtime} onDetails={() => onSelectMainView("openresearch")} />
+      <StatusStrip runtime={runtime} onDetails={openRuntimeDetails} />
     </aside>
   );
 
@@ -7791,12 +8278,6 @@ export function ChatPanel({
           </Button>
         )}
 
-        {pendingQuestions.length > 0 && (
-          <div inert={contentLoading || Boolean(contentError) || historyLoading || connection !== null} className="chat-prompt-questions mx-auto mb-2 flex max-h-96 w-full max-w-readable shrink-0 flex-col gap-2 overflow-y-auto px-3">
-            {pendingQuestions.map((part) => <div key={`${activeId}-${part.id}`} data-part-id={part.id} data-search-target={focusedMessage?.partId === part.id || undefined} tabIndex={-1}><PromptCard part={part} onRespond={respond} /></div>)}
-          </div>
-        )}
-
         {/* Docked while a plan awaits a decision, so the approval controls never
           scroll away. Actions mirror the (now compact) inline card's wire. */}
         <div inert={contentLoading || Boolean(contentError) || historyLoading} className="composer px-3 pb-3 shrink-0 relative z-4 bg-background w-full max-w-readable my-0 mx-auto">
@@ -7949,7 +8430,7 @@ export function ChatPanel({
           )}
           <RemoteConnectionStrip />
           <div inert={connection !== null} className={`composer-frame flex flex-col rounded-xl bg-surface${connection ? " opacity-60" : ""}`} data-onboarding="composer">
-            <div className={`composer-box relative flex flex-col rounded-xl border ${bashMode ? "border-accent-amber" : "border-border"} bg-background shadow-control-subtle`}>
+            <div className={`composer-box relative flex flex-col rounded-xl border ${bashMode && !asking ? "border-accent-amber" : "border-border"} bg-background shadow-control-subtle`}>
               {unconfirmedSend !== null && (
                 <div id={unconfirmedSendId} role="alert" className="flex items-start gap-2 pt-2 px-3 text-sm text-text">
                   <span className="flex-1" dir="auto">{m.chat_send_unconfirmed({ error: ltr(unconfirmedSend) })}</span>
@@ -7982,7 +8463,7 @@ export function ChatPanel({
                   )}
                 </div>
               )}
-              {skillMenuOpen && (
+              {skillMenuOpen && !asking && (
                 <SkillMenu
                   skills={skillMatches}
                   activeIndex={activeSkillIdx}
@@ -7990,7 +8471,7 @@ export function ChatPanel({
                   onHover={setSkillIdx}
                 />
               )}
-              {mentionMenuOpen && (
+              {mentionMenuOpen && !asking && (
                 <MentionMenu
                   matches={mentionMatches}
                   activeIndex={activeMentionIdx}
@@ -7998,7 +8479,7 @@ export function ChatPanel({
                   onHover={setMentionIdx}
                 />
               )}
-              {annotations.length > 0 && (
+              {annotations.length > 0 && !asking && (
                 <ComposerAnnotations
                   annotations={annotations}
                   onClear={() => {
@@ -8024,13 +8505,33 @@ export function ChatPanel({
                   {settingsError}
                 </div>
               )}
-              <div className="composer-input flex min-w-0 items-end">
+              {questions.part && (
+                <QuestionDock
+                  part={questions.part}
+                  index={questions.index}
+                  total={questions.total}
+                  picked={questions.answer.picked}
+                  disabled={questions.busy}
+                  hotkeys={mainView === "chat" && !contentInert && !contentLoading && !contentError && !historyLoading && connection === null
+                    && (embedded ? searchRegion === "right" : searchRegion !== "right")}
+                  searchTarget={focusedMessage?.partId === questions.part.id}
+                  onPick={questions.pick}
+                />
+              )}
+              {/* The answer lines up with the question's text above it. */}
+              <div className={`composer-input flex min-w-0 items-end ${asking ? "[--composer-pad-x:1rem]" : ""}`}>
                 <ComposerEditor
                   ref={composerRef}
-                  value={draft}
+                  value={questions.part ? questions.answer.note : draft}
                   describedBy={[demoHintVisible && demoHintId, unconfirmedSend !== null && unconfirmedSendId].filter(Boolean).join(" ") || undefined}
                   placeholder={
-                    steering && activeHarness
+                    asking
+                      ? questions.answer.picked.length > 0
+                        ? m.chat_question_add_note()
+                        : questions.part?.prompt?.options?.length
+                          ? m.chat_question_custom_response()
+                          : m.chat_question_your_answer()
+                      : steering && activeHarness
                       ? m.chat_steer_placeholder({ harness: ltr(activeHarness.name), shortcut: ltr(queueChord) })
                       : composerSelection
                         ? activeHarness?.agentReady
@@ -8038,14 +8539,19 @@ export function ChatPanel({
                           : m.chat_harness_unavailable({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
                         : m.chat_ask_agent_placeholder()
                   }
-                  plain={bashMode}
+                  plain={bashMode && !asking}
+                  readOnly={questions.busy}
                   chipSource={chipSource}
                   projectId={projectId}
-                  draftKey={stashKey}
+                  draftKey={questions.part ? `question:${questions.part.id}` : stashKey}
                   resizeKey={embedded ? "orx:composer-height:side" : "orx:composer-height"}
-                  onFiles={addFiles}
-                  onPaste={onComposerPaste}
+                  onFiles={asking ? () => {} : addFiles}
+                  onPaste={asking ? () => {} : onComposerPaste}
                   onChange={(v, cursor, typed) => {
+                    if (asking) {
+                      if (v !== questions.answer.note) questions.setNote(v);
+                      return;
+                    }
                     setComposerCursor(cursor);
                     if (v === draft) return;
                     // Composer commands run rather than send: each fires the moment
@@ -8071,6 +8577,7 @@ export function ChatPanel({
                     setSkillMenuDismissed(false);
                   }}
                   onKeyDown={(e) => {
+                    if (asking) return;
                     if (skillMenuOpen) {
                       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
                         e.preventDefault();
@@ -8120,7 +8627,8 @@ export function ChatPanel({
                     }
                   }}
                   onSubmit={(e) => {
-                    if (bashMode) void runShell();
+                    if (asking) questions.next();
+                    else if (bashMode) void runShell();
                     else void send({ queue: matchesKeyboardEvent(e, "Mod+Enter") });
                   }}
                 />
@@ -8136,19 +8644,40 @@ export function ChatPanel({
                       e.target.value = ""; // let the same file be re-picked
                     }}
                   />
-                  <Tooltip interactive content={m.chat_panel_attach_a_pdf_or_image()}>
-                    <IconButton
-                      type="button"
-                      className="composer-attach"
-                      aria-label={m.chat_panel_attach_a_pdf_or_image()}
-                      onClick={() => fileInputRef.current?.click()}
-                    >
-                      <Paperclip size={16} />
-                    </IconButton>
-                  </Tooltip>
-                  {busy ? (
+                  {!asking && (
+                    <Tooltip interactive content={m.chat_panel_attach_a_pdf_or_image()}>
+                      <IconButton
+                        type="button"
+                        className="composer-attach"
+                        aria-label={m.chat_panel_attach_a_pdf_or_image()}
+                        onClick={() => fileInputRef.current?.click()}
+                      >
+                        <Paperclip size={16} />
+                      </IconButton>
+                    </Tooltip>
+                  )}
+                  {asking ? (
+                    <>
+                      <Tooltip interactive content={m.chat_question_skip()}>
+                        <IconButton type="button" variant="filled" aria-label={m.chat_question_skip()} disabled={questions.busy} onClick={questions.skip}>
+                          <X size={16} />
+                        </IconButton>
+                      </Tooltip>
+                      {/* Stays put on the first question: Skip must not slide under a second click. */}
+                      {questions.total > 1 && (
+                        <Tooltip interactive content={m.chat_question_back()}>
+                          <IconButton type="button" variant="filled" aria-label={m.chat_question_back()} disabled={questions.busy || questions.index === 0} onClick={questions.back}>
+                            <ChevronLeft size={16} className="rtl:rotate-180" />
+                          </IconButton>
+                        </Tooltip>
+                      )}
+                      <Button type="button" variant="primary" className="min-w-20" disabled={questions.busy || !questions.answered} onClick={questions.next}>
+                        {questions.last ? m.chat_panel_submit() : m.chat_question_next()}
+                      </Button>
+                    </>
+                  ) : busy ? (
                     <Tooltip interactive content={m.chat_panel_stop()}>
-                      <IconButton className="send-btn" variant="stop" aria-label={m.chat_panel_stop()} onClick={stop}>
+                      <IconButton className="send-btn" variant="filled" aria-label={m.chat_panel_stop()} onClick={stop}>
                         <X size={16} />
                       </IconButton>
                     </Tooltip>
@@ -8285,7 +8814,7 @@ export function ChatPanel({
                   onSelect={selectModel}
                   onStartHarness={startHarness}
                   onOpenSettings={() => onSelectMainView("harnesses")}
-                  permissionChoices={activeHarness?.agentReady ? (opts?.permissionModes ?? []) : []}
+                  permissionChoices={activeHarness?.agentReady ? withAutoReviewer(opts?.permissionModes ?? [], activeHarness, uiState?.opencodeReviewModel, composerSelection?.model) : []}
                   defaultPermissionId={opts?.defaultPermissionMode ?? null}
                   onSelectPermission={setPermissionMode}
                   reasoningChoices={activeHarness?.agentReady ? reasoning.choices : []}
@@ -8296,6 +8825,7 @@ export function ChatPanel({
                   disabled={switchingAgent}
                   lockHarness={busy || switchingAgent || (!openSession && !!sideParentSessionId)}
                   openRequest={modelPickerRequest}
+                  canNudge={!embedded && !contentInert}
                   nativeOptions={openSession?.harness.startsWith("acp:") ? acpOptions.filter((option) => option.category !== "model") : []}
                   onSelectNativeOption={(optionId, value) => {
                     if (!openSession) return;
@@ -8317,7 +8847,7 @@ export function ChatPanel({
         </div>
       </section>
       <EscapeScope enabled={dataSources.open} onEscape={() => dataSources.setOpen(false)} />
-      <EscapeScope enabled={skillMenuOpen || mentionMenuOpen} onEscape={() => setSkillMenuDismissed(true)} />
+      <EscapeScope enabled={!asking && (skillMenuOpen || mentionMenuOpen)} onEscape={() => setSkillMenuDismissed(true)} />
     </>
   );
 }

@@ -1,4 +1,4 @@
-import { useContext, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { memo, useContext, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { useMutate } from "@clo/react-mutation";
 import { useQuery } from "@tanstack/react-query";
 import { Popover } from "@base-ui/react/popover";
@@ -17,9 +17,11 @@ import { Button, IconButton, LoadingRow, SEGMENTED_CLASS_NAME, Spinner, Tooltip 
 import { cn } from "./ui/cn";
 import { fmtEstimate, fmtMoney, leftTone, lowestWindow, LOW_PERCENT, PLAN_GRID, PlanMark, PlanRows, planSummary, Ring, UsageGauge, usePlanAgent, useUpdateAgent } from "./Usage";
 import { useMachineState, WorkspaceConnection } from "./WorkspaceConnection";
+import { useLocale } from "../locale";
 
 /** The sidebar's footer: you, your agents' plans, then the machine, which grows into what's left. */
-export function StatusStrip({ runtime, onDetails }: { runtime: RuntimeInfo; onDetails: () => void }) {
+export const StatusStrip = memo(function StatusStrip({ runtime, onDetails }: { runtime: RuntimeInfo; onDetails: () => void }) {
+  useLocale();
   const { current, live } = useMachineState(runtime);
   const usage = useQuery(useWorkspace().queries.getUsageQuery());
   const report = usage.data;
@@ -74,7 +76,7 @@ export function StatusStrip({ runtime, onDetails }: { runtime: RuntimeInfo; onDe
     {!machineFilled && <Separator />}
     <WorkspaceConnection runtime={runtime} />
   </div>;
-}
+});
 
 function Separator() {
   return <span className="mx-0.5 h-3.5 w-px shrink-0 bg-border @max-[230px]:hidden" aria-hidden="true" />;

@@ -555,7 +555,7 @@ jobs:
           key: ${{ steps.incremental.outputs.cache-primary-key }}
 
   check:
-    name: fmt, clippy, test
+    name: CI passed
     if: always()
     needs: [changes, workflow-lint, frontend, helpers, rust-lint, rust, e2e, linux-app, windows]
     runs-on: ubuntu-24.04

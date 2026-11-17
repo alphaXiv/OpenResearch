@@ -191,10 +191,14 @@ for line in sys.stdin:
         update(dict(sessionUpdate="agent_thought_chunk", content=dict(type="text", text="thinking")))
         update(dict(sessionUpdate="tool_call", toolCallId="tool-one", title="Inspect file", kind="read", status="completed"))
         if text.startswith("permission"):
+            options = [dict(optionId="opaque-once", name="Allow this action", kind="allow_once"),
+                       dict(optionId="opaque-deny", name="Reject this action", kind="reject_once")]
+            if text == "permission-always":
+                options[0] = dict(optionId="opaque-always", name="Always allow", kind="allow_always")
+            if text == "permission-deny":
+                options = options[1:]
             send(dict(id="permission", method="session/request_permission", params=dict(sessionId=session,
-                toolCall=dict(toolCallId="tool-one", title="Inspect file"), options=[
-                    dict(optionId="opaque-once", name="Allow this action", kind="allow_once"),
-                    dict(optionId="opaque-deny", name="Reject this action", kind="reject_once")])))
+                toolCall=dict(toolCallId="tool-one", title="Inspect file", kind="switch_mode" if text == "permission-switch" else "read"), options=options)))
             update(dict(sessionUpdate="agent_message_chunk", content=dict(type="text", text="while waiting")))
             answer = json.loads(sys.stdin.readline())
             assert answer["id"] == "permission", answer

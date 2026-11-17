@@ -1,15 +1,16 @@
 import { useCallback } from "react";
 import { useQuery } from "@tanstack/react-query";
-import type { AgentIcon, AgentSelection, Harness, LocalModelConnection, OpenCodeProvider } from "../api";
+import type { AgentIcon, AgentSelection, FoundProvider, Harness, LocalModelConnection, OpenCodeProvider } from "../api";
 import { m } from "../paraglide/messages.js";
 import { groupModelLines, type ModelOffer } from "../modelLines";
 import { harnessDisplayName, harnessKey, selectionHarness } from "../modelSelection";
 import { useWorkspace } from "../workspace";
 import { BRAND_ICON, type Logo } from "./AgentIcon";
 import { profileTile, providerRank, providerTile, sortHarnesses, TileMark } from "./AddAgentDialog";
-import { HarnessLogo } from "./HarnessLogo";
+import { HarnessLogo, logoMark } from "./HarnessLogo";
 import { EndpointMark, endpointServer } from "./LocalModelSetup";
-import { lineName, offerOn } from "./ModelList";
+import { foundProviderLook, hostLogo } from "./providerIdentity";
+import { FREE, lineName, offerOn, SectionMark } from "./ModelList";
 
 /** A row of Settings → Agents, as the model picker offers it: one place a model can run. */
 export interface PickerAgent {
@@ -23,6 +24,14 @@ export interface PickerAgent {
 }
 
 const FREE_PROVIDER = "opencode";
+/** The prefix of the providers openresearch.sh's model feed hosts, whose models are free like OpenCode's own. */
+const HOSTED_PREFIX = "openresearch-";
+
+/** The OpenCode provider whose agent runs `model`: Free Models for the feed's hosted ones. */
+const modelProvider = (model: string) => {
+  const provider = model.split("/")[0];
+  return provider.startsWith(HOSTED_PREFIX) ? FREE_PROVIDER : provider;
+};
 
 /** The icon a row of Settings → Agents shows, and the logo its brand icon draws. */
 interface AgentMark {
@@ -31,46 +40,56 @@ interface AgentMark {
 }
 
 export function harnessMark(h: Harness): AgentMark {
-  return h.profile
-    ? { icon: h.profile.icon ?? BRAND_ICON, brand: (size) => <TileMark tile={profileTile(h.id)} size={size} /> }
-    : { icon: h.label?.icon ?? BRAND_ICON, brand: (size) => <HarnessLogo harness={h.id} logo={h.logo} size={size} /> };
+  if (h.profile) {
+    const tile = profileTile(h.id);
+    return { icon: h.profile.icon ?? BRAND_ICON, brand: logoMark(h.profile.logo) ?? ((size) => <TileMark tile={tile} size={size} />) };
+  }
+  return { icon: h.label?.icon ?? BRAND_ICON, brand: logoMark(h.label?.logo) ?? ((size) => <HarnessLogo harness={h.id} logo={h.logo} size={size} />) };
 }
 
 export function providerMark(provider: OpenCodeProvider): AgentMark {
   const { tile } = providerTile(provider);
-  return { icon: provider.icon ?? BRAND_ICON, brand: (size) => <TileMark tile={tile} size={size} /> };
+  return { icon: provider.icon ?? BRAND_ICON, brand: logoMark(provider.logo) ?? ((size) => <TileMark tile={tile} size={size} />) };
 }
 
 export function endpointMark(connection: LocalModelConnection): AgentMark {
   const server = endpointServer(connection);
-  return { icon: connection.icon ?? BRAND_ICON, brand: (size) => <EndpointMark server={server} size={size} /> };
+  const remote = server?.icon ? undefined : logoMark(hostLogo(connection.baseUrl));
+  return { icon: connection.icon ?? BRAND_ICON, brand: logoMark(connection.logo) ?? remote ?? ((size) => <EndpointMark server={server} size={size} />) };
 }
 
-export const FREE_MODELS_MARK: AgentMark = { icon: BRAND_ICON, brand: (size) => <HarnessLogo harness="opencode" size={size} /> };
+export const FREE_MODELS_MARK: AgentMark = { icon: BRAND_ICON, brand: (size) => <SectionMark id={FREE} size={size} /> };
 
-/** A provider OpenCode signed in to itself, which no record of OpenResearch's names. */
-function signInAgent(opencode: Harness, provider: string): PickerAgent {
-  const { tile } = providerTile({ id: provider, name: provider });
-  return { key: `opencode:${provider}`, name: tile.name, icon: BRAND_ICON, brand: (size) => <TileMark tile={tile} size={size} />, harness: opencode, provider };
+/** A provider set up in the user's own OpenCode, by its name and logo; a tile OpenResearch offers names the ones it knows. */
+export function foundProviderMark(provider: FoundProvider): AgentMark & { name: string } {
+  const { tile } = providerTile({ id: provider.id, name: provider.id });
+  const known = "letter" in tile.mark ? undefined : { name: tile.name, logo: (size: number) => <TileMark tile={tile} size={size} /> };
+  return foundProviderLook(provider, known);
 }
 
 /**
- * The agents that can run a model now, in Settings' order, less those turned off but `kept`. OpenCode stands
- * behind its providers.
+ * The agents that can run a model now, in Settings' order, less those turned off but the one `kept` picks. OpenCode
+ * stands behind its providers.
  */
-export function pickerAgents(harnesses: Harness[], providers: OpenCodeProvider[], endpoints: LocalModelConnection[], kept?: string): PickerAgent[] {
-  const off = (h: Harness) => h.off && h.id !== kept;
+export function pickerAgents(harnesses: Harness[], providers: OpenCodeProvider[], endpoints: LocalModelConnection[], kept?: Picked | null): PickerAgent[] {
+  const keptProvider = kept?.harness === "opencode" ? kept.model && modelProvider(kept.model) : undefined;
+  const off = (h: Harness) => h.off && !(kept && h.id === kept.harness && (h.profile?.id ?? null) === (kept.profile ?? null));
   return sortHarnesses(harnesses).filter((h) => h.agentReady && (h.id === "opencode" || !off(h))).flatMap((h) => {
     if (h.id !== "opencode") return [{ key: harnessKey(h), name: h.profile?.name ?? harnessDisplayName(h), ...harnessMark(h), harness: h }];
-    const used = new Set(h.models.map((model) => model.id.split("/")[0]));
-    const records = [...providers].sort((a, b) => providerRank(a) - providerRank(b)).filter((provider) => used.has(provider.id));
-    const connections = endpoints.filter((connection) => used.has(connection.id));
-    const named = new Set([...records.map((provider) => provider.id), ...connections.map((connection) => connection.id), FREE_PROVIDER]);
+    const used = new Set(h.models.map((model) => modelProvider(model.id)));
+    const named = new Set([...providers.map((provider) => provider.id), ...endpoints.map((connection) => connection.id), FREE_PROVIDER]);
+    // A server from before found providers names them only in its model ids.
+    const found = h.foundProviders ?? [...used].filter((provider) => !named.has(provider)).map((id): FoundProvider => ({ id, sources: ["catalog"], removable: false }));
+    // A server from before the per-provider switches turns everything it found off at once.
+    const turnedOff = new Set(h.offProviders ?? (h.off ? found.map((provider) => provider.id) : []));
+    const shown = (provider: string) => used.has(provider) && (!turnedOff.has(provider) || provider === keptProvider);
+    const records = [...providers].sort((a, b) => providerRank(a) - providerRank(b)).filter((provider) => shown(provider.id));
+    const connections = endpoints.filter((connection) => shown(connection.id));
     return [
       ...records.map((provider) => ({ key: `opencode:${provider.id}`, name: provider.name, ...providerMark(provider), harness: h, provider: provider.id })),
       ...connections.map((connection) => ({ key: `opencode:${connection.id}`, name: connection.name, ...endpointMark(connection), harness: h, provider: connection.id })),
       ...(used.has(FREE_PROVIDER) ? [{ key: `opencode:${FREE_PROVIDER}`, name: m.settings_free_models(), ...FREE_MODELS_MARK, harness: h, provider: FREE_PROVIDER }] : []),
-      ...(off(h) ? [] : [...used].filter((provider) => !named.has(provider)).map((provider) => signInAgent(h, provider))),
+      ...found.filter((provider) => shown(provider.id)).map((provider) => ({ key: `opencode:${provider.id}`, ...foundProviderMark(provider), harness: h, provider: provider.id })),
     ];
   });
 }
@@ -78,15 +97,16 @@ export function pickerAgents(harnesses: Harness[], providers: OpenCodeProvider[]
 /** Which of `agents` runs `model` on harness entry `h`. */
 export function agentFor(agents: PickerAgent[], h: Harness, model: string | null): PickerAgent | undefined {
   if (h.id !== "opencode") return agents.find((agent) => agent.key === harnessKey(h));
-  const provider = model?.split("/")[0];
+  const provider = model && modelProvider(model);
   return agents.find((agent) => agent.harness.id === "opencode" && agent.provider === provider);
 }
 
-/** An agent's models as offers; OpenCode's providers each offer their own. */
-export function agentOffers(agent: PickerAgent): ModelOffer<PickerAgent>[] {
+/** An agent's models as offers, less the moving aliases its versions stand for, unless `kept`. OpenCode's providers
+ * each offer their own. */
+export function agentOffers(agent: PickerAgent, kept?: string | null): ModelOffer<PickerAgent>[] {
   const h = agent.harness;
-  const models = agent.provider ? h.models.filter((model) => model.id.startsWith(`${agent.provider}/`)) : h.models;
-  return models.map((model) => ({ tile: agent, model }));
+  const models = agent.provider ? h.models.filter((model) => modelProvider(model.id) === agent.provider) : h.models;
+  return models.filter((model) => !model.parsed.superseded || model.id === kept).map((model) => ({ tile: agent, model }));
 }
 
 interface PickerCatalog {
@@ -108,11 +128,11 @@ export function pickerLines({ catalog, providers, endpoints, hiddenModels }: Pic
     .sort((a, b) => position(a) - position(b));
   const harnesses = sessionHarness ? [sessionHarness, ...offered.filter((h) => h.id !== sessionHarness.id)] : offered;
 
-  const agents = pickerAgents(harnesses, providers, endpoints, value?.harness);
-  const offers = agents.flatMap(agentOffers);
+  const agents = pickerAgents(harnesses, providers, endpoints, value);
   const selectedHarness = selectionHarness(harnesses, value);
   const selectedModel = value?.model ?? null;
   const selectedAgent = selectedHarness ? agentFor(agents, selectedHarness, selectedModel) : undefined;
+  const offers = agents.flatMap((agent) => agentOffers(agent, agent === selectedAgent ? selectedModel : null));
 
   const hidden = new Set(hiddenModels);
   const lines = groupModelLines(offers.filter((offer) => !hidden.has(offer.model.parsed.key) || (offer.tile === selectedAgent && offer.model.id === selectedModel)));

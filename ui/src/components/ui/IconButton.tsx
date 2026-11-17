@@ -9,12 +9,12 @@ const BASE = [
 ].join(" ");
 
 type IconButtonSize = "default" | "small";
-type IconButtonVariant = "default" | "primary" | "stop";
+type IconButtonVariant = "default" | "primary" | "filled";
 
 const VARIANTS: Record<IconButtonVariant, string> = {
   default: "text-subtext [&:hover:not(:disabled)]:bg-surface [&:hover:not(:disabled)]:text-text [&:active:not(:disabled)]:bg-highlight [&.active]:bg-surface [&.active]:text-text",
   primary: "bg-primary text-background [&:hover:not(:disabled)]:bg-primary-hover [&:active:not(:disabled)]:bg-primary-active",
-  stop: "bg-surface text-text [&:hover:not(:disabled)]:bg-stop-hover [&:active:not(:disabled)]:bg-highlight",
+  filled: "bg-surface text-text [&:hover:not(:disabled)]:bg-stop-hover [&:active:not(:disabled)]:bg-highlight",
 };
 
 const SIZES: Record<IconButtonSize, string> = {
