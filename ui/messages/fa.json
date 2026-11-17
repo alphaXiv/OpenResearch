@@ -2027,5 +2027,7 @@
   "usage_reset_confirm": "استفاده از بازنشانی",
   "usage_reset_done": "سقف‌های Codex شما دوباره پر شد.",
   "usage_reset_nothing": "هنوز چیزی برای بازنشانی نیست: سقف‌هایتان تمام نشده است. بازنشانی برایتان می‌ماند.",
-  "usage_reset_none_left": "بازنشانی‌ای باقی نمانده است."
+  "usage_reset_none_left": "بازنشانی‌ای باقی نمانده است.",
+  "media_preview_install_runtime": "صدا و ویدئو در دسترس نیستند. بسته‌های رسانه‌ای زیر را نصب کنید، سپس OpenResearch را دوباره باز کنید.",
+  "media_preview_install_commands": "دستورهای نصب"
 }

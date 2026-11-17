@@ -2027,5 +2027,7 @@
   "usage_reset_confirm": "रीसेट इस्तेमाल करें",
   "usage_reset_done": "आपकी Codex सीमाएँ फिर से भर गईं।",
   "usage_reset_nothing": "अभी रीसेट करने को कुछ नहीं: आपकी सीमाएँ खत्म नहीं हुई हैं। रीसेट आपके पास रहेगा।",
-  "usage_reset_none_left": "कोई रीसेट बाकी नहीं।"
+  "usage_reset_none_left": "कोई रीसेट बाकी नहीं।",
+  "media_preview_install_runtime": "ऑडियो और वीडियो उपलब्ध नहीं हैं। नीचे दिए गए मीडिया पैकेज इंस्टॉल करें, फिर OpenResearch दोबारा खोलें।",
+  "media_preview_install_commands": "इंस्टॉलेशन कमांड"
 }

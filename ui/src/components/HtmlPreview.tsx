@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { isExternalMarkdownTarget } from "../markdownTarget";
+import { MediaUnavailable, mediaUnavailable } from "./MediaUnavailable";
 import { Spinner } from "./ui";
 import { OptionPicker } from "./ModelPicker";
 import { inlineHtmlHeight } from "../htmlPreviewSizing";
@@ -278,6 +279,7 @@ export function HtmlPreview({
 
   return (
     <div ref={viewport} className={fitContent ? "relative flex flex-col" : "flex h-full min-h-0 flex-col"}>
+      {mediaUnavailable() && <MediaUnavailable />}
       {page.partial && (
         <div className="file-view-note shrink-0 border-b border-b-border-variant py-2 px-4 text-sm text-muted">
           {m.file_viewer_html_partial()}

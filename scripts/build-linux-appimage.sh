@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Package an `orx` built with `--features desktop` into OpenResearch-<arch>.AppImage,
 # bundling WebKitGTK so the app runs without it installed. Run on the oldest
-# glibc to support (CI uses Ubuntu 22.04) with libwebkit2gtk-4.1-dev and
-# patchelf installed.
+# glibc to support (CI uses Ubuntu 22.04) with libwebkit2gtk-4.1-dev,
+# libgstreamer1.0-dev and patchelf installed.
 #
 #   scripts/build-linux-appimage.sh <orx binary> <output dir>
 set -euo pipefail
@@ -62,7 +62,6 @@ export APPIMAGE_EXTRACT_AND_RUN=1
 
 echo "==> Staging the AppDir"
 install -Dm755 "$ORX" "$APPDIR/usr/bin/orx"
-cc -Wall -Wextra -Werror "$ROOT/linux/appimage-runtime.c" -ldl -o "$APPDIR/usr/bin/orx-runtime"
 # WebKit starts these helpers from a path compiled into libwebkit2gtk, which the
 # sed below makes relative to AppRun's working directory, $APPDIR/usr.
 for helper in WebKitNetworkProcess WebKitWebProcess injected-bundle/libwebkit2gtkinjectedbundle.so; do
@@ -86,8 +85,6 @@ DEPLOY_GTK_VERSION=3 linuxdeploy \
 # host environment before running those hooks itself, exactly once.
 install -m755 "$ROOT/linux/AppRun" "$APPDIR/AppRun"
 rm -f "$APPDIR/AppRun.wrapped"
-# The runtime checker must discover the host before considering the bundled GTK.
-patchelf --remove-rpath "$APPDIR/usr/bin/orx-runtime"
 
 # linuxdeploy leaves files below usr/lib looking beside themselves, so they
 # would load the host's libraries (or none); point them at the bundled usr/lib.

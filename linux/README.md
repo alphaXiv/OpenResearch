@@ -1,8 +1,10 @@
 # Linux desktop runtime
 
-OpenResearch prefers the system's WebKitGTK 4.1 and GStreamer libraries so HTML previews use media plugins built for the same runtime. Installing new system plugins does not make them compatible with the older GStreamer inside an AppImage.
+OpenResearch prefers the system's WebKitGTK 4.1 libraries so HTML previews use media plugins built for the same runtime. AppRun finds WebKit through `ldconfig -p` and checks that the desktop binary can load against that directory. If it cannot, the existing bundled WebKit starts with its GTK hooks. Host programs launched by OpenResearch receive the session's original library path.
 
-Install the runtime and common video codecs before opening the AppImage:
+Before opening the dashboard, the app runs its hidden `check-media` command as a child with the selected runtime. Plugin scanning stays inside that child so a hung scanner cannot outlive the timeout. The Rust GStreamer API checks the base elements needed by audio, Web Audio and video. Missing optional codecs remain ordinary playback errors. A failed, crashed or timed-out check disables media, Web Audio and MediaSource in the webview before loading any page. The dashboard and ordinary HTML remain available. Audio/video previews offer a download and installation instructions; HTML previews show those instructions above the document.
+
+To enable audio and video, install the system runtime and media packages, then reopen OpenResearch:
 
 Ubuntu / Debian:
 
@@ -16,8 +18,6 @@ Arch Linux:
 sudo pacman -S --needed webkit2gtk-4.1 gst-plugins-base-libs gst-plugins-good gst-libav
 ```
 
-AppRun discovers the library directory, checks the required media elements and verifies the desktop binary's imports before selecting the system stack. It leaves the session's GTK settings in place. No global `LD_LIBRARY_PATH` setting or manual launch command is needed, and host programs launched by OpenResearch receive the session's original library path.
+No global library-path override is needed. Installing newer plugins alone does not make them compatible with an older bundled GStreamer. Other video formats may need additional codecs.
 
-If the system stack is unavailable, the existing bundled WebKit can still run with compatible system media plugins, as on Ubuntu 22.04. If neither stack has the required media elements, a dialog gives installation commands before the dashboard starts. A video format can still require additional codecs; the libav package above supplies the H.264/AAC support exercised by the package test.
-
-The fallback keeps its previous bundle size: media plugins and their codec dependencies are not added to the AppImage. Both stable and Canary builds test system selection, the bundled fallback after removing system WebKit, and the dependency dialog after removing media plugins.
+Media plugins and codec dependencies stay in shared system packages; they are not added to each AppImage. Stable and Canary builds test the system runtime, system WebKit without `gst-plugins-good`, the bundled fallback, and the bundled fallback without media plugins. They also check system-library selection without `/sbin` on PATH, and use a test-only Rust GStreamer plugin to verify crash and timeout isolation and child cleanup. That plugin is not packaged. The smoke test opens a fixture in the AppImage's own HTML preview, checking Web Audio initialization and a decoded H.264 frame. For binaries predating `check-media`, older release rebuilds check dashboard startup and explicitly skip the new media and degradation checks.

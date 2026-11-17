@@ -2027,5 +2027,7 @@
   "usage_reset_confirm": "リセットを使う",
   "usage_reset_done": "Codex の上限が回復しました。",
   "usage_reset_nothing": "まだリセットするものがありません。上限を使い切っていません。リセットはそのまま残ります。",
-  "usage_reset_none_left": "リセットは残っていません。"
+  "usage_reset_none_left": "リセットは残っていません。",
+  "media_preview_install_runtime": "音声と動画を利用できません。以下のメディアパッケージをインストールし、OpenResearch を開き直してください。",
+  "media_preview_install_commands": "インストールコマンド"
 }

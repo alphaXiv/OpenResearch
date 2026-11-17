@@ -2027,5 +2027,7 @@
   "usage_reset_confirm": "Use reset",
   "usage_reset_done": "Your Codex limits are refilled.",
   "usage_reset_nothing": "Nothing to reset yet: your limits aren't used up. The reset is kept.",
-  "usage_reset_none_left": "No resets left."
+  "usage_reset_none_left": "No resets left.",
+  "media_preview_install_runtime": "Audio and video are unavailable. Install the media packages below, then reopen OpenResearch.",
+  "media_preview_install_commands": "Installation commands"
 }

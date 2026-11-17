@@ -2027,5 +2027,7 @@
   "usage_reset_confirm": "Использовать сброс",
   "usage_reset_done": "Лимиты Codex восстановлены.",
   "usage_reset_nothing": "Пока нечего сбрасывать: лимиты не исчерпаны. Сброс сохранён.",
-  "usage_reset_none_left": "Сбросов не осталось."
+  "usage_reset_none_left": "Сбросов не осталось.",
+  "media_preview_install_runtime": "Аудио и видео недоступны. Установите указанные медиапакеты и снова откройте OpenResearch.",
+  "media_preview_install_commands": "Команды установки"
 }

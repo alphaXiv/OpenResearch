@@ -2027,5 +2027,7 @@
   "usage_reset_confirm": "Sıfırlamayı kullan",
   "usage_reset_done": "Codex sınırlarınız yenilendi.",
   "usage_reset_nothing": "Henüz sıfırlanacak bir şey yok: sınırlarınız dolmadı. Sıfırlama sizde kalır.",
-  "usage_reset_none_left": "Sıfırlama kalmadı."
+  "usage_reset_none_left": "Sıfırlama kalmadı.",
+  "media_preview_install_runtime": "Ses ve video kullanılamıyor. Aşağıdaki medya paketlerini yükleyip OpenResearch uygulamasını yeniden açın.",
+  "media_preview_install_commands": "Kurulum komutları"
 }

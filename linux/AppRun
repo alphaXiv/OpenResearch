@@ -20,24 +20,26 @@ for var in LD_LIBRARY_PATH GDK_BACKEND GDK_PIXBUF_MODULE_FILE GI_TYPELIB_PATH GI
 done
 
 cd "$APPDIR/usr"
-runtime_log="$(mktemp)"
-trap 'rm -f "$runtime_log"' EXIT
-runtime="$APPDIR/usr/bin/orx-runtime"
-check_runtime() {
-  (ulimit -c 0; timeout 15 "$runtime" check)
-}
 system_lib=
-if system_lib="$(check_runtime 2>"$runtime_log")"; then
-  case "$system_lib/" in
-    "$APPDIR/"*) system_lib= ;;
-    *)
-      if ! LD_LIBRARY_PATH="$system_lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" check_runtime >>"$runtime_log" 2>&1 || \
-        ! LD_LIBRARY_PATH="$system_lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-        LD_BIND_NOW=1 ORX_TELEMETRY_ENV=off timeout 10 "$APPDIR/usr/bin/orx" version >/dev/null 2>>"$runtime_log"; then
-        system_lib=
-      fi
-      ;;
-  esac
+# Resolve the host library without loading the bundled WebKit first.
+ldconfig_bin="$(command -v ldconfig || true)"
+if [ -z "$ldconfig_bin" ]; then
+  for candidate in /sbin/ldconfig /usr/sbin/ldconfig; do
+    if [ -x "$candidate" ]; then ldconfig_bin="$candidate"; break; fi
+  done
+fi
+if [ -n "$ldconfig_bin" ]; then
+  system_webkit="$("$ldconfig_bin" -p 2>/dev/null | awk '$1 == "libwebkit2gtk-4.1.so.0" { sub(/^.*=>[[:space:]]*/, ""); print }')"
+  while IFS= read -r library; do
+    [ -f "$library" ] || continue
+    directory="$(dirname "$library")"
+    case "$directory/" in "$APPDIR/"*) continue ;; esac
+    if LD_LIBRARY_PATH="$directory${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+      LD_BIND_NOW=1 ORX_TELEMETRY_ENV=off "$APPDIR/usr/bin/orx" version >/dev/null 2>&1; then
+      system_lib="$directory"
+      break
+    fi
+  done <<< "$system_webkit"
 fi
 if [ -n "$system_lib" ]; then
   export LD_LIBRARY_PATH="$system_lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
@@ -60,24 +62,7 @@ else
   export GIO_MODULE_DIR="$APPDIR/usr/lib/gio/modules"
   unset GIO_EXTRA_MODULES
   export ORX_APPIMAGE_RUNTIME=bundled
-  if ! LD_LIBRARY_PATH="$APPDIR/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" check_runtime >>"$runtime_log" 2>&1 || \
-    ! LD_BIND_NOW=1 ORX_TELEMETRY_ENV=off timeout 10 "$APPDIR/usr/bin/orx" version >/dev/null 2>>"$runtime_log"; then
-    cat "$runtime_log" >&2
-    rm -f "$runtime_log"
-    trap - EXIT
-    exec env LD_LIBRARY_PATH="$APPDIR/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$runtime" error "OpenResearch could not find compatible WebKitGTK / GStreamer media libraries.
-
-Install the system libraries, then reopen OpenResearch:
-
-Ubuntu / Debian:
-sudo apt install libwebkit2gtk-4.1-0 gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav
-
-Arch Linux:
-sudo pacman -S --needed webkit2gtk-4.1 gst-plugins-base-libs gst-plugins-good gst-libav"
-  fi
 fi
-rm -f "$runtime_log"
-trap - EXIT
 
 # scripts/build-linux-appimage.sh rewrote libwebkit2gtk's /usr paths to ././,
 # so WebKit finds its bundled helper processes relative to this directory.

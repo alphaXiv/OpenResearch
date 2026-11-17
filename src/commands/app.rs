@@ -12,6 +12,9 @@
 //! CLI. The GUI parts build only under `cfg(desktop_app)`: macOS, Windows, and
 //! Linux with the `desktop` feature (see build.rs).
 
+#[cfg(all(desktop_app, target_os = "linux"))]
+pub mod media;
+
 /// True when `exe` is a `<name>.app/Contents/MacOS` bundle executable that was
 /// invoked under its own name — the signal to enter GUI app mode instead of
 /// parsing CLI args.
@@ -345,6 +348,8 @@ pub async fn run() {
             return;
         }
     };
+    #[cfg(target_os = "linux")]
+    let media_available = media::available().await;
     let discovered = match crate::commands::remote_host::canonical_data_dir() {
         Ok(data_dir) => crate::commands::remote_host::ServerDescriptor::live(&data_dir).await,
         Err(error) => Err(error),
@@ -357,6 +362,8 @@ pub async fn run() {
             imp::run_event_loop(
                 server.port,
                 true,
+                #[cfg(target_os = "linux")]
+                media_available,
                 focus_requests,
                 link.as_deref().and_then(link_path),
             );
@@ -389,6 +396,8 @@ pub async fn run() {
     imp::run_event_loop(
         port,
         false,
+        #[cfg(target_os = "linux")]
+        media_available,
         focus_requests,
         link.as_deref().and_then(link_path),
     );
@@ -1030,6 +1039,7 @@ mod imp {
     pub(super) fn run_event_loop(
         port: u16,
         external_server: bool,
+        #[cfg(target_os = "linux")] media_available: bool,
         #[cfg(not(target_os = "macos"))] focus_requests: super::instance::FocusRequests,
         #[cfg(not(target_os = "macos"))] launch_path: Option<String>,
     ) {
@@ -1410,6 +1420,12 @@ mod imp {
         } else {
             builder
         };
+        #[cfg(target_os = "linux")]
+        let builder = if media_available {
+            builder
+        } else {
+            builder.with_initialization_script("window.__ORX_MEDIA_DISABLED__ = true;")
+        };
         #[cfg(not(target_os = "linux"))]
         let webview = builder.build(&*window);
         // `build` supports only X11 on Linux.
@@ -1435,6 +1451,11 @@ mod imp {
             use wry::WebViewExtUnix;
 
             if let Some(settings) = webview.webview().settings() {
+                if !media_available {
+                    settings.set_enable_media(false);
+                    settings.set_enable_webaudio(false);
+                    settings.set_enable_mediasource(false);
+                }
                 // Remote workspace pop-ups follow an async request, after the click's user gesture expires.
                 settings.set_javascript_can_open_windows_automatically(true);
             }

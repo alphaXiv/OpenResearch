@@ -276,7 +276,7 @@ jobs:
           path: ui/dist
       - run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev file patchelf xvfb xdotool gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libgstreamer1.0-dev librsvg2-dev file patchelf xvfb xauth xdotool python3 imagemagick gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: canary-linux
@@ -294,17 +294,27 @@ jobs:
           ORX_DESKTOP_CANARY_SHA: ${{ github.sha }}
           ORX_DESKTOP_CANARY_CHANGES: ${{ needs.identity.outputs.changes }}
         run: |
+          cargo build --release --locked --features desktop --example gstorxprobe
           cargo build --release --locked --features desktop
           test "$(target/release/orx --no-telemetry version --build-channel)" = production
           test "$(target/release/orx --no-telemetry version --build-id)" = "$ORX_DESKTOP_CANARY_TAG"
           scripts/build-linux-appimage.sh target/release/orx app-dist
-          # shellcheck disable=SC2046 # pkg-config emits compiler arguments.
-          cc -Wall -Wextra scripts/appimage-media-probe.c -o app-dist/appimage-media-probe $(pkg-config --cflags --libs webkit2gtk-4.1)
-          scripts/smoke-test-linux-appimage.sh app-dist/OpenResearch-${{ matrix.arch }}.AppImage app-dist/appimage-media-probe system
+          scripts/smoke-test-linux-appimage.sh app-dist/OpenResearch-${{ matrix.arch }}.AppImage system
+          PATH=/usr/bin:/bin scripts/smoke-test-linux-appimage.sh app-dist/OpenResearch-${{ matrix.arch }}.AppImage system
+          ulimit -c 0
+          for fault in abort hang; do
+            scripts/smoke-test-linux-appimage.sh app-dist/OpenResearch-${{ matrix.arch }}.AppImage "system-$fault" target/release/examples
+          done
+          sudo dpkg --remove --force-depends gstreamer1.0-plugins-good
+          scripts/smoke-test-linux-appimage.sh app-dist/OpenResearch-${{ matrix.arch }}.AppImage system-disabled
+          sudo apt-get install -y gstreamer1.0-plugins-good
           sudo apt-get remove -y libwebkit2gtk-4.1-0 libjavascriptcoregtk-4.1-0
-          scripts/smoke-test-linux-appimage.sh app-dist/OpenResearch-${{ matrix.arch }}.AppImage app-dist/appimage-media-probe bundled
+          scripts/smoke-test-linux-appimage.sh app-dist/OpenResearch-${{ matrix.arch }}.AppImage bundled
+          for fault in abort hang; do
+            scripts/smoke-test-linux-appimage.sh app-dist/OpenResearch-${{ matrix.arch }}.AppImage "bundled-$fault" target/release/examples
+          done
           sudo apt-get remove -y gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav
-          scripts/smoke-test-linux-appimage.sh app-dist/OpenResearch-${{ matrix.arch }}.AppImage app-dist/appimage-media-probe missing
+          scripts/smoke-test-linux-appimage.sh app-dist/OpenResearch-${{ matrix.arch }}.AppImage bundled-disabled
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: canary-linux-${{ matrix.arch }}

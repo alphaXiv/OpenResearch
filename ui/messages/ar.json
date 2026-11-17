@@ -2027,5 +2027,7 @@
   "usage_reset_confirm": "استخدام إعادة التعيين",
   "usage_reset_done": "أُعيد ملء حدود Codex.",
   "usage_reset_nothing": "لا شيء لإعادة تعيينه بعد: لم تستنفد حدودك. تبقى إعادة التعيين لديك.",
-  "usage_reset_none_left": "لم تتبق أي إعادات تعيين."
+  "usage_reset_none_left": "لم تتبق أي إعادات تعيين.",
+  "media_preview_install_runtime": "الصوت والفيديو غير متاحين. ثبّت حزم الوسائط أدناه، ثم أعد فتح OpenResearch.",
+  "media_preview_install_commands": "أوامر التثبيت"
 }

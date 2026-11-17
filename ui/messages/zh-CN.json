@@ -2027,5 +2027,7 @@
   "usage_reset_confirm": "使用重置",
   "usage_reset_done": "你的 Codex 额度已恢复。",
   "usage_reset_nothing": "暂时没有可重置的内容：你的额度还没用完。重置会保留。",
-  "usage_reset_none_left": "没有剩余的重置。"
+  "usage_reset_none_left": "没有剩余的重置。",
+  "media_preview_install_runtime": "音视频暂不可用。请安装下列媒体组件，然后重新打开 OpenResearch。",
+  "media_preview_install_commands": "安装命令"
 }

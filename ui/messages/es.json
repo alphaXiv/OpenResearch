@@ -2027,5 +2027,7 @@
   "usage_reset_confirm": "Usar reinicio",
   "usage_reset_done": "Tus límites de Codex están recargados.",
   "usage_reset_nothing": "Aún no hay nada que reiniciar: no has agotado tus límites. Conservas el reinicio.",
-  "usage_reset_none_left": "No quedan reinicios."
+  "usage_reset_none_left": "No quedan reinicios.",
+  "media_preview_install_runtime": "El audio y el vídeo no están disponibles. Instala los paquetes multimedia indicados y vuelve a abrir OpenResearch.",
+  "media_preview_install_commands": "Comandos de instalación"
 }
