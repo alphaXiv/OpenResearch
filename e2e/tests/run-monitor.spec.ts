@@ -531,9 +531,9 @@ for (let step = 1; step <= ${total}; step++) {
   if (step === 20) gate('mid')
 }`)
   const runs = [
-    { title: 'Depth 4 at 2e15 FLOPs', label: 'Depth 4', total: 40, run: sweep('depth-4', 40, 1.3) },
-    { title: 'Depth 6 at 2e15 FLOPs', label: 'Depth 6', total: 60, run: sweep('depth-6', 60, 1.2) },
-    { title: 'Depth 8 at 2e15 FLOPs', label: 'Depth 8', total: 80, run: sweep('depth-8', 80, 1.25) },
+    { title: 'Depth 4 at 2e15 FLOPs', label: '4', total: 40, run: sweep('depth-4', 40, 1.3) },
+    { title: 'Depth 6 at 2e15 FLOPs', label: '6', total: 60, run: sweep('depth-6', 60, 1.2) },
+    { title: 'Depth 8 at 2e15 FLOPs', label: '8', total: 80, run: sweep('depth-8', 80, 1.25) },
     { title: 'Tokenizer check', label: 'Tokenizer check', total: 30, run: sweep('tokenizer', 30, 4) },
   ]
   const start = (from: number, to: number) => runs.slice(from, to).flatMap(({ title, run }) => [

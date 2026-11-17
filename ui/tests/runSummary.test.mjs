@@ -8,28 +8,34 @@ import { shortLabels, summarize } from "../src/runMonitor/summary.ts";
 const sweep = ["Depth 4 at 2e15 FLOPs", "Depth 6 at 2e15 FLOPs", "Depth 8 at 2e15 FLOPs"];
 
 for (const [titles, labels, context] of [
-  [sweep, ["Depth 4", "Depth 6", "Depth 8"], "… at 2e15 FLOPs"],
-  // One unrelated title keeps its whole; the rest keep their labels, and no context claims to cover it.
-  [[...sweep, "Tokenizer check"], ["Depth 4", "Depth 6", "Depth 8", "Tokenizer check"], null],
-  [["LR 3e-4, warmup 200 steps", "LR 1e-3, warmup 200 steps"], ["LR 3e-4", "LR 1e-3"], "… warmup 200 steps"],
-  [["nanochat d20 lr 3e-4", "nanochat d20 lr 1e-3"], ["lr 3e-4", "lr 1e-3"], "nanochat d20 …"],
-  [["Ablation: no dropout", "Ablation: no weight decay"], ["no dropout", "no weight decay"], "Ablation: …"],
-  [["Baseline (depth 4)", "Baseline (depth 12)"], ["(depth 4)", "(depth 12)"], "Baseline …"],
-  [["Dropout 10% at 2e15 FLOPs", "Dropout 20% at 2e15 FLOPs"], ["Dropout 10%", "Dropout 20%"], "… at 2e15 FLOPs"],
-  [["Глубина 4 при 2e15 FLOPs", "Глубина 6 при 2e15 FLOPs"], ["Глубина 4", "Глубина 6"], "… при 2e15 FLOPs"],
-  [["العمق 4 عند 2e15", "العمق 6 عند 2e15"], ["العمق 4", "العمق 6"], "… عند 2e15"],
-  // Written without spaces there are no whole words to take off.
+  [sweep, ["4", "6", "8"], "Depth … at 2e15 FLOPs"],
+  [[...sweep, "Tokenizer check"], ["4", "6", "8", "Tokenizer check"], null],
+  [["LR 3e-4, warmup 200 steps", "LR 1e-3, warmup 200 steps"], ["3e-4", "1e-3"], "LR … warmup 200 steps"],
+  [["nanochat d20 lr 3e-4", "nanochat d20 lr 1e-3"], ["3e-4", "1e-3"], "nanochat d20 lr …"],
+  [["Ablation: no dropout", "Ablation: no weight decay"], ["dropout", "weight decay"], "Ablation: no …"],
+  [["Baseline (depth 4)", "Baseline (depth 12)"], ["4)", "12)"], "Baseline (depth …"],
+  [["Dropout 10% at 2e15 FLOPs", "Dropout 20% at 2e15 FLOPs"], ["10%", "20%"], "Dropout … at 2e15 FLOPs"],
+  [["Глубина 4 при 2e15 FLOPs", "Глубина 6 при 2e15 FLOPs"], ["4", "6"], "Глубина … при 2e15 FLOPs"],
+  [["العمق 4 عند 2e15", "العمق 6 عند 2e15"], ["4", "6"], "العمق … عند 2e15"],
   [["深さ4で学習", "深さ6で学習"], ["深さ4で学習", "深さ6で学習"], null],
-  [["深さ 4 で学習", "深さ 6 で学習"], ["深さ 4", "深さ 6"], "… で学習"],
-  // Nothing shared but the word that names what varies.
-  [["Depth 4", "Depth 6"], ["Depth 4", "Depth 6"], null],
-  [["Baseline", "Baseline with dropout"], ["Baseline", "Baseline with dropout"], null],
-  // Two runs of one experiment share its title, and say it whole.
+  [["深さ 4 で学習", "深さ 6 で学習"], ["4", "6"], "深さ … で学習"],
+  [["Depth 4", "Depth 6"], ["4", "6"], "Depth …"],
+  [["Baseline", "Baseline with dropout"], ["Baseline", "with dropout"], "Baseline …"],
   [["Depth 4 at 2e15 FLOPs", "Depth 4 at 2e15 FLOPs"], ["Depth 4 at 2e15 FLOPs", "Depth 4 at 2e15 FLOPs"], null],
-  [[...sweep, sweep[0]], ["Depth 4", "Depth 6", "Depth 8", "Depth 4"], "… at 2e15 FLOPs"],
-  // Two families, each its own.
-  [["Depth 4 at 2e15 FLOPs", "Depth 6 at 2e15 FLOPs", "LR 3e-4 on SQuAD", "LR 1e-3 on SQuAD"], ["Depth 4", "Depth 6", "LR 3e-4", "LR 1e-3"], null],
-  [["depth-4", "depth-6"], ["depth-4", "depth-6"], null],
+  [[...sweep, sweep[0]], ["4", "6", "8", "4"], "Depth … at 2e15 FLOPs"],
+  [["Depth 4 at 2e15 FLOPs", "Depth 6 at 2e15 FLOPs", "LR 3e-4 on SQuAD", "LR 1e-3 on SQuAD"], ["4", "6", "3e-4", "1e-3"], null],
+  [["depth-4", "depth-6"], ["4", "6"], "depth …"],
+  [["short-pipeline-sft-lr-x1", "short-pipeline-sft-lr-x2"], ["x1", "x2"], "short-pipeline-sft-lr …"],
+  [["lr-3e-4", "lr-1e-3"], ["3e-4", "1e-3"], "lr …"],
+  [["lr_3e-4", "lr_1e-3"], ["3e-4", "1e-3"], "lr …"],
+  [["scale_-0.5", "scale_+0.5"], ["-0.5", "+0.5"], "scale …"],
+  [["scale--0.5", "scale--1.5"], ["-0.5", "-1.5"], "scale …"],
+  [["Scale -0.5", "Scale -1.5"], ["-0.5", "-1.5"], "Scale …"],
+  [["scale-x0.5", "scale-x1.5"], ["x0.5", "x1.5"], "scale …"],
+  [["compute-2e15", "compute-3e15"], ["2e15", "3e15"], "compute …"],
+  [["run-small_lr-3e-4-eval", "run-large_lr-1e-3-eval"], ["small_lr-3e-4", "large_lr-1e-3"], "run … eval"],
+  [["lr-3e-4-eval", "lr-1e-4-eval"], ["3e-4", "1e-4"], "lr … eval"],
+  [["run--0.5-eval", "run--1.5-eval"], ["-0.5", "-1.5"], "run … eval"],
 ]) {
   test(`labels for ${JSON.stringify(titles)}`, () => {
     const named = shortLabels(titles);
@@ -60,10 +66,10 @@ const said = (models, titles = models.map((item) => item.run.id)) => {
 
 test("runs that differ by one setting and share a headline that says which way is better name the leader, its number bound to its value", () => {
   const models = [model("a", scored(1.31)), model("b", scored(1.21)), model("c", scored(1.27))];
-  assert.equal(said(models, depths(4, 6, 8)).text, "Depth 6 leads at val bpb **1.21**");
+  assert.equal(said(models, depths(4, 6, 8)).text, "6 leads at val bpb **1.21**");
   const higher = { acc: { label: "accuracy", digits: 2, better: "higher" } };
   const accurate = (value) => summary({ headline: { name: "acc", label: "accuracy", value, vs: null }, signals: higher });
-  assert.equal(said([model("a", accurate(0.5)), model("b", accurate(0.75))], ["LR 3e-4 on SQuAD", "LR 1e-3 on SQuAD"]).text, "LR 1e-3 leads at accuracy **0.75**");
+  assert.equal(said([model("a", accurate(0.5)), model("b", accurate(0.75))], ["LR 3e-4 on SQuAD", "LR 1e-3 on SQuAD"]).text, "1e-3 leads at accuracy **0.75**");
 });
 
 test("runs lead only within one label group; unrelated runs are counted", () => {
@@ -71,7 +77,7 @@ test("runs lead only within one label group; unrelated runs are counted", () => 
   // Unrelated titles share no setting to rank.
   assert.equal(said([model("a", scored(1.3)), model("b", scored(1.2))]).text, count(2));
   // An unrelated run with the same headline neither leads nor stops the sweep from leading.
-  assert.equal(said([model("a", scored(1.3)), model("b", scored(1.2)), model("c", scored(0.9))], [...depths(4, 6), "Tokenizer check"]).text, "Depth 6 leads at val bpb **1.20**");
+  assert.equal(said([model("a", scored(1.3)), model("b", scored(1.2)), model("c", scored(0.9))], [...depths(4, 6), "Tokenizer check"]).text, "6 leads at val bpb **1.20**");
   // Two sweeps that could each lead: the line can't say both, so it counts.
   const two = [model("a", scored(1.3)), model("b", scored(1.2)), model("c", scored(1.1)), model("d", scored(1.0))];
   assert.equal(said(two, [...depths(4, 6), "LR 3e-4 on SQuAD", "LR 1e-3 on SQuAD"]).text, count(4));
@@ -82,7 +88,7 @@ test("runs lead only within one label group; unrelated runs are counted", () => 
 test("once every run has finished the leader is said with that", () => {
   const done = { status: "done", endedAt: now };
   const models = [model("a", scored(1.3, { tone: "done" }), done), model("b", scored(1.2, { tone: "done" }), done)];
-  assert.equal(said(models, depths(4, 6)).text, "Depth 6 leads at val bpb **1.20**; all finished");
+  assert.equal(said(models, depths(4, 6)).text, "6 leads at val bpb **1.20**; all finished");
 });
 
 test("no leader without a declared direction, a shared headline, or two numbers", () => {
@@ -93,7 +99,7 @@ test("no leader without a declared direction, a shared headline, or two numbers"
   assert.equal(said([model("a", scored(1.3)), model("b", other)], depths(4, 6)).text, progress);
   assert.equal(said([model("a", scored(1.3)), model("b", scored("NaN"))], depths(4, 6)).text, progress);
   // A run with no headline yet neither leads nor stops the others from leading.
-  assert.equal(said([model("a", scored(1.3)), model("b", scored(1.2)), model("c", summary())], depths(4, 6, 8)).text, "Depth 6 leads at val bpb **1.20**");
+  assert.equal(said([model("a", scored(1.3)), model("b", scored(1.2)), model("c", summary())], depths(4, 6, 8)).text, "6 leads at val bpb **1.20**");
 });
 
 test("who needs attention comes first, before any leader", () => {
@@ -126,10 +132,10 @@ test("the watcher's summary stands for the runs its look covered, with names and
   const models = [model("a", scored(1.31, { bindings: { val_bpb: 1.31 } })), model("b", scored(1.207, { bindings: { val_bpb: 1.207 } }))];
   const watch = { lookId: "7", at: now, runIds: ["b", "a"], keys: { r1: "a", r2: "b" }, summary: { template: "{r2} leads at val bpb **{r2:val_bpb}**; {r1} is close behind." } };
   const { parts } = summarize(models, shortLabels(depths(4, 6)), watch, now);
-  assert.equal(bare(parts.map((part) => part.text).join("")), "Depth 6 leads at val bpb **1.21**; Depth 4 is close behind.");
+  assert.equal(bare(parts.map((part) => part.text).join("")), "6 leads at val bpb **1.21**; 4 is close behind.");
   // A look that missed a run now live, or a run that needs attention, gives the words back to orx.
   const third = [...models, model("c", summary())];
   assert.doesNotMatch(bare(summarize(third, shortLabels(depths(4, 6, 8)), watch, now).parts.map((part) => part.text).join("")), /close behind/);
   const failed = [models[0], model("b", scored(1.2, { tone: "failed" }), { status: "failed", endedAt: now })];
-  assert.match(bare(summarize(failed, shortLabels(depths(4, 6)), watch, now).parts[0].who ?? ""), /Depth 6/);
+  assert.match(bare(summarize(failed, shortLabels(depths(4, 6)), watch, now).parts[0].who ?? ""), /6/);
 });

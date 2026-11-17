@@ -191,7 +191,7 @@ test("several runs show one summary that opens into a row each, named by what se
   await settle();
   assert.ok(plain(container.textContent).includes("… at 2e15 FLOPs"), "the summary says what they share");
   assert.deepEqual(rows().map((row) => row.getAttribute("aria-label")), ["Depth 4 at 2e15 FLOPs", "Depth 6 at 2e15 FLOPs", "Depth 8 at 2e15 FLOPs"]);
-  assert.deepEqual(rows().map((row) => plain(row.querySelector('button[aria-haspopup="dialog"]').textContent).split(" · ")[0]), ["Depth 4", "Depth 6", "Depth 8"]);
+  assert.deepEqual(rows().map((row) => plain(row.querySelector('button[aria-haspopup="dialog"]').textContent).split(" · ")[0]), ["4", "6", "8"]);
   assert.ok(plain(rows()[0].querySelector('button[aria-haspopup="dialog"]').getAttribute("aria-label")).includes("Depth 4 at 2e15 FLOPs"), "the accessible name includes the whole title");
   assert.equal(requests.filter((r) => r.request.endsWith("/monitor")).length, 0, "closed rows read their summaries");
 
@@ -199,7 +199,7 @@ test("several runs show one summary that opens into a row each, named by what se
   const open = rows()[1];
   assert.ok(open.querySelector(`button[aria-label="${m.run_show_less()}"]`), "the row opened into its strip in place");
   assert.equal(document.activeElement, open.querySelector(`button[aria-label="${m.run_show_less()}"]`));
-  assert.ok(plain(open.querySelector('button[aria-haspopup="dialog"]').textContent).startsWith("Depth 6 · "));
+  assert.ok(plain(open.querySelector('button[aria-haspopup="dialog"]').textContent).startsWith("6 · "));
 
   await press("Escape");
   await settle();
@@ -240,7 +240,7 @@ test("a summary says who needs attention first, and a run waiting for a choice o
   await act(async () => workspace.queryClient.setQueryData(workspace.queries.listChatShownRunsQuery().queryKey, { source: "shown", runs: [sweep("r1", 4), { ...sweep("r2", 6), run: waiting }] }));
   await settle();
   const head = plain(find("button[aria-expanded]").textContent);
-  assert.ok(head.startsWith(plain(m.run_summary_attention({ name: "Depth 6", state: m.status_flagged() }))), head);
+  assert.ok(head.startsWith(plain(m.run_summary_attention({ name: "6", state: m.status_flagged() }))), head);
   assert.equal(rows().length, 2, "the rows opened");
   assert.ok(rows()[1].querySelector(`button[aria-label="${m.run_show_less()}"]`), "and so did the waiting run's strip");
 });
