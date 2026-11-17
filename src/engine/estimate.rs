@@ -9,6 +9,7 @@ pub(crate) struct Range {
 
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct Phase {
+    #[cfg(test)]
     pub name: String,
     pub total: Option<f64>,
     pub prior: Option<Range>,
@@ -202,6 +203,7 @@ pub(crate) struct Eta {
 
 #[derive(Debug)]
 pub(crate) struct Segment {
+    #[cfg(test)]
     pub name: String,
     pub weight: f64,
     pub fill: Option<f64>,
@@ -216,7 +218,9 @@ pub(crate) struct Cost {
     pub spend: Option<f64>,
     /// Allocated GPU count × payload-active hours, independent of billing setup.
     pub gpu_hours: Option<f64>,
+    #[cfg(test)]
     pub uncertain: bool,
+    #[cfg(test)]
     pub at: f64,
 }
 
@@ -628,6 +632,7 @@ pub(crate) fn estimate(input: &Input) -> Result<Output, InputError> {
         .iter()
         .enumerate()
         .map(|(i, p)| Segment {
+            #[cfg(test)]
             name: p.name.clone(),
             weight: if weights_estimated {
                 1.0 / phases.len() as f64
@@ -843,6 +848,7 @@ pub(crate) fn estimate(input: &Input) -> Result<Output, InputError> {
             .zip(spend)
             .map(|(machine, spend)| machine + spend)
     });
+    #[cfg(test)]
     let uncertain = !errors.is_empty()
         || matches!(input.spend, Spend::NeverReported)
         || input.contact_lost
@@ -895,7 +901,9 @@ pub(crate) fn estimate(input: &Input) -> Result<Output, InputError> {
             gpu_hours: gpu_count
                 .zip(elapsed)
                 .map(|(gpus, elapsed)| gpus * elapsed / 3_600_000.0),
+            #[cfg(test)]
             uncertain,
+            #[cfg(test)]
             at,
         },
     })
@@ -1100,6 +1108,7 @@ pub(crate) fn with_signals(
         as_of,
         contact_lost: run.contact_lost,
         phases: vec![Phase {
+            #[cfg(test)]
             name: String::new(),
             total: None,
             prior: None,
@@ -1130,6 +1139,7 @@ pub(crate) fn with_signals(
         input.phases = shown
             .iter()
             .map(|stage| Phase {
+                #[cfg(test)]
                 name: stage.name.clone(),
                 total: stage.of,
                 prior: prior(stage),
@@ -1191,7 +1201,10 @@ pub(crate) fn with_signals(
             .zip(phase.done)
             .is_some_and(|(of, done)| done >= of);
     if signals.several_bars() || full {
-        input.phases[0].name = phase.name.clone();
+        #[cfg(test)]
+        {
+            input.phases[0].name = phase.name.clone();
+        }
         return input;
     }
     if declared {
@@ -1203,6 +1216,7 @@ pub(crate) fn with_signals(
         .iter()
         .enumerate()
         .map(|(index, occurrence)| Phase {
+            #[cfg(test)]
             name: occurrence.name.clone(),
             total: occurrence.of,
             prior: plan
