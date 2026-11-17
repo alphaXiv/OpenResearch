@@ -581,22 +581,45 @@ fn harness_route_name(harness: &Value, id: &str, taken: &[String]) -> String {
     }
 }
 
-/// Whether the user turned `harness`, an entry of `/api/harnesses`, off in Settings → Agents. Only
-/// a found agent has a switch; turning OpenCode off drops just the providers it signed in to itself.
+/// Whether the user turned `harness`, an entry of `/api/harnesses`, off in Settings → Agents: an
+/// account by its profile id, any other agent by its own. OpenCode's providers have switches of
+/// their own ([`off_providers`]); its entry's answer is for clients that predate them.
 pub fn turned_off(harness: &Value, hidden: &[String]) -> bool {
-    let id = harness["id"].as_str().unwrap_or_default();
-    let kept_install =
-        harness["managed"] == true && !matches!(id, "claude-code" | "codex" | "opencode");
-    harness["profile"].is_null() && !kept_install && hidden.iter().any(|hidden| hidden == id)
+    let key = harness
+        .pointer("/profile/id")
+        .or_else(|| harness.get("id"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    hidden.iter().any(|hidden| hidden == key)
 }
 
-/// Remove routes belonging to found agents the user turned off, before model deduplication.
+/// The providers whose OpenCode models the user turned off: each `opencode:<id>` switched off,
+/// and every provider found in the user's own OpenCode while OpenCode itself is.
+pub fn off_providers(harness: &Value, hidden: &[String]) -> Vec<String> {
+    let mut off: Vec<String> = hidden
+        .iter()
+        .filter_map(|key| key.strip_prefix("opencode:"))
+        .filter(|id| *id != "opencode")
+        .map(str::to_string)
+        .collect();
+    if hidden.iter().any(|key| key == "opencode") {
+        let found = harness["foundProviders"].as_array().into_iter().flatten();
+        off.extend(found.filter_map(|found| found["id"].as_str().map(str::to_string)));
+    }
+    off.sort();
+    off.dedup();
+    off
+}
+
+/// Remove routes the user turned off, before model deduplication; naming one refuses delegation.
 pub fn filter_agents(
     catalog: &mut Value,
     hidden: &[String],
-    owned_providers: &[String],
     requested: Option<&str>,
 ) -> Result<(), String> {
+    let refusal = |route: &str| {
+        format!("Agent `{route}` is turned off in Settings → Agents. Choose another route or ask the user to turn it on.")
+    };
     let mut names = Vec::new();
     for harness in catalog["harnesses"].as_array_mut().into_iter().flatten() {
         let Some(id) = harness["id"].as_str().map(str::to_string) else {
@@ -606,39 +629,30 @@ pub fn filter_agents(
         if harness["agentReady"] == true {
             names.push(name.clone());
         }
+        if id == "opencode" && harness["profile"].is_null() {
+            let off = off_providers(harness, hidden);
+            if let Some(route) = requested.filter(|route| off.iter().any(|id| id == route)) {
+                return Err(refusal(route));
+            }
+            if let Some(entries) = harness["models"].as_array_mut() {
+                entries.retain(|entry| {
+                    let native = entry["id"].as_str().unwrap_or_default();
+                    let provider = native.split('/').next().unwrap_or(native);
+                    !off.iter().any(|id| id == provider)
+                });
+            }
+            continue;
+        }
         if !turned_off(harness, hidden) {
             continue;
         }
-        let refusal = |route| {
-            format!("Agent `{route}` is turned off in Settings → Agents. Choose another route or ask the user to turn it on.")
-        };
-        if let Some(route) =
-            requested.filter(|route| id != "opencode" && (*route == id || *route == name))
+        let profile = !harness["profile"].is_null();
+        if let Some(route) = requested.filter(|route| *route == name || (!profile && *route == id))
         {
             return Err(refusal(route));
         }
         if let Some(entries) = harness["models"].as_array_mut() {
-            if id != "opencode" {
-                entries.clear();
-                continue;
-            }
-            let is_owned = |entry: &Value| {
-                entry["id"].as_str().is_some_and(|native| {
-                    let provider = native.split('/').next().unwrap_or(native);
-                    provider == "opencode" || owned_providers.iter().any(|id| id == provider)
-                })
-            };
-            if let Some(route) = requested.filter(|route| {
-                entries.iter().any(|entry| {
-                    !is_owned(entry)
-                        && entry["id"]
-                            .as_str()
-                            .is_some_and(|id| id.split('/').next() == Some(*route))
-                })
-            }) {
-                return Err(refusal(route));
-            }
-            entries.retain(is_owned);
+            entries.clear();
         }
     }
     Ok(())
@@ -796,33 +810,43 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn hidden_agents_keep_profiles_and_managed_opencode_providers() {
-        let mut catalog = json!({"harnesses":[
+    fn every_agent_account_and_provider_has_a_switch() {
+        let catalog = json!({"harnesses":[
             {"id":"codex","agentReady":true,"models":[{"id":"gpt-6"}]},
             {"id":"codex","profile":{"id":"codex-work"},"agentReady":true,"models":[{"id":"gpt-6"}]},
-            {"id":"cursor","agentReady":true,"models":[{"id":"gpt-6"}]},
-            {"id":"acp:deepseek","name":"DeepSeek Harness","agentReady":true,"models":[{"id":"deepseek-v4"}]},
-            {"id":"opencode","agentReady":true,"models":[
+            {"id":"codex","profile":{"id":"codex-home"},"agentReady":true,"models":[{"id":"gpt-6"}]},
+            {"id":"cursor","managed":true,"agentReady":true,"models":[{"id":"gpt-6"}]},
+            {"id":"acp:deepseek","name":"DeepSeek Harness","managed":true,"agentReady":true,"models":[{"id":"deepseek-v4"}]},
+            {"id":"opencode","agentReady":true,"foundProviders":[{"id":"external-signin"},{"id":"tinker"}],"models":[
                 {"id":"own-key/gpt-6"}, {"id":"local-endpoint/gpt-6"},
                 {"id":"opencode/gpt-6-free"}, {"id":"opencode/gpt-6"},
-                {"id":"external-signin/gpt-6"}
+                {"id":"external-signin/gpt-6"}, {"id":"tinker/gpt-6"}
             ]}
         ]});
-        let hidden = ["codex", "cursor", "acp:deepseek", "opencode"].map(str::to_string);
-        let owned = ["own-key", "local-endpoint"].map(str::to_string);
+        let hidden = [
+            "codex",
+            "codex-work",
+            "cursor",
+            "acp:deepseek",
+            "opencode:own-key",
+            "opencode:tinker",
+        ]
+        .map(str::to_string);
         for route in [
             "codex",
+            "codex-work",
             "cursor",
             "acp:deepseek",
             "deepseek-harness",
-            "external-signin",
+            "own-key",
+            "tinker",
         ] {
-            let error =
-                filter_agents(&mut catalog.clone(), &hidden, &owned, Some(route)).unwrap_err();
+            let error = filter_agents(&mut catalog.clone(), &hidden, Some(route)).unwrap_err();
             assert_eq!(error, format!("Agent `{route}` is turned off in Settings → Agents. Choose another route or ask the user to turn it on."));
         }
-        filter_agents(&mut catalog, &hidden, &owned, Some("codex-work")).unwrap();
-        let visible = models(&catalog, &[]);
+        let mut filtered = catalog.clone();
+        filter_agents(&mut filtered, &hidden, Some("codex-home")).unwrap();
+        let visible = models(&filtered, &[]);
         let names: Vec<_> = visible[0]
             .routes
             .iter()
@@ -830,35 +854,52 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            ["codex-work", "opencode", "own-key", "local-endpoint"]
+            [
+                "codex-home",
+                "opencode",
+                "local-endpoint",
+                "external-signin"
+            ]
         );
-        assert!(visible[0].routes.iter().all(|route| !route.free));
         assert_eq!(
             resolve(&visible, "gpt-6", None).unwrap().profile.as_deref(),
-            Some("codex-work")
+            Some("codex-home")
         );
-        let free_only = models(&catalog, &["gpt@6".into()]);
+        let free_only = models(&filtered, &["gpt@6".into()]);
         assert_eq!(free_only[0].routes.len(), 1);
         assert!(free_only[0].routes[0].free);
-        filter_agents(&mut catalog, &hidden, &owned, Some("opencode")).unwrap();
-    }
 
-    #[test]
-    fn hidden_agents_keep_removable_managed_installs() {
-        let mut catalog = json!({"harnesses":[
-            {"id":"codex","managed":true,"agentReady":true,"models":[{"id":"gpt-6"}]},
-            {"id":"codex","managed":true,"profile":{"id":"codex-work"},"agentReady":true,"models":[{"id":"gpt-6"}]},
-            {"id":"cursor","managed":true,"agentReady":true,"models":[{"id":"gpt-6"}]},
-            {"id":"acp:dsh","name":"DeepSeek Harness","managed":true,"agentReady":true,"models":[{"id":"deepseek-v4"}]}
-        ]});
-        let hidden = ["codex", "cursor", "acp:dsh"].map(str::to_string);
-        assert!(filter_agents(&mut catalog.clone(), &hidden, &[], Some("codex")).is_err());
-        filter_agents(&mut catalog, &hidden, &[], Some("cursor")).unwrap();
-        let visible = models(&catalog, &[]);
-        assert!(resolve(&visible, "gpt-6", Some("cursor")).is_ok());
-        assert!(resolve(&visible, "gpt-6", Some("codex-work")).is_ok());
-        assert!(resolve(&visible, "gpt-6", Some("codex")).is_err());
-        assert!(resolve(&visible, "deepseek-v4", Some("deepseek-harness")).is_ok());
+        let opencode = &catalog["harnesses"][5];
+        assert!(!turned_off(opencode, &hidden));
+        assert_eq!(off_providers(opencode, &hidden), ["own-key", "tinker"]);
+        let legacy = ["opencode".to_string()];
+        assert!(turned_off(opencode, &legacy));
+        assert_eq!(
+            off_providers(opencode, &legacy),
+            ["external-signin", "tinker"]
+        );
+        let mut filtered = catalog.clone();
+        filter_agents(&mut filtered, &legacy, Some("opencode")).unwrap();
+        let routes: Vec<_> = models(&filtered, &[])
+            .into_iter()
+            .find(|model| model.id == "gpt-6")
+            .unwrap()
+            .routes
+            .iter()
+            .map(|route| route.name.clone())
+            .collect();
+        assert_eq!(
+            routes,
+            [
+                "codex",
+                "codex-work",
+                "codex-home",
+                "opencode",
+                "own-key",
+                "local-endpoint",
+                "cursor"
+            ]
+        );
     }
 
     #[test]

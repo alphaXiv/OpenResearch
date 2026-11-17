@@ -125,6 +125,7 @@ fn read_providers(path: &Path) -> Result<BTreeMap<String, Provider>> {
 }
 
 pub fn provider_list() -> Result<Value> {
+    let labels = crate::local::agent_profiles::labels()?;
     Ok(Value::Array(
         providers()?
             .into_iter()
@@ -132,6 +133,11 @@ pub fn provider_list() -> Result<Value> {
                 let mut item = json!({"id": id, "name": provider.name});
                 if let Some(icon) = provider.icon {
                     item["icon"] = icon;
+                }
+                if let Some(logo) =
+                    crate::local::agent_profiles::logo(&labels, &format!("opencode:{id}"))
+                {
+                    item["logo"] = logo;
                 }
                 match provider.credential {
                     ProviderCredential::Key { key, canonical, .. } => {
@@ -305,10 +311,13 @@ pub fn record_oauth(path: &Path, id: &str, name: String, icon: Option<Value>) ->
 }
 
 pub fn remove_provider(id: &str) -> Result<()> {
-    let _lock = WRITE_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-    let mut records = providers()?;
-    records.remove(id);
-    save_providers(&records)
+    {
+        let _lock = WRITE_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let mut records = providers()?;
+        records.remove(id);
+        save_providers(&records)?;
+    }
+    crate::local::agent_profiles::forget(&format!("opencode:{id}"))
 }
 
 fn save_providers(records: &BTreeMap<String, Provider>) -> Result<()> {
@@ -370,12 +379,21 @@ pub fn read() -> Result<BTreeMap<String, Connection>> {
 }
 
 pub fn list() -> Result<Value> {
+    let labels = crate::local::agent_profiles::labels()?;
     Ok(json!(read()?
         .into_iter()
-        .map(|(id, c)| json!({
-            "id": id, "name": c.name, "baseUrl": c.base_url,
-            "models": c.models, "hasApiKey": !c.api_key.is_empty(), "icon": c.icon
-        }))
+        .map(|(id, c)| {
+            let mut item = json!({
+                "id": id, "name": c.name, "baseUrl": c.base_url,
+                "models": c.models, "hasApiKey": !c.api_key.is_empty(), "icon": c.icon
+            });
+            if let Some(logo) =
+                crate::local::agent_profiles::logo(&labels, &format!("opencode:{id}"))
+            {
+                item["logo"] = logo;
+            }
+            item
+        })
         .collect::<Vec<_>>()))
 }
 
@@ -570,16 +588,19 @@ fn save(connections: &BTreeMap<String, Connection>) -> Result<()> {
 /// Removes one of a connection's models, or with none named the whole connection;
 /// a connection left without models goes too.
 pub fn remove(id: &str, model: Option<&str>) -> Result<()> {
-    let _lock = WRITE_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-    let mut connections = read()?;
-    if let (Some(model), Some(connection)) = (model, connections.get_mut(id)) {
-        connection.models.remove(model);
-        if !connection.models.is_empty() {
-            return save(&connections);
+    {
+        let _lock = WRITE_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let mut connections = read()?;
+        if let (Some(model), Some(connection)) = (model, connections.get_mut(id)) {
+            connection.models.remove(model);
+            if !connection.models.is_empty() {
+                return save(&connections);
+            }
         }
+        connections.remove(id);
+        save(&connections)?;
     }
-    connections.remove(id);
-    save(&connections)
+    crate::local::agent_profiles::forget(&format!("opencode:{id}"))
 }
 
 pub fn prepare_env(

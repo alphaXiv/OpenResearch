@@ -4,7 +4,7 @@ import { act, createElement } from "react";
 import { Onboarding } from "../src/components/Onboarding.tsx";
 import { ltr } from "../src/i18n.ts";
 import { m } from "../src/paraglide/messages.js";
-import { find, render, renderApp, serve, serveApp, settle, type } from "./render.mjs";
+import { clients, find, render, renderApp, serve, serveApp, settle, type } from "./render.mjs";
 import { model } from "./models.mjs";
 
 /** The page's sockets; a test plays the server's side on them. */
@@ -169,22 +169,32 @@ test("removing the provider added in the wizard starts the first chat elsewhere"
   await click(wizardButton("DeepSeek"));
   await type(find('[role="dialog"] input[type="password"]'), "sk-test");
   await click(wizardButton(m.onboarding_continue()));
+  const removeDeepSeek = () => document.querySelector(`button[aria-label="${m.settings_remove_agent({ name: ltr("DeepSeek") })}"]`);
+  assert.equal(removeDeepSeek(), null, "the provider lists once the wizard finishes");
   await click(wizardButton(m.add_agent_finish({ name: "DeepSeek" })));
 
-  await click(document.querySelector(`button[aria-label="${m.settings_remove_agent({ name: ltr("DeepSeek") })}"]`));
+  await click(removeDeepSeek());
   await click(find('[role="dialog"] button', m.chat_panel_remove()));
   await click(button(m.onboarding_continue()));
   const [write] = preferredAgentWrites(setup);
   assert.notEqual(write.preferredAgent.model, "deepseek/deepseek-v4", "a removed provider's model isn't the first chat's");
 });
 
-test("signing a Claude Code account in again from its row warns about a datacenter first", async () => {
-  await remoteSetup({ harnesses: [codex, claude(), { ...claude(), installed: true, authState: "needsLogin", profile: { id: "claude-work", name: "Claude Code 2" } }] });
-  await click(button(m.harness_setup_login()));
-  assert.equal(warnings(), 1);
-  await click(button(m.remote_claude_datacenter_continue()));
-  assert.equal(warnings(), 0);
-  assert.ok(find('[role="dialog"]', "Claude Code"), "the sign-in opens");
+test("an account lists once it is signed in and the wizard that adds it finishes", async () => {
+  const signedOut = { ...claude(), installed: true, authState: "needsLogin", profile: { id: "claude-old", name: "Claude Code 2" } };
+  const setup = await remoteSetup({ harnesses: [codex, claude(), signedOut] });
+  const row = (name) => document.querySelector(`button[aria-label="${m.settings_agent_use({ name })}"]`);
+  assert.equal(row("Claude Code 2"), null, "a signed-out account isn't listed");
+  assert.equal(button(m.harness_setup_login()), null);
+
+  await click(button("OpenAI Codex"));
+  // The wizard made the account and it signed in, but the wizard is still open.
+  setup.harnesses.push({ ...codex, profile: { id: "claude-work", name: "Codex 2" } });
+  await act(async () => { for (const client of clients) await client.invalidateQueries(); });
+  await settle();
+  assert.ok(find('[role="dialog"]', "Codex"), "the wizard is still open");
+  assert.equal(row("Codex 2"), null, "the account waits for its wizard");
+  await click(wizardButton(m.settings_page_cancel()));
 });
 
 test("a datacenter warning precedes a Claude sign-in once", async () => {

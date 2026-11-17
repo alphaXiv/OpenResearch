@@ -1106,6 +1106,7 @@ mod tests {
             configured_model: None,
             models: Vec::new(),
             options: crate::local::harness::HarnessOptions::none(),
+            found_providers: Vec::new(),
         }
     }
 

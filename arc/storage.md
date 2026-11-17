@@ -68,7 +68,8 @@ Claude Code, Codex and Cursor use isolated homes; OpenCode uses its own session 
 Claude Code and Codex profiles keep private sign-ins under `agents/profiles`,
 with their names and icons in owner-only `agent-profiles.json`; their transcript
 directories link into the harness's shared orx home. Owner-only `agent-labels.json`
-stores names and icons the user gives agents found on this computer. Removing a profile leaves
+stores names and icons the user gives agents and OpenCode providers found on this
+computer, and the logo pinned on any row. Removing a profile leaves
 those transcripts intact. Chats created before isolation existed keep resolving
 to the user's own stores. Because these homes hold live SQLite files, a
 data-directory move first shuts down every idle agent process.

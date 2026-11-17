@@ -7,6 +7,7 @@ import { m } from "../src/paraglide/messages.js";
 import { assistantMessage, codex, composer, deferred, emit, renderChat, session, userMessage } from "./chat.mjs";
 import { clients, find, press, render, renderApp, serve, serveApp, settle, type } from "./render.mjs";
 import { model } from "./models.mjs";
+import { ltr } from "../src/i18n.ts";
 
 const click = async (element) => {
   await act(async () => element.click());
@@ -85,8 +86,8 @@ test("agent settings list what works, OpenResearch's accounts and installs, and 
 
   harnesses = harnesses.map((h) => h.id === "claude-code" && !h.profile ? { ...h, agentReady: true } : h);
   await refresh();
-  // What OpenResearch keeps lists first, then what it found.
-  assert.deepEqual(rows(), ["claude-0123456789", "acp:custom", "claude-code"]);
+  // One list: each agent's own entry, then the accounts OpenResearch keeps for it.
+  assert.deepEqual(rows(), ["claude-code", "claude-0123456789", "acp:custom"]);
 
   // An agent OpenResearch installed for itself is kept, signed in or not; its copy of Codex stands in for the user's.
   harnesses = [...harnesses.filter((h) => h.id !== "codex"), harness("antigravity", { managed: true, agentReady: false }), harness("codex", { managed: true, agentReady: false })];
@@ -96,8 +97,8 @@ test("agent settings list what works, OpenResearch's accounts and installs, and 
 });
 
 /** Settings → Agents over `harnesses`, with the free models switched off; records each preference written. */
-async function agentSwitches(harnesses) {
-  let uiState = { onboardingCompleted: true, hiddenAgents: [], hiddenModels: [], modelSectionOrder: [], opencodeFreeModels: false };
+async function agentSwitches(harnesses, hiddenAgents = []) {
+  let uiState = { onboardingCompleted: true, hiddenAgents, hiddenModels: [], modelSectionOrder: [], opencodeFreeModels: false };
   const state = { writes: [], harnessReads: 0 };
   serveApp({
     "GET /api/projects": () => ({ projects: [{ id: "p", name: "Project" }] }),
@@ -145,12 +146,89 @@ test("the free models come back on with the last other agent turned off, and sta
   assert.equal(freeModels().getAttribute("aria-disabled"), null);
 });
 
-test("a provider signed in to in OpenCode itself is listed, and switching it off brings the free models back", async () => {
+test("a provider signed in to in OpenCode itself has its own row, and switching it off brings the free models back", async () => {
   // Signed in through the environment, so OpenCode lists its models but names no account for it.
   const state = await agentSwitches([opencodeWith("opencode/big-pickle", "deepseek/deepseek-v4")]);
-  assert.ok(agentSwitch("OpenCode"), "OpenCode's own sign-ins have a row");
-  await click(agentSwitch("OpenCode"));
-  assert.deepEqual(state.writes, [{ hiddenAgents: ["opencode"], opencodeFreeModels: true }]);
+  assert.equal(agentSwitch("OpenCode"), null, "OpenCode stands behind its providers");
+  await click(agentSwitch("DeepSeek"));
+  assert.deepEqual(state.writes, [{ hiddenAgents: ["opencode:deepseek"], opencodeFreeModels: true }]);
+});
+
+const tinker = {
+  id: "tinker", npm: "@ai-sdk/openai-compatible", env: ["TINKER_API_KEY"], sources: ["config"], removable: true,
+  baseUrl: "https://tinker.thinkingmachines.dev/services/tinker-prod/oai/api/v1", configPath: "/home/me/.config/opencode/opencode.json",
+};
+const thinkingMachines = { id: "thinkingmachines", env: ["TINKER_API_KEY"], sources: ["env"], removable: false };
+const opencodeFound = (offProviders) => ({
+  ...opencodeWith("tinker/thinkingmachines/Inkling-Small", "thinkingmachines/thinkingmachines/Inkling", "openrouter/qwen"),
+  foundProviders: [{ id: "openrouter", sources: ["auth"], removable: true }, thinkingMachines, tinker],
+  ...(offProviders ? { offProviders } : {}),
+});
+
+test("providers set up in OpenCode each get a row named for what they are, a switch, and Remove where OpenResearch can delete them", async () => {
+  const removed = [];
+  serveApp({
+    "GET /api/projects": () => ({ projects: [{ id: "p", name: "Project" }] }),
+    "GET /api/settings/ui-state": () => ({ onboardingCompleted: true, hiddenAgents: [], hiddenModels: [], modelSectionOrder: [], opencodeFreeModels: true }),
+    "GET /api/harnesses": () => ({ harnesses: [codex, opencodeFound()] }),
+    "GET /api/harnesses/acp": () => [],
+    "GET /api/harnesses/acp/presets": () => [],
+    "GET /api/harnesses/setup/commands": () => ({}),
+    "GET /api/opencode/providers": () => [],
+    "GET /api/local-models": () => [],
+    "DELETE /api/opencode/found-providers/tinker": () => { removed.push("tinker"); return { ok: true }; },
+  });
+  await renderApp("/projects/p/settings/harnesses");
+  for (const name of ["OpenRouter", "Thinking Machines", "Tinker"]) assert.ok(agentSwitch(name), name);
+
+  const row = (name) => agentSwitch(name).closest(".settings-card");
+  const button = (scope, text) => [...scope.querySelectorAll("button")].find((element) => element.textContent === text);
+  await click(row("Tinker").querySelector("button[aria-expanded]"));
+  assert.ok(row("Tinker").textContent.includes("tinker.thinkingmachines.dev"), "its address shows");
+  await click(button(row("Tinker"), m.chat_panel_remove()));
+  assert.ok(document.body.textContent.includes(m.settings_remove_found_description()), "the confirm says it leaves OpenCode too");
+  await click(button(find('[role="dialog"]', m.settings_remove_found_description()), m.chat_panel_remove()));
+  assert.deepEqual(removed, ["tinker"]);
+
+  await click(row("Thinking Machines").querySelector("button[aria-expanded]"));
+  assert.ok(row("Thinking Machines").textContent.includes(m.settings_found_env_note({ name: ltr("TINKER_API_KEY") })), "a key from the environment says where to remove it");
+  assert.equal(button(row("Thinking Machines"), m.chat_panel_remove()), undefined);
+});
+
+test("any row can pin a logo from the icon picker", async () => {
+  const patches = [];
+  serveApp({
+    "GET /api/projects": () => ({ projects: [{ id: "p", name: "Project" }] }),
+    "GET /api/settings/ui-state": () => ({ onboardingCompleted: true, hiddenAgents: [], hiddenModels: [], modelSectionOrder: [], opencodeFreeModels: true }),
+    "GET /api/harnesses": () => ({ harnesses: [codex, opencodeFound()] }),
+    "GET /api/harnesses/acp": () => [],
+    "GET /api/harnesses/acp/presets": () => [],
+    "GET /api/harnesses/setup/commands": () => ({}),
+    "GET /api/opencode/providers": () => [],
+    "GET /api/local-models": () => [],
+    "PATCH /api/agents/opencode%3Atinker": (init) => { patches.push(JSON.parse(init.body)); return {}; },
+  });
+  await renderApp("/projects/p/settings/harnesses");
+  const row = agentSwitch("Tinker").closest(".settings-card");
+  await click(row.querySelector("button[aria-expanded]"));
+  await click(row.querySelector(`button[aria-label="${m.icon_change()}"]`));
+  await click(find("button[aria-pressed]", m.icon_tab_logos()));
+  await click(document.querySelector(`[role="radio"][aria-label="OpenRouter"]`));
+  assert.deepEqual(patches, [{ icon: { brand: true }, logo: "openrouter" }]);
+});
+
+test("turning one provider back on from the old all-at-once OpenCode switch keeps the others off", async () => {
+  const state = await agentSwitches([codex, { ...opencodeFound(), off: true }], ["opencode"]);
+  assert.equal(agentSwitch("OpenRouter").getAttribute("aria-checked"), "false");
+  await click(agentSwitch("OpenRouter"));
+  assert.deepEqual(state.writes, [{ hiddenAgents: ["opencode:thinkingmachines", "opencode:tinker"] }]);
+});
+
+test("accounts OpenResearch keeps have switches too", async () => {
+  const work = { ...codex, profile: { id: "codex-0123456789", name: "Work" } };
+  const state = await agentSwitches([codex, work]);
+  await click(agentSwitch("Work"));
+  assert.deepEqual(state.writes, [{ hiddenAgents: ["codex-0123456789"] }]);
 });
 
 test("the free models name two models a user may know", async () => {

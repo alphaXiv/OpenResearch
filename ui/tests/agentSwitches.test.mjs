@@ -14,11 +14,51 @@ const harnesses = [
 ];
 const providers = [{ id: "anthropic", name: "Anthropic" }];
 
-test("OpenCode turned off drops only the sign-ins made in OpenCode itself, unless it is the one picked", () => {
+test("OpenCode turned off by an older server drops only the sign-ins made in OpenCode itself, unless one is picked", () => {
   const keys = (kept) => pickerAgents(harnesses, providers, [], kept).map((agent) => agent.key).sort();
   const records = ["codex", "codex-work", "cursor", "antigravity", "opencode:anthropic", "opencode:opencode"];
   assert.deepEqual(keys(), records.sort());
-  assert.deepEqual(keys("opencode"), [...records, "opencode:github-copilot"].sort());
+  assert.deepEqual(keys({ harness: "opencode", profile: null, model: "github-copilot/gpt" }), [...records, "opencode:github-copilot"].sort());
+});
+
+test("each account and OpenCode provider turns off on its own, unless it is the one picked", () => {
+  const opencode = {
+    ...harness("opencode", { models: [model("anthropic/opus"), model("tinker/inkling"), model("opencode/free")] }),
+    foundProviders: [{ id: "tinker", sources: ["config"], removable: true }],
+    offProviders: ["anthropic", "tinker"],
+  };
+  const agents = [harness("codex"), harness("codex", { off: true, profile: { id: "codex-work", name: "Work" } }), opencode];
+  const keys = (kept) => pickerAgents(agents, providers, [], kept).map((agent) => agent.key).sort();
+  assert.deepEqual(keys(), ["codex", "opencode:opencode"]);
+  assert.deepEqual(keys({ harness: "codex", profile: "codex-work", model: null }), ["codex", "codex-work", "opencode:opencode"]);
+  assert.deepEqual(keys({ harness: "opencode", profile: null, model: "tinker/inkling" }), ["codex", "opencode:opencode", "opencode:tinker"]);
+});
+
+test("a provider found in OpenCode is named and marked by what it points at", async () => {
+  const { foundProviderMark } = await import("../src/components/pickerAgents.tsx");
+  const { guessLogo, hostLogo } = await import("../src/components/providerIdentity.tsx");
+  const name = (provider) => foundProviderMark({ sources: ["config"], removable: false, ...provider }).name;
+  assert.equal(name({ id: "thinkingmachines" }), "Thinking Machines");
+  assert.equal(name({ id: "tinker" }), "Tinker");
+  assert.equal(name({ id: "or", baseUrl: "https://openrouter.ai/api/v1" }), "OpenRouter");
+  assert.equal(name({ id: "my-router", name: "Team router" }), "Team router");
+  assert.equal(name({ id: "my-router", label: { name: "Mine" } }), "Mine");
+
+  assert.equal(guessLogo("TINKER_API_KEY"), "thinkingmachines");
+  assert.equal(guessLogo("thinking-machines"), "thinkingmachines");
+  assert.equal(guessLogo("azure-work"), "microsoft");
+  assert.equal(guessLogo("deep seek"), "deepseek");
+  assert.equal(guessLogo("my-router"), undefined);
+  assert.equal(hostLogo("https://tinker.thinkingmachines.dev/services/tinker-prod/oai/api/v1"), "thinkingmachines");
+  assert.equal(hostLogo("https://my-team.openai.azure.com/openai"), "microsoft");
+  assert.equal(hostLogo("https://bedrock-runtime.us-east-1.amazonaws.com"), "bedrock");
+  assert.equal(hostLogo("https://api.example-router.io/v1"), undefined);
+
+  // A provider no logo knows wears a glyph on a colour of its own, the same each time.
+  const icon = (id) => foundProviderMark({ id, sources: ["config"], removable: false, baseUrl: "https://api.example-router.io/v1" }).icon;
+  assert.ok(icon("my-router").color);
+  assert.deepEqual(icon("my-router"), icon("my-router"));
+  assert.equal(foundProviderMark({ id: "thinkingmachines", sources: ["env"], removable: false }).icon.color, undefined);
 });
 
 test("an agent's model count counts the picker's lines, older versions last", () => {

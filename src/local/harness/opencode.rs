@@ -227,16 +227,6 @@ impl OpenCode {
         // but this process may not. Measured, not assumed: `opencode models`
         // still lists free/bundled models when signed out, so a non-empty
         // model list can't stand in for a credential.
-        const PROVIDER_KEYS: &[(&str, &str)] = &[
-            ("anthropic", "ANTHROPIC_API_KEY"),
-            ("openai", "OPENAI_API_KEY"),
-            ("openrouter", "OPENROUTER_API_KEY"),
-            ("google", "GEMINI_API_KEY"),
-            ("google", "GOOGLE_API_KEY"),
-            ("groq", "GROQ_API_KEY"),
-            ("xai", "XAI_API_KEY"),
-            ("deepseek", "DEEPSEEK_API_KEY"),
-        ];
         if !info.authenticated
             && (crate::local::local_models::configures_remote()
                 || PROVIDER_KEYS.iter().any(|(id, key)| {
@@ -386,11 +376,16 @@ impl Harness for OpenCode {
     }
 
     async fn detect(&self) -> Option<HarnessInfo> {
-        self.detect_at(false).await
+        let mut info = self.detect_at(false).await?;
+        info.found_providers =
+            found_providers(info.models.iter().map(|model| model_provider(&model.id)));
+        Some(info)
     }
 
     async fn detect_snapshot(&self) -> Option<HarnessInfo> {
-        self.detect_at(true).await
+        let mut info = self.detect_at(true).await?;
+        info.found_providers = found_providers([]);
+        Some(info)
     }
 
     async fn run_turn(&self, ctx: &mut TurnCtx) -> TurnResult {
@@ -481,6 +476,373 @@ fn opencode_auth_path() -> Option<PathBuf> {
     Some(crate::config::test_contained(
         base.join("opencode").join("auth.json"),
     ))
+}
+
+/// Built-in providers OpenCode activates from a key in the environment, which writes no auth.json.
+const PROVIDER_KEYS: &[(&str, &str)] = &[
+    ("anthropic", "ANTHROPIC_API_KEY"),
+    ("openai", "OPENAI_API_KEY"),
+    ("openrouter", "OPENROUTER_API_KEY"),
+    ("google", "GEMINI_API_KEY"),
+    ("google", "GOOGLE_API_KEY"),
+    ("groq", "GROQ_API_KEY"),
+    ("xai", "XAI_API_KEY"),
+    ("deepseek", "DEEPSEEK_API_KEY"),
+    ("thinkingmachines", "TINKER_API_KEY"),
+];
+
+/// A provider set up in the user's own OpenCode rather than by OpenResearch.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FoundProvider {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub npm: Option<String>,
+    /// The variables that hold its key: its config's own list, else the ones OpenCode reads.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<String>,
+    pub sources: Vec<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_path: Option<PathBuf>,
+    /// Deleting it from the user's OpenCode would succeed.
+    pub removable: bool,
+}
+
+/// One layer of the user's own OpenCode configuration.
+struct UserConfig {
+    /// `None` for `OPENCODE_CONFIG_CONTENT`.
+    path: Option<PathBuf>,
+    value: Value,
+    /// Strict JSON, which a rewrite keeps whole.
+    rewritable: bool,
+}
+
+/// The user's OpenCode configuration as they wrote it, without the inline content orx gives its
+/// own children: the stock directory, `OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR` and
+/// `OPENCODE_CONFIG_CONTENT`, later layers overriding earlier ones. Layers orx can't read or
+/// parse come back as errors beside the rest.
+fn user_configs() -> (Vec<UserConfig>, Vec<String>) {
+    let stock = super::xdg_config_home().join("opencode");
+    let custom = crate::config::env_path("OPENCODE_CONFIG").map(crate::config::test_contained);
+    let dir = crate::config::env_path("OPENCODE_CONFIG_DIR").map(crate::config::test_contained);
+    let files = [stock.join("opencode.json"), stock.join("opencode.jsonc")]
+        .into_iter()
+        .chain(custom)
+        .chain(
+            dir.into_iter()
+                .flat_map(|dir| [dir.join("opencode.json"), dir.join("opencode.jsonc")]),
+        );
+    let mut layers: Vec<UserConfig> = Vec::new();
+    let mut unread = Vec::new();
+    for path in files {
+        if layers
+            .iter()
+            .any(|layer| layer.path.as_ref() == Some(&path))
+        {
+            continue;
+        }
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                unread.push(format!("Could not read {}: {error}", path.display()));
+                continue;
+            }
+        };
+        let strict = serde_json::from_str::<Value>(&text).ok();
+        let rewritable = strict.is_some();
+        match strict.or_else(|| parse_jsonc(&text)) {
+            Some(value) => layers.push(UserConfig {
+                path: Some(path),
+                value,
+                rewritable,
+            }),
+            None => unread.push(format!(
+                "{} is not a valid OpenCode config. Fix it, then try again.",
+                path.display()
+            )),
+        }
+    }
+    if let Some(value) = crate::local::shell_env::var("OPENCODE_CONFIG_CONTENT")
+        .and_then(|content| parse_jsonc(&content.to_string_lossy()))
+    {
+        layers.push(UserConfig {
+            path: None,
+            value,
+            rewritable: false,
+        });
+    }
+    (layers, unread)
+}
+
+/// JSON with the comments and trailing commas OpenCode's config parser accepts.
+fn parse_jsonc(text: &str) -> Option<Value> {
+    let uncommented = outside_strings(text, |c, rest, out| match c {
+        '/' if rest.peek() == Some(&'/') => {
+            out.extend(rest.by_ref().find(|c| *c == '\n'));
+        }
+        '/' if rest.peek() == Some(&'*') => {
+            rest.next();
+            let mut last = ' ';
+            for c in rest.by_ref() {
+                if last == '*' && c == '/' {
+                    break;
+                }
+                last = c;
+            }
+            out.push(' ');
+        }
+        _ => out.push(c),
+    });
+    let strict = outside_strings(&uncommented, |c, rest, out| {
+        let trailing =
+            c == ',' && matches!(rest.clone().find(|c| !c.is_whitespace()), Some('}' | ']'));
+        if !trailing {
+            out.push(c);
+        }
+    });
+    serde_json::from_str(&strict).ok().filter(Value::is_object)
+}
+
+/// Copies `text`, passing each character outside a JSON string to `step`.
+fn outside_strings(
+    text: &str,
+    mut step: impl FnMut(char, &mut std::iter::Peekable<std::str::Chars>, &mut String),
+) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '"' {
+            step(c, &mut chars, &mut out);
+            continue;
+        }
+        out.push(c);
+        while let Some(c) = chars.next() {
+            out.push(c);
+            match c {
+                '\\' => out.extend(chars.next()),
+                '"' => break,
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// Providers set up in the user's own OpenCode that no record or endpoint of OpenResearch's
+/// stands for: its sign-ins, its config's provider blocks, keys in the environment, and any other
+/// provider `catalog` lists models from.
+fn found_providers<'a>(catalog: impl IntoIterator<Item = &'a str>) -> Vec<FoundProvider> {
+    let (layers, _) = user_configs();
+    let records = crate::local::local_models::providers().unwrap_or_default();
+    let endpoints = crate::local::local_models::read().unwrap_or_default();
+    let owned =
+        |id: &str| id == "opencode" || endpoints.contains_key(id) || records.contains_key(id);
+    let mut gates = json!({});
+    for layer in &layers {
+        for key in ["enabled_providers", "disabled_providers"] {
+            if let Some(list) = layer.value.get(key) {
+                gates[key] = list.clone();
+            }
+        }
+    }
+
+    let skip = |id: &str| owned(id) || !provider_enabled(&gates, id);
+    let mut found = std::collections::BTreeMap::new();
+    for id in opencode_providers() {
+        if !skip(&id) {
+            add_source(&mut found, &id, "auth");
+        }
+    }
+    for layer in &layers {
+        for (group, base_url, package) in CONFIG_GROUPS {
+            let blocks = layer.value.get(group).and_then(Value::as_object);
+            for (id, block) in blocks.into_iter().flatten().filter(|(id, _)| !skip(id)) {
+                let entry = add_source(&mut found, id, "config");
+                let text = |pointer| block.pointer(pointer).and_then(Value::as_str);
+                if let Some(name) = text("/name") {
+                    entry.name = Some(name.to_owned());
+                }
+                if let Some(url) = text(base_url) {
+                    entry.base_url = Some(url.to_owned());
+                }
+                if let Some(npm) = text(package) {
+                    entry.npm = Some(npm.to_owned());
+                }
+                if let Some(env) = block.get("env").and_then(Value::as_array) {
+                    entry.env = env
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect();
+                }
+                if entry.config_path.is_none() {
+                    entry.config_path.clone_from(&layer.path);
+                }
+                entry.removable &= layer.rewritable;
+            }
+        }
+    }
+    for (id, key) in PROVIDER_KEYS {
+        if !skip(id) && super::detect::api_key(key).is_some() {
+            let entry = add_source(&mut found, id, "env");
+            entry.removable = false;
+            if !entry.sources.contains(&"config") {
+                entry.env.push((*key).to_owned());
+            }
+        }
+    }
+    for id in catalog {
+        if !skip(id) && !found.contains_key(id) {
+            add_source(&mut found, id, "catalog").removable = false;
+        }
+    }
+    found.into_values().collect()
+}
+
+/// The config groups that set up a provider, with where each keeps its address and package:
+/// OpenCode 1's `provider` and OpenCode 2's `providers`.
+const CONFIG_GROUPS: [(&str, &str, &str); 2] = [
+    ("provider", "/options/baseURL", "/npm"),
+    ("providers", "/settings/baseURL", "/package"),
+];
+
+/// A provider id as OpenCode accepts one: any key of its config or auth.json that is not a path.
+pub(crate) fn is_found_provider_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id != "opencode"
+        && !id.contains('/')
+        && !id.chars().any(char::is_control)
+}
+
+fn add_source<'a>(
+    found: &'a mut std::collections::BTreeMap<String, FoundProvider>,
+    id: &str,
+    source: &'static str,
+) -> &'a mut FoundProvider {
+    let entry = found.entry(id.to_owned()).or_insert_with(|| FoundProvider {
+        id: id.to_owned(),
+        name: None,
+        base_url: None,
+        npm: None,
+        env: Vec::new(),
+        sources: Vec::new(),
+        config_path: None,
+        removable: true,
+    });
+    if !entry.sources.contains(&source) {
+        entry.sources.push(source);
+    }
+    entry
+}
+
+/// Deletes `found` from the user's own OpenCode: its sign-in in auth.json and its provider block
+/// in each config file. Changes nothing unless every source can go, so a provider that stays set
+/// up by something orx cannot edit keeps its sign-in too.
+pub(crate) fn delete_found_provider(id: &str) -> Result<()> {
+    static REWRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _lock = REWRITE.lock().unwrap_or_else(|error| error.into_inner());
+    let (layers, unread) = user_configs();
+    if let Some(problem) = unread.into_iter().next() {
+        return Err(anyhow!("{problem}"));
+    }
+    let found = found_providers([])
+        .into_iter()
+        .find(|found| found.id == id)
+        .ok_or_else(|| FoundProviderGone(id.to_owned()))?;
+    if let Some((_, var)) = PROVIDER_KEYS
+        .iter()
+        .find(|(provider, key)| *provider == id && super::detect::api_key(key).is_some())
+    {
+        return Err(anyhow!(
+            "`{var}` in your environment provides {id}. Remove it there, or turn this provider off."
+        ));
+    }
+    let defines = |config: &Value| {
+        CONFIG_GROUPS.iter().any(|(group, ..)| {
+            config
+                .get(group)
+                .and_then(|blocks| blocks.get(id))
+                .is_some()
+        })
+    };
+    let layers: Vec<_> = layers
+        .into_iter()
+        .filter(|layer| defines(&layer.value))
+        .collect();
+    for layer in &layers {
+        if layer.rewritable {
+            continue;
+        }
+        return Err(match &layer.path {
+            Some(path) => anyhow!(
+                "OpenResearch can't edit {} because it has comments. Remove the `{id}` provider there, then re-check OpenCode.",
+                path.display()
+            ),
+            None => anyhow!(
+                "`OPENCODE_CONFIG_CONTENT` in your environment sets up {id}. Remove it there, or turn this provider off."
+            ),
+        });
+    }
+    for path in layers.iter().filter_map(|layer| layer.path.as_ref()) {
+        rewrite_json(path, None, |config| {
+            for (group, ..) in CONFIG_GROUPS {
+                if let Some(blocks) = config.get_mut(group).and_then(Value::as_object_mut) {
+                    blocks.retain(|key, _| key != id);
+                }
+            }
+        })?;
+    }
+    if found.sources.contains(&"auth") {
+        if let Some(path) = opencode_auth_path() {
+            rewrite_json(&path, Some(0o600), |auth| {
+                if let Some(auth) = auth.as_object_mut() {
+                    auth.retain(|key, _| key != id);
+                }
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// No source orx can edit sets up this provider any more.
+#[derive(Debug)]
+pub struct FoundProviderGone(String);
+
+impl std::fmt::Display for FoundProviderGone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "OpenResearch can't find where your OpenCode sets up {}. Remove it in OpenCode, or turn this provider off.",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for FoundProviderGone {}
+
+/// Rewrites a JSON file of the user's in place, through a link to the file it names.
+fn rewrite_json(path: &Path, mode: Option<u32>, change: impl FnOnce(&mut Value)) -> Result<()> {
+    let path = std::fs::canonicalize(path)
+        .map_err(|error| anyhow!("Could not read {}: {error}", path.display()))?;
+    let text = std::fs::read_to_string(&path)
+        .map_err(|error| anyhow!("Could not read {}: {error}", path.display()))?;
+    let mut value: Value = serde_json::from_str(&text).map_err(|error| {
+        anyhow!(
+            "{} is not valid JSON ({error}). Fix it, then try again.",
+            path.display()
+        )
+    })?;
+    change(&mut value);
+    let mut bytes = serde_json::to_vec_pretty(&value)?;
+    bytes.push(b'\n');
+    crate::local::git::atomic_write_with_mode(&path, &bytes, mode)
+        .map_err(|error| anyhow!("Could not write {}: {error}", path.display()))
 }
 
 /// The cheap config read for the snapshot pass: `OPENCODE_CONFIG_CONTENT`,
@@ -2242,6 +2604,194 @@ mod tests {
             assert!(error.to_string().contains("model"), "{error}");
             assert!(!error.to_string().contains("No such file"), "{error}");
         }
+    }
+
+    #[test]
+    fn found_providers_come_from_the_users_own_opencode() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let dir = super::super::xdg_config_home().join("opencode");
+        std::fs::create_dir_all(&dir).unwrap();
+        let json = dir.join("opencode.json");
+        std::fs::write(
+            &json,
+            r#"{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "tinker/gpt-oss",
+  "provider": {
+    "tinker": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Tinker",
+      "options": {"baseURL": "https://tinker.thinkingmachines.dev/services/tinker-prod/oai/api/v1", "apiKey": "{env:TINKER_API_KEY}"},
+      "env": ["TINKER_API_KEY"],
+      "models": {"gpt-oss": {}}
+    },
+    "switched-off": {"options": {"baseURL": "https://example.com/v1"}}
+  },
+  "providers": {
+    "team_router": {"name": "Team router", "package": "@ai-sdk/openai-compatible", "settings": {"baseURL": "https://llm.example.edu/v1"}}
+  },
+  "disabled_providers": ["switched-off"]
+}"#,
+        )
+        .unwrap();
+        let jsonc = dir.join("opencode.jsonc");
+        std::fs::write(
+            &jsonc,
+            "{\n  // a lab box\n  \"provider\": {\"commented\": {\"name\": \"Lab, \\\"quoted\\\" // not a comment\"},},\n  /* done */\n}\n",
+        )
+        .unwrap();
+        let auth = opencode_auth_path().unwrap();
+        std::fs::create_dir_all(auth.parent().unwrap()).unwrap();
+        std::fs::write(
+            &auth,
+            r#"{"openrouter":{"type":"api","key":"one"},"github-copilot":{"type":"oauth"},"anthropic":{"type":"api","key":"two"},"openai":{"type":"api","key":"three"}}"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&auth, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let records = crate::local::local_models::providers_path();
+        std::fs::create_dir_all(records.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(crate::store::data_dir()).unwrap();
+        std::fs::write(
+            records,
+            r#"{"openai":{"kind":"key","key":"sk-test","name":"OpenAI"},"anthropic-abc123":{"kind":"key","key":"sk-test","canonical":"anthropic","name":"Second"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            crate::store::data_dir().join("local-models.json"),
+            r#"{"orx-local-1":{"name":"Box","baseUrl":"http://127.0.0.1:1234/v1","models":{"m":4096}}}"#,
+        )
+        .unwrap();
+        std::env::set_var("TINKER_API_KEY", "fixture-only");
+        std::env::set_var("XAI_API_KEY", "fixture-only");
+
+        let snapshot = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(OpenCode.detect_snapshot())
+            .unwrap();
+        assert!(snapshot
+            .found_providers
+            .iter()
+            .any(|found| found.id == "tinker"));
+        let found = found_providers(["mistral", "opencode", "orx-local-1", "tinker", "openai"]);
+        let shown = serde_json::to_value(&found).unwrap();
+        assert_eq!(
+            shown,
+            json!([
+                {"id":"anthropic","sources":["auth"],"removable":true},
+                {"id":"commented","name":"Lab, \"quoted\" // not a comment","sources":["config"],"configPath":jsonc,"removable":false},
+                {"id":"github-copilot","sources":["auth"],"removable":true},
+                {"id":"mistral","sources":["catalog"],"removable":false},
+                {"id":"openrouter","sources":["auth"],"removable":true},
+                {"id":"team_router","name":"Team router","baseUrl":"https://llm.example.edu/v1","npm":"@ai-sdk/openai-compatible","sources":["config"],"configPath":json,"removable":true},
+                {"id":"thinkingmachines","env":["TINKER_API_KEY"],"sources":["env"],"removable":false},
+                {"id":"tinker","name":"Tinker","baseUrl":"https://tinker.thinkingmachines.dev/services/tinker-prod/oai/api/v1","npm":"@ai-sdk/openai-compatible","env":["TINKER_API_KEY"],"sources":["config"],"configPath":json,"removable":true},
+                {"id":"xai","env":["XAI_API_KEY"],"sources":["env"],"removable":false}
+            ])
+        );
+
+        let refused = |id: &str| delete_found_provider(id).unwrap_err().to_string();
+        assert_eq!(
+            refused("xai"),
+            "`XAI_API_KEY` in your environment provides xai. Remove it there, or turn this provider off."
+        );
+        assert_eq!(
+            refused("commented"),
+            format!("OpenResearch can't edit {} because it has comments. Remove the `commented` provider there, then re-check OpenCode.", jsonc.display())
+        );
+        let gone = delete_found_provider("mistral").unwrap_err();
+        assert!(gone.downcast_ref::<FoundProviderGone>().is_some(), "{gone}");
+        std::env::set_var(
+            "OPENCODE_CONFIG_CONTENT",
+            r#"{"provider":{"inline":{},"github-copilot":{}}}"#,
+        );
+        assert_eq!(
+            refused("inline"),
+            "`OPENCODE_CONFIG_CONTENT` in your environment sets up inline. Remove it there, or turn this provider off."
+        );
+        assert!(refused("github-copilot").contains("OPENCODE_CONFIG_CONTENT"));
+        assert!(std::fs::read_to_string(&auth)
+            .unwrap()
+            .contains("github-copilot"));
+        std::env::remove_var("OPENCODE_CONFIG_CONTENT");
+
+        delete_found_provider("tinker").unwrap();
+        let config = std::fs::read_to_string(&json).unwrap();
+        let keys: Vec<_> = serde_json::from_str::<serde_json::Map<String, Value>>(&config)
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "$schema",
+                "model",
+                "provider",
+                "providers",
+                "disabled_providers"
+            ]
+        );
+        assert!(!config.contains("tinker.thinkingmachines.dev"));
+        assert!(config.contains("switched-off"));
+
+        let label: crate::local::agent_profiles::Edit =
+            serde_json::from_value(json!({"logo": "openrouter"})).unwrap();
+        crate::local::agent_profiles::edit("opencode:team_router", &label).unwrap();
+        delete_found_provider("team_router").unwrap();
+        assert!(!std::fs::read_to_string(&json)
+            .unwrap()
+            .contains("llm.example.edu"));
+
+        delete_found_provider("openrouter").unwrap();
+        let signed_in: Value =
+            serde_json::from_str(&std::fs::read_to_string(&auth).unwrap()).unwrap();
+        assert_eq!(
+            signed_in.as_object().unwrap().keys().collect::<Vec<_>>(),
+            ["github-copilot", "anthropic", "openai"]
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&auth).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        let broken = dir.join("broken.json");
+        std::fs::write(&broken, "{ not json").unwrap();
+        std::env::set_var("OPENCODE_CONFIG", &broken);
+        assert_eq!(
+            refused("anthropic"),
+            format!(
+                "{} is not a valid OpenCode config. Fix it, then try again.",
+                broken.display()
+            )
+        );
+        assert!(std::fs::read_to_string(&auth)
+            .unwrap()
+            .contains("anthropic"));
+        std::env::remove_var("OPENCODE_CONFIG");
+
+        let ids: Vec<_> = found_providers([])
+            .into_iter()
+            .map(|found| found.id)
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "anthropic",
+                "commented",
+                "github-copilot",
+                "thinkingmachines",
+                "xai"
+            ]
+        );
     }
 
     #[test]

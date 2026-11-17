@@ -4,6 +4,8 @@
 #[path = "common/home.rs"]
 mod home;
 
+#[path = "cli/agents_cli.rs"]
+mod agents_cli;
 #[path = "cli/antigravity_gate_cli.rs"]
 mod antigravity_gate_cli;
 #[path = "cli/compute_cli.rs"]
