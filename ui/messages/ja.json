@@ -2111,8 +2111,6 @@
   "run_watch_flagged_orx": "OpenResearch がモデルを使わずに自らフラグを立てました。",
   "run_watch_kept": "続行を選びました。この実行ではもう知らせません。",
   "run_watch_kept_by": "{agent} が続行を選びました。",
-  "run_sentence_kept": "これを見たうえで続行しました。次の確認で現状を伝えます。",
-  "run_sentence_kept_by": "{agent} はこれを見たうえで続行しました。次の確認で現状を伝えます。",
   "run_watch_stopped_you": "実行を停止しました。",
   "run_watch_stopped_by": "{agent} が実行を停止しました。",
   "run_watch_stopped_by_rule": "ルール {name} が実行を停止しました。",

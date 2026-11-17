@@ -2111,8 +2111,6 @@
   "run_watch_flagged_orx": "由 OpenResearch 自行标记，未使用模型。",
   "run_watch_kept": "你选择了继续。此运行中不会再提示此问题。",
   "run_watch_kept_by": "{agent} 选择了继续。",
-  "run_sentence_kept": "你选择了继续运行。下一次查看会说明现状。",
-  "run_sentence_kept_by": "{agent} 选择了继续运行。下一次查看会说明现状。",
   "run_watch_stopped_you": "你停止了此次运行。",
   "run_watch_stopped_by": "{agent} 停止了此次运行。",
   "run_watch_stopped_by_rule": "规则 {name} 停止了此次运行。",

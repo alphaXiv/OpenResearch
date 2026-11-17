@@ -2111,8 +2111,6 @@
   "run_watch_flagged_orx": "Flagged by OpenResearch itself, with no model.",
   "run_watch_kept": "You chose to keep going. This run won't raise it again.",
   "run_watch_kept_by": "{agent} chose to keep going.",
-  "run_sentence_kept": "You chose to keep going after this. The next look says how it stands.",
-  "run_sentence_kept_by": "{agent} chose to keep going after this. The next look says how it stands.",
   "run_watch_stopped_you": "You stopped the run.",
   "run_watch_stopped_by": "{agent} stopped the run.",
   "run_watch_stopped_by_rule": "Rule {name} stopped the run.",

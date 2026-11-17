@@ -2111,8 +2111,6 @@
   "run_watch_flagged_orx": "Marcado por OpenResearch, sin modelo.",
   "run_watch_kept": "Elegiste continuar. Esta ejecución no volverá a avisar de esto.",
   "run_watch_kept_by": "{agent} eligió continuar.",
-  "run_sentence_kept": "Elegiste seguir pese a esto. La próxima revisión dirá cómo está.",
-  "run_sentence_kept_by": "{agent} eligió seguir pese a esto. La próxima revisión dirá cómo está.",
   "run_watch_stopped_you": "Detuviste la ejecución.",
   "run_watch_stopped_by": "{agent} detuvo la ejecución.",
   "run_watch_stopped_by_rule": "La regla {name} detuvo la ejecución.",

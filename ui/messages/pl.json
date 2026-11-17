@@ -2111,8 +2111,6 @@
   "run_watch_flagged_orx": "Oznaczone przez samo OpenResearch, bez modelu.",
   "run_watch_kept": "Wybrano kontynuację. To uruchomienie nie zgłosi tego ponownie.",
   "run_watch_kept_by": "{agent} wybrał kontynuację.",
-  "run_sentence_kept": "Mimo to postanowiono kontynuować. Następne sprawdzenie powie, jak jest.",
-  "run_sentence_kept_by": "{agent} mimo to postanowił kontynuować. Następne sprawdzenie powie, jak jest.",
   "run_watch_stopped_you": "Zatrzymano uruchomienie.",
   "run_watch_stopped_by": "{agent} zatrzymał uruchomienie.",
   "run_watch_stopped_by_rule": "Reguła {name} zatrzymała uruchomienie.",

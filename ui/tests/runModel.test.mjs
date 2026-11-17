@@ -263,15 +263,16 @@ test("a run that hasn't started says why it waits, in its backend's words, until
   assert.ok(!waiting.text.includes("lab-a40"));
 });
 
-test("a run is named by its title, and a flag's sentence kept going after says so until the next look", () => {
+test("a kept flag retains its record and falls through to the pace note", () => {
   const sentence = { template: "Test accuracy **{loss}**, far below the parent.", t: now - 60_000 };
-  const kept = { ...running, sentence, flags: [{ id: "f1", at: now - 60_000, whole: 0.2, template: sentence.template, detail: sentence.template, evidence: null,
+  const kept = { ...running, sentence, pace: { than: "parent", times: 2.5 }, flags: [{ id: "f1", at: now - 60_000, whole: 0.2, template: sentence.template, detail: sentence.template, evidence: null,
     state: "kept", mode: "copilot", source: "look", lookId: "4", choice: { by: "user", c: "keep", at: now - 30_000 } }] };
   const line = model(run({ monitor: summary({ sentence }) }), { monitor: kept });
   assert.equal(line.name, "Rank 16");
-  assert.equal(line.note, m.run_sentence_kept());
+  assert.equal(line.note, m.run_pace_slower_parent({ times: "⁦2.5⁩" }));
+  assert.equal(kept.flags[0].state, "kept");
   const rewritten = { ...kept, sentence: { template: "Loss **{loss}**, falling.", t: now } };
-  assert.equal(model(run({ monitor: summary({ sentence: rewritten.sentence }) }), { monitor: rewritten }).note, null, "a new look's words need no note");
+  assert.equal(model(run({ monitor: summary({ sentence: rewritten.sentence }) }), { monitor: rewritten }).note, line.note);
 });
 
 test("a plan the run reports only as rows says the plan and the run disagree, live and once ended", () => {

@@ -408,8 +408,6 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     text: tickText(look, signals, clockText(look.at)),
   }]);
 
-  // A flag's sentence someone kept going after stays until the next look rewrites it: say it was kept.
-  const kept = live && watched ? monitor?.flags?.find((record) => record.state === "kept" && record.detail === watched.template && (record.choice?.at ?? 0) >= watched.t) : undefined;
   const logError = (monitor ?? summary)?.logError ?? null;
   const pace = monitor?.pace ?? null;
   const disagrees = monitor?.disagrees ?? null;
@@ -417,7 +415,6 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     : tone === "stopped" && outcome?.by === "rule" && outcome.rule ? m.run_rule_detail({ text: ruleText(outcome.rule), name: autoDir(outcome.rule.name) })
     : tone === "stopped" && outcome?.by === "agent" ? (outcome.reason ? m.run_stop_reason({ agent: autoDir(agent), reason: autoDir(outcome.reason) }) : m.run_rule_reason_in_chat())
     : tone === "failed" && logError ? m.run_failed_log_error({ line: quoted(logError) })
-    : kept ? (kept.choice?.by === "agent" ? m.run_sentence_kept_by({ agent: autoDir(agent) }) : m.run_sentence_kept())
     : disagrees ? m.run_plan_disagrees({ of: ltr(fmtNumber(disagrees.of)), unit: autoDir(disagrees.unit ?? m.run_plan_steps()), stage: autoDir(disagrees.stage), rows: ltr(fmtNumber(disagrees.rows)) })
     : live && pace ? (pace.than === "earlier" ? m.run_pace_slower_earlier : m.run_pace_slower_parent)({ times: ltr(fmtNumber(pace.times)) })
     : null;

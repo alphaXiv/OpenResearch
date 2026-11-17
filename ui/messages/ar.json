@@ -2111,8 +2111,6 @@
   "run_watch_flagged_orx": "علّمه OpenResearch بنفسه، دون نموذج.",
   "run_watch_kept": "اخترت المتابعة. لن يثيره هذا التشغيل مجددًا.",
   "run_watch_kept_by": "اختار {agent} المتابعة.",
-  "run_sentence_kept": "اخترت المتابعة رغم هذا. ستقول النظرة التالية كيف يسير.",
-  "run_sentence_kept_by": "اختار {agent} المتابعة رغم هذا. ستقول النظرة التالية كيف يسير.",
   "run_watch_stopped_you": "أوقفت التشغيل.",
   "run_watch_stopped_by": "أوقف {agent} التشغيل.",
   "run_watch_stopped_by_rule": "أوقفت القاعدة {name} التشغيل.",

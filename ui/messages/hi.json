@@ -2111,8 +2111,6 @@
   "run_watch_flagged_orx": "OpenResearch ने खुद, बिना मॉडल के, फ़्लैग किया।",
   "run_watch_kept": "आपने जारी रखना चुना। यह रन इसे फिर नहीं उठाएगा।",
   "run_watch_kept_by": "{agent} ने जारी रखना चुना।",
-  "run_sentence_kept": "आपने इसके बावजूद जारी रखना चुना। अगली जाँच बताएगी कि स्थिति क्या है।",
-  "run_sentence_kept_by": "{agent} ने इसके बावजूद जारी रखना चुना। अगली जाँच बताएगी कि स्थिति क्या है।",
   "run_watch_stopped_you": "आपने रन रोक दिया।",
   "run_watch_stopped_by": "{agent} ने रन रोक दिया।",
   "run_watch_stopped_by_rule": "नियम {name} ने रन रोक दिया।",

@@ -2111,8 +2111,6 @@
   "run_watch_flagged_orx": "OpenResearch가 모델 없이 직접 표시했습니다.",
   "run_watch_kept": "계속하기로 했습니다. 이 실행에서는 다시 알리지 않습니다.",
   "run_watch_kept_by": "{agent}이(가) 계속하기로 했습니다.",
-  "run_sentence_kept": "이를 보고도 계속하기로 했습니다. 다음 확인에서 상황을 알려 줍니다.",
-  "run_sentence_kept_by": "{agent}이(가) 이를 보고도 계속하기로 했습니다. 다음 확인에서 상황을 알려 줍니다.",
   "run_watch_stopped_you": "실행을 중지했습니다.",
   "run_watch_stopped_by": "{agent}이(가) 실행을 중지했습니다.",
   "run_watch_stopped_by_rule": "규칙 {name}이(가) 실행을 중지했습니다.",
