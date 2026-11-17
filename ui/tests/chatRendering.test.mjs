@@ -376,6 +376,16 @@ test("continuation prompts stay outside collapsed activity", async () => {
   assert.deepEqual(splitResponseParts([first, { ...message(prompt), id: "next" }], true).answer, [prompt]);
 });
 
+test("an inline approval leaves the work and answer split intact", () => {
+  const tool = { id: "read", type: "tool", tool: "Read" };
+  const answer = { id: "answer", type: "text", phase: "final_answer", text: "The results so far" };
+  const approval = { id: "approval", type: "prompt", prompt: { kind: "permission", resolved: false } };
+  const withoutApproval = splitResponseParts([message(tool, answer)], true);
+  const pending = splitResponseParts([message(tool, answer, approval)], true);
+  assert.deepEqual(pending.work, withoutApproval.work);
+  assert.deepEqual(pending.answer, [answer, approval]);
+});
+
 test("every event for an agent resolves to its combined live transcript", async () => {
   const { agentTranscript } = await import("../src/chatRendering.ts");
   const event = (id, threads, children = [], status = "completed") => ({

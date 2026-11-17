@@ -110,6 +110,35 @@ test("tool labels refresh after stream replacement and locale change", async () 
   }
 });
 
+test("a standalone approval leaves open activity and its details visible", async () => {
+  const activity = [
+    { id: "failed-read", type: "tool", tool: "Read", state: { status: "error", input: { file_path: "results" }, error: "The path is a directory" } },
+    { id: "read-config", type: "tool", tool: "Read", state: { status: "completed", input: { file_path: "config.toml" } } },
+  ];
+  const work = { ...assistantMessage("a1", activity, "u1"), completedAt: null };
+  await renderChat("/projects/p/tasks/s", {
+    sessions: [session("s", { busy: true })],
+    transcripts: { s: [userMessage("u1", "Inspect the results"), work] },
+  });
+  await act(async () => find(`button[aria-label="${m.chat_expand_tool_activity()}"]`).click());
+  await act(async () => find('[data-part-id="failed-read"] button[aria-expanded="false"]').click());
+  const detailIsVisible = () => {
+    const detail = find('[data-message-id="a1"] [data-part-id="failed-read"]', "The path is a directory");
+    return detail !== null && !detail.closest('[aria-hidden="true"]');
+  };
+  assert.equal(detailIsVisible(), true);
+
+  const prompt = { id: "approval", type: "prompt", prompt: { kind: "permission", tool: "Read", toolInput: { file_path: "notes.txt" } } };
+  const approval = { ...assistantMessage("a2", [prompt], "a1"), completedAt: null };
+  await emit("chat.message", { sessionId: "s", message: approval });
+  assert.ok(find("button", m.chat_panel_allow()));
+  assert.equal(detailIsVisible(), true);
+
+  await emit("chat.message", { sessionId: "s", message: { ...approval, parts: [{ ...prompt, prompt: { ...prompt.prompt, resolved: true } }] } });
+  assert.equal(find("button", m.chat_panel_allow()), null);
+  assert.equal(detailIsVisible(), true);
+});
+
 const article = (id) => document.querySelector(`[role="article"][data-message-id="${id}"]`);
 const focusedRow = () => document.activeElement?.closest?.("[role=article]")?.dataset.messageId ?? null;
 const focus = (id) => act(async () => article(id).focus());
