@@ -25,6 +25,7 @@ import { normalizeMarkdownForRendering } from "../markdownNormalization";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { Button, Dialog, DialogContent, IconButton, IconButtonLink, Tooltip } from "./ui";
 
+import { RunFigure } from "./RunFigure";
 import { InlineHtmlFigure } from "./InlineHtmlFigure";
 import { ImageCarousel, ImageCarouselContext } from "./ImageCarousel";
 import { FileChip, FileReference, FileScopeContext, type OpenFile } from "./FileReference";
@@ -194,12 +195,12 @@ interface MdastPosition {
   start: MdastPoint;
 }
 
-/** Pull `name="value"` (or single-quoted) attributes off a tag's attribute run. */
+/** Read quoted attributes and the boolean figure attribute on evidence mentions. */
 function parseTagAttrs(attrs: string): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const attr of attrs.matchAll(/([\w-]+)=(["'])(.*?)\2/g)) {
+  for (const attr of attrs.matchAll(/([\w-]+)(?:=(["'])(.*?)\2)?/g)) {
     const key = attr[1];
-    if (key) out[key.toLowerCase()] = attr[3] ?? "";
+    if (key && (attr[2] || key.toLowerCase() === "figure")) out[key.toLowerCase()] = attr[3] ?? "";
   }
   return out;
 }
@@ -332,6 +333,9 @@ function replaceMentions(parent: MdastNode) {
       }
     }
     replaceMentions(child);
+    if (child.type === "paragraph" && child.children?.some((node) => node.type === "runMention" && node.data?.hProperties?.figure !== undefined)) {
+      child.data = { hName: "div", hProperties: { className: "my-2.5" } };
+    }
   }
 }
 
@@ -339,9 +343,7 @@ function remarkMentions() {
   return (tree: MdastNode) => replaceMentions(tree);
 }
 
-/** A `<run id="..."/>` evidence mention: a chip that opens the run's logs (the
- * only evidence channel for a metric). `label` overrides the default text so a
- * claim can read "…, not significant [+3.65pp]" rather than a bare run id. */
+/** A run citation that opens its evidence; the agent may label it with the cited result. */
 function RunChip({
   id,
   label,
@@ -504,7 +506,9 @@ export const Md = memo(function Md({
         : <FileChip path={cited.path} line={line} exp={props.exp} />;
     },
     "run-mention": (props) => (
-      <RunChip id={props.id} label={props.label} onOpenRun={onOpenRun} />
+      props.figure === undefined
+        ? <RunChip id={props.id} label={props.label} onOpenRun={onOpenRun} />
+        : <RunFigure id={props.id}><RunChip id={props.id} label={props.label} onOpenRun={onOpenRun} /></RunFigure>
     ),
     "cited-id": (props) => <CitedId cited={props.cited} code={props.kind === "code"} />,
     a: ({ node: _node, href, children, "data-figure-src": figureSrc, "data-cited-href": citedHref, ...rest }) => {

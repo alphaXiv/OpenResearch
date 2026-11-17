@@ -215,6 +215,12 @@ trouble while it runs. Never wait inside a turn: no `sleep` loops over
 back the user's next message (such as "chart it differently" while it runs)
 and every other run's result, and outlives a short run anyway.
 
+When reporting a result about a number shown in the run's first view block,
+cite `<run id="RUN_ID" figure/>` in the message. It shows the run's own block
+beneath its chip and stays live while the run runs. Use `label="…"` to name
+the cited result. Reuse that figure instead of plotting the same data again.
+A run with no view or no data yet shows only its chip.
+
 ## 8. Change it while it runs
 
 The user may ask mid-run to chart something else or to compare differently,
