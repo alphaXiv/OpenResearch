@@ -535,6 +535,8 @@ export function ArtifactsTab({
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
   const [order, setOrder] = useState<ArtifactOrder>("name");
   const [filter, setFilter] = useState("");
+  // Folders closed while a filter is active; the saved set stays untouched.
+  const [filterCollapsed, setFilterCollapsed] = useState(NO_COLLAPSED_DIRS);
   const [filterOpen, setFilterOpen] = useState(false);
   const filterInputRef = useRef<HTMLInputElement>(null);
   const treeRef = useRef<HTMLDivElement>(null);
@@ -586,14 +588,6 @@ export function ArtifactsTab({
     if (!entry || entry.isDir) setSelected(null);
   }, [selected, artifacts]);
 
-  const toggle = (path: string) =>
-    setCollapsed((prev) => {
-      const next = new Set(prev);
-      if (next.has(path)) next.delete(path);
-      else next.add(path);
-      return next;
-    });
-
   const sortedEntries = useMemo(
     () => (artifacts ? sortArtifactEntries(artifacts.entries, order) : []),
     [artifacts, order],
@@ -603,9 +597,20 @@ export function ArtifactsTab({
     [sortedEntries, filter],
   );
   const filterActive = filter.trim() !== "";
-  // With a filter active the tree shows every match expanded — the user's
-  // collapsed set would hide what they just searched for.
-  const treeCollapsed = filterActive ? NO_COLLAPSED_DIRS : collapsed;
+  // Each new filter shows every match expanded — the user's saved collapsed
+  // set would hide what they just searched for.
+  const treeCollapsed = filterActive ? filterCollapsed : collapsed;
+  const changeFilter = (next: string) => {
+    setFilter(next);
+    setFilterCollapsed(NO_COLLAPSED_DIRS);
+  };
+  const toggle = (path: string) =>
+    (filterActive ? setFilterCollapsed : setCollapsed)((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
   useEffect(() => {
     if (filterOpen) filterInputRef.current?.focus();
   }, [filterOpen]);
@@ -681,9 +686,9 @@ export function ArtifactsTab({
               <OptionPicker
                 triggerIcon={<ArrowDownWideNarrow size={16} />}
                 choices={[
-                  { id: "newest", label: m.history_order_newest() },
-                  { id: "oldest", label: m.history_order_oldest() },
                   { id: "name", label: m.artifacts_order_name() },
+                  { id: "oldest", label: m.history_order_oldest() },
+                  { id: "newest", label: m.history_order_newest() },
                 ]}
                 value={order}
                 header={m.history_order()}
@@ -706,7 +711,7 @@ export function ArtifactsTab({
                 aria-pressed={filterOpen}
                 onClick={() => {
                   setFilterOpen((open) => !open);
-                  if (filterOpen) setFilter("");
+                  if (filterOpen) changeFilter("");
                 }}
               >
                 <Filter size={16} strokeWidth={2.5} />
@@ -721,10 +726,10 @@ export function ArtifactsTab({
                 placeholder={m.artifacts_filter_placeholder()}
                 aria-label={m.artifacts_filter()}
                 value={filter}
-                onChange={(event) => setFilter(event.target.value)}
+                onChange={(event) => changeFilter(event.target.value)}
                 onKeyDown={(event) => {
                   if (event.key === "Escape") {
-                    setFilter("");
+                    changeFilter("");
                     setFilterOpen(false);
                   }
                 }}
@@ -734,7 +739,7 @@ export function ArtifactsTab({
                   size="small"
                   className="absolute end-0.5"
                   aria-label={m.artifacts_filter_clear()}
-                  onClick={() => setFilter("")}
+                  onClick={() => changeFilter("")}
                 >
                   <X size={13} />
                 </IconButton>

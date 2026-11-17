@@ -12,21 +12,9 @@ const file = (name, modifiedAt, children) => ({
   ...(children !== undefined ? { children } : {}),
 });
 
-test("sorting keeps dirs first and orders by name by default", () => {
-  const entries = [
-    file("report.md", 30),
-    file("zed.log", 40),
-    file("figures", 20, [file("b.png", 35), file("a.png", 5)]),
-  ];
-  const sorted = sortArtifactEntries(entries, "name");
-  assert.deepEqual(
-    sorted.map((entry) => entry.name),
-    ["figures", "report.md", "zed.log"],
-  );
-  assert.deepEqual(
-    sorted[0].children.map((entry) => entry.name),
-    ["a.png", "b.png"],
-  );
+test("name order is the server's order as is", () => {
+  const entries = [file("figures", 20, [file("b.png", 35), file("a.png", 5)]), file("Zed.log", 40), file("report.md", 30)];
+  assert.equal(sortArtifactEntries(entries, "name"), entries);
 });
 
 test("newest and oldest order siblings by modified time, recursively", () => {
@@ -49,7 +37,7 @@ test("newest and oldest order siblings by modified time, recursively", () => {
 test("sorting never mutates the input or reorders children of the original", () => {
   const inner = [file("b.png", 35), file("a.png", 5)];
   const entries = [file("figures", 20, inner)];
-  sortArtifactEntries(entries, "name");
+  sortArtifactEntries(entries, "oldest");
   assert.deepEqual(
     entries[0].children.map((entry) => entry.name),
     ["b.png", "a.png"],
@@ -70,6 +58,15 @@ test("filtering keeps matched files and the folders that contain them", () => {
   );
   assert.equal(filterArtifactEntries(entries, "report.md").length, 1);
   assert.equal(filterArtifactEntries(entries, "loss.png")[0].name, "figures");
+});
+
+test("filtering trims nested folders down to their matches", () => {
+  const entries = [file("outputs", 20, [file("figures", 20, [file("loss.png", 5), file("notes.txt", 5)])])];
+  const [outputs] = filterArtifactEntries(entries, "png");
+  assert.deepEqual(
+    outputs.children[0].children.map((entry) => entry.name),
+    ["loss.png"],
+  );
 });
 
 test("filtering is case-insensitive and an empty query keeps everything", () => {
