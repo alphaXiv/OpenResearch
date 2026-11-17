@@ -4,7 +4,8 @@ import { useWorkspace } from "../workspace";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { Popover } from "@base-ui/react/popover";
 import { formatForDisplay } from "@tanstack/react-hotkeys";
-import { PanelLeft } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { ChevronRight, PanelLeft, RefreshCw } from "lucide-react";
 
 import { appHotkeys } from "../hotkeys";
 import { ltr } from "../i18n";
@@ -91,7 +92,7 @@ function Brand() {
         </Popover.Trigger>
         <Popover.Portal container={portalContainer}>
           <Popover.Positioner side="bottom" align="start" sideOffset={6} collisionPadding={8} className="z-50">
-            <Popover.Popup aria-label="OpenResearch" className="w-max min-w-56 max-w-[calc(100vw-1rem)] rounded-lg border border-border bg-background p-3 text-sm text-text shadow-menu outline-none">
+            <Popover.Popup aria-label="OpenResearch" className={`${import.meta.env.DEV ? "w-[36rem]" : "w-max"} min-w-56 max-w-[calc(100vw-1rem)] rounded-lg border border-border bg-background p-3 text-sm text-text shadow-menu outline-none`}>
               <dl className="m-0 grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-4 gap-y-2">
                 <dt className="text-subtext">{m.settings_page_version()}</dt>
                 <dd className="m-0 flex items-center justify-between gap-3">
@@ -111,7 +112,10 @@ function Brand() {
               </dl>
               {changes && <p className="mt-2 mb-0 text-subtext">{changes}</p>}
               {shownError && <p role="alert" className="mt-2 mb-0 text-accent-red">{shownError}</p>}
-              {import.meta.env.DEV && <DevtoolsSwitch />}
+              {import.meta.env.DEV && <>
+                <DevCommit />
+                <DevtoolsSwitch />
+              </>}
             </Popover.Popup>
           </Popover.Positioner>
         </Popover.Portal>
@@ -135,6 +139,47 @@ function DevtoolsSwitch() {
     <div className="mt-3 flex items-center justify-between gap-3 border-t border-border pt-3">
       <span className="text-subtext">{label}</span>
       <Switch checked={open} aria-label={label} onClick={() => setQueryDevtoolsOpen(!open)} />
+    </div>
+  );
+}
+
+type Commit = { id: string; ref: string; description: string };
+
+/** The dev server's checkout, so windows launched from different worktrees can be told apart. */
+function DevCommit() {
+  const commit = useQuery({
+    queryKey: ["dev-commit"],
+    queryFn: async (): Promise<Commit> => {
+      const res = await fetch("/__dev/commit", { headers: { accept: "application/json" } });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error);
+      return body;
+    },
+  });
+  const refreshLabel = m.header_dev_commit_refresh();
+
+  const description = commit.data?.description ?? "";
+  const newline = description.indexOf("\n");
+  const title = newline === -1 ? description : description.slice(0, newline);
+  const body = newline === -1 ? "" : description.slice(newline + 1).trim();
+
+  return (
+    <div className="mt-3 flex flex-col gap-2 border-t border-border pt-3">
+      <div className="flex items-center gap-3">
+        <span className="text-subtext">{m.header_dev_commit()}</span>
+        {commit.data && <span className="min-w-0 truncate font-mono text-xs text-subtext">{ltr([commit.data.id, commit.data.ref].filter(Boolean).join(" "))}</span>}
+        <IconButton size="small" className="ms-auto" aria-label={refreshLabel} disabled={commit.isFetching} onClick={() => commit.refetch()}>
+          <RefreshCw size={14} className={commit.isFetching ? "animate-spin" : undefined} />
+        </IconButton>
+      </div>
+      {commit.error && <p role="alert" className="m-0 break-words text-accent-red">{commit.error.message}</p>}
+      {commit.data && <details className="group/commit">
+        <summary className="flex cursor-pointer list-none items-center gap-1.5 rounded-sm focus-visible:outline-2 focus-visible:outline-focus [&::-webkit-details-marker]:hidden">
+          <ChevronRight size={14} className="shrink-0 text-subtext group-open/commit:rotate-90 rtl:-scale-x-100" aria-hidden="true" />
+          <span className="min-w-0 truncate group-open/commit:whitespace-normal group-open/commit:break-words">{title || <span className="text-subtext">{m.header_dev_commit_undescribed()}</span>}</span>
+        </summary>
+        {body && <pre tabIndex={0} className="m-0 mt-2 max-h-64 rounded-sm outline-none focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus overflow-y-auto whitespace-pre-wrap break-words font-mono text-xs text-subtext">{body}</pre>}
+      </details>}
     </div>
   );
 }
