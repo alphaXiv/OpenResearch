@@ -237,10 +237,10 @@ for (let step = 1; step <= total; step++) {
     await expect(banner).toContainText('NaN')
   })
 
-  await test.step('half way the chart carries progress, with time left and the latest value', async () => {
+  await test.step('half way the bar and the chart carry progress, with time left and the latest value', async () => {
     await run.open('nan')
     await expect(banner).toContainText(said('Step 20 of 40'))
-    await expect(banner.getByRole('progressbar')).toHaveCount(0)
+    await expect(banner.getByRole('progressbar')).toHaveCount(1)
     await expect(banner).toContainText(/\d+s⁩? left/)
     await expect(banner).not.toContainText('At least')
     await expect(chart).toHaveAccessibleName(said('loss 0.1'))
@@ -250,7 +250,7 @@ for (let step = 1; step <= total; step++) {
   await test.step('the run goes on while orx up is down; the open page catches up with each step once', async () => {
     await orx.restart('SIGTERM', () => run.open('half'))
     await expect(banner).toContainText(said('Step 30 of 40'), { timeout: 20_000 })
-    await expect(banner.getByRole('progressbar')).toHaveCount(0)
+    await expect(banner.getByRole('progressbar')).toHaveCount(1)
     await expect(chart).toHaveAccessibleName(said('loss 0.0667'))
     const { x } = await steps(page, orx, runId)
     expect(x).toEqual(Array.from({ length: 30 }, (_, i) => i + 1))
@@ -324,7 +324,7 @@ for (let step = 1; step <= 30; step++) {
   await expect(banner).toContainText(said('Step 24'))
   await expect(banner).not.toContainText(said('24 of'))
   await expect(banner).not.toContainText('No estimate')
-  await expect(banner.getByRole('progressbar')).toHaveCount(0)
+  await expect(banner.getByRole('progressbar')).not.toHaveAttribute('aria-valuenow')
   await expect(page.getByText('This run deliberately has no total.', { exact: true })).toBeVisible()
   await themes(page, banner, info, 'strip-open')
   await run.open('some')

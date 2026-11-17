@@ -436,7 +436,7 @@ test("a monitor that can't be refreshed keeps its chart and says so once, how ol
   assert.ok(find("div", m.run_view_refresh_failed()).contains(named(m.app_retry())), "Retry sits beside the one message");
   assert.ok(container.querySelector('[role="img"][aria-label*="Loss"]'), "the chart stays");
   assert.ok(plain(container.textContent).includes(m.status_last_seen({ time: plain(fmtClock(running.asOf)) })));
-  assert.equal(container.querySelector('[role="progressbar"]'), null, "the chart carries progress");
+  assert.ok(container.querySelector('[role="progressbar"]'), "the bar stays below the chart");
 });
 
 test("a run whose view was rebuilt reads its monitor again, and shows none of the old one meanwhile", async () => {
@@ -611,7 +611,7 @@ test("an unresolved flag stays visible after completion and announces that the r
   assert.equal(requests.find((r) => r.request === "POST /api/runs/r1/flag").body.choice, "keep");
 });
 
-test("the row opens only for two chart points and returns to one line when done", async () => {
+test("the row reserves its headline before chart points and returns to one line when done", async () => {
   const setup = { ...running, sentence: null, setup: { stage: "Download", line: null, startsAt: now + 60_000 }, series: {}, latest: {}, headline: null,
     phases: [{ name: "Download", of: 9, unit: "shards", priorMs: null, startedAt: now, endedAt: null }],
     progress: { ...running.progress, phase: 0, done: 4, whole: null, segments: [{ name: "Download", weight: 1, fill: 4 / 9 }] } };
@@ -633,7 +633,7 @@ test("the row opens only for two chart points and returns to one line when done"
   await act(async () => workspace.queryClient.setQueryData(queryKey, { ...chart, rev: chart.rev + 1, series: { loss: [[0, 3.4], [20, 3.3]] } }));
   await settle();
   assert.ok(view.container.querySelector('svg[role="img"]'));
-  assert.equal(view.container.querySelector('[role="progressbar"]'), null);
+  assert.ok(view.container.querySelector('[role="progressbar"]'));
 
   await view.update([run("r1", { status: "done", endedAt: now, monitor: summary({ tone: "done" }) })]);
   await settle();

@@ -71,7 +71,7 @@ export function RunLine({ model, agent, label, onToggle, onOpenRunPage, expanded
         <Controls model={model} expandable={expandable} expanded={expanded} onToggle={onToggle} />
       </div>
       {children}
-      {!expanded && <Rail model={model} kind="edge" />}
+      <Rail model={model} kind="edge" />
     </div>
   );
 }
