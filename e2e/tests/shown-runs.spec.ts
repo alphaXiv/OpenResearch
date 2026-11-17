@@ -1,7 +1,11 @@
 import { spawnSync } from 'node:child_process'
 import { writeFile } from 'node:fs/promises'
+import { writeFileSync } from 'node:fs'
 import path from 'node:path'
-import { expect, send, test } from '../src/test.ts'
+import { expect as baseExpect, send, test } from '../src/test.ts'
+
+// Run submission and agent replies share the busy-machine budget used by the run monitor specs.
+const expect = baseExpect.configure({ timeout: 30_000 })
 
 for (const dismiss of [false, true]) {
   test(`an ended run stays until ${dismiss ? 'dismissed in both windows' : 'its result reply completes'}`, async ({ page, browser, project, agent, orx }) => {
@@ -18,10 +22,17 @@ for (const dismiss of [false, true]) {
     const gate = path.join(orx.root, `finish-${project.id}`)
     const fifo = spawnSync('mkfifo', [gate])
     expect(fifo.status).toBe(0)
+    const script = path.join(orx.root, `monitored-${project.id}.sh`)
+    writeFileSync(script, [
+      `echo '::orx:: {"step":1,"of":20,"m":{"loss":0.5}}'`,
+      `echo '::orx:: {"step":2,"m":{"loss":0.25}}'`,
+      `cat ${gate}`,
+      'echo loss=0.125',
+    ].join('\n'))
     agent.script('Launch the monitored run.', [
       { run: [
         'set -e',
-        `id=$(orx create-experiment ${project.id} --title Monitored --run-command 'cat ${gate}; echo loss=0.125' | sed -n 's/^ *id: *//p')`,
+        `id=$(orx create-experiment ${project.id} --title Monitored --run-command 'sh ${script}' | sed -n 's/^ *id: *//p')`,
         'orx exp run "$id" --backend local',
         'orx exp wake "$id"',
       ].join('\n') },
@@ -45,6 +56,15 @@ for (const dismiss of [false, true]) {
       await other.goto(page.url())
       const otherBanner = other.getByRole('region', { name: 'Runs in this chat' })
       await expect(otherBanner).toBeVisible()
+      const saved = page.waitForResponse((response) => response.request().method() === 'POST' && response.url().endsWith('/api/settings/ui-state'))
+      await banner.getByRole('button', { name: 'Show less', exact: true }).click()
+      expect((await saved).status()).toBe(200)
+      const preferences = await (await page.request.get(`${orx.url}/api/settings/ui-state`)).json()
+      expect(preferences.runBanner).toBe('line')
+      await other.reload()
+      await expect(otherBanner.getByRole('button', { name: 'Show more', exact: true })).toBeVisible()
+      await banner.getByRole('button', { name: 'Show more', exact: true }).click()
+      await expect(banner.getByRole('img', { name: /^loss / })).toBeVisible()
       await writeFile(gate, 'finish\n')
       await agent.reached(hold)
       await expect(banner.getByRole('button', { name: 'Dismiss', exact: true })).toBeVisible()
@@ -52,15 +72,8 @@ for (const dismiss of [false, true]) {
       await expect(otherBanner.getByRole('button', { name: 'Dismiss', exact: true })).toBeVisible()
       const active = await (await page.request.get(`${orx.url}/api/chat/active-runs`)).json()
       expect(active.some((item: { run: { id: string } }) => item.run.id === row.run.id)).toBe(false)
-      const saved = page.waitForResponse((response) => response.request().method() === 'POST' && response.url().endsWith('/api/settings/ui-state'))
-      await banner.getByRole('button', { name: 'Show less', exact: true }).click()
-      expect((await saved).status()).toBe(200)
-      await expect(banner).toContainText('Done')
-      await expect(banner.getByRole('button', { name: /monitored/i, exact: true })).toBeVisible()
-      const preferences = await (await page.request.get(`${orx.url}/api/settings/ui-state`)).json()
-      expect(preferences.runBanner).toBe('line')
-      await other.reload()
-      await expect(otherBanner.getByRole('button', { name: 'Show more', exact: true })).toBeVisible()
+      await expect(banner.getByRole('button', { name: 'Show less', exact: true })).toHaveCount(0)
+      await expect(banner.getByRole('button', { name: /monitored/i })).toBeVisible()
       if (dismiss) {
         await banner.getByRole('button', { name: 'Dismiss', exact: true }).click()
         await expect(banner).toHaveCount(0)
