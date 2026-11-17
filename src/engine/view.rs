@@ -562,8 +562,9 @@ impl Parser<'_> {
         let from = attributes.get("from").map(|a| self.name(a)).transpose()?;
         let ghost = attributes
             .get("ghost")
-            .map(|ghost| self.choice(ghost, &["parent"]))
-            .transpose()?;
+            .map(|ghost| self.choice(ghost, &["parent", "false"]))
+            .transpose()?
+            .unwrap_or_else(|| "parent".into());
         let column = |table: &Option<String>| match table {
             Some(table) => Kind::Column(table.clone()),
             None => Kind::Signal,
@@ -661,12 +662,6 @@ impl Parser<'_> {
                     one["label"] = json!(self.text(label, 80)?);
                 }
                 if let Some(drawn) = attributes.get("ghost") {
-                    if ghost.is_none() {
-                        return Err(self.attribute_problem(
-                            drawn,
-                            "ghost on a <series> says whether the parent's run is drawn under it: add ghost=\"parent\" to the chart".into(),
-                        ));
-                    }
                     one["ghost"] = json!(self.choice(drawn, &["true", "false"])? == "true");
                 }
                 series.push(one);
@@ -719,9 +714,7 @@ impl Parser<'_> {
                 json!(self.choice(mark, &["line", "points", "bars"])?),
             );
         }
-        if let Some(ghost) = ghost {
-            block.insert("ghost".into(), json!(ghost));
-        }
+        block.insert("ghost".into(), json!(ghost));
         Ok(())
     }
 }
@@ -2193,6 +2186,19 @@ where
 mod tests {
     use super::*;
 
+    #[test]
+    fn charts_draw_the_parent_unless_the_view_turns_it_off() {
+        let default = compile(r#"<view><chart y="loss"/></view>"#).unwrap().tree;
+        assert_eq!(default["blocks"][0]["ghost"], "parent");
+        let off = compile(r#"<view><chart y="loss" ghost="false"/></view>"#)
+            .unwrap()
+            .tree;
+        assert_eq!(off["blocks"][0]["ghost"], "false");
+        let series = compile(r#"<view><chart from="scores"><series x="step" y="score" ghost="false"/></chart></view>"#).unwrap().tree;
+        assert_eq!(series["blocks"][0]["ghost"], "parent");
+        assert_eq!(series["blocks"][0]["series"][0]["ghost"], false);
+    }
+
     fn shown_run() -> crate::store::StoredRun {
         crate::store::StoredRun {
             id: "run-1".into(),
@@ -2602,7 +2608,6 @@ mod tests {
             ("<signal name=\"v\" pick=\"best\"/><view/>", 1, 1, "signal \"v\" picks its best value but declares no better=\"lower|higher\""),
             ("<view><chart y=\"a\"><series x=\"b\" y=\"c\"/></chart></view>", 1, 7, "a chart takes y=\"…\" or <series> inside it, not both"),
             ("<view><chart><series x=\"b\" y=\"c\"/></chart></view>", 1, 14, "<series> draws columns of a table: add from=\"TABLE\" to the chart"),
-            ("<view><chart from=\"t\"><series x=\"b\" y=\"c\" ghost=\"false\"/></chart></view>", 1, 43, "ghost on a <series> says whether the parent's run is drawn under it: add ghost=\"parent\" to the chart"),
             ("<view><chart from=\"t\" ghost=\"parent\"><series x=\"b\" y=\"c\" ghost=\"no\"/></chart></view>", 1, 58, "ghost=\"no\" is not one of true, false"),
             ("<view><chart from=\"t\" x=\"a\" y=\"b\" x-range=\"run\"/></view>", 1, 35, "x-range sets how far a chart over the run's steps reaches; a chart from a table spans its points"),
             ("<view><chart y=\"loss\" x-range=\"all\"/></view>", 1, 23, "x-range=\"all\" is not one of run, parent"),
@@ -2678,12 +2683,12 @@ mod tests {
         let default = json!({
             "signals": {"loss": {"label": "loss"}, "lr": {"label": "lr"}},
             "headline": ["loss"],
-            "blocks": [{"chart": ["loss"], "x": "elapsed"}, {"table": "eval", "columns": ["task", "score"]}, {"stats": ["lr"]}],
+            "blocks": [{"chart": ["loss"], "x": "elapsed", "ghost": "parent"}, {"table": "eval", "columns": ["task", "score"]}, {"stats": ["lr"]}],
         });
         let text = markup(&default);
         assert_eq!(
             text,
-            "<signal name=\"loss\" />\n<signal name=\"lr\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"elapsed\" />\n  <table name=\"eval\" columns=\"task score\" />\n  <stats of=\"lr\" />\n</view>\n"
+            "<signal name=\"loss\" />\n<signal name=\"lr\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" x=\"elapsed\" ghost=\"parent\" />\n  <table name=\"eval\" columns=\"task score\" />\n  <stats of=\"lr\" />\n</view>\n"
         );
         assert_eq!(compile(&text).unwrap().tree, default);
     }

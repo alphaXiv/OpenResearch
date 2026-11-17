@@ -9,7 +9,7 @@ const expect = baseExpect.configure({ timeout: 30_000 })
 
 const VIEW = `<signal name="loss" label="Training loss" digits="3" better="lower" />
 <view headline="loss">
-  <chart y="loss" ghost="parent" phase="train" />
+  <chart y="loss" phase="train" />
 </view>
 `
 
@@ -18,6 +18,7 @@ test("an agent's view labels its runs, and a child's line says how it compares w
   const dir = path.join(orx.root, `view-${project.id}`)
   mkdirSync(dir)
   writeFileSync(path.join(dir, 'view.xml'), VIEW)
+  writeFileSync(path.join(dir, 'off.xml'), VIEW.replace('<chart ', '<chart ghost="false" '))
   writeFileSync(path.join(dir, 'typo.xml'), VIEW.replace('y="loss"', 'y="los"'))
   expect(spawnSync('mkfifo', [path.join(dir, 'half')]).status).toBe(0)
   // The loss is argv[2] times 2/step; the child stops half way until the test opens its gate.
@@ -26,7 +27,7 @@ test("an agent's view labels its runs, and a child's line says how it compares w
 const scale = Number(process.argv[2])
 const tick = () => new Promise((resolve) => setTimeout(resolve, 100))
 const started = performance.now()
-process.stdout.write('::orx:: {"step":0,"of":20,"t":0}\\n')
+process.stdout.write('::orx:: {"phase":"train","step":0,"of":20,"t":0}\\n')
 for (let step = 1; step <= 20; step++) {
   await tick()
   process.stdout.write('::orx:: {"step":' + step + ',"t":' + ((performance.now() - started) / 1000) + ',"m":{"loss":' + (scale * 2 / step).toFixed(4) + '}}\\n')
@@ -71,7 +72,27 @@ for (let step = 1; step <= 20; step++) {
     ])
     await send(page, 'Launch Child.')
     const child = banner.getByRole('group', { name: 'Child', exact: true })
-    await expect(child).toContainText(/Training loss/)
+    await expect(child).toContainText(/Training loss/, { timeout: 90_000 })
+    await expect(child.locator('svg path[stroke-dasharray]')).toHaveCount(1)
+    const shots = path.resolve(import.meta.dirname, '../../.shots/k1')
+    mkdirSync(shots, { recursive: true })
+    await page.getByRole('button', { name: 'Close panel', exact: true }).click()
+    for (const width of [1440, 420]) {
+      await page.setViewportSize({ width, height: 1000 })
+      for (const colorScheme of ['light', 'dark'] as const) {
+        await page.emulateMedia({ colorScheme, reducedMotion: 'reduce' })
+        await expect(page.locator('html')).toHaveAttribute('data-theme', colorScheme)
+        await page.screenshot({ path: path.join(shots, `parent-${colorScheme}-${width}.png`) })
+      }
+    }
+    const shown = await (await page.request.get(`${orx.url}/api/chat/shown-runs`)).json()
+    const childId = shown.find((entry: { experimentName: string }) => entry.experimentName === 'Child').run.experimentId
+    agent.script('Hide the parent curve.', [
+      { run: `orx exp view set ${childId} --file ${dir}/off.xml` },
+      { say: 'Parent curve hidden.' },
+    ])
+    await send(page, 'Hide the parent curve.')
+    await expect(child.locator('svg path[stroke-dasharray]')).toHaveCount(0)
     // At step 10 the child's loss is 0.160 against the parent's 0.200.
     await expect(child).toContainText(/0\.040⁩? better than parent/)
   })
@@ -114,7 +135,7 @@ test("an agent changes a running run's view and patterns, and the open strip and
   writeFileSync(script, `import { readFileSync } from 'node:fs'
 const tick = () => new Promise((resolve) => setTimeout(resolve, 100))
 const started = performance.now()
-process.stdout.write('::orx:: {"step":0,"of":20,"t":0}\\n')
+process.stdout.write('::orx:: {"phase":"train","step":0,"of":20,"t":0}\\n')
 for (let step = 1; step <= 20; step++) {
   await tick()
   process.stdout.write('::orx:: {"step":' + step + ',"t":' + ((performance.now() - started) / 1000) + ',"m":{"loss":' + (2 / step).toFixed(4) + '}}\\n')
@@ -281,7 +302,7 @@ process.stdout.write('::orx:: {"step":3,"m":{"loss":0.5}}\\n')
   await expect(page.getByText('Reporting smoke test finished.', { exact: true })).toBeVisible()
 })
 
-test('a timed floor names the untimed stage above the chat', async ({ page, project, agent, orx }, info) => {
+test('a timed floor names the untimed stage above the chat', async ({ page, project, agent, orx }) => {
   test.slow()
   const dir = path.join(orx.root, `floor-${project.id}`)
   mkdirSync(dir)
@@ -310,9 +331,10 @@ readFileSync(${JSON.stringify(gate)})
   await send(page, 'Launch timed floor.')
   const banner = page.getByRole('region', { name: 'Runs in this chat' })
   await expect(banner).toContainText(/At least .* left/)
-  await expect(banner.getByRole('img')).toBeVisible()
+  await expect(banner.getByRole('img', { name: /^loss / })).toBeVisible()
   const shots = path.resolve(import.meta.dirname, '../../.shots/k1')
   mkdirSync(shots, { recursive: true })
+  await page.getByRole('button', { name: 'Close panel', exact: true }).click()
   for (const width of [1440, 420]) {
     await page.setViewportSize({ width, height: 1000 })
     for (const colorScheme of ['light', 'dark'] as const) {

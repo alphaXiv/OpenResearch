@@ -7071,7 +7071,7 @@ mod tests {
     #[test]
     fn a_child_finds_an_unpublished_parent_curve() {
         let f = Fixture::new("orx-monitor-unpublished-parent");
-        f.view("exp", VIEW);
+        f.view("exp", &VIEW.replace(" ghost=\"parent\"", ""));
         f.run_in("p1", "exp", "done", local());
         let mut parent = Snapshot::new("p1", "1-1", "g1");
         fold(&mut parent, &[(T0, "::orx:: {\"phase\":\"train\"}".into())]);

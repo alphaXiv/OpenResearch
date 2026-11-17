@@ -84,7 +84,7 @@ export interface ChartBlock {
   xRange?: "parent";
   /** A line over steps, and a line with points from a table, when absent. */
   mark?: "line" | "points" | "bars";
-  ghost?: "parent";
+  ghost?: "parent" | "false";
 }
 
 export type ViewBlock = { phase?: string; title?: string } & (

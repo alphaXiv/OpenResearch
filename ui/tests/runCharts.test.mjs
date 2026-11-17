@@ -270,3 +270,11 @@ test("without a parent the chart marks its starting value and the best value in 
     assert.ok(marks.some((label) => label.includes(m.run_stat_best({ label: "Loss" })) && label.endsWith(value)));
   }
 });
+
+test("a chart can hide its parent curves at every size", async () => {
+  const monitor = fixture("finetune");
+  for (const size of ["strip", "tile", "page"]) {
+    const page = await draw(monitor, { chart: ["val_loss", "loss"], ghost: "false" }, size);
+    assert.equal(chartOf(page).querySelectorAll("path[stroke-dasharray]").length, 0);
+  }
+});

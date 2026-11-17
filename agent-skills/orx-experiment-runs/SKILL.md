@@ -142,7 +142,7 @@ orx exp view set <expId> --file view.xml
 | --- | --- |
 | `signal` | `name`, `label`, `unit`, `digits` (0–12), `better="lower\|higher"`, `smooth` (above 0, at most 1; noisy curves only), `as="duration\|compact"`, `scale` (a factor, `100` for percent), `sign="true"`, `pick="latest\|best"` (`best` needs `better`), `vs`, `labels='{"1":"valid","0":"invalid"}'` |
 | `view` | `headline="a b"`: the first with a number is shown |
-| `chart` | `y="a b"`, `x` (`step`, the default, or `elapsed`), `ghost="parent"`, `x-range="run\|parent"`, `x-scale="log"`, `y-scale="log"`, `mark="line\|points\|bars"`; with `from="table"`, `x`/`y` are its columns, `by="column"` draws a series per value, and `<series x= y= label= ghost=/>` children give each series its own columns |
+| `chart` | `y="a b"`, `x` (`step`, the default, or `elapsed`), `ghost="parent\|false"` (default `parent`), `x-range="run\|parent"`, `x-scale="log"`, `y-scale="log"`, `mark="line\|points\|bars"`; with `from="table"`, `x`/`y` are its columns, `by="column"` draws a series per value, and `<series x= y= label= ghost=/>` children give each series its own columns |
 | `stats` | `of="a b"`, `vs` |
 | `table` | `name`, `columns="a b"`, `last="5"`, `vs="parent\|step\|final"` |
 
@@ -163,9 +163,10 @@ How a run meets its parent is yours to choose, per experiment:
   ends. Use `final` when the parent's result is the bar to clear, `step` when
   the question is the path (does it learn faster?). A table compares only with
   `vs`; `vs="parent"` takes the default.
-- **`ghost="parent"`** draws the parent's same series dashed under each line.
-  Put `ghost="false"` on a `<series>` the parent would only repeat, such as a
-  reference measured the same way in every run.
+- **`ghost="parent"`** (the default) draws the parent's same series dashed
+  under each line. Put `ghost="false"` on a chart to hide its parent curves, or
+  on a `<series>` the parent would only repeat, such as a reference measured
+  the same way in every run.
 - **`x-range`** on a chart over steps: `run` (the default) spans this run's
   total and cuts the parent off at the edge; `parent` spans the parent's run
   too, for a child that stops early or runs longer.
