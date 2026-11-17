@@ -1854,6 +1854,7 @@ fn a_flag_prepared_before_cancel_cannot_wake_after_cancel() {
     assert!(store.run_flag_notices("a").unwrap().is_empty());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_completed_result_without_a_parent_retries_an_unsupported_comparison() {
     if !crate::config::in_test_child(&[]) {
