@@ -1492,6 +1492,7 @@
   "harness_setup_update_fallback": "Если {agent} не может обновиться сам, OpenResearch скачает собственную копию.",
   "harness_setup_approve_run": "Выполнить команду",
   "harness_setup_installing": "Установка {agent}…",
+  "harness_setup_queued": "Ожидание завершения другой установки или обновления агента…",
   "harness_setup_updating": "Обновление {agent}…",
   "harness_setup_signin_starting": "Начинаем вход…",
   "harness_setup_signin_page": "страницу входа",

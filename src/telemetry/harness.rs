@@ -405,6 +405,31 @@ const PHRASES: &[&str] = &[
     "Could not reach",
     "does not match its published SHA-256",
     "Could not unpack the download",
+    "The download was interrupted",
+    "Could not move the release into",
+    "OpenCode is in use",
+    "Couldn't create",
+    "Couldn't open",
+    "Couldn't lock",
+    // What reqwest, hyper and rustls say under those, which is the actual cause.
+    "dns error",
+    "failed to lookup address information",
+    "No such host is known",
+    "tcp connect error",
+    "actively refused it",
+    "did not properly respond after a period of time",
+    "forcibly closed by the remote host",
+    "connection closed before message completed",
+    "invalid peer certificate",
+    "UnknownIssuer",
+    "certificate not valid for name",
+    "certificate expired",
+    "error decoding response body",
+    "HTTP status client error (403",
+    "HTTP status client error (404",
+    "HTTP status client error (407",
+    "HTTP status client error (429",
+    "HTTP status server error",
     // .NET's network faults, which PowerShell installers print.
     "The remote name could not be resolved",
     "The operation has timed out",
@@ -721,6 +746,46 @@ mod tests {
             )
             .as_deref(),
             Some("stdin is not a terminal")
+        );
+    }
+
+    #[test]
+    fn a_managed_download_keeps_the_network_cause_without_the_url() {
+        let url = "https://registry.npmjs.org/@opencode%2fcli-windows-x64/latest?token=secret";
+        for (cause, expected) in [
+            (
+                "client error (Connect): dns error: No such host is known. (os error 11001)",
+                "Could not reach; dns error; No such host is known",
+            ),
+            (
+                "client error (Connect): tcp connect error: No connection could be made because the target machine actively refused it. (os error 10061)",
+                "Could not reach; tcp connect error; actively refused it",
+            ),
+            (
+                "client error (Connect): invalid peer certificate: UnknownIssuer",
+                "Could not reach; invalid peer certificate; UnknownIssuer",
+            ),
+            (
+                "client error (SendRequest): connection closed before message completed",
+                "Could not reach; connection closed before message completed",
+            ),
+        ] {
+            let output = format!("Could not reach {url}: error sending request for url ({url}): {cause}");
+            assert_eq!(safe_error_excerpt(&output).as_deref(), Some(expected), "{output}");
+        }
+        assert_eq!(
+            safe_error_excerpt(&format!(
+                "Could not reach {url}: HTTP status client error (403 rate limit exceeded) for url ({url})"
+            ))
+            .as_deref(),
+            Some("Could not reach; HTTP status client error (403")
+        );
+        assert_eq!(
+            safe_error_excerpt(
+                "Could not move the release into C:\\Users\\person\\.cache\\openresearch\\managed-agents\\opencode\\2.3.0: Access is denied. (os error 5)"
+            )
+            .as_deref(),
+            Some("Access is denied; Could not move the release into")
         );
     }
 

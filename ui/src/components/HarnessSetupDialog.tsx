@@ -198,6 +198,11 @@ function progressFrame(value: unknown): Progress | null {
   return { received: value.received, total: typeof value.total === "number" ? value.total : null };
 }
 
+/** `type: queue` frames: whether the attempt waits for another install or update to finish. */
+function queueFrame(value: unknown): boolean | null {
+  return isRecord(value) && value.type === "queue" && typeof value.waiting === "boolean" ? value.waiting : null;
+}
+
 function DownloadBar({ progress }: { progress: Progress | null }) {
   const label = !progress ? undefined
     : progress.total === null ? (progress.received < 512 * 1024 ? undefined : fmtBytes(progress.received))
@@ -216,6 +221,7 @@ function InstallProgress({ path, agent, running, onComplete, onError }: {
 }) {
   const { socketUrl } = useWorkspace();
   const [progress, setProgress] = useState<Progress | null>(null);
+  const [queued, setQueued] = useState(false);
   const events = useRef({ onComplete, onError });
   events.current = { onComplete, onError };
 
@@ -234,7 +240,9 @@ function InstallProgress({ path, agent, running, onComplete, onError }: {
       let value: unknown;
       try { value = JSON.parse(event.data); } catch { return; }
       const next = progressFrame(value);
+      const waiting = queueFrame(value);
       if (next) setProgress(next);
+      else if (waiting !== null) setQueued(waiting);
       else if (isRecord(value) && value.type === "complete") end();
       else if (isRecord(value) && value.type === "error") end(typeof value.error === "string" ? value.error : m.harness_setup_failed());
     };
@@ -250,7 +258,7 @@ function InstallProgress({ path, agent, running, onComplete, onError }: {
   if (!running) return null;
   return (
     <div className="mt-1">
-      <p role="status" className="m-0 text-sm">{m.harness_setup_installing({ agent })}</p>
+      <p role="status" className="m-0 text-sm">{queued ? m.harness_setup_queued() : m.harness_setup_installing({ agent })}</p>
       <DownloadBar progress={progress} />
     </div>
   );
@@ -292,6 +300,7 @@ function SetupRun({ path, label, command, running, signIn, status, expanded, onC
   const [code, setCode] = useState("");
   const [sent, setSent] = useState(false);
   const [progress, setProgress] = useState<Progress | null>(null);
+  const [queued, setQueued] = useState(false);
   const sendRef = useRef<((message: object) => void) | null>(null);
 
   const send = () => {
@@ -300,6 +309,7 @@ function SetupRun({ path, label, command, running, signIn, status, expanded, onC
     setSent(true);
   };
   const line: ReactNode = !running ? null
+    : queued ? m.harness_setup_queued()
     : !signIn ? status
       : signIn.page && !url ? m.harness_setup_signin_starting()
         : sent ? m.harness_setup_signin_checking_code()
@@ -354,6 +364,8 @@ function SetupRun({ path, label, command, running, signIn, status, expanded, onC
             onComplete={(value) => {
               const next = progressFrame(value);
               if (next) setProgress(next);
+              const waiting = queueFrame(value);
+              if (waiting !== null) setQueued(waiting);
               if (isRecord(value) && value.type === "signin" && typeof value.url === "string") setUrl(value.url);
               if (!isRecord(value) || value.type !== "complete") return false;
               onComplete();

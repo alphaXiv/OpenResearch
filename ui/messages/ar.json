@@ -1473,6 +1473,7 @@
   "chat_model_unavailable": "النموذج غير متاح",
   "harness_setup_approve_run": "تشغيل الأمر",
   "harness_setup_installing": "جارٍ تثبيت {agent}…",
+  "harness_setup_queued": "في انتظار انتهاء تثبيت أو تحديث وكيل آخر…",
   "harness_setup_updating": "جارٍ تحديث {agent}…",
   "harness_setup_signin_starting": "جارٍ بدء تسجيل الدخول…",
   "harness_setup_signin_page": "صفحة تسجيل الدخول",

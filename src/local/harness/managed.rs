@@ -67,14 +67,16 @@ pub(crate) fn lock_installations() -> Result<crate::file_lock::FileLock> {
 /// [`lock_installations`], or `None` while another install or removal holds it.
 pub(crate) fn try_lock_installations() -> Result<Option<crate::file_lock::FileLock>> {
     let root = crate::config::config_dir();
-    std::fs::create_dir_all(&root)?;
+    std::fs::create_dir_all(&root)
+        .with_context(|| format!("Couldn't create {}", root.display()))?;
     let path = root.join("managed-agents.lock");
     let lock = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
-        .open(&path)?;
+        .open(&path)
+        .with_context(|| format!("Couldn't open {}", path.display()))?;
     match lock.try_lock() {
         Ok(()) => Ok(Some(crate::file_lock::FileLock::new(lock))),
         Err(std::fs::TryLockError::WouldBlock) => Ok(None),
