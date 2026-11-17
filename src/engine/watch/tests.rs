@@ -1543,16 +1543,20 @@ async fn instrumentation_waits_for_a_view_changed_during_the_pass() {
     let store = Store::open().unwrap();
     chat(&store, "editing-owner", "claude-code");
     let log = "::orx:: {\"phase\":\"train\",\"step\":1,\"of\":3,\"m\":{\"loss\":2}}\n::orx:: {\"step\":2,\"m\":{\"loss\":1}}\n";
-    let row = run(
+    let mut row = run(
         &store,
         "editing-instrumentation",
         "Editing",
         "editing-owner",
         log,
     );
+    row.created_at -= 240_000;
+    store.upsert_run(&row).unwrap();
     let now = crate::store::now_ms();
     let mut snapshot = orx_signals::Snapshot::new(&row.id, "1-7", "g1");
-    snapshot.feed(log.as_bytes(), false, now, true).unwrap();
+    snapshot
+        .feed(log.as_bytes(), false, now - 180_000, true)
+        .unwrap();
     snapshot.reached_end(now);
     let path = store
         .data_dir()

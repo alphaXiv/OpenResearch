@@ -297,7 +297,9 @@ The existing watcher pass also checks instrumentation after reporting starts or
 the run's first minutes pass. It checks patterns against real log bytes, the
 headline and charts against reported names, and observed stages against their
 totals, including totals supplied by the plan. Views and patterns scoped to a
-future stage wait for it. A run gets at most one instrumentation notice, kept
+future stage wait for it. Missing chart and headline data wait two minutes from
+the reporting stage's start; an unphased view uses the first stage with metric
+or table data, leaving setup counters out. A run gets at most one instrumentation notice, kept
 in the outbox across restarts and batched with any notice already due to its
 chat. It names the missing reports and how to inspect and fix them; it never
 stops or retries the run. Unavailable or rebuilding evidence waits for collection.

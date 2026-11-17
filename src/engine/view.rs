@@ -2004,13 +2004,40 @@ pub(crate) fn instrumentation(
         }
     }
     let view = &monitor["view"];
+    let ready = |phase: Option<&str>| {
+        let Some(now) = monitor["asOf"].as_i64() else {
+            return false;
+        };
+        let first_reporting = snapshot.and_then(|s| {
+            s.series_stages
+                .values()
+                .min()
+                .and_then(|occurrence| s.phases.iter().find(|p| p.occurrence == *occurrence))
+                .or_else(|| (!s.rows.is_empty()).then(|| s.phases.last()).flatten())
+        });
+        let phase = phase.or_else(|| first_reporting.map(|p| p.name.as_str()));
+        monitor["phases"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|stage| phase.is_some_and(|name| stage["name"] == name))
+            .filter_map(|stage| stage["startedAt"].as_i64())
+            .next_back()
+            .is_some_and(|start| now.saturating_sub(start) >= 120_000)
+    };
     let headline: Vec<&str> = view["headline"]
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
         .collect();
-    if (!seen.signals.is_empty() || !seen.tables.is_empty())
+    if (ready(None)
+        || view["blocks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|block| ready(block["phase"].as_str())))
+        && (!seen.signals.is_empty() || !seen.tables.is_empty())
         && !headline.is_empty()
         && !headline.iter().any(|name| seen.has_signal(name))
     {
@@ -2018,7 +2045,9 @@ pub(crate) fn instrumentation(
     }
     let mut missing = std::collections::BTreeSet::new();
     for block in view["blocks"].as_array().into_iter().flatten() {
-        if block["phase"].as_str().is_some_and(|name| !started(name)) {
+        if !ready(block["phase"].as_str())
+            || block["phase"].as_str().is_some_and(|name| !started(name))
+        {
             continue;
         }
         if let Some(table) = block["from"].as_str() {
@@ -2302,6 +2331,43 @@ mod tests {
     }
 
     #[test]
+    fn instrumentation_gives_chart_stages_two_minutes_to_report() {
+        let config = orx_signals::Config::default();
+        let snapshot = check_snapshot(
+            "::orx:: {\"phase\":\"train\",\"step\":1,\"m\":{\"loss\":2}}\n",
+            &config,
+        );
+        let view = compile(r#"<signal name="loss"/><signal name="val_bpb"/><view headline="val_bpb"><chart y="val_bpb" phase="train"/></view>"#).unwrap().tree;
+        let mut monitor =
+            json!({"view":view,"asOf":1000,"phases":[{"name":"train","of":10,"startedAt":1000}]});
+        assert!(instrumentation(&monitor, Some(&snapshot), &config, None).is_empty());
+        monitor["asOf"] = json!(121000);
+        let problems = instrumentation(&monitor, Some(&snapshot), &config, None);
+        assert!(problems.iter().any(|p| p.contains("val_bpb")));
+        monitor["phases"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"name":"train","of":10,"startedAt":121000}));
+        assert!(instrumentation(&monitor, Some(&snapshot), &config, None).is_empty());
+        monitor["phases"].as_array_mut().unwrap().truncate(1);
+        monitor["view"]["blocks"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("phase");
+        monitor["asOf"] = json!(120999);
+        assert!(instrumentation(&monitor, Some(&snapshot), &config, None).is_empty());
+        monitor["asOf"] = json!(121000);
+        assert!(!instrumentation(&monitor, Some(&snapshot), &config, None).is_empty());
+        let setup = check_snapshot(
+            "::orx:: {\"phase\":\"download\",\"step\":1,\"of\":9}\n",
+            &config,
+        );
+        monitor["phases"] = json!([{"name":"download","of":9,"startedAt":0}]);
+        monitor["asOf"] = json!(600000);
+        assert!(instrumentation(&monitor, Some(&setup), &config, None).is_empty());
+    }
+
+    #[test]
     fn instrumentation_reports_each_missing_part_and_its_fix() {
         let config: orx_signals::Config = serde_json::from_value(json!({"patterns":[
             {"regex":"^loss (?P<loss>\\d+)$","phase":"train"},
@@ -2313,7 +2379,8 @@ mod tests {
             &config,
         );
         let view = compile(r#"<signal name="accuracy"/><signal name="missing"/><view headline="accuracy"><chart y="missing"/></view>"#).unwrap().tree;
-        let monitor = json!({"view":view,"phases":[{"name":"train"}]});
+        let monitor =
+            json!({"view":view,"asOf":121000,"phases":[{"name":"train","startedAt":1000}]});
         let problems = instrumentation(&monitor, Some(&snapshot), &config, Some(&snapshot));
         assert_eq!(problems.len(), 4, "{problems:?}");
         assert!(problems.iter().any(|p| p.contains("--pattern PATH")));
@@ -2340,8 +2407,7 @@ mod tests {
             &config,
         );
         let view = compile(r#"<signal name="accuracy"/><signal name="loss"/><view headline="accuracy loss"><chart y="loss" phase="train"/><chart y="accuracy" phase="eval"/></view>"#).unwrap().tree;
-        let monitor =
-            json!({"view":view,"phases":[{"name":"train","of":10},{"name":"eval","of":5}]});
+        let monitor = json!({"view":view,"asOf":121000,"phases":[{"name":"train","startedAt":1000,"of":10},{"name":"eval","startedAt":1000,"of":5}]});
         assert!(instrumentation(&monitor, Some(&snapshot), &config, Some(&snapshot)).is_empty());
     }
 
@@ -2373,7 +2439,7 @@ mod tests {
         assert_eq!(replay.tally.as_ref().unwrap().hits[0].matched, 0);
         assert_eq!(snapshot.tally.as_ref().unwrap().hits[0].matched, 1);
         let view = compile(r#"<view headline="loss"><chart y="loss" phase="train"/><chart y="accuracy" phase="eval"/></view>"#).unwrap().tree;
-        let monitor = json!({"view":view});
+        let monitor = json!({"view":view,"asOf":121000,"phases":[{"name":"train","startedAt":1000},{"name":"eval","startedAt":1000}]});
         let problems = instrumentation(&monitor, Some(&snapshot), &config, Some(&replay));
         assert!(problems.is_empty(), "{problems:?}");
 
@@ -2392,7 +2458,7 @@ mod tests {
             super::super::monitor::default_view(Some(&snapshot)),
             compile(r#"<view headline="accuracy"><chart y="accuracy"/><chart from="scores" x="item" y="accuracy"/></view>"#).unwrap().tree,
         ] {
-            let monitor = json!({"view":view});
+            let monitor = json!({"view":view,"asOf":121000,"phases":[{"name":"eval","startedAt":1000}]});
             assert!(instrumentation(&monitor, Some(&snapshot), &config, None).is_empty());
         }
     }
@@ -2408,7 +2474,7 @@ mod tests {
         let view = compile(r#"<view><chart from="scores" x="task" y="accuracy" by="arm"/></view>"#)
             .unwrap()
             .tree;
-        let monitor = json!({"view":view,"phases":[{"name":"train","of":10},{"name":"eval","of":1},{"name":"train"}]});
+        let monitor = json!({"view":view,"asOf":121000,"phases":[{"name":"train","startedAt":1000,"of":10},{"name":"eval","startedAt":1000,"of":1},{"name":"train","startedAt":1000}]});
         let problems = instrumentation(&monitor, Some(&snapshot), &config, None);
         assert_eq!(problems.len(), 2, "{problems:?}");
         assert!(problems.iter().any(|p| p.contains("scores.accuracy")));
@@ -2422,7 +2488,7 @@ mod tests {
     fn instrumentation_uses_the_runs_plan_instead_of_an_older_experiment_plan() {
         let config = orx_signals::Config::default();
         let snapshot = check_snapshot("::orx:: {\"plan\":[{\"phase\":\"train\",\"of\":5}],\"phase\":\"train\",\"step\":1,\"m\":{\"loss\":2}}\n", &config);
-        let monitor = json!({"view":compile("<view><chart y=\"loss\"/></view>").unwrap().tree,"phases":[{"name":"train","of":10}]});
+        let monitor = json!({"view":compile("<view><chart y=\"loss\"/></view>").unwrap().tree,"asOf":121000,"phases":[{"name":"train","startedAt":1000,"of":10}]});
         assert!(instrumentation(&monitor, Some(&snapshot), &config, None).is_empty());
         let snapshot = check_snapshot("::orx:: {\"plan\":[{\"phase\":\"train\"}],\"phase\":\"train\",\"step\":1,\"m\":{\"loss\":2}}\n", &config);
         let problems = instrumentation(&monitor, Some(&snapshot), &config, None);
