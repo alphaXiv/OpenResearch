@@ -1292,6 +1292,13 @@ impl Store {
                 claim_token     TEXT NOT NULL,
                 heartbeat_at    INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS chat_turn_checkpoints (
+                turn_id    TEXT PRIMARY KEY,
+                keep_id    TEXT NOT NULL,
+                offset     INTEGER NOT NULL,
+                state_json TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS data_dir_move_lease (
                 id           INTEGER PRIMARY KEY CHECK (id = 1),
                 claim_token  TEXT NOT NULL,
@@ -2421,6 +2428,38 @@ impl Store {
             params![chat_session_id, token, now_ms()],
         )?;
         Ok(renewed == 1)
+    }
+
+    pub fn write_chat_turn_checkpoint(&self, checkpoint: TurnCheckpointWrite<'_>) -> Result<()> {
+        write_turn_checkpoint(&self.conn, checkpoint)
+    }
+
+    pub fn chat_turn_checkpoint(&self, turn_id: &str) -> Result<Option<StoredTurnCheckpoint>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT keep_id, offset, state_json FROM chat_turn_checkpoints WHERE turn_id = ?1",
+                params![turn_id],
+                |row| {
+                    Ok(StoredTurnCheckpoint {
+                        keep_id: row.get(0)?,
+                        offset: row.get::<_, i64>(1)? as u64,
+                        state_json: row.get(2)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// Checkpoints only matter while their turn runs.
+    pub fn delete_finished_chat_turn_checkpoints(&self) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM chat_turn_checkpoints WHERE turn_id NOT IN (
+                 SELECT id FROM chat_turns WHERE state IN ('preparing', 'retrying', 'running')
+             )",
+            [],
+        )?;
+        Ok(())
     }
 
     pub fn release_chat_turn(&self, chat_session_id: &str, token: &str) -> Result<()> {
@@ -4317,10 +4356,21 @@ impl Store {
     /// torn read-leaf/append would make a permission card and its own reply
     /// siblings, hiding one of them.
     pub fn upsert_chat_message_on_branch(&self, m: &StoredChatMessage) -> Result<Option<String>> {
+        self.upsert_chat_message_with_checkpoint(m, TurnCheckpointWrite::Keep)
+    }
+
+    /// [`Self::upsert_chat_message_on_branch`], committing the turn's checkpoint with it so
+    /// a resumed turn never applies output the message already shows, or misses some.
+    pub fn upsert_chat_message_with_checkpoint(
+        &self,
+        m: &StoredChatMessage,
+        checkpoint: TurnCheckpointWrite<'_>,
+    ) -> Result<Option<String>> {
         let tx = rusqlite::Transaction::new_unchecked(
             &self.conn,
             rusqlite::TransactionBehavior::Immediate,
         )?;
+        write_turn_checkpoint(&tx, checkpoint)?;
         // Outer None = no such row yet; inner None = a row that is a branch root.
         let known: Option<Option<String>> = tx
             .query_row(
@@ -5336,6 +5386,55 @@ pub struct StoredChatMessage {
     pub result_native_message_id: Option<String>,
     /// The harness that owns both native session ids on this message.
     pub native_harness: Option<String>,
+}
+
+/// Where a running turn's harness can go on from, written with the transcript flush it matches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredTurnCheckpoint {
+    pub keep_id: String,
+    pub offset: u64,
+    pub state_json: String,
+}
+
+pub enum TurnCheckpointWrite<'a> {
+    Keep,
+    Set {
+        turn_id: &'a str,
+        keep_id: &'a str,
+        offset: u64,
+        state_json: &'a str,
+    },
+    /// The transcript moved past the last checkpoint without a new one.
+    Clear {
+        turn_id: &'a str,
+    },
+}
+
+fn write_turn_checkpoint(conn: &Connection, checkpoint: TurnCheckpointWrite<'_>) -> Result<()> {
+    match checkpoint {
+        TurnCheckpointWrite::Keep => {}
+        TurnCheckpointWrite::Set {
+            turn_id,
+            keep_id,
+            offset,
+            state_json,
+        } => {
+            conn.execute(
+                "INSERT INTO chat_turn_checkpoints (turn_id, keep_id, offset, state_json, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(turn_id) DO UPDATE SET keep_id = ?2, offset = ?3, state_json = ?4,
+                     updated_at = ?5",
+                params![turn_id, keep_id, offset as i64, state_json, now_ms()],
+            )?;
+        }
+        TurnCheckpointWrite::Clear { turn_id } => {
+            conn.execute(
+                "DELETE FROM chat_turn_checkpoints WHERE turn_id = ?1",
+                params![turn_id],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn upsert_chat_message_with(conn: &Connection, m: &StoredChatMessage) -> Result<()> {

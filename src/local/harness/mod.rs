@@ -241,6 +241,13 @@ pub trait Harness: Send + Sync {
         false
     }
 
+    /// Whether [`Harness::run_turn`] honors `ctx.resume`: it goes on with a turn a previous
+    /// server left running on a kept agent, from its checkpoint, without sending the prompt.
+    /// A harness that cannot is never handed a resume; its turns recover as failed instead.
+    fn supports_resume(&self) -> bool {
+        false
+    }
+
     /// Whether native compaction or the shared summarize-and-reseed path is supported.
     fn supports_compaction(&self) -> bool {
         false

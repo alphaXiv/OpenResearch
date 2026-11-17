@@ -24,6 +24,7 @@ mod file_lock;
 mod folder_picker;
 mod invocation;
 mod jobs;
+mod keep;
 // Local mode (`orx up`): builds out across stages; not all of it is wired yet.
 #[allow(dead_code)]
 mod local;
@@ -1100,6 +1101,18 @@ pub struct PaperArgs {
 }
 
 fn main() {
+    // Before any thread starts: a keeper forks to leave this process tree.
+    let mut args = std::env::args_os().skip(1);
+    if args.next().as_deref() == Some(std::ffi::OsStr::new("keep")) {
+        let status = match (args.next(), args.next()) {
+            (Some(dir), None) => orx_keep::run(std::path::Path::new(&dir)).map_or(1, |()| 0),
+            _ => {
+                eprintln!("usage: orx keep KEEPER_DIR");
+                2
+            }
+        };
+        std::process::exit(status);
+    }
     if let Err(error) = commands::remote_host::prepare_readiness_pipe() {
         eprintln!("Could not prepare server readiness: {error}");
         std::process::exit(1);

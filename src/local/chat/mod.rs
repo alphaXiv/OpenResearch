@@ -3357,7 +3357,8 @@ pub struct SendMessageResult {
     pub existing: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DeliveryState {
     NotSent,
     Rejected,
@@ -8389,6 +8390,43 @@ pub struct TurnCtx {
     target_event_bindings: HashMap<String, Vec<String>>,
     /// The turn records output the agent produced on its own; there is no prompt to send.
     pub continuation: bool,
+    /// Set when this turn continues one a previous server left running: the harness attaches
+    /// to the kept agent and goes on from the checkpoint, sending nothing it already sent.
+    pub resume: Option<Resume>,
+    /// Whether the store holds a checkpoint that this turn's transcript still matches.
+    checkpointed: bool,
+}
+
+/// Where a harness goes on from in a resumed turn: its kept agent, the output offset its last
+/// checkpoint had applied through, and the state it recorded there.
+#[derive(Debug, Clone)]
+pub struct Resume {
+    pub keep_id: String,
+    pub offset: u64,
+    pub state: Value,
+}
+
+/// The turn's own progress a resumed turn restores; the harness's state rides beside it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub(crate) struct CtxCheckpoint {
+    delivery_state: Option<DeliveryState>,
+    attempt_count: i64,
+    usage_execution_id: String,
+    native_message_models: HashMap<String, crate::store::InvocationIdentity>,
+    native_usage_scopes: HashSet<String>,
+    retry_owner: Option<String>,
+    retry_started_emitted: bool,
+    retry_exhausted: bool,
+    orx_retry_count: u32,
+    terminal_error: Option<(String, String)>,
+    native_session_id: Option<String>,
+    native_message_id: Option<String>,
+    context_usage: Option<ContextUsage>,
+    target_event_offset: u64,
+    pending_target_events: Vec<(String, String, String, String, String)>,
+    target_event_bindings: HashMap<String, Vec<String>>,
+    continuation: bool,
 }
 
 fn turn_ctx_from_stored(
@@ -8471,6 +8509,8 @@ fn turn_ctx_from_stored(
         pending_target_events: Vec::new(),
         target_event_bindings: HashMap::new(),
         continuation: false,
+        resume: None,
+        checkpointed: false,
     })
 }
 
@@ -8890,6 +8930,8 @@ impl TurnCtx {
             pending_target_events: Vec::new(),
             target_event_bindings: HashMap::new(),
             continuation: false,
+            resume: None,
+            checkpointed: false,
         }
     }
 
@@ -9197,11 +9239,140 @@ impl TurnCtx {
         }
     }
 
+    /// [`Self::maybe_flush`] for a harness that can resume: the flush, when it happens,
+    /// commits a checkpoint at `offset` with `state`, then lets the keeper forget what it
+    /// covers.
+    pub fn maybe_flush_at(
+        &mut self,
+        keeper: &crate::keep::KeptHandle,
+        offset: u64,
+        state: &impl Serialize,
+    ) {
+        let tool_states = tool_state_signature(&self.assistant.parts);
+        let unattempted_state = tool_states != self.last_flushed_tool_states
+            && tool_states != self.last_attempted_tool_states;
+        if unattempted_state || self.last_flush.elapsed() >= FLUSH_INTERVAL {
+            self.last_attempted_tool_states = tool_states;
+            if let Err(error) = self.flush_at(keeper, offset, state) {
+                eprintln!("orx up: could not save turn {}: {error:#}", self.turn_id);
+            }
+        } else {
+            self.deferred_flush = true;
+        }
+    }
+
+    /// [`Self::flush`] with a checkpoint: the transcript and where the harness has applied
+    /// its agent's output through commit together, and only then is that output released.
+    pub fn flush_at(
+        &mut self,
+        keeper: &crate::keep::KeptHandle,
+        offset: u64,
+        state: &impl Serialize,
+    ) -> Result<()> {
+        let state_json = serde_json::to_string(&json!({
+            "ctx": self.ctx_checkpoint(),
+            "harness": state,
+        }))?;
+        self.flush_with(crate::store::TurnCheckpointWrite::Set {
+            turn_id: &self.turn_id.clone(),
+            keep_id: keeper.id(),
+            offset,
+            state_json: &state_json,
+        })?;
+        self.checkpointed = true;
+        keeper.ack(offset);
+        Ok(())
+    }
+
+    fn ctx_checkpoint(&self) -> CtxCheckpoint {
+        CtxCheckpoint {
+            delivery_state: Some(self.delivery_state),
+            attempt_count: self.attempt_count,
+            usage_execution_id: self.usage_execution_id.clone(),
+            native_message_models: self.native_message_models.clone(),
+            native_usage_scopes: self.native_usage_scopes.clone(),
+            retry_owner: self.retry_owner.clone(),
+            retry_started_emitted: self.retry_started_emitted,
+            retry_exhausted: self.retry_exhausted,
+            orx_retry_count: self.orx_retry_count,
+            terminal_error: self.terminal_error.clone(),
+            native_session_id: self.native_session_id.clone(),
+            native_message_id: self.native_message_id.clone(),
+            context_usage: self.context_usage.clone(),
+            target_event_offset: self.target_event_offset,
+            pending_target_events: self.pending_target_events.clone(),
+            target_event_bindings: self.target_event_bindings.clone(),
+            continuation: self.continuation,
+        }
+    }
+
+    /// Restores a checkpoint's turn progress and hands its harness state to the harness as
+    /// [`Self::resume`]. The transcript already matches it: it was committed with it.
+    pub(crate) fn restore_checkpoint(
+        &mut self,
+        checkpoint: &crate::store::StoredTurnCheckpoint,
+    ) -> Result<()> {
+        let mut state: Value = serde_json::from_str(&checkpoint.state_json).map_err(|error| {
+            anyhow!(
+                "turn {} has an unreadable checkpoint: {error}",
+                self.turn_id
+            )
+        })?;
+        let ctx: CtxCheckpoint = serde_json::from_value(state["ctx"].take()).map_err(|error| {
+            anyhow!(
+                "turn {} has an unreadable checkpoint: {error}",
+                self.turn_id
+            )
+        })?;
+        if let Some(delivery_state) = ctx.delivery_state {
+            self.delivery_state = delivery_state;
+        }
+        self.attempt_count = ctx.attempt_count;
+        if !ctx.usage_execution_id.is_empty() {
+            self.usage_execution_id = ctx.usage_execution_id;
+        }
+        self.native_message_models = ctx.native_message_models;
+        self.native_usage_scopes = ctx.native_usage_scopes;
+        self.retry_owner = ctx.retry_owner;
+        self.retry_started_emitted = ctx.retry_started_emitted;
+        self.retry_exhausted = ctx.retry_exhausted;
+        self.orx_retry_count = ctx.orx_retry_count;
+        self.terminal_error = ctx.terminal_error;
+        self.native_session_id = ctx.native_session_id.or(self.native_session_id.take());
+        self.native_message_id = ctx.native_message_id;
+        self.context_usage = ctx.context_usage.or(self.context_usage.take());
+        self.target_event_offset = ctx.target_event_offset;
+        self.pending_target_events = ctx.pending_target_events;
+        self.target_event_bindings = ctx.target_event_bindings;
+        self.continuation = ctx.continuation;
+        self.checkpointed = true;
+        self.resume = Some(Resume {
+            keep_id: checkpoint.keep_id.clone(),
+            offset: checkpoint.offset,
+            state: state["harness"].take(),
+        });
+        Ok(())
+    }
+
     pub fn flush(&mut self) -> Result<()> {
+        // A flush without a checkpoint moves the transcript past the stored one, which a
+        // resumed turn would then apply twice.
+        let turn_id = self.turn_id.clone();
+        let checkpoint = if self.checkpointed {
+            crate::store::TurnCheckpointWrite::Clear { turn_id: &turn_id }
+        } else {
+            crate::store::TurnCheckpointWrite::Keep
+        };
+        self.flush_with(checkpoint)?;
+        self.checkpointed = false;
+        Ok(())
+    }
+
+    fn flush_with(&mut self, checkpoint: crate::store::TurnCheckpointWrite<'_>) -> Result<()> {
         self.last_flush = Instant::now();
         self.deferred_flush = false;
         if self.assistant.parts.is_empty() {
-            return Ok(());
+            return Store::open()?.write_chat_turn_checkpoint(checkpoint);
         }
         self.apply_target_events();
         cap_tool_parts(&mut self.assistant.parts);
@@ -9233,12 +9404,14 @@ impl TurnCtx {
                     && stored.result_native_message_id == self.native_message_id
                     && stored.native_harness.as_deref() == Some(self.harness.as_str())
             });
-            if !unchanged {
+            if unchanged {
+                store.write_chat_turn_checkpoint(checkpoint)?;
+            } else {
                 let mut wire_assistant = self.assistant.clone();
                 // Stamp the branch position onto the SSE copy (see the interrupt
                 // marker above for what an unparented broadcast does to a client).
-                wire_assistant.parent_id =
-                    store.upsert_chat_message_on_branch(&StoredChatMessage {
+                wire_assistant.parent_id = store.upsert_chat_message_with_checkpoint(
+                    &StoredChatMessage {
                         id: wire_assistant.id.clone(),
                         session_id: self.session_id.clone(),
                         role: wire_assistant.role.clone(),
@@ -9250,7 +9423,9 @@ impl TurnCtx {
                         result_native_session_id: self.native_session_id.clone(),
                         result_native_message_id: self.native_message_id.clone(),
                         native_harness: Some(self.harness.clone()),
-                    })?;
+                    },
+                    checkpoint,
+                )?;
                 self.host.emit(
                     "chat.message",
                     message_json(&wire_assistant, &self.session_id),

@@ -12,6 +12,7 @@ test-hooks = []
 
 [dependencies]
 orx-host-proto = { path = "../orx-host-proto" }
+orx-keep = { path = "../orx-keep" }
 libc = "0.2"
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
