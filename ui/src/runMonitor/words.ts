@@ -92,9 +92,7 @@ export function costWords(cost: Cost, live: boolean, lastSeen: boolean): string 
       return cost.budget === null ? spend : `${spend} · ${m.run_cost_budget({ budget: usdText(cost.budget) })}`;
     }
     if (live && cost.projected !== null) return m.run_cost_in_all({ cost: amount, total: usdText(cost.projected) });
-    if (live && cost.atLimit !== null) return m.run_cost_at_limit({ cost: amount, limitCost: usdText(cost.atLimit) });
     return m.run_cost_so_far({ cost: amount });
   }
-  if (cost.gpuHours === null) return "";
-  return m.run_cost_gpu_hours({ hours: ltr(new Intl.NumberFormat(getLocale(), { maximumFractionDigits: 1 }).format(cost.gpuHours)) });
+  return "";
 }

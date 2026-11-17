@@ -270,10 +270,8 @@ export interface Estimate {
 export interface Cost {
   soFar: number | null;
   projected: number | null;
-  atLimit: number | null;
   spend: number | null;
   budget: number | null;
-  gpuHours: number | null;
 }
 
 export interface Watch {

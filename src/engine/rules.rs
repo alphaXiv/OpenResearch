@@ -726,9 +726,7 @@ fn step(rule: &Rule, count: &mut Count, facts: &Facts) -> Option<String> {
                     "it has cost ${spent:.2}, past its ${usd:.2} budget"
                 ));
             }
-            let projected = cost["projectedRange"][1]
-                .as_f64()
-                .or(cost["projected"].as_f64());
+            let projected = cost["projected"].as_f64();
             projecting(count, facts, projected.is_some_and(|p| p > *usd)).then(|| {
                 format!(
                     "it would cost up to ${:.2} by its end, past its ${usd:.2} budget",

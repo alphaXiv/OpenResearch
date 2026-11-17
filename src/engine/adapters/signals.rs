@@ -1843,10 +1843,7 @@ mod collection_tests {
             started_at: 0.0,
             contact_lost: false,
             ends_at: None,
-            machine: crate::engine::estimate::Machine::Unpriced,
-            gpu_count: None,
-            spend: crate::engine::estimate::Spend::NeverReported,
-            spend_per_hour: None,
+            machine_cost_unknown: false,
         }
     }
 

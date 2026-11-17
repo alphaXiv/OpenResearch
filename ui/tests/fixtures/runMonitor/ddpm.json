@@ -103,12 +103,9 @@
   "cost": {
     "soFar": 11.06,
     "projected": null,
-    "atLimit": null,
     "spend": null,
     "budget": null,
-    "gpuHours": null,
     "at": 1794404280000,
-    "projectedRange": null,
     "uncertain": false
   },
   "watch": {

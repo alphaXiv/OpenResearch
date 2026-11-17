@@ -731,31 +731,15 @@ fn estimate_input(
 ) -> (estimate::Input, i64) {
     let clock: Option<(i64, i64)> = serde_json::from_value(fold.status["clock"].clone()).ok();
     let offset = clock.map_or(0, |(host, laptop)| host - laptop);
-    let machine = match life.kind.as_str() {
-        "openresearch_job" | "hf_job" | "modal_job" | "vercel_job" => estimate::Machine::Unknown,
-        _ => estimate::Machine::Unpriced,
-    };
     let snapshot = fold.snapshot.as_deref();
-    let spend = match snapshot.and_then(|s| s.spend) {
-        // Spend at a later phase's start is not kept, so its rate cannot be projected.
-        Some(usd) if snapshot.is_some_and(|s| s.phases.len() <= 1) => estimate::Spend::Reported {
-            usd,
-            at_phase_start: 0.0,
-        },
-        Some(usd) => estimate::Spend::Reported {
-            usd,
-            at_phase_start: f64::NAN,
-        },
-        None => estimate::Spend::NeverReported,
-    };
     let run = estimate::Run {
         started_at: life.start() as f64,
         contact_lost: life.contact_lost(),
         ends_at: life.ends_at().map(|at| at as f64),
-        machine,
-        gpu_count: None,
-        spend,
-        spend_per_hour: None,
+        machine_cost_unknown: matches!(
+            life.kind.as_str(),
+            "openresearch_job" | "hf_job" | "modal_job" | "vercel_job"
+        ),
     };
     let empty;
     let signals = match snapshot {
@@ -992,16 +976,12 @@ fn evaluate(
         _ => None,
     });
     let cost = output.as_ref().map(|o| &o.cost).and_then(|cost| {
-        let nothing = cost.so_far.is_none() && cost.spend.is_none() && cost.gpu_hours.is_none();
-        (!(nothing && matches!(input.machine, estimate::Machine::Unpriced))).then(|| {
+        (input.machine_cost_unknown || cost.spend.is_some()).then(|| {
             json!({
                 "soFar": cost.so_far,
                 "projected": cost.projected,
-                "atLimit": cost.at_limit,
                 "spend": cost.spend,
                 "budget": budget,
-                "gpuHours": cost.gpu_hours,
-                "projectedRange": cost.projected_range,
             })
         })
     });
@@ -2980,15 +2960,11 @@ fn with_cost(text: String, cost: Option<&Value>, last_seen: bool) -> String {
     let usd = |key: &str| cost[key].as_f64().map(|usd| format!("${usd:.2}"));
     let detail = if last_seen {
         usd("soFar").map(|so_far| format!("{so_far} when last seen"))
-    } else if let Some(so_far) = usd("soFar") {
-        Some(match usd("projected") {
+    } else {
+        usd("soFar").map(|so_far| match usd("projected") {
             Some(total) => format!("{so_far} so far, about {total} in all"),
             None => format!("{so_far} so far"),
         })
-    } else {
-        cost["gpuHours"]
-            .as_f64()
-            .map(|hours| format!("{hours:.1} GPU-hours"))
     };
     match detail {
         Some(detail) => format!("{text}  ·  {detail}"),
@@ -7327,6 +7303,57 @@ mod tests {
         let reason = stopped_by(&f, "slow").unwrap().reason.unwrap();
         assert!(reason.starts_with("it would finish up to "), "{reason}");
         assert!(reason.ends_with(" past its time limit"), "{reason}");
+    }
+
+    #[test]
+    fn projected_spend_stops_only_after_two_revisions_above_the_budget() {
+        let f = Fixture::new("orx-rules-projected-spend");
+        let run = ruled(
+            &f,
+            "r1",
+            "exp",
+            local(),
+            json!([{"name": "budget", "does": "stop", "when": {"kind": "costAbove", "usd": 8}}]),
+        );
+        let mut snapshot = Snapshot::new("r1", "1-1", "g1");
+        for (from, through, extra) in [(0, 64, 0.0), (65, 65, 0.0), (66, 66, 0.25), (67, 67, 0.25)]
+        {
+            let lines: Vec<_> = (from..=through)
+                .map(|step| {
+                    let spend = step as f64 / 16.0 + extra;
+                    (
+                        T0 + step * 1000,
+                        format!(r#"::orx:: {{"step":{step},"of":128,"t":{step},"spend":{spend}}}"#),
+                    )
+                })
+                .collect();
+            fold(&mut snapshot, &lines);
+            f.collect(&snapshot);
+            let now = T0 + through * 1000;
+            f.confirmed("r1", now);
+            let (monitor, _) = monitor_at(&f, &run, now);
+            let projected = monitor["cost"]["projected"].as_f64().unwrap();
+            assert_eq!(projected > 8.0, extra > 0.0);
+            assert!(monitor["cost"]["soFar"].as_f64().unwrap() < 8.0);
+            rules_at(&f, "r1", now);
+            assert_eq!(stopped_by(&f, "r1").is_some(), through == 67);
+        }
+    }
+
+    #[test]
+    fn hosted_spend_is_reported_without_a_machine_total() {
+        let f = Fixture::new("orx-monitor-hosted-spend");
+        let run = f.run("running", json!({"kind": "hf_job"}));
+        f.signals(&folded(&[(
+            T0,
+            r#"::orx:: {"step":10,"of":100,"spend":1}"#.into(),
+        )]));
+        f.collected(T0);
+        let (monitor, _) = monitor_at(&f, &run, T0 + 1000);
+        let cost = &monitor["cost"];
+        assert_eq!(cost["spend"], 1.0);
+        assert!(cost["soFar"].is_null());
+        assert!(cost["projected"].is_null());
     }
 
     #[test]

@@ -1,42 +1,24 @@
-use serde::Deserialize;
-
-#[derive(Clone, Copy, Debug, Deserialize)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct Range {
     pub lo_ms: f64,
     pub mid_ms: f64,
     pub hi_ms: f64,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug)]
 pub(crate) struct Phase {
-    #[cfg(test)]
-    pub name: String,
     pub total: Option<f64>,
     pub prior: Option<Range>,
-    /// Expected total API spend for this phase; absence means unknown.
-    pub spend: Option<f64>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct Point {
     pub at: f64,
     pub done: f64,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize)]
-pub(crate) enum Machine {
-    Unpriced,
-    Unknown,
-    Priced {
-        usd_per_hour: f64,
-        quantum_ms: f64,
-        billed_from: Option<f64>,
-        uncertain: bool,
-    },
-}
-
-#[derive(Clone, Copy, Debug, Deserialize)]
-pub(crate) enum Spend {
+#[derive(Clone, Copy, Debug)]
+enum Spend {
     NeverReported,
     Reported { usd: f64, at_phase_start: f64 },
 }
@@ -159,7 +141,7 @@ fn clock_time(field: &'static str, value: f64, at: f64) -> Result<f64, InputErro
     bounded(field, None, value, 0.0, at).map(|()| value)
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug)]
 pub(crate) struct Input {
     pub now: f64,
     pub started_at: f64,
@@ -178,14 +160,11 @@ pub(crate) struct Input {
     /// is known, but where they lie, and so any stall, is not.
     pub placed: bool,
     pub ends_at: Option<f64>,
-    pub machine: Machine,
-    pub gpu_count: Option<f64>,
-    pub spend: Spend,
-    pub spend_per_hour: Option<f64>,
+    pub machine_cost_unknown: bool,
+    spend: Spend,
     /// `phases` is the run's declared plan, stages to come included: a stage's weight is its
     /// prior, so whole-run progress is unknown unless every stage has one, and a stage with no
     /// prior leaves time left a floor.
-    #[serde(default)]
     pub planned: bool,
 }
 
@@ -203,8 +182,6 @@ pub(crate) struct Eta {
 
 #[derive(Debug)]
 pub(crate) struct Segment {
-    #[cfg(test)]
-    pub name: String,
     pub weight: f64,
     pub fill: Option<f64>,
 }
@@ -213,23 +190,15 @@ pub(crate) struct Segment {
 pub(crate) struct Cost {
     pub so_far: Option<f64>,
     pub projected: Option<f64>,
-    pub projected_range: Option<[f64; 2]>,
-    pub at_limit: Option<f64>,
     pub spend: Option<f64>,
-    /// Allocated GPU count × payload-active hours, independent of billing setup.
-    pub gpu_hours: Option<f64>,
     #[cfg(test)]
     pub uncertain: bool,
-    #[cfg(test)]
-    pub at: f64,
 }
 
 #[derive(Debug)]
 pub(crate) struct Output {
     pub phase_fraction: Option<f64>,
     pub segments: Vec<Segment>,
-    #[cfg_attr(not(test), expect(dead_code))]
-    pub weights_estimated: bool,
     pub whole: Option<f64>,
     pub current_phase: Option<Eta>,
     pub estimate: Option<Eta>,
@@ -445,13 +414,6 @@ pub(crate) fn estimate(input: &Input) -> Result<Output, InputError> {
             };
             phase.total = checked(result, &mut errors).map(|()| value);
         }
-        if let Some(spend) = phase.spend {
-            phase.spend = checked(
-                bounded("phase.spend", Some(index), spend, 0.0, f64::INFINITY),
-                &mut errors,
-            )
-            .map(|()| spend);
-        }
         if let Some(r) = phase.prior {
             let mid = checked(
                 bounded("prior.mid_ms", Some(index), r.mid_ms, 0.0, f64::INFINITY),
@@ -511,8 +473,8 @@ pub(crate) fn estimate(input: &Input) -> Result<Output, InputError> {
         }
         points.push(*point);
     }
-    let (spend, spend_projection_valid) = match input.spend {
-        Spend::NeverReported => (None, true),
+    let (spend, spent_in_phase) = match input.spend {
+        Spend::NeverReported => (None, None),
         Spend::Reported {
             usd,
             at_phase_start,
@@ -536,60 +498,9 @@ pub(crate) fn estimate(input: &Input) -> Result<Output, InputError> {
                 bounded("spend.usd", None, usd, at_phase_start, f64::INFINITY),
                 &mut errors,
             );
-            (amount, baseline.is_some() && monotonic.is_some())
+            let spent_in_phase = baseline.and(monotonic).map(|()| usd - at_phase_start);
+            (amount, spent_in_phase)
         }
-    };
-    let gpu_count = input.gpu_count.and_then(|count| {
-        checked(
-            bounded("gpu_count", None, count, 0.0, f64::INFINITY),
-            &mut errors,
-        )
-        .map(|()| count)
-    });
-    let spend_per_hour = input.spend_per_hour.and_then(|rate| {
-        checked(
-            bounded("spend_per_hour", None, rate, 0.0, f64::INFINITY),
-            &mut errors,
-        )
-        .map(|()| rate)
-    });
-    let machine = match input.machine {
-        Machine::Priced {
-            usd_per_hour,
-            quantum_ms,
-            billed_from,
-            uncertain,
-        } => {
-            let rate = checked(
-                bounded("usd_per_hour", None, usd_per_hour, 0.0, f64::INFINITY),
-                &mut errors,
-            );
-            let quantum = checked(
-                if quantum_ms == 0.0 {
-                    Err(InputError::NonPositive {
-                        field: "quantum_ms",
-                        index: None,
-                        value: quantum_ms,
-                    })
-                } else {
-                    bounded("quantum_ms", None, quantum_ms, 0.0, f64::INFINITY)
-                },
-                &mut errors,
-            );
-            let origin = billed_from
-                .and_then(|from| checked(clock_time("billed_from", from, at), &mut errors));
-            if rate.is_some() && quantum.is_some() {
-                Machine::Priced {
-                    usd_per_hour,
-                    quantum_ms,
-                    billed_from: origin,
-                    uncertain,
-                }
-            } else {
-                Machine::Unknown
-            }
-        }
-        machine => machine,
     };
     let phase = &phases[input.current];
     let open = input.phases[input.current].total.is_none();
@@ -632,8 +543,6 @@ pub(crate) fn estimate(input: &Input) -> Result<Output, InputError> {
         .iter()
         .enumerate()
         .map(|(i, p)| Segment {
-            #[cfg(test)]
-            name: p.name.clone(),
             weight: if weights_estimated {
                 1.0 / phases.len() as f64
             } else {
@@ -778,97 +687,23 @@ pub(crate) fn estimate(input: &Input) -> Result<Output, InputError> {
                 .map(|(r, prior)| later(r, prior));
         }
     }
-    let machine_cost = |end: f64| match machine {
-        Machine::Unpriced => Some(0.0),
-        Machine::Unknown => None,
-        Machine::Priced {
-            usd_per_hour,
-            quantum_ms,
-            billed_from,
-            ..
-        } => billed_from.map(|start| {
-            let billed = ((end - start).max(0.0) / quantum_ms).ceil() * quantum_ms;
-            usd_per_hour * billed / 3_600_000.0
-        }),
-    };
-    let prior_start = input.current + usize::from(matches!(input.spend, Spend::Reported { .. }));
-    let mut future = phases.iter().skip(prior_start);
-    let future_spend = match input.spend {
-        Spend::NeverReported => Some(future.filter_map(|phase| phase.spend).sum::<f64>()),
-        Spend::Reported { .. } => future.try_fold(0.0, |sum, phase| Some(sum + phase.spend?)),
-    };
-    let projected_spend = match input.spend {
-        Spend::NeverReported => future_spend,
-        Spend::Reported {
-            usd,
-            at_phase_start,
-        } => total
-            .filter(|_| progress_valid && spend_projection_valid && done > 0.0)
-            .zip(future_spend)
-            .map(|(total, future)| {
-                usd + (usd - at_phase_start) / done * (total - done).max(0.0) + future
-            }),
-    };
-    let has_usd = !matches!(machine, Machine::Unpriced)
-        || spend.is_some()
-        || phases
-            .iter()
-            .skip(prior_start)
-            .any(|phase| phase.spend.is_some());
-    let projection = |remaining: f64| {
-        if !has_usd {
-            return None;
-        }
-        machine_cost(finish(remaining))
-            .zip(projected_spend)
-            .map(|(machine, spend)| machine + spend)
-    };
-    let api_only = if matches!(machine, Machine::Unpriced) && total.is_some() && has_usd {
-        projected_spend
-    } else {
-        None
-    };
-    // A floor on the time left is no projection of what the run will cost.
-    let total_range_known = total_range.filter(|_| !floor);
-    let projected = total_range_known
-        .and_then(|r| projection(r.mid_ms))
-        .or(api_only);
-    let projected_range = total_range_known
-        .and_then(|r| Some([projection(r.lo_ms)?, projection(r.hi_ms)?]))
-        .or(api_only.map(|spend| [spend, spend]));
-    let at_limit = ends_at.filter(|_| has_usd).and_then(|end| {
-        let spend = if open && spend.is_some() {
-            spend_per_hour.zip(future_spend).map(|(rate, future)| {
-                spend.unwrap() + rate * (end - at).max(0.0) / 3_600_000.0 + future
-            })
-        } else {
-            projected_spend
-        };
-        machine_cost(end)
-            .zip(spend)
-            .map(|(machine, spend)| machine + spend)
-    });
+    let projected = total
+        .zip(spend)
+        .zip(spent_in_phase)
+        .filter(|_| {
+            !input.machine_cost_unknown
+                && input.current + 1 == phases.len()
+                && progress_valid
+                && done > 0.0
+        })
+        .map(|((total, usd), spent_in_phase)| {
+            usd + spent_in_phase / done * (total - done).max(0.0)
+        });
     #[cfg(test)]
-    let uncertain = !errors.is_empty()
-        || matches!(input.spend, Spend::NeverReported)
-        || input.contact_lost
-        || matches!(
-            machine,
-            Machine::Unknown
-                | Machine::Priced {
-                    billed_from: None,
-                    ..
-                }
-                | Machine::Priced {
-                    uncertain: true,
-                    ..
-                }
-        )
-        || (spend.is_some() && projected_spend.is_none());
+    let uncertain = !errors.is_empty() || input.contact_lost || projected.is_none();
     Ok(Output {
         phase_fraction: fraction,
         segments,
-        weights_estimated,
         whole: whole.filter(|_| !floor),
         current_phase: input.phases[input.current]
             .total
@@ -889,22 +724,15 @@ pub(crate) fn estimate(input: &Input) -> Result<Output, InputError> {
         stall_ms,
         errors,
         cost: Cost {
-            so_far: if !matches!(machine, Machine::Unpriced) || spend.is_some() {
-                machine_cost(at).map(|machine| machine + spend.unwrap_or(0.0))
-            } else {
+            so_far: if input.machine_cost_unknown {
                 None
+            } else {
+                spend.map(f64::abs)
             },
             projected,
-            projected_range,
-            at_limit,
             spend,
-            gpu_hours: gpu_count
-                .zip(elapsed)
-                .map(|(gpus, elapsed)| gpus * elapsed / 3_600_000.0),
             #[cfg(test)]
             uncertain,
-            #[cfg(test)]
-            at,
         },
     })
 }
@@ -1056,10 +884,7 @@ pub(crate) struct Run {
     pub started_at: f64,
     pub contact_lost: bool,
     pub ends_at: Option<f64>,
-    pub machine: Machine,
-    pub gpu_count: Option<f64>,
-    pub spend: Spend,
-    pub spend_per_hour: Option<f64>,
+    pub machine_cost_unknown: bool,
 }
 
 /// Evaluates a run in its host's time. `plan` is the run's stages as `stages` lays them, a
@@ -1087,19 +912,17 @@ pub(crate) fn with_signals(
         now + offset
     };
     let host = |laptop: f64| laptop + offset;
-    let machine = match run.machine {
-        Machine::Priced {
-            usd_per_hour,
-            quantum_ms,
-            billed_from,
-            uncertain,
-        } => Machine::Priced {
-            usd_per_hour,
-            quantum_ms,
-            billed_from: billed_from.map(host),
-            uncertain,
+    let spend = match signals.spend {
+        Some(usd) => Spend::Reported {
+            usd,
+            // An unknown baseline keeps the original diagnostic and blocks extrapolation.
+            at_phase_start: if signals.phases.len() <= 1 {
+                0.0
+            } else {
+                f64::NAN
+            },
         },
-        machine => machine,
+        None => Spend::NeverReported,
     };
     let mut input = Input {
         now,
@@ -1108,21 +931,16 @@ pub(crate) fn with_signals(
         as_of,
         contact_lost: run.contact_lost,
         phases: vec![Phase {
-            #[cfg(test)]
-            name: String::new(),
             total: None,
             prior: None,
-            spend: None,
         }],
         current: 0,
         current_started: false,
         points: Vec::new(),
         placed: true,
         ends_at: run.ends_at.map(host),
-        machine,
-        gpu_count: run.gpu_count,
-        spend: run.spend,
-        spend_per_hour: run.spend_per_hour,
+        machine_cost_unknown: run.machine_cost_unknown,
+        spend,
         planned: false,
     };
     let prior = |stage: &Stage| {
@@ -1139,11 +957,8 @@ pub(crate) fn with_signals(
         input.phases = shown
             .iter()
             .map(|stage| Phase {
-                #[cfg(test)]
-                name: stage.name.clone(),
                 total: stage.of,
                 prior: prior(stage),
-                spend: None,
             })
             .collect();
         input.current = shown
@@ -1201,10 +1016,6 @@ pub(crate) fn with_signals(
             .zip(phase.done)
             .is_some_and(|(of, done)| done >= of);
     if signals.several_bars() || full {
-        #[cfg(test)]
-        {
-            input.phases[0].name = phase.name.clone();
-        }
         return input;
     }
     if declared {
@@ -1216,14 +1027,11 @@ pub(crate) fn with_signals(
         .iter()
         .enumerate()
         .map(|(index, occurrence)| Phase {
-            #[cfg(test)]
-            name: occurrence.name.clone(),
             total: occurrence.of,
             prior: plan
                 .iter()
                 .find(|stage| stage.phase == Some(index))
                 .and_then(prior),
-            spend: None,
         })
         .collect();
     input.current = signals.phases.len() - 1;
@@ -1318,14 +1126,6 @@ mod tests {
         );
     }
 
-    fn optional_close(actual: Option<f64>, expected: &serde_json::Value) {
-        match (actual, expected.as_f64()) {
-            (Some(actual), Some(expected)) => close(actual, expected),
-            (None, None) => (),
-            other => panic!("{other:?}"),
-        }
-    }
-
     fn input(total: Option<f64>) -> Input {
         Input {
             now: 100_000.0,
@@ -1333,12 +1133,7 @@ mod tests {
             started_at: 0.0,
             phase_started_at: Some(0.0),
             contact_lost: false,
-            phases: vec![Phase {
-                name: "train".into(),
-                total,
-                prior: None,
-                spend: None,
-            }],
+            phases: vec![Phase { total, prior: None }],
             current: 0,
             current_started: true,
             points: (1..=10)
@@ -1349,10 +1144,8 @@ mod tests {
                 .collect(),
             placed: true,
             ends_at: None,
-            machine: Machine::Unpriced,
-            gpu_count: Some(2.0),
+            machine_cost_unknown: false,
             spend: Spend::NeverReported,
-            spend_per_hour: None,
             planned: false,
         }
     }
@@ -1374,145 +1167,6 @@ mod tests {
         i.now = at;
         i.as_of = at;
         i
-    }
-
-    fn priced() -> Machine {
-        Machine::Priced {
-            usd_per_hour: 3600.0,
-            quantum_ms: 1.0,
-            billed_from: Some(0.0),
-            uncertain: false,
-        }
-    }
-
-    #[test]
-    fn prototype_reference_moments() {
-        #[derive(Deserialize)]
-        struct Moment {
-            name: String,
-            point_count: usize,
-            now: f64,
-            spend: Option<f64>,
-            expected: Option<serde_json::Value>,
-            original: Option<serde_json::Value>,
-            whole: Option<f64>,
-            reason: Option<String>,
-            details: serde_json::Value,
-        }
-        #[derive(Deserialize)]
-        struct Fixture {
-            input: serde_json::Value,
-            points: Vec<[f64; 2]>,
-            segments: Vec<(String, f64)>,
-            moments: Vec<Moment>,
-        }
-        let fixtures: Vec<Fixture> =
-            serde_json::from_str(include_str!("../../tests/estimate/prototype.json")).unwrap();
-        for fixture in fixtures {
-            for moment in fixture.moments {
-                if moment.reason.is_none() {
-                    assert_eq!(moment.expected, moment.original, "{}", moment.name);
-                }
-                let mut value = fixture.input.clone();
-                value["points"] = serde_json::Value::Array(
-                    fixture.points[..moment.point_count]
-                        .iter()
-                        .map(|p| serde_json::json!({"at":p[0],"done":p[1]}))
-                        .collect(),
-                );
-                value["now"] = serde_json::json!(moment.now);
-                value["as_of"] = value["now"].clone();
-                // The prototype's runs of several stages know them all, as a declared plan does.
-                value["planned"] = serde_json::json!(fixture.segments.len() > 1);
-                value["placed"] = serde_json::json!(true);
-                value["spend"] = moment.spend.map_or(
-                    serde_json::json!("NeverReported"),
-                    |usd| serde_json::json!({"Reported":{"usd":usd,"at_phase_start":0.0}}),
-                );
-                let i: Input = serde_json::from_value(value).unwrap();
-                let out = estimate(&i).unwrap();
-                optional_close(out.whole, &serde_json::json!(moment.whole));
-                assert!(out.errors.is_empty(), "{} {:?}", moment.name, out.errors);
-                let d = &moment.details;
-                let anchor = i.points.last().map_or(i.now, |p| p.at);
-                match (out.current_phase.as_ref(), d["current"].as_array()) {
-                    (None, None) => assert!(d["current"].is_null()),
-                    (Some(eta), Some(bounds)) => {
-                        close(eta.at, anchor);
-                        assert!(!eta.pending);
-                        let r = eta.range.unwrap();
-                        for (actual, want) in [r.lo_ms, r.mid_ms, r.hi_ms].into_iter().zip(bounds) {
-                            close(actual, want.as_f64().unwrap());
-                        }
-                    }
-                    (Some(eta), None) => {
-                        assert!(eta.pending);
-                        close(eta.at, anchor);
-                    }
-                    other => panic!("{} {other:?}", moment.name),
-                }
-                if let Some(eta) = &out.current_phase {
-                    optional_close(eta.past_limit_ms, &d["past"][0]);
-                }
-                if let Some(eta) = &out.estimate {
-                    close(eta.at, anchor);
-                    optional_close(eta.past_limit_ms, &d["past"][1]);
-                }
-                assert_eq!(out.segments.len(), fixture.segments.len());
-                for (index, (segment, (name, weight))) in
-                    out.segments.iter().zip(&fixture.segments).enumerate()
-                {
-                    assert_eq!(&segment.name, name);
-                    close(segment.weight, *weight);
-                    optional_close(segment.fill, &d["fills"][index]);
-                }
-                optional_close(out.stall_ms, &d["stall"]);
-                assert_eq!(
-                    out.completed_slices,
-                    d["completed"].as_u64().unwrap() as usize
-                );
-                optional_close(out.phase_fraction, &d["fraction"]);
-                assert_eq!(
-                    out.weights_estimated,
-                    d["weights_estimated"].as_bool().unwrap()
-                );
-                let c = &d["cost"];
-                for (actual, want) in [
-                    out.cost.so_far,
-                    out.cost.projected,
-                    out.cost.at_limit,
-                    out.cost.gpu_hours,
-                ]
-                .into_iter()
-                .zip([&c[0], &c[1], &c[3], &c[4]])
-                {
-                    optional_close(actual, want);
-                }
-                match (out.cost.projected_range, c[2].as_array()) {
-                    (None, None) => (),
-                    (Some(r), Some(want)) => {
-                        close(r[0], want[0].as_f64().unwrap());
-                        close(r[1], want[1].as_f64().unwrap());
-                    }
-                    other => panic!("{} {other:?}", moment.name),
-                }
-                assert_eq!(out.cost.spend, moment.spend);
-                close(out.cost.at, i.now);
-                assert_eq!(out.cost.uncertain, c[5].as_bool().unwrap());
-                match moment.expected {
-                    None => assert!(out.estimate.is_none()),
-                    Some(expected) if expected.get("pending").is_some() => {
-                        assert!(out.estimate.unwrap().pending)
-                    }
-                    Some(expected) => {
-                        let r = out.estimate.unwrap().range.unwrap();
-                        for (key, actual) in [("lo", r.lo_ms), ("mid", r.mid_ms), ("hi", r.hi_ms)] {
-                            close(actual, expected[key].as_f64().unwrap() * 1000.0);
-                        }
-                    }
-                }
-            }
-        }
     }
 
     #[test]
@@ -1793,15 +1447,12 @@ mod tests {
     fn future_phase_priors_and_estimated_weights() {
         let mut i = input(Some(100.0));
         i.phases.push(Phase {
-            name: "eval".into(),
             total: Some(5.0),
             prior: None,
-            spend: None,
         });
         let out = estimate(&i).unwrap();
         assert!(out.estimate.unwrap().pending);
         assert!(!out.current_phase.unwrap().pending);
-        assert!(out.weights_estimated);
         assert_eq!(
             out.whole, None,
             "no equal split stands in for unknown weights"
@@ -1844,25 +1495,15 @@ mod tests {
         i.points.clear();
         assert_eq!(estimate(&i).unwrap().whole, None);
         i.ends_at = Some(200_000.0);
-        i.machine = priced();
         let out = estimate(&i).unwrap();
         close(out.whole.unwrap(), 0.5);
         close(out.segments[0].fill.unwrap(), 0.5);
         assert!(out.estimate.is_none());
-        close(out.cost.at_limit.unwrap(), 200.0);
-        i.spend = Spend::Reported {
-            usd: 10.0,
-            at_phase_start: 0.0,
-        };
-        assert_eq!(estimate(&i).unwrap().cost.at_limit, None);
-        i.spend_per_hour = Some(360.0);
-        close(estimate(&i).unwrap().cost.at_limit.unwrap(), 220.0);
     }
 
     #[test]
-    fn stall_ignores_heartbeats_and_contact_loss_freezes_cost() {
+    fn stall_ignores_heartbeats_and_contact_loss_freezes_timing() {
         let mut i = input(Some(100.0));
-        i.machine = priced();
         let baseline = estimate(&i).unwrap();
         i.now = 200_000.0;
         i.as_of = i.now;
@@ -1880,16 +1521,12 @@ mod tests {
         i.contact_lost = true;
         i.now = 5_000_000.0;
         let lost = estimate(&i).unwrap();
-        close(lost.cost.at, 200_000.0);
-        close(lost.cost.so_far.unwrap(), 200.0);
-        close(lost.cost.gpu_hours.unwrap(), 1.0 / 9.0);
-        assert!(lost.cost.uncertain);
+        assert_eq!(lost.stall_ms, stalled.stall_ms);
     }
 
     #[test]
-    fn deadline_and_cost_use_caller_time() {
+    fn deadline_uses_caller_time() {
         let mut i = slice_reports(&[60_000.0; 10]);
-        i.machine = priced();
         i.now += 45.0 * 60_000.0;
         i.as_of = i.now;
         i.ends_at = Some(i.now + 300_000.0);
@@ -1900,7 +1537,6 @@ mod tests {
             eta.past_limit_ms.unwrap(),
             i.now + r.hi_ms - i.ends_at.unwrap(),
         );
-        close(out.cost.projected.unwrap(), (i.now + r.mid_ms) / 1000.0);
     }
 
     #[test]
@@ -1998,101 +1634,6 @@ mod tests {
     }
 
     #[test]
-    fn machine_and_api_costs_keep_quantum_and_unknowns() {
-        let mut i = input(Some(100.0));
-        i.machine = Machine::Priced {
-            usd_per_hour: 3600.0,
-            quantum_ms: 60_000.0,
-            billed_from: Some(0.0),
-            uncertain: false,
-        };
-        i.spend = Spend::Reported {
-            usd: 10.0,
-            at_phase_start: 0.0,
-        };
-        i.ends_at = Some(2_000_000.0);
-        let out = estimate(&i).unwrap();
-        close(out.cost.so_far.unwrap(), 130.0);
-        close(out.cost.projected.unwrap(), 1120.0);
-        close(out.cost.at_limit.unwrap(), 2140.0);
-        let bounds = out.cost.projected_range.unwrap();
-        assert!(bounds[0] <= 1120.0 && bounds[1] >= 1120.0);
-        i.machine = Machine::Unknown;
-        let out = estimate(&i).unwrap();
-        assert_eq!(out.cost.so_far, None);
-        assert_eq!(out.cost.spend, Some(10.0));
-        assert!(out.cost.uncertain);
-        i.machine = Machine::Priced {
-            usd_per_hour: 1.0,
-            quantum_ms: 1.0,
-            billed_from: None,
-            uncertain: true,
-        };
-        assert_eq!(estimate(&i).unwrap().cost.projected, None);
-    }
-
-    #[test]
-    fn spend_priors_and_unknown_future_spend() {
-        let mut i = input(Some(100.0));
-        i.phases[0].spend = Some(20.0);
-        i.phases.push(Phase {
-            name: "judge".into(),
-            total: Some(10.0),
-            prior: Some(Range {
-                lo_ms: 2000.0,
-                mid_ms: 2000.0,
-                hi_ms: 2000.0,
-            }),
-            spend: Some(5.0),
-        });
-        let out = estimate(&i).unwrap();
-        close(out.cost.projected.unwrap(), 25.0);
-        assert_eq!(out.cost.so_far, None);
-        i.spend = Spend::Reported {
-            usd: 10.0,
-            at_phase_start: 5.0,
-        };
-        close(estimate(&i).unwrap().cost.projected.unwrap(), 60.0);
-        i.phases[1].spend = None;
-        let out = estimate(&i).unwrap();
-        assert_eq!(out.cost.projected, None);
-        assert!(out.cost.uncertain);
-        i.phases[1].spend = Some(20.0);
-        i.phases[0].total = None;
-        i.ends_at = Some(i.now + 3_600_000.0);
-        i.spend_per_hour = Some(2.0);
-        close(estimate(&i).unwrap().cost.at_limit.unwrap(), 32.0);
-    }
-
-    #[test]
-    fn negative_phase_spend_is_disabled_and_reported() {
-        let mut i = input(Some(100.0));
-        i.phases[0].spend = Some(-20.0);
-        let out = estimate(&i).unwrap();
-        assert!(out.errors.contains(&InputError::BelowMinimum {
-            field: "phase.spend",
-            index: Some(0),
-            value: -20.0,
-            minimum: 0.0
-        }));
-        assert_eq!(out.cost.projected, None);
-        assert!(out.cost.uncertain);
-        assert!(!out.estimate.unwrap().pending);
-        i.phases[0].spend = None;
-        i.phases.push(Phase {
-            name: "judge".into(),
-            total: Some(10.0),
-            prior: None,
-            spend: Some(-5.0),
-        });
-        i.spend = Spend::Reported {
-            usd: 10.0,
-            at_phase_start: 0.0,
-        };
-        assert_eq!(estimate(&i).unwrap().cost.projected, None);
-    }
-
-    #[test]
     fn spend_projection_is_independent_of_timing() {
         let mut i = input(Some(100.0));
         i.points = vec![Point {
@@ -2112,12 +1653,6 @@ mod tests {
     fn independent_components_keep_all_degradation_reasons() {
         let mut i = input(Some(100.0));
         i.started_at = i.now + 5001.0;
-        i.machine = Machine::Priced {
-            usd_per_hour: 1.0,
-            quantum_ms: 1.0,
-            billed_from: Some(i.now + 5001.0),
-            uncertain: false,
-        };
         i.points[5].at = 1000.0;
         i.phases[0].prior = Some(Range {
             lo_ms: 200.0,
@@ -2127,7 +1662,7 @@ mod tests {
         let out = estimate(&i).unwrap();
         assert!(out.estimate.unwrap().pending);
         close(out.whole.unwrap(), 0.1);
-        for field in ["started_at", "billed_from", "points.at", "prior.lo_ms"] {
+        for field in ["started_at", "points.at", "prior.lo_ms"] {
             assert!(
                 out.errors
                     .iter()
@@ -2136,7 +1671,6 @@ mod tests {
                 out.errors
             );
         }
-        assert_eq!(out.cost.gpu_hours, None);
         assert_eq!(out.cost.so_far, None);
     }
 
@@ -2149,16 +1683,9 @@ mod tests {
         };
         for skew in [3.0, 5000.0] {
             i.started_at = i.now + skew;
-            i.machine = Machine::Priced {
-                usd_per_hour: 1.0,
-                quantum_ms: 1.0,
-                billed_from: Some(i.now + skew),
-                uncertain: false,
-            };
             let out = estimate(&i).unwrap();
             assert!(out.errors.is_empty());
             assert!(!out.cost.uncertain);
-            assert_eq!(out.cost.gpu_hours, Some(0.0));
             assert_eq!(out.cost.so_far, Some(0.0));
         }
         i.points[5].at = 1000.0;
@@ -2176,9 +1703,12 @@ mod tests {
     }
 
     #[test]
-    fn malformed_points_keep_progress_and_observed_billing() {
+    fn malformed_points_keep_progress_and_reported_spend() {
         let mut i = input(Some(100.0));
-        i.machine = priced();
+        i.spend = Spend::Reported {
+            usd: 100.0,
+            at_phase_start: 0.0,
+        };
         i.points[9].at = 200_000.0;
         let out = estimate(&i).unwrap();
         assert!(out.errors.contains(&InputError::AboveMaximum {
@@ -2206,7 +1736,6 @@ mod tests {
     #[test]
     fn bad_prior_baseline_and_later_total_degrade_independently() {
         let mut i = input(Some(100.0));
-        i.machine = priced();
         i.phases[0].prior = Some(Range {
             lo_ms: 200.0,
             mid_ms: 100.0,
@@ -2217,21 +1746,18 @@ mod tests {
             at_phase_start: 10.0,
         };
         i.phases.push(Phase {
-            name: "eval".into(),
             total: Some(0.0),
             prior: Some(Range {
                 lo_ms: 100_000.0,
                 mid_ms: 100_000.0,
                 hi_ms: 100_000.0,
             }),
-            spend: Some(0.0),
         });
         let out = estimate(&i).unwrap();
         assert_eq!(out.errors.len(), 3);
-        assert!(out.weights_estimated);
         close(out.current_phase.unwrap().range.unwrap().mid_ms, 900_000.0);
         close(out.estimate.unwrap().range.unwrap().mid_ms, 1_000_000.0);
-        close(out.cost.so_far.unwrap(), 105.0);
+        close(out.cost.so_far.unwrap(), 5.0);
         assert_eq!(out.cost.projected, None);
     }
 
@@ -2481,10 +2007,7 @@ mod retained_timing {
             started_at,
             contact_lost: false,
             ends_at: None,
-            machine: Machine::Unpriced,
-            gpu_count: None,
-            spend: Spend::NeverReported,
-            spend_per_hour: None,
+            machine_cost_unknown: false,
         }
     }
 
@@ -2608,12 +2131,6 @@ mod retained_timing {
             let clock = Some((host(received) as f64, received));
             let run = Run {
                 ends_at: Some(laptop_started + 120_000.0),
-                machine: Machine::Priced {
-                    usd_per_hour: 3.6,
-                    quantum_ms: 1_000.0,
-                    billed_from: Some(laptop_started - 30_000.0),
-                    uncertain: false,
-                },
                 ..run(laptop_started)
             };
             [0.0, 30_000.0, 200_000.0].map(|later| {
@@ -2633,8 +2150,6 @@ mod retained_timing {
                     (eta.at - skew as f64).round(),
                     eta.past_limit_ms,
                     out.whole,
-                    [out.cost.so_far, out.cost.at_limit, out.cost.projected]
-                        .map(|usd| usd.map(|usd| (usd * 1e6).round())),
                 )
             })
         })
@@ -2644,7 +2159,6 @@ mod retained_timing {
             estimates[0][2].3.unwrap() > 0.0,
             "the last case is past its limit"
         );
-        assert!(estimates[0][0].5[1].is_some(), "a limit prices the run");
         assert!(
             estimates.windows(2).all(|pair| pair[0] == pair[1]),
             "{estimates:?}"

@@ -112,7 +112,7 @@ test("an ended run leads with how it ended and offers Dismiss", () => {
 
 test("lost contact speaks in the contact notice's words and freezes the bar", () => {
   const since = now - 60_000;
-  const away = model(run({ host: "lab-a40", contact: { type: "unreachable", since, cause: "timed out" } }), { monitor: { ...running, cost: { soFar: 1.06, projected: 4, atLimit: null, spend: null, budget: null, gpuHours: null, at: now, projectedRange: null, uncertain: false } }, retry: now + 180_000 });
+  const away = model(run({ host: "lab-a40", contact: { type: "unreachable", since, cause: "timed out" } }), { monitor: { ...running, cost: { soFar: 1.06, projected: 4, spend: null, budget: null, at: now, uncertain: false } }, retry: now + 180_000 });
   assert.equal(away.tone, "lost");
   assert.ok(away.text.startsWith(bare(m.run_notice_unreachable({ host: "lab-a40", time: `**${fmtClock(since)}**` }))), away.text);
   assert.ok(away.text.includes(bare(m.run_progress_last_seen({ progress: bare(m.run_progress_steps({ done: "1,240", of: "5,000" })) }))));
@@ -175,7 +175,7 @@ test("a monitor newer than the summary states every fact, the flag and the tone 
 
 test("a view that is stale, rebuilding or unavailable reads like lost contact, each in its own words", () => {
   const reason = "The cluster hasn't answered.";
-  const cost = { soFar: 1.06, projected: 4, atLimit: null, spend: null, budget: null, gpuHours: null, at: now, projectedRange: null, uncertain: false };
+  const cost = { soFar: 1.06, projected: 4, spend: null, budget: null, at: now, uncertain: false };
   const words = new Set();
   for (const state of ["stale", "rebuilding", "unavailable"]) {
     const old = { ...running, cost, availability: { state, reason, omitted: {} } };
