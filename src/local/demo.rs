@@ -76,7 +76,7 @@ const TURN_CONTEXT: &str = r#"<openresearch-demo-evidence>
 This is a recorded OpenResearch demo run. The project's Artifacts/evidence directory contains real checkpoint metadata, the trained tokenizer, structured training and evaluation metrics, the final inference transcript, and run-manifest.json. To reduce the bundled demo project's download size, the multi-gigabyte model checkpoints, optimizer states, datasets, and environment are intentionally not included; the manifest records their original paths, sizes, hashes, and omission status. Do not search for or claim access to omitted files. Before proposing work that requires model weights, explain that the weights must be regenerated or downloaded. When the user asks you to choose an autonomous follow-up, prefer an analysis supported by the bundled evidence unless they explicitly ask to regenerate or download the weights.
 </openresearch-demo-evidence>"#;
 
-const USER_PROMPT: &str = "Run nanochat's local pipeline end-to-end with bash runs/runcpu.sh (the shrunk-down version for laptops, not speedrun.sh, ~40 min), streaming output and surfacing val_bpb/eval numbers as they appear, fixing any setup errors in place, and when it finishes chat with the model via python -m scripts.chat_cli -p \"What is the capital of France?\" to confirm it works.";
+const USER_PROMPT: &str = "Run nanochat's local pipeline end-to-end with bash runs/runcpu.sh (the shrunk-down version for laptops, not speedrun.sh), streaming output and surfacing val_bpb/eval numbers as they appear, fixing any setup errors in place, and when it finishes chat with the model via python -m scripts.chat_cli -p \"What is the capital of France?\" to confirm it works.";
 
 const FIGURE_USER_PROMPT: &str = "Using nanochat’s recorded base-training and SFT logs, create publication-quality SVG-only figures for base and SFT loss/validation BPB, training throughput, and CORE evaluation results. Use Helvetica Neue, a restrained academic style, exact metric labels, colorblind-safe colors, and no decorative infographics or PNG duplicates.";
 
@@ -126,7 +126,7 @@ This bundled demo records a completed local `runs/runcpu.sh` pipeline on Apple S
 ## Base training and evaluation
 
 - Model: d6, 6 layers, 73.5M parameters, sequence length 512
-- Training: 5,000 steps, 81.92M tokens, 131.55 minutes
+- Training: 5,000 steps, 81.92M tokens
 - Final training-loop validation BPB: 1.165758
 - Base-eval train BPB: 1.152185
 - Base-eval validation BPB: 1.119301
@@ -135,7 +135,7 @@ This bundled demo records a completed local `runs/runcpu.sh` pipeline on Apple S
 ## Supervised fine-tuning
 
 - Started from the validated base checkpoint with a fresh optimizer
-- Training: 1,500 steps, 39.07 minutes
+- Training: 1,500 steps
 - Validation BPB: 1.0174 → 1.0580 → 0.9914 → 0.9513 → 0.9141 → 0.8483 → 0.7950 → 0.7486 → 0.7389
 - Final/minimum validation BPB: 0.7389
 
@@ -956,8 +956,8 @@ fn validate_snapshot(store: &Store, repo: &Path, newly_created: bool) -> Result<
 
 const BASE_PROGRESS: &[&str] = &[
     "Base training is under way. Initial validation BPB was **3.195800**; by step 100 it had already dropped to **1.940739**, and MPS throughput is steady at roughly 10–11k tokens/s.",
-    "Halfway through base training: **step 2,500 `val_bpb = 1.248040`**. Every one of the 25 validation points so far has improved on the last, and the remaining base ETA is about 67 minutes.",
-    "Base training finished: **final step 5,000 `val_bpb = 1.165758`**, down from 3.195800 at initialization with no regressions across all 50 validation points. The base phase took 131.55 minutes on this Mac and the pipeline is moving into `base_eval`.",
+    "Halfway through base training: **step 2,500 `val_bpb = 1.248040`**. Every one of the 25 validation points so far has improved on the last.",
+    "Base training finished: **final step 5,000 `val_bpb = 1.165758`**, down from 3.195800 at initialization with no regressions across all 50 validation points. The pipeline is moving into `base_eval`.",
 ];
 
 const SFT_PROGRESS: &[&str] = &[
@@ -1084,12 +1084,12 @@ fn assistant_parts(harness: &str) -> Vec<WirePart> {
         "tokenizer-log",
         shell_name,
         json!({ "command": "log=$(orx logs demo_nanochat_run_v1 | head -n 1); log=${log#*: }; tail -n 100 \"$log\"" }),
-        Some("Starting BPE training: 32503 merges to compute\nProgress: 25% (8126/32503 merges)\nProgress: 50% (16251/32503 merges)\nProgress: 75% (24378/32503 merges)\nProgress: 100% (32503/32503 merges)\nFinished training: 32503 merges completed\nTraining time: 42.69s\nclimbmix-val 3024593 bytes 644939 tokens 4.69 bytes/token"),
+        Some("Starting BPE training: 32503 merges to compute\nProgress: 25% (8126/32503 merges)\nProgress: 50% (16251/32503 merges)\nProgress: 75% (24378/32503 merges)\nProgress: 100% (32503/32503 merges)\nFinished training: 32503 merges completed\nclimbmix-val 3024593 bytes 644939 tokens 4.69 bytes/token"),
         Some("Stream tokenizer training"),
     ));
     parts.push(WirePart::text(
         "tokenizer-complete",
-        "Tokenizer training finished in 42.69s. Its validation text compression was 4.69 bytes/token (644,939 tokens over 3,024,593 bytes), about 1.2% better than GPT‑2 and 2.2% behind GPT‑4 on that sample. Base training is now running on MPS: 6 layers, 73.5M parameters, 5,000 iterations, 81.92M tokens. I’m watching every `val_bpb` checkpoint.",
+        "Tokenizer training finished. Its validation text compression was 4.69 bytes/token (644,939 tokens over 3,024,593 bytes), about 1.2% better than GPT‑2 and 2.2% behind GPT‑4 on that sample. Base training is now running on MPS: 6 layers, 73.5M parameters, 5,000 iterations, 81.92M tokens. I’m watching every `val_bpb` checkpoint.",
     ));
     parts.push(tool_part(
         "base-log",
@@ -1105,7 +1105,7 @@ fn assistant_parts(harness: &str) -> Vec<WirePart> {
         "base-eval-log",
         shell_name,
         json!({ "command": "log=$(orx logs demo_nanochat_run_v1 | head -n 1); log=${log#*: }; tail -n 100 \"$log\"" }),
-        Some("Total training time: 131.55m\nMinimum validation bpb: 1.165758\n\nBPB Evaluation\ntrain bpb: 1.152185\nval bpb: 1.119301\n\nCORE Evaluation\nbigbench_qa_wikidata accuracy: 0.0000\nopenbook_qa accuracy: 0.2500\nwinogrande accuracy: 0.5625 | centered: 0.1250\nbigbench_operators accuracy: 0.0000"),
+        Some("Minimum validation bpb: 1.165758\n\nBPB Evaluation\ntrain bpb: 1.152185\nval bpb: 1.119301\n\nCORE Evaluation\nbigbench_qa_wikidata accuracy: 0.0000\nopenbook_qa accuracy: 0.2500\nwinogrande accuracy: 0.5625 | centered: 0.1250\nbigbench_operators accuracy: 0.0000"),
         Some("Read base evaluation"),
     ));
     parts.push(WirePart::text(
@@ -1130,7 +1130,7 @@ fn assistant_parts(harness: &str) -> Vec<WirePart> {
         "sft-complete-log",
         shell_name,
         json!({ "command": "log=$(orx logs demo_nanochat_run_v1 | head -n 1); log=${log#*: }; tail -n 100 \"$log\"" }),
-        Some("step 01498 (99.93%) | loss: 2.052968 | total time: 39.04m\nstep 01499 (100.00%) | loss: 2.026530 | total time: 39.07m\nStep 01499 | Validation bpb: 0.7389\nSaved model parameters to: $ORX_RUN_DIR/repo/.cache/nanochat/chatsft_checkpoints/d6/model_001499.pt\nTotal training time: 39.07m\nMinimum validation bpb: 0.7389"),
+        Some("step 01498 (99.93%) | loss: 2.052968\nstep 01499 (100.00%) | loss: 2.026530\nStep 01499 | Validation bpb: 0.7389\nSaved model parameters to: $ORX_RUN_DIR/repo/.cache/nanochat/chatsft_checkpoints/d6/model_001499.pt\nMinimum validation bpb: 0.7389"),
         Some("Read final SFT checkpoint"),
     ));
     parts.push(WirePart::text(
@@ -1171,7 +1171,7 @@ fn assistant_parts(harness: &str) -> Vec<WirePart> {
     ));
     parts.push(WirePart::text(
         "final",
-        "Pipeline completed successfully. Base training finished at **1.1658 BPB**; SFT finished at **0.7389 BPB**. Explore each phase’s validation curve and the CORE benchmark scores below.\n\n![Nanochat pipeline results](artifacts/nanochat-pipeline-results.html)\n\nBase training took **131.55 min** (5,000 steps, 81.92M tokens), followed by **39.07 min** of SFT (1,500 steps). The SFT checkpoint answered **Paris**. These are recorded results from the demo pipeline.\n\n[Full results](artifacts/cpu-apple-silicon-pipeline-results.md) · [Metric data](artifacts/evidence/training-metrics.csv)",
+        "Pipeline completed successfully. Base training finished at **1.1658 BPB**; SFT finished at **0.7389 BPB**. Explore each phase’s validation curve and the CORE benchmark scores below.\n\n![Nanochat pipeline results](artifacts/nanochat-pipeline-results.html)\n\nThe pipeline ran 5,000 base steps (81.92M tokens), base evaluation, and 1,500 SFT steps. The SFT checkpoint answered **Paris**. These are recorded results from the demo pipeline.\n\n[Full results](artifacts/cpu-apple-silicon-pipeline-results.md) · [Metric data](artifacts/evidence/training-metrics.csv)",
     ));
     parts
 }
@@ -2534,6 +2534,20 @@ mod tests {
             .is_file());
         drop(store);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn seeded_explanations_do_not_mistake_training_clocks_for_stage_durations() {
+        for harness in ["claude-code", "codex", "opencode"] {
+            let transcript = serde_json::to_string(&assistant_parts(harness)).unwrap();
+            for old_duration in ["131.55", "39.07"] {
+                assert!(
+                    !transcript.contains(old_duration),
+                    "{harness}: {old_duration}"
+                );
+                assert!(!REPORT.contains(old_duration));
+            }
+        }
     }
 
     /// The setup runs under Git Bash on Windows, where uv lays the venv out as
