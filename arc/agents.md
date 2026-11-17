@@ -242,7 +242,7 @@ Where an agent offers a hook or plugin, it stamps each shell command with the is
 
 A turn is a row with a state and a **delivery state**: its prompt was never sent, rejected, accepted, or of unknown fate. A running turn holds a per-chat lease with a heartbeat, which keeps one turn per chat and exposes a turn whose process died ([storage](storage.md)).
 
-When a dashboard starts or a lease expires, every turn still marked running has no process behind it, and a turn that finds its own lease gone stops. Each becomes a failed turn with a recovery action chosen by its delivery state:
+When a dashboard starts or a lease expires, a running turn resumes from its checkpoint when its keeper is reachable ([restarts](restarts.md)). Codex app-server restores its connection and pending requests without initializing again or re-sending the prompt; Cursor and `codex exec` restore their per-turn parsers and read retained output through the child’s exit. Without a usable keeper and checkpoint, the turn fails with a recovery action chosen by its delivery state:
 
 | Delivery state | Action | Effect |
 | --- | --- | --- |

@@ -19,8 +19,9 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use super::detect::{
@@ -36,8 +37,8 @@ use super::{
 };
 use crate::error::{anyhow, Result};
 use crate::local::chat::{
-    find_part_mut, harness_log, prepare_env, set_chat_session_env, DeliveryState, PromptAnswer,
-    ResumeCtx, TurnCtx, WirePart, WirePrompt, WireToolState,
+    find_part_mut, prepare_env, set_chat_session_env, DeliveryState, PromptAnswer, ResumeCtx,
+    TurnCtx, WirePart, WirePrompt, WireToolState,
 };
 use crate::local::native_store::{self, NativeStore};
 use crate::local::opencode::{ensure_playbook, PLAYBOOK_REL};
@@ -167,6 +168,21 @@ impl Harness for Cursor {
 
     fn supports_chat(&self) -> bool {
         true
+    }
+
+    fn supports_resume(&self) -> bool {
+        true
+    }
+
+    async fn adopt(
+        &self,
+        _chat: &std::sync::Arc<crate::local::chat::ChatHost>,
+        adoption: super::Adoption,
+    ) -> Result<()> {
+        if adoption.resume_at.is_none() || adoption.state["per_turn"] != true {
+            return Err(anyhow!("Cursor child has no turn checkpoint"));
+        }
+        Ok(())
     }
 
     fn supports_compaction(&self) -> bool {
@@ -601,11 +617,11 @@ fn read_log_tail(path: &Path, max: usize) -> String {
     String::from_utf8_lossy(&data).into_owned()
 }
 
-fn cursor_exit_detail(status: std::process::ExitStatus, log: &Path) -> String {
+fn cursor_exit_detail(status: impl std::fmt::Debug, log: &Path) -> String {
     let tail = read_log_tail(log, 8 * 1024);
     cursor_cli_error(&tail).unwrap_or_else(|| {
         format!(
-            "Cursor ended without a result ({status}); see {}",
+            "Cursor ended without a result ({status:?}); see {}",
             log.display()
         )
     })
@@ -680,114 +696,147 @@ fn first_turn_prompt(text: &str) -> String {
 }
 
 async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
-    let bin = find_cursor().ok_or_else(|| {
-        anyhow!("cursor-agent not found on PATH — install Cursor CLI and run `agent login` first")
-    })?;
-    let project = ctx.project.clone();
-    let session_id = ctx.session_id.clone();
-    let skills_dir = Cursor.session_skills_dir();
-    let (repo, _playbook) =
-        tokio::task::spawn_blocking(move || ensure_playbook(&project, &session_id, skills_dir))
-            .await
-            .map_err(|e| anyhow!("playbook task failed: {e}"))??;
-
-    let native_session = match ctx.native_session_id.clone() {
-        Some(id) => tokio::task::spawn_blocking(move || native_store::cursor_session(&id))
-            .await
-            .map_err(|error| anyhow!("Cursor session lookup failed: {error}"))??,
-        None => None,
-    };
-    let native_store = native_session
-        .as_ref()
-        .map(|session| session.store)
-        .unwrap_or(NativeStore::Isolated);
-    let cursor_home =
-        tokio::task::spawn_blocking(move || native_store::prepare_cursor(native_store))
-            .await
-            .map_err(|error| anyhow!("Cursor config preparation failed: {error}"))??;
-
-    let resume = ctx
-        .native_session_id
-        .clone()
-        .filter(|_| native_session.is_some());
-    let mut prompt = ctx.text.clone();
-    if ctx.native_session_id.is_some() && resume.is_none() {
-        if let Some(recovery) = super::native_recovery_context(ctx, "Cursor")? {
-            prompt = format!("{recovery}\n\n{prompt}");
-        }
-    }
-    if resume.is_none() {
-        prompt = first_turn_prompt(&prompt);
-    }
-
-    let mut cmd = crate::process::tokio_command(&bin);
-    cmd.args([
-        "--print",
-        "--output-format",
-        "stream-json",
-        "--stream-partial-output",
-        "--trust",
-        "--workspace",
-    ])
-    .arg(&repo);
-    if let Some(model) = ctx.model.as_deref().filter(|model| !model.is_empty()) {
-        cmd.args(["--model", model]);
-    }
-    if ctx.plan_mode || ctx.permission_mode == Some(PermissionMode::Plan) {
-        cmd.args(["--mode", "plan"]);
+    let (mut child, mut state, mut offset) = if let Some(resume) = &ctx.resume {
+        (
+            crate::keep::attach(&resume.keep_id).await?,
+            serde_json::from_value::<TurnState>(resume.state.clone())?,
+            resume.offset,
+        )
     } else {
-        match ctx.permission_mode.unwrap_or(PermissionMode::Auto) {
-            PermissionMode::Ask => {
-                cmd.args(["--mode", "ask"]);
-            }
-            PermissionMode::Bypass => {
-                cmd.args(["--force", "--sandbox", "disabled"]);
-            }
-            PermissionMode::Auto | PermissionMode::AcceptEdits | PermissionMode::Plan => {
-                cmd.arg("--force");
-            }
-        }
-    }
-    if let Some(native_id) = &resume {
-        cmd.args(["--resume", native_id]);
-    }
-    let log_name = format!("cursor-{}", uuid::Uuid::new_v4());
-    cmd.current_dir(&repo)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::from(harness_log(&log_name)?))
-        .kill_on_drop(true);
-    prepare_env(&mut cmd);
-    cmd.env("CURSOR_CONFIG_DIR", &cursor_home);
-    if native_store == NativeStore::Isolated {
-        cmd.env("CURSOR_DATA_DIR", &cursor_home);
-    }
-    cmd.env("NO_COLOR", "1");
-    set_chat_session_env(&mut cmd, &ctx.session_id, "cursor", ctx.host.up_port())?;
+        let bin = find_cursor().ok_or_else(|| {
+            anyhow!(
+                "cursor-agent not found on PATH — install Cursor CLI and run `agent login` first"
+            )
+        })?;
+        let project = ctx.project.clone();
+        let session_id = ctx.session_id.clone();
+        let skills_dir = Cursor.session_skills_dir();
+        let (repo, _playbook) =
+            tokio::task::spawn_blocking(move || ensure_playbook(&project, &session_id, skills_dir))
+                .await
+                .map_err(|e| anyhow!("playbook task failed: {e}"))??;
 
-    ctx.persist_delivery(DeliveryState::Unknown)?;
-    let mut child = match cmd.spawn() {
-        Ok(child) => child,
-        Err(error) => {
-            ctx.mark_delivery(DeliveryState::NotSent);
-            return Err(anyhow!("Could not spawn {}: {}", bin.display(), error));
+        let native_session = match ctx.native_session_id.clone() {
+            Some(id) => tokio::task::spawn_blocking(move || native_store::cursor_session(&id))
+                .await
+                .map_err(|error| anyhow!("Cursor session lookup failed: {error}"))??,
+            None => None,
+        };
+        let native_store = native_session
+            .as_ref()
+            .map(|session| session.store)
+            .unwrap_or(NativeStore::Isolated);
+        let cursor_home =
+            tokio::task::spawn_blocking(move || native_store::prepare_cursor(native_store))
+                .await
+                .map_err(|error| anyhow!("Cursor config preparation failed: {error}"))??;
+
+        let resume = ctx
+            .native_session_id
+            .clone()
+            .filter(|_| native_session.is_some());
+        let mut prompt = ctx.text.clone();
+        if ctx.native_session_id.is_some() && resume.is_none() {
+            if let Some(recovery) = super::native_recovery_context(ctx, "Cursor")? {
+                prompt = format!("{recovery}\n\n{prompt}");
+            }
         }
+        if resume.is_none() {
+            prompt = first_turn_prompt(&prompt);
+        }
+
+        let mut cmd = crate::process::tokio_command(&bin);
+        cmd.args([
+            "--print",
+            "--output-format",
+            "stream-json",
+            "--stream-partial-output",
+            "--trust",
+            "--workspace",
+        ])
+        .arg(&repo);
+        if let Some(model) = ctx.model.as_deref().filter(|model| !model.is_empty()) {
+            cmd.args(["--model", model]);
+        }
+        if ctx.plan_mode || ctx.permission_mode == Some(PermissionMode::Plan) {
+            cmd.args(["--mode", "plan"]);
+        } else {
+            match ctx.permission_mode.unwrap_or(PermissionMode::Auto) {
+                PermissionMode::Ask => {
+                    cmd.args(["--mode", "ask"]);
+                }
+                PermissionMode::Bypass => {
+                    cmd.args(["--force", "--sandbox", "disabled"]);
+                }
+                PermissionMode::Auto | PermissionMode::AcceptEdits | PermissionMode::Plan => {
+                    cmd.arg("--force");
+                }
+            }
+        }
+        if let Some(native_id) = &resume {
+            cmd.args(["--resume", native_id]);
+        }
+        let log_name = format!("cursor-{}", uuid::Uuid::new_v4());
+        let log_path = crate::store::data_dir().join(format!("agent-{log_name}.log"));
+        cmd.current_dir(&repo);
+        prepare_env(&mut cmd);
+        cmd.env("CURSOR_CONFIG_DIR", &cursor_home);
+        if native_store == NativeStore::Isolated {
+            cmd.env("CURSOR_DATA_DIR", &cursor_home);
+        }
+        cmd.env("NO_COLOR", "1");
+        set_chat_session_env(&mut cmd, &ctx.session_id, "cursor", ctx.host.up_port())?;
+
+        ctx.persist_delivery(DeliveryState::Unknown)?;
+        let mut child = crate::keep::spawn(crate::keep::Keep {
+            command: cmd.as_std(),
+            io: crate::keep::Io::Pipes {
+                stderr: Some(log_path.clone()),
+            },
+            retain: crate::keep::LOSSLESS,
+            owner: crate::keep::Owner::Agent {
+                harness: "cursor".into(),
+                session_id: ctx.session_id.clone(),
+                state: serde_json::json!({"per_turn":true}),
+            }
+            .to_value(),
+        })
+        .await
+        .inspect_err(|_| {
+            ctx.mark_delivery(DeliveryState::NotSent);
+        })?;
+        let mut stdin = child
+            .take_stdin()
+            .ok_or_else(|| anyhow!("Cursor keeper has no stdin"))?;
+        stdin.write_all(prompt.as_bytes()).await?;
+        child.handle().close_stdin();
+        let state = TurnState {
+            log_path,
+            ..Default::default()
+        };
+        (child, state, 0)
     };
-    send_prompt(&mut child, &prompt).await?;
-    let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
-    let mut lines = BufReader::new(stdout).lines();
-    let mut state = TurnState::default();
+    let keeper = child.handle();
+    let mut lines = child
+        .take_stdout()
+        .ok_or_else(|| anyhow!("Cursor keeper has no stdout"))?
+        .lines();
+    lines.skip_to(offset)?;
+    ctx.flush_at(&keeper, offset, &state)?;
 
     loop {
         let next = tokio::select! {
+            biased;
             next = tokio::time::timeout(TURN_WATCHDOG, lines.next_line()) => next,
+            _ = keeper.wait() => break,
             _ = ctx.flush_due() => {
-                let _ = ctx.flush();
+                ctx.flush_at(&keeper, offset, &state)?;
                 continue;
             }
         };
         match next {
-            Ok(Ok(Some(line))) => {
+            Ok(Ok(Some((line, end)))) => {
+                offset = end;
                 let Ok(event) = serde_json::from_str::<Value>(&line) else {
                     continue;
                 };
@@ -796,7 +845,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
                 if let Some(sid) = state.native_session_id.as_deref() {
                     ctx.set_native_session_id(sid);
                 }
-                ctx.maybe_flush();
+                ctx.maybe_flush_at(&keeper, offset, &state);
                 if terminal {
                     break;
                 }
@@ -814,10 +863,10 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
         }
     }
 
-    let status = child.wait().await?;
-    let log_path = crate::store::data_dir().join(format!("agent-{log_name}.log"));
+    let status = keeper.wait().await;
+    let log_path = &state.log_path;
     if !state.saw_result {
-        return Err(anyhow!("{}", cursor_exit_detail(status, &log_path)));
+        return Err(anyhow!("{}", cursor_exit_detail(&status, log_path)));
     }
     if ctx.plan_mode {
         if let Some(card) = plan_card(&ctx.assistant.parts, &ctx.assistant.id, state.turn_errored) {
@@ -833,10 +882,10 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
             .find_map(|part| part.state.as_ref()?.error.clone())
             .unwrap_or_else(|| "Cursor reported a terminal turn error".into());
         ctx.mark_terminal_failure("cursor_terminal", message);
-    } else if status.success() {
+    } else if status.code == Some(0) {
         let _ = std::fs::remove_file(log_path);
     }
-    let _ = ctx.flush();
+    ctx.flush_at(&keeper, offset, &state)?;
     Ok(())
 }
 
@@ -861,8 +910,9 @@ fn cursor_native_usage(usage: &Value) -> crate::store::TokenUsage {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 struct TurnState {
+    log_path: PathBuf,
     /// Cursor's `system/init` model label (`Auto` included), announced before the request.
     init_model: Option<String>,
     /// The request produced output, so `init_model` names an execution.
@@ -1365,6 +1415,58 @@ mod tests {
         );
         assert!(state.turn_errored);
         assert!(ctx.assistant.parts.iter().all(|part| part.phase.is_none()));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn kept_output_restores_partial_cursor_text_without_repeating_it() {
+        let mut command = crate::process::command("sh");
+        command.args(["-c", r#"printf '%s\n' '{"type":"assistant","timestamp_ms":1,"message":{"content":[{"type":"text","text":"Hel"}]}}'; read -r go; printf '%s\n' '{"type":"assistant","timestamp_ms":2,"message":{"content":[{"type":"text","text":"lo"}]}}' '{"type":"result","subtype":"success","result":"Hello"}'"#]);
+        let mut child = crate::keep::spawn(crate::keep::Keep {
+            command: &command,
+            io: crate::keep::Io::Pipes { stderr: None },
+            retain: crate::keep::LOSSLESS,
+            owner: Value::Null,
+        })
+        .await
+        .unwrap();
+        let keeper = child.handle();
+        let id = keeper.id().to_string();
+        let mut lines = child.take_stdout().unwrap().lines();
+        let (line, offset) = lines.next_line().await.unwrap().unwrap();
+        let mut ctx = TurnCtx::test_stub();
+        let mut state = TurnState::default();
+        apply_event(&mut ctx, &mut state, &serde_json::from_str(&line).unwrap());
+        let saved = serde_json::to_value(&state).unwrap();
+        keeper.ack(offset);
+        keeper.detach();
+        drop(lines);
+        drop(child);
+        let mut adopted = crate::keep::attach(&id).await.unwrap();
+        let mut state: TurnState = serde_json::from_value(saved).unwrap();
+        let mut lines = adopted.take_stdout().unwrap().lines();
+        lines.skip_to(offset).unwrap();
+        adopted
+            .take_stdin()
+            .unwrap()
+            .write_all(b"go\n")
+            .await
+            .unwrap();
+        assert_eq!(adopted.handle().wait().await.code, Some(0));
+        for _ in 0..2 {
+            let (line, _) = lines.next_line().await.unwrap().unwrap();
+            apply_event(&mut ctx, &mut state, &serde_json::from_str(&line).unwrap());
+        }
+        assert!(state.saw_result);
+        assert_eq!(
+            ctx.assistant
+                .parts
+                .iter()
+                .filter_map(|part| part.text.as_deref())
+                .collect::<String>(),
+            "Hello"
+        );
+        adopted.handle().stop(Duration::from_secs(2)).await.unwrap();
     }
 
     #[test]
