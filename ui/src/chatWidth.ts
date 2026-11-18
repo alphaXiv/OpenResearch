@@ -17,8 +17,7 @@ function readStoredChatWidth(): ChatWidth {
   try {
     return parseChatWidth(localStorage.getItem(STORAGE_KEY));
   } catch {
-    // localStorage may be unavailable (private mode, etc.). The default applies,
-    // but the choice cannot persist, so say so instead of failing silently.
+    // Nothing can be stored, so the default applies for this session only; say so rather than fail silently.
     warnStorageUnavailable();
     return "balanced";
   }
@@ -26,7 +25,7 @@ function readStoredChatWidth(): ChatWidth {
 
 let storageWarningShown = false;
 
-/** One warning per session: every write after the first would repeat it. */
+/** One warning per session; later writes would only repeat it. */
 function warnStorageUnavailable(): void {
   if (storageWarningShown) return;
   storageWarningShown = true;

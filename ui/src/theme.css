@@ -228,8 +228,7 @@
   /* Sits above the highlighted text, so a light translucent veil keeps selected syntax readable.
      Literal rgb, not color-mix: macOS 11 WebKit would drop the selection entirely. */
   --editor-selection: rgb(22 22 22 / 12%);
-  /* Shared reading width for chat, markdown, and plan surfaces. The appearance
-     setting may widen it or remove the cap. */
+  /* Shared reading width for chat, markdown, and plan surfaces; the setting may widen it or drop the cap. */
   --readable-col: 840px;
   --readable-wide: 1100px;
   /* The side gap `full` keeps instead of a cap. */
@@ -259,8 +258,7 @@
   --syntax-blue: #4078f2;
 }
 
-/* The chat width setting. `full` keeps a fixed side offset instead of a cap, so
-   a wide pane (or a zoomed-out page) widens the text rather than the margins. */
+/* `full` trades the cap for a fixed side offset, so a wide pane widens the text and not the margins. */
 :root[data-chat-width="wide"] {
   --readable-col: var(--readable-wide);
 }
@@ -269,13 +267,7 @@
   --readable-col: calc(100% - var(--readable-offset));
 }
 
-/* The chat heading sits in a grid whose side gutters hold the rail toggle, so its
-   `100%` is the middle cell, not the pane: every percentage measure inside it
-   shrinks by those gutters, and the title drifts in from the text below it. In the
-   wider modes the header is therefore measured against the row itself (100cqi) and
-   centered by hand, because grid auto-margins cannot center an item that is wider
-   than its area. `balanced` keeps today's geometry; only the modes this setting
-   adds opt in. */
+/* The header lives in a grid cell that reserves a rail gutter on each side, so it is measured against the row instead. */
 :root[data-chat-width="wide"] .chat-heading-row,
 :root[data-chat-width="full"] .chat-heading-row {
   container-type: inline-size;
@@ -295,9 +287,7 @@
   margin-inline: calc((100% - var(--chat-header-width)) / 2);
 }
 
-/* The widened header reaches into the rail toggle's gutter, and its background and
-   `z-4` would otherwise cover the button's edge and swallow clicks there. Lift the
-   toggle above it; both sit on the same background, so nothing changes visually. */
+/* The header can reach into the rail toggle's gutter, so the toggle must paint above its z-4 background. */
 :root[data-chat-width="wide"] .chat-heading-row > .sidebar-toggle,
 :root[data-chat-width="full"] .chat-heading-row > .sidebar-toggle {
   position: relative;
