@@ -1870,6 +1870,7 @@
   "library_open_alphaxiv": "Open alphaXiv",
   "chat_resize_composer": "Resize message box",
   "chat_resize_composer_hint": "Drag to resize. Double-click to reset.",
+  "chat_resize_question": "Resize question",
   "remote_machine_switcher": "Switch machine: {machine}",
   "remote_machine_switcher_status": "Switch machine: {machine} ({status})",
   "remote_machine_connected": "Connected",
