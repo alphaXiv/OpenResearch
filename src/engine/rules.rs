@@ -711,15 +711,11 @@ fn step(rule: &Rule, count: &mut Count, facts: &Facts) -> Option<String> {
         }
         When::NoProgress { seconds } => {
             let progress = &body["progress"];
-            let since = if progress.is_null() {
-                facts.started_at
-            } else {
-                progress["lastAt"].as_i64()?
-            };
-            let silent = facts.now - since;
+            let last_at = progress["lastAt"].as_i64();
+            let silent = facts.now - last_at.unwrap_or(facts.started_at);
             (silent >= *seconds as i64 * 1000).then(|| {
-                let from = match progress["done"].as_f64() {
-                    Some(done) if !progress.is_null() => format!("since {}", at(done)),
+                let from = match last_at.and(progress["done"].as_f64()) {
+                    Some(done) => format!("since {}", at(done)),
                     _ => "since it started".into(),
                 };
                 format!(

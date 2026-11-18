@@ -7347,6 +7347,39 @@ mod tests {
     }
 
     #[test]
+    fn a_planned_run_reporting_metrics_without_steps_can_trip_no_progress() {
+        let f = Fixture::new("orx-rules-no-step");
+        let run = ruled(
+            &f,
+            "r1",
+            "exp",
+            local(),
+            json!([{"name": "stuck", "text": "Stop if no step is reported for ten minutes.",
+                "does": "stop", "when": {"kind": "noProgress", "seconds": 600}}]),
+        );
+        plan(&f, "exp", json!([{"phase":"train","of":100}])).unwrap();
+        f.collect(&folded(&[
+            (T0, r#"::orx:: {"phase":"train","m":{"loss":2}}"#.into()),
+            (T0 + 590_000, r#"::orx:: {"m":{"loss":1}}"#.into()),
+        ]));
+
+        let before = T0 + 599_000;
+        f.confirmed("r1", before);
+        let (monitor, _) = monitor_at(&f, &run, before);
+        assert!(monitor["progress"].is_object());
+        assert!(monitor["progress"]["lastAt"].is_null());
+        assert_eq!(monitor["latest"]["loss"], 1.0);
+        rules_at(&f, "r1", before);
+        assert!(stopped_by(&f, "r1").is_none());
+
+        let deadline = T0 + 600_000;
+        f.confirmed("r1", deadline);
+        rules_at(&f, "r1", deadline);
+        let stop = stopped_by(&f, "r1").expect("no step since the run started");
+        assert_eq!(stop.rule.unwrap()["name"], "stuck");
+    }
+
+    #[test]
     fn a_silent_run_spend_and_a_projection_each_stop_when_they_should() {
         let f = Fixture::new("orx-rules-time");
         ruled(
