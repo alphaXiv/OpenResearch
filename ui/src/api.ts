@@ -3328,8 +3328,12 @@ export function createApi(
     get<ChatActiveRun[]>("/api/chat/active-runs", signal);
 
   /** Null from an older server, which has only active runs. */
-  const listChatShownRuns = (signal?: AbortSignal) =>
-    fetch("/api/chat/shown-runs", { signal }).then((r) => r.status === 404 ? null : json<ChatShownRun[]>(r));
+  const listChatShownRuns = async (signal?: AbortSignal) => {
+    const response = await fetch("/api/chat/shown-runs?includeFailures=true", { signal });
+    if (response.status === 404) return null;
+    const data = await json<ChatShownRun[] | { runs: ChatShownRun[]; failedSessions: string[] }>(response);
+    return Array.isArray(data) ? { runs: data } : data;
+  };
 
   const getRunMonitor = (runId: string, signal?: AbortSignal) =>
     get<RunMonitor>(`/api/runs/${encodeURIComponent(runId)}/monitor`, signal);

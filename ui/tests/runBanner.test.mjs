@@ -598,7 +598,7 @@ test("a chat whose runs can't be listed says so and lists them once it can, neve
     if (path === "/api/settings/ui-state") return { onboardingCompleted: true };
     if (path === "/api/compute/hosts") return [];
     if (path === "/api/runs/r1/monitor") return running;
-    if (path === "/api/chat/shown-runs") return failing ? Response.json({ error: "The server stopped." }, { status: 500 }) : [item(run("r1"))];
+    if (path === "/api/chat/shown-runs?includeFailures=true") return failing ? Response.json({ error: "The server stopped." }, { status: 500 }) : [item(run("r1"))];
     if (init.method === "POST") return {};
   });
   const { container } = await render(createElement(RunBanner, { sessionId: "s", agent: "Claude" }));
@@ -609,6 +609,28 @@ test("a chat whose runs can't be listed says so and lists them once it can, neve
   await click(named(m.app_retry()));
   assert.ok(!plain(container.textContent).includes(m.run_banner_load_failed()));
   assert.ok(button(m.run_show_less()), "the run shows");
+});
+
+test("an unreadable row shows Retry in its own chat and keeps healthy rows visible", async () => {
+  let failedSessions = ["s"];
+  serve((path) => {
+    if (path === "/api/settings/ui-state") return { onboardingCompleted: true };
+    if (path === "/api/compute/hosts") return [];
+    if (path === "/api/runs/r1/monitor") return running;
+    if (path === "/api/chat/shown-runs?includeFailures=true") return { runs: [item(run("r1"))], failedSessions };
+  });
+  const { container } = await render([
+    createElement(RunBanner, { key: "other", sessionId: "other", agent: "Claude" }),
+    createElement(RunBanner, { key: "s", sessionId: "s", agent: "Claude" }),
+  ]);
+  await settle();
+  assert.equal(container.querySelectorAll("section").length, 1, "only the affected chat shows anything");
+  assert.ok(find('[role="status"]', m.run_banner_load_failed()));
+  assert.ok(button(m.run_show_less()), "the readable run still shows");
+  failedSessions = [];
+  await click(named(m.app_retry()));
+  assert.ok(!find('[role="status"]', m.run_banner_load_failed()));
+  assert.ok(button(m.run_show_less()));
 });
 
 test("the evidence's log lines ask to open the run's log at the cited bytes of the cited file", async () => {

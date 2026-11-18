@@ -76,6 +76,7 @@ export function RunBanner({ sessionId, agent, onOpenRun, onOpenRunPage }: {
   const workspace = useWorkspace();
   const { getUiStateQuery, getRunMonitorQuery, listChatShownRunsQuery, useEngineHosts } = workspace.queries;
   const list = useQuery(listChatShownRunsQuery());
+  const listFailed = list.isError || list.data?.failedSessions?.includes(sessionId);
   const remembered = useQuery(getUiStateQuery()).data?.runBanner ?? "strip";
   const hosts = useEngineHosts();
   const section = useRef<HTMLElement>(null);
@@ -147,7 +148,7 @@ export function RunBanner({ sessionId, agent, onOpenRun, onOpenRunPage }: {
     section.current?.querySelector<HTMLElement>(`[data-run-toggle="${CSS.escape(id)}"]`)?.focus();
   });
 
-  if (runs.length === 0 && !list.isError) return null;
+  if (runs.length === 0 && !listFailed) return null;
 
   function toggle(id: string) {
     refocus.current = id;
@@ -168,7 +169,7 @@ export function RunBanner({ sessionId, agent, onOpenRun, onOpenRunPage }: {
   }
 
   function onKeyDown(event: KeyboardEvent) {
-    if (event.key !== "Escape" || event.defaultPrevented) return;
+    if (event.key !== "Escape" || event.defaultPrevented || runs.length === 0) return;
     const id = single ? runs[0].run.id : openId;
     const step = id && isOpen(id) ? () => toggle(id) : !single && rows ? toggleRows : null;
     if (!step) return;
@@ -196,9 +197,9 @@ export function RunBanner({ sessionId, agent, onOpenRun, onOpenRunPage }: {
   return (
     <section ref={section} aria-label={m.run_banner_label()} onKeyDown={onKeyDown}>
       <div role="status" className="sr-only">{announcement}</div>
-      {list.isError && (
+      {listFailed && (
         <div className="mb-2.5 flex min-h-9 items-center gap-2 rounded-lg border border-border bg-surface py-1 ps-3 pe-1.5 text-sm text-ink-subtext">
-          <span className="min-w-0 flex-1">{m.run_banner_load_failed()}</span>
+          <span role="status" className="min-w-0 flex-1">{m.run_banner_load_failed()}</span>
           <Button size="small" variant="ghost" onClick={() => void list.refetch()}><RefreshCw size={13} />{m.app_retry()}</Button>
         </div>
       )}

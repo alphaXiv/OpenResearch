@@ -154,7 +154,7 @@ export function createChatQueries(
     queryFn: async ({ signal, client, queryKey }) => {
       const read = await readLiveSnapshot(client, queryKey, async (): Promise<ShownRuns> => {
         const shown = await api.listChatShownRuns(signal);
-        return shown ? { source: "shown", runs: shown } : { source: "active", runs: await api.listChatActiveRuns(signal) };
+        return shown ? { source: "shown", ...shown } : { source: "active", runs: await api.listChatActiveRuns(signal) };
       }, (incoming) => incoming);
       // The list has no revision of its own, so each run keeps whichever copy is newer, the cache's or the reply's.
       const cached = new Map(client.getQueryData<ShownRuns>(queryKey)?.runs.map((item) => [item.run.id, item.run]));
@@ -184,7 +184,7 @@ export function createChatQueries(
   };
 }
 
-type ShownRuns = { source: "shown" | "active"; runs: ShownRun[] };
+type ShownRuns = { source: "shown" | "active"; runs: ShownRun[]; failedSessions?: string[] };
 
 type ChatTurn = ReturnType<Workspace["chat"]["reserve"]>;
 const heldTurns = new Map<string, ChatTurn[]>();

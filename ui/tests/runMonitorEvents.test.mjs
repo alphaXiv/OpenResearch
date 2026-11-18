@@ -140,7 +140,7 @@ test("a run update refreshes the run above its chat's composer, never with an ol
 test("a shown-runs reply older than a run update never undoes it", async () => {
   const run = { id: "r1", projectId: "p", status: "running", updatedAt: 10, monitor: null };
   const replies = [];
-  serve((path) => path === "/api/chat/shown-runs" ? new Promise((resolve) => replies.push(resolve)) : undefined);
+  serve((path) => path === "/api/chat/shown-runs?includeFailures=true" ? new Promise((resolve) => replies.push(resolve)) : undefined);
   const workspace = createWorkspace("test");
   const shown = workspace.queries.listChatShownRunsQuery();
   workspace.queryClient.setQueryData(shown.queryKey, { source: "shown", runs: [{ sessionId: "s", run, experimentName: null }] });
@@ -175,7 +175,7 @@ test("each shown run keeps its newer copy: a repair or a refetch never puts back
   const run = { id: "r1", projectId: "p", status: "running", updatedAt: 10, monitor: null };
   const row = (extra) => [{ sessionId: "s", run: { ...run, ...extra }, experimentName: null }];
   const replies = [];
-  serve((path) => path === "/api/chat/shown-runs" ? new Promise((resolve) => replies.push(resolve)) : undefined);
+  serve((path) => path === "/api/chat/shown-runs?includeFailures=true" ? new Promise((resolve) => replies.push(resolve)) : undefined);
   const workspace = createWorkspace("test");
   const shown = workspace.queries.listChatShownRunsQuery();
   const cached = () => workspace.queryClient.getQueryData(shown.queryKey).runs[0].run;

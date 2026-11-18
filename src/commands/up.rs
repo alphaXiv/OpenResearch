@@ -9715,6 +9715,7 @@ async fn chat_active_runs() -> ApiResult {
 }
 
 fn chat_shown_runs_json(store: &Store) -> Result<Value> {
+    let mut failed_sessions = std::collections::BTreeSet::new();
     let rows = store
         .chat_shown_runs()?
         .into_iter()
@@ -9723,9 +9724,10 @@ fn chat_shown_runs_json(store: &Store) -> Result<Value> {
                 Ok(run) => run,
                 Err(error) => {
                     eprintln!(
-                        "orx up: could not show run {} above the composer: {error}",
+                        "orx up: could not show run {} above the composer: {error:#}",
                         item.run.id
                     );
+                    failed_sessions.insert(item.session_id);
                     return None;
                 }
             };
@@ -9755,11 +9757,26 @@ fn chat_shown_runs_json(store: &Store) -> Result<Value> {
         }
         row["watch"] = watched[&chat].clone();
     }
-    Ok(json!(rows))
+    Ok(json!({ "runs": rows, "failedSessions": failed_sessions }))
 }
 
-async fn chat_shown_runs() -> ApiResult {
-    blocking_api(|| Ok(Json(chat_shown_runs_json(&Store::open()?)?))).await
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatShownRunsQuery {
+    #[serde(default)]
+    include_failures: bool,
+}
+
+async fn chat_shown_runs(Query(query): Query<ChatShownRunsQuery>) -> ApiResult {
+    blocking_api(move || {
+        let mut projection = chat_shown_runs_json(&Store::open()?)?;
+        Ok(Json(if query.include_failures {
+            projection
+        } else {
+            projection["runs"].take()
+        }))
+    })
+    .await
 }
 
 async fn dismiss_shown_run(Path((session_id, run_id)): Path<(String, String)>) -> ApiResult {
@@ -11562,7 +11579,7 @@ mod tests {
         let store = Store::open().unwrap();
         let writer = store.begin_immediate().unwrap();
         let start = std::time::Instant::now();
-        let request = chat_shown_runs();
+        let request = chat_shown_runs(Query(ChatShownRunsQuery::default()));
         tokio::pin!(request);
         assert!(futures::poll!(&mut request).is_pending());
         let error = request.await.unwrap_err();
@@ -11570,7 +11587,13 @@ mod tests {
         assert!(error.1.contains("database is busy"), "{}", error.1);
         assert!(start.elapsed() < crate::store::BUSY_TIMEOUT + Duration::from_secs(1));
         drop(writer);
-        assert_eq!(chat_shown_runs().await.unwrap().0, json!([]));
+        assert_eq!(
+            chat_shown_runs(Query(ChatShownRunsQuery::default()))
+                .await
+                .unwrap()
+                .0,
+            json!([])
+        );
     }
 
     #[tokio::test]
@@ -11949,7 +11972,8 @@ mod tests {
             )
             .unwrap();
         let shown = chat_shown_runs_json(&store).unwrap();
-        let ids: Vec<_> = shown
+        assert_eq!(shown["failedSessions"], json!(["chat"]));
+        let ids: Vec<_> = shown["runs"]
             .as_array()
             .unwrap()
             .iter()
@@ -12030,7 +12054,10 @@ mod tests {
             let mut events = Vec::new();
             push_chat_run_events(&store, cursor, &mut events).unwrap();
             assert_eq!(events.len(), 1);
-            assert_eq!(cursor.chat_shown_runs, Some(json!([])));
+            assert_eq!(
+                cursor.chat_shown_runs,
+                Some(json!({ "runs": [], "failedSessions": [] }))
+            );
             events.clear();
             push_chat_run_events(&store, cursor, &mut events).unwrap();
             assert!(events.is_empty());
