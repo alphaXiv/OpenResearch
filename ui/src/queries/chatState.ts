@@ -49,6 +49,34 @@ export function inputSummaryChanged(event: ChatEvent, promptStates: Map<string, 
   return key !== previous;
 }
 
+/** The sent message as the transcript shows it until the server's copy lands. */
+export function optimisticUserMessage(
+  sent: Pick<Extract<Action, { type: "optimisticUser" }>, "text" | "attachments" | "annotations">,
+  parentId: string | null,
+): ChatMessage {
+  const parts: ChatPart[] = sent.text
+    ? [{ id: "p0", type: "text", text: sent.text }]
+    : [];
+  // Data URLs stand in until the server's copy arrives with file names.
+  sent.attachments.forEach((a, i) =>
+    parts.push({ id: `img${i}`, type: "image", text: a.url, name: a.name }),
+  );
+  sent.annotations.forEach((annotation, i) =>
+    parts.push({
+      id: `annotation${i}`,
+      type: "annotation",
+      text: annotation.text,
+    }),
+  );
+  return {
+    id: `${LOCAL_PREFIX}${Date.now()}`,
+    role: "user",
+    parts,
+    createdAt: Date.now(),
+    parentId,
+  };
+}
+
 function upsertMessage(list: ChatMessage[], message: ChatMessage): ChatMessage[] {
   const i = list.findIndex((m) => m.id === message.id);
   if (i >= 0) {
@@ -151,27 +179,7 @@ export function reducer(state: ChatState, action: Exclude<Action, { type: "busy"
       };
     case "optimisticUser": {
       const list = state.messagesBySession[action.sessionId] ?? [];
-      const parts: ChatPart[] = action.text
-        ? [{ id: "p0", type: "text", text: action.text }]
-        : [];
-      // Data URLs stand in until the server's copy arrives with file names.
-      action.attachments.forEach((a, i) =>
-        parts.push({ id: `img${i}`, type: "image", text: a.url, name: a.name }),
-      );
-      action.annotations.forEach((annotation, i) =>
-        parts.push({
-          id: `annotation${i}`,
-          type: "annotation",
-          text: annotation.text,
-        }),
-      );
-      const msg: ChatMessage = {
-        id: `${LOCAL_PREFIX}${Date.now()}`,
-        role: "user",
-        parts,
-        createdAt: Date.now(),
-        parentId: state.activeLeafBySession[action.sessionId] ?? null,
-      };
+      const msg = optimisticUserMessage(action, state.activeLeafBySession[action.sessionId] ?? null);
       return {
         ...state,
         messagesBySession: { ...state.messagesBySession, [action.sessionId]: [...list, msg] },

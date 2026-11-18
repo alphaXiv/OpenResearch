@@ -35,6 +35,12 @@ impl LocalProject {
         !self.github_owner.trim().is_empty() && !self.github_repo.trim().is_empty()
     }
 
+    /// A chat without a project yet: orx keeps its repository until the user
+    /// names the project and gives it a folder of its own.
+    pub fn is_scratch(&self) -> bool {
+        std::path::Path::new(&self.repo_path).starts_with(super::projects::scratch_root())
+    }
+
     pub fn github_url(&self) -> Option<String> {
         self.has_github_repository().then(|| {
             format!(

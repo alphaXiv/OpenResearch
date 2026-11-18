@@ -25,7 +25,7 @@ import { TARGET_LABELS } from "../computeTargets";
 import { AcpAuthDialog } from "./AcpAuthDialog";
 import { accountErrorMessage, OpenResearchAccount } from "./OpenResearchAccount";
 import { OpenResearchSshKey } from "./OpenResearchSshKey";
-import { HarnessSetupDialog } from "./HarnessSetupDialog";
+import { HarnessSetupDialog, useAgentSignIn } from "./HarnessSetupDialog";
 import { RefreshAgents, useAgentRefresh } from "./RefreshAgents";
 import { AcpHarnessDialog } from "./AcpHarnessDialog";
 import { AddAgentDialog, canConfigureHarness, ChoiceGrid, keyKind, OpenCodeSignInDialog, opencodeVersion, providerRank, providerTile, RECOMMENDED_TILES, sortHarnesses, TileMark, type AddedAgent } from "./AddAgentDialog";
@@ -142,7 +142,7 @@ import { OptionPicker } from "./ModelPicker";
 import { useDebouncedValue } from "./NewProjectForm";
 import { Popover } from "@base-ui/react/popover";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
-import { endpointMark, foundProviderMark, FREE_MODELS_MARK, harnessMark, pickerAgents, providerMark } from "./pickerAgents";
+import { endpointMark, foundProviderMark, FREE_MODELS_MARK, harnessMark, listedSignedOut, pickerAgents, providerMark } from "./pickerAgents";
 import { BrandMark, logoMark, ModelMark, modelLab } from "./HarnessLogo";
 import { agentModelLines, harnessKey, keptInstall, modelsAvailable } from "../modelSelection";
 import { ModelSettings } from "./ModelSettings";
@@ -449,6 +449,7 @@ export function AgentList({ remote, onboarding }: {
   /** The row an open Add agent dialog set up, which lists once the dialog finishes. */
   const [adding, setAdding] = useState<string | null>(null);
   const setupRun = useCommandRun();
+  const signIn = useAgentSignIn();
   const setupCommands = useQuery(getHarnessSetupCommandsQuery());
   const definitions = useQuery(listAcpHarnessesQuery());
   const presets = useQuery({ queryKey: workspaceKey("getAcpPresets"), queryFn: api.listAcpPresets });
@@ -476,11 +477,12 @@ export function AgentList({ remote, onboarding }: {
   const found: FoundProvider[] = !opencode?.installed ? []
     : opencode.foundProviders ?? [...new Set(signIns)].filter((id) => id && !recorded(id)).map((id) => ({ id, sources: ["catalog"], removable: false }));
   const kept = (h: Harness) => Boolean(h.profile || keptInstall(h) || definitions.data?.some((definition) => definition.id === h.id));
-  // An account or install shows once signed in: Add agent signs it in, and an expired one goes until the user adds it again.
-  const signedIn = (h: Harness) => !(h.profile || keptInstall(h)) || h.authState !== "needsLogin";
+  // An account, or an agent research ran on here, stays while signed out with a way to sign in again. One that never
+  // ran any shows once Add agent signs it in.
+  const signedIn = (h: Harness) => !(h.profile || keptInstall(h)) || h.authState !== "needsLogin" || listedSignedOut(h);
   const rows = orderedHarnesses
     .filter((h) => harnessKey(h) !== adding && signedIn(h))
-    .filter((h) => kept(h)
+    .filter((h) => kept(h) || listedSignedOut(h)
       || (h.id === "opencode" ? (records.length > 0 || found.length > 0) && (h.installBroken || h.needsConfigRepair || (!h.agentReady && !h.catalogPending)) : works(h)))
     .filter((h, index, all) => h.profile || !h.setupUrl || all.findIndex((other) => other.setupUrl === h.setupUrl) === index);
   const offersFreeModels = opencode?.installed && !opencode.installBroken;
@@ -613,6 +615,10 @@ export function AgentList({ remote, onboarding }: {
     const commands = setupCommands.data?.[h.id];
     const status = harnessStatus(h);
     const signedOut = !h.catalogPending && (!h.agentReady || Boolean(h.authCheckFailed));
+    const openSignIn = h.authState === "needsLogin" ? signIn(h) : undefined;
+    const signInButton = openSignIn && (
+      <Button size="small" onClick={openSignIn} aria-haspopup="dialog">{m.harness_setup_login()}</Button>
+    );
     if (h.profile) {
       const profile = h.profile;
       const remove = () => confirmRemove(profile.name, () => api.removeAgentProfile(profile.id));
@@ -625,7 +631,7 @@ export function AgentList({ remote, onboarding }: {
           detail={signedOut ? status.label : [h.accountName ?? h.account, h.plan].filter(Boolean).join(" · ") || status.label}
           warn={signedOut}
           off={turnedOff.has(profile.id)}
-          action={agentSwitch(profile.id, profile.name)}
+          action={<>{signInButton}{agentSwitch(profile.id, profile.name)}</>}
           logo={profile.logo}
           onRemove={remove}
           onSave={saver((changes) => api.updateAgent(profile.id, changes), harnessesOptions.queryKey)}
@@ -645,7 +651,7 @@ export function AgentList({ remote, onboarding }: {
       );
     }
     const acp = definitions.data?.find((definition) => definition.id === h.id);
-    const action = (!h.agentReady && !h.catalogPending && !h.id.startsWith("acp:") && Boolean(canConfigureHarness(h, remote, commands)));
+    const action = !openSignIn && !h.agentReady && !h.catalogPending && !h.id.startsWith("acp:") && Boolean(canConfigureHarness(h, remote, commands));
     const noModels = h.agentReady && !h.models.length;
     const detail = h.authCheckFailed || !h.agentReady
         ? status.label
@@ -673,6 +679,7 @@ export function AgentList({ remote, onboarding }: {
         off={switchable && turnedOff.has(h.id)}
         warn={Boolean(h.authCheckFailed) || (!h.agentReady && !h.catalogPending) || noModels}
         action={<>
+          {signInButton}
           {action && (
             <Button size="small" onClick={() => openSetup(h)} disabled={!commands} aria-haspopup="dialog">
               <SquareTerminal size={14} />

@@ -217,6 +217,8 @@ pub async fn run(args: UpArgs) -> Result<()> {
                 if let Err(err) = chat.reconcile_expired_turn_leases() {
                     eprintln!("orx up: could not reconcile expired chat turns: {err}");
                 }
+                // Also picks up moves waiting from before a restart.
+                chat.apply_project_moves().await;
             }
         });
     }
@@ -389,8 +391,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     state.opencode_signins.shutdown().await;
     state.remote_sessions.shutdown().await;
     agent.shutdown().await;
-    codex.shutdown().await;
-    claude.shutdown().await;
+    tokio::join!(codex.shutdown(), claude.shutdown());
     state.chat.acp.shutdown().await;
     state.chat.release_turn_leases();
     if let Some(server) = control_server {
@@ -670,6 +671,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
             post(prewarm_starter_prompts),
         )
         .route("/api/projects/activity", get(list_project_activity))
+        .route("/api/projects/scratch", post(create_scratch_project))
         .route(
             "/api/projects/{id}",
             get(get_project)
@@ -1048,6 +1050,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
         .route("/api/chat/sessions/{id}/worktree", get(session_worktree))
         .route("/api/chat/sessions/{id}/message", post(send_chat_message))
         .route("/api/chat/sessions/{id}/shell", post(run_shell_command))
+        .route(
+            "/api/chat/sessions/{id}/project",
+            post(move_chat_to_project).delete(cancel_chat_project_move),
+        )
         .route(
             "/api/chat/sessions/{id}/compact",
             post(compact_chat_session),
@@ -1746,6 +1752,7 @@ fn project_json_with_artifacts_dir(p: &local::model::LocalProject, artifacts_dir
         map.insert("filesDir".into(), dir);
         map.insert("path".into(), Value::String(p.repo_path.clone()));
         map.insert("githubEnabled".into(), Value::Bool(p.github_enabled()));
+        map.insert("scratch".into(), Value::Bool(p.is_scratch()));
         map.insert(
             "githubUrl".into(),
             p.github_url().map(Value::String).unwrap_or(Value::Null),
@@ -2030,6 +2037,66 @@ async fn get_project(Path(id): Path<String>) -> ApiResult {
     Ok(Json(json!({ "project": project_json(&project) })))
 }
 
+async fn create_scratch_project(State(state): State<AppState>) -> ApiResult {
+    reject_if_moving(&state)?;
+    let _admission = state
+        .project_lifecycle
+        .admit("__project_create__")
+        .ok_or_else(|| bad_request("project creation is unavailable"))?;
+    let creation_guard = state.project_creation_lock.clone().lock_owned().await;
+    let project = tokio::task::spawn_blocking(move || {
+        let _creation_guard = creation_guard;
+        local::projects::scratch_project(&Store::open()?)
+    })
+    .await
+    .map_err(|error| anyhow!("project task failed: {error}"))??;
+    Ok(Json(json!({ "project": project_json(&project) })))
+}
+
+#[derive(Deserialize)]
+struct ChatProjectReq {
+    name: String,
+    path: String,
+}
+
+/// Makes a chat a project of its own, now or once its turn ends.
+async fn move_chat_to_project(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<ChatProjectReq>,
+) -> ApiResult {
+    reject_if_moving(&state)?;
+    let project_id = Store::open()?
+        .get_chat_session(&id)?
+        .ok_or_else(|| not_found("chat session"))?
+        .project_id;
+    let _changing = state
+        .project_lifecycle
+        .begin_delete(&project_id)
+        .ok_or_else(|| bad_request("The project is busy with another change; try again."))?;
+    let moved = state
+        .chat
+        .move_to_new_project(&id, &req.name, &req.path)
+        .await
+        .map_err(bad_request)?;
+    Ok(Json(match moved {
+        Some(project) => json!({ "project": project_json(&project), "pending": false }),
+        None => json!({ "pending": true }),
+    }))
+}
+
+async fn cancel_chat_project_move(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult {
+    if !state.chat.cancel_project_move(&id).await? {
+        return Err(bad_request(
+            "No move is waiting for this chat; it may have already started.",
+        ));
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
 fn project_git_json(
     project: &local::model::LocalProject,
     github_status: local::github::Status,
@@ -2185,7 +2252,9 @@ async fn create_independent_project_repository(
     let reroot_shallow = local::git::prepare_shallow_repository_for_publication(
         std::path::Path::new(&project.repo_path),
     )?;
-    let (owner, repo) = local::github::create_project_repo(&project.slug, organization).await?;
+    // Named for the project as it is called now, as the preview shows it.
+    let name = local::slugify(&project.name);
+    let (owner, repo) = local::github::create_project_repo(&name, organization).await?;
     if reroot_shallow {
         local::git::reroot_shallow_repository(
             std::path::Path::new(&project.repo_path),
@@ -2865,6 +2934,9 @@ async fn update_project(
 struct DeleteProjectQuery {
     #[serde(default)]
     delete_artifacts: bool,
+    /// Only a scratch project left with no chats, checked under the deletion lease.
+    #[serde(skip)]
+    only_unused_scratch: bool,
 }
 
 /// Delete a project and everything hanging off it. Refuses while runs are in
@@ -2893,6 +2965,11 @@ async fn delete_project_inner(state: AppState, id: String, query: DeleteProjectQ
     let project = store
         .get_local_project(&id)?
         .ok_or_else(|| not_found("project"))?;
+    if query.only_unused_scratch
+        && (!project.is_scratch() || !store.list_chat_sessions_by_project(&id)?.is_empty())
+    {
+        return Ok(Json(json!({ "ok": false })));
+    }
     let in_flight: Vec<_> = store
         .list_runs_by_project(&id)?
         .into_iter()
@@ -7617,6 +7694,12 @@ async fn relay_pty(
                             return None;
                         }
                     }
+                    if let Some(code) = update.user_code {
+                        let frame = json!({ "type": "signin", "userCode": code }).to_string();
+                        if socket.send(Message::Text(frame.into())).await.is_err() {
+                            return None;
+                        }
+                    }
                     if update.failure.is_some() {
                         return Some(Ok(portable_pty::ExitStatus::with_exit_code(1)));
                     }
@@ -8751,9 +8834,15 @@ async fn harness_snapshot(Path(id): Path<String>) -> ApiResult {
 
 async fn list_harnesses(State(state): State<AppState>, Query(q): Query<HarnessQuery>) -> ApiResult {
     let mut payload = harnesses_payload(&state, &q).await;
-    let hidden = Store::open()?.ui_state()?.hidden_agents;
+    let store = Store::open()?;
+    let hidden = store.ui_state()?.hidden_agents;
+    let used = store.chat_agents_used()?;
     for entry in payload["harnesses"].as_array_mut().into_iter().flatten() {
         entry["off"] = json!(local::model_routes::turned_off(entry, &hidden));
+        let profile = entry["profile"]["id"].as_str();
+        entry["hasChats"] = json!(used
+            .iter()
+            .any(|(harness, used)| entry["id"] == harness.as_str() && used.as_deref() == profile));
         if entry["id"] == "opencode" && entry["profile"].is_null() {
             entry["offProviders"] = json!(local::model_routes::off_providers(entry, &hidden));
         }
@@ -9715,9 +9804,20 @@ async fn create_chat_session(
         .admit(&req.project_id)
         .ok_or_else(|| bad_request("project deletion is in progress"))?;
     let store = Store::open()?;
-    store
+    let project = store
         .get_local_project(&req.project_id)?
         .ok_or_else(|| not_found("project"))?;
+    // A chat without a project gets one of its own, even when two drafts were
+    // opened on the same unused scratch project.
+    let _scratch_guard = if project.is_scratch() {
+        let guard = state.project_creation_lock.clone().lock_owned().await;
+        if !store.list_chat_sessions_by_project(&project.id)?.is_empty() {
+            req.project_id = local::projects::scratch_project(&store)?.id;
+        }
+        Some(guard)
+    } else {
+        None
+    };
     let catalog = harnesses_payload(&state, &HarnessQuery::default()).await;
     if req.harness.is_none() {
         if let Some(profile) = req.profile.as_deref() {
@@ -9910,9 +10010,44 @@ async fn delete_chat_session(State(state): State<AppState>, Path(id): Path<Strin
     reject_if_moving(&state)?;
     // Detached so a canceled request cannot stop between the native purge and the row delete.
     let chat = state.chat.clone();
-    tokio::spawn(async move { chat.delete_session(&id).await })
-        .await
-        .map_err(|error| anyhow!("chat deletion task failed: {error}"))??;
+    let store = Store::open()?;
+    let scratch = store
+        .get_chat_session(&id)?
+        .map(|session| store.get_local_project(&session.project_id))
+        .transpose()?
+        .flatten()
+        .filter(|project| project.is_scratch());
+    drop(store);
+    tokio::spawn(async move {
+        chat.delete_session(&id).await?;
+        // A chat without a project owns its repository, which goes with its last chat.
+        let Some(project) = scratch else {
+            return Ok(());
+        };
+        // The chat is gone either way; a scratch project left behind is reused by the next one.
+        let query = DeleteProjectQuery {
+            delete_artifacts: true,
+            only_unused_scratch: true,
+        };
+        match delete_project_inner(state, project.id.clone(), query).await {
+            Ok(Json(deleted)) if deleted["ok"] == false => {}
+            Ok(Json(deleted)) => {
+                if let Some(error) = deleted["artifactsError"].as_str() {
+                    eprintln!("orx up: {error}");
+                }
+                if let Err(error) = std::fs::remove_dir_all(&project.repo_path) {
+                    eprintln!("orx up: could not remove {}: {error}", project.repo_path);
+                }
+            }
+            Err(error) => eprintln!(
+                "orx up: kept the scratch project {} after its last chat: {}",
+                project.id, error.1
+            ),
+        }
+        Ok::<_, crate::error::Error>(())
+    })
+    .await
+    .map_err(|error| anyhow!("chat deletion task failed: {error}"))??;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -12762,6 +12897,77 @@ mod tests {
             .await
         });
         address
+    }
+
+    #[tokio::test]
+    async fn removed_codex_account_fails_the_setup_socket_not_install_detection() {
+        use futures::StreamExt;
+        use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message as Frame};
+        if !crate::config::in_test_child(&["PATH"]) {
+            return;
+        }
+        #[cfg(unix)]
+        std::env::set_var(
+            "PATH",
+            orx_test_support::agentless_path(&crate::config::config_dir()),
+        );
+        #[cfg(windows)]
+        {
+            // A signed-out npm-style shim, not a CLI from the runner's account.
+            let bin = crate::config::config_dir().join("agent-stand-ins");
+            std::fs::create_dir_all(&bin).unwrap();
+            std::fs::write(bin.join("codex.cmd"), "@echo off\r\nif \"%1\"==\"--version\" (echo codex-cli 0.200.0 & exit /b 0)\r\nexit /b 1\r\n").unwrap();
+            std::env::set_var("PATH", bin);
+        }
+        let (send, events) = std::sync::mpsc::channel();
+        crate::telemetry::TEST_CAPTURE.set(send).unwrap();
+        let profile = local::agent_profiles::create("codex", "Disposable", None).unwrap();
+        local::agent_profiles::remove(&profile).unwrap();
+        let address = serve(router(test_state(), None, up_remote::Reach::Loopback)).await;
+        let mut request = format!(
+            "ws://{address}/api/harnesses/setup?harness=codex&action=login&profile={profile}"
+        )
+        .into_client_request()
+        .unwrap();
+        request
+            .headers_mut()
+            .insert("origin", format!("http://{address}").parse().unwrap());
+        let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(10), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let Frame::Text(text) = frame else {
+            panic!("expected the setup error, got {frame:?}")
+        };
+        let result: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(result["type"], "error");
+        assert!(
+            result["error"]
+                .as_str()
+                .unwrap()
+                .contains("account was removed"),
+            "{result}"
+        );
+        let setup: Vec<_> = events
+            .try_iter()
+            .filter(|(name, _)| name == "harness_setup")
+            .map(|(_, properties)| properties)
+            .collect();
+        assert_eq!(setup.len(), 2, "{setup:?}");
+        assert_eq!(setup[0]["outcome"], "started");
+        let failure = &setup[1];
+        assert_eq!(failure["attemptId"], setup[0]["attemptId"]);
+        assert_eq!(failure["harness"], "codex");
+        assert_eq!(failure["action"], "login");
+        assert_eq!(failure["outcome"], "failed");
+        assert_eq!(failure["stage"], "detect");
+        assert_eq!(failure["reason"], "not_ready");
+        assert_eq!(
+            failure["errorExcerpt"],
+            "agent account could not be prepared"
+        );
     }
 
     /// A dashboard whose openresearch.sh is a fake that serves one project's `.orx` file under

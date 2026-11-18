@@ -100,6 +100,7 @@ import { WorkspaceTools } from "./components/WorkspaceTools";
 import { ProjectTerminal } from "./components/ProjectTerminal";
 import { SettingsCommandTerminal } from "./components/SshConnectTerminal";
 import { isWindowsDrivePath } from "./markdownTarget";
+import { projectLabel } from "./components/NoProject";
 import { ChatPanel, findPartById, spawnRowTitle, type FocusedMessage } from "./components/ChatPanel";
 import { OptionPicker, usePopover } from "./components/ModelPicker";
 import { SubagentTab } from "./components/SubagentTab";
@@ -823,7 +824,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
 
   // The home, error, and loading screens leave projects populated but show no project.
   useEffect(() => {
-    const name = startupError || uiState === null ? null : activeProject?.name;
+    const name = startupError || uiState === null || !activeProject ? null : projectLabel(activeProject);
     const machine = runtime.kind === "ssh" ? `${autoDir(runtime.session.host)} — ` : "";
     document.title = name ? `${machine}${autoDir(name)} — OpenResearch` : `${machine}OpenResearch`;
   }, [startupError, uiState, activeProject, runtime]);
@@ -2064,7 +2065,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
           <ChatPanel
             find={mainFind}
             projectId={projectId}
-            projectName={activeProject.name}
+            projectName={projectLabel(activeProject)}
             contentLoading={conversationLoading}
             contentError={conversationError || null}
             onRetryContent={retryConversation}
@@ -2525,7 +2526,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                       embedded
                       composerFocusNonce={sideComposerFocusNonce}
                       projectId={projectId}
-                      projectName={activeProject?.name ?? ""}
+                      projectName={activeProject ? projectLabel(activeProject) : ""}
                       railOpen={false}
                       onShowRail={() => setRailOpen(true)}
                       mainView="chat"

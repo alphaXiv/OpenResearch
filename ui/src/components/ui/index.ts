@@ -5,7 +5,7 @@ export { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 export { IconButton, IconButtonLink } from "./IconButton";
 export { Input, Textarea } from "./Input";
 export type { InputProps } from "./Input";
-export { MenuItem } from "./MenuItem";
+export { MENU_LABEL, MENU_POPUP, MENU_SEPARATOR, MenuItem } from "./MenuItem";
 export { SEGMENTED_CLASS_NAME } from "./Segmented";
 export { LoadingRow, Spinner } from "./Spinner";
 export { StatusIndicator } from "./StatusIndicator";

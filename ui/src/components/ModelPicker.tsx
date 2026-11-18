@@ -44,14 +44,15 @@ import {
 import type { NativeOption } from "../acp";
 import { HarnessLogo, LABS, ModelGlyph, ModelMark } from "./HarnessLogo";
 
-import { IconButton, MenuItem, SwitchIndicator, Tooltip } from "./ui";
+import { Button, IconButton, MENU_LABEL, MENU_POPUP, MENU_SEPARATOR, MenuItem, SwitchIndicator, Tooltip } from "./ui";
 import { cn } from "./ui/cn";
 
-import { harnessKey, selectionHarness } from "../modelSelection";
+import { harnessDisplayName, harnessKey, selectionHarness } from "../modelSelection";
 import { defaultOffer, localDay, newLines, VARIANT_EFFORTS, variantOffer } from "../modelLines";
 import { AgentIconTile } from "./AgentIcon";
 import { feedLine, lineLab, lineName, lineSection, ModelList, offerOn, type PickedFrom, type PickerLine } from "./ModelList";
-import { pickerLines, type PickerAgent } from "./pickerAgents";
+import { harnessMark, listedSignedOut, pickerLines, type PickerAgent } from "./pickerAgents";
+import { useAgentSignIn } from "./HarnessSetupDialog";
 
 const MODEL_GROUP_CLASS_NAME = [
   "model-group flex items-center justify-between gap-2",
@@ -115,10 +116,6 @@ export function usePopover(triggerRef?: RefObject<HTMLButtonElement | null>) {
 
 const PILL =
   "composer-pill inline-flex h-7 min-w-0 shrink-0 items-center gap-1.5 rounded-md px-2 text-sm text-subtext whitespace-nowrap transition-[background,color] duration-150 ease-standard hover:bg-hover-muted hover:text-text data-[popup-open]:bg-hover-muted data-[popup-open]:text-text";
-
-const MENU_POPUP = "overflow-y-auto rounded-lg border border-border bg-background p-1 shadow-dropdown outline-none";
-
-const MENU_LABEL = "px-2 pt-1.5 pb-1 text-sm text-muted";
 
 /** Effort tiers fill more of a 3×3 grid; ids the grid does not know stay empty. */
 const EFFORT_DOTS: Record<string, { dots: number[]; tone: string }> = {
@@ -217,7 +214,8 @@ const SPEED_SEGMENT =
   "inline-flex h-6 w-7 cursor-default items-center justify-center rounded-sm text-subtext outline-none transition-[background,color] duration-120 ease-standard data-[highlighted]:text-text data-[checked]:bg-background data-[checked]:text-text data-[checked]:shadow-segment focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus";
 
 const SETTINGS_ROW =
-  "flex min-h-8 w-full items-center justify-between gap-2 rounded-sm px-2 py-1.5 text-start text-sm text-text outline-none transition-[background,color] duration-120 ease-standard data-[highlighted]:bg-surface data-[popup-open]:bg-surface focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:outline-offset-2";
+  // Inset, so a scrolling menu never clips the focus ring.
+  "flex min-h-8 w-full items-center justify-between gap-2 rounded-sm px-2 py-1.5 text-start text-sm text-text outline-none transition-[background,color] duration-120 ease-standard data-[highlighted]:bg-surface data-[popup-open]:bg-surface focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:-outline-offset-2";
 
 function SettingsSubmenu({
   label,
@@ -368,6 +366,13 @@ export function ModelPicker({
   const released = newLines(lines, releases, Date.now());
   const [menu, setMenu] = useState<"model" | "effort" | "permissions" | null>(null);
   const [filter, setFilter] = useState("");
+  const signIn = useAgentSignIn();
+  // An agent signed out of research it ran keeps a row here, so signing in again is one click away.
+  const signedOut = catalog.filter((h) => listedSignedOut(h) && !h.off).flatMap((h) => {
+    const name = h.profile?.name ?? harnessDisplayName(h);
+    const open = signIn(h);
+    return open && name.toLowerCase().includes(filter.trim().toLowerCase()) ? [{ h, name, open }] : [];
+  });
   const modelTriggerRef = useRef<HTMLButtonElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const handledOpenRequest = useRef(openRequest);
@@ -714,6 +719,21 @@ export function ModelPicker({
                   {harnesses.length === 0 && (
                     <div className={MODEL_MORE_CLASS_NAME}>{m.model_picker_detecting_harnesses()}</div>
                   )}
+                  {signedOut.map(({ h, name, open }) => {
+                    const mark = harnessMark(h);
+                    return (
+                      <div key={harnessKey(h)} className="flex items-center gap-2 px-2 py-1.5 text-sm">
+                        <AgentIconTile icon={mark.icon} brand={mark.brand} size="xs" />
+                        <span className="min-w-0 flex-1 truncate">
+                          {name}
+                          <span className="text-muted"> · {m.settings_page_not_signed_in()}</span>
+                        </span>
+                        <Button type="button" size="small" data-nav onClick={() => { close(); open(); }}>
+                          {m.harness_setup_login()}
+                        </Button>
+                      </div>
+                    );
+                  })}
                 </ModelList>
               </Popover.Popup>
             </Popover.Positioner>
@@ -850,7 +870,7 @@ export function ModelPicker({
                     />
                   ))}
                   {(ultracodeChoice || speeds.length > 0 || variantSwitches) && (effortChoices.length > 0 || variantEfforts.length > 0 || nativeOptions.length > 0) && (
-                    <Menu.Separator className="m-1 h-px bg-border-variant" />
+                    <Menu.Separator className={MENU_SEPARATOR} />
                   )}
                   {ultracodeChoice && (
                     <Tooltip interactive side="start" content={m.model_picker_ultracode_description()} className="flex w-full rounded-sm">
@@ -954,7 +974,7 @@ export function ModelPicker({
                       </Menu.RadioGroup>
                     </Menu.Group>
                   )}
-                  {permissionChoices.length > 0 && onSelectAutonomy && <Menu.Separator className="m-1 h-px bg-border-variant" />}
+                  {permissionChoices.length > 0 && onSelectAutonomy && <Menu.Separator className={MENU_SEPARATOR} />}
                   {onSelectAutonomy && (
                     <Menu.Group>
                       <Menu.GroupLabel className={MENU_LABEL}>{m.model_picker_autonomy()}</Menu.GroupLabel>

@@ -1,3 +1,4 @@
+import { projectLabel } from "./NoProject";
 import {
   useContext,
   useEffect,
@@ -79,7 +80,7 @@ export function ResumeDialog({
   const [activeIndex, setActiveIndex] = useState(0);
 
   const projectNames = useMemo(
-    () => new Map(projects.map((project) => [project.id, project.name])),
+    () => new Map(projects.map((project) => [project.id, projectLabel(project)])),
     [projects],
   );
   const matches = useMemo<ResumeEntry[]>(() => {
