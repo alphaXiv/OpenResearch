@@ -7655,7 +7655,7 @@ mod tests {
             local(),
             json!([{"name": "budget", "does": "stop", "when": {"kind": "costAbove", "usd": 5}}]),
         );
-        let lines = [(T0, r#"::orx:: {"step":1,"of":100,"spend":5.25}"#.to_owned())];
+        let lines = [(T0, r#"::orx:: {"step":1,"of":100,"spend":5}"#.to_owned())];
         f.collect(&Snapshot {
             run_id: "spent".into(),
             ..folded(&lines)
@@ -7665,7 +7665,7 @@ mod tests {
         let stop = stopped_by(&f, "spent").unwrap();
         mentions(
             stop.reason.as_deref().unwrap(),
-            &["cost", "$5.25", "past", "$5.00", "budget"],
+            &["cost", "reached", "$5.00", "budget"],
         );
 
         let limited = json!({"kind": "local_job", "timeoutSecs": 120});

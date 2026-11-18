@@ -62,7 +62,7 @@ pub(crate) enum When {
     },
     /// No progress was reported for `seconds`.
     NoProgress { seconds: u64 },
-    /// What the run has cost, or would cost by its end, passed `usd`.
+    /// What the run has cost reached `usd`, or what it would cost by its end passed it.
     CostAbove { usd: f64 },
     /// The run would finish after its time limit.
     FinishPastLimit,
@@ -740,7 +740,7 @@ fn step(rule: &Rule, count: &mut Count, facts: &Facts) -> Option<String> {
             let spent = cost["soFar"].as_f64().or(cost["spend"].as_f64());
             if let Some(spent) = spent.filter(|spent| spent >= usd) {
                 return Some(format!(
-                    "it has cost ${spent:.2}, past its ${usd:.2} budget"
+                    "it has cost ${spent:.2} and reached its ${usd:.2} budget"
                 ));
             }
             let projected = cost["projected"].as_f64();
