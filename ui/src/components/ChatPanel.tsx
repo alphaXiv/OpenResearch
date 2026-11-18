@@ -28,7 +28,7 @@ import { chatSearchRanges } from "../chatSearch";
 import { ComposerProjectPicker } from "./ComposerProjectPicker";
 import { LibraryPicker } from "./LibraryPicker";
 import { ProjectInfoCard } from "./ProjectInfoCard";
-import { NoProjectGroupHeader, ProjectProposalCard, projectLabel, projectProposal, useCreateProject, type ProjectProposal } from "./NoProject";
+import { NoProjectGroupHeader, PendingProjectMove, ProjectProposalCard, projectLabel, projectProposal, useCreateProject, type ProjectProposal } from "./NoProject";
 import { mutCreateScratchProject } from "../queries/projects";
 import { SessionHoverCard } from "./SessionHoverCard";
 import { AgentMessageCard } from "./AgentMessageCard";
@@ -4630,7 +4630,7 @@ const Transcript = memo(function Transcript({
   delegates,
   onOpenDelegate,
   project,
-  sessionId,
+  session,
   focusedMessageId,
   focusedPartId,
   focusNonce,
@@ -4668,9 +4668,9 @@ const Transcript = memo(function Transcript({
   /** Chats this one delegated to, oldest first. */
   delegates: DelegateRow[];
   onOpenDelegate?: (sessionId: string) => void;
-  /** The chat's project, for the projects its agent proposes to create. */
+  /** The chat and its project, for the projects its agent proposes to create. */
   project?: Project;
-  sessionId: string;
+  session?: ChatSession;
   focusedMessageId?: string | null;
   focusedPartId?: string;
   focusNonce?: number;
@@ -5047,7 +5047,7 @@ const Transcript = memo(function Transcript({
           {proposalsByRow.has(item.index) && (
             <div className="mt-3 flex flex-col gap-2">
               {proposalsByRow.get(item.index)?.map((proposal, index) => (
-                <ProjectProposalCard key={index} proposal={proposal} project={project} session={{ id: sessionId }} />
+                <ProjectProposalCard key={index} proposal={proposal} proposedAt={visibleMessages[item.index][0].createdAt} project={project} session={session} />
               ))}
             </div>
           )}
@@ -6684,6 +6684,10 @@ export function ChatPanel({
     return onChatEvent((ev) => {
       switch (ev.type) {
         case "session": {
+          if (ev.session.id === composerScopeRef.current.activeId && ev.session.projectId !== projectId) {
+            onActiveSessionChangeRef.current(ev.session.id, { projectId: ev.session.projectId, replace: true });
+            return;
+          }
           if (ev.session.projectId !== projectId) return;
           if (deletedSessionIds.has(ev.session.id)) return;
           // A generated title landing on a session already on screen is the
@@ -8128,15 +8132,23 @@ export function ChatPanel({
                   />
                 </PaperTitle>
               ) : busy ? <Spinner /> : null}
-              {currentProject?.scratch && !embedded ? (
-                <Button size="small" className="shrink-0 font-normal" onClick={() => createProject(currentProject, activeSession)}>
-                  <FolderPlus size={14} />{m.create_project_button()}
-                </Button>
-              ) : (
-                <span className="min-w-0 truncate rounded-md border border-border bg-surface px-2.5 py-0.5 text-sm font-normal text-subtext" title={projectName}>
-                  {projectName}
-                </span>
-              )}
+              {activeSession.pendingProject ? <PendingProjectMove session={activeSession} />
+                : currentProject?.scratch && !embedded ? (
+                  <Button size="small" className="shrink-0 font-normal" onClick={() => createProject(currentProject, activeSession)}>
+                    <FolderPlus size={14} />{m.create_project_button()}
+                  </Button>
+                ) : <>
+                  <span className="min-w-0 truncate rounded-md border border-border bg-surface px-2.5 py-0.5 text-sm font-normal text-subtext" title={projectName}>
+                    {projectName}
+                  </span>
+                  {currentProject && !embedded && (
+                    <Tooltip interactive content={m.create_project_move_title()} className="rounded-md">
+                      <IconButton size="small" aria-label={m.create_project_move_title()} onClick={() => createProject(currentProject, activeSession)}>
+                        <FolderPlus size={14} />
+                      </IconButton>
+                    </Tooltip>
+                  )}
+                </>}
             </>}
           </div>
           {embedded && activeSession && (
@@ -8301,7 +8313,7 @@ export function ChatPanel({
                   delegates={delegates}
                   onOpenDelegate={onOpenDelegate}
                   project={currentProject}
-                  sessionId={activeId ?? ""}
+                  session={activeSession}
                   focusedMessageId={focusedMessage?.sessionId === activeId ? focusedMessage.messageId : null}
                   focusedPartId={focusedMessage?.spawnPartId ?? focusedMessage?.partId}
                   focusNonce={focusedMessage?.nonce}

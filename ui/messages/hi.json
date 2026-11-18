@@ -2183,5 +2183,9 @@
   "create_project_created": "बनाया गया",
   "create_project_review": "समीक्षा करें…",
   "activity_proposed_project": "प्रोजेक्ट {name} प्रस्तावित किया",
-  "chat_delete_scratch_session_confirm": "“{title}” हटाएँ?\n\nइस चैट का कोई प्रोजेक्ट नहीं है, इसलिए इसका वार्तालाप, साइड चैट और फ़ाइलें स्थायी रूप से हटा दी जाएँगी।"
+  "chat_delete_scratch_session_confirm": "“{title}” हटाएँ?\n\nइस चैट का कोई प्रोजेक्ट नहीं है, इसलिए इसका वार्तालाप, साइड चैट और फ़ाइलें स्थायी रूप से हटा दी जाएँगी।",
+  "create_project_move_title": "नए प्रोजेक्ट में ले जाएँ",
+  "create_project_move_description": "यह चैट आपके चुने फ़ोल्डर में एक नए प्रोजेक्ट में चली जाती है, जो {project} के इतिहास और चैट के काम से शुरू होता है। {project} अपनी प्रति रखता है।",
+  "create_project_pending": "यह टर्न खत्म होने पर {name} में चली जाएगी",
+  "create_project_pending_cancel": "ले जाना रद्द करें"
 }

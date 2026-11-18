@@ -41,3 +41,29 @@ test('a chat without a project becomes the project its agent proposes', async ({
     expect(readFileSync(path.join(folder, 'notes.md'), 'utf8')).toBe('ideas\n')
   })
 })
+
+test('a chat in a project moves into a new one once its turn ends', async ({ page, project, agent, orx }) => {
+  const folder = path.join(orx.root, 'kept', 'split-off')
+  agent.script('Write a probe and keep working.', [
+    { run: "printf 'probe\\n' > probe.txt" },
+    { hold: 'working' },
+    { say: 'Probe written.' },
+  ])
+  agent.script('made this chat the project', [{ say: 'Carrying on in the new project.' }])
+  await project.open(page)
+  await send(page, 'Write a probe and keep working.')
+  await agent.reached('working')
+
+  await page.getByRole('button', { name: 'Move to a new project' }).click()
+  const dialog = page.getByRole('dialog')
+  await dialog.getByRole('textbox', { name: 'Project name' }).fill('Split off')
+  await dialog.getByRole('textbox', { name: 'Project location' }).fill(folder)
+  await dialog.getByRole('button', { name: 'Create project' }).click()
+  await expect(dialog).toBeHidden()
+  await expect(page.getByText(/Moves to .*Split off.* when this turn ends/)).toBeVisible()
+
+  agent.release('working')
+  await expect(page.getByText('Carrying on in the new project.', { exact: true })).toBeVisible()
+  await expect(page.getByRole('complementary').getByRole('button', { name: 'Split off', exact: true })).toBeVisible()
+  expect(readFileSync(path.join(folder, 'probe.txt'), 'utf8')).toBe('probe\n')
+})

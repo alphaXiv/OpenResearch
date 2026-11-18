@@ -2183,5 +2183,9 @@
   "create_project_created": "Oluşturuldu",
   "create_project_review": "İncele…",
   "activity_proposed_project": "{name} projesini önerdi",
-  "chat_delete_scratch_session_confirm": "“{title}” silinsin mi?\n\nBu sohbetin projesi yok, bu yüzden konuşma dökümü, yan sohbetleri ve dosyaları kalıcı olarak kaldırılacak."
+  "chat_delete_scratch_session_confirm": "“{title}” silinsin mi?\n\nBu sohbetin projesi yok, bu yüzden konuşma dökümü, yan sohbetleri ve dosyaları kalıcı olarak kaldırılacak.",
+  "create_project_move_title": "Yeni bir projeye taşı",
+  "create_project_move_description": "Bu sohbet, seçtiğiniz klasördeki yeni bir projeye taşınır; proje {project} geçmişinden ve sohbetin çalışmasından başlar. {project} kendi kopyasını korur.",
+  "create_project_pending": "Bu tur bitince {name} projesine taşınır",
+  "create_project_pending_cancel": "Taşımayı iptal et"
 }

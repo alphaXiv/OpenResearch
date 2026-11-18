@@ -2183,5 +2183,9 @@
   "create_project_created": "만들어짐",
   "create_project_review": "검토…",
   "activity_proposed_project": "프로젝트 {name} 제안",
-  "chat_delete_scratch_session_confirm": "“{title}”을(를) 삭제할까요?\n\n이 채팅은 프로젝트가 없으므로 대화 기록, 사이드 채팅, 파일이 영구적으로 삭제됩니다."
+  "chat_delete_scratch_session_confirm": "“{title}”을(를) 삭제할까요?\n\n이 채팅은 프로젝트가 없으므로 대화 기록, 사이드 채팅, 파일이 영구적으로 삭제됩니다.",
+  "create_project_move_title": "새 프로젝트로 옮기기",
+  "create_project_move_description": "이 채팅은 선택한 폴더의 새 프로젝트로 옮겨지며, {project}의 기록과 채팅의 작업에서 시작합니다. {project}는 자체 사본을 유지합니다.",
+  "create_project_pending": "이번 턴이 끝나면 {name}(으)로 옮겨집니다",
+  "create_project_pending_cancel": "옮기기 취소"
 }

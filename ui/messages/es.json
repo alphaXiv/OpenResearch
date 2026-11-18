@@ -2183,5 +2183,9 @@
   "create_project_created": "Creado",
   "create_project_review": "Revisar…",
   "activity_proposed_project": "Propuso el proyecto {name}",
-  "chat_delete_scratch_session_confirm": "¿Eliminar «{title}»?\n\nEste chat no tiene proyecto, así que su transcripción, sus chats secundarios y sus archivos se eliminarán permanentemente."
+  "chat_delete_scratch_session_confirm": "¿Eliminar «{title}»?\n\nEste chat no tiene proyecto, así que su transcripción, sus chats secundarios y sus archivos se eliminarán permanentemente.",
+  "create_project_move_title": "Mover a un proyecto nuevo",
+  "create_project_move_description": "Este chat pasa a un proyecto nuevo en la carpeta que elijas, a partir del historial de {project} y del trabajo del chat. {project} conserva su propia copia.",
+  "create_project_pending": "Pasa a {name} cuando termine este turno",
+  "create_project_pending_cancel": "Cancelar el traslado"
 }

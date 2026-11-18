@@ -306,9 +306,9 @@ pub enum ProjectCommand {
         no_artifacts: bool,
     },
 
-    /// From a chat without a project: propose making it a project. The user
-    /// reviews the name and folder in the chat; creating it commits the chat's
-    /// work and moves its repository there.
+    /// From a chat: propose making it a project of its own. The user reviews
+    /// the name and folder in the chat; creating it commits the chat's work and
+    /// moves the chat there.
     Create {
         /// The project's name.
         #[arg(long)]

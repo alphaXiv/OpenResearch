@@ -2183,5 +2183,9 @@
   "create_project_created": "تم الإنشاء",
   "create_project_review": "مراجعة…",
   "activity_proposed_project": "اقترح المشروع {name}",
-  "chat_delete_scratch_session_confirm": "هل تريد حذف «{title}»؟\n\nلا مشروع لهذه المحادثة، لذا سيُحذف سجلها ومحادثاتها الجانبية وملفاتها نهائيًا."
+  "chat_delete_scratch_session_confirm": "هل تريد حذف «{title}»؟\n\nلا مشروع لهذه المحادثة، لذا سيُحذف سجلها ومحادثاتها الجانبية وملفاتها نهائيًا.",
+  "create_project_move_title": "النقل إلى مشروع جديد",
+  "create_project_move_description": "تنتقل هذه المحادثة إلى مشروع جديد في المجلد الذي تختاره، يبدأ من سجل {project} وعمل المحادثة. يحتفظ {project} بنسخته.",
+  "create_project_pending": "تنتقل إلى {name} عند انتهاء هذه الجولة",
+  "create_project_pending_cancel": "إلغاء النقل"
 }

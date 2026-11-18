@@ -2183,5 +2183,9 @@
   "create_project_created": "已创建",
   "create_project_review": "查看…",
   "activity_proposed_project": "建议创建项目 {name}",
-  "chat_delete_scratch_session_confirm": "删除“{title}”？\n\n此对话不属于任何项目，其聊天记录、侧边聊天和文件都将被永久删除。"
+  "chat_delete_scratch_session_confirm": "删除“{title}”？\n\n此对话不属于任何项目，其聊天记录、侧边聊天和文件都将被永久删除。",
+  "create_project_move_title": "移到新项目",
+  "create_project_move_description": "此对话会移到你所选文件夹中的新项目，新项目从 {project} 的历史和对话的工作开始。{project} 保留自己的副本。",
+  "create_project_pending": "本轮结束后移到 {name}",
+  "create_project_pending_cancel": "取消移动"
 }

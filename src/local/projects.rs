@@ -280,28 +280,13 @@ pub fn promote_scratch_project(
 ) -> Result<Promotion> {
     if !project.is_scratch() {
         return Err(crate::error::anyhow!(
-            "This chat is already in {}, at {}.",
+            "{} is already a project, at {}.",
             project.name,
             project.repo_path
         ));
     }
-    let name = name.trim();
-    if name.is_empty() {
-        return Err(crate::error::anyhow!("Give the project a name."));
-    }
-    let target = expand_path(path)?;
-    if target.starts_with(crate::store::data_dir()) {
-        return Err(crate::error::anyhow!(
-            "{} is inside OpenResearch's data folder; choose a folder of your own.",
-            target.display()
-        ));
-    }
-    if target.exists() && (!target.is_dir() || std::fs::read_dir(&target)?.next().is_some()) {
-        return Err(crate::error::anyhow!(
-            "{} already exists; choose a new folder for the project.",
-            target.display()
-        ));
-    }
+    let (name, target) = new_project_place(name, path)?;
+    let name = name.as_str();
 
     let repo = PathBuf::from(&project.repo_path);
     let worktree = worktree.filter(|dir| dir.join(".git").exists());
@@ -328,6 +313,7 @@ pub fn promote_scratch_project(
             .to_string_lossy()
             .into_owned();
         store.update_local_project(&promoted)?;
+        store.restamp_local_project_created(&promoted.id)?;
         Ok(promoted)
     })();
     let mut promoted = match moved {
@@ -366,6 +352,132 @@ pub fn promote_scratch_project(
     let promoted = store.get_local_project(&project.id)?.unwrap_or(promoted);
     Ok(Promotion {
         project: promoted,
+        left_out,
+    })
+}
+
+/// The trimmed name and the folder for a project made from a chat, which must
+/// be new or empty and outside the data directory.
+pub fn new_project_place(name: &str, path: &str) -> Result<(String, PathBuf)> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(crate::error::anyhow!("Give the project a name."));
+    }
+    let target = expand_path(path)?;
+    if target.starts_with(crate::store::data_dir()) {
+        return Err(crate::error::anyhow!(
+            "{} is inside OpenResearch's data folder; choose a folder of your own.",
+            target.display()
+        ));
+    }
+    if target.exists() && (!target.is_dir() || std::fs::read_dir(&target)?.next().is_some()) {
+        return Err(crate::error::anyhow!(
+            "{} already exists; choose a new folder for the project.",
+            target.display()
+        ));
+    }
+    Ok((name.to_string(), target))
+}
+
+/// Move a chat out of `project` into a new project at `path`, seeded with the
+/// project's history up to the chat's work. `sessions` are the chat and the
+/// side chats sharing its worktree; the caller keeps them idle meanwhile.
+pub fn split_chat_project(
+    store: &Store,
+    project: &LocalProject,
+    owner: &str,
+    sessions: &[String],
+    name: &str,
+    path: &str,
+) -> Result<Promotion> {
+    let (name, target) = new_project_place(name, path)?;
+    let worktree = git::existing_session_worktree_path(project, owner);
+    let has_worktree = worktree.join(".git").exists();
+    let left_out = if has_worktree {
+        commit_chat_work(&worktree, &name)?
+    } else {
+        Vec::new()
+    };
+    let source = if has_worktree {
+        worktree.clone()
+    } else {
+        PathBuf::from(&project.repo_path)
+    };
+    let head = git::git(Some(&source), &["rev-parse", "HEAD"])?;
+
+    crate::paths::create_dir_all(&target)?;
+    let seeded = (|| -> Result<()> {
+        git::git(Some(&target), &["init", "--quiet", "-b", "main"])?;
+        // Lets the push below check out what it brings into the empty folder.
+        git::git(
+            Some(&target),
+            &["config", "receive.denyCurrentBranch", "updateInstead"],
+        )?;
+        let into = target.to_string_lossy();
+        git::git(
+            Some(&source),
+            &["push", "--quiet", &into, &format!("{head}:refs/heads/main")],
+        )?;
+        git::git(
+            Some(&target),
+            &["config", "--unset", "receive.denyCurrentBranch"],
+        )?;
+        Ok(())
+    })();
+    if let Err(error) = seeded {
+        let _ = std::fs::remove_dir_all(&target);
+        return Err(crate::error::anyhow!(
+            "Could not start the project at {}: {error}",
+            target.display()
+        ));
+    }
+
+    let now = now_ms();
+    let created = LocalProject {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: name.clone(),
+        slug: unique_project_slug(store, &slugify(&name))?,
+        github_owner: String::new(),
+        github_repo: String::new(),
+        github_sync_enabled: false,
+        baseline_branch: "main".into(),
+        repo_path: crate::paths::canonicalize(&target)?
+            .to_string_lossy()
+            .into_owned(),
+        run_command: project.run_command.clone(),
+        paper_id: project.paper_id.clone(),
+        created_at: now,
+        updated_at: now,
+    };
+    store.create_local_project(&created)?;
+
+    // The chat keeps the files Git doesn't track, such as data and environments.
+    let moved_worktree = git::session_worktree_path(&created.id, owner);
+    git::ensure_worktree_at(Path::new(&created.repo_path), &moved_worktree, "main")?;
+    if has_worktree {
+        let untracked = git::git(
+            Some(&worktree),
+            &[
+                "ls-files",
+                "--others",
+                "--directory",
+                "--no-empty-directory",
+                "-z",
+            ],
+        )?;
+        for file in untracked.split('\0').filter(|file| !file.is_empty()) {
+            let file = file.trim_end_matches('/');
+            let to = moved_worktree.join(file);
+            if let Some(parent) = to.parent() {
+                crate::paths::create_dir_all(parent)?;
+            }
+            std::fs::rename(worktree.join(file), &to)?;
+        }
+        git::remove_session_worktree(project, owner);
+    }
+    store.move_chat_sessions(sessions, &created.id)?;
+    Ok(Promotion {
+        project: created,
         left_out,
     })
 }
@@ -1465,7 +1577,11 @@ mod tests {
             .exists());
 
         let again = promote_scratch_project(&store, &project, None, "Other", "/nowhere");
-        assert!(again.err().unwrap().to_string().contains("already in"));
+        assert!(again
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("already a project"));
         let _ = std::fs::remove_dir_all(crate::local::files::files_dir(&project));
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1493,6 +1609,93 @@ mod tests {
             .unwrap()
             .is_scratch());
         let _ = std::fs::remove_dir_all(&scratch.repo_path);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn moving_a_chat_to_a_new_project_keeps_its_history_work_and_untracked_files() {
+        let root = root();
+        let store = Store::open_at(root.join("data")).unwrap();
+        let source = root.join("source");
+        initialized(&source);
+        std::fs::write(source.join(".gitignore"), "data/\n").unwrap();
+        run_git(&source, &["add", "-A"]);
+        run_git(
+            &source,
+            &[
+                "-c",
+                "user.name=T",
+                "-c",
+                "user.email=t@e",
+                "commit",
+                "-qm",
+                "ignore data",
+            ],
+        );
+        let project = create_project(
+            &store,
+            "Source",
+            source.to_str().unwrap(),
+            Default::default(),
+        )
+        .unwrap();
+        let session = format!("chat_{}", uuid::Uuid::new_v4());
+        let worktree = git::session_worktree_path(&project.id, &session);
+        std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+        run_git(
+            &source,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                worktree.to_str().unwrap(),
+                "main",
+            ],
+        );
+        std::fs::write(worktree.join("probe.py"), "print(2)\n").unwrap();
+        std::fs::create_dir_all(worktree.join("data")).unwrap();
+        std::fs::write(worktree.join("data").join("shard.bin"), "bytes").unwrap();
+
+        let target = root.join("split");
+        let promotion = split_chat_project(
+            &store,
+            &project,
+            &session,
+            std::slice::from_ref(&session),
+            "Probe",
+            target.to_str().unwrap(),
+        )
+        .unwrap();
+
+        let created = promotion.project;
+        assert_ne!(created.id, project.id);
+        assert!(!created.is_scratch());
+        assert_eq!(
+            std::fs::read_to_string(target.join("probe.py")).unwrap(),
+            "print(2)\n"
+        );
+        assert_eq!(
+            git_output(&target, &["log", "--format=%s"]),
+            "Start Probe\nignore data\ninitial"
+        );
+        // The chat works on in a worktree of the new project, untracked files included.
+        let moved = git::session_worktree_path(&created.id, &session);
+        assert_eq!(
+            std::fs::read_to_string(moved.join("data").join("shard.bin")).unwrap(),
+            "bytes"
+        );
+        assert_eq!(
+            git_output(&moved, &["rev-parse", "HEAD"]),
+            git_output(&target, &["rev-parse", "HEAD"])
+        );
+        assert!(!worktree.exists());
+        // The source project keeps its own history.
+        assert_eq!(
+            git_output(&source, &["log", "-1", "--format=%s"]),
+            "ignore data"
+        );
+        let _ = std::fs::remove_dir_all(git::worktrees_root(&created.id));
+        let _ = std::fs::remove_dir_all(git::worktrees_root(&project.id));
         let _ = std::fs::remove_dir_all(root);
     }
 }

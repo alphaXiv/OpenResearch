@@ -1754,6 +1754,8 @@ export interface ChatSession {
   awaitingInput?: boolean;
   id: string;
   projectId: string;
+  /** A project the user asked this chat to move into once its turn ends. */
+  pendingProject?: { name: string; path: string } | null;
   harness: HarnessId;
   /** The account the chat runs on, when it's one OpenResearch keeps. */
   profile?: string | null;
@@ -2289,9 +2291,14 @@ export function createApi(
   const createScratchProject = () =>
     post<{ project: Project }>("/api/projects/scratch", {}).then((r) => r.project);
 
-  /** Name a scratch project and move its code to `path`; `sessionId`'s work is committed first. */
-  const promoteProject = (projectId: string, body: { name: string; path: string; sessionId?: string }) =>
-    post<{ project: Project; leftOut: string[] }>(`/api/projects/${projectId}/promote`, body);
+  /** Make a chat a project of its own at `path`, now or, while it runs, once its turn ends. */
+  const moveChatToProject = (sessionId: string, body: { name: string; path: string }) =>
+    post<{ pending: true } | { pending: false; project: Project; leftOut: string[] }>(`/api/chat/sessions/${sessionId}/project`, body);
+
+  const cancelChatProjectMove = (sessionId: string) =>
+    writeResponse(`/api/chat/sessions/${sessionId}/project`, { method: "DELETE" }).then(async (r) => {
+      if (!r.ok) throw new Error((await r.json().catch(() => null))?.error ?? `cancel failed (${r.status})`);
+    });
 
   const updateProject = (projectId: string, body: { runCommand?: string; name?: string }) =>
     patch<{ project: Project }>(`/api/projects/${projectId}`, body).then((r) => r.project);
@@ -3297,7 +3304,8 @@ export function createApi(
     resolvePaper,
     updateProject,
     createScratchProject,
-    promoteProject,
+    moveChatToProject,
+    cancelChatProjectMove,
     prewarmStarterPrompts,
     getProjectStarterPrompts,
     deleteProject,

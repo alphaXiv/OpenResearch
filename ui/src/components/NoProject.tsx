@@ -1,13 +1,13 @@
 import { useContext, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { FolderPlus, MessageCircleDashed, Plus } from "lucide-react";
+import { FolderPlus, MessageCircleDashed, Plus, X } from "lucide-react";
 
 import type { ChatSession, Project } from "../api";
 import type { DialogContentProps } from "../dialog";
 import { autoDir, ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
 import { getLocale } from "../paraglide/runtime.js";
-import { mutPromoteProject } from "../queries/projects";
+import { mutMoveChatToProject } from "../queries/projects";
 import { useWorkspace } from "../workspace";
 import { WorkspaceDomContext } from "../WorkspaceDom";
 import { defaultProjectPath, useDebouncedValue } from "./NewProjectForm";
@@ -32,8 +32,10 @@ export function projectProposal(argv: readonly string[] | null): ProjectProposal
 }
 
 /** Name a chat without a project and choose the folder its code moves to. */
-function CreateProjectDialog({ confirm, cancel, cancelable, isDisabled, isPending, errorMessage, initial }: DialogContentProps<ProjectProposal> & {
+function CreateProjectDialog({ confirm, cancel, cancelable, isDisabled, isPending, errorMessage, initial, title, description }: DialogContentProps<ProjectProposal> & {
   initial?: Partial<ProjectProposal>;
+  title: string;
+  description: string;
 }) {
   const { id: elementId } = useContext(WorkspaceDomContext);
   const { getProjectPathStatusQuery } = useWorkspace().queries;
@@ -59,8 +61,8 @@ function CreateProjectDialog({ confirm, cancel, cancelable, isDisabled, isPendin
       }} />}
     >
       <DialogHeader>
-        <DialogTitle>{m.create_project_title()}</DialogTitle>
-        <DialogDescription>{m.create_project_description()}</DialogDescription>
+        <DialogTitle>{title}</DialogTitle>
+        <DialogDescription>{description}</DialogDescription>
       </DialogHeader>
       <div className="mt-4 flex flex-col gap-3">
         <label className="flex flex-col gap-1.5 text-sm font-medium">
@@ -89,17 +91,22 @@ function CreateProjectDialog({ confirm, cancel, cancelable, isDisabled, isPendin
   );
 }
 
-/** Opens the dialog that turns `project`, a chat without a project, into a project. */
+/** Opens the dialog that makes `session` a project of its own: a chat without a
+ * project becomes one, and a chat in `project` moves into a new one. */
 export function useCreateProject() {
   const workspace = useWorkspace();
-  return (project: Project, session: Pick<ChatSession, "id"> | null, initial?: Partial<ProjectProposal>) =>
+  return (project: Project, session: Pick<ChatSession, "id">, initial?: Partial<ProjectProposal>) =>
     workspace.dialogs.showCustomDialog({
       component: CreateProjectDialog,
-      props: { initial },
+      props: {
+        initial,
+        title: project.scratch ? m.create_project_title() : m.create_project_move_title(),
+        description: project.scratch ? m.create_project_description() : m.create_project_move_description({ project: autoDir(project.name) }),
+      },
       onConfirm: async ({ name, path }) => {
-        const { leftOut } = await mutPromoteProject.runAsHeadlessPromise(workspace, project.id, { name, path, sessionId: session?.id }, {});
-        if (leftOut.length) {
-          const files = new Intl.ListFormat(getLocale(), { type: "conjunction" }).format(leftOut.map((file) => ltr(file)));
+        const moved = await mutMoveChatToProject.runAsHeadlessPromise(workspace, session.id, { name, path }, {});
+        if (!moved.pending && moved.leftOut.length) {
+          const files = new Intl.ListFormat(getLocale(), { type: "conjunction" }).format(moved.leftOut.map((file) => ltr(file)));
           showAlert(m.create_project_left_out({ files }), "warning");
         }
       },
@@ -107,14 +114,33 @@ export function useCreateProject() {
     });
 }
 
+/** The move waiting for the chat's turn to end, with a way to call it off. */
+export function PendingProjectMove({ session }: { session: ChatSession }) {
+  const { cancelChatProjectMove } = useWorkspace().api;
+  if (!session.pendingProject) return null;
+  return (
+    <span className="flex min-w-0 items-center gap-1 rounded-md border border-border bg-surface ps-2.5 text-sm text-subtext">
+      <span className="min-w-0 truncate">{m.create_project_pending({ name: autoDir(session.pendingProject.name) })}</span>
+      <Tooltip interactive content={m.create_project_pending_cancel()} className="rounded-sm">
+        <IconButton size="small" aria-label={m.create_project_pending_cancel()}
+          onClick={() => void cancelChatProjectMove(session.id).catch((error: unknown) => showAlert(error instanceof Error ? error.message : String(error), "error"))}>
+          <X size={14} />
+        </IconButton>
+      </Tooltip>
+    </span>
+  );
+}
+
 /** An agent's `orx project create`: the project it proposes, until the user creates it. */
-export function ProjectProposalCard({ proposal, project, session }: {
+export function ProjectProposalCard({ proposal, proposedAt, project, session }: {
   proposal: ProjectProposal;
+  /** When the agent proposed it; a project made since then is this one. */
+  proposedAt: number;
   project: Project | undefined;
-  session: Pick<ChatSession, "id">;
+  session: ChatSession | undefined;
 }) {
   const createProject = useCreateProject();
-  const created = project && !project.scratch;
+  const created = project && !project.scratch && project.createdAt >= proposedAt;
   return (
     <div className="flex w-full items-start gap-3 rounded-lg border border-border bg-background px-3 py-2.5">
       <span className="flex h-6 shrink-0 items-center text-subtext"><FolderPlus size={16} aria-hidden="true" /></span>
@@ -123,7 +149,8 @@ export function ProjectProposalCard({ proposal, project, session }: {
         <span className="truncate text-sm text-subtext" dir="ltr">{ltr(created ? project.path : proposal.path)}</span>
       </span>
       {created ? <span className="flex h-6 shrink-0 items-center text-sm text-subtext">{m.create_project_created()}</span>
-        : project && <Button size="small" className="shrink-0" onClick={() => createProject(project, session, proposal)}>{m.create_project_review()}</Button>}
+        : session?.pendingProject ? <PendingProjectMove session={session} />
+          : project && session && <Button size="small" className="shrink-0" onClick={() => createProject(project, session, proposal)}>{m.create_project_review()}</Button>}
     </div>
   );
 }

@@ -2183,5 +2183,9 @@
   "create_project_created": "Создан",
   "create_project_review": "Проверить…",
   "activity_proposed_project": "Предложен проект {name}",
-  "chat_delete_scratch_session_confirm": "Удалить «{title}»?\n\nУ этого чата нет проекта, поэтому стенограмма, боковые чаты и файлы будут удалены безвозвратно."
+  "chat_delete_scratch_session_confirm": "Удалить «{title}»?\n\nУ этого чата нет проекта, поэтому стенограмма, боковые чаты и файлы будут удалены безвозвратно.",
+  "create_project_move_title": "Перенести в новый проект",
+  "create_project_move_description": "Этот чат переедет в новый проект в выбранной папке, начиная с истории {project} и работы чата. У {project} останется своя копия.",
+  "create_project_pending": "Переедет в {name}, когда закончится этот ход",
+  "create_project_pending_cancel": "Отменить перенос"
 }

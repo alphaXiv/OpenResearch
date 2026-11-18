@@ -2183,5 +2183,9 @@
   "create_project_created": "ساخته شد",
   "create_project_review": "بازبینی…",
   "activity_proposed_project": "پروژهٔ {name} را پیشنهاد داد",
-  "chat_delete_scratch_session_confirm": "«{title}» حذف شود؟\n\nاین گفتگو پروژه ندارد، پس متن گفتگو، گفتگوهای جانبی و فایل‌هایش برای همیشه حذف خواهند شد."
+  "chat_delete_scratch_session_confirm": "«{title}» حذف شود؟\n\nاین گفتگو پروژه ندارد، پس متن گفتگو، گفتگوهای جانبی و فایل‌هایش برای همیشه حذف خواهند شد.",
+  "create_project_move_title": "انتقال به پروژهٔ جدید",
+  "create_project_move_description": "این گفتگو به پروژهٔ جدیدی در پوشه‌ای که انتخاب می‌کنید منتقل می‌شود که از تاریخچهٔ {project} و کار گفتگو شروع می‌شود. {project} نسخهٔ خودش را نگه می‌دارد.",
+  "create_project_pending": "پس از پایان این نوبت به {name} منتقل می‌شود",
+  "create_project_pending_cancel": "لغو انتقال"
 }

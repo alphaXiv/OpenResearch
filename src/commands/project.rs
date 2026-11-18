@@ -165,22 +165,20 @@ fn propose(name: &str, path: Option<&str>) -> Result<()> {
         .ok()
         .filter(|id| !id.trim().is_empty())
         .ok_or_else(|| {
-            anyhow!("orx project create makes a chat without a project into one; run it from that chat.")
+            anyhow!("orx project create makes the chat it runs in a project of its own; run it from that chat.")
         })?;
     let store = crate::store::Store::open_for_reading()?;
     let session = store
         .get_chat_session(&session_id)?
         .ok_or_else(|| anyhow!("Chat {session_id} was not found."))?;
-    let project = store
+    let moves = if store
         .get_local_project(&session.project_id)?
-        .ok_or_else(|| anyhow!("Project {} was not found.", session.project_id))?;
-    if !project.is_scratch() {
-        return Err(anyhow!(
-            "This chat is already in the project {} at {}; orx project create only works in a chat without a project.",
-            project.name,
-            project.repo_path
-        ));
-    }
+        .is_some_and(|project| project.is_scratch())
+    {
+        "this chat's work is committed and moved there"
+    } else {
+        "this chat moves there, with its work committed on top of the project's history"
+    };
     let name = name.trim();
     if name.is_empty() {
         return Err(anyhow!("Give the project a name with --name."));
@@ -201,8 +199,9 @@ fn propose(name: &str, path: Option<&str>) -> Result<()> {
     };
     println!(
         "Proposed the project \"{name}\" {place}. The user reviews the name and folder in this chat and creates it; \
-         then this chat's work is committed and moved there, and the chat continues in that project. \
-         Until then the chat has no project, so tell the user it is ready for their review."
+         then {moves}, and the chat continues in that project. If you are mid-task when they do, \
+         the move waits for your turn to end and you are told where your files went. \
+         Tell the user the proposal is ready for their review."
     );
     Ok(())
 }

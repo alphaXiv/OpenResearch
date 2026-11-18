@@ -217,6 +217,8 @@ pub async fn run(args: UpArgs) -> Result<()> {
                 if let Err(err) = chat.reconcile_expired_turn_leases() {
                     eprintln!("orx up: could not reconcile expired chat turns: {err}");
                 }
+                // Also picks up moves waiting from before a restart.
+                chat.apply_project_moves().await;
             }
         });
     }
@@ -671,7 +673,6 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
         )
         .route("/api/projects/activity", get(list_project_activity))
         .route("/api/projects/scratch", post(create_scratch_project))
-        .route("/api/projects/{id}/promote", post(promote_project))
         .route(
             "/api/projects/{id}",
             get(get_project)
@@ -1050,6 +1051,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
         .route("/api/chat/sessions/{id}/worktree", get(session_worktree))
         .route("/api/chat/sessions/{id}/message", post(send_chat_message))
         .route("/api/chat/sessions/{id}/shell", post(run_shell_command))
+        .route(
+            "/api/chat/sessions/{id}/project",
+            post(move_chat_to_project).delete(cancel_chat_project_move),
+        )
         .route(
             "/api/chat/sessions/{id}/compact",
             post(compact_chat_session),
@@ -2050,67 +2055,47 @@ async fn create_scratch_project(State(state): State<AppState>) -> ApiResult {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PromoteProjectReq {
+struct ChatProjectReq {
     name: String,
     path: String,
-    /// The chat whose work the project's folder starts from.
-    session_id: Option<String>,
 }
 
-async fn promote_project(
+/// Makes a chat a project of its own, now or once its turn ends.
+async fn move_chat_to_project(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(req): Json<PromoteProjectReq>,
+    Json(req): Json<ChatProjectReq>,
 ) -> ApiResult {
     reject_if_moving(&state)?;
-    let _promoting = state
+    let project_id = Store::open()?
+        .get_chat_session(&id)?
+        .ok_or_else(|| not_found("chat session"))?
+        .project_id;
+    let _changing = state
         .project_lifecycle
-        .begin_delete(&id)
+        .begin_delete(&project_id)
         .ok_or_else(|| bad_request("The project is busy with another change; try again."))?;
-    let (project, sessions) = {
-        let store = Store::open()?;
-        let project = store
-            .get_local_project(&id)?
-            .ok_or_else(|| not_found("project"))?;
-        let sessions = store
-            .list_chat_sessions_by_project(&id)?
-            .into_iter()
-            .map(|session| session.id)
-            .collect::<Vec<_>>();
-        (project, sessions)
-    };
-    let worktree = match req.session_id.as_deref() {
-        Some(session_id) if sessions.iter().any(|id| id == session_id) => Some(
-            local::git::existing_session_worktree_path(&project, session_id),
-        ),
-        Some(_) => return Err(bad_request("That chat is not in this project.")),
-        None => None,
-    };
-    let promotion = state
+    let moved = state
         .chat
-        .while_idle(&sessions, || {
-            local::projects::promote_scratch_project(
-                &Store::open()?,
-                &project,
-                worktree.as_deref(),
-                &req.name,
-                &req.path,
-            )
-        })
+        .move_to_new_project(&id, &req.name, &req.path)
         .await
         .map_err(bad_request)?;
-    // Resident agents restart on their next turn with the new project's playbook.
-    for session_id in &sessions {
-        state.chat.opencode.kill_session(session_id).await;
-        state.chat.codex.kill_session(session_id).await;
-        state.chat.claude.kill_session(session_id).await;
-        state.chat.acp.stop(session_id).await;
-    }
-    Ok(Json(json!({
-        "project": project_json(&promotion.project),
-        "leftOut": promotion.left_out,
-    })))
+    Ok(Json(match moved {
+        Some(promotion) => json!({
+            "project": project_json(&promotion.project),
+            "leftOut": promotion.left_out,
+            "pending": false,
+        }),
+        None => json!({ "pending": true }),
+    }))
+}
+
+async fn cancel_chat_project_move(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult {
+    state.chat.cancel_project_move(&id).await?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 fn project_git_json(

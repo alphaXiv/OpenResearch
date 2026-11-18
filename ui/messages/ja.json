@@ -2183,5 +2183,9 @@
   "create_project_created": "作成済み",
   "create_project_review": "確認…",
   "activity_proposed_project": "プロジェクト {name} を提案しました",
-  "chat_delete_scratch_session_confirm": "「{title}」を削除しますか？\n\nこのチャットにはプロジェクトがないため、会話履歴、サイドチャット、ファイルが完全に削除されます。"
+  "chat_delete_scratch_session_confirm": "「{title}」を削除しますか？\n\nこのチャットにはプロジェクトがないため、会話履歴、サイドチャット、ファイルが完全に削除されます。",
+  "create_project_move_title": "新しいプロジェクトに移動",
+  "create_project_move_description": "このチャットは選んだフォルダーの新しいプロジェクトに移動し、{project} の履歴とチャットの作業から始まります。{project} には元のコピーが残ります。",
+  "create_project_pending": "このターンが終わると {name} に移動します",
+  "create_project_pending_cancel": "移動を取り消す"
 }
