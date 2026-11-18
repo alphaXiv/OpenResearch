@@ -23,7 +23,7 @@ export async function send(page: Page, text: string) {
 const size = (file: string) => statSync(file, { throwIfNoEntry: false })?.size ?? 0
 const since = (file: string, offset: number) => (size(file) ? readFileSync(file).subarray(offset).toString() : '')
 
-export const test = base.extend<{ launchOrx: (options?: { ownBuild?: boolean }) => Promise<Orx>; project: Project }, { agent: Agent; outside: Outside; orx: Orx }>({
+export const test = base.extend<{ launchOrx: (options?: { ownBuild?: boolean; appWindow?: boolean }) => Promise<Orx>; project: Project }, { agent: Agent; outside: Outside; orx: Orx }>({
   agent: [
     async ({}, use) => {
       const agent = await startAgentScripts()

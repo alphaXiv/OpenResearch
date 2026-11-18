@@ -1,4 +1,5 @@
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
+import path from 'node:path'
 import { openTerminal } from '../src/terminal.ts'
 import { expect, send, test } from '../src/test.ts'
 
@@ -64,4 +65,36 @@ test('an approval and a terminal in flight carry over to another executable with
   expect(asked, 'the agent asked once').toHaveLength(1)
   const answered = log.filter(({ arrow, message }) => arrow === '←' && message.method === undefined && message.id === asked[0]!.message.id)
   expect(answered, 'and was answered once, by the process that asked').toMatchObject([{ pid: asked[0]!.pid }])
+})
+
+test('a page restarting into an update keeps its overlay through the reload', async ({ page, launchOrx }) => {
+  const orx = await launchOrx({ appWindow: true })
+  await orx.onboard()
+  const project = await orx.createProject('overlay')
+  // An update on disk, as the updater records one; this build stands in for it, so the restart comes back
+  // unchanged. Written before the page loads, since the server samples it only every ten seconds after.
+  writeFileSync(path.join(orx.config, 'update-check-unknown.json'), JSON.stringify({ checked_at: 0, latest: '999.0.0', installed_version: '999.0.0', installed_tag: 'v999.0.0' }))
+  await project.open(page)
+  const restart = page.getByRole('button', { name: 'Restart now' })
+  await expect(restart).toBeVisible()
+  const server = orx.pid()
+
+  // The next page's app never loads, so what shows after the reload is index.html's alone.
+  await page.route('**/assets/*.js', (route) => route.abort())
+  const reloaded = page.waitForEvent('framenavigated', (frame) => frame === page.mainFrame())
+  await restart.click()
+  const updating = page.getByRole('alertdialog', { name: 'Updating OpenResearch' })
+  await expect(updating).toBeVisible()
+  await reloaded
+  await expect(updating).toBeVisible()
+  await expect(updating).toContainText(/Restarting into \W*v999\.0\.0/)
+  expect(orx.pid(), 'the window keeps the same server process, restarted in place').toBe(server)
+
+  await page.unroute('**/assets/*.js')
+  await page.reload()
+  const unchanged = page.getByRole('alertdialog', { name: 'Update not installed' })
+  await expect(unchanged).toContainText(/OpenResearch is still on \W*v/)
+  await page.getByRole('button', { name: 'Close' }).click()
+  await expect(unchanged).toBeHidden()
+  await expect(restart).toBeVisible()
 })
