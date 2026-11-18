@@ -81,9 +81,9 @@ with tempfile.TemporaryDirectory() as d:
                         if e.get('name')=='cli_harness_setup' and props.get('attemptId')==aid and props not in rows:rows.append(props)
             return rows
         if mode=='after':
-            await_until(lambda:any(terminal(e) for e in traces()),'observed interruption')
+            await_until(lambda:any(e['attemptId']==aid and terminal(e) for e in events),'interruption acknowledged by loopback HTTP receiver')
         rows=traces(); ends=[e for e in rows if terminal(e)]
-        show(scenario='SIGTERM while PTY login still in flight; app restarted',last_stage='command',terminal_events=[(e['outcome'],e['errorExcerpt']) for e in ends])
+        show(scenario='SIGTERM while PTY login still in flight; app restarted',last_stage='command',receiver='loopback HTTP (202)',terminal_events=[(e['outcome'],e['errorExcerpt']) for e in ends])
         if mode=='after':assert [(e['outcome'],e['errorExcerpt']) for e in ends]==[('interrupted','setup command task ended before a result')],ends
         else: assert not ends,ends
         show(result='PASS',production_traffic=False)

@@ -41,12 +41,10 @@ jobs:
           ORX_OFFICIAL_RELEASE_BUILD: '1'
           ORX_EMBED_HOST_DIR: ${{ runner.temp }}/hosts
         run: cargo build --locked --bin orx
-      - name: Install terminal recording tools
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq xterm ffmpeg xvfb
-      - name: Record both real application runs
+      - name: Record before and after under a real PTY
         run: |
           mkdir -p "$RUNNER_TEMP/evidence"
-          xvfb-run -a -s '-screen 0 1280x720x24' bash qa-1076/record.sh
+          python3 qa-1076/capture.py "$RUNNER_TEMP/evidence/setup-linux.cast" /bin/bash qa-1076/terminal-proof.sh
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
