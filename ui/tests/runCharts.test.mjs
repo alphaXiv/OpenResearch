@@ -5,7 +5,7 @@ import { act, createElement } from "react";
 import { Block } from "../src/components/run/blocks/Block.tsx";
 import { m } from "../src/paraglide/messages.js";
 import { runModel } from "../src/runMonitor/model.ts";
-import { render, serveApp, settle } from "./render.mjs";
+import { press, render, serveApp, settle } from "./render.mjs";
 
 const read = (url) => JSON.parse(readFileSync(new URL(url, import.meta.url), "utf8"));
 /** The view the server parses the codec benchmark's markup to: its candidate over the parent's, the reference measured in the run drawn once. */
@@ -81,28 +81,30 @@ test("the readout under the pointer gives each series its value, and its own x w
   assert.match(said, /Reference build[\d.]+( KB)? at [\d.]+/, said);
 });
 
-test("a strip's chart reads out under the pointer, and steps through its points by arrow key", async () => {
+test("a strip's chart names its axes in one line, reads out under the pointer, and steps through its points by arrow key", async () => {
   const monitor = fixture("sweep");
   const block = monitor.view.blocks[0];
   const strip = await draw(monitor, block, "strip");
   const box = chartOf(strip).parentElement;
+  assert.match(text(box.querySelector("div[aria-hidden]")), /Learning rate \S+ → \S+ log.*Val loss [\d.]+ → [\d.]+/, "what x and y are, and how far each reaches");
 
   await act(async () => box.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX: 400 })));
   const said = text(box.querySelector("[popover]"));
   assert.match(said, /^Learning rate [\d.]+/, said);
   assert.match(said, /Batch \d+.*[\d.]+/, "a value for each line beside the pointer");
-  await act(async () => box.dispatchEvent(new MouseEvent("mouseout", { bubbles: true })));
-  assert.ok(!box.querySelector("[popover]"), "it goes with the pointer");
+  await act(async () => box.dispatchEvent(new MouseEvent("mouseout", { bubbles: true, relatedTarget: document.body })));
+  assert.ok(!box.querySelector("[popover]"), "the readout closes when the pointer leaves");
 
-  const key = (name) => act(async () => box.dispatchEvent(new KeyboardEvent("keydown", { key: name, bubbles: true, cancelable: true })));
-  await key("ArrowLeft");
+  await press("ArrowLeft", box);
   const first = text(box.querySelector("[popover]"));
-  assert.match(text(box.querySelector('[role="status"]')), /^Learning rate [\d.]+: Batch 32 Val loss [\d.]+, Batch 64 Val loss [\d.]+/, "a keyboard reader hears what it shows");
-  await key("Home");
+  const status = box.querySelector('[role="status"]');
+  const announced = text(status).replace(/: |, /g, "").replace(/\s/g, "");
+  assert.equal(announced, first.replace(/\s/g, ""), "a keyboard reader hears what it shows");
+  await press("Home", box);
   assert.notEqual(text(box.querySelector("[popover]")), first, "Home reads the first point, not the last");
-  await key("Escape");
-  assert.ok(!box.querySelector("[popover]"));
-  assert.equal(text(box.querySelector('[role="status"]')), "");
+  await press("Escape", box);
+  assert.ok(!box.querySelector("[popover]"), "Escape closes the readout");
+  assert.equal(text(status), "");
 });
 
 test("a readout stays under the pointer while the run adds points", async () => {
@@ -209,7 +211,7 @@ test("a column the table lacks, or one that holds no numbers, is named, and the 
   const words = { ...monitor, parent: null, rows: { levels: monitor.rows.levels.map((row) => ({ ...row, cand_ms: "fast", ref_ms: "slow" })) } };
   const nothing = await draw(words, block);
   assert.equal(name(nothing), "The ref_ms column of levels holds no numbers. The cand_ms column of levels holds no numbers.");
-  assert.equal(nothing.querySelector("p"), null, "with nothing drawn, the reason is the chart's own words");
+  assert.ok(!nothing.querySelector("p"), "with nothing drawn, the reason is the chart's own words");
   const strip = await draw(words, block, "strip");
   assert.match(text(strip), /The ref_ms column of levels holds no numbers\./);
 });

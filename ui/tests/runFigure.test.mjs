@@ -3,8 +3,9 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { act, createElement } from "react";
 import { ChatImageScope, Md } from "../src/components/Md.tsx";
+import { m } from "../src/paraglide/messages.js";
 import { createWorkspace } from "../src/workspace.tsx";
-import { render, serveApp, settle } from "./render.mjs";
+import { find, render, serveApp, settle } from "./render.mjs";
 
 const fixture = JSON.parse(readFileSync(new URL("./fixtures/runMonitor/running.json", import.meta.url), "utf8"));
 
@@ -34,14 +35,14 @@ test("a figure citation draws the page chart and keeps the chip's open gesture",
   assert.equal(chip.textContent, "Training result");
   await act(() => chip.click());
   assert.equal(opened[0][0], "r1");
-  assert.equal(container.querySelector("p div"), null, "block content does not nest in a paragraph");
+  assert.ok(!container.querySelector("p div"), "block content does not nest in a paragraph");
 });
 
 test("stats are the first block and update with the shared live query", async () => {
   const monitor = { ...fixture, view: { ...fixture.view, blocks: [{ stats: ["loss"] }, ...fixture.view.blocks] } };
   const { container, workspace } = await message({ monitor });
   assert.ok(container.querySelector("dl"));
-  assert.equal(container.querySelector('svg[role="img"]'), null, "only the first block is cited");
+  assert.ok(!container.querySelector('svg[role="img"]'), "only the first block is cited");
   const next = { ...monitor, rev: monitor.rev + 1, latest: { loss: 1.11 } };
   await act(async () => workspace.queryClient.setQueryData(workspace.queries.getRunMonitorQuery("r1").queryKey, next));
   await settle();
@@ -56,7 +57,7 @@ for (const [name, options] of [
 ]) test(`${name} leaves only the chip`, async () => {
   const { container, calls } = await message(options);
   assert.ok(container.querySelector("button.run-chip"));
-  assert.equal(container.querySelector('svg[role="img"], dl'), null);
+  assert.ok(!container.querySelector('svg[role="img"], dl'), "no figure is drawn");
   if (options.visible === false || options.figure === "") assert.deepEqual(calls, []);
 });
 
@@ -67,13 +68,14 @@ test("quoted figure attributes use the message project", async () => {
 
 for (const failure of ["runs", "monitor"]) test(`${failure} failure stays visible and can be retried`, async () => {
   const { container, recover } = await message({ failure });
-  assert.ok(container.querySelector('[role="status"]'));
-  assert.equal(container.querySelector('svg[role="img"]'), null);
+  const failureNotice = () => find('[role="status"]', m.run_monitor_load_failed());
+  assert.ok(failureNotice(), "the failure is announced");
+  assert.ok(!container.querySelector('svg[role="img"]'), "the chart waits for its data");
   recover();
   const retry = [...container.querySelectorAll("button")].find((button) => !button.classList.contains("run-chip"));
   await act(() => retry.click());
   await settle();
-  assert.equal(container.querySelector('[role="status"]'), null);
+  assert.ok(!failureNotice(), "the failure notice clears after retry");
   assert.ok(container.querySelector('svg[role="img"]'));
 });
 

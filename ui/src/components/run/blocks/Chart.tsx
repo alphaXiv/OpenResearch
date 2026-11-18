@@ -130,6 +130,14 @@ function nearest(points: Point[], x: number): Point | undefined {
   return before && after && Math.abs(before[0] - x) <= Math.abs(after[0] - x) ? before : after;
 }
 
+const extent = (values: number[]): [number, number] => [Math.min(...values), Math.max(...values)];
+
+/** An axis in a line: its name, the span it covers and whether it is log. */
+function rangeLine(name: string | null | undefined, lo: number, hi: number, label: (value: number) => string, log: boolean): string {
+  const span = lo === hi ? label(lo) : `${label(lo)} → ${label(hi)}`;
+  return [name && autoDir(name), span, log ? m.run_chart_log() : null].filter(Boolean).join(" ");
+}
+
 /** Wide enough apart to mark each point, as a run that reports once a round or an eval is. */
 const DOT_SPACING = 14;
 
@@ -167,8 +175,9 @@ function Readout({ at, width, above, onDismiss, children }: { at: number; width:
 }
 
 /**
- * A chart block. In a strip it is the marks alone, no axes, filling its box; on a page it has axes and a dot per point
- * when they are far enough apart. Both give a readout under the pointer, or at the point an arrow key has reached. Over steps, each line ends in its latest value; from a table's rows, the axes name
+ * A chart block. In a strip it is the marks and one line under them naming each axis and the range it spans; on a page
+ * it has axes and a dot per point when they are far enough apart. Both give a readout under the pointer, or at the
+ * point an arrow key has reached. Over steps, each line ends in its latest value; from a table's rows, the axes name
  * their measures and anything left out of the picture is said under it.
  */
 export function Chart({ monitor, block, size, live, height = 160 }: { monitor: RunMonitor; block: ChartBlock; size: "strip" | "page"; live: boolean; height?: number }) {
@@ -234,7 +243,12 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
   /** The one measure a table's chart plots, which a readout names beside a value when its line is labelled by something else. */
   const yName = table && yNames.size === 1 ? [...yNames][0] : null;
   const ys = drawn.map((point) => point[1]);
-  const margin = page ? { start: 38, end: 48, top: yCaption ? 22 : 8, bottom: 22 } : { start: 1, end: 5, top: 5, bottom: 3 };
+  const [xLo, xHi] = table && drawn.length > 0 ? extent(drawn.map((point) => point[0])) : [x0, x1];
+  const xRange = !page && !categories && drawn.length > 0 ? rangeLine(table ? lead && xName(lead) : monitor.x.name, xLo, xHi, xLabel, xLog) : "";
+  const yRange = !page && drawn.length > 0 ? rangeLine(yName, Math.min(...ys), Math.max(...ys), yLabel, yLog) : "";
+  /** A strip with room for its axes in a line under the plot, the two ranges at full length. */
+  const ranged = !page && boxHeight >= 44 && !blank && (xRange.length + yRange.length) * CHAR_WIDTH + 12 <= width;
+  const margin = page ? { start: 38, end: 48, top: yCaption ? 22 : 8, bottom: 22 } : { start: 1, end: 5, top: 5, bottom: ranged ? 17 : 3 };
   const innerWidth = Math.max(1, width - margin.start - margin.end);
   const innerHeight = Math.max(1, boxHeight - margin.top - margin.bottom);
   let y0 = Math.min(...ys);
@@ -382,6 +396,7 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
       <div ref={ref} dir="ltr" className={cn("relative h-full min-h-6 w-full", focusRing)} {...interact}>
         {drawn.length > 0 && (
           <svg width={width} height={boxHeight} role="img" aria-label={label} className="absolute inset-0 overflow-visible">
+            {width > 0 && ranged && <line x1={margin.start} x2={margin.start + innerWidth} y1={margin.top + innerHeight} y2={margin.top + innerHeight} stroke="var(--border-variant)" />}
             {width > 0 && mark === "bars" && bars(true)}
             {width > 0 && mark === "points" && series.map((line) => <g key={line.name}>{points(line, 2.5)}</g>)}
             {width > 0 && mark === "line" && series.map((line) => line.points.length > 0 && (
@@ -400,6 +415,12 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
             {width > 0 && !table && mark === "line" && lead && last && last[1] !== null && <circle cx={x(last[0])} cy={y(last[1])} r="3" fill={lead.color} stroke="var(--base)" strokeWidth="1.5" />}
             {width > 0 && cursor}
           </svg>
+        )}
+        {width > 0 && ranged && (
+          <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 bottom-0 flex justify-between gap-3 text-xs leading-3 text-ink-subtext">
+            <span className="truncate">{xRange}</span>
+            <span className="truncate">{yRange}</span>
+          </div>
         )}
         {width > 0 && blank && <span className="text-xs text-ink-subtext">{empty}</span>}
         {readoutView}
