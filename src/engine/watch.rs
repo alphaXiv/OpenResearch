@@ -1612,7 +1612,7 @@ fn due(store: &Store, state: &State, owned: &Owned, now: i64) -> Result<Vec<Plan
         .min()
         .unwrap_or(now);
     let looks = store.chat_watch_looks(&owned.chat.id, earliest)?;
-    let last_at = looks.iter().map(|look| look.created_at).max();
+    let last_at = store.last_chat_watch_at(&owned.chat.id)?;
     let live: Vec<&(Now, Vec<String>)> = owned.runs.iter().filter(|(run, _)| run.live()).collect();
     let keyed = |runs: Vec<(String, &'static str)>| -> Vec<(String, String, &'static str)> {
         runs.into_iter()
@@ -1680,10 +1680,12 @@ fn due(store: &Store, state: &State, owned: &Owned, now: i64) -> Result<Vec<Plan
         return Ok(Vec::new());
     }
 
-    let (min_gap, max_gap) = live
+    let min_gap = chat_min_gap(store, live.iter().map(|(run, _)| &run.run))?;
+    let max_gap = live
         .iter()
-        .map(|(run, _)| gaps(&run.settings))
-        .fold((0, i64::MAX), |(min, max), (a, b)| (min.max(a), max.min(b)));
+        .map(|(run, _)| gaps(&run.settings).1)
+        .min()
+        .expect("there are live runs");
     let floor = last_at.is_none_or(|at| now - at >= min_gap);
     // Looks a change asks for never outnumber the ceilings the oldest run's time has passed.
     let oldest = live
@@ -1786,6 +1788,29 @@ fn material(seen: Option<&Seen>, run: &Now) -> bool {
     printed || run.points() as u64 > last.basis["points"].as_u64().unwrap_or(0)
 }
 
+fn active_owned(store: &Store, chat: &str) -> Result<Vec<StoredRun>> {
+    let mut runs = Vec::new();
+    for run in store.list_active_runs()? {
+        if matches!(owner(store, &run)?, Ok((owner, Watching::Selected { .. })) if owner.id == chat)
+        {
+            runs.push(run);
+        }
+    }
+    Ok(runs)
+}
+
+fn chat_min_gap<'a>(store: &Store, runs: impl IntoIterator<Item = &'a StoredRun>) -> Result<i64> {
+    let mut gap = 0;
+    for run in runs {
+        let settings = store
+            .run_monitor_json(&run.experiment_id)?
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or(Value::Null);
+        gap = gap.max(gaps(&settings).0);
+    }
+    Ok(gap)
+}
+
 /// Asks for a look at the run's chat now. It waits for no schedule, wakes nobody, and still keeps
 /// the chat's least gap between looks.
 pub(crate) fn look_now(store: &Store, run: &StoredRun) -> std::result::Result<Value, LookNow> {
@@ -1796,32 +1821,25 @@ pub(crate) fn look_now(store: &Store, run: &StoredRun) -> std::result::Result<Va
     let Watching::Selected { .. } = &watching else {
         return Err(LookNow::NotWatched(not_watched(&watching)));
     };
-    let mut runs = vec![run.clone()];
-    for other in store.list_active_runs().map_err(LookNow::Failed)? {
-        if other.id != run.id && runs.len() < RUNS_PER_LOOK {
-            if let Ok(Ok((owner, _))) = owner(store, &other) {
-                if owner.id == chat.id {
-                    runs.push(other);
-                }
-            }
-        }
+    let tx = store.begin_immediate().map_err(LookNow::Failed)?;
+    let siblings = active_owned(store, &chat.id).map_err(LookNow::Failed)?;
+    let min_gap = if siblings.is_empty() {
+        chat_min_gap(store, [run])
+    } else {
+        chat_min_gap(store, &siblings)
     }
-    let rows: Vec<(String, String)> = runs
-        .iter()
+    .map_err(LookNow::Failed)?;
+    let runs = std::iter::once(run)
+        .chain(siblings.iter().filter(|other| other.id != run.id))
+        .take(RUNS_PER_LOOK);
+    let rows: Vec<(&str, String)> = runs
         .enumerate()
-        .map(|(index, run)| (run.id.clone(), format!("r{}", index + 1)))
+        .map(|(index, run)| (run.id.as_str(), format!("r{}", index + 1)))
         .collect();
     let rows: Vec<(&str, &str, &str)> = rows
         .iter()
-        .map(|(id, key)| (id.as_str(), key.as_str(), "subject"))
+        .map(|(id, key)| (*id, key.as_str(), "subject"))
         .collect();
-    let tx = store.begin_immediate().map_err(LookNow::Failed)?;
-    let settings = store
-        .run_monitor_json(&run.experiment_id)
-        .map_err(LookNow::Failed)?
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or(Value::Null);
-    let (min_gap, _) = gaps(&settings);
     let now = crate::store::now_ms();
     let looks = store
         .chat_watch_looks(&chat.id, now - min_gap)
@@ -1837,8 +1855,13 @@ pub(crate) fn look_now(store: &Store, run: &StoredRun) -> std::result::Result<Va
             return Ok(json!({"lookId": look.id, "state": look.state}));
         }
     }
-    if let Some(last) = looks.last() {
-        return Err(LookNow::TooSoon(last.created_at + min_gap));
+    if let Some(floor) = looks
+        .iter()
+        .map(|look| look.created_at + min_gap)
+        .max()
+        .filter(|floor| *floor > now)
+    {
+        return Err(LookNow::TooSoon(floor));
     }
     let id = Store::prepare_watch_look(&tx, &chat.id, "manual", "You asked for a look", &rows, now)
         .map_err(LookNow::Failed)?;
@@ -2760,9 +2783,21 @@ async fn log_since(run: &str, cursor: &Value) -> Result<digest::LogRead> {
 /// What a run's watch says on the page and in `orx exp status`: whether and by what it is
 /// watched, its looks, their cost, when the next one is due at the latest, and its sentence.
 pub(crate) fn run_facts(store: &Store, run: &StoredRun) -> Result<Value> {
-    // Every projection reads this, many a second for a run that prints fast: what was said is
-    // read again only when a look or a count moved, and who watches once every few seconds.
-    let key = store.run_watch_version(&run.id)?;
+    // Cache the journal, but use the chat's latest admission even when it covered only a sibling.
+    let (chat, watching) = match owner(store, run)? {
+        Ok((chat, watching)) => (Some(chat), watching),
+        Err(watching) => (None, watching),
+    };
+    let last = match &chat {
+        Some(chat) if matches!(watching, Watching::Selected { .. }) => {
+            store.last_chat_watch_at(&chat.id)?
+        }
+        _ => None,
+    };
+    let key = format!(
+        "{}:{last:?}:{watching:?}",
+        store.run_watch_version(&run.id)?
+    );
     // A run's id is unique only within its data directory.
     let held = format!("{}\n{}", store.data_dir().display(), run.id);
     let fresh =
@@ -2776,7 +2811,19 @@ pub(crate) fn run_facts(store: &Store, run: &StoredRun) -> Result<Value> {
     let facts = match cached {
         Some(facts) => facts,
         None => {
-            let read = read_facts(store, run)?;
+            let floor = match (chat, last) {
+                (Some(chat), Some(last)) => {
+                    let siblings = active_owned(store, &chat.id)?;
+                    let gap = if siblings.is_empty() {
+                        chat_min_gap(store, [run])?
+                    } else {
+                        chat_min_gap(store, &siblings)?
+                    };
+                    Some(last + gap)
+                }
+                _ => None,
+            };
+            let read = read_facts(store, run, &watching, floor)?;
             facts()
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -2795,11 +2842,13 @@ fn facts() -> &'static Mutex<HashMap<String, (String, std::time::Instant, Value)
     FACTS.get_or_init(Default::default)
 }
 
-fn read_facts(store: &Store, run: &StoredRun) -> Result<Value> {
+fn read_facts(
+    store: &Store,
+    run: &StoredRun,
+    watching: &Watching,
+    floor_until: Option<i64>,
+) -> Result<Value> {
     let looks = store.run_watch_looks(&run.id, JOURNAL)?;
-    let watching = match owner(store, run)? {
-        Ok((_, watching)) | Err(watching) => watching,
-    };
     let mut entries = Vec::new();
     let mut spent: Option<f64> = None;
     let mut tokens = 0u64;
@@ -2871,15 +2920,7 @@ fn read_facts(store: &Store, run: &StoredRun) -> Result<Value> {
             "notedUnder": noted_under(look.id),
         }));
     }
-    let floor_until = {
-        let settings = store
-            .run_monitor_json(&run.experiment_id)?
-            .and_then(|raw| serde_json::from_str(&raw).ok())
-            .unwrap_or(Value::Null);
-        let (min_gap, _) = gaps(&settings);
-        looks.last().map(|(look, _)| look.created_at + min_gap)
-    };
-    let (model, state, why) = match &watching {
+    let (model, state, why) = match watching {
         Watching::Selected { label, .. } => (Some(label.clone()), "on", None),
         Watching::Unfollowed => (None, "none", None),
         Watching::Unavailable(why) => (None, watching.state(), Some(why.clone())),

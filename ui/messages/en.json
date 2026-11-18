@@ -2145,7 +2145,7 @@
   "run_watch_cost_unknown": "cost not reported",
   "run_watch_look_now": "Look now",
   "run_watch_looking": "Looking…",
-  "run_watch_look_too_soon": "A look ran moments ago. The next can start at {clock}.",
+  "run_watch_look_too_soon": "The next look can start at {clock}.",
   "run_watch_off": "Not watched: run watching is off in Settings.",
   "run_watch_needs_pick": "Not watched. This chat's agent has no watching model, so the sentence shows the stage and progress.",
   "run_watch_no_model": "Not watched: {why}.",

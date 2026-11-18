@@ -2423,3 +2423,50 @@ async fn the_model_is_asked_to_write_counts_without_a_plural_noun() {
     let args = std::fs::read_to_string(dir.join("args-1")).unwrap();
     assert!(args.contains(r#"HTTP 429 count: **{count:"HTTP 429"}**"#));
 }
+
+#[test]
+fn look_now_shares_the_chats_longest_gap_and_siblings_last_look() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let store = Store::open().unwrap();
+    chat(&store, "sweep", "claude-code");
+    let row = run(&store, "a", "A", "sweep", LOG);
+    let sibling = run(&store, "b", "B", "sweep", LOG);
+    let config = json!({"watch":{"minGapS":600}});
+    super::super::view::set(
+        &store,
+        &sibling.experiment_id,
+        &super::super::view::etag(None),
+        None,
+        None,
+        Some(&config),
+        &super::super::view::Source {
+            file: None,
+            patterns: None,
+            config: None,
+        },
+    )
+    .unwrap();
+    assert!(run_facts(&store, &row).unwrap()["floorUntil"].is_null());
+    let tx = store.begin_immediate().unwrap();
+    let last = crate::store::now_ms() - paced_ms(240);
+    let id = Store::prepare_watch_look(
+        &tx,
+        "sweep",
+        "change",
+        "a sibling changed",
+        &[("b", "r1", "subject")],
+        last,
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    let results = unanswered(&store.watch_look_runs(id).unwrap(), "line");
+    store
+        .finish_watch_look(id, "done", last, None, None, None, &results, &[])
+        .unwrap();
+
+    let floor = last + paced_ms(600);
+    assert_eq!(run_facts(&store, &row).unwrap()["floorUntil"], floor);
+    assert!(matches!(look_now(&store, &row), Err(LookNow::TooSoon(at)) if at == floor));
+}

@@ -150,6 +150,12 @@ export interface Run {
 
 export class RejectedResponseError extends Error {}
 
+export class LookTooSoonError extends RejectedResponseError {
+  constructor(message: string, readonly notBefore: number) {
+    super(message);
+  }
+}
+
 /** Why a model server listed no models: nothing answered, it wants an API key, or it has no models. */
 export class UnlistedError extends RejectedResponseError {
   constructor(message: string, readonly code: "unreachable" | "needsKey" | "noModels") {
@@ -2152,6 +2158,8 @@ export function createApi(
                 : null;
             throw new FileChangedError(message, currentVersion, parsed.exists);
           }
+          if (res.status === 409 && "notBefore" in parsed && typeof parsed.notBefore === "number")
+            throw new LookTooSoonError(message, parsed.notBefore);
           if (res.status === 400 && "code" in parsed && (parsed.code === "unreachable" || parsed.code === "needsKey" || parsed.code === "noModels"))
             throw new UnlistedError(message, parsed.code);
           if (res.status === 400 && "fields" in parsed && typeof parsed.fields === "object" && parsed.fields !== null)

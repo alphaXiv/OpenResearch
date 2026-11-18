@@ -330,6 +330,14 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    pub(crate) fn last_chat_watch_at(&self, chat: &str) -> Result<Option<i64>> {
+        Ok(self.conn.query_row(
+            "SELECT MAX(created_at) FROM watch_looks WHERE chat_session_id = ?1",
+            [chat],
+            |row| row.get(0),
+        )?)
+    }
+
     /// The chat that last looked at the run, which keeps watching it.
     pub(crate) fn run_watch_owner(&self, run_id: &str) -> Result<Option<String>> {
         Ok(self

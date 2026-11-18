@@ -2145,7 +2145,7 @@
   "run_watch_cost_unknown": "費用は不明",
   "run_watch_look_now": "今すぐ確認",
   "run_watch_looking": "確認中…",
-  "run_watch_look_too_soon": "少し前に確認しました。次は {clock} から始められます。",
+  "run_watch_look_too_soon": "次は {clock} から確認できます。",
   "run_watch_off": "見守っていません: 設定で実行の見守りがオフになっています。",
   "run_watch_needs_pick": "見守っていません。このチャットのエージェントには見守り用のモデルがないため、文は段階と進み具合を示します。",
   "run_watch_no_model": "見守っていません: {why}。",

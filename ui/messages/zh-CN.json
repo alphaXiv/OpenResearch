@@ -2145,7 +2145,7 @@
   "run_watch_cost_unknown": "未报告费用",
   "run_watch_look_now": "立即查看",
   "run_watch_looking": "正在查看…",
-  "run_watch_look_too_soon": "刚刚查看过。下一次可以在 {clock} 开始。",
+  "run_watch_look_too_soon": "下一次可在 {clock} 开始查看。",
   "run_watch_off": "未看护：设置中已关闭运行看护。",
   "run_watch_needs_pick": "未看护。此对话的智能体没有看护模型，因此这句话显示阶段和进度。",
   "run_watch_no_model": "未看护：{why}。",

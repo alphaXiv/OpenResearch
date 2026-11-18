@@ -2145,7 +2145,7 @@
   "run_watch_cost_unknown": "هزینه گزارش نشد",
   "run_watch_look_now": "اکنون نگاه کن",
   "run_watch_looking": "در حال نگاه…",
-  "run_watch_look_too_soon": "لحظاتی پیش نگاهی انجام شد. نگاه بعدی از {clock} می‌تواند آغاز شود.",
+  "run_watch_look_too_soon": "نگاه بعدی از {clock} می‌تواند آغاز شود.",
   "run_watch_off": "پایش نمی‌شود: پایش اجراها در تنظیمات خاموش است.",
   "run_watch_needs_pick": "پایش نمی‌شود. عامل این گفتگو مدل پایشگری ندارد، پس جمله مرحله و پیشرفت را نشان می‌دهد.",
   "run_watch_no_model": "پایش نمی‌شود: {why}.",

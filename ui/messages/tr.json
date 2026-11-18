@@ -2145,7 +2145,7 @@
   "run_watch_cost_unknown": "maliyet bildirilmedi",
   "run_watch_look_now": "Şimdi bak",
   "run_watch_looking": "Bakılıyor…",
-  "run_watch_look_too_soon": "Az önce bir bakış yapıldı. Sonraki {clock} itibarıyla başlayabilir.",
+  "run_watch_look_too_soon": "Sonraki bakış {clock} itibarıyla başlayabilir.",
   "run_watch_off": "İzlenmiyor: çalıştırma izleme Ayarlar'da kapalı.",
   "run_watch_needs_pick": "İzlenmiyor. Bu sohbetin ajanının izleyici modeli yok, bu yüzden cümle aşamayı ve ilerlemeyi gösterir.",
   "run_watch_no_model": "İzlenmiyor: {why}.",

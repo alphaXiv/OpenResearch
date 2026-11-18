@@ -2145,7 +2145,7 @@
   "run_watch_cost_unknown": "koszt nieznany",
   "run_watch_look_now": "Spójrz teraz",
   "run_watch_looking": "Patrzę…",
-  "run_watch_look_too_soon": "Spojrzenie było przed chwilą. Następne może zacząć się o {clock}.",
+  "run_watch_look_too_soon": "Następne spojrzenie może zacząć się o {clock}.",
   "run_watch_off": "Bez obserwacji: obserwowanie przebiegów jest wyłączone w Ustawieniach.",
   "run_watch_needs_pick": "Bez obserwacji. Agent tego czatu nie ma modelu obserwatora, więc zdanie pokazuje etap i postęp.",
   "run_watch_no_model": "Bez obserwacji: {why}.",

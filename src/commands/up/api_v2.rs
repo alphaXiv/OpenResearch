@@ -356,7 +356,7 @@ async fn look_now(
             Ok(look) => Ok((StatusCode::ACCEPTED, Json(look)).into_response()),
             Err(LookNow::TooSoon(at)) => Ok((
                 StatusCode::CONFLICT,
-                Json(json!({"error": "A look ran under two minutes ago. Try again after it.", "notBefore": at})),
+                Json(json!({"error": format!("The next look can start at {}.", crate::engine::monitor::clock_text(at)), "notBefore": at})),
             ).into_response()),
             Err(LookNow::NotWatched(why)) => Err(super::ApiError(StatusCode::CONFLICT, why)),
             Err(LookNow::Failed(error)) => Err(error.into()),

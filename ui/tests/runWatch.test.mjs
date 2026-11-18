@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { act, createElement } from "react";
 import { Watch } from "../src/components/run/Watch.tsx";
+import { clockText } from "../src/runMonitor/words.ts";
 import { m } from "../src/paraglide/messages.js";
 import { journalRows } from "../src/runMonitor/journal.ts";
 import { createWorkspace } from "../src/workspace.tsx";
@@ -128,4 +129,16 @@ test("a look says what it left out to keep within its budget", async () => {
   const looks = [look("1", now - 20_000, "Loss **{loss}**, falling.", { omitted: cut })];
   const { container } = await watched({ looks });
   assert.ok(text(container).includes(cut), text(container));
+});
+
+test("a stale Look now button uses the wait returned by the workspace", async () => {
+  const notBefore = now + 330_000;
+  const { container } = await watched({ looks: [] }, {
+    [`POST /api/runs/${running.runId}/look`]: () => Response.json({ error: "A look just ran.", notBefore }, { status: 409 }),
+  });
+  const button = () => [...container.querySelectorAll("button")].find((node) => text(node) === m.run_watch_look_now());
+  await act(async () => button().click());
+  await settle();
+  assert.equal(button().getAttribute("aria-disabled"), "true");
+  assert.equal(text(container.querySelector('[role="status"]')), m.run_watch_look_too_soon({ clock: clockText(notBefore) }).replace(/[⁦-⁩]/g, ""));
 });

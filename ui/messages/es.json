@@ -2145,7 +2145,7 @@
   "run_watch_cost_unknown": "coste no informado",
   "run_watch_look_now": "Revisar ahora",
   "run_watch_looking": "Revisando…",
-  "run_watch_look_too_soon": "Hubo una revisión hace un momento. La siguiente puede empezar a las {clock}.",
+  "run_watch_look_too_soon": "La siguiente revisión puede empezar a las {clock}.",
   "run_watch_off": "Sin vigilancia: la vigilancia de ejecuciones está desactivada en Ajustes.",
   "run_watch_needs_pick": "Sin vigilancia. El agente de este chat no tiene un modelo vigilante, así que la frase muestra la etapa y el avance.",
   "run_watch_no_model": "Sin vigilancia: {why}.",

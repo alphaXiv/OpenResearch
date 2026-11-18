@@ -1,6 +1,7 @@
 import { useMutate } from "@clo/react-mutation";
 import { ChevronRight, RefreshCw, TriangleAlert } from "lucide-react";
 import { useEffect, useState } from "react";
+import { LookTooSoonError } from "../../api";
 import { autoDir, fmtNumber, ltr } from "../../i18n";
 import { m } from "../../paraglide/messages.js";
 import { getLocale } from "../../paraglide/runtime.js";
@@ -37,7 +38,7 @@ const usd = (value: number) => new Intl.NumberFormat(getLocale(), {
 export function Watch({ monitor, runId, agent, tone, live, now }: { monitor: Pick<RunMonitor, "watch" | "view" | "brief" | "flags">; runId: string; agent: string | null; tone: Tone; live: boolean; now: number }) {
   const workspace = useWorkspace();
   const look = useMutate(mutLookNow);
-  const [refused, setRefused] = useState<string | null>(null);
+  const [refused, setRefused] = useState<string | LookTooSoonError | null>(null);
   const { watch } = monitor;
   const signals = monitor.view.signals;
   const looks = watch.looks.filter((look) => look.said !== "error" && look.said !== "interrupted");
@@ -45,9 +46,11 @@ export function Watch({ monitor, runId, agent, tone, live, now }: { monitor: Pic
   // A flag a tripwire or a rule raised stands in the journal beside the looks, in time order.
   const rows = journalRows([...watch.looks, ...flags.filter((flag) => !flag.lookId).map(flagLook)].sort((a, b) => a.at - b.at));
   const lastLook = watch.looks.at(-1)?.id;
-  useEffect(() => setRefused(null), [lastLook]);
+  useEffect(() => setRefused(null), [runId, lastLook]);
 
-  const tooSoon = watch.floorUntil !== null && watch.floorUntil !== undefined && watch.floorUntil > now;
+  const floorUntil = Math.max(watch.floorUntil ?? 0, refused instanceof LookTooSoonError ? refused.notBefore : 0);
+  const wait = floorUntil > now ? m.run_watch_look_too_soon({ clock: clockText(floorUntil) }) : null;
+  const refusal = refused instanceof LookTooSoonError ? wait : refused;
   const watched = watch.state === "on";
   const absent = watch.state === "off" ? m.run_watch_off()
     : watch.state === "needs_pick" ? m.run_watch_needs_pick()
@@ -113,28 +116,26 @@ export function Watch({ monitor, runId, agent, tone, live, now }: { monitor: Pic
         <div className="mt-3.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-ink-subtext">
           {totals && <span className="tabular-nums">{totals}</span>}
           {watched && live && (
-            tooSoon ? (
-              <Tooltip interactive content={m.run_watch_look_too_soon({ clock: clockText(watch.floorUntil!) })}>
-                <Button size="small" variant="ghost" className="-my-1" aria-disabled="true" aria-description={m.run_watch_look_too_soon({ clock: clockText(watch.floorUntil!) })}>
-                  <RefreshCw size={13} />{m.run_watch_look_now()}
-                </Button>
-              </Tooltip>
-            ) : (
+            <Tooltip interactive disabled={!wait} content={wait ?? ""}>
               <Button
                 size="small"
                 variant="ghost"
                 className="-my-1"
-                disabled={look.isPending}
+                aria-disabled={Boolean(wait) || look.isPending}
+                aria-description={wait ?? undefined}
                 onClick={() => {
+                  if (wait || look.isPending) return;
                   setRefused(null);
-                  look.runWithOptions(workspace, runId, { onError: (error) => setRefused(error instanceof Error ? error.message : String(error)) });
+                  look.runWithOptions(workspace, runId, {
+                    onError: (error) => setRefused(error instanceof LookTooSoonError ? error : error instanceof Error ? error.message : String(error)),
+                  });
                 }}
               >
                 <RefreshCw size={13} className={cn(look.isPending && "motion-safe:animate-spin")} />{look.isPending ? m.run_watch_looking() : m.run_watch_look_now()}
               </Button>
-            )
+            </Tooltip>
           )}
-          {refused && <span role="status" className={TONE_INK.flag}>{refused}</span>}
+          {refusal && <span role="status" className={TONE_INK.flag}>{refusal}</span>}
         </div>
       )}
       {monitor.brief && monitor.brief.length > 0 && (

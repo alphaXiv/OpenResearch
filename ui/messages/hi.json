@@ -2145,7 +2145,7 @@
   "run_watch_cost_unknown": "लागत नहीं बताई गई",
   "run_watch_look_now": "अभी देखें",
   "run_watch_looking": "देख रहे हैं…",
-  "run_watch_look_too_soon": "अभी-अभी एक नज़र चली। अगली {clock} पर शुरू हो सकती है।",
+  "run_watch_look_too_soon": "अगली नज़र {clock} पर शुरू हो सकती है।",
   "run_watch_off": "निगरानी नहीं: सेटिंग्स में रन की निगरानी बंद है।",
   "run_watch_needs_pick": "निगरानी नहीं। इस चैट के एजेंट के पास निगरानी मॉडल नहीं है, इसलिए वाक्य चरण और प्रगति दिखाता है।",
   "run_watch_no_model": "निगरानी नहीं: {why}।",
