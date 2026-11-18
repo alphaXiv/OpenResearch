@@ -101,9 +101,16 @@ fn report(plan: &[orx_signals::Stage], parent: Option<&orx_signals::Snapshot>) -
                         .filter(|each| *each > 0.0)
                         .ok_or("no completed parent count to scale")?;
                     let unit = unit.or(parent_unit).unwrap_or("units");
+                    let per_unit = if each < 1.0 {
+                        "under 1 ms".to_owned()
+                    } else if each < 1000.0 {
+                        format!("{each:.0} ms")
+                    } else {
+                        duration(each)
+                    };
                     (
                         each * of,
-                        format!("{of} {unit}; the parent took {} each", duration(each)),
+                        format!("{of} {unit}; the parent took {per_unit} each"),
                     )
                 }
                 None => (prior.ms, "(as the parent)".into()),
@@ -196,6 +203,30 @@ mod tests {
         );
         assert!(report(&plan[..2], Some(&parent())).contains("Total: about 31 min"));
         assert!(report(&plan, None).contains("download, train, eval not timed"));
+    }
+
+    #[test]
+    fn sizing_reports_subsecond_parent_steps() {
+        let mut snapshot = orx_signals::Snapshot::new("parent", "log", "generation");
+        snapshot
+            .feed(
+                b"::orx:: {\"phase\":\"train\",\"step\":0,\"of\":60,\"unit\":\"steps\"}\n",
+                false,
+                0,
+                true,
+            )
+            .unwrap();
+        snapshot
+            .feed(b"::orx:: {\"step\":60}\n", true, 6_000, true)
+            .unwrap();
+        let plan =
+            orx_signals::plan(&json!([{"phase":"train", "of":60, "unit":"steps"}]), false).unwrap();
+        let text = report(&plan, Some(&snapshot));
+        assert!(
+            text.contains("train: about 6 s — 60 steps; the parent took 100 ms each"),
+            "{text}"
+        );
+        assert!(text.contains("Total: about 6 s"), "{text}");
     }
 
     #[test]
