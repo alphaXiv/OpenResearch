@@ -774,6 +774,7 @@ pub struct Submission {
     pub source: SourceSnapshot,
     pub command: String,
     pub launch: LaunchSpec,
+    pub monitor_config: Option<String>,
 }
 
 /// Snapshots the source and prepares the launch intent, then hands it to `insert` while the
@@ -875,6 +876,16 @@ where
             ));
         }
     }
+    let settings = store.run_monitor_json(&experiment.id)?;
+    let has_time_limit = launch.options["timeout_seconds"]
+        .as_i64()
+        .is_some_and(|seconds| seconds > 0);
+    let monitor_config = crate::engine::rules::freeze(
+        &experiment.id,
+        settings.as_deref(),
+        args.budget,
+        has_time_limit,
+    )?;
     store.reserve_run_telemetry(&run_id, identity.as_ref(), report.as_ref())?;
     let branch = experiment.branch_name.clone();
     insert(Submission {
@@ -883,6 +894,7 @@ where
         source,
         command,
         launch,
+        monitor_config,
     })
     .await?;
     if project.github_enabled() {

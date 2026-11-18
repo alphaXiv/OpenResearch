@@ -378,6 +378,11 @@ The `kind` field names the condition. For `nonFinite`, `compare`, and
 | `{"kind": "costAbove", "usd": 5}` | spend passed it, or the estimate says it will |
 | `{"kind": "projectedFinishPastLimit"}` | the estimate says the run ends after its time limit |
 
+`projectedFinishPastLimit` requires a run with a time limit. OpenResearch,
+Hugging Face Jobs, Modal, Kubernetes, and Vercel supply one by default. For
+Slurm, pass `--timeout` or set a time limit in the Slurm settings. Local, SSH,
+Ray, and Tinker launches with this rule are refused.
+
 `"stop"` cancels the run, which shows as Auto-stopped by that rule, and you
 are woken with what orx saw; `"ask"` raises a flag (§10) and the run goes on. `text` is
 what the user reads, so say the condition in your words. `orx exp run <expId>

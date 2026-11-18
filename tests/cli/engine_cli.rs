@@ -753,6 +753,38 @@ async fn abandon_says_the_cancel_stays_pending_only_once_the_server_accepts() {
 }
 
 #[test]
+fn launch_refuses_a_time_limit_rule_when_the_run_has_no_limit() {
+    let sandbox = Sandbox::new();
+    sandbox.project("echo done\n");
+    let config = sandbox.root.join("rules.json");
+    std::fs::write(
+        &config,
+        r#"{"rules":[{"name":"too-slow","text":"Stop if the run will miss its deadline.","does":"stop","when":{"kind":"projectedFinishPastLimit"}}]}"#,
+    )
+    .unwrap();
+    let saved = sandbox.run(&[
+        "exp",
+        "view",
+        "set",
+        "exp",
+        "--config",
+        config.to_str().unwrap(),
+    ]);
+    assert!(saved.status.success(), "{}", diagnostics(&saved));
+
+    let launched = sandbox.run(&["exp", "run", "exp", "--backend", "local"]);
+    assert!(!launched.status.success(), "{}", diagnostics(&launched));
+    let error = String::from_utf8_lossy(&launched.stderr);
+    assert!(error.contains("too-slow"), "{error}");
+    assert!(error.contains("time limit"), "{error}");
+    let runs: u64 = sandbox
+        .db()
+        .query_row("SELECT count(*) FROM runs", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(runs, 0);
+}
+
+#[test]
 fn an_engine_run_finishing_while_up_is_down_keeps_the_receipt_finish_time() {
     let sandbox = Sandbox::new();
     let release = sandbox.root.join("release");

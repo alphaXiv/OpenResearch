@@ -6786,7 +6786,8 @@ mod tests {
         let launched = |run: &str, experiment: &str, budget: Option<f64>| {
             let settings = f.store.run_monitor_json(experiment).unwrap();
             let config =
-                crate::engine::rules::freeze(experiment, settings.as_deref(), budget).unwrap();
+                crate::engine::rules::freeze(experiment, settings.as_deref(), budget, false)
+                    .unwrap();
             f.run_in(run, experiment, "running", local());
             f.store.set_run_monitor_config(run, config.as_deref());
         };

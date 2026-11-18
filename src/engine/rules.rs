@@ -403,6 +403,7 @@ pub(crate) fn freeze(
     experiment: &str,
     settings: Option<&str>,
     budget_usd: Option<f64>,
+    has_time_limit: bool,
 ) -> crate::error::Result<Option<String>> {
     let mut rules = stored(experiment, settings)?;
     if let Some(usd) = budget_usd {
@@ -414,6 +415,15 @@ pub(crate) fn freeze(
             );
         }
         rules.push(budget);
+    }
+    if let Some(rule) = rules
+        .iter()
+        .find(|rule| !has_time_limit && rule.when == When::FinishPastLimit)
+    {
+        crate::error::bail!(
+            "Rule \"{}\" requires a time limit and this run has none. Run on a backend with a time limit or remove the rule with `orx exp view set {experiment} --config PATH`.",
+            rule.name
+        );
     }
     Ok((!rules.is_empty())
         .then(|| json!({"rules": rules.iter().map(Rule::json).collect::<Vec<_>>()}).to_string()))
@@ -955,12 +965,14 @@ mod tests {
             {"name": "budget", "text": "Old.", "does": "ask", "when": {"kind": "costAbove", "usd": 1}},
         ]})
         .to_string();
-        let frozen_rules = freeze("exp", Some(&settings), Some(5.0)).unwrap().unwrap();
+        let frozen_rules = freeze("exp", Some(&settings), Some(5.0), false)
+            .unwrap()
+            .unwrap();
         let rules = frozen("run", Some(&frozen_rules)).unwrap();
         assert_eq!(rules.len(), 2);
         assert_eq!(rules[1], budget(5.0).unwrap());
         assert_eq!(rules[1].shown()["budgetUsd"], 5.0);
-        assert_eq!(freeze("exp", None, None).unwrap(), None);
+        assert_eq!(freeze("exp", None, None, false).unwrap(), None);
         assert_eq!(frozen("run", None).unwrap(), vec![]);
     }
 
@@ -973,15 +985,15 @@ mod tests {
             })
             .collect();
         let settings = json!({"rules": rules}).to_string();
-        assert!(freeze("exp", Some(&settings), None).is_ok());
-        assert!(freeze("exp", Some(&settings), Some(5.0))
+        assert!(freeze("exp", Some(&settings), None, false).is_ok());
+        assert!(freeze("exp", Some(&settings), Some(5.0), false)
             .unwrap_err()
             .to_string()
             .contains("--budget"));
 
         rules[0]["name"] = json!("budget");
         let settings = json!({"rules": rules}).to_string();
-        let frozen_rules = freeze("exp", Some(&settings), Some(5.0)).unwrap();
+        let frozen_rules = freeze("exp", Some(&settings), Some(5.0), false).unwrap();
         assert_eq!(
             frozen("run", frozen_rules.as_deref()).unwrap().len(),
             MAX_RULES
@@ -991,7 +1003,7 @@ mod tests {
     #[test]
     fn a_rule_a_newer_orx_declared_stops_a_launch_with_what_to_do() {
         let settings = json!({"rules": [{"name": "r", "text": "t", "does": "stop", "when": {"kind": "lossAbove", "value": 3}}]});
-        let error = freeze("exp", Some(&settings.to_string()), None)
+        let error = freeze("exp", Some(&settings.to_string()), None, false)
             .unwrap_err()
             .to_string();
         assert!(
@@ -1002,5 +1014,16 @@ mod tests {
             error.contains("Update orx before launching this rule"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn a_time_limit_rule_is_frozen_when_the_run_has_a_limit() {
+        let settings = json!({"rules": [{
+            "name": "deadline", "text": "This would run too long.", "does": "stop",
+            "when": {"kind": "projectedFinishPastLimit"}
+        }]});
+        let config = freeze("exp", Some(&settings.to_string()), None, true).unwrap();
+        let rules = frozen("run", config.as_deref()).unwrap();
+        assert!(matches!(&rules[..], [rule] if rule.when == When::FinishPastLimit));
     }
 }

@@ -347,7 +347,8 @@ An agent declares rules beside an experiment's stage plan (`orx exp view set
 --config`, `src/engine/rules.rs`): each names one bounded condition on what a run
 reports, never an expression, and stops the run or raises a flag. A child
 experiment starts with a copy, and a run freezes the rules it was launched with,
-so editing them changes only later runs; `--budget` adds one. Only `orx up`
+so editing them changes only later runs; `--budget` adds one. A projected-finish
+rule requires a time limit in the launch intent. Only `orx up`
 checks them, in the projection's pass, while the run is running, contact is
 live and collection confirms a current, caught-up checkpoint. Each pass counts the
 new reports in the fold's contiguous tail. A new generation, stage, relaunch
