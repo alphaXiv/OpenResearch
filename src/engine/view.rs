@@ -1427,8 +1427,7 @@ pub(crate) fn raw_etag(store: &crate::store::Store, id: &str) -> Result<String, 
     Ok(etag(store.run_monitor_json(id)?.as_deref()))
 }
 
-/// `GET /api/experiments/:id/view`: the saved markup and its tree, or the default orx draws
-/// from the newest run's first signal.
+/// The saved markup and its tree, or the default drawn from the newest run's first signal.
 pub(crate) fn described(store: &crate::store::Store, id: &str) -> Result<Value, Refusal> {
     experiment_of(store, id)?;
     let raw = store.run_monitor_json(id)?;
@@ -1479,9 +1478,8 @@ fn view_of(store: &crate::store::Store, id: &str, raw: Option<&str>) -> Result<V
     )
 }
 
-/// `PUT /api/experiments/:id/view`: saves the view's `markup` once it parses and every name it
-/// draws is one the experiment's runs reported or may still report, and `patterns` once each
-/// compiles; what is not given is kept. Its runs are drawn again from it.
+/// Saves the view's `markup` if it parses and names only signals the experiment's runs
+/// reported or may still report, and `patterns` if each compiles. Omitted settings are kept.
 pub(crate) fn set(
     store: &crate::store::Store,
     id: &str,

@@ -2598,7 +2598,6 @@ pub(crate) fn series_page(
         points.partition_point(|p| p[0].as_f64().is_some_and(|x| x <= after))
     });
     let page: Vec<&Value> = points[start..].iter().take(limit.min(2048)).collect();
-    let next = (start + page.len() < points.len()).then(|| page.last().map(|p| p[0].clone()));
     Some(json!({
         "runId": monitor["runId"],
         "rev": monitor["rev"],
@@ -2606,7 +2605,6 @@ pub(crate) fn series_page(
         "seriesRev": monitor["seriesRev"],
         "name": name,
         "points": page,
-        "next": next.flatten(),
     }))
 }
 
@@ -9100,18 +9098,6 @@ mod tests {
             first["series"]["a"].as_array().unwrap().last(),
             points.last()
         );
-        let page = series_page(&first, "a", Some(499_990.0), 5).unwrap();
-        assert_eq!(
-            page["points"],
-            json!([
-                [499_991, 1.5],
-                [499_992, 1.5],
-                [499_993, 1.5],
-                [499_994, 1.5],
-                [499_995, 1.5]
-            ])
-        );
-        assert_eq!(page["next"], 499_995);
     }
 
     #[test]

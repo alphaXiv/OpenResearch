@@ -3168,18 +3168,21 @@ async fn the_monitor_route_serves_one_rev_and_says_what_it_cannot() {
         .unwrap();
     assert_eq!(unchanged.status(), StatusCode::NOT_MODIFIED);
 
-    let page = f
-        .client
-        .json(
-            reqwest::Method::GET,
-            "runs/run/monitor?series=loss&after=20&limit=4",
-            None,
-        )
-        .await
-        .unwrap();
-    assert_eq!(page["points"].as_array().unwrap().len(), 4);
-    assert_eq!(page["points"][0][0], 21.0);
-    assert_eq!(page["next"], 24.0);
+    let path = "runs/run/monitor?series=loss&after=20&limit=4";
+    let http = crate::net::loopback_client().build().unwrap();
+    let base = format!("http://127.0.0.1:{}/api", f.descriptor.port);
+    for request in [
+        f.client.request(reqwest::Method::GET, path),
+        http.get(format!("{base}/{path}")),
+    ] {
+        let response = request.send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["etag"], etag);
+        let page: Value = response.json().await.unwrap();
+        assert_eq!(page["points"].as_array().unwrap().len(), 4);
+        assert_eq!(page["points"][0][0], 21.0);
+        assert!(page.get("next").is_none(), "{page}");
+    }
 
     for path in ["runs/missing/monitor", "runs/run/monitor?series=lr"] {
         let missing = f
@@ -3194,28 +3197,49 @@ async fn the_monitor_route_serves_one_rev_and_says_what_it_cannot() {
             "{path}"
         );
     }
-    let anonymous = crate::net::loopback_client()
-        .build()
-        .unwrap()
-        .get(format!(
-            "http://127.0.0.1:{}/api/v2/runs/run/monitor",
-            f.descriptor.port
-        ))
+    let anonymous = http
+        .get(format!("{base}/v2/runs/run/monitor"))
         .send()
         .await
         .unwrap();
     assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
-    let dashboard = crate::net::loopback_client()
-        .build()
-        .unwrap()
-        .get(format!(
-            "http://127.0.0.1:{}/api/runs/run/monitor",
-            f.descriptor.port
-        ))
+    let dashboard = http
+        .get(format!("{base}/runs/run/monitor"))
         .send()
         .await
         .unwrap();
     assert_eq!(dashboard.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn experiment_views_are_only_served_under_v2() {
+    let f = Fixture::new().await;
+    let client = crate::net::loopback_client().build().unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}/api/experiments/exp/view",
+        f.descriptor.port
+    );
+    for request in [
+        client.get(&url),
+        client.put(&url).json(&json!({"markup": "<view/>"})),
+    ] {
+        let response = request.send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    let response = f
+        .client
+        .request(reqwest::Method::PUT, "experiments/exp/view")
+        .json(&json!({"markup": "<view/>"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PRECONDITION_REQUIRED);
+    let error: Value = response.json().await.unwrap();
+    assert!(error["error"]
+        .as_str()
+        .unwrap()
+        .contains("GET /api/v2/experiments/exp/view"));
 }
 
 #[tokio::test]

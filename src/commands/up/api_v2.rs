@@ -276,7 +276,6 @@ fn dashboard_routes(api: Arc<Api>) -> Router {
         .route("/api/runs/{id}/media", get(run_image))
         .route("/api/runs/{id}/look", post(look_now))
         .route("/api/runs/{id}/flag", post(dashboard_choose_flag))
-        .route("/api/experiments/{id}/view", get(view).put(set_view))
         .route("/api/runs/{id}/abandon", post(dashboard_abandon))
         .route("/api/runs/{id}/cleanup", post(cleanup))
         .route("/api/pending-work", get(dashboard_pending_work))
@@ -1400,7 +1399,7 @@ async fn blocking_view(
     }
 }
 
-/// `GET /api/experiments/:id/view`: the experiment's saved view, or the default its runs draw.
+/// `GET /api/v2/experiments/:id/view`: the experiment's saved view, or the default its runs draw.
 async fn view(State(api): State<Arc<Api>>, Path(id): Path<String>) -> Response {
     blocking_view(move || crate::engine::view::described(&api.store(), &id)).await
 }
@@ -1427,7 +1426,7 @@ struct ViewBody {
     config_file: Option<String>,
 }
 
-/// `PUT /api/experiments/:id/view` with `If-Match`: saves the view and its patterns, and draws
+/// `PUT /api/v2/experiments/:id/view` with `If-Match`: saves the view and its patterns, and draws
 /// the experiment's runs with them. New patterns have each run's log read again: a live one at
 /// its next collection, an ended one from the log kept on this machine.
 async fn set_view(
@@ -1444,7 +1443,7 @@ async fn set_view(
     else {
         return (
             StatusCode::PRECONDITION_REQUIRED,
-            Json(json!({"error": format!("Send If-Match with the etag GET /api/experiments/{id}/view returned.")})),
+            Json(json!({"error": format!("Send If-Match with the etag GET /api/v2/experiments/{id}/view returned.")})),
         )
             .into_response();
     };
