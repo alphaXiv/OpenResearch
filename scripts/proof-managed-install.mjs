@@ -87,7 +87,7 @@ for (const [label,exe] of [['Released v0.2.27',base],['Candidate '+sha.slice(0,8
     const e=fails[0];
     assert(connects>0); assert.equal(e.stage,'command');assert.equal(e.reason,'exit_nonzero');assert.equal(e.exitCode,1);
     if(exe===base) assert.equal(e.errorExcerpt,null);
-    else assert.equal(e.errorExcerpt,'Managed release lookup failed; Could not look up the latest Claude Code release');
+    else assert.equal(e.errorExcerpt,'managed release lookup; Managed release lookup failed; Could not look up the latest Claude Code release');
     const receipt={build:label,os:'Windows '+release()+' '+process.arch,entry:'Dashboard setup WebSocket / Claude Code / Install',vendorRequest:'downloads.claude.ai:443 rejected by local fixture',localError:'Could not look up the latest Claude Code release',telemetry:{outcome:e.outcome,stage:e.stage,reason:e.reason,exitCode:e.exitCode,errorExcerpt:e.errorExcerpt}};
     evidence.push(receipt); console.log(JSON.stringify(receipt,null,2));
   } finally {
