@@ -7154,7 +7154,7 @@ impl Store {
         tail.drain(..start);
         if records > 0 {
             tail.push_str(&format!(
-                "\n({records} `::orx::` records left out; `orx logs {}` shows the whole log.)",
+                "\n({records} `::orx::` records left out. `orx logs {}` shows the log path and a tail preview.)",
                 run.id
             ));
         }
@@ -7186,7 +7186,7 @@ impl Store {
         if run.status == "cancelled" {
             let actor = match self.run_stop(&run.id) {
                 Ok(Some(stop)) => match stop.by {
-                    StopBy::User => "the user from the dashboard".into(),
+                    StopBy::User => "the user".into(),
                     StopBy::Agent => "the agent".into(),
                     StopBy::Rule => format!(
                         "rule {}",
@@ -7933,30 +7933,32 @@ pub(crate) mod tests {
         )
         .unwrap();
         for (by, actor) in [
-            (StopBy::User, "user"),
-            (StopBy::Agent, "agent"),
-            (StopBy::Rule, "rule"),
+            (StopBy::User, "the user"),
+            (StopBy::Agent, "the agent"),
+            (StopBy::Rule, "rule budget"),
         ] {
-            let mut stop = StopContext::by(by);
-            stop.rule = Some(serde_json::json!({"name":"budget"}));
-            store
-                .conn
-                .execute(
-                    "UPDATE runs SET stop_context_json = ?1, cancel_accepted_at = 1000 WHERE id = ?2",
-                    params![serde_json::to_string(&stop).unwrap(), run.id],
-                )
-                .unwrap();
+            let stop = match by {
+                StopBy::User => crate::commands::exp::exp_cancel_stop(None, None).unwrap().1,
+                StopBy::Agent => StopContext::by(by),
+                StopBy::Rule => StopContext {
+                    rule: Some(serde_json::json!({"name":"budget"})),
+                    ..StopContext::by(by)
+                },
+            };
+            store.conn.execute(
+                "UPDATE runs SET stop_context_json = ?1, cancel_accepted_at = 1000 WHERE id = ?2",
+                params![serde_json::to_string(&stop).unwrap(), run.id],
+            ).unwrap();
             run.status = "cancelled".into();
             let body = store.terminal_notice_body(&run).unwrap();
-            assert!(body.contains(actor), "{body}");
+            assert_eq!(
+                body.lines()
+                    .find_map(|line| line.strip_prefix("Stopped by: ")),
+                Some(format!("{actor}.").as_str()),
+                "{body}"
+            );
             assert!(body.contains("val_bpb = 1.940825 at step 100"), "{body}");
             assert!(!body.contains("val_bpb = 1.940825 at step 123"), "{body}");
-            if by == StopBy::User {
-                assert!(body.contains("dashboard"), "{body}");
-            }
-            if by == StopBy::Rule {
-                assert!(body.contains("budget"), "{body}");
-            }
         }
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
@@ -8005,16 +8007,22 @@ pub(crate) mod tests {
         let tail = body.split("Recent log:\n").nth(1).unwrap();
         assert!(!tail.contains("::orx:: {"), "{tail}");
         assert!(tail.starts_with("step 340 | loss 1.2\nTraceback"), "{tail}");
-        assert!(
-            tail.ends_with(
-                "(200 `::orx::` records left out; `orx logs failed` shows the whole log.)"
-            ),
-            "{tail}"
-        );
-        assert_eq!(
-            crate::plane::Run::from_store(&store, &run).unwrap().failure_detail().as_deref(),
-            Some("reason: last error in the log: `torch.OutOfMemoryError: CUDA out of memory.` (`orx logs failed` has the rest)")
-        );
+        let hint = tail.lines().last().unwrap();
+        for fact in ["200", "`orx logs failed`", "path", "preview"] {
+            assert!(hint.contains(fact), "{hint}");
+        }
+        let detail = crate::plane::Run::from_store(&store, &run)
+            .unwrap()
+            .failure_detail()
+            .unwrap();
+        for fact in [
+            "torch.OutOfMemoryError",
+            "`orx logs failed`",
+            "path",
+            "preview",
+        ] {
+            assert!(detail.contains(fact), "{detail}");
+        }
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }

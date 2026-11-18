@@ -196,7 +196,7 @@ impl Run {
             Some(reason) if !reason.is_empty() => Some(format!("reason: {reason}")),
             _ => Some(match &self.log_error {
                 Some(line) => format!(
-                    "reason: last error in the log: `{line}` (`orx logs {}` has the rest)",
+                    "reason: last error in the log: `{line}` (see `orx logs {}` for the log path and a tail preview)",
                     self.id
                 ),
                 None => format!(
