@@ -40,17 +40,17 @@ test("a transport status stays visible outside a preceding collapsed tool group"
   assert.equal(count(html, m.chat_turn_incomplete()), 0);
 });
 
-test("nontransport failures retain the generic recovery label", async () => {
+test("a nontransport failure headlines its own error", async () => {
   const html = await renderMessage([bash, { ...apiError, tool: "error" }, recovery]);
-  assert.equal(count(html, m.chat_turn_incomplete()), 1);
+  assert.equal(count(html, m.chat_turn_incomplete()), 0);
+  assert.equal(html.querySelector(".turn-failure p").textContent, detail);
   assert.equal(count(html, m.chat_panel_temporary_api_error()), 0);
 });
 
 test("unrelated errors are not absorbed into recovery", async () => {
   const html = await renderMessage([apiError, { ...recovery, state: { ...recovery.state, error: "Other failure" } }]);
   assert.equal(count(html, m.chat_panel_temporary_api_error()), 1);
-  assert.equal(count(html, m.chat_turn_incomplete()), 1);
-  assert.ok(html.textContent.includes("Other failure"));
+  assert.deepEqual([...html.querySelectorAll(".turn-failure p")].map((p) => p.textContent), [m.chat_panel_temporary_api_error(), "Other failure"]);
 });
 
 test("local send uncertainty is visible in an alert", async () => {
@@ -111,17 +111,67 @@ test("a sign-in failure waits for the composer's sign-in while its agent is sign
   assert.deepEqual(signedInElsewhere.recovered, [["turn-2", "retry"]]);
 });
 
-test("an unrecognized failure keeps its recovery outside the collapsed error details", async () => {
+test("an unrecognized failure headlines its error and keeps its recovery outside any details", async () => {
   for (const cause of [undefined, "new_failure_cause"]) {
     const { container, button, recovered } = await renderFailure({ errorKind: "adapter_error", cause, recoveryAction: "continue" }, undefined, "claude exited mid-turn");
-    assert.ok(container.textContent.includes(m.chat_turn_incomplete()));
-    const details = container.querySelector("details");
-    assert.ok(details.textContent.includes("claude exited mid-turn"));
+    assert.equal(container.querySelector(".turn-failure p").textContent, "claude exited mid-turn");
+    assert.equal(container.querySelector("details"), null);
     const resume = button(m.chat_continue());
-    assert.ok(resume && !resume.closest("details"));
+    assert.ok(resume);
     resume.click();
     assert.deepEqual(recovered, [["turn-2", "continue"]]);
   }
+
+  const { container } = await renderFailure({ errorKind: "adapter_error", recoveryAction: "continue" }, undefined, "claude exited mid-turn\nexit status 137");
+  assert.equal(container.querySelector(".turn-failure p").textContent, "claude exited mid-turn");
+  assert.ok(container.querySelector("details").textContent.includes("exit status 137"));
+});
+
+test("only the last turn in a row offers recovery", async () => {
+  const failed = (id) => ({ id, role: "assistant", parts: [{ id: "turn-recovery", type: "tool", tool: "error", state: { status: "error", error: `${id} failed`, input: { turnId: id, errorKind: "adapter_error", recoveryAction: "continue" } } }], createdAt: 0, completedAt: 1000 });
+  const responses = [failed("older"), failed("newer")];
+  const recovered = [];
+  const { container } = await render(createElement(Message, {
+    message: responses[1],
+    responseMessages: responses,
+    activePermissionId: null,
+    forkDisabled: false,
+    branchDisabled: false,
+    onFork: () => {},
+    onSelectFork: () => {},
+    onRecover: (turnId) => recovered.push(turnId),
+  }));
+  assert.ok(container.textContent.includes("older failed"));
+  const resume = [...container.querySelectorAll("button")].filter((button) => button.textContent === m.chat_continue());
+  assert.equal(resume.length, 1);
+  resume[0].click();
+  assert.deepEqual(recovered, ["newer"]);
+
+  const compacted = { id: "compacted", role: "assistant", parts: [{ id: "c", type: "tool", tool: "compacted", state: { status: "completed" } }], createdAt: 1, completedAt: 1 };
+  const afterCompaction = await render(createElement(Message, {
+    message: compacted,
+    responseMessages: [failed("only"), compacted],
+    activePermissionId: null,
+    forkDisabled: false,
+    branchDisabled: false,
+    onFork: () => {},
+    onSelectFork: () => {},
+    onRecover: () => {},
+  }));
+  assert.ok([...afterCompaction.container.querySelectorAll("button")].some((button) => button.textContent === m.chat_continue()), "a compaction takes no turn's place");
+
+  const approval = { id: "approval", role: "assistant", parts: [{ id: "p", type: "prompt", prompt: { kind: "permission", id: "perm", title: "Run tests", options: [] }, state: { status: "completed" } }], createdAt: 2, completedAt: 2 };
+  const afterApproval = await render(createElement(Message, {
+    message: approval,
+    responseMessages: [failed("only"), approval],
+    activePermissionId: null,
+    forkDisabled: false,
+    branchDisabled: false,
+    onFork: () => {},
+    onSelectFork: () => {},
+    onRecover: () => {},
+  }));
+  assert.ok([...afterApproval.container.querySelectorAll("button")].some((button) => button.textContent === m.chat_continue()), "a resolved approval takes no turn's place");
 });
 
 test("each cause the server names reads as itself", async () => {
