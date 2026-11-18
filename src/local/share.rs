@@ -6,7 +6,9 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
+use regex::{Captures, Regex};
 use serde::{Deserialize, Serialize};
 
 use super::git;
@@ -815,6 +817,7 @@ fn import_staged(
             &project.id,
             harness,
             artifact_links.as_ref(),
+            &run_ids,
         )?
         else {
             continue;
@@ -922,6 +925,7 @@ fn shared_session(
     project_id: &str,
     harness: &str,
     artifact_links: Option<&(String, String)>,
+    run_ids: &HashMap<&str, String>,
 ) -> Result<Option<(StoredChatSession, Vec<StoredChatMessage>)>> {
     let Some(file) = safe_name(&shared.id)
         .and_then(|name| std::fs::read(staging.join(format!("chats/{name}.json"))).ok())
@@ -943,7 +947,15 @@ fn shared_session(
         .iter()
         .enumerate()
         .map(|(index, message)| {
-            let mut parts = serde_json::to_string(&message.parts)?;
+            let mut parts = message.parts.clone();
+            if let Some(parts) = parts.as_array_mut() {
+                for part in parts.iter_mut().filter(|part| part["type"] == "text") {
+                    if let Some(text) = part["text"].as_str() {
+                        part["text"] = remap_run_mentions(text, run_ids).into();
+                    }
+                }
+            }
+            let mut parts = serde_json::to_string(&parts)?;
             if let Some((from, to)) = artifact_links {
                 parts = parts.replace(from.as_str(), to);
             }
@@ -1008,6 +1020,37 @@ fn shared_session(
         updated_at: shared.updated_at,
     };
     Ok(Some((session, messages)))
+}
+
+fn remap_run_mentions(text: &str, run_ids: &HashMap<&str, String>) -> String {
+    static TAG: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"<(?i-u:run)\b([^>]*?)\s*/?>").unwrap());
+    static ATTRIBUTE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r#"([\w-]+)(?:=(?:"([^"]*)"|'([^']*)'))?"#).unwrap());
+
+    TAG.replace_all(text, |tag: &Captures<'_>| {
+        let whole = tag.get(0).unwrap();
+        let raw = whole.as_str();
+        let attrs = tag.get(1).unwrap();
+        let id = ATTRIBUTE
+            .captures_iter(attrs.as_str())
+            .filter(|attr| attr[1].eq_ignore_ascii_case("id"))
+            .filter_map(|attr| attr.get(2).or_else(|| attr.get(3)))
+            .last();
+        if let Some((id, mapped)) =
+            id.and_then(|id| run_ids.get(id.as_str()).map(|mapped| (id, mapped)))
+        {
+            let offset = attrs.start() - whole.start();
+            format!(
+                "{}{mapped}{}",
+                &raw[..offset + id.start()],
+                &raw[offset + id.end()..]
+            )
+        } else {
+            raw.to_owned()
+        }
+    })
+    .into_owned()
 }
 
 /// Move the share's artifacts and run logs into place, recording each file placed.
@@ -1268,9 +1311,17 @@ mod tests {
             created_at: 1,
             updated_at: 1,
         };
-        let (_, messages) = shared_session(&staging, &chat, "chat", "p", "claude-code", None)
-            .unwrap()
-            .unwrap();
+        let (_, messages) = shared_session(
+            &staging,
+            &chat,
+            "chat",
+            "p",
+            "claude-code",
+            None,
+            &HashMap::new(),
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(messages[0].parent_id, None);
         assert_eq!(messages[1].parent_id.as_ref(), Some(&messages[0].id));
         assert_eq!(messages[2].parent_id, None);
@@ -1390,7 +1441,10 @@ mod tests {
         store
             .upsert_chat_message(&message("m1", "chat_a", None, "user", "try a lower lr"))
             .unwrap();
-        let figure = format!("![loss]({}/figures/loss.svg)", artifacts.display());
+        let figure = format!(
+            "![loss]({}/figures/loss.svg) <run id=\"done-run\" figure/> <run label=\"done-run\" id='done-run'/> done-run",
+            artifacts.display()
+        );
         store
             .upsert_chat_message(&message("m2", "chat_a", Some("m1"), "assistant", &figure))
             .unwrap();
@@ -1608,6 +1662,15 @@ mod tests {
         assert!(messages[1]
             .parts_json
             .contains(&json_text(&copied.to_string_lossy())));
+        let parts: serde_json::Value = serde_json::from_str(&messages[1].parts_json).unwrap();
+        let text = parts[0]["text"].as_str().unwrap();
+        let id = &imported_run.id;
+        assert!(
+            text.ends_with(&format!(
+                "<run id=\"{id}\" figure/> <run label=\"done-run\" id='{id}'/> done-run"
+            )),
+            "{text}"
+        );
 
         let occupied = import_into(
             &recipient,
