@@ -5,7 +5,7 @@ import { Menu } from "@base-ui/react/menu";
 import { Check, ChevronDown, FolderOpen, MessageCircleDashed, Plus } from "lucide-react";
 import type { Project, ProjectActivity } from "../api";
 import { m } from "../paraglide/messages.js";
-import { Button, MenuItem } from "./ui";
+import { Button, MENU_LABEL, MENU_POPUP, MENU_SEPARATOR, MenuItem } from "./ui";
 
 export function ComposerProjectPicker({ projects, activity, projectId, projectName, onSelect, onNoProject, onNewProject }: {
   projects: Project[];
@@ -29,18 +29,18 @@ export function ComposerProjectPicker({ projects, activity, projectId, projectNa
         </Menu.Trigger>
         <Menu.Portal container={portalContainer}>
           <Menu.Positioner className="z-50" positionMethod="fixed" side="top" align="start" sideOffset={8} collisionPadding={16}>
-            <Menu.Popup aria-label={m.projects_home_projects()} className="outline-none max-h-(--available-height) overflow-y-auto w-64 max-w-[calc(100vw-2rem)] rounded-lg border border-border bg-background p-1.5 shadow-menu">
-              <div className="px-2 py-1 text-sm text-subtext">{m.chat_recents()}</div>
-              <Menu.RadioGroup value={projectId} className="max-h-64 overflow-y-auto pb-1.5">
-                {recent.map((project) => <Menu.RadioItem nativeButton key={project.id} value={project.id} closeOnClick render={<MenuItem size="compact" className="text-sm data-highlighted:bg-surface" />} onClick={() => onSelect(project.id)}>
+            <Menu.Popup aria-label={m.projects_home_projects()} className={`${MENU_POPUP} max-h-(--available-height) w-64 max-w-[calc(100vw-2rem)]`}>
+              <div className={MENU_LABEL}>{m.chat_recents()}</div>
+              <Menu.RadioGroup value={projectId} className="max-h-64 overflow-y-auto">
+                {recent.map((project) => <Menu.RadioItem nativeButton key={project.id} value={project.id} closeOnClick render={<MenuItem className="data-highlighted:bg-surface" />} onClick={() => onSelect(project.id)}>
                   <span className="truncate">{project.name}</span>{project.id === projectId && <Check size={14} className="shrink-0" />}
                 </Menu.RadioItem>)}
               </Menu.RadioGroup>
-              <Menu.Separator className="mb-1 border-t border-border" />
-              <Menu.Item nativeButton render={<MenuItem size="compact" className="text-sm data-highlighted:bg-surface" />} onClick={() => { if (!scratch) onNoProject(); }}>
+              <Menu.Separator className={MENU_SEPARATOR} />
+              <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={() => { if (!scratch) onNoProject(); }}>
                 <span className="flex items-center gap-2"><MessageCircleDashed size={14} />{m.no_project()}</span>{scratch && <Check size={14} className="shrink-0" />}
               </Menu.Item>
-              <Menu.Item nativeButton render={<MenuItem size="compact" className="text-sm data-highlighted:bg-surface" />} onClick={onNewProject}><span className="flex items-center gap-2"><Plus size={14} />{m.projects_home_new_project()}</span></Menu.Item>
+              <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={onNewProject}><span className="flex items-center gap-2"><Plus size={14} />{m.projects_home_new_project()}</span></Menu.Item>
             </Menu.Popup>
           </Menu.Positioner>
         </Menu.Portal>

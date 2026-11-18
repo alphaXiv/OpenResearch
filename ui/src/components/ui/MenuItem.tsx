@@ -1,6 +1,11 @@
 import type { ButtonHTMLAttributes, Ref } from "react";
 import { cn } from "./cn";
 
+/** A menu's surface and its section headings, shared so every menu spaces the same. */
+export const MENU_POPUP = "overflow-y-auto rounded-lg border border-border bg-background p-1 shadow-dropdown outline-none";
+export const MENU_LABEL = "px-2 pt-1.5 pb-1 text-sm text-muted";
+export const MENU_SEPARATOR = "m-1 h-px bg-border-variant";
+
 export function MenuItem({ active = false, danger = false, size = "default", className, ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { title?: never; active?: boolean; danger?: boolean; size?: "default" | "compact"; ref?: Ref<HTMLButtonElement> }) {
   return (
     <button

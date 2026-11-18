@@ -44,7 +44,7 @@ import {
 import type { NativeOption } from "../acp";
 import { HarnessLogo, LABS, ModelGlyph, ModelMark } from "./HarnessLogo";
 
-import { IconButton, MenuItem, SwitchIndicator, Tooltip } from "./ui";
+import { IconButton, MENU_LABEL, MENU_POPUP, MENU_SEPARATOR, MenuItem, SwitchIndicator, Tooltip } from "./ui";
 import { cn } from "./ui/cn";
 
 import { harnessKey, selectionHarness } from "../modelSelection";
@@ -115,10 +115,6 @@ export function usePopover(triggerRef?: RefObject<HTMLButtonElement | null>) {
 
 const PILL =
   "composer-pill inline-flex h-7 min-w-0 shrink-0 items-center gap-1.5 rounded-md px-2 text-sm text-subtext whitespace-nowrap transition-[background,color] duration-150 ease-standard hover:bg-hover-muted hover:text-text data-[popup-open]:bg-hover-muted data-[popup-open]:text-text";
-
-const MENU_POPUP = "overflow-y-auto rounded-lg border border-border bg-background p-1 shadow-dropdown outline-none";
-
-const MENU_LABEL = "px-2 pt-1.5 pb-1 text-sm text-muted";
 
 /** Effort tiers fill more of a 3×3 grid; ids the grid does not know stay empty. */
 const EFFORT_DOTS: Record<string, { dots: number[]; tone: string }> = {
@@ -850,7 +846,7 @@ export function ModelPicker({
                     />
                   ))}
                   {(ultracodeChoice || speeds.length > 0 || variantSwitches) && (effortChoices.length > 0 || variantEfforts.length > 0 || nativeOptions.length > 0) && (
-                    <Menu.Separator className="m-1 h-px bg-border-variant" />
+                    <Menu.Separator className={MENU_SEPARATOR} />
                   )}
                   {ultracodeChoice && (
                     <Tooltip interactive side="start" content={m.model_picker_ultracode_description()} className="flex w-full rounded-sm">
@@ -954,7 +950,7 @@ export function ModelPicker({
                       </Menu.RadioGroup>
                     </Menu.Group>
                   )}
-                  {permissionChoices.length > 0 && onSelectAutonomy && <Menu.Separator className="m-1 h-px bg-border-variant" />}
+                  {permissionChoices.length > 0 && onSelectAutonomy && <Menu.Separator className={MENU_SEPARATOR} />}
                   {onSelectAutonomy && (
                     <Menu.Group>
                       <Menu.GroupLabel className={MENU_LABEL}>{m.model_picker_autonomy()}</Menu.GroupLabel>

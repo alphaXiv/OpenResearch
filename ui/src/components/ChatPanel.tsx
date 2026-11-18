@@ -274,7 +274,7 @@ import {
   shouldRecoverLegacyMath,
   tableMarkdown,
 } from "./annotationMarkdown";
-import { Button, IconButton, LoadingRow, MenuItem, showAlert, Spinner, Tooltip } from "./ui";
+import { Button, IconButton, LoadingRow, MENU_LABEL, MENU_SEPARATOR, MenuItem, showAlert, Spinner, Tooltip } from "./ui";
 import { QuestionDock, useQuestions } from "./QuestionDock";
 import { PaperTitle } from "./PaperTitle";
 
@@ -5101,18 +5101,17 @@ function SessionFilterMenu({
       </Tooltip>
       {open && (
         <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-40 p-1 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down align-right">
-          <div className="px-2 py-0.5 text-sm text-subtext">{m.sidebar_group_by()}</div>
+          <div className={MENU_LABEL}>{m.sidebar_group_by()}</div>
           {(["projects", "list"] as const).map((mode) => (
-            <MenuItem size="compact" className="text-sm" key={mode} onClick={() => { onGroupingChange(mode); setOpen(false); }}>
+            <MenuItem key={mode} onClick={() => { onGroupingChange(mode); setOpen(false); }}>
               <span>{mode === "projects" ? m.projects_home_projects() : m.sidebar_one_list()}</span>
               {grouping === mode && <Check size={14} />}
             </MenuItem>
           ))}
-          <div className="my-1 border-t border-border" />
-          <div className="px-2 py-0.5 text-sm text-subtext">{m.sidebar_filter()}</div>
+          <div className={MENU_SEPARATOR} />
+          <div className={MENU_LABEL}>{m.sidebar_filter()}</div>
           {SESSION_FILTERS.map((f) => (
             <MenuItem
-              size="compact" className="text-sm"
               key={f.id}
 
               onClick={() => {
@@ -5735,8 +5734,12 @@ export function ChatPanel({
   const chatCounts = new Map(projectActivity.map((activity) => [activity.projectId, activity.totalAgents]));
   const scratchProjects = sidebarProjects.filter((project) => project.scratch && (project.id === projectId || chatCounts.get(project.id))).sort(byRecency);
   const scratchGroup = currentProject?.scratch ? currentProject : scratchProjects[0];
-  const sortedProjects = [...sidebarProjects.filter((project) => !project.scratch), ...(scratchGroup ? [scratchGroup] : [])]
-    .sort((a, b) => Number(pinnedProjects.includes(b.id)) - Number(pinnedProjects.includes(a.id)) || byRecency(a, b));
+  // Chats without a project stay on top, so opening one never reshuffles the projects below.
+  const sortedProjects = [
+    ...(scratchGroup ? [scratchGroup] : []),
+    ...sidebarProjects.filter((project) => !project.scratch)
+      .sort((a, b) => Number(pinnedProjects.includes(b.id)) - Number(pinnedProjects.includes(a.id)) || byRecency(a, b)),
+  ];
   const candidateLimit = sidebarGrouping === "list" || sidebarExpanded ? sortedProjects.length : Math.max(1, Math.ceil(railHeight / 36));
   let shownProjects = sortedProjects.slice(0, candidateLimit);
   const shownCurrent = currentProject?.scratch ? scratchGroup : currentProject;
