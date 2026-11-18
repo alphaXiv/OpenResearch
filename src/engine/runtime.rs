@@ -3845,6 +3845,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn saving_patterns_preserves_a_live_local_run_during_replay() {
+        use crate::engine::adapters::{local::Local, signals};
+        use crate::engine::view::{etag, set, Source};
+
+        let dir = crate::local::git::TemporaryDirectory::new("orx-live-pattern-replay").unwrap();
+        let root = dir.path().join("local-runs");
+        let job = root.join("run");
+        std::fs::create_dir_all(&job).unwrap();
+        let mut log = vec![b'\n'; 5 * 1024 * 1024];
+        log.extend_from_slice(b"::orx:: {\"step\":42,\"m\":{\"loss\":2}}\nscore 3\n");
+        std::fs::write(job.join("log"), log).unwrap();
+        let run = WatchedRun {
+            id: "run".into(),
+            handle: Handle::Local {
+                dir: job.to_string_lossy().into_owned(),
+            },
+        };
+        let backend = Local::new(root);
+        let runtime = launched_signal_run(dir.path());
+        let store = Store::open_at(dir.path().to_path_buf()).unwrap();
+        store
+            .create_local_experiment(&crate::local::model::LocalExperiment {
+                id: "exp".into(),
+                project_id: "project".into(),
+                parent_experiment_id: None,
+                slug: "exp".into(),
+                branch_name: "orx/exp".into(),
+                title: None,
+                description: None,
+                run_command: "train".into(),
+                agent_status: "idle".into(),
+                created_at: 1,
+                updated_at: 1,
+                chat_session_id: None,
+                archived: false,
+            })
+            .unwrap();
+        let collect = || {
+            signals::collect(dir.path(), &backend, &run, false, 10, || {
+                store.run_patterns("run")
+            })
+        };
+        collect().await.unwrap();
+        collect().await.unwrap();
+        let held = runtime.held_signals("run").unwrap().unwrap();
+        assert_eq!(held.latest["loss"], 2);
+        set(
+            &store,
+            "exp",
+            &etag(None),
+            None,
+            Some(&json!([{"regex": "^score (?P<score>\\d+)$"}])),
+            None,
+            &Source {
+                file: None,
+                patterns: Some("pattern.json"),
+                config: None,
+            },
+        )
+        .unwrap();
+
+        collect().await.unwrap();
+        let replaying = runtime.held_signals("run").unwrap().unwrap();
+        assert_eq!(replaying.generation, held.generation);
+        assert_eq!(replaying.progress().unwrap().done, Some(42.0));
+        assert!(replaying
+            .coverage
+            .reasons
+            .iter()
+            .any(|reason| reason == "rebuilding"));
+        for _ in 0..8 {
+            collect().await.unwrap();
+            if runtime.held_signals("run").unwrap().unwrap().generation != held.generation {
+                break;
+            }
+        }
+        let updated = runtime.held_signals("run").unwrap().unwrap();
+        assert_ne!(updated.generation, held.generation);
+        assert_eq!(updated.latest["score"].as_f64(), Some(3.0));
+    }
+
+    #[tokio::test]
     async fn saving_patterns_reopens_collection_for_an_ended_run_across_restart() {
         use crate::engine::view::{etag, set, Source};
 

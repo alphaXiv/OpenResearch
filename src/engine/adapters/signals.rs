@@ -291,10 +291,9 @@ async fn collect_from(
         .as_ref()
         .map_or(!config.patterns.is_empty(), |p| p.config_hash != hash);
     let native = if let Some(backend) = backend {
-        if matches!(
-            Key::of_handle(&run.handle),
-            Ok(Key::Local | Key::Api { .. })
-        ) && (!config.patterns.is_empty() || path.with_extension("config.json").try_exists()?)
+        let key = Key::of_handle(&run.handle);
+        if matches!(key, Ok(Key::Local | Key::Api { .. }))
+            && (!config.patterns.is_empty() || path.with_extension("config.json").try_exists()?)
         {
             // The shared scanner reads the applied config beside its checkpoint.
             configure(&path, &config)?;
@@ -302,10 +301,15 @@ async fn collect_from(
         if reconfigured {
             backend.configure_signals(run, &config).await?;
         }
-        backend
-            .signals(run, terminal, previous.as_ref())
-            .await?
-            .map(|snapshot| (backend, snapshot))
+        // The local scanner publishes directly. Stage its replay until it covers the old fold.
+        if matches!(key, Ok(Key::Local)) && reconfigured && previous.is_some() {
+            None
+        } else {
+            backend
+                .signals(run, terminal, previous.as_ref())
+                .await?
+                .map(|snapshot| (backend, snapshot))
+        }
     } else {
         None
     };
@@ -437,6 +441,9 @@ async fn collect_from(
     snapshot.configure(patterns.map(Arc::new));
     if !resume {
         snapshot.updated_at = folded_at;
+        if refolding {
+            snapshot.timing.started_ms = held.as_ref().and_then(|old| old.timing.started_ms);
+        }
         if let Some(cause) = previous_error {
             snapshot.extra.insert("collectionError".into(), cause);
         }
