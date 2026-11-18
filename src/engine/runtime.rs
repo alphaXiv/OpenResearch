@@ -854,11 +854,13 @@ impl Runtime {
             match due {
                 Ok(due) => {
                     let full = due.len() == 10;
-                    for run_id in &due {
-                        if let Err(error) = self.collect_finished(run_id).await {
+                    let runtime = self.as_ref();
+                    futures::future::join_all(due.iter().map(|run_id| async move {
+                        if let Err(error) = runtime.collect_finished(run_id).await {
                             eprintln!("orx up: run {run_id}: final collection: {error:#}");
                         }
-                    }
+                    }))
+                    .await;
                     if full
                         && self
                             .store()
@@ -3287,6 +3289,54 @@ mod tests {
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }
+    #[tokio::test(start_paused = true)]
+    async fn an_ended_rentals_signal_read_does_not_delay_another_release() {
+        let directory = crate::local::git::TemporaryDirectory::new("orx-rental-finish").unwrap();
+        let runtime = collector(directory.path());
+        let mut backends = Vec::new();
+        for id in ["a-slow", "b-fast"] {
+            let descriptor = crate::jobs::BackendDescriptor::parse(
+                &json!({"kind":"openresearch_job","namespace":"org","jobId":id}).to_string(),
+            )
+            .unwrap();
+            let handle = Handle::OpenResearch {
+                descriptor: Box::new(descriptor),
+            };
+            let mut run = crate::store::tests::run_fixture(id, "done", None);
+            run.backend_json = json!({"kind":"engine","handle":handle}).to_string();
+            let store = runtime.store().unwrap();
+            store.upsert_run(&run).unwrap();
+            store.queue_log_collection(id).unwrap();
+            store.checkpoint_log_collection(id).unwrap();
+            store.queue_signal_collection(id).unwrap();
+
+            let backend = Arc::new(Host::default());
+            backend.hang_signals.store(id == "a-slow", Ordering::SeqCst);
+            lock(&runtime.backends).insert(Key::of_handle(&handle).unwrap(), backend.clone());
+            backends.push(backend);
+        }
+
+        let mut events = runtime.engine.bus.subscribe();
+        let task = tokio::spawn(runtime.clone().collect_pending());
+        let first = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let super::super::bus::RunEvent::LogCollection { run_id } =
+                    events.recv().await.unwrap()
+                {
+                    break run_id;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        task.abort();
+        let _ = task.await;
+
+        assert_eq!(first, "b-fast");
+        assert!(backends[1].destroyed.load(Ordering::SeqCst));
+        assert!(!backends[0].destroyed.load(Ordering::SeqCst));
+    }
+
     #[tokio::test(start_paused = true)]
     async fn rental_live_at_eight_minutes_wakes_collection_after_seven_minute_failure() {
         let dir =
