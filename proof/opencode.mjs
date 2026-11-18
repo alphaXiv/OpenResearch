@@ -51,6 +51,9 @@ async function exercise(mode) {
     const state=async()=>{const r=await fetch(base+'/api/harnesses/opencode/snapshot');assert.equal(r.status,200);return r.json();};
     const initial=await state(); assert.equal(initial.installed,native,'unexpected preexisting OpenCode');
     const host=base.replace('http:','ws:'); ws=new WebSocket(host+'/api/harnesses/setup?harness=opencode&trigger=manual&action='+(native?'update':'install'),{headers:{Origin:base}});
+    // The app terminal answers ConPTY's cursor-position query, even when folded.
+    ws.binaryType='arraybuffer';let tail='';
+    ws.addEventListener('message',evt=>{if(typeof evt.data!=='string'){const chars=tail+Buffer.from(evt.data).toString('ascii');if(chars.includes('\x1b[6n'))ws.send(Buffer.from('\x1b[1;1R'));tail=chars.slice(-3);}});
     const frame=await limited(new Promise((ok,no)=>{ws.addEventListener('message',evt=>{if(typeof evt.data==='string'){const m=JSON.parse(evt.data);if(['complete','error'].includes(m.type))ok(m);}});ws.addEventListener('error',()=>no(Error('setup websocket failed')));ws.addEventListener('close',()=>no(Error('no terminal frame')));}),180000,'setup socket');
     assert.equal(injected,1);console.log(mode+': socket='+frame.type+' / npm tunnels='+tunnels);
     assert.equal(frame.type,recover?'complete':'error',JSON.stringify(frame).slice(0,450));
@@ -67,7 +70,7 @@ async function exercise(mode) {
       const expected=native?'native agent updater':asset?'managed agent copy':'managed release lookup';assert.ok(wire.errorExcerpt?.startsWith(expected),JSON.stringify(wire));
     }else if(native){assert.equal(wire.errorExcerpt,null);}
     const row={variant,sha,platform:process.platform+' '+os.release()+' '+os.arch(),mode,initiallyInstalled:initial.installed,setupFrame:frame.type,wire,installedVersion:version,npmTunnels:tunnels};
-    all.push(row);console.log(JSON.stringify(row));
+    all.push(row);fs.writeFileSync(path.join(dest,variant+'.json'),JSON.stringify(all,null,2));console.log(JSON.stringify(row));
   }finally{ws?.close();lines.close();app.kill();for(const s of sockets)s.destroy();server.closeAllConnections();server.close();}
 }
 for(const mode of (variant==='base'?['timeout-metadata','timeout-asset','refusal-metadata','refusal-asset','native']:variant==='fixed'?['timeout-metadata','timeout-asset']:['refusal-metadata','refusal-asset','native']))await exercise(mode);
