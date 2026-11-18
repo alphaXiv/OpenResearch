@@ -2708,8 +2708,8 @@ function TurnStatusRow({
   const errorMessage = cleanToolError(part.state?.error || "");
   const fixLabel = cause && FIX_LABEL[cause];
   const fix = fixLabel && input && failure?.fix(cause, input);
-  // Signing in sends the turn again; with the agent signed out, the composer offers that sign-in instead.
-  const waitsForSignIn = cause === "sign_in" && (fix || agent?.authState === "needsLogin");
+  // While the agent is signed out, only signing in, here or in the composer, sends the turn again.
+  const waitsForSignIn = cause === "sign_in" && agent?.authState === "needsLogin";
   const recover = onRecover && turnId && (action === "retry" || action === "continue") && cause !== "usage_limit" && !waitsForSignIn
     ? action
     : undefined;
@@ -7569,9 +7569,8 @@ export function ChatPanel({
       if (cause === "sign_in") {
         const agent = failedAgent(input);
         const action = parseRecoveryAction(input.recoveryAction);
-        // Signed in since, by any route, the turn only needs sending again.
-        if (agent?.authState !== "needsLogin") return undefined;
-        if (harnessKey(agent) === harnessKey(activeHarness) && composerSignIn) return undefined;
+        // A ready agent may still hold the token the turn saw rejected, so Sign in stays beside Retry.
+        if (agent && harnessKey(agent) === harnessKey(activeHarness) && composerSignIn) return undefined;
         return signIn(agent, () => { if (input.turnId && (action === "retry" || action === "continue")) void recoverFailedTurn(input.turnId, action); });
       }
       if (cause === "model_unavailable") return () => setModelPickerRequest((request) => request + 1);

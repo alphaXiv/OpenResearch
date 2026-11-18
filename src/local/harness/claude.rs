@@ -784,16 +784,50 @@ mod plan_tests {
         assert_eq!(read_plan(api_key, None).await, Read::NoPlan);
     }
 
+    /// A named pipe the test and a fake agent hand signals through, so neither waits on the clock.
+    #[cfg(unix)]
+    fn fifo(dir: &std::path::Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        let status = crate::process::command("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        path
+    }
+
+    /// What the fake agent writes into `fifo`; a writer that never comes fails the test.
+    #[cfg(unix)]
+    async fn read_fifo(fifo: &std::path::Path) -> String {
+        let fifo = fifo.to_path_buf();
+        tokio::time::timeout(
+            Duration::from_secs(60),
+            tokio::task::spawn_blocking(move || std::fs::read_to_string(fifo).unwrap()),
+        )
+        .await
+        .expect("the fake agent never wrote")
+        .unwrap()
+    }
+
+    #[cfg(unix)]
+    async fn write_fifo(fifo: &std::path::Path) {
+        let fifo = fifo.to_path_buf();
+        tokio::task::spawn_blocking(move || std::fs::write(fifo, "go\n").unwrap())
+            .await
+            .unwrap();
+    }
+
+    const NO_PLAN: &str = r#"{"type":"control_response","response":{"subtype":"success","request_id":"orx_control","response":{"rate_limits_available":false,"rate_limits":null}}}"#;
+
     #[cfg(unix)]
     #[tokio::test]
     async fn a_plan_read_lets_claude_finish_saving_its_sign_in() {
         let dir = crate::local::git::TemporaryDirectory::new("orx-claude-probe").unwrap();
-        let saved = dir.path().join("credentials");
+        let saved = fifo(dir.path(), "credentials");
         let fake = dir.path().join("claude");
-        let answer = r#"{"type":"control_response","response":{"subtype":"success","request_id":"orx_control","response":{"rate_limits_available":false,"rate_limits":null}}}"#;
         // Answers, then saves only once its input closes, as Claude Code finishes a refresh.
         let script = format!(
-            "#!/bin/sh\nread request\necho '{answer}'\ncat >/dev/null\necho refreshed > '{}'\n",
+            "#!/bin/sh\nread request\necho '{NO_PLAN}'\ncat >/dev/null\necho refreshed > '{}'\n",
             saved.display()
         );
         orx_test_support::write_executable(&fake, script, 0o755).unwrap();
@@ -801,46 +835,32 @@ mod plan_tests {
         assert_eq!(read_plan(fake, None).await, Read::NoPlan);
 
         // The answer comes back first; the child goes on to exit on its own.
-        let read_saved = || std::fs::read_to_string(&saved).unwrap_or_default();
-        for _ in 0..500 {
-            if read_saved() == "refreshed\n" {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        assert_eq!(read_saved(), "refreshed\n");
+        assert_eq!(read_fifo(&saved).await, "refreshed\n");
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn a_plan_read_given_up_on_still_lets_claude_finish_saving() {
         let dir = crate::local::git::TemporaryDirectory::new("orx-claude-cancel").unwrap();
-        let started = dir.path().join("started");
-        let saved = dir.path().join("credentials");
+        let started = fifo(dir.path(), "started");
+        let go = fifo(dir.path(), "go");
+        let saved = fifo(dir.path(), "credentials");
         let fake = dir.path().join("claude");
-        let answer = r#"{"type":"control_response","response":{"subtype":"success","request_id":"orx_control","response":{"rate_limits_available":false,"rate_limits":null}}}"#;
-        // Answers after the caller has stopped waiting, then saves once its input closes.
+        // Answers only after the caller has stopped waiting, then saves once its input closes.
         let script = format!(
-            "#!/bin/sh\nread request\ntouch '{}'\nsleep 0.3\necho '{answer}'\ncat >/dev/null\necho refreshed > '{}'\n",
+            "#!/bin/sh\nread request\necho started > '{}'\nread go < '{}'\necho '{NO_PLAN}'\ncat >/dev/null\necho refreshed > '{}'\n",
             started.display(),
+            go.display(),
             saved.display()
         );
         orx_test_support::write_executable(&fake, script, 0o755).unwrap();
 
         let read = tokio::spawn(read_plan(fake, None));
-        while !started.exists() {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        assert_eq!(read_fifo(&started).await, "started\n");
         read.abort();
+        write_fifo(&go).await;
 
-        let read_saved = || std::fs::read_to_string(&saved).unwrap_or_default();
-        for _ in 0..500 {
-            if read_saved() == "refreshed\n" {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        assert_eq!(read_saved(), "refreshed\n");
+        assert_eq!(read_fifo(&saved).await, "refreshed\n");
     }
 
     #[cfg(unix)]

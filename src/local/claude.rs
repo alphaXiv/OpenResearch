@@ -2542,23 +2542,18 @@ pub(crate) mod tests {
     async fn stopping_a_turn_interrupts_claude_without_waiting_for_it_to_finish() {
         let dir = crate::local::git::TemporaryDirectory::new("orx-claude-interrupt").unwrap();
         let stopped = dir.path().join("stopped");
-        let ready = dir.path().join("ready");
         let now = Instant::now();
         // Mid-turn, Claude Code keeps working after its input closes; only a signal stops it.
         let shell = format!(
-            "trap 'echo stopped > \"{}\"; exit 0' TERM; touch \"{}\"; while :; do sleep 0.05; done",
-            stopped.display(),
-            ready.display()
+            "trap 'echo stopped > \"{}\"; exit 0' TERM; echo ready; while :; do sleep 0.05; done",
+            stopped.display()
         );
         let client = test_client("busy", now, now, &shell).await;
+        let stdout = client.child.lock().await.stdout.take().unwrap();
+        let mut ready = String::new();
+        BufReader::new(stdout).read_line(&mut ready).await.unwrap();
         let host = ClaudeHost::new();
         install_test_client(&host, client.clone()).await;
-        for _ in 0..500 {
-            if ready.exists() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
 
         let started = std::time::Instant::now();
         host.interrupt_session("busy").await;

@@ -3754,12 +3754,17 @@ impl Store {
     }
 
     /// Each agent and account (`profile_id`) a chat on this machine ran a turn on. Seeded
-    /// chats, such as the demo's, never ran one.
+    /// chats, such as the demo's, never ran one. An agent a chat switched away from counts as
+    /// its own install, since a switch records the agent of its earlier messages but no account.
     pub fn chat_agents_used(&self) -> Result<Vec<(String, Option<String>)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT harness, profile_id FROM chat_sessions AS s
+            "SELECT harness, profile_id FROM chat_sessions AS s
              WHERE native_session_id IS NOT NULL
-                OR EXISTS (SELECT 1 FROM chat_turns WHERE session_id = s.id)",
+                OR EXISTS (SELECT 1 FROM chat_turns WHERE session_id = s.id)
+             UNION
+             SELECT m.native_harness, NULL FROM chat_messages AS m
+             JOIN chat_sessions AS s ON s.id = m.session_id
+             WHERE m.native_harness IS NOT NULL AND m.native_harness != s.harness",
         )?;
         let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -10864,6 +10869,11 @@ mod tests {
         account.profile_id = Some("claude-work".into());
         store.create_chat_session(&account).unwrap();
         store.conn.execute("INSERT INTO chat_turns (id, session_id, assistant_message_id, client_turn_id, request_hash, prepared_input, settings_json, state, delivery_state, created_at, updated_at) VALUES ('turn', 'account', 'assistant', 'ct', 'hash', 'task', '{}', 'failed', 'not_sent', 1, 1)", []).unwrap();
+        // Ran on Cursor, then switched to Codex: the switch stamps Cursor on its messages.
+        let mut switched = chat_session_fixture("switched");
+        switched.harness = "codex".into();
+        store.create_chat_session(&switched).unwrap();
+        store.conn.execute("INSERT INTO chat_messages (id, session_id, role, parts_json, created_at, native_harness) VALUES ('earlier', 'switched', 'user', '[]', 1, 'cursor')", []).unwrap();
 
         let mut used = store.chat_agents_used().unwrap();
         used.sort();
@@ -10872,6 +10882,7 @@ mod tests {
             [
                 ("claude-code".to_string(), Some("claude-work".to_string())),
                 ("codex".to_string(), None),
+                ("cursor".to_string(), None),
             ]
         );
         drop(store);

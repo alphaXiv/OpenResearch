@@ -118,7 +118,7 @@ test("searching the model picker narrows its signed-out agents too", async () =>
   assert.ok(!find(".model-menu button", m.harness_setup_login()));
 });
 
-test("a sign-out the agent has since recovered from offers Retry, not another sign-in", async () => {
+test("a sign-out whose agent now reads as signed in offers Retry beside Sign in", async () => {
   const recovery = {
     id: "turn-recovery", type: "tool", tool: "error",
     state: { status: "error", error: "Sign in with `claude auth login`, then re-check this agent.", input: { turnId: "t1", errorKind: "claude_signed_out", cause: "sign_in", recoveryAction: "retry", harness: "claude-code" } },
@@ -130,7 +130,8 @@ test("a sign-out the agent has since recovered from offers Retry, not another si
     harnesses: [codex, signedIn],
     routes: { ...commands, "POST /api/chat/sessions/s/turns/t1/recover": () => ({ turn: { existing: false } }) },
   });
-  assert.ok(!find(".turn-failure button", m.harness_setup_login()));
+  // A ready agent may still hold the token the turn saw rejected.
+  assert.ok(find(".turn-failure button", m.harness_setup_login()));
   await click(find(".turn-failure button", m.app_retry()));
   assert.equal(chat.requests.filter(({ request }) => request === "POST /api/chat/sessions/s/turns/t1/recover").length, 1);
 });
