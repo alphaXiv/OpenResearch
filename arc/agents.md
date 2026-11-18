@@ -27,6 +27,10 @@ through its CLI; profiles check theirs in parallel in the second pass. Adding,
 renaming or removing an account, provider or endpoint re-checks only the agent
 it changes.
 
+The registry lists saved launches and presets without searching for executables.
+The agent catalog hides presets whose launch matches a saved agent. Existing
+chats can still check and run either launch.
+
 **Plan limits come from the agents themselves.** For each Claude Code and Codex
 sign-in that may be on a subscription, the user's own and each profile's, one
 request answers: Claude's `get_usage` control request on a throwaway child in
@@ -139,6 +143,8 @@ The providers differ in shape, and the interface absorbs three:
 | resident child per chat | Claude Code, Codex, Antigravity, ACP agents | one request over a stdio protocol; events stream back |
 | resident server per chat | OpenCode | posts to `opencode serve` in the chat's worktree |
 | child per turn | Cursor, older Codex (`codex exec`) | a print-mode process resuming the native session by id |
+
+Setup checks and chats use the same ACP launcher. orx skips stdout lines that are not JSON, such as banners and notices, rather than answering each with a parse error that some agents exit on. A connection failure names the local log that holds the launch, exit observations, and the last of its stderr and skipped stdout.
 
 A resident agent restarts with its native session resumed when a setting it started with changes or when it crashes. Resident children also restart after an interrupt or a switch to another fork, and idle ones are released (`src/local/agent_lifecycle.rs`); the next message resumes them. A child with background work still running is not idle: Claude Code resumes on its own when a background task finishes, and orx records what it writes then as a turn with no user message; until then orx refuses to switch, retry or edit a fork, which would stop the child and land its reply on the wrong branch. An ACP agent counts as busy while a command it runs in a terminal orx opened for it, or one it started in a session of its own as agy does, has not exited, since agents report no end to a command between turns; a switch to another fork still restarts it and stops those commands. A task that never ends, such as a dev server, keeps its child until the chat stops or restarts it, on low-memory machines too. Stopping a resident child also stops the commands it started in their own sessions. Windows has no sessions to tell those commands apart, so there an ACP agent's own commands keep nothing and releasing it stops them.
 
