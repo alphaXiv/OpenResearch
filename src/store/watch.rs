@@ -330,6 +330,35 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    pub(crate) fn watch_auth_refusal(
+        &self,
+        harness: &str,
+        profile: Option<&str>,
+    ) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT revision FROM watch_auth_refusals WHERE harness = ?1 AND profile = ?2",
+                params![harness, profile.unwrap_or_default()],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    pub(crate) fn record_watch_auth_refusal(
+        &self,
+        harness: &str,
+        profile: Option<&str>,
+        revision: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO watch_auth_refusals (harness, profile, revision) VALUES (?1, ?2, ?3)
+             ON CONFLICT(harness, profile) DO UPDATE SET revision = excluded.revision",
+            params![harness, profile.unwrap_or_default(), revision],
+        )?;
+        Ok(())
+    }
+
     pub(crate) fn last_chat_watch_at(&self, chat: &str) -> Result<Option<i64>> {
         Ok(self.conn.query_row(
             "SELECT MAX(created_at) FROM watch_looks WHERE chat_session_id = ?1",
@@ -411,7 +440,7 @@ impl Store {
     pub(crate) fn run_watch_terminal_done(&self, run_id: &str) -> Result<bool> {
         Ok(self.conn.query_row(
             "SELECT COUNT(CASE WHEN r.result IS NULL OR r.result IN ('line', 'same', 'flag') THEN 1 END) > 0
-                    OR COUNT(*) >= ?2
+                    OR COUNT(CASE WHEN r.result IN ('error', 'interrupted') THEN 1 END) >= ?2
              FROM watch_look_runs r JOIN watch_looks l ON l.id = r.look_id
              WHERE r.run_id = ?1 AND l.kind = 'terminal' AND r.role = 'subject'",
             params![run_id, TERMINAL_TRIES],

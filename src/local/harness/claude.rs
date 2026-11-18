@@ -1090,7 +1090,7 @@ pub(crate) const CLAUDE_ENTRYPOINT: &str = "openresearch";
 /// Either credential Claude Code accepts. `ANTHROPIC_AUTH_TOKEN` is the one a
 /// custom `ANTHROPIC_BASE_URL` gateway uses, so detecting only the api key
 /// reports those working setups as signed out.
-const CLAUDE_CREDENTIAL_VARS: [&str; 2] = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
+pub(super) const CLAUDE_CREDENTIAL_VARS: [&str; 2] = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
 
 fn has_api_credential() -> bool {
     CLAUDE_CREDENTIAL_VARS
@@ -1147,8 +1147,11 @@ fn claude_result_reply(out: &[u8]) -> Result<OneShotReply> {
         )
     })?;
     let text = result["result"].as_str().unwrap_or_default().to_owned();
+    if result["error"] == "authentication_failed" {
+        return Err(super::OneShotAuthError.into());
+    }
     if result["is_error"] == true {
-        return Err(anyhow!("{}", super::one_line(&text, 300)));
+        return Err(super::one_shot_request_error(&super::one_line(&text, 300)));
     }
     let usage = &result["usage"];
     let input = [
@@ -1253,18 +1256,22 @@ async fn claude_one_shot_output(
     if !out.status.success() {
         // A JSON result says why in its own words.
         let said = serde_json::from_slice::<Value>(&out.stdout).ok();
+        if said
+            .as_ref()
+            .is_some_and(|said| said["error"] == "authentication_failed")
+        {
+            return Err(super::OneShotAuthError.into());
+        }
         if let Some(why) = said
             .as_ref()
             .and_then(|said| said["result"].as_str())
             .filter(|why| !why.trim().is_empty())
         {
-            return Err(anyhow!("{}", super::one_line(why, 300)));
+            return Err(super::one_shot_request_error(&super::one_line(why, 300)));
         }
         // `-p` prints request failures (bad model, signed out) on stdout; stderr is diagnostics.
-        return Err(super::one_shot_exit_error(
-            out.status,
-            &[&out.stdout, &out.stderr],
-        ));
+        let error = super::one_shot_exit_error(out.status, &[&out.stdout, &out.stderr]);
+        return Err(super::one_shot_request_error(&error.to_string()));
     }
     Ok(out.stdout)
 }

@@ -2535,3 +2535,66 @@ async fn a_fallback_flag_keeps_its_valid_count_even_with_an_overlong_sentence() 
     assert!(text.starts_with("**1**"), "{text}");
     assert!(!text.contains("count:"));
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_refused_sign_in_blocks_live_and_final_looks_until_credentials_change() {
+    if !crate::config::in_test_child(&["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]) {
+        return;
+    }
+    let dir = crate::config::home_dir().unwrap().join("claude-calls");
+    fake_claude(
+        &dir,
+        &[
+            "API Error: 401 Unauthorized",
+            r#"{"runs":{"r1":{"status":"ok","line":"Done."}}}"#,
+            "API Error: 401 Unauthorized",
+            r#"{"runs":{"r1":{"status":"ok","line":"Done."}}}"#,
+        ],
+    );
+    let store = Store::open().unwrap();
+    chat(&store, "chat", "claude-code");
+    let mut row = run(&store, "a", "Depth 6", "chat", LOG);
+    take(look(&store, "chat", "ceiling", &[("a", "r1")]))
+        .await
+        .unwrap();
+    let facts = run_facts(&store, &row).unwrap();
+    assert_eq!(facts["state"], "no_model", "{facts}");
+    assert!(matches!(
+        look_now(&store, &row),
+        Err(LookNow::NotWatched(_))
+    ));
+    let now = crate::store::now_ms();
+    row.status = "done".into();
+    row.ended_at = Some(now);
+    store.upsert_run(&row).unwrap();
+    pass(&mut State::default()).await.unwrap();
+    assert_eq!(calls(&dir), 1);
+    assert!(store.prepared_watch_looks("chat").unwrap().is_empty());
+
+    use crate::local::native_store::{claude_home, NativeStore};
+    let home = claude_home(NativeStore::Legacy);
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join(".credentials.json"), "new sign-in").unwrap();
+    take(look(&store, "chat", "terminal", &[("a", "r1")]))
+        .await
+        .unwrap();
+    assert_eq!(calls(&dir), 2);
+    assert!(store.run_watch_terminal_done("a").unwrap());
+    let other = run(&store, "b", "Depth 8", "chat", LOG);
+    take(look(&store, "chat", "terminal", &[("b", "r1")]))
+        .await
+        .unwrap();
+    assert!(!store.run_watch_terminal_done(&other.id).unwrap());
+    assert!(matches!(
+        look_now(&store, &other),
+        Err(LookNow::NotWatched(_))
+    ));
+
+    std::env::set_var("ANTHROPIC_API_KEY", "updated-test-key");
+    take(look(&store, "chat", "terminal", &[("b", "r1")]))
+        .await
+        .unwrap();
+    assert_eq!(calls(&dir), 4);
+    assert!(store.run_watch_terminal_done(&other.id).unwrap());
+}

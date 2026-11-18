@@ -670,6 +670,76 @@ pub struct OneShotUsage {
     pub cost_usd: Option<f64>,
 }
 
+pub(crate) fn sign_in_revision(harness: &str, profile: Option<&str>) -> Result<String> {
+    use crate::local::native_store::{claude_config_file, claude_home, codex_home, NativeStore};
+
+    use sha2::{Digest, Sha256};
+
+    let mut vars: Vec<&str> = match harness {
+        "claude-code" => claude::CLAUDE_CREDENTIAL_VARS.into(),
+        "codex" => vec!["OPENAI_API_KEY", "CODEX_API_KEY"],
+        _ => unreachable!("only Claude Code and Codex take looks"),
+    };
+    let custom_key;
+    let files = match (harness, profile) {
+        ("claude-code", None) => vec![
+            claude_home(NativeStore::Legacy).join(".credentials.json"),
+            claude_config_file(),
+        ],
+        ("claude-code", Some(id)) => {
+            let home = crate::local::agent_profiles::home(id, harness)?;
+            vec![home.join(".credentials.json"), home.join(".claude.json")]
+        }
+        ("codex", profile) => {
+            let home = profile
+                .map(|id| crate::local::agent_profiles::home(id, harness))
+                .transpose()?
+                .unwrap_or_else(|| codex_home(NativeStore::Legacy));
+            let config = home.join("config.toml");
+            custom_key = codex::provider_env_key(&config);
+            vars.extend(custom_key.as_deref());
+            vec![home.join("auth.json"), config]
+        }
+        _ => unreachable!("only Claude Code and Codex take looks"),
+    };
+    let mut times = Vec::new();
+    for file in files {
+        match std::fs::metadata(&file).and_then(|metadata| metadata.modified()) {
+            Ok(time) => times.push(Some(time)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => times.push(None),
+            Err(error) => return Err(anyhow!("Couldn't inspect {}: {error}", file.display())),
+        }
+    }
+    let configured: Vec<_> = vars.into_iter().map(detect::api_key).collect();
+    let revision = serde_json::to_vec(&(times, configured))?;
+    Ok(format!("{:x}", Sha256::digest(revision)))
+}
+
+#[derive(Debug)]
+pub(crate) struct OneShotAuthError;
+
+impl std::fmt::Display for OneShotAuthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Sign-in was refused")
+    }
+}
+
+impl std::error::Error for OneShotAuthError {}
+
+fn one_shot_request_error(detail: &str) -> Error {
+    let lower = detail.trim().to_ascii_lowercase();
+    if lower.starts_with("not logged in")
+        || lower.starts_with("invalid api key")
+        || lower.starts_with("api error: 401")
+        || lower.contains("unexpected status 401")
+        || lower.contains("refresh token was already used")
+    {
+        OneShotAuthError.into()
+    } else {
+        anyhow!("{detail}")
+    }
+}
+
 /// A failed one-shot child's message from the first of `outputs` it wrote to,
 /// on one line so a dumped model catalog stays readable in the log.
 pub(crate) fn one_shot_exit_error(status: std::process::ExitStatus, outputs: &[&[u8]]) -> Error {

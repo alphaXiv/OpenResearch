@@ -14,7 +14,9 @@ use serde_json::{json, Map, Value};
 
 use super::{ByteRange, LogPage, Phase};
 use crate::error::{anyhow, Result};
-use crate::local::harness::{OneShot, OneShotQuality, OneShotUsage};
+use crate::local::harness::{
+    sign_in_revision, OneShot, OneShotAuthError, OneShotQuality, OneShotUsage,
+};
 use crate::store::{LookResult, Store, StoredChatSession, StoredRun, WatchLook, WatchLookRun};
 
 /// Ceilings on silence after a stage starts, in seconds: a look at least this often while the run
@@ -62,6 +64,7 @@ pub(crate) enum Watching {
     NeedsPick,
     /// It has one that cannot be used now, for this reason.
     Unavailable(String),
+    NeedsSignIn(String),
     /// Run watching is turned off in Settings.
     Off,
     /// No chat follows the run, so there is no chat to watch it from.
@@ -73,7 +76,7 @@ impl Watching {
         match self {
             Self::Selected { .. } => "on",
             Self::NeedsPick => "needs_pick",
-            Self::Unavailable(_) => "no_model",
+            Self::Unavailable(_) | Self::NeedsSignIn(_) => "no_model",
             Self::Off => "off",
             Self::Unfollowed => "none",
         }
@@ -136,6 +139,13 @@ pub(crate) fn watching_model(store: &Store, chat: &StoredChatSession) -> Result<
             "{} cannot take a look without tools",
             agent.name()
         )));
+    }
+    if matches!(harness.as_str(), "claude-code" | "codex") {
+        if let Some(rejected) = store.watch_auth_refusal(&harness, profile.as_deref())? {
+            if rejected == sign_in_revision(&harness, profile.as_deref())? {
+                return Ok(Watching::NeedsSignIn(agent.name().into()));
+            }
+        }
     }
     match harness.as_str() {
         "claude-code" => Ok(Watching::Selected {
@@ -632,7 +642,12 @@ fn spawn_looks(state: &mut State, chat: String) {
             if let Err(error) = take(id).await {
                 eprintln!("orx up: watcher: look {id}: {error:#}");
                 let failed = Store::open().and_then(|store| {
-                    let results = unanswered(&store.watch_look_runs(id)?, "error");
+                    let result = if error.is::<OneShotAuthError>() {
+                        "auth_error"
+                    } else {
+                        "error"
+                    };
+                    let results = unanswered(&store.watch_look_runs(id)?, result);
                     store.finish_watch_look(
                         id,
                         "error",
@@ -1885,6 +1900,9 @@ fn not_watched(watching: &Watching) -> String {
             "This chat's agent has no watching model, so its runs are not watched.".into()
         }
         Watching::Unavailable(why) => format!("This run is not watched: {why}."),
+        Watching::NeedsSignIn(agent) => {
+            format!("Sign in to {agent} on this workspace to resume watching.")
+        }
         Watching::Unfollowed => "No chat follows this run, so nothing watches it.".into(),
         Watching::Selected { .. } => String::new(),
     }
@@ -2020,6 +2038,9 @@ async fn take(id: i64) -> Result<()> {
         ..
     } = &watching
     else {
+        if matches!(watching, Watching::NeedsSignIn(_)) {
+            return Err(OneShotAuthError.into());
+        }
         return Err(anyhow!("{}", not_watched(&watching)));
     };
     let mut logs = BTreeMap::new();
@@ -2277,6 +2298,7 @@ async fn take(id: i64) -> Result<()> {
     let mut correction = String::new();
     let mut sent = Vec::new();
     let mut failure = None;
+    let mut auth_failed = false;
     for attempt in ["look", "retry"] {
         let fixed = digest::SYSTEM.len() + DIGEST_PREAMBLE.len() + correction.len();
         let digest = digest::build(&shared, &digest_runs, digest::room(fixed));
@@ -2288,9 +2310,19 @@ async fn take(id: i64) -> Result<()> {
             ));
             break;
         }
+        let revision = sign_in_revision(harness, profile.as_deref())?;
         let allowed = {
             let store = Store::open()?;
             let tx = store.begin_immediate()?;
+            if store
+                .watch_auth_refusal(harness, profile.as_deref())?
+                .as_deref()
+                == Some(&revision)
+            {
+                auth_failed = true;
+                failure = Some(not_watched(&Watching::NeedsSignIn(agent.name().into())));
+                break;
+            }
             let allowed = if sent.is_empty() {
                 store.watch_look_sent(id)?
             } else {
@@ -2320,10 +2352,17 @@ async fn take(id: i64) -> Result<()> {
         let answer = match answer {
             Ok(answer) => answer,
             Err(error) => {
-                failure = Some(format!(
-                    "{} could not take this {attempt}: {error:#}",
-                    agent.name()
-                ));
+                auth_failed = error.is::<OneShotAuthError>();
+                failure = Some(if auth_failed {
+                    Store::open()?.record_watch_auth_refusal(
+                        harness,
+                        profile.as_deref(),
+                        &revision,
+                    )?;
+                    not_watched(&Watching::NeedsSignIn(agent.name().into()))
+                } else {
+                    format!("{} could not take this {attempt}: {error:#}", agent.name())
+                });
                 break;
             }
         };
@@ -2417,10 +2456,13 @@ async fn take(id: i64) -> Result<()> {
             }
             Some(reply::Answer::Same) => ("same", last_template.clone()),
             Some(reply::Answer::Silent) => ("line", None),
+            None if auth_failed => ("auth_error", None),
             None => ("error", None),
         };
         let cursor = match (result, read_log) {
-            ("error", _) | (_, Err(_)) => last.map_or(Value::Null, |(_, row)| row.cursor.clone()),
+            ("error" | "auth_error", _) | (_, Err(_)) => {
+                last.map_or(Value::Null, |(_, row)| row.cursor.clone())
+            }
             (_, Ok(read)) => {
                 let mut families: Vec<String> = read.families.iter().cloned().collect();
                 for line in &read.lines {
@@ -2525,7 +2567,7 @@ async fn take(id: i64) -> Result<()> {
                 true,
             )?);
         }
-        let basis = if result == "error" {
+        let basis = if matches!(result, "error" | "auth_error") {
             last.map_or(Value::Null, |(_, row)| row.basis.clone())
         } else {
             basis_of(run, template.as_deref(), false)
@@ -2571,7 +2613,10 @@ async fn take(id: i64) -> Result<()> {
         (Some(failure), Some(rejected)) => Some(format!("{failure} {rejected}")),
         (failure, rejected) => failure.or(rejected),
     };
-    let state = if results.iter().all(|r| r.result == "error") {
+    let state = if results
+        .iter()
+        .all(|r| matches!(r.result.as_str(), "error" | "auth_error"))
+    {
         "error"
     } else {
         "done"
@@ -2925,6 +2970,13 @@ fn read_facts(
         Watching::Selected { label, .. } => (Some(label.clone()), "on", None),
         Watching::Unfollowed => (None, "none", None),
         Watching::Unavailable(why) => (None, watching.state(), Some(why.clone())),
+        Watching::NeedsSignIn(agent) => (
+            None,
+            watching.state(),
+            Some(format!(
+                "Sign in to {agent} on this workspace to resume watching"
+            )),
+        ),
         other => (None, other.state(), Some(not_watched(other))),
     };
     let with =

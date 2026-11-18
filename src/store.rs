@@ -1431,6 +1431,12 @@ impl Store {
                 PRIMARY KEY(look_id, run_id)
             );
             CREATE INDEX IF NOT EXISTS idx_watch_look_runs_run ON watch_look_runs(run_id, look_id);
+            CREATE TABLE IF NOT EXISTS watch_auth_refusals (
+                harness TEXT NOT NULL,
+                profile TEXT NOT NULL,
+                revision TEXT NOT NULL,
+                PRIMARY KEY (harness, profile)
+            );
             CREATE TABLE IF NOT EXISTS watch_counts (
                 run_id TEXT NOT NULL,
                 pattern TEXT NOT NULL,

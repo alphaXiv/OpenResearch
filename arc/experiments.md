@@ -399,9 +399,10 @@ minutes, then the experiment's `maxGapS`) bounds the silence while the run keeps
 printing; with nothing new there is no look. Looks a change brings keep the
 chat's `minGapS` between them and never outnumber the ladder's points since the
 oldest run started. A run gets one last look when it ends, shared with siblings
-ending within a minute; one that fails or is interrupted is taken once more,
-after the chat's `minGapS`, and a second failure stands in the journal as the
-run's last look.
+ending within a minute. The oldest ready run opens that window; a newer finish
+cannot extend it. A failed or interrupted final look is taken once more after
+the retry gap. A refused sign-in blocks looks on that account until its local
+sign-in or configured credential changes and leaves the retry budget available.
 
 A look's request, system prompt and digest together, is held to 4,096 tokens,
 counted as two bytes a token, and never past 16 KiB; so is its retry, with the

@@ -1204,6 +1204,10 @@ impl CustomProvider {
     }
 }
 
+pub(super) fn provider_env_key(config: &Path) -> Option<String> {
+    parse_custom_provider(&std::fs::read_to_string(config).ok()?)?.env_key
+}
+
 /// The active provider, when it is a custom one that bypasses OpenAI auth.
 /// `None` means first-party detection (auth.json) applies.
 fn parse_custom_provider(raw: &str) -> Option<CustomProvider> {
@@ -1469,8 +1473,9 @@ async fn codex_exec_one_shot(
     })
     .await??;
     match (status.success(), last, error) {
+        (_, _, Some(error)) if error.is::<super::OneShotAuthError>() => Err(error),
         (true, Some(text), _) => Ok(OneShotReply { text, usage }),
-        (_, _, Some(message)) => Err(anyhow!("{message}")),
+        (_, _, Some(error)) => Err(error),
         (true, None, None) => Err(anyhow!("returned no reply")),
         (false, _, None) => Err(anyhow!("{status}")),
     }
@@ -1522,7 +1527,7 @@ fn exec_line_usage(line: &str) -> Option<OneShotUsage> {
 
 /// A `codex exec --json` line's turn error, with the provider's message
 /// unwrapped from the JSON body Codex embeds in it.
-fn exec_line_error(line: &str) -> Option<String> {
+fn exec_line_error(line: &str) -> Option<crate::error::Error> {
     let event = serde_json::from_str::<Value>(line).ok()?;
     let message = match event.get("type").and_then(Value::as_str)? {
         "error" => event.get("message"),
@@ -1531,10 +1536,15 @@ fn exec_line_error(line: &str) -> Option<String> {
     }?
     .as_str()?;
     let nested = serde_json::from_str::<Value>(message).ok();
+    if nested.as_ref().is_some_and(|body| {
+        body["status"] == 401 || body["error"]["type"] == "authentication_error"
+    }) {
+        return Some(super::OneShotAuthError.into());
+    }
     let inner = nested
         .as_ref()
-        .and_then(|body| body.get("error")?.get("message")?.as_str());
-    Some(inner.unwrap_or(message).to_string())
+        .and_then(|body| body["error"]["message"].as_str());
+    Some(super::one_shot_request_error(inner.unwrap_or(message)))
 }
 
 /// One `codex exec --json` stdout line → its agent message text, if it carries
@@ -6922,13 +6932,20 @@ requires_openai_auth = false
             exec_line_error(
                 r#"{"type":"turn.failed","error":{"message":"{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'gpt-x' model is not supported when using Codex with a ChatGPT account.\"}}"}}"#
             )
-            .as_deref(),
+            .map(|error| error.to_string()).as_deref(),
             Some(unsupported)
         );
         assert_eq!(
-            exec_line_error(r#"{"type":"error","message":"stream disconnected"}"#).as_deref(),
+            exec_line_error(r#"{"type":"error","message":"stream disconnected"}"#)
+                .map(|error| error.to_string())
+                .as_deref(),
             Some("stream disconnected")
         );
+        let rejected = exec_line_error(
+            r#"{"type":"turn.failed","error":{"message":"{\"status\":401,\"error\":{\"message\":\"The credentials were refused\"}}"}}"#,
+        )
+        .unwrap();
+        assert!(rejected.is::<super::super::OneShotAuthError>());
         // A metadata warning rides an item, not a turn error.
         assert!(exec_line_error(
             r#"{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Model metadata not found"}}"#
