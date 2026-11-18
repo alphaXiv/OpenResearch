@@ -652,6 +652,8 @@ export interface UpdateStatus {
   canRestart: boolean;
   /** Per-process id: changes when the server has relaunched. */
   instance: string;
+  /** This build, named the way `installedVersion` names a target. */
+  build: string;
 }
 
 export interface InstalledCli {

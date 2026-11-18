@@ -14,4 +14,5 @@
 /* The Windows app, where the page draws the caption buttons at the top-right. */
 @custom-variant win-titlebar (&:where(.win-titlebar *));
 @source "../index.html";
+@source "../public/update-overlay.js";
 @source ".";

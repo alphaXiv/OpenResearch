@@ -73,6 +73,10 @@ How an update applies depends on the install (`src/updates.rs`, `src/updates/`, 
 
 **Channels.** The desktop apps follow stable releases (`v1.2.3`) or canary builds (`canary-YYYYMMDD.N`). A build moves to a canary, or from a canary to stable, only when the target's history contains its own commit, so a switch never moves an install backward. Switching is refused while an installed update waits for a restart.
 
+## Keeping the window through an update
+
+**An update never closes the window.** The page that restarts the server into an update covers itself with an overlay that hides the page entirely, then reloads under it once the next server answers. WebKit keeps showing the old page until the new document first paints, and the next build's `index.html` draws the same overlay from a record in session storage before that paint, so the swap never shows; the next build's app then takes the overlay down, or says the update did not install and that it will try again later. A dialog drawn by the app's own code would come too late and leave a frame of bare background. [FROZEN.md](../src/commands/app/FROZEN.md) holds what each build must keep doing for the next.
+
 ## The build channel
 
 A build is **production** only when it is an official release or canary built in the project's own GitHub Actions; every other build is **development**. `build.rs` enforces this and requires production builds to embed `orx-host`. Only production builds send telemetry and install released binaries on remote machines. A locally built desktop app never replaces itself with a release.

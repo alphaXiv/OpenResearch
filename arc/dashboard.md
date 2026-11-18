@@ -95,7 +95,7 @@ Blocking work is any API request whose response is still being sent, a setup or 
 2. If blocking work remains, reopen admission and try again later.
 3. Commit. Admission never reopens and no new turn starts, so nothing begins on old code that a new process would have to adopt.
 4. Hand off: no kept child stops, turns that resume are let go as their last checkpoint left them, the rest stop as for a quit, and leases are released. Gateways close, the install lock is released, and any deferred update installs. A failed install relaunches on the current version and backs off instead of looping.
-5. Announce the relaunch, so the CLI waits for the next server rather than starting one, and relaunch. The page polls update status until `instance` changes, then reloads.
+5. Announce the relaunch, so the CLI waits for the next server rather than starting one, and relaunch. The page that asked polls update status until `instance` changes, then reloads under the update overlay ([desktop](desktop.md#keeping-the-window-through-an-update)); every other page reloads once update status reports another `build`.
 
 Reopening into another data directory is a restart without a successor for its children: it stops them as a quit does.
 

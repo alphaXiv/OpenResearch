@@ -7,10 +7,13 @@ import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { RefreshCw, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { type Changes, type UpdateStatus } from "../api";
+import type { Workspace } from "../workspace";
 import { getLocale } from "../paraglide/runtime.js";
 import { mutRestartApp } from "../queries/settings";
 
+import { EscapeScope } from "./EscapeScope";
 import { Button, IconButton, Spinner } from "./ui";
 
 export interface UpdateState {
@@ -96,6 +99,15 @@ export function useRestartApp(status: UpdateStatus | null): RestartState {
 
       setRestarting(true);
       setError(null);
+      const target = status?.installedVersion;
+      if (status && target) {
+        window.orxUpdateOverlay?.begin({
+          from: status.build,
+          to: target,
+          title: m.update_overlay_applying_title(),
+          body: m.update_overlay_applying_body({ version: versionLabel(target) }),
+        });
+      }
       try {
         await mutRestartApp.runAsHeadlessPromise(workspace, agents.length > 0, {});
         if (retired()) return;
@@ -112,6 +124,7 @@ export function useRestartApp(status: UpdateStatus | null): RestartState {
         }
         throw new Error(m.update_banner_restart_timed_out());
       } catch (e) {
+        window.orxUpdateOverlay?.end();
         if (retired()) return;
         setError(e instanceof Error ? e.message : String(e));
         setRestarting(false);
@@ -119,6 +132,50 @@ export function useRestartApp(status: UpdateStatus | null): RestartState {
     })();
   };
   return { restarting, error, restart };
+}
+
+const versionLabel = (version: string) => ltr(/^\d/.test(version) ? `v${version}` : version);
+
+/** Reloads the page once the server runs another build, and finishes the overlay a page
+ *  restarting into an update left: gone when the update took, a notice when it didn't. */
+export function UpdateHandoff({ workspace }: { workspace: Workspace }) {
+  const { data: status } = useQuery(workspace.queries.getUpdateStatusQuery());
+  const build = useRef<string | null>(null);
+  const [unchanged, setUnchanged] = useState<HTMLElement | null>(null);
+
+  useEffect(() => {
+    if (!status) return;
+    if (build.current === null) {
+      build.current = status.build;
+      const overlay = window.orxUpdateOverlay;
+      const record = overlay?.pending();
+      if (!overlay || !record) return;
+      if (status.build !== record.from) {
+        overlay.end();
+        return;
+      }
+      overlay.show({
+        title: m.update_overlay_unchanged_title(),
+        body: m.update_overlay_unchanged_body({ current: versionLabel(record.from), version: versionLabel(record.to) }),
+        busy: false,
+      });
+      setUnchanged(overlay.actions());
+    } else if (status.build !== build.current) {
+      window.location.reload();
+    }
+  }, [status]);
+
+  if (!unchanged) return null;
+  const close = () => {
+    window.orxUpdateOverlay?.end();
+    setUnchanged(null);
+  };
+  return createPortal(
+    <EscapeScope onEscape={close}>
+      <Button type="button" variant="primary" autoFocus onClick={close}>{m.update_overlay_close()}</Button>
+    </EscapeScope>,
+    unchanged,
+  );
 }
 
 /** Shown once a newer version is installed, or held back until this server
@@ -137,7 +194,7 @@ export function UpdateBanner({ status, hasSidebar = false }: { status: UpdateSta
 
   const canary = status?.installedTag?.startsWith("canary-");
   const changes = describeChanges(status?.changes ?? null);
-  const label = ltr(version.startsWith("v") ? version : `v${version}`);
+  const label = versionLabel(version);
 
   return (
     <div

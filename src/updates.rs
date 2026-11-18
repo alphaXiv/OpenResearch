@@ -1425,6 +1425,8 @@ pub struct UpdateStatus {
     /// Identifies this server process, so a client can tell a relaunched server
     /// from the one it was talking to even when both report the same version.
     pub instance: &'static str,
+    /// This build: its release tag for a canary, its version otherwise, as `installed_version` names a target.
+    pub build: &'static str,
 }
 
 /// Installed on disk or held back for this restart: either way a restart is what moves to it.
@@ -1483,6 +1485,7 @@ pub fn status() -> UpdateStatus {
         restart_required: restart_target.is_some(),
         can_restart: true,
         instance: instance_id(),
+        build: current_build_id(),
         installed_tag: restart_target
             .as_ref()
             .and_then(|(_, tag)| (!tag.is_empty()).then(|| tag.to_string())),
