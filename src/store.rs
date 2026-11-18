@@ -458,7 +458,9 @@ pub fn public_backend(value: &str, launch: Option<&LaunchSpec>) -> Option<serde_
                     fields.insert(field, value);
                 }
             }
-        } else if let Some(launch) = launch {
+        }
+        // A box's descriptor keeps where it runs, not what was rented; the launch says that.
+        if let Some(launch) = launch {
             let options = &launch.options;
             let directives = &options["directives"];
             let cpus = directives["cpus-per-task"]
@@ -475,7 +477,8 @@ pub fn public_backend(value: &str, launch: Option<&LaunchSpec>) -> Option<serde_
                 ("mem", directives["mem"].clone()),
             ];
             for (field, value) in derived {
-                if !value.is_null() {
+                let open = fields.get(field).is_none_or(|was| was == "engine");
+                if !value.is_null() && open {
                     fields.insert(field.into(), value);
                 }
             }
@@ -7367,10 +7370,14 @@ impl Store {
             .exit_code
             .map(|code| code.to_string())
             .unwrap_or_else(|| "unavailable".into());
-        let duration = run
-            .ended_at
-            .map(|ended| format!("{} ms", ended.saturating_sub(run.created_at).max(0)))
-            .unwrap_or_else(|| "unavailable".into());
+        let view = crate::plane::Run::with_store_state(self, run)?;
+        let duration = match (view.never_started(), run.ended_at) {
+            (true, _) => "none, the run never started".into(),
+            (false, Some(_)) => {
+                format!("{} ms", crate::local::run_duration_ms(run, view.started_at))
+            }
+            (false, None) => "unavailable".into(),
+        };
         let cancel_reason = run
             .cancel_reason
             .as_deref()
@@ -7378,13 +7385,20 @@ impl Store {
         let result = run
             .result_markdown
             .as_deref()
-            .filter(|text| !text.trim().is_empty());
+            .filter(|text| !text.trim().is_empty())
+            .map(|text| {
+                if run.status == "failed" {
+                    crate::plane::reason_words(text)
+                } else {
+                    text.to_owned()
+                }
+            });
         let reason = match (cancel_reason, result) {
             (Some(cancel), Some(result)) => Some(format!("{cancel} {result}")),
             (None, None) if run.status == "failed" => evidence
                 .last_error
                 .map(|line| format!("Last error in the log: `{line}`")),
-            (cancel, result) => cancel.or(result).map(str::to_owned),
+            (cancel, result) => cancel.map(str::to_owned).or(result),
         }
         .map_or_else(String::new, |reason| format!("Reason: {reason}\n"));
         let mut facts = String::new();
@@ -7407,7 +7421,6 @@ impl Store {
             facts.push_str(&format!("Stopped by: {actor}.\n"));
         }
         facts.push_str(&evidence.signals);
-        let view = crate::plane::Run::with_store_state(self, run)?;
         let status = view.display_status();
         Ok(format!(
             "[orx] Run `{}` finished with status **{}**.\nExit code: {code}\nDuration: {duration}\n{reason}{facts}\nRecent log:\n{tail}",
@@ -7526,7 +7539,7 @@ fn shown_runs_sql() -> String {
                 (SELECT COUNT(*) FROM runs o WHERE o.experiment_id = r.experiment_id),
                 r.id, r.experiment_id, r.project_id, r.status, r.backend_json, r.command,
                 r.created_at, r.updated_at, r.ended_at, r.exit_code, r.commit_sha,
-                CASE WHEN r.status = 'lost' THEN r.result_markdown END,
+                CASE WHEN r.status IN ('failed', 'lost') THEN r.result_markdown END,
                 r.cancel_requested, r.chat_session_id, r.cancel_reason
          FROM together a
          JOIN runs r ON r.id = a.run
@@ -8171,6 +8184,66 @@ pub(crate) mod tests {
         run.status = "done".into();
         let body = store.terminal_notice_body(&run).unwrap();
         assert!(body.contains("\nReason: Killed by signal 15.\n"));
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_run_that_never_started_tells_the_agent_why_in_words_and_runs_no_clock() {
+        let (dir, store) = engine_fixture();
+        let mut run = run_fixture("unstarted", "failed", Some("owner"));
+        run.created_at = 1_000;
+        run.ended_at = Some(14_000);
+        run.result_markdown = Some(
+            r#"Request to /sandboxes failed (400 Bad Request): {"error":{"message":"No offer available for L40S × 1 with ≥100 GB disk. Try a different configuration."}}"#.into(),
+        );
+        store.upsert_run(&run).unwrap();
+        let body = store.terminal_notice_body(&run).unwrap();
+        assert!(
+            body.contains("\nDuration: none, the run never started\n"),
+            "{body}"
+        );
+        let reason = "There was no L40S free to rent. Try another GPU, or launch again.";
+        assert!(body.contains(&format!("\nReason: {reason}\n")), "{body}");
+        let view = crate::plane::Run::from_store(&store, &run).unwrap();
+        assert!(view.never_started());
+        assert_eq!(view.failure_detail(), Some(format!("reason: {reason}")));
+        store
+            .insert_run_notice(&run.id, "owner", TERMINAL, TERMINAL, &body, 14_000)
+            .unwrap();
+        let shown = store
+            .chat_shown_runs()
+            .unwrap()
+            .into_iter()
+            .find(|shown| shown.session_id == "owner" && shown.run.id == run.id)
+            .unwrap();
+        assert_eq!(shown.run.result_markdown, run.result_markdown);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_run_is_timed_from_its_start_not_its_launch() {
+        let (dir, store) = engine_fixture();
+        let mut run = run_fixture("started", "running", None);
+        run.created_at = 1_000;
+        store.upsert_run(&run).unwrap();
+        assert!(store
+            .set_engine_phase(
+                "started",
+                "running",
+                "failed",
+                Some(64_000),
+                Some(1),
+                Some(4_000)
+            )
+            .unwrap());
+        let run = store.get_run("started").unwrap().unwrap();
+        let body = store.terminal_notice_body(&run).unwrap();
+        assert!(body.contains("\nDuration: 60000 ms\n"), "{body}");
+        let view = crate::plane::Run::from_store(&store, &run).unwrap();
+        assert!(!view.never_started());
+        assert_eq!(view.duration_secs, 60);
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -10574,6 +10647,23 @@ pub(crate) mod tests {
         assert!(!store.log_collection_pending("late").unwrap());
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_rented_box_keeps_the_gpu_it_was_launched_with() {
+        let launch = LaunchSpec {
+            kind: "openresearch_job".into(),
+            target: Some("org".into()),
+            options: serde_json::json!({"flavor": "l40s", "timeout_seconds": 7200}),
+        };
+        let stored = r#"{"kind":"engine","jobId":"box","handle":{"type":"OpenResearch","descriptor":{"kind":"openresearch_job","namespace":"org","jobId":"box","sshHost":"10.0.0.1"}}}"#;
+        let public = public_backend(stored, Some(&launch)).unwrap();
+        assert_eq!(public["kind"], "openresearch_job");
+        assert_eq!(public["flavor"], "l40s");
+        assert_eq!(public["sshHost"], "10.0.0.1");
+        let unlaunched = public_backend(r#"{"kind":"engine"}"#, Some(&launch)).unwrap();
+        assert_eq!(unlaunched["kind"], "openresearch_job");
+        assert_eq!(unlaunched["flavor"], "l40s");
     }
 
     #[test]

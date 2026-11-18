@@ -128,7 +128,8 @@ impl Api {
                     .as_ref()
                     .is_some_and(|state| state.cancel_accepted_at.is_some()));
         let mut value = serde_json::to_value(run)?;
-        value["startedAt"] = json!(state.as_ref().and_then(|state| state.started_at));
+        let started_at = state.as_ref().and_then(|state| state.started_at);
+        value["startedAt"] = json!(started_at);
         let launch = state.as_ref().and_then(|state| state.launch.as_ref());
         if let Some(backend) = crate::store::public_backend(&run.backend_json, launch) {
             value["backendJson"] = json!(backend.to_string());
@@ -148,7 +149,7 @@ impl Api {
         value["host"] = json!(super::run_host(&self.store(), run)?);
         value["cancelling"] = json!(cancelling);
         value["cancelError"] = json!(self.engine.cancel_error(&run.id));
-        value["durationSecs"] = json!(crate::local::run_duration_secs(run));
+        value["durationSecs"] = json!(crate::local::run_duration_ms(run, started_at) / 1000);
         value["updatedDisplay"] = json!(crate::local::fmt_ago(run.updated_at));
         value["monitor"] = json!(super::run_monitor_summary(&self.store(), run));
         value["outcome"] = json!(super::run_outcome(&self.store(), run));

@@ -33,6 +33,10 @@ pub struct Run {
     /// For a failed run that recorded no message, the line in its log that says why.
     #[serde(default)]
     pub log_error: Option<String>,
+    #[serde(default)]
+    pub started_at: Option<i64>,
+    #[serde(default)]
+    pub exit_code: Option<i64>,
 }
 
 impl From<&StoredRun> for Run {
@@ -50,11 +54,13 @@ impl From<&StoredRun> for Run {
             cancel_error: None,
             host: None,
             commit_sha: run.commit_sha.clone(),
-            duration_secs: crate::local::run_duration_secs(run),
+            duration_secs: crate::local::run_duration_ms(run, None) / 1000,
             updated_display: crate::local::fmt_ago(run.updated_at),
             result_markdown: run.result_markdown.clone(),
             cancel_reason: run.cancel_reason.clone(),
             log_error: None,
+            started_at: None,
+            exit_code: run.exit_code,
         }
     }
 }
@@ -89,6 +95,8 @@ impl Run {
             run.contact = state.contact;
             run.cancel_unconfirmed = state.cancel_unconfirmed;
             run.waiting_reason = state.waiting_reason;
+            run.started_at = state.started_at;
+            run.duration_secs = crate::local::run_duration_ms(stored, state.started_at) / 1000;
         }
         run.cancel_error = crate::commands::up::api_v2::cancel_error(&stored.id);
         run.host = crate::commands::up::run_host(store, stored)?;
@@ -107,6 +115,11 @@ impl Run {
             "contact: {contact}, since {}: {cause}",
             crate::telemetry::iso8601_utc(*since)
         ))
+    }
+
+    /// Ended before it ran a command: nothing started it and nothing exited.
+    pub fn never_started(&self) -> bool {
+        self.status == "failed" && self.started_at.is_none() && self.exit_code.is_none()
     }
 
     pub fn waiting_detail(&self) -> Option<String> {
@@ -198,7 +211,7 @@ impl Run {
             return None;
         }
         match self.result_markdown.as_deref().map(str::trim) {
-            Some(reason) if !reason.is_empty() => Some(format!("reason: {reason}")),
+            Some(reason) if !reason.is_empty() => Some(format!("reason: {}", reason_words(reason))),
             _ => Some(match &self.log_error {
                 Some(line) => format!(
                     "reason: last error in the log: `{line}` (see `orx logs {}` for the log path and a tail preview)",
@@ -211,6 +224,55 @@ impl Run {
             }),
         }
     }
+}
+
+/// A run's recorded failure in the user's words: a provider refusal or provisioning failure orx knows
+/// becomes what happened and what to do; any other provider answer is its own message, without the
+/// HTTP request and JSON around it; everything else is kept as written.
+pub(crate) fn reason_words(text: &str) -> String {
+    static WRAPPED: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"(?s)^Request to \S+ failed \(\d{3}[^)]*\): (.+)$").unwrap()
+    });
+    static NO_OFFER: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"^No offer available for (.+?) × (\d+)\b").unwrap()
+    });
+    let text = text.trim();
+    let message = match WRAPPED.captures(text) {
+        Some(wrapped) => {
+            let body = &wrapped[1];
+            let parsed = serde_json::from_str::<serde_json::Value>(body).ok();
+            let said = parsed.as_ref().and_then(|body| {
+                let error = &body["error"];
+                error["message"]
+                    .as_str()
+                    .or(error.as_str())
+                    .or(body["message"].as_str())
+            });
+            said.unwrap_or(body).trim().to_owned()
+        }
+        None => text.to_owned(),
+    };
+    if let Some(offer) = NO_OFFER.captures(&message) {
+        let gpu = &offer[1];
+        let gpus = if &offer[2] == "1" {
+            gpu.to_owned()
+        } else {
+            format!("{} × {gpu}", &offer[2])
+        };
+        return format!("There was no {gpus} free to rent. Try another GPU, or launch again.");
+    }
+    if let Some((code, said)) = message
+        .strip_prefix("Provisioning failed: ")
+        .and_then(|message| message.split_once(": "))
+        .filter(|(code, _)| code.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'))
+    {
+        return if code == "provider_error" {
+            "The provider couldn't start the box. Launch again.".into()
+        } else {
+            said.to_owned()
+        };
+    }
+    message
 }
 
 pub enum DescInput {
@@ -354,6 +416,54 @@ mod tests {
             run.failure_detail().as_deref(),
             Some("reason: — (no message recorded — see `orx logs r1`)")
         );
+    }
+
+    #[test]
+    fn a_failure_reads_in_the_users_words() {
+        let offer = r#"Request to /sandboxes failed (400 Bad Request): {"error":{"message":"No offer available for L40S × 1 with ≥100 GB disk. Try a different configuration."}}"#;
+        assert_eq!(
+            reason_words(offer),
+            "There was no L40S free to rent. Try another GPU, or launch again."
+        );
+        assert_eq!(
+            reason_words(&offer.replace("× 1", "× 2")),
+            "There was no 2 × L40S free to rent. Try another GPU, or launch again."
+        );
+        assert_eq!(
+            reason_words("Provisioning failed: provider_error: The provider could not provision this instance. Please try again."),
+            "The provider couldn't start the box. Launch again."
+        );
+        assert_eq!(
+            reason_words(
+                r#"Request to /sandboxes failed (422 Unprocessable Entity): {"error":{"message":"Disk must be at most 2000 GB."}}"#
+            ),
+            "Disk must be at most 2000 GB."
+        );
+        assert_eq!(
+            reason_words(
+                "Request to /sandboxes failed (500 Internal Server Error): upstream timed out"
+            ),
+            "upstream timed out"
+        );
+        assert_eq!(
+            reason_words("Provisioning failed: no_gpu: Out of H100s."),
+            "Out of H100s."
+        );
+        for kept in ["Killed by signal 15.", "No orx-host for linux-x86_64"] {
+            assert_eq!(reason_words(kept), kept);
+        }
+    }
+
+    #[test]
+    fn a_run_that_never_started_is_told_from_one_that_ran() {
+        let mut run = Run::from(&stored_run("failed", None));
+        assert!(run.never_started());
+        run.exit_code = Some(1);
+        assert!(!run.never_started());
+        run.exit_code = None;
+        run.started_at = Some(1);
+        assert!(!run.never_started());
+        assert!(!Run::from(&stored_run("running", None)).never_started());
     }
 
     #[test]

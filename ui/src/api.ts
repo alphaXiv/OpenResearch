@@ -2006,8 +2006,8 @@ export function backendDetail(backend: Run["backend"]): string {
   if (!backend) return "";
   if (typeof backend.flavor === "string" && backend.flavor) return backend.flavor;
   if (typeof backend.manifest === "string" && backend.manifest) return backend.manifest;
-  // Ray's namespace is the whole Jobs URL — too long for a badge.
-  if (backendKind(backend) === "ray_job") return "";
+  // Ray's namespace is the whole Jobs URL, too long for a badge; OpenResearch's is the paying organization's id.
+  if (backendKind(backend) === "ray_job" || backendKind(backend) === "openresearch_job") return "";
   if (typeof backend.namespace === "string" && backend.namespace) {
     const container = backend.sshContainer;
     if (container && typeof container === "object" && "reference" in container && typeof container.reference === "string") {

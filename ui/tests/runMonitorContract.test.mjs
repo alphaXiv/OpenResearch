@@ -428,14 +428,15 @@ test("a stage going far slower than the run that timed it says by how much again
   assert.equal(model("running").note, null);
 });
 
-test("a failed run that recorded no message says the last error its log names, quoted on one line", () => {
+test("a failed run that recorded no message says, as its sentence, the last error its log names, quoted on one line", () => {
   const { summary, now } = states.running;
   const line = "torch.OutOfMemoryError: CUDA out of memory.   Tried *2.00* GiB";
   const run = { ...runOf("running"), status: "failed", endedAt: now, monitor: { ...summary, tone: "failed", logError: line } };
   const view = runModel({ item: { sessionId: "s", run, experimentName: null, experimentSlug: "baseline" }, monitor: null, shown: true, agent: "Claude", now, nextRetryMs: null });
-  assert.equal(bare(view.note), bare(m.run_failed_log_error({ line: "torch.OutOfMemoryError: CUDA out of memory. Tried ∗2.00∗ GiB" })));
+  assert.equal(bare(view.sentence.text), "torch.OutOfMemoryError: CUDA out of memory. Tried ∗2.00∗ GiB");
+  assert.equal(view.note, null);
   const silent = runModel({ item: { sessionId: "s", run: { ...run, monitor: { ...run.monitor, logError: null } }, experimentName: null, experimentSlug: "baseline" }, monitor: null, shown: true, agent: "Claude", now, nextRetryMs: null });
-  assert.equal(silent.note, null);
+  assert.ok(!silent.sentence.text.includes("OutOfMemoryError"));
 });
 
 test("the floor expires below one second at the midpoint", () => {

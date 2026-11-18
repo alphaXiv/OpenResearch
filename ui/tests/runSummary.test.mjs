@@ -125,10 +125,12 @@ test("no leader without a declared direction, a shared headline, or two numbers"
 });
 
 test("who needs attention comes first, before any leader", () => {
-  const failed = model("c", scored(1.0, { tone: "failed" }), { status: "failed", endedAt: now });
+  const failed = model("c", scored(1.0, { tone: "failed", logError: "ImportError: cannot import name 'Parakeet'" }), { status: "failed", endedAt: now, exitCode: 1 });
   const models = [model("a", scored(1.3)), model("b", scored(1.2)), failed];
+  assert.equal(said(models).text, `${bare(m.run_summary_attention({ name: "c", state: m.status_failed() }))} ImportError: cannot import name 'Parakeet'`);
   // A run that ended with nothing more to say says how long it took.
-  assert.equal(said(models).text, bare(m.run_summary_attention_ended({ name: "c", ended: m.run_failed_after({ duration: "10m" }) })));
+  const stopped = model("e", scored(1.0, { tone: "stopped" }), { status: "cancelled", endedAt: now, exitCode: 143, outcome: { by: "rule", at: now } });
+  assert.equal(said([models[0], stopped]).text, bare(m.run_summary_attention_ended({ name: "e", ended: m.run_eta_stopped_at({ duration: "10m" }) })));
   const choice = model("d", summary({ tone: "flag", flag: { id: "f", state: "waiting", text: "Loss went to **NaN**." } }));
   assert.match(said([...models, choice]).text, /^d · Flagged: Loss went to \*\*NaN\*\*\.$/);
   const lost = model("e", summary(), { contact: { type: "unreachable", since: now - 60_000, cause: "timed out" }, host: "lab-a40", backend: { kind: "ssh_job" } });
@@ -167,4 +169,21 @@ test("a summary's subsecond time left stays positive", () => {
   const { text } = said([line]);
   const expected = m.run_summary_first_done({ duration: `**${m.duration_seconds({ value: "1" })}**` });
   assert.ok(text.includes(bare(expected)), text);
+});
+
+test("a stage counting work during setup takes precedence over the watcher's starting summary", () => {
+  const models = [
+    model("baseline", scored(1.3)),
+    model("new labels", summary({
+      setup: { line: null, startsAt: null },
+      stage: { name: "label", done: 1664, of: 5086, unit: "clips" },
+    })),
+  ];
+  const watch = {
+    at: now, runIds: ["baseline", "new labels"], keys: { r1: "baseline", r2: "new labels" },
+    summary: { template: "{r1} is training. {r2} is still starting." },
+  };
+  const { parts } = summarize(models, shortLabels(models.map((item) => item.name)), watch, now);
+  assert.equal(bare(parts[0].who), "new labels");
+  assert.match(bare(parts[0].text), /label \*\*1,664\*\* of \*\*5,086\*\* clips/);
 });

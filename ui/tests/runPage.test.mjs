@@ -378,3 +378,33 @@ test("a run page explains when its chat has no watching model or sign-in", async
     await unmount();
   }
 });
+
+test("a run that never started says why where its sentence goes and says once that it never started, with no stages, clock or charts", async () => {
+  const monitor = { ...pipeline(), progress: { ...pipeline().progress, phase: 0, done: null }, stageOrder: { index: null, count: 5, first: null }, latest: {}, series: {}, estimate: null };
+  const reason = "There was no L40S free to rent. Try another GPU, or launch again.";
+  const never = run("r2", { status: "failed", startedAt: null, endedAt: now - 1_000, resultMarkdown: reason, monitor: summary(monitor, { tone: "failed" }) });
+  const { container } = await overview([never], () => monitor);
+  const latest = [...container.querySelectorAll("section")].find((section) => section.querySelector("h2")?.textContent === m.experiment_latest_run());
+  assert.equal(text(latest).split(reason).length - 1, 1, "the provider's reason is said once, in the run's sentence");
+  assert.equal(text(latest).split(m.run_page_never_started()).length - 1, 1);
+  assert.equal(latest.querySelector('[aria-current="step"]'), null, "no stage is marked as the one it failed in");
+  assert.equal(latest.querySelector('[role="progressbar"]'), null);
+  assert.equal(latest.querySelectorAll('section[aria-label="Eval"], section[aria-label="Train loss"], dl').length, 0, "no empty charts");
+  assert.ok(!/Failed after/.test(text(latest)), text(latest));
+  const row = text(container.querySelector(".experiment-run-history button"));
+  assert.ok(row.includes(reason) && row.includes("—"), row);
+});
+
+test("run history says why each failed run failed: the provider's words, else the log's last error", async () => {
+  const monitor = pipeline();
+  const provider = run("r3", { status: "failed", startedAt: null, endedAt: now - 1_000, resultMarkdown: "The provider couldn't start the box. Launch again.", monitor: summary(monitor, { tone: "failed" }) });
+  const crashed = run("r2", {
+    status: "failed", exitCode: 1, createdAt: now - 900_000, startedAt: now - 600_000, endedAt: now - 300_000,
+    monitor: summary(monitor, { tone: "failed", logError: "ImportError: cannot import name 'Parakeet'", stage: { name: "label", done: 2543, of: 5086, unit: "clips" } }),
+  });
+  const { container } = await overview([provider, crashed], () => monitor);
+  const rows = [...container.querySelectorAll(".experiment-run-history button")].map(text);
+  assert.match(rows[0], /The provider couldn't start the box\. Launch again\./);
+  assert.match(rows[1], /ImportError: cannot import name 'Parakeet'/);
+  assert.match(rows[1], /5m/, "a run that ran is timed from its start, not from when it was launched");
+});

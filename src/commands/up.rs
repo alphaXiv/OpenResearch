@@ -1347,7 +1347,13 @@ impl ApiRun {
             backend: crate::store::public_backend(&run.backend_json, launch),
             command: Some(run.command.clone()).filter(|c| !c.is_empty()),
             commit_sha: run.commit_sha.clone(),
-            result_markdown: run.result_markdown.clone(),
+            result_markdown: if run.status == "failed" {
+                run.result_markdown
+                    .as_deref()
+                    .map(crate::plane::reason_words)
+            } else {
+                run.result_markdown.clone()
+            },
             created_at: run.created_at,
             updated_at: run.updated_at,
             started_at: state.as_ref().and_then(|state| state.started_at),

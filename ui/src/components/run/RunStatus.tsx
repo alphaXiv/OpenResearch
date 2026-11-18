@@ -46,7 +46,7 @@ export function RunStatus({ model, label, descriptionId, onOpenRunPage, expanded
   const monitor = useRunMonitors([model.run], () => open)[0];
   const data = monitor && monitor.status !== "loading" ? monitor.data : null;
   const behind = data && monitorBehind(model.run.monitor, data);
-  const stages = data && !behind ? foldedStages(data, model) : null;
+  const stages = data && !behind && !model.neverStarted ? foldedStages(data, model) : null;
   const progress = data?.progress;
   const availability = data?.availability;
   const availabilityNote = availability && availability.state !== "live"
@@ -64,6 +64,7 @@ export function RunStatus({ model, label, descriptionId, onOpenRunPage, expanded
     ? model.flagDetail ?? model.sentence.text
     : model.sentence.text;
   const status = plainSentence([label, model.lead, sentence].filter(Boolean).join(" · "));
+  const cardSentence = model.tone === "failed" ? model.sentence.text : model.sentence.watcher;
 
   // Focus returns before closing so it cannot reopen the focus-triggered popover.
   function close() {
@@ -133,7 +134,7 @@ export function RunStatus({ model, label, descriptionId, onOpenRunPage, expanded
                   <Phases model={model} phases={stages.phases} current={stages.current} progress={count} setupNames={stages.names} className="flex-col gap-y-2" />
                 </div>}
               </>}
-              {model.sentence.watcher && <p className="m-0 mt-2.5 break-words text-sm"><Sentence text={autoDir(model.sentence.watcher)} tone={model.tone} /></p>}
+              {cardSentence && <p className="m-0 mt-2.5 break-words text-sm"><Sentence text={autoDir(cardSentence)} tone={model.tone} /></p>}
               {time && <p className="m-0 mt-2.5 border-t border-border-variant pt-2.5 text-xs text-ink-subtext">{footerNames ? footer.split(footerNames).map((part, index) => untimed.includes(part) ? <span key={index} className="whitespace-nowrap">{part}</span> : part) : <Sentence text={footer} tone={model.tone} />}</p>}
             </Popover.Popup>
           </Popover.Positioner>

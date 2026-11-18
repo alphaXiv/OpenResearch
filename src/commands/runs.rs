@@ -47,7 +47,11 @@ pub async fn run(args: crate::RunsArgs) -> Result<()> {
                     Some(sha) => sha.chars().take(7).collect::<String>(),
                     None => "—".to_string(),
                 },
-                format_duration(r.duration_secs),
+                if r.never_started() {
+                    "—".to_string()
+                } else {
+                    format_duration(r.duration_secs)
+                },
                 r.updated_display.clone(),
             ]
         })

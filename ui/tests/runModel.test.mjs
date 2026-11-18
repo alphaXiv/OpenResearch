@@ -4,7 +4,7 @@ import test from "node:test";
 import { fmtDuration } from "../src/api.ts";
 import { fmtClock } from "../src/i18n.ts";
 import { m } from "../src/paraglide/messages.js";
-import { runModel, sessionRunMark } from "../src/runMonitor/model.ts";
+import { historySentence, runModel, sessionRunMark } from "../src/runMonitor/model.ts";
 
 const fixture = (name) => JSON.parse(readFileSync(new URL(`./fixtures/runMonitor/${name}.json`, import.meta.url), "utf8"));
 const running = fixture("running");
@@ -378,4 +378,33 @@ test("setup keeps the declared stage ahead of log chatter and rejects structured
     const short = summary({ setup, sentence: null, stage: { name: "install", of: null, done: null }, stageOrder: data.stageOrder });
     assert.match(model(run({ monitor: short })).text, /install started/);
   }
+});
+
+test("a failed run says why in the words the CLI and the agent's notice use, never a blank", () => {
+  const ended = { status: "failed", endedAt: now, monitor: summary({ tone: "failed", sentence: null, stage: { name: "label", done: 2543, of: 5086, unit: "clips" } }) };
+  const logged = model(run({ ...ended, exitCode: 1, monitor: { ...ended.monitor, logError: "ImportError: cannot import name 'Parakeet'" } }));
+  assert.equal(logged.text, "ImportError: cannot import name 'Parakeet'");
+  assert.equal(logged.note, null, "the reason is said once");
+  assert.equal(logged.eta, m.run_failed_after({ duration: fmtDuration(1_800_000) }));
+
+  const said = model(run({ ...ended, exitCode: 1, resultMarkdown: "Killed by   signal 9." }));
+  assert.equal(said.text, "Killed by signal 9.");
+
+  const quiet = model(run({ ...ended, exitCode: 1 }));
+  assert.equal(quiet.text, bare(`${m.run_failed_exit_code({ code: "1" })} ${m.run_auto_at({ progress: "**2,543** of **5,086** clips" })}`));
+  assert.equal(model(run({ status: "failed", endedAt: now, startedAt: null })).text, m.run_failed_no_reason());
+
+  for (const failed of [run({ ...ended, exitCode: 1 }), run({ ...ended, exitCode: 1, monitor: { ...ended.monitor, logError: "ValueError: bad shape" } })]) {
+    assert.equal(bare(historySentence(failed, now)), model(failed).text.replaceAll("**", ""), "history says what the line says");
+  }
+});
+
+test("a run that never started runs no clock: no time since it was created, and no stage it failed in", () => {
+  const reason = "There was no L40S free to rent. Try another GPU, or launch again.";
+  const never = model(run({ status: "failed", startedAt: null, createdAt: now - 13_000, endedAt: now, resultMarkdown: reason, monitor: summary({ tone: "failed", sentence: null, stageOrder: { index: null, count: 4, first: null } }) }));
+  assert.ok(never.neverStarted);
+  assert.equal(never.text, reason);
+  assert.equal(never.eta, m.run_not_started());
+  assert.ok(!model(run({ status: "failed", startedAt: null, endedAt: now, exitCode: 1 })).neverStarted, "a run that exited ran, whether or not it reported a start");
+  assert.ok(!model(run({ status: "starting", startedAt: null })).neverStarted);
 });

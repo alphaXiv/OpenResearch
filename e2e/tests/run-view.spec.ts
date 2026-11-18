@@ -452,7 +452,8 @@ readFileSync(${JSON.stringify(gate)})
     }
   }
   await writeFile(ready, 'go\n')
-  await expect(banner).toContainText(/ of .*training-a-very-long-stage-name.* left/)
+  const stageTime = /of [⁦-⁩]*training-a-very-long-stage-name[⁦-⁩]* left/
+  await expect(banner).toContainText(stageTime)
   await expect(banner.getByRole('img', { name: /^loss / })).toBeVisible()
   for (const width of [1440, 420]) {
     await page.setViewportSize({ width, height: 1000 })
@@ -470,7 +471,9 @@ readFileSync(${JSON.stringify(gate)})
       await page.screenshot({ path: path.join(shots, `floor-${colorScheme}-${width}.png`) })
       await banner.getByRole('button', { name: /Timed floor/, exact: false }).first().click()
       const card = page.getByRole('dialog')
-      await expect(card).toContainText(/ of .*training-a-very-long-stage-name.* left.*sweep.*not timed/)
+      await expect(card).toContainText(stageTime)
+      await expect(card).toContainText(/sweep.*not timed/)
+      await expect(card).not.toContainText('Whole run:')
       await expect(card).toBeInViewport({ ratio: 1 })
       await expect.poll(async () => {
         const popup = await card.boundingBox()
@@ -486,7 +489,8 @@ readFileSync(${JSON.stringify(gate)})
   await banner.getByRole('button', { name: /Timed floor/ }).first().hover()
   await page.getByRole('dialog').getByRole('link', { name: /Timed floor/ }).click()
   const latest = page.locator('section', { has: page.getByRole('heading', { name: 'Latest run', exact: true }) })
-  const estimate = latest.getByText(/ of .*training-a-very-long-stage-name.* left.*sweep.*not timed/)
+  const estimate = latest.getByText(stageTime)
+  await expect(latest).toContainText(/sweep.*not timed/)
   await expect(estimate).toBeVisible()
   for (const width of [420, 1440]) {
     await page.setViewportSize({ width, height: 1000 })

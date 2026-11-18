@@ -32,16 +32,16 @@ function useChatAgent(run: Run, experimentChat: string | null | undefined): stri
 
 /**
  * A run in full: the sentence, stages, bar and captions, then every block
- * of the view in the agent's order. Nothing against an older server, which keeps the run's status and log.
+ * of the view in the agent's order. A failed run can say why even without a monitor.
  */
 export function RunPage({ run, name, chatSessionId, now }: { run: Run; name: string; chatSessionId?: string | null; now: number }) {
   const agent = useChatAgent(run, chatSessionId);
   const hosts = useWorkspace().queries.useEngineHosts();
   const [monitor] = useRunMonitors([run], () => true);
-  if (monitor === null) return null;
+  if (monitor === null && run.status !== "failed") return null;
 
-  const data = monitor.status === "loading" ? null : monitor.data;
-  const failed = monitor.status === "error";
+  const data = monitor && monitor.status !== "loading" ? monitor.data : null;
+  const failed = monitor?.status === "error";
   const host = hostForRun(hosts, run);
   const model = runModel({
     item: { sessionId: "", run, experimentName: name },
@@ -53,6 +53,7 @@ export function RunPage({ run, name, chatSessionId, now }: { run: Run; name: str
     nextRetryMs: host?.status === "backoff" ? host.nextRetryMs : null,
   });
   const age = model.live && model.sentence.at !== null ? model.sentence.at : null;
+  const sentence = model.tone !== "failed" && model.flagDetail ? model.flagDetail : model.sentence.text;
   const blocks = data?.view.blocks.filter((block) => drawsAt(block, "page")) ?? [];
   const canSayEmpty = !failed && data?.availability.state === "live";
   const stale = model.stale && [model.stale.why, model.stale.age].filter(Boolean).join(" · ");
@@ -68,7 +69,7 @@ export function RunPage({ run, name, chatSessionId, now }: { run: Run; name: str
           <span className="flex h-[1.625em] shrink-0 items-center self-start"><Mark tone={model.tone} live={model.live} label={model.status} /></span>
           <span>
             <Lead model={model} stop />
-            <Sentence text={model.flagDetail ?? model.sentence.text} tone={model.tone} />
+            <Sentence text={sentence} tone={model.tone} />
             {age !== null && <span className="whitespace-nowrap text-xs text-ink-subtext"> {timeAgo(age)}</span>}
           </span>
         </p>
@@ -82,12 +83,14 @@ export function RunPage({ run, name, chatSessionId, now }: { run: Run; name: str
           <Button size="small" variant="ghost" onClick={monitor.retry}><RefreshCw size={13} />{m.app_retry()}</Button>
         </div>
       )}
-      {!model.pre && data && namedStages(data) && <div className="mt-5"><Phases model={model} phases={data.phases} current={data.progress?.phase ?? data.stageOrder.index} /></div>}
-      <div className="mt-3"><Rail model={model} kind="bar" hover /></div>
-      <div className="mt-1.5"><Captions model={model} /></div>
+      {model.neverStarted ? <p className="m-0 mt-1.5 text-sm text-ink-subtext">{m.run_page_never_started()}</p> : <>
+        {!model.pre && data && namedStages(data) && <div className="mt-5"><Phases model={model} phases={data.phases} current={model.live ? data.progress?.phase ?? data.stageOrder.index : data.stageOrder.index} /></div>}
+        <div className="mt-3"><Rail model={model} kind="bar" hover /></div>
+        <div className="mt-1.5"><Captions model={model} /></div>
+      </>}
       {!model.notice && runNotice(run) && <RunContactNotice run={run} className="mt-4" />}
-      {model.pre && (model.headline || monitor.status === "loading") && <div className="mt-7"><HeadlineStat model={model} /></div>}
-      {!model.pre && (
+      {model.pre && (model.headline || monitor?.status === "loading") && <div className="mt-7"><HeadlineStat model={model} /></div>}
+      {monitor && !model.pre && !model.neverStarted && (
         <div className={cn("mt-7 flex flex-col gap-8", !data && "min-h-40")} aria-busy={monitor.status === "loading"}>
           {!data && monitor.status === "loading" && <HeadlineStat model={model} />}
           {data && blocks.map((block, index) => <Block key={index} monitor={data} block={block} size="page" tone={model.tone} live={model.live} />)}

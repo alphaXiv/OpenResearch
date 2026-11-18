@@ -21,7 +21,7 @@ import {
 } from "../api";
 import { autoDir, fmtNumber, ltr } from "../i18n";
 import { capitalized } from "../runMonitor/words";
-import { noticeRun, runActive, runDisplay, runResult } from "../runDisplay";
+import { noticeRun, runActive, runDisplay, runNeverStarted, runResult } from "../runDisplay";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { BackendBadge } from "./BackendLogos";
 import { BranchPill } from "./BranchPill";
@@ -57,7 +57,8 @@ function fmtDate(ms: number): string {
 }
 
 function runDuration(run: Run, now: number): string {
-  return fmtDuration((run.endedAt ?? now) - run.createdAt);
+  if (runNeverStarted(run)) return "—";
+  return fmtDuration((run.endedAt ?? (runActive(run.status) ? now : run.updatedAt)) - (run.startedAt ?? run.createdAt));
 }
 
 export function ExperimentOverview({
@@ -97,7 +98,7 @@ export function ExperimentOverview({
   const display = run ? runDisplay(run) : null;
   const waiting = display?.waiting;
   const attentionRun = selectedRunId ? run : noticeRun(runs);
-  const result = run ? runResult(run) : null;
+  const result = run && run.status !== "failed" ? runResult(run) : null;
   const hasLiveRun = runs.some((run) => runActive(run.status));
   const [now, setNow] = useState(() => Date.now());
   const overview = useRef<HTMLDivElement>(null);
@@ -182,14 +183,18 @@ export function ExperimentOverview({
               <div className="experiment-overview-meta flex items-center flex-wrap gap-y-2.5 gap-x-4.5 text-text text-sm [&_svg]:text-muted [&_.backend-badge]:text-text [&_.status-badge]:text-text [&_>_span]:inline-flex [&_>_span]:items-center [&_>_span]:gap-1 [&_code]:text-text [&_code]:text-xs">
                 <StatusBadge {...runDisplay(run)} className="max-w-full" />
                 <BackendBadge backend={run.backend} />
-                <span title={m.experiment_overview_started()}>
-                  <CalendarDays size={14} />
-                  {fmtDate(run.createdAt)}
-                </span>
-                <span title={m.experiment_overview_duration()}>
-                  <Clock3 size={14} />
-                  {runDuration(run, now)}
-                </span>
+                {run.startedAt != null && (
+                  <span title={m.experiment_overview_started()}>
+                    <CalendarDays size={14} />
+                    {fmtDate(run.startedAt)}
+                  </span>
+                )}
+                {!runNeverStarted(run) && (
+                  <span title={m.experiment_overview_duration()}>
+                    <Clock3 size={14} />
+                    {runDuration(run, now)}
+                  </span>
+                )}
                 {run.commitSha && (
                   <span title={m.experiment_overview_commit()}>
                     <GitCommitHorizontal size={14} />
@@ -206,7 +211,7 @@ export function ExperimentOverview({
                 <code className={EXPERIMENT_OVERVIEW_COMMAND_CLASS_NAME}>$ {run.command}</code>
               )}
               <RunPage key={run.id} run={run} name={experiment.slug} chatSessionId={experiment.chatSessionId} now={now} />
-              {attentionRun && !(run.monitor && attentionRun.id === run.id) && <RunContactNotice run={attentionRun} className="mt-4" />}
+              {attentionRun && !((run.monitor || run.status === "failed") && attentionRun.id === run.id) && <RunContactNotice run={attentionRun} className="mt-4" />}
               {result && (
                 <div
                   className={`experiment-overview-result mt-4 [&.failed]:text-accent-red ${run.status === "failed" ? "failed" : ""}`}
@@ -221,7 +226,7 @@ export function ExperimentOverview({
         {runs.length > 0 && (
           <section className={`${EXPERIMENT_OVERVIEW_SECTION_CLASS_NAME} @container`}>
             <h2>{m.experiment_overview_run_history()}</h2>
-            <div className="experiment-run-history divide-y divide-border-variant [&_button]:w-full [&_button]:grid [&_button]:grid-cols-[minmax(56px,_0.5fr)_minmax(100px,_0.9fr)_minmax(0,_2.2fr)_minmax(64px,_0.6fr)_60px_16px] [&_button]:items-center [&_button]:gap-3.5 [&_button]:py-3 [&_button]:px-0.5 [&_button]:text-text [&_button]:text-start [&_button]:text-sm [&_button:hover]:bg-surface @max-lg:[&_button]:grid-cols-[48px_minmax(0,_1fr)_40px_16px] @max-lg:[&_button_>_:nth-child(3)]:hidden @max-lg:[&_button_>_:nth-child(4)]:hidden">
+            <div className="experiment-run-history divide-y divide-border-variant [&_button]:w-full [&_button]:grid [&_button]:grid-cols-[minmax(56px,_0.5fr)_minmax(100px,_0.9fr)_minmax(0,_2.2fr)_minmax(64px,_0.6fr)_60px_16px] [&_button]:items-center [&_button]:gap-3.5 [&_button]:py-3 [&_button]:px-0.5 [&_button]:text-text [&_button]:text-start [&_button]:text-sm [&_button:hover]:bg-surface @max-lg:[&_button]:grid-cols-[48px_minmax(0,_1fr)_40px_16px] @max-lg:[&_button]:gap-y-1">
               {runs.map((attempt, index) => (
                 <button
                   key={attempt.id}
@@ -233,8 +238,8 @@ export function ExperimentOverview({
                 >
                   <span className="experiment-run-number text-xs font-medium">{m.experiment_overview_run()} {runs.length - index}</span>
                   <StatusBadge {...runDisplay(attempt)} className="min-w-0" />
-                  <span className="truncate text-ink-subtext">{historySentence(attempt, now)}</span>
-                  <span>{timeAgo(attempt.createdAt)}</span>
+                  <span className="truncate text-ink-subtext @max-lg:order-last @max-lg:col-start-2 @max-lg:col-span-3 @max-lg:line-clamp-2 @max-lg:whitespace-normal @max-lg:empty:hidden">{historySentence(attempt, now)}</span>
+                  <span className="@max-lg:hidden">{timeAgo(attempt.createdAt)}</span>
                   <span>{runDuration(attempt, now)}</span>
                   <ArrowUpRight size={14} aria-hidden="true" />
                 </button>

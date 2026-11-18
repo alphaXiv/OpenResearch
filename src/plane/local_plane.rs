@@ -250,13 +250,14 @@ impl LocalPlane {
                 } else {
                     format!("{}, ", run.display_status())
                 };
+                let ran = if run.never_started() {
+                    "never started".to_owned()
+                } else {
+                    format!("ran {}", crate::output::format_duration(run.duration_secs))
+                };
                 println!(
-                    "  last run: {} ({}commit {}, ran {}, updated {})",
-                    run.id,
-                    state_prefix,
-                    commit,
-                    crate::output::format_duration(run.duration_secs),
-                    run.updated_display
+                    "  last run: {} ({}commit {}, {ran}, updated {})",
+                    run.id, state_prefix, commit, run.updated_display
                 );
                 for detail in [run.waiting_detail(), run.contact_detail()]
                     .into_iter()

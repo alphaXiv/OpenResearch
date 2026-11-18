@@ -52,6 +52,11 @@ export function runActive(status: RunStatus): status is ActiveRunStatus {
   return status === "submitting" || status === "starting" || status === "running";
 }
 
+/** Ended before it ran its command: nothing reported a start and nothing exited. */
+export function runNeverStarted(run: Pick<Run, "status" | "startedAt" | "exitCode">): boolean {
+  return run.status === "failed" && run.startedAt == null && run.exitCode == null;
+}
+
 function runCancelling(run: RunState): boolean {
   return run.cancelling ?? (runActive(run.status) && run.cancelRequested === true);
 }

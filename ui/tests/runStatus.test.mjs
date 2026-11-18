@@ -167,3 +167,21 @@ test("lineage shares committed diff counts and uses the run start time", async (
   const started = [...card.querySelectorAll("dt")].find((dt) => dt.textContent === m.run_card_started());
   assert.equal(bare(started.nextElementSibling.textContent), fmtClock(startedAt));
 });
+
+test("a rented box is named by the GPU it was rented for, never by the paying organization's id", async () => {
+  const backend = { kind: "openresearch_job", namespace: "00000000-0000-4000-8000-000000000001", flavor: "l40s", jobId: "box" };
+  await status(null, {}, { run: { backend, host: null } });
+  const card = document.querySelector('[role="dialog"]');
+  assert.ok(card.textContent.includes("OpenResearch") && card.textContent.includes("l40s"), card.textContent);
+  assert.ok(!card.textContent.includes(backend.namespace), card.textContent);
+});
+
+test("a run that never started lists no stage as the one it failed in", async () => {
+  const run = { status: "failed", startedAt: null, endedAt: now, resultMarkdown: "The provider couldn't start the box. Launch again." };
+  await status(null, { progress: { ...base.progress, phase: 0, done: null }, stageOrder: { index: null, count: 4, first: null } }, { run });
+  const card = document.querySelector('[role="dialog"]');
+  assert.equal(card.querySelector("ol"), null);
+  assert.equal(card.querySelector('[aria-current="step"]'), null);
+  assert.ok(card.textContent.includes(run.resultMarkdown), card.textContent);
+  assert.ok(card.textContent.includes(m.run_not_started()), card.textContent);
+});

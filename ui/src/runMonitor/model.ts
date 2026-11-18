@@ -3,7 +3,7 @@ import { runNoticeCopy } from "../components/RunContactNotice";
 import { statusLabel } from "../components/StatusBadge";
 import { autoDir, fmtNumber, ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
-import { runActive, runApiProvider, runConnectHost, runDisplay, runNotice, runStoppable, type RunNotice } from "../runDisplay";
+import { runActive, runApiProvider, runConnectHost, runDisplay, runNeverStarted, runNotice, runResult, runStoppable, type RunNotice } from "../runDisplay";
 import { fillSentence, fmtMagnitude, fmtSignal, plainSentence, tokensOf } from "./format";
 import type { Bindings, Flag, FlagState, RunMonitor, RunMonitorSummary, ShownRun, SignalSpec, SignalValue, Signals, Versus, VersusBy } from "./types";
 import { tickText } from "./journal";
@@ -29,6 +29,8 @@ export interface RunModel {
   live: boolean;
   /** Submitted and not yet running. */
   pre: boolean;
+  /** Ended before it ran its command, so it has no log, stages or duration. */
+  neverStarted: boolean;
   settingUp: boolean;
   /** The state a run ended in, or is in, said before its sentence: "Auto-stopped". */
   lead: string | null;
@@ -135,11 +137,14 @@ const SETUP_LINE = 120;
 
 const bold = (value: string) => `**${value}**`;
 
-/** A log line as one line of a sentence: its whitespace collapsed, shortened, its `*` kept from drawing bold. */
+/** Text as one line of a sentence: its whitespace collapsed, its `*` kept from drawing bold. */
+const flat = (text: string) => text.replace(/\s+/g, " ").replaceAll("*", "∗").trim();
+
+/** A log line as one line of a sentence, shortened. */
 function quoted(line: string): string {
-  const flat = line.replace(/\s+/g, " ").replaceAll("*", "∗").trim();
-  const chars = [...flat];
-  return ltr(chars.length > SETUP_LINE ? `${chars.slice(0, SETUP_LINE - 1).join("")}…` : flat);
+  const text = flat(line);
+  const chars = [...text];
+  return ltr(chars.length > SETUP_LINE ? `${chars.slice(0, SETUP_LINE - 1).join("")}…` : text);
 }
 
 /** The bar's accessible text: its parts as one sentence, none keeping a stop of its own. */
@@ -231,6 +236,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   const live = runActive(run.status);
   const finalizing = !live && failing === null && !monitorFailed && (availability === "stale" || availability === "rebuilding");
   const pre = run.status === "submitting" || run.status === "starting";
+  const neverStarted = runNeverStarted(run);
   const display = runDisplay(run);
 
   const pageOnly = runNotice(run);
@@ -302,6 +308,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   const stageSlots = { name: detail ? `${stageLabel} · ${autoDir(detail)}` : count ? `${stageLabel} ·` : stageLabel, count };
   const statusText = [stageSlots.name, count].filter(Boolean).join(" ");
   const stageKey = `${settingUp ? "setup" : finishing ? "finishing" : "stage"}:${order?.index ?? rawName}:${order?.first ?? ""}:${order?.count ?? ""}`;
+  const logError = (monitor ?? summary)?.logError ?? null;
   const recorded = monitor ? monitor.sentence : summary?.sentence ?? null;
   const watched = live && recorded && now - recorded.t <= 3 * 60_000 ? recorded : null;
   const warning = (live || run.status === "done") && flagText;
@@ -317,6 +324,14 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   } else if (warning) {
     const text = autoDir(warning);
     sentence = { text, watcher: text, key: `flag:${flag?.id}:${run.status}`, at: record?.at ?? null };
+  } else if (tone === "failed") {
+    const result = runResult(run)?.trim();
+    const why = result ? autoDir(flat(result)) : logError ? quoted(logError) : null;
+    const where = [
+      run.exitCode != null ? m.run_failed_exit_code({ code: ltr(String(run.exitCode)) }) : "",
+      progressText ? m.run_auto_at({ progress: autoDir(progressText) }) : "",
+    ].filter(Boolean).join(" ");
+    sentence = { text: why ?? (where || m.run_failed_no_reason()), key: `end:${tone}`, at: null };
   } else if (!live) {
     const text = !progressText || tone === "done" ? ""
       : outcome?.by === "user" ? m.run_auto_by_you({ progress: autoDir(progressText) })
@@ -353,7 +368,8 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     : tone === "failed" ? m.run_failed_after({ duration: durationText(elapsed) })
     : tone === "stopped" || tone === "revising" ? m.run_eta_stopped_at({ duration: durationText(elapsed) })
     : "";
-  if (!live) eta = ended;
+  if (neverStarted) eta = m.run_not_started();
+  else if (!live) eta = ended;
   else if (notice?.kind === "unreachable") eta = nextRetryMs === null ? "" : m.run_notice_retry_at({ time: clockText(nextRetryMs) });
   else if (notice || degraded) eta = "";
   else if (pre) {
@@ -406,13 +422,11 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     text: tickText(look, signals, clockText(look.at)),
   }]);
 
-  const logError = (monitor ?? summary)?.logError ?? null;
   const pace = monitor?.pace ?? null;
   const disagrees = monitor?.disagrees ?? null;
   const note = tone === "revising" ? m.run_flag_revising({ agent: autoDir(agent) })
     : tone === "stopped" && outcome?.by === "rule" && outcome.rule ? m.run_rule_detail({ text: autoDir(outcome.rule.text), name: autoDir(outcome.rule.name) })
     : tone === "stopped" && outcome?.by === "agent" ? (outcome.reason ? m.run_stop_reason({ agent: autoDir(agent), reason: autoDir(outcome.reason) }) : m.run_rule_reason_in_chat())
-    : tone === "failed" && logError ? m.run_failed_log_error({ line: quoted(logError) })
     : disagrees ? m.run_plan_disagrees({ of: ltr(fmtNumber(disagrees.of)), unit: autoDir(disagrees.unit ?? m.run_plan_steps()), stage: autoDir(disagrees.stage), rows: ltr(fmtNumber(disagrees.rows)) })
     : live && pace ? (pace.than === "earlier" ? m.run_pace_slower_earlier : m.run_pace_slower_parent)({ times: ltr(fmtNumber(pace.times)) })
     : null;
@@ -443,6 +457,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     tone,
     live,
     pre,
+    neverStarted,
     settingUp,
     lead,
     status,
