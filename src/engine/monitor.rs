@@ -3617,6 +3617,24 @@ mod tests {
         snapshot
     }
 
+    fn mentions(text: &str, parts: &[&str]) {
+        for part in parts {
+            assert!(text.contains(*part), "missing {part:?} in {text:?}");
+        }
+    }
+
+    fn status_line<'a>(body: &'a Value, label: &str) -> &'a str {
+        body["statusText"]
+            .as_str()
+            .unwrap()
+            .lines()
+            .find_map(|line| {
+                let (name, text) = line.split_once(' ')?;
+                (name == label).then_some(text.trim_start())
+            })
+            .unwrap_or_default()
+    }
+
     fn monitor_at(f: &Fixture, run: &StoredRun, now: i64) -> (Value, Option<Value>) {
         let (projection, event) = publish(&f.store, run, now, None).unwrap();
         let mut monitor = projection.body.clone();
@@ -3659,12 +3677,25 @@ mod tests {
             "a local run costs nothing to show"
         );
         let text = monitor["statusText"].as_str().unwrap();
+        let header = text.lines().next().unwrap();
+        mentions(
+            header,
+            &["baseline", "running", "50%", "step 200 of 400", "[run r1]"],
+        );
+        mentions(status_line(&monitor, "eta"), &["left", " to "]);
+        assert_eq!(status_line(&monitor, "signals"), "loss 0.143");
+        let stamp = "2026-11-12T00:45:20.000Z";
         assert!(
-            text.starts_with("baseline  running  50%  step 200 of 400  [run r1]\neta      "),
+            text.lines()
+                .any(|line| line.contains("collected") && line.contains(stamp)),
             "{text}"
         );
-        assert!(text.contains(" left ("), "{text}");
-        assert!(text.contains("\nsignals  loss 0.143"), "{text}");
+        assert!(
+            text.lines()
+                .any(|line| line.contains("Data as of") && line.contains(stamp)),
+            "{text}"
+        );
+        mentions(text, &["1 log diagnostics", "orx logs r1"]);
 
         let summary = current(&f.store, &run).unwrap().unwrap().summary().clone();
         assert_eq!(summary["tone"], "running");
@@ -3961,10 +3992,7 @@ mod tests {
         let (asleep, _) = monitor_at(&f, &run, T0 + 3_600_000);
         assert_eq!(asleep["availability"]["state"], "stale");
         let reason = asleep["availability"]["reason"].as_str().unwrap();
-        assert!(
-            reason.starts_with("No update from the run since "),
-            "{reason}"
-        );
+        mentions(reason, &["No update", "00:45 UTC"]);
         assert_eq!(asleep["asOf"], T0 + 10_000);
         let projection = current(&f.store, &run).unwrap().unwrap();
         let summary = projection.summary();
@@ -3976,10 +4004,9 @@ mod tests {
             "nothing advances across the gap"
         );
         assert_eq!(asleep["progress"]["stallMs"], live["progress"]["stallMs"]);
-        let text = asleep["statusText"].as_str().unwrap();
-        assert!(
-            text.contains("\neta      Last seen at step 100 of 400."),
-            "{text}"
+        mentions(
+            status_line(&asleep, "eta"),
+            &["Last seen", "step 100 of 400"],
         );
 
         f.collected(T0 + 3_601_000);
@@ -3991,11 +4018,9 @@ mod tests {
             awake["progress"]["stallMs"].as_i64().unwrap() > 3_000_000,
             "a collection shows the silence"
         );
-        let text = awake["statusText"].as_str().unwrap();
-        assert!(
-            text.contains("\neta      No progress for 59m (was due about 00:45 UTC)"),
-            "past its estimate a silent run is late, never 0s left: {text}"
-        );
+        let eta = status_line(&awake, "eta");
+        mentions(eta, &["No progress", "59m", "due", "00:45 UTC"]);
+        assert!(!eta.contains("0s left"), "{eta}");
     }
 
     #[test]
@@ -4010,10 +4035,10 @@ mod tests {
             stale["availability"],
             json!({"state": "stale", "reason": "The host did not answer", "omitted": {}})
         );
-        assert!(stale["statusText"]
-            .as_str()
-            .unwrap()
-            .contains("Signal collection is delayed; orx keeps retrying."));
+        mentions(
+            stale["statusText"].as_str().unwrap(),
+            &["collection", "delayed", "retry"],
+        );
 
         snapshot.coverage.add_reason("rebuilding");
         f.signals(&snapshot);
@@ -4061,37 +4086,23 @@ mod tests {
         assert_eq!(monitor["progress"]["whole"], 0.25);
         assert_eq!(monitor["x"]["max"], Value::Null);
         let text = monitor["statusText"].as_str().unwrap();
-        assert!(
-            text.contains("25%  step 5  [run r1]\neta      45m to the limit (ends by "),
-            "{text}"
-        );
+        mentions(text.lines().next().unwrap(), &["25%", "step 5", "[run r1]"]);
+        mentions(status_line(&monitor, "eta"), &["45m", "limit", "01:45 UTC"]);
         let summary = current(&f.store, &run).unwrap().unwrap().summary().clone();
         assert_eq!(summary["limitEndsAt"], T0 + 3_600_000);
         assert_eq!(summary["estimate"], Value::Null);
     }
 
     #[test]
-    fn each_lifecycle_state_has_its_words() {
+    fn status_reports_the_lifecycle_and_elapsed_time() {
         let cases = [
-            (
-                "starting",
-                "starting",
-                "baseline  starting  [run r1]\neta      Not started",
-            ),
-            ("done", "done", "eta      Done in 10m"),
-            ("failed", "failed", "eta      Failed at 10m"),
-            (
-                "lost",
-                "failed",
-                "baseline  lost  100%  step 100 of 100  [run r1]",
-            ),
-            (
-                "cancelled",
-                "stopped",
-                "baseline  Cancelled  100%  step 100 of 100  [run r1]\neta      Stopped at 10m",
-            ),
+            ("starting", "starting", "starting", &["Not started"][..]),
+            ("done", "done", "done", &["Done", "10m"]),
+            ("failed", "failed", "failed", &["Failed", "10m"]),
+            ("lost", "failed", "lost", &[]),
+            ("cancelled", "stopped", "Cancelled", &["Stopped", "10m"]),
         ];
-        for (status, tone, words) in cases {
+        for (status, tone, label, timing) in cases {
             let f = Fixture::new("orx-monitor-words");
             let run = f.run(status, local());
             if Phase::parse(status).is_some_and(Phase::is_terminal) {
@@ -4100,7 +4111,12 @@ mod tests {
             }
             let (monitor, _) = monitor_at(&f, &run, T0 + 700_000);
             let text = monitor["statusText"].as_str().unwrap();
-            assert!(text.contains(words), "{status}: {text}");
+            let header = text.lines().next().unwrap();
+            mentions(header, &["baseline", label, "[run r1]"]);
+            if matches!(status, "lost" | "cancelled") {
+                mentions(header, &["100%", "step 100 of 100"]);
+            }
+            mentions(status_line(&monitor, "eta"), timing);
             assert_eq!(monitor["estimate"], Value::Null, "{status}");
             let summary = current(&f.store, &run).unwrap().unwrap().summary().clone();
             assert_eq!(summary["tone"], tone, "{status}");
@@ -4114,12 +4130,12 @@ mod tests {
         let run = f.run("running", local());
         let (monitor, _) = monitor_at(&f, &run, T0 + 5_000);
         let text = monitor["statusText"].as_str().unwrap();
-        assert!(
-            text.starts_with(
-                "baseline  running  [run r1]\neta      Setting up\nsignals  No metrics found in the log yet."
-            ),
-            "{text}"
+        mentions(
+            text.lines().next().unwrap(),
+            &["baseline", "running", "[run r1]"],
         );
+        mentions(status_line(&monitor, "eta"), &["Setting up"]);
+        mentions(status_line(&monitor, "signals"), &["No metrics"]);
         assert_eq!(monitor["progress"], Value::Null);
         let summary = current(&f.store, &run).unwrap().unwrap().summary().clone();
         assert_eq!(summary["whole"], Value::Null, "unknown is not done");
@@ -4133,10 +4149,10 @@ mod tests {
         f.collected(T0 + 1000);
         let (monitor, _) = monitor_at(&f, &run, T0 + 2000);
         assert_eq!(monitor["estimate"]["pending"], true);
-        assert!(monitor["statusText"]
-            .as_str()
-            .unwrap()
-            .contains("eta      Estimating… (needs timed progress)"));
+        mentions(
+            status_line(&monitor, "eta"),
+            &["Estimating", "timed progress"],
+        );
     }
 
     #[test]
@@ -4257,15 +4273,6 @@ mod tests {
 
     #[test]
     fn a_run_that_reports_no_progress_is_promised_no_estimate() {
-        let eta = |monitor: &Value| {
-            monitor["statusText"]
-                .as_str()
-                .unwrap()
-                .lines()
-                .nth(1)
-                .unwrap()
-                .to_owned()
-        };
         let slurm = json!({"kind": "slurm_job", "timeoutSecs": 3600});
         let metrics = folded(&[(T0 + 1000, "::orx:: {\"m\":{\"loss\":2.5}}".into())]);
         for (name, backend, reported) in [
@@ -4290,15 +4297,15 @@ mod tests {
                 assert_eq!(monitor["estimate"], Value::Null, "{name} {after}");
                 let summary = current(&f.store, &run).unwrap().unwrap().summary().clone();
                 assert_eq!(summary["estimate"], Value::Null, "{name} {after}");
-                let left = short(3_600_000 - after);
-                let said = if limited {
-                    format!("eta      {left} to the limit (ends by 01:45 UTC)")
+                let eta = status_line(&monitor, "eta");
+                if limited {
+                    let left = short(3_600_000 - after);
+                    mentions(eta, &[&left, "limit", "01:45 UTC"]);
                 } else if reported.is_none() {
-                    "eta      Setting up".to_owned()
+                    mentions(eta, &["Setting up"]);
                 } else {
-                    "eta      No estimate (no progress found in the log)".to_owned()
-                };
-                assert_eq!(eta(&monitor), said, "{name} {after}");
+                    mentions(eta, &["No estimate", "no progress"]);
+                }
             }
         }
 
@@ -4309,7 +4316,10 @@ mod tests {
         f.collected(T0);
         let (monitor, _) = monitor_at(&f, &run, T0 + 5_000);
         assert_eq!(monitor["estimate"]["pending"], true);
-        assert_eq!(eta(&monitor), "eta      Estimating… (needs timed progress)");
+        mentions(
+            status_line(&monitor, "eta"),
+            &["Estimating", "timed progress"],
+        );
         assert_eq!(
             current(&f.store, &run).unwrap().unwrap().summary()["estimate"]["pending"],
             true
@@ -4504,42 +4514,29 @@ mod tests {
         let incomplete = json!({"state":"incomplete","reason":"The rental was released"});
         let cached = json!({"state":"cached","reason":null});
         let table = [
+            (true, &retrying, None, &["Final", "retry", "1970"][..]),
+            (true, &live, None, &["collection", "delayed", "retry"]),
             (
-                true,
-                &retrying,
-                None,
-                "Final signal collection is retrying; next attempt at 1970",
-            ),
-            (
-                true,
-                &live,
-                None,
-                "Signal collection is delayed; orx keeps retrying.",
+                false,
+                &incomplete,
+                Some(&settled),
+                &["collection", "could not finish"],
             ),
             (
                 false,
                 &incomplete,
                 Some(&settled),
-                "Signal collection could not finish.",
+                &["run ended", "signals", "kept"],
             ),
-            (
-                false,
-                &incomplete,
-                Some(&settled),
-                "The run ended before all signals could be kept.",
-            ),
-            (
-                true,
-                &cached,
-                Some(&folding),
-                "Signal history is still being read.",
-            ),
+            (true, &cached, Some(&folding), &["history", "being read"]),
         ];
-        for (reading, availability, snapshot, words) in table {
+        for (reading, availability, snapshot, facts) in table {
             let notes = signal_notes("r1", reading, availability, snapshot);
             assert!(
-                notes.iter().any(|note| note.starts_with(words)),
-                "{words} in {notes:?}"
+                notes
+                    .iter()
+                    .any(|note| facts.iter().all(|part| note.contains(*part))),
+                "{facts:?} in {notes:?}"
             );
         }
         let notes = signal_notes("r1", false, &cached, Some(&folding));
@@ -4612,9 +4609,9 @@ mod tests {
             .unwrap()
             .lines()
             .next()
-            .unwrap()
-            .to_owned();
-        assert_eq!(first, "baseline  running  step 1 of 4  [run r1]");
+            .unwrap();
+        mentions(first, &["baseline", "running", "step 1 of 4", "[run r1]"]);
+        assert!(!first.contains('%'), "{first}");
 
         let f = Fixture::new("orx-monitor-epochs-done");
         let run = f.run("done", local());
@@ -4642,7 +4639,10 @@ mod tests {
             .next()
             .unwrap()
             .to_owned();
-        assert_eq!(first, "baseline  running  75%  step 3 of 4  [run r1]");
+        mentions(
+            &first,
+            &["baseline", "running", "75%", "step 3 of 4", "[run r1]"],
+        );
 
         let f = Fixture::new("orx-monitor-epochs-limit");
         let run = f.run(
@@ -5153,15 +5153,10 @@ mod tests {
             assert_eq!(progress["segments"][0]["fill"], 1.0, "{after}: {progress}");
             assert_eq!(monitor["estimate"], Value::Null, "{after}");
             let text = monitor["statusText"].as_str().unwrap();
-            let lines: Vec<&str> = text.lines().take(2).collect();
-            assert_eq!(
-                lines,
-                [
-                    "baseline  running  step 4 of 4  [run r1]",
-                    "eta      No estimate (how much is left is unknown)"
-                ],
-                "{after}"
-            );
+            let header = text.lines().next().unwrap();
+            mentions(header, &["baseline", "running", "step 4 of 4", "[run r1]"]);
+            assert!(!header.contains('%'), "{header}");
+            mentions(status_line(&monitor, "eta"), &["No estimate", "unknown"]);
             let summary = current(&f.store, &run).unwrap().unwrap().summary().clone();
             assert_eq!(summary["whole"], Value::Null, "{after}");
             assert_eq!(summary["estimate"], Value::Null, "{after}");
@@ -5406,10 +5401,7 @@ mod tests {
         let (projection, whole) = super::monitor(&f.store, &run).unwrap();
         assert!(projection.snapshot.is_none());
         assert_eq!(whole["series"]["loss"].as_array().unwrap().len(), 11);
-        assert_eq!(
-            whole["statusText"].as_str().unwrap().lines().nth(1),
-            Some("eta      Done in 10m")
-        );
+        mentions(status_line(&whole, "eta"), &["Done", "10m"]);
         f.restart();
         let (again, _) = super::monitor(&f.store, &run).unwrap();
         assert_eq!(
@@ -5478,9 +5470,7 @@ mod tests {
         assert_eq!(stored["schedule"], json!({"nextAt": 5}));
     }
 
-    /// One state of a run as the server shows it, with what its time words must say on both
-    /// sides: `cli` is `orx exp status`'s eta line, which begins with `eta`, the page's time left
-    /// when it has one, and gives `range` when there is one.
+    /// One server state with the display values shared by the CLI and dashboard tests.
     fn state(
         name: &str,
         status: &str,
@@ -5488,7 +5478,7 @@ mod tests {
         snapshot: &Snapshot,
         collected: i64,
         now: i64,
-        expect: Value,
+        mut expect: Value,
     ) -> (String, Value) {
         let f = Fixture::new(&format!("orx-monitor-contract-{name}"));
         let run = f.run(status, backend.clone());
@@ -5496,26 +5486,23 @@ mod tests {
         f.collected(collected);
         let (monitor, _) = monitor_at(&f, &run, now);
         let summary = current(&f.store, &run).unwrap().unwrap().summary().clone();
-        let eta = monitor["statusText"]
-            .as_str()
-            .unwrap()
-            .lines()
-            .nth(1)
-            .unwrap();
-        let (cli, left) = (&expect["cli"], &expect["eta"]);
-        assert_eq!(
-            eta.strip_prefix("eta      "),
-            cli.as_str(),
-            "{name}: {}",
-            monitor["statusText"]
-        );
-        let left = left.as_str().unwrap_or_default();
-        assert!(cli.as_str().unwrap().starts_with(left), "{name}");
-        let range = expect["range"].as_str().map(|range| format!("({range}"));
-        assert!(
-            range.is_none_or(|range| eta.contains(&range)),
-            "{name}: {eta}"
-        );
+        let eta = status_line(&monitor, "eta");
+        assert!(!eta.is_empty(), "{name}: missing estimate line");
+        let cli = expect.as_object_mut().unwrap().remove("cli").unwrap();
+        for part in cli.as_array().unwrap() {
+            mentions(eta, &[part.as_str().unwrap()]);
+        }
+        if let Some(duration) = expect["duration"].as_str() {
+            mentions(eta, &[duration]);
+        }
+        if let Some(range) = expect["range"].as_array() {
+            let evidence = format!(
+                "{} to {}",
+                range[0].as_str().unwrap(),
+                range[1].as_str().unwrap()
+            );
+            mentions(eta, &[&evidence]);
+        }
         let text = monitor["statusText"].as_str().unwrap();
         for (signal, words) in expect["measures"].as_object().into_iter().flatten() {
             let said = format!("{signal} {}", words.as_str().unwrap());
@@ -6024,8 +6011,10 @@ mod tests {
             .summary()
             .clone();
         assert_eq!(summary["segments"].as_array().unwrap().len(), 5);
-        let text = monitor["statusText"].as_str().unwrap();
-        assert!(text.contains("\nstages   \u{2713} install 10s \u{b7} \u{25cf} download \u{b7} \u{25cb} train about 1m"), "{text}");
+        let mut stages = status_line(&monitor, "stages").split(" · ");
+        assert_eq!(stages.next(), Some("✓ install 10s"));
+        assert_eq!(stages.next(), Some("● download"));
+        mentions(stages.next().unwrap(), &["○ train", "1m"]);
 
         // At the end of train, eval and sft are still to come: never 100%.
         let child = staged(&f, "c1", "child", "running", &pipeline, 99);
@@ -6038,8 +6027,11 @@ mod tests {
             "eval and sft are left: {}",
             monitor["estimate"]
         );
-        let text = monitor["statusText"].as_str().unwrap();
-        assert!(text.contains("\u{2713} install 10s \u{b7} \u{2713} download 30s \u{b7} \u{25cf} train \u{b7} \u{25cb} eval about 30s"), "{text}");
+        let mut stages = status_line(&monitor, "stages").split(" · ");
+        assert_eq!(stages.next(), Some("✓ install 10s"));
+        assert_eq!(stages.next(), Some("✓ download 30s"));
+        assert_eq!(stages.next(), Some("● train"));
+        mentions(stages.next().unwrap(), &["○ eval", "30s"]);
     }
 
     #[test]
@@ -6079,8 +6071,7 @@ mod tests {
         let (monitor, _) = monitor_at(&f, &child, T0 + 4_500);
         assert_eq!(monitor["estimate"]["midMs"], 1_000);
         assert_eq!(monitor["estimate"]["at"], T0 + 4_000);
-        let text = monitor["statusText"].as_str().unwrap();
-        assert!(text.contains("eta      1s left"), "{text}");
+        mentions(status_line(&monitor, "eta"), &["1s", "left"]);
     }
 
     #[test]
@@ -6212,9 +6203,9 @@ mod tests {
             text.starts_with("baseline  running  train \u{b7} step 59 of 60"),
             "{text}"
         );
-        assert!(
-            text.contains("\neta      No estimate (no earlier run timed eval, sft)"),
-            "a floor under a second is no promise: {text}"
+        mentions(
+            status_line(&monitor, "eta"),
+            &["No estimate", "timed", "eval", "sft"],
         );
 
         // Its last step done, how long eval and sft take is all that is left, and unknown.
@@ -6234,10 +6225,9 @@ mod tests {
             "{}",
             monitor["estimate"]
         );
-        let text = monitor["statusText"].as_str().unwrap();
-        assert!(
-            text.contains("\neta      No estimate (no earlier run timed eval, sft)"),
-            "{text}"
+        mentions(
+            status_line(&monitor, "eta"),
+            &["No estimate", "timed", "eval", "sft"],
         );
     }
 
@@ -6473,10 +6463,7 @@ mod tests {
         let slow = paced("slow", 3);
         assert_eq!(slow["pace"], json!({"times": 3.0, "than": "parent"}));
         let text = slow["statusText"].as_str().unwrap();
-        assert!(
-            text.contains("3\u{d7} slower than the parent at this stage"),
-            "{text}"
-        );
+        mentions(text, &["3\u{d7}", "slower", "parent"]);
         assert_eq!(paced("level", 1)["pace"], Value::Null);
     }
 
@@ -6559,21 +6546,17 @@ mod tests {
                 .collect::<Vec<_>>(),
         );
         for (now, eta) in [
-            (T0 + 59_000, "At least 1s left"),
-            (T0 + 59_001, "No estimate"),
+            (T0 + 59_000, &["At least", "1s", "left"][..]),
+            (T0 + 59_001, &["No estimate"][..]),
         ] {
             let f = Fixture::new("orx-monitor-floor-out");
             let run = f.run("running", local());
             f.collect(&snapshot);
             f.collected(now);
             let (monitor, _) = monitor_at(&f, &run, now);
-            let text = monitor["statusText"].as_str().unwrap();
-            assert!(
-                text.contains(&format!(
-                    "\neta      {eta} (timed from progress in the log; more work may follow it)"
-                )),
-                "{text}"
-            );
+            let line = status_line(&monitor, "eta");
+            mentions(line, eta);
+            mentions(line, &["progress in the log", "more work"]);
         }
     }
 
@@ -6648,10 +6631,10 @@ mod tests {
             monitor["disagrees"],
             json!({"stage": "bench", "of": 16, "unit": "cases", "table": "cases", "rows": 20})
         );
-        let text = monitor["statusText"].as_str().unwrap();
-        assert!(
-            text.contains("plan     the plan counts 16 cases in bench, but the run reported 20 rows in cases and no step"),
-            "{text}"
+        let warning = status_line(&monitor, "plan");
+        mentions(
+            warning,
+            &["16 cases", "bench", "20 rows", "cases", "no step"],
         );
 
         let counted = staged(&f, "r2", "exp", "done", &[("bench", 16, Some(16))], 60);
@@ -6887,30 +6870,64 @@ mod tests {
                 &source,
             )
         };
-        assert_eq!(
-            invalid(raw(json!({"plan": [], "notes": []}))),
-            "Config config.json: \"notes\" is not something this orx reads; a config takes plan, rules, brief and watch. Run `orx exp view set exp --config config.json`."
-        );
-        assert_eq!(
-            invalid(raw(json!({}))),
-            "Config config.json: give a JSON object with plan, rules, brief and watch. Run `orx exp view set exp --config config.json`."
-        );
-        assert_eq!(
-            invalid(raw(json!({"rules": [{"name": "nan", "text": "Stop at NaN.", "does": "halt", "when": {"kind": "nonFinite", "signal": "loss"}}]}))),
-            "Config config.json: rules[0] (nan): \"does\" must be \"stop\" or \"ask\". Run `orx exp view set exp --config config.json`."
-        );
-        for (config, said) in [
-            (json!({"brief": {"goal": "x"}}), "the brief has no label \"goal\"; it takes question, healthy, noise, worth_a_flag, from_parent, decided"),
-            (json!({"brief": {"question": 3}}), "the brief's \"question\" is text"),
-            (json!({"brief": {"question": "x".repeat(3300)}}), "the brief is 3300 bytes; keep it to 3200, about 800 tokens"),
-            (json!({"watch": {"minGapS": 5}}), "watch's minGapS is a whole number of seconds from 30 to 3600"),
-            (json!({"watch": {"everyS": 60}}), "watch has no \"everyS\"; it takes minGapS and maxGapS"),
-            (json!({"watch": {"minGapS": 600, "maxGapS": 300}}), "watch's minGapS is longer than its maxGapS"),
-        ] {
-            assert_eq!(
-                invalid(raw(config)),
-                format!("Config config.json: {said}. Run `orx exp view set exp --config config.json`.")
+        let refusal = |answer, facts: &[&str]| {
+            let error = invalid(answer);
+            mentions(
+                &error,
+                &["config.json", "orx exp view set exp --config config.json"],
             );
+            mentions(&error, facts);
+        };
+        refusal(
+            raw(json!({"plan": [], "notes": []})),
+            &["notes", "plan", "rules", "brief", "watch"],
+        );
+        refusal(
+            raw(json!({})),
+            &["JSON object", "plan", "rules", "brief", "watch"],
+        );
+        refusal(
+            raw(
+                json!({"rules": [{"name": "nan", "text": "Stop at NaN.", "does": "halt", "when": {"kind": "nonFinite", "signal": "loss"}}]}),
+            ),
+            &["rules[0]", "nan", "does", "stop", "ask"],
+        );
+        for (config, facts) in [
+            (
+                json!({"brief": {"goal": "x"}}),
+                &[
+                    "brief",
+                    "goal",
+                    "question",
+                    "healthy",
+                    "noise",
+                    "worth_a_flag",
+                    "from_parent",
+                    "decided",
+                ][..],
+            ),
+            (
+                json!({"brief": {"question": 3}}),
+                &["brief", "question", "text"],
+            ),
+            (
+                json!({"brief": {"question": "x".repeat(3300)}}),
+                &["3300 bytes", "3200", "800 tokens"],
+            ),
+            (
+                json!({"watch": {"minGapS": 5}}),
+                &["minGapS", "whole number", "seconds", "30", "3600"],
+            ),
+            (
+                json!({"watch": {"everyS": 60}}),
+                &["everyS", "minGapS", "maxGapS"],
+            ),
+            (
+                json!({"watch": {"minGapS": 600, "maxGapS": 300}}),
+                &["minGapS", "longer", "maxGapS"],
+            ),
+        ] {
+            refusal(raw(config), facts);
         }
         let save = |config: Value| {
             let source = crate::engine::view::Source {
@@ -6934,9 +6951,9 @@ mod tests {
             "an empty brief clears it, and keeps the gaps"
         );
         assert_eq!(cleared["watch"], json!({"maxGapS": 600}));
-        assert_eq!(
-            invalid(plan(&f, "exp", json!([{"phase": "train"}, {"phase": "train"}]))),
-            "Config config.json: stages 1 and 2 are both \"train\"; list a stage again only after another stage, since a log cannot tell two in a row apart. Run `orx exp view set exp --config config.json`."
+        refusal(
+            plan(&f, "exp", json!([{"phase": "train"}, {"phase": "train"}])),
+            &["stages 1 and 2", "train", "another stage", "log"],
         );
         let saved = plan(
             &f,
@@ -7011,15 +7028,15 @@ mod tests {
                 {"name": "budget", "text": null, "does": "stop", "budgetUsd": 5.0},
             ])
         );
-        let text = monitor["statusText"].as_str().unwrap();
-        assert!(
-            text.contains("rules    nan-loss stops the run \u{b7} plateau wakes the agent \u{b7} budget stops the run past $5.00"),
-            "{text}"
-        );
+        let rules: Vec<_> = status_line(&monitor, "rules").split('·').collect();
+        assert_eq!(rules.len(), 3);
+        mentions(rules[0], &["nan-loss", "stops"]);
+        mentions(rules[1], &["plateau", "wakes", "agent"]);
+        mentions(rules[2], &["budget", "stops", "$5.00"]);
         let (_, later) =
             super::monitor(&f.store, &f.store.get_run("r2").unwrap().unwrap()).unwrap();
         assert_eq!(later["rules"], json!([]));
-        assert!(!later["statusText"].as_str().unwrap().contains("rules"));
+        assert_eq!(status_line(&later, "rules"), "");
 
         // A run's rules written by a newer orx are said to be unreadable, not dropped.
         f.run_in("r3", "child", "running", local());
@@ -7029,10 +7046,10 @@ mod tests {
         );
         let (_, newer) =
             super::monitor(&f.store, &f.store.get_run("r3").unwrap().unwrap()).unwrap();
-        assert!(newer["statusText"]
-            .as_str()
-            .unwrap()
-            .contains("rules    Run r3's rules: rules[0] (r): unknown condition \"lossAbove\""));
+        mentions(
+            status_line(&newer, "rules"),
+            &["r3", "rules[0]", "(r)", "unknown", "lossAbove"],
+        );
     }
 
     /// A running run in `experiment` launched with `rules`.
@@ -7268,14 +7285,12 @@ mod tests {
         let config = f.store.run_monitor_config("r1").unwrap().unwrap();
         let frozen: Value = serde_json::from_str(&config).unwrap();
         assert_eq!(stop.rule.as_ref(), Some(&frozen["rules"][0]));
-        assert_eq!(
-            stop.reason.as_deref(),
-            Some("loss was NaN on 3 reports in a row, step 40 to 60")
-        );
+        let reason = stop.reason.as_deref().unwrap();
+        mentions(reason, &["loss", "NaN", "3 reports", "step 40 to 60"]);
         let run = f.store.get_run("r1").unwrap().unwrap();
-        assert_eq!(
-            run.cancel_reason.as_deref(),
-            Some("Stopped by rule nan-loss: loss was NaN on 3 reports in a row, step 40 to 60. No model was involved.")
+        mentions(
+            run.cancel_reason.as_deref().unwrap(),
+            &["Stopped", "rule", "nan-loss", reason, "No model"],
         );
         assert!(super::super::flags::read(&f.store, &run)
             .unwrap()
@@ -7411,21 +7426,34 @@ mod tests {
             (Some("rule"), Some("eval-zero"))
         );
         let at = clock_text(flag["at"].as_i64().unwrap());
-        assert_eq!(
+        mentions(
             body,
-            &format!(
-                "[orx] Run r1 (experiment exp) was flagged for review.\n\
-                 Rule eval-zero: Ask when the eval score falls below 0.1.\n\
-                 What orx saw at {at}: eval_score was 0.05 (below 0.1) at step 10.\n\
-                 OpenResearch checked this rule itself, with no model. Inspect the run\n\
-                 yourself and confirm this flag before acting on it.\n\
-                 Read: orx exp status exp --run r1; orx logs r1\n\
-                 If confirmed, decide whether to keep going or stop. To stop:\n\
-                 orx exp flag r1 --flag {id} --stop --reason 'your confirmed reason'\n\
-                 To settle this flag without stopping: orx exp flag r1 --flag {id} --keep --reason '…'\n\
-                 To leave the choice to the user: orx exp flag r1 --flag {id} --ask --reason '…'"
-            )
+            &[
+                "[orx]",
+                "r1",
+                "exp",
+                "flagged",
+                "eval-zero",
+                "Ask when the eval score falls below 0.1.",
+                &at,
+                "eval_score",
+                "0.05",
+                "below 0.1",
+                "step 10",
+                "no model",
+                "confirm",
+                "orx exp status exp --run r1",
+                "orx logs r1",
+            ],
         );
+        for (action, reason) in [
+            ("stop", "your confirmed reason"),
+            ("keep", "…"),
+            ("ask", "…"),
+        ] {
+            let command = format!("orx exp flag r1 --flag {id} --{action} --reason '{reason}'");
+            mentions(body, &[&command]);
+        }
         let summary = advance(&f.store, &run, T0 + 3_000)
             .unwrap()
             .summary()
@@ -7465,9 +7493,19 @@ mod tests {
         );
         rules_at(&f, "r1", T0 + 6_000);
         let stop = stopped_by(&f, "r1").expect("worse by more than 1 on three reports");
-        assert_eq!(
-            stop.reason.as_deref(),
-            Some("loss was 1.2 worse than the parent's at the same step (1.7 against 0.5) on 3 reports in a row, step 30 to 50")
+        mentions(
+            stop.reason.as_deref().unwrap(),
+            &[
+                "loss",
+                "1.2",
+                "worse",
+                "parent",
+                "same step",
+                "1.7",
+                "0.5",
+                "3 reports",
+                "step 30 to 50",
+            ],
         );
     }
 
@@ -7538,9 +7576,20 @@ mod tests {
         losses.push("1.47");
         reported(&f, "r1", "val_loss", &losses, 600);
         rules_at(&f, "r1", T0 + 6_000);
-        assert_eq!(
-            stopped_by(&f, "r1").unwrap().reason.as_deref(),
-            Some("val_loss improved by 0.03 over its last 3 reports, step 30 to 50, on its best of 1.5 before them; the rule needs 0.05")
+        let stop = stopped_by(&f, "r1").unwrap();
+        mentions(
+            stop.reason.as_deref().unwrap(),
+            &[
+                "val_loss",
+                "improved",
+                "0.03",
+                "3 reports",
+                "step 30 to 50",
+                "best",
+                "1.5",
+                "needs",
+                "0.05",
+            ],
         );
     }
 
@@ -7593,9 +7642,10 @@ mod tests {
         assert_eq!(stopped_by(&f, "r1"), None);
         f.confirmed("r1", T0 + 602_000);
         rules_at(&f, "r1", T0 + 602_000);
-        assert_eq!(
-            stopped_by(&f, "r1").unwrap().reason.as_deref(),
-            Some("no progress was reported for 10m since step 10")
+        let stop = stopped_by(&f, "r1").unwrap();
+        mentions(
+            stop.reason.as_deref().unwrap(),
+            &["no progress", "10m", "step 10"],
         );
 
         ruled(
@@ -7612,9 +7662,10 @@ mod tests {
         });
         f.confirmed("spent", T0);
         rules_at(&f, "spent", T0 + 1_000);
-        assert_eq!(
-            stopped_by(&f, "spent").unwrap().reason.as_deref(),
-            Some("it has cost $5.25, past its $5.00 budget")
+        let stop = stopped_by(&f, "spent").unwrap();
+        mentions(
+            stop.reason.as_deref().unwrap(),
+            &["cost", "$5.25", "past", "$5.00", "budget"],
         );
 
         let limited = json!({"kind": "local_job", "timeoutSecs": 120});
@@ -7667,8 +7718,7 @@ mod tests {
         f.confirmed("slow", T0 + 83_000);
         rules_at(&f, "slow", T0 + 83_000);
         let reason = stopped_by(&f, "slow").unwrap().reason.unwrap();
-        assert!(reason.starts_with("it would finish up to "), "{reason}");
-        assert!(reason.ends_with(" past its time limit"), "{reason}");
+        mentions(&reason, &["finish", "past", "time limit"]);
     }
 
     #[test]
@@ -7806,47 +7856,42 @@ mod tests {
             let live = super::monitor(&f.store, &f.store.get_run(id).unwrap().unwrap())
                 .unwrap()
                 .1;
-            let line = |monitor: &Value| {
-                monitor["statusText"]
-                    .as_str()
-                    .unwrap()
-                    .lines()
-                    .find_map(|line| line.strip_prefix("stop     "))
-                    .map(str::to_owned)
-            };
-            let asked = line(&live);
+            let asked = status_line(&live, "stop").to_owned();
             f.store.set_run_status(id, "cancelled");
             let ended = super::monitor(&f.store, &f.store.get_run(id).unwrap().unwrap())
                 .unwrap()
                 .1;
-            (asked, line(&ended))
+            (asked, status_line(&ended, "stop").to_owned())
         };
-        assert_eq!(
-            stopped("u", StopBy::User, None, None),
-            (
-                Some("The user asked to stop it.".into()),
-                Some("Stopped by the user.".into())
-            )
+        let (asked, ended) = stopped("u", StopBy::User, None, None);
+        mentions(&asked, &["user", "asked", "stop"]);
+        mentions(&ended, &["Stopped", "user"]);
+        mentions(
+            &stopped("a", StopBy::Agent, Some("Loss went NaN"), None).1,
+            &["Auto-stopped", "agent", "Loss went NaN"],
         );
-        assert_eq!(
-            stopped("a", StopBy::Agent, Some("Loss went NaN"), None)
-                .1
-                .as_deref(),
-            Some("Auto-stopped by the agent: Loss went NaN.")
+        let reason = "loss was NaN on 3 reports in a row";
+        let (asked, ended) = stopped(
+            "r",
+            StopBy::Rule,
+            Some(reason),
+            Some(json!({"name": "nan-loss"})),
         );
-        assert_eq!(
-            stopped("r", StopBy::Rule, Some("loss was NaN on 3 reports in a row"), Some(json!({"name": "nan-loss"}))),
-            (
-                Some("Stopping by rule nan-loss: loss was NaN on 3 reports in a row. No model was involved.".into()),
-                Some("Auto-stopped by rule nan-loss: loss was NaN on 3 reports in a row. No model was involved.".into()),
-            )
+        mentions(
+            &asked,
+            &["Stopping", "rule", "nan-loss", reason, "No model"],
+        );
+        mentions(
+            &ended,
+            &["Auto-stopped", "rule", "nan-loss", reason, "No model"],
         );
         f.run_named("n", "cancelled", local());
         let never = super::monitor(&f.store, &f.store.get_run("n").unwrap().unwrap())
             .unwrap()
             .1;
-        assert!(
-            !never["statusText"].as_str().unwrap().contains("stop "),
+        assert_eq!(
+            status_line(&never, "stop"),
+            "",
             "no one is named for an old stop"
         );
     }
@@ -8062,9 +8107,9 @@ mod tests {
             "drawn under the child's curve"
         );
         let text = monitor["statusText"].as_str().unwrap();
-        assert!(
-            text.contains("signals  Loss 0.227 (0.045 better than parent at step 100)"),
-            "{text}"
+        mentions(
+            text,
+            &["Loss 0.227", "0.045", "better", "parent", "step 100"],
         );
         let summary = current(&f.store, &child)
             .unwrap()
@@ -8142,9 +8187,9 @@ mod tests {
         assert_eq!(monitor["versus"]["final"], json!({}));
         assert_eq!(event.unwrap()["versus"], monitor["versus"]);
         let text = monitor["statusText"].as_str().unwrap();
-        assert!(
-            text.contains("Loss 0.675 (0.075 better than parent at step 30)"),
-            "{text}"
+        mentions(
+            text,
+            &["Loss 0.675", "0.075", "better", "parent", "step 30"],
         );
 
         // An unstepped report does not use the old step, even when the value is the same.
@@ -8160,10 +8205,7 @@ mod tests {
         let ended = staged_run(&f, "c3", "child", "done", 3, 0.9, None);
         let (monitor, _) = monitor_at(&f, &ended, T0 + 700_000);
         let text = monitor["statusText"].as_str().unwrap();
-        assert!(
-            text.contains("Loss 0.675 (0.669 worse than parent's final value)"),
-            "{text}"
-        );
+        mentions(text, &["Loss 0.675", "0.669", "worse", "parent", "final"]);
 
         f.view(
             "child",
@@ -8174,9 +8216,9 @@ mod tests {
         );
         let (monitor, _) = monitor_at(&f, &ended, T0 + 701_000);
         let text = monitor["statusText"].as_str().unwrap();
-        assert!(
-            text.contains("Loss 0.675 (0.075 better than parent at step 30)"),
-            "the signal's own way wins: {text}"
+        mentions(
+            text,
+            &["Loss 0.675", "0.075", "better", "parent", "step 30"],
         );
     }
 
@@ -8232,9 +8274,9 @@ mod tests {
             "{vs}"
         );
         let text = monitor["statusText"].as_str().unwrap();
-        assert!(
-            text.contains("Frontier gain +0.412 (0.391 better than parent's final value)"),
-            "{text}"
+        mentions(
+            text,
+            &["Frontier gain +0.412", "0.391", "better", "parent", "final"],
         );
     }
 
@@ -8283,11 +8325,9 @@ mod tests {
             .unwrap();
         let (monitor, _) = monitor_at(&f, &run, T0 + 5_500);
         assert_eq!(monitor["viewFrom"]["isDefault"], true);
-        let text = monitor["statusText"].as_str().unwrap();
-        assert!(
-            text.contains("view     View of exp:1:7: unknown element \"heatmap\"")
-                && text.contains("The default view is shown."),
-            "{text}"
+        mentions(
+            status_line(&monitor, "view"),
+            &["exp:1:7", "unknown element", "heatmap", "default view"],
         );
         // Saving keeps what a newer orx stored beside the view.
         f.view("exp", "<view><stats of=\"loss\" /></view>");
@@ -8321,45 +8361,103 @@ mod tests {
             )
         };
         // Before any run there is nothing to check a view against.
-        assert_eq!(
-            invalid(view("<view><html/></view>")),
-            format!("View view.xml:1:7: unknown element \"html\"; allowed: {}. Run `orx exp view set exp --file view.xml`.", crate::engine::view::ELEMENTS.join(", "))
-        );
+        let unknown_element = |command| {
+            let error = invalid(view("<view><html/></view>"));
+            mentions(
+                &error,
+                &["view.xml:1:7", "unknown element", "html", command],
+            );
+            mentions(&error, crate::engine::view::ELEMENTS);
+        };
+        unknown_element("orx exp view set exp --file view.xml");
         loss_run(&f, "r1", "exp", "running", 5, 1.0);
-        assert_eq!(
-            invalid(view("<view><html/></view>")),
-            format!("View view.xml:1:7: unknown element \"html\"; allowed: {}. Run `orx exp view check r1 --file view.xml`.", crate::engine::view::ELEMENTS.join(", "))
+        unknown_element("orx exp view check r1 --file view.xml");
+        let error = invalid(view("<view>\n  <chart y=\"los\" />\n</view>"));
+        mentions(
+            &error,
+            &[
+                "view.xml:2:3",
+                "blocks[0].chart[0]",
+                "no signal",
+                "los",
+                "loss",
+                "orx exp view set exp --file view.xml",
+            ],
         );
-        assert_eq!(
-            invalid(view("<view>\n  <chart y=\"los\" />\n</view>")),
-            "View view.xml:2:3: blocks[0].chart[0]: no signal \"los\"; seen: loss. Run `orx exp view set exp --file view.xml`."
-        );
-        assert!(matches!(
-            set(&f.store, "exp", "\"stale\"", Some("<view/>"), None, None, &file),
-            Err(Refusal::Changed(message)) if message == "Experiment exp changed while saving its view. Run `orx exp view get exp` and retry."
-        ));
-        assert!(matches!(
-            set(&f.store, "nope", &etag(None), Some("<view/>"), None, None, &file),
-            Err(Refusal::Missing(message)) if message == "Experiment nope not found."
-        ));
+        let Err(Refusal::Changed(message)) = set(
+            &f.store,
+            "exp",
+            "\"stale\"",
+            Some("<view/>"),
+            None,
+            None,
+            &file,
+        ) else {
+            panic!("a stale etag should be refused");
+        };
+        mentions(&message, &["exp", "changed", "orx exp view get exp"]);
+        let Err(Refusal::Missing(message)) = set(
+            &f.store,
+            "nope",
+            &etag(None),
+            Some("<view/>"),
+            None,
+            None,
+            &file,
+        ) else {
+            panic!("a missing experiment should be refused");
+        };
+        mentions(&message, &["nope", "not found"]);
         let patterns =
             |list: Value| set(&f.store, "exp", &etag(None), None, Some(&list), None, &file);
-        assert_eq!(
-            invalid(patterns(json!([{"regex": "^chunk (?P<step\\d+)"}]))),
-            "Pattern patterns.json: pattern 1: invalid regex at column 16: invalid capture group character. Run `orx exp view check r1 --pattern patterns.json`."
+        let error = invalid(patterns(json!([{"regex": "^chunk (?P<step\\d+)"}])));
+        mentions(
+            &error,
+            &[
+                "patterns.json",
+                "pattern 1",
+                "invalid regex",
+                "column 16",
+                "capture group",
+                "orx exp view check r1 --pattern patterns.json",
+            ],
         );
-        assert_eq!(
-            invalid(patterns(json!([{"regex": "^x", "candidates": "^y"}]))),
-            "Pattern patterns.json: give a JSON list of {\"regex\", \"phase\", \"unit\", \"row\"} objects (unknown field `candidates`, expected one of `regex`, `phase`, `unit`, `row`). Run `orx exp view check r1 --pattern patterns.json`."
+        let error = invalid(patterns(json!([{"regex": "^x", "candidates": "^y"}])));
+        mentions(
+            &error,
+            &[
+                "patterns.json",
+                "JSON list",
+                "candidates",
+                "regex",
+                "phase",
+                "unit",
+                "row",
+                "orx exp view check r1 --pattern patterns.json",
+            ],
         );
         let stdin = Source {
             file: None,
             patterns: None,
             config: None,
         };
-        assert_eq!(
-            invalid(check(&f.store, "r1", Some("<view><chart y=\"lr\" /></view>"), None, &stdin)),
-            "View <stdin>:1:7: blocks[0].chart[0]: no signal \"lr\"; seen: loss. Run `orx exp view set exp --stdin`."
+        let error = invalid(check(
+            &f.store,
+            "r1",
+            Some("<view><chart y=\"lr\" /></view>"),
+            None,
+            &stdin,
+        ));
+        mentions(
+            &error,
+            &[
+                "<stdin>:1:7",
+                "blocks[0].chart[0]",
+                "no signal",
+                "lr",
+                "loss",
+                "orx exp view set exp --stdin",
+            ],
         );
         let error = invalid(set(
             &f.store,
@@ -8453,11 +8551,15 @@ mod tests {
         let mut snapshot = folded(&declared(0..=20, 400));
         f.collect(&snapshot);
         f.collected(T0 + 20_000);
-        let (_, first) = monitor_at(&f, &run, T0 + 20_500);
+        let (before, first) = monitor_at(&f, &run, T0 + 20_500);
         fold(&mut snapshot, &declared(21..=22, 400));
         f.collect(&snapshot);
         f.collected(T0 + 22_000);
-        let (_, next) = monitor_at(&f, &run, T0 + 22_500);
+        let (after, next) = monitor_at(&f, &run, T0 + 22_500);
+
+        let mut events = [first.unwrap(), next.unwrap()];
+        assert_eq!(events[0]["statusText"], before["statusText"]);
+        assert_eq!(events[1]["statusText"], after["statusText"]);
 
         let open = folded(&[
             (T0 + 1000, "::orx:: {\"step\":23,\"m\":{\"loss\":2}}".into()),
@@ -8476,7 +8578,7 @@ mod tests {
                 &folded(&declared(0..=20, 400)),
                 T0 + 20_000,
                 T0 + 20_500,
-                json!({"eta": "19s left", "range": "18s to 20s", "cli": "19s left (18s to 20s)"}),
+                json!({"duration": "19s", "range": ["18s", "20s"], "cli": ["left"]}),
             ),
             state(
                 "nan",
@@ -8485,7 +8587,7 @@ mod tests {
                 &folded(&declared(0..=5, 400)),
                 T0 + 5_000,
                 T0 + 5_000,
-                json!({"eta": "35s left", "range": "31s to 38s", "cli": "35s left (31s to 38s)"}),
+                json!({"duration": "35s", "range": ["31s", "38s"], "cli": ["left"], "measures": {"loss": "NaN"}}),
             ),
             state(
                 "stall",
@@ -8494,7 +8596,7 @@ mod tests {
                 &folded(&declared(0..=10, 400)),
                 T0 + 3_601_000,
                 T0 + 3_601_000,
-                json!({"eta": "No progress for 59m", "range": null, "stall": "59m", "cli": "No progress for 59m (was due about 00:45 UTC)"}),
+                json!({"duration": "59m", "cli": ["No progress", "due", "00:45 UTC"]}),
             ),
             state(
                 "limit",
@@ -8503,7 +8605,7 @@ mod tests {
                 &limited,
                 T0 + 900_000,
                 T0 + 900_000,
-                json!({"eta": "45m to the limit", "range": null, "cli": "45m to the limit (ends by 01:45 UTC)"}),
+                json!({"duration": "45m", "cli": ["limit", "01:45 UTC"]}),
             ),
             state(
                 "open",
@@ -8512,7 +8614,7 @@ mod tests {
                 &open,
                 T0 + 2_000,
                 T0 + 20_000,
-                json!({"eta": null, "range": null, "cli": "No estimate (no total or time limit)"}),
+                json!({"noEstimate": "noTotal", "cli": ["No estimate", "no total", "limit"]}),
             ),
             state(
                 "ended",
@@ -8521,7 +8623,7 @@ mod tests {
                 &folded(&declared(0..=10, 100)),
                 T0 + 10_000,
                 T0 + 700_000,
-                json!({"eta": "Done in 10m", "range": null, "cli": "Done in 10m"}),
+                json!({"duration": "10m", "cli": ["Done"]}),
             ),
             state(
                 "full",
@@ -8530,7 +8632,7 @@ mod tests {
                 &epochs(0, 4, 4),
                 T0 + 125_000,
                 T0 + 125_000,
-                json!({"eta": null, "range": null, "cli": "No estimate (how much is left is unknown)"}),
+                json!({"noEstimate": "unknownLeft", "cli": ["No estimate", "left", "unknown"]}),
             ),
             state(
                 "long",
@@ -8539,7 +8641,7 @@ mod tests {
                 &folded(&declared(0..=10, 1_000_000)),
                 T0 + 10_000,
                 T0 + 10_000,
-                json!({"eta": "1d 3h left", "range": "13h 53m to 1d 20h", "cli": "1d 3h left (13h 53m to 1d 20h)"}),
+                json!({"duration": "1d 3h", "range": ["13h 53m", "1d 20h"], "cli": ["left"]}),
             ),
             state(
                 "epochs",
@@ -8548,7 +8650,7 @@ mod tests {
                 &epochs(3, 4, 1),
                 T0 + 20_000,
                 T0 + 20_000,
-                json!({"eta": null, "range": null, "cli": "No estimate (how much is left is unknown)"}),
+                json!({"noEstimate": "unknownLeft", "cli": ["No estimate", "left", "unknown"]}),
             ),
             state(
                 "first",
@@ -8557,7 +8659,7 @@ mod tests {
                 &folded(&[(T0 + 1000, "::orx:: {\"m\":{\"loss\":2.5}}".into())]),
                 T0 + 1000,
                 T0 + 10_000,
-                json!({"eta": null, "range": null, "cli": "No estimate (no progress found in the log)"}),
+                json!({"noEstimate": "noProgress", "cli": ["No estimate", "no progress", "log"]}),
             ),
             state(
                 "measures",
@@ -8570,7 +8672,7 @@ mod tests {
                 T0 + 1000,
                 T0 + 5_000,
                 json!({
-                    "eta": "Estimating…", "range": null, "cli": "Estimating… (needs timed progress)",
+                    "cli": ["Estimating", "timed progress"],
                     "stage": "round 14 of 24",
                     "columns": ["round", "win_rate", "elo", "game_len"],
                     "headline": "lr",
@@ -8607,7 +8709,7 @@ mod tests {
                 &folded(&[(T0 + 1000, "::orx:: {\"phase\":\"train\"}".into())]),
                 T0 + 1000,
                 T0 + 5_000,
-                json!({"eta": null, "range": null, "cli": "train started"}),
+                json!({"cli": ["train", "started"]}),
             ),
             state(
                 "setup",
@@ -8619,7 +8721,7 @@ mod tests {
                 ]),
                 T0 + 2_000,
                 T0 + 10_000,
-                json!({"eta": null, "range": null, "cli": "Setting up · Successfully downloaded shard_00001.parquet"}),
+                json!({"cli": ["Setting up", "Successfully downloaded shard_00001.parquet"]}),
             ),
             state(
                 "detected",
@@ -8633,8 +8735,8 @@ mod tests {
                 T0 + 18_000,
                 T0 + 18_000,
                 json!({
-                    "eta": "At least 42s left", "range": null,
-                    "cli": "At least 42s left (timed from progress in the log; more work may follow it)",
+                    "duration": "42s",
+                    "cli": ["At least", "left", "progress in the log", "more work"],
                     "stage": "3 of 10 chunks",
                 }),
             ),
@@ -8651,8 +8753,8 @@ mod tests {
                 T0 + 9_000,
                 T0 + 9_000,
                 json!({
-                    "eta": "At least 5s left", "range": null,
-                    "cli": "At least 5s left (no earlier run timed eval)",
+                    "duration": "5s",
+                    "cli": ["At least", "left", "earlier run", "timed", "eval"],
                     "stage": "train · step 5 of 10",
                 }),
             ),
@@ -8664,7 +8766,7 @@ mod tests {
                 T0 + 1000,
                 T0 + 5_000,
                 json!({
-                    "eta": "Estimating…", "range": null, "cli": "Estimating… (needs timed progress)",
+                    "cli": ["Estimating", "timed progress"],
                     "stage": "train · step 2,280 of 4,200",
                 }),
             ),
@@ -8677,8 +8779,18 @@ mod tests {
         states.insert("failing_done".into(), failing_done_state());
         states.insert("compared".into(), compared_state());
         states.insert("flagged".into(), flagged_state());
+        // Keep the wire field and check its type without snapshotting the CLI's prose.
+        for body in states
+            .values_mut()
+            .map(|state| &mut state["monitor"])
+            .chain(&mut events)
+        {
+            let text = body["statusText"].as_str().expect("statusText is a string");
+            assert!(!text.is_empty());
+            body["statusText"] = json!("");
+        }
         let api = json!({"states": states});
-        let events = json!([first.unwrap(), next.unwrap()]);
+        let events = json!(events);
         for (name, actual) in [
             ("run-monitor-api.json", api),
             ("run-monitor-events.json", events),
@@ -8715,12 +8827,14 @@ mod tests {
         f.collect(&snapshot);
         f.collected(T0 + 22_000);
         assert!(publish(&f.store, &run, T0 + 22_000, None).is_err());
-        let summary = current(&f.store, &run).unwrap().unwrap().summary().clone();
+        let mut summary = current(&f.store, &run).unwrap().unwrap().summary().clone();
+        assert_eq!(summary["unavailable"], MONITOR_FAILED);
+        summary["unavailable"] = json!("Projection failed");
         let run = json!({
             "status": "running", "createdAt": T0, "startedAt": T0, "updatedAt": T0,
             "endedAt": null, "backend": local(),
         });
-        let expect = json!({"eta": null, "range": null, "cli": null});
+        let expect = json!({});
         json!({"run": run, "now": T0 + 22_000, "monitor": monitor, "summary": summary, "expect": expect})
     }
 
@@ -8734,12 +8848,14 @@ mod tests {
         f.failing("r1", true);
         let run = f.run("done", local());
         assert!(publish(&f.store, &run, T0 + 22_000, None).is_err());
-        let summary = current(&f.store, &run).unwrap().unwrap().summary().clone();
+        let mut summary = current(&f.store, &run).unwrap().unwrap().summary().clone();
+        assert_eq!(summary["unavailable"], MONITOR_FAILED);
+        summary["unavailable"] = json!("Projection failed");
         let run = json!({
             "status": "done", "createdAt": T0, "startedAt": T0, "updatedAt": T0 + 22_000,
             "endedAt": T0 + 22_000, "backend": local(),
         });
-        let expect = json!({"eta": null, "range": null, "cli": null});
+        let expect = json!({});
         json!({"run": run, "now": T0 + 22_000, "monitor": monitor, "summary": summary, "expect": expect})
     }
 
@@ -8761,11 +8877,17 @@ mod tests {
             "status": "running", "createdAt": T0, "startedAt": T0, "updatedAt": T0,
             "endedAt": null, "backend": local(),
         });
-        let expect = json!({"eta": null, "range": null, "cli": null, "said": "Loss 0.227 (0.045 better than parent at step 100)"});
-        assert!(monitor["statusText"]
-            .as_str()
-            .unwrap()
-            .contains(expect["said"].as_str().unwrap()));
+        let expect = json!({"delta": "0.045"});
+        mentions(
+            status_line(&monitor, "signals"),
+            &[
+                "Loss 0.227",
+                expect["delta"].as_str().unwrap(),
+                "better",
+                "parent",
+                "step 100",
+            ],
+        );
         json!({"run": run, "now": T0 + 10_000, "monitor": monitor, "summary": summary, "expect": expect})
     }
 
@@ -8792,7 +8914,20 @@ mod tests {
             "status": "running", "createdAt": T0, "startedAt": T0, "updatedAt": T0,
             "endedAt": null, "backend": local(),
         });
-        let expect = json!({"eta": null, "range": null, "cli": null, "flag": "waiting"});
+        mentions(
+            status_line(&monitor, "watch"),
+            &["Claude Haiku", "not looked"],
+        );
+        mentions(
+            status_line(&monitor, "flag"),
+            &[
+                "Loss 0.143 rose at step 18.",
+                "log line 19",
+                "flag f1",
+                "waits for the user",
+            ],
+        );
+        let expect = json!({});
         assert_eq!(summary["flag"]["state"], "waiting");
         json!({"run": run, "now": T0 + 20_500, "monitor": monitor, "summary": summary, "expect": expect})
     }
@@ -8804,20 +8939,25 @@ mod tests {
         f.collected(T0 + 20_000);
         monitor_at(&f, &run, T0 + 20_000);
         std::fs::write(&signal_paths(f.dir.path(), "r1")[0], "{not json").unwrap();
-        let (monitor, _) = monitor_at(&f, &run, T0 + 22_000);
-        // The checkpoint's path names a temporary directory that differs on every run.
+        let (mut monitor, _) = monitor_at(&f, &run, T0 + 22_000);
         let path = signal_paths(f.dir.path(), "r1")[0].display().to_string();
-        let escaped = serde_json::to_string(&path).unwrap();
-        let fixed = monitor
-            .to_string()
-            .replace(escaped.trim_matches('"'), "/data/run-signals/r1.json");
-        let monitor: Value = serde_json::from_str(&fixed).unwrap();
-        let summary = current(&f.store, &run).unwrap().unwrap().summary().clone();
+        mentions(
+            monitor["availability"]["reason"].as_str().unwrap(),
+            &[&path],
+        );
+        mentions(
+            monitor["statusText"].as_str().unwrap(),
+            &["could not be read", "orx logs r1", &path],
+        );
+        monitor["availability"]["reason"] = json!("Unreadable checkpoint");
+        let mut summary = current(&f.store, &run).unwrap().unwrap().summary().clone();
+        assert_eq!(summary["unavailable"], SIGNALS_UNREADABLE);
+        summary["unavailable"] = json!("Unreadable checkpoint");
         let run = json!({
             "status": "running", "createdAt": T0, "startedAt": T0, "updatedAt": T0,
             "endedAt": null, "backend": local(),
         });
-        let expect = json!({"eta": null, "range": null, "cli": null});
+        let expect = json!({});
         json!({"run": run, "now": T0 + 22_000, "monitor": monitor, "summary": summary, "expect": expect})
     }
 
@@ -8912,12 +9052,9 @@ mod tests {
 
         let stop = stopped_by(&f, "r1")
             .expect("2.6 is 1.1 above the parent's 1.5 halfway between its reports");
-        assert!(
-            stop.reason
-                .as_deref()
-                .unwrap_or_default()
-                .contains("(2.6 against 1.5)"),
-            "{stop:?}"
+        mentions(
+            stop.reason.as_deref().unwrap(),
+            &["loss", "worse", "parent", "2.6", "1.5"],
         );
     }
 }

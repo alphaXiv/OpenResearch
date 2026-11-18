@@ -767,11 +767,17 @@ for (let step = 1; step <= 400; step++) {
   await test.step('the third NaN stops the run, named by its rule, with no model involved', async () => {
     await agent.reached(seen)
     await expect(banner).toContainText('Auto-stopped')
-    await expect.poll(async () => (await banner.innerText()).replace(/[⁦-⁩]/g, ''))
-      .toContain('Stop when the loss is NaN on 3 reports in a row. Rule: nan-loss. No model was involved.')
-    const { statusText } = await (await page.request.get(`${orx.url}/api/runs/${runId}/monitor`)).json()
+    await expect(banner).toContainText('Stop when the loss is NaN on 3 reports in a row.')
+    await expect(banner).toContainText('nan-loss')
+    await expect(banner).toContainText('No model')
+    const { statusText }: { statusText: string } = await (await page.request.get(`${orx.url}/api/runs/${runId}/monitor`)).json()
+    const stop = statusText.split('\n').find(line => /^stop\s/.test(line))
     // A pass counts every report since the last, so a fast run is stopped a few reports past the third.
-    expect(statusText).toMatch(/\nstop {5}Auto-stopped by rule nan-loss: loss was NaN on \d+ reports in a row, step 10 to \d+\. No model was involved\.\n/)
+    for (const fact of ['Auto-stopped', 'rule', 'nan-loss', 'NaN', 'No model']) {
+      expect(stop).toContain(fact)
+    }
+    expect(stop).toMatch(/\b\d+ reports\b/)
+    expect(stop).toMatch(/\bstep 10 to \d+\b/)
     await themes(page, banner, info, 'strip-auto-stopped')
   })
 

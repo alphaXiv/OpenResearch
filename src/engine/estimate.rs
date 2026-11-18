@@ -1973,9 +1973,60 @@ mod retained_timing {
                 let clock = Some((*at as f64, *at as f64));
                 let kept = estimate(&with_signals(run.clone(), &signals, &[], clock, now)).unwrap();
                 let whole = estimate(&with_signals(run, &every, &[], clock, now)).unwrap();
+                let eta = |eta: &Eta| {
+                    let Eta {
+                        range,
+                        at,
+                        pending,
+                        past_limit_ms,
+                        floor,
+                    } = *eta;
+                    let range = range.map(
+                        |Range {
+                             lo_ms,
+                             mid_ms,
+                             hi_ms,
+                         }| (lo_ms, mid_ms, hi_ms),
+                    );
+                    (range, at, pending, past_limit_ms, floor)
+                };
+                let result = |out: &Output| {
+                    let Output {
+                        phase_fraction,
+                        segments,
+                        whole,
+                        current_phase,
+                        estimate,
+                        completed_slices,
+                        stall_ms,
+                        errors,
+                        cost,
+                    } = out;
+                    let segments: Vec<_> = segments
+                        .iter()
+                        .map(|Segment { weight, fill }| (*weight, *fill))
+                        .collect();
+                    let Cost {
+                        so_far,
+                        projected,
+                        spend,
+                        uncertain,
+                    } = *cost;
+                    (
+                        *phase_fraction,
+                        segments,
+                        *whole,
+                        current_phase.as_ref().map(eta),
+                        estimate.as_ref().map(eta),
+                        *completed_slices,
+                        *stall_ms,
+                        errors.clone(),
+                        (so_far, projected, spend, uncertain),
+                    )
+                };
                 assert_eq!(
-                    format!("{kept:?}"),
-                    format!("{whole:?}"),
+                    result(&kept),
+                    result(&whole),
                     "{name}: line {index}, {later} ms later"
                 );
                 stalled += usize::from(kept.stall_ms.is_some_and(|ms| ms > 0.0));

@@ -45,28 +45,36 @@ async function banner(name, level = "strip", state = states[name]) {
 }
 
 test("time left and its range read as `orx exp status` reads them, on the strip and the line", () => {
-  for (const [name, { expect }] of Object.entries(states)) {
+  const timing = { ended: m.run_done_in, limit: m.run_eta_to_limit, stall: m.run_eta_silent_for };
+  for (const [name, { expect, monitor }] of Object.entries(states)) {
     for (const full of [true, false]) {
       const view = model(name, full);
-      // A finished run says how long it took as its sentence.
-      if (expect.eta !== null) assert.equal(bare(view.eta || view.sentence.text), expect.eta, `${name} ${full}`);
-      if (expect.range !== null) assert.ok(bare(view.etaDetail).startsWith(expect.range), `${name} ${full}: ${view.etaDetail}`);
+      if (expect.duration) {
+        const message = timing[name] ?? (monitor.estimate?.floor ? m.run_eta_floor : m.run_eta_left);
+        assert.equal(bare(view.eta || view.sentence.text), bare(message({ duration: expect.duration })), `${name} ${full}`);
+      }
+      if (expect.range) {
+        const [lo, hi] = expect.range;
+        assert.ok(bare(view.etaDetail).startsWith(bare(m.run_eta_range({ lo, hi }))), `${name} ${full}: ${view.etaDetail}`);
+      }
     }
   }
 });
 
 test("a range whose ends read alike is left out", () => {
-  const { monitor } = states.running;
+  const { monitor, expect } = states.running;
   const close = { ...monitor, estimate: { ...monitor.estimate, loMs: 19_600, midMs: 19_800, hiMs: 19_900 } };
   assert.ok(!bare(model("running", true, close).etaDetail).includes(bare(m.run_eta_range({ lo: "19s", hi: "19s" }))));
-  assert.ok(bare(model("running").etaDetail).includes(states.running.expect.range));
+  const [lo, hi] = expect.range;
+  assert.ok(bare(model("running").etaDetail).includes(bare(m.run_eta_range({ lo, hi }))));
 });
 
 test("zero overrun leaves the range and finish time visible", () => {
   const { monitor, now, expect } = states.running;
   const view = model("running", true, { ...monitor, limit: { endsAt: now + 30_000 }, estimate: { ...monitor.estimate, pastLimitMs: 0 } });
-  assert.ok(bare(view.etaDetail).startsWith(expect.range));
-  assert.match(bare(view.etaDetail), /done about/);
+  const [lo, hi] = expect.range;
+  assert.ok(bare(view.etaDetail).startsWith(bare(m.run_eta_range({ lo, hi }))), view.etaDetail);
+  assert.equal(view.etaDetail, model("running").etaDetail);
 });
 
 test("with no total the stage reads as steps, from the full monitor and from the summary alone", () => {
@@ -87,7 +95,7 @@ test("the caption says only what the sentence doesn't", () => {
 test("a run past its estimate with no progress since says how long it has been silent, never 0s left", () => {
   for (const full of [true, false]) {
     const view = model("stall", full);
-    assert.equal(bare(view.eta), states.stall.expect.eta, `full: ${full}`);
+    assert.equal(bare(view.eta), bare(m.run_eta_silent_for({ duration: states.stall.expect.duration })), `full: ${full}`);
     assert.equal(view.leftMs, null, `full: ${full}: no countdown`);
   }
   const { monitor, now } = states.stall;
@@ -118,12 +126,10 @@ test("a finished run says it finished, and the line's right carries its number i
 });
 
 /** Why each state with no estimate has none, in the page's words for the reason `orx exp status` gives. */
-const reasons = { "no progress found in the log": m.run_eta_no_progress(), "no total or time limit": m.run_eta_no_total(), "how much is left is unknown": m.run_eta_unknown_left() };
-const noEstimate = Object.fromEntries(Object.entries(states).flatMap(([name, { expect, summary }]) => {
-  const why = expect.cli?.match(/^No estimate \((.+)\)$/)?.[1];
-  // A run still setting up says so instead.
-  return why && !summary.setup ? [[name, reasons[why]]] : [];
-}));
+const reasons = { noProgress: m.run_eta_no_progress(), noTotal: m.run_eta_no_total(), unknownLeft: m.run_eta_unknown_left() };
+const noEstimate = Object.fromEntries(Object.entries(states).flatMap(([name, { expect, summary }]) =>
+  expect.noEstimate && !summary.setup ? [[name, reasons[expect.noEstimate]]] : []
+));
 
 test("every state with no estimate gives a reason both sides share", () => {
   assert.ok(noEstimate.open);
@@ -230,7 +236,7 @@ test("the line says its time is elapsed, and why there is no estimate in its des
 test("a detected counter times only its stage and promises no whole-run finish", async () => {
   for (const full of [true, false]) {
     const view = model("detected", full);
-    assert.equal(bare(view.eta), states.detected.expect.eta);
+    assert.equal(bare(view.eta), bare(m.run_eta_floor({ duration: states.detected.expect.duration })));
     assert.equal(view.leftMs, null);
     assert.equal(view.etaDetail, m.run_eta_log_floor_detail());
     assert.equal(view.bar.whole, null);
@@ -408,7 +414,7 @@ test("a run compared with its parent says by how much, as `orx exp status` says 
     const { headline } = model("compared", full);
     assert.equal(headline.label, "Loss", `full: ${full}`);
     assert.equal(headline.delta.good, true, `full: ${full}`);
-    assert.ok(expect.said.includes(`${bare(headline.delta.magnitude)} better than parent`), `full: ${full}`);
+    assert.equal(bare(headline.delta.magnitude), expect.delta, `full: ${full}`);
   }
 });
 
@@ -434,12 +440,12 @@ test("a failed run that recorded no message says the last error its log names, q
 test("the floor expires below one second at the midpoint", () => {
   const { monitor } = states.detected;
   for (const full of [true, false]) {
-    for (const [left, eta] of [[1000, "At least 1s left"], [999, "No estimate"]]) {
+    for (const [left, eta] of [[1000, m.run_eta_floor({ duration: "1s" })], [999, m.run_eta_no_estimate()]]) {
       const later = runModel({
         item: { sessionId: "s", run: runOf("detected"), experimentName: null, experimentSlug: "baseline" },
         monitor: full ? monitor : null, shown: true, agent: "Claude", now: monitor.estimate.at + monitor.estimate.midMs - left, nextRetryMs: null,
       });
-      assert.equal(bare(later.eta), eta, `full: ${full}`);
+      assert.equal(bare(later.eta), bare(eta), `full: ${full}`);
       assert.equal(later.etaDetail, m.run_eta_log_floor_detail(), `full: ${full}`);
     }
   }

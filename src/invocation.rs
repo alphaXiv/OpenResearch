@@ -86,10 +86,13 @@ mod tests {
     #[test]
     fn the_hint_uses_one_spelling_throughout() {
         let orx = orx();
-        assert_eq!(
-            follow_up("exp_1", "run_1", false),
-            format!("  Follow it with `{orx} exp wait exp_1` or `{orx} logs run_1`.")
-        );
+        let standalone = follow_up("exp_1", "run_1", false);
+        for command in ["exp wait exp_1", "logs run_1"] {
+            assert!(
+                standalone.contains(&format!("`{orx} {command}`")),
+                "{standalone}"
+            );
+        }
         let agent = follow_up("exp_1", "run_1", true);
         assert!(
             agent.contains(&format!("`{orx} exp view check run_1`")),

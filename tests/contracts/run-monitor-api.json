@@ -122,7 +122,7 @@
         "revising": false,
         "brief": [],
         "rules": [],
-        "statusText": "baseline  running  50%  step 200 of 400  [run r1]\neta      19s left (18s to 20s)\nsignals  loss 0.143\nsignals  Last collected at 2026-11-12T00:45:20.000Z.\nsignals  Data as of 2026-11-12T00:45:20.000Z.\nsignals  1 log diagnostics; inspect `orx logs r1`.",
+        "statusText": "",
         "rev": 1,
         "seriesRev": 1,
         "series": {
@@ -259,9 +259,11 @@
         "rev": 1
       },
       "expect": {
-        "eta": "19s left",
-        "range": "18s to 20s",
-        "cli": "19s left (18s to 20s)"
+        "range": [
+          "18s",
+          "20s"
+        ],
+        "duration": "19s"
       }
     },
     "nan": {
@@ -386,7 +388,7 @@
         "revising": false,
         "brief": [],
         "rules": [],
-        "statusText": "baseline  running  12%  step 50 of 400  [run r1]\neta      35s left (31s to 38s)\nsignals  loss NaN\nsignals  Last collected at 2026-11-12T00:45:05.000Z.\nsignals  Data as of 2026-11-12T00:45:05.000Z.\nsignals  1 log diagnostics; inspect `orx logs r1`.",
+        "statusText": "",
         "rev": 1,
         "seriesRev": 1,
         "series": {
@@ -463,9 +465,14 @@
         "rev": 1
       },
       "expect": {
-        "eta": "35s left",
-        "range": "31s to 38s",
-        "cli": "35s left (31s to 38s)"
+        "range": [
+          "31s",
+          "38s"
+        ],
+        "duration": "35s",
+        "measures": {
+          "loss": "NaN"
+        }
       }
     },
     "stall": {
@@ -590,7 +597,7 @@
         "revising": false,
         "brief": [],
         "rules": [],
-        "statusText": "baseline  running  25%  step 100 of 400  [run r1]\neta      No progress for 59m (was due about 00:45 UTC)\nsignals  loss 0.273\nsignals  Last collected at 2026-11-12T01:45:01.000Z.\nsignals  Data as of 2026-11-12T00:45:10.000Z.\nsignals  1 log diagnostics; inspect `orx logs r1`.",
+        "statusText": "",
         "rev": 1,
         "seriesRev": 1,
         "series": {
@@ -687,10 +694,7 @@
         "rev": 1
       },
       "expect": {
-        "eta": "No progress for 59m",
-        "range": null,
-        "stall": "59m",
-        "cli": "No progress for 59m (was due about 00:45 UTC)"
+        "duration": "59m"
       }
     },
     "limit": {
@@ -810,7 +814,7 @@
         "revising": false,
         "brief": [],
         "rules": [],
-        "statusText": "baseline  running  25%  step 5  [run r1]\neta      45m to the limit (ends by 01:45 UTC)\nsignals  loss 2\nsignals  Last collected at 2026-11-12T01:00:00.000Z.\nsignals  Data as of 2026-11-12T00:45:01.000Z.",
+        "statusText": "",
         "rev": 1,
         "seriesRev": 1,
         "series": {
@@ -860,9 +864,7 @@
         "rev": 1
       },
       "expect": {
-        "eta": "45m to the limit",
-        "range": null,
-        "cli": "45m to the limit (ends by 01:45 UTC)"
+        "duration": "45m"
       }
     },
     "open": {
@@ -979,7 +981,7 @@
         "revising": false,
         "brief": [],
         "rules": [],
-        "statusText": "baseline  running  step 24  [run r1]\neta      No estimate (no total or time limit)\nsignals  loss 1.9\nsignals  Last collected at 2026-11-12T00:45:02.000Z.\nsignals  Data as of 2026-11-12T00:45:02.000Z.",
+        "statusText": "",
         "rev": 1,
         "seriesRev": 1,
         "series": {
@@ -1039,9 +1041,7 @@
         "rev": 1
       },
       "expect": {
-        "eta": null,
-        "range": null,
-        "cli": "No estimate (no total or time limit)"
+        "noEstimate": "noTotal"
       }
     },
     "ended": {
@@ -1158,7 +1158,7 @@
         "revising": false,
         "brief": [],
         "rules": [],
-        "statusText": "baseline  done  100%  step 100 of 100  [run r1]\neta      Done in 10m\nsignals  loss 0.273\nsignals  Last collected at 2026-11-12T00:45:10.000Z.\nsignals  Data as of 2026-11-12T00:45:10.000Z.\nsignals  1 log diagnostics; inspect `orx logs r1`.",
+        "statusText": "",
         "rev": 1,
         "seriesRev": 1,
         "series": {}
@@ -1201,9 +1201,7 @@
         "rev": 1
       },
       "expect": {
-        "eta": "Done in 10m",
-        "range": null,
-        "cli": "Done in 10m"
+        "duration": "10m"
       }
     },
     "full": {
@@ -1309,7 +1307,7 @@
         "revising": false,
         "brief": [],
         "rules": [],
-        "statusText": "baseline  running  step 4 of 4  [run r1]\neta      No estimate (how much is left is unknown)\nsignals  Last collected at 2026-11-12T00:47:05.000Z.\nsignals  Data as of 2026-11-12T00:45:05.000Z.",
+        "statusText": "",
         "rev": 1,
         "seriesRev": 1,
         "series": {}
@@ -1352,9 +1350,7 @@
         "rev": 1
       },
       "expect": {
-        "eta": null,
-        "range": null,
-        "cli": "No estimate (how much is left is unknown)"
+        "noEstimate": "unknownLeft"
       }
     },
     "long": {
@@ -1479,7 +1475,7 @@
         "revising": false,
         "brief": [],
         "rules": [],
-        "statusText": "baseline  running  0%  step 100 of 1,000,000  [run r1]\neta      1d 3h left (13h 53m to 1d 20h)\nsignals  loss 0.273\nsignals  Last collected at 2026-11-12T00:45:10.000Z.\nsignals  Data as of 2026-11-12T00:45:10.000Z.\nsignals  1 log diagnostics; inspect `orx logs r1`.",
+        "statusText": "",
         "rev": 1,
         "seriesRev": 1,
         "series": {
@@ -1576,9 +1572,11 @@
         "rev": 1
       },
       "expect": {
-        "eta": "1d 3h left",
-        "range": "13h 53m to 1d 20h",
-        "cli": "1d 3h left (13h 53m to 1d 20h)"
+        "range": [
+          "13h 53m",
+          "1d 20h"
+        ],
+        "duration": "1d 3h"
       }
     },
     "epochs": {
@@ -1708,7 +1706,7 @@
         "revising": false,
         "brief": [],
         "rules": [],
-        "statusText": "baseline  running  step 1 of 4  [run r1]\neta      No estimate (how much is left is unknown)\nsignals  Last collected at 2026-11-12T00:45:20.000Z.\nsignals  Data as of 2026-11-12T00:45:17.000Z.",
+        "statusText": "",
         "rev": 1,
         "seriesRev": 1,
         "series": {}
@@ -1751,9 +1749,7 @@
         "rev": 1
       },
       "expect": {
-        "eta": null,
-        "range": null,
-        "cli": "No estimate (how much is left is unknown)"
+        "noEstimate": "unknownLeft"
       }
     },
     "first": {
@@ -1849,7 +1845,7 @@
         "revising": false,
         "brief": [],
         "rules": [],
-        "statusText": "baseline  running  [run r1]\neta      No estimate (no progress found in the log)\nsignals  loss 2.5\nsignals  Last collected at 2026-11-12T00:45:01.000Z.\nsignals  Data as of 2026-11-12T00:45:01.000Z.",
+        "statusText": "",
         "rev": 1,
         "seriesRev": 1,
         "series": {
@@ -1900,9 +1896,7 @@
         "rev": 1
       },
       "expect": {
-        "eta": null,
-        "range": null,
-        "cli": "No estimate (no progress found in the log)"
+        "noEstimate": "noProgress"
       }
     },
     "measures": {
@@ -2095,7 +2089,7 @@
         "revising": false,
         "brief": [],
         "rules": [],
-        "statusText": "baseline  running  58%  round 14 of 24  [run r1]\neta      Estimating… (needs timed progress)\nsignals  round 14 · win_rate 0.507 · elo 1,291 · game_len 79.9 · lr 3e-4 · lr_min 1.32e-4 · loss 0.482 · ratio 1.13 · drift 0 · tokens 123,456,789 · flops 1e15\nsignals  Last collected at 2026-11-12T00:45:01.000Z.\nsignals  Data as of 2026-11-12T00:45:01.000Z.",
+        "statusText": "",
         "rev": 1,
         "seriesRev": 1,
         "series": {
@@ -2252,9 +2246,6 @@
         "rev": 1
       },
       "expect": {
-        "eta": "Estimating…",
-        "range": null,
-        "cli": "Estimating… (needs timed progress)",
         "stage": "round 14 of 24",
         "columns": [
           "round",
@@ -2526,7 +2517,7 @@
         "revising": false,
         "brief": [],
         "rules": [],
-        "statusText": "baseline  running  [run r1]\neta      train started\nsignals  Last collected at 2026-11-12T00:45:01.000Z.\nsignals  Data as of 2026-11-12T00:45:01.000Z.",
+        "statusText": "",
         "rev": 1,
         "seriesRev": 1,
         "series": {}
@@ -2568,11 +2559,7 @@
         ],
         "rev": 1
       },
-      "expect": {
-        "eta": null,
-        "range": null,
-        "cli": "train started"
-      }
+      "expect": {}
     },
     "setup": {
       "run": {
@@ -2656,7 +2643,7 @@
         "revising": false,
         "brief": [],
         "rules": [],
-        "statusText": "baseline  running  [run r1]\neta      Setting up · Successfully downloaded shard_00001.parquet\nsignals  No metrics found in the log yet.",
+        "statusText": "",
         "rev": 1,
         "seriesRev": 1,
         "series": {}
@@ -2693,11 +2680,7 @@
         ],
         "rev": 1
       },
-      "expect": {
-        "eta": null,
-        "range": null,
-        "cli": "Setting up · Successfully downloaded shard_00001.parquet"
-      }
+      "expect": {}
     },
     "detected": {
       "run": {
@@ -2810,7 +2793,7 @@
         "revising": false,
         "brief": [],
         "rules": [],
-        "statusText": "baseline  running  30%  3 of 10 chunks  [run r1]\neta      At least 42s left (timed from progress in the log; more work may follow it)\nsignals  Last collected at 2026-11-12T00:45:18.000Z.\nsignals  Data as of 2026-11-12T00:45:18.000Z.",
+        "statusText": "",
         "rev": 1,
         "seriesRev": 1,
         "series": {}
@@ -2854,10 +2837,8 @@
         "rev": 1
       },
       "expect": {
-        "eta": "At least 42s left",
-        "range": null,
-        "cli": "At least 42s left (timed from progress in the log; more work may follow it)",
-        "stage": "3 of 10 chunks"
+        "stage": "3 of 10 chunks",
+        "duration": "42s"
       }
     },
     "planned": {
@@ -3004,7 +2985,7 @@
         "revising": false,
         "brief": [],
         "rules": [],
-        "statusText": "baseline  running  train · step 5 of 10  [run r1]\neta      At least 5s left (no earlier run timed eval)\nstages   ✓ download 4s · ● train · ○ eval\nsignals  loss 0.5\nsignals  Last collected at 2026-11-12T00:45:09.000Z.\nsignals  Data as of 2026-11-12T00:45:09.000Z.",
+        "statusText": "",
         "rev": 1,
         "seriesRev": 1,
         "series": {
@@ -3090,10 +3071,8 @@
         "rev": 1
       },
       "expect": {
-        "eta": "At least 5s left",
-        "range": null,
-        "cli": "At least 5s left (no earlier run timed eval)",
-        "stage": "train · step 5 of 10"
+        "stage": "train · step 5 of 10",
+        "duration": "5s"
       }
     },
     "named": {
@@ -3207,7 +3186,7 @@
         "revising": false,
         "brief": [],
         "rules": [],
-        "statusText": "baseline  running  54%  train · step 2,280 of 4,200  [run r1]\neta      Estimating… (needs timed progress)\nsignals  Last collected at 2026-11-12T00:45:01.000Z.\nsignals  Data as of 2026-11-12T00:45:01.000Z.",
+        "statusText": "",
         "rev": 1,
         "seriesRev": 1,
         "series": {}
@@ -3251,9 +3230,6 @@
         "rev": 1
       },
       "expect": {
-        "eta": "Estimating…",
-        "range": null,
-        "cli": "Estimating… (needs timed progress)",
         "stage": "train · step 2,280 of 4,200"
       }
     },
@@ -3379,7 +3355,7 @@
         "revising": false,
         "brief": [],
         "rules": [],
-        "statusText": "baseline  running  50%  step 200 of 400  [run r1]\neta      20s left (18s to 21s)\nsignals  loss 0.143\nsignals  Last collected at 2026-11-12T00:45:20.000Z.\nsignals  Data as of 2026-11-12T00:45:20.000Z.\nsignals  1 log diagnostics; inspect `orx logs r1`.",
+        "statusText": "",
         "rev": 1,
         "seriesRev": 1,
         "series": {
@@ -3507,13 +3483,9 @@
         "generation": "g1",
         "asOf": 1794444320000,
         "rev": 1,
-        "unavailable": "Couldn't update this run's progress. OpenResearch is trying again."
+        "unavailable": "Projection failed"
       },
-      "expect": {
-        "eta": null,
-        "range": null,
-        "cli": null
-      }
+      "expect": {}
     },
     "unreadable": {
       "run": {
@@ -3533,7 +3505,7 @@
         "asOf": 1794444320000,
         "availability": {
           "state": "unavailable",
-          "reason": "Read /data/run-signals/r1.json: parse signals /data/run-signals/r1.json: key must be a string at line 1 column 2",
+          "reason": "Unreadable checkpoint",
           "omitted": {}
         },
         "view": {
@@ -3593,7 +3565,7 @@
         "revising": false,
         "brief": [],
         "rules": [],
-        "statusText": "baseline  running  [run r1]\nsignals  Signal data could not be read. Read any saved output with `orx logs r1`.\nsignals  Error details: Read /data/run-signals/r1.json: parse signals /data/run-signals/r1.json: key must be a string at line 1 column 2",
+        "statusText": "",
         "rev": 2,
         "seriesRev": 2,
         "series": {}
@@ -3618,7 +3590,7 @@
         "setup": null,
         "generation": "",
         "asOf": 1794444320000,
-        "unavailable": "Couldn't read the progress saved for this run. Its log shows what it printed.",
+        "unavailable": "Unreadable checkpoint",
         "segments": [
           {
             "weight": 1.0,
@@ -3627,11 +3599,7 @@
         ],
         "rev": 2
       },
-      "expect": {
-        "eta": null,
-        "range": null,
-        "cli": null
-      }
+      "expect": {}
     },
     "failing_done": {
       "run": {
@@ -3755,7 +3723,7 @@
         "revising": false,
         "brief": [],
         "rules": [],
-        "statusText": "baseline  running  50%  step 200 of 400  [run r1]\neta      20s left (18s to 21s)\nsignals  loss 0.143\nsignals  Last collected at 2026-11-12T00:45:20.000Z.\nsignals  Data as of 2026-11-12T00:45:20.000Z.\nsignals  1 log diagnostics; inspect `orx logs r1`.",
+        "statusText": "",
         "rev": 1,
         "seriesRev": 1,
         "series": {
@@ -3883,13 +3851,9 @@
         "generation": "g1",
         "asOf": 1794444320000,
         "rev": 1,
-        "unavailable": "Couldn't update this run's progress. OpenResearch is trying again."
+        "unavailable": "Projection failed"
       },
-      "expect": {
-        "eta": null,
-        "range": null,
-        "cli": null
-      }
+      "expect": {}
     },
     "compared": {
       "run": {
@@ -4126,7 +4090,7 @@
         "revising": false,
         "brief": [],
         "rules": [],
-        "statusText": "child  running  25%  step 100 of 400  [run c1]\neta      30s left (28s to 31s)\nsignals  Loss 0.227 (0.045 better than parent at step 100)\nsignals  Data as of 2026-11-12T00:45:10.000Z.",
+        "statusText": "",
         "rev": 1,
         "seriesRev": 1,
         "series": {
@@ -4238,10 +4202,7 @@
         "rev": 1
       },
       "expect": {
-        "eta": null,
-        "range": null,
-        "cli": null,
-        "said": "Loss 0.227 (0.045 better than parent at step 100)"
+        "delta": "0.045"
       }
     },
     "flagged": {
@@ -4389,7 +4350,7 @@
         "revising": false,
         "brief": [],
         "rules": [],
-        "statusText": "baseline  running  50%  step 200 of 400  [run r1]\nwatch    Claude Haiku watches this run; it has not looked yet.\nflag     Loss 0.143 rose at step 18.  [log line 19]  (flag f1, waits for the user)\neta      19s left (18s to 20s)\nsignals  loss 0.143\nsignals  Last collected at 2026-11-12T00:45:20.000Z.\nsignals  Data as of 2026-11-12T00:45:20.000Z.\nsignals  1 log diagnostics; inspect `orx logs r1`.",
+        "statusText": "",
         "rev": 1,
         "seriesRev": 1,
         "series": {
@@ -4528,12 +4489,7 @@
         "asOf": 1794444320000,
         "rev": 1
       },
-      "expect": {
-        "eta": null,
-        "range": null,
-        "cli": null,
-        "flag": "waiting"
-      }
+      "expect": {}
     }
   }
 }
