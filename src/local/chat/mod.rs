@@ -4850,11 +4850,12 @@ impl ChatHost {
             .cloned()
     }
 
-    /// The agent read the steer: it is in the transcript, so its queued row goes.
-    pub fn forget_steer(&self, session_id: &str, steer_id: &str) {
+    /// The agent read the steer and the transcript holds it, so its queued row
+    /// goes. False when the row could not be deleted and is still pending.
+    pub fn forget_steer(&self, session_id: &str, steer_id: &str) -> bool {
         let _mutation = self.queue_persistence.lock().unwrap();
-        if !self.take_pending_steer(session_id, steer_id) {
-            return;
+        if !self.steer_pending(session_id, steer_id) {
+            return true;
         }
         if let Err(error) =
             Store::open().and_then(|store| store.delete_queued_chat_message(steer_id))
@@ -4862,8 +4863,11 @@ impl ChatHost {
             eprintln!(
                 "orx up: could not remove read steer {steer_id} in chat {session_id}: {error}"
             );
+            return false;
         }
+        self.take_pending_steer(session_id, steer_id);
         self.emit_queued(session_id);
+        true
     }
 
     /// The agent will never read the steer: it runs as a queued message instead.
@@ -8578,6 +8582,8 @@ pub struct TurnCtx {
     last_flush: Instant,
     /// A change `maybe_flush` held back, which no later event may arrive to carry.
     deferred_flush: bool,
+    /// Steers recorded in this reply whose queued rows go once it is saved.
+    read_steers: Vec<String>,
     last_flushed_tool_states: Vec<(String, String)>,
     last_attempted_tool_states: Vec<(String, String)>,
     target_event_path: Option<PathBuf>,
@@ -8661,6 +8667,7 @@ fn turn_ctx_from_stored(
         steering: None,
         last_flush: Instant::now() - FLUSH_INTERVAL,
         deferred_flush: false,
+        read_steers: Vec::new(),
         last_flushed_tool_states: Vec::new(),
         last_attempted_tool_states: Vec::new(),
         target_event_path: None,
@@ -9080,6 +9087,7 @@ impl TurnCtx {
             steering: None,
             last_flush: Instant::now(),
             deferred_flush: false,
+            read_steers: Vec::new(),
             last_flushed_tool_states: Vec::new(),
             last_attempted_tool_states: Vec::new(),
             target_event_path: None,
@@ -9274,15 +9282,19 @@ impl TurnCtx {
     }
 
     /// Record a steer at the point the agent read it, without waiting for the
-    /// flush interval, and retire its queued row.
+    /// flush interval. Its queued row goes once the reply is saved.
     pub fn record_steer(&mut self, steer: &SteerMessage) {
         self.upsert_part(WirePart {
             orx: steer.orx.clone(),
             ..WirePart::steer(format!("steer-{}", uuid::Uuid::new_v4()), &steer.display)
         });
-        // An unflushed part still lands with the turn; running the row again would repeat it.
-        let _ = self.flush();
-        self.host.forget_steer(&self.session_id, &steer.id);
+        self.read_steers.push(steer.id.clone());
+        if let Err(error) = self.flush() {
+            eprintln!(
+                "orx up: could not save a read steer in chat {}: {error}",
+                self.session_id
+            );
+        }
     }
 
     /// Like `upsert_part`, but carries forward an existing part's `children` when
@@ -9394,6 +9406,15 @@ impl TurnCtx {
     }
 
     pub fn flush(&mut self) -> Result<()> {
+        self.save()?;
+        let host = self.host.clone();
+        let session_id = self.session_id.clone();
+        self.read_steers
+            .retain(|id| !host.forget_steer(&session_id, id));
+        Ok(())
+    }
+
+    fn save(&mut self) -> Result<()> {
         self.last_flush = Instant::now();
         self.deferred_flush = false;
         if self.assistant.parts.is_empty() {
