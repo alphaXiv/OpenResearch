@@ -158,6 +158,15 @@ impl Store {
         Ok(runs.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    pub(crate) fn pending_flag_review_runs(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT run_id FROM run_notices
+             WHERE kind = ?1 AND delivered_at IS NULL AND retired_at IS NULL",
+        )?;
+        let runs = stmt.query_map([WATCH_FLAG], |row| row.get(0))?;
+        Ok(runs.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     /// Appends each flag that still applies, with the notices that wake its chats, in one
     /// transaction. Returns what became of each.
     pub(crate) fn raise_flags(&self, flags: &[NewFlag], now: i64) -> Result<Vec<Raise>> {

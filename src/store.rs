@@ -5438,7 +5438,7 @@ impl Store {
 
     pub fn complete_chat_turn(&self, id: &str) -> Result<bool> {
         let changed = self.conn.execute(
-            "UPDATE chat_turns SET state = 'completed', next_retry_at = NULL,
+            "UPDATE chat_turns SET state = 'completed', delivery_state = 'accepted', next_retry_at = NULL,
                  error_kind = NULL, error_message = NULL, recovery_action = NULL,
                  updated_at = ?2 WHERE id = ?1
                    AND state IN ('preparing', 'retrying', 'running')",

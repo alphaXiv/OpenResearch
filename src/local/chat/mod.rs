@@ -8699,6 +8699,7 @@ pub struct TurnCtx {
     pub(crate) native_message_models: HashMap<String, crate::store::InvocationIdentity>,
     pub(crate) native_usage_scopes: HashSet<String>,
     delivery_state: DeliveryState,
+    retry_delivery_at: Option<Instant>,
     attempt_count: i64,
     retry_owner: Option<String>,
     retry_started_emitted: bool,
@@ -8792,6 +8793,7 @@ fn turn_ctx_from_stored(
         native_message_models: HashMap::new(),
         native_usage_scopes: HashSet::new(),
         delivery_state: DeliveryState::NotSent,
+        retry_delivery_at: None,
         attempt_count: turn.attempt_count,
         retry_owner: None,
         retry_started_emitted: false,
@@ -8965,18 +8967,26 @@ impl TurnCtx {
     }
 
     pub fn mark_delivery(&mut self, delivery: DeliveryState) {
-        let _ = self.persist_delivery(delivery);
+        if let Err(error) = self.persist_delivery(delivery) {
+            eprintln!(
+                "orx up: could not record delivery of turn {}: {error:#}",
+                self.turn_id
+            );
+        }
     }
 
     pub fn persist_delivery(&mut self, delivery: DeliveryState) -> Result<()> {
-        if self.delivery_state == delivery {
+        if self.delivery_state == delivery
+            && self.retry_delivery_at.is_none_or(|at| Instant::now() < at)
+        {
             return Ok(());
         }
         self.delivery_state = delivery;
+        let retrying = self.retry_delivery_at.take().is_some();
         if !self.durable {
             return Ok(());
         }
-        Store::open().and_then(|store| {
+        let saved = Store::open().and_then(|store| {
             store.update_chat_turn_progress(
                 &self.turn_id,
                 "running",
@@ -8984,7 +8994,21 @@ impl TurnCtx {
                 self.attempt_count.max(1),
                 None,
             )
-        })
+        });
+        if delivery == DeliveryState::Accepted
+            && saved.as_ref().is_err_and(crate::store::is_db_locked)
+        {
+            if !retrying {
+                eprintln!(
+                    "orx up: store busy recording acceptance of turn {}. Retrying.",
+                    self.turn_id
+                );
+            }
+            self.retry_delivery_at =
+                Some(Instant::now() + crate::config::paced(Duration::from_secs(1)));
+            return Ok(());
+        }
+        saved
     }
 
     pub fn mark_terminal_failure(&mut self, kind: impl Into<String>, message: impl Into<String>) {
@@ -9177,6 +9201,7 @@ impl TurnCtx {
             native_message_models: HashMap::new(),
             native_usage_scopes: HashSet::new(),
             delivery_state: DeliveryState::NotSent,
+            retry_delivery_at: None,
             attempt_count: 0,
             retry_owner: None,
             retry_started_emitted: false,
@@ -9530,12 +9555,12 @@ impl TurnCtx {
         }
     }
 
-    /// Resolves when the change `maybe_flush` held back is due, and never if there is none, so a
-    /// harness waiting on a quiet agent can flush it. Borrows nothing, to sit beside `steering`.
+    /// Wakes a quiet turn when its reply or delivery confirmation needs saving.
     pub fn flush_due(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
-        let due = self
+        let reply = self
             .deferred_flush
             .then(|| self.last_flush + FLUSH_INTERVAL);
+        let due = reply.into_iter().chain(self.retry_delivery_at).min();
         async move {
             match due {
                 Some(due) => tokio::time::sleep_until(due.into()).await,
@@ -9556,6 +9581,12 @@ impl TurnCtx {
     fn save(&mut self) -> Result<()> {
         self.last_flush = Instant::now();
         self.deferred_flush = false;
+        if self
+            .retry_delivery_at
+            .is_some_and(|at| self.last_flush >= at)
+        {
+            self.mark_delivery(self.delivery_state);
+        }
         if self.assistant.parts.is_empty() {
             return Ok(());
         }
@@ -14561,6 +14592,46 @@ for line in sys.stdin:
         assert_eq!(DeliveryState::Rejected.recovery_action(), "retry");
         assert_eq!(DeliveryState::Accepted.recovery_action(), "continue");
         assert_eq!(DeliveryState::Unknown.recovery_action(), "continue");
+    }
+
+    #[tokio::test]
+    async fn a_quiet_turn_persists_acceptance_after_a_busy_store_recovers() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+
+        let store = Store::open().unwrap();
+        let mut ctx = TurnCtx::test_stub();
+        ctx.durable = true;
+        store.put_chat_session(&ctx.session_id, &ctx.harness, None);
+        store.put_chat_turn(&ctx.session_id, &ctx.turn_id, "running", now_ms());
+        ctx.persist_delivery(DeliveryState::Unknown).unwrap();
+
+        let writer = store.begin_immediate().unwrap();
+        ctx.persist_delivery(DeliveryState::Accepted).unwrap();
+        writer.commit().unwrap();
+
+        assert_eq!(ctx.delivery_state(), DeliveryState::Accepted);
+        assert_eq!(
+            store
+                .get_chat_turn(&ctx.session_id, &ctx.turn_id)
+                .unwrap()
+                .unwrap()
+                .delivery_state,
+            "unknown"
+        );
+        tokio::time::timeout(Duration::from_secs(3), ctx.flush_due())
+            .await
+            .expect("acceptance should be retried without another agent update");
+        ctx.flush().unwrap();
+        assert_eq!(
+            store
+                .get_chat_turn(&ctx.session_id, &ctx.turn_id)
+                .unwrap()
+                .unwrap()
+                .delivery_state,
+            "accepted"
+        );
     }
 
     #[test]

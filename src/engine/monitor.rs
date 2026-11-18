@@ -1995,7 +1995,7 @@ fn reprojected(store: &Store, run: &StoredRun, now: i64) -> Result<Arc<Projectio
 }
 
 /// Keeps every live run's monitor current: projected each second, and at once when its lifecycle
-/// changes. A run stays watched after it ends until its last signals are collected and projected.
+/// changes. A run stays watched after it ends through final collection and pending flag reviews.
 pub(crate) async fn keep_current(
     engine: Arc<super::Engine>,
     mut stop: tokio::sync::watch::Receiver<()>,
@@ -2067,6 +2067,7 @@ fn watch(
             let mut ids = held.clone();
             ids.extend(store.list_active_runs()?.into_iter().map(|run| run.id));
             ids.extend(store.pending_signal_collections(false, 1024)?);
+            ids.extend(store.pending_flag_review_runs()?);
             ids
         }
     };
@@ -2098,11 +2099,15 @@ fn watch(
         }
         let failed = advanced.is_err();
         let ended = Phase::parse(&run.status).is_some_and(Phase::is_terminal);
-        // A revising run is watched until its revision ends, so its line hears when it does.
-        let revising = advanced
-            .as_ref()
-            .is_ok_and(|projection| projection.summary["tone"] == "revising");
-        if ended && !failed && !revising && store.signal_collection_retry_at(&id)?.is_none() {
+        // A finished run can still change when the agent's turn ends.
+        let agent_work = advanced.as_ref().is_ok_and(|projection| {
+            projection.summary["tone"] == "revising"
+                || matches!(
+                    projection.summary["flag"]["state"].as_str(),
+                    Some("raised" | "asking" | "waking" | "agent_looking")
+                )
+        });
+        if ended && !failed && !agent_work && store.signal_collection_retry_at(&id)?.is_none() {
             next.remove(&id);
         } else {
             next.insert(id);
@@ -7695,6 +7700,48 @@ mod tests {
             7,
             "the reports are counted"
         );
+    }
+
+    #[test]
+    fn a_finished_runs_review_is_reprojected_without_a_turn_event() {
+        let f = Fixture::new("orx-finished-flag-review");
+        let run = f.run("running", local());
+        let chat = "reviewer";
+        f.store.put_chat_session(chat, "claude-code", None);
+        f.store.subscribe_run(&run.id, chat, T0).unwrap();
+        let flag = super::super::flags::new_flag(
+            &f.store,
+            &run,
+            json!({"id": "f1", "template": "The loss rose.", "source": "look"}),
+            true,
+        )
+        .unwrap();
+        f.store.raise_flags(&[flag], T0).unwrap();
+        let batch = f.store.run_notice_batch_at(chat, T0).unwrap();
+        let turn = &batch[0].client_turn_id;
+        f.store.put_chat_turn(chat, turn, "running", T0);
+        f.store.set_run_status(&run.id, "done");
+        watch(&f.store, Some(run.id.clone()), BTreeSet::new(), None).unwrap();
+        let before = f.store.run_monitor_state(&run.id).unwrap().unwrap();
+        assert_eq!(before["published"]["summary"]["flag"]["state"], "waking");
+
+        f.store
+            .update_chat_turn_progress(turn, "running", "accepted", 1, None)
+            .unwrap();
+        let watched = watch(&f.store, None, BTreeSet::new(), None).unwrap();
+        let after = f.store.run_monitor_state(&run.id).unwrap().unwrap();
+        assert_eq!(
+            after["published"]["summary"]["flag"]["state"],
+            "agent_looking"
+        );
+
+        f.store
+            .mark_run_notice_batch_delivered(chat, turn, T0)
+            .unwrap();
+        f.store.complete_chat_turn(turn).unwrap();
+        watch(&f.store, None, watched, None).unwrap();
+        let after = f.store.run_monitor_state(&run.id).unwrap().unwrap();
+        assert_eq!(after["published"]["summary"]["flag"]["state"], "waiting");
     }
 
     #[test]

@@ -327,7 +327,8 @@ A rebuilding checkpoint reads as rebuilding, never as lost contact.
 a pointer to what was last published and the summary it numbered, never the
 monitor. Only `orx up` publishes, from one task that projects live runs each
 second, at once when a run changes state or an agent accepts its flag review,
-and every ten seconds for what time alone moves. A checkpoint the laptop
+and every ten seconds for what time alone moves. The periodic pass follows
+pending and active flag reviews even after their runs end. A checkpoint the laptop
 publishes is handed to the projection in memory,
 so the hot path never reads one back, and a status rewrite that changes nothing
 the projection reads projects nothing. Readers never wait on a projection under
