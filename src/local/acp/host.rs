@@ -1036,35 +1036,40 @@ async fn connect(
             .builder()
             .on_receive_notification(
                 async move |notification: UntypedMessage, _connection| {
-                    if notification.method == "session/update"
-                        && notifications.owns(&notification.params)
-                    {
-                        let update = &notification.params["update"];
-                        // A one-shot session has no stored chat session to update.
-                        let one_shot = notifications.one_shot.load(std::sync::atomic::Ordering::Relaxed);
-                        if !one_shot && matches!(update["sessionUpdate"].as_str(), Some("config_option_update" | "current_mode_update")) {
-                            let store = crate::store::Store::open().map_err(|error| agent_client_protocol::Error::internal_error().data(error.to_string()))?;
-                            store.apply_acp_configuration_update(&chat_id, update).map_err(|error| agent_client_protocol::Error::internal_error().data(error.to_string()))?;
-                            if let (Some(events), Ok(Some(session))) = (&events, store.get_chat_session(&chat_id)) {
-                                let busy = notifications.events.lock().unwrap().is_some();
-                                let _ = events.send(("chat.session", json!({"session": crate::local::chat::session_json(&session, busy)})));
+                    let handled = async {
+                        if notification.method == "session/update"
+                            && notifications.owns(&notification.params)
+                        {
+                            let update = &notification.params["update"];
+                            // A one-shot session has no stored chat session to update.
+                            let one_shot = notifications.one_shot.load(std::sync::atomic::Ordering::Relaxed);
+                            if !one_shot && matches!(update["sessionUpdate"].as_str(), Some("config_option_update" | "current_mode_update")) {
+                                let store = crate::store::Store::open().map_err(|error| agent_client_protocol::Error::internal_error().data(error.to_string()))?;
+                                store.apply_acp_configuration_update(&chat_id, update).map_err(|error| agent_client_protocol::Error::internal_error().data(error.to_string()))?;
+                                if let (Some(events), Ok(Some(session))) = (&events, store.get_chat_session(&chat_id)) {
+                                    let busy = notifications.events.lock().unwrap().is_some();
+                                    let _ = events.send(("chat.session", json!({"session": crate::local::chat::session_json(&session, busy)})));
+                                }
                             }
-                        }
-                        let delivered = notifications.emit(Event::Update(update.clone()));
-                        if !delivered && update["sessionUpdate"] == "session_info_update" {
-                            if let Some(title) = update["title"].as_str() {
-                                if let Ok(store) = crate::store::Store::open() {
-                                    if store.set_chat_session_title_if_placeholder(&chat_id, title).unwrap_or(false) {
-                                        if let (Some(events), Ok(Some(session))) = (&events, store.get_chat_session(&chat_id)) {
-                                            let _ = events.send(("chat.session", json!({"session": crate::local::chat::session_json(&session, false)})));
+                            let delivered = notifications.emit(Event::Update(update.clone()));
+                            if !delivered && update["sessionUpdate"] == "session_info_update" {
+                                if let Some(title) = update["title"].as_str() {
+                                    if let Ok(store) = crate::store::Store::open() {
+                                        if store.set_chat_session_title_if_placeholder(&chat_id, title).unwrap_or(false) {
+                                            if let (Some(events), Ok(Some(session))) = (&events, store.get_chat_session(&chat_id)) {
+                                                let _ = events.send(("chat.session", json!({"session": crate::local::chat::session_json(&session, false)})));
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
+                        Ok(())
                     }
+                    .await;
+                    // Even one that failed, or the agent's next message never arrives.
                     notification_wire.processed();
-                    Ok(())
+                    handled
                 },
                 agent_client_protocol::on_receive_notification!(),
             )
@@ -2435,6 +2440,27 @@ exec "$@""#
         assert!(
             matches!(events.try_recv(), Ok(Event::Update(update)) if update["sessionUpdate"] == "current_mode_update")
         );
+        client.end_turn();
+        host.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_configuration_update_the_store_refuses_holds_up_no_later_message() {
+        let host = Arc::new(Host::default());
+        // Not one-shot and never stored, like a built-in agent's chat.
+        let client = new_client(&host, "acp-unstored-configuration").await;
+        drop(client.begin_turn());
+        for value in ["second", "third"] {
+            let answered = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                client.request(
+                    "session/set_config_option",
+                    json!({"sessionId": client.native_id(), "configId": "opaque-model", "value": value}),
+                ),
+            )
+            .await;
+            assert!(matches!(answered, Ok(Ok(_))), "{answered:?}");
+        }
         client.end_turn();
         host.shutdown().await;
     }
