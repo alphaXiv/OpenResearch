@@ -39,7 +39,20 @@ for (const [titles, labels, context] of [
 ]) {
   test(`labels for ${JSON.stringify(titles)}`, () => {
     const named = shortLabels(titles);
-    assert.deepEqual({ labels: named.labels, context: named.context }, { labels, context });
+    assert.deepEqual({ labels: named.labels, context: named.context?.short ?? null }, { labels, context });
+  });
+}
+
+for (const [titles, whole, short] of [
+  [["Voted LoRA, no augmentation", "Voted LoRA, 30% augmented", "Voted LoRA, 60% augmented"], "Voted LoRA, no augmentation, 30% augmented, 60% augmented", "Voted LoRA"],
+  [sweep, "Depth 4, 6, 8 at 2e15 FLOPs", "Depth … at 2e15 FLOPs"],
+  [["LR 3e-4", "LR 1e-3", "LR 3e-3"], "LR 3e-4, 1e-3, 3e-3", "LR …"],
+  [["nanochat d12 baseline", "nanochat d20 baseline", "nanochat d26 baseline"], "nanochat d12, d20, d26 baseline", "nanochat … baseline"],
+  [["LoRA on Wispr text", "LoRA on voted labels"], "LoRA on Wispr text, voted labels", "LoRA on …"],
+  [[...sweep, sweep[0]], "Depth 4, 6, 8 at 2e15 FLOPs", "Depth … at 2e15 FLOPs"],
+]) {
+  test(`what ${JSON.stringify(titles)} share, whole and short`, () => {
+    assert.deepEqual(shortLabels(titles).context, { whole, short });
   });
 }
 

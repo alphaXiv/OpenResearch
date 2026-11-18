@@ -1,5 +1,6 @@
 import { autoDir, fmtNumber, ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
+import { getLocale } from "../paraglide/runtime.js";
 import { fillSentence } from "./format";
 import type { RunModel, Tone } from "./model";
 import type { ChatWatch } from "./types";
@@ -34,10 +35,11 @@ const DANGLING = /[\s,;:.、。，；：]+$/u;
  * Each run's short label from its experiment's title: the words it shares with every title it is grouped with go, from
  * the start and from the end. Titles group when two of them share such words, so one
  * unrelated title keeps its own whole and leaves the rest their labels. `groups` numbers each title's group, null for a
- * title said whole. `context` is the shared words as written, with "…" where the labels go, when every title is in one
- * group. Spaces, hyphens and underscores separate tokens; the label preserves the original separators.
+ * title said whole. `context` is what the titles share when every title is in one group: `whole` with the labels in
+ * their place, `short` with "…" there, or without it when the shared words end a clause of their own. Spaces, hyphens
+ * and underscores separate tokens; the label preserves the original separators.
  */
-export function shortLabels(titles: string[]): { labels: string[]; groups: (number | null)[]; context: string | null } {
+export function shortLabels(titles: string[]): { labels: string[]; groups: (number | null)[]; context: { whole: string; short: string } | null } {
   const distinct = [...new Set(titles.map((title) => title.normalize("NFC")))];
   const words = distinct.map(wordsOf);
   const cut = (group: number[]) => shared(group.map((index) => words[index]));
@@ -52,7 +54,7 @@ export function shortLabels(titles: string[]): { labels: string[]; groups: (numb
   }
 
   const label = new Map<string, { text: string; group: number | null }>();
-  let context: string | null = null;
+  let context: { whole: string; short: string } | null = null;
   for (const head of new Set(distinct.map((_, index) => root(index)))) {
     const group = distinct.flatMap((_, index) => root(index) === head ? [index] : []);
     const { start, end } = group.length > 1 ? cut(group) : { start: 0, end: 0 };
@@ -65,7 +67,9 @@ export function shortLabels(titles: string[]): { labels: string[]; groups: (numb
       const [title, own] = [distinct[group[0]], words[group[0]]];
       const before = title.slice(0, own[start]?.start ?? title.length).replace(/[\s_\-\p{Ps}\p{Pi}]+$/u, "");
       const after = title.slice(own[own.length - 1 - end]?.end ?? 0).replace(/^[\s_\-\p{Pe}\p{Pf},;:.、。，；：]+/u, "");
-      context = [before, "…", after].filter(Boolean).join(" ");
+      const between = new Intl.ListFormat(getLocale(), { type: "unit", style: "short" }).format(group.map((index) => label.get(distinct[index])!.text));
+      const clause = !after && DANGLING.test(before) ? before.replace(DANGLING, "") : null;
+      context = { whole: [before, between, after].filter(Boolean).join(" "), short: clause ?? [before, "…", after].filter(Boolean).join(" ") };
     }
   }
   const of = (title: string) => label.get(title.normalize("NFC"));

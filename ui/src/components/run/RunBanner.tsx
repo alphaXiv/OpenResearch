@@ -67,7 +67,6 @@ function useAnnouncement(models: RunModel[], names: string[] | null): string {
   return announcement;
 }
 
-/** The runs of one chat above its composer: one run as its line or strip, several as one summary that opens into a line each, each opening in place. */
 export function RunBanner({ sessionId, agent, onOpenRun, onOpenRunPage }: {
   sessionId: string;
   agent: string;
@@ -83,7 +82,14 @@ export function RunBanner({ sessionId, agent, onOpenRun, onOpenRunPage }: {
   const section = useRef<HTMLElement>(null);
   const refocus = useRef<string | null>(null);
   const [level, setLevel] = useState<RunBannerLevel | null>(null);
-  const [opened, setOpened] = useState<{ id: string | null } | null>(null);
+  const collapseKey = `run-cards:${workspace.url("/api/")}:${sessionId}`;
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => {
+    try {
+      const stored: unknown = JSON.parse(sessionStorage.getItem(collapseKey) ?? "[]");
+      if (Array.isArray(stored)) return new Set(stored.filter((id): id is string => typeof id === "string"));
+    } catch {}
+    return new Set();
+  });
   const [listed, setListed] = useState<boolean | null>(null);
   const [now, setNow] = useState(Date.now);
 
@@ -98,19 +104,17 @@ export function RunBanner({ sessionId, agent, onOpenRun, onOpenRunPage }: {
     const flag = statedFlag(item.run, cached);
     return flag?.state === "waiting";
   }).map((item) => item.run.id);
-  const openId = opened ? opened.id : waiting[0] ?? null;
   const singleLevel = level ?? (waiting.length > 0 ? "strip" : remembered);
   // The remembered level says whether a summary opens to its rows.
   const rows = listed ?? (waiting.length > 0 || remembered === "strip");
-  const isOpen = (id: string) => single ? singleLevel === "strip" : rows && openId === id;
-  // A lone run reads its monitor at either level; several read only the open row's.
-  const reads = (run: Run) => shown && (single || isOpen(run.id));
+  const isOpen = (id: string) => !collapsed.has(id) && (!single || singleLevel === "strip");
 
   const retryAt = (item: ShownRun) => {
     const host = hostForRun(hosts, item.run);
     return host?.status === "backoff" ? host.nextRetryMs : null;
   };
-  const monitors = useRunMonitors(runs.map((item) => item.run), reads);
+  // A folded card still reads its monitor, to know whether it has anything to unfold.
+  const monitors = useRunMonitors(runs.map((item) => item.run), () => shown && (single || rows));
   const models = runs.map((item, index) => {
     const read = shown ? monitors[index] : null;
     return runModel({
@@ -138,9 +142,16 @@ export function RunBanner({ sessionId, agent, onOpenRun, onOpenRunPage }: {
   useEffect(() => {
     if (!waitingKey) return;
     setLevel(null);
-    setOpened(null);
     setListed(null);
+    setCollapsed((ids) => waiting.some((id) => ids.has(id)) ? new Set([...ids].filter((id) => !waiting.includes(id))) : ids);
   }, [waitingKey]);
+
+  useEffect(() => {
+    try {
+      if (collapsed.size) sessionStorage.setItem(collapseKey, JSON.stringify([...collapsed]));
+      else sessionStorage.removeItem(collapseKey);
+    } catch {}
+  }, [collapseKey, collapsed]);
 
   useLayoutEffect(() => {
     const id = refocus.current;
@@ -153,11 +164,15 @@ export function RunBanner({ sessionId, agent, onOpenRun, onOpenRunPage }: {
 
   function toggle(id: string) {
     refocus.current = id;
-    if (!single) {
-      setOpened({ id: isOpen(id) ? null : id });
-      return;
-    }
-    const next = singleLevel === "strip" ? "line" : "strip";
+    const open = isOpen(id);
+    setCollapsed((ids) => {
+      const next = new Set(ids);
+      if (open) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+    if (!single) return;
+    const next = open ? "line" : "strip";
     setLevel(next);
     mutUpdateUiState.run(workspace, { runBanner: next });
   }
@@ -165,14 +180,15 @@ export function RunBanner({ sessionId, agent, onOpenRun, onOpenRunPage }: {
   function toggleRows() {
     refocus.current = "*";
     setListed(!rows);
-    setOpened({ id: null });
     mutUpdateUiState.run(workspace, { runBanner: rows ? "line" : "strip" });
   }
 
   function onKeyDown(event: KeyboardEvent) {
     if (event.key !== "Escape" || event.defaultPrevented || runs.length === 0) return;
-    const id = single ? runs[0].run.id : openId;
-    const step = id && isOpen(id) ? () => toggle(id) : !single && rows ? toggleRows : null;
+    // Escape folds the open card the focus is in, then the summary.
+    const row = single ? section.current : (event.target as HTMLElement).closest("[data-run]");
+    const id = row?.querySelector<HTMLElement>('[data-run-toggle][aria-expanded="true"]')?.dataset.runToggle;
+    const step = id ? () => toggle(id) : !single && rows ? toggleRows : null;
     if (!step) return;
     event.preventDefault();
     event.stopPropagation();
@@ -210,11 +226,11 @@ export function RunBanner({ sessionId, agent, onOpenRun, onOpenRunPage }: {
         <div data-run-frame="" className="@container relative mb-2.5 overflow-hidden rounded-lg border border-border bg-surface text-sm text-text">
           <RunSummary models={models} context={context} {...summarize(models, named, runs[0].watch, now, rows)} open={rows} onToggle={toggleRows} />
           {rows && (
-            <ul role="list" className="m-0 list-none p-0">
+            <ul role="list" className="m-0 max-h-[35vh] list-none overflow-y-auto overscroll-y-contain p-0">
               {models.map((model, index) => {
                 const label = { text: labels[index], title: titles[index] };
                 return (
-                  <li key={model.run.id} className="border-t border-border-variant">
+                  <li key={model.run.id} data-run={model.run.id} className="border-t border-border-variant">
                     {strip(model, index, label)}
                   </li>
                 );

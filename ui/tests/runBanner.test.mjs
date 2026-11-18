@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import test from "node:test";
+import test, { afterEach } from "node:test";
 import { act, createElement } from "react";
 import { DetailDrawer } from "../src/components/DetailDrawer.tsx";
 import { RunBanner } from "../src/components/run/RunBanner.tsx";
@@ -14,6 +14,7 @@ const fixture = (name) => JSON.parse(readFileSync(new URL(`./fixtures/runMonitor
 const running = fixture("running");
 const flagged = fixture("flagged");
 const now = Date.now();
+afterEach(() => window.sessionStorage.clear());
 const summary = (extra = {}) => ({
   tone: "running", whole: 0.248, headline: { name: "loss", label: "Loss", value: 2.31 }, sentence: running.sentence,
   bindings: { loss: 2.31 }, signals: running.view.signals, estimate: null, flag: null, rev: 1, generation: "g1", asOf: now, ...extra,
@@ -140,7 +141,8 @@ test("a new sentence is announced once; a number refilling is not", async () => 
 });
 
 test("the status holds an announcement only until it is made, and nothing of a run that left", async (t) => {
-  backend({ monitors: {} });
+  const reading = new Promise(() => {});
+  backend({ uiState: { onboardingCompleted: true, runBanner: "line" }, monitors: { r1: reading, r2: reading } });
   const plain = () => status().replace(/[⁦-⁩]/g, "");
   // Each a newer summary than the last, as the server's events are.
   const step = (done) => summary({ sentence: null, headline: null, stage: { name: "", done, of: 45, unit: null }, rev: done + 2 });
@@ -185,26 +187,27 @@ async function several(items, { workspace = createWorkspace("test"), onOpenRunPa
 }
 const rows = () => [...document.querySelectorAll('[role="list"] > li > [role="group"]')];
 
-test("several runs show one summary that opens into a row each, named by what sets it apart", async () => {
+test("several runs show one summary over a card each, all open without a click and named by what sets it apart", async () => {
   const requests = backend({ monitors: { r1: running, r2: running, r3: running } });
-  const { container } = await several([sweep("r1", 4), sweep("r2", 6), sweep("r3", 8)]);
+  const runs = [sweep("r1", 4), sweep("r2", 6), sweep("r3", 8)];
+  const { container, unmount } = await several(runs);
   await settle();
-  assert.ok(plain(container.textContent).includes("… at 2e15 FLOPs"), "the summary says what they share");
+  assert.ok(plain(container.textContent).includes("Depth 4, 6, 8 at 2e15 FLOPs"), "the summary names every run by what they share");
   assert.deepEqual(rows().map((row) => row.getAttribute("aria-label")), ["Depth 4 at 2e15 FLOPs", "Depth 6 at 2e15 FLOPs", "Depth 8 at 2e15 FLOPs"]);
   assert.deepEqual(rows().map((row) => plain(row.querySelector('button[aria-haspopup="dialog"]').textContent).split(" · ")[0]), ["4", "6", "8"]);
   assert.ok(plain(rows()[0].querySelector('button[aria-haspopup="dialog"]').getAttribute("aria-label")).includes("Depth 4 at 2e15 FLOPs"), "the accessible name includes the whole title");
-  assert.equal(requests.filter((r) => r.request.endsWith("/monitor")).length, 0, "closed rows read their summaries");
+  assert.deepEqual(rows().map((row) => Boolean(row.querySelector(`button[aria-label="${m.run_show_less()}"]`) && row.querySelector('[role="img"][aria-label*="Loss"]'))), [true, true, true], "every card is open with its chart");
+  assert.equal(requests.filter((r) => r.request.endsWith("/monitor")).length, 3, "each card reads its monitor once");
 
-  await click(rows()[1].querySelector(`button[aria-label="${m.run_show_more()}"]`));
-  const open = rows()[1];
-  assert.ok(open.querySelector(`button[aria-label="${m.run_show_less()}"]`), "the row opened into its strip in place");
-  assert.equal(document.activeElement, open.querySelector(`button[aria-label="${m.run_show_less()}"]`));
-  assert.ok(plain(open.querySelector('button[aria-haspopup="dialog"]').textContent).startsWith("6 · "));
+  await click(rows()[1].querySelector(`button[aria-label="${m.run_show_less()}"]`));
+  assert.equal(document.activeElement, rows()[1].querySelector(`button[aria-label="${m.run_show_more()}"]`));
+  assert.equal(rows()[1].querySelector('[role="img"][aria-label*="Loss"]'), null, "the folded card hides its chart");
+  assert.ok(rows()[2].querySelector('[role="img"][aria-label*="Loss"]'), "and leaves the others open");
 
-  await press("Escape");
+  await press("Escape", rows()[0].querySelector(`button[aria-label="${m.run_show_less()}"]`));
   await settle();
   assert.equal(rows().length, 3);
-  assert.equal(document.activeElement, rows()[1].querySelector(`button[aria-label="${m.run_show_more()}"]`));
+  assert.equal(document.activeElement, rows()[0].querySelector(`button[aria-label="${m.run_show_more()}"]`), "Escape folds the card it is in");
   await press("Escape");
   await settle();
   assert.equal(rows().length, 0, "the second Escape folds the rows into the summary");
@@ -213,9 +216,51 @@ test("several runs show one summary that opens into a row each, named by what se
   assert.deepEqual(requests.filter((r) => r.request === "POST /api/settings/ui-state").map((r) => r.body), [{ runBanner: "line" }]);
   await press("Escape");
   assert.ok(button(m.run_show_each()), "Escape at the summary does nothing");
+
   await click(button(m.run_show_each()));
   assert.equal(rows().length, 3);
   assert.equal(document.activeElement, button(m.run_show_less()));
+  assert.deepEqual(rows().map((row) => row.querySelector("[data-run-toggle]").getAttribute("aria-expanded")), ["false", "false", "true"], "a card the user folded stays folded");
+  assert.equal(requests.filter((r) => r.request.endsWith("/monitor")).length, 3, "reopening reads nothing again");
+
+  await unmount();
+  await several(runs, { workspace: createWorkspace("reloaded-workspace") });
+  await settle();
+  assert.deepEqual(rows().map((row) => row.querySelector("[data-run-toggle]").getAttribute("aria-expanded")), ["false", "false", "true"]);
+});
+
+test("a setup line whose only stat has no value yet has no card, and gains one with its first value", async () => {
+  const setup = { ...running, sentence: null, setup: { stage: "Label", line: null, startsAt: null }, series: {}, latest: {}, headline: "test_wer",
+    view: { ...running.view, signals: { ...running.view.signals, test_wer: { label: "Test WER", digits: 2 } }, headline: ["test_wer"] },
+    phases: [{ name: "Label", of: 5086, unit: "clips", priorMs: null, startedAt: now, endedAt: null }],
+    progress: { ...running.progress, phase: 0, done: 4351, whole: null, segments: [{ weight: 1, fill: 4351 / 5086 }] } };
+  backend({ monitors: { r1: setup, r2: running } });
+  const workspace = createWorkspace("test");
+  const pending = summary({ headline: { name: "test_wer", label: "Test WER", value: null } });
+  await several([{ ...sweep("r1", 4), run: run("r1", { monitor: pending }) }, sweep("r2", 6)], { workspace });
+  await settle();
+  assert.equal(rows()[0].querySelector("[data-run-toggle]"), null, "no chevron and no card");
+  assert.ok(!plain(rows()[0].textContent).includes("Test WER"), "the empty stat isn't drawn");
+  assert.equal(rows()[1].querySelector("[data-run-toggle]").getAttribute("aria-expanded"), "true", "a run beside it with a chart is open");
+
+  const { queryKey } = workspace.queries.getRunMonitorQuery("r1");
+  await act(async () => workspace.queryClient.setQueryData(queryKey, { ...setup, rev: setup.rev + 1, latest: { test_wer: 3.55 } }));
+  await settle();
+  assert.equal(rows()[0].querySelector("[data-run-toggle]").getAttribute("aria-expanded"), "true", "the first value opens its card");
+  assert.ok(plain(rows()[0].querySelector(".text-xl").textContent).includes("3.55"));
+});
+
+test("eight runs all open and each read its monitor once", async () => {
+  const ids = Array.from({ length: 8 }, (_, index) => `r${index + 1}`);
+  const requests = backend({ monitors: Object.fromEntries(ids.map((id) => [id, running])) });
+  await several(ids.map((id, index) => sweep(id, index + 2)));
+  await settle();
+  assert.equal(rows().length, 8);
+  assert.equal(document.querySelectorAll(`[role="list"] button[aria-label="${m.run_show_less()}"]`).length, 8);
+  assert.equal(requests.filter((r) => r.request.endsWith("/monitor")).length, 8);
+  const list = find('[role="list"]');
+  assert.ok(!list.contains(button(m.run_show_less())), "the summary's toggle stays outside the scrolling list");
+  assert.ok(list.compareDocumentPosition(button(m.run_show_less())) & Node.DOCUMENT_POSITION_PRECEDING, "and comes first in Tab order");
 });
 
 test("a summary lists its runs in the order they were launched", async () => {
@@ -226,8 +271,9 @@ test("a summary lists its runs in the order they were launched", async () => {
   assert.deepEqual(rows().map((row) => row.getAttribute("aria-label")), ["Depth 4 at 2e15 FLOPs", "Depth 6 at 2e15 FLOPs", "Depth 8 at 2e15 FLOPs"]);
 });
 
-test("closed sweep rows stop counting down when their summaries go stale or rebuild", async () => {
-  const requests = backend({ monitors: { r1: running, r2: running } });
+test("sweep rows stop counting down when their summaries go stale or rebuild while their monitors are read", async () => {
+  const reading = new Promise(() => {});
+  const requests = backend({ monitors: { r1: reading, r2: reading } });
   const estimate = { ...running.estimate, at: now };
   const items = [sweep("r1", 4), sweep("r2", 6)].map((item) => ({
     ...item, run: { ...item.run, monitor: summary({ estimate }) },
@@ -249,10 +295,9 @@ test("closed sweep rows stop counting down when their summaries go stale or rebu
   rows().forEach((row, index) => {
     assert.ok(plain(row.textContent).includes(plain(m.status_last_seen({ time: fmtClock(now) }))));
     assert.doesNotMatch(plain(row.textContent), /\d+[mh].*left/);
-    const status = row.querySelector('button[aria-describedby]');
-    assert.ok(plain(document.getElementById(status.getAttribute("aria-describedby")).textContent).includes(reasons[index]));
+    assert.ok(plain(row.textContent).includes(reasons[index]), "the open card says why");
   });
-  assert.equal(requests.filter((r) => r.request.endsWith("/monitor")).length, 0);
+  assert.equal(requests.filter((r) => r.request.endsWith("/monitor")).length, 2);
 });
 
 test("a summary says who needs attention first, and a run waiting for a choice opens itself from a folded summary", async () => {
@@ -267,6 +312,9 @@ test("a summary says who needs attention first, and a run waiting for a choice o
   monitors.r2 = { ...flagged, flags: [{ ...flagged.flags[0], detail: flagged.flags[0].template }] };
   const waiting = run("r2", { monitor: summary({ tone: "flag", sentence: flagged.sentence, bindings: { loss: "NaN" }, flag: { id: "f1", state: "waiting", mode: "copilot" }, rev: flagged.rev }) });
   await act(async () => workspace.queryClient.setQueryData(workspace.queries.listChatShownRunsQuery().queryKey, { source: "shown", runs: [sweep("r1", 4), { ...sweep("r2", 6), run: waiting }] }));
+  await settle();
+  // The rows read their monitors before the remembered level arrived; the catch-up reads the flag's again.
+  await act(async () => workspace.queryClient.refetchQueries({ queryKey: workspace.queries.getRunMonitorQuery("r2").queryKey }));
   await settle();
   const warning = "Loss is NaN.";
   assert.equal(plain(find("[data-run-frame]").textContent).split(warning).length - 1, 1);
@@ -802,7 +850,7 @@ test("an unresolved flag stays visible after completion and announces that the r
   assert.equal(requests.find((r) => r.request === "POST /api/runs/r1/flag").body.choice, "keep");
 });
 
-test("the row reserves its headline before chart points and returns to one line when done", async () => {
+test("a chart needs two points and a finished card keeps its headline", async () => {
   const setup = { ...running, sentence: null, setup: { stage: "Download", line: null, startsAt: now + 60_000 }, series: {}, latest: {}, headline: null,
     phases: [{ name: "Download", of: 9, unit: "shards", priorMs: null, startedAt: now, endedAt: null }],
     progress: { ...running.progress, phase: 0, done: 4, whole: null, segments: [{ weight: 1, fill: 4 / 9 }] } };
@@ -831,6 +879,8 @@ test("the row reserves its headline before chart points and returns to one line 
   assert.equal(view.container.querySelector('svg[role="img"]'), null);
   assert.equal(view.container.querySelector('[role="progressbar"]'), null);
   assert.ok(plain(view.container.textContent).includes("Done in"));
+  assert.ok(button(m.run_show_less()));
+  assert.ok(plain(view.container.querySelector(".text-xl").textContent).includes("2.3"));
 });
 
 
@@ -885,11 +935,11 @@ test("cancellation is said once while a failed stop retains its explanation", as
   assert.ok(view.container.querySelector('.run-contact-notice').textContent.includes("The scheduler refused this stop"));
 });
 
-test("the headline reserves its label and missing value before its first evaluation", async () => {
+test("a chart can open on its own while its headline is pending", async () => {
   const view = { ...running.view, signals: { ...running.view.signals, val_bpb: { label: "Val bpb", digits: 3 } }, headline: ["val_bpb"] };
   backend({ monitors: { r1: { ...running, view, headline: null } } });
   const { container } = await banner([run("r1", { monitor: summary({ headline: null }) })]);
   await settle();
-  assert.ok(container.textContent.includes("Val bpb"));
-  assert.ok(container.querySelector(`[role="img"][aria-label="${m.run_value_pending()}"]`));
+  assert.ok(container.querySelector('svg[role="img"]'));
+  assert.ok(!container.textContent.includes("Val bpb"));
 });

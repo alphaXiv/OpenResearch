@@ -10,7 +10,6 @@ import { cn } from "../ui/cn";
 import { Controls } from "./Controls";
 import { Delta } from "./Delta";
 import { Mark } from "./Mark";
-import { PendingValue } from "./HeadlineStat";
 import { Rail } from "./Rail";
 import { RunStatus } from "./RunStatus";
 
@@ -20,10 +19,10 @@ export const runFrame = (model: RunModel) => cn(
   model.needsChoice ? "border-accent-amber/45 bg-accent-amber-subtle" : "border-border bg-surface",
 );
 
-/** The run's one number, unless the sentence already says it; then only how it compares. */
+/** The run's one number once it has one, unless the sentence already says it; then only how it compares. */
 function Headline({ model }: { model: RunModel }) {
   const headline = model.headline;
-  if (!headline || (model.tone !== "starting" && model.tone !== "running" && model.tone !== "done")) return null;
+  if (!headline?.known || (model.tone !== "starting" && model.tone !== "running" && model.tone !== "done")) return null;
   const { delta } = headline;
   if (headline.inSentence) {
     if (!delta || delta.flat || headline.vsInSentence) return null;
@@ -31,7 +30,7 @@ function Headline({ model }: { model: RunModel }) {
   }
   return (
     <span className="shrink-0 whitespace-nowrap text-ink-subtext @max-[40rem]:hidden">
-      {autoDir(headline.label)} <span className="font-medium tabular-nums text-text">{headline.known ? headline.value : <PendingValue />}</span>
+      {autoDir(headline.label)} <span className="font-medium tabular-nums text-text">{headline.value}</span>
       {delta && <> <Delta delta={delta} said />{!delta.flat && <> {m.run_than_parent()}</>}</>}
     </span>
   );
@@ -63,20 +62,23 @@ export function RunLine({ model, agent, label, onToggle, onOpenRunPage, expanded
     : model.eta ? { text: model.eta, why: model.etaDetail, tip: `${model.eta} · ${model.etaDetail}` }
     : null;
   const { text, title } = label ?? { text: model.name, title: model.name };
+  // Under the sentence, the time starts where the sentence does: past the mark and the gap.
+  const under = cn("@max-[30rem]:order-last", model.tone === "flag" ? "@max-[30rem]:ms-[22px]" : "@max-[30rem]:ms-[15px]");
   return (
     <div data-run-frame={label ? undefined : ""} role="group" aria-label={title} className={label ? cn("relative", model.needsChoice && "bg-accent-amber-subtle") : runFrame(model)}>
-      <div className="flex min-h-9 min-w-0 items-center gap-x-2 py-1 ps-3 pe-1.5">
-        <Mark tone={model.tone} live={model.live} label={model.status} />
+      <div className="flex min-h-9 min-w-0 items-center gap-x-2 py-1 ps-3 pe-1.5 @max-[30rem]:flex-wrap @max-[30rem]:items-start">
+        <span className="flex h-7 shrink-0 items-center"><Mark tone={model.tone} live={model.live} label={model.status} /></span>
         <RunStatus model={model} label={label ? text : undefined} descriptionId={time?.why ? whyId : undefined} onOpenRunPage={onOpenRunPage} expanded={expanded} />
         {working && <span className={cn("shrink-0 whitespace-nowrap @max-[40rem]:hidden", editing || state === "agent_looking" ? "tool-running-shimmer" : "text-ink-subtext")}>{working}</span>}
         {!expanded && <Headline model={model} />}
         {host && <Button size="small" onClick={() => requestHostConnect(host)}>{m.settings_connect()}</Button>}
+        {time && <span aria-hidden="true" className="hidden basis-full @max-[30rem]:order-last @max-[30rem]:block" />}
         {time && (time.why ? (
-          <Tooltip content={time.tip} className="shrink-0 rounded-xs">
+          <Tooltip content={time.tip} className={cn("shrink-0 rounded-xs", under)}>
             <span className="whitespace-nowrap tabular-nums text-ink-subtext">{time.text}</span>
             <span id={whyId} hidden>{time.why}</span>
           </Tooltip>
-        ) : <span className={cn("whitespace-nowrap tabular-nums text-ink-subtext", stale ? "max-w-3/5 shrink-0 truncate" : "shrink-0")}>{time.text}</span>)}
+        ) : <span className={cn("whitespace-nowrap tabular-nums text-ink-subtext", under, stale ? "max-w-3/5 shrink-0 truncate" : "shrink-0")}>{time.text}</span>)}
         <Controls model={model} expandable={expandable} expanded={expanded} onToggle={onToggle} />
       </div>
       {children}

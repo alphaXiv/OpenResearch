@@ -72,7 +72,7 @@ for (const dismiss of [false, true]) {
       await expect(otherBanner.getByRole('button', { name: 'Dismiss', exact: true })).toBeVisible()
       const active = await (await page.request.get(`${orx.url}/api/chat/active-runs`)).json()
       expect(active.some((item: { run: { id: string } }) => item.run.id === row.run.id)).toBe(false)
-      await expect(banner.getByRole('button', { name: 'Show less', exact: true })).toHaveCount(0)
+      await expect(banner.getByRole('button', { name: 'Show less', exact: true })).toBeVisible()
       await expect(banner.getByRole('button', { name: /monitored/i })).toBeVisible()
       if (dismiss) {
         await banner.getByRole('button', { name: 'Dismiss', exact: true }).click()

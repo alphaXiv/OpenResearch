@@ -5,7 +5,7 @@ import path from 'node:path'
 import type { Locator, Page, TestInfo } from '@playwright/test'
 import type { Agent } from '../src/agent.ts'
 import type { Orx, Project } from '../src/orx.ts'
-import { expect as baseExpect, send, test } from '../src/test.ts'
+import { expect as baseExpect, composer, send, test } from '../src/test.ts'
 
 // Waits on the run or the agent, which a busy machine slows, get this budget; the restart's and the clock's set their own.
 const expect = baseExpect.configure({ timeout: 30_000 })
@@ -267,9 +267,10 @@ for (let step = 1; step <= total; step++) {
     expect(x).toEqual(Array.from({ length: 40 }, (_, i) => i + 1))
     expect(monitor.series.loss[9]).toEqual([10, null])
     await themes(page, banner, info, 'strip-done')
-    await expect(banner.getByRole('button', { name: 'Show less', exact: true })).toHaveCount(0)
+    await banner.getByRole('button', { name: 'Show less', exact: true }).click()
     await expect(banner).toContainText('Done in')
     await themes(page, banner, info, 'line-done')
+    await banner.getByRole('button', { name: 'Show more', exact: true }).click()
     // The status card links to the run page, which draws the whole curve with axes.
     await openRunPage(page, banner, /Declared/)
     const latest = latestRun(page)
@@ -333,9 +334,8 @@ for (let step = 1; step <= 30; step++) {
   await agent.reached(hold)
   await expect(banner).toContainText('Done in')
   await expect(banner).not.toContainText('At step')
-  await expect(banner.getByRole('button', { name: 'Show less', exact: true })).toHaveCount(0)
-  await expect(banner).toContainText('Done in')
-  await themes(page, banner, info, 'line-open-done')
+  await expect(banner.getByRole('button', { name: 'Show less', exact: true })).toBeVisible()
+  await themes(page, banner, info, 'strip-open-done')
   agent.release(hold)
   await expect(page.getByText('The open run finished.', { exact: true })).toBeVisible()
 })
@@ -618,7 +618,7 @@ gate('done')
   await expect(page.getByText('The plain run finished.', { exact: true })).toBeVisible()
 })
 
-test('several runs share one summary whose rows name what sets each apart and open in place', async ({ page, agent, launchOrx }, info) => {
+test('several runs share one summary over an open card each, whose rows name what sets each apart', async ({ page, agent, launchOrx }, info) => {
   // Four runs, three theme passes and each run's result turn outlast the default budget on a busy machine.
   test.slow()
   const orx = await launchOrx()
@@ -656,30 +656,43 @@ for (let step = 1; step <= ${total}; step++) {
   await test.step('the summary says what the runs share, and each row only what sets it apart', async () => {
     await expect(rows).toHaveCount(3, { timeout: 60_000 })
     for (const { total } of runs.slice(0, 3)) await expect(banner).toContainText(said(`Step 20 of ${total}`))
-    await expect(banner).toContainText('… at 2e15 FLOPs')
+    await expect(banner).toContainText(said('Depth 4, 6, 8 at 2e15 FLOPs'))
     await expect(banner).toContainText(said('3 running'))
     for (const [index, { title, label }] of runs.slice(0, 3).entries()) {
       await expect(named(title)).toContainText(said(label))
       await expect(rows.nth(index)).toContainText(said(label))
+      await expect(rows.nth(index).getByRole('img', { name: /^val_bpb / })).toBeVisible()
     }
     await themes(page, banner, info, 'summary-rows')
 
     await page.clock.setFixedTime(Date.now() + 30_000)
     await page.setViewportSize({ width: 420, height: 860 })
     await expect(banner).toContainText('No progress for')
+    await expect(banner).toContainText('Depth … at 2e15 FLOPs')
     for (const { title, label } of runs.slice(0, 3)) {
       const clipped = await named(title).evaluate((trigger, short) => {
         const label = Array.from(trigger.children).find((element) => element.textContent.replace(/[⁦-⁩]/g, '').trim() === `${short} ·`)
-        return label ? label.scrollWidth - label.clientWidth : Infinity
+        if (!label) return Infinity
+        const range = document.createRange()
+        range.selectNodeContents(label)
+        const bounds = trigger.getBoundingClientRect()
+        return Math.max(0, ...Array.from(range.getClientRects(), (rect) => Math.max(bounds.left - rect.left, rect.right - bounds.right)))
       }, label)
       expect(clipped).toBeLessThanOrEqual(1)
     }
+    const list = banner.getByRole('list')
+    const overflow = await list.evaluate((element) => element.scrollHeight - element.clientHeight)
+    expect(overflow, 'three open cards outgrow the cap on a short window').toBeGreaterThan(0)
+    await list.evaluate((element) => element.scrollTo(0, element.scrollHeight))
+    await expect(summary).toBeInViewport()
+    await expect(rows.nth(2).getByRole('img', { name: /^val_bpb / })).toBeInViewport()
+    await expect(composer(page)).toBeInViewport()
     await page.setViewportSize({ width: 1440, height: 900 })
     await page.clock.setFixedTime(Date.now())
   })
 
   await test.step('the summary folds to one line over every bar, and opens back to its rows', async () => {
-    await banner.getByRole('button', { name: 'Show less', exact: true }).click()
+    await summary.click()
     await expect(rows).toHaveCount(0)
     await expect(banner.getByRole('progressbar')).toHaveCount(3)
     await expect(summary).toBeFocused()
@@ -688,12 +701,9 @@ for (let step = 1; step <= ${total}; step++) {
     await expect(rows).toHaveCount(3)
   })
 
-  await test.step('a row opens into its strip in place, and Escape steps back to the row', async () => {
-    await rows.nth(1).getByRole('button', { name: 'Show more', exact: true }).click()
-    await expect(rows.nth(1).getByRole('img', { name: /^val_bpb / })).toBeVisible()
-    await expect(rows.nth(1).getByRole('button', { name: 'Show less', exact: true })).toBeFocused()
-    await expect(rows).toHaveCount(3)
-    await themes(page, banner, info, 'summary-row-strip')
+  await test.step('Escape folds the card the focus is in, and it stays folded', async () => {
+    for (const index of [0, 1, 2]) await expect(rows.nth(index).getByRole('img', { name: /^val_bpb / })).toBeVisible()
+    await rows.nth(1).getByRole('button', { name: 'Show less', exact: true }).focus()
     await page.keyboard.press('Shift+Tab')
     await page.keyboard.press('Shift+Tab')
     await page.keyboard.press('Shift+Tab')
@@ -706,6 +716,12 @@ for (let step = 1; step <= ${total}; step++) {
     await expect(rows.nth(1).getByRole('img', { name: /^val_bpb / })).toBeVisible()
     await page.keyboard.press('Escape')
     await expect(rows.nth(1).getByRole('button', { name: 'Show more', exact: true })).toBeFocused()
+    await expect(rows.nth(1).getByRole('img', { name: /^val_bpb / })).toHaveCount(0)
+    await expect(rows.nth(0).getByRole('img', { name: /^val_bpb / })).toBeVisible()
+    await themes(page, banner, info, 'summary-row-folded')
+    await summary.click()
+    await summary.click()
+    await expect(rows.nth(1).getByRole('button', { name: 'Show more', exact: true })).toBeVisible()
   })
 
   await test.step('an unrelated run keeps its whole title and leaves the sweep its labels', async () => {
@@ -979,7 +995,7 @@ gate('finish')`)
       await agent.reached(waking)
       await expect(banner.getByRole('button', { name: /^Ask / })).toHaveCount(0)
       const row = banner.getByRole('group', { name: 'Copiloted', exact: true })
-      await row.getByRole('button', { name: 'Show more', exact: true }).click()
+      await expect(row.getByRole('button', { name: 'Show less', exact: true })).toBeVisible()
       await expect(row).toContainText('Waking')
       agent.release(waking)
       await agent.reached(asked)

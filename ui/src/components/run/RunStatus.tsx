@@ -86,9 +86,9 @@ export function RunStatus({ model, label, descriptionId, onOpenRunPage, expanded
           onKeyDown={onKeyDown}
           aria-label={m.run_status_for({ status: autoDir(status), name: autoDir(model.name) })}
           aria-describedby={descriptionId}
-          className="flex min-h-6 min-w-0 flex-1 items-center overflow-hidden rounded-xs text-start whitespace-nowrap focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:outline-offset-2"
+          className="flex min-h-6 min-w-0 flex-1 items-center overflow-hidden rounded-xs text-start whitespace-nowrap @max-[30rem]:block @max-[30rem]:py-1 @max-[30rem]:whitespace-normal @max-[30rem]:wrap-break-word @max-[30rem]:[&_span]:whitespace-normal focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:outline-offset-2"
         >
-          {label && <span className="me-1 max-w-1/4 shrink-0 truncate text-ink-subtext">{autoDir(label)} · </span>}
+          {label && <span className="me-1 min-w-0 shrink-[0.001] truncate text-ink-subtext @max-[30rem]:me-0">{autoDir(label)} · </span>}
           <Lead model={model} />
           {stage ? <>
             {stage.name && <span className="min-w-0 shrink truncate"><Sentence text={stage.name} tone={model.tone} /></span>}
