@@ -2059,6 +2059,70 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "run by the official-build telemetry gate; destination is loopback"]
+    async fn install_failure_steps_reach_the_collector() {
+        use axum::{http::StatusCode, routing::post, Json, Router};
+        use harness::{InstallStep, SetupAttempt};
+
+        if !crate::config::in_test_child(TELEMETRY_ENV) {
+            return;
+        }
+        assert_eq!(build_channel(), "production");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let host = format!("http://{}", listener.local_addr().unwrap());
+        std::env::set_var("ORX_TELEMETRY_HOST", &host);
+        assert_eq!(telemetry_host(), host);
+        let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let app = Router::new().route(
+            ANALYTICS_PATH,
+            post(move |Json(payload): Json<serde_json::Value>| {
+                let sent = sent.clone();
+                async move {
+                    for event in payload["events"].as_array().unwrap() {
+                        assert_eq!(event["name"], "cli_harness_setup");
+                        let p = &event["properties"];
+                        if p["outcome"] == "failed" {
+                            sent.send(p["errorExcerpt"].clone()).unwrap();
+                        }
+                    }
+                    StatusCode::ACCEPTED
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        for (step, expected) in [
+            (None, serde_json::Value::Null),
+            (
+                Some(InstallStep::ReleaseLookup),
+                json!("managed release lookup"),
+            ),
+            (
+                Some(InstallStep::NativeUpdater),
+                json!("native agent updater"),
+            ),
+            (Some(InstallStep::ManagedCopy), json!("managed agent copy")),
+        ] {
+            let attempt = SetupAttempt::new("opencode", "update", "manual");
+            if let Some(step) = step {
+                attempt.set_install_step(step);
+            }
+            attempt.record(
+                "failed",
+                "command",
+                Some("exit_nonzero"),
+                Some(1),
+                Some("private.test/?token=secret"),
+            );
+            let observed = tokio::time::timeout(std::time::Duration::from_secs(5), received.recv())
+                .await
+                .unwrap();
+            assert_eq!(observed, Some(expected));
+        }
+        flush_pending().await;
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn sender_posts_the_first_party_endpoint() {
         use tokio::io::AsyncWriteExt;
 
