@@ -37,6 +37,27 @@ struct Kept {
     commands: Vec<(String, String, Value)>,
 }
 
+/// Why a chat's kept agents are not taken back.
+enum Refusal {
+    /// Confirmed: the chat or its turn is gone or cannot resume, so its children are stopped.
+    Stop(String),
+    /// Unknown: the store could not be read, so its children keep running.
+    Unread(String),
+}
+
+impl Refusal {
+    fn unread(what: &str, error: anyhow::Error) -> Self {
+        Self::Unread(format!("{what} could not be read: {error:#}"))
+    }
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (Self::Stop(reason) | Self::Unread(reason)) = self;
+        f.write_str(reason)
+    }
+}
+
 fn unfinished(turn: &StoredChatTurn) -> bool {
     matches!(turn.state.as_str(), "preparing" | "retrying" | "running")
 }
@@ -120,11 +141,19 @@ async fn adopt(
     let claimed = if reachable {
         claim(chat, &harness_id, &session_id, &keepers)
     } else {
-        Err("this server lacks the port or bearer its environment names".into())
+        Err(Refusal::Stop(
+            "this server lacks the port or bearer its environment names".into(),
+        ))
     };
     let (harness, resume) = match claimed {
         Ok(claimed) => claimed,
-        Err(reason) => {
+        Err(Refusal::Unread(reason)) => {
+            eprintln!(
+                "orx up: leaving the {harness_id} agent of chat {session_id} running: {reason}"
+            );
+            return;
+        }
+        Err(Refusal::Stop(reason)) => {
             let ids = kept
                 .agents
                 .into_iter()
@@ -186,43 +215,48 @@ async fn adopt(
 }
 
 /// The harness that takes back `session_id`'s kept agents, and the running turn that resumes
-/// on one of `keepers`; `Err` says why they are stopped instead. A running turn that cannot
-/// resume takes its agent with it, as a restart always did, so its recovery starts afresh.
+/// on one of `keepers`; `Err` says why they are stopped, or left running when the store could
+/// not say. A running turn that cannot resume takes its agent with it, as a restart always
+/// did, so its recovery starts afresh.
 fn claim(
     chat: &Arc<ChatHost>,
     harness_id: &str,
     session_id: &str,
     keepers: &[&str],
-) -> std::result::Result<(Box<dyn Harness>, Option<Resumable>), String> {
-    let store = Store::open().map_err(|error| format!("{error:#}"))?;
-    let session = match store.get_chat_session(session_id) {
-        Ok(Some(session)) => session,
-        Ok(None) => return Err("its chat was deleted".into()),
-        Err(error) => return Err(format!("its chat could not be read: {error:#}")),
-    };
+) -> std::result::Result<(Box<dyn Harness>, Option<Resumable>), Refusal> {
+    let store = Store::open().map_err(|error| Refusal::unread("the store", error))?;
+    let session = store
+        .get_chat_session(session_id)
+        .map_err(|error| Refusal::unread("its chat", error))?
+        .ok_or_else(|| Refusal::Stop("its chat was deleted".into()))?;
     if session.harness != harness_id {
-        return Err(format!("the chat now runs {}", session.harness));
+        return Err(Refusal::Stop(format!(
+            "the chat now runs {}",
+            session.harness
+        )));
     }
     let harness = session_harness(harness_id, session_id)
-        .ok_or_else(|| format!("no harness of this version runs {harness_id}"))?;
+        .ok_or_else(|| Refusal::Stop(format!("no harness of this version runs {harness_id}")))?;
     let turn = store
         .latest_chat_turn(session_id)
-        .map_err(|error| format!("its turns could not be read: {error:#}"))?
+        .map_err(|error| Refusal::unread("its turns", error))?
         .filter(unfinished);
     let Some(turn) = turn else {
         return Ok((harness, None));
     };
     if !harness.supports_resume() {
-        return Err(format!("its running turn {} cannot resume", turn.id));
+        return Err(Refusal::Stop(format!(
+            "its running turn {} cannot resume",
+            turn.id
+        )));
     }
-    let ctx = resumed_turn(chat, &store, &turn)
-        .map_err(|error| format!("its running turn cannot resume: {error:#}"))?;
+    let ctx = resumed_turn(chat, &store, &turn)?;
     let resume = ctx.resume.as_ref().expect("a restored checkpoint resumes");
     if !keepers.contains(&resume.keep_id.as_str()) {
-        return Err(format!(
+        return Err(Refusal::Stop(format!(
             "its running turn {} resumes on keeper {}, which is gone",
             turn.id, resume.keep_id
-        ));
+        )));
     }
     Ok((
         harness,
@@ -235,17 +269,27 @@ fn claim(
 }
 
 /// A turn as its last checkpoint left it, on the transcript committed with that checkpoint.
-fn resumed_turn(chat: &Arc<ChatHost>, store: &Store, turn: &StoredChatTurn) -> Result<TurnCtx> {
+fn resumed_turn(
+    chat: &Arc<ChatHost>,
+    store: &Store,
+    turn: &StoredChatTurn,
+) -> std::result::Result<TurnCtx, Refusal> {
     let checkpoint = store
-        .chat_turn_checkpoint(&turn.id)?
-        .ok_or_else(|| anyhow!("turn {} has no checkpoint", turn.id))?;
+        .chat_turn_checkpoint(&turn.id)
+        .map_err(|error| Refusal::unread("its checkpoint", error))?
+        .ok_or_else(|| Refusal::Stop(format!("turn {} has no checkpoint", turn.id)))?;
     let session = store
-        .get_chat_session(&turn.session_id)?
-        .ok_or_else(|| anyhow!("chat {} is gone", turn.session_id))?;
+        .get_chat_session(&turn.session_id)
+        .map_err(|error| Refusal::unread("its chat", error))?
+        .ok_or_else(|| Refusal::Stop(format!("chat {} is gone", turn.session_id)))?;
     let project = store
-        .get_local_project(&session.project_id)?
-        .ok_or_else(|| anyhow!("project {} is gone", session.project_id))?;
-    let assistant = match store.get_chat_message(&turn.assistant_message_id)? {
+        .get_local_project(&session.project_id)
+        .map_err(|error| Refusal::unread("its project", error))?
+        .ok_or_else(|| Refusal::Stop(format!("project {} is gone", session.project_id)))?;
+    let message = store
+        .get_chat_message(&turn.assistant_message_id)
+        .map_err(|error| Refusal::unread("its transcript", error))?;
+    let assistant = match message {
         Some(message) => stored_to_wire(&message),
         None => WireMessage {
             id: turn.assistant_message_id.clone(),
@@ -256,8 +300,10 @@ fn resumed_turn(chat: &Arc<ChatHost>, store: &Store, turn: &StoredChatTurn) -> R
             parent_id: turn.user_message_id.clone(),
         },
     };
-    let mut ctx = turn_ctx_from_stored(chat.clone(), store, &session, project, turn, assistant)?;
-    ctx.restore_checkpoint(&checkpoint)?;
+    let mut ctx = turn_ctx_from_stored(chat.clone(), store, &session, project, turn, assistant)
+        .map_err(|error| Refusal::unread("its turn", error))?;
+    ctx.restore_checkpoint(&checkpoint)
+        .map_err(|error| Refusal::Stop(format!("{error:#}")))?;
     Ok(ctx)
 }
 
@@ -340,7 +386,7 @@ fn resumed(
         .latest_chat_turn(session_id)?
         .filter(|turn| turn.id == resume.turn_id && unfinished(turn))
         .ok_or_else(|| anyhow!("it is no longer the chat's running turn"))?;
-    let ctx = resumed_turn(chat, store, &turn)?;
+    let ctx = resumed_turn(chat, store, &turn).map_err(|refusal| anyhow!("{refusal}"))?;
     let restored = ctx.resume.as_ref().expect("a restored checkpoint resumes");
     if restored.keep_id != resume.keep_id || restored.offset != resume.offset {
         bail!("its checkpoint moved after its agent was taken back");

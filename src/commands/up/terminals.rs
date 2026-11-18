@@ -449,9 +449,14 @@ impl Terminal {
             generation,
             frames: sender,
         });
+        let mut replay: Vec<u8> = view.scrollback.iter().copied().collect();
+        // The page this one replaces may have left without answering; this page answers it.
+        if view.cursor_query {
+            replay.extend_from_slice(CURSOR_QUERY);
+        }
         Subscription {
             generation,
-            replay: view.scrollback.iter().copied().collect(),
+            replay,
             exit: view.exit.clone(),
             frames,
         }

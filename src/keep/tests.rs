@@ -350,3 +350,21 @@ fn a_keeper_whose_files_cannot_be_read_is_unknown_and_left_in_place() {
         handle.stop(Duration::from_secs(10)).await.unwrap();
     });
 }
+
+#[tokio::test]
+async fn a_failed_start_keeps_the_directory_of_a_keeper_that_is_running() {
+    let kept = kept_cat(Value::Null).await;
+    let id = kept.handle().id().to_string();
+
+    let error = abandon(&id, anyhow!("The keeper did not start within 15 seconds"));
+    assert!(root().join(&id).exists());
+    let error = error.to_string();
+    assert!(error.contains("did not start") && error.contains("still running"));
+
+    kept.handle().stop(Duration::from_secs(10)).await.unwrap();
+    let gone = root().join("gone");
+    create_private_dir(&gone).unwrap();
+    let error = abandon("gone", anyhow!("The keeper exited before starting"));
+    assert!(!gone.exists());
+    assert_eq!(error.to_string(), "The keeper exited before starting");
+}

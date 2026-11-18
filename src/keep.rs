@@ -247,12 +247,19 @@ pub async fn spawn(keep: Keep<'_>) -> Result<Kept> {
     let id = uuid::Uuid::new_v4().simple().to_string();
     let dir = root().join(&id);
     create_private_dir(&dir)?;
-    let spawned = start_keeper(&dir, &keep).await;
-    if let Err(error) = &spawned {
-        let _ = std::fs::remove_dir_all(&dir);
-        return Err(anyhow!("{error}"));
+    if let Err(error) = start_keeper(&dir, &keep).await {
+        return Err(abandon(&id, error));
     }
     attach(&id).await
+}
+
+/// A failed start's error, once its directory is gone. A keeper that locked it before the
+/// start timed out is still running its child, and its records are all that can reach it.
+fn abandon(id: &str, error: anyhow::Error) -> anyhow::Error {
+    match remove(id) {
+        Ok(()) => error,
+        Err(left) => anyhow!("{error}; keeper directory {id} stays: {left:#}"),
+    }
 }
 
 fn create_private_dir(dir: &Path) -> Result<()> {

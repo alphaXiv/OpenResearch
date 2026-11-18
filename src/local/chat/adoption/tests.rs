@@ -516,6 +516,45 @@ fn keepers_that_cannot_be_read_are_left_running_not_stopped_or_cleared() {
 
 #[cfg(unix)]
 #[test]
+fn an_agent_whose_chat_cannot_be_read_is_left_running_not_stopped() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        register();
+        let store = Store::open().unwrap();
+        chat(&store, "chat", "test-resume");
+        let unread = left_running(&store, "test-resume", "chat", json!({})).await;
+        let deleted = left_running(&store, "test-resume", "deleted", json!({})).await;
+        // A row the store cannot map: reading the chat fails rather than finding nothing.
+        rusqlite::Connection::open(crate::store::data_dir().join("orx.db"))
+            .unwrap()
+            .execute(
+                "UPDATE chat_sessions SET created_at = 'unreadable' WHERE id = 'chat'",
+                [],
+            )
+            .unwrap();
+
+        adopt_kept_work(&host(), true).await.unwrap();
+
+        gone(&deleted).await;
+        // A stop's receipt is written before `stop` returns, so an agent stopped has one.
+        let running = keep::entries().unwrap().into_iter().any(|entry| {
+            entry.id == unread && entry.liveness == keep::Liveness::Alive && entry.exit.is_none()
+        });
+        assert!(running, "an unread chat's agent was stopped");
+        assert!(ADOPTED.lock().unwrap().is_empty());
+        keep::attach(&unread)
+            .await
+            .unwrap()
+            .handle()
+            .stop(STOP_TIMEOUT)
+            .await;
+    });
+}
+
+#[cfg(unix)]
+#[test]
 fn a_restart_waits_only_for_work_it_would_stop() {
     if !crate::config::in_test_child(&[]) {
         return;

@@ -166,6 +166,19 @@ fn wait_for(what: &str, condition: impl Fn() -> bool) {
     }
 }
 
+/// Attaches until the keeper's welcome satisfies `ready`, and returns that attachment.
+fn attach_when(endpoint: &Endpoint, what: &str, ready: impl Fn(&Welcome) -> bool) -> Link {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let link = Link::attach(endpoint, 0);
+        if ready(&link.welcome) {
+            return link;
+        }
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 fn keeper_alive(dir: &Path) -> bool {
     let lock = std::fs::File::open(dir.join(wire::LOCK_FILE)).unwrap();
     lock.try_lock_shared().is_err()
@@ -217,13 +230,15 @@ fn a_reattached_server_gets_everything_since_its_last_ack_without_gaps() {
     let (seen, _) = first.read_until(|output| output.len() >= 200);
     let acked = 100;
     first.ack(acked);
-    // Windows resets a socket closed with unread data, which can discard a frame just sent.
-    std::thread::sleep(Duration::from_millis(100));
-    drop(first);
+    // Windows resets a socket closed with unread data, which can discard a frame just sent:
+    // closing our side and reading until the keeper closes its own delivers the ack.
+    first.stream.shutdown(std::net::Shutdown::Write).unwrap();
+    while wire::read_frame(&mut first.stream).is_ok() {}
 
     // The child keeps writing while no server is attached.
-    std::thread::sleep(Duration::from_millis(300));
-    let mut second = Link::attach(&endpoint, 0);
+    let mut second = attach_when(&endpoint, "output written while detached", |welcome| {
+        welcome.next > first.position
+    });
     assert_eq!(second.welcome.start, acked);
     let (resumed, _) = second.read_until(|output| output.len() >= 2000);
     assert_eq!(
@@ -248,11 +263,27 @@ fn unacknowledged_output_holds_the_child_at_its_limit() {
     let dir = scratch();
     let limit = 512;
     let endpoint = start(&dir, &spec("spam", pipes(), Retain::Unacked { limit }, 60));
-    std::thread::sleep(Duration::from_millis(500));
-    let mut link = Link::attach(&endpoint, 0);
+    let mut link = attach_when(&endpoint, "the child to fill the limit", |welcome| {
+        welcome.next >= limit
+    });
     let held = link.welcome.next;
-    assert!(held >= limit && held <= limit + wire::MAX_OUTPUT as u64);
+    assert!(held <= limit + wire::MAX_OUTPUT as u64);
+    // At a line every 5 ms, a child still running would write more within this wait.
+    link.stream
+        .set_read_timeout(Some(Duration::from_millis(300)))
+        .unwrap();
+    while link.position < held {
+        link.read_until(|_| true);
+    }
+    assert!(
+        wire::read_frame(&mut link.stream).is_err(),
+        "output went on past the limit"
+    );
+    link.stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
     // Acknowledging lets it go on.
+    link.ack(held);
     while link.position < held + limit * 2 {
         link.read_until(|_| true);
         let position = link.position;
@@ -269,9 +300,9 @@ fn tail_retention_keeps_the_newest_output_and_never_holds_the_child() {
         &dir,
         &spec("spam", pipes(), Retain::Tail { bytes: 256 }, 60),
     );
-    std::thread::sleep(Duration::from_millis(500));
-    let mut link = Link::attach(&endpoint, 0);
-    assert!(link.welcome.start > 0);
+    let mut link = attach_when(&endpoint, "the child to outgrow its tail", |welcome| {
+        welcome.start > 0
+    });
     assert!(link.welcome.next - link.welcome.start <= 256);
     link.control(&Control::Stop);
     link.read_exit();
@@ -346,7 +377,10 @@ fn strangers_cannot_hold_unlimited_handshakes_open() {
             token: TOKEN.into(),
             from: 0,
         };
-        wire::write_frame(&mut stream, kind::HELLO, &wire::json(&hello)).unwrap();
+        // A connection the keeper is still shedding resets; the next try finds it free.
+        if wire::write_frame(&mut stream, kind::HELLO, &wire::json(&hello)).is_err() {
+            return false;
+        }
         stream
             .set_read_timeout(Some(Duration::from_secs(1)))
             .unwrap();

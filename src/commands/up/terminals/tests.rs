@@ -215,6 +215,49 @@ async fn a_terminal_outlives_its_page_and_ends_with_its_tab() {
         .expect("a closed terminal's keeper goes away");
 }
 
+/// Raw output until it holds `needle`, answering nothing.
+async fn read_unanswered(socket: &mut Socket, needle: &[u8]) -> Vec<u8> {
+    let mut output = Vec::new();
+    let read = async {
+        while let Some(frame) = socket.next().await {
+            if let Frame::Binary(bytes) = frame.unwrap() {
+                output.extend_from_slice(&bytes);
+                if output.windows(needle.len()).any(|window| window == needle) {
+                    return;
+                }
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), read)
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "waited for {:?}; the terminal showed:\n{:?}",
+                String::from_utf8_lossy(needle),
+                String::from_utf8_lossy(&output)
+            )
+        });
+    output
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_page_taking_over_gets_the_cursor_query_the_last_page_never_answered() {
+    if !crate::config::in_test_child(&["SHELL"]) {
+        return;
+    }
+    let project = add_project("cursor-query");
+    let address = serve(crate::commands::up::tests::test_state()).await;
+
+    let mut page = open(address, &project, "tab").await;
+    type_in(&mut page, "printf '\\033[6n'; echo asked-$((1+1))\r").await;
+    read_unanswered(&mut page, b"asked-2").await;
+
+    let mut other = open(address, &project, "tab").await;
+    read_unanswered(&mut other, CURSOR_QUERY).await;
+    assert_eq!(message(&mut page).await["type"], "elsewhere");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_terminal_is_only_its_projects() {
     if !crate::config::in_test_child(&["SHELL"]) {

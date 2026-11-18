@@ -2602,6 +2602,39 @@ async fn cli_wait_skips_unknown_sse_event_names_before_decoding_their_data() {
 }
 
 #[tokio::test]
+async fn cli_wait_times_out_when_the_server_never_answers_the_event_stream() {
+    let f = Fixture::new().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut descriptor = f.descriptor.clone();
+    descriptor.port = listener.local_addr().unwrap().port();
+    let app = axum::Router::new().route(
+        "/api/v2/events",
+        axum::routing::get(std::future::pending::<&'static str>),
+    );
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        ApiClient::new(descriptor).unwrap().wait(
+            Filter {
+                run: Some("run".into()),
+                wait: true,
+                ..Default::default()
+            },
+            Instant::now() + crate::config::paced(Duration::from_millis(200)),
+        ),
+    )
+    .await
+    .expect("the wait outlived its own deadline");
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("Timed out waiting for a run state change"));
+    server.abort();
+}
+
+#[tokio::test]
 async fn initial_connection_failure_and_idle_refusal_rediscover_without_replaying_accepted_posts() {
     for idle in [false, true] {
         let calls = Arc::new(AtomicUsize::new(0));

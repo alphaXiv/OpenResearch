@@ -193,13 +193,15 @@ pub fn host_binaries() -> PathBuf {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| workspace.join("target"))
                 .join("test-hooks");
+            // The shipped profile, so the binary fits the size an upload allows; the hooks need
+            // debug assertions.
             let output = Command::new(env!("CARGO"))
-                .env("CARGO_PROFILE_DEV_DEBUG", "0")
-                .env("CARGO_PROFILE_DEV_STRIP", "symbols")
-                .env("CARGO_PROFILE_DEV_OPT_LEVEL", "1")
+                .env("CARGO_PROFILE_HOST_DEBUG_ASSERTIONS", "true")
                 .args([
                     "build",
                     "--locked",
+                    "--profile",
+                    "host",
                     "--features",
                     "test-hooks",
                     "-p",
@@ -215,7 +217,7 @@ pub fn host_binaries() -> PathBuf {
                 "{}",
                 String::from_utf8_lossy(&output.stderr)
             );
-            let binary = target.join("debug/orx-host");
+            let binary = target.join("host/orx-host");
             let mut digest = std::collections::hash_map::DefaultHasher::new();
             fs::read(&binary).unwrap().hash(&mut digest);
             let directory = target

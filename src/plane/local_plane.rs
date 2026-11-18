@@ -786,28 +786,33 @@ impl ApiClient {
     }
 
     /// Follows `filter` until a run it waits for ends, or fails at `deadline` with what it was
-    /// waiting on: a server to reach, or a state change.
+    /// waiting on: a server to reach, or a state change. The deadline covers every step,
+    /// rediscovery and response headers included.
     pub async fn wait(
         &self,
         filter: crate::commands::up::api_v2::Filter,
         deadline: Instant,
     ) -> Result<()> {
+        let waiting_on = std::cell::Cell::new("a run state change");
+        tokio::time::timeout_at(deadline.into(), self.follow(&filter, deadline, &waiting_on))
+            .await
+            .unwrap_or_else(|_| Err(anyhow!("Timed out waiting for {}.", waiting_on.get())))
+    }
+
+    async fn follow(
+        &self,
+        filter: &crate::commands::up::api_v2::Filter,
+        deadline: Instant,
+        waiting_on: &std::cell::Cell<&'static str>,
+    ) -> Result<()> {
         use futures::StreamExt;
-        let timed_out = || anyhow!("Timed out waiting for a run state change.");
         let mut client = self.clone();
         let mut original_in_flight: Option<std::collections::HashSet<String>> = None;
         let mut last_status = None;
         loop {
-            let mut events = client.events(&filter, Some(deadline)).await?;
+            let mut events = client.events(filter, Some(deadline)).await?;
             loop {
-                // A stream with an event ready is read before its timeout looks at the clock.
-                if Instant::now() >= deadline {
-                    return Err(timed_out());
-                }
-                let event = tokio::time::timeout_at(deadline.into(), events.next())
-                    .await
-                    .map_err(|_| timed_out())?;
-                let Some(event) = event else {
+                let Some(event) = events.next().await else {
                     break;
                 };
                 let mut value = match event {
@@ -884,7 +889,9 @@ impl ApiClient {
                 }
             }
             drop(events);
+            waiting_on.set("the OpenResearch server to start");
             client = Self::discover().await?;
+            waiting_on.set("a run state change");
         }
     }
 
