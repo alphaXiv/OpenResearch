@@ -9177,7 +9177,6 @@ export function ChatPanel({
                   onLeaveFeed={leaveTranscriptFeed}
                 />
                 </ChatLinksContext>
-              </ChatImageScope>
               {busy && awaitingInput && (
                 <div className="flex items-center gap-2 text-subtext text-sm pt-0.5 px-0 pb-2 italic">{m.chat_panel_waiting_for_your_input()}</div>
               )}
@@ -9206,6 +9205,7 @@ export function ChatPanel({
                   <span role="status" className="tool-running-shimmer -mt-3 ms-auto px-1 text-xs">{m.chat_steering()}</span>
                 </div>
               )}
+              </ChatImageScope>
             </div>
             </div>
           </div>

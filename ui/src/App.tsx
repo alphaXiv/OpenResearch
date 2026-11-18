@@ -120,7 +120,7 @@ import { NewProjectDialog } from "./components/ProjectsHome";
 import { ExperimentsTable } from "./components/ExperimentsTable";
 import { archiveActionsByExperiment } from "./components/ArchiveMenu";
 import { type HistoryOrder } from "./components/ExperimentLineage";
-import { Md } from "./components/Md";
+import { ChatImageScope, Md } from "./components/Md";
 import { SettingsView, type SettingsTab } from "./components/SettingsPage";
 import { DemoWelcomeModal } from "./components/Tour";
 import { TreeView } from "./components/TreeView";
@@ -2499,6 +2499,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                 {/* The plan markdown is already client-side — render directly,
                   file links resolve against the plan's session worktree. */}
                 <div className="pane-content flex-1 min-h-0 relative plan-tab-content overflow-y-auto [overflow-anchor:none] bg-background py-4.5 px-6 [&_.md]:max-w-readable">
+                  <ChatImageScope projectId={projectId} sessionId={planTab.sessionId}>
                   <Md
                     partId={planTab.promptId}
                     text={planContent?.key === `${planTab.sessionId}:${planTab.promptId}` ? planContent.text ?? m.model_picker_unavailable() : planTabs.find((tab) => tab.promptId === planTab.promptId)?.plan || m.artifacts_tab_loading()}
@@ -2516,6 +2517,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                       )
                     }
                   />
+                  </ChatImageScope>
                 </div>
               </TabBody>
             ) : sideTab && projectId ? (
