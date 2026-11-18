@@ -37,6 +37,7 @@ fn add_project(id: &str) -> String {
             repo_path: repo.to_string_lossy().into_owned(),
             run_command: None,
             paper_id: None,
+            icon: None,
             created_at: 1,
             updated_at: 1,
         })

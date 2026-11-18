@@ -19,9 +19,31 @@ pub(super) fn sample_project() -> LocalProject {
         repo_path: "/tmp/nonexistent".into(),
         run_command: None,
         paper_id: None,
+        icon: None,
         created_at: 0,
         updated_at: 0,
     }
+}
+
+fn scratch_project() -> LocalProject {
+    let mut project = sample_project();
+    project.repo_path = super::projects::scratch_root()
+        .join(&project.id)
+        .to_string_lossy()
+        .into_owned();
+    project
+}
+
+/// A chat without a project learns how to make one, and is never told its
+/// temporary folder is the user's checkout.
+#[test]
+fn a_chat_without_a_project_is_told_how_to_make_one() {
+    let scratch = playbook_md(&scratch_project(), &ProjectState::default());
+    assert!(scratch.contains("orx project create --name"));
+    assert!(!scratch.contains("Project folder"));
+    let project = playbook_md(&sample_project(), &ProjectState::default());
+    assert!(project.contains("- Project folder: `/tmp/nonexistent`"));
+    assert!(!project.contains("orx project create"));
 }
 
 /// Text rendered from a template at runtime, labelled for failure messages.
@@ -37,6 +59,10 @@ fn rendered() -> Vec<(String, String)> {
         (
             "local playbook".into(),
             playbook_md(&local, &ProjectState::default()),
+        ),
+        (
+            "scratch playbook".into(),
+            playbook_md(&scratch_project(), &ProjectState::default()),
         ),
     ];
     for skill in super::skills::CATALOG {

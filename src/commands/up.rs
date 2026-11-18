@@ -253,6 +253,8 @@ pub async fn run(args: UpArgs) -> Result<()> {
                 if let Err(err) = chat.reconcile_expired_turn_leases().await {
                     eprintln!("orx up: could not reconcile expired chat turns: {err}");
                 }
+                // Also picks up moves waiting from before a restart.
+                chat.apply_project_moves().await;
             }
         });
     }
@@ -841,6 +843,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
             post(prewarm_starter_prompts),
         )
         .route("/api/projects/activity", get(list_project_activity))
+        .route("/api/projects/scratch", post(create_scratch_project))
         .route(
             "/api/projects/{id}",
             get(get_project)
@@ -1223,6 +1226,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
         .route("/api/chat/sessions/{id}/worktree", get(session_worktree))
         .route("/api/chat/sessions/{id}/message", post(send_chat_message))
         .route("/api/chat/sessions/{id}/shell", post(run_shell_command))
+        .route(
+            "/api/chat/sessions/{id}/project",
+            post(move_chat_to_project).delete(cancel_chat_project_move),
+        )
         .route(
             "/api/chat/sessions/{id}/compact",
             post(compact_chat_session),
@@ -1921,6 +1928,7 @@ fn project_json_with_artifacts_dir(p: &local::model::LocalProject, artifacts_dir
         map.insert("filesDir".into(), dir);
         map.insert("path".into(), Value::String(p.repo_path.clone()));
         map.insert("githubEnabled".into(), Value::Bool(p.github_enabled()));
+        map.insert("scratch".into(), Value::Bool(p.is_scratch()));
         map.insert(
             "githubUrl".into(),
             p.github_url().map(Value::String).unwrap_or(Value::Null),
@@ -2205,6 +2213,66 @@ async fn get_project(Path(id): Path<String>) -> ApiResult {
     Ok(Json(json!({ "project": project_json(&project) })))
 }
 
+async fn create_scratch_project(State(state): State<AppState>) -> ApiResult {
+    reject_if_moving(&state)?;
+    let _admission = state
+        .project_lifecycle
+        .admit("__project_create__")
+        .ok_or_else(|| bad_request("project creation is unavailable"))?;
+    let creation_guard = state.project_creation_lock.clone().lock_owned().await;
+    let project = tokio::task::spawn_blocking(move || {
+        let _creation_guard = creation_guard;
+        local::projects::scratch_project(&Store::open()?)
+    })
+    .await
+    .map_err(|error| anyhow!("project task failed: {error}"))??;
+    Ok(Json(json!({ "project": project_json(&project) })))
+}
+
+#[derive(Deserialize)]
+struct ChatProjectReq {
+    name: String,
+    path: String,
+}
+
+/// Makes a chat a project of its own, now or once its turn ends.
+async fn move_chat_to_project(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<ChatProjectReq>,
+) -> ApiResult {
+    reject_if_moving(&state)?;
+    let project_id = Store::open()?
+        .get_chat_session(&id)?
+        .ok_or_else(|| not_found("chat session"))?
+        .project_id;
+    let _changing = state
+        .project_lifecycle
+        .begin_delete(&project_id)
+        .ok_or_else(|| bad_request("The project is busy with another change; try again."))?;
+    let moved = state
+        .chat
+        .move_to_new_project(&id, &req.name, &req.path)
+        .await
+        .map_err(bad_request)?;
+    Ok(Json(match moved {
+        Some(project) => json!({ "project": project_json(&project), "pending": false }),
+        None => json!({ "pending": true }),
+    }))
+}
+
+async fn cancel_chat_project_move(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult {
+    if !state.chat.cancel_project_move(&id).await? {
+        return Err(bad_request(
+            "No move is waiting for this chat; it may have already started.",
+        ));
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
 fn project_git_json(
     project: &local::model::LocalProject,
     github_status: local::github::Status,
@@ -2360,7 +2428,9 @@ async fn create_independent_project_repository(
     let reroot_shallow = local::git::prepare_shallow_repository_for_publication(
         std::path::Path::new(&project.repo_path),
     )?;
-    let (owner, repo) = local::github::create_project_repo(&project.slug, organization).await?;
+    // Named for the project as it is called now, as the preview shows it.
+    let name = local::slugify(&project.name);
+    let (owner, repo) = local::github::create_project_repo(&name, organization).await?;
     if reroot_shallow {
         local::git::reroot_shallow_repository(
             std::path::Path::new(&project.repo_path),
@@ -2982,11 +3052,12 @@ async fn open_project(Path(id): Path<String>) -> ApiResult {
 }
 
 /// Present-vs-absent for PATCH fields: absent = leave, null = clear.
-fn double_option<'de, D>(d: D) -> std::result::Result<Option<Option<String>>, D::Error>
+fn double_option<'de, T, D>(d: D) -> std::result::Result<Option<Option<T>>, D::Error>
 where
+    T: Deserialize<'de>,
     D: serde::Deserializer<'de>,
 {
-    Option::<String>::deserialize(d).map(Some)
+    Option::<T>::deserialize(d).map(Some)
 }
 
 #[derive(Deserialize)]
@@ -2995,6 +3066,33 @@ struct UpdateProjectReq {
     name: Option<String>,
     #[serde(default, deserialize_with = "double_option")]
     run_command: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
+    icon: Option<Option<Value>>,
+}
+
+/// An agent's kinds of icon, where `brand` is the project's initials, or an image in its repository.
+fn validate_project_icon(icon: &Value) -> std::result::Result<(), ApiError> {
+    let Some(file) = icon.get("file") else {
+        return local::agent_profiles::validate_icon(icon).map_err(bad_request);
+    };
+    let path = file
+        .as_str()
+        .ok_or_else(|| bad_request("Choose an image in the project"))?;
+    let (_, rel_path) = validated_project_file_path(path)?;
+    let image = rel_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            ["png", "jpg", "jpeg", "gif", "webp", "svg", "ico"]
+                .contains(&ext.to_ascii_lowercase().as_str())
+        });
+    let fields = icon.as_object().map_or(0, |object| object.len());
+    if !image || fields != 1 + usize::from(icon.get("color").is_some()) {
+        return Err(bad_request(
+            "Choose a PNG, JPEG, GIF, WebP, SVG or ICO image in the project",
+        ));
+    }
+    Ok(())
 }
 
 async fn update_project(
@@ -3008,10 +3106,13 @@ async fn update_project(
         .admit(&id)
         .ok_or_else(|| bad_request("project deletion is in progress"))?;
     reject_if_moving(&state)?;
-    if req.name.is_none() && req.run_command.is_none() {
+    if req.name.is_none() && req.run_command.is_none() && req.icon.is_none() {
         return Err(bad_request(
-            "nothing to update: pass name and/or runCommand",
+            "nothing to update: pass name, runCommand or icon",
         ));
+    }
+    if let Some(Some(icon)) = &req.icon {
+        validate_project_icon(icon)?;
     }
     let store = Store::open()?;
     let mut project = store
@@ -3025,6 +3126,9 @@ async fn update_project(
     }
     if let Some(cmd) = req.run_command {
         project.run_command = cmd.filter(|c| !c.trim().is_empty());
+    }
+    if let Some(icon) = req.icon {
+        project.icon = icon;
     }
     store.update_local_project(&project)?;
     // Re-read: update bumps updated_at, which is also what fires the SSE
@@ -3040,6 +3144,9 @@ async fn update_project(
 struct DeleteProjectQuery {
     #[serde(default)]
     delete_artifacts: bool,
+    /// Only a scratch project left with no chats, checked under the deletion lease.
+    #[serde(skip)]
+    only_unused_scratch: bool,
 }
 
 /// Delete a project and everything hanging off it. Refuses while runs are in
@@ -3068,6 +3175,11 @@ async fn delete_project_inner(state: AppState, id: String, query: DeleteProjectQ
     let project = store
         .get_local_project(&id)?
         .ok_or_else(|| not_found("project"))?;
+    if query.only_unused_scratch
+        && (!project.is_scratch() || !store.list_chat_sessions_by_project(&id)?.is_empty())
+    {
+        return Ok(Json(json!({ "ok": false })));
+    }
     let in_flight: Vec<_> = store
         .list_runs_by_project(&id)?
         .into_iter()
@@ -9746,11 +9858,19 @@ fn sidebar_session_json(
     store: &Store,
     session: &StoredChatSession,
     busy: bool,
+    background: Option<&Value>,
     catalog: &Value,
 ) -> Result<Value> {
     let mut value = local::chat::session_json_with(Some(store), session, busy);
+    value["background"] = background.cloned().unwrap_or(Value::Null);
     local::chat::project_model(&mut value, session, catalog);
     value["awaitingInput"] = json!(store.chat_session_awaiting_input(&session.id, busy)?);
+    value["lastTurn"] = json!(store.latest_chat_turn(&session.id)?.map(|turn| json!({
+        "state": turn.state,
+        "startedAt": turn.created_at,
+        "errorKind": turn.error_kind,
+        "error": turn.error_message,
+    })));
     Ok(value)
 }
 
@@ -9799,10 +9919,30 @@ async fn list_chat_sessions(
             .filter(|_| has_more)
             .map(|session| json!({ "updatedAt": session.updated_at, "id": session.id }));
         let busy = state.chat.busy_sessions().await;
+        let background = state.chat.waiting_on().await?;
+        // Working shows every chat at work, however far down the list it has fallen.
+        if before.is_none() {
+            let live: Vec<&str> = busy
+                .iter()
+                .chain(background.keys())
+                .map(String::as_str)
+                .collect();
+            for session in store.sidebar_chat_sessions_at_work(q.archived, &live)? {
+                if !sessions.iter().any(|listed| listed.id == session.id) {
+                    sessions.push(session);
+                }
+            }
+        }
         let sessions: Vec<Value> = sessions
             .iter()
             .map(|session| {
-                sidebar_session_json(&store, session, busy.contains(&session.id), &catalog)
+                sidebar_session_json(
+                    &store,
+                    session,
+                    busy.contains(&session.id),
+                    background.get(&session.id),
+                    &catalog,
+                )
             })
             .collect::<Result<_>>()?;
         return Ok(Json(json!({ "sessions": sessions, "next": next })));
@@ -9813,9 +9953,18 @@ async fn list_chat_sessions(
         (None, _) => return Err(bad_request("projectId or scope=all is required")),
     };
     let busy = state.chat.busy_sessions().await;
+    let background = state.chat.waiting_on().await?;
     let sessions: Vec<Value> = sessions
         .iter()
-        .map(|s| sidebar_session_json(&store, s, busy.contains(&s.id), &catalog))
+        .map(|s| {
+            sidebar_session_json(
+                &store,
+                s,
+                busy.contains(&s.id),
+                background.get(&s.id),
+                &catalog,
+            )
+        })
         .collect::<Result<_>>()?;
     Ok(Json(json!({ "sessions": sessions })))
 }
@@ -9995,9 +10144,20 @@ async fn create_chat_session(
         .admit(&req.project_id)
         .ok_or_else(|| bad_request("project deletion is in progress"))?;
     let store = Store::open()?;
-    store
+    let project = store
         .get_local_project(&req.project_id)?
         .ok_or_else(|| not_found("project"))?;
+    // A chat without a project gets one of its own, even when two drafts were
+    // opened on the same unused scratch project.
+    let _scratch_guard = if project.is_scratch() {
+        let guard = state.project_creation_lock.clone().lock_owned().await;
+        if !store.list_chat_sessions_by_project(&project.id)?.is_empty() {
+            req.project_id = local::projects::scratch_project(&store)?.id;
+        }
+        Some(guard)
+    } else {
+        None
+    };
     let catalog = harnesses_payload(&state, &HarnessQuery::default()).await;
     if req.harness.is_none() {
         if let Some(profile) = req.profile.as_deref() {
@@ -10194,9 +10354,44 @@ async fn delete_chat_session(State(state): State<AppState>, Path(id): Path<Strin
         .await;
     // Detached so a canceled request cannot stop between the native purge and the row delete.
     let chat = state.chat.clone();
-    tokio::spawn(async move { chat.delete_session(&id).await })
-        .await
-        .map_err(|error| anyhow!("chat deletion task failed: {error}"))??;
+    let store = Store::open()?;
+    let scratch = store
+        .get_chat_session(&id)?
+        .map(|session| store.get_local_project(&session.project_id))
+        .transpose()?
+        .flatten()
+        .filter(|project| project.is_scratch());
+    drop(store);
+    tokio::spawn(async move {
+        chat.delete_session(&id).await?;
+        // A chat without a project owns its repository, which goes with its last chat.
+        let Some(project) = scratch else {
+            return Ok(());
+        };
+        // The chat is gone either way; a scratch project left behind is reused by the next one.
+        let query = DeleteProjectQuery {
+            delete_artifacts: true,
+            only_unused_scratch: true,
+        };
+        match delete_project_inner(state, project.id.clone(), query).await {
+            Ok(Json(deleted)) if deleted["ok"] == false => {}
+            Ok(Json(deleted)) => {
+                if let Some(error) = deleted["artifactsError"].as_str() {
+                    eprintln!("orx up: {error}");
+                }
+                if let Err(error) = std::fs::remove_dir_all(&project.repo_path) {
+                    eprintln!("orx up: could not remove {}: {error}", project.repo_path);
+                }
+            }
+            Err(error) => eprintln!(
+                "orx up: kept the scratch project {} after its last chat: {}",
+                project.id, error.1
+            ),
+        }
+        Ok::<_, crate::error::Error>(())
+    })
+    .await
+    .map_err(|error| anyhow!("chat deletion task failed: {error}"))??;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -12891,6 +13086,28 @@ mod tests {
     }
 
     #[test]
+    fn project_icons_take_agent_icons_or_an_image_inside_the_repository() {
+        for icon in [
+            json!({ "brand": true }),
+            json!({ "glyph": "rocket", "color": "teal" }),
+            json!({ "file": "assets/Logo.PNG" }),
+            json!({ "file": "docs/icon.svg", "color": "gray" }),
+        ] {
+            validate_project_icon(&icon).unwrap();
+        }
+        for icon in [
+            json!({ "file": "../outside.png" }),
+            json!({ "file": "/etc/logo.png" }),
+            json!({ "file": "notes.txt" }),
+            json!({ "file": "logo.png", "extra": 1 }),
+            json!({ "file": 7 }),
+            json!({ "glyph": "rocket", "color": "plaid" }),
+        ] {
+            assert!(validate_project_icon(&icon).is_err(), "{icon}");
+        }
+    }
+
+    #[test]
     fn project_json_exposes_artifacts_dir_with_legacy_alias() {
         let project = local::model::LocalProject {
             id: "p1".into(),
@@ -12903,6 +13120,7 @@ mod tests {
             repo_path: "/tmp/r".into(),
             run_command: None,
             paper_id: None,
+            icon: None,
             created_at: 0,
             updated_at: 0,
         };

@@ -7,7 +7,7 @@ orx keeps a researcher's work on their own machine. Projects, experiments, runs,
 | Directory | Location | Holds |
 | --- | --- | --- |
 | config | `$XDG_CONFIG_HOME/openresearch`, else `~/.config/openresearch` | `settings.json`, credentials for openresearch.sh, alphaXiv and Overleaf, the SSH hosts saved in orx (`ssh/`), the telemetry outbox, the locks that cover the data directory as a whole |
-| data | resolved below | `orx.db`, `repos/`, `worktrees/`, `agents/`, `run-logs/`, `files/`, `chat-attachments/`, `keep/`, per-run state |
+| data | resolved below | `orx.db`, `repos/`, `scratch/`, `worktrees/`, `agents/`, `run-logs/`, `files/`, `chat-attachments/`, `keep/`, per-run state |
 | cache | `ORX_CACHE_DIR`, the `cacheDir` setting, else `~/.cache/openresearch` | orx's managed agent copies, the model price list, the last model feed, and the legacy repository root, which [migrations](#migrations-follow-paths) empty |
 
 **The data directory is one relocatable unit.** Its location resolves, most to least authoritative, from `ORX_DATA_DIR`, the `dataDir` in `settings.json`, `$XDG_DATA_HOME/openresearch`, and `~/.local/share/openresearch`. The setting is read fresh on every resolution, so a process opening the store after a move sees the new place. The directory is owner-only because the store holds scoped compute capabilities. The desktop app imports these overrides from the login shell, or it and a terminal `orx` would open different databases ([desktop](desktop.md)).
@@ -57,6 +57,10 @@ Removable managed installs also ignore hidden-agent settings.
 ## Code lives in Git
 
 A project is a Git repository anywhere on disk, the user's own or one orx cloned into `repos/`; the store records only its path. orx shells out to `git` rather than embedding a Git library, so every repository stays readable with ordinary tools (`src/local/git.rs`). Each chat works in its own worktree under `worktrees/<project>/<session>`, so agents never edit the user's checkout. [Experiments](experiments.md) covers how branches relate.
+
+**A chat without a project is a project orx keeps for it.** Its repository lives under `scratch/<project>`, and that location is what marks it: the store has no flag, so an older orx shows it as an ordinary project named "No project". Creating the project from the chat fast-forwards the baseline to the chat's commits, moves the repository to the folder the user picked and repairs the worktree links, all while every chat of the project is idle; a failure after the move moves it back. orx commits nothing: uncommitted files stay in the chat's worktree. The project keeps its id, its chats and its artifacts folder, so links in earlier messages keep working. Deleting the last chat deletes the scratch project and its repository (`src/local/projects.rs`).
+
+A chat in a project can move into a new one the same way: its latest commit is pushed as the new repository's `main` with the history behind it, and its worktree folder moves whole and is registered with the new repository, so uncommitted and ignored files stay as they were; the old project keeps its history, experiments and artifacts. A request made while a chat involved runs is kept in `chat_project_moves` and carried out once they are idle, which survives a restart (`src/local/chat/project_move.rs`).
 
 Per-project artifacts are a plain folder, `files/<project slug>/` (`src/local/files.rs`). The filesystem is their truth: there is no registry and no upload step, and every path the API accepts must resolve inside the folder once symlinks are followed.
 

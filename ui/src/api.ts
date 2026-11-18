@@ -61,6 +61,8 @@ export interface Project {
   path: string;
   githubEnabled: boolean;
   githubUrl?: string | null;
+  /** A chat without a project yet: orx keeps its code until the user makes it a project. */
+  scratch?: boolean;
   /** Absolute path of the project's artifacts directory, non-canonical to
    *  match paths agents inline into chat. */
   artifactsDir: string;
@@ -69,6 +71,8 @@ export interface Project {
   runCommand?: string | null;
   /** arXiv or alphaXiv paper id the project starts from (versionless). */
   paperId?: string | null;
+  /** The user's mark for the project; without one it shows its initials. */
+  icon?: ProjectIcon;
   createdAt: number;
   updatedAt: number;
 }
@@ -1339,6 +1343,9 @@ export type AgentIcon = { color?: AgentIconColor } & (
   | { image: { type: "image/webp" | "image/png"; data: string } }
 );
 
+/** A project's mark: an agent's kinds of icon, where `brand` is its initials, or an image file in its repository. */
+export type ProjectIcon = AgentIcon | { color?: AgentIconColor; file: string };
+
 /** An account OpenResearch signs an agent in to, beside the user's own. */
 export interface AgentProfile {
   id: string;
@@ -1764,6 +1771,8 @@ export interface ChatSession {
   awaitingInput?: boolean;
   id: string;
   projectId: string;
+  /** A project the user asked this chat to move into once its turn ends. */
+  pendingProject?: { name: string; path: string } | null;
   harness: HarnessId;
   /** The account the chat runs on, when it's one OpenResearch keeps. */
   profile?: string | null;
@@ -1808,6 +1817,15 @@ export interface ChatSession {
   busy: boolean;
   activeLeafId: string | null;
   contextUsage?: ContextUsage;
+  /** Tasks the agent left running after its turn, which it resumes to report; in the session lists. */
+  background?: { count: number; since: number } | null;
+  /** The chat's most recent turn, in the session lists. */
+  lastTurn?: {
+    state: string;
+    startedAt: number;
+    errorKind: string | null;
+    error: string | null;
+  } | null;
 }
 
 /** Fields `PATCH /api/chat/sessions/<id>` changes; each is optional. */
@@ -2299,7 +2317,20 @@ export function createApi(
       (r) => r.paper,
     );
 
-  const updateProject = (projectId: string, body: { runCommand?: string; name?: string }) =>
+  /** The project a new chat without a project starts in. */
+  const createScratchProject = () =>
+    post<{ project: Project }>("/api/projects/scratch", {}).then((r) => r.project);
+
+  /** Make a chat a project of its own at `path`, now or, while it runs, once its turn ends. */
+  const moveChatToProject = (sessionId: string, body: { name: string; path: string }) =>
+    post<{ pending: true } | { pending: false; project: Project }>(`/api/chat/sessions/${sessionId}/project`, body);
+
+  const cancelChatProjectMove = (sessionId: string) =>
+    writeResponse(`/api/chat/sessions/${sessionId}/project`, { method: "DELETE" }).then(async (r) => {
+      if (!r.ok) throw new Error((await r.json().catch(() => null))?.error ?? `cancel failed (${r.status})`);
+    });
+
+  const updateProject = (projectId: string, body: { runCommand?: string; name?: string; icon?: ProjectIcon }) =>
     patch<{ project: Project }>(`/api/projects/${projectId}`, body).then((r) => r.project);
 
   /** Start generating starter prompts for a project that is about to be created,
@@ -3305,6 +3336,9 @@ export function createApi(
     repoAccess,
     resolvePaper,
     updateProject,
+    createScratchProject,
+    moveChatToProject,
+    cancelChatProjectMove,
     prewarmStarterPrompts,
     getProjectStarterPrompts,
     deleteProject,

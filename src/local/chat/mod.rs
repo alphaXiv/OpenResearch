@@ -13,6 +13,7 @@ pub mod delegation;
 pub mod env_request;
 pub(crate) mod handoff;
 pub mod news;
+pub mod project_move;
 pub(crate) mod subagent;
 
 pub use adoption::{adopt_kept_work, stop_kept};
@@ -1379,9 +1380,13 @@ pub fn session_json_with(store: Option<&Store>, s: &StoredChatSession, busy: boo
             models
         })
         .filter(|models| models.as_array().is_some_and(|models| !models.is_empty()));
+    let pending_project = store
+        .and_then(|store| store.chat_project_move(&s.id).ok().flatten())
+        .map(|(name, path)| json!({ "name": name, "path": path }));
     json!({
         "id": s.id,
         "projectId": s.project_id,
+        "pendingProject": pending_project,
         "harness": s.harness,
         "profile": s.profile_id,
         "harnessName": acp.as_ref().map(|state| state.launch.name.as_str()),
@@ -3079,6 +3084,8 @@ pub struct ChatHost {
     /// prepared but has not reached atomic durable admission yet.
     pending_client_turns: std::sync::Mutex<HashMap<(String, String), PendingClientTurn>>,
     queue_dispatch_suppressed: std::sync::Mutex<HashSet<String>>,
+    /// Whether a project move may be waiting, so most turn ends skip the store.
+    project_moves_waiting: std::sync::atomic::AtomicBool,
     queue_dispatch_cancelled: std::sync::Mutex<HashSet<String>>,
     /// Sink for mid-turn steering text, present only while a capable harness is running.
     steering: std::sync::Mutex<HashMap<String, SteerSink>>,
@@ -3728,6 +3735,7 @@ mod slash_skill_tests {
             repo_path: "/tmp/test-repo".into(),
             run_command: None,
             paper_id: None,
+            icon: None,
             created_at: 0,
             updated_at: 0,
         }
@@ -4055,6 +4063,8 @@ impl ChatHost {
             queue_persistence: std::sync::Mutex::new(()),
             pending_client_turns: std::sync::Mutex::new(HashMap::new()),
             queue_dispatch_suppressed: std::sync::Mutex::new(HashSet::new()),
+            // Until the first pass reads the store, a move from before a restart may wait.
+            project_moves_waiting: std::sync::atomic::AtomicBool::new(true),
             queue_dispatch_cancelled: std::sync::Mutex::new(HashSet::new()),
             steering: std::sync::Mutex::new(HashMap::new()),
             pending_steers: std::sync::Mutex::new(HashMap::new()),
@@ -4488,7 +4498,18 @@ impl ChatHost {
     }
 
     fn emit(&self, name: &'static str, data: Value) {
+        // A delegate starting or ending a turn changes what its delegator waits on.
+        let delegator = (name == "chat.busy")
+            .then(|| data["sessionId"].as_str())
+            .flatten()
+            .and_then(|id| Store::open().and_then(|store| store.delegation(id)).ok())
+            .and_then(|delegation| delegation.parent);
         let _ = self.events.send((name, data));
+        if let Some(parent) = delegator {
+            let _ = self
+                .events
+                .send(("chat.background", json!({ "sessionId": parent })));
+        }
     }
 
     /// Publish an arbitrary named event onto the SSE broadcast that `/api/events`
@@ -4532,6 +4553,60 @@ impl ChatHost {
 
     pub async fn busy_sessions(&self) -> Vec<String> {
         self.turns.lock().await.keys().cloned().collect()
+    }
+
+    /// What will pick each idle chat back up: its agent's background tasks and
+    /// its delegates still working or waiting themselves, as `{count, since}`
+    /// by chat id.
+    pub async fn waiting_on(&self) -> Result<HashMap<String, Value>> {
+        let background = self.claude.background_tasks().await;
+        let busy = self.busy_sessions().await;
+        let store = Store::open()?;
+
+        // When each chat's own work began: its background tasks or its running turn.
+        let mut active: HashMap<String, i64> = background
+            .iter()
+            .map(|(id, (_, since))| (id.clone(), *since))
+            .collect();
+        for id in busy {
+            let started = store
+                .latest_chat_turn(&id)?
+                .map_or_else(crate::store::now_ms, |turn| turn.created_at);
+            let first = active.entry(id).or_insert(started);
+            *first = (*first).min(started);
+        }
+
+        // A delegate at work keeps its delegator waiting, up the chain, since the earliest start below it.
+        let mut delegates: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut queue: Vec<String> = active.keys().cloned().collect();
+        while let Some(id) = queue.pop() {
+            let Some(parent) = store.delegation(&id)?.parent else {
+                continue;
+            };
+            let since = active[&id];
+            delegates.entry(parent.clone()).or_default().insert(id);
+            match active.get_mut(&parent) {
+                Some(first) if *first <= since => {}
+                Some(first) => {
+                    *first = since;
+                    queue.push(parent);
+                }
+                None => {
+                    active.insert(parent.clone(), since);
+                    queue.push(parent);
+                }
+            }
+        }
+
+        let waiting: HashSet<&String> = background.keys().chain(delegates.keys()).collect();
+        Ok(waiting
+            .into_iter()
+            .map(|id| {
+                let count = background.get(id).map_or(0, |(count, _)| *count)
+                    + delegates.get(id).map_or(0, HashSet::len);
+                (id.clone(), json!({ "count": count, "since": active[id] }))
+            })
+            .collect())
     }
 
     pub fn queued_count(&self) -> usize {
@@ -7331,6 +7406,14 @@ impl ChatHost {
             json!({ "sessionId": session_id, "busy": busy }),
         );
         self.start_slot_holder(session_id, next).await;
+        if !busy
+            && self
+                .project_moves_waiting
+                .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            let host = self.clone();
+            tokio::spawn(async move { host.apply_project_moves().await });
+        }
     }
 
     /// Records what a resident Claude child wrote on its own after its turn
@@ -9398,6 +9481,7 @@ impl TurnCtx {
                 repo_path: "/tmp/test-repo".into(),
                 run_command: None,
                 paper_id: None,
+                icon: None,
                 created_at: 0,
                 updated_at: 0,
             },
@@ -11467,6 +11551,7 @@ mod cap_tests {
                 repo_path: dir.join("repo").display().to_string(),
                 run_command: None,
                 paper_id: None,
+                icon: None,
                 created_at: 1,
                 updated_at: 1,
             })
@@ -14120,6 +14205,7 @@ mod run_wakeup_tests {
                     repo_path: std::env::var("ORX_DATA_DIR").unwrap(),
                     run_command: None,
                     paper_id: None,
+                    icon: None,
                     created_at: 1,
                     updated_at: 1,
                 })
@@ -14346,6 +14432,7 @@ mod run_wakeup_tests {
                 repo_path: repo.to_string_lossy().into_owned(),
                 run_command: None,
                 paper_id: None,
+                icon: None,
                 created_at: 1,
                 updated_at: 1,
             })
@@ -14961,6 +15048,76 @@ for line in sys.stdin:
 
     #[cfg(unix)]
     #[test]
+    fn a_chat_waits_while_a_delegate_down_its_chain_has_background_work() {
+        use crate::local::claude::tests::{chat_echo_worker, emit, ready_host};
+
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let store = Store::open().unwrap();
+            for id in ["parent", "delegate", "nested", "unrelated"] {
+                session_on(&store, id, "claude-code");
+            }
+            store
+                .record_chat_delegate("delegate", "parent", true)
+                .unwrap();
+            store
+                .record_chat_delegate("nested", "delegate", false)
+                .unwrap();
+            let claude = ready_host();
+            let chat = Arc::new(ChatHost::new(
+                Arc::new(crate::local::opencode::AgentHost::new(None)),
+                Arc::new(crate::local::codex::CodexHost::new()),
+                claude.clone(),
+            ));
+            let client = chat_echo_worker(&claude, "nested", Arc::downgrade(&chat)).await;
+            assert!(chat.waiting_on().await.unwrap().is_empty());
+
+            emit(
+                &client,
+                &[json!({"type": "system", "subtype": "task_started", "task_id": "shell"})],
+            )
+            .await;
+            let waiting = chat.waiting_on().await.unwrap();
+            let mut ids: Vec<_> = waiting.keys().map(String::as_str).collect();
+            ids.sort();
+            assert_eq!(ids, ["delegate", "nested", "parent"]);
+            assert_eq!(waiting["parent"]["count"], 1);
+
+            // A delegate with work of its own and a delegate at work below it counts once,
+            // since the earliest of them began.
+            let own = chat_echo_worker(&claude, "delegate", Arc::downgrade(&chat)).await;
+            emit(
+                &own,
+                &[json!({"type": "system", "subtype": "task_started", "task_id": "own"})],
+            )
+            .await;
+            let waiting = chat.waiting_on().await.unwrap();
+            assert_eq!(waiting["parent"]["count"], 1);
+            assert_eq!(waiting["delegate"]["count"], 2);
+            let earliest = waiting["nested"]["since"]
+                .as_i64()
+                .min(waiting["delegate"]["since"].as_i64());
+            assert_eq!(waiting["parent"]["since"].as_i64(), earliest);
+            emit(
+                &own,
+                &[json!({"type": "system", "subtype": "task_notification", "task_id": "own"})],
+            )
+            .await;
+
+            emit(
+                &client,
+                &[json!({"type": "system", "subtype": "task_notification", "task_id": "shell"})],
+            )
+            .await;
+            assert!(chat.waiting_on().await.unwrap().is_empty());
+            claude.shutdown().await;
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn claude_output_after_its_turn_becomes_a_turn_of_its_own() {
         use crate::local::claude::tests::{chat_echo_worker, emit, ready_host, serve_turn};
         use crate::local::claude::TurnEvent;
@@ -14986,6 +15143,7 @@ for line in sys.stdin:
                     repo_path: repo.to_string_lossy().into_owned(),
                     run_command: None,
                     paper_id: None,
+                    icon: None,
                     created_at: 1,
                     updated_at: 1,
                 })
@@ -15130,6 +15288,7 @@ for line in sys.stdin:
                     repo_path: repo.to_string_lossy().into_owned(),
                     run_command: None,
                     paper_id: None,
+                    icon: None,
                     created_at: 1,
                     updated_at: 1,
                 })
@@ -15284,6 +15443,7 @@ for line in sys.stdin:
                     repo_path: repo.to_string_lossy().into_owned(),
                     run_command: None,
                     paper_id: None,
+                    icon: None,
                     created_at: 1,
                     updated_at: 1,
                 })

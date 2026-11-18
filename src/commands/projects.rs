@@ -4,7 +4,12 @@ use crate::error::Result;
 use crate::store::Store;
 
 pub async fn run(args: crate::ProjectsArgs) -> Result<()> {
-    let projects = Store::open_for_reading()?.list_local_projects()?;
+    // Chats without a project are not projects the user made.
+    let projects = Store::open_for_reading()?
+        .list_local_projects()?
+        .into_iter()
+        .filter(|project| !project.is_scratch())
+        .collect::<Vec<_>>();
 
     if args.json {
         let rows = projects
