@@ -40,7 +40,11 @@ function useAnnouncement(models: RunModel[], names: string[] | null): string {
       const change = model.sentence.key === "end:done" ? "" : `${model.status}. `;
       const text = plainSentence([model.sentence.text, !model.live && model.sentence.watcher ? model.eta : ""].filter(Boolean).join(" · "));
       if (!first && (!before || before.tone !== model.tone)) news.push(`${prefix}${change}${text}`);
-      else if (!first && before.stale !== stale) news.push(prefix + (model.stale ? `${model.stale.why}. ${model.stale.age}.` : text));
+      else if (!first && before.stale !== stale) {
+        const lastSeen = model.stale;
+        const separator = lastSeen && /[.。۔।][\u2066-\u2069]*$/u.test(lastSeen.why) ? " " : ". ";
+        news.push(prefix + (lastSeen ? `${lastSeen.why}${separator}${lastSeen.age}.` : text));
+      }
       else if (!first && before.words !== model.sentence.key) news.push(prefix + text);
     }
     seen.current = new Map(models.map((model) => [model.run.id, { tone: model.tone, words: model.sentence.key, stale: model.stale?.state ?? null }]));

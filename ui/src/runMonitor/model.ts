@@ -222,7 +222,8 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   const monitor = fetched && !monitorBehind(run.monitor, fetched) ? fetched : null;
   const summary = monitor ? null : run.monitor ?? null;
   const sameGeneration = fetched && run.monitor?.generation === fetched.generation ? fetched : monitor;
-  const availability = monitor?.availability.state ?? "live";
+  const source = (monitor ?? summary)?.availability;
+  const availability = source?.state ?? "live";
   // The run's projection is failing, which reaches lines that never read its whole monitor too.
   const failing = run.monitor?.unavailable ?? null;
   const shownAsOf = monitor?.asOf ?? run.monitor?.asOf ?? now;
@@ -414,7 +415,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     unavailable: m.run_view_unavailable,
     failed: fetched ? m.run_view_refresh_failed : m.run_monitor_load_failed,
   }[staleState]();
-  const why = failing ?? (!monitorFailed ? monitor?.availability.reason : null) ?? null;
+  const why = failing ?? (!monitorFailed ? source?.reason : null) ?? null;
   const reason = why ? autoDir(why) : null;
   const stale = degraded ? { state: staleState, age: m.status_last_seen({ time: clockText(shownAsOf) }), why: [words, reason].filter(Boolean).join(" · ") } : null;
   const timeLabel = stale?.age ?? eta;

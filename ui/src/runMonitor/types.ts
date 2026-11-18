@@ -206,6 +206,8 @@ export interface RunMonitorSummary {
   segments?: Progress["segments"];
   /** Why this summary stopped updating, while the run's projection fails. */
   unavailable?: string;
+  /** Why this summary's signal data is no longer live. */
+  availability?: { state: "stale" | "rebuilding"; reason: string | null };
   /** When the run's time limit ends; lets a line count down to it without the full monitor. */
   limitEndsAt: number | null;
   /** The unsettled flag only. */

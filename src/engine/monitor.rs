@@ -1366,7 +1366,9 @@ fn evaluate(
         "generation": generation,
         "asOf": as_of,
     });
-    if state == "unavailable" {
+    if matches!(state, "stale" | "rebuilding") {
+        summary["availability"] = json!({"state": state, "reason": reason});
+    } else if state == "unavailable" {
         let message = if fold.error.is_some() {
             SIGNALS_UNREADABLE
         } else {
@@ -3963,6 +3965,11 @@ mod tests {
             "{reason}"
         );
         assert_eq!(asleep["asOf"], T0 + 10_000);
+        let projection = current(&f.store, &run).unwrap().unwrap();
+        let summary = projection.summary();
+        assert_eq!(summary["availability"]["state"], "stale");
+        assert_eq!(summary["availability"]["reason"], reason);
+        assert_eq!(summary["asOf"], asleep["asOf"]);
         assert_eq!(
             asleep["estimate"], live["estimate"],
             "nothing advances across the gap"
@@ -3977,6 +3984,8 @@ mod tests {
         f.collected(T0 + 3_601_000);
         let (awake, _) = monitor_at(&f, &run, T0 + 3_601_000);
         assert_eq!(awake["availability"]["state"], "live");
+        let projection = current(&f.store, &run).unwrap().unwrap();
+        assert!(projection.summary().get("availability").is_none());
         assert!(
             awake["progress"]["stallMs"].as_i64().unwrap() > 3_000_000,
             "a collection shows the silence"
@@ -4012,6 +4021,13 @@ mod tests {
         assert_eq!(
             rebuilding["availability"]["state"], "rebuilding",
             "never lost contact"
+        );
+        let projection = current(&f.store, &run).unwrap().unwrap();
+        let summary = projection.summary();
+        assert_eq!(summary["availability"]["state"], "rebuilding");
+        assert_eq!(
+            summary["availability"]["reason"],
+            rebuilding["availability"]["reason"]
         );
 
         let [path, _] = signal_paths(f.dir.path(), "r1");

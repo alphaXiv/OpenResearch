@@ -226,6 +226,35 @@ test("a summary lists its runs in the order they were launched", async () => {
   assert.deepEqual(rows().map((row) => row.getAttribute("aria-label")), ["Depth 4 at 2e15 FLOPs", "Depth 6 at 2e15 FLOPs", "Depth 8 at 2e15 FLOPs"]);
 });
 
+test("closed sweep rows stop counting down when their summaries go stale or rebuild", async () => {
+  const requests = backend({ monitors: { r1: running, r2: running } });
+  const estimate = { ...running.estimate, at: now };
+  const items = [sweep("r1", 4), sweep("r2", 6)].map((item) => ({
+    ...item, run: { ...item.run, monitor: summary({ estimate }) },
+  }));
+  const workspace = createWorkspace("test");
+  await several(items, { workspace });
+  await settle();
+  assert.match(plain(rows()[0].textContent), /\d+[mh].*left/);
+
+  const { queryKey } = workspace.queries.listChatShownRunsQuery();
+  const reasons = ["The host stopped answering.", "The run's log was replaced."];
+  await act(async () => workspace.queryClient.setQueryData(queryKey, {
+    source: "shown",
+    runs: items.map((item, index) => ({
+      ...item, run: { ...item.run, monitor: { ...item.run.monitor, rev: 2, availability: { state: index === 0 ? "stale" : "rebuilding", reason: reasons[index] } } },
+    })),
+  }));
+  await settle();
+  rows().forEach((row, index) => {
+    assert.ok(plain(row.textContent).includes(plain(m.status_last_seen({ time: fmtClock(now) }))));
+    assert.doesNotMatch(plain(row.textContent), /\d+[mh].*left/);
+    const status = row.querySelector('button[aria-describedby]');
+    assert.ok(plain(document.getElementById(status.getAttribute("aria-describedby")).textContent).includes(reasons[index]));
+  });
+  assert.equal(requests.filter((r) => r.request.endsWith("/monitor")).length, 0);
+});
+
 test("a summary says who needs attention first, and a run waiting for a choice opens itself from a folded summary", async () => {
   const monitors = { r1: running, r2: running };
   backend({ uiState: { onboardingCompleted: true, runBanner: "line" }, monitors });
@@ -491,6 +520,7 @@ test("a failed first read freezes the closed line and Retry brings back its coun
   const description = document.getElementById(trigger.getAttribute("aria-describedby"));
   assert.ok(description?.textContent.includes(m.run_monitor_load_failed()));
   assert.doesNotMatch(plain(line.textContent), /\d+[mh].*left/);
+  assert.equal(plain(status()), `${m.run_monitor_load_failed()} ${plain(m.status_last_seen({ time: fmtClock(now) }))}.`);
 
   await click(button(m.run_show_more()));
   monitors.r1 = { ...running, estimate };
@@ -606,12 +636,12 @@ test("a degraded line names its state and reason on hover, focus and to a screen
   const tip = [...container.querySelectorAll('[role="img"]')].find((element) => element.textContent.includes(plain(age).slice(0, 9)));
   assert.equal(plain(tip.getAttribute("aria-label")), `${why} · ${age}`);
   assert.equal(plain(tip.querySelector('[role="tooltip"]').textContent), `${why} · ${age}`, "hover or focus shows the reason");
-  assert.equal(plain(status()), `${why}. ${age}.`);
+  assert.equal(plain(status()), `${why} ${age}.`);
   assert.ok(!plain(container.textContent).includes(m.run_eta_left({ duration: "" }).trim()), "no time left");
 
   await act(async () => workspace.queryClient.refetchQueries({ queryKey: workspace.queries.getRunMonitorQuery("r1").queryKey }));
   await settle();
-  assert.equal(plain(status()), `${why}. ${age}.`, "said once");
+  assert.equal(plain(status()), `${why} ${age}.`, "said once");
 });
 
 test("shown runs without a summary draw their terminal status at both levels without fetching a monitor", async () => {
