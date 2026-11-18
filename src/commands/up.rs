@@ -1248,6 +1248,12 @@ impl IntoResponse for ApiError {
 
 impl From<crate::error::Error> for ApiError {
     fn from(err: crate::error::Error) -> Self {
+        if crate::store::is_db_locked(&err) {
+            return Self(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "OpenResearch's database is busy. Try again in a moment.".into(),
+            );
+        }
         Self(StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
     }
 }
@@ -3532,14 +3538,14 @@ fn diff_json(d: local::git::DiffPayload) -> Value {
     })
 }
 
-/// Off-worker helper for git-backed handlers.
+/// Runs a synchronous handler on the blocking pool.
 async fn blocking_api<F>(f: F) -> ApiResult
 where
     F: FnOnce() -> std::result::Result<Json<Value>, ApiError> + Send + 'static,
 {
     tokio::task::spawn_blocking(f)
         .await
-        .map_err(|e| ApiError::from(anyhow!("git task failed: {e}")))?
+        .map_err(|e| ApiError::from(anyhow!("Request worker failed: {e}")))?
 }
 
 /// Cumulative diff of a run's commit vs its experiment's parent branch. A root
@@ -9711,25 +9717,27 @@ fn chat_shown_runs_json(store: &Store) -> Result<Value> {
 }
 
 async fn chat_shown_runs() -> ApiResult {
-    Ok(Json(chat_shown_runs_json(&Store::open()?)?))
+    blocking_api(|| Ok(Json(chat_shown_runs_json(&Store::open()?)?))).await
 }
 
 async fn dismiss_shown_run(Path((session_id, run_id)): Path<(String, String)>) -> ApiResult {
-    let mut store = Store::open()?;
-    if store.get_chat_session(&session_id)?.is_none() {
-        return Err(not_found("chat"));
-    }
-    if store.get_run(&run_id)?.is_none() {
-        return Err(not_found("run"));
-    }
-    match store.dismiss_chat_run(&session_id, &run_id)? {
-        crate::store::RunDismissal::Dismissed => {}
-        crate::store::RunDismissal::NotAssociated => return Err(not_found("run in this chat")),
-        crate::store::RunDismissal::Refused(reason) => {
-            return Err(ApiError(StatusCode::CONFLICT, reason.into()))
+    blocking_api(move || {
+        let mut store = Store::open()?;
+        if store.get_chat_session(&session_id)?.is_none() {
+            return Err(not_found("chat"));
         }
-    }
-    Ok(Json(json!({ "dismissed": true })))
+        if store.get_run(&run_id)?.is_none() {
+            return Err(not_found("run"));
+        }
+        match store.dismiss_chat_run(&session_id, &run_id)? {
+            crate::store::RunDismissal::Dismissed => Ok(Json(json!({ "dismissed": true }))),
+            crate::store::RunDismissal::NotAssociated => Err(not_found("run in this chat")),
+            crate::store::RunDismissal::Refused(reason) => {
+                Err(ApiError(StatusCode::CONFLICT, reason.into()))
+            }
+        }
+    })
+    .await
 }
 
 async fn list_chat_sessions(
@@ -11474,6 +11482,25 @@ pub(crate) async fn spa(uri: Uri) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn shown_runs_reports_a_busy_database_without_blocking_the_worker() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let store = Store::open().unwrap();
+        let writer = store.begin_immediate().unwrap();
+        let start = std::time::Instant::now();
+        let request = chat_shown_runs();
+        tokio::pin!(request);
+        assert!(futures::poll!(&mut request).is_pending());
+        let error = request.await.unwrap_err();
+        assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE, "{}", error.1);
+        assert!(error.1.contains("database is busy"), "{}", error.1);
+        assert!(start.elapsed() < crate::store::BUSY_TIMEOUT + Duration::from_secs(1));
+        drop(writer);
+        assert_eq!(chat_shown_runs().await.unwrap().0, json!([]));
+    }
 
     #[tokio::test]
     async fn variables_save_for_a_project_or_every_project_with_their_descriptions() {

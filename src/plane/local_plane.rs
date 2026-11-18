@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use super::{CreateExperimentSpec, DescInput, ProjectEdit, Run, RunListing};
 use crate::error::{anyhow, Context, Result};
 use crate::local::model::{LocalExperiment, LocalProject};
-use crate::store::Store;
+use crate::store::{is_db_locked, Store};
 use crate::ExpRunArgs;
 
 /// The local-store plane. `project`/`experiment` carry the row the resolver
@@ -592,16 +592,6 @@ fn warn_unreachable_trackio(store: &Store, project_id: &str, backend: &str) -> R
         _ => {}
     }
     Ok(())
-}
-
-/// True when `error` is a transient SQLite lock ("database is locked") —
-/// contention a wait command should outlast, not die on.
-pub(crate) fn is_db_locked(error: &crate::error::Error) -> bool {
-    matches!(
-        error.downcast_ref::<rusqlite::Error>(),
-        Some(rusqlite::Error::SqliteFailure(failure, _))
-            if failure.code == rusqlite::ErrorCode::DatabaseBusy
-    )
 }
 
 fn note_db_locked(notified: &mut bool) {

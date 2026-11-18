@@ -3699,6 +3699,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn drifted_monitor_tables_fail_without_blocking_another_writer() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-monitor-drift").unwrap();
+        let runtime = ended_signal_run(dir.path());
+        let mut store = Store::open_at(dir.path().to_path_buf()).unwrap();
+        store.put_chat_session("chat", "claude-code", None);
+        store.set_run_watching(true).unwrap();
+        let run = store.get_run("run").unwrap().unwrap();
+        let other = rusqlite::Connection::open(dir.path().join("orx.db")).unwrap();
+        other.busy_timeout(Duration::ZERO).unwrap();
+        other.execute_batch(
+            "ALTER TABLE signal_collections DROP COLUMN refold;
+             DROP TABLE watch_looks;
+             CREATE TABLE watch_looks (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT, chat_session_id TEXT NOT NULL,
+                 kind TEXT NOT NULL, state TEXT NOT NULL, reason TEXT NOT NULL, created_at INTEGER NOT NULL,
+                 model TEXT NOT NULL, done_at INTEGER, summary_template TEXT, summary_text TEXT, usage_json TEXT, error TEXT
+             );
+             DROP TABLE run_dismissals;
+             CREATE TABLE run_dismissals (
+                 chat_session_id TEXT NOT NULL, run_id TEXT NOT NULL, dismissed_at INTEGER NOT NULL,
+                 PRIMARY KEY (chat_session_id, run_id)
+             );",
+        ).unwrap();
+        let another_writer_proceeds = || {
+            other
+                .execute("UPDATE ui_state SET run_watching = 1 WHERE id = 1", [])
+                .unwrap();
+        };
+
+        assert!(super::super::monitor::advance(&store, &run, crate::store::now_ms()).is_err());
+        another_writer_proceeds();
+        let Err(super::super::watch::LookNow::Failed(error)) =
+            super::super::watch::look_now(&store, &run)
+        else {
+            panic!("expected a watcher admission error");
+        };
+        assert!(format!("{error:#}").contains("watch_looks.model"));
+        another_writer_proceeds();
+
+        assert_eq!(store.due_log_collections(10).unwrap(), ["run"]);
+        let error = runtime.collect_finished("run").await.unwrap_err();
+        assert!(format!("{error:#}").contains("no such column: refold"));
+        another_writer_proceeds();
+        assert_eq!(store.due_log_collections(10).unwrap(), ["run"]);
+
+        let error = store.dismiss_chat_run("chat", "run").err().unwrap();
+        assert!(format!("{error:#}").contains("run_dismissals.dismissed_at"));
+        another_writer_proceeds();
+    }
+
+    #[tokio::test]
     async fn final_signal_batches_reach_the_end_of_long_logs() {
         let dir = crate::local::git::TemporaryDirectory::new("orx-final-batches").unwrap();
         let runtime = ended_signal_run(dir.path());

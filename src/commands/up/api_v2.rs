@@ -93,7 +93,9 @@ impl Api {
     }
 
     fn store(&self) -> MutexGuard<'_, Store> {
-        self.store.lock().unwrap()
+        self.store
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Admitted before preparation and held until the run is durable, so a deletion or move
@@ -340,51 +342,28 @@ pub(crate) async fn run_log(
 
 /// `POST /api/runs/:id/look`: a look at the run's chat now, under the chat's least gap between
 /// looks. 202 with the look; 409 when one ran too lately or the run is not watched.
-async fn look_now(State(api): State<Arc<Api>>, Path(id): Path<String>) -> Response {
-    let run = match api.store().get_run(&id) {
-        Ok(Some(run)) => run,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": format!("Run {id} not found.")})),
-            )
-                .into_response()
-        }
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("Couldn't read run {id}: {error:#}")})),
-            )
-                .into_response()
-        }
-    };
-    let asked = tokio::task::spawn_blocking(move || {
-        let store = Store::open()?;
-        Ok::<_, crate::error::Error>(crate::engine::watch::look_now(&store, &run))
-    })
-    .await;
+async fn look_now(
+    State(api): State<Arc<Api>>,
+    Path(id): Path<String>,
+) -> Result<Response, super::ApiError> {
     use crate::engine::watch::LookNow;
-    match asked {
-        Ok(Ok(Ok(look))) => (StatusCode::ACCEPTED, Json(look)).into_response(),
-        Ok(Ok(Err(LookNow::TooSoon(at)))) => (
-            StatusCode::CONFLICT,
-            Json(json!({"error": "A look ran under two minutes ago. Try again after it.", "notBefore": at})),
-        )
-            .into_response(),
-        Ok(Ok(Err(LookNow::NotWatched(why)))) => {
-            (StatusCode::CONFLICT, Json(json!({"error": why}))).into_response()
+    tokio::task::spawn_blocking(move || {
+        let store = Store::open_at(api.data_dir.clone())?;
+        let run = store
+            .get_run(&id)?
+            .ok_or_else(|| super::not_found(&format!("Run {id}")))?;
+        match crate::engine::watch::look_now(&store, &run) {
+            Ok(look) => Ok((StatusCode::ACCEPTED, Json(look)).into_response()),
+            Err(LookNow::TooSoon(at)) => Ok((
+                StatusCode::CONFLICT,
+                Json(json!({"error": "A look ran under two minutes ago. Try again after it.", "notBefore": at})),
+            ).into_response()),
+            Err(LookNow::NotWatched(why)) => Err(super::ApiError(StatusCode::CONFLICT, why)),
+            Err(LookNow::Failed(error)) => Err(error.into()),
         }
-        Ok(Ok(Err(LookNow::Failed(error))) | Err(error)) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("Couldn't ask for a look: {error:#}")})),
-        )
-            .into_response(),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("Couldn't ask for a look: {error}")})),
-        )
-            .into_response(),
-    }
+    })
+    .await
+    .context("Couldn't ask for a look")?
 }
 
 /// Wakes the notice loop for chats a flag queued a notice for, when the engine runs here; the

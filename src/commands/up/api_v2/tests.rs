@@ -361,6 +361,26 @@ impl Drop for Fixture {
 }
 
 #[tokio::test]
+async fn run_requests_recover_when_a_writer_panics() {
+    let fixture = Fixture::new().await;
+    fixture.insert("run", "exp", "project", "running");
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let store = fixture.api.store();
+        let _tx = store.begin_immediate().unwrap();
+        store.set_run_status("run", "done");
+        panic!("writer panicked");
+    }));
+    assert!(failed.is_err());
+
+    let run = fixture
+        .client
+        .json(reqwest::Method::GET, "runs/run", None)
+        .await
+        .unwrap();
+    assert_eq!(run["status"], "running");
+}
+
+#[tokio::test]
 async fn authenticated_routes_expose_contact_and_commands() {
     let f = Fixture::new().await;
     let response = crate::net::loopback_client()

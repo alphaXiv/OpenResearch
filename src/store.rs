@@ -736,8 +736,7 @@ fn expired_before(ttl: std::time::Duration) -> i64 {
     now_ms() - crate::config::paced(ttl).as_millis() as i64
 }
 
-fn migrate_chat_spawns(conn: &Connection) -> Result<()> {
-    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+fn migrate_chat_spawns(tx: &rusqlite::Transaction<'_>) -> Result<()> {
     let exists: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chat_spawns')",
         [],
@@ -810,14 +809,19 @@ fn migrate_chat_spawns(conn: &Connection) -> Result<()> {
         )?;
     }
     tx.execute_batch("DROP TABLE chat_spawns")?;
-    tx.commit()?;
     Ok(())
 }
 
-/// Default SQLite busy_timeout for every store connection (5s). Long enough
-/// to ride out ordinary writer bursts, short enough that a dead writer doesn't
-/// stall a command for long.
+/// Lock wait budget for opening the store and for each later SQLite statement.
 pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_millis(5000);
+
+pub(crate) fn is_db_locked(error: &crate::error::Error) -> bool {
+    error
+        .downcast_ref::<rusqlite::Error>()
+        .and_then(rusqlite::Error::sqlite_error_code)
+        == Some(rusqlite::ErrorCode::DatabaseBusy)
+}
+
 /// How long submission and project deletion wait out each other or an orphan scan before failing as busy.
 #[cfg(not(test))]
 pub(crate) const RUN_ARTIFACTS_WAIT: Duration = Duration::from_secs(60);
@@ -1054,8 +1058,8 @@ impl Store {
             drop(conn);
             return writable();
         }
+        conn.busy_timeout(busy_timeout)?;
         check_reader_floor(&conn)?;
-        conn.pragma_update(None, "busy_timeout", busy_timeout.as_millis() as u64)?;
         Ok(Self {
             conn,
             data_dir: dir,
@@ -1077,13 +1081,14 @@ impl Store {
         }
         crate::paths::create_dir_all(&dir.join("run-logs"))?;
         let conn = Connection::open(dir.join("orx.db"))?;
+        let opened_at = std::time::Instant::now();
         conn.busy_timeout(busy_timeout)?;
         check_reader_floor(&conn)?;
         // WAL conversion can return SQLITE_BUSY without invoking SQLite's busy handler.
-        let wal_start = std::time::Instant::now();
+        conn.busy_timeout(busy_timeout.saturating_sub(opened_at.elapsed()))?;
         let mut delay = Duration::from_millis(1);
         while let Err(error) = conn.pragma_update(None, "journal_mode", "WAL") {
-            let remaining = busy_timeout.saturating_sub(wal_start.elapsed());
+            let remaining = busy_timeout.saturating_sub(opened_at.elapsed());
             if remaining.is_zero()
                 || error.sqlite_error_code() != Some(rusqlite::ErrorCode::DatabaseBusy)
             {
@@ -1095,10 +1100,10 @@ impl Store {
                 });
             }
             std::thread::sleep(delay.min(remaining));
-            conn.busy_timeout(busy_timeout.saturating_sub(wal_start.elapsed()))?;
+            conn.busy_timeout(busy_timeout.saturating_sub(opened_at.elapsed()))?;
             delay = (delay * 2).min(Duration::from_millis(50));
         }
-        conn.busy_timeout(busy_timeout)?;
+        conn.busy_timeout(busy_timeout.saturating_sub(opened_at.elapsed()))?;
         let schema =
             rusqlite::Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate)?;
         schema.execute_batch(
@@ -1485,8 +1490,7 @@ impl Store {
                 preferred_reasoning_level TEXT
             );",
         )?;
-        // Best-effort migrations for pre-existing dbs; re-runs fail with
-        // "duplicate column name", which is exactly the no-op we want.
+        // SQLite has no ADD COLUMN IF NOT EXISTS.
         for ddl in [
             "ALTER TABLE native_invocation_identities ADD COLUMN session_id TEXT",
             "ALTER TABLE native_invocation_identities ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0",
@@ -1566,7 +1570,15 @@ impl Store {
             "ALTER TABLE chat_usage_samples ADD COLUMN recorded_at INTEGER",
             "ALTER TABLE ui_state ADD COLUMN seen_nudges TEXT",
         ] {
-            let _ = schema.execute(ddl, []);
+            if let Err(error) = schema.execute(ddl, []) {
+                if !matches!(
+                    &error,
+                    rusqlite::Error::SqliteFailure(_, Some(message))
+                        if message.starts_with("duplicate column name:")
+                ) {
+                    return Err(error).with_context(|| format!("Could not apply database update {ddl}"));
+                }
+            }
         }
         schema.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_chat_usage_samples_recorded
@@ -1616,26 +1628,24 @@ impl Store {
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_subscriptions AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_subscriptions WHERE subscriber_session_id = OLD.id OR target_session_id = OLD.id; END;")?;
         // A delegate that outlives its delegator, in a worktree of its own, stands as the user's.
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_delegates AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_delegates WHERE session_id = OLD.id OR parent_session_id = OLD.id; END;")?;
-        schema.commit()?;
-        conn.execute(
+        schema.execute(
             "DELETE FROM native_invocation_identities WHERE session_id IS NULL AND created_at < ?1",
             [now_ms() - 7 * 24 * 60 * 60 * 1000],
         )?;
         // Legacy tool failures cannot identify the missing dependency, so require one fresh check.
-        conn.execute(
+        schema.execute(
             "DELETE FROM ssh_host_tests
              WHERE reachable = 1 AND tools_found = 0 AND missing_tools = ''",
             [],
         )?;
-        migrate_chat_spawns(&conn)?;
+        migrate_chat_spawns(&schema)?;
         // Chat messages became a tree (forked turns). Legacy rows are one linear
         // chain each; after this a NULL parent_id genuinely means "branch root".
         // All-or-nothing, because a half-applied backfill that still bumped the
         // marker would leave those transcripts unparented for good.
-        let schema_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        let schema_version: i64 = schema.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         if schema_version < 1 {
-            let tx = conn.unchecked_transaction()?;
-            tx.execute(
+            schema.execute(
                 "UPDATE chat_messages AS m SET parent_id = (
                      SELECT p.id FROM chat_messages p
                      WHERE p.session_id = m.session_id
@@ -1644,7 +1654,7 @@ impl Store {
                  ) WHERE m.parent_id IS NULL",
                 [],
             )?;
-            tx.execute(
+            schema.execute(
                 "UPDATE chat_sessions SET active_leaf_id = (
                      SELECT m.id FROM chat_messages m WHERE m.session_id = chat_sessions.id
                      ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1
@@ -1655,7 +1665,7 @@ impl Store {
             // session's live id to its newest message: without it, switching
             // back to a pre-upgrade branch would resume from nothing and strand
             // that conversation's harness history.
-            tx.execute(
+            schema.execute(
                 "UPDATE chat_messages SET result_native_session_id = (
                      SELECT s.native_session_id FROM chat_sessions s WHERE s.id = session_id
                  ) WHERE id IN (
@@ -1663,31 +1673,30 @@ impl Store {
                  )",
                 [],
             )?;
-            tx.pragma_update(None, "user_version", 1)?;
-            tx.commit()?;
+            schema.pragma_update(None, "user_version", 1)?;
         }
-        search::initialize(&conn)?;
+        schema.execute_batch(include_str!("store/search.sql"))?;
         // Older builds of this branch created a one-root-per-project unique
         // index; multiple baselines are allowed, so make sure it's gone.
-        let _ = conn.execute(
+        schema.execute(
             "DROP INDEX IF EXISTS uidx_local_experiments_project_baseline",
             [],
-        );
+        )?;
         // Provider-owned permission ids + the independent Codex/OpenCode Plan
         // axis. These updates are idempotent and intentionally do not touch
         // Claude's native `plan`, Manual, or Accept edits modes.
-        let _ = conn.execute(
+        schema.execute(
             "UPDATE chat_sessions
              SET plan_mode = 1, permission_mode = 'ask'
              WHERE harness = 'codex' AND permission_mode = 'plan'",
             [],
-        );
-        let _ = conn.execute(
+        )?;
+        schema.execute(
             "UPDATE chat_sessions
              SET plan_mode = 1, permission_mode = 'auto-approve'
              WHERE harness = 'opencode' AND permission_mode = 'plan'",
             [],
-        );
+        )?;
         for (harness, old, new) in [
             ("claude-code", "ask", "manual"),
             ("claude-code", "default", "manual"),
@@ -1703,36 +1712,36 @@ impl Store {
             ("opencode", "accept-edits", "auto-approve"),
             ("opencode", "acceptEdits", "auto-approve"),
         ] {
-            let _ = conn.execute(
+            schema.execute(
                 "UPDATE chat_sessions SET permission_mode = ?3
                  WHERE harness = ?1 AND permission_mode = ?2",
                 params![harness, old, new],
-            );
+            )?;
         }
-        let _ = conn.execute(
+        schema.execute(
             "UPDATE chat_sessions SET permission_mode = 'auto'
              WHERE harness = 'claude-code'
                AND (permission_mode IS NULL OR permission_mode NOT IN
                     ('manual', 'acceptEdits', 'plan', 'auto', 'bypassPermissions'))",
             [],
-        );
-        let _ = conn.execute(
+        )?;
+        schema.execute(
             "UPDATE chat_sessions SET permission_mode = 'approve-for-me'
              WHERE harness = 'codex'
                AND (permission_mode IS NULL OR permission_mode NOT IN
                     ('ask', 'approve-for-me', 'full-access'))",
             [],
-        );
-        let _ = conn.execute(
+        )?;
+        schema.execute(
             "UPDATE chat_sessions SET permission_mode = 'auto-approve'
              WHERE harness = 'opencode'
                AND (permission_mode IS NULL OR permission_mode NOT IN
                     ('manual', 'auto', 'auto-approve'))",
             [],
-        );
+        )?;
         // Seed before normalizing preferences: on the first open of an older
         // database the latest session may itself carry a retired mode or Plan.
-        conn.execute(
+        schema.execute(
             "INSERT OR IGNORE INTO ui_state (
                  id, onboarding_completed, tour_completed,
                  preferred_harness, preferred_model,
@@ -1750,21 +1759,21 @@ impl Store {
         )?;
         // Preferred-agent state never carries Plan for command-activated
         // harnesses: new sessions start in Build/Default until `/plan` is used.
-        let _ = conn.execute(
+        schema.execute(
             "UPDATE ui_state SET preferred_permission_mode = 'ask'
              WHERE preferred_harness = 'codex' AND preferred_permission_mode = 'plan'",
             [],
-        );
-        let _ = conn.execute(
+        )?;
+        schema.execute(
             "UPDATE ui_state SET preferred_permission_mode = 'auto-approve'
              WHERE preferred_harness = 'opencode' AND preferred_permission_mode = 'plan'",
             [],
-        );
-        let _ = conn.execute(
+        )?;
+        schema.execute(
             "UPDATE ui_state SET preferred_permission_mode = 'auto'
              WHERE preferred_harness = 'claude-code' AND preferred_permission_mode = 'plan'",
             [],
-        );
+        )?;
         for (harness, old, new) in [
             ("claude-code", "ask", "manual"),
             ("claude-code", "default", "manual"),
@@ -1775,31 +1784,31 @@ impl Store {
             ("opencode", "default", "auto-approve"),
             ("opencode", "bypass", "auto-approve"),
         ] {
-            let _ = conn.execute(
+            schema.execute(
                 "UPDATE ui_state SET preferred_permission_mode = ?3
                  WHERE preferred_harness = ?1 AND preferred_permission_mode = ?2",
                 params![harness, old, new],
-            );
+            )?;
         }
-        let _ = conn.execute(
+        schema.execute(
             "UPDATE ui_state SET preferred_permission_mode = 'auto'
              WHERE preferred_harness = 'claude-code'
                AND preferred_permission_mode NOT IN
                    ('manual', 'acceptEdits', 'plan', 'auto', 'bypassPermissions')",
             [],
-        );
-        let _ = conn.execute(
+        )?;
+        schema.execute(
             "UPDATE ui_state SET preferred_permission_mode = 'approve-for-me'
              WHERE preferred_harness = 'codex'
                AND preferred_permission_mode NOT IN ('ask', 'approve-for-me', 'full-access')",
             [],
-        );
-        let _ = conn.execute(
+        )?;
+        schema.execute(
             "UPDATE ui_state SET preferred_permission_mode = 'auto-approve'
              WHERE preferred_harness = 'opencode'
                AND preferred_permission_mode NOT IN ('manual', 'auto', 'auto-approve')",
             [],
-        );
+        )?;
         // NOTE: `reasoning_level` deliberately has NO migration for issue #123,
         // unlike the permission modes above. Rows written by older builds carry
         // an implicit effort (`high`), but every value the old builds wrote is
@@ -1810,6 +1819,8 @@ impl Store {
         // to do it safely exists: `reconcileReasoning` in `ui/src/api.ts` drops
         // one the selected model doesn't offer, and each harness's mapper drops
         // it again before it can reach a CLI.
+        schema.commit()?;
+        conn.busy_timeout(busy_timeout)?;
         Ok(Self {
             conn,
             data_dir: dir,
@@ -1818,7 +1829,7 @@ impl Store {
     }
 
     /// Short write transaction over this connection; rolls back when dropped
-    /// without `commit()`. Keep network I/O out of the closure it guards.
+    /// without `commit()`. Finish it before I/O on any other connection.
     pub fn begin(&self) -> Result<rusqlite::Transaction<'_>> {
         Ok(self.conn.unchecked_transaction()?)
     }
@@ -7602,6 +7613,70 @@ pub(crate) mod tests {
             .query_row("SELECT value FROM preserved", [], |row| row.get(0))
             .unwrap();
         assert_eq!(preserved, "kept");
+    }
+
+    #[test]
+    fn schema_setup_rolls_back_when_permission_migration_fails() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-migration-rollback").unwrap();
+        let store = Store::open_at(dir.path().to_path_buf()).unwrap();
+        store.put_chat_session("chat", "codex", None);
+        store
+            .conn
+            .execute_batch(
+                "UPDATE chat_sessions SET permission_mode = 'auto' WHERE id = 'chat';
+             DROP TABLE engine_host_auth;
+             CREATE TRIGGER fail_permission_update BEFORE UPDATE OF permission_mode ON chat_sessions
+                 BEGIN SELECT RAISE(ABORT, 'permission migration failed'); END;",
+            )
+            .unwrap();
+
+        let error = Store::open_at(dir.path().to_path_buf()).err().unwrap();
+        assert!(format!("{error:#}").contains("permission migration failed"));
+        assert!(
+            store.engine_host_auth("host").is_err(),
+            "schema creation rolled back"
+        );
+
+        store.conn.busy_timeout(Duration::ZERO).unwrap();
+        store
+            .conn
+            .execute_batch("DROP TRIGGER fail_permission_update")
+            .unwrap();
+        let reopened = Store::open_at(dir.path().to_path_buf()).unwrap();
+        assert_eq!(
+            reopened
+                .get_chat_session("chat")
+                .unwrap()
+                .unwrap()
+                .permission_mode
+                .as_deref(),
+            Some("approve-for-me")
+        );
+        reopened.engine_host_auth("host").unwrap();
+    }
+
+    #[test]
+    fn a_failed_statement_rolls_back_the_preceding_write() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-statement-rollback").unwrap();
+        let store = Store::open_at(dir.path().to_path_buf()).unwrap();
+        let other = Store::open_at_with_move_lock(
+            dir.path().to_path_buf(),
+            dir.path().join(".orx-data-dir-move.lock"),
+            Duration::ZERO,
+        )
+        .unwrap();
+        let run = run_fixture("run", "running", None);
+        let write = || -> Result<()> {
+            let tx = store.begin_immediate()?;
+            store.upsert_run(&run)?;
+            tx.execute("UPDATE runs SET nonexistent = 1", [])?;
+            tx.commit()?;
+            Ok(())
+        };
+        let error = write().unwrap_err();
+        assert!(format!("{error:#}").contains("no such column: nonexistent"));
+        assert!(store.get_run(&run.id).unwrap().is_none());
+        other.upsert_run(&run).unwrap();
     }
 
     #[test]
