@@ -3032,6 +3032,9 @@ pub struct ChatHost {
     queue_dispatch_cancelled: std::sync::Mutex<HashSet<String>>,
     /// Sink for mid-turn steering text, present only while a capable harness is running.
     steering: std::sync::Mutex<HashMap<String, SteerSink>>,
+    /// Steers handed toward the agent that it has not read yet, oldest first;
+    /// each also has a queued row, held out of `queued` until released.
+    pending_steers: std::sync::Mutex<HashMap<String, Vec<SteerMessage>>>,
     queue_dispatch_in_flight: std::sync::Mutex<HashMap<String, String>>,
 }
 
@@ -3225,14 +3228,12 @@ pub(crate) fn legacy_opening_message(
     })
 }
 
-/// The running turn's end of the steering channel. Steers it never read,
-/// including when the turn is aborted, become queued messages on drop.
+/// The running turn's end of the steering channel. Steers it never handed to
+/// the agent, including when the turn is aborted, run as queued messages.
 pub struct SteerReceiver {
     rx: mpsc::UnboundedReceiver<SteerMessage>,
     host: Arc<ChatHost>,
     session_id: String,
-    /// The turn's reply, where a steer that could not be queued is shown.
-    message_id: String,
 }
 
 impl SteerReceiver {
@@ -3245,30 +3246,7 @@ impl Drop for SteerReceiver {
     fn drop(&mut self) {
         self.rx.close();
         while let Ok(message) = self.rx.try_recv() {
-            let text = message.display.clone();
-            if let Err(error) = self.host.park_steer(&self.session_id, message) {
-                eprintln!(
-                    "orx up: could not queue an unread steer in chat {}: {error}",
-                    self.session_id
-                );
-                // Live only: the store just refused a write, so the reply carries the text back.
-                let Ok(Some(stored)) =
-                    Store::open().and_then(|store| store.get_chat_message(&self.message_id))
-                else {
-                    continue;
-                };
-                let mut reply = stored_to_wire(&stored);
-                reply.parts.push(WirePart::tool(
-                    format!("err-{}", reply.parts.len()),
-                    "error",
-                    "error",
-                    Some(format!(
-                        "This message was not sent and could not be queued ({error}). Send it again:\n\n{text}"
-                    )),
-                ));
-                self.host
-                    .emit("chat.message", message_json(&reply, &self.session_id));
-            }
+            self.host.release_steer(&self.session_id, &message.id);
         }
     }
 }
@@ -3337,8 +3315,10 @@ impl TurnSettings {
 
 /// A message handed to a turn already in flight: what the transcript shows,
 /// and the expanded text the harness receives.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SteerMessage {
+    /// Also the id of its queued row.
+    pub id: String,
     pub display: String,
     pub text: String,
     pub client_turn_id: Option<String>,
@@ -4005,6 +3985,7 @@ impl ChatHost {
             queue_dispatch_suppressed: std::sync::Mutex::new(HashSet::new()),
             queue_dispatch_cancelled: std::sync::Mutex::new(HashSet::new()),
             steering: std::sync::Mutex::new(HashMap::new()),
+            pending_steers: std::sync::Mutex::new(HashMap::new()),
             queue_dispatch_in_flight: std::sync::Mutex::new(HashMap::new()),
         }
     }
@@ -4552,8 +4533,11 @@ impl ChatHost {
     }
 
     /// The session's parked messages, oldest first — for the reload snapshot.
+    /// Parked messages in run order, then steers the running turn's agent has
+    /// not read yet (`dispatchState: "steering"`).
     pub fn queued_items(&self, session_id: &str) -> Vec<Value> {
-        self.queued
+        let mut items: Vec<Value> = self
+            .queued
             .lock()
             .unwrap()
             .get(session_id)
@@ -4577,7 +4561,18 @@ impl ChatHost {
                     })
                     .collect()
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if let Some(steers) = self.pending_steers.lock().unwrap().get(session_id) {
+            items.extend(steers.iter().map(|steer| {
+                json!({
+                    "id": steer.id,
+                    "text": steer.display,
+                    "orx": steer.orx,
+                    "dispatchState": "steering",
+                })
+            }));
+        }
+        items
     }
 
     fn queued_json(&self, session_id: &str) -> Value {
@@ -4613,6 +4608,7 @@ impl ChatHost {
             .into_iter()
             .filter_map(|row| serde_json::from_str::<QueuedMessage>(&row.payload_json).ok())
             .filter(|message| in_flight.as_deref() != Some(message.id.as_str()))
+            .filter(|message| !self.steer_pending(session_id, &message.id))
             .collect::<VecDeque<_>>();
         let exhausted = restored.front().is_some_and(queued_delivery_exhausted);
         let mut queued = self.queued.lock().unwrap();
@@ -4738,19 +4734,15 @@ impl ChatHost {
         }
     }
 
-    /// Park a steer the running turn could not take — an app-server that
-    /// rejects `turn/steer`, a dead child, a turn that ended underneath the
-    /// send. It becomes an ordinary queued message (chip and all) so the text
-    /// still runs when the turn ends instead of vanishing.
-    pub fn park_steer(&self, session_id: &str, message: SteerMessage) -> Result<()> {
-        let store = Store::open()?;
-        self.park_steer_with_store(session_id, message, &store)
-    }
-
-    fn park_steer_with_store(
+    /// Persist a steer as a queued message before the running turn gets it,
+    /// held out of dispatch while it is pending. The agent reading it
+    /// ([`Self::forget_steer`]) removes the row; anything else that loses it
+    /// ([`Self::release_steer`]) lets it run as an ordinary queued message, as
+    /// does a restart, since the child that held it died with orx.
+    pub(crate) fn queue_steer(
         &self,
         session_id: &str,
-        message: SteerMessage,
+        message: &SteerMessage,
         store: &Store,
     ) -> Result<()> {
         let _mutation = self.queue_persistence.lock().unwrap();
@@ -4763,7 +4755,7 @@ impl ChatHost {
         {
             return Ok(());
         }
-        let id = new_queued_id();
+        let id = message.id.clone();
         let client_turn_id = format!("ct_{}", uuid::Uuid::new_v4());
         let steer_client_turn_id = message.client_turn_id.clone();
         // The raw text: the queue path expands slash-skills itself. What orx
@@ -4778,9 +4770,9 @@ impl ChatHost {
             })
             .collect();
         let text = if orx.is_empty() {
-            message.display
+            message.display.clone()
         } else {
-            message.text
+            message.text.clone()
         };
         let messages = vec![AnnotatedText {
             text: text.clone(),
@@ -4817,7 +4809,13 @@ impl ChatHost {
             payload_json,
             created_at: message.sent_at,
         })?;
-        // The row is saved; a failed reload only delays its chip until the next one.
+        self.pending_steers
+            .lock()
+            .unwrap()
+            .entry(session_id.to_string())
+            .or_default()
+            .push(message.clone());
+        // The row is saved; a failed reload only delays its bubble until the next one.
         if let Err(error) = self.refresh_persisted_queue_locked(session_id, store) {
             eprintln!("orx up: could not reload the queue of chat {session_id}: {error}");
         }
@@ -4830,6 +4828,88 @@ impl ChatHost {
             }
         }
         Ok(())
+    }
+
+    /// Whether a steer is still waiting for the agent to read it.
+    pub fn steer_pending(&self, session_id: &str, steer_id: &str) -> bool {
+        self.pending_steers
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .is_some_and(|pending| pending.iter().any(|steer| steer.id == steer_id))
+    }
+
+    /// The oldest pending steer the agent was sent as `text`.
+    pub fn pending_steer_sent_as(&self, session_id: &str, text: &str) -> Option<SteerMessage> {
+        self.pending_steers
+            .lock()
+            .unwrap()
+            .get(session_id)?
+            .iter()
+            .find(|steer| steer.text == text)
+            .cloned()
+    }
+
+    /// The agent read the steer and the transcript holds it, so its queued row
+    /// goes. False when the row could not be deleted and is still pending.
+    pub fn forget_steer(&self, session_id: &str, steer_id: &str) -> bool {
+        let _mutation = self.queue_persistence.lock().unwrap();
+        if !self.steer_pending(session_id, steer_id) {
+            return true;
+        }
+        if let Err(error) =
+            Store::open().and_then(|store| store.delete_queued_chat_message(steer_id))
+        {
+            eprintln!(
+                "orx up: could not remove read steer {steer_id} in chat {session_id}: {error}"
+            );
+            return false;
+        }
+        self.take_pending_steer(session_id, steer_id);
+        self.emit_queued(session_id);
+        true
+    }
+
+    /// The agent will never read the steer: it runs as a queued message instead.
+    pub fn release_steer(self: &Arc<Self>, session_id: &str, steer_id: &str) {
+        if self.take_pending_steer(session_id, steer_id) {
+            self.requeue_released_steers(session_id);
+        }
+    }
+
+    /// Every unread steer of the session goes back to the queue: its agent
+    /// process ended or its turn was stopped.
+    pub fn release_steers(self: &Arc<Self>, session_id: &str) {
+        if self
+            .pending_steers
+            .lock()
+            .unwrap()
+            .remove(session_id)
+            .is_some()
+        {
+            self.requeue_released_steers(session_id);
+        }
+    }
+
+    fn take_pending_steer(&self, session_id: &str, steer_id: &str) -> bool {
+        let mut pending = self.pending_steers.lock().unwrap();
+        let Some(steers) = pending.get_mut(session_id) else {
+            return false;
+        };
+        let before = steers.len();
+        steers.retain(|steer| steer.id != steer_id);
+        let taken = steers.len() != before;
+        if steers.is_empty() {
+            pending.remove(session_id);
+        }
+        taken
+    }
+
+    fn requeue_released_steers(self: &Arc<Self>, session_id: &str) {
+        if let Err(error) = self.refresh_persisted_queue(session_id) {
+            eprintln!("orx up: could not queue unread steers in chat {session_id}: {error}");
+        }
+        self.resume_persisted_queues();
     }
 
     /// Drop every parked message for a session being deleted. Emits an
@@ -4860,13 +4940,19 @@ impl ChatHost {
             }
             return Err(error);
         }
+        let had_steers = self
+            .pending_steers
+            .lock()
+            .unwrap()
+            .remove(session_id)
+            .is_some();
         let had = self
             .queued
             .lock()
             .unwrap()
             .remove(session_id)
             .is_some_and(|q| !q.is_empty());
-        if had {
+        if had || had_steers {
             self.emit_queued(session_id);
         }
         if !self
@@ -5329,6 +5415,7 @@ impl ChatHost {
                     prepare_project_slash_worktree(project, &text, session_id).await;
                 }
                 let message = SteerMessage {
+                    id: new_queued_id(),
                     text: project
                         .filter(|_| orx.is_none())
                         .map(|project| {
@@ -5348,7 +5435,7 @@ impl ChatHost {
                     orx: orx.as_ref().map(|orx| orx.source.clone()),
                     sent_at: now_ms(),
                 };
-                if send_live_steer(&store, session_id, id, &request_hash, &sink, message)? {
+                if send_live_steer(self, &store, session_id, id, &request_hash, &sink, message)? {
                     return Ok(None);
                 }
             }
@@ -6787,7 +6874,6 @@ impl ChatHost {
                 rx,
                 host: self.clone(),
                 session_id: sid.clone(),
-                message_id: message_id.clone(),
             });
             self.register_steering(&sid, tx, TurnSettings::of(&ctx))
         });
@@ -6830,14 +6916,7 @@ impl ChatHost {
                 }
             };
             drop(steer_route);
-            if let Some(mut steering) = ctx.steering.take() {
-                steering.rx.close();
-                while let Some(message) = steering.recv().await {
-                    if let Err(error) = ctx.host.park_steer(&ctx.session_id, message) {
-                        ctx.push_error(format!("Could not preserve steering message: {error}"));
-                    }
-                }
-            }
+            drop(ctx.steering.take());
             let failure = match result {
                 Err(error) => {
                     ctx.delivery_state = error.delivery;
@@ -7186,6 +7265,8 @@ impl ChatHost {
             };
             if let Some(active) = active {
                 let _ = active.handle.await;
+                // A steer the aborted turn was still handing over runs next instead.
+                host.release_steers(&session_id);
                 let _ = Store::open().and_then(|store| {
                     store.finalize_turn_usage(
                         &active.turn_id,
@@ -8263,6 +8344,7 @@ impl RecoveryOverrides {
 }
 
 fn send_live_steer(
+    host: &Arc<ChatHost>,
     store: &Store,
     session_id: &str,
     client_turn_id: Option<&str>,
@@ -8270,7 +8352,7 @@ fn send_live_steer(
     sink: &mpsc::UnboundedSender<SteerMessage>,
     message: SteerMessage,
 ) -> Result<bool> {
-    // The claim stays uncertain until the harness confirms or the message is parked.
+    // The claim stays uncertain until the steer's queued row is written.
     if let Some(id) = client_turn_id {
         if !store.claim_steer(session_id, id, request_hash)? {
             let Some((hash, delivered)) = store.steer_receipt(session_id, id)? else {
@@ -8285,13 +8367,17 @@ fn send_live_steer(
             return Err(anyhow!("Steering delivery could not be confirmed"));
         }
     }
-    if sink.send(message).is_ok() {
-        return Ok(true);
+    if let Err(error) = host.queue_steer(session_id, &message, store) {
+        if let Some(id) = client_turn_id {
+            store.discard_steer(session_id, id)?;
+        }
+        return Err(error);
     }
-    if let Some(id) = client_turn_id {
-        store.discard_steer(session_id, id)?;
+    let steer_id = message.id.clone();
+    if sink.send(message).is_err() {
+        host.release_steer(session_id, &steer_id);
     }
-    Ok(false)
+    Ok(true)
 }
 
 fn message_transcript(text: &str, annotations: &[TextAnnotation]) -> TranscriptDisplay {
@@ -8489,6 +8575,8 @@ pub struct TurnCtx {
     last_flush: Instant,
     /// A change `maybe_flush` held back, which no later event may arrive to carry.
     deferred_flush: bool,
+    /// Steers recorded in this reply whose queued rows go once it is saved.
+    read_steers: Vec<String>,
     last_flushed_tool_states: Vec<(String, String)>,
     last_attempted_tool_states: Vec<(String, String)>,
     target_event_path: Option<PathBuf>,
@@ -8573,6 +8661,7 @@ fn turn_ctx_from_stored(
         steering: None,
         last_flush: Instant::now() - FLUSH_INTERVAL,
         deferred_flush: false,
+        read_steers: Vec::new(),
         last_flushed_tool_states: Vec::new(),
         last_attempted_tool_states: Vec::new(),
         target_event_path: None,
@@ -9012,6 +9101,7 @@ impl TurnCtx {
             steering: None,
             last_flush: Instant::now(),
             deferred_flush: false,
+            read_steers: Vec::new(),
             last_flushed_tool_states: Vec::new(),
             last_attempted_tool_states: Vec::new(),
             target_event_path: None,
@@ -9205,16 +9295,19 @@ impl TurnCtx {
         self.upsert_part_raw(part);
     }
 
-    /// Record a steer inline without waiting for the flush interval.
-    pub fn record_steer(&mut self, steer: &SteerMessage, confirmed: bool) {
+    /// Record a steer at the point the agent read it, without waiting for the
+    /// flush interval. Its queued row goes once the reply is saved.
+    pub fn record_steer(&mut self, steer: &SteerMessage) {
         self.upsert_part(WirePart {
             orx: steer.orx.clone(),
             ..WirePart::steer(format!("steer-{}", uuid::Uuid::new_v4()), &steer.display)
         });
-        if self.flush().is_ok() && confirmed {
-            if let Some(id) = steer.client_turn_id.as_deref() {
-                let _ = Store::open().and_then(|store| store.finish_steer(&self.session_id, id));
-            }
+        self.read_steers.push(steer.id.clone());
+        if let Err(error) = self.flush() {
+            eprintln!(
+                "orx up: could not save a read steer in chat {}: {error}",
+                self.session_id
+            );
         }
     }
 
@@ -9327,6 +9420,15 @@ impl TurnCtx {
     }
 
     pub fn flush(&mut self) -> Result<()> {
+        self.save()?;
+        let host = self.host.clone();
+        let session_id = self.session_id.clone();
+        self.read_steers
+            .retain(|id| !host.forget_steer(&session_id, id));
+        Ok(())
+    }
+
+    fn save(&mut self) -> Result<()> {
         self.last_flush = Instant::now();
         self.deferred_flush = false;
         if self.assistant.parts.is_empty() {
@@ -15425,7 +15527,7 @@ mod transcript_tree_tests {
 }
 
 #[cfg(test)]
-mod steering_tests {
+pub(crate) mod steering_tests {
     use super::*;
 
     fn test_host() -> Arc<ChatHost> {
@@ -15436,18 +15538,16 @@ mod steering_tests {
         ))
     }
 
-    fn test_store(tag: &str) -> (Store, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("orx-steer-{tag}-{}", uuid::Uuid::new_v4()));
-        let store = Store::open_at(dir.clone()).unwrap();
-        add_test_session(&store);
-        (store, dir)
+    fn add_test_session(store: &Store) {
+        add_chat_session(store, "owner");
     }
 
-    fn add_test_session(store: &Store) {
+    /// A Codex chat `id` in project `p1`.
+    pub(crate) fn add_chat_session(store: &Store, id: &str) {
         store
             .create_chat_session(&StoredChatSession {
                 profile_id: None,
-                id: "owner".into(),
+                id: id.into(),
                 project_id: "p1".into(),
                 harness: "codex".into(),
                 native_session_id: None,
@@ -15486,6 +15586,7 @@ mod steering_tests {
 
     fn steer(text: &str) -> SteerMessage {
         SteerMessage {
+            id: new_queued_id(),
             display: text.into(),
             text: text.into(),
             client_turn_id: None,
@@ -15517,9 +15618,9 @@ mod steering_tests {
             assert!(send().await.unwrap().is_none());
             let steer = rx.try_recv().unwrap();
             assert_eq!(steer.client_turn_id.as_deref(), Some("ct1"));
-            assert!(send().await.is_err());
+            assert_eq!(host.queued_items("owner")[0]["dispatchState"], "steering");
+            assert!(send().await.unwrap().is_none());
             assert!(rx.try_recv().is_err());
-            store.finish_steer("owner", "ct1").unwrap();
             drop(route);
             assert!(send().await.unwrap().is_none());
             assert!(host
@@ -15560,85 +15661,135 @@ mod steering_tests {
 
     #[test]
     fn steering_retry_is_deduplicated_and_uncertain_claims_do_not_redeliver() {
-        let (store, dir) = test_store("idempotency");
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let host = test_host();
+        let store = Store::open().unwrap();
+        add_test_session(&store);
         let (tx, mut rx) = mpsc::unbounded_channel();
         let request_hash =
             message_request_hash("hello", &TurnOverrides::default(), &[], &[]).unwrap();
-        assert!(send_live_steer(
-            &store,
-            "owner",
-            Some("ct1"),
-            &request_hash,
-            &tx,
-            steer("hello")
-        )
-        .unwrap());
+        let send = |id: &str, hash: &str, text: &str| {
+            let mut message = steer(text);
+            message.client_turn_id = Some(id.into());
+            send_live_steer(&host, &store, "owner", Some(id), hash, &tx, message)
+        };
+        assert!(send("ct1", &request_hash, "hello").unwrap());
         assert_eq!(rx.try_recv().unwrap().display, "hello");
-        assert!(send_live_steer(
-            &store,
-            "owner",
-            Some("ct1"),
-            &request_hash,
-            &tx,
-            steer("hello")
-        )
-        .is_err());
-        store.finish_steer("owner", "ct1").unwrap();
-        drop(store);
-        let store = Store::open_at(dir.clone()).unwrap();
-        assert!(send_live_steer(
-            &store,
-            "owner",
-            Some("ct1"),
-            &request_hash,
-            &tx,
-            steer("hello")
-        )
-        .unwrap());
+        assert!(send("ct1", &request_hash, "hello").unwrap());
         assert!(rx.try_recv().is_err());
         assert!(is_client_turn_conflict(
-            &send_live_steer(
-                &store,
-                "owner",
-                Some("ct1"),
-                "different",
-                &tx,
-                steer("other")
-            )
-            .unwrap_err()
+            &send("ct1", "different", "other").unwrap_err()
         ));
         assert!(store
             .claim_steer("owner", "uncertain", &request_hash)
             .unwrap());
-        drop(store);
-        let store = Store::open_at(dir.clone()).unwrap();
-        assert!(send_live_steer(
-            &store,
-            "owner",
-            Some("uncertain"),
-            &request_hash,
-            &tx,
-            steer("hello")
-        )
-        .is_err());
+        assert!(send("uncertain", &request_hash, "hello").is_err());
         assert!(rx.try_recv().is_err());
         store.delete_chat_session("owner").unwrap();
         assert!(store.steer_receipt("owner", "ct1").unwrap().is_none());
-        drop(store);
-        let _ = std::fs::remove_dir_all(dir);
     }
 
-    #[test]
-    fn dead_steering_channel_releases_claim_for_queue_fallback() {
-        let (store, dir) = test_store("dead-receipt");
+    #[tokio::test]
+    async fn a_steer_to_a_turn_that_just_ended_runs_as_a_queued_message() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let host = test_host();
+        let store = Store::open().unwrap();
+        add_test_session(&store);
         let (tx, rx) = mpsc::unbounded_channel();
         drop(rx);
+        let mut message = steer("/plan the migration");
+        message.client_turn_id = Some("ct1".into());
         assert!(
-            !send_live_steer(&store, "owner", Some("ct1"), "hash", &tx, steer("hello")).unwrap()
+            send_live_steer(&host, &store, "owner", Some("ct1"), "hash", &tx, message).unwrap()
         );
-        assert!(store.steer_receipt("owner", "ct1").unwrap().is_none());
-        drop(store);
-        let _ = std::fs::remove_dir_all(dir);
+        assert_eq!(
+            store.steer_receipt("owner", "ct1").unwrap(),
+            Some(("hash".into(), true))
+        );
+        let queued = host.queued_items("owner");
+        assert_eq!(queued.len(), 1);
+        // It shows what the user typed, and the queue path re-expands it.
+        assert_eq!(queued[0]["text"], "/plan the migration");
+        assert_eq!(queued[0]["dispatchState"], "queued");
+    }
+
+    #[tokio::test]
+    async fn stopping_a_turn_queues_the_steer_it_was_still_handing_over() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let host = test_host();
+        let store = Store::open().unwrap();
+        add_test_session(&store);
+        host.queue_steer("owner", &steer("stop"), &store).unwrap();
+        // Holds the queue still, so the released steer is not dispatched mid-assertion.
+        host.exiting
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        host.turns.lock().await.insert(
+            "owner".into(),
+            TurnState::Active(ActiveTurn {
+                handle: tokio::spawn(std::future::pending()),
+                message_id: "answer".into(),
+                turn_id: "turn".into(),
+            }),
+        );
+
+        assert!(host.stop_turn("owner", StopMode::Shutdown).await.unwrap());
+
+        let queued = host.queued_items("owner");
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0]["dispatchState"], "queued");
+    }
+
+    #[tokio::test]
+    async fn a_pending_steer_waits_outside_the_queue_until_the_agent_reads_it() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let host = test_host();
+        let store = Store::open().unwrap();
+        add_test_session(&store);
+        let read = steer("stop");
+        let parked = steer("then summarize");
+        host.queue_steer("owner", &read, &store).unwrap();
+        host.queue_steer("owner", &parked, &store).unwrap();
+        let states = |host: &ChatHost| {
+            host.queued_items("owner")
+                .iter()
+                .map(|item| {
+                    (
+                        item["text"].as_str().unwrap().to_string(),
+                        item["dispatchState"].as_str().unwrap().to_string(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let pair = |text: &str, state: &str| (text.to_string(), state.to_string());
+        assert_eq!(
+            states(&host),
+            [pair("stop", "steering"), pair("then summarize", "steering")]
+        );
+        assert!(host.queued.lock().unwrap().get("owner").is_none());
+
+        host.forget_steer("owner", &read.id);
+        assert_eq!(states(&host), [pair("then summarize", "steering")]);
+        assert_eq!(
+            store
+                .list_queued_chat_messages_for_session("owner")
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // A restarted orx lost the child that held it, so the row runs as queued.
+        assert_eq!(states(&test_host()), [pair("then summarize", "queued")]);
+
+        host.release_steers("owner");
+        assert_eq!(states(&host), [pair("then summarize", "queued")]);
     }
 
     #[test]
@@ -15694,29 +15845,6 @@ mod steering_tests {
     }
 
     #[tokio::test]
-    async fn an_undeliverable_steer_becomes_a_queued_chip() {
-        let host = test_host();
-        let (store, dir) = test_store("queued");
-
-        assert!(store.claim_steer("owner", "ct-parked", "hash").unwrap());
-        let mut message = steer("/plan the migration");
-        message.client_turn_id = Some("ct-parked".into());
-        host.park_steer_with_store("owner", message, &store)
-            .unwrap();
-        assert_eq!(
-            store.steer_receipt("owner", "ct-parked").unwrap(),
-            Some(("hash".into(), true))
-        );
-
-        let queued = host.queued_items("owner");
-        assert_eq!(queued.len(), 1);
-        // The chip shows what the user typed, and the queue path re-expands it.
-        assert_eq!(queued[0]["text"], "/plan the migration");
-        drop(store);
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[tokio::test]
     async fn a_dead_turns_route_never_detaches_its_successors() {
         let host = test_host();
         let (first_tx, _first_rx) = mpsc::unbounded_channel();
@@ -15760,7 +15888,6 @@ mod steering_tests {
             rx,
             host: test_host(),
             session_id: "owner".into(),
-            message_id: "reply".into(),
         });
         tx.send(steer("go")).unwrap();
         tokio::select! {
@@ -15782,14 +15909,19 @@ mod steering_tests {
             return;
         }
         let host = test_host();
-        add_test_session(&Store::open().unwrap());
+        let store = Store::open().unwrap();
+        add_test_session(&store);
         let (tx, rx) = mpsc::unbounded_channel();
+        // The turn still holds the session while its steering winds down.
+        host.turns
+            .lock()
+            .await
+            .insert("owner".into(), TurnState::Reserved { turn_id: None });
         let route = host.register_steering("owner", tx.clone(), TurnSettings::default());
         let steering = SteerReceiver {
             rx,
             host: host.clone(),
             session_id: "owner".into(),
-            message_id: "reply".into(),
         };
         let turn = tokio::spawn(async move {
             let _route = route;
@@ -15797,10 +15929,11 @@ mod steering_tests {
             std::future::pending::<()>().await;
         });
         let unread = steer("still here");
-        let mut later = steer("queued after it");
-        later.sent_at = unread.sent_at + 1;
+        let mut sent = steer("sent to the agent");
+        sent.sent_at = unread.sent_at + 1;
+        host.queue_steer("owner", &unread, &store).unwrap();
+        host.queue_steer("owner", &sent, &store).unwrap();
         tx.send(unread).unwrap();
-        host.park_steer("owner", later).unwrap();
 
         turn.abort();
         let _ = turn.await;
@@ -15809,6 +15942,14 @@ mod steering_tests {
         assert!(tx.send(steer("too late")).is_err());
         let queued = host.queued_items("owner");
         assert_eq!(queued[0]["text"], "still here");
-        assert_eq!(queued[1]["text"], "queued after it");
+        assert_eq!(queued[0]["dispatchState"], "queued");
+        assert_eq!(queued[1]["dispatchState"], "steering");
+
+        // The agent process exiting takes the steer it was handed.
+        host.release_steers("owner");
+        let queued = host.queued_items("owner");
+        assert_eq!(queued[0]["text"], "still here");
+        assert_eq!(queued[1]["text"], "sent to the agent");
+        assert_eq!(queued[1]["dispatchState"], "queued");
     }
 }
