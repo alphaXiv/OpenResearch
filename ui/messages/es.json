@@ -2173,6 +2173,8 @@
   "run_output_lines_one": "Hasta ahora, {count} línea de salida.",
   "run_output_lines_other": "Hasta ahora, {count} líneas de salida.",
   "run_stage_run": "Ejecución",
+  "run_stage_finishing": "Finalizando",
+  "run_setup_starting": "La ejecución está empezando",
   "run_stage_setup": "Preparación",
   "run_whole_time": "Ejecución completa: {time}",
   "run_setup_starts_in": "La ejecución empieza en unos {duration}",

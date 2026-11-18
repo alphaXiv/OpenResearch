@@ -2173,6 +2173,8 @@
   "run_output_lines_one": "{count} line of output so far.",
   "run_output_lines_other": "{count} lines of output so far.",
   "run_stage_run": "Run",
+  "run_stage_finishing": "Finishing",
+  "run_setup_starting": "Run is starting",
   "run_stage_setup": "Setup",
   "run_whole_time": "Whole run: {time}",
   "run_setup_starts_in": "Run starts in about {duration}",

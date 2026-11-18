@@ -136,7 +136,7 @@ test("a new sentence is announced once; a number refilling is not", async () => 
   const next = { template: "Loss **{loss}**, flattening out.", t: now };
   await view.update([matching({ sentence: next, bindings: { loss: 2.1 }, rev: running.rev + 1 })]);
   await settle();
-  assert.equal(status().replace(/[⁦-⁩]/g, ""), "Train (2/2) · Step 1,240 of 5,000. Loss 2.10, flattening out.");
+  assert.equal(status().replace(/[⁦-⁩]/g, ""), "train (2/2) · Step 1,240 of 5,000. Loss 2.10, flattening out.");
 });
 
 test("the status holds an announcement only until it is made, and nothing of a run that left", async (t) => {

@@ -2173,6 +2173,8 @@
   "run_output_lines_one": "目前已输出 {count} 行。",
   "run_output_lines_other": "目前已输出 {count} 行。",
   "run_stage_run": "运行",
+  "run_stage_finishing": "正在收尾",
+  "run_setup_starting": "运行正在启动",
   "run_stage_setup": "准备",
   "run_whole_time": "整个运行：{time}",
   "run_setup_starts_in": "运行将在约 {duration} 后开始",

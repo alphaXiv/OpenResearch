@@ -8,7 +8,7 @@ import { fillSentence, fmtMagnitude, fmtSignal, fmtUsd, plainSentence, tokensOf 
 import type { Bindings, Flag, FlagState, RunMonitor, RunMonitorSummary, RunRule, ShownRun, SignalSpec, SignalValue, Signals, Versus, VersusBy } from "./types";
 import { tickText } from "./journal";
 import { stagePosition } from "./stages";
-import { capitalized, captionProgress, clockText, costWords, durationText, estimateWords, progressWords } from "./words";
+import { capitalized, captionProgress, clockText, costWords, durationText, estimateWords, progressWords, remainingText } from "./words";
 
 /** How the headline compares with the parent: the arrow follows the number, the colour whether that is better. */
 export interface Delta {
@@ -240,8 +240,6 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     : tone === "failed" ? m.status_failed()
     : tone === "stopped" ? (outcome && outcome.by !== "user" ? m.status_auto_stopped() : m.run_lead_stopped())
     : null;
-  const status = tone === "lost" ? statusLabel(display.status, display.stopping)
-    : lead ?? (tone === "flag" ? m.status_flagged() : tone === "done" ? m.status_done() : tone === "starting" ? m.status_starting() : m.status_running());
 
   const signals: Signals = monitor?.view.signals ?? summary?.signals ?? {};
   const bindings = monitor ? bindingsOf(monitor, live) : summary?.bindings ?? {};
@@ -267,6 +265,12 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   const settingUp = setup != null && hasStages;
   const stageDone = progress?.done ?? stage?.done ?? null;
   const progressText = stageDone === null ? null : progressWords(stagePhase, stageDone);
+  const finishing = tone === "running" && !settingUp && !notice && !degraded
+    && estimate?.midMs === 0 && !estimate.floor
+    && stageDone !== null && stagePhase?.of != null && stageDone >= stagePhase.of
+    && (order?.count == null || order.index === order.count - 1);
+  const status = tone === "lost" ? statusLabel(display.status, display.stopping)
+    : lead ?? (tone === "flag" ? m.status_flagged() : tone === "done" ? m.status_done() : tone === "starting" ? m.status_starting() : finishing ? m.run_stage_finishing() : m.status_running());
 
   const stated = statedFlag(run, fetched);
   // A flag's words and evidence never change, so a lagging monitor still supplies them for the same flag.
@@ -275,20 +279,21 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   const looking = flag?.state === "waking" || flag?.state === "agent_looking" || flag?.state === "asking";
 
   const position = stagePosition(order, settingUp);
-  const rawName = stagePhase?.name ? capitalized(stagePhase.name) : "";
-  const name = settingUp ? m.run_stage_setup() : rawName || status;
-  const stageLabel = position?.index != null && position.count !== null
+  const rawName = stagePhase?.name ?? "";
+  const setupName = m.run_stage_setup();
+  const name = settingUp ? setupName : finishing ? status : rawName || status;
+  const stageLabel = autoDir(position?.index != null && position.count !== null
     ? m.run_stage_position({ stage: autoDir(name), position: ltr(`${fmtNumber(position.index + 1)}/${fmtNumber(position.count)}`) })
-    : autoDir(name);
+    : name);
   const count = progressText === null ? "" : autoDir(capitalized(progressText));
   const logLine = setup?.line;
-  const setupStage = settingUp && rawName && rawName !== m.run_stage_setup() ? autoDir(rawName) : "";
-  const setupDetail = settingUp && rawName ? m.run_stage_started({ stage: autoDir(rawName) })
+  const setupStage = settingUp && rawName.toLowerCase() !== setupName.toLowerCase() ? rawName : "";
+  const setupDetail = setupStage ? m.run_stage_started({ stage: autoDir(setupStage) })
       : logLine && !/^\s*(?:[{}\[\]]|["']?[\w.-]+["']?\s*[:=])/.test(logLine) ? quoted(logLine) : "";
   const detail = count ? setupStage : setupDetail;
-  const stageSlots = { name: detail ? `${autoDir(stageLabel)} · ${autoDir(detail)}` : count ? `${autoDir(stageLabel)} ·` : stageLabel, count };
+  const stageSlots = { name: detail ? `${stageLabel} · ${autoDir(detail)}` : count ? `${stageLabel} ·` : stageLabel, count };
   const statusText = [stageSlots.name, count].filter(Boolean).join(" ");
-  const stageKey = `${settingUp ? "setup" : "stage"}:${order?.index ?? rawName}:${order?.first ?? ""}:${order?.count ?? ""}`;
+  const stageKey = `${settingUp ? "setup" : finishing ? "finishing" : "stage"}:${order?.index ?? rawName}:${order?.first ?? ""}:${order?.count ?? ""}`;
   const recorded = monitor ? monitor.sentence : summary?.sentence ?? null;
   const watched = live && recorded && now - recorded.t <= 3 * 60_000 ? recorded : null;
   const warning = (live || run.status === "done") && flag ? flag.record?.template ?? recorded?.template ?? null : null;
@@ -342,14 +347,15 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     etaElapsed = !monitor;
     eta = monitor ? m.run_eta_none() : m.run_elapsed({ duration: durationText(now - run.createdAt) });
   } else if (settingUp) {
-    eta = setup?.startsAt != null && setup.startsAt > now ? m.run_setup_starts_in({ duration: durationText(setup.startsAt - now) }) : "";
+    const startsAt = setup?.startsAt;
+    if (startsAt != null) eta = startsAt > now ? m.run_setup_starts_in({ duration: remainingText(startsAt - now) }) : m.run_setup_starting();
   } else if (open && limitEndsAt !== null) {
     eta = m.run_eta_to_limit({ duration: durationText(limitEndsAt - now) });
     etaDetail = monitor?.rules.length ? m.run_eta_ends_by_rules({ clock: clockText(limitEndsAt) }) : m.run_eta_ends_by({ clock: clockText(limitEndsAt) });
-  } else if (open) {
+  } else if (open || finishing) {
     eta = m.run_elapsed({ duration: durationText(elapsed) });
     etaElapsed = true;
-    etaDetail = setup || stagePhase?.of == null && stageDone !== null ? "" : noEstimate;
+    if (!finishing && !setup && (stagePhase?.of != null || stageDone === null)) etaDetail = noEstimate;
   } else if (estimate) {
     ({ eta, detail: etaDetail, strong: etaStrong, leftMs } = estimateWords({ ...estimate, floor: etaFloor }, now, limit, progress?.stallMs ?? 0));
   } else {

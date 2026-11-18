@@ -37,7 +37,7 @@ test("against an older server a running run reads from its status alone", () => 
 
 test("a watched run fills the watcher's words and counts down from the server's estimate", () => {
   const line = model(run({ monitor: summary() }), { monitor: { ...running, sentence: { ...running.sentence, t: now + 600_000 } }, at: now + 600_000 });
-  assert.equal(line.text, "Train (2/2) · Step **1,240** of **5,000**. Loss **2.31**, falling steadily.");
+  assert.equal(line.text, "train (2/2) · Step **1,240** of **5,000**. Loss **2.31**, falling steadily.");
   assert.equal(bare(line.sentence.watcher), "Loss **2.31**, falling steadily.");
   assert.equal(line.eta, m.run_eta_left({ duration: fmtDuration(4_800_000) }));
   assert.equal(line.progress, "25%", "the count stays on the status line");
@@ -288,18 +288,43 @@ test("a live run's subsecond estimate never reads zero seconds left", () => {
   assert.equal(line.leftMs, 500);
 });
 
+test("a run still exiting after its last reported step reads Finishing", () => {
+  const estimate = { ...running.estimate, loMs: 0, midMs: 0, hiMs: 0, at: now, pending: false, floor: false };
+  const stage = { ...running.phases[0], name: "", done: 5000, of: 5000 };
+  const stageOrder = { ...running.stageOrder, count: null };
+  const monitor = { ...running, estimate, stageOrder, phases: [stage], progress: { ...running.progress, done: 5000 } };
+  const row = run({ monitor: summary({ estimate, stageOrder, stage }) });
+  for (const full of [null, monitor]) {
+    const line = model(row, { monitor: full });
+    assert.match(line.text, /^Finishing · Step \*\*5,000\*\* of \*\*5,000\*\*/);
+    assert.match(line.eta, /elapsed$/);
+    assert.ok(line.canStop && !line.canDismiss);
+  }
+  const moreStages = { ...monitor, stageOrder: { ...stageOrder, count: 2 } };
+  assert.equal(model(run(), { monitor: moreStages }).status, m.status_running());
+});
+
+test("setup keeps the declared stage name and reads as starting as the estimate passes", () => {
+  const data = { ...running, setup: { line: null, startsAt: now + 500 }, sentence: null, progress: null,
+    stageOrder: { index: 0, count: 2, first: 1 }, phases: [{ name: "preTrain", of: null, unit: null }] };
+  const before = model(run(), { monitor: data });
+  assert.match(before.text, /preTrain started/);
+  assert.equal(before.eta, "Run starts in about 1s");
+  assert.equal(model(run(), { monitor: data, at: now + 500 }).eta, "Run is starting");
+});
+
 test("setup keeps the declared stage ahead of log chatter and rejects structured fallbacks", () => {
   for (const line of ['"window_pattern": "L"', 'batch_size=16', '{"model": "tiny"}', 'Downloading weights']) {
     const setup = { line, startsAt: null };
     const data = { ...running, setup, sentence: null, progress: null, stageOrder: { index: 0, count: 2, first: 1 }, phases: [{ name: "install", of: null, unit: null }] };
-    assert.match(model(run(), { monitor: data }).text, /Install started/);
+    assert.match(model(run(), { monitor: data }).text, /install started/);
     const counted = { ...data, progress: { ...running.progress, phase: 0, done: 1 }, phases: [{ ...data.phases[0], of: 3, unit: "packages" }] };
     const words = model(run(), { monitor: counted }).text;
-    assert.match(words, /Install .*1.*of.*3.*packages/);
+    assert.match(words, /install .*1.*of.*3.*packages/);
     assert.ok(!words.includes(line));
     const unnamed = { ...data, phases: [], stageOrder: { index: null, count: null, first: null } };
     assert.equal(model(run(), { monitor: unnamed }).text.includes(line), line === "Downloading weights");
     const short = summary({ setup, sentence: null, stage: { name: "install", of: null, done: null }, stageOrder: data.stageOrder });
-    assert.match(model(run({ monitor: short })).text, /Install started/);
+    assert.match(model(run({ monitor: short })).text, /install started/);
   }
 });

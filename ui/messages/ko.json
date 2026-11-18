@@ -2173,6 +2173,8 @@
   "run_output_lines_one": "지금까지 출력된 줄은 {count}개입니다.",
   "run_output_lines_other": "지금까지 출력된 줄은 {count}개입니다.",
   "run_stage_run": "실행",
+  "run_stage_finishing": "마무리 중",
+  "run_setup_starting": "실행 시작 중",
   "run_stage_setup": "준비",
   "run_whole_time": "전체 실행: {time}",
   "run_setup_starts_in": "약 {duration} 후 실행 시작",

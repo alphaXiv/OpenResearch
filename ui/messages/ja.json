@@ -2173,6 +2173,8 @@
   "run_output_lines_one": "これまでの出力は{count}行です。",
   "run_output_lines_other": "これまでの出力は{count}行です。",
   "run_stage_run": "実行",
+  "run_stage_finishing": "終了処理中",
+  "run_setup_starting": "実行を開始しています",
   "run_stage_setup": "準備",
   "run_whole_time": "実行全体: {time}",
   "run_setup_starts_in": "約{duration}後に実行開始",

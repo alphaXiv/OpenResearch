@@ -2173,6 +2173,8 @@
   "run_output_lines_one": "Şu ana kadar {count} satır çıktı.",
   "run_output_lines_other": "Şu ana kadar {count} satır çıktı.",
   "run_stage_run": "Çalıştırma",
+  "run_stage_finishing": "Tamamlanıyor",
+  "run_setup_starting": "Çalıştırma başlıyor",
   "run_stage_setup": "Hazırlık",
   "run_whole_time": "Tüm çalıştırma: {time}",
   "run_setup_starts_in": "Çalıştırma yaklaşık {duration} sonra başlar",

@@ -160,14 +160,14 @@ test("a stage the run declared and has no step of yet keeps its own words over l
   assert.equal(setup.stage, "train");
   for (const full of [true, false]) {
     const view = model("announced", full);
-    assert.equal(bare(view.sentence.text), `${m.run_stage_setup()} · ${capital(bare(m.run_stage_started({ stage: "Train" })))}`, `full: ${full}`);
+    assert.equal(bare(view.sentence.text), `${m.run_stage_setup()} · ${bare(m.run_stage_started({ stage: "train" }))}`, `full: ${full}`);
     assert.equal(view.etaDetail, "", `full: ${full}`);
     assert.equal(view.eta, "", `full: ${full}`);
   }
   const printing = { ...setup, line: "Loading 9 shards" };
   const state = { ...states.announced, summary: { ...states.announced.summary, setup: printing } };
   const line = runModel({ item: { sessionId: "s", run: runOf("announced", state), experimentName: null, experimentSlug: "baseline" }, monitor: null, shown: true, agent: "Claude", now: state.now + 60 * 60_000, nextRetryMs: null });
-  assert.equal(bare(line.sentence.text), "Setup · Train started");
+  assert.equal(bare(line.sentence.text), "Setup · train started");
 });
 
 test("a running job with nothing printed yet keeps its machine off the line", () => {
@@ -357,10 +357,10 @@ test("a table's columns come in the order the run printed them, and the headline
   for (const full of [true, false]) assert.equal(model("measures", full).headline?.label, expect.headline, `full: ${full}`);
 });
 
-test("stage names and counts start with capitals", () => {
+test("declared stages keep their names next to capitalized counts", () => {
   for (const full of [true, false]) {
-    assert.equal(bare(model("named", full).sentence.text), "Setup · Train Step **2,280** of **4,200**", `full: ${full}`);
-    assert.equal(bare(model("measures", full).sentence.text), "Round · Round **14** of **24**", `full: ${full}`);
+    assert.equal(bare(model("named", full).sentence.text), "Setup · train Step **2,280** of **4,200**", `full: ${full}`);
+    assert.equal(bare(model("measures", full).sentence.text), "round · Round **14** of **24**", `full: ${full}`);
   }
 });
 

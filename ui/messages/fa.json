@@ -2173,6 +2173,8 @@
   "run_output_lines_one": "تا اینجا {count} خط خروجی.",
   "run_output_lines_other": "تا اینجا {count} خط خروجی.",
   "run_stage_run": "اجرا",
+  "run_stage_finishing": "در حال پایان",
+  "run_setup_starting": "اجرا در حال شروع است",
   "run_stage_setup": "آماده‌سازی",
   "run_whole_time": "کل اجرا: {time}",
   "run_setup_starts_in": "اجرا حدود {duration} دیگر شروع می‌شود",

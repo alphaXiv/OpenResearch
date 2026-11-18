@@ -2173,6 +2173,8 @@
   "run_output_lines_one": "Строк вывода на данный момент: {count}.",
   "run_output_lines_other": "Строк вывода на данный момент: {count}.",
   "run_stage_run": "Запуск",
+  "run_stage_finishing": "Завершение",
+  "run_setup_starting": "Запуск начинается",
   "run_stage_setup": "Подготовка",
   "run_whole_time": "Весь запуск: {time}",
   "run_setup_starts_in": "Эксперимент начнётся примерно через {duration}",
