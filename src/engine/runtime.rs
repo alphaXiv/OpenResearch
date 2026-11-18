@@ -786,12 +786,12 @@ impl Runtime {
         observations: &[(String, Observation)],
     ) {
         for run in watched {
-            if !observations
+            let Some((_, exit)) = observations
                 .iter()
-                .any(|(id, observation)| *id == run.id && observation.ends_run())
-            {
+                .find(|(id, observation)| *id == run.id && observation.ends_run())
+            else {
                 continue;
-            }
+            };
             let terminal = self
                 .store()
                 .and_then(|store| store.get_run(&run.id))
@@ -802,7 +802,27 @@ impl Runtime {
             if terminal {
                 continue;
             }
-            if let Err(error) = self.collect(backend, run, COLLECTION_BUDGET).await {
+            let local_exit = matches!(Key::of_handle(&run.handle), Ok(Key::Local))
+                && matches!(
+                    exit,
+                    Observation::Exited { .. }
+                        | Observation::Cancelled { .. }
+                        | Observation::CancelReceipt { remaining: 0, .. }
+                        | Observation::Failed {
+                            finished_at: Some(_),
+                            ..
+                        }
+                );
+            let collected = async {
+                if self.collect(backend, run, COLLECTION_BUDGET).await?
+                    && local_exit
+                    && self.engine.read_notify(backend, &run.id, true).await?
+                {
+                    self.store()?.finish_log_collection(&run.id)?;
+                }
+                Ok::<_, crate::error::Error>(())
+            };
+            if let Err(error) = collected.await {
                 eprintln!("orx up: run {}: log collection: {error:#}", run.id);
             }
         }
@@ -2914,13 +2934,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_local_exit_keeps_its_log_and_final_notify_before_the_terminal_phase() {
+        local_exit_collection(false).await;
+    }
+
+    #[tokio::test]
     async fn early_collection_and_failed_final_notify_do_not_finish_output_debt() {
+        local_exit_collection(true).await;
+    }
+
+    async fn local_exit_collection(fail_notify: bool) {
         let dir = std::env::temp_dir().join(format!("orx-final-notify-{}", uuid::Uuid::new_v4()));
         let runtime = collector(&dir);
         let local = dir.join("local-runs/run");
         std::fs::create_dir_all(&local).unwrap();
         std::fs::write(local.join("log"), "finished\n").unwrap();
-        std::fs::create_dir(local.join("notify")).unwrap();
+        if fail_notify {
+            std::fs::create_dir(local.join("notify")).unwrap();
+        } else {
+            std::fs::write(local.join("notify"), "final evaluation\n").unwrap();
+        }
         let metadata = crate::jobs::BackendDescriptor::parse(r#"{"kind":"local_job"}"#).unwrap();
         runtime
             .engine
@@ -2962,38 +2995,44 @@ mod tests {
             handle,
         };
         let backend = Local::new(dir.clone());
+        let observations = vec![(
+            "run".into(),
+            Observation::Exited {
+                finished_at: None,
+                code: Some(0),
+                signal: None,
+            },
+        )];
+        let watched = [watched];
         runtime
-            .collect(&backend, &watched, COLLECTION_BUDGET)
-            .await
-            .unwrap();
-        assert!(store.log_collection("run").unwrap().is_none());
+            .collect_logs(&backend, &watched, &observations)
+            .await;
         runtime
             .engine
-            .observe(
-                "run",
-                Observation::Exited {
-                    finished_at: None,
-                    code: Some(0),
-                    signal: None,
-                },
-            )
-            .unwrap();
-        assert!(store.log_collection_pending("run").unwrap());
-        assert!(runtime.collect_finished("run").await.is_err());
-        assert!(store.log_collection_pending("run").unwrap());
-        drop(runtime);
-        let runtime = collector(&dir);
-        assert_eq!(store.pending_log_collections().unwrap(), ["run"]);
-        std::fs::remove_dir(local.join("notify")).unwrap();
-        std::fs::write(local.join("notify"), "final evaluation\n").unwrap();
-        runtime.collect_finished("run").await.unwrap();
+            .apply_observations(&backend, &watched, observations)
+            .await;
+        assert_eq!(store.get_run("run").unwrap().unwrap().status, "done");
+        assert!(store.signal_collection_pending("run").unwrap());
+        assert_eq!(
+            std::fs::read(dir.join("run-logs/run.log")).unwrap(),
+            b"finished\n"
+        );
+        if fail_notify {
+            assert!(runtime.collect_finished("run").await.is_err());
+            assert!(store.log_collection_pending("run").unwrap());
+            drop(runtime);
+            let runtime = collector(&dir);
+            assert_eq!(store.pending_log_collections().unwrap(), ["run"]);
+            std::fs::remove_dir(local.join("notify")).unwrap();
+            std::fs::write(local.join("notify"), "final evaluation\n").unwrap();
+            runtime.collect_finished("run").await.unwrap();
+        }
         assert!(!store.log_collection_pending("run").unwrap());
         let notices = store.run_notice_batch("chat").unwrap();
         assert!(notices
             .iter()
             .any(|notice| notice.kind == crate::store::NOTIFY
                 && notice.body.ends_with("final evaluation\n")));
-        drop(runtime);
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }

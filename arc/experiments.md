@@ -116,7 +116,7 @@ kept has no one recorded, never one guessed from its words. A cancelled run's
 
 A run's log is written on the machine that ran it. The engine pages it from the host by byte range and file identity; a changed identity resets the reader rather than splicing different bytes. API backends offer no random access, so a running job's log streams into a local spool whether or not anyone is reading it. A stream that goes quiet is reopened, and resumes from a position that holds however the provider rechunks or cuts short its replay: a timestamp, a log entry, a byte offset. The spool outlives `orx up`: a restart continues it from that position, saved beside it after the bytes it covers, or from the spool's length when the provider replays the whole log. A spool without that file beside it came from an older orx and is rebuilt from the provider.
 
-When a run ends, keeping its log becomes an obligation recorded in the same transaction as the terminal phase (`src/engine/runtime.rs`):
+When a run ends, any remaining log collection is recorded in the same transaction as the terminal phase (`src/engine/runtime.rs`):
 
 - A log within a size limit is kept whole; a larger one keeps its head and tail, where setup and results live, and the middle stays readable on the host.
 - Collection resumes from its last synced offset and never gives up: it backs off, raises one notice after repeated failures, and retries at once when the host returns or the engine restarts.

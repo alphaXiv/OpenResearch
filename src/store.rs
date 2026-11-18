@@ -3609,11 +3609,11 @@ impl Store {
         Ok(())
     }
 
-    /// The terminal run's log and notify have both been consumed.
+    /// The run's final log and notify have both been consumed.
     pub(crate) fn finish_log_collection(&self, run_id: &str) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO log_collections (run_id, done) VALUES (?1, 1)
-             ON CONFLICT(run_id) DO UPDATE SET done = 1, last_error = NULL",
+            "INSERT INTO log_collections (run_id, done, collected) VALUES (?1, 1, 1)
+             ON CONFLICT(run_id) DO UPDATE SET done = 1, collected = 1, last_error = NULL",
             params![run_id],
         )?;
         Ok(())
