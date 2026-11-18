@@ -2745,7 +2745,8 @@ mod imp {
     struct PageMenu {
         id: String,
         label: String,
-        items: Vec<PageMenuEntry>,
+        /// Read one by one, so an item a newer page adds costs only that item.
+        items: Vec<serde_json::Value>,
     }
 
     #[cfg(target_os = "macos")]
@@ -2771,12 +2772,27 @@ mod imp {
         checked: Option<bool>,
     }
 
+    /// The entries of a menu section this window can show; a newer page's others are left out.
+    #[cfg(target_os = "macos")]
+    fn menu_entries(items: &[serde_json::Value]) -> Vec<PageMenuEntry> {
+        items
+            .iter()
+            .filter_map(|item| match serde_json::from_value(item.clone()) {
+                Ok(entry) => Some(entry),
+                Err(error) => {
+                    eprintln!("openresearch app: leaving out menu item {item}: {error}");
+                    None
+                }
+            })
+            .collect()
+    }
+
     #[cfg(target_os = "macos")]
     fn build_menu(spec: &[PageMenu]) -> anyhow::Result<Menu> {
         let menu = Menu::new();
         for section in spec {
             let submenu = Submenu::with_id(&section.id, &section.label, true);
-            for entry in &section.items {
+            for entry in &menu_entries(&section.items) {
                 match entry {
                     PageMenuEntry::Command {
                         id,
@@ -2787,8 +2803,13 @@ mod imp {
                         let accelerator = hotkey
                             .as_ref()
                             .and_then(serde_json::Value::as_str)
-                            .map(|hotkey| hotkey.replace("Mod", "CmdOrCtrl").parse::<Accelerator>())
-                            .transpose()?;
+                            .and_then(|hotkey| match hotkey.replace("Mod", "CmdOrCtrl").parse::<Accelerator>() {
+                                Ok(accelerator) => Some(accelerator),
+                                Err(error) => {
+                                    eprintln!("openresearch app: showing {id} without its shortcut {hotkey}: {error}");
+                                    None
+                                }
+                            });
                         if let Some(checked) = checked {
                             submenu.append(&CheckMenuItem::with_id(
                                 id,
@@ -2825,7 +2846,10 @@ mod imp {
                             "fullscreen" => PredefinedMenuItem::fullscreen(None),
                             "minimize" => PredefinedMenuItem::minimize(None),
                             "maximize" => PredefinedMenuItem::maximize(None),
-                            _ => anyhow::bail!("unknown native menu item: {name}"),
+                            _ => {
+                                eprintln!("openresearch app: leaving out native menu item {name}");
+                                continue;
+                            }
                         };
                         submenu.append(&item)?;
                     }
@@ -3054,6 +3078,26 @@ mod imp {
     #[cfg(test)]
     mod tests {
         use super::ZoomAction;
+
+        #[cfg(target_os = "macos")]
+        #[test]
+        fn a_newer_pages_menu_items_cost_only_themselves() {
+            let items = serde_json::json!([
+                { "kind": "command", "id": "chat.new", "label": "New Chat", "hotkey": "Mod+N" },
+                { "kind": "submenu", "id": "recent", "label": "Open Recent", "items": [] },
+                { "kind": "separator" },
+                { "kind": "native", "name": "copy", "role": "edit" },
+            ]);
+            let entries = super::menu_entries(items.as_array().unwrap());
+            assert!(matches!(
+                entries.as_slice(),
+                [
+                    super::PageMenuEntry::Command { id, .. },
+                    super::PageMenuEntry::Separator,
+                    super::PageMenuEntry::Native { name },
+                ] if id == "chat.new" && name == "copy"
+            ));
+        }
 
         #[test]
         fn a_reported_error_is_the_reason_and_leaves_the_log() {
