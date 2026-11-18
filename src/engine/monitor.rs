@@ -2226,15 +2226,13 @@ fn check_rules(
         .collect();
     let record = |store: &Store| {
         store.record_rules(
-            &run.id,
+            run,
             &checked.counts,
             &flags,
             stop.as_ref()
                 .map(|(reason, context)| (reason.as_str(), context)),
-            |store| {
-                let experiment = &run.experiment_id;
-                let settings = store.run_monitor_json(experiment)?;
-                let patterns = super::view::stored_patterns(experiment, settings.as_deref())?;
+            |settings| {
+                let patterns = super::view::stored_patterns(&run.experiment_id, settings)?;
                 Ok(patterns.hash() == snapshot.config_hash && current())
             },
         )
@@ -7608,14 +7606,46 @@ mod tests {
     }
 
     #[test]
+    fn a_rule_lands_when_another_writer_commits_during_its_check() {
+        use crate::store::{StopBy, StopContext};
+
+        let f = Fixture::new("orx-rule-concurrent-writer");
+        let run = f.run("running", local());
+        let writer = Store::open_at(f.dir.path().to_path_buf()).unwrap();
+        let counts = json!({"basis": ["g1", 0]});
+
+        let accepted = f
+            .store
+            .record_rules(
+                &run,
+                &counts,
+                &[],
+                Some(("Rule stopped it.", &StopContext::by(StopBy::Rule))),
+                |settings| {
+                    assert_eq!(settings, None);
+                    writer.subscribe_run("r1", "observer", T0)?;
+                    Ok(true)
+                },
+            )
+            .unwrap();
+
+        assert!(accepted.is_some());
+        assert_eq!(stopped_by(&f, "r1").unwrap().by, StopBy::Rule);
+        assert_eq!(
+            f.store.run_monitor_state("r1").unwrap().unwrap()["ruleState"],
+            counts
+        );
+    }
+
+    #[test]
     fn a_user_cancel_accepted_before_recording_wins_over_a_rule() {
         use crate::store::{StopBy, StopContext};
 
         let f = Fixture::new("orx-rule-cancel");
-        f.run("running", local());
+        let run = f.run("running", local());
         f.store
             .accept_run_stop(
-                "r1",
+                &run.id,
                 Some("User stopped it."),
                 Some(&StopContext::by(StopBy::User)),
             )
@@ -7625,7 +7655,7 @@ mod tests {
         let accepted = f
             .store
             .record_rules(
-                "r1",
+                &run,
                 &json!({}),
                 &[],
                 Some(("Rule stopped it.", &StopContext::by(StopBy::Rule))),

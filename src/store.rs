@@ -6716,18 +6716,23 @@ impl Store {
     /// cancel lock. Returns when the rule's cancel was accepted.
     pub(crate) fn record_rules(
         &self,
-        run_id: &str,
+        run: &StoredRun,
         counts: &serde_json::Value,
         flags: &[NewFlag],
         stop: Option<(&str, &StopContext)>,
-        fresh: impl FnOnce(&Self) -> Result<bool>,
+        fresh: impl FnOnce(Option<&str>) -> Result<bool>,
     ) -> Result<Option<i64>> {
+        let settings = self.run_monitor_json(&run.experiment_id)?;
+        if !fresh(settings.as_deref())? {
+            return Ok(None);
+        }
+
+        let run_id = &run.id;
         let mut lock = stop
             .map(|_| open_lifecycle_lock_at(&self.run_lock_path(CANCEL_LOCK, run_id)?))
             .transpose()?;
         let _guard = lock.as_mut().map(|lock| lock.write()).transpose()?;
-        // The freshness check reads the checkpoint and settings before acquiring the write lock.
-        let tx = self.begin()?;
+        let tx = self.begin_immediate()?;
         let contact = tx
             .query_row(
                 "SELECT contact FROM runs WHERE id = ?1 AND status = 'running'
@@ -6744,7 +6749,7 @@ impl Store {
             .map(serde_json::from_str::<Contact>)
             .transpose()?
             .is_some_and(|contact| contact != Contact::Live)
-            || !fresh(self)?
+            || self.run_monitor_json(&run.experiment_id)? != settings
         {
             return Ok(None);
         }
