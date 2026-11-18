@@ -277,6 +277,12 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   // A flag's words and evidence never change, so a lagging monitor still supplies them for the same flag.
   const flag = stated && { id: stated.id, state: stated.state, record: fetched?.flags.find((flag) => flag.id === stated.id) ?? null };
   const needsChoice = flag?.state === "waiting";
+  const record = flag?.record;
+  const flagSummary = flag && run.monitor?.flag?.id === flag.id ? run.monitor.flag : null;
+  const flagTemplate = record?.template ?? flagSummary?.template;
+  const flagBindings = record?.bindings ?? flagSummary?.bindings;
+  const flagText = flagTemplate && flagBindings ? fillSentence(flagTemplate, flagBindings, signals)
+    : (record?.source === "look" ? record.text : record?.template) ?? flagSummary?.text ?? null;
 
   const position = stagePosition(order, settingUp);
   const rawName = stagePhase?.name ?? "";
@@ -296,7 +302,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   const stageKey = `${settingUp ? "setup" : finishing ? "finishing" : "stage"}:${order?.index ?? rawName}:${order?.first ?? ""}:${order?.count ?? ""}`;
   const recorded = monitor ? monitor.sentence : summary?.sentence ?? null;
   const watched = live && recorded && now - recorded.t <= 3 * 60_000 ? recorded : null;
-  const warning = (live || run.status === "done") && flag ? flag.record?.template ?? recorded?.template ?? null : null;
+  const warning = (live || run.status === "done") && flagText;
   let speaking: string | null = null;
   let sentence: RunModel["sentence"];
   if (notice) {
@@ -307,9 +313,8 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     const text = `${statusLabel(display.status)} · ${autoDir(display.waiting)}`;
     sentence = { text, key: `pre:waiting:${display.waiting}`, at: null };
   } else if (warning) {
-    speaking = warning;
-    const text = autoDir(fillSentence(warning, bindings, signals));
-    sentence = { text, watcher: text, key: `flag:${flag?.id}:${run.status}:${warning}`, at: flag?.record?.at ?? recorded?.t ?? null };
+    const text = autoDir(warning);
+    sentence = { text, watcher: text, key: `flag:${flag?.id}:${run.status}`, at: record?.at ?? null };
   } else if (!live) {
     const text = !progressText || tone === "done" ? ""
       : outcome?.by === "user" ? m.run_auto_by_you({ progress: autoDir(progressText) })
@@ -445,7 +450,8 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     bar: { segments, whole, frozen, label: barLabel([sentence.text, caption, timeLabel, etaElapsed ? etaDetail : ""]) },
     ticks,
     flag,
-    flagDetail: flag?.record?.detail ? autoDir(fillSentence(flag.record.detail, bindings, signals)) : null,
+    flagDetail: record?.detail === flagTemplate ? flagText && autoDir(flagText)
+      : record?.detail ? autoDir(fillSentence(record.detail, flagBindings ?? {}, signals)) : null,
     needsChoice,
     note,
     notice,

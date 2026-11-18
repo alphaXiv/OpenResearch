@@ -148,6 +148,9 @@ export interface Flag {
   whole: number | null;
   template: string;
   detail: string;
+  text?: string;
+  /** Values from the look that raised the flag, when still available. */
+  bindings?: Bindings | null;
   evidence: Evidence | null;
   state: FlagState | "kept" | "stopped";
   /** The choice that settled it, or the last that sent it to someone. */
@@ -211,7 +214,7 @@ export interface RunMonitorSummary {
   /** When the run's time limit ends; lets a line count down to it without the full monitor. */
   limitEndsAt: number | null;
   /** The unsettled flag only. */
-  flag: { id: string; state: FlagState } | null;
+  flag: { id: string; state: FlagState; template?: string | null; text?: string | null; bindings?: Bindings | null } | null;
   /** Present until a headline or chart signal has its first point. */
   setup: Setup | null;
   /** For a failed run that recorded no message, the line in its log that says why. */

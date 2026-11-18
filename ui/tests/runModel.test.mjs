@@ -74,6 +74,28 @@ test("a flag waiting on the user opens the choice while one the agent handles ke
   assert.ok(!looking.needsChoice);
 });
 
+test("an open flag reads the report that raised it while an ordinary sentence still refills", () => {
+  const template = "Train rising to **{loss}**.";
+  const saved = { ...flagged.flags[0], template, detail: template, text: "Train rising to **6.04**.", bindings: { loss: 6.04 } };
+  const flag = { id: saved.id, state: "waiting", template, text: saved.text, bindings: saved.bindings };
+  const sentence = { template: "Train is **{loss}** now.", t: now };
+  const read = (loss, status, withFlag, full) => {
+    const data = { ...flagged, latest: { loss }, sentence, flags: withFlag ? [saved] : [], flagId: withFlag ? saved.id : null };
+    const runSummary = summary({ rev: flagged.rev, bindings: { loss }, sentence, flag: withFlag ? flag : null });
+    return model(run({ status, monitor: runSummary }), { monitor: full ? data : null });
+  };
+  for (const full of [false, true]) {
+    for (const status of ["running", "done"]) {
+      const first = read(6.04, status, true, full);
+      const after = read(5.438, status, true, full);
+      assert.equal(after.text, "Train rising to **6.04**.");
+      assert.equal(after.text, first.text);
+      if (full) assert.equal(bare(after.flagDetail), after.text);
+    }
+    assert.match(read(5.438, "running", false, full).text, /Train is \*\*5\.44\*\* now\./);
+  }
+});
+
 test("an ended run leads with how it ended and offers Dismiss", () => {
   const ended = (extra, monitorTone) => model(run({ status: "cancelled", endedAt: now, ...extra, monitor: monitorTone ? summary({ tone: monitorTone, sentence: null, estimate: null }) : null }), { monitor: { ...running, revising: monitorTone === "revising" } });
   const rule = { id: "nan", name: "nan-loss", text: "Loss is NaN.", does: "stop" };

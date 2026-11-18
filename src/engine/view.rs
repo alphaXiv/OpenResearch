@@ -2003,7 +2003,7 @@ pub(crate) fn shown(
     });
     let flags = monitor["flags"].as_array().map_or(&[][..], Vec::as_slice);
     lines.push(match super::flags::open(flags) {
-        Some(flag) => format!("Open {}", super::flags::status_line(flag, fill)),
+        Some(flag) => format!("Open {}", super::flags::status_line(flag)),
         None => "Open flag: none.".into(),
     });
     let phase = monitor["progress"]["phase"]

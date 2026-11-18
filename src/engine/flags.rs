@@ -331,12 +331,17 @@ pub(crate) fn batch_text<'a>(bodies: impl Iterator<Item = &'a str>) -> String {
     parts.join("\n\n")
 }
 
-/// The line `orx exp status` prints for the run's newest flag, filled by `fill`.
-pub(crate) fn status_line(flag: &Value, fill: impl Fn(&str) -> String) -> String {
-    let detail = flag["template"]
-        .as_str()
-        .map(|template| fill(template).replace("**", ""))
-        .unwrap_or_default();
+/// The recorded warning. Rule and tripwire titles contain their figures already.
+pub(super) fn sentence(flag: &Value) -> Option<&str> {
+    if flag["source"] == "look" {
+        return flag["text"].as_str();
+    }
+    flag["template"].as_str()
+}
+
+/// The line `orx exp status` prints for the run's newest flag.
+pub(crate) fn status_line(flag: &Value) -> String {
+    let detail = sentence(flag).unwrap_or_default().replace("**", "");
     let lines = match (
         flag["evidence"]["from"].as_u64(),
         flag["evidence"]["to"].as_u64(),

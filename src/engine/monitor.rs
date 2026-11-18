@@ -213,6 +213,21 @@ impl Lifecycle {
             .filter(|run| run.created_at < row.created_at)
             .take(32)
             .find(|run| Phase::parse(&run.status) == Some(Phase::Done));
+        let mut flags = super::flags::read(store, row)?;
+        if let Some(flag) = flags
+            .iter_mut()
+            .rev()
+            .find(|flag| !super::flags::settled(flag))
+        {
+            let look = flag["lookId"].as_str().and_then(|id| id.parse().ok());
+            let rows = look
+                .map(|id| store.watch_look_runs(id))
+                .transpose()?
+                .unwrap_or_default();
+            if let Some(look) = rows.into_iter().find(|look| look.run_id == row.id) {
+                flag["bindings"] = look.basis["bindings"].clone();
+            }
+        }
         Ok(Self {
             phase: Phase::parse(&row.status),
             contact: run.contact.clone(),
@@ -241,7 +256,7 @@ impl Lifecycle {
                     "sentence": null, "counts": {},
                 })
             }),
-            flags: super::flags::read(store, row)?,
+            flags,
             run: row.clone(),
         })
     }
@@ -1357,8 +1372,13 @@ fn evaluate(
             count.clone(),
         );
     }
+    let open = super::flags::open(&life.flags);
     let mut watch = life.watch.clone();
-    if has_work && watch["sentence"]["setup"] == true {
+    let flag_look = open.and_then(|flag| flag["lookId"].as_str());
+    let sentence_look = watch["sentence"]["lookId"].as_str();
+    if has_work && watch["sentence"]["setup"] == true
+        || flag_look.is_some() && flag_look == sentence_look
+    {
         watch["sentence"] = Value::Null;
     }
     let sentence = watch["sentence"].clone();
@@ -1371,7 +1391,6 @@ fn evaluate(
             estimate
         });
     // A flag no one settled waits after the run ends too; it colours a run that finished.
-    let open = super::flags::open(&life.flags);
     let flagged = open.is_some() && (life.live() || life.phase == Some(Phase::Done));
     let mut summary = json!({
         "tone": match (life.revising, flagged) {
@@ -1392,7 +1411,10 @@ fn evaluate(
         "signals": view["signals"],
         "estimate": summary_estimate,
         "limitEndsAt": life.ends_at(),
-        "flag": open.map(|flag| json!({"id": flag["id"], "state": flag["state"]})),
+        "flag": open.map(|flag| json!({
+            "id": flag["id"], "state": flag["state"], "template": flag["template"],
+            "text": super::flags::sentence(flag), "bindings": flag["bindings"],
+        })),
 
         "setup": setup,
         "generation": generation,
@@ -2697,9 +2719,7 @@ fn status_text(life: &Lifecycle, fold: &Fold, watch: &Value, facts: &StatusFacts
         facts.signals,
     ));
     if let Some(flag) = super::flags::open(&life.flags).or(life.flags.last()) {
-        lines.push(super::flags::status_line(flag, |template| {
-            super::watch::fill_values(template, facts.bindings, facts.signals)
-        }));
+        lines.push(super::flags::status_line(flag));
     }
     if let Some(eta) = eta_text(life, snapshot, facts) {
         lines.push(format!("eta      {eta}"));
@@ -4873,6 +4893,62 @@ mod tests {
     }
 
     #[test]
+    fn an_open_watch_flag_uses_its_look_in_the_summary_monitor_and_status() {
+        let f = Fixture::new("orx-monitor-frozen-flag");
+        let run = f.run("running", local());
+        f.store.put_chat_session("chat", "claude-code", None);
+        let tx = f.store.begin_immediate().unwrap();
+        let look = Store::prepare_watch_look(
+            &tx,
+            "chat",
+            "live",
+            "test",
+            &[(&run.id, "r1", "subject")],
+            T0,
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        let template = "Train rising to **{loss}**.";
+        let text = "Train rising to **6.040**.";
+        let body = json!({"id": "f1", "source": "look", "lookId": look.to_string(), "template": template, "text": text});
+        let flag = super::super::flags::new_flag(&f.store, &run, body, true).unwrap();
+        let result = crate::store::LookResult {
+            run_id: run.id.clone(),
+            result: "flag".into(),
+            template: Some(template.into()),
+            text: Some(text.into()),
+            basis: json!({"bindings": {"loss": 6.04}}),
+            whole: None,
+            cursor: Value::Null,
+        };
+        f.store
+            .finish_watch_look(
+                look,
+                "done",
+                T0 + 1_000,
+                None,
+                None,
+                None,
+                &[result],
+                &[flag],
+            )
+            .unwrap();
+        let snapshot = folded(&[(
+            T0 + 2_000,
+            r#"::orx:: {"step":2,"m":{"loss":5.438}}"#.into(),
+        )]);
+        f.collect(&snapshot);
+        let (monitor, _) = monitor_at(&f, &run, T0 + 2_000);
+        let summary = current(&f.store, &run).unwrap().unwrap();
+        assert_eq!(monitor["latest"]["loss"], 5.438);
+        assert_eq!(monitor["flags"][0]["bindings"]["loss"], 6.04);
+        assert_eq!(summary.summary()["flag"]["bindings"]["loss"], 6.04);
+        assert_eq!(summary.summary()["flag"]["text"], text);
+        assert!(status_line(&monitor, "flag").contains("Train rising to 6.040."));
+        assert!(monitor["sentence"].is_null());
+    }
+
+    #[test]
     fn a_finished_runs_flag_returns_to_waiting_when_its_agent_turn_ends() {
         let f = Fixture::new("orx-monitor-finished-flag");
         let run = f.run("running", local());
@@ -6853,7 +6929,8 @@ mod tests {
         let (monitor, _) = monitor_at(&f, &run, T0 + 31_000);
         let summary = current(&f.store, &row).unwrap().unwrap().summary().clone();
         assert_eq!(summary["tone"], "flag");
-        assert_eq!(summary["flag"], json!({"id": "f1", "state": "waiting"}));
+        assert_eq!(summary["flag"]["id"], "f1");
+        assert_eq!(summary["flag"]["state"], "waiting");
         assert_eq!(monitor["flagId"], monitor["flags"][0]["id"]);
         assert_eq!(monitor["flags"][0]["state"], "waiting");
     }
@@ -7650,7 +7727,8 @@ mod tests {
             .summary()
             .clone();
         assert_eq!(summary["tone"], "flag");
-        assert_eq!(summary["flag"], json!({"id": id, "state": "raised"}));
+        assert_eq!(summary["flag"]["id"], id);
+        assert_eq!(summary["flag"]["state"], "raised");
     }
 
     #[test]
@@ -9118,7 +9196,7 @@ mod tests {
         mentions(
             status_line(&monitor, "flag"),
             &[
-                "Loss 0.143 rose at step 18.",
+                "Loss 2.31 rose at step 18.",
                 "log line 19",
                 "flag f1",
                 "waits for the user",

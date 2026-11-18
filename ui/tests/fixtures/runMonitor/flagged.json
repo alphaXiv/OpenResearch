@@ -144,6 +144,8 @@
       "at": 1794446160000,
       "whole": 0.25,
       "template": "Loss is **{loss}**.",
+      "text": "Loss is **NaN**.",
+      "bindings": { "loss": "NaN" },
       "detail": "A non-finite loss was reported.",
       "evidence": {
         "lines": [

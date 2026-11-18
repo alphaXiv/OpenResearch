@@ -116,7 +116,7 @@ test("who needs attention comes first, before any leader", () => {
   const models = [model("a", scored(1.3)), model("b", scored(1.2)), failed];
   // A run that ended with nothing more to say says how long it took.
   assert.equal(said(models).text, bare(m.run_summary_attention_ended({ name: "c", ended: m.run_failed_after({ duration: "10m" }) })));
-  const choice = model("d", summary({ tone: "flag", flag: { id: "f", state: "waiting", mode: "copilot" }, sentence: { template: "Loss went to **NaN**.", t: now } }));
+  const choice = model("d", summary({ tone: "flag", flag: { id: "f", state: "waiting", text: "Loss went to **NaN**." } }));
   assert.match(said([...models, choice]).text, /^d · Flagged: Loss went to \*\*NaN\*\*\.$/);
   const lost = model("e", summary(), { contact: { type: "unreachable", since: now - 60_000, cause: "timed out" }, host: "lab-a40", backend: { kind: "ssh_job" } });
   assert.match(said([model("a", scored(1.3)), lost]).text, /^e · /);

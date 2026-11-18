@@ -351,12 +351,12 @@ test("lost contact puts the contact words on the line, Connect beside them, and 
   assert.ok(find("p", "timed out"));
 });
 
-test("a flag's detail keeps its counts live in the strip", async () => {
-  const counted = { ...flagged, counts: { "ERR 429": 43 }, flags: [{ ...flagged.flags[0], detail: '{count:"ERR 429"} items came back HTTP 429.' }] };
+test("a flag's detail pluralizes the count from its own look", async () => {
+  const counted = { ...flagged, counts: { "ERR 429": 43 }, flags: [{ ...flagged.flags[0], bindings: { 'count:"ERR 429"': 1 }, detail: '**{count:"ERR 429"}** lines like "ERR 429" so far.' }] };
   backend({ monitors: { r1: counted } });
   await banner([run("r1", { monitor: summary({ tone: "flag", flag: { id: "f1", state: "waiting", mode: "copilot" } }) })]);
   await settle();
-  assert.ok([...document.querySelectorAll("[role=group] span")].some((p) => p.textContent.replace(/[⁦-⁩]/g, "").startsWith("43 items came back HTTP 429.")));
+  assert.ok([...document.querySelectorAll("[role=group] span")].some((p) => p.textContent.replace(/[⁦-⁩]/g, "").startsWith('1 line like "ERR 429" so far.')));
 });
 
 for (const [source, template, warning] of [

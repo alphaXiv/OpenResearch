@@ -4458,7 +4458,10 @@
         "limitEndsAt": null,
         "flag": {
           "id": "f1",
-          "state": "waiting"
+          "state": "waiting",
+          "template": "Loss **{loss}** rose at step 18.",
+          "text": "Loss **2.31** rose at step 18.",
+          "bindings": null
         },
         "setup": null,
         "generation": "g1",
