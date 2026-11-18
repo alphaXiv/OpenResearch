@@ -306,7 +306,7 @@ pub fn promote_scratch_project(
         store.restamp_local_project_created(&promoted.id)?;
         Ok(promoted)
     })();
-    let mut promoted = match moved {
+    let promoted = match moved {
         Ok(promoted) => promoted,
         Err(error) => {
             let restored = move_repository(&target, &repo)
@@ -324,21 +324,8 @@ pub fn promote_scratch_project(
         }
     };
 
-    // The artifacts folder follows the name; a failed rename keeps the old one.
-    let slug = unique_project_slug(store, &slugify(name))?;
-    let artifacts = super::files::files_dir(project);
-    let renamed = super::files::files_root().join(&slug);
-    if !artifacts.exists() || std::fs::rename(&artifacts, &renamed).is_ok() {
-        let previous = std::mem::replace(&mut promoted.slug, slug);
-        if let Err(error) = store.update_local_project(&promoted) {
-            let _ = std::fs::rename(&renamed, &artifacts);
-            promoted.slug = previous;
-            eprintln!(
-                "orx: kept the artifacts folder of {}: {error}",
-                promoted.name
-            );
-        }
-    }
+    // The slug, and the artifacts folder named by it, stay: the chat's earlier
+    // messages link to files there.
     Ok(store.get_local_project(&project.id)?.unwrap_or(promoted))
 }
 
@@ -581,7 +568,13 @@ fn move_repository(from: &Path, to: &Path) -> Result<()> {
         ));
     }
     std::fs::rename(&temporary, to)?;
-    std::fs::remove_dir_all(from)?;
+    // The copy is complete; a source that won't go away is only wasted space.
+    if let Err(error) = std::fs::remove_dir_all(from) {
+        eprintln!(
+            "orx: could not remove {} after copying it: {error}",
+            from.display()
+        );
+    }
     Ok(())
 }
 
@@ -1592,7 +1585,6 @@ mod tests {
         assert!(!project.is_scratch());
         assert_eq!(project.id, scratch.id);
         assert_eq!(project.name, "Fibonacci sandbox");
-        assert_eq!(project.slug, "fibonacci-sandbox");
         assert_eq!(
             Path::new(&project.repo_path),
             crate::paths::canonicalize(&target).unwrap()
@@ -1613,7 +1605,8 @@ mod tests {
             git_output(&worktree, &["rev-parse", "HEAD"]),
             git_output(&target, &["rev-parse", "HEAD"])
         );
-        // Artifacts follow the new name.
+        // Artifacts stay where the chat's messages link to them.
+        assert_eq!(project.slug, scratch.slug);
         assert!(crate::local::files::files_dir(&project)
             .join("report.md")
             .exists());

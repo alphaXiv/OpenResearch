@@ -73,8 +73,6 @@ test("a folder that already has files blocks creating the project", async () => 
   await render(createElement(ProjectProposalCard, { proposal: { name: "Fib", path: "/home/me/full" }, proposedAt: 10, project, session: { id: "chat_1" } }));
   await act(async () => find("button", m.create_project_review()).click());
   await settle();
-  await new Promise((resolve) => setTimeout(resolve, 250));
-  await settle();
   assert.equal(document.querySelector('[role="dialog"] [role="alert"]')?.textContent, m.create_project_folder_has_files());
   assert.equal(find('[role="dialog"] button', m.create_project_confirm()).disabled, true);
 });

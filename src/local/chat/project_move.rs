@@ -163,6 +163,14 @@ impl ChatHost {
         place: Option<(String, String)>,
     ) -> Result<LocalProject> {
         let (_, _, checked) = scope(&Store::open()?, session_id)?;
+        // Stopped first, while the chats are idle, so none restarts its agent
+        // mid-turn afterwards; their next turn starts in the new project.
+        for id in &checked {
+            self.opencode.kill_session(id).await;
+            self.codex.kill_session(id).await;
+            self.claude.kill_session(id).await;
+            self.acp.stop(id).await;
+        }
         let mut ran = false;
         let moved = self
             .while_idle(&checked, || {
@@ -202,13 +210,6 @@ impl ChatHost {
             Err(_) if !ran => return Err(anyhow!(BUSY)),
             moved => moved?,
         };
-        // Resident agents restart on their next turn in the new project.
-        for id in &sessions {
-            self.opencode.kill_session(id).await;
-            self.codex.kill_session(id).await;
-            self.claude.kill_session(id).await;
-            self.acp.stop(id).await;
-        }
         self.emit_sessions(&sessions).await;
         Ok(created)
     }

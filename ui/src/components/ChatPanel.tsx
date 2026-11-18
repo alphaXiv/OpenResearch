@@ -7651,14 +7651,16 @@ export function ChatPanel({
     if (sideParentSessionId && sideDraftAutonomy !== null && session.autonomy !== sideDraftAutonomy) {
       session = await patchSession(session, { autonomy: sideDraftAutonomy });
     }
-    if (isCurrentScope(sessionsOptions.queryKey) && projectVisitRef.current === visit) {
+    // A chat without a project can land in a scratch project of its own.
+    const here = session.projectId === projectId;
+    if (here && isCurrentScope(sessionsOptions.queryKey) && projectVisitRef.current === visit) {
       setSessions((cur) => [session, ...cur.filter((row) => row.id !== session.id)]);
       if (!queryClient.getQueryData(sessionsOptions.queryKey)) void syncSessionList(true);
     }
     if (isCurrentScope(sessionsOptions.queryKey) && projectVisitRef.current === visit && composerScopeRef.current === scope) {
       // Synchronous, so no frame shows the new route without the launch it continues.
       if (launchMessage) flushSync(() => setLaunch((current) => current?.message === launchMessage ? { ...current, sessionId: session.id } : current));
-      onActiveSessionChangeRef.current(session.id, { replace: true });
+      onActiveSessionChangeRef.current(session.id, { replace: true, projectId: session.projectId });
       composerScopeRef.current = { ...scope, activeId: session.id };
     }
     return session;
