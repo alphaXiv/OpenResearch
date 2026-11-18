@@ -213,10 +213,15 @@ fn paced_ms(seconds: u64) -> i64 {
 
 /// The experiment's gaps, as `watch` in its config gives them, paced like every timer.
 fn gaps(settings: &Value) -> (i64, i64) {
-    let watch = &settings["watch"];
-    let min = watch["minGapS"].as_u64().unwrap_or(MIN_GAP_S);
-    let max = watch["maxGapS"].as_u64().unwrap_or(MAX_GAP_S);
+    let (min, max) = gap_seconds(&settings["watch"]);
     (paced_ms(min), paced_ms(max))
+}
+
+pub(super) fn gap_seconds(watch: &Value) -> (u64, u64) {
+    (
+        watch["minGapS"].as_u64().unwrap_or(MIN_GAP_S),
+        watch["maxGapS"].as_u64().unwrap_or(MAX_GAP_S),
+    )
 }
 
 /// One owned run as a pass or a look reads it now.

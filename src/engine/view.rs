@@ -1296,10 +1296,9 @@ pub(crate) fn config_of(given: &Value, source: &Source, fix: &str) -> Result<Con
                     )));
                 }
             }
-            if let (Some(min), Some(max)) = (gaps.get("minGapS"), gaps.get("maxGapS")) {
-                if min.as_u64() > max.as_u64() {
-                    return Err(refuse("watch's minGapS is longer than its maxGapS".into()));
-                }
+            let (min, max) = super::watch::gap_seconds(watch);
+            if min > max {
+                return Err(refuse("watch's minGapS is longer than its maxGapS".into()));
             }
             Ok(gaps.clone())
         })
@@ -3492,4 +3491,22 @@ mod tests {
         );
         assert_eq!(compile(&text).unwrap().tree, default);
     }
+}
+
+#[cfg(test)]
+#[test]
+fn watch_gaps_are_checked_against_the_same_defaults_as_scheduling() {
+    let source = Source {
+        file: None,
+        patterns: None,
+        config: None,
+    };
+    let refused = |settings: Value| match config_of(&settings, &source, "") {
+        Err(Refusal::Invalid(message)) => message,
+        _ => panic!("accepted {settings}"),
+    };
+    assert_eq!(
+        refused(json!({"watch": {"maxGapS": 60}})),
+        refused(json!({"watch": {"minGapS": 120, "maxGapS": 60}}))
+    );
 }
