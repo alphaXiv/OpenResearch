@@ -668,7 +668,11 @@ impl Parser<'_> {
             }
         }
         if let Some(phase) = attributes.get("phase") {
-            block.insert("phase".into(), json!(self.text(phase, 128)?));
+            let name = phase.value();
+            if name.is_empty() || name.len() > 128 {
+                return Err(self.attribute_problem(phase, "phase must be 1 to 128 bytes".into()));
+            }
+            block.insert("phase".into(), json!(name));
         }
         if let Some(title) = attributes.get("title") {
             block.insert("title".into(), json!(self.text(title, 120)?));
@@ -3157,6 +3161,16 @@ mod tests {
                     .any(|p| p.contains("Pattern 1"))
             );
         }
+    }
+
+    #[test]
+    fn a_block_names_its_reported_stage_verbatim() {
+        let phase = " train ";
+        let stages = orx_signals::plan(&json!([{ "phase": phase }]), true).unwrap();
+        let view = compile(r#"<view><chart y="loss" phase=" train " /></view>"#)
+            .unwrap()
+            .tree;
+        assert_eq!(view["blocks"][0]["phase"], stages[0].phase);
     }
 
     #[test]

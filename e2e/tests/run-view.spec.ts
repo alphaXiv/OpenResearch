@@ -9,7 +9,7 @@ const expect = baseExpect.configure({ timeout: 30_000 })
 
 const VIEW = `<signal name="loss" label="Training loss" digits="3" better="lower" />
 <view headline="loss">
-  <chart y="loss" phase="train" />
+  <chart y="loss" phase=" train " />
 </view>
 `
 
@@ -27,7 +27,7 @@ test("an agent's view labels its runs, and a child's line says how it compares w
 const scale = Number(process.argv[2])
 const tick = () => new Promise((resolve) => setTimeout(resolve, 100))
 const started = performance.now()
-process.stdout.write('::orx:: {"phase":"train","step":0,"of":20,"t":0}\\n')
+process.stdout.write('::orx:: {"phase":" train ","step":0,"of":20,"t":0}\\n')
 for (let step = 1; step <= 20; step++) {
   await tick()
   process.stdout.write('::orx:: {"step":' + step + ',"t":' + ((performance.now() - started) / 1000) + ',"m":{"loss":' + (scale * 2 / step).toFixed(4) + '}}\\n')
@@ -136,7 +136,7 @@ for (let step = 1; step <= 20; step++) {
     expect(readFileSync(path.join(dir, 'stdin-error.txt'), 'utf8')).toContain(`orx exp view set ${experiment} --stdin`)
     expect(readFileSync(path.join(dir, 'after-invalid.json'), 'utf8')).toBe(readFileSync(path.join(dir, 'before-invalid.json'), 'utf8'))
     const status = JSON.parse(readFileSync(path.join(dir, 'status.json'), 'utf8'))
-    expect(status).toMatchObject({ experimentId: experiment, runId: run, status: 'running', stage: 'train', progress: { done: 10, of: 20 }, latest: { loss: 0.16 }, flags: [] })
+    expect(status).toMatchObject({ experimentId: experiment, runId: run, status: 'running', stage: ' train ', progress: { done: 10, of: 20 }, latest: { loss: 0.16 }, flags: [] })
     expect(Object.keys(status).sort()).toEqual(['estimate', 'experimentId', 'flags', 'latest', 'progress', 'runId', 'stage', 'status'])
     agent.script('finished with status **done**', [{ say: 'Child finished.' }])
     await writeFile(path.join(dir, 'half'), 'go\n')
