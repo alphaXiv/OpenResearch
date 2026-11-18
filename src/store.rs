@@ -837,6 +837,8 @@ const FULL_RUNS_PER_PROJECT: i64 = 3;
 const CHAT_ATTACHMENT_SETTLE: Duration = Duration::from_secs(24 * 60 * 60);
 /// A harness writes its session before orx records the id, so the sweep spares recent ones.
 const NATIVE_SESSION_SETTLE: Duration = Duration::from_secs(24 * 60 * 60);
+/// Spare fresh atomic writes, which may still be between creation and rename.
+const SIGNAL_TEMP_SETTLE: Duration = Duration::from_secs(60 * 60);
 const SLIMMED_RUN_PATHS: [&[&str]; 2] = [&["repo", ".venv"], &["repo", ".cache", "uv"]];
 
 const SUBMISSION_HANDLE: (&str, &str) = ("submission-handles", ".json");
@@ -3142,7 +3144,41 @@ impl Store {
                         log_generation_run_id(name).or_else(|| name.strip_suffix(suffix))
                     }
                     "run-signals" => {
-                        signal_generation_run_id(name).or_else(|| name.strip_suffix(suffix))
+                        let generation = signal_generation_run_id(name);
+                        if suffix == ".json" && deleting_runs.is_none() {
+                            let status_temporary = name
+                                .strip_prefix(".openresearch-")
+                                .and_then(|name| name.strip_suffix(".tmp"))
+                                .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok());
+                            let run_temporary = name.contains(".tmp-")
+                                && generation.is_some_and(|id| uuid::Uuid::parse_str(id).is_ok());
+                            if status_temporary || run_temporary {
+                                let path = entry.path();
+                                let metadata = match entry.metadata() {
+                                    Ok(metadata) => metadata,
+                                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                                        continue
+                                    }
+                                    Err(error) => {
+                                        return Err(error).with_context(|| {
+                                            format!(
+                                                "Inspect temporary signal file {}",
+                                                path.display()
+                                            )
+                                        })
+                                    }
+                                };
+                                if metadata.is_file()
+                                    && metadata
+                                        .modified()?
+                                        .elapsed()
+                                        .is_ok_and(|age| age >= SIGNAL_TEMP_SETTLE)
+                                {
+                                    remove_run_artifact(&path)?;
+                                }
+                            }
+                        }
+                        generation.or_else(|| name.strip_suffix(suffix))
                     }
                     _ => name.strip_suffix(suffix),
                 };
@@ -7482,10 +7518,11 @@ pub fn now_ms() -> i64 {
 }
 
 fn signal_generation_run_id(name: &str) -> Option<&str> {
-    let (run, generation) = name
-        .strip_suffix(".json")
-        .and_then(|name| name.split_once(".corrupt-"))
-        .or_else(|| name.split_once(".tmp-"))?;
+    let (run, suffix) = name.split_once('.')?;
+    let generation = suffix
+        .strip_prefix("tmp-")
+        .or_else(|| suffix.strip_prefix("config.tmp-"))
+        .or_else(|| suffix.strip_prefix("corrupt-")?.strip_suffix(".json"))?;
     uuid::Uuid::parse_str(generation).ok()?;
     Some(run)
 }
@@ -10166,6 +10203,31 @@ pub(crate) mod tests {
         assert!(std::fs::read_dir(signals).unwrap().next().is_none());
         drop(store);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn orphan_cleanup_reclaims_interrupted_signal_status_and_config_writes() {
+        let directory = crate::local::git::TemporaryDirectory::new("orx-signal-temp").unwrap();
+        let store = Store::open_at(directory.path().to_path_buf()).unwrap();
+        let signals = directory.path().join("run-signals");
+        std::fs::create_dir_all(&signals).unwrap();
+        let run = uuid::Uuid::new_v4();
+        let orphan = signals.join(format!("{run}.config.tmp-{}", uuid::Uuid::new_v4()));
+        let status = signals.join(format!(".openresearch-{}.tmp", uuid::Uuid::new_v4()));
+        let recent = signals.join(format!(".openresearch-{}.tmp", uuid::Uuid::new_v4()));
+        for file in [&orphan, &status, &recent] {
+            std::fs::write(file, b"partial").unwrap();
+        }
+        std::fs::File::open(&status)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH)
+            .unwrap();
+
+        store.cleanup_orphaned_run_artifacts().unwrap();
+
+        assert!(!orphan.exists());
+        assert!(!status.exists());
+        assert!(recent.exists());
     }
 
     #[test]
