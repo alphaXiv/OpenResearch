@@ -12,6 +12,8 @@
   --color-highlight: var(--highlight);
   --color-text: var(--text);
   --color-subtext: var(--subtext);
+  --color-title-read: var(--title-read);
+  --color-title-unread: var(--title-unread);
   --color-muted: var(--muted);
   --color-primary: var(--primary);
   --color-border: var(--border);
@@ -159,6 +161,9 @@
   --code-selection: var(--selection-background);
   --text: #171717;
   --subtext: #737373;
+  /* Sidebar chat titles: unread at full contrast, read halfway from subtext to it. */
+  --title-read: #3a3a3a;
+  --title-unread: #000000;
   --muted: #a1a1a1;
   --primary: #9a2036;
   --border: #d4d4d4;
@@ -270,6 +275,8 @@
   --editor-selection: rgb(255 255 255 / 14%);
   --text: #dcdcdc;
   --subtext: #9e9e9e;
+  --title-read: #cfcfcf;
+  --title-unread: #ffffff;
   --muted: #737373;
   --primary: #ffb3ad;
   --lineage: #8eafd2;

@@ -220,6 +220,7 @@ pub fn create_project(
         repo_path: repo_path.to_string_lossy().to_string(),
         run_command: run_command.filter(|c| !c.trim().is_empty()),
         paper_id: paper_id.filter(|p| !p.trim().is_empty()),
+        icon: None,
         created_at: now,
         updated_at: now,
     };
@@ -255,6 +256,7 @@ pub fn scratch_project(store: &Store) -> Result<LocalProject> {
         repo_path: repo.to_string_lossy().into_owned(),
         run_command: None,
         paper_id: None,
+        icon: None,
         created_at: now,
         updated_at: now,
     };
@@ -422,6 +424,7 @@ pub fn split_chat_project(
             .into_owned(),
         run_command: project.run_command.clone(),
         paper_id: project.paper_id.clone(),
+        icon: None,
         created_at: now,
         updated_at: now,
     };

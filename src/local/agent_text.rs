@@ -19,6 +19,7 @@ pub(super) fn sample_project() -> LocalProject {
         repo_path: "/tmp/nonexistent".into(),
         run_command: None,
         paper_id: None,
+        icon: None,
         created_at: 0,
         updated_at: 0,
     }

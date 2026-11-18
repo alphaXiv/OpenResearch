@@ -59,7 +59,7 @@ test('a chat in a project moves into a new one once its turn ends', async ({ pag
   await agent.reached('working')
 
   await page.getByRole('complementary').getByRole('button', { name: /^Write a probe and keep working\./ }).click({ button: 'right' })
-  await page.getByRole('button', { name: 'Move to a new project…' }).click()
+  await page.getByRole('menuitem', { name: 'Move to a new project…' }).click()
   const dialog = page.getByRole('dialog')
   await dialog.getByRole('textbox', { name: 'Project name' }).fill('Split off')
   await dialog.getByRole('textbox', { name: 'Project location' }).fill(folder)

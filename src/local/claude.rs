@@ -91,6 +91,8 @@ struct TurnSlot {
     /// resumes on its own when one finishes, so it must outlive them, even one
     /// that never ends.
     background: HashSet<String>,
+    /// When `background` last went from empty to not, in epoch milliseconds.
+    background_since: Option<i64>,
     /// A segment the child began on its own after a turn ended, held until a
     /// turn takes it.
     unclaimed: Option<Vec<Value>>,
@@ -109,6 +111,7 @@ impl TurnSlot {
             idle_since: now,
             served: false,
             background: HashSet::new(),
+            background_since: None,
             unclaimed: None,
             recording: false,
             task_finished_at: None,
@@ -167,10 +170,12 @@ impl TurnSlot {
         true
     }
 
-    fn track_background(&mut self, event: &Value, now: Instant) {
+    /// Follows the child's background tasks; returns whether how many there are changed.
+    fn track_background(&mut self, event: &Value, now: Instant) -> bool {
         if event.get("type").and_then(Value::as_str) != Some("system") {
-            return;
+            return false;
         }
+        let before = self.background.len();
         let task_id = || {
             event
                 .get("task_id")
@@ -196,6 +201,12 @@ impl TurnSlot {
             }
             _ => {}
         }
+        if self.background.is_empty() {
+            self.background_since = None;
+        } else if before == 0 {
+            self.background_since = Some(crate::store::now_ms());
+        }
+        self.background.len() != before
     }
 
     /// Whether a line no turn is listening for starts a segment the child
@@ -676,7 +687,14 @@ async fn read_loop(client: Arc<ClaudeClient>, stdout: tokio::process::ChildStdou
                 // line (an aborted turn's tail) is dropped once its tool
                 // identities are recorded.
                 let mut turn = client.turn.lock().unwrap();
-                turn.track_background(&value, Instant::now());
+                if turn.track_background(&value, Instant::now()) {
+                    if let Some(chat) = client.chat.upgrade() {
+                        chat.emit_event(
+                            "chat.background",
+                            json!({ "sessionId": client.session_id }),
+                        );
+                    }
+                }
                 if let Some(tx) = turn.sender.as_ref() {
                     let _ = tx.send(TurnEvent::Line(value));
                 } else if let Some(lines) = turn.unclaimed.as_mut() {
@@ -745,6 +763,15 @@ async fn end_client(client: &Arc<ClaudeClient>, interrupt: bool) {
 async fn end_detached(client: &ClaudeClient, interrupt: bool) {
     if client.terminated.swap(true, Ordering::AcqRel) {
         return;
+    }
+    // The tasks die with the child, and nothing will resume to report them.
+    let abandoned = {
+        let mut turn = client.turn.lock().unwrap();
+        turn.background_since = None;
+        !std::mem::take(&mut turn.background).is_empty()
+    };
+    if let Some(chat) = client.chat.upgrade().filter(|_| abandoned) {
+        chat.emit_event("chat.background", json!({ "sessionId": client.session_id }));
     }
     #[cfg(unix)]
     let group = Some(client.process_group_id);
@@ -1539,6 +1566,22 @@ impl ClaudeHost {
         .await
         .map_err(|e| anyhow!("claude bring-up task failed: {e}"))??;
         Ok(client.register_turn(tx, self.reaper_notify.clone()))
+    }
+
+    /// How many background tasks each live child has unfinished, and since
+    /// when the first of them has run, by session id.
+    pub async fn background_tasks(&self) -> HashMap<String, (usize, i64)> {
+        let live: Vec<_> = self.inner.lock().await.values().cloned().collect();
+        live.iter()
+            .filter(|client| !client.terminated.load(Ordering::Acquire))
+            .filter_map(|client| {
+                let turn = client.turn.lock().unwrap();
+                let since = turn
+                    .background_since
+                    .filter(|_| !turn.background.is_empty())?;
+                Some((client.session_id.clone(), (turn.background.len(), since)))
+            })
+            .collect()
     }
 
     /// Whether the session's child holds a segment it started on its own that
@@ -2383,6 +2426,30 @@ pub(crate) mod tests {
         host.reap_expired_at(Instant::now() + TASK_REPORT_GRACE, IdlePolicy::LOW_MEMORY)
             .await;
         assert!(!host.inner.lock().await.contains_key("reporting"));
+        host.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn background_tasks_are_listed_from_the_first_start_until_the_last_finishes() {
+        let (host, client) = echo_worker("listed").await;
+        let started =
+            |id: &str| json!({"type": "system", "subtype": "task_started", "task_id": id});
+        let finished =
+            |id: &str| json!({"type": "system", "subtype": "task_notification", "task_id": id});
+        assert!(host.background_tasks().await.is_empty());
+
+        emit(&client, &[started("a")]).await;
+        let (_, since) = host.background_tasks().await["listed"];
+        emit(&client, &[started("b"), finished("a")]).await;
+        assert_eq!(
+            host.background_tasks().await["listed"],
+            (1, since),
+            "a task still runs since the first began"
+        );
+
+        emit(&client, &[finished("b")]).await;
+        assert!(host.background_tasks().await.is_empty());
         host.shutdown().await;
     }
 

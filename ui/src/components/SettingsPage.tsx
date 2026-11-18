@@ -20,6 +20,7 @@ import { SkillsTab } from "./SkillsTab";
 import { confirmDeleteProject } from "./ProjectInfoCard";
 import { useFileManagerLabel } from "./useFileManagerLabel";
 import { mutUpdateProject } from "../queries/projects";
+import { ProjectIconButton } from "./ProjectIcon";
 import { formatAcpCommand } from "../acp";
 import { TARGET_LABELS } from "../computeTargets";
 import { AcpAuthDialog } from "./AcpAuthDialog";
@@ -101,6 +102,7 @@ import {
   type EnvVar,
   type FoundProvider,
   type Project,
+  type ProjectIcon,
   type AgentIcon,
   modelLabel,
   tidyModelName,
@@ -5069,6 +5071,12 @@ function ProjectSettings({ project, onRemoved }: { project: Project; onRemoved: 
       onSettled: () => setSaving(false),
     });
   };
+  const setIcon = (icon: ProjectIcon) => {
+    setError(null);
+    mutUpdateProject.runWithOptions(workspace, project.id, { icon }, {
+      onError: (err) => setError(err instanceof Error ? err.message : String(err)),
+    });
+  };
   const reveal = () => {
     void workspace.api.revealFileInManager(project.id, ".").catch((err: unknown) => showAlert(err instanceof Error ? err.message : String(err), "error"));
   };
@@ -5081,7 +5089,8 @@ function ProjectSettings({ project, onRemoved }: { project: Project; onRemoved: 
           <div className={SETTINGS_CARD_CLASS_NAME}>
             <form className={`${PROJECT_DEFAULT_ROW_CLASS_NAME} flex-wrap gap-y-2`} onSubmit={(event) => { event.preventDefault(); rename(); }}>
               <label htmlFor={nameId} className="project-default-title text-base font-medium">{m.new_project_form_project_name()}</label>
-              <div className="flex min-w-0 flex-1 justify-end gap-2">
+              <div className="flex min-w-0 flex-1 items-center justify-end gap-2">
+                <ProjectIconButton project={project} name={name} value={project.icon} onChange={setIcon} disabled={saving} />
                 <Input id={nameId} value={name} disabled={saving} onChange={(event) => setDraft(event.target.value)} className="w-72 min-w-0" />
                 <Button type="submit" disabled={!changed || saving}>{saving && <Spinner />}{m.common_save()}</Button>
               </div>

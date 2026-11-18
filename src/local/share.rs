@@ -1128,6 +1128,7 @@ mod tests {
             repo_path: String::new(),
             run_command: None,
             paper_id: None,
+            icon: None,
             created_at: 0,
             updated_at: 0,
         };
