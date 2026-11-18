@@ -3,9 +3,8 @@ import json, os, platform, textwrap
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 root=Path("evidence-opencode")
-all={name:json.loads((root/(name+".json")).read_text()) for name in ("base","fixed","origin")}
+all={name:json.loads((root/(name+".json")).read_text()) for name in ("base","origin")}
 for candidate,modes,title in [
- ("fixed",["timeout-metadata","timeout-asset"],"OpenCode setup: an intermittent vendor timeout"),
  ("origin",["refusal-metadata","refusal-asset","native"],"OpenCode setup: attribute a failed install or update")]:
     img=Image.new("RGB",(1500,240+245*len(modes)),"#f2f4f5");d=ImageDraw.Draw(img)
     font=lambda s:ImageFont.load_default(size=s)

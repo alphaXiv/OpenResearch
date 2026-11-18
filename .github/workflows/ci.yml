@@ -8,7 +8,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest]
+        os: [windows-latest, macos-15, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 75
     env:
@@ -22,7 +22,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           path: product
-          ref: 2567ddf9eb09c6acedc150e6f5c82e5b1b0262a1
+          ref: 48c35db6e3a09676064241f9dcc0781f59b00128
           persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
@@ -40,12 +40,15 @@ jobs:
           ORX_EMBED_HOST_DIR: ${{ runner.temp }}/orx-hosts
         run: |
           set -euo pipefail
-          for pair in 'base 2567ddf9eb09c6acedc150e6f5c82e5b1b0262a1' 'fixed 1c3f67869058440272aa505eb008ae4385860edb' 'origin 9bbd3555d56d2383007df7128d3ce111a772f644'; do
+          for pair in 'base 48c35db6e3a09676064241f9dcc0781f59b00128' 'origin cb5926405b7957d1033df14f22ec232f681dfb52'; do
             read -r label sha <<< "$pair"
             git -C product fetch --depth=1 origin "$sha"
             git -C product checkout --detach "$sha"
             test "$(git -C product rev-parse HEAD)" = "$sha"
             (cd product && cargo build --locked --bin orx)
+            if [[ "$label" == origin ]]; then
+              (cd product && cargo test --locked --bin orx telemetry::tests::install_failure_steps_reach_the_collector -- --ignored --exact)
+            fi
             ext=''; if [[ "$RUNNER_OS" == Windows ]]; then ext='.exe'; fi
             node evidence/proof/opencode.mjs "$label" "$sha" "product/target/debug/orx$ext"
           done

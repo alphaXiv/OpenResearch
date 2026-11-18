@@ -73,5 +73,5 @@ async function exercise(mode) {
     all.push(row);fs.writeFileSync(path.join(dest,variant+'.json'),JSON.stringify(all,null,2));console.log(JSON.stringify(row));
   }finally{ws?.close();lines.close();app.kill();for(const s of sockets)s.destroy();server.closeAllConnections();server.close();}
 }
-for(const mode of (variant==='base'?['timeout-metadata','timeout-asset','refusal-metadata','refusal-asset','native']:variant==='fixed'?['timeout-metadata','timeout-asset']:['refusal-metadata','refusal-asset','native']))await exercise(mode);
+for(const mode of ['refusal-metadata','refusal-asset','native'])await exercise(mode);
 fs.writeFileSync(path.join(dest,variant+'.json'),JSON.stringify(all,null,2));
