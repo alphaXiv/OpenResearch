@@ -625,7 +625,7 @@ run.step(3, odd="\udc80")
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let warnings = String::from_utf8(output.stderr).unwrap();
+        let warnings = String::from_utf8_lossy(&output.stderr);
         for dropped in [
             "the whole plan for the total 0",
             "the whole plan: it lists 65 stages",
