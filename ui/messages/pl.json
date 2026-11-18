@@ -2205,6 +2205,7 @@
   "sidebar_inbox": "Skrzynka",
   "chat_inbox_working": "W toku",
   "chat_inbox_done": "Gotowe",
+  "chat_inbox_other": "Inne",
   "chat_status_working_for": "Pracuje {duration}",
   "chat_status_working": "Pracuje",
   "chat_status_running": "Działa {duration}",

@@ -1878,7 +1878,8 @@ export interface ChatSearchPage {
   requiresLongerQuery: boolean;
 }
 export interface SidebarChatCursor { updatedAt: number; id: string }
-export interface SidebarChatPage { sessions: ChatSession[]; next: SidebarChatCursor | null }
+/** `total` counts the chats the filter holds, however far down the pages they run; a server too old to send it omits it. */
+export interface SidebarChatPage { sessions: ChatSession[]; next: SidebarChatCursor | null; total?: number }
 
 /** Per-session (and per-turn) composer selections beyond the harness itself. */
 export interface TurnOptions {

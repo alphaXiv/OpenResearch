@@ -2205,6 +2205,7 @@
   "sidebar_inbox": "صندوق ورودی",
   "chat_inbox_working": "در حال کار",
   "chat_inbox_done": "تمام‌شده",
+  "chat_inbox_other": "دیگر",
   "chat_status_working_for": "در حال کار {duration}",
   "chat_status_working": "در حال کار",
   "chat_status_running": "در حال اجرا {duration}",

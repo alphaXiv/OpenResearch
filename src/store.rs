@@ -3746,6 +3746,18 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// How many chats the sidebar's archive filter holds, however far down its paging they run.
+    pub fn count_sidebar_chat_sessions(&self, archived: Option<bool>) -> Result<i64> {
+        Ok(self.conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM chat_sessions
+                 WHERE {TOP_LEVEL_CHATS} AND (?1 IS NULL OR archived = ?1)"
+            ),
+            params![archived],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Top-level chats with an experiment run in flight, wherever they fall in the sidebar's paging.
     /// Top-level chats still at work: with an experiment running, or among `live`,
     /// the chats whose agent or delegates the server sees working.
@@ -11456,6 +11468,10 @@ pub(crate) mod tests {
             store.list_sidebar_chat_sessions(None, None).unwrap()[0].id,
             "chat_064"
         );
+        // A folded section counts every chat it holds, not just the page in hand.
+        assert_eq!(store.count_sidebar_chat_sessions(Some(false)).unwrap(), 60);
+        assert_eq!(store.count_sidebar_chat_sessions(Some(true)).unwrap(), 5);
+        assert_eq!(store.count_sidebar_chat_sessions(None).unwrap(), 65);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

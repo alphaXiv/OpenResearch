@@ -2205,6 +2205,7 @@
   "sidebar_inbox": "Bandeja",
   "chat_inbox_working": "En curso",
   "chat_inbox_done": "Terminados",
+  "chat_inbox_other": "Otros",
   "chat_status_working_for": "Trabajando {duration}",
   "chat_status_working": "Trabajando",
   "chat_status_running": "Ejecutando {duration}",

@@ -9676,7 +9676,12 @@ async fn list_chat_sessions(
                 )
             })
             .collect::<Result<_>>()?;
-        return Ok(Json(json!({ "sessions": sessions, "next": next })));
+        // A folded section still says how much it holds, so the count comes with the page rather than from paging it all.
+        return Ok(Json(json!({
+            "sessions": sessions,
+            "next": next,
+            "total": store.count_sidebar_chat_sessions(q.archived)?,
+        })));
     }
     let sessions = match (q.project_id.as_deref(), q.scope.as_deref()) {
         (Some(project_id), _) => store.list_chat_sessions_by_project(project_id)?,

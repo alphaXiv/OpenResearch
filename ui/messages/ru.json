@@ -2205,6 +2205,7 @@
   "sidebar_inbox": "Входящие",
   "chat_inbox_working": "В работе",
   "chat_inbox_done": "Готово",
+  "chat_inbox_other": "Другие",
   "chat_status_working_for": "Работает {duration}",
   "chat_status_working": "Работает",
   "chat_status_running": "Идёт {duration}",

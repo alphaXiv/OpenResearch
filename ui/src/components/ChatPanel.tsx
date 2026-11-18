@@ -40,7 +40,7 @@ import { DelegateCard } from "./DelegateCard";
 import { EnvRequestCard } from "./EnvRequestCard";
 import { delegateStatus, delegatesOf, type DelegateStatus } from "../delegates";
 import { taskLocation } from "../workspaceState";
-import { DONE_PREVIEW_HEIGHT, fitSidebarRows, sidebarGroup, sidebarRowHeight, type SidebarRow } from "../sidebarLayout";
+import { DONE_PREVIEW_HEIGHT, fitSidebarRows, sidebarGroup, sidebarRowHeight, type SidebarRow, type SidebarSection } from "../sidebarLayout";
 import { useVirtualizer, defaultRangeExtractor, elementScroll, measureElement as measureVirtualElement, type Range as VirtualRange } from "@tanstack/react-virtual";
 import { markLiveUpdate } from "../queries/live";
 import {
@@ -6150,8 +6150,12 @@ export function ChatPanel({
   }, [doneExpanded, closeDone]);
   const doneSessions = useInfiniteQuery({
     ...listSidebarChatSessionsQuery("archived"),
-    enabled: !embedded && doneExpanded,
+    // Read even while Done is folded: its header counts what it holds, and the rows are there when it opens.
+    enabled: !embedded && sidebarGrouping === "inbox",
   });
+  const doneCount = doneSessions.data?.pages[0]?.total
+    ?? doneSessions.data?.pages.flatMap((page) => page.sessions).length
+    ?? 0;
   const sessionsOptions = useMemo(() => listChatSessionsQuery(projectId), [projectId]);
   const { data: sessions = EMPTY_SESSIONS, isSuccess: sessionsLoaded } = useQuery(sessionsOptions);
   const setSessions = useCallback((value: React.SetStateAction<ChatSession[]>) => {
@@ -8315,7 +8319,7 @@ export function ChatPanel({
         retry: () => { void (query.isFetchNextPageError ? query.fetchNextPage() : query.refetch()); } });
     }
   };
-  // Rows past this index belong to Working and Done; paging the open chats only needs to keep up with the rows above it.
+  // The rows past this index are Done's; folding it away only needs to keep up with the rows above it.
   let inboxEnd = 0;
   const flatListed = flatSessions.data?.pages.flatMap((page) => page.sessions) ?? EMPTY_SESSIONS;
   if (sidebarGrouping === "list") {
@@ -8327,16 +8331,23 @@ export function ChatPanel({
       chatStatusWorking(chatStatus(session, sessionBusy(project, session), sessionWaiting(session), runsBySession.get(session.id) ?? EMPTY_RUNS)));
     // Newest first by creation, so streaming updates don't reshuffle what's running.
     working.sort((a, b) => b.session.createdAt - a.session.createdAt);
-    open.filter((chat) => !working.includes(chat)).forEach(({ project, session }) => sidebarRows.push({ kind: "inbox", project, session }));
-    pushListStatus(flatSessions, !open.length);
-    inboxEnd = sidebarRows.length;
+    const other = open.filter((chat) => !working.includes(chat));
 
+    // Working sits on top: a chat at work is what the inbox is for. A section with nothing in it stays out of the way.
     const workingCollapsed = collapsedInbox.includes("working");
     if (working.length) {
       sidebarRows.push({ kind: "section", section: "working", collapsed: workingCollapsed, count: working.length });
       if (!workingCollapsed) working.forEach(({ project, session }) => sidebarRows.push({ kind: "inbox", project, session }));
     }
-    sidebarRows.push({ kind: "section", section: "done", collapsed: !doneExpanded, count: 0 });
+    const otherCollapsed = collapsedInbox.includes("other");
+    if (other.length) {
+      sidebarRows.push({ kind: "section", section: "other", collapsed: otherCollapsed, count: other.length });
+      if (!otherCollapsed) other.forEach(({ project, session }) => sidebarRows.push({ kind: "inbox", project, session }));
+    }
+    pushListStatus(flatSessions, !open.length);
+    inboxEnd = sidebarRows.length;
+
+    sidebarRows.push({ kind: "section", section: "done", collapsed: !doneExpanded, count: doneCount });
     const doneStart = sidebarRows.length;
     if (doneExpanded) {
       const done = listedChats(doneSessions.data?.pages.flatMap((page) => page.sessions) ?? EMPTY_SESSIONS, true);
@@ -8349,7 +8360,7 @@ export function ChatPanel({
     const unique = sidebarRows.filter((row) => !("session" in row) || (!seen.has(row.session.id) && Boolean(seen.add(row.session.id))));
     sidebarRows.splice(0, sidebarRows.length, ...unique);
 
-    // Holds Working and a preview of Done at the rail's foot while the inbox is short; scrolling closes the gap first.
+    // Holds Done at the rail's foot while the sections above it are short; scrolling closes the gap first.
     const heightOf = (rows: SidebarRow[]) => rows.reduce((total, row) => total + sidebarRowHeight(row), 0);
     const height = heightOf(sidebarRows.slice(0, doneStart)) + Math.min(heightOf(sidebarRows.slice(doneStart)), DONE_PREVIEW_HEIGHT);
     if (height < railHeight) sidebarRows.splice(inboxEnd, 0, { kind: "spacer", height: railHeight - height });
@@ -8418,7 +8429,7 @@ export function ChatPanel({
   const sidebarVirtualItems = sidebarVirtualizer.getVirtualItems();
 
   // A section just opened scrolls into view far enough to show its first rows.
-  const railReveal = useRef<"working" | "done" | null>(null);
+  const railReveal = useRef<SidebarSection | null>(null);
   // Where each row was last drawn at rest, from the top of the rail's viewport.
   const railRest = useRef(new Map<string, number>());
   useLayoutEffect(() => {
@@ -8598,9 +8609,9 @@ export function ChatPanel({
   const openRuntimeDetails = useCallback(() => onSelectMainView("openresearch"), [onSelectMainView]);
   const openSettings = useCallback(() => onSelectMainView("settings"), [onSelectMainView]);
 
-  /** How far above the rail's foot a section header pins: Working sits on Done's header. */
-  const railStickyBottom = (section: "working" | "done") => {
-    const done = section === "working" ? sidebarRows.find((row) => row.kind === "section" && row.section === "done") : undefined;
+  /** How far above the rail's foot a section header pins: Done holds the foot, so the sections above it pin on its header. */
+  const railStickyBottom = (section: SidebarSection) => {
+    const done = section === "done" ? undefined : sidebarRows.find((row) => row.kind === "section" && row.section === "done");
     return done ? sidebarRowHeight(done) : 0;
   };
   const railGap = inboxPinned ? sidebarVirtualizer.measurementsCache[inboxEnd]?.size ?? 0 : 0;
@@ -8695,8 +8706,8 @@ export function ChatPanel({
           onFocusCapture={() => setFocusedSidebarRow(sidebarRowKey(row))}>
           <button data-sidebar-keyboard-row aria-expanded={!row.collapsed} onClick={toggle}
             className="group/section flex h-full w-full items-end gap-1 rounded-md px-2.25 pb-1.5 text-start text-sm font-medium text-subtext hover:text-text">
-            <span>{row.section === "working" ? m.chat_inbox_working() : m.chat_inbox_done()}</span>
-            {row.section === "working" && row.collapsed && <span className="tabular-nums text-muted">{fmtNumber(row.count)}</span>}
+            <span>{row.section === "working" ? m.chat_inbox_working() : row.section === "other" ? m.chat_inbox_other() : m.chat_inbox_done()}</span>
+            {row.collapsed && row.count > 0 && <span className="tabular-nums text-muted">{fmtNumber(row.count)}</span>}
             <ChevronRight size={14} aria-hidden="true"
               className={`mb-px shrink-0 text-muted transition-transform duration-120 ease-standard motion-reduce:transition-none ${row.collapsed ? "" : "rotate-90"}`} />
             <span aria-hidden="true" className="mb-2.5 ms-1.5 h-px flex-1 bg-border-variant" />

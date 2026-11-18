@@ -2205,6 +2205,7 @@
   "sidebar_inbox": "صندوق الوارد",
   "chat_inbox_working": "قيد العمل",
   "chat_inbox_done": "منتهية",
+  "chat_inbox_other": "أخرى",
   "chat_status_working_for": "يعمل {duration}",
   "chat_status_working": "يعمل",
   "chat_status_running": "قيد التشغيل {duration}",

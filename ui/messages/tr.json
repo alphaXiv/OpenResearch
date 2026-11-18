@@ -2205,6 +2205,7 @@
   "sidebar_inbox": "Gelen kutusu",
   "chat_inbox_working": "Çalışanlar",
   "chat_inbox_done": "Bitenler",
+  "chat_inbox_other": "Diğerleri",
   "chat_status_working_for": "Çalışıyor {duration}",
   "chat_status_working": "Çalışıyor",
   "chat_status_running": "Koşuyor {duration}",

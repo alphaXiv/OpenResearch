@@ -1,9 +1,12 @@
 import type { ChatSession, Project } from "./api";
 
+/** The inbox's sections, top to bottom: what is at work, the rest of the open chats, and Done at the rail's foot. */
+export type SidebarSection = "working" | "other" | "done";
+
 export type SidebarRow =
   | { kind: "project"; project: Project; collapsed: boolean; busy: boolean }
   | { kind: "chat"; project: Project; session: ChatSession }
-  | { kind: "section"; section: "working" | "done"; collapsed: boolean; count: number }
+  | { kind: "section"; section: SidebarSection; collapsed: boolean; count: number }
   | { kind: "inbox"; project: Project; session: ChatSession }
   | { kind: "done"; project: Project; session: ChatSession }
   | { kind: "spacer"; height: number }

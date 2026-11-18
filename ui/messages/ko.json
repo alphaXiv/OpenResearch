@@ -2205,6 +2205,7 @@
   "sidebar_inbox": "받은함",
   "chat_inbox_working": "작업 중",
   "chat_inbox_done": "완료",
+  "chat_inbox_other": "기타",
   "chat_status_working_for": "작업 중 {duration}",
   "chat_status_working": "작업 중",
   "chat_status_running": "실행 중 {duration}",

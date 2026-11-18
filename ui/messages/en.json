@@ -2205,6 +2205,7 @@
   "sidebar_inbox": "Inbox",
   "chat_inbox_working": "Working",
   "chat_inbox_done": "Done",
+  "chat_inbox_other": "Other",
   "chat_status_working_for": "Working {duration}",
   "chat_status_working": "Working",
   "chat_status_running": "Running {duration}",

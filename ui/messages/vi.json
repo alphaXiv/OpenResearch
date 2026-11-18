@@ -2205,6 +2205,7 @@
   "sidebar_inbox": "Hộp thư đến",
   "chat_inbox_working": "Đang làm việc",
   "chat_inbox_done": "Xong",
+  "chat_inbox_other": "Khác",
   "chat_status_working_for": "Đang làm việc {duration}",
   "chat_status_working": "Đang làm việc",
   "chat_status_running": "Đang chạy {duration}",
