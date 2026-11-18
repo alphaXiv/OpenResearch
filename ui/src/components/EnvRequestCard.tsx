@@ -50,7 +50,7 @@ function EnvRequestForm({
   const saved = useQuery(useWorkspace().queries.getEnvVarsQuery(projectId)).data;
   const headingId = useId();
 
-  const [values, setValues] = useState<Record<string, string>>({});
+  const [values, setValues] = useState<ReadonlyMap<string, string>>(() => new Map());
   const [validation, setValidation] = useState<{ values: typeof values; variables: EnvRequestVar[]; mismatches: string[] }>();
   const [selectedScope, setScope] = useState<EnvScope>("project");
   const [menuOpen, setMenuOpen] = useState(false);
@@ -58,7 +58,7 @@ function EnvRequestForm({
   useEffect(() => {
     if (done) return;
     const fields = variables.flatMap(({ name, pattern }) => {
-      const value = values[name]?.trim();
+      const value = values.get(name)?.trim();
       return pattern && value ? [{ name, pattern, value }] : [];
     });
     if (!fields.length) return;
@@ -90,12 +90,10 @@ function EnvRequestForm({
   const [beforeScope, afterScope] = m.chat_env_footer({ scope: "\0" }).split("\0");
   const savedVars = scope === "project" ? saved?.projectVars : saved?.vars;
   const mismatches = validation?.values === values && validation.variables === variables ? validation.mismatches : [];
-  const answers: EnvAnswer[] = variables
-    .filter((variable) => values[variable.name]?.trim())
-    .map((variable) => {
-      const value = values[variable.name].trim();
-      return { name: variable.name, value, scope, mismatched: mismatches.includes(variable.name) };
-    });
+  const answers: EnvAnswer[] = variables.flatMap(({ name }) => {
+    const value = values.get(name)?.trim();
+    return value ? [{ name, value, scope, mismatched: mismatches.includes(name) }] : [];
+  });
 
   const save = () => { if (answers.length) void respond({ approve: true, env: answers }); };
 
@@ -117,7 +115,7 @@ function EnvRequestForm({
           const descriptionId = `${headingId}-${index}-description`;
           const warningId = `${headingId}-${index}-warning`;
           const current = savedVars?.find((entry) => entry.key === variable.name);
-          const value = values[variable.name] ?? "";
+          const value = values.get(variable.name) ?? "";
           const mismatched = mismatches.includes(variable.name);
           return (
             <div key={variable.name} className="flex flex-col gap-1.5">
@@ -129,7 +127,10 @@ function EnvRequestForm({
               <Input
                 type={variable.secret ? "password" : "text"}
                 value={value}
-                onChange={(event) => setValues((all) => ({ ...all, [variable.name]: event.target.value }))}
+                onChange={(event) => {
+                  const value = event.currentTarget.value;
+                  setValues((all) => new Map(all).set(variable.name, value));
+                }}
                 placeholder={variable.example}
                 aria-label={m.a11y_value_for({ name: ltr(variable.name) })}
                 aria-invalid={mismatched || undefined}

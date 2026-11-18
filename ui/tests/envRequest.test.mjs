@@ -127,6 +127,22 @@ test("declining an env card sends no values, and a saved variable is marked", as
   assert.deepEqual(view.answers(), [{ promptId: "env_1", approve: false }]);
 });
 
+test("valid names shared with object properties start blank and can be saved", async () => {
+  const names = ["constructor", "toString", "__proto__"];
+  const view = await waiting(request(names.map((name) => ({ name, secret: false }))));
+
+  for (const name of names) assert.equal(view.field(name).value, "");
+  assert.ok(view.button(m.common_save()).disabled);
+  await type(view.field("__proto__"), "configured");
+  await click(view.button(m.common_save()));
+
+  assert.deepEqual(view.answers(), [{
+    promptId: "env_1",
+    approve: true,
+    env: [{ name: "__proto__", value: "configured", scope: "project", mismatched: false }],
+  }]);
+});
+
 test("an answered env card records where each variable went, never its value", async () => {
   const chat = await renderChat("/projects/p/tasks/s", {
     transcripts: { s: [userMessage("u1", "start"), assistantMessage("a1", [request([
