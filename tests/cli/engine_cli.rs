@@ -752,6 +752,82 @@ async fn abandon_says_the_cancel_stays_pending_only_once_the_server_accepts() {
     server.abort();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn launch_requires_server_support_only_when_a_budget_is_set() {
+    use axum::{
+        routing::{get, post},
+        Json, Router,
+    };
+    use serde_json::{json, Value};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    };
+
+    let sandbox = Sandbox::new();
+    sandbox.project("echo done\n");
+    let supported = Arc::new(AtomicBool::new(false));
+    let capability = supported.clone();
+    let launches = Arc::new(Mutex::new(Vec::new()));
+    let recorded = launches.clone();
+    let app = Router::new()
+        .route(
+            "/api/v2/hello",
+            get(move || {
+                let supported = capability.load(Ordering::SeqCst);
+                async move {
+                    let mut hello = json!({"version":"0.2.27","proto":2});
+                    if supported {
+                        hello["runBudget"] = json!(true);
+                    }
+                    Json(hello)
+                }
+            }),
+        )
+        .route(
+            "/api/v2/runs",
+            post(move |Json(body): Json<Value>| {
+                recorded.lock().unwrap().push(body);
+                async {
+                    Json(json!({
+                        "id":"test-run", "experimentId":"exp", "status":"submitting",
+                        "contact":{"type":"live"}, "durationSecs":0, "updatedDisplay":"now"
+                    }))
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let launch = |extra: &[&str]| {
+        sandbox
+            .command()
+            .env("ORX_UP_PORT", port.to_string())
+            .env("ORX_UP_AUTH_TOKEN", "test-only")
+            .args(["exp", "run", "exp", "--backend", "local"])
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+
+    let refused = launch(&["--budget", "5"]);
+    assert!(!refused.status.success(), "{}", diagnostics(&refused));
+    let error = diagnostics(&refused);
+    assert!(error.contains("--budget"), "{error}");
+    assert!(launches.lock().unwrap().is_empty());
+    let plain = launch(&[]);
+    assert!(plain.status.success(), "{}", diagnostics(&plain));
+
+    supported.store(true, Ordering::SeqCst);
+    let accepted = launch(&["--budget", "5"]);
+    assert!(accepted.status.success(), "{}", diagnostics(&accepted));
+    let requests = launches.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0]["budget"].is_null());
+    assert_eq!(requests[1]["budget"], 5.0);
+    server.abort();
+}
+
 #[test]
 fn launch_refuses_a_time_limit_rule_when_the_run_has_no_limit() {
     let sandbox = Sandbox::new();
