@@ -480,6 +480,24 @@ test("a monitor that can't be refreshed keeps its chart and says so once, how ol
   assert.ok(container.querySelector('[role="progressbar"]'), "the bar stays below the chart");
 });
 
+test("a failed first read freezes the closed line and Retry brings back its countdown", async () => {
+  const monitors = { r1: Response.json({ error: "The monitor is down." }, { status: 500 }) };
+  backend({ uiState: { onboardingCompleted: true, runBanner: "line" }, monitors });
+  const estimate = { ...running.estimate, at: now };
+  const { container } = await banner([run("r1", { monitor: summary({ estimate }) })]);
+  await settle();
+  const line = container.querySelector('[role="group"]');
+  const trigger = line.querySelector('button[aria-haspopup="dialog"]');
+  const description = document.getElementById(trigger.getAttribute("aria-describedby"));
+  assert.ok(description?.textContent.includes(m.run_monitor_load_failed()));
+  assert.doesNotMatch(plain(line.textContent), /\d+[mh].*left/);
+
+  await click(button(m.run_show_more()));
+  monitors.r1 = { ...running, estimate };
+  await click(named(m.app_retry()));
+  assert.match(plain(line.textContent), /\d+[mh].*left/);
+});
+
 test("a run whose view was rebuilt reads its monitor again, and shows none of the old one meanwhile", async () => {
   const requests = backend();
   const view = await banner([run("r1")]);

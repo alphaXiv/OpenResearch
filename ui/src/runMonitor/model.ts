@@ -205,7 +205,7 @@ export interface RunModelInput {
   item: ShownRun;
   /** The run's whole live state, once a strip has fetched it; it states the run's facts only while it is the newest source. */
   monitor: RunMonitor | null;
-  /** The monitor's last refresh failed, so what it holds may be out of date. */
+  /** The last read of the full monitor failed. */
   monitorFailed?: boolean;
   /** Whether this server keeps shown runs; an older one lists only active runs. */
   shown: boolean;
@@ -226,7 +226,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   // The run's projection is failing, which reaches lines that never read its whole monitor too.
   const failing = run.monitor?.unavailable ?? null;
   const shownAsOf = monitor?.asOf ?? run.monitor?.asOf ?? now;
-  const degraded = failing !== null || (monitor !== null && (availability !== "live" || monitorFailed));
+  const degraded = failing !== null || monitorFailed || availability !== "live";
   const live = runActive(run.status);
   const pre = run.status === "submitting" || run.status === "starting";
   const display = runDisplay(run);
@@ -408,7 +408,12 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   const staleState: NonNullable<RunModel["stale"]>["state"] = failing !== null ? "unavailable"
     : monitorFailed || availability === "live" ? "failed"
     : availability;
-  const words = { stale: m.run_view_stale, rebuilding: m.run_view_rebuilding, unavailable: m.run_view_unavailable, failed: m.run_view_refresh_failed }[staleState]();
+  const words = {
+    stale: m.run_view_stale,
+    rebuilding: m.run_view_rebuilding,
+    unavailable: m.run_view_unavailable,
+    failed: fetched ? m.run_view_refresh_failed : m.run_monitor_load_failed,
+  }[staleState]();
   const why = failing ?? (!monitorFailed ? monitor?.availability.reason : null) ?? null;
   const reason = why ? autoDir(why) : null;
   const stale = degraded ? { state: staleState, age: m.status_last_seen({ time: clockText(shownAsOf) }), why: [words, reason].filter(Boolean).join(" · ") } : null;
