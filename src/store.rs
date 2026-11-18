@@ -10235,7 +10235,9 @@ pub(crate) mod tests {
         for file in [&orphan, &status, &recent] {
             std::fs::write(file, b"partial").unwrap();
         }
-        std::fs::File::open(&status)
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&status)
             .unwrap()
             .set_modified(std::time::UNIX_EPOCH)
             .unwrap();
