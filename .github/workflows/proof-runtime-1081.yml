@@ -10,16 +10,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-latest]
+        os: [ubuntu-24.04, windows-latest, macos-15]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 55
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           persist-credentials: false
       - name: Verify exact PR product source
-        run: git diff --exit-code 01a2ea6245d5e5aac05e55e686074e9afb743ac4 -- src crates Cargo.toml Cargo.lock build.rs
+        run: git diff --exit-code cb1343d24a3f9524e8931fb6a5f50a35939c9345 -- src crates Cargo.toml Cargo.lock build.rs
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           artifact-ids: 14383180091
@@ -37,6 +37,15 @@ jobs:
           mkdir -p "$RUNNER_TEMP/baseline"
           curl -fsSL --retry 2 https://github.com/alphaXiv/OpenResearch/releases/download/v0.2.27/openresearch-cli-x86_64-unknown-linux-musl.tar.gz -o "$RUNNER_TEMP/baseline.tar.gz"
           echo "23645831cdab764c4455ada3331b545054cf0f28d327b6c04803b816a3fbf065  $RUNNER_TEMP/baseline.tar.gz" | sha256sum -c -
+          tar xzf "$RUNNER_TEMP/baseline.tar.gz" -C "$RUNNER_TEMP/baseline"
+          echo "PROOF_BASELINE=$RUNNER_TEMP/baseline" >> "$GITHUB_ENV"
+      - name: Prepare macOS released fixture
+        if: runner.os == 'macOS'
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/baseline"
+          curl -fsSL --retry 2 https://github.com/alphaXiv/OpenResearch/releases/download/v0.2.27/openresearch-cli-aarch64-apple-darwin.tar.gz -o "$RUNNER_TEMP/baseline.tar.gz"
+          echo "6703766b23f3bb55a751ba3da7c80799e9bb80b13cf4428d36bb40d0d01a30aa  $RUNNER_TEMP/baseline.tar.gz" | shasum -a 256 -c -
           tar xzf "$RUNNER_TEMP/baseline.tar.gz" -C "$RUNNER_TEMP/baseline"
           echo "PROOF_BASELINE=$RUNNER_TEMP/baseline" >> "$GITHUB_ENV"
       - name: Prepare Windows released fixture

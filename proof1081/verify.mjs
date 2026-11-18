@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'; import http from 'node:http'; import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path'; import {spawn,execFileSync} from 'node:child_process'; import {once} from 'node:events'; import {setTimeout as delay} from 'node:timers/promises'; import {DatabaseSync} from 'node:sqlite'; import readline from 'node:readline';
 const win=process.platform==='win32',ext=win?'.exe':'',exe=n=>n+ext;
-const sha='01a2ea6245d5e5aac05e55e686074e9afb743ac4';
+const sha='cb1343d24a3f9524e8931fb6a5f50a35939c9345';
 const out=path.resolve('receipts');fs.mkdirSync(out,{recursive:true}); const verified=[];
 function findFile(dir,name){for(const e of fs.readdirSync(dir,{withFileTypes:true})){const p=path.join(dir,e.name);if(e.isFile()&&e.name===name)return p;if(e.isDirectory()){const f=findFile(p,name);if(f)return f;}}}
 async function until(fn,label,ms=90000){const end=Date.now()+ms;while(Date.now()<end){const v=await fn();if(v)return v;await delay(120);}throw Error('Timed out: '+label);}
