@@ -30,7 +30,7 @@ Bộ công cụ và không gian làm việc ưu tiên chạy cục bộ cho agen
 <a href="https://github.com/alphaXiv/OpenResearch/releases"><img src=".github/readme-assets/action-releases.svg" alt="Bản phát hành" width="78" height="24" /></a>
 </p>
 
-<p><sub>macOS 11+ · Windows beta yêu cầu ứng dụng <a href="https://gitforwindows.org">Git cho Windows</a> · <a href="https://openresearch.sh/docs/install">Linux</a> ứng dụng cần glibc 2.35+</sub></p>
+<p><sub>macOS 11+ · Windows beta yêu cầu ứng dụng <a href="https://gitforwindows.org">Git cho Windows</a> · ứng dụng <a href="https://openresearch.sh/docs/install">Linux</a> cần glibc 2.35+</sub></p>
 
 <p><a href="https://trendshift.io/repositories/89363"><img src="https://trendshift.io/api/badge/repositories/89363" alt="GitHub Trending: #1 Repository of the Day" width="250" height="55" /></a>
 <a href="https://trendshift.io/repositories/89363?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-89363" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/89363/daily?language=Rust" alt="alphaXiv/OpenResearch | Trendshift" width="250" height="55" /></a></p>
