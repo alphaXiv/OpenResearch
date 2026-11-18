@@ -6173,11 +6173,17 @@ impl Store {
              ON CONFLICT(run_id, chat_session_id, dedupe) DO NOTHING",
             params![run_id, chat, now],
         )?;
-        // An assigned batch must keep the body used to compute its turn's request hash.
         tx.execute(
             "DELETE FROM run_notices WHERE run_id = ?1 AND chat_session_id = ?2
              AND delivered_at IS NULL AND client_turn_id IS NULL",
             params![run_id, chat],
+        )?;
+        // An assigned batch keeps the body its retry hash was computed from, so it is retired.
+        tx.execute(
+            "UPDATE run_notices SET retired_at = ?3, next_delivery_at = NULL, delivery_error = NULL
+             WHERE run_id = ?1 AND chat_session_id = ?2
+             AND delivered_at IS NULL AND retired_at IS NULL",
+            params![run_id, chat, now],
         )?;
         tx.commit()?;
         Ok(())
@@ -7912,6 +7918,20 @@ pub(crate) mod tests {
             .insert_run_notice("cancelled", "subscriber", TERMINAL, TERMINAL, "done", 1)
             .unwrap();
         assert_eq!(store.pending_run_notice_sessions().unwrap(), ["subscriber"]);
+
+        store
+            .insert_run_notice("retrying", "owner", ATTENTION, "attention:0", "outage", 1)
+            .unwrap();
+        let batch = store.run_notice_batch_at("owner", 10).unwrap();
+        store
+            .record_run_notice_failure("owner", &batch[0].client_turn_id, "busy", false, 11)
+            .unwrap();
+        store.dismiss_run_notices("retrying", "owner", 12).unwrap();
+        assert!(store
+            .run_notice_batch_at("owner", i64::MAX / 2)
+            .unwrap()
+            .is_empty());
+        assert_eq!(store.run_notice_error("retrying").unwrap(), None);
         let _ = std::fs::remove_dir_all(dir);
     }
 
