@@ -1249,7 +1249,7 @@ mod tests {
         h.auth_state = crate::local::harness::HarnessAuthState::Unknown;
         for cause in CursorStatusError::ALL {
             h.cursor_status_error = Some(cause);
-            let (reason, detail) = verify_reason(Some(&h));
+            let (reason, detail) = verify_reason(Action::Login, Some(&h));
             assert_eq!(reason, "not_ready");
             assert_eq!(detail, cause.excerpt());
             let output = format!("account=private@example.org {detail} secret-token");
