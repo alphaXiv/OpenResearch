@@ -7,7 +7,7 @@ import path from 'node:path';
 import os from 'node:os';
 import readline from 'node:readline';
 
-const candidateSha='d2c62a971fae1bfef2eca6fcafda7aff5071c37a';
+const candidateSha='a196cfab95dc740aa25695524d29d457438e21e1';
 const proof=path.resolve('receipts'); fs.mkdirSync(proof,{recursive:true});
 const harmless='This chat\'s OpenAI Codex account was removed. Choose another agent.';
 const fixture='Codex sign-in for a removed account';
