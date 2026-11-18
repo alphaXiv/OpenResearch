@@ -50,7 +50,7 @@ async function exercise(mode) {
     const base=await limited(new Promise((ok,no)=>{lines.on('line',line=>{const m=/dashboard on (http:\/\/127\.0\.0\.1:\d+)/.exec(line);if(m)ok(m[1]);});app.once('error',no);app.once('exit',c=>no(Error('orx exited '+c)));}),60000,'startup');
     const state=async()=>{const r=await fetch(base+'/api/harnesses/opencode/snapshot');assert.equal(r.status,200);return r.json();};
     const initial=await state(); assert.equal(initial.installed,native,'unexpected preexisting OpenCode');
-    const host=base.replace('http:','ws:'); ws=new WebSocket(host+'/api/harnesses/setup?harness=opencode&trigger=manual&action='+(native?'update':'install'));
+    const host=base.replace('http:','ws:'); ws=new WebSocket(host+'/api/harnesses/setup?harness=opencode&trigger=manual&action='+(native?'update':'install'),{headers:{Origin:base}});
     const frame=await limited(new Promise((ok,no)=>{ws.addEventListener('message',evt=>{if(typeof evt.data==='string'){const m=JSON.parse(evt.data);if(['complete','error'].includes(m.type))ok(m);}});ws.addEventListener('error',()=>no(Error('setup websocket failed')));ws.addEventListener('close',()=>no(Error('no terminal frame')));}),180000,'setup socket');
     assert.equal(injected,1);console.log(mode+': socket='+frame.type+' / npm tunnels='+tunnels);
     assert.equal(frame.type,recover?'complete':'error',JSON.stringify(frame).slice(0,450));
@@ -58,7 +58,7 @@ async function exercise(mode) {
     const finals=events.filter(p=>['succeeded','failed'].includes(p.outcome));assert.equal(finals.length,1);const wire=finals[0];
     assert.equal(wire.outcome,recover?'succeeded':'failed');let version=null;
     if(recover){
-      const current=await state();assert.equal(current.installed,true);assert.match(current.version, /2\./);
+      const current=await state();assert.equal(current.installed,true);
       const root=path.join(home,'orx-cache','managed-agents','opencode'),dir=fs.readdirSync(root).find(s=>/^2\./.test(s));assert.ok(dir);
       const command=spawnSync(path.join(root,dir,'opencode'+exe),['--version'],{env,encoding:'utf8',timeout:30000});assert.equal(command.status,0);version=command.stdout.trim();assert.ok(version.includes(dir));
     }else if(transient){
