@@ -481,7 +481,7 @@ pub(crate) async fn run(args: RemoteHostArgs) -> Result<()> {
 #[cfg(unix)]
 async fn ensure(expected_instance: Option<String>) -> Result<()> {
     let data_dir = canonical_data_dir()?;
-    match live_descriptor(&data_dir).await {
+    match live_descriptor(&data_dir).await? {
         LiveHost::Running(descriptor) => {
             verify_expected(&descriptor, expected_instance.as_deref())?;
             return print_descriptor(&descriptor);
@@ -515,7 +515,7 @@ async fn ensure(expected_instance: Option<String>) -> Result<()> {
         move || {
             let data_dir = data_dir.clone();
             async move {
-                match live_descriptor(&data_dir).await {
+                match live_descriptor(&data_dir).await? {
                     LiveHost::Running(descriptor) => Ok(Some(descriptor)),
                     LiveHost::Stopping(_) => {
                         wait_for_server_lock_free(&data_dir).await?;
@@ -608,19 +608,23 @@ enum LiveHost {
     Missing,
 }
 
+/// A host that holds the lock but answers too slowly is an error: it is neither gone nor
+/// another dashboard.
 #[cfg(unix)]
-async fn live_descriptor(data_dir: &Path) -> LiveHost {
-    let Ok(response) = control_exchange(data_dir, &ControlRequest::Status).await else {
-        return LiveHost::Missing;
+async fn live_descriptor(data_dir: &Path) -> Result<LiveHost> {
+    let response = match control_exchange(data_dir, &ControlRequest::Status).await {
+        Ok(response) => Ok(response),
+        Err(error) if error.is::<tokio::time::error::Elapsed>() => Err(error),
+        Err(_) => return Ok(LiveHost::Missing),
     };
     if !server_lock_is_held(data_dir).unwrap_or(false) {
-        return LiveHost::Missing;
+        return Ok(LiveHost::Missing);
     }
-    match response {
+    Ok(match response? {
         ControlResponse::Status { descriptor, .. } => LiveHost::Running(descriptor),
         ControlResponse::Stopping { descriptor } => LiveHost::Stopping(descriptor),
         _ => LiveHost::Missing,
-    }
+    })
 }
 
 #[cfg(unix)]
@@ -659,7 +663,10 @@ async fn control_exchange(data_dir: &Path, request: &ControlRequest) -> Result<C
         Ok::<_, crate::error::Error>(serde_json::from_str(&line)?)
     })
     .await
-    .map_err(|_| anyhow!("Timed out contacting the persistent OpenResearch host."))?
+    .map_err(|elapsed| {
+        crate::error::Error::new(elapsed)
+            .context("The persistent OpenResearch host is not responding. Try again in a moment.")
+    })?
 }
 
 #[cfg(unix)]
@@ -1248,6 +1255,25 @@ mod tests {
             assert!(started.is_err(), "target exists: {target_exists}");
             assert!(link_kept, "target exists: {target_exists}");
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_host_holding_the_lock_is_not_responding_not_missing() {
+        let root = crate::local::git::TemporaryDirectory::new("orx-silent-host").unwrap();
+        let data_dir = root.path().join("data");
+        std::fs::create_dir(&data_dir).unwrap();
+        let mut lock = open_lock(&shared_path(&data_dir, "lock").unwrap()).unwrap();
+        let _held = lock.try_write().unwrap();
+        let socket = control_socket_path(&data_dir).unwrap();
+        let _silent = UnixListener::bind(&socket).unwrap();
+
+        let error = match live_descriptor(&data_dir).await {
+            Err(error) => error,
+            Ok(_) => panic!("a silent host read as running or missing"),
+        };
+        std::fs::remove_file(&socket).unwrap();
+        assert!(error.to_string().contains("not responding"), "{error}");
     }
 
     #[cfg(unix)]

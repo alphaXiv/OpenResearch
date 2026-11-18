@@ -851,6 +851,8 @@ pub fn cancel(dir: &Path) -> io::Result<CancelAck> {
     Ok(CancelAck::WrapperGone)
 }
 
+/// No settle wait: an unreadable process already counts as live, and callers check every run
+/// folder in turn.
 pub fn has_live_processes(dir: &Path) -> io::Result<bool> {
     let identity = match read_json::<ProcessIdentity>(&dir.join("wrapper.json")) {
         Ok(identity) => identity,
@@ -881,7 +883,7 @@ pub fn has_live_processes(dir: &Path) -> io::Result<bool> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(receipt(dir)?.is_none()),
         Err(error) => return Err(error),
     };
-    let mut scan = platform::scan(Some(&identity), tag.trim(), false)?;
+    let mut scan = platform::scan_within(Some(&identity), tag.trim(), false, Duration::ZERO)?;
     let known = proof.map_or_else(Vec::new, |proof| proof.processes);
     scan.include(&known)?;
     Ok(!scan.processes.is_empty() || !scan.unreadable.is_empty())
