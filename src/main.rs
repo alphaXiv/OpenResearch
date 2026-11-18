@@ -950,9 +950,11 @@ pub struct UpArgs {
     /// Internal persistent dashboard/agent-host mode.
     #[arg(long, hide = true)]
     pub remote_host: bool,
-    /// Serving the desktop app's window, which only restarts when asked.
-    #[arg(skip)]
-    pub desktop_app: bool,
+    /// Serve the desktop window that started this, which only restarts when asked: its
+    /// stdin is the window's lease, and end of input means the window is gone. A contract
+    /// with every window shipped (src/commands/app/FROZEN.md).
+    #[arg(long, hide = true, conflicts_with_all = ["remote", "remote_host", "headless"])]
+    pub app_window: bool,
 }
 
 #[derive(Args, Clone, Debug)]
@@ -1242,6 +1244,7 @@ fn main() {
         std::process::exit(1);
     }
     run_cli();
+    commands::up::flush_stderr();
 }
 
 // Desktop app mode blocks the main thread while the dashboard runs on worker threads.
@@ -1477,6 +1480,7 @@ async fn run_cli() {
         } else {
             1
         };
+        commands::up::flush_stderr();
         std::process::exit(code);
     }
 }
@@ -1530,7 +1534,10 @@ fn show_error_dialog(message: &str) {
 
     // The app's console is hidden, and shared with the agents it runs, so it
     // doesn't own it.
-    if !owns_its_console() && !commands::app::launched_with_app_arg() {
+    if !owns_its_console()
+        && !commands::app::launched_with_app_arg()
+        && !commands::app::serves_window()
+    {
         return;
     }
     let wide = |text: &str| text.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
@@ -1548,7 +1555,8 @@ fn show_error_dialog(message: &str) {
 
 #[cfg(target_os = "macos")]
 fn show_error_dialog(message: &str) {
-    if !commands::app::launched_as_app_bundle() || std::env::args_os().len() != 1 {
+    let app = std::env::args_os().len() == 1 || commands::app::serves_window();
+    if !commands::app::launched_as_app_bundle() || !app {
         return;
     }
     let _ = crate::process::command("osascript")
@@ -1565,7 +1573,7 @@ fn show_error_dialog(message: &str) {
 /// whichever desktop's dialog tool is installed, as the folder picker does.
 #[cfg(all(desktop_app, target_os = "linux"))]
 fn show_error_dialog(message: &str) {
-    if !commands::app::launched_with_app_arg() {
+    if !commands::app::launched_with_app_arg() && !commands::app::serves_window() {
         return;
     }
     eprintln!("OpenResearch: {message}");
@@ -1621,6 +1629,9 @@ fn should_capture_command(command: &Command) -> bool {
         command,
         Command::Update(UpdateArgs {
             background: true,
+            ..
+        }) | Command::Up(UpArgs {
+            app_window: true,
             ..
         })
     )

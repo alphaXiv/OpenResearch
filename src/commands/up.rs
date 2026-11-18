@@ -61,6 +61,11 @@ mod usage;
 use compute_settings::*;
 
 pub async fn run(args: UpArgs) -> Result<()> {
+    if args.app_window {
+        if let Err(error) = relay_stderr() {
+            eprintln!("orx up: could not relay stderr to the app window: {error}");
+        }
+    }
     // orx's own clients reach the server on 127.0.0.1, which both of these binds serve.
     let reach = match args.host {
         std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST) => up_remote::Reach::Loopback,
@@ -71,7 +76,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
             ))
         }
     };
-    if !args.desktop_app && !args.remote_host && !args.headless {
+    if !args.app_window && !args.remote_host && !args.headless {
         let data_dir = crate::commands::remote_host::canonical_data_dir()?;
         if let Some(server) =
             crate::commands::remote_host::ServerDescriptor::live(&data_dir).await?
@@ -111,7 +116,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     // An install that finished while this process waited replaced the image it was started from.
     if backend_lock.is_some() && updates::updated_exe_on_disk().await {
         drop(backend_lock);
-        let err = updates::relaunch(port);
+        let err = updates::relaunch();
         return Err(anyhow!("orx up: could not restart: {err}"));
     }
     let inherited = Lineage::inherited()?;
@@ -119,7 +124,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     let recorded = inherited
         .as_ref()
         .map(|lineage| lineage.port)
-        .filter(|recorded| *recorded != port && !args.desktop_app);
+        .filter(|recorded| *recorded != port && !args.app_window);
     let taken_back = match recorded {
         Some(recorded) => {
             match tokio::net::TcpListener::bind((args.host, recorded)).await {
@@ -220,6 +225,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
         stopping: stopping.clone(),
         dashboard_locks: Arc::new(std::sync::Mutex::new(vec![dashboard_lock])),
         restart: Arc::new(tokio::sync::Notify::new()),
+        app_window: args.app_window,
         reopen: Arc::default(),
         trackio: Arc::default(),
         opencode_signins: Arc::default(),
@@ -300,7 +306,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
         state.harness_fill_in_flight.clone(),
     );
     spawn_background_tasks(remote_auth.is_none());
-    if !persistent_host && !args.desktop_app {
+    if !persistent_host && !args.app_window {
         spawn_restart_when_idle(state.clone());
     }
     let live_events = state.chat.clone();
@@ -378,13 +384,13 @@ pub async fn run(args: UpArgs) -> Result<()> {
         if let Some(warning) = crate::local::bash::missing_toolchain() {
             eprintln!("orx up: warning: {warning}");
         }
-        if !args.desktop_app && !persistent_host && std::io::stderr().is_terminal() {
+        if !args.app_window && !persistent_host && std::io::stderr().is_terminal() {
             eprintln!(
                 "orx up: the OpenResearch desktop app opens these same projects: {}",
                 crate::updates::desktop_app_download_url()
             );
         }
-        if !args.no_browser {
+        if !args.no_browser && !args.app_window {
             browser::open_dashboard(&url, crate::telemetry::UpLaunchMode::of(&args));
         }
     }
@@ -414,8 +420,8 @@ pub async fn run(args: UpArgs) -> Result<()> {
     let monitor = tokio::spawn(crate::engine::monitor::keep_current(engine, stop.clone()));
     let watcher = tokio::spawn(crate::engine::watch::keep_watching(stop));
     let mut restarting = false;
-    // A development rebuild hands off like an update, then exits for the next build to start.
-    let mut rebuilding = false;
+    // A development rebuild, or a window gone without quitting, hands off like an update and exits.
+    let mut handing_off = false;
     let mut explicit_stop = false;
     let served = tokio::select! {
         result = axum::serve(listener, app) => result,
@@ -424,7 +430,8 @@ pub async fn run(args: UpArgs) -> Result<()> {
             Ok(())
         }
         _ = restart.notified() => { restarting = true; Ok(()) }
-        _ = hand_off_signal(), if !persistent_host => { rebuilding = true; Ok(()) }
+        _ = hand_off_signal(), if !persistent_host => { handing_off = true; Ok(()) }
+        _ = window_closed(), if args.app_window => { handing_off = true; Ok(()) }
         _ = async {
             if persistent_host {
                 persistent_shutdown_signal().await;
@@ -435,7 +442,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
         } => Ok(()),
     };
     // Reopening into another data directory leaves no successor to take its children back.
-    let hand_off = rebuilding || restarting && !state.reopen.load(Ordering::SeqCst);
+    let hand_off = handing_off || restarting && !state.reopen.load(Ordering::SeqCst);
     if persistent_host {
         stopping.store(true, std::sync::atomic::Ordering::SeqCst);
     }
@@ -473,7 +480,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     served.map_err(|error| anyhow!("orx up: server error: {error}"))?;
     if hand_off {
         if let Err(error) =
-            crate::commands::remote_host::ServerDescriptor::announce_relaunch(&data_dir)
+            crate::commands::remote_host::ServerDescriptor::announce_relaunch(&data_dir, None)
         {
             eprintln!("orx up: the CLI will not wait out this restart: {error:#}");
         }
@@ -506,7 +513,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
             }
         }
         eprintln!("orx up: restarting");
-        let err = updates::relaunch(actual_port);
+        let err = updates::relaunch();
         return Err(anyhow!("orx up: could not restart: {err}"));
     }
     Ok(())
@@ -595,19 +602,14 @@ pub(crate) fn kept_agents_port() -> Option<u16> {
         .map(|lineage| lineage.port)
 }
 
-/// The desktop app's quit. A stored permit covers a quit that lands before the
-/// server is waiting for one.
+/// A quit from the desktop window or an idle headless server. A stored permit covers a
+/// quit that lands before the server is waiting for one.
 static SHUTDOWN_REQUESTED: tokio::sync::Notify = tokio::sync::Notify::const_new();
-
-#[cfg(desktop_app)]
-pub(crate) fn request_shutdown() {
-    SHUTDOWN_REQUESTED.notify_one();
-}
 
 /// Resolves when the process is asked to stop: SIGINT everywhere; on Unix also
 /// SIGTERM and SIGHUP (SIGHUP is what an SSH tunnel delivers on disconnect, so
 /// a `--remote`-launched server exits with its tunnel instead of leaking); and
-/// [`request_shutdown`].
+/// [`SHUTDOWN_REQUESTED`].
 async fn shutdown_signal() {
     tokio::select! {
         _ = SHUTDOWN_REQUESTED.notified() => {}
@@ -641,6 +643,168 @@ async fn os_shutdown_signal() {
     {
         let _ = tokio::signal::ctrl_c().await;
     }
+}
+
+/// Resolves once the desktop window that started this server is gone: it holds the other end of
+/// stdin and never writes, so end of input, or a broken pipe, is its exit.
+async fn window_closed() {
+    let (closed, gone) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        use std::io::Read as _;
+        let mut stdin = std::io::stdin();
+        let mut buffer = [0; 256];
+        while matches!(stdin.read(&mut buffer), Ok(read) if read > 0) {}
+        let _ = closed.send(());
+    });
+    let _ = gone.await;
+}
+
+/// A `--app-window` server's stderr, which the window reads.
+struct StderrRelay {
+    /// The window's end, which a successor inherits in place of the relay's pipe.
+    window: std::fs::File,
+    /// The relay's end, which fd 2 is again after a failed exec.
+    #[cfg(unix)]
+    writer: std::io::PipeWriter,
+    /// How many [`FLUSH`] markers the relay has passed.
+    flushed: std::sync::Arc<(std::sync::Mutex<u64>, std::sync::Condvar)>,
+}
+
+static STDERR_RELAY: std::sync::OnceLock<StderrRelay> = std::sync::OnceLock::new();
+
+/// Written by [`flush_stderr`]; the relay drops it once all written before it is passed on.
+const FLUSH: &[u8] = b"\0orx: stderr flushed\n";
+
+/// Points stderr at a pipe of this process's own and relays it to the window's until a write
+/// there fails, then drains it: `eprintln!` panics on a write to a closed pipe.
+fn relay_stderr() -> std::io::Result<()> {
+    use std::io::{BufRead as _, Write as _};
+
+    if STDERR_RELAY.get().is_some() {
+        return Err(std::io::Error::other("stderr is relayed already"));
+    }
+    let (reader, writer) = std::io::pipe()?;
+    #[cfg(unix)]
+    let window = std::os::fd::AsFd::as_fd(&std::io::stderr()).try_clone_to_owned()?;
+    #[cfg(windows)]
+    let window =
+        std::os::windows::io::AsHandle::as_handle(&std::io::stderr()).try_clone_to_owned()?;
+    let window = std::fs::File::from(window);
+    let flushed = std::sync::Arc::<(std::sync::Mutex<u64>, std::sync::Condvar)>::default();
+
+    // Before stderr is the pipe: until then a failure leaves stderr as it was.
+    let mut to = Some(window.try_clone()?);
+    let passed = flushed.clone();
+    std::thread::Builder::new().spawn(move || {
+        let mut reader = std::io::BufReader::new(reader);
+        let mut line = Vec::new();
+        while reader
+            .read_until(b'\n', &mut line)
+            .is_ok_and(|read| read > 0)
+        {
+            let flush = line.ends_with(FLUSH);
+            if flush {
+                line.truncate(line.len() - FLUSH.len());
+            }
+            if to.as_mut().is_some_and(|to| to.write_all(&line).is_err()) {
+                to = None;
+            }
+            if flush {
+                let (count, passed) = &*passed;
+                *count
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+                passed.notify_all();
+            }
+            line.clear();
+        }
+    })?;
+
+    // SAFETY: a plain syscall on descriptors this process owns.
+    #[cfg(unix)]
+    if unsafe {
+        libc::dup2(
+            std::os::fd::AsRawFd::as_raw_fd(&writer),
+            libc::STDERR_FILENO,
+        )
+    } < 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::{AsRawHandle as _, IntoRawHandle as _};
+        use windows_sys::Win32::System::Console::{SetStdHandle, STD_ERROR_HANDLE};
+        // SAFETY: a plain syscall; on success the handle is released to stay open as stderr.
+        if unsafe { SetStdHandle(STD_ERROR_HANDLE, writer.as_raw_handle()) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let _ = writer.into_raw_handle();
+    }
+
+    let relay = StderrRelay {
+        window,
+        #[cfg(unix)]
+        writer,
+        flushed,
+    };
+    if STDERR_RELAY.set(relay).is_err() {
+        return Err(std::io::Error::other("stderr is relayed already"));
+    }
+    let report = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic| {
+        report(panic);
+        flush_stderr();
+    }));
+    Ok(())
+}
+
+/// Waits, up to a second, for the relay to pass on what stderr has had so far, which an exit or
+/// an exec would lose.
+pub(crate) fn flush_stderr() {
+    use std::io::Write as _;
+
+    let Some(relay) = STDERR_RELAY.get() else {
+        return;
+    };
+    let (count, passed) = &*relay.flushed;
+    let lock = || {
+        count
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    };
+    let before = *lock();
+    if std::io::stderr().write_all(FLUSH).is_ok() {
+        let _ = passed.wait_timeout_while(lock(), Duration::from_secs(1), |count| *count == before);
+    }
+}
+
+/// Execs `command` in place with the window's stderr, as the relay ends with this process; a
+/// failed exec leaves stderr the relay's again.
+#[cfg(unix)]
+pub(crate) fn exec(command: &mut std::process::Command) -> std::io::Error {
+    use std::os::unix::process::CommandExt as _;
+
+    flush_stderr();
+    let error = command.stderr(successor_stderr()).exec();
+    if let Some(relay) = STDERR_RELAY.get() {
+        // SAFETY: a plain syscall on descriptors this process owns.
+        unsafe {
+            libc::dup2(
+                std::os::fd::AsRawFd::as_raw_fd(&relay.writer),
+                libc::STDERR_FILENO,
+            )
+        };
+    }
+    error
+}
+
+/// The stderr for a successor this server starts: the window's, which outlives the relay.
+pub(crate) fn successor_stderr() -> std::process::Stdio {
+    STDERR_RELAY
+        .get()
+        .and_then(|relay| relay.window.try_clone().ok())
+        .map_or_else(std::process::Stdio::inherit, std::process::Stdio::from)
 }
 
 /// `node dev.ts restart` asks with SIGUSR2 for its next build to take this server's work back.
@@ -709,6 +873,8 @@ struct AppState {
     dashboard_locks: Arc<std::sync::Mutex<Vec<DashboardLock>>>,
     /// Fired by `POST /api/update/restart`; the serve loop relaunches on it.
     restart: Arc<tokio::sync::Notify>,
+    /// Serving a desktop window, which controls it through `/api/app-window`.
+    app_window: bool,
     /// Set with `restart` when the data directory changed: the engine reopens there, and no
     /// update is installed first.
     reopen: Arc<AtomicBool>,
@@ -1282,7 +1448,15 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
         // authenticated in the handler by that chat's agent token.
         .route("/api/internal/mcp", post(agent_tools::agent_tools))
         .route("/api/chat/attachments/{name}", get(chat_attachment))
-        .route("/api/agent/status", get(agent_status))
+        .route("/api/agent/status", get(agent_status));
+    // The window's control API, a contract with every window shipped (src/commands/app/FROZEN.md).
+    let app = if state.app_window {
+        app.route("/api/app-window", get(app_window_state))
+            .route("/api/app-window/quit", post(quit_app_window))
+    } else {
+        app
+    };
+    let app = app
         .fallback(spa)
         // Chat attachments (PDFs, images) ride as base64 in the send-message
         // JSON body; the 2 MB axum default rejects any real paper. Cap it well
@@ -1381,6 +1555,8 @@ fn remote_route_forbidden(path: &str) -> bool {
             | "/api/update"
             | "/api/update/apply"
             | "/api/update/restart"
+            | "/api/app-window"
+            | "/api/app-window/quit"
             | "/api/update/auto"
             | "/api/update/channel"
             | "/api/update/install-cli"
@@ -5983,9 +6159,6 @@ fn spawn_restart_when_idle(state: AppState) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(UPDATE_SAMPLE_INTERVAL).await;
-            if crate::commands::app::windowless() {
-                continue;
-            }
             let status = updates::status();
             // The cache can claim an install the exec target doesn't have; never restart in a loop.
             if !(status.auto_update
@@ -7107,6 +7280,21 @@ async fn set_update_channel(Json(req): Json<SetUpdateChannelReq>) -> ApiResult {
 async fn apply_update() -> ApiResult {
     updates::apply_now().await?;
     Ok(Json(json!(updates::status())))
+}
+
+/// Whether quitting would interrupt work or close a page someone has open.
+async fn app_window_state() -> ApiResult {
+    Ok(Json(json!({ "busy": api_v2::busy().await? })))
+}
+
+/// The window's quit, once nothing pending holds it or the user chose to quit anyway: asks the
+/// runs that need OpenResearch open to stop, then stops everything else and exits. Answers first.
+async fn quit_app_window() -> StatusCode {
+    tokio::spawn(async {
+        api_v2::force_stop_runs().await;
+        SHUTDOWN_REQUESTED.notify_one();
+    });
+    StatusCode::NO_CONTENT
 }
 
 /// Relaunch into the copy the updater already installed. Answers first, then
@@ -13836,6 +14024,7 @@ mod tests {
             stopping: Default::default(),
             dashboard_locks: Default::default(),
             restart: Default::default(),
+            app_window: false,
             reopen: Default::default(),
             trackio: Default::default(),
             opencode_signins: Arc::default(),

@@ -586,7 +586,7 @@ impl std::fmt::Display for RunStatus {
 }
 
 /// What quitting `orx up` does to a pending run.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum AfterQuit {
     /// Already finished; only its result has not reached a chat.
@@ -598,7 +598,7 @@ pub(crate) enum AfterQuit {
 }
 
 /// A chat with a turn in flight.
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PendingAgent {
     pub project_id: String,
@@ -612,7 +612,7 @@ pub(crate) struct PendingAgent {
     pub resumes_after_restart: bool,
 }
 
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PendingRun {
     pub project_id: String,
@@ -629,7 +629,8 @@ pub(crate) struct PendingRun {
 }
 
 /// Chats with a turn in flight, and runs unfinished or with a result no chat has received.
-#[derive(Debug, Default, PartialEq, Serialize)]
+/// A desktop window reads it from `GET /api/pending-work` of servers newer than itself.
+#[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct PendingWork {
     pub agents: Vec<PendingAgent>,
     pub runs: Vec<PendingRun>,

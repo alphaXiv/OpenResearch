@@ -1744,13 +1744,33 @@ impl ServerDescriptor {
 
     /// Tells discovery a successor is on its way, for up to [`RELAUNCH_WAIT`], so the CLI waits
     /// for it instead of starting a server of its own; the successor's [`Self::publish`] ends it.
-    pub(crate) fn announce_relaunch(data_dir: &Path) -> Result<()> {
+    /// Once started, a successor is named by its pid, which a desktop window follows
+    /// (src/commands/app/FROZEN.md).
+    pub(crate) fn announce_relaunch(data_dir: &Path, successor: Option<u32>) -> Result<()> {
         let until = crate::store::now_ms() + RELAUNCH_WAIT.as_millis() as i64;
+        let mut announcement = serde_json::json!({ "until": until });
+        if let Some(pid) = successor {
+            announcement["pid"] = pid.into();
+        }
         crate::local::git::atomic_write_with_mode(
             &runtime_path(data_dir, "relaunch.json")?,
-            &serde_json::to_vec(&serde_json::json!({ "until": until }))?,
+            &serde_json::to_vec(&announcement)?,
             Some(0o600),
         )
+    }
+
+    /// The successor a relaunching server named, while its announcement lasts.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn announced_successor(data_dir: &Path) -> Option<u32> {
+        let announcement: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(runtime_path(data_dir, "relaunch.json").ok()?).ok()?,
+        )
+        .ok()?;
+        let until = announcement["until"].as_i64()?;
+        (until > crate::store::now_ms())
+            .then(|| announcement["pid"].as_u64())
+            .flatten()
+            .and_then(|pid| u32::try_from(pid).ok())
     }
 
     /// The successor a relaunching server announced, once it is live; `None` once the
@@ -2139,12 +2159,38 @@ mod discovery_tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 
+    #[test]
+    fn a_relaunch_names_its_successor_until_the_successor_takes_over() {
+        let directory =
+            std::env::temp_dir().join(format!("orx-relaunch-successor-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        ServerDescriptor::announce_relaunch(&directory, Some(4242)).unwrap();
+        assert_eq!(
+            ServerDescriptor::announced_successor(&directory),
+            Some(4242)
+        );
+
+        let descriptor = ServerDescriptor {
+            instance: "successor".into(),
+            pid: 4242,
+            starttime: 0,
+            port: 1,
+            version: "test".into(),
+            proto: 2,
+            token: "secret".into(),
+        };
+        descriptor.publish(&directory).unwrap();
+        assert_eq!(ServerDescriptor::announced_successor(&directory), None);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     #[tokio::test]
     async fn discovery_waits_out_an_announced_relaunch_without_spawning() {
         let directory =
             std::env::temp_dir().join(format!("orx-relaunch-discovery-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&directory).unwrap();
-        ServerDescriptor::announce_relaunch(&directory).unwrap();
+        ServerDescriptor::announce_relaunch(&directory, None).unwrap();
+        assert_eq!(ServerDescriptor::announced_successor(&directory), None);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let descriptor = ServerDescriptor {
             instance: "successor".into(),

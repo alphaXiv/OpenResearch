@@ -57,7 +57,7 @@ A starting server accepts agents' calls only once it has adopted their children 
 
 ## Restarting
 
-**A restart hands its children off; a quit stops them.** Restarting into an update, from the update banner or on its own once one is due, stops admitting requests, waits for those in flight, then hands off: no kept child is stopped, leases are released, and the server exits or execs into the new binary ([dashboard](dashboard.md#restarting-into-an-update)). Running turns, queued messages, approvals and terminals no longer hold a restart back. Quitting the app or interrupting `orx up` stops every kept child, as before. A crash hands off by default: its keepers wait out their orphan timeout for a successor.
+**A restart hands its children off; a quit stops them.** Restarting into an update, from the update banner or on its own once one is due, stops admitting requests, waits for those in flight, then hands off: no kept child is stopped, leases are released, and the server exits or execs into the new binary ([dashboard](dashboard.md#restarting-into-an-update)). Running turns, queued messages, approvals and terminals no longer hold a restart back. Quitting the app or interrupting `orx up` stops every kept child, as before. A crash hands off by default: its keepers wait out their orphan timeout for a successor. So does a desktop window that goes away without quitting: its server hands off and exits ([desktop](desktop.md#keeping-the-window-through-an-update)).
 
 ## Terminals
 

@@ -157,7 +157,6 @@ impl Api {
     }
 
     /// Asks each run that needs the app open to stop, including runs launched meanwhile, for at most `wait`.
-    #[cfg_attr(not(desktop_app), allow(dead_code))]
     pub(crate) async fn force_stop_runs(&self, wait: Duration) {
         use futures::StreamExt;
 
@@ -168,9 +167,7 @@ impl Api {
                 let runs = match self.pending_work().await {
                     Ok(work) => work.runs,
                     Err(error) => {
-                        eprintln!(
-                            "openresearch app: could not check which runs to stop: {error:#}"
-                        );
+                        eprintln!("orx up: could not check which runs to stop: {error:#}");
                         return;
                     }
                 };
@@ -182,10 +179,7 @@ impl Api {
                     let stored = match self.run(&run.run_id) {
                         Ok(stored) => stored,
                         Err(error) => {
-                            eprintln!(
-                                "openresearch app: could not stop run {}: {error:#}",
-                                run.run_id
-                            );
+                            eprintln!("orx up: could not stop run {}: {error:#}", run.run_id);
                             continue;
                         }
                     };
@@ -202,10 +196,7 @@ impl Api {
                             .cancel(&stored, "Stopped when OpenResearch was force quit.", None)
                             .await
                         {
-                            eprintln!(
-                                "openresearch app: could not stop run {}: {error:#}",
-                                stored.id
-                            );
+                            eprintln!("orx up: could not stop run {}: {error:#}", stored.id);
                         }
                     });
                 }
@@ -222,7 +213,7 @@ impl Api {
             }
         };
         if tokio::time::timeout(wait, stopping).await.is_err() {
-            eprintln!("openresearch app: quitting before every run answered its stop");
+            eprintln!("orx up: quitting before every run answered its stop");
         }
     }
 
@@ -406,24 +397,15 @@ fn installed() -> Result<&'static Arc<Api>> {
         .ok_or_else(|| anyhow!("Run engine is not initialized"))
 }
 
-#[cfg(desktop_app)]
 pub(crate) async fn busy() -> Result<bool> {
     installed()?.busy().await
 }
 
-/// For the window's event loop, which runs on the thread blocked on the runtime.
-#[cfg(desktop_app)]
-pub(crate) fn pending_work() -> Result<crate::store::PendingWork> {
-    let api = installed()?;
-    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(api.pending_work()))
-}
-
-/// A force quit's stops; the quit goes ahead once all have answered or ten seconds have passed.
-#[cfg(desktop_app)]
+/// A quit's stops; the quit goes ahead once all have answered or ten seconds have passed.
 pub(crate) async fn force_stop_runs() {
     match installed() {
         Ok(api) => api.force_stop_runs(Duration::from_secs(10)).await,
-        Err(error) => eprintln!("openresearch app: could not stop runs before quitting: {error:#}"),
+        Err(error) => eprintln!("orx up: could not stop runs before quitting: {error:#}"),
     }
 }
 

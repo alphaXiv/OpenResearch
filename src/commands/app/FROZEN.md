@@ -30,3 +30,25 @@ image's. A window starts its server this way, so the server runs from a mount of
 outlives the window's, and a server restarts into an update this way, from the image now at that
 path. Every AppRun keeps this entry, because a window started from any earlier image runs it on the
 newest one.
+
+## The window's server
+
+A window starts its server as a child and controls it over HTTP on the port the window chose.
+After an update the server is a newer build than the window, so every server keeps answering what
+every older window sends.
+
+| Surface | Contract |
+|---|---|
+| Start | `orx [--no-telemetry] up --app-window --port PORT`, from the window's own executable path, or on Linux `"$APPIMAGE" server` and the same arguments. The server binds `127.0.0.1:PORT`, opens no browser and restarts only when its page asks. Its fatal errors it shows in a native alert itself. |
+| Lease | The server's stdin is a pipe whose other end the window holds and never writes. End of input or a broken pipe means the window is gone without quitting: the server hands its work off as for a restart and exits, and the next launch adopts it. |
+| Restart | A server restarting into an update keeps the lease and the port. On Unix it execs in place, so its pid stays. On Windows it starts its successor, which inherits stdin, names it in the runtime directory's `relaunch.json` as `{until, pid}` and exits; the successor publishes `server.json` with the same `pid`, which ends the announcement. A window follows each successor by that `pid`, from `relaunch.json` or, once it is gone, `server.json`, and treats an exit with no successor as the server gone. |
+| `GET /api/pending-work` | `{agents, runs}`, as `PendingWork` in `ui/src/api.ts`. The window passes it whole to the page's close dialog, and lists what it can read in a native alert when the page cannot ask. Both lists empty means a quit interrupts nothing. |
+| `GET /api/app-window` | `{busy}`: whether quitting would interrupt work or close a page someone has open. A window with no page shown quits once this has been false for ten minutes. |
+| `POST /api/app-window/quit` | Answers `204`, asks the runs that need OpenResearch open to stop for at most ten seconds, stops everything else and exits. A window waits a while for the exit, then leaves anyway. |
+
+The window's requests carry no `Origin`, so the loopback guard admits them as any local client's.
+Only a server started with `--app-window` has the `/api/app-window` routes.
+
+An app from before the window outlived its server relaunches into a newer build as a whole: with
+`ORX_APP_RELAUNCH_PORT=PORT` on every platform, and `ORX_RELAUNCH_WAIT_PID` on Windows, whose new
+window waits for that process to exit. A window keeps that port.

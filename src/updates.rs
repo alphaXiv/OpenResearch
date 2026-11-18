@@ -18,8 +18,6 @@
 
 use std::collections::HashMap;
 use std::io::{IsTerminal, Write};
-#[cfg(unix)]
-use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -1675,83 +1673,40 @@ fn instance_id() -> &'static str {
     ID.get_or_init(|| uuid::Uuid::new_v4().to_string())
 }
 
-/// Environment the app relaunch hands to the new app: the port the old one
-/// served on, so the new window keeps its origin (and localStorage) even when
-/// the old one had fallen back from the app's usual port.
+/// The port an app from before the window kept itself through updates hands the app it
+/// relaunches into, so the new window keeps its origin (and localStorage).
 #[cfg(desktop_app)]
 pub const APP_RELAUNCH_PORT_ENV: &str = "ORX_APP_RELAUNCH_PORT";
 
-/// Relaunch this process into the copy on disk. Returns only on failure.
+/// Relaunch this server into the copy on disk. Returns only on failure.
 ///
-/// A terminal `orx up` execs itself: same PID, same terminal, same arguments
-/// (plus `--no-browser`), so whatever started it (a shell, a supervisor, an SSH launcher's tunnel)
-/// sees an uninterrupted process. The macOS app cannot be exec'd — AppKit and
-/// LaunchServices track the launch, not the image — so it exits and leaves a
-/// detached shell to `open` the bundle once the old process is gone. The Linux
-/// AppImage execs the replaced `.AppImage` file.
-///
-/// `port` is what the dashboard is served on; the relaunch keeps it. A terminal
-/// `orx up` also skips opening a browser, because the tab that asked is reloading
-/// itself; the app opens a fresh window on the same origin.
+/// It execs itself: same PID, same arguments (plus `--no-browser`), so whatever started it (a
+/// shell, a supervisor, an SSH launcher's tunnel, the desktop window) sees an uninterrupted
+/// process. A server running from the AppImage's mount execs the replaced `.AppImage` file
+/// through its `server` entry instead, since the mount still holds the old image.
 #[cfg(unix)]
-pub fn relaunch(port: u16) -> std::io::Error {
-    // Same test as `main`: the bundle exe run from a terminal with arguments is
-    // a CLI and execs like one.
-    #[cfg(target_os = "macos")]
-    if crate::commands::app::launched_as_app_bundle() && std::env::args_os().len() == 1 {
-        match current_exe().ok().and_then(|exe| app_bundle_root(&exe)) {
-            Some(root) => return relaunch_app_bundle(&root, port),
-            None => return std::io::Error::other("could not locate the app bundle to relaunch"),
-        }
-    }
+pub fn relaunch() -> std::io::Error {
+    let args = relaunch_args(std::env::args_os().skip(1));
     #[cfg(all(desktop_app, target_os = "linux"))]
-    if crate::commands::app::launched_with_app_arg() {
-        // The update replaced the `.AppImage` file, not this mount of it, and its
-        // AppRun adds `app`, which the exec below's `--no-browser` would undo.
-        let mut app = match running_appimage() {
-            Some(appimage) => {
-                let mut app = crate::process::command(appimage);
-                // Or the new AppRun would save this image's GTK settings as the session's.
-                crate::local::shell_env::restore_host_gui_env(&mut app);
-                app
-            }
-            None => {
-                let Ok(exe) = crate::paths::spawnable_exe() else {
-                    return std::io::Error::other("could not resolve the running executable");
-                };
-                let mut app = crate::process::command(exe);
-                app.arg(crate::commands::app::APP_ARG);
-                app
-            }
-        };
-        return app.env(APP_RELAUNCH_PORT_ENV, port.to_string()).exec();
+    if let Some(appimage) = running_appimage() {
+        let mut server = crate::process::command(appimage);
+        // Or the new AppRun would save this image's GTK settings as the session's.
+        crate::local::shell_env::restore_host_gui_env(&mut server);
+        return crate::commands::up::exec(server.arg("server").args(args));
     }
-    // Only the app relaunches need the port; exec keeps the original `--port`.
-    #[cfg(not(all(desktop_app, unix)))]
-    let _ = port;
-
     // Not the canonical helper: the launch path is what the installer swapped
     // under, and canonicalizing a replaced binary would pin the old inode.
     let Ok(exe) = crate::paths::spawnable_exe() else {
         return std::io::Error::other("could not resolve the running executable");
     };
-    crate::process::command(exe)
-        .args(relaunch_args(std::env::args_os().skip(1)))
-        .exec()
+    crate::commands::up::exec(crate::process::command(exe).args(args))
 }
 
 /// Windows has no `exec`: spawn the new binary, which waits for this process to
-/// exit before it binds the port, then leave. The desktop app comes back as the
-/// app, on the same port.
+/// exit before it binds the port, then leave.
 #[cfg(windows)]
-pub fn relaunch(port: u16) -> std::io::Error {
-    if crate::commands::app::launched_with_app_arg() {
-        return windows::relaunch(
-            vec![crate::commands::app::APP_ARG.into()],
-            &[(APP_RELAUNCH_PORT_ENV, port.to_string())],
-        );
-    }
-    windows::relaunch(relaunch_args(std::env::args_os().skip(1)), &[])
+pub fn relaunch() -> std::io::Error {
+    windows::relaunch(relaunch_args(std::env::args_os().skip(1)))
 }
 
 /// The original arguments plus `--no-browser`: the tab that asked for the
@@ -1762,27 +1717,6 @@ fn relaunch_args(args: impl Iterator<Item = std::ffi::OsString>) -> Vec<std::ffi
         args.push("--no-browser".into());
     }
     args
-}
-
-#[cfg(target_os = "macos")]
-fn relaunch_app_bundle(root: &Path, port: u16) -> std::io::Error {
-    let spawned = crate::process::command("/bin/sh")
-        .arg("-c")
-        .arg(r#"while kill -0 "$1" 2>/dev/null; do sleep 0.1; done; exec open -n --env "$3" "$2""#)
-        .arg("sh")
-        .arg(std::process::id().to_string())
-        .arg(root)
-        .arg(format!("{APP_RELAUNCH_PORT_ENV}={port}"))
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        // Its own group, so it outlives this process and whatever signals it.
-        .process_group(0)
-        .spawn();
-    match spawned {
-        Ok(_) => std::process::exit(0),
-        Err(err) => err,
-    }
 }
 
 /// The newest release published for this install and selected channel.

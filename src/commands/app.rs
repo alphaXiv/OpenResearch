@@ -5,8 +5,10 @@
 //! Windows the installed `OpenResearch.exe` launcher (windows/launcher) starts
 //! the `orx.exe` beside it as `orx app`, in a hidden console its children share;
 //! on Linux the AppImage's AppRun (linux/AppRun) does the same. Either way app
-//! mode owns the main thread with the window's run loop, while the `orx up`
-//! dashboard server runs on background tokio worker threads.
+//! mode owns the main thread with the window's run loop, and starts the dashboard
+//! server as a child, `orx up --app-window`, so an update can replace the server
+//! under a window that stays open. [FROZEN.md](app/FROZEN.md) is what the two
+//! promise each other across builds.
 //!
 //! This is distinct from `orx up` launched in a terminal, which stays a plain
 //! CLI. The GUI parts build only under `cfg(desktop_app)`: macOS, Windows, and
@@ -45,6 +47,12 @@ pub fn launched_as_app_bundle() -> bool {
         return false;
     };
     is_bundle_exe_launch(&exe, std::env::args_os().next().as_deref())
+}
+
+/// Whether this process is the server a desktop window started, whose fatal errors no
+/// terminal shows.
+pub fn serves_window() -> bool {
+    std::env::args_os().skip(1).any(|arg| arg == "--app-window")
 }
 
 /// The argument the Windows launcher and the Linux AppImage's AppRun start `orx`
@@ -282,10 +290,12 @@ fn close_alert_description(work: &crate::store::PendingWork) -> String {
     lines.join("\n").trim_start().to_string()
 }
 
+#[cfg(desktop_app)]
 static WINDOWLESS: std::sync::LazyLock<tokio::sync::watch::Sender<bool>> =
     std::sync::LazyLock::new(|| tokio::sync::watch::channel(false).0);
 
-pub(crate) fn windowless() -> bool {
+#[cfg(desktop_app)]
+fn windowless() -> bool {
     *WINDOWLESS.borrow()
 }
 
@@ -327,23 +337,6 @@ pub async fn run() {
         crate::show_error_dialog(&error.to_string());
         return;
     }
-    // App mode returns before `dispatch`, which is where `orx up` takes this
-    // same read lock. Without it `orx delete` from a CLI install sees no reader
-    // and wipes the store out from under a running app.
-    let lifecycle = match crate::store::open_lifecycle_lock() {
-        Ok(lock) => lock,
-        Err(error) => {
-            crate::show_error_dialog(&format!("Could not open the storage lock: {error}"));
-            return;
-        }
-    };
-    let _lifecycle_guard = match lifecycle.read() {
-        Ok(guard) => guard,
-        Err(error) => {
-            crate::show_error_dialog(&format!("Could not hold the storage lock: {error}"));
-            return;
-        }
-    };
     #[cfg(target_os = "linux")]
     let media_available = media::available().await;
     let discovered = match crate::commands::remote_host::canonical_data_dir() {
@@ -353,11 +346,11 @@ pub async fn run() {
     match discovered {
         Ok(Some(server)) => {
             #[cfg(target_os = "macos")]
-            imp::run_event_loop(server.port, true);
+            imp::run_event_loop(server.port, None);
             #[cfg(not(target_os = "macos"))]
             imp::run_event_loop(
                 server.port,
-                true,
+                None,
                 #[cfg(target_os = "linux")]
                 media_available,
                 focus_requests,
@@ -371,9 +364,9 @@ pub async fn run() {
             return;
         }
     }
-    // After an update relaunch, keep the previous port, as after a crash the port the
-    // agents it left running call. Otherwise a fixed port, since the window's
-    // localStorage is keyed by origin, falling back to an ephemeral one when a
+    // After the relaunch of an app from before the window outlived its server, keep its port,
+    // as after a crash the port the agents it left running call. Otherwise a fixed port, since
+    // the window's localStorage is keyed by origin, falling back to an ephemeral one when a
     // terminal `orx up` or another app holds it.
     let port_is_free = |port: &u16| std::net::TcpListener::bind(("127.0.0.1", *port)).is_ok();
     let port = std::env::var(crate::updates::APP_RELAUNCH_PORT_ENV)
@@ -388,12 +381,19 @@ pub async fn run() {
                 .map(|a| a.port())
                 .unwrap_or(4791)
         });
+    let server = match start_server(port) {
+        Ok(server) => server,
+        Err(error) => {
+            crate::show_error_dialog(&format!("Could not start OpenResearch's server: {error}"));
+            return;
+        }
+    };
     #[cfg(target_os = "macos")]
-    imp::run_event_loop(port, false);
+    imp::run_event_loop(port, Some(server));
     #[cfg(not(target_os = "macos"))]
     imp::run_event_loop(
         port,
-        false,
+        Some(server),
         #[cfg(target_os = "linux")]
         media_available,
         focus_requests,
@@ -403,7 +403,64 @@ pub async fn run() {
 
 #[cfg(all(target_os = "macos", debug_assertions))]
 pub fn run_dev(port: u16) {
-    imp::run_event_loop(port, true);
+    imp::run_event_loop(port, None);
+}
+
+/// Starts the server a window controls: `orx up --app-window`, with its stdin as the
+/// window's lease (FROZEN.md). From the AppImage it starts through the image's `server`
+/// entry, so it runs from a mount of its own that outlives this window's.
+#[cfg(desktop_app)]
+fn start_server(port: u16) -> std::io::Result<std::process::Child> {
+    #[cfg(target_os = "linux")]
+    let mut server = match crate::updates::running_appimage() {
+        Some(appimage) => {
+            let mut server = crate::process::command(appimage);
+            // Or the image's AppRun would save this one's GTK settings as the session's.
+            crate::local::shell_env::restore_host_gui_env(&mut server);
+            server.arg("server");
+            server
+        }
+        None => crate::process::command(crate::paths::spawnable_exe()?),
+    };
+    #[cfg(not(target_os = "linux"))]
+    let mut server = crate::process::command(crate::paths::spawnable_exe()?);
+    #[cfg(not(target_os = "macos"))]
+    if std::env::var_os(APP_NO_TELEMETRY_ENV).is_some() {
+        server.arg("--no-telemetry");
+    }
+    server
+        .args(["up", "--app-window", "--port", &port.to_string()])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+}
+
+/// A request to the window's own server, through its control API (FROZEN.md).
+#[cfg(desktop_app)]
+async fn ask_server(
+    port: u16,
+    method: reqwest::Method,
+    path: &str,
+) -> anyhow::Result<reqwest::Response> {
+    let response = crate::net::loopback_client()
+        .build()?
+        .request(method, format!("http://127.0.0.1:{port}{path}"))
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await?;
+    Ok(response.error_for_status()?)
+}
+
+/// Whether the server would interrupt something by quitting; true when it cannot say.
+#[cfg(desktop_app)]
+async fn server_busy(port: u16) -> bool {
+    let busy = async {
+        let state: serde_json::Value = ask_server(port, reqwest::Method::GET, "/api/app-window")
+            .await?
+            .json()
+            .await?;
+        anyhow::Ok(state["busy"].as_bool())
+    };
+    busy.await.ok().flatten().unwrap_or(true)
 }
 
 /// Adopt the user's shell environment in place of the one launchd or the desktop
@@ -990,8 +1047,8 @@ mod imp {
         /// The page is showing the dialog a close asked it for.
         CloseAsked,
         CloseAnswer(super::CloseAnswer),
-        /// The runs a quit stops have answered, or stopped being waited on.
-        RunsStopped,
+        /// The window's server exited, and no successor took over from it.
+        ServerExited,
         /// Tell a newly loaded page whether the window is maximized (Windows) or fullscreen (macOS).
         #[cfg(any(windows, target_os = "macos"))]
         SyncWindowState,
@@ -1016,11 +1073,17 @@ mod imp {
 
     enum Quit {
         No,
-        /// Waiting on the runs a quit stops, with the window already gone.
-        StoppingRuns,
+        /// The page unloads, which sends its last workspace state to the server.
         Flushing,
+        /// The server stops its runs and agents and exits; the window waits for it, for a while.
         ShuttingDown,
     }
+
+    /// How long a quitting window waits for its server: the runs it stops get ten seconds, the agents five.
+    const SERVER_QUIT_WAIT: Duration = Duration::from_secs(16);
+
+    /// The port of the server this window started, for AppKit's quit callback, which has no context.
+    static SERVER_PORT: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
 
     /// A close with work pending, waiting on the user's choice.
     enum Ask {
@@ -1036,11 +1099,12 @@ mod imp {
 
     pub(super) fn run_event_loop(
         port: u16,
-        external_server: bool,
+        server: Option<std::process::Child>,
         #[cfg(target_os = "linux")] media_available: bool,
         #[cfg(not(target_os = "macos"))] focus_requests: super::instance::FocusRequests,
         #[cfg(not(target_os = "macos"))] launch_path: Option<String>,
     ) {
+        let external_server = server.is_none();
         let origin = format!(
             "http://{}:{port}",
             if external_server {
@@ -1060,30 +1124,9 @@ mod imp {
             intercept_native_quit();
         }
 
-        // Dashboard server on background workers (we're inside main's runtime).
-        if !external_server {
-            tokio::spawn(async move {
-                let args = crate::UpArgs {
-                    port,
-                    host: std::net::Ipv4Addr::LOCALHOST.into(),
-                    remote: None,
-                    no_browser: true,
-                    headless: false,
-                    no_agent: false,
-                    model: None,
-                    remote_host: false,
-                    desktop_app: true,
-                };
-                // The window is useless without its server, so the app goes with it.
-                match crate::commands::up::run(args).await {
-                    Ok(()) => std::process::exit(0),
-                    Err(err) => {
-                        eprintln!("openresearch app: dashboard server exited: {err}");
-                        crate::show_error_dialog(&format!("The dashboard server stopped: {err}"));
-                        std::process::exit(1);
-                    }
-                }
-            });
+        if let Some(server) = server {
+            let _ = SERVER_PORT.set(port);
+            watch_server(server, event_loop.create_proxy());
         }
 
         if !external_server {
@@ -1097,7 +1140,7 @@ mod imp {
                         }
                         let _ = lifecycle.send_event(UserEvent::EngineBusy(true));
                     }
-                    let busy = crate::commands::up::api_v2::busy().await.unwrap_or(true);
+                    let busy = super::server_busy(port).await;
                     if lifecycle.send_event(UserEvent::EngineBusy(busy)).is_err() {
                         return;
                     }
@@ -1493,7 +1536,6 @@ mod imp {
                 menu.init_for_nsapp();
             }
             Event::NewEvents(StartCause::ResumeTimeReached { .. }) => match quit {
-                Quit::StoppingRuns => {}
                 Quit::No => {
                     let deadline = match ask {
                         Ask::Sent(deadline) => Some(deadline),
@@ -1507,16 +1549,19 @@ mod imp {
                         close_window(external_server, false, &mut quit, &mut ask, &window, &webview, control_flow);
                     }
                 }
-                // The server's own shutdown path stops the agents and then exits
-                // the process.
                 Quit::Flushing => {
                     if external_server {
                         *control_flow = ControlFlow::Exit;
                         return;
                     }
-                    crate::commands::up::request_shutdown();
+                    // Past the wait, leaving drops the lease, and the server hands its work off instead.
+                    tokio::spawn(async move {
+                        if let Err(error) = super::ask_server(port, reqwest::Method::POST, "/api/app-window/quit").await {
+                            eprintln!("openresearch app: could not ask the server to quit: {error:#}");
+                        }
+                    });
                     quit = Quit::ShuttingDown;
-                    *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_secs(5));
+                    *control_flow = ControlFlow::WaitUntil(Instant::now() + SERVER_QUIT_WAIT);
                 }
                 Quit::ShuttingDown => *control_flow = ControlFlow::Exit,
             },
@@ -1558,10 +1603,8 @@ mod imp {
                 *control_flow = ControlFlow::Wait;
                 answer_close(answer, &mut quit, &window, &webview, control_flow);
             }
-            Event::UserEvent(UserEvent::RunsStopped) if matches!(quit, Quit::StoppingRuns) => {
-                quit = Quit::No;
-                begin_quit(&mut quit, &window, &webview, control_flow);
-            }
+            // The window is useless without its server, so the app goes with it.
+            Event::UserEvent(UserEvent::ServerExited) => *control_flow = ControlFlow::Exit,
             #[cfg(windows)]
             Event::UserEvent(UserEvent::SyncWindowState) => {
                 page_maximized = window.is_maximized();
@@ -1778,14 +1821,106 @@ mod imp {
         static EVENT_PROXY: RefCell<Option<tao::event_loop::EventLoopProxy<UserEvent>>> = const { RefCell::new(None) };
     }
 
-    /// For code on the main thread with no proxy of its own: AppKit's callbacks, a windowless close, a quit's stops.
-    fn event_proxy() -> Option<tao::event_loop::EventLoopProxy<UserEvent>> {
-        EVENT_PROXY.with(|slot| slot.borrow().clone())
-    }
-
+    /// For code on the main thread with no proxy of its own: AppKit's callbacks and a windowless close.
     #[cfg(target_os = "macos")]
     fn send_later(event: UserEvent) -> bool {
-        event_proxy().is_some_and(|proxy| proxy.send_event(event).is_ok())
+        EVENT_PROXY
+            .with(|slot| slot.borrow().clone())
+            .is_some_and(|proxy| proxy.send_event(event).is_ok())
+    }
+
+    /// Waits on the window's server and, on Windows, on each successor it restarts into,
+    /// which inherits the lease, until the last one exits.
+    fn watch_server(
+        mut server: std::process::Child,
+        proxy: tao::event_loop::EventLoopProxy<UserEvent>,
+    ) {
+        // Held while any server it was handed to runs: `wait` would close it first.
+        let lease = server.stdin.take();
+        #[cfg(windows)]
+        let runtime = tokio::runtime::Handle::current();
+        std::thread::spawn(move || {
+            let _lease = lease;
+            #[cfg(windows)]
+            let pid = server.id();
+            match server.wait() {
+                Ok(status) => eprintln!("openresearch app: the server exited: {status}"),
+                Err(error) => eprintln!("openresearch app: could not wait for the server: {error}"),
+            }
+            #[cfg(windows)]
+            follow_successors(&runtime, pid);
+            let _ = proxy.send_event(UserEvent::ServerExited);
+        });
+    }
+
+    /// Windows has no exec, so a server restarts by starting its successor, naming it in
+    /// `relaunch.json` and exiting; the successor inherits the lease. Waits out each in turn.
+    #[cfg(windows)]
+    fn follow_successors(runtime: &tokio::runtime::Handle, mut exited: u32) {
+        while let Some(pid) = successor(runtime, exited) {
+            if let Err(error) = wait_for_exit(pid) {
+                eprintln!("openresearch app: could not follow the restarted server {pid}: {error}");
+                return;
+            }
+            exited = pid;
+        }
+    }
+
+    /// The server that took over from the one that exited, if one did.
+    #[cfg(windows)]
+    fn successor(runtime: &tokio::runtime::Handle, exited: u32) -> Option<u32> {
+        use crate::commands::remote_host::{canonical_data_dir, ServerDescriptor};
+
+        let data_dir = canonical_data_dir()
+            .map_err(|error| {
+                eprintln!("openresearch app: could not look for a restarted server: {error:#}")
+            })
+            .ok()?;
+        if let Some(pid) =
+            ServerDescriptor::announced_successor(&data_dir).filter(|pid| *pid != exited)
+        {
+            return Some(pid);
+        }
+        // A successor quick enough to have started already replaced the announcement with its descriptor.
+        match runtime.block_on(ServerDescriptor::live(&data_dir)) {
+            Ok(server) => server.map(|server| server.pid).filter(|pid| *pid != exited),
+            Err(error) => {
+                eprintln!("openresearch app: could not look for a restarted server: {error:#}");
+                None
+            }
+        }
+    }
+
+    /// Waits for the process `pid` to exit, then reads its exit code.
+    #[cfg(windows)]
+    fn wait_for_exit(pid: u32) -> std::io::Result<u32> {
+        use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, WaitForSingleObject, INFINITE,
+            PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+        };
+
+        // SAFETY: plain syscalls on a handle opened here and closed on every path out.
+        unsafe {
+            let process = OpenProcess(
+                PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                0,
+                pid,
+            );
+            if process.is_null() {
+                return Err(std::io::Error::last_os_error());
+            }
+            let mut code = 0;
+            let read = WaitForSingleObject(process, INFINITE) == WAIT_OBJECT_0
+                && GetExitCodeProcess(process, &mut code) != 0;
+            let error = std::io::Error::last_os_error();
+            CloseHandle(process);
+            if read {
+                Ok(code)
+            } else {
+                Err(error)
+            }
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -1847,11 +1982,25 @@ mod imp {
         }
     }
 
-    /// The work a quit would interrupt; none when it can't be read, which a developer has to fix.
-    fn pending_work() -> Option<crate::store::PendingWork> {
-        match crate::commands::up::api_v2::pending_work() {
-            Ok(work) if work.is_empty() => None,
-            Ok(work) => Some(work),
+    /// The work a quit would interrupt, as the window's server lists it; none when it can't
+    /// say, which a developer has to fix. Kept whole for the page, which the server serves.
+    fn pending_work() -> Option<serde_json::Value> {
+        let port = *SERVER_PORT.get()?;
+        let read = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let work: serde_json::Value =
+                    super::ask_server(port, reqwest::Method::GET, "/api/pending-work")
+                        .await?
+                        .json()
+                        .await?;
+                anyhow::Ok(work)
+            })
+        });
+        match read {
+            Ok(work) => {
+                let empty = |list: &str| work[list].as_array().is_some_and(Vec::is_empty);
+                (!(empty("agents") && empty("runs"))).then_some(work)
+            }
             Err(error) => {
                 eprintln!("openresearch app: could not check for pending work: {error:#}");
                 None
@@ -1918,17 +2067,7 @@ mod imp {
     ) {
         match answer {
             super::CloseAnswer::Cancel => {}
-            super::CloseAnswer::Quit => {
-                let Some(proxy) = event_proxy() else {
-                    return begin_quit(quit, window, webview, control_flow);
-                };
-                window.set_visible(false);
-                *quit = Quit::StoppingRuns;
-                tokio::spawn(async move {
-                    crate::commands::up::api_v2::force_stop_runs().await;
-                    let _ = proxy.send_event(UserEvent::RunsStopped);
-                });
-            }
+            super::CloseAnswer::Quit => begin_quit(quit, window, webview, control_flow),
             #[cfg(not(target_os = "macos"))]
             super::CloseAnswer::Background => {
                 let _ = webview;
@@ -1960,9 +2099,15 @@ mod imp {
             .contains(NSWindowStyleMask::FullScreen)
     }
 
-    fn ask_natively(window: &Window, pending: &crate::store::PendingWork) -> super::CloseAnswer {
+    fn ask_natively(window: &Window, pending: &serde_json::Value) -> super::CloseAnswer {
         let title = "Work is still running";
-        let description = super::close_alert_description(pending);
+        // A newer server may list work this build cannot read; the page it serves still can.
+        let pending = serde_json::from_value::<crate::store::PendingWork>(pending.clone());
+        let description = pending.as_ref().map_or_else(
+            |_| "Agents or experiments are still running.".to_string(),
+            super::close_alert_description,
+        );
+        let pending = pending.unwrap_or_default();
         let background = if cfg!(target_os = "macos") {
             "Run in background"
         } else {
