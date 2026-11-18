@@ -105,9 +105,9 @@ export function RunStatus({ model, label, descriptionId, onOpenRunPage }: {
               </div>}
               {monitor?.status === "error" ? <div className="mt-2.5 text-xs text-ink-subtext" role="alert">
                 {m.run_monitor_load_failed()} <Button size="small" variant="ghost" onClick={monitor.retry}><RefreshCw size={13} />{m.app_retry()}</Button>
-              </div> : monitor?.status === "loading" || behind ? <p className="m-0 mt-2.5 text-xs text-ink-subtext" role="status">{m.common_loading()}</p> : data && stages && <>
+              </div> : monitor?.status === "loading" || behind ? <p className="m-0 mt-2.5 text-xs text-ink-subtext" role="status">{m.common_loading()}</p> : data && <>
                 {data.availability.state !== "live" && <p className="m-0 mt-2.5 text-xs text-ink-subtext">{data.availability.reason ?? m.run_view_stale()}</p>}
-                {(data.availability.state !== "unavailable" && (data.phases.length > 0 || data.setup != null || data.stageOrder.first === null)) && <div className="mt-2.5 border-t border-border-variant pt-2.5">
+                {data.availability.state !== "unavailable" && stages && <div className="mt-2.5 border-t border-border-variant pt-2.5">
                   <Phases model={model} phases={stages.phases} current={stages.current} progress={count} setupNames={stages.names} className="flex-col gap-y-2" />
                 </div>}
               </>}

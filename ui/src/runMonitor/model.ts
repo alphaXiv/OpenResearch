@@ -260,8 +260,11 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   const open = live && !pre && (monitor !== null || summary !== null) && estimate === null;
   const limitEndsAt = monitor ? limit?.endsAt ?? null : summary?.limitEndsAt ?? null;
   const noEstimate = !stagePhase ? m.run_eta_no_progress() : stagePhase.of == null ? m.run_eta_no_total() : m.run_eta_unknown_left();
-  const setup = (monitor ? monitor.setup : summary?.setup) ?? null;
-  const settingUp = live && !pre && !degraded && !notice && !display.waiting && setup !== null;
+  const setup = live && !pre && !degraded && !notice && !display.waiting
+    ? monitor ? monitor.setup : summary?.setup
+    : null;
+  const hasStages = monitor ? phases.length > 0 : stage !== null || (order?.count ?? 0) > 0;
+  const settingUp = setup != null && hasStages;
   const stageDone = progress?.done ?? stage?.done ?? null;
   const progressText = stageDone === null ? null : progressWords(stagePhase, stageDone);
 
@@ -271,18 +274,18 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   const needsChoice = flag?.state === "waiting";
   const looking = flag?.state === "waking" || flag?.state === "agent_looking" || flag?.state === "asking";
 
-  const position = stagePosition(order, setup !== null);
+  const position = stagePosition(order, settingUp);
   const rawName = stagePhase?.name ? capitalized(stagePhase.name) : "";
   const name = settingUp ? m.run_stage_setup() : rawName || status;
   const stageLabel = position?.index != null && position.count !== null
     ? m.run_stage_position({ stage: autoDir(name), position: ltr(`${fmtNumber(position.index + 1)}/${fmtNumber(position.count)}`) })
     : autoDir(name);
   const count = stageDone === null ? "" : capitalized(progressWords(stagePhase, stageDone));
-  const detail = settingUp ? stageDone !== null
-    ? [rawName && rawName !== m.run_stage_setup() ? autoDir(rawName) : "", count].filter(Boolean).join(" ")
-    : rawName ? m.run_stage_started({ stage: autoDir(rawName) })
-      : setup?.line && !/^\s*(?:[{}\[\]]|["']?[\w.-]+["']?\s*[:=])/.test(setup.line) ? quoted(setup.line) : ""
-    : count;
+  const logLine = setup?.line;
+  const detail = stageDone !== null
+    ? settingUp && rawName && rawName !== m.run_stage_setup() ? `${autoDir(rawName)} ${count}` : count
+    : settingUp && rawName ? m.run_stage_started({ stage: autoDir(rawName) })
+      : logLine && !/^\s*(?:[{}\[\]]|["']?[\w.-]+["']?\s*[:=])/.test(logLine) ? quoted(logLine) : "";
   const statusText = detail ? `${stageLabel} · ${detail}` : stageLabel;
   const stageSlots = { name: stageDone === null ? statusText : stageLabel, count: stageDone === null ? "" : detail };
   const stageKey = `${settingUp ? "setup" : "stage"}:${order?.index ?? rawName}:${order?.first ?? ""}:${order?.count ?? ""}`;
@@ -346,7 +349,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   } else if (open) {
     eta = m.run_elapsed({ duration: durationText(elapsed) });
     etaElapsed = true;
-    etaDetail = settingUp || stagePhase?.of == null && stageDone !== null ? "" : noEstimate;
+    etaDetail = setup || stagePhase?.of == null && stageDone !== null ? "" : noEstimate;
   } else if (estimate) {
     ({ eta, detail: etaDetail, strong: etaStrong, leftMs } = estimateWords({ ...estimate, floor: etaFloor }, now, limit, progress?.stallMs ?? 0));
   } else {

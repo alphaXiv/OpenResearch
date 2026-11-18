@@ -13,6 +13,8 @@ export function stagePosition(order: StageOrder | null | undefined, settingUp: b
 
 /** The phases before the first displayed point share one Setup stage. */
 export function foldedStages(monitor: RunMonitor, model: RunModel) {
+  if (monitor.phases.length === 0) return null;
+
   const order = monitor.stageOrder;
   const first = order.first ?? (model.live ? (order.index ?? -1) + 1 : monitor.phases.length);
   const setup = monitor.phases.slice(0, first);

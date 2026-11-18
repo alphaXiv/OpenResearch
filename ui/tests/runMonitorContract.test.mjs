@@ -143,14 +143,14 @@ test("unknown whole-run progress reads the step, the time so far and why there i
   assert.equal(bar.getAttribute("aria-valuenow"), null);
 });
 
-test("a run whose log has said nothing orx recognises is setting up, and says what it printed last", () => {
+test("a run without stages or progress says it is running and shows its latest log line", () => {
   const { setup } = states.setup.summary;
   assert.equal(setup.line, "Successfully downloaded shard_00001.parquet");
   for (const full of [true, false]) {
     const view = model("setup", full);
-    assert.equal(bare(view.sentence.text), `${m.run_stage_setup()} · ${setup.line}`, `full: ${full}`);
+    assert.equal(bare(view.sentence.text), `${m.status_running()} · ${setup.line}`, `full: ${full}`);
     assert.equal(view.etaDetail, "", `full: ${full}: no fault to explain`);
-    assert.equal(view.eta, "", `full: ${full}`);
+    assert.match(bare(view.eta), /elapsed$/, `full: ${full}`);
     assert.deepEqual(view.bar.segments, [{ weight: 1, fill: null }], `full: ${full}`);
   }
 });
@@ -170,12 +170,13 @@ test("a stage the run declared and has no step of yet keeps its own words over l
   assert.equal(bare(line.sentence.text), "Setup · Train started");
 });
 
-test("a setting-up run with nothing printed yet keeps its machine off the line", () => {
+test("a running job with nothing printed yet keeps its machine off the line", () => {
   const setup = { ...states.setup.summary.setup, line: null };
   const state = { ...states.setup, summary: { ...states.setup.summary, setup }, monitor: { ...states.setup.monitor, setup } };
   for (const full of [true, false]) {
     const view = runModel({ item: { sessionId: "s", run: runOf("setup", state), experimentName: null, experimentSlug: "baseline" }, monitor: full ? state.monitor : null, shown: true, agent: "Claude", now: state.now, nextRetryMs: null });
-    assert.equal(bare(view.sentence.text), bare(m.run_stage_setup()), `full: ${full}`);
+    assert.equal(bare(view.sentence.text), bare(m.status_running()), `full: ${full}`);
+    assert.match(bare(view.eta), /elapsed$/, `full: ${full}`);
   }
 });
 
@@ -189,11 +190,12 @@ test("a log line never draws as bold, and a long one is shortened", () => {
   assert.ok(long.endsWith("…") && long.length < 140, long);
 });
 
-test("after a long time with nothing recognised the run is just running, with no estimate and why", () => {
+test("elapsed time advances while the run has no recognised progress", () => {
   const state = states.setup;
   for (const full of [true, false]) {
     const view = runModel({ item: { sessionId: "s", run: runOf("setup"), experimentName: null, experimentSlug: "baseline" }, monitor: full ? state.monitor : null, shown: true, agent: "Claude", now: state.now + 16 * 60_000, nextRetryMs: null });
-    assert.ok(view.settingUp, `full: ${full}`);
+    assert.notEqual(view.eta, model("setup", full).eta, `full: ${full}`);
+    assert.match(bare(view.eta), /elapsed$/, `full: ${full}`);
     assert.equal(view.etaDetail, "", `full: ${full}`);
   }
 });

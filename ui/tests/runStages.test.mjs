@@ -70,6 +70,11 @@ test("an empty or skipped prep group invents no duration or infinite timestamp",
   assert.equal(stages.phases[0].skipped, true);
 });
 
+test("a run with no stages has no folded stage list", () => {
+  const data = { ...monitor(), phases: [], progress: null, stageOrder: { index: null, count: null, first: null } };
+  assert.equal(foldedStages(data, model(data)), null);
+});
+
 test("an unnamed reported counter has a readable label in the stage card", () => {
   const data = monitor();
   data.phases[3].name = "";

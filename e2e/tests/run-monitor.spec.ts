@@ -522,7 +522,7 @@ for (const line of lines) {
   for (const [name, text] of Object.entries(stops)) if (line.includes(text)) gate(name)
 }`)
 
-test('a run nobody instrumented says it is setting up and what it printed, then shows the bars its log has', async ({ page, project, agent, orx }, info) => {
+test('an uninstrumented run shows what it printed, then shows the bars its log has', async ({ page, project, agent, orx }, info) => {
   // Two theme passes and the run itself outlast the default budget on a busy machine.
   test.slow()
   const run = replay(orx, `nanochat-${project.id}`, { setup: 'Starting merge loop', tokenizer: '(18202/32503 merges)', training: 'step 00010/01617' })
@@ -532,13 +532,12 @@ test('a run nobody instrumented says it is setting up and what it printed, then 
   const banner = await launch(page, agent, project, 'Nanochat', run.command)
   const progress = banner.getByRole('progressbar')
 
-  await test.step('before any progress the strip says it is setting up and the newest line, not a fault', async () => {
-    await expect(banner).toContainText(/Setup\W+Starting merge loop/)
+  await test.step('before the first bar the line shows elapsed time and the newest log line', async () => {
+    await expect(banner).toContainText(/Running\W+Starting merge loop/)
+    await expect(banner).toContainText('elapsed')
     await expect(banner).not.toContainText('No estimate')
     await expect(banner).not.toContainText('Running on')
-    await themes(page, banner, info, 'strip-setting-up')
-    await expect(banner).toContainText(/Setup\W+Starting merge loop/)
-    await themes(page, banner, info, 'line-setting-up')
+    await themes(page, banner, info, 'line-before-tokenizer')
   })
 
   await test.step('the tokenizer bar behind its logging prefix is found', async () => {
@@ -565,22 +564,49 @@ test('a run nobody instrumented says it is setting up and what it printed, then 
   })
 })
 
-test('a run without a signal point remains in setup without an invented deadline', async ({ page, project, agent, orx }, info) => {
+test('a plain run shows elapsed time without inventing a stage', async ({ page, project, agent, orx }, info) => {
   test.slow()
-  const run = replay(orx, `silent-${project.id}`, { setup: 'Starting merge loop' })
-  const hold = `silent-result-${project.id}`
-  agent.script('finished with status **done**', [{ hold }, { say: 'The silent run finished.' }])
+  const run = payload(orx, `plain-${project.id}`, ['done'], `
+console.log('Finished checking the rowan sample')
+gate('done')
+`)
+  const hold = `plain-result-${project.id}`
+  agent.script('finished with status **done**', [{ hold }, { say: 'The plain run finished.' }])
   await page.request.post(`${orx.url}/api/settings/ui-state`, { headers: { origin: orx.url }, data: { runBanner: 'strip' } })
-  const banner = await launch(page, agent, project, 'Silent', run.command)
-  await expect(banner).toContainText(/Setup\W+Starting merge loop/)
-  await page.clock.setFixedTime(Date.now() + 16 * 60_000)
-  await expect(banner).toContainText(/Setup\W+Starting merge loop/)
-  await expect(banner).not.toContainText('No estimate')
-  await themes(page, banner, info, 'strip-silent-for-long')
-  await run.open('setup')
+  const banner = await launch(page, agent, project, 'Plain', run.command)
+  const status = banner.getByRole('button', { name: /Running.+Plain/ })
+  const elapsed = /2m[⁦-⁩]* elapsed/
+  await expect(status).toHaveText(/Running\W+Finished checking the rowan sample/)
+  await page.clock.setFixedTime(Date.now() + 2 * 60_000)
+  await expect(banner).toContainText(elapsed)
+
+  const card = page.getByRole('dialog', { name: 'Plain' })
+  for (const width of [1440, 420]) {
+    await page.setViewportSize({ width, height: 860 })
+    await themes(page, banner, info, `plain-line-${width}`)
+    await status.hover()
+    await expect(card).toContainText(elapsed)
+    await expect(card.getByRole('list')).toHaveCount(0)
+    await themes(page, card, info, `plain-card-${width}`)
+    await page.mouse.move(0, 0)
+    await expect(card).toBeHidden()
+  }
+
+  await openRunPage(page, banner, /Plain/)
+  const details = latestRun(page).getByRole('group', { name: 'Plain' })
+  await expect(details).toContainText('Running')
+  await expect(details).toContainText(elapsed)
+  await expect(details.getByRole('list')).toHaveCount(0)
+  for (const width of [420, 1440]) {
+    await page.setViewportSize({ width, height: 860 })
+    await themes(page, details, info, `plain-page-${width}`)
+  }
+
+  await run.open('done')
   await agent.reached(hold)
+  await expect(details).toContainText('Done in')
   agent.release(hold)
-  await expect(page.getByText('The silent run finished.', { exact: true })).toBeVisible()
+  await expect(page.getByText('The plain run finished.', { exact: true })).toBeVisible()
 })
 
 test('several runs share one summary whose rows name what sets each apart and open in place', async ({ page, agent, launchOrx }, info) => {
