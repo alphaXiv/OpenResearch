@@ -2176,16 +2176,15 @@
   "no_project_new_chat": "Новый чат без проекта",
   "create_project_button": "Создать проект",
   "create_project_title": "Создать проект",
-  "create_project_description": "Файлы этого чата переместятся в выбранную папку, и чат продолжится в новом проекте.",
   "create_project_confirm": "Создать проект",
   "create_project_folder_has_files": "В этой папке уже есть файлы. Выберите другое место.",
-  "create_project_left_out": "Эти файлы слишком велики для коммита и остаются только в копии чата: {files}",
   "create_project_created": "Создан",
   "create_project_review": "Проверить…",
   "activity_proposed_project": "Предложен проект {name}",
   "chat_delete_scratch_session_confirm": "Удалить «{title}»?\n\nУ этого чата нет проекта, поэтому стенограмма, боковые чаты и файлы будут удалены безвозвратно.",
   "create_project_move_title": "Перенести в новый проект",
-  "create_project_move_description": "Этот чат переедет в новый проект в выбранной папке, начиная с истории {project} и работы чата. У {project} останется своя копия.",
   "create_project_pending": "Переедет в {name}, когда закончится этот ход",
-  "create_project_pending_cancel": "Отменить перенос"
+  "create_project_pending_cancel": "Отменить перенос",
+  "create_project_folder_description": "В выбранную папку попадёт закоммиченная работа этого чата, и чат продолжится в новом проекте. Незакоммиченные файлы останутся у чата, пока он их не закоммитит.",
+  "create_project_split_description": "В выбранную папку попадут история {project} и коммиты этого чата, и чат продолжится в новом проекте с файлами как есть. У {project} останется своя копия."
 }

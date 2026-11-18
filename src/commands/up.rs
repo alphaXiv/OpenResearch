@@ -2081,11 +2081,7 @@ async fn move_chat_to_project(
         .await
         .map_err(bad_request)?;
     Ok(Json(match moved {
-        Some(promotion) => json!({
-            "project": project_json(&promotion.project),
-            "leftOut": promotion.left_out,
-            "pending": false,
-        }),
+        Some(project) => json!({ "project": project_json(&project), "pending": false }),
         None => json!({ "pending": true }),
     }))
 }

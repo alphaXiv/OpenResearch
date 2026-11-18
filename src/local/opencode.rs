@@ -182,8 +182,8 @@ fn project_state_md(project: &LocalProject, state: &ProjectState) -> String {
                 is worth keeping, or the user asks to make it a project, run \
                 `orx project create --name \"<name>\"` (add `--path <folder>` for a folder \
                 other than `~/OpenResearch/<name>`). The user reviews the name and folder in \
-                the chat and creates it; the chat's work is then committed and moved there, \
-                and this chat continues in that project."
+                the chat and creates it; the repository then moves there with your commits, \
+                and this chat continues in that project with its worktree as it was."
             .to_string();
     }
     let has_run_command = project

@@ -2176,16 +2176,15 @@
   "no_project_new_chat": "گفتگوی جدید بدون پروژه",
   "create_project_button": "ساخت پروژه",
   "create_project_title": "ساخت یک پروژه",
-  "create_project_description": "فایل‌های این گفتگو به پوشه‌ای که انتخاب می‌کنید منتقل می‌شوند و گفتگو در پروژهٔ جدید ادامه می‌یابد.",
   "create_project_confirm": "ساخت پروژه",
   "create_project_folder_has_files": "این پوشه از قبل فایل دارد. مکان دیگری انتخاب کنید.",
-  "create_project_left_out": "این فایل‌ها برای ثبت بیش از حد بزرگ‌اند و فقط در نسخهٔ گفتگو می‌مانند: {files}",
   "create_project_created": "ساخته شد",
   "create_project_review": "بازبینی…",
   "activity_proposed_project": "پروژهٔ {name} را پیشنهاد داد",
   "chat_delete_scratch_session_confirm": "«{title}» حذف شود؟\n\nاین گفتگو پروژه ندارد، پس متن گفتگو، گفتگوهای جانبی و فایل‌هایش برای همیشه حذف خواهند شد.",
   "create_project_move_title": "انتقال به پروژهٔ جدید",
-  "create_project_move_description": "این گفتگو به پروژهٔ جدیدی در پوشه‌ای که انتخاب می‌کنید منتقل می‌شود که از تاریخچهٔ {project} و کار گفتگو شروع می‌شود. {project} نسخهٔ خودش را نگه می‌دارد.",
   "create_project_pending": "پس از پایان این نوبت به {name} منتقل می‌شود",
-  "create_project_pending_cancel": "لغو انتقال"
+  "create_project_pending_cancel": "لغو انتقال",
+  "create_project_folder_description": "پوشه‌ای که انتخاب می‌کنید کارهای ثبت‌شدهٔ این گفتگو را می‌گیرد و گفتگو در پروژهٔ جدید ادامه می‌یابد. فایل‌های ثبت‌نشده تا وقتی گفتگو آن‌ها را ثبت کند نزد گفتگو می‌مانند.",
+  "create_project_split_description": "پوشه‌ای که انتخاب می‌کنید تاریخچهٔ {project} و کامیت‌های این گفتگو را می‌گیرد و گفتگو با همان فایل‌ها در پروژهٔ جدید ادامه می‌یابد. {project} نسخهٔ خودش را نگه می‌دارد."
 }

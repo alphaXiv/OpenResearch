@@ -1,11 +1,13 @@
 import { composer, expect, send, test } from '../src/test.ts'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
+
+const commit = 'git -c user.name=E2E -c user.email=e2e@example.com commit -qm'
 
 test('a chat without a project becomes the project its agent proposes', async ({ page, project, agent, orx }, info) => {
   const folder = path.join(orx.root, 'kept', 'tokenizer-probes')
   agent.script('Jot down some ideas.', [
-    { run: "printf 'ideas\\n' > notes.md" },
+    { run: `printf 'ideas\\n' > notes.md && printf 'draft\\n' > draft.md && git add notes.md && ${commit} 'Add notes'` },
     { say: 'Wrote notes.md.' },
   ])
   agent.script('Keep this as a project.', [
@@ -38,14 +40,16 @@ test('a chat without a project becomes the project its agent proposes', async ({
     await expect(dialog).toBeHidden()
     await expect(page.getByText('Created', { exact: true })).toBeVisible()
     await expect(page.getByRole('complementary').getByRole('button', { name: 'Tokenizer probes', exact: true })).toBeVisible()
+    // The folder gets what the chat committed; its unsaved draft stays with the chat.
     expect(readFileSync(path.join(folder, 'notes.md'), 'utf8')).toBe('ideas\n')
+    expect(existsSync(path.join(folder, 'draft.md'))).toBe(false)
   })
 })
 
 test('a chat in a project moves into a new one once its turn ends', async ({ page, project, agent, orx }) => {
   const folder = path.join(orx.root, 'kept', 'split-off')
   agent.script('Write a probe and keep working.', [
-    { run: "printf 'probe\\n' > probe.txt" },
+    { run: `printf 'probe\\n' > probe.txt && git add probe.txt && ${commit} 'Add probe'` },
     { hold: 'working' },
     { say: 'Probe written.' },
   ])

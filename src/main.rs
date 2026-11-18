@@ -307,8 +307,8 @@ pub enum ProjectCommand {
     },
 
     /// From a chat: propose making it a project of its own. The user reviews
-    /// the name and folder in the chat; creating it commits the chat's work and
-    /// moves the chat there.
+    /// the name and folder in the chat; creating it moves the chat's committed
+    /// work there, and the chat continues in that project.
     Create {
         /// The project's name.
         #[arg(long)]

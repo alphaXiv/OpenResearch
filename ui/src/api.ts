@@ -2293,7 +2293,7 @@ export function createApi(
 
   /** Make a chat a project of its own at `path`, now or, while it runs, once its turn ends. */
   const moveChatToProject = (sessionId: string, body: { name: string; path: string }) =>
-    post<{ pending: true } | { pending: false; project: Project; leftOut: string[] }>(`/api/chat/sessions/${sessionId}/project`, body);
+    post<{ pending: true } | { pending: false; project: Project }>(`/api/chat/sessions/${sessionId}/project`, body);
 
   const cancelChatProjectMove = (sessionId: string) =>
     writeResponse(`/api/chat/sessions/${sessionId}/project`, { method: "DELETE" }).then(async (r) => {

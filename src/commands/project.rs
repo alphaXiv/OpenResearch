@@ -175,9 +175,9 @@ fn propose(name: &str, path: Option<&str>) -> Result<()> {
         .get_local_project(&session.project_id)?
         .is_some_and(|project| project.is_scratch())
     {
-        "this chat's work is committed and moved there"
+        "the repository moves there with your commits"
     } else {
-        "this chat moves there, with its work committed on top of the project's history"
+        "a new repository starts there from the project's history and your commits"
     };
     let name = name.trim();
     if name.is_empty() {
@@ -199,8 +199,8 @@ fn propose(name: &str, path: Option<&str>) -> Result<()> {
     };
     println!(
         "Proposed the project \"{name}\" {place}. The user reviews the name and folder in this chat and creates it; \
-         then {moves}, and the chat continues in that project. If you are mid-task when they do, \
-         the move waits for your turn to end and you are told where your files went. \
+         then {moves}, your worktree keeps every file, and the chat continues in that project. \
+         If you are mid-task when they do, the move waits for your turn to end and you are told when it happened. \
          Tell the user the proposal is ready for their review."
     );
     Ok(())

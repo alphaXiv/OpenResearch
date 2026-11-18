@@ -6,7 +6,6 @@ import type { ChatSession, Project } from "../api";
 import type { DialogContentProps } from "../dialog";
 import { autoDir, ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
-import { getLocale } from "../paraglide/runtime.js";
 import { mutMoveChatToProject } from "../queries/projects";
 import { useWorkspace } from "../workspace";
 import { WorkspaceDomContext } from "../WorkspaceDom";
@@ -101,14 +100,10 @@ export function useCreateProject() {
       props: {
         initial,
         title: project.scratch ? m.create_project_title() : m.create_project_move_title(),
-        description: project.scratch ? m.create_project_description() : m.create_project_move_description({ project: autoDir(project.name) }),
+        description: project.scratch ? m.create_project_folder_description() : m.create_project_split_description({ project: autoDir(project.name) }),
       },
       onConfirm: async ({ name, path }) => {
-        const moved = await mutMoveChatToProject.runAsHeadlessPromise(workspace, session.id, { name, path }, {});
-        if (!moved.pending && moved.leftOut.length) {
-          const files = new Intl.ListFormat(getLocale(), { type: "conjunction" }).format(moved.leftOut.map((file) => ltr(file)));
-          showAlert(m.create_project_left_out({ files }), "warning");
-        }
+        await mutMoveChatToProject.runAsHeadlessPromise(workspace, session.id, { name, path }, {});
       },
       onCancel: "close",
     });

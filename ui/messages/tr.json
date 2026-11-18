@@ -2176,16 +2176,15 @@
   "no_project_new_chat": "Projesiz yeni sohbet",
   "create_project_button": "Proje oluştur",
   "create_project_title": "Proje oluştur",
-  "create_project_description": "Bu sohbetin dosyaları seçtiğiniz klasöre taşınır ve sohbet yeni projede devam eder.",
   "create_project_confirm": "Proje oluştur",
   "create_project_folder_has_files": "Bu klasörde zaten dosyalar var. Yeni bir konum seçin.",
-  "create_project_left_out": "Bu dosyalar commit için çok büyük, bu yüzden yalnızca sohbetin kopyasında kalır: {files}",
   "create_project_created": "Oluşturuldu",
   "create_project_review": "İncele…",
   "activity_proposed_project": "{name} projesini önerdi",
   "chat_delete_scratch_session_confirm": "“{title}” silinsin mi?\n\nBu sohbetin projesi yok, bu yüzden konuşma dökümü, yan sohbetleri ve dosyaları kalıcı olarak kaldırılacak.",
   "create_project_move_title": "Yeni bir projeye taşı",
-  "create_project_move_description": "Bu sohbet, seçtiğiniz klasördeki yeni bir projeye taşınır; proje {project} geçmişinden ve sohbetin çalışmasından başlar. {project} kendi kopyasını korur.",
   "create_project_pending": "Bu tur bitince {name} projesine taşınır",
-  "create_project_pending_cancel": "Taşımayı iptal et"
+  "create_project_pending_cancel": "Taşımayı iptal et",
+  "create_project_folder_description": "Seçtiğiniz klasör bu sohbetin commit edilmiş çalışmasını alır ve sohbet yeni projede devam eder. Commit edilmemiş dosyalar, sohbet onları commit edene kadar sohbette kalır.",
+  "create_project_split_description": "Seçtiğiniz klasör {project} geçmişini ve bu sohbetin commit'lerini alır; sohbet dosyaları olduğu gibi kalarak yeni projede devam eder. {project} kendi kopyasını korur."
 }

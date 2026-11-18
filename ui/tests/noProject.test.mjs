@@ -44,7 +44,7 @@ test("creating the proposed project moves the chat into it", async () => {
     if (path === "/api/chat/sessions/chat_1/project" && init.method === "POST") {
       promoted.push(JSON.parse(init.body));
       project = { ...project, name: "Fib sandbox", scratch: false, path: "/home/me/fib", createdAt: 20 };
-      return { pending: false, project, leftOut: [] };
+      return { pending: false, project };
     }
   });
   const view = await render(createElement(ProjectProposalCard, { proposal: { name: "Fib sandbox", path: "~/OpenResearch/fib-sandbox" }, proposedAt: 10, project, session: { id: "chat_1" } }));

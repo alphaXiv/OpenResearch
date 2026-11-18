@@ -13,7 +13,7 @@ use super::{
 };
 use crate::error::{anyhow, Result};
 use crate::local::model::LocalProject;
-use crate::local::projects::{self, Promotion};
+use crate::local::projects;
 use crate::store::Store;
 
 /// The chats whose files move with `session_id`: every chat of a scratch
@@ -43,7 +43,7 @@ impl ChatHost {
         session_id: &str,
         name: &str,
         path: &str,
-    ) -> Result<Option<Promotion>> {
+    ) -> Result<Option<LocalProject>> {
         let (name, _) = projects::new_project_place(name, path)?;
         let (_, _, sessions) = scope(&Store::open()?, session_id)?;
         if !self.idle(&sessions).await? {
@@ -95,18 +95,9 @@ impl ChatHost {
             }
             let _ = Store::open().and_then(|store| store.clear_chat_project_move(&session_id));
             let note = match self.make_project(&session_id, &name, &path).await {
-                Ok(promotion) => format!(
-                    "The user made this chat the project \"{}\", at {}. Your work is committed there{}, and this chat now belongs to it. Continue from where you left off.",
-                    promotion.project.name,
-                    promotion.project.repo_path,
-                    if promotion.left_out.is_empty() {
-                        String::new()
-                    } else {
-                        format!(
-                            " except files too large to commit ({}), which stay in your worktree",
-                            promotion.left_out.join(", ")
-                        )
-                    }
+                Ok(project) => format!(
+                    "The user made this chat the project \"{}\", at {}, and this chat now belongs to it. Your worktree keeps every file, uncommitted ones included; the project folder holds what you have committed. Continue from where you left off.",
+                    project.name, project.repo_path
                 ),
                 Err(error) => format!(
                     "Making this chat the project \"{name}\" at {path} failed: {error}. The chat stays where it was; tell the user."
@@ -153,9 +144,9 @@ impl ChatHost {
         session_id: &str,
         name: &str,
         path: &str,
-    ) -> Result<Promotion> {
+    ) -> Result<LocalProject> {
         let (project, owner, sessions) = scope(&Store::open()?, session_id)?;
-        let promotion = self
+        let created = self
             .while_idle(&sessions, || {
                 let store = Store::open()?;
                 if project.is_scratch() {
@@ -175,7 +166,7 @@ impl ChatHost {
             self.acp.stop(id).await;
         }
         self.emit_sessions(&sessions).await;
-        Ok(promotion)
+        Ok(created)
     }
 
     async fn emit_sessions(&self, sessions: &[String]) {

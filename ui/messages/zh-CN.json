@@ -2176,16 +2176,15 @@
   "no_project_new_chat": "不属于项目的新对话",
   "create_project_button": "创建项目",
   "create_project_title": "创建项目",
-  "create_project_description": "此对话的文件会移到你选择的文件夹，对话将在新项目中继续。",
   "create_project_confirm": "创建项目",
   "create_project_folder_has_files": "此文件夹已有文件。请选择新的位置。",
-  "create_project_left_out": "这些文件太大，无法提交，只保留在对话的副本中：{files}",
   "create_project_created": "已创建",
   "create_project_review": "查看…",
   "activity_proposed_project": "建议创建项目 {name}",
   "chat_delete_scratch_session_confirm": "删除“{title}”？\n\n此对话不属于任何项目，其聊天记录、侧边聊天和文件都将被永久删除。",
   "create_project_move_title": "移到新项目",
-  "create_project_move_description": "此对话会移到你所选文件夹中的新项目，新项目从 {project} 的历史和对话的工作开始。{project} 保留自己的副本。",
   "create_project_pending": "本轮结束后移到 {name}",
-  "create_project_pending_cancel": "取消移动"
+  "create_project_pending_cancel": "取消移动",
+  "create_project_folder_description": "你选择的文件夹会得到此对话已提交的工作，对话将在新项目中继续。未提交的文件会留在对话中，直到它提交。",
+  "create_project_split_description": "你选择的文件夹会得到 {project} 的历史和此对话的提交，对话将保持文件原样在新项目中继续。{project} 保留自己的副本。"
 }

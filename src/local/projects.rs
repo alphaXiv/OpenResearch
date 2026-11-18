@@ -262,22 +262,17 @@ pub fn scratch_project(store: &Store) -> Result<LocalProject> {
     Ok(project)
 }
 
-pub struct Promotion {
-    pub project: LocalProject,
-    /// Files too large to commit, still in the chat's worktree.
-    pub left_out: Vec<String>,
-}
-
-/// Turn a scratch project into a real one at `path`: commit the chat's work
-/// onto the baseline, move the repository there, and give it `name`. The
-/// caller keeps every chat of the project idle meanwhile.
+/// Turn a scratch project into a real one at `path`: bring the chat's commits
+/// onto the baseline, move the repository there, and give it `name`. What the
+/// chat left uncommitted stays in its worktree. The caller keeps every chat of
+/// the project idle meanwhile.
 pub fn promote_scratch_project(
     store: &Store,
     project: &LocalProject,
     worktree: Option<&Path>,
     name: &str,
     path: &str,
-) -> Result<Promotion> {
+) -> Result<LocalProject> {
     if !project.is_scratch() {
         return Err(crate::error::anyhow!(
             "{} is already a project, at {}.",
@@ -289,12 +284,7 @@ pub fn promote_scratch_project(
     let name = name.as_str();
 
     let repo = PathBuf::from(&project.repo_path);
-    let worktree = worktree.filter(|dir| dir.join(".git").exists());
-    let left_out = match worktree {
-        Some(dir) => commit_chat_work(dir, name)?,
-        None => Vec::new(),
-    };
-    if let Some(dir) = worktree {
+    if let Some(dir) = worktree.filter(|dir| dir.join(".git").exists()) {
         let head = git::git(Some(dir), &["rev-parse", "HEAD"])?;
         git::git(Some(&repo), &["merge", "--ff-only", "--quiet", &head]).map_err(|error| {
             crate::error::anyhow!(
@@ -349,11 +339,7 @@ pub fn promote_scratch_project(
             );
         }
     }
-    let promoted = store.get_local_project(&project.id)?.unwrap_or(promoted);
-    Ok(Promotion {
-        project: promoted,
-        left_out,
-    })
+    Ok(store.get_local_project(&project.id)?.unwrap_or(promoted))
 }
 
 /// The trimmed name and the folder for a project made from a chat, which must
@@ -380,8 +366,9 @@ pub fn new_project_place(name: &str, path: &str) -> Result<(String, PathBuf)> {
 }
 
 /// Move a chat out of `project` into a new project at `path`, seeded with the
-/// project's history up to the chat's work. `sessions` are the chat and the
-/// side chats sharing its worktree; the caller keeps them idle meanwhile.
+/// project's history up to the chat's latest commit. The chat's worktree moves
+/// whole, uncommitted and ignored files included. `sessions` are the chat and
+/// the side chats sharing its worktree; the caller keeps them idle meanwhile.
 pub fn split_chat_project(
     store: &Store,
     project: &LocalProject,
@@ -389,15 +376,10 @@ pub fn split_chat_project(
     sessions: &[String],
     name: &str,
     path: &str,
-) -> Result<Promotion> {
+) -> Result<LocalProject> {
     let (name, target) = new_project_place(name, path)?;
     let worktree = git::existing_session_worktree_path(project, owner);
     let has_worktree = worktree.join(".git").exists();
-    let left_out = if has_worktree {
-        commit_chat_work(&worktree, &name)?
-    } else {
-        Vec::new()
-    };
     let source = if has_worktree {
         worktree.clone()
     } else {
@@ -450,70 +432,54 @@ pub fn split_chat_project(
         updated_at: now,
     };
     store.create_local_project(&created)?;
-
-    // The chat keeps the files Git doesn't track, such as data and environments.
-    let moved_worktree = git::session_worktree_path(&created.id, owner);
-    git::ensure_worktree_at(Path::new(&created.repo_path), &moved_worktree, "main")?;
     if has_worktree {
-        let untracked = git::git(
-            Some(&worktree),
-            &[
-                "ls-files",
-                "--others",
-                "--directory",
-                "--no-empty-directory",
-                "-z",
-            ],
-        )?;
-        for file in untracked.split('\0').filter(|file| !file.is_empty()) {
-            let file = file.trim_end_matches('/');
-            let to = moved_worktree.join(file);
-            if let Some(parent) = to.parent() {
-                crate::paths::create_dir_all(parent)?;
-            }
-            std::fs::rename(worktree.join(file), &to)?;
-        }
-        git::remove_session_worktree(project, owner);
+        relink_worktree(project, &worktree, &created, owner)?;
     }
     store.move_chat_sessions(sessions, &created.id)?;
-    Ok(Promotion {
-        project: created,
-        left_out,
-    })
+    Ok(created)
 }
 
-/// Commit what the chat left uncommitted, so the new project's folder holds it.
-fn commit_chat_work(worktree: &Path, name: &str) -> Result<Vec<String>> {
-    git::git(Some(worktree), &["add", "--all"])?;
-    let added = git::git(
-        Some(worktree),
-        &["diff", "--cached", "--name-only", "--diff-filter=A", "-z"],
+/// Moves a chat's worktree, files untouched, to the same commit in `to`'s
+/// repository: `to` registers a worktree, which takes over the chat's files.
+fn relink_worktree(
+    from: &LocalProject,
+    worktree: &Path,
+    to: &LocalProject,
+    owner: &str,
+) -> Result<()> {
+    let moved = git::session_worktree_path(&to.id, owner);
+    let head = git::git(Some(worktree), &["rev-parse", "HEAD"])?;
+    crate::paths::create_dir_all(moved.parent().unwrap_or(&moved))?;
+    git::git(
+        Some(Path::new(&to.repo_path)),
+        &[
+            "worktree",
+            "add",
+            "--no-checkout",
+            "--detach",
+            &moved.to_string_lossy(),
+            &head,
+        ],
     )?;
-    let mut left_out = Vec::new();
-    for file in added.split('\0').filter(|file| !file.is_empty()) {
-        let size = std::fs::symlink_metadata(worktree.join(file)).map_or(0, |meta| meta.len());
-        if size >= git::INITIAL_SNAPSHOT_MAX_FILE_BYTES {
-            git::git(Some(worktree), &["reset", "--quiet", "--", file])?;
-            left_out.push(file.to_string());
-        }
+    let link = std::fs::read(moved.join(".git"))?;
+    std::fs::remove_file(moved.join(".git"))?;
+    std::fs::remove_dir(&moved)?;
+    std::fs::rename(worktree, &moved)?;
+    std::fs::write(moved.join(".git"), link)?;
+    // The new registration starts with an empty index; this matches it to HEAD
+    // and leaves every file as the chat had it.
+    git::git(Some(&moved), &["reset", "--quiet"])?;
+    // The old registration only points at a folder that has moved.
+    if let Err(error) = git::git(
+        Some(Path::new(&from.repo_path)),
+        &["worktree", "remove", "--force", &worktree.to_string_lossy()],
+    ) {
+        eprintln!(
+            "orx: left a stale worktree entry in {}: {error}",
+            from.repo_path
+        );
     }
-    if git::git(Some(worktree), &["diff", "--cached", "--name-only"])?.is_empty() {
-        return Ok(left_out);
-    }
-    let (user, email, _, _) = git::identity(worktree);
-    let mut args = vec!["-c", "commit.gpgSign=false"];
-    if user.is_none() || email.is_none() {
-        args.extend([
-            "-c",
-            "user.name=OpenResearch",
-            "-c",
-            "user.email=local@openresearch.sh",
-        ]);
-    }
-    let message = format!("Start {name}");
-    args.extend(["commit", "--no-verify", "--quiet", "-m", &message]);
-    git::git(Some(worktree), &args)?;
-    Ok(left_out)
+    Ok(())
 }
 
 fn move_repository(from: &Path, to: &Path) -> Result<()> {
@@ -1510,7 +1476,7 @@ mod tests {
     }
 
     #[test]
-    fn creating_a_project_moves_the_chat_work_to_the_chosen_folder() {
+    fn creating_a_project_moves_the_repository_and_leaves_unsaved_work_in_the_chat() {
         let root = root();
         let store = Store::open_at(root.join("data")).unwrap();
         let scratch = scratch_project(&store).unwrap();
@@ -1526,16 +1492,26 @@ mod tests {
             ],
         );
         std::fs::write(worktree.join("fib.py"), "print(1)\n").unwrap();
-        sparse_file(
-            &worktree.join("weights.bin"),
-            git::INITIAL_SNAPSHOT_MAX_FILE_BYTES,
+        run_git(&worktree, &["add", "fib.py"]);
+        run_git(
+            &worktree,
+            &[
+                "-c",
+                "user.name=T",
+                "-c",
+                "user.email=t@e",
+                "commit",
+                "-qm",
+                "fib",
+            ],
         );
+        std::fs::write(worktree.join("draft.md"), "unsaved\n").unwrap();
         let artifacts = crate::local::files::files_dir(&scratch);
         std::fs::create_dir_all(&artifacts).unwrap();
         std::fs::write(artifacts.join("report.md"), "# report\n").unwrap();
 
         let target = root.join("projects").join("fib");
-        let promotion = promote_scratch_project(
+        let project = promote_scratch_project(
             &store,
             &scratch,
             Some(&worktree),
@@ -1544,7 +1520,6 @@ mod tests {
         )
         .unwrap();
 
-        let project = promotion.project;
         assert!(!project.is_scratch());
         assert_eq!(project.id, scratch.id);
         assert_eq!(project.name, "Fibonacci sandbox");
@@ -1554,19 +1529,17 @@ mod tests {
             crate::paths::canonicalize(&target).unwrap()
         );
         assert!(!Path::new(&scratch.repo_path).exists());
-        // The folder holds the chat's work, committed on the baseline.
+        // The folder holds what the chat committed, and nothing orx committed for it.
         assert_eq!(
             std::fs::read_to_string(target.join("fib.py")).unwrap(),
             "print(1)\n"
         );
+        assert_eq!(git_output(&target, &["log", "-1", "--format=%s"]), "fib");
+        // The chat keeps working in its worktree, its unsaved work intact.
         assert_eq!(
-            git_output(&target, &["log", "-1", "--format=%s"]),
-            "Start Fibonacci sandbox"
+            std::fs::read_to_string(worktree.join("draft.md")).unwrap(),
+            "unsaved\n"
         );
-        assert_eq!(promotion.left_out, vec!["weights.bin".to_string()]);
-        assert!(!target.join("weights.bin").exists());
-        // The chat keeps working in its worktree, now linked to the moved repository.
-        assert!(git_output(&worktree, &["status", "--porcelain"]).contains("weights.bin"));
         assert_eq!(
             git_output(&worktree, &["rev-parse", "HEAD"]),
             git_output(&target, &["rev-parse", "HEAD"])
@@ -1613,7 +1586,7 @@ mod tests {
     }
 
     #[test]
-    fn moving_a_chat_to_a_new_project_keeps_its_history_work_and_untracked_files() {
+    fn moving_a_chat_to_a_new_project_keeps_its_history_and_its_worktree() {
         let root = root();
         let store = Store::open_at(root.join("data")).unwrap();
         let source = root.join("source");
@@ -1656,8 +1629,23 @@ mod tests {
         std::fs::create_dir_all(worktree.join("data")).unwrap();
         std::fs::write(worktree.join("data").join("shard.bin"), "bytes").unwrap();
 
+        run_git(&worktree, &["add", "probe.py"]);
+        run_git(
+            &worktree,
+            &[
+                "-c",
+                "user.name=T",
+                "-c",
+                "user.email=t@e",
+                "commit",
+                "-qm",
+                "probe",
+            ],
+        );
+        std::fs::write(worktree.join("README.md"), "# edited\n").unwrap();
+
         let target = root.join("split");
-        let promotion = split_chat_project(
+        let created = split_chat_project(
             &store,
             &project,
             &session,
@@ -1667,7 +1655,6 @@ mod tests {
         )
         .unwrap();
 
-        let created = promotion.project;
         assert_ne!(created.id, project.id);
         assert!(!created.is_scratch());
         assert_eq!(
@@ -1676,13 +1663,21 @@ mod tests {
         );
         assert_eq!(
             git_output(&target, &["log", "--format=%s"]),
-            "Start Probe\nignore data\ninitial"
+            "probe\nignore data\ninitial"
         );
-        // The chat works on in a worktree of the new project, untracked files included.
+        // The chat's worktree moves whole: ignored files and unsaved edits stay as they were.
         let moved = git::session_worktree_path(&created.id, &session);
         assert_eq!(
             std::fs::read_to_string(moved.join("data").join("shard.bin")).unwrap(),
             "bytes"
+        );
+        assert_eq!(
+            std::fs::read_to_string(moved.join("README.md")).unwrap(),
+            "# edited\n"
+        );
+        assert_eq!(
+            git_output(&moved, &["status", "--porcelain"]),
+            "M README.md"
         );
         assert_eq!(
             git_output(&moved, &["rev-parse", "HEAD"]),
