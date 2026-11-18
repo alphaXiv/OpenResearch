@@ -289,6 +289,13 @@ impl SetupAttempt {
         attempt
     }
 
+    pub(crate) async fn command<T>(&self, work: impl std::future::Future<Output = T>) -> T {
+        observe_command(work, |outcome, detail| {
+            self.record(outcome, "command", None, None, detail);
+        })
+        .await
+    }
+
     pub(crate) fn record(
         &self,
         outcome: &str,
@@ -339,6 +346,32 @@ impl SetupAttempt {
         };
         safe_error_excerpt_with_step(output.unwrap_or_default(), step)
     }
+}
+
+/// A dropped future is an observed interruption, not evidence the agent command failed.
+async fn observe_command<T>(
+    work: impl std::future::Future<Output = T>,
+    report: impl Fn(&'static str, Option<&'static str>),
+) -> T {
+    struct Pending<F: FnOnce()>(Option<F>);
+    impl<F: FnOnce()> Drop for Pending<F> {
+        fn drop(&mut self) {
+            if let Some(report) = self.0.take() {
+                report();
+            }
+        }
+    }
+
+    report("command_started", None);
+    let mut pending = Pending(Some(|| {
+        report(
+            "interrupted",
+            Some("setup command task ended before a result"),
+        );
+    }));
+    let result = work.await;
+    pending.0.take();
+    result
 }
 
 #[cfg(test)]
@@ -534,6 +567,7 @@ const PHRASES: &[&str] = &[
     // `reason` allowlist has no vocabulary for which predicate failed.
     "agent is not installed",
     "agent is installed but failed to run",
+    "setup command task ended before a result",
     "agent is not signed in",
     "agent sign-in could not be verified",
     "agent version is unsupported",
@@ -576,6 +610,43 @@ fn safe_error_excerpt_with_step(output: &str, step: Option<InstallStep>) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn only_an_observed_command_drop_adds_an_interruption() {
+        let events = std::cell::RefCell::new(Vec::new());
+        let observe = |outcome, detail: Option<&'static str>| {
+            events
+                .borrow_mut()
+                .push((outcome, detail.and_then(safe_error_excerpt)));
+        };
+
+        // Never polled: setup did not reach its command.
+        drop(observe_command(std::future::pending::<()>(), observe));
+        assert!(events.borrow().is_empty());
+
+        let mut command = Box::pin(observe_command(std::future::pending::<()>(), observe));
+        assert!(futures::poll!(&mut command).is_pending());
+        drop(command);
+        assert_eq!(
+            *events.borrow(),
+            vec![
+                ("command_started", None),
+                (
+                    "interrupted",
+                    Some("setup command task ended before a result".to_owned())
+                ),
+            ]
+        );
+
+        for result in [Ok(()), Err("disconnected")] {
+            events.borrow_mut().clear();
+            assert_eq!(
+                observe_command(std::future::ready(result), observe).await,
+                result
+            );
+            assert_eq!(*events.borrow(), vec![("command_started", None)]);
+        }
+    }
+
     #[test]
     fn install_failures_name_the_step_even_without_an_allowed_error() {
         let attempt = SetupAttempt {
