@@ -2170,6 +2170,8 @@
   "run_status_for": "{status} · {name}",
   "run_stage_position": "{stage} ({position})",
   "run_stage_with_look": "{stage}. {sentence}",
+  "run_output_lines_one": "Dotychczas wypisano {count} wiersz.",
+  "run_output_lines_other": "Dotychczasowa liczba wierszy wyjścia to {count}.",
   "run_stage_run": "Uruchomienie",
   "run_stage_setup": "Przygotowanie",
   "run_whole_time": "Cały przebieg: {time}",

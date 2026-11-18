@@ -2170,6 +2170,8 @@
   "run_status_for": "{status} · {name}",
   "run_stage_position": "{stage} ({position})",
   "run_stage_with_look": "{stage}. {sentence}",
+  "run_output_lines_one": "Hasta ahora, {count} línea de salida.",
+  "run_output_lines_other": "Hasta ahora, {count} líneas de salida.",
   "run_stage_run": "Ejecución",
   "run_stage_setup": "Preparación",
   "run_whole_time": "Ejecución completa: {time}",

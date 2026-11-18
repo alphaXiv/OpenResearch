@@ -2170,6 +2170,8 @@
   "run_status_for": "{status} · {name}",
   "run_stage_position": "{stage} ({position})",
   "run_stage_with_look": "{stage}。{sentence}",
+  "run_output_lines_one": "目前已输出 {count} 行。",
+  "run_output_lines_other": "目前已输出 {count} 行。",
   "run_stage_run": "运行",
   "run_stage_setup": "准备",
   "run_whole_time": "整个运行：{time}",

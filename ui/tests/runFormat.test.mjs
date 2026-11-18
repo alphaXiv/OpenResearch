@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { setLocale } from "../src/locale.ts";
+import { autoDir, ltr } from "../src/i18n.ts";
+import { m } from "../src/paraglide/messages.js";
 import { fillSentence, fmtSignal } from "../src/runMonitor/format.ts";
 
 const bare = (text) => text.replace(/[⁦-⁩]/g, "");
@@ -30,4 +32,36 @@ test("numbers take the app's language", (t) => {
   setLocale("pl");
   assert.equal(fmtSignal(signals.acc, 52.6), "52,6%");
   assert.equal(bare(fillSentence('{count:"e"}', { 'count:"e"': 12000 }, signals)), new Intl.NumberFormat("pl").format(12000));
+});
+
+test("watcher labels and values each keep their direction", (t) => {
+  t.after(() => setLocale("en"));
+  setLocale("ar");
+  const label = "الخسارة";
+  const specs = { val_loss: { ...signals.val_loss, label } };
+  const comparison = { d: -0.11, mag: 0.11, good: true, flat: false, parent: 2.61 };
+  const delta = ltr(fmtSignal(specs.val_loss, 0.11));
+  const value = ltr(fmtSignal(specs.val_loss, 2.5));
+  assert.equal(
+    fillSentence(`${label} **{val_loss}** at this point. {val_loss.vs}.`, { val_loss: 2.5, "val_loss.vs": comparison }, specs),
+    `${autoDir(label)} **${value}** at this point. ${autoDir(m.run_vs_token_better({ delta }))}.`,
+  );
+});
+
+test("a comparison that no longer has a parent value drops its trailing clause", () => {
+  const template = "Val loss **{val_loss}**, {val_loss.vs}.";
+  assert.equal(bare(fillSentence(template, { val_loss: 2.5, "val_loss.vs": null }, signals)), "Val loss **2.50**.");
+  assert.equal(bare(fillSentence(template, { val_loss: 2.5 }, signals)), "Val loss **2.50**.");
+  assert.match(bare(fillSentence(template, { val_loss: 2.5, "val_loss.vs": { flat: true } }, signals)), /level with the parent/);
+});
+
+test("the output line count updates its grammar and uses the app locale", (t) => {
+  t.after(() => setLocale("en"));
+  const template = '**{count:"."}** lines of output so far.';
+  const line = (count) => bare(fillSentence(template, { 'count:"."': count }, {}));
+  assert.equal(line(1), "**1** line of output so far.");
+  assert.equal(line(2), "**2** lines of output so far.");
+  setLocale("es");
+  assert.equal(line(1), "Hasta ahora, **1** línea de salida.");
+  assert.equal(line(2), "Hasta ahora, **2** líneas de salida.");
 });

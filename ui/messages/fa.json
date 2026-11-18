@@ -2170,6 +2170,8 @@
   "run_status_for": "{status} · {name}",
   "run_stage_position": "{stage} ({position})",
   "run_stage_with_look": "{stage}. {sentence}",
+  "run_output_lines_one": "تا اینجا {count} خط خروجی.",
+  "run_output_lines_other": "تا اینجا {count} خط خروجی.",
   "run_stage_run": "اجرا",
   "run_stage_setup": "آماده‌سازی",
   "run_whole_time": "کل اجرا: {time}",

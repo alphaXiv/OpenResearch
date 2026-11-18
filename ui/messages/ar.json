@@ -2170,6 +2170,8 @@
   "run_status_for": "{status} · {name}",
   "run_stage_position": "{stage} ({position})",
   "run_stage_with_look": "{stage}. {sentence}",
+  "run_output_lines_one": "{count} سطر من المخرجات حتى الآن.",
+  "run_output_lines_other": "عدد أسطر المخرجات حتى الآن {count}.",
   "run_stage_run": "تشغيل",
   "run_stage_setup": "الإعداد",
   "run_whole_time": "التشغيل الكامل: {time}",

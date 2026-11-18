@@ -1,5 +1,5 @@
 import { fmtDuration } from "../api";
-import { ltr } from "../i18n";
+import { autoDir, ltr } from "../i18n";
 import { getLocale } from "../paraglide/runtime.js";
 import { m } from "../paraglide/messages.js";
 import type { Bindings, SignalSpec, SignalValue, Signals, Versus } from "./types";
@@ -65,7 +65,30 @@ export const tokensOf = (template: string) => new Set([...template.matchAll(TOKE
 
 /** A watcher's sentence with each token filled from the live values; `**` marks stay for the renderer. */
 export function fillSentence(template: string, bindings: Bindings, signals: Signals): string {
-  return template.replace(TOKEN, (_token, key: string) => {
+  const outputLines = bindings['count:"."'];
+  if (template === '**{count:"."}** lines of output so far.' && typeof outputLines === "number") {
+    const message = new Intl.PluralRules(getLocale()).select(outputLines) === "one" ? m.run_output_lines_one : m.run_output_lines_other;
+    return message({ count: `**${ltr(number(0).format(outputLines))}**` });
+  }
+
+  // A later step can lose the parent comparison the watcher had when it wrote this clause.
+  const text = template.replace(/[,،，]\s*(\*\*)?\{([^{}]+\.vs)\}\1(?=[.!?…。۔؟।]?\s*$)/u, (clause, _bold, key: string) => {
+    const comparison = bindings[key];
+    return comparison !== null && typeof comparison === "object" ? clause : "";
+  });
+
+  const labels = [...tokensOf(text)].flatMap((key) => {
+    const name = key.replace(/\.vs$/u, "");
+    const label = Object.hasOwn(signals, name) ? signals[name].label ?? name : "";
+    return label ? [label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")] : [];
+  });
+  const literalLabel = labels.length
+    ? new RegExp(`(^|[^\\p{L}\\p{N}_])(${labels.sort((a, b) => b.length - a.length).join("|")})(?=$|[^\\p{L}\\p{N}_])`, "gu")
+    : null;
+
+  return text.split(TOKEN).map((part, index) => {
+    if (index % 2 === 0) return literalLabel ? part.replace(literalLabel, (_, before: string, label: string) => before + autoDir(label)) : part;
+    const key = part;
     if (!Object.hasOwn(bindings, key)) return "—";
     const value = bindings[key];
     if (key.startsWith("count:")) return typeof value === "number" ? ltr(number(0).format(value)) : "—";
@@ -73,12 +96,15 @@ export function fillSentence(template: string, bindings: Bindings, signals: Sign
       const name = key.slice(0, -3);
       const vs = value;
       if (vs === null || typeof vs !== "object") return "—";
-      if (vs.flat) return m.run_vs_token_level();
+      if (vs.flat) return autoDir(m.run_vs_token_level());
       const delta = ltr(fmtMagnitude(signals[name], vs.mag));
-      return vs.good ? m.run_vs_token_better({ delta }) : m.run_vs_token_worse({ delta });
+      return autoDir(vs.good ? m.run_vs_token_better({ delta }) : m.run_vs_token_worse({ delta }));
     }
-    return ltr(fmtSignal(signals[key], typeof value === "object" ? null : value));
-  });
+    const spec = signals[key];
+    const signal = typeof value === "object" ? null : value;
+    const formatted = fmtSignal(spec, signal);
+    return typeof signal === "number" && labelOf(spec, signal) === undefined && spec?.as !== "duration" ? ltr(formatted) : autoDir(formatted);
+  }).join("");
 }
 
 export const plainSentence = (filled: string) => filled.replaceAll("**", "");

@@ -31,7 +31,7 @@ function Headline({ model }: { model: RunModel }) {
   }
   return (
     <span className="shrink-0 whitespace-nowrap text-ink-subtext @max-[40rem]:hidden">
-      {headline.label} <span className="font-medium tabular-nums text-text">{headline.known ? headline.value : <PendingValue />}</span>
+      {autoDir(headline.label)} <span className="font-medium tabular-nums text-text">{headline.known ? headline.value : <PendingValue />}</span>
       {delta && <> <Delta delta={delta} said />{!delta.flat && <> {m.run_than_parent()}</>}</>}
     </span>
   );

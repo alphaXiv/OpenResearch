@@ -45,10 +45,10 @@ export function RunStatus({ model, label, descriptionId, onOpenRunPage }: {
   const behind = data && monitorBehind(model.run.monitor, data);
   const stages = data && !behind ? foldedStages(data, model) : null;
   const progress = data?.progress;
-  const count = data && progress?.done != null ? plainSentence(capitalized(progressWords(data.phases[progress.phase], progress.done))) : "";
+  const count = data && progress?.done != null ? autoDir(plainSentence(capitalized(progressWords(data.phases[progress.phase], progress.done)))) : "";
   const time = [model.eta, model.etaDetail].filter(Boolean).join(" · ") || (!model.live ? model.sentence.text : "");
   const untimed = [...(data?.estimate?.untimed ?? model.run.monitor?.estimate?.untimed ?? [])].sort((a, b) => b.length - a.length);
-  const footer = model.settingUp || !model.live ? time : m.run_whole_time({ time });
+  const footer = autoDir(model.settingUp || !model.live ? time : m.run_whole_time({ time: autoDir(time) }));
   const footerNames = untimed.length ? new RegExp(`(${untimed.map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`, "g") : null;
   const stage = model.sentence.stage;
   const status = plainSentence([label, model.lead, model.sentence.text].filter(Boolean).join(" · "));
@@ -72,7 +72,7 @@ export function RunStatus({ model, label, descriptionId, onOpenRunPage }: {
         <Popover.Trigger ref={trigger} openOnHover delay={180} closeDelay={180}
           onFocus={(event) => { if (event.currentTarget.matches(":focus-visible")) setOpen(true); }}
           onKeyDown={onKeyDown}
-          aria-label={m.run_status_for({ status, name: autoDir(model.name) })}
+          aria-label={m.run_status_for({ status: autoDir(status), name: autoDir(model.name) })}
           aria-describedby={descriptionId}
           className="flex min-h-6 min-w-0 flex-1 items-center overflow-hidden whitespace-nowrap rounded-xs text-start focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:outline-offset-2"
         >

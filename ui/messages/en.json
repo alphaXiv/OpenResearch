@@ -2170,6 +2170,8 @@
   "run_status_for": "{status} · {name}",
   "run_stage_position": "{stage} ({position})",
   "run_stage_with_look": "{stage}. {sentence}",
+  "run_output_lines_one": "{count} line of output so far.",
+  "run_output_lines_other": "{count} lines of output so far.",
   "run_stage_run": "Run",
   "run_stage_setup": "Setup",
   "run_whole_time": "Whole run: {time}",

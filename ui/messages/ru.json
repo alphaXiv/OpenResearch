@@ -2170,6 +2170,8 @@
   "run_status_for": "{status} · {name}",
   "run_stage_position": "{stage} ({position})",
   "run_stage_with_look": "{stage}. {sentence}",
+  "run_output_lines_one": "Строк вывода на данный момент: {count}.",
+  "run_output_lines_other": "Строк вывода на данный момент: {count}.",
   "run_stage_run": "Запуск",
   "run_stage_setup": "Подготовка",
   "run_whole_time": "Весь запуск: {time}",

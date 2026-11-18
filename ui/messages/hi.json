@@ -2170,6 +2170,8 @@
   "run_status_for": "{status} · {name}",
   "run_stage_position": "{stage} ({position})",
   "run_stage_with_look": "{stage}। {sentence}",
+  "run_output_lines_one": "अब तक आउटपुट की {count} पंक्ति।",
+  "run_output_lines_other": "अब तक आउटपुट की {count} पंक्तियाँ।",
   "run_stage_run": "रन",
   "run_stage_setup": "तैयारी",
   "run_whole_time": "पूरा रन: {time}",

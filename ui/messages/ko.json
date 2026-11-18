@@ -2170,6 +2170,8 @@
   "run_status_for": "{status} · {name}",
   "run_stage_position": "{stage} ({position})",
   "run_stage_with_look": "{stage}. {sentence}",
+  "run_output_lines_one": "지금까지 출력된 줄은 {count}개입니다.",
+  "run_output_lines_other": "지금까지 출력된 줄은 {count}개입니다.",
   "run_stage_run": "실행",
   "run_stage_setup": "준비",
   "run_whole_time": "전체 실행: {time}",

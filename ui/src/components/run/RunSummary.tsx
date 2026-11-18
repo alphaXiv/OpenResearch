@@ -43,7 +43,7 @@ export function RunSummary({ models, context, parts, firstDone, open, onToggle }
             <Fragment key={index}>
               {index > 0 && " · "}
               {part.who && <span className={cn("font-medium", TONE_INK[part.tone])}>{part.who} </span>}
-              <Sentence text={part.text} tone={part.tone} />
+              <Sentence text={autoDir(part.text)} tone={part.tone} />
             </Fragment>
           ))}
         </button>
