@@ -36,6 +36,26 @@ def ws(port,harness='opencode'):
     req=f'GET /api/harnesses/setup?harness={harness}&action=login HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n'
     s.sendall(req.encode()); status=f.readline(); assert b' 101 ' in status,status
     while f.readline().strip(): pass
+    if win:
+        # The real xterm client answers ConPTY's device-status query. Without that
+        # handshake ConPTY holds the child's startup/output until the socket closes.
+        def terminal_client():
+            while True:
+                try:
+                    hdr=f.read(2)
+                    if len(hdr)<2:return
+                    kind=hdr[0]&15; n=hdr[1]&127
+                    if n==126:n=int.from_bytes(f.read(2),'big')
+                    elif n==127:n=int.from_bytes(f.read(8),'big')
+                    if n>1048576:raise AssertionError('unexpected frame size')
+                    data=f.read(n)
+                    if kind==8:return
+                    reply=(bytes([27])+b'[1;1R') if kind==2 and bytes([27])+b'[6n' in data else (data if kind==9 else None)
+                    if reply is not None:
+                        mask=os.urandom(4);op=10 if kind==9 else 2
+                        s.sendall(bytes([128|op,128|len(reply)])+mask+bytes(b^mask[i%4] for i,b in enumerate(reply)))
+                except (OSError, ValueError):return
+        threading.Thread(target=terminal_client,daemon=True).start()
     return s,f
 def unused_port():
     with socket.socket() as s:s.bind(('127.0.0.1',0));return s.getsockname()[1]
@@ -117,11 +137,15 @@ with tempfile.TemporaryDirectory() as d:
         raise
     finally:
         for obj in sockets:
-            try:obj.close()
-            except OSError:pass
+            if isinstance(obj,socket.socket):
+                try:obj.shutdown(socket.SHUT_RDWR)
+                except OSError:pass
         for p in servers:
             if p.poll() is None:
                 p.terminate()
                 try:p.wait(15)
                 except subprocess.TimeoutExpired:p.kill();p.wait()
+        for obj in sockets:
+            try:obj.close()
+            except OSError:pass
         collector.shutdown()

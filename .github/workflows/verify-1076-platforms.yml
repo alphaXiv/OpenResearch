@@ -15,10 +15,6 @@ jobs:
             artifact: 14382284364
             from: OpenResearch-Canary-orx.exe
             suffix: '.exe'
-          - os: macos-latest
-            artifact: 14382007670
-            from: orx
-            suffix: ''
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     defaults:
