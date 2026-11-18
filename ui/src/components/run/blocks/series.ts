@@ -79,7 +79,7 @@ function categoriesOf(lines: Line[], monitor: RunMonitor) {
   return { keys: unique.map(String), words: unique.map((value) => fmtSignal(spec, value)) };
 }
 
-/** What a chart block draws: its lines, scaled and marked as the view asks, and what was left out of them. */
+/** The samples a chart can show, and what was left out of them. */
 export function chartOf(monitor: RunMonitor, block: ChartBlock): ChartData {
   const { signals } = monitor.view;
   const notes: string[] = [];
@@ -90,16 +90,10 @@ export function chartOf(monitor: RunMonitor, block: ChartBlock): ChartData {
   let count: number | null = null;
 
   if (block.from === undefined) {
-    lines = block.chart.map((name, index) => {
-      const smooth = signals[name]?.smooth;
-      let level: number | null = null;
-      const pairs = (monitor.series[name] ?? []).map(([x, y]): [number, number | null] => {
-        if (!smooth || y === null) return [x, y];
-        level = level === null ? y : level + smooth * (y - level);
-        return [x, level];
-      });
-      return { name, label: signals[name]?.label ?? name, color: COLORS[index % COLORS.length], pairs, ghost: false, x: monitor.x.name, y: name };
-    });
+    lines = block.chart.map((name, index) => ({
+      name, label: signals[name]?.label ?? name, color: COLORS[index % COLORS.length],
+      pairs: monitor.series[name] ?? [], ghost: false, x: monitor.x.name, y: name,
+    }));
     const ghosts = block.ghost === "parent" ? lines.flatMap((line) => {
       const parent = monitor.parent?.series[line.y];
       return parent ? [{ ...line, name: `parent ${line.name}`, color: "var(--subtext)", pairs: parent, ghost: true }] : [];
@@ -159,5 +153,5 @@ export function chartOf(monitor: RunMonitor, block: ChartBlock): ChartData {
   return { series, categories: categories?.words ?? null, notes, rows: count };
 }
 
-/** A chart block's lines, smoothed as the view asks, with the parent's dashed behind each one the view ghosts. */
+/** A chart block's lines, including each comparison its view asks for. */
 export const seriesOf = (monitor: RunMonitor, block: ChartBlock) => chartOf(monitor, block).series;

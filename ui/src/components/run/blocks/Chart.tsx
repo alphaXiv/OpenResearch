@@ -211,8 +211,22 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
     if (xLog) [x0, x1] = spanned.length > 0 ? span(spanned, true) : [1, 10];
     else [x0, x1] = [Math.min(0, ...spanned), block.xRange === "parent" || reach === null ? Math.max(reach ?? 1, ...theirs) : reach];
   }
-  const series = table || categories ? data.series : data.series.map((line) => ({ ...line, points: clip(line.points, x0, x1) }));
+  const samples = table ? data.series : data.series.map((line) => ({
+    ...line,
+    points: line.points.filter(([at]) => at >= x0 && at <= x1),
+  }));
+  const series = table || mark !== "line" ? samples : data.series.map((line) => {
+    const smooth = line.ghost ? undefined : signals[line.y]?.smooth;
+    let level: number | null = null;
+    const points = smooth ? line.points.map(([at, value]): Point => {
+      if (value === null) return [at, null];
+      level = level === null ? value : level + smooth * (value - level);
+      return [at, level];
+    }) : line.points;
+    return { ...line, points: clip(points, x0, x1) };
+  });
   const drawn = known(series.flatMap((line) => line.points));
+  const visible = samples === series ? drawn : known(samples.flatMap((line) => line.points));
   const nothing = rows === 0 ? (live ? m.run_block_no_rows() : m.run_block_no_rows_ended()) : live ? m.run_block_no_points() : m.run_block_no_points_ended();
   /** Nothing of this run's own to draw; a table's chart may still show the parent's under the words that say so. */
   const blank = table ? !series.some((line) => !line.ghost && line.points.some((point) => point[1] !== null)) : drawn.length === 0;
@@ -241,7 +255,7 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
   const yNames = new Set(owned.map((line) => signals[line.y]?.label ?? line.y));
   /** The one measure a table's chart plots, which a readout names beside a value when its line is labelled by something else. */
   const yName = table && yNames.size === 1 ? [...yNames][0] : null;
-  const ys = drawn.map((point) => point[1]);
+  const ys = (visible === drawn ? drawn : [...drawn, ...visible]).map((point) => point[1]);
   const [xLo, xHi] = table && drawn.length > 0 ? extent(drawn.map((point) => point[0])) : [x0, x1];
   const xRange = !page && !categories && drawn.length > 0 ? rangeLine(table ? lead && xName(lead) : monitor.x.name, xLo, xHi, xLabel, xLog) : "";
   const yRange = !page && drawn.length > 0 ? rangeLine(yName, Math.min(...ys), Math.max(...ys), yLabel, yLog) : "";
@@ -287,10 +301,10 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
       </g>
     );
   });
-  const points = (line: Series, radius: number) => line.points.map(([px, py]) => py !== null && (
+  const points = (line: Series, radius: number) => line.points.map(([px, py], index) => py !== null && (
     line.ghost
-      ? <circle key={px} cx={x(px)} cy={y(py)} r={radius - 1} fill="none" stroke={line.color} strokeWidth="1.5" strokeDasharray="2 1.5" />
-      : <circle key={px} cx={x(px)} cy={y(py)} r={radius} fill={line.color} stroke="var(--base)" strokeWidth={radius > 3 ? 2 : 1} />
+      ? <circle key={index} cx={x(px)} cy={y(py)} r={radius - 1} fill="none" stroke={line.color} strokeWidth="1.5" strokeDasharray="2 1.5" />
+      : <circle key={index} cx={x(px)} cy={y(py)} r={radius} fill={line.color} stroke="var(--base)" strokeWidth={radius > 3 ? 2 : 1} />
   ));
 
   const landmarks = mark === "line" && !table && !series.some((line) => line.ghost) ? owned.flatMap((line) => {
@@ -314,7 +328,7 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
     const at = categories ? Math.round(x0 + ((hover - margin.start) / innerWidth) * (x1 - x0)) : null;
     const position = (hover - margin.start) / innerWidth;
     const target = at ?? (xLog ? Math.exp(Math.log(x0) + position * (Math.log(x1) - Math.log(x0))) : x0 + position * (x1 - x0));
-    const hits = series.flatMap((line) => {
+    const hits = samples.flatMap((line) => {
       const point = at === null ? nearest(line.points, target) : line.points.find(([px]) => px === at);
       return point && point[1] !== null && (at !== null || (pointer?.keyboard && !line.ghost) || Math.abs(x(point[0]) - hover) <= 40) ? [{ line, point }] : [];
     });
@@ -342,8 +356,8 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
   }));
   const spoken = readout && readoutRows && `${readoutTitle(readout.anchor)}: ${readoutRows.map((row) => `${row.name} ${row.measure ? `${row.measure} ` : ""}${row.value}`).join(", ")}`;
 
-  const own = known(owned.flatMap((line) => line.points));
-  const stops = [...new Set((own.length > 0 ? own : drawn).map((point) => point[0]))].sort((a, b) => a - b);
+  const own = known(samples.filter((line) => !line.ghost).flatMap((line) => line.points));
+  const stops = [...new Set((own.length > 0 ? own : visible).map((point) => point[0]))].sort((a, b) => a - b);
   const interact = {
     tabIndex: 0,
     role: "group",
@@ -500,7 +514,7 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
                 strokeLinecap="round"
                 opacity={dim(line) ? 0.45 : 1}
               />
-              {dotted(line) && line.points.map(([px, py]) => py !== null && <circle key={px} cx={x(px)} cy={y(py)} r={table ? 3 : 4} fill={line.color} stroke="var(--base)" strokeWidth={table ? 1.5 : 2} />)}
+              {dotted(line) && line.points.map(([px, py], index) => py !== null && <circle key={index} cx={x(px)} cy={y(py)} r={table ? 3 : 4} fill={line.color} stroke="var(--base)" strokeWidth={table ? 1.5 : 2} />)}
             </g>
           ))}
           {marks}

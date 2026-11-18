@@ -122,6 +122,26 @@ test("a readout never gives a value beside a step it wasn't recorded at", async 
   assert.ok(parents.every((one) => !one.endsWith(` at ${step}`)), said);
 });
 
+test("a readout uses reports under a smoothed line and a clipped parent", async () => {
+  const base = fixture("finetune");
+  const monitor = {
+    ...base,
+    x: { name: "step", max: 10 },
+    view: { ...base.view, signals: { loss: { label: "Train loss", smooth: 0.5 } } },
+    series: { loss: [[0, 2], [10, 6]] },
+    parent: { ...base.parent, series: { loss: [[0, 4], [20, 8]] } },
+  };
+  for (const size of ["page", "strip"]) {
+    const chart = await draw(monitor, { chart: ["loss"], ghost: "parent" }, size);
+    const box = chartOf(chart).parentElement;
+    await press("End", box);
+    const readout = text(box.querySelector("[popover]"));
+    assert.match(readout, /^step 10Train loss6(?:\.0+)?$/, readout);
+    assert.match(text(box.querySelector('[role="status"]')), /^step 10: Train loss 6(?:\.0+)?$/);
+    assert.ok(chartOf(chart).querySelector("path[stroke-dasharray]"), "the parent curve is still drawn");
+  }
+});
+
 test("a strip's keyboard entry reads the run's own latest point with every line there, and its focus ring stops above the axis", async () => {
   const monitor = fixture("finetune");
   const short = (points) => points.filter(([step]) => step <= 500);
