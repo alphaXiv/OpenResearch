@@ -980,6 +980,40 @@ mod tests {
         server.abort();
     }
 
+    #[tokio::test]
+    async fn claude_archive_failures_have_a_safe_diagnostic() {
+        use axum::{routing::get, Router};
+        let directory = crate::local::git::TemporaryDirectory::new("orx-install-excerpt").unwrap();
+        let private = "private-install-fixture";
+        let app = Router::new().route("/{name}", get(|| async { "not a zstd archive" }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let release = Release {
+            version: semver::Version::new(0, 0, 179),
+            url: format!("http://{}/{private}", listener.local_addr().unwrap()),
+            sha256: format!("{:x}", Sha256::digest(b"not a zstd archive")),
+            format: Format::Zstd(String::new()),
+        };
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let error = install("claude-code", &release, &mut |_, _| {}, None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            crate::telemetry::harness::excerpt_for_test(&format!("{error:#}")).as_deref(),
+            Some("The download is not zstd")
+        );
+        let bin = directory.path().join(private);
+        std::fs::write(&bin, b"not an executable").unwrap();
+        let error = verify("claude-code", &bin, &release.version)
+            .await
+            .unwrap_err();
+        assert!(
+            crate::telemetry::harness::excerpt_for_test(&format!("{error:#}"))
+                .unwrap()
+                .contains("Could not run the downloaded")
+        );
+        server.abort();
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn install_repairs_damaged_and_nonexecutable_current_copies() {

@@ -380,8 +380,13 @@ pub(crate) mod contract {
     pub(crate) const MAX_ERROR_EXCERPT: usize = 1024;
 }
 
+pub(crate) const MANAGED_LOOKUP: &str = "Managed release lookup failed";
+pub(crate) const MANAGED_INSTALL: &str = "Managed release installation failed";
+
 // Fail closed: only fixed diagnostic phrases from output can leave the machine, never arbitrary tokens.
 const PHRASES: &[&str] = &[
+    MANAGED_LOOKUP,
+    MANAGED_INSTALL,
     "Could not resolve host",
     "Could not resolve proxy",
     "Failed to connect",
@@ -405,6 +410,13 @@ const PHRASES: &[&str] = &[
     "Could not reach",
     "does not match its published SHA-256",
     "Could not unpack the download",
+    "The download is not zstd",
+    "Could not run the downloaded",
+    "did not answer `--version`",
+    "failed `--version`",
+    "Could not look up the latest Claude Code release",
+    "Could not read the latest Claude Code release",
+    "returned something other than a version",
     "The download was interrupted",
     "Could not move the release into",
     "OpenCode is in use",

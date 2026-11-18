@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use super::{bad_request, AppState};
 use crate::local::harness::managed;
 use crate::store::human_bytes;
-use crate::telemetry::harness::SetupAttempt;
+use crate::telemetry::harness::{SetupAttempt, MANAGED_INSTALL, MANAGED_LOOKUP};
 
 mod sign_in;
 pub(super) use sign_in::SignInPage;
@@ -569,7 +569,7 @@ async fn managed_setup(
     }
     let release = match release {
         Ok(release) => release,
-        Err(error) => return Ok(Some(install_failure(error))),
+        Err(error) => return Ok(Some(install_failure(MANAGED_LOOKUP, error))),
     };
     if let Some((bin, version)) = &copy {
         if current_copy(version, &release) && managed::verify(harness, bin, version).await.is_ok() {
@@ -583,7 +583,7 @@ async fn managed_setup(
             attempt.record("command_completed", "command", None, Some(0), None);
             Ok(None)
         }
-        Some(Err(error)) => Ok(Some(install_failure(error))),
+        Some(Err(error)) => Ok(Some(install_failure(MANAGED_INSTALL, error))),
         None => {
             attempt.record("interrupted", "command", Some("disconnected"), None, None);
             Err("Terminal disconnected".into())
@@ -592,11 +592,11 @@ async fn managed_setup(
 }
 
 /// The terminal prints the attempt's error itself, once the attempt ends.
-fn install_failure(error: crate::error::Error) -> CommandFailure {
+fn install_failure(step: &'static str, error: crate::error::Error) -> CommandFailure {
     let message = format!("{error:#}");
     CommandFailure {
         exit_code: 1,
-        output: message.clone(),
+        output: format!("{step}: {message}"),
         message,
     }
 }
@@ -953,6 +953,19 @@ pub(super) fn append_output(output: &mut String, bytes: &[u8]) {
 mod tests {
 
     use super::*;
+
+    #[test]
+    fn managed_failure_keeps_its_step_without_sending_the_local_error() {
+        let private = "local-only vendor detail /private/person/vendor?token=private";
+        for step in [MANAGED_LOOKUP, MANAGED_INSTALL] {
+            let failure = install_failure(step, crate::error::anyhow!(private));
+            assert_eq!(failure.message, private);
+            assert_eq!(
+                crate::telemetry::harness::excerpt_for_test(&failure.output).as_deref(),
+                Some(step)
+            );
+        }
+    }
 
     #[tokio::test]
     async fn every_preset_has_a_managed_install_without_a_command() {
