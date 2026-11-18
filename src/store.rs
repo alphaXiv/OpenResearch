@@ -3854,7 +3854,8 @@ impl Store {
         if let Some(purge) = native_purge {
             purge()?;
         }
-        let tx = self.begin()?;
+        // A deferred read-to-write upgrade can skip SQLite's busy timeout.
+        let tx = self.begin_immediate()?;
         let attachments = self
             .chat_attachment_names_where(
                 "m.session_id IN (SELECT id FROM chat_sessions WHERE project_id = ?1)",
@@ -3885,14 +3886,12 @@ impl Store {
             params![id],
         )?;
         queue_remote_cleanups(&tx, "project_id", id, true)?;
-        self.conn
-            .execute("DELETE FROM runs WHERE project_id = ?1", params![id])?;
-        self.conn.execute(
+        tx.execute("DELETE FROM runs WHERE project_id = ?1", params![id])?;
+        tx.execute(
             "DELETE FROM local_experiments WHERE project_id = ?1",
             params![id],
         )?;
-        self.conn
-            .execute("DELETE FROM local_projects WHERE id = ?1", params![id])?;
+        tx.execute("DELETE FROM local_projects WHERE id = ?1", params![id])?;
         tx.commit()?;
         self.remove_unreferenced_chat_attachments(attachments);
         Ok(())
@@ -10623,6 +10622,57 @@ pub(crate) mod tests {
         assert!(!dir.join("local-runs/run").exists());
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn project_deletion_waits_for_the_chat_completion_writer() {
+        use std::cell::Cell;
+        use std::sync::mpsc::{channel, Receiver, Sender};
+
+        thread_local! {
+            static WRITER: Cell<Option<(Sender<()>, Receiver<()>)>> = const { Cell::new(None) };
+        }
+
+        let dir = crate::local::git::TemporaryDirectory::new("orx-delete-completion").unwrap();
+        let store = Store::open_at(dir.path().to_path_buf()).unwrap();
+        store
+            .create_local_project(&local_project_fixture("project"))
+            .unwrap();
+        store.put_chat_session("chat", "claude-code", None);
+        store.put_chat_turn("chat", "reply", "running", 1);
+        let writer = Store::open_at(dir.path().to_path_buf()).unwrap();
+
+        std::thread::scope(|scope| {
+            let (writing, started) = channel();
+            let (release, stop) = channel();
+            let (committed, finished) = channel();
+            let peer = scope.spawn(move || {
+                let tx = writer.begin_immediate().unwrap();
+                assert!(writer.complete_chat_turn("reply").unwrap());
+                writing.send(()).unwrap();
+                if stop.recv().is_ok() {
+                    tx.commit().unwrap();
+                    committed.send(()).unwrap();
+                }
+            });
+            started.recv().unwrap();
+            store
+                .conn
+                .busy_handler(Some(|_| {
+                    WRITER.take().is_some_and(|(release, finished)| {
+                        release.send(()).is_ok() && finished.recv().is_ok()
+                    })
+                }))
+                .unwrap();
+            WRITER.set(Some((release, finished)));
+            let deleted = store.delete_local_project("project");
+            drop(WRITER.take());
+            peer.join().unwrap();
+            deleted.unwrap();
+        });
+
+        assert!(store.get_local_project("project").unwrap().is_none());
+        assert!(store.get_chat_session("chat").unwrap().is_none());
     }
 
     #[cfg(unix)]
