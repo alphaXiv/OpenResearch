@@ -1449,6 +1449,7 @@ impl Store {
             "ALTER TABLE chat_usage_samples ADD COLUMN cost_currency TEXT",
             "ALTER TABLE chat_usage_samples ADD COLUMN recorded_at INTEGER",
             "ALTER TABLE ui_state ADD COLUMN seen_nudges TEXT",
+            "ALTER TABLE ui_state ADD COLUMN created_at INTEGER",
         ] {
             let _ = schema.execute(ddl, []);
         }
@@ -1600,17 +1601,19 @@ impl Store {
             "INSERT OR IGNORE INTO ui_state (
                  id, onboarding_completed, tour_completed,
                  preferred_harness, preferred_model,
-                 preferred_service_tier, preferred_permission_mode, preferred_reasoning_level
+                 preferred_service_tier, preferred_permission_mode, preferred_reasoning_level,
+                 created_at
              )
              SELECT 1,
                     EXISTS(SELECT 1 FROM local_projects),
                     EXISTS(SELECT 1 FROM local_projects),
-                    harness, model, service_tier, permission_mode, reasoning_level
+                    harness, model, service_tier, permission_mode, reasoning_level,
+                    ?1
              FROM (SELECT 1) seed
              LEFT JOIN chat_sessions ON chat_sessions.id = (
                  SELECT id FROM chat_sessions ORDER BY updated_at DESC LIMIT 1
              )",
-            [],
+            [now_ms()],
         )?;
         // Preferred-agent state never carries Plan for command-activated
         // harnesses: new sessions start in Build/Default until `/plan` is used.
@@ -1715,7 +1718,7 @@ impl Store {
                     preferred_autonomy, nested_delegation, opencode_free_models, preferred_profile,
                     favorite_models, hidden_models, model_section_order,
                     collapsed_model_sections, model_sightings, hidden_agents, seen_nudges,
-                    opencode_review_model
+                    opencode_review_model, created_at
              FROM ui_state WHERE id = 1",
             [],
             |row| {
@@ -1762,6 +1765,7 @@ impl Store {
                         .get::<_, Option<String>>(16)?
                         .and_then(|json| serde_json::from_str(&json).ok()),
                     seen_nudges: list(18)?,
+                    created_at: row.get(20)?,
                 })
             },
         )?)
@@ -5447,6 +5451,8 @@ pub struct StoredUiState {
     pub model_sightings: Option<serde_json::Value>,
     /// The ids of model feed nudges the user dismissed.
     pub seen_nudges: Vec<String>,
+    /// When this copy first opened its store, in ms; empty for a store older than the field.
+    pub created_at: Option<i64>,
 }
 
 /// Normalized transcript entry; `parts_json` is the wire-format parts array
@@ -9778,6 +9784,8 @@ pub(crate) mod tests {
     fn ui_state_roundtrips_functional_preferences() {
         let dir = std::env::temp_dir().join(format!("orx-store-ui-state-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
+        let created_at = store.ui_state().unwrap().created_at;
+        assert!(created_at.is_some_and(|at| at > 0));
         assert_eq!(
             store.ui_state().unwrap(),
             StoredUiState {
@@ -9796,6 +9804,7 @@ pub(crate) mod tests {
                 collapsed_model_sections: Vec::new(),
                 model_sightings: None,
                 seen_nudges: Vec::new(),
+                created_at,
             }
         );
 
@@ -9856,8 +9865,24 @@ pub(crate) mod tests {
                 collapsed_model_sections: vec!["openai".into()],
                 model_sightings: Some(serde_json::json!({"seen": ["gpt-6"]})),
                 seen_nudges: vec!["2026-11-12-c081d9e1".into()],
+                created_at,
             }
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ui_state_from_before_created_at_reads_as_undated() {
+        let dir = std::env::temp_dir().join(format!("orx-store-ui-dated-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .conn
+            .execute("UPDATE ui_state SET created_at = NULL", [])
+            .unwrap();
+        drop(store);
+
+        let reopened = Store::open_at(dir.clone()).unwrap();
+        assert_eq!(reopened.ui_state().unwrap().created_at, None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
