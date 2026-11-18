@@ -22,7 +22,10 @@ impl HfAccount {
         let key: [u8; 32] = Sha256::digest(token.as_bytes()).into();
         let mut cache = self.whoami.lock().await;
         if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry(key) {
-            entry.insert(hf::who(token).await?);
+            let identity = tokio::time::timeout(std::time::Duration::from_secs(15), hf::who(token))
+                .await
+                .map_err(|_| anyhow!("Timed out checking the Hugging Face account"))??;
+            entry.insert(identity);
         }
         Ok(hf::unseen(&cache[&key], &self.namespace, id))
     }
@@ -195,6 +198,38 @@ mod tests {
         assert!(account.unseen("bad", "five").await.is_err());
         assert!(account.unseen("bad", "six").await.is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 4);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn stalled_identity_lookup_releases_cached_tokens() {
+        if !crate::config::in_test_child(&["HF_ENDPOINT"]) {
+            return;
+        }
+        let started = Arc::new(tokio::sync::Notify::new());
+        let app = Router::new()
+            .route("/api/whoami-v2", get(|State(started): State<Arc<tokio::sync::Notify>>, headers: HeaderMap| async move {
+                if headers.get("authorization").and_then(|value| value.to_str().ok()) == Some("Bearer stalled") {
+                    started.notify_one();
+                    std::future::pending::<()>().await;
+                }
+                Json(serde_json::json!({"name":"me", "orgs":[{"name":"org"}]}))
+            }))
+            .with_state(started.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        std::env::set_var("HF_ENDPOINT", format!("http://{}", listener.local_addr().unwrap()));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let account = Arc::new(HfAccount::new("org".into()));
+        assert!(account.unseen("member", "first").await.unwrap().is_none());
+        let stalled_account = account.clone();
+        let stalled = tokio::spawn(async move { stalled_account.unseen("stalled", "second").await });
+        started.notified().await;
+        tokio::time::pause();
+        let cached_account = account.clone();
+        let cached = tokio::spawn(async move { cached_account.unseen("member", "third").await });
+        tokio::time::advance(std::time::Duration::from_secs(15)).await;
+        assert!(stalled.await.unwrap().is_err());
+        assert!(cached.await.unwrap().unwrap().is_none());
         server.abort();
     }
 }
