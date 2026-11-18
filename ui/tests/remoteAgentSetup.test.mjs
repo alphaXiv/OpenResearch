@@ -27,6 +27,8 @@ const runtime = {
 };
 const codex = { id: "codex", name: "Codex", installed: true, authenticated: true, authState: "ready", agentReady: true, models: [model("gpt-6.1-sol")], defaultModel: "gpt-6.1-sol", options: {} };
 const claude = () => ({ id: "claude-code", name: "Claude Code", installed: false, agentReady: false, models: [], options: {} });
+/** The machine's own Claude Code, signed in, so adding Claude Code makes an account OpenResearch keeps. */
+const ownClaude = { ...claude(), installed: true, authenticated: true, authState: "ready", agentReady: true, models: [model("claude-opus-5-5")], defaultModel: "claude-opus-5-5" };
 const opencode = (models, extra = {}) => ({
   id: "opencode", name: "OpenCode", installed: true, installBroken: false, version: "2.1.0", authenticated: true, authState: "ready",
   agentReady: true, models: models.map((id) => model(id)), defaultModel: models[0], options: {}, ...extra,
@@ -180,12 +182,17 @@ test("removing the provider added in the wizard starts the first chat elsewhere"
   assert.notEqual(write.preferredAgent.model, "deepseek/deepseek-v4", "a removed provider's model isn't the first chat's");
 });
 
-test("an account lists once it is signed in and the wizard that adds it finishes", async () => {
+test("a signed-out account stays listed with its sign-in, and a new one lists once its wizard finishes", async () => {
   const signedOut = { ...claude(), installed: true, authState: "needsLogin", profile: { id: "claude-old", name: "Claude Code 2" } };
   const setup = await remoteSetup({ harnesses: [codex, claude(), signedOut] });
   const row = (name) => document.querySelector(`button[aria-label="${m.settings_agent_use({ name })}"]`);
-  assert.equal(row("Claude Code 2"), null, "a signed-out account isn't listed");
-  assert.equal(button(m.harness_setup_login()), null);
+  assert.ok(row("Claude Code 2"), "a signed-out account stays listed");
+  await click(button(m.harness_setup_login()));
+  const login = new URL(sockets.at(-1).url, location.href);
+  assert.equal(login.searchParams.get("action"), "login");
+  assert.equal(login.searchParams.get("profile"), "claude-old", "signing in again reuses the account");
+  await act(async () => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+  await settle();
 
   await click(button("OpenAI Codex"));
   // The wizard made the account and it signed in, but the wizard is still open.
@@ -193,12 +200,56 @@ test("an account lists once it is signed in and the wizard that adds it finishes
   await act(async () => { for (const client of clients) await client.invalidateQueries(); });
   await settle();
   assert.ok(find('[role="dialog"]', "Codex"), "the wizard is still open");
-  assert.equal(row("Codex 2"), null, "the account waits for its wizard");
+  assert.ok(!row("Codex 2"), "the account waits for its wizard");
+  await click(wizardButton(m.settings_page_cancel()));
+});
+
+test("the machine's own agent lists while signed out only once research ran on it", async () => {
+  const own = { ...claude(), installed: true, authenticated: false, authState: "needsLogin", loginEligible: true };
+  for (const hasChats of [false, true]) {
+    await remoteSetup({ harnesses: [codex, { ...own, hasChats }] });
+    const listed = document.querySelector(`button[aria-label="${m.settings_agent_use({ name: "Claude Code" })}"]`);
+    assert.equal(Boolean(listed), hasChats);
+  }
+});
+
+for (const [name, tile, own] of [
+  ["Claude Code", () => addClaude(), { ...claude(), installed: true, authenticated: false, authState: "needsLogin", loginEligible: true }],
+  ["Codex", () => click(button("OpenAI Codex")), { ...codex, authenticated: false, authState: "needsLogin", agentReady: false, models: [] }],
+]) {
+  test(`the first ${name} added signs in the machine's own install, not a new account`, async () => {
+    const setup = await remoteSetup({ harnesses: own.id === "codex" ? [own, claude()] : [codex, own], network: () => ({ ip: "192.0.2.1", isDatacenter: false }) });
+    await tile();
+    const login = new URL(sockets.at(-1).url, location.href);
+    assert.equal(login.searchParams.get("harness"), own.id);
+    assert.equal(login.searchParams.get("action"), "login");
+    assert.equal(login.searchParams.get("profile"), null);
+    assert.equal(setup.requests("POST /api/agent-profiles").length, 0);
+
+    const ready = own.id === "codex" ? codex : ownClaude;
+    setup.harnesses[setup.harnesses.indexOf(own)] = ready;
+    await act(async () => sockets.at(-1).dispatchEvent(new MessageEvent("message", {
+      data: JSON.stringify({ type: "complete" }),
+    })));
+    await settle();
+    const finish = wizardButton(m.add_agent_finish({ name }));
+    assert.ok(finish && !finish.disabled, "the machine's own name is ready to use after sign-in");
+    await click(finish);
+    assert.equal(document.querySelectorAll('[role="dialog"]').length, 0);
+    assert.equal(setup.requests("POST /api/agent-profiles").length, 0);
+  });
+}
+
+test("a Claude Code its provider signs in elsewhere gets an account of OpenResearch's own", async () => {
+  const ownOnBedrock = { ...claude(), installed: true, authenticated: false, authState: "needsLogin", loginEligible: false };
+  const setup = await remoteSetup({ harnesses: [codex, ownOnBedrock], network: () => ({ ip: "192.0.2.1", isDatacenter: false }) });
+  await addClaude();
+  assert.equal(setup.requests("POST /api/agent-profiles").length, 1);
   await click(wizardButton(m.settings_page_cancel()));
 });
 
 test("a datacenter warning precedes a Claude sign-in once", async () => {
-  const setup = await remoteSetup();
+  const setup = await remoteSetup({ harnesses: [codex, ownClaude] });
   await addClaude();
   assert.equal(warnings(), 1);
   assert.ok(document.querySelector('[role="alertdialog"]').textContent.includes(m.remote_claude_datacenter_description({ host: ltr("gpu-lab"), ip: ltr("192.0.2.1") })));
@@ -214,7 +265,7 @@ test("a datacenter warning precedes a Claude sign-in once", async () => {
 });
 
 test("dismissing the warning goes back to the page without repeating it", async () => {
-  const setup = await remoteSetup();
+  const setup = await remoteSetup({ harnesses: [codex, ownClaude] });
   await addClaude();
   await click(find('[role="alertdialog"] button', m.common_cancel()));
   assert.equal(document.querySelectorAll('[role="dialog"], [role="alertdialog"]').length, 0);
@@ -226,7 +277,7 @@ test("dismissing the warning goes back to the page without repeating it", async 
 
 for (const [verdict, network] of [["no datacenter", () => ({ ip: "192.0.2.1", isDatacenter: false })], ["an unknown network", () => ({ ip: "192.0.2.1", isDatacenter: null })], ["a failed lookup", () => Response.json({ error: "lookup failed" }, { status: 502 })]]) {
   test(`Claude sign-in starts directly with ${verdict}`, async () => {
-    const setup = await remoteSetup({ network });
+    const setup = await remoteSetup({ harnesses: [codex, ownClaude], network });
     await addClaude();
     assert.equal(warnings(), 0);
     assert.equal(setup.requests("POST /api/agent-profiles").length, 1);

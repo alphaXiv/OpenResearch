@@ -263,12 +263,22 @@ async fn run(
                 }
                 let bin =
                     setup_program(&harness).map_err(|error| error.record(attempt, "detect"))?;
-                let (_, args) = if matches!(request.action, Action::Login) {
+                let (_, mut args) = if matches!(request.action, Action::Login) {
                     login_command(&request.harness)
                 } else {
                     update_command(&request.harness)
                 }
                 .unwrap();
+                // Codex's page signs in through a server on this machine's localhost, which a
+                // browser on the laptop cannot reach; a code typed on its page signs in anywhere.
+                let browser_elsewhere = state.remote_instance_id.is_some()
+                    || std::env::var_os("SSH_CONNECTION").is_some();
+                if request.harness == "codex"
+                    && matches!(request.action, Action::Login)
+                    && browser_elsewhere
+                {
+                    args.push("--device-auth".into());
+                }
                 (bin.to_owned(), args)
             }
         };
