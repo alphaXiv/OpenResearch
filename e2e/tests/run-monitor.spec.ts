@@ -824,12 +824,14 @@ const settle = (exp: string, run: string, choice: string, reason: string) =>
 
 test('an error flags the run and wakes its Agentic agent once, which confirms it and keeps the run going', async ({ page, project, agent, orx }, info) => {
   test.slow()
+  await page.request.post(`${orx.url}/api/settings/ui-state`, { headers: { origin: orx.url }, data: { runBanner: 'strip' } })
   const run = erring(orx, `flagged-${project.id}`, [['err', 6, 'RuntimeError: CUDA error: device-side assert triggered']])
   const banner = await launch(page, agent, project, 'Flagged', run.command)
   const shown = (await (await page.request.get(`${orx.url}/api/chat/shown-runs`)).json()).find((item: { run: { projectId: string } }) => item.run.projectId === project.id)
   const { id: runId, experimentId } = shown.run
   const woken = `woken-${project.id}`
   agent.script('was flagged for review', [
+    { think: 'Checking the evidence in the log.' },
     { hold: woken },
     { run: settle(experimentId, runId, 'keep', 'One bad batch on a warm GPU; the loss kept falling.') },
     { say: 'Looked at the log: one bad batch, and the loss kept falling. Keeping it going.' },
@@ -873,7 +875,7 @@ test('an error flags the run and wakes its Agentic agent once, which confirms it
 
 test('a Copilot flag opens the strip with its evidence and waits: Keep going settles it, Ask sends it to the agent', async ({ page, project, agent, orx }, info) => {
   test.slow()
-  const autonomy = (value: string) => page.request.post(`${orx.url}/api/settings/ui-state`, { headers: { origin: orx.url }, data: { preferredAutonomy: value } })
+  const autonomy = (value: string) => page.request.post(`${orx.url}/api/settings/ui-state`, { headers: { origin: orx.url }, data: { preferredAutonomy: value, runBanner: 'strip' } })
   await autonomy('copilot')
   try {
     const run = erring(orx, `copilot-${project.id}`, [
@@ -926,34 +928,57 @@ gate('finish')`)
       expect([flag.state, flag.choice.by, flag.choice.c]).toEqual(['kept', 'user', 'keep'])
     })
 
-    await test.step('a new kind of error flags it again, and Ask wakes the agent, who stops the run', async () => {
+    await test.step('Ask can queue behind a turn and can wake the agent again after a lost reply and handback', async () => {
+      const busy = `busy-${project.id}`
+      const waking = `waking-${project.id}`
       const asked = `asked-${project.id}`
+      const stopped = `stopped-${project.id}`
+      agent.script('Review the experiment setup.', [{ hold: busy }, { say: 'I reviewed the experiment setup.' }])
       agent.script('The user asked you to look at a flag', [
         { run: settle(experimentId, runId, 'ask', 'This choice needs the user.') },
         { say: 'The flag is back with you.' },
       ])
       agent.script('The user asked you to look at a flag', [
+        { hold: waking },
+        { think: 'Checking the shard error in the log.' },
         { hold: asked },
         { run: settle(experimentId, runId, 'stop', 'Shard 3 is corrupt; the rest of this run would train on garbage.') },
         { say: 'Shard 3 is corrupt, so I stopped the run. Shall I rebuild the shard and relaunch?' },
       ])
-      agent.script('finished with status', [{ say: 'Copiloted stopped.' }])
+      agent.script('finished with status', [{ hold: stopped }, { say: 'Copiloted stopped.' }])
       await run.open('shard')
       await expect(banner.locator('pre')).toHaveText('ValueError: shard 3 of the training set is corrupt (bad header)')
+      await send(page, 'Review the experiment setup.')
+      await agent.reached(busy)
+      await page.route(`**/api/runs/${runId}/flag`, async (route) => {
+        const saved = await route.fetch()
+        expect(saved.ok()).toBe(true)
+        await route.abort()
+      }, { times: 1 })
       await banner.getByRole('button', { name: /^Ask / }).click()
+      await expect(banner.getByText('Queued', { exact: true })).toBeVisible()
+      agent.release(busy)
       await expect(page.getByText('The flag is back with you.', { exact: true })).toBeVisible()
       await expect(banner.getByRole('button', { name: /^Ask / })).toBeEnabled()
       await banner.getByRole('button', { name: /^Ask / }).click()
-      await agent.reached(asked)
+      await agent.reached(waking)
       await expect(banner.getByRole('button', { name: /^Ask / })).toHaveCount(0)
+      const row = banner.getByRole('group', { name: 'Copiloted', exact: true })
+      await row.getByRole('button', { name: 'Show more', exact: true }).click()
+      await expect(row).toContainText('Waking')
+      agent.release(waking)
+      await agent.reached(asked)
+      await expect(row).toContainText('is reading the evidence')
       await themes(page, banner, info, 'strip-copilot-asked')
       await keep(page, banner, 'copilot-asked')
       agent.release(asked)
       await expect(page.getByText('Shard 3 is corrupt, so I stopped the run. Shall I rebuild the shard and relaunch?', { exact: true })).toBeVisible()
+      await agent.reached(stopped)
       await expect(banner).toContainText('Auto-stopped')
       await expect(page.getByRole('img', { name: 'A run needs your attention' })).toHaveCount(0)
       const { flags } = await (await page.request.get(`${orx.url}/api/runs/${runId}/monitor`)).json()
       expect(flags.map((flag: { state: string; choice: { by: string } }) => [flag.state, flag.choice.by])).toEqual([['kept', 'user'], ['stopped', 'agent']])
+      agent.release(stopped)
       await expect(page.getByText('Copiloted stopped.', { exact: true })).toBeVisible()
       await keep(page, page, 'copilot-answered')
     })

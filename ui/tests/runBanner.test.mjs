@@ -431,7 +431,8 @@ function heldFlag() {
     }
   });
   const answer = (body, status = 200) => act(async () => answers.shift()(Response.json(body, { status })));
-  return { choices, answer };
+  const lose = () => act(async () => answers.shift()(Promise.reject(new TypeError("Failed to fetch"))));
+  return { choices, answer, lose };
 }
 
 test("Ask retries reuse the request id and a new Ask after handback gets a new id", async () => {
@@ -460,6 +461,25 @@ test("Ask retries reuse the request id and a new Ask after handback gets a new i
   assert.notEqual(choices[2].requestId, choices[1].requestId, "a new Ask after the handback wakes the agent again");
   await answer({ flag: { ...flagged.flags[0], state: "asking" }, run: waitingRun() });
   await settle();
+});
+
+test("a lost Ask reply does not replay the request after the agent hands back the flag", async () => {
+  const { choices, answer, lose } = heldFlag();
+  const workspace = createWorkspace("test");
+  const { queryKey } = workspace.queries.getRunMonitorQuery("r1");
+  await banner([waitingRun()], { workspace });
+  await settle();
+  await click(named(m.run_flag_ask({ agent: "Claude" })));
+
+  // The server accepted Ask and the agent handed it back before the next monitor update.
+  const handedBack = { ...flagged.flags[0], choice: { by: "agent", c: "ask", at: now } };
+  await act(async () => workspace.setScopedQueryData(queryKey, { ...flagged, rev: flagged.rev + 2, flags: [handedBack] }));
+  await lose();
+  await settle();
+  await click(named(m.run_flag_ask({ agent: "Claude" })));
+  await answer({ flag: { ...handedBack, state: "asking" }, run: waitingRun() });
+  assert.equal(choices.length, 2);
+  assert.notEqual(choices[0].requestId, choices[1].requestId);
 });
 
 test("a refused Keep going stays where it was, says why and keeps focus", async () => {

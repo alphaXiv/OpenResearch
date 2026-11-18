@@ -322,7 +322,7 @@ export type FlagAnswer = "stop" | "keep" | "ask";
 /** A flag's answer on its way: one at a time per flag, one request id per choice, and why the server refused the last. */
 export interface FlagChoice {
   sending: FlagAnswer | null;
-  requestIds: Partial<Record<FlagAnswer, string>>;
+  requests: Partial<Record<FlagAnswer, { id: string; after?: string }>>;
   error: string | null;
 }
 
@@ -357,20 +357,25 @@ export function chooseFlag(ws: Workspace, run: Pick<api.Run, "id">, flagId: stri
   const current = ws.queryClient.getQueryData(queryKey);
   if (current?.sending) return;
 
-  const requestId = current?.requestIds[choice] ?? crypto.randomUUID();
-  const requestIds = { ...current?.requestIds, [choice]: requestId };
-  ws.setScopedQueryData(queryKey, { sending: choice, requestIds, error: null });
+  const previous = current?.requests[choice];
+  const monitor = ws.queryClient.getQueryData(ws.queries.getRunMonitorQuery(run.id).queryKey);
+  const recorded = monitor?.flags.find((flag) => flag.id === flagId)?.choice;
+  // A recorded choice advances the Ask even when the response and intermediate states were missed.
+  const after = choice === "ask" && recorded ? `${recorded.by}:${recorded.c}:${recorded.at}` : undefined;
+  const requestId = previous && previous.after === after ? previous.id : crypto.randomUUID();
+  const requests = { ...current?.requests, [choice]: { id: requestId, after } };
+  ws.setScopedQueryData(queryKey, { sending: choice, requests, error: null });
   // Observed until the server answers, so the lock is never collected while its request is out.
   const release = new QueryObserver(ws.queryClient, options).subscribe(() => {});
   mutFlagChoice.runWithOptions(ws, run, flagId, choice, requestId, {
     onError: (error) => {
-      ws.setScopedQueryData(queryKey, { sending: null, requestIds, error: error instanceof Error ? error.message : String(error) });
+      ws.setScopedQueryData(queryKey, { sending: null, requests, error: error instanceof Error ? error.message : String(error) });
       onRefused();
     },
     onSuccessData: () => {
-      const remaining = { ...requestIds };
+      const remaining = { ...requests };
       delete remaining[choice];
-      ws.setScopedQueryData(queryKey, { sending: null, requestIds: remaining, error: null });
+      ws.setScopedQueryData(queryKey, { sending: null, requests: remaining, error: null });
     },
     onSettled: release,
   });
