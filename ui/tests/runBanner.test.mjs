@@ -235,14 +235,21 @@ test("a summary says who needs attention first, and a run waiting for a choice o
   assert.equal(rows().length, 0, "the remembered line folds the summary");
   assert.ok(button(m.run_show_each()));
 
-  monitors.r2 = flagged;
+  monitors.r2 = { ...flagged, flags: [{ ...flagged.flags[0], detail: flagged.flags[0].template }] };
   const waiting = run("r2", { monitor: summary({ tone: "flag", sentence: flagged.sentence, bindings: { loss: "NaN" }, flag: { id: "f1", state: "waiting", mode: "copilot" }, rev: flagged.rev }) });
   await act(async () => workspace.queryClient.setQueryData(workspace.queries.listChatShownRunsQuery().queryKey, { source: "shown", runs: [sweep("r1", 4), { ...sweep("r2", 6), run: waiting }] }));
   await settle();
+  const warning = "Loss is NaN.";
+  assert.equal(plain(find("[data-run-frame]").textContent).split(warning).length - 1, 1);
   const head = plain(find("button[aria-expanded]").textContent);
-  assert.ok(head.startsWith(plain(m.run_summary_attention({ name: "6", state: m.status_flagged() }))), head);
+  assert.ok(head.startsWith(plain(m.run_status_for({ name: "6", status: m.status_flagged() }))), head);
   assert.equal(rows().length, 2, "the rows opened");
   assert.ok(rows()[1].querySelector(`button[aria-label="${m.run_show_less()}"]`), "and so did the waiting run's strip");
+  assert.ok(plain(rows()[1].textContent).includes(warning));
+
+  await click(find('[data-run-toggle="*"]'));
+  assert.equal(rows().length, 0);
+  assert.ok(plain(find("button[aria-expanded]").textContent).includes(warning));
 });
 
 test("a finished sweep stays one summary, which is dismissed whole once none of it runs", async () => {
@@ -323,12 +330,28 @@ test("a flag's detail keeps its counts live in the strip", async () => {
   assert.ok([...document.querySelectorAll("[role=group] span")].some((p) => p.textContent.replace(/[⁦-⁩]/g, "").startsWith("43 items came back HTTP 429.")));
 });
 
-test("an expanded flag says its warning once when the detail repeats it", async () => {
-  const flag = { ...flagged.flags[0], detail: "Loss is NaN." };
+for (const [source, template, warning] of [
+  ["look", "Loss is **{loss}**.", "Loss is NaN."],
+  ["tripwire", "A new kind of error in the log: **RuntimeError**.", "A new kind of error in the log: RuntimeError."],
+  ["rule", "Rule **memory** asks: Memory use is rising.", "Rule memory asks: Memory use is rising."],
+]) {
+  test(`a ${source} flag says its warning once when template and detail match`, async () => {
+    const flag = { ...flagged.flags[0], source, template, detail: template };
+    backend({ monitors: { r1: { ...flagged, flags: [flag] } } });
+    const { container } = await banner([waitingRun()]);
+    await settle();
+    assert.equal(plain(container.querySelector("[role=group]").textContent).split(warning).length - 1, 1);
+  });
+}
+
+test("the expanded flag renders the full warning in one place", async () => {
+  const flag = { ...flagged.flags[0], detail: "Loss is NaN. Check the log." };
   backend({ monitors: { r1: { ...flagged, flags: [flag] } } });
   const { container } = await banner([waitingRun()]);
   await settle();
-  assert.equal(plain(container.querySelector("[role=group]").textContent).split("Loss is NaN.").length, 2);
+  const strip = plain(container.querySelector("[role=group]").textContent);
+  assert.match(strip, /Loss is NaN\. Check the log\./);
+  assert.equal(strip.split("Loss is NaN.").length - 1, 1);
 });
 
 const plain = (text) => text.replace(/[⁦-⁩]/g, "");

@@ -138,7 +138,7 @@ function watcherSummary(models: RunModel[], labels: string[], watch: ChatWatch |
  * does. The watcher's summary, when there is one, says the last two. `firstDone` is when the soonest live run should
  * finish, for the line to say beside a sentence that doesn't.
  */
-export function summarize(models: RunModel[], { labels, groups }: { labels: string[]; groups: (number | null)[] }, watch?: ChatWatch | null, now = Date.now()): { parts: SummaryPart[]; firstDone: string | null } {
+export function summarize(models: RunModel[], { labels, groups }: { labels: string[]; groups: (number | null)[] }, watch?: ChatWatch | null, now = Date.now(), rowsOpen = false): { parts: SummaryPart[]; firstDone: string | null } {
   const name = (model: RunModel) => autoDir(labels[models.indexOf(model)]);
   const urgent = models.reduce<RunModel | null>((most, model) => urgency(model) < (most ? urgency(most) : Infinity) ? model : most, null);
   const leaders = [...new Set(groups)].flatMap((group) => {
@@ -149,9 +149,12 @@ export function summarize(models: RunModel[], { labels, groups }: { labels: stri
   // A run that ended with nothing to say, not even why, says how long it took.
   const why = urgent && (urgent.sentence.text || urgent.note);
   const watched = urgent ? null : watcherSummary(models, labels, watch, now);
-  const parts: SummaryPart[] | null = watched ? [watched] : urgent ? [why
-    ? { tone: urgent.tone, who: m.run_summary_attention({ name: name(urgent), state: urgent.status }), text: why }
-    : { tone: urgent.tone, who: m.run_summary_attention_ended({ name: name(urgent), ended: urgent.eta }), text: "" }]
+  const attention = !urgent ? null
+    : rowsOpen && urgent.tone === "flag" && urgent.sentence.watcher
+      ? { tone: urgent.tone, who: m.run_status_for({ status: autoDir(urgent.status), name: name(urgent) }), text: "" }
+    : why ? { tone: urgent.tone, who: m.run_summary_attention({ name: name(urgent), state: urgent.status }), text: why }
+    : { tone: urgent.tone, who: m.run_summary_attention_ended({ name: name(urgent), ended: urgent.eta }), text: "" };
+  const parts: SummaryPart[] | null = watched ? [watched] : attention ? [attention]
     : leading?.found.headline ? [{
       tone: leading.found.tone,
       text: (models.some((model) => model.live && groups[models.indexOf(model)] === leading.group) ? m.run_summary_leads : m.run_summary_leads_all_done)({

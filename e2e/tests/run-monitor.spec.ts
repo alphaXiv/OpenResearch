@@ -847,6 +847,7 @@ test('an error flags the run and wakes its Agentic agent once, which confirms it
     expect(text).toContain('OpenResearch checked this itself, with no model')
     expect(text).toMatch(new RegExp(`orx exp flag ${runId} --flag f[0-9a-f]{8} --keep`))
     await expect(banner).toContainText('is reading the evidence')
+    await expect(banner.locator('[data-run-frame]').getByText('A new kind of error in the log:')).toHaveCount(1)
     await expect(page.getByRole('img', { name: 'A run was flagged' })).toBeVisible()
     await keep(page, banner, 'agentic-line-looking')
   })
@@ -908,6 +909,7 @@ gate('finish')`)
 
     await test.step('the strip opens by itself with the evidence and three choices; the sidebar row turns amber', async () => {
       await expect(banner.locator('pre')).toHaveText('RuntimeError: CUDA error: device-side assert triggered')
+      await expect(banner.locator('[data-run-frame]').getByText('A new kind of error in the log:')).toHaveCount(1)
       for (const name of [/^Stop run$/, /^Keep going$/, /^Ask /]) await expect(banner.getByRole('button', { name })).toBeVisible()
       await expect(banner).toContainText('The run keeps going until you choose.')
       await expect(page.getByRole('img', { name: 'A run needs your attention' })).toBeVisible()
