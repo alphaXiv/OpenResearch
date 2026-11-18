@@ -18,10 +18,8 @@ import { HeadlineStat } from "./HeadlineStat";
 import { Lead } from "./Lead";
 import { Mark } from "./Mark";
 import { Rail } from "./Rail";
-import { Rules } from "./Rules";
 import { Sentence } from "./Sentence";
 import { useRunMonitors } from "./useRunMonitor";
-import { ViewSource } from "./ViewSource";
 import { Watch } from "./Watch";
 
 /** The agent of the chat that launched the run, else of the chat that created its experiment, by name; null when neither is known. */
@@ -96,8 +94,6 @@ export function RunPage({ run, name, chatSessionId, now }: { run: Run; name: str
           {empty && <p className="m-0 text-sm text-ink-subtext">{empty}</p>}
         </div>
       )}
-      {data && <Rules rules={data.rules} outcome={run.outcome ?? null} />}
-      {data && <ViewSource monitor={data} projectId={run.projectId} live={model.live} canSayEmpty={canSayEmpty} />}
     </div>
   );
 }
@@ -110,7 +106,7 @@ export function WatchSection({ run, chatSessionId, now, className }: { run: Run;
   const agent = useChatAgent(run, chatSessionId);
   const { getRunMonitorQuery } = useWorkspace().queries;
   // Only what the watch says: the section redraws when a look lands, not with every new point.
-  const monitor = useQuery({ ...getRunMonitorQuery(run.id), enabled: false, select: (data) => ({ watch: data.watch, view: data.view, brief: data.brief, flags: data.flags }) }).data;
+  const monitor = useQuery({ ...getRunMonitorQuery(run.id), enabled: false, select: (data) => ({ watch: data.watch, view: data.view, flags: data.flags }) }).data;
   const quiet = monitor?.watch.state === "none" && monitor.watch.looks.length === 0 && !monitor.flags.length;
   if (!monitor || quiet) return null;
   return (

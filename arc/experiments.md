@@ -405,13 +405,15 @@ chat's `minGapS` between them and never outnumber the ladder's points since the
 oldest run started. A run gets one last look when it ends, shared with siblings
 ending within a minute. The oldest ready run opens that window; a newer finish
 cannot extend it. A failed or interrupted final look is taken once more after
-the retry gap. A refused sign-in blocks looks on that account until its local
-sign-in or configured credential changes and leaves the retry budget available.
+the retry gap. A run that ended before starting gets no look. A refused sign-in
+blocks looks on that account until its local sign-in or configured credential
+changes and leaves the retry budget available.
 
 A look's request, system prompt and digest together, is held to 4,096 tokens,
-counted as two bytes a token, and never past 16 KiB; so is its retry, with the
-reply it answers. It holds the brief, each run's progress, signals and last
-three sentences, and its new log lines, new kinds of warning first, repeats said
+counted as two bytes a token. The request reserves room for one retry's short
+correction, which uses the same digest and log excerpts. The digest holds the
+brief, each run's progress, signals and last three sentences, and its new log
+lines, new kinds of warning first, repeats said
 once with their count. It uses the monitor's signal comparisons. A run's first
 lines go to the first look that has room once every run's new lines are in,
 and to no later one. When it is too
@@ -422,8 +424,9 @@ journal says what each request left out. A request that still exceeds the budget
 is skipped and recorded. Each field and log line passes sharing's credential
 scan as written, before it is clipped or encoded. A match is left out, saying so,
 and the journal tells the user once where it is.
-A retry's reply is scanned before it goes back. A reply is strict JSON: each number that can
-move is a token orx fills, a sentence with figures marks one bold (optional in the
+The previous reply and the errors are scanned before any part goes back in a
+retry. A reply is strict JSON: each number that can move is a token orx fills,
+a sentence with figures marks one bold (optional in the
 group summary), a run sentence reads at most 48 characters filled (90 for the summary),
 and a number written as the value it reads now is refused.
 One retry carries what was wrong; a run whose answer stays wrong keeps its last

@@ -429,7 +429,7 @@ async fn a_reply_that_breaks_the_contract_is_asked_for_once_more_with_why() {
     assert_eq!(calls(&calls_dir), 2);
     let again = std::fs::read_to_string(calls_dir.join("prompt-2")).unwrap();
     assert!(
-        again.contains("It was not accepted: r1: mark exactly one figure in **bold**"),
+        again.contains("not accepted: r1: mark exactly one figure in **bold**"),
         "{again}"
     );
     let results = store.watch_look_runs(id).unwrap();
@@ -489,7 +489,7 @@ async fn switching_watching_off_while_the_model_answers_blocks_the_retry() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn an_oversized_digest_or_repair_never_reaches_the_provider() {
+async fn an_oversized_digest_is_refused_and_an_oversized_repair_is_bounded() {
     if !crate::config::in_test_child(&[]) {
         return;
     }
@@ -508,30 +508,35 @@ async fn an_oversized_digest_or_repair_never_reaches_the_provider() {
     assert_eq!(missed.state, "error");
     assert!(missed.error.unwrap().contains("budget"));
 
+    // A reply too long to echo is retried within the budget, its notes left out of the echo.
     run(&store, "b", "Depth 6", "chat", LOG);
     let retry = look(&store, "chat", "ceiling", &[("b", "r1")]);
     take(retry).await.unwrap();
 
-    assert_eq!(calls(&calls_dir), 1);
+    assert_eq!(calls(&calls_dir), 2);
+    let again = std::fs::read_to_string(calls_dir.join("prompt-2")).unwrap();
+    assert!(digest::system(false).len() + again.len() <= digest::room(0));
+    assert!(again.contains("notes must be text"), "{again}");
+    assert!(!again.contains("xxxx"));
     let missed = store.watch_look(retry).unwrap().unwrap();
-    assert!(missed.error.unwrap().contains("budget"));
-    assert_eq!(missed.usage.unwrap().cost_usd, Some(0.002));
+    assert!(!missed.error.unwrap().contains("budget"));
+    assert_eq!(missed.usage.unwrap().cost_usd, Some(0.004));
 }
 
 #[cfg(unix)]
 #[tokio::test]
-async fn a_retry_cannot_cite_an_excerpt_trimmed_from_its_request() {
+async fn a_retry_resends_the_digest_its_reply_cites_within_the_budget() {
     if !crate::config::in_test_child(&[]) {
         return;
     }
     let calls_dir = crate::config::home_dir().unwrap().join("claude-calls");
-    let room = digest::room(digest::SYSTEM.len() + DIGEST_PREAMBLE.len());
+    let room = digest::room(digest::system(false).len() + DIGEST_PREAMBLE.len());
     let first = json!({
         "notes": "x".repeat(room - 1000),
-        "runs": {"r1": {"status": "ok", "line": 37}}
+        "runs": {"r1": {"status": "flag", "line": "Config **4** ignores its flag.", "evidence": [{"from": 0, "to": 25}]}}
     })
     .to_string();
-    let second = r#"{"runs":{"r1":{"status":"ok","line":"Training continues.","evidence":[{"from":0,"to":25}]}}}"#;
+    let second = r#"{"runs":{"r1":{"status":"flag","line":"Depth **4** ignores --depth 8.","evidence":[{"from":26,"to":69}]}}}"#;
     fake_claude(&calls_dir, &[&first, second]);
     let store = Store::open().unwrap();
     chat(&store, "chat", "claude-code");
@@ -542,16 +547,19 @@ async fn a_retry_cannot_cite_an_excerpt_trimmed_from_its_request() {
 
     assert_eq!(calls(&calls_dir), 2);
     let prompt = |i| std::fs::read_to_string(calls_dir.join(format!("prompt-{i}"))).unwrap();
-    assert!(prompt(1).contains("config: depth=4 width=512"));
-    assert!(!prompt(2).contains("config: depth=4 width=512"));
-    let missed = store.watch_look(id).unwrap().unwrap();
-    assert_eq!(missed.state, "error");
-    assert!(missed.error.unwrap().contains("not a log excerpt"));
+    let digest = |text: String| text.split("\n\nYour reply").next().unwrap().to_owned();
+    assert_eq!(
+        digest(prompt(1)),
+        digest(prompt(2)),
+        "the retry is shown what the look was"
+    );
+    assert!(digest::system(false).len() + prompt(2).len() <= digest::room(0));
+    let look = store.watch_look(id).unwrap().unwrap();
+    assert_eq!(look.state, "done");
+    assert_eq!(look.error, None);
     let row = &store.watch_look_runs(id).unwrap()[0];
-    assert!(row.cursor["omitted"]
-        .as_str()
-        .unwrap()
-        .contains("new log lines"));
+    assert_eq!(row.result.as_deref(), Some("flag"));
+    assert!(row.cursor["omitted"].is_null());
 }
 
 #[cfg(unix)]
@@ -1664,6 +1672,8 @@ fn a_row_that_falls_to_zero_asks_for_a_look_and_its_sentence_may_say_so() {
         key: "r1",
         signals: &signals,
         versus: &versus,
+        series: &signals,
+        live: true,
         counts: &counts,
         moving: &moving,
         step: None,
@@ -2322,7 +2332,7 @@ fn a_flag_prepared_before_cancel_cannot_wake_after_cancel() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn a_completed_result_without_a_parent_retries_an_unsupported_comparison() {
+async fn a_completed_result_without_a_parent_drops_the_comparison_and_the_flag() {
     if !crate::config::in_test_child(&[]) {
         return;
     }
@@ -2361,7 +2371,6 @@ async fn a_completed_result_without_a_parent_retries_an_unsupported_comparison()
         &calls_dir,
         &[
             r#"{"runs":{"r1":{"status":"flag","line":"Cases **{evaluated_cases}**, {evaluated_cases.vs}."}}}"#,
-            r#"{"runs":{"r1":{"status":"ok","line":"Evaluated **{evaluated_cases}** cases."}}}"#,
         ],
     );
     let id = look(&store, "chat", "terminal", &[("audit", "r1")]);
@@ -2369,7 +2378,13 @@ async fn a_completed_result_without_a_parent_retries_an_unsupported_comparison()
     let results = store.watch_look_runs(id).unwrap();
     assert_eq!(results[0].result.as_deref(), Some("line"));
     assert!(super::super::flags::read(&store, &row).unwrap().is_empty());
-    assert_eq!(calls(&calls_dir), 2);
+    assert_eq!(
+        results[0].template.as_deref(),
+        Some("Cases **{evaluated_cases}**.")
+    );
+    assert_eq!(calls(&calls_dir), 1);
+    let args = std::fs::read_to_string(calls_dir.join("args-1")).unwrap();
+    assert!(!args.contains("{signal.vs}"), "{args}");
     let prompt = std::fs::read_to_string(calls_dir.join("prompt-1")).unwrap();
     let sent: Value = serde_json::from_str(prompt.strip_prefix(DIGEST_PREAMBLE).unwrap()).unwrap();
     assert!(sent["parents"].is_null());
@@ -2398,7 +2413,7 @@ async fn an_overlong_sentence_gets_one_retry_with_the_exact_error() {
     assert_eq!(calls(&calls_dir), 2);
     let again = std::fs::read_to_string(calls_dir.join("prompt-2")).unwrap();
     assert!(
-        again.contains("the sentence reads 59 characters with its numbers filled; keep it to 48"),
+        again.contains("the sentence reads 59 characters with its numbers filled; keep it to 44"),
         "{again}"
     );
     assert_eq!(
@@ -2728,4 +2743,58 @@ async fn a_refused_sign_in_blocks_live_and_final_looks_until_credentials_change(
         .unwrap();
     assert_eq!(calls(&dir), 4);
     assert!(store.run_watch_terminal_done(&other.id).unwrap());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_run_that_ended_before_it_started_gets_no_look() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let dir = crate::config::home_dir().unwrap().join("claude-calls");
+    fake_claude(&dir, &[r#"{"runs":{"r1":{"status":"ok","line":"Done."}}}"#]);
+    let store = Store::open().unwrap();
+    chat(&store, "chat", "claude-code");
+    let now = crate::store::now_ms();
+    for (id, started) in [("never", None), ("ran", Some(now - 180_000))] {
+        let mut row = run(&store, id, id, "chat", "");
+        row.backend_json = r#"{"kind":"engine"}"#.into();
+        store.upsert_run(&row).unwrap();
+        assert!(store
+            .set_engine_phase(
+                id,
+                "running",
+                "failed",
+                Some(now - 120_000),
+                Some(1),
+                started
+            )
+            .unwrap());
+    }
+
+    let mut state = State::default();
+    pass(&mut state).await.unwrap();
+    while let Some(task) = state.looks.join_next().await {
+        task.unwrap();
+    }
+    let final_looks = store.run_watch_looks("ran", JOURNAL).unwrap();
+    assert_eq!(
+        final_looks.len(),
+        1,
+        "a run that started gets its last look"
+    );
+    let never = store.get_run("never").unwrap().unwrap();
+    assert!(matches!(
+        look_now(&store, &never),
+        Err(LookNow::NotWatched(_))
+    ));
+    let prepared = look(&store, "chat", "manual", &[("never", "r1")]);
+    take(prepared).await.unwrap();
+    assert_eq!(
+        calls(&dir),
+        1,
+        "a look prepared before failure does not get sent"
+    );
+    assert!(store.run_flag_events("never").unwrap().is_empty());
+    assert_eq!(run_facts(&store, &never).unwrap()["looks"], json!([]));
 }

@@ -246,9 +246,10 @@ fn conditions(
             .unwrap()
     });
     for (kind, line) in scan.into_iter().flat_map(|scan| &scan.firsts) {
-        let severe = ERROR_WORDS.iter().any(|word| kind.contains(word));
-        let named_error =
-            error.is_match(&line.text) && !tally.is_match(&line.text.to_ascii_lowercase());
+        let spoken = digest::spoken(&line.text);
+        let lower = spoken.to_ascii_lowercase();
+        let severe = ERROR_WORDS.iter().any(|word| lower.contains(word));
+        let named_error = error.is_match(&spoken) && !tally.is_match(&lower);
         if !(severe || named_error) {
             continue;
         }
@@ -516,6 +517,48 @@ mod tests {
 
     fn far(seen: &Seen, of: f64) -> bool {
         seen.compared["loss"].far_worse(true, Some(of))
+    }
+
+    #[test]
+    fn an_error_word_inside_printed_text_or_json_is_no_error_but_a_real_error_is() {
+        let flagged = |line: &str| {
+            let mut scan = Scan::default();
+            if let Some(kind) = digest::family(line) {
+                scan.firsts.insert(
+                    kind,
+                    digest::Line {
+                        from: 0,
+                        to: line.len() as u64 + 1,
+                        text: line.to_owned(),
+                    },
+                );
+            }
+            let seen = Seen {
+                scan: Some(scan),
+                ..Seen::default()
+            };
+            let run = at(("eval", 0), 10.0, 1.0, 1.0, 1.0);
+            conditions(&seen, &run, &BTreeSet::new(), 0)
+                .iter()
+                .any(|trip| trip.kind == "error")
+        };
+        for transcript in [
+            r#"HYP {"id": "a12", "text": "there was an error in the transcript"}"#,
+            r#"REF "the error was mine" HYP "an error was made""#,
+            r#"{"utt": 3, "hyp": "a fatal error killed the process"}"#,
+        ] {
+            assert!(!flagged(transcript), "{transcript}");
+        }
+        for error in [
+            "Traceback (most recent call last):",
+            "RuntimeError: CUDA error: device-side assert triggered",
+            r#"ERROR: file "data.json" not found"#,
+            r#"error: could not compile "orx-host""#,
+            r#"{"level": "error", "msg": "shard 3 unreadable"}"#,
+            "torch.OutOfMemoryError: CUDA out of memory",
+        ] {
+            assert!(flagged(error), "{error}");
+        }
     }
 
     #[test]

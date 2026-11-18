@@ -4,10 +4,9 @@ import { getLocale } from "../paraglide/runtime.js";
 import { fillSentence } from "./format";
 import type { Flag, Look, Signals } from "./types";
 
-/** What a look said, with the numbers of its moment, in the app's language; a look that said nothing, why. */
+/** What a look said, with the numbers of its moment, in the app's language; a look that failed says so. */
 export function lookText(look: Look, signals: Signals): string {
-  if (look.said === "interrupted") return m.run_watch_interrupted();
-  if (look.said === "error") return look.text ? m.run_watch_failed({ why: autoDir(look.text) }) : m.run_watch_failed_bare();
+  if (look.said === "interrupted" || look.said === "error") return m.run_watch_look_failed();
   return look.template && look.bindings ? fillSentence(look.template, look.bindings, signals) : look.text;
 }
 
@@ -39,6 +38,8 @@ const ownRow = (look: Look) => Boolean(look.withheld.length || look.notedUnder);
 export function journalRows(looks: Look[]): JournalRow[] {
   const rows: JournalRow[] = [];
   for (const look of looks) {
+    // A look that kept silent changed nothing a reader sees.
+    if ((look.said === "new" || look.said === "same") && look.template === null && !look.text && !ownRow(look)) continue;
     const last = rows.at(-1);
     const keeps = last && look.said !== "flag" && last.look.said !== "error" && last.look.said !== "interrupted"
       && !ownRow(look) && !ownRow(last.look) && look.template !== null && look.template === last.look.template;

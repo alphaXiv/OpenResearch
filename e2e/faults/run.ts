@@ -239,7 +239,7 @@ async function runScenario(scenario: Scenario) {
     await banner.getByRole('button', { name: new RegExp(`^\\W?${title}\\W?$`) }).click()
     const section = page.locator('section', { has: page.getByRole('heading', { name: 'Latest run', exact: true }) })
     await section.waitFor()
-    const rules = section.locator('details', { has: page.locator('summary', { hasText: /checked with no model/ }) })
+    const rules = page.locator('details', { has: page.locator('summary', { hasText: /^Details$/ }) })
     if (await rules.count()) await rules.locator('summary').click()
     say(`page   ${plain(await section.innerText())}`)
     // The page is taller than its pane: its lead, its rules and its journal, each where it scrolls to.

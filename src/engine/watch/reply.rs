@@ -7,6 +7,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 /// The longest run sentence, in displayed characters, at the numbers it reads now.
 pub(super) const MAX_GRAPHEMES: usize = 48;
+pub(super) const MAX_SUMMARY_GRAPHEMES: usize = 90;
 const MAX_TOKENS: usize = 12;
 const MAX_NEW_COUNTS_PER_RUN: usize = 2;
 const MAX_NEW_COUNTS: usize = 4;
@@ -16,6 +17,12 @@ const MAX_EVIDENCE_BYTES: u64 = 3 * 1024;
 const MAX_NOTES: usize = 1024;
 const LIVE: char = '\u{fffc}';
 
+/// The length a look asks for: a model counts characters loosely, so it is asked for less than
+/// it is held to.
+pub(super) const fn asked(limit: usize) -> usize {
+    limit - limit / 12
+}
+
 /// What one run's tokens can bind in this look.
 pub(super) struct Bindable<'a> {
     pub key: &'a str,
@@ -23,6 +30,9 @@ pub(super) struct Bindable<'a> {
     pub signals: &'a Value,
     /// Signals compared with the parent now.
     pub versus: &'a BTreeSet<String>,
+    /// Each signal's points, which a trend needs two of.
+    pub series: &'a Value,
+    pub live: bool,
     /// Patterns already counted for this run.
     pub counts: &'a BTreeSet<String>,
     /// Numbers that move: no sentence may write one of these as it reads now.
@@ -280,14 +290,16 @@ pub(super) fn read(
                 answer["line"] = Value::from(line.replace(&format!("{{{}:", run.key), "{"));
             }
         }
+        let flagged = answer
+            .as_ref()
+            .is_some_and(|answer| answer["status"] == "flag");
         let mut valid_template = None;
-        let mut unsupported_comparison = false;
+        let mut supports_flag = true;
         match answer_of(answer.as_ref(), run.sentence, run.setup, &mut |template| {
-            unsupported_comparison = tokens(template, false).is_ok_and(|tokens| {
-                tokens.iter().any(|(_, token)| {
-                    matches!(token, Token::Versus(_, name) if !run.versus.contains(name))
-                })
-            });
+            let cleaned = without_comparisons(template, false, runs, Some(run));
+            // The comparison may be why the model raised the flag.
+            supports_flag = cleaned == template;
+            let template = cleaned.as_str();
             let (template, length_error) = check_line(template, false, runs, Some(run), render)?;
             valid_template = Some(template.clone());
             length_error.map_or(Ok(template), Err)
@@ -296,32 +308,48 @@ pub(super) fn read(
                 flag,
                 template,
                 evidence,
-            }) => match check_evidence(&evidence, run.excerpts) {
-                Ok(evidence) => {
-                    read.runs.insert(
-                        run.key.to_owned(),
-                        Answer::Line {
-                            flag,
-                            template,
-                            evidence,
-                        },
-                    );
+            }) => {
+                let flag = flag && supports_flag;
+                let evidence = if flag {
+                    check_evidence(&evidence, run.excerpts)
+                } else {
+                    Ok(Vec::new())
+                };
+                match evidence {
+                    Ok(evidence) => {
+                        read.runs.insert(
+                            run.key.to_owned(),
+                            Answer::Line {
+                                flag,
+                                template,
+                                evidence,
+                            },
+                        );
+                    }
+                    Err(error) => read.errors.push(format!("{}: {error}", run.key)),
                 }
-                Err(error) => read.errors.push(format!("{}: {error}", run.key)),
-            },
+            }
             Ok(answer @ (Answer::Same | Answer::Silent)) => {
                 read.runs.insert(run.key.to_owned(), answer);
             }
             Err(error) => read.errors.push(format!("{}: {error}", run.key)),
         }
         let refused = !read.runs.contains_key(run.key);
-        let flagged = answer
-            .as_ref()
-            .is_some_and(|answer| answer["status"] == "flag");
         if let Some(line) = answer
             .as_ref()
             .and_then(|answer| answer["line"].as_str())
-            .filter(|_| refused && flagged && !unsupported_comparison)
+            .filter(|line| {
+                refused
+                    && flagged
+                    && supports_flag
+                    && check_trend(
+                        line,
+                        &tokens(line, false).unwrap_or_default(),
+                        runs,
+                        Some(run),
+                    )
+                    .is_ok()
+            })
         {
             let kept = valid_template.unwrap_or_else(|| plain_flag(line));
             read.runs.insert(
@@ -339,9 +367,11 @@ pub(super) fn read(
         match answer_of(
             object.get("summary"),
             bounds.sentence,
-            bounds.setup,
+            // A summary left out with none to keep is no summary yet.
+            bounds.setup || bounds.sentence.is_none(),
             &mut |template| {
-                let (template, length_error) = check_line(template, true, runs, None, render)?;
+                let template = without_comparisons(template, true, runs, None);
+                let (template, length_error) = check_line(&template, true, runs, None, render)?;
                 length_error.map_or(Ok(template), Err)
             },
         ) {
@@ -358,6 +388,49 @@ pub(super) fn read(
 pub(super) struct SummaryBounds<'a> {
     pub sentence: Option<&'a str>,
     pub setup: bool,
+}
+
+/// `template` without the `{signal.vs}` tokens no parent can fill, each with the comma or space
+/// or bold markers that join it.
+fn without_comparisons(
+    template: &str,
+    summary: bool,
+    runs: &[Bindable],
+    own: Option<&Bindable>,
+) -> String {
+    let Ok(found) = tokens(template, summary) else {
+        return template.to_owned();
+    };
+    let mut kept = template.to_owned();
+    for (range, token) in found.iter().rev() {
+        let Token::Versus(key, name) = token else {
+            continue;
+        };
+        let run = key
+            .as_deref()
+            .and_then(|key| runs.iter().find(|run| run.key == key))
+            .or(own);
+        if run.is_none_or(|run| run.versus.contains(name)) {
+            continue;
+        }
+        let mut before = &kept[..range.start];
+        let mut after = &kept[range.end..];
+        if let (Some(left), Some(right)) = (before.strip_suffix("**"), after.strip_prefix("**")) {
+            before = left;
+            after = right;
+        }
+        let joined = before.trim_end();
+        let start = joined
+            .strip_suffix([',', ';', '·'])
+            .map_or(joined.len(), |joined| joined.trim_end().len());
+        if start == 0 {
+            after = after.trim_start();
+            after = after.strip_prefix([',', ';']).unwrap_or(after).trim_start();
+        }
+        let end = kept.len() - after.len();
+        kept.replace_range(start..end, "");
+    }
+    kept
 }
 
 /// The reply as JSON. A model that fences it in a code block still means the JSON inside.
@@ -478,6 +551,64 @@ fn check_evidence(
     });
     cited.truncate(MAX_EVIDENCE);
     Ok(cited)
+}
+
+fn check_trend(
+    template: &str,
+    found: &[(std::ops::Range<usize>, Token)],
+    runs: &[Bindable],
+    own: Option<&Bindable>,
+) -> Result<(), String> {
+    static TREND: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let trend = TREND.get_or_init(|| {
+        regex::Regex::new(r"(?i-u)\b(?:rising|falling|climbing|dropping|declining|decreasing|increasing|improving|worsening|(?:trending|going) (?:up|down))\b")
+            .expect("fixed trend pattern")
+    });
+    for word in trend.find_iter(template) {
+        if found.iter().any(|(range, _)| range.contains(&word.start()))
+            || template[word.start()..]
+                .get(.."falling back".len())
+                .is_some_and(|text| text.eq_ignore_ascii_case("falling back"))
+        {
+            continue;
+        }
+        let signal =
+            |(_, token): &&(std::ops::Range<usize>, Token)| matches!(token, Token::Signal(..));
+        // A trend word speaks of the signal before it, else the one it leads.
+        let Some((_, token @ Token::Signal(_, name))) = found
+            .iter()
+            .rev()
+            .filter(signal)
+            .find(|(range, _)| range.end <= word.start())
+            .or_else(|| {
+                found
+                    .iter()
+                    .filter(signal)
+                    .find(|(range, _)| range.start >= word.end())
+            })
+        else {
+            return Err("bind a signal with two readings before describing its trend".into());
+        };
+        let Some(run) = token
+            .run()
+            .and_then(|key| runs.iter().find(|run| run.key == key))
+            .or(own)
+        else {
+            continue;
+        };
+        if !run.live {
+            return Err(format!(
+                "{} has ended: say where {{{name}}} ended, never where it is heading",
+                run.key
+            ));
+        }
+        if run.series[name].as_array().map_or(0, Vec::len) < 2 {
+            return Err(format!(
+                "{{{name}}} needs two readings before you can describe a trend"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The checks of one sentence; returns the count patterns it reads.
@@ -623,10 +754,21 @@ fn check_line(
             "\"{number}\" is a number that still moves; write it as its token so it stays current"
         ));
     }
+    check_trend(template, &found, runs, own)?;
     let shown = rendered.replace("**", "").graphemes(true).count();
-    let limit = if summary { 90 } else { MAX_GRAPHEMES };
+    let limit = if summary {
+        MAX_SUMMARY_GRAPHEMES
+    } else {
+        MAX_GRAPHEMES
+    };
     if shown <= limit {
         return Ok((template.to_owned(), None));
+    }
+
+    if shown == limit + 1 {
+        if let Some(shortened) = template.strip_suffix(['.', '。', '۔', '।']) {
+            return Ok((shortened.to_owned(), None));
+        }
     }
 
     static TRAILING_COMPARISON: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
@@ -649,7 +791,8 @@ fn check_line(
     Ok((
         template.to_owned(),
         Some(format!(
-            "the sentence reads {shown} characters with its numbers filled; keep it to {limit}"
+            "the sentence reads {shown} characters with its numbers filled; keep it to {}",
+            asked(limit)
         )),
     ))
 }
@@ -734,6 +877,8 @@ mod tests {
 
     struct Run {
         signals: Value,
+        series: Value,
+        live: bool,
         versus: BTreeSet<String>,
         counts: BTreeSet<String>,
         moving: Vec<f64>,
@@ -743,6 +888,8 @@ mod tests {
     fn run() -> Run {
         Run {
             signals: json!({"loss": {"label": "Loss"}, "val_loss": {"label": "Val loss", "better": "lower"}}),
+            series: json!({"loss": [[1, 2.6], [2, 2.31]], "val_loss": [[2, 2.41]]}),
+            live: true,
             versus: ["val_loss".to_owned()].into(),
             counts: BTreeSet::new(),
             moving: vec![2.3104, 2.412, 340.0],
@@ -754,6 +901,8 @@ mod tests {
         Bindable {
             key,
             signals: &run.signals,
+            series: &run.series,
+            live: run.live,
             versus: &run.versus,
             counts: &run.counts,
             moving: &run.moving,
@@ -843,25 +992,154 @@ mod tests {
     }
 
     #[test]
-    fn an_unavailable_parent_comparison_is_never_salvaged_as_a_flag() {
+    fn a_comparison_no_parent_can_fill_leaves_a_sentence_and_is_never_salvaged_as_a_flag() {
         let mut run = run();
         run.versus.clear();
-        for status in ["ok", "flag"] {
-            let reply = json!({"runs": {"r1": {"status": status,
-                "line": "Val loss **{val_loss}**, {val_loss.vs}."}}})
-            .to_string();
+        for (line, kept) in [
+            (
+                "Val loss **{val_loss}**, {val_loss.vs}.",
+                "Val loss **{val_loss}**.",
+            ),
+            (
+                "Val loss **{val_loss}** {val_loss.vs}.",
+                "Val loss **{val_loss}**.",
+            ),
+            (
+                "{val_loss.vs}, val loss **{val_loss}**.",
+                "val loss **{val_loss}**.",
+            ),
+        ] {
+            let reply = json!({"runs": {"r1": {"status": "ok", "line": line}}}).to_string();
             let result = read(&reply, &[bind("r1", &run, false)], None, &render);
-            assert!(!result.errors.is_empty());
-            assert!(result.runs.is_empty(), "{:?}", result.runs);
+            assert!(result.errors.is_empty(), "{line}: {:?}", result.errors);
+            assert!(
+                matches!(&result.runs["r1"], Answer::Line { template, .. } if template == kept),
+                "{line}: {:?}",
+                result.runs
+            );
+        }
+        for (status, line, expected) in [
+            (
+                "flag",
+                "Val loss **{val_loss}**, {val_loss.vs}.",
+                "Val loss **{val_loss}**.",
+            ),
+            ("ok", "Val loss **{val_loss.vs}**.", "Val loss."),
+            (
+                "ok",
+                "Val loss **{val_loss}**, {val_loss.vs} {val_loss.vs}.",
+                "Val loss **{val_loss}**.",
+            ),
+        ] {
+            let reply = json!({"runs": {"r1": {"status": status, "line": line}}}).to_string();
+            let result = read(&reply, &[bind("r1", &run, false)], None, &render);
+            assert!(result.errors.is_empty(), "{line}: {:?}", result.errors);
+            assert!(
+                matches!(&result.runs["r1"], Answer::Line { flag: false, template, .. } if template == expected),
+                "{line}: {:?}",
+                result.runs
+            );
             assert!(result.salvaged.is_empty());
         }
-        let result = read(
-            r#"{"runs":{"r1":{"status":"ok","line":"Val loss **{val_loss}**."}}}"#,
-            &[bind("r1", &run, false)],
-            None,
+        let bounds = SummaryBounds {
+            sentence: None,
+            setup: false,
+        };
+        let reply = json!({"runs": {"r1": {"status": "ok", "line": null}},
+            "summary": {"status": "ok", "line": "{r1} at **{r1:val_loss}**, {r1:val_loss.vs}."}})
+        .to_string();
+        let result = read(&reply, &[bind("r1", &run, false)], Some(&bounds), &render);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert!(
+            matches!(&result.summary, Some(Answer::Line { template, .. }) if template == "{r1} at **{r1:val_loss}**.")
+        );
+    }
+
+    #[test]
+    fn a_trend_needs_two_points_and_a_live_run() {
+        let mut run = run();
+        let said = |run: &Run, reply: Value| {
+            read(&reply.to_string(), &[bind("r1", run, true)], None, &render).errors
+        };
+        let line = |text: &str| json!({"runs": {"r1": {"status": "ok", "line": text}}});
+        assert!(said(&run, line("Loss **{loss}** and falling.")).is_empty());
+        let one = said(&run, line("Val loss **{val_loss}** and falling."));
+        assert!(one[0].contains("needs two readings"), "{one:?}");
+        assert!(said(&run, line("Val loss **{val_loss}**.")).is_empty());
+
+        run.live = false;
+        for reply in [
+            line("Loss **{loss}**, still falling."),
+            json!({"runs": {"r1": {"same": true}}}),
+        ] {
+            let ended = read(
+                &reply.to_string(),
+                &[Bindable {
+                    sentence: Some("Loss **{loss}** and falling."),
+                    ..bind("r1", &run, true)
+                }],
+                None,
+                &render,
+            )
+            .errors;
+            assert!(ended[0].contains("has ended"), "{reply}: {ended:?}");
+        }
+        assert!(said(&run, line("Loss ended at **{loss}**.")).is_empty());
+        for template in ["Loss is falling.", "Loss **{loss}** is falling."] {
+            let reply = json!({"runs": {"r1": {"status": "flag", "line": template}}});
+            let checked = read(&reply.to_string(), &[bind("r1", &run, true)], None, &render);
+            assert!(!checked.errors.is_empty(), "{:?}", checked.errors);
+            assert!(checked.runs.is_empty(), "{:?}", checked.errors);
+        }
+    }
+
+    #[test]
+    fn a_plain_sentence_drops_a_citation_it_never_needed() {
+        let run = run();
+        let reply = r#"{"runs": {"r1": {"status": "ok", "line": "Loss **{loss}**.", "evidence": [{"from": 9679, "to": 9714}]}}}"#;
+        let read = read(reply, &[bind("r1", &run, false)], None, &render);
+        assert!(read.errors.is_empty(), "{:?}", read.errors);
+        assert!(matches!(&read.runs["r1"], Answer::Line { evidence, .. } if evidence.is_empty()));
+    }
+
+    #[test]
+    fn a_sentence_is_asked_for_shorter_than_it_is_held_to() {
+        let run = run();
+        let render = |_: Option<&str>, _: &Token| String::new();
+        let line = |length: usize| {
+            let reply = json!({"runs": {"r1": {"status": "ok", "line": "x".repeat(length)}}});
+            read(
+                &reply.to_string(),
+                &[bind("r1", &run, false)],
+                None,
+                &render,
+            )
+            .errors
+        };
+        assert!(asked(MAX_GRAPHEMES) < MAX_GRAPHEMES);
+        assert!(line(MAX_GRAPHEMES).is_empty());
+        let over = line(MAX_GRAPHEMES + 1);
+        assert!(
+            over[0].ends_with(&format!("keep it to {}", asked(MAX_GRAPHEMES))),
+            "{over:?}"
+        );
+    }
+
+    #[test]
+    fn a_summary_one_character_over_can_drop_its_period() {
+        let text = "x".repeat(MAX_SUMMARY_GRAPHEMES);
+        let reply = json!({"summary": {"status": "ok", "line": format!("{text}.")}});
+        let checked = read(
+            &reply.to_string(),
+            &[],
+            Some(&SummaryBounds {
+                sentence: None,
+                setup: false,
+            }),
             &render,
         );
-        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert!(checked.errors.is_empty(), "{:?}", checked.errors);
+        assert!(matches!(checked.summary, Some(Answer::Line { template, .. }) if template == text));
     }
 
     #[test]
@@ -963,10 +1241,6 @@ mod tests {
             (
                 r#"{"runs": {"r1": {"status": "ok", "line": "Loss **{los}**."}}}"#,
                 "{los} is not a signal",
-            ),
-            (
-                r#"{"runs": {"r1": {"status": "ok", "line": "Loss **{loss.vs}**."}}}"#,
-                "has no comparison",
             ),
             (
                 r#"{"runs": {"r1": {"status": "ok", "line": "Loss **{loss}** <b>"}}}"#,

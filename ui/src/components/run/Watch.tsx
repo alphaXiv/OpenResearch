@@ -6,23 +6,14 @@ import { autoDir, fmtNumber, ltr } from "../../i18n";
 import { m } from "../../paraglide/messages.js";
 import { getLocale } from "../../paraglide/runtime.js";
 import { mutLookNow } from "../../queries/projects";
-import { flagLook, flagOutcome, flagRow, journalRows, listed, lookText } from "../../runMonitor/journal";
+import { flagLook, flagOutcome, flagRow, journalRows, listed, lookText, type JournalRow } from "../../runMonitor/journal";
 import { TONE_INK, type Tone } from "../../runMonitor/model";
-import type { BriefLabel, RunMonitor } from "../../runMonitor/types";
+import type { Flag, RunMonitor } from "../../runMonitor/types";
 import { capitalized, clockText } from "../../runMonitor/words";
 import { useWorkspace } from "../../workspace";
 import { Button, Tooltip } from "../ui";
 import { cn } from "../ui/cn";
 import { Sentence } from "./Sentence";
-
-const BRIEF: Record<BriefLabel, () => string> = {
-  question: m.run_brief_question,
-  healthy: m.run_brief_healthy,
-  noise: m.run_brief_noise,
-  worth_a_flag: m.run_brief_worth_a_flag,
-  from_parent: m.run_brief_from_parent,
-  decided: m.run_brief_decided,
-};
 
 /** A look's cost, which is often a fraction of a cent: never rounded to nothing. */
 const usd = (value: number) => new Intl.NumberFormat(getLocale(), {
@@ -32,15 +23,14 @@ const usd = (value: number) => new Intl.NumberFormat(getLocale(), {
 }).format(value);
 
 /**
- * The page's Watch section: what the watcher said of this run, one row per change, how many looks it took and what
- * they cost, and Look now. A run nobody watches says why, in place of the journal.
+ * The page's Watch section: one line per change in what the watcher said, each opening to its whole text and how
+ * it came about, then how many looks it took and what they cost, and Look now. A run nobody watches says why.
  */
-export function Watch({ monitor, runId, agent, tone, live, now }: { monitor: Pick<RunMonitor, "watch" | "view" | "brief" | "flags">; runId: string; agent: string | null; tone: Tone; live: boolean; now: number }) {
+export function Watch({ monitor, runId, agent, tone, live, now }: { monitor: Pick<RunMonitor, "watch" | "view" | "flags">; runId: string; agent: string | null; tone: Tone; live: boolean; now: number }) {
   const workspace = useWorkspace();
   const look = useMutate(mutLookNow);
   const [refused, setRefused] = useState<string | LookTooSoonError | null>(null);
   const { watch } = monitor;
-  const signals = monitor.view.signals;
   const looks = watch.looks.filter((look) => look.said !== "error" && look.said !== "interrupted");
   const flags = monitor.flags;
   // A flag a tripwire or a rule raised stands in the journal beside the looks, in time order.
@@ -71,45 +61,18 @@ export function Watch({ monitor, runId, agent, tone, live, now }: { monitor: Pic
         <p className="m-0 text-sm text-ink-subtext">{live ? m.run_watch_first_look() : m.run_watch_never_looked()}</p>
       )}
       {rows.length > 0 && (
-        <ol aria-label={m.run_watch_journal()} className="m-0 grid list-none grid-cols-[auto_1fr] gap-x-4 gap-y-2.5 p-0 text-sm">
-          {rows.map((row, index) => {
-            const failed = row.look.said === "error" || row.look.said === "interrupted";
-            const flag = row.look.said === "flag";
-            const raised = flags.find((candidate) => flagRow(candidate) === row.look.id);
-            const outcome = raised ? flagOutcome(raised, agent) : null;
-            return (
-              <li key={row.look.id} className="contents">
-                <span className="whitespace-nowrap pt-0.5 text-xs tabular-nums text-ink-subtext">{clockText(row.look.at)}</span>
-                <span className={cn("leading-snug", index === 0 && !failed || flag ? "text-text" : "text-ink-subtext")}>
-                  {flag && <TriangleAlert size={13} aria-hidden="true" className="me-1.5 inline-block align-[-2px] text-mark-amber" />}
-                  {flag && <span className="font-medium">{raised && !raised.lookId ? m.run_watch_flagged_orx() : m.run_watch_flagged()} </span>}
-                  {failed || (index > 0 && !flag)
-                    ? lookText(row.look, signals).replaceAll("**", "")
-                    : <Sentence text={lookText(row.look, signals)} tone={flag ? "flag" : tone} />}
-                  {outcome && (
-                    <span className="block text-xs text-ink-subtext">
-                      {outcome}{raised?.choice?.reason ? ` ${autoDir(raised.choice.reason)}` : ""}
-                    </span>
-                  )}
-                  {row.look.notedUnder && (
-                    <span className="block text-xs text-ink-subtext">{m.run_watch_noted({ clock: clockText(row.look.notedUnder) })}</span>
-                  )}
-                  {row.look.omitted && (
-                    <span className="block text-xs text-ink-subtext">{autoDir(row.look.omitted)}</span>
-                  )}
-                  {row.look.withheld.map((note) => (
-                    <span key={note} className={cn("block text-xs", TONE_INK.flag)}>{autoDir(note)}</span>
-                  ))}
-                  {row.since && (
-                    <span className="block text-xs text-ink-subtext">{capitalized(m.run_watch_same_since({ count: ltr(fmtNumber(row.count)), clock: clockText(row.since.at) }))}</span>
-                  )}
-                  {row.look.with.length > 0 && (
-                    <span className="block text-xs text-ink-subtext">{m.run_watch_with({ names: listed(row.look.with) })}</span>
-                  )}
-                </span>
-              </li>
-            );
-          })}
+        <ol aria-label={m.run_watch_journal()} className="m-0 grid list-none grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-0.5 p-0 text-sm">
+          {rows.map((row, index) => (
+            <Entry
+              key={row.since?.id ?? row.look.id}
+              row={row}
+              latest={index === 0}
+              raised={flags.find((candidate) => flagRow(candidate) === row.look.id) ?? null}
+              monitor={monitor}
+              agent={agent}
+              tone={tone}
+            />
+          ))}
         </ol>
       )}
       {(totals || watched) && (
@@ -138,22 +101,57 @@ export function Watch({ monitor, runId, agent, tone, live, now }: { monitor: Pic
           {refusal && <span role="status" className={TONE_INK.flag}>{refusal}</span>}
         </div>
       )}
-      {monitor.brief && monitor.brief.length > 0 && (
-        <details className="group mt-3.5 text-sm">
-          <summary className="inline-flex cursor-pointer list-none items-center gap-1 rounded-sm text-ink-subtext hover:text-text focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus [&::-webkit-details-marker]:hidden">
-            <ChevronRight size={14} aria-hidden="true" className="shrink-0 motion-safe:transition-transform rtl:rotate-180 group-open:rotate-90 rtl:group-open:rotate-90" />
-            {m.run_watch_told()}
-          </summary>
-          <dl className="m-0 mt-2.5 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5">
-            {monitor.brief.filter((line) => Object.hasOwn(BRIEF, line.label)).map((line) => (
-              <div key={line.label} className="contents">
-                <dt className="text-xs text-ink-subtext">{BRIEF[line.label]()}</dt>
-                <dd className="m-0 text-text">{autoDir(line.text)}</dd>
-              </div>
-            ))}
-          </dl>
-        </details>
-      )}
     </div>
+  );
+}
+
+/** One change in the journal: its time and words on one line, which open to the whole text and how it came about. */
+function Entry({ row, latest, raised, monitor, agent, tone }: {
+  row: JournalRow;
+  latest: boolean;
+  raised: Flag | null;
+  monitor: Pick<RunMonitor, "view">;
+  agent: string | null;
+  tone: Tone;
+}) {
+  const [open, setOpen] = useState(false);
+  const { look } = row;
+  const failed = look.said === "error" || look.said === "interrupted";
+  const flag = look.said === "flag";
+  const said = lookText(look, monitor.view.signals) || autoDir(look.withheld[0] ?? "");
+  const outcome = raised ? flagOutcome(raised, agent) : null;
+  const why = look.said === "interrupted" ? m.run_watch_interrupted() : failed && look.text ? autoDir(look.text) : null;
+  const detail = [
+    why,
+    outcome && `${outcome}${raised?.choice?.reason ? ` ${autoDir(raised.choice.reason)}` : ""}`,
+    look.notedUnder && m.run_watch_noted({ clock: clockText(look.notedUnder) }),
+    row.since && capitalized(m.run_watch_same_since({ count: ltr(fmtNumber(row.count)), clock: clockText(row.since.at) })),
+    look.with.length > 0 && m.run_watch_with({ names: listed(look.with) }),
+    look.omitted && autoDir(look.omitted),
+  ].filter((line): line is string => Boolean(line));
+
+  return (
+    <li className="col-span-2 grid grid-cols-subgrid">
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((was) => !was)}
+        className="relative col-span-2 -mx-1.5 grid min-h-6 grid-cols-subgrid rounded-sm px-1.5 py-1 text-start hover:bg-surface focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus"
+      >
+        <span className="whitespace-nowrap pt-0.5 text-xs tabular-nums text-ink-subtext">{clockText(look.at)}</span>
+        <span className={cn("min-w-0 pe-5 leading-snug", open ? "wrap-anywhere" : "truncate", latest && !failed || flag ? "text-text" : "text-ink-subtext")}>
+          {flag && <TriangleAlert size={13} role="img" aria-label={m.run_watch_flagged()} className="me-1.5 inline-block align-[-2px] text-mark-amber" />}
+          {look.withheld.length > 0 && <TriangleAlert size={13} role="img" aria-label={listed(look.withheld)} className="me-1.5 inline-block align-[-2px] text-mark-amber" />}
+          {failed || !latest && !flag ? said.replaceAll("**", "") : <Sentence text={said} tone={flag ? "flag" : tone} />}
+          <ChevronRight size={13} aria-hidden="true" className={cn("absolute end-1.5 top-1.5 text-ink-subtext rtl:rotate-180", open && "rotate-90 rtl:rotate-90")} />
+        </span>
+      </button>
+      {open && (detail.length > 0 || look.withheld.length > 0) && (
+        <div className="col-start-2 flex min-w-0 flex-col gap-0.5 pb-1.5 text-xs wrap-anywhere text-ink-subtext">
+          {look.withheld.map((note) => <span key={note} className={TONE_INK.flag}>{autoDir(note)}</span>)}
+          {detail.map((line) => <span key={line}>{line}</span>)}
+        </div>
+      )}
+    </li>
   );
 }

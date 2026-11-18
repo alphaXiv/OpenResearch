@@ -75,11 +75,30 @@ test("the latest run draws its sentence, stages, bar and captions, then every bl
   assert.deepEqual(blocks.map((block) => block.tagName), ["SECTION", "SECTION", "DL"], "blocks keep the agent's order on the page, whatever stage is running");
 });
 
+/** The page's one Details disclosure, at its foot. */
+const pageDetails = (container) => {
+  const details = [...container.querySelectorAll("details")].filter((element) => text(element.querySelector("summary")) === m.run_details());
+  assert.equal(details.length, 1, "one Details disclosure");
+  return details[0];
+};
+
+test("Details, folded at the foot of the page, holds how the view is built, what the watcher was told and the rules", async () => {
+  const brief = [{ label: "question", text: "Does the student keep 95% of GLUE?" }];
+  const rules = [{ name: "nan-loss", text: "Stop when the loss is NaN.", does: "stop" }];
+  const monitor = { ...pipeline(), brief, rules };
+  const { container } = await overview([run("r2", { monitor: summary(monitor) })], () => monitor);
+  const details = pageDetails(container);
+  assert.equal(details.open, false);
+  assert.equal(details.nextElementSibling, null, "nothing follows it");
+  assert.deepEqual([...details.querySelectorAll("h3")].map(text), [m.run_rules_heading(), m.run_watch_told(), m.run_view_how()]);
+  assert.ok(text(details).includes(`${m.run_brief_question()}Does the student keep 95% of GLUE?`), text(details));
+  assert.equal(container.querySelectorAll("details").length, 1, "nothing else on the page folds away");
+});
+
 test("how the view is built shows the view as the agent wrote it, where its signals come from and what an agent reads", async () => {
   const monitor = { ...pipeline(), viewFrom: { ...pipeline().viewFrom, experimentId: "e1" } };
   const { container } = await overview([run("r2", { monitor: summary(monitor) })], () => monitor);
-  const details = container.querySelector("details");
-  assert.equal(text(details.querySelector("summary")), m.run_view_how());
+  const details = pageDetails(container);
   assert.ok(text(details).includes("The view, stored on distil-glue-6l and inherited by its children"));
   assert.deepEqual([...details.querySelectorAll("pre")].map((pre) => pre.textContent), [monitor.viewFrom.markup, monitor.statusText]);
   assert.ok(details.textContent.includes(m.run_view_source_declared()));
@@ -88,13 +107,13 @@ test("how the view is built shows the view as the agent wrote it, where its sign
 test("a default view with no markup says where it comes from and shows no code; a source from a newer server goes unnamed", async () => {
   const monitor = { ...pipeline(), viewFrom: { experimentId: "e1", markup: "", isDefault: true }, source: "wandb" };
   const { container } = await overview([run("r2", { monitor: summary(monitor) })], () => monitor);
-  const details = container.querySelector("details");
+  const details = pageDetails(container);
   assert.ok(text(details).includes(m.run_view_default()));
   assert.deepEqual([...details.querySelectorAll("pre")].map((pre) => pre.textContent), [monitor.statusText]);
   assert.ok(!text(details).includes(m.run_view_source_none()));
 });
 
-test("the rules a run was launched with are listed as checked with no model, the one that stopped it marked", async () => {
+test("the rules a run was launched with are listed under Details, the one that stopped it marked", async () => {
   const rules = [
     { name: "nan-loss", text: "Stop when the loss is NaN.", does: "stop" },
     { name: "plateau", text: "Ask when val loss stops improving.", does: "ask" },
@@ -106,8 +125,7 @@ test("the rules a run was launched with are listed as checked with no model, the
   const { container } = await overview([stopped], () => monitor);
   const budget = rules[2].text;
   assert.ok(text(container).includes(`${budget} ${m.run_rule_detail({ text: "", name: "budget" }).trim()}`), text(container));
-  const details = [...container.querySelectorAll("details")].find((element) => text(element.querySelector("summary")) === m.run_rules_summary_other({ count: "3" }));
-  assert.ok(details, "the rules are a disclosure of their own");
+  const details = pageDetails(container);
   assert.ok(text(details).includes(m.run_rules_when_active()));
   assert.deepEqual([...details.querySelectorAll("li")].map(text), [
     `nan-loss Stop when the loss is NaN. · ${m.run_rule_stops()}`,
@@ -116,7 +134,7 @@ test("the rules a run was launched with are listed as checked with no model, the
   ]);
 
   const { container: none } = await overview([run("r2", { monitor: summary(pipeline()) })], () => pipeline());
-  assert.ok(![...none.querySelectorAll("summary")].some((summary) => text(summary).includes(m.run_rules_summary_other({ count: "0" }))));
+  assert.ok(![...pageDetails(none).querySelectorAll("h3")].some((heading) => text(heading) === m.run_rules_heading()));
 });
 
 test("a starting run draws none of its view's blocks", async () => {

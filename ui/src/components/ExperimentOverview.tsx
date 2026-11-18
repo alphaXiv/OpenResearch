@@ -27,6 +27,7 @@ import { BackendBadge } from "./BackendLogos";
 import { BranchPill } from "./BranchPill";
 import { Md } from "./Md";
 import { RunContactNotice } from "./RunContactNotice";
+import { RunDetails } from "./run/Details";
 import { RunPage, WatchSection } from "./run/RunPage";
 import { historySentence } from "../runMonitor/model";
 import { StatusBadge } from "./StatusBadge";
@@ -272,6 +273,7 @@ export function ExperimentOverview({
           )}
         </section>
 
+        {run?.monitor && <RunDetails key={`details:${run.id}`} run={run} className="mt-5.5 border-t border-t-border-variant pt-4.5" />}
       </div>
     </div>
   );
