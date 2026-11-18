@@ -16,7 +16,7 @@ jobs:
         with:
           persist-credentials: false
           path: product
-          ref: de498231317e83e2850d8f1ddfa1bb8f336393a6
+          ref: 708872db4618b403258ef2d706e3a025cc7ac2fe
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           artifact-ids: 14383180091
@@ -43,7 +43,7 @@ jobs:
           $before=(Get-ChildItem $dir -Recurse -Filter 'orx.exe' | Select-Object -First 1).FullName
           $after=(Resolve-Path 'product/target/debug/orx.exe').Path
           $proof=Join-Path $env:RUNNER_TEMP 'proof'
-          node evidence/scripts/proof-managed-install.mjs $before $after $proof de498231317e83e2850d8f1ddfa1bb8f336393a6
+          node evidence/scripts/proof-managed-install.mjs $before $after $proof 708872db4618b403258ef2d706e3a025cc7ac2fe
           if ($LASTEXITCODE -ne 0) {exit $LASTEXITCODE}
           $edge="${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
           $uri=[Uri]::new((Join-Path $proof 'capture.html')).AbsoluteUri
