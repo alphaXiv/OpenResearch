@@ -53,7 +53,8 @@ export function RunStatus({ model, label, descriptionId, onOpenRunPage, expanded
     ? availability.reason ?? (!model.live && availability.state === "stale" ? null : m.run_view_stale())
     : null;
   const count = data && progress?.done != null ? autoDir(plainSentence(capitalized(progressWords(data.phases[progress.phase], progress.done)))) : "";
-  const time = [model.eta, model.etaDetail].filter(Boolean).join(" · ") || (!model.live ? model.sentence.text : "");
+  const time = [model.eta, model.etaDetail].filter(Boolean).join(" · ")
+    || (!model.live ? [model.lead, model.sentence.text].filter(Boolean).join(" · ") : "");
   const untimed = [...(data?.estimate?.untimed ?? model.run.monitor?.estimate?.untimed ?? [])].sort((a, b) => b.length - a.length);
   const footer = autoDir(model.settingUp || !model.live ? time : m.run_whole_time({ time: autoDir(time) }));
   const footerNames = untimed.length ? new RegExp(`(${untimed.map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`, "g") : null;
@@ -133,7 +134,7 @@ export function RunStatus({ model, label, descriptionId, onOpenRunPage, expanded
                 </div>}
               </>}
               {model.sentence.watcher && <p className="m-0 mt-2.5 break-words text-sm"><Sentence text={autoDir(model.sentence.watcher)} tone={model.tone} /></p>}
-              {time && <p className="m-0 mt-2.5 border-t border-border-variant pt-2.5 text-xs text-ink-subtext">{footerNames ? footer.split(footerNames).map((part, index) => untimed.includes(part) ? <span key={index} className="whitespace-nowrap">{part}</span> : part) : footer}</p>}
+              {time && <p className="m-0 mt-2.5 border-t border-border-variant pt-2.5 text-xs text-ink-subtext">{footerNames ? footer.split(footerNames).map((part, index) => untimed.includes(part) ? <span key={index} className="whitespace-nowrap">{part}</span> : part) : <Sentence text={footer} tone={model.tone} />}</p>}
             </Popover.Popup>
           </Popover.Positioner>
         </Popover.Portal>

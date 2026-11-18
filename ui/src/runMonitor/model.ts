@@ -234,11 +234,13 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   const pageOnly = runNotice(run);
   const notice = pageOnly && !PAGE_ONLY.has(pageOnly.kind) ? pageOnly : null;
   const tone = runTone(run, monitor);
+  const lostStatus = tone === "lost" ? statusLabel(display.status, display.stopping) : null;
 
   const outcome = run.outcome ?? null;
   const lead = tone === "revising" ? m.status_revising()
     : tone === "failed" ? m.status_failed()
     : tone === "stopped" ? (outcome && outcome.by !== "user" ? m.status_auto_stopped() : m.run_lead_stopped())
+    : !live && notice?.kind !== "abandoned" ? lostStatus
     : null;
 
   const signals: Signals = monitor?.view.signals ?? summary?.signals ?? {};
@@ -269,8 +271,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     && estimate?.midMs === 0 && !estimate.floor
     && stageDone !== null && stagePhase?.of != null && stageDone >= stagePhase.of
     && (order?.count == null || order.index === order.count - 1);
-  const status = tone === "lost" ? statusLabel(display.status, display.stopping)
-    : lead ?? (tone === "flag" ? m.status_flagged() : tone === "done" ? m.status_done() : tone === "starting" ? m.status_starting() : finishing ? m.run_stage_finishing() : m.status_running());
+  const status = lostStatus ?? lead ?? (tone === "flag" ? m.status_flagged() : tone === "done" ? m.status_done() : tone === "starting" ? m.status_starting() : finishing ? m.run_stage_finishing() : m.status_running());
 
   const stated = statedFlag(run, fetched);
   // A flag's words and evidence never change, so a lagging monitor still supplies them for the same flag.

@@ -861,6 +861,20 @@ test("a terminal lead keeps a visible separator before its sentence", async () =
   assert.ok(line.textContent.includes(`${m.run_lead_stopped()}\u00a0`), line.textContent);
 });
 
+test("a lost run names its outcome and draws the last count in its card", async () => {
+  backend({ monitors: { r1: { ...running, sentence: null } } });
+  const { container } = await banner([run("r1", { status: "lost", endedAt: now })]);
+  await settle();
+  const line = container.querySelector('button[aria-haspopup="dialog"]');
+  assert.ok(plain(line.textContent).startsWith(m.status_lost()), line.textContent);
+  assert.ok(plain(line.getAttribute("aria-label")).includes(m.status_lost()));
+  await click(line);
+  const card = document.querySelector('[role="dialog"]');
+  assert.ok(plain(card.textContent).includes(m.status_lost()), card.textContent);
+  assert.ok(!card.textContent.includes("**"), card.textContent);
+  assert.deepEqual([...card.querySelectorAll("strong")].map((figure) => plain(figure.textContent)), ["1,240", "5,000"]);
+});
+
 test("cancellation is said once while a failed stop retains its explanation", async () => {
   backend();
   const view = await banner([run("r1", { cancelling: true })]);
