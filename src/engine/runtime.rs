@@ -3017,7 +3017,7 @@ mod tests {
             std::fs::read(dir.join("run-logs/run.log")).unwrap(),
             b"finished\n"
         );
-        if fail_notify {
+        let runtime = if fail_notify {
             assert!(runtime.collect_finished("run").await.is_err());
             assert!(store.log_collection_pending("run").unwrap());
             drop(runtime);
@@ -3026,7 +3026,10 @@ mod tests {
             std::fs::remove_dir(local.join("notify")).unwrap();
             std::fs::write(local.join("notify"), "final evaluation\n").unwrap();
             runtime.collect_finished("run").await.unwrap();
-        }
+            runtime
+        } else {
+            runtime
+        };
         assert!(!store.log_collection_pending("run").unwrap());
         let notices = store.run_notice_batch("chat").unwrap();
         assert!(notices
@@ -3034,6 +3037,7 @@ mod tests {
             .any(|notice| notice.kind == crate::store::NOTIFY
                 && notice.body.ends_with("final evaluation\n")));
         drop(store);
+        drop(runtime);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
