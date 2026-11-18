@@ -8321,6 +8321,8 @@ export function ChatPanel({
   };
   // The rows past this index are Done's; folding it away only needs to keep up with the rows above it.
   let inboxEnd = 0;
+  // Whether further pages of open chats could land on screen at all; a folded section keeps its chats off the rail.
+  let inboxPagesShown = true;
   const flatListed = flatSessions.data?.pages.flatMap((page) => page.sessions) ?? EMPTY_SESSIONS;
   if (sidebarGrouping === "list") {
     listedChats(flatListed, null).forEach(({ project, session }) => sidebarRows.push({ kind: "chat", project, session }));
@@ -8332,6 +8334,9 @@ export function ChatPanel({
     // Newest first by creation, so streaming updates don't reshuffle what's running.
     working.sort((a, b) => b.session.createdAt - a.session.createdAt);
     const other = open.filter((chat) => !working.includes(chat));
+    // The loaded pages only reach as far as the rail has scrolled, so Other counts what the server holds when it says.
+    const openTotal = flatSessions.data?.pages[0]?.total;
+    const otherCount = openTotal === undefined ? other.length : Math.max(other.length, openTotal - working.length);
 
     // Working sits on top: a chat at work is what the inbox is for. A section with nothing in it stays out of the way.
     const workingCollapsed = collapsedInbox.includes("working");
@@ -8340,10 +8345,12 @@ export function ChatPanel({
       if (!workingCollapsed) working.forEach(({ project, session }) => sidebarRows.push({ kind: "inbox", project, session }));
     }
     const otherCollapsed = collapsedInbox.includes("other");
-    if (other.length) {
-      sidebarRows.push({ kind: "section", section: "other", collapsed: otherCollapsed, count: other.length });
+    if (otherCount > 0) {
+      sidebarRows.push({ kind: "section", section: "other", collapsed: otherCollapsed, count: otherCount });
       if (!otherCollapsed) other.forEach(({ project, session }) => sidebarRows.push({ kind: "inbox", project, session }));
     }
+    // Paging to fill the rail only helps while a section that takes the next chats is open; a folded one never grows.
+    inboxPagesShown = !otherCollapsed || (!workingCollapsed && otherCount === 0);
     pushListStatus(flatSessions, !open.length);
     inboxEnd = sidebarRows.length;
 
@@ -8555,9 +8562,9 @@ export function ChatPanel({
     const page = (query: typeof flatSessions, end: number) => {
       if (lastVisibleIndex >= end - 6 && query.hasNextPage && !query.isFetching && !query.isError) void query.fetchNextPage();
     };
-    page(flatSessions, listEnd);
+    if (inboxPagesShown) page(flatSessions, listEnd);
     if (sidebarGrouping === "inbox" && doneExpanded) page(doneSessions, sidebarRows.length);
-  }, [sidebarGrouping, railOpen, embedded, lastVisibleIndex, listEnd, flatSessions, doneExpanded, doneSessions, sidebarRows.length]);
+  }, [sidebarGrouping, railOpen, embedded, lastVisibleIndex, listEnd, inboxPagesShown, flatSessions, doneExpanded, doneSessions, sidebarRows.length]);
   const sidebarActions = useRef<SidebarActions>(null!);
   sidebarActions.current = {
     toggleProjectCollapsed: (project) => {
