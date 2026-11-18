@@ -1871,12 +1871,16 @@ export interface TurnOptions {
   reasoningLevel?: string | null;
 }
 
-/** A message the user sent while a turn was running, parked to run next. */
+/**
+ * A message the user sent while a turn was running, parked to run next, or
+ * (`steering`) handed to that turn and not yet read by its agent.
+ */
 export interface QueuedMessage {
   id: string;
   text: string;
+  orx?: OrxSource | null;
   planMode?: boolean;
-  dispatchState?: "queued" | "retrying" | "blocked";
+  dispatchState?: "queued" | "retrying" | "blocked" | "steering";
   nextRetryAt?: number | null;
   error?: string | null;
 }

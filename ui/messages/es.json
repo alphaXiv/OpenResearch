@@ -1050,6 +1050,7 @@
   "chat_pasted_image": "Imagen pegada",
   "chat_type_custom_answer": "Escribe una respuesta personalizada…",
   "chat_steer_placeholder": "Guía a {harness}… ({shortcut} para poner en cola)",
+  "chat_steering": "Guiando…",
   "chat_message_harness": "Escribe a {harness}… (/ para comandos y skills, ! para la shell)",
   "chat_harness_unavailable": "{harness} no está disponible — abre el selector de modelos",
   "chat_ask_agent_placeholder": "Pregunta al agente de investigación… (/ para comandos y skills, ! para la shell)",

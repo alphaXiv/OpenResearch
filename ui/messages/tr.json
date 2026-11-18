@@ -1076,6 +1076,7 @@
   "chat_pasted_image": "Yapıştırılan görsel",
   "chat_type_custom_answer": "Özel bir yanıt yazın…",
   "chat_steer_placeholder": "{harness} yönlendir… (sıraya almak için {shortcut})",
+  "chat_steering": "Yönlendiriliyor…",
   "chat_message_harness": "{harness} ajanına mesaj gönder… (komutlar ve skill'ler için /, kabuk için !)",
   "chat_harness_unavailable": "{harness} kullanılamıyor — model seçiciyi açın",
   "chat_ask_agent_placeholder": "Araştırma ajanına sor… (komutlar ve skill'ler için /, kabuk için !)",
