@@ -3969,21 +3969,37 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    pub fn clear_chat_project_move(&self, session_id: &str) -> Result<()> {
-        self.conn.execute(
-            "DELETE FROM chat_project_moves WHERE session_id = ?1",
-            params![session_id],
-        )?;
-        Ok(())
+    /// Removes the waiting move, returning it: whoever takes it owns it.
+    pub fn take_chat_project_move(&self, session_id: &str) -> Result<Option<(String, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("DELETE FROM chat_project_moves WHERE session_id = ?1 RETURNING name, path")?;
+        // Stepped to the end, so the delete has committed before the row is returned.
+        let rows = stmt
+            .query_map(params![session_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows.into_iter().next())
     }
 
-    /// Moves chats, with their transcripts, into another project.
-    pub fn move_chat_sessions(&self, session_ids: &[String], project_id: &str) -> Result<()> {
+    /// Creates `p` and moves chats, with their transcripts, into it at once.
+    pub fn create_local_project_for_chats(
+        &self,
+        p: &LocalProject,
+        session_ids: &[String],
+    ) -> Result<()> {
         let tx = self.begin_immediate()?;
+        tx.execute(
+            &format!("INSERT INTO local_projects ({PROJECT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"),
+            params![
+                p.id, p.name, p.slug, p.github_owner, p.github_repo,
+                p.github_sync_enabled, p.baseline_branch, p.repo_path, p.run_command, p.paper_id,
+                p.created_at, p.updated_at,
+            ],
+        )?;
         for id in session_ids {
             tx.execute(
                 "UPDATE chat_sessions SET project_id = ?2 WHERE id = ?1",
-                params![id, project_id],
+                params![id, p.id],
             )?;
         }
         tx.commit()?;

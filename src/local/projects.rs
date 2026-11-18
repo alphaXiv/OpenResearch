@@ -380,6 +380,13 @@ pub fn split_chat_project(
     let (name, target) = new_project_place(name, path)?;
     let worktree = git::existing_session_worktree_path(project, owner);
     let has_worktree = worktree.join(".git").exists();
+    // The new repository can't hold staged changes the chat never committed.
+    if has_worktree && !git::git(Some(&worktree), &["diff", "--cached", "--name-only"])?.is_empty()
+    {
+        return Err(crate::error::anyhow!(
+            "This chat has staged changes that aren't committed. Commit or unstage them, then try again."
+        ));
+    }
     let source = if has_worktree {
         worktree.clone()
     } else {
@@ -431,27 +438,52 @@ pub fn split_chat_project(
         created_at: now,
         updated_at: now,
     };
-    store.create_local_project(&created)?;
-    if has_worktree {
-        relink_worktree(project, &worktree, &created, owner)?;
+    let moved = git::session_worktree_path(&created.id, owner);
+    let relinked = if has_worktree {
+        relink_worktree(&worktree, &moved, Path::new(&created.repo_path))
+    } else {
+        Ok(None)
+    };
+    let done = relinked.and_then(|undo| {
+        store
+            .create_local_project_for_chats(&created, sessions)
+            .inspect_err(|_| {
+                if let Some(undo) = undo {
+                    undo();
+                }
+            })
+    });
+    if let Err(error) = done {
+        let _ = std::fs::remove_dir_all(&target);
+        return Err(crate::error::anyhow!(
+            "Could not move the chat to {}: {error}",
+            target.display()
+        ));
     }
-    store.move_chat_sessions(sessions, &created.id)?;
+
+    if has_worktree {
+        relocate_opencode_sessions(&worktree, &moved);
+        // The old registration only points at a folder that has moved.
+        if let Err(error) = git::git(
+            Some(Path::new(&project.repo_path)),
+            &["worktree", "remove", "--force", &worktree.to_string_lossy()],
+        ) {
+            eprintln!(
+                "orx: left a stale worktree entry in {}: {error}",
+                project.repo_path
+            );
+        }
+    }
     Ok(created)
 }
 
-/// Moves a chat's worktree, files untouched, to the same commit in `to`'s
-/// repository: `to` registers a worktree, which takes over the chat's files.
-fn relink_worktree(
-    from: &LocalProject,
-    worktree: &Path,
-    to: &LocalProject,
-    owner: &str,
-) -> Result<()> {
-    let moved = git::session_worktree_path(&to.id, owner);
+/// Moves a chat's worktree, files untouched, to `moved` at the same commit in
+/// `repo`, which registers it. Returns how to put it back.
+fn relink_worktree(worktree: &Path, moved: &Path, repo: &Path) -> Result<Option<impl FnOnce()>> {
     let head = git::git(Some(worktree), &["rev-parse", "HEAD"])?;
-    crate::paths::create_dir_all(moved.parent().unwrap_or(&moved))?;
+    crate::paths::create_dir_all(moved.parent().unwrap_or(moved))?;
     git::git(
-        Some(Path::new(&to.repo_path)),
+        Some(repo),
         &[
             "worktree",
             "add",
@@ -461,25 +493,62 @@ fn relink_worktree(
             &head,
         ],
     )?;
-    let link = std::fs::read(moved.join(".git"))?;
+    let new_link = std::fs::read(moved.join(".git"))?;
+    let old_link = std::fs::read(worktree.join(".git"))?;
     std::fs::remove_file(moved.join(".git"))?;
-    std::fs::remove_dir(&moved)?;
-    std::fs::rename(worktree, &moved)?;
-    std::fs::write(moved.join(".git"), link)?;
+    std::fs::remove_dir(moved)?;
+    std::fs::rename(worktree, moved)?;
+    let undo = {
+        let (worktree, moved) = (worktree.to_path_buf(), moved.to_path_buf());
+        move || {
+            let restored = std::fs::rename(&moved, &worktree)
+                .and_then(|()| std::fs::write(worktree.join(".git"), &old_link));
+            if let Err(error) = restored {
+                eprintln!(
+                    "orx: could not put the chat's files back at {}; they are at {}: {error}",
+                    worktree.display(),
+                    moved.display()
+                );
+            }
+        }
+    };
     // The new registration starts with an empty index; this matches it to HEAD
     // and leaves every file as the chat had it.
-    git::git(Some(&moved), &["reset", "--quiet"])?;
-    // The old registration only points at a folder that has moved.
-    if let Err(error) = git::git(
-        Some(Path::new(&from.repo_path)),
-        &["worktree", "remove", "--force", &worktree.to_string_lossy()],
-    ) {
-        eprintln!(
-            "orx: left a stale worktree entry in {}: {error}",
-            from.repo_path
-        );
+    let linked = std::fs::write(moved.join(".git"), new_link)
+        .map_err(crate::error::Error::from)
+        .and_then(|()| git::git(Some(moved), &["reset", "--quiet"]).map(drop));
+    match linked {
+        Ok(()) => Ok(Some(undo)),
+        Err(error) => {
+            undo();
+            Err(error)
+        }
     }
-    Ok(())
+}
+
+/// OpenCode remembers each session's folder, in orx's database or, for older
+/// chats, the user's own; point both at the moved worktree. A chat whose
+/// session can't be found again starts a new one from orx's transcript.
+fn relocate_opencode_sessions(from: &Path, to: &Path) {
+    use super::native_store::{opencode_db, opencode_relocation, NativeStore};
+    for database in [
+        opencode_db(NativeStore::Isolated),
+        opencode_db(NativeStore::Legacy),
+    ] {
+        let relocated = opencode_relocation(&database, |path| {
+            path.strip_prefix(from)
+                .map(|rest| to.join(rest))
+                .unwrap_or_else(|_| path.to_path_buf())
+        })
+        .and_then(|changes| changes.map_or(Ok(()), |changes| changes.apply()));
+        if let Err(error) = relocated {
+            eprintln!(
+                "orx: {} still names {} for this chat: {error}",
+                database.display(),
+                from.display()
+            );
+        }
+    }
 }
 
 fn move_repository(from: &Path, to: &Path) -> Result<()> {
@@ -1643,6 +1712,20 @@ mod tests {
             ],
         );
         std::fs::write(worktree.join("README.md"), "# edited\n").unwrap();
+
+        // Staged changes would be lost to the new repository, so they block the move.
+        run_git(&worktree, &["add", "README.md"]);
+        let staged = split_chat_project(
+            &store,
+            &project,
+            &session,
+            std::slice::from_ref(&session),
+            "Probe",
+            root.join("staged").to_str().unwrap(),
+        );
+        assert!(staged.err().unwrap().to_string().contains("staged changes"));
+        assert!(!root.join("staged").exists());
+        run_git(&worktree, &["reset", "--quiet"]);
 
         let target = root.join("split");
         let created = split_chat_project(

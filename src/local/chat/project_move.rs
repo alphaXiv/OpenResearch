@@ -16,6 +16,10 @@ use crate::local::model::LocalProject;
 use crate::local::projects;
 use crate::store::Store;
 
+const CANCELLED: &str = "The move was cancelled.";
+/// A chat started a turn before the move could begin.
+const BUSY: &str = "A chat is busy.";
+
 /// The chats whose files move with `session_id`: every chat of a scratch
 /// project, else the chat and the side chats in its worktree.
 fn scope(store: &Store, session_id: &str) -> Result<(LocalProject, String, Vec<String>)> {
@@ -52,13 +56,24 @@ impl ChatHost {
             self.emit_sessions(&sessions).await;
             return Ok(None);
         }
-        Ok(Some(self.make_project(session_id, &name, path).await?))
+        let place = Some((name.clone(), path.to_string()));
+        match self.make_project(session_id, place).await {
+            // A turn started first: wait for it like any request made mid-turn.
+            Err(error) if error.to_string() == BUSY => {
+                Store::open()?.set_chat_project_move(session_id, &name, path)?;
+                self.project_moves_waiting.store(true, Ordering::SeqCst);
+                self.emit_sessions(&sessions).await;
+                Ok(None)
+            }
+            moved => moved.map(Some),
+        }
     }
 
-    pub async fn cancel_project_move(&self, session_id: &str) -> Result<()> {
-        Store::open()?.clear_chat_project_move(session_id)?;
+    /// Whether there was a waiting move to cancel; `false` once it has started.
+    pub async fn cancel_project_move(&self, session_id: &str) -> Result<bool> {
+        let cancelled = Store::open()?.take_chat_project_move(session_id)?.is_some();
         self.emit_sessions(&[session_id.to_string()]).await;
-        Ok(())
+        Ok(cancelled)
     }
 
     /// Carries out every waiting move whose chats are idle now: as a turn ends,
@@ -81,11 +96,8 @@ impl ChatHost {
                 self.project_moves_waiting.store(true, Ordering::SeqCst);
                 return;
             };
-            let Ok(Some((name, path))) = store.chat_project_move(&session_id) else {
-                continue;
-            };
             let Ok((_, _, sessions)) = scope(&store, &session_id) else {
-                let _ = store.clear_chat_project_move(&session_id);
+                let _ = store.take_chat_project_move(&session_id);
                 continue;
             };
             drop(store);
@@ -93,14 +105,19 @@ impl ChatHost {
                 self.project_moves_waiting.store(true, Ordering::SeqCst);
                 continue;
             }
-            let _ = Store::open().and_then(|store| store.clear_chat_project_move(&session_id));
-            let note = match self.make_project(&session_id, &name, &path).await {
+            let note = match self.make_project(&session_id, None).await {
                 Ok(project) => format!(
                     "The user made this chat the project \"{}\", at {}, and this chat now belongs to it. Your worktree keeps every file, uncommitted ones included; the project folder holds what you have committed. Continue from where you left off.",
                     project.name, project.repo_path
                 ),
+                Err(error) if error.to_string() == CANCELLED => continue,
+                // A turn that started first keeps it waiting.
+                Err(error) if error.to_string() == BUSY => {
+                    self.project_moves_waiting.store(true, Ordering::SeqCst);
+                    continue;
+                }
                 Err(error) => format!(
-                    "Making this chat the project \"{name}\" at {path} failed: {error}. The chat stays where it was; tell the user."
+                    "Making this chat a project of its own failed: {error}. The chat stays where it was; tell the user."
                 ),
             };
             let shown = OrxDisplay {
@@ -142,22 +159,49 @@ impl ChatHost {
     async fn make_project(
         self: &Arc<Self>,
         session_id: &str,
-        name: &str,
-        path: &str,
+        // `None` takes the waiting move for the chat, if it's still there.
+        place: Option<(String, String)>,
     ) -> Result<LocalProject> {
-        let (project, owner, sessions) = scope(&Store::open()?, session_id)?;
-        let created = self
-            .while_idle(&sessions, || {
+        let (_, _, checked) = scope(&Store::open()?, session_id)?;
+        let mut ran = false;
+        let moved = self
+            .while_idle(&checked, || {
+                ran = true;
                 let store = Store::open()?;
-                if project.is_scratch() {
+                // Read again under the guard: another move may have just changed it.
+                // Taken while no turn can start, so neither a turn nor a cancel can race it.
+                // A request made now replaces one that was waiting.
+                let waiting = store.take_chat_project_move(session_id)?;
+                let (name, path) = match place.or(waiting) {
+                    Some(place) => place,
+                    None => return Err(anyhow!(CANCELLED)),
+                };
+                let (project, owner, sessions) = scope(&store, session_id)?;
+                let unchanged = sessions.len() == checked.len()
+                    && sessions.iter().all(|id| checked.contains(id));
+                if !unchanged {
+                    return Err(anyhow!("This chat just moved; try again."));
+                }
+                let created = if project.is_scratch() {
                     let worktree =
                         crate::local::git::existing_session_worktree_path(&project, &owner);
-                    projects::promote_scratch_project(&store, &project, Some(&worktree), name, path)
+                    projects::promote_scratch_project(
+                        &store,
+                        &project,
+                        Some(&worktree),
+                        &name,
+                        &path,
+                    )
                 } else {
-                    projects::split_chat_project(&store, &project, &owner, &sessions, name, path)
-                }
+                    projects::split_chat_project(&store, &project, &owner, &sessions, &name, &path)
+                }?;
+                Ok((created, sessions))
             })
-            .await?;
+            .await;
+        let (created, sessions) = match moved {
+            Err(_) if !ran => return Err(anyhow!(BUSY)),
+            moved => moved?,
+        };
         // Resident agents restart on their next turn in the new project.
         for id in &sessions {
             self.opencode.kill_session(id).await;

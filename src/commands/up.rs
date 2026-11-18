@@ -2089,7 +2089,11 @@ async fn cancel_chat_project_move(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult {
-    state.chat.cancel_project_move(&id).await?;
+    if !state.chat.cancel_project_move(&id).await? {
+        return Err(bad_request(
+            "No move is waiting for this chat; it may have already started.",
+        ));
+    }
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -2928,6 +2932,9 @@ async fn update_project(
 struct DeleteProjectQuery {
     #[serde(default)]
     delete_artifacts: bool,
+    /// Only a scratch project left with no chats, checked under the deletion lease.
+    #[serde(skip)]
+    only_unused_scratch: bool,
 }
 
 /// Delete a project and everything hanging off it. Refuses while runs are in
@@ -2956,6 +2963,11 @@ async fn delete_project_inner(state: AppState, id: String, query: DeleteProjectQ
     let project = store
         .get_local_project(&id)?
         .ok_or_else(|| not_found("project"))?;
+    if query.only_unused_scratch
+        && (!project.is_scratch() || !store.list_chat_sessions_by_project(&id)?.is_empty())
+    {
+        return Ok(Json(json!({ "ok": false })));
+    }
     let in_flight: Vec<_> = store
         .list_runs_by_project(&id)?
         .into_iter()
@@ -9999,17 +10011,13 @@ async fn delete_chat_session(State(state): State<AppState>, Path(id): Path<Strin
         let Some(project) = scratch else {
             return Ok(());
         };
-        if !Store::open()?
-            .list_chat_sessions_by_project(&project.id)?
-            .is_empty()
-        {
-            return Ok(());
-        }
         // The chat is gone either way; a scratch project left behind is reused by the next one.
         let query = DeleteProjectQuery {
             delete_artifacts: true,
+            only_unused_scratch: true,
         };
         match delete_project_inner(state, project.id.clone(), query).await {
+            Ok(Json(deleted)) if deleted["ok"] == false => {}
             Ok(Json(deleted)) => {
                 if let Some(error) = deleted["artifactsError"].as_str() {
                     eprintln!("orx up: {error}");
