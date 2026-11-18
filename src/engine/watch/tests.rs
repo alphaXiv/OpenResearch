@@ -317,21 +317,34 @@ fn a_flag_falls_to_the_user_when_the_agent_it_woke_settles_nothing() {
     );
 }
 
-/// The watcher's flags in one wake say once that it saw only a digest.
+/// Flags from separate looks can queue behind the same busy chat and wake it together.
 #[test]
-fn a_wake_with_several_flags_of_a_look_says_what_they_share_once() {
-    let body = |run: &str| {
-        format!("[orx] Run {run} was flagged for review.\nWatcher sentence at 10:00 UTC: …\n{}\nRead: orx logs {run}", super::super::flags::UNTRUSTED)
-    };
-    let text = super::super::flags::batch_text([body("a"), body("b")].iter().map(String::as_str));
+fn a_wake_with_flags_from_separate_looks_says_what_they_share_once() {
+    use super::super::flags;
+
+    let dir = crate::local::git::TemporaryDirectory::new("orx-flag-batch").unwrap();
+    let store = Store::open_at(dir.path().to_path_buf()).unwrap();
+    chat(&store, "chat", "claude-code");
+    for (id, look) in [("a", 1), ("b", 2)] {
+        let row = run(&store, id, id, "chat", LOG);
+        let body = json!({"id": format!("f-{id}"), "source": "look", "lookId": look.to_string(), "at": look,
+            "template": format!("Warning on {id}."), "evidence": null});
+        let flag = flags::new_flag(&store, &row, body, true).unwrap();
+        assert_eq!(
+            store.raise_flags(&[flag], look).unwrap(),
+            [crate::store::Raise::Raised]
+        );
+    }
+    let notices = store.run_notice_batch("chat").unwrap();
+    assert_eq!(notices.len(), 2);
+    let text = flags::batch_text(notices.iter().map(|notice| notice.body.as_str()));
     assert_eq!(text.matches("saw only a digest").count(), 1, "{text}");
-    assert!(
-        text.starts_with("[orx] The watcher flagged these runs in one look."),
-        "{text}"
+    assert!(!text.contains("in one look"), "{text}");
+    assert!(text.contains("Warning on a.") && text.contains("Warning on b."));
+    assert_eq!(
+        flags::batch_text([notices[0].body.as_str()].into_iter()),
+        notices[0].body
     );
-    assert!(text.contains("Run a was") && text.contains("Run b was"));
-    let one = super::super::flags::batch_text([body("a")].iter().map(String::as_str));
-    assert_eq!(one, body("a"));
 }
 
 /// Tripwires watch a run no model watches: a new kind of error is flagged once, with its line.
