@@ -44,14 +44,15 @@ import {
 import type { NativeOption } from "../acp";
 import { HarnessLogo, LABS, ModelGlyph, ModelMark } from "./HarnessLogo";
 
-import { IconButton, MENU_LABEL, MENU_POPUP, MENU_SEPARATOR, MenuItem, SwitchIndicator, Tooltip } from "./ui";
+import { Button, IconButton, MENU_LABEL, MENU_POPUP, MENU_SEPARATOR, MenuItem, SwitchIndicator, Tooltip } from "./ui";
 import { cn } from "./ui/cn";
 
-import { harnessKey, selectionHarness } from "../modelSelection";
+import { harnessDisplayName, harnessKey, selectionHarness } from "../modelSelection";
 import { defaultOffer, localDay, newLines, VARIANT_EFFORTS, variantOffer } from "../modelLines";
 import { AgentIconTile } from "./AgentIcon";
 import { feedLine, lineLab, lineName, lineSection, ModelList, offerOn, type PickedFrom, type PickerLine } from "./ModelList";
-import { pickerLines, type PickerAgent } from "./pickerAgents";
+import { harnessMark, listedSignedOut, pickerLines, type PickerAgent } from "./pickerAgents";
+import { useAgentSignIn } from "./HarnessSetupDialog";
 
 const MODEL_GROUP_CLASS_NAME = [
   "model-group flex items-center justify-between gap-2",
@@ -365,6 +366,13 @@ export function ModelPicker({
   const released = newLines(lines, releases, Date.now());
   const [menu, setMenu] = useState<"model" | "effort" | "permissions" | null>(null);
   const [filter, setFilter] = useState("");
+  const signIn = useAgentSignIn();
+  // An agent signed out of research it ran keeps a row here, so signing in again is one click away.
+  const signedOut = catalog.filter((h) => listedSignedOut(h) && !h.off).flatMap((h) => {
+    const name = h.profile?.name ?? harnessDisplayName(h);
+    const open = signIn(h);
+    return open && name.toLowerCase().includes(filter.trim().toLowerCase()) ? [{ h, name, open }] : [];
+  });
   const modelTriggerRef = useRef<HTMLButtonElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const handledOpenRequest = useRef(openRequest);
@@ -711,6 +719,21 @@ export function ModelPicker({
                   {harnesses.length === 0 && (
                     <div className={MODEL_MORE_CLASS_NAME}>{m.model_picker_detecting_harnesses()}</div>
                   )}
+                  {signedOut.map(({ h, name, open }) => {
+                    const mark = harnessMark(h);
+                    return (
+                      <div key={harnessKey(h)} className="flex items-center gap-2 px-2 py-1.5 text-sm">
+                        <AgentIconTile icon={mark.icon} brand={mark.brand} size="xs" />
+                        <span className="min-w-0 flex-1 truncate">
+                          {name}
+                          <span className="text-muted"> · {m.settings_page_not_signed_in()}</span>
+                        </span>
+                        <Button type="button" size="small" data-nav onClick={() => { close(); open(); }}>
+                          {m.harness_setup_login()}
+                        </Button>
+                      </div>
+                    );
+                  })}
                 </ModelList>
               </Popover.Popup>
             </Popover.Positioner>

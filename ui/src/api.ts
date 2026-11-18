@@ -1381,6 +1381,8 @@ export interface Harness {
   label?: AgentLabel;
   /** The user turned this agent or account off in Settings. On OpenCode, `offProviders` says which providers are. */
   off?: boolean;
+  /** A chat on this machine ran on this agent or account; absent from servers that predate it. */
+  hasChats?: boolean;
   /** On OpenCode: the providers set up in the user's own OpenCode. */
   foundProviders?: FoundProvider[];
   /** On OpenCode: the providers whose models the user turned off. */
@@ -1536,6 +1538,8 @@ export function tidyModelName(name: string): string {
 
 // --- chat (unified harness sessions) ------------------------------------------
 
+export type FailureCause = "sign_in" | "usage_limit" | "credits" | "model_unavailable" | "context_full" | "overloaded" | "network";
+
 export interface ChatToolState {
   status: "running" | "completed" | "error";
   input?: {
@@ -1549,6 +1553,11 @@ export interface ChatToolState {
     nextRetryAt?: number | null;
     turnId?: string;
     errorKind?: string;
+    /** Why the turn failed, in terms of what the user does next; absent when nothing says, and from older servers. */
+    cause?: FailureCause | null;
+    /** The agent and account the failed turn ran on; absent from older servers. */
+    harness?: HarnessId;
+    profile?: string | null;
     recoveryAction?: "retry" | "continue";
     [k: string]: unknown;
   };
@@ -1866,12 +1875,16 @@ export interface TurnOptions {
   reasoningLevel?: string | null;
 }
 
-/** A message the user sent while a turn was running, parked to run next. */
+/**
+ * A message the user sent while a turn was running, parked to run next, or
+ * (`steering`) handed to that turn and not yet read by its agent.
+ */
 export interface QueuedMessage {
   id: string;
   text: string;
+  orx?: OrxSource | null;
   planMode?: boolean;
-  dispatchState?: "queued" | "retrying" | "blocked";
+  dispatchState?: "queued" | "retrying" | "blocked" | "steering";
   nextRetryAt?: number | null;
   error?: string | null;
 }
