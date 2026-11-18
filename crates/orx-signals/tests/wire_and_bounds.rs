@@ -318,10 +318,12 @@ fn current_bounds_fit_without_a_snapshot_reduction_pass() {
                         x: Some(1.2345678901234567e-200),
                         value: Some(1.2345678901234567e200),
                         non_finite: false,
+                        extra: Default::default(),
                     },
                     retained as usize,
                 )
                 .collect(),
+                extra: Default::default(),
             },
         );
     }

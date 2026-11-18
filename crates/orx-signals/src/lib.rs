@@ -133,6 +133,8 @@ pub struct MetricReport {
     pub x: Option<f64>,
     pub value: Option<f64>,
     pub non_finite: bool,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -140,6 +142,8 @@ pub struct MetricReports {
     /// Total in this epoch, including reports that have fallen out of the tail.
     pub seen: u64,
     pub tail: std::collections::VecDeque<MetricReport>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -215,6 +219,8 @@ pub struct Stage {
     pub of: Option<serde_json::Number>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 pub const MAX_STAGES: usize = 64;
@@ -282,6 +288,7 @@ pub fn plan(value: &Value, strict: bool) -> Result<Vec<Stage>, String> {
             phase: phase.into(),
             of,
             unit,
+            extra: BTreeMap::new(),
         });
     }
     Ok(stages)
@@ -1095,6 +1102,7 @@ impl Snapshot {
             x,
             value: value.as_f64(),
             non_finite: matches!(value.as_str(), Some("NaN" | "Infinity" | "-Infinity")),
+            extra: BTreeMap::new(),
         });
     }
 

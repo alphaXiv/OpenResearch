@@ -481,11 +481,22 @@ fn checkpoint_and_payload_contracts_round_trip_with_future_fields() {
     raw["future"] = json!({"x":1});
     raw["cursor"]["future"] = json!(true);
     raw["timing"]["future"] = json!("kept");
+    let newer: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/contracts/run-signals-future-fields.json"
+    ))
+    .unwrap();
+    raw["plan"] = newer["plan"].clone();
+    raw["metricReports"]["latency"] = newer["metricReports"]["latency"].clone();
     let checkpoint: Snapshot = serde_json::from_value(raw).unwrap();
     let saved = serde_json::to_value(&checkpoint).unwrap();
     assert_eq!(saved["future"], json!({"x":1}));
     assert_eq!(saved["cursor"]["future"], true);
     assert_eq!(saved["timing"]["future"], "kept");
+    assert_eq!(saved["plan"], newer["plan"]);
+    assert_eq!(
+        saved["metricReports"]["latency"],
+        newer["metricReports"]["latency"]
+    );
     let mut s = fresh();
     s.feed(
         include_bytes!("../../../tests/contracts/run-monitor-wire.jsonl"),
