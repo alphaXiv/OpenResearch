@@ -1,0 +1,76 @@
+name: Native runtime retry evidence (1081)
+on:
+  push:
+    branches: [proof/runtime-1081-native]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  proof:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Verify exact PR product source
+        run: git diff --exit-code 01a2ea6245d5e5aac05e55e686074e9afb743ac4 -- src crates Cargo.toml Cargo.lock build.rs
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: 14383180091
+          run-id: 44201407204
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/orx-hosts
+          merge-multiple: true
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 22
+      - name: Prepare Linux released fixture
+        if: runner.os == 'Linux'
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/baseline"
+          curl -fsSL --retry 2 https://github.com/alphaXiv/OpenResearch/releases/download/v0.2.27/openresearch-cli-x86_64-unknown-linux-musl.tar.gz -o "$RUNNER_TEMP/baseline.tar.gz"
+          echo "23645831cdab764c4455ada3331b545054cf0f28d327b6c04803b816a3fbf065  $RUNNER_TEMP/baseline.tar.gz" | sha256sum -c -
+          tar xzf "$RUNNER_TEMP/baseline.tar.gz" -C "$RUNNER_TEMP/baseline"
+          echo "PROOF_BASELINE=$RUNNER_TEMP/baseline" >> "$GITHUB_ENV"
+      - name: Prepare Windows released fixture
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = "$env:RUNNER_TEMP/baseline.zip"
+          curl.exe --fail --silent --show-error --location --retry 2 --output $zip https://github.com/alphaXiv/OpenResearch/releases/download/v0.2.27/openresearch-cli-x86_64-pc-windows-msvc.zip
+          if ($LASTEXITCODE -ne 0 -or (Get-FileHash $zip).Hash -ne 'e1ccafb4fa99aae14f29ec380923fea57d7280111ea01b0e2e4c33ff74469bd0') { throw 'Invalid baseline archive' }
+          Expand-Archive $zip "$env:RUNNER_TEMP/baseline"
+          "PROOF_BASELINE=$env:RUNNER_TEMP/baseline" >> $env:GITHUB_ENV
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          shared-key: check
+          save-if: false
+      - name: Build unmodified PR commit with genuine release telemetry
+        env:
+          ORX_OFFICIAL_RELEASE_BUILD: '1'
+          ORX_EMBED_HOST_DIR: ${{ runner.temp }}/orx-hosts
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: lld-link
+          CARGO_PROFILE_DEV_DEBUG: 0
+        run: cargo build --locked --bin orx
+      - name: Build native fake agent executable
+        shell: bash
+        run: |
+          suffix=""
+          if test "$RUNNER_OS" = Windows; then suffix=".exe"; fi
+          rustc proof1081/agent.rs -o "$RUNNER_TEMP/proof-agent$suffix"
+      - name: Verify release and candidate over the chat API and telemetry HTTP
+        run: node proof1081/verify.mjs
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: runtime-1081-${{ runner.os }}-receipts
+          path: receipts/native-traces.json
+          retention-days: 30
+          if-no-files-found: error
