@@ -2402,3 +2402,24 @@ fn a_ready_final_look_does_not_wait_for_a_newly_ended_sibling() {
         ]
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn the_model_is_asked_to_write_counts_without_a_plural_noun() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let dir = crate::config::home_dir().unwrap().join("claude-calls");
+    fake_claude(
+        &dir,
+        &[r#"{"runs":{"r1":{"status":"ok","line":"HTTP 429 count: **{count:\"HTTP 429\"}**."}}}"#],
+    );
+    let store = Store::open().unwrap();
+    chat(&store, "chat", "claude-code");
+    run(&store, "a", "A", "chat", "WARNING HTTP 429\n");
+    take(look(&store, "chat", "manual", &[("a", "r1")]))
+        .await
+        .unwrap();
+    let args = std::fs::read_to_string(dir.join("args-1")).unwrap();
+    assert!(args.contains(r#"HTTP 429 count: **{count:"HTTP 429"}**"#));
+}

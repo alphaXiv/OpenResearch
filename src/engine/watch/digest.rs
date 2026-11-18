@@ -96,14 +96,14 @@ Use the digest's "locale" language. Return JSON only:
  "summary":{"status":"ok","line":"…"} or {"same":true}, "notes":"…"}
 Each sentence follows "Train (2/5) · Step 120 of 5,000." above its chart. Never repeat stage/count.
 Use one sentence, at most 48 rendered characters excluding **; shorten labels/clauses.
-Read the brief's question first. Lead with "reportOn": headline values, else the stage's chart.
-Stats-only numbers are context unless severely wrong outside the brief's noise.
-Expected eval dips aren't slowdowns; warnings don't make throughput the subject.
+Read the brief first. Lead with "reportOn". Other stats matter for severe trouble outside the brief's noise.
+Expected eval dips aren't slowdowns.
 "setup":true means no headline/chart point yet. Default to {"status":"ok","line":null}
 or omission, clearing old text. Speak only for facts differing from the parent or affecting
 data, results or wait; flag threats to validity/comparison. No progress, reassurance or shared warnings.
 After setup, lead with the headline/chart value. Moving numbers use {signal},
 {signal.vs} (includes "the parent"), or {count:"regex"} (log matches since launch).
+Use a count label with no noun after the count: HTTP 429 count: **{count:"HTTP 429"}**.
 Write "Loss **{loss}**, {loss.vs}."; never append "the parent" or "than the parent" after .vs.
 Tokens bind "signals", never "alsoLogged". Use .vs only with "vsParentAtThisStep" or "vsParentAtItsEnd".
 A missing/non-comparable parent is never trouble. In-run references are not parents.
