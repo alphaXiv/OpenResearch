@@ -12,7 +12,7 @@ const MAX_SECONDS: u64 = 30 * 24 * 3600;
 const KINDS: &str =
     "nonFinite, compare, noImprovement, worseThanParent, noProgress, costAbove, projectedFinishPastLimit";
 /// The rule `orx exp run --budget` adds.
-pub(crate) const BUDGET: &str = "budget";
+const BUDGET: &str = "budget";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Does {
@@ -184,6 +184,10 @@ pub(crate) fn budget(usd: f64) -> Result<Rule, String> {
 
 /// Rules as an agent declared them, each checked, or the first mistake in its own words.
 pub(crate) fn parse(value: &Value) -> Result<Vec<Rule>, String> {
+    parse_rules(value, false)
+}
+
+fn parse_rules(value: &Value, allow_generated_budget: bool) -> Result<Vec<Rule>, String> {
     let rules = value
         .as_array()
         .ok_or("\"rules\" must be a list of rules")?;
@@ -195,9 +199,11 @@ pub(crate) fn parse(value: &Value) -> Result<Vec<Rule>, String> {
     }
     let mut parsed: Vec<Rule> = Vec::new();
     for (index, rule) in rules.iter().enumerate() {
-        let rule = parse_rule(rule).map_err(|why| match rule["name"].as_str() {
-            Some(name) => format!("rules[{index}] ({name}): {why}"),
-            None => format!("rules[{index}]: {why}"),
+        let rule = parse_rule(rule, allow_generated_budget).map_err(|why| {
+            match rule["name"].as_str() {
+                Some(name) => format!("rules[{index}] ({name}): {why}"),
+                None => format!("rules[{index}]: {why}"),
+            }
         })?;
         if parsed.iter().any(|seen| seen.name == rule.name) {
             return Err(format!(
@@ -210,7 +216,7 @@ pub(crate) fn parse(value: &Value) -> Result<Vec<Rule>, String> {
     Ok(parsed)
 }
 
-fn parse_rule(value: &Value) -> Result<Rule, String> {
+pub(crate) fn parse_rule(value: &Value, allow_generated_budget: bool) -> Result<Rule, String> {
     let rule = value
         .as_object()
         .ok_or("give {\"name\", \"text\", \"does\", \"when\"}")?;
@@ -230,8 +236,22 @@ fn parse_rule(value: &Value) -> Result<Rule, String> {
         .ok_or(format!(
             "\"name\" must be text of 1 to {MAX_NAME} characters"
         ))?;
+    let does = match rule.get("does").and_then(Value::as_str) {
+        Some("stop") => Does::Stop,
+        Some("ask") => Does::Ask,
+        _ => return Err("\"does\" must be \"stop\" or \"ask\"".into()),
+    };
+    let when = rule
+        .get("when")
+        .and_then(Value::as_object)
+        .ok_or("\"when\" must be an object with a \"kind\" field")?;
+    let when = parse_when(when)?;
+    let generated_budget = allow_generated_budget
+        && name == BUDGET
+        && does == Does::Stop
+        && matches!(when, When::CostAbove { .. });
     let text = match rule.get("text") {
-        None | Some(Value::Null) if name == BUDGET => None,
+        None | Some(Value::Null) if generated_budget => None,
         Some(Value::String(text))
             if !text.trim().is_empty() && text.chars().count() <= MAX_TEXT =>
         {
@@ -243,20 +263,11 @@ fn parse_rule(value: &Value) -> Result<Rule, String> {
             ))
         }
     };
-    let does = match rule.get("does").and_then(Value::as_str) {
-        Some("stop") => Does::Stop,
-        Some("ask") => Does::Ask,
-        _ => return Err("\"does\" must be \"stop\" or \"ask\"".into()),
-    };
-    let when = rule
-        .get("when")
-        .and_then(Value::as_object)
-        .ok_or("\"when\" must be an object with a \"kind\" field")?;
     Ok(Rule {
         name: name.to_owned(),
         text,
         does,
-        when: parse_when(when)?,
+        when,
     })
 }
 
@@ -436,7 +447,7 @@ pub(crate) fn frozen(run: &str, config: Option<&str>) -> crate::error::Result<Ve
     };
     let config: Value = serde_json::from_str(config)
         .map_err(|error| crate::error::anyhow!("Run {run}'s rules are unreadable: {error}"))?;
-    parse(&config["rules"])
+    parse_rules(&config["rules"], true)
         .map_err(|why| crate::error::anyhow!("Run {run}'s rules: {why}. Update orx to check them."))
 }
 
@@ -947,6 +958,19 @@ mod tests {
             when_with_reports["reports"] = json!(1);
             assert!(when(when_with_reports).contains("unexpected field \"reports\""));
         }
+    }
+
+    #[test]
+    fn a_declared_budget_rule_requires_text() {
+        let rule =
+            json!({"name": "budget", "does": "stop", "when": {"kind": "costAbove", "usd": 5}});
+        let missing = parse(&json!([rule])).unwrap_err();
+        assert!(missing.contains("\"text\""), "{missing}");
+
+        let mut rule = rule;
+        rule["text"] = Value::Null;
+        let null = parse(&json!([rule])).unwrap_err();
+        assert!(null.contains("\"text\""), "{null}");
     }
 
     #[test]

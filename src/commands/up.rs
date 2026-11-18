@@ -1402,8 +1402,8 @@ pub(crate) fn run_outcome(store: &Store, run: &StoredRun) -> Option<Value> {
     };
     let mut outcome = json!({"by": stop.by, "at": stop.at, "reason": stop.reason});
     if let Some(rule) = stop.rule {
-        outcome["rule"] = match crate::engine::rules::parse(&json!([rule])) {
-            Ok(rules) => rules[0].shown(),
+        outcome["rule"] = match crate::engine::rules::parse_rule(&rule, true) {
+            Ok(rule) => rule.shown(),
             Err(_) => rule,
         };
     }
