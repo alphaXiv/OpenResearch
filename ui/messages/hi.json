@@ -2463,6 +2463,8 @@
   "chat_inbox_restore": "पुनर्स्थापित करें",
   "chat_inbox_done_empty": "जिन चैट को आप पूरा हुआ चिह्नित करेंगे, वे यहां दिखेंगी।",
   "run_eta_floor": "कम से कम {duration} बाकी",
+  "run_eta_no_estimate": "कोई अनुमान नहीं",
+  "run_eta_log_floor_detail": "समय की गणना लॉग में दर्ज प्रगति से हुई है। इसके बाद और काम हो सकता है।",
   "run_eta_untimed": "{stages} का समय अज्ञात",
   "run_summary_first_floor": "पहला कम से कम {duration} में पूरा",
   "run_summary_next_floor": "अगला कम से कम {duration} में पूरा",

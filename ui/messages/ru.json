@@ -2463,6 +2463,8 @@
   "chat_inbox_restore": "Восстановить",
   "chat_inbox_done_empty": "Здесь появятся чаты, отмеченные как готовые.",
   "run_eta_floor": "Осталось не менее {duration}",
+  "run_eta_no_estimate": "Нет оценки",
+  "run_eta_log_floor_detail": "Время рассчитано по данным о ходе работы из журнала. После этого могут остаться другие задачи.",
   "run_eta_untimed": "{stages}: время неизвестно",
   "run_summary_first_floor": "первое завершение не ранее чем через {duration}",
   "run_summary_next_floor": "следующее завершение не ранее чем через {duration}",

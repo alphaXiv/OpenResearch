@@ -2463,6 +2463,8 @@
   "chat_inbox_restore": "Geri yükle",
   "chat_inbox_done_empty": "Bitti olarak işaretlediğiniz sohbetler burada görünür.",
   "run_eta_floor": "En az {duration} kaldı",
+  "run_eta_no_estimate": "Süre tahmini yok",
+  "run_eta_log_floor_detail": "Süre, günlükteki ilerlemeye göre hesaplandı. Ardından başka işler gelebilir.",
   "run_eta_untimed": "{stages} süresi bilinmiyor",
   "run_summary_first_floor": "ilki en az {duration} sonra biter",
   "run_summary_next_floor": "sıradaki en az {duration} sonra biter",

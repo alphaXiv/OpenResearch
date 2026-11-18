@@ -141,6 +141,7 @@ test("a timed counter shows its floor during setup before the first metric", asy
   const page = container.querySelector('[role="group"]');
   assert.match(text(page), /9 of 10 chunks/);
   assert.match(text(page), /At least 5m left/);
+  assert.match(text(page), /Timed from progress in the log\. More work may follow\./);
   assert.ok(text(page).includes(m.run_page_no_signals()));
 });
 

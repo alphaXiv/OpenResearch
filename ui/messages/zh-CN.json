@@ -2463,6 +2463,8 @@
   "chat_inbox_restore": "恢复",
   "chat_inbox_done_empty": "标记为完成的对话会显示在这里。",
   "run_eta_floor": "至少还需 {duration}",
+  "run_eta_no_estimate": "暂无预估",
+  "run_eta_log_floor_detail": "时间根据日志中记录的进度计算。之后可能还有其他工作。",
   "run_eta_untimed": "{stages} 耗时未知",
   "run_summary_first_floor": "首个至少还需 {duration} 完成",
   "run_summary_next_floor": "下一个至少还需 {duration} 完成",

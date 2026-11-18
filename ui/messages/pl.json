@@ -2463,6 +2463,8 @@
   "chat_inbox_restore": "Przywróć",
   "chat_inbox_done_empty": "Tu pojawią się czaty oznaczone jako gotowe.",
   "run_eta_floor": "Pozostało co najmniej {duration}",
+  "run_eta_no_estimate": "Brak szacunku czasu",
+  "run_eta_log_floor_detail": "Czas obliczono na podstawie postępu w dzienniku. Mogą pozostać dalsze zadania.",
   "run_eta_untimed": "{stages}: czas nieznany",
   "run_summary_first_floor": "pierwsze zakończenie za co najmniej {duration}",
   "run_summary_next_floor": "następne zakończenie za co najmniej {duration}",

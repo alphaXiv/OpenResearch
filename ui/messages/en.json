@@ -2463,6 +2463,8 @@
   "chat_inbox_restore": "Restore",
   "chat_inbox_done_empty": "Chats you mark as done appear here.",
   "run_eta_floor": "At least {duration} left",
+  "run_eta_no_estimate": "No estimate",
+  "run_eta_log_floor_detail": "Timed from progress in the log. More work may follow.",
   "run_eta_untimed": "{stages} not timed",
   "run_summary_first_floor": "first done in at least {duration}",
   "run_summary_next_floor": "next done in at least {duration}",

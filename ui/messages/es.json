@@ -2463,6 +2463,8 @@
   "chat_inbox_restore": "Restaurar",
   "chat_inbox_done_empty": "Aquí aparecen los chats que marques como hechos.",
   "run_eta_floor": "Quedan al menos {duration}",
+  "run_eta_no_estimate": "Sin estimación",
+  "run_eta_log_floor_detail": "El tiempo se calcula a partir del progreso en el registro. Puede quedar más trabajo.",
   "run_eta_untimed": "{stages} sin duración estimada",
   "run_summary_first_floor": "primero termina en al menos {duration}",
   "run_summary_next_floor": "siguiente termina en al menos {duration}",

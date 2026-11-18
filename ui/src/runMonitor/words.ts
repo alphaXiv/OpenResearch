@@ -52,19 +52,18 @@ export function captionProgress(progress: Progress, phases: Phase[], openLimitMs
 /** Time left and its detail, counted down from when the server estimated it. */
 export function estimateWords(estimate: Estimate, now: number, limit: { endsAt: number; ms: number } | null, stallMs: number): { eta: string; detail: string; strong: boolean; leftMs: number | null } {
   const remaining = (ms: number) => Math.max(0, ms - (now - estimate.at));
+  if (estimate.pending || estimate.midMs === null) return { eta: m.run_eta_estimating(), detail: m.run_eta_needs_steps(), strong: false, leftMs: null };
   if (estimate.floor) {
     const stages = estimate.untimed ?? [];
-    const left = stages.length
-      ? remaining(estimate.midMs ?? 0)
-      : 1000 * Math.floor(remaining(estimate.loMs ?? 0) / 1000);
+    const left = remaining(estimate.loMs ?? 0);
+    const timed = left >= 1000;
     return {
-      eta: left > 0 ? m.run_eta_floor({ duration: remainingText(left) }) : "",
-      detail: stages.length ? m.run_eta_untimed({ stages: autoDir(stages.join(", ")) }) : "",
-      strong: left > 0,
-      leftMs: left > 0 ? left : null,
+      eta: timed ? m.run_eta_floor({ duration: durationText(left) }) : m.run_eta_no_estimate(),
+      detail: stages.length ? m.run_eta_untimed({ stages: autoDir(stages.join(", ")) }) : m.run_eta_log_floor_detail(),
+      strong: timed,
+      leftMs: timed ? left : null,
     };
   }
-  if (estimate.pending || estimate.midMs === null) return { eta: m.run_eta_estimating(), detail: m.run_eta_needs_steps(), strong: false, leftMs: null };
   const mid = remaining(estimate.midMs);
   const stalled = stallMs > 0 ? m.run_eta_stalled({ duration: durationText(stallMs) }) : null;
   // Past its estimate with no progress since, a run is late, never "0s left".
@@ -73,7 +72,7 @@ export function estimateWords(estimate: Estimate, now: number, limit: { endsAt: 
   }
   const eta = m.run_eta_left({ duration: remainingText(mid) });
   if (stalled) return { eta, detail: stalled, strong: true, leftMs: mid };
-  if (estimate.pastLimitMs != null && limit) {
+  if (estimate.pastLimitMs != null && estimate.pastLimitMs > 0 && limit) {
     return { eta, detail: m.run_eta_past_limit({ duration: durationText(estimate.pastLimitMs), limit: durationText(limit.ms) }), strong: true, leftMs: mid };
   }
   const done = m.run_eta_done_about({ clock: clockText(now + mid) });

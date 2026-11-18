@@ -2463,6 +2463,8 @@
   "chat_inbox_restore": "استعادة",
   "chat_inbox_done_empty": "تظهر هنا المحادثات التي تضع عليها علامة منتهية.",
   "run_eta_floor": "متبقٍ {duration} على الأقل",
+  "run_eta_no_estimate": "لا يوجد تقدير",
+  "run_eta_log_floor_detail": "حُسب الوقت من التقدم المُسجّل. قد يتبقى عمل آخر.",
   "run_eta_untimed": "لم تُقدّر مدة {stages}",
   "run_summary_first_floor": "الأول ينتهي بعد {duration} على الأقل",
   "run_summary_next_floor": "التالي ينتهي بعد {duration} على الأقل",

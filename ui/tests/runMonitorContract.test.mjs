@@ -49,8 +49,8 @@ test("time left and its range read as `orx exp status` reads them, on the strip 
     for (const full of [true, false]) {
       const view = model(name, full);
       // A finished run says how long it took as its sentence.
-      if (expect.eta !== null && !view.settingUp && !states[name].monitor.estimate?.floor) assert.equal(bare(view.eta || view.sentence.text), expect.eta, `${name} ${full}`);
-      if (expect.range !== null && !view.settingUp && !states[name].monitor.estimate?.floor) assert.ok(bare(view.etaDetail).startsWith(expect.range), `${name} ${full}: ${view.etaDetail}`);
+      if (expect.eta !== null) assert.equal(bare(view.eta || view.sentence.text), expect.eta, `${name} ${full}`);
+      if (expect.range !== null) assert.ok(bare(view.etaDetail).startsWith(expect.range), `${name} ${full}: ${view.etaDetail}`);
     }
   }
 });
@@ -60,6 +60,13 @@ test("a range whose ends read alike is left out", () => {
   const close = { ...monitor, estimate: { ...monitor.estimate, loMs: 19_600, midMs: 19_800, hiMs: 19_900 } };
   assert.ok(!bare(model("running", true, close).etaDetail).includes(bare(m.run_eta_range({ lo: "19s", hi: "19s" }))));
   assert.ok(bare(model("running").etaDetail).includes(states.running.expect.range));
+});
+
+test("zero overrun leaves the range and finish time visible", () => {
+  const { monitor, now, expect } = states.running;
+  const view = model("running", true, { ...monitor, limit: { endsAt: now + 30_000 }, estimate: { ...monitor.estimate, pastLimitMs: 0 } });
+  assert.ok(bare(view.etaDetail).startsWith(expect.range));
+  assert.match(bare(view.etaDetail), /done about/);
 });
 
 test("with no total the stage reads as steps, from the full monitor and from the summary alone", () => {
@@ -225,7 +232,7 @@ test("a detected counter times only its stage and promises no whole-run finish",
     const view = model("detected", full);
     assert.equal(bare(view.eta), states.detected.expect.eta);
     assert.equal(view.leftMs, null);
-    assert.equal(view.etaDetail, "");
+    assert.equal(view.etaDetail, m.run_eta_log_floor_detail());
     assert.equal(view.bar.whole, null);
   }
   const { container } = await banner("detected");
@@ -233,7 +240,7 @@ test("a detected counter times only its stage and promises no whole-run finish",
 });
 
 test("the line and the strip say the same whether the estimate waits on its pace or on progress never reported", () => {
-  for (const [name, eta] of [["named", ""], ["first", m.run_elapsed({ duration: "10s" })]]) {
+  for (const [name, eta] of [["named", m.run_eta_estimating()], ["first", m.run_elapsed({ duration: "10s" })]]) {
     const [line, strip] = [model(name, false), model(name)];
     assert.equal(bare(line.eta), bare(eta), name);
     assert.deepEqual([line.eta, line.etaDetail], [strip.eta, strip.etaDetail], name);
@@ -425,12 +432,13 @@ test("a failed run that recorded no message says the last error its log names, q
 });
 
 test("a floor counted down to nothing reads as no estimate, naming the stages no earlier run timed", () => {
-  const { now, monitor } = states.planned;
+  const { monitor } = states.planned;
   for (const full of [true, false]) {
     const later = runModel({
       item: { sessionId: "s", run: runOf("planned"), experimentName: null, experimentSlug: "baseline" },
-      monitor: full ? monitor : null, shown: true, agent: "Claude", now: now + monitor.estimate.midMs + 500, nextRetryMs: null,
+      monitor: full ? monitor : null, shown: true, agent: "Claude", now: monitor.estimate.at + monitor.estimate.loMs - 999, nextRetryMs: null,
     });
+    assert.equal(later.eta, "No estimate", `full: ${full}`);
     assert.match(bare(later.etaDetail), /eval.*not timed/, `full: ${full}`);
     assert.equal(later.leftMs, null, `full: ${full}`);
   }

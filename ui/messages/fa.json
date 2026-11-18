@@ -2463,6 +2463,8 @@
   "chat_inbox_restore": "بازگردانی",
   "chat_inbox_done_empty": "گفتگوهایی که انجام‌شده علامت بزنید اینجا نمایش داده می‌شوند.",
   "run_eta_floor": "حداقل {duration} باقی مانده",
+  "run_eta_no_estimate": "بدون برآورد",
+  "run_eta_log_floor_detail": "زمان از پیشرفت ثبت‌شده در گزارش محاسبه شده است. ممکن است کار بیشتری باقی مانده باشد.",
   "run_eta_untimed": "زمان {stages} مشخص نیست",
   "run_summary_first_floor": "اولین پایان پس از حداقل {duration}",
   "run_summary_next_floor": "پایان بعدی پس از حداقل {duration}",

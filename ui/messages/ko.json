@@ -2463,6 +2463,8 @@
   "chat_inbox_restore": "복원",
   "chat_inbox_done_empty": "완료로 표시한 채팅이 여기에 표시됩니다.",
   "run_eta_floor": "최소 {duration} 남음",
+  "run_eta_no_estimate": "예상 시간 없음",
+  "run_eta_log_floor_detail": "로그에 기록된 진행 상황을 바탕으로 계산한 시간입니다. 이후에도 작업이 이어질 수 있습니다.",
   "run_eta_untimed": "{stages} 소요 시간 미정",
   "run_summary_first_floor": "첫 완료까지 최소 {duration}",
   "run_summary_next_floor": "다음 완료까지 최소 {duration}",

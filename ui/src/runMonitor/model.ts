@@ -329,7 +329,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   let eta = "";
   let etaDetail = "";
   let etaStrong = false;
-  const etaFloor = Boolean(estimate?.floor && (monitor || !estimate.pending));
+  const etaFloor = Boolean(estimate?.floor && !estimate.pending);
   let leftMs: RunModel["leftMs"] = null;
   // Time since the run started, where it has no time left to show, said as that.
   let etaElapsed = false;
@@ -346,7 +346,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   else if (pre) {
     etaElapsed = !monitor;
     eta = monitor ? m.run_eta_none() : m.run_elapsed({ duration: durationText(now - run.createdAt) });
-  } else if (settingUp && (setup?.startsAt != null || !etaFloor)) {
+  } else if (settingUp && (setup?.startsAt != null || (!etaFloor && !estimate?.pending))) {
     const startsAt = setup?.startsAt;
     if (startsAt != null) eta = startsAt > now ? m.run_setup_starts_in({ duration: remainingText(startsAt - now) }) : m.run_setup_starting();
   } else if (open && limitEndsAt !== null) {
@@ -357,7 +357,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     etaElapsed = true;
     if (!finishing && !setup && (stagePhase?.of != null || stageDone === null)) etaDetail = noEstimate;
   } else if (estimate) {
-    ({ eta, detail: etaDetail, strong: etaStrong, leftMs } = estimateWords({ ...estimate, floor: etaFloor }, now, limit, progress?.stallMs ?? 0));
+    ({ eta, detail: etaDetail, strong: etaStrong, leftMs } = estimateWords(estimate, now, limit, progress?.stallMs ?? 0));
   } else {
     // A server that sends no monitor at all.
     eta = m.run_elapsed({ duration: durationText(elapsed) });
