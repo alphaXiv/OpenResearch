@@ -1,0 +1,56 @@
+name: Linux setup wire evidence (1076)
+on:
+  push:
+    branches: [verify/1076-linux-setup-wire]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  record:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Check product source and download real baseline binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          git diff --exit-code 12cc022e76df89f0aee4a46ebc999fea69a9f74b -- src crates Cargo.lock Cargo.toml build.rs
+          mkdir -p "$RUNNER_TEMP/baseline" "$RUNNER_TEMP/hosts"
+          gh api 'repos/alphaXiv/OpenResearch/actions/artifacts/14381833476/zip' > "$RUNNER_TEMP/baseline.zip"
+          unzip -q "$RUNNER_TEMP/baseline.zip" -d "$RUNNER_TEMP/baseline"
+          if ! test -f "$RUNNER_TEMP/baseline/orx"; then
+            find "$RUNNER_TEMP/baseline" -name '*.tar.gz' -exec tar xzf '{}' -C "$RUNNER_TEMP/baseline" \;
+            cp "$(find "$RUNNER_TEMP/baseline" -type f -name orx | head -1)" "$RUNNER_TEMP/baseline/orx"
+          fi
+          chmod +x "$RUNNER_TEMP/baseline/orx"
+          gh api 'repos/alphaXiv/OpenResearch/actions/artifacts/14383180091/zip' > "$RUNNER_TEMP/hosts.zip"
+          unzip -q "$RUNNER_TEMP/hosts.zip" -d "$RUNNER_TEMP/hosts"
+          ls -l "$RUNNER_TEMP/hosts"; "$RUNNER_TEMP/baseline/orx" --no-telemetry version --build-channel
+      - run: rustup toolchain install --no-self-update
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          shared-key: check
+          save-if: false
+      - name: Build exact candidate for an isolated collector
+        env:
+          ORX_OFFICIAL_RELEASE_BUILD: '1'
+          ORX_EMBED_HOST_DIR: ${{ runner.temp }}/hosts
+        run: cargo build --locked --bin orx
+      - name: Install terminal recording tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq xterm ffmpeg xvfb
+      - name: Record both real application runs
+        run: |
+          mkdir -p "$RUNNER_TEMP/evidence"
+          xvfb-run -a -s '-screen 0 1280x720x24' bash qa-1076/record.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: linux-1076-e2e
+          path: ${{ runner.temp }}/evidence/
+          retention-days: 30
+          if-no-files-found: warn
