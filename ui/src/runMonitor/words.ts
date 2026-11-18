@@ -49,24 +49,35 @@ export function captionProgress(progress: Progress, phases: Phase[], openLimitMs
   return [where, share].filter(Boolean).join(" · ");
 }
 
-/** Time left and its detail, counted down from when the server estimated it. */
-export function estimateWords(estimate: Estimate, now: number, limit: { endsAt: number; ms: number } | null, stallMs: number): { eta: string; detail: string; strong: boolean; leftMs: number | null } {
+/**
+ * Time left and its detail, counted down from when the server estimated it. A floor that counts only the current
+ * `stage` names it, or setup when the run is setting up in its last stage before the work.
+ */
+export function estimateWords(estimate: Estimate, now: number, limit: { endsAt: number; ms: number } | null, stallMs: number, stage: { name: string; setup: boolean } | null): { eta: string; detail: string; strong: boolean; leftMs: number | null } {
   const remaining = (ms: number) => Math.max(0, ms - (now - estimate.at));
   if (estimate.pending || estimate.midMs === null) return { eta: m.run_eta_estimating(), detail: m.run_eta_needs_steps(), strong: false, leftMs: null };
   const mid = remaining(estimate.midMs);
   if (estimate.floor) {
     const stages = estimate.untimed ?? [];
     const timed = mid >= 1000;
+    const duration = durationText(mid);
+    const eta = !timed ? m.run_eta_none()
+      : stage?.setup ? m.run_eta_setup_left({ duration })
+      : stage ? m.run_eta_stage_left({ duration, stage: autoDir(stage.name) })
+      : m.run_eta_floor({ duration });
     return {
-      eta: timed ? m.run_eta_floor({ duration: durationText(mid) }) : m.run_eta_no_estimate(),
+      eta,
       detail: stages.length ? m.run_eta_untimed({ stages: autoDir(stages.join(", ")) }) : m.run_eta_log_floor_detail(),
       strong: timed,
       leftMs: timed ? mid : null,
     };
   }
   const stalled = stallMs > 0 ? m.run_eta_stalled({ duration: durationText(stallMs) }) : null;
-  // Past its estimate with no progress since, a run is late, never "0s left".
+  // Past its estimate, a run is late, never "0s left", once it has stalled or outlasted the high end: one that reports
+  // in chunks runs past its midpoint between two reports.
   if (estimate.midMs > 0 && mid === 0) {
+    const late = stallMs > 0 || remaining(estimate.hiMs ?? estimate.midMs) === 0;
+    if (!late) return { eta: m.run_eta_almost_done(), detail: "", strong: true, leftMs: null };
     return { eta: m.run_eta_silent_for({ duration: durationText(now - estimate.at) }), detail: m.run_eta_was_due({ clock: clockText(estimate.at + estimate.midMs) }), strong: true, leftMs: null };
   }
   const eta = m.run_eta_left({ duration: remainingText(mid) });

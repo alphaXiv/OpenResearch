@@ -3029,11 +3029,20 @@ fn eta_text(life: &Lifecycle, snapshot: Option<&Snapshot>, facts: &StatusFacts) 
                     short(stall)
                 ));
             }
+            // A floor that every later stage is missing from counts only the stage the run is in.
+            let stage = facts.stages.and_then(|(stages, current)| {
+                let current = current?;
+                let name = stages.get(current)?["name"]
+                    .as_str()
+                    .filter(|name| !name.is_empty())?;
+                let later = stages.len() - current - 1;
+                (later > 0 && untimed.len() == later && !untimed.contains(&name)).then_some(name)
+            });
             let duration = short(mid_left.max(1_000));
-            let left = if floor {
-                format!("At least {duration} left")
-            } else {
-                format!("{duration} left")
+            let left = match stage {
+                Some(stage) if floor => format!("{duration} of {stage} left"),
+                _ if floor => format!("At least {duration} left"),
+                _ => format!("{duration} left"),
             };
             if detail.is_empty() {
                 left
@@ -9124,7 +9133,7 @@ mod tests {
                 T0 + 9_000,
                 json!({
                     "duration": "5s",
-                    "cli": ["At least", "left", "earlier run", "timed", "eval"],
+                    "cli": ["5s of train left", "earlier run", "timed", "eval"],
                     "stage": "train · step 5 of 10",
                 }),
             ),

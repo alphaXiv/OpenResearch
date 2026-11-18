@@ -63,6 +63,20 @@ test("an estimate that needs more steps, or a stalled run, says so", () => {
   assert.equal(stalled.etaDetail, m.run_eta_stalled({ duration: fmtDuration(180_000) }));
 });
 
+test("a run that reports in chunks is almost done past its midpoint, and late only once it stalls or outlasts the high end", () => {
+  const estimate = { ...running.estimate, loMs: 1_000, midMs: 1_700, hiMs: 4_000, pending: false, floor: false, pastLimitMs: null };
+  const at = (ago, stallMs = 0) => model(run(), { monitor: { ...running, estimate: { ...estimate, at: now - ago }, progress: { ...running.progress, stallMs } } });
+  const between = at(2_000);
+  assert.equal(between.eta, m.run_eta_almost_done());
+  assert.equal(between.etaDetail, "");
+  assert.equal(between.leftMs, null);
+  const stalled = at(2_000, 30_000);
+  assert.equal(stalled.eta, m.run_eta_silent_for({ duration: fmtDuration(2_000) }));
+  const overdue = at(5_000);
+  assert.equal(overdue.eta, m.run_eta_silent_for({ duration: fmtDuration(5_000) }));
+  assert.equal(overdue.etaDetail, m.run_eta_was_due({ clock: fmtClock(now - 5_000 + 1_700) }));
+});
+
 test("a flag waiting on the user opens the choice while one the agent handles keeps its state", () => {
   const waiting = model(run({ monitor: summary({ tone: "flag", sentence: flagged.sentence, bindings: { loss: "NaN" }, flag: { id: "f1", state: "waiting", mode: "copilot" } }) }), { monitor: flagged });
   assert.equal(waiting.tone, "flag");

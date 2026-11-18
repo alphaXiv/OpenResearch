@@ -56,7 +56,7 @@ export function RunStatus({ model, label, descriptionId, onOpenRunPage, expanded
   const time = [model.eta, model.etaDetail].filter(Boolean).join(" · ")
     || (!model.live ? [model.lead, model.sentence.text].filter(Boolean).join(" · ") : "");
   const untimed = [...(data?.estimate?.untimed ?? model.run.monitor?.estimate?.untimed ?? [])].sort((a, b) => b.length - a.length);
-  const footer = autoDir(model.settingUp || !model.live ? time : m.run_whole_time({ time: autoDir(time) }));
+  const footer = autoDir(model.settingUp || model.etaStage || !model.live ? time : m.run_whole_time({ time: autoDir(time) }));
   const footerNames = untimed.length ? new RegExp(`(${untimed.map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`, "g") : null;
   const stage = model.sentence.stage;
   const wrapWarning = expanded && model.tone === "flag";

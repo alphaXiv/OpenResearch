@@ -45,7 +45,7 @@ async function banner(name, level = "strip", state = states[name]) {
 }
 
 test("time left and its range read as `orx exp status` reads them, on the strip and the line", () => {
-  const timing = { ended: m.run_done_in, limit: m.run_eta_to_limit, stall: m.run_eta_silent_for };
+  const timing = { ended: m.run_done_in, limit: m.run_eta_to_limit, stall: m.run_eta_silent_for, planned: ({ duration }) => m.run_eta_stage_left({ duration, stage: "train" }) };
   for (const [name, { expect, monitor }] of Object.entries(states)) {
     for (const full of [true, false]) {
       const view = model(name, full);
@@ -175,7 +175,7 @@ test("a stage the run declared and has no step of yet keeps its own words over l
     const view = model("announced", full);
     assert.equal(bare(view.sentence.text), `${m.run_stage_setup()} · ${bare(m.run_stage_started({ stage: "train" }))}`, `full: ${full}`);
     assert.equal(view.etaDetail, "", `full: ${full}`);
-    assert.equal(view.eta, "", `full: ${full}`);
+    assert.equal(view.eta, m.run_eta_none(), `full: ${full}: the time slot says there is no estimate`);
   }
   const printing = { ...setup, line: "Loading 9 shards" };
   const state = { ...states.announced, summary: { ...states.announced.summary, setup: printing } };
@@ -441,7 +441,7 @@ test("a failed run that recorded no message says the last error its log names, q
 test("the floor expires below one second at the midpoint", () => {
   const { monitor } = states.detected;
   for (const full of [true, false]) {
-    for (const [left, eta] of [[1000, m.run_eta_floor({ duration: "1s" })], [999, m.run_eta_no_estimate()]]) {
+    for (const [left, eta] of [[1000, m.run_eta_floor({ duration: "1s" })], [999, m.run_eta_none()]]) {
       const later = runModel({
         item: { sessionId: "s", run: runOf("detected"), experimentName: null, experimentSlug: "baseline" },
         monitor: full ? monitor : null, shown: true, agent: "Claude", now: monitor.estimate.at + monitor.estimate.midMs - left, nextRetryMs: null,
@@ -452,15 +452,64 @@ test("the floor expires below one second at the midpoint", () => {
   }
 });
 
-test("a timed floor names untimed stages and leaves one stage-local bar", async () => {
+/** The `planned` state with its monitor and summary changed alike. */
+function replanned({ phases, stageOrder, untimed, progress, setup = null }) {
+  const { monitor, summary } = states.planned;
+  const estimate = { ...monitor.estimate, untimed };
+  const phase = phases[progress.phase];
+  return {
+    ...states.planned,
+    monitor: { ...monitor, phases, stageOrder, estimate, progress: { ...monitor.progress, ...progress }, setup },
+    summary: { ...summary, stageOrder, estimate: { ...summary.estimate, untimed }, setup, stage: { name: phase.name, done: progress.done, of: phase.of, unit: phase.unit } },
+  };
+}
+
+const lineOf = (state, full) => runModel({
+  item: { sessionId: "s", run: runOf("planned", state), experimentName: null, experimentSlug: "baseline" },
+  monitor: full ? state.monitor : null, shown: true, agent: "Claude", now: state.now, nextRetryMs: null,
+});
+
+test("a timed floor that counts only the current stage names it, untimed stages in its detail, on one stage-local bar", async () => {
   for (const full of [true, false]) {
     const view = model("planned", full);
     assert.ok(view.leftMs > 0);
-    assert.match(bare(view.eta), /At least .* left/);
+    assert.equal(bare(view.eta), bare(m.run_eta_stage_left({ duration: "5s", stage: "train" })));
+    assert.ok(view.etaStage);
     assert.match(bare(view.etaDetail), /eval.*not timed/);
     assert.equal(view.bar.segments.length, 1);
     assert.equal(view.bar.whole, null);
   }
   const { container } = await banner("planned");
   assert.equal(container.querySelector("ol"), null);
+});
+
+test("a floor summing several timed stages says at least, naming none", () => {
+  const { phases } = states.planned.monitor;
+  const state = replanned({
+    phases: [...phases.slice(0, 2), { ...phases[2], priorMs: 60_000 }, { ...phases[2], name: "export" }],
+    stageOrder: { index: 1, count: 4, first: 1 },
+    untimed: ["export"],
+    progress: { phase: 1, done: 5 },
+  });
+  for (const full of [true, false]) {
+    const view = lineOf(state, full);
+    assert.equal(bare(view.eta), bare(m.run_eta_floor({ duration: "5s" })), `full: ${full}`);
+    assert.equal(view.etaStage, false);
+    assert.match(bare(view.etaDetail), /export not timed/);
+  }
+});
+
+test("a floor that counts only the setup stage the run is in says how much setup is left", () => {
+  const { phases } = states.planned.monitor;
+  const setup = { line: null, stage: "download", startsAt: null };
+  const last = replanned({ phases: phases.slice(0, 2), stageOrder: { index: 0, count: 2, first: 1 }, untimed: ["train"], progress: { phase: 0, done: 2 }, setup });
+  // With more setup to come, the time is the stage's own, not setup's.
+  const early = replanned({ phases, stageOrder: { index: 0, count: 3, first: 2 }, untimed: ["train", "eval"], progress: { phase: 0, done: 2 }, setup });
+  for (const full of [true, false]) {
+    const view = lineOf(last, full);
+    assert.ok(view.settingUp, `full: ${full}`);
+    assert.equal(bare(view.eta), bare(m.run_eta_setup_left({ duration: "5s" })), `full: ${full}`);
+    assert.equal(bare(view.etaDetail), bare(m.run_eta_untimed({ stages: "train" })));
+    assert.equal(bare(lineOf(early, full).eta), bare(m.run_eta_stage_left({ duration: "5s", stage: "download" })), `full: ${full}`);
+  }
 });

@@ -64,6 +64,8 @@ export interface RunModel {
   leftMs: number | null;
   etaFloor: boolean;
   etaDetail: string;
+  /** `eta` counts only the stage the run is in, never the whole run. */
+  etaStage: boolean;
   /** Whether `eta` is a live countdown, drawn heavier in the strip. */
   etaStrong: boolean;
   progress: string;
@@ -331,6 +333,12 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     sentence = { text: statusText, stage: stageSlots, key: `auto:${stageKey}`, at: null };
   }
 
+  // A floor that every later stage is missing from counts only the stage the run is in.
+  const untimed = estimate?.untimed ?? [];
+  const later = order?.count != null && order.index != null ? order.count - order.index - 1 : 0;
+  const floorStage = estimate?.floor && rawName && later > 0 && untimed.length === later && !untimed.includes(rawName)
+    ? { name: rawName, setup: settingUp && order?.index != null && order.index + 1 === order.first }
+    : null;
   let eta = "";
   let etaDetail = "";
   let etaStrong = false;
@@ -353,7 +361,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     eta = monitor ? m.run_eta_none() : m.run_elapsed({ duration: durationText(now - run.createdAt) });
   } else if (settingUp && (setup?.startsAt != null || (!etaFloor && !estimate?.pending))) {
     const startsAt = setup?.startsAt;
-    if (startsAt != null) eta = startsAt > now ? m.run_setup_starts_in({ duration: remainingText(startsAt - now) }) : m.run_setup_starting();
+    eta = startsAt == null ? m.run_eta_none() : startsAt > now ? m.run_setup_starts_in({ duration: remainingText(startsAt - now) }) : m.run_setup_starting();
   } else if (open && limitEndsAt !== null) {
     eta = m.run_eta_to_limit({ duration: durationText(limitEndsAt - now) });
     etaDetail = monitor?.rules.length ? m.run_eta_ends_by_rules({ clock: clockText(limitEndsAt) }) : m.run_eta_ends_by({ clock: clockText(limitEndsAt) });
@@ -362,7 +370,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     etaElapsed = true;
     if (!finishing && !setup && (stagePhase?.of != null || stageDone === null)) etaDetail = noEstimate;
   } else if (estimate) {
-    ({ eta, detail: etaDetail, strong: etaStrong, leftMs } = estimateWords(estimate, now, limit, progress?.stallMs ?? 0));
+    ({ eta, detail: etaDetail, strong: etaStrong, leftMs } = estimateWords(estimate, now, limit, progress?.stallMs ?? 0, floorStage));
   } else {
     // A server that sends no monitor at all.
     eta = m.run_elapsed({ duration: durationText(elapsed) });
@@ -443,6 +451,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     eta,
     leftMs: settingUp ? null : leftMs,
     etaFloor,
+    etaStage: floorStage !== null && leftMs !== null,
     etaDetail,
     etaStrong: etaStrong && !frozen,
     progress: caption,

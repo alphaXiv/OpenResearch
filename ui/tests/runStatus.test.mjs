@@ -98,6 +98,13 @@ test("the whole-run line shows a floor and names stages with no timing", async (
   assert.match(bare(card.textContent), /Whole run: At least 1h 5m left.*sweep not timed/);
 });
 
+test("a floor that counts only the current stage drops whole run from the card and names the stage", async () => {
+  await status(null, { estimate: { loMs: 3_840_000, midMs: 3_900_000, hiMs: 4_000_000, at: now, pending: false, pastLimitMs: null, floor: true, untimed: ["eval", "export"] } });
+  const text = bare(find('[role="dialog"]').textContent);
+  assert.ok(text.includes(`${bare(m.run_eta_stage_left({ duration: "1h 5m", stage: "train" }))} · eval, export not timed`), text);
+  assert.ok(!text.includes(bare(m.run_whole_time({ time: "" }))), text);
+});
+
 test("a timed floor counts down its midpoint on full and summary rows", () => {
   const estimate = { loMs: 11 * 60_000, midMs: 22 * 60_000, hiMs: 36 * 60_000, at: now, floor: true, pending: false, pastLimitMs: null, untimed: ["eval"] };
   for (const full of [true, false]) {
