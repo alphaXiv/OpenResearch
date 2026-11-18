@@ -6,7 +6,6 @@ import { getLocale } from "../../../paraglide/runtime.js";
 import { fmtMagnitude, fmtMeasure, fmtSignal } from "../../../runMonitor/format";
 import { versusOf } from "../../../runMonitor/model";
 import type { ChartBlock, Point, RunMonitor, SignalSpec } from "../../../runMonitor/types";
-import { cn } from "../../ui/cn";
 import { useBoxSize } from "../useBoxSize";
 import { chartOf, type ChartData, type Series } from "./series";
 
@@ -144,8 +143,8 @@ const DOT_SPACING = 14;
 /** About how wide a character of an axis label is, to thin labels that would collide. */
 const CHAR_WIDTH = 6.5;
 
-/** A readout beside the pointer, in the top layer so no card around the chart clips it; `above` floats it over the chart's box rather than inside it. */
-function Readout({ at, width, above, onDismiss, children }: { at: number; width: number; above: boolean; onDismiss: () => void; children: ReactNode }) {
+/** A readout beside the pointer, in the top layer so no card around the chart clips it; `outside` floats it under the chart's box, over the box only where the screen has no room below, rather than inside it. */
+function Readout({ at, width, outside, onDismiss, children }: { at: number; width: number; outside: boolean; onDismiss: () => void; children: ReactNode }) {
   const ref = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     const readout = ref.current!;
@@ -158,9 +157,9 @@ function Readout({ at, width, above, onDismiss, children }: { at: number; width:
     const box = readout.parentElement!.getBoundingClientRect();
     const size = readout.getBoundingClientRect();
     const left = at > width / 2 ? box.left + at - size.width - 10 : box.left + at + 10;
-    const over = box.top - size.height - 6;
+    const under = box.bottom + 6;
     readout.style.left = `${Math.max(8, Math.min(left, window.innerWidth - size.width - 8))}px`;
-    readout.style.top = `${above ? (over >= 8 ? over : box.bottom + 6) : box.top + 8}px`;
+    readout.style.top = `${outside ? (under + size.height <= window.innerHeight - 8 ? under : Math.max(8, box.top - size.height - 6)) : box.top + 8}px`;
   });
   return (
     <div
@@ -317,7 +316,7 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
     const target = at ?? (xLog ? Math.exp(Math.log(x0) + position * (Math.log(x1) - Math.log(x0))) : x0 + position * (x1 - x0));
     const hits = series.flatMap((line) => {
       const point = at === null ? nearest(line.points, target) : line.points.find(([px]) => px === at);
-      return point && point[1] !== null && (at !== null || Math.abs(x(point[0]) - hover) <= 40) ? [{ line, point }] : [];
+      return point && point[1] !== null && (at !== null || (pointer?.keyboard && !line.ghost) || Math.abs(x(point[0]) - hover) <= 40) ? [{ line, point }] : [];
     });
     if (hits.length === 0) return null;
     const mine = hits.filter((hit) => !hit.line.ghost);
@@ -343,7 +342,8 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
   }));
   const spoken = readout && readoutRows && `${readoutTitle(readout.anchor)}: ${readoutRows.map((row) => `${row.name} ${row.measure ? `${row.measure} ` : ""}${row.value}`).join(", ")}`;
 
-  const stops = [...new Set(drawn.map((point) => point[0]))].sort((a, b) => a - b);
+  const own = known(owned.flatMap((line) => line.points));
+  const stops = [...new Set((own.length > 0 ? own : drawn).map((point) => point[0]))].sort((a, b) => a - b);
   const interact = {
     tabIndex: 0,
     role: "group",
@@ -371,14 +371,20 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
       setPointer({ at: x(stops[Math.max(0, Math.min(stops.length - 1, next))]), keyboard: true });
     },
   };
-  const focusRing = "rounded-sm outline-none focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:-outline-offset-2";
+  const focusRing = (
+    <span
+      aria-hidden="true"
+      className="pointer-events-none absolute rounded-sm group-focus-visible:outline-2 group-focus-visible:outline-solid group-focus-visible:outline-focus group-focus-visible:-outline-offset-2"
+      style={{ left: margin.start, top: margin.top, width: innerWidth, height: innerHeight }}
+    />
+  );
 
   const cursor = readout && <>
     <line x1={hover!} x2={hover!} y1={margin.top} y2={margin.top + innerHeight} stroke="var(--border)" />
     {mark !== "bars" && readout.hits.map(({ line, point }) => <circle key={line.name} cx={x(point[0])} cy={y(point[1]!)} r="4" fill={line.color} stroke="var(--base)" strokeWidth="2" />)}
   </>;
   const readoutView = readout && readoutRows && (
-    <Readout at={hover!} width={width} above={!page} onDismiss={dismiss}>
+    <Readout at={hover!} width={width} outside={!page} onDismiss={dismiss}>
       <b className="font-medium text-text">{readoutTitle(readout.anchor)}</b>
       {readoutRows.map(({ line, name, value, measure }) => (
         <span key={line.name} className="flex items-center gap-1.5">
@@ -393,7 +399,8 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
 
   if (!page) {
     return (
-      <div ref={ref} dir="ltr" className={cn("relative h-full min-h-6 w-full", focusRing)} {...interact}>
+      <div ref={ref} dir="ltr" className="group relative h-full min-h-6 w-full outline-none" {...interact}>
+        {width > 0 && focusRing}
         {drawn.length > 0 && (
           <svg width={width} height={boxHeight} role="img" aria-label={label} className="absolute inset-0 overflow-visible">
             {width > 0 && ranged && <line x1={margin.start} x2={margin.start + innerWidth} y1={margin.top + innerHeight} y2={margin.top + innerHeight} stroke="var(--border-variant)" />}
@@ -461,7 +468,8 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
   });
 
   const chart = (
-    <div ref={ref} dir="ltr" className={cn("relative w-full", focusRing)} style={{ height: boxHeight }} {...interact}>
+    <div ref={ref} dir="ltr" className="group relative w-full outline-none" style={{ height: boxHeight }} {...interact}>
+      {width > 0 && focusRing}
       <svg width={width} height={boxHeight} role="img" aria-label={blank ? empty : label} className="block overflow-visible text-xs">
           {drawn.length > 0 && yTicks.map((value) => (
             <g key={value}>

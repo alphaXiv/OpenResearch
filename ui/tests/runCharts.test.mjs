@@ -41,7 +41,7 @@ async function draw(monitor, block, size = "page", { live = true } = {}) {
 async function point(container, x) {
   const box = chartOf(container).parentElement;
   await act(async () => box.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX: x })));
-  return box.querySelector('[aria-hidden="true"]');
+  return box.querySelector("[popover]");
 }
 
 test("a codec's frontier draws each series against its own x on a log axis, the parent's under it, and names both axes by their units", async () => {
@@ -119,6 +119,25 @@ test("a readout never gives a value beside a step it wasn't recorded at", async 
   const parents = said.match(/parent[\d.]+ at [\d,.]+/g) ?? [];
   assert.equal(parents.length, 2, `the parent samples every 100 steps, so each of its values names its own step: ${said}`);
   assert.ok(parents.every((one) => !one.endsWith(` at ${step}`)), said);
+});
+
+test("a strip's keyboard entry reads the run's own latest point with every line there, and its focus ring stops above the axis", async () => {
+  const monitor = fixture("finetune");
+  const short = (points) => points.filter(([step]) => step <= 500);
+  const behind = { ...monitor, series: { ...monitor.series, loss: short(monitor.series.loss), val_loss: short(monitor.series.val_loss) } };
+  const latest = behind.series.loss.at(-1)[0];
+  const strip = await draw(behind, monitor.view.blocks[0], "strip");
+  const box = chartOf(strip).parentElement;
+  await press("ArrowLeft", box);
+  const said = text(box.querySelector("[popover]"));
+  assert.match(said, new RegExp(`^step ${latest}(?!\\d)`), `the parent runs on to ${monitor.x.max}, but the run is at ${latest}: ${said}`);
+  assert.equal(said.match(/parent/g)?.length, 2, said);
+  assert.match(said, /Val loss[\d.]+Train loss[\d.]+$/, `the run's own lines are there too: ${said}`);
+
+  const ring = box.querySelector(":scope > span[aria-hidden]");
+  const axis = [...chartOf(strip).querySelectorAll("line")].find((line) => line.getAttribute("stroke") === "var(--border-variant)");
+  assert.ok(ring && axis, "a ring and an axis line");
+  assert.ok(parseFloat(ring.style.top) + parseFloat(ring.style.height) <= Number(axis.getAttribute("y1")), "the ring ends where the axis line begins, clear of the labels under it");
 });
 
 test("a readout stays under the pointer while the run adds points", async () => {
