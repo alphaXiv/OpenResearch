@@ -11,6 +11,7 @@ import {
   type RefObject,
 } from "react";
 import { WorkspaceDomContext } from "../WorkspaceDom";
+import { useRuntime } from "../RemoteRuntime";
 import { useWorkspace } from "../workspace";
 import { mutUpdateUiState } from "../queries/settings";
 import { EscapeScope } from "./EscapeScope";
@@ -342,6 +343,7 @@ export function ModelPicker({
   const { portalContainer } = useContext(WorkspaceDomContext);
 
   const workspace = useWorkspace();
+  const runtime = useRuntime();
   const { getHarnessesQuery, getOpenCodeProvidersQuery, getLocalModelsQuery, getUiStateQuery, getModelFeedQuery } = workspace.queries;
 
   const { data: catalog = EMPTY_HARNESSES, isPending: catalogLoading } = useQuery(getHarnessesQuery());
@@ -386,10 +388,19 @@ export function ModelPicker({
 
   // The open chat's model button points at one model at a time, once each: the newest release an agent offers, then
   // the feed's nudge toward a free model while free models are on. After one is dismissed, the next waits for a reload.
+  // None in a development build.
   const nudge = feed?.nudge;
   const nudgeLine = nudge && uiState?.opencodeFreeModels ? feedLine(lines, nudge.model) : undefined;
   const nudgeText = nudge && nudgeLine && nudgeMessage(nudge);
-  const release = released.find((line) => !line.offers[0].model.free && FRONTIER_LABS.includes(lineLab(line) as never));
+  const installed = uiState?.createdAt ? new Date(uiState.createdAt) : undefined;
+  const installedDayBefore = installed && new Date(installed.getFullYear(), installed.getMonth(), installed.getDate() - 1).getTime();
+  const release = released.find(
+    (line) =>
+      !line.offers[0].model.free &&
+      FRONTIER_LABS.includes(lineLab(line) as never) &&
+      // A model that came out before the day before this copy was installed isn't news to its user.
+      !(installedDayBefore && localDay(releases[line.key]).getTime() < installedDayBefore),
+  );
   const callouts: Callout[] = [
     ...(release ? [{
       kind: "release" as const,
@@ -409,7 +420,7 @@ export function ModelPicker({
     }] : []),
   ];
   const seenNudges = uiState?.seenNudges;
-  const callout = canNudge && !disabled && seenNudges && !calledOut.has(workspace) ? callouts.find(({ id, line }) => !seenNudges.includes(id) && line !== selectedLine) : undefined;
+  const callout = canNudge && runtime.buildChannel !== "development" && !disabled && seenNudges && !calledOut.has(workspace) ? callouts.find(({ id, line }) => !seenNudges.includes(id) && line !== selectedLine) : undefined;
   const leaving = useRef<number>(undefined);
   useEffect(() => () => clearTimeout(leaving.current), []);
 

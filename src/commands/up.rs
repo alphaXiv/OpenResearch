@@ -197,7 +197,8 @@ pub async fn run(args: UpArgs) -> Result<()> {
     };
     // Plan-mode turns hand this port to the `orx mcp` permission bridge.
     state.chat.set_up_port(actual_port);
-    state.chat.resume_persisted_queues();
+    // Before any queue, notice or lease sweep can take a quit turn's slot.
+    state.chat.resume_quit_turns().await;
     {
         let chat = state.chat.clone();
         let moving = state.data_dir_move_in_progress.clone();
@@ -10700,6 +10701,15 @@ async fn recover_chat_turn(
 ) -> ApiResult {
     reject_if_stopping(&state)?;
     reject_if_moving(&state)?;
+    let latest = Store::open()
+        .and_then(|store| store.latest_chat_turn(&id))
+        .map_err(|error| ApiError(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    if latest.is_some_and(|turn| turn.id != turn_id) {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "A later message replaced this turn.".into(),
+        ));
+    }
     let result = state
         .chat
         .recover_turn(
@@ -11679,6 +11689,7 @@ mod tests {
             collapsed_model_sections: Vec::new(),
             model_sightings: None,
             seen_nudges: Vec::new(),
+            created_at: None,
             preferred_agent: Some(StoredAgentSelection {
                 profile: None,
                 harness: "codex".into(),
@@ -11720,6 +11731,7 @@ mod tests {
             collapsed_model_sections: Vec::new(),
             model_sightings: None,
             seen_nudges: Vec::new(),
+            created_at: None,
         };
         let catalog = json!({"harnesses": [{"id":"claude-code", "agentReady":true,"defaultModel":"opus",
             "models":[{"id":"opus"}], "options":{"defaultPermissionMode":"plan", "reasoningLevels":[{"id":"default"}]}}]});
@@ -11777,6 +11789,7 @@ mod tests {
             collapsed_model_sections: Vec::new(),
             model_sightings: None,
             seen_nudges: Vec::new(),
+            created_at: None,
         };
         let catalog = json!({"harnesses":[
             {"id":"codex", "agentReady":true, "models":[], "options":{}},

@@ -33,12 +33,13 @@ const feed = (fields = {}) => ({
 });
 
 /** The open chat over a server whose feed is `served` and whose saved preferences, which the page's changes update, start as `state`. */
-async function open(served = feed(), state = {}) {
+async function open(served = feed(), state = {}, buildChannel = "stable") {
   const saved = { onboardingCompleted: true, opencodeFreeModels: true, seenNudges: [], ...state };
   const chat = await renderChat("/projects/p/tasks/s", {
     sessions: [session("s")],
     harnesses: [codex, opencode],
     routes: {
+      "GET /_orx/runtime": () => ({ kind: "local", version: "test", buildChannel }),
       "GET /api/model-feed": () => served,
       "GET /api/settings/ui-state": () => saved,
       "POST /api/settings/ui-state": (init) => Object.assign(saved, JSON.parse(init.body)),
@@ -111,6 +112,21 @@ test("a release is dated today, yesterday or this week", async () => {
     assert.ok(callout("GPT-6 Astra").textContent.endsWith(text({ lab: "OpenAI" })), String(days));
     await view.unmount();
   }
+});
+
+test("a release more than a day older than this copy isn't pointed at", async () => {
+  const installed = new Date(`${daysAgo(0)}T12:00:00`).getTime();
+  for (const [released, createdAt, shown] of [[1, installed, true], [2, installed, false], [6, null, true]]) {
+    const view = await open(feed({ releases: { "gpt-6-astra": daysAgo(released) } }), { createdAt });
+    assert.equal(Boolean(callout("GPT-6 Astra")), shown, JSON.stringify({ released, createdAt }));
+    await view.unmount();
+  }
+});
+
+test("a development build points at nothing", async () => {
+  await open(feed({ releases: { "gpt-6-astra": daysAgo(0) } }), {}, "development");
+  assert.equal(callout("GPT-6 Astra"), null);
+  assert.equal(shownNudge(), null);
 });
 
 test("the nudge shows over the open chat's model button until its model, the free models or its days are gone", async () => {
