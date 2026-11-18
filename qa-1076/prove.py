@@ -8,11 +8,13 @@ binary=str(Path(binary).resolve())
 assert mode in ('before','after')
 win=os.name=='nt'
 events=[]
+received_names=[]
 class Receiver(BaseHTTPRequestHandler):
     def do_POST(self):
         raw=self.rfile.read(int(self.headers.get('Content-Length','0')))
         if self.path=='/analytics/v1/cli-events':
             for e in json.loads(raw)['events']:
+                received_names.append(e['name'])
                 if e['name']=='cli_harness_setup': events.append(e['properties'])
             self.send_response(202)
         else: self.send_response(404)
@@ -28,10 +30,10 @@ def await_until(check, label, timeout=55):
         if result:return result
         time.sleep(.05)
     raise RuntimeError('timed out: '+label)
-def ws(port):
+def ws(port,harness='opencode'):
     s=socket.create_connection(('127.0.0.1',port)); f=s.makefile('rb')
     key=base64.b64encode(os.urandom(16)).decode()
-    req=f'GET /api/harnesses/setup?harness=opencode&action=login HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n'
+    req=f'GET /api/harnesses/setup?harness={harness}&action=login HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n'
     s.sendall(req.encode()); status=f.readline(); assert b' 101 ' in status,status
     while f.readline().strip(): pass
     return s,f
@@ -48,9 +50,11 @@ with tempfile.TemporaryDirectory() as d:
     root=Path(d); (root/'bin').mkdir()
     fixture=Path(__file__).with_name('opencode-fixture.py').resolve()
     if win:
-        # Windows PTYs launch a native process; use a tiny executable wrapper only for the external agent fixture.
-        shim=root/'shim.rs'; shim.write_text('fn main(){let s=std::process::Command::new(std::env::var_os("FIXTURE_PY").unwrap()).arg(std::env::var_os("FIXTURE_SCRIPT").unwrap()).args(std::env::args_os().skip(1)).status().unwrap();std::process::exit(s.code().unwrap_or(1));}')
-        subprocess.run(['rustc',str(shim),'-o',str(root/'bin/opencode.exe')],check=True)
+        # The Windows missing-terminal evidence includes Codex. Run a native fixture inside the real ConPTY.
+        marker=root/'login-running'
+        source='fn main(){let a=std::env::args().collect::<Vec<_>>();if a.get(1).map(String::as_str)==Some("--version"){println!("codex-cli 0.145.0");return}if a.get(1).map(String::as_str)==Some("login") && a.len()==2{std::fs::write(r#"'+str(marker)+'"#,b"running").unwrap();loop{std::thread::park()}}}'
+        shim=root/'shim.rs';shim.write_text(source)
+        subprocess.run(['rustc',str(shim),'-o',str(root/'bin/codex.exe')],check=True)
     else:
         exe=root/'bin/opencode'; shutil.copyfile(fixture,exe);exe.chmod(0o755)
     env={'HOME':d,'PATH':str(root/'bin')+':/usr/bin:/bin:/usr/sbin:/sbin','XDG_CONFIG_HOME':d+'/config','XDG_CACHE_HOME':d+'/cache','XDG_DATA_HOME':d+'/data','TMPDIR':d,
@@ -60,22 +64,26 @@ with tempfile.TemporaryDirectory() as d:
         env.update(USERPROFILE=d, APPDATA=d+'/roaming', LOCALAPPDATA=d+'/local', TEMP=d, TMP=d, FIXTURE_PY=sys.executable,FIXTURE_SCRIPT=str(fixture))
         env['PATH']=str(root/'bin')+os.pathsep+os.path.join(os.environ['SYSTEMROOT'],'System32')
     assert subprocess.check_output([binary,'version','--build-channel'],env=env,text=True).strip()=='production'
-    show(revision=mode,platform=platform.system()+' '+platform.machine(),app='unmodified orx',transport='setup WebSocket and localhost telemetry HTTP',external_fixture='OpenCode 2.3; free model, no authenticated providers')
+    show(revision=mode,platform=platform.system()+' '+platform.machine(),app='unmodified orx',transport='setup WebSocket and localhost telemetry HTTP',external_fixture=('native Codex; login in progress' if win else 'OpenCode 2.3; free model, no authenticated providers'))
     servers=[]; sockets=[]
     def start():
         port=unused_port(); log=open(root/f'{port}.log','w')
         p=subprocess.Popen([binary,'up','--no-browser','--port',str(port)],env=env,cwd=d,stdin=subprocess.DEVNULL,stdout=log,stderr=log,creationflags=(subprocess.CREATE_NEW_CONSOLE if win else 0))
         servers.append(p);log.close();await_until(lambda: alive(port),'app startup');return p,port
     try:
-        p,port=start();sockets.extend(ws(port))
-        failure=await_until(lambda:next((e for e in events if terminal(e)),None),'login failure')
-        show(scenario='free model, login returned without credentials',outcome=failure['outcome'],stage=failure['stage'],reason=failure['reason'],diagnostic=failure['errorExcerpt'])
-        assert (failure['outcome'],failure['stage'],failure['reason'])==('failed','verify','not_ready'),failure
-        assert failure['errorExcerpt']==('agent reported no usable state' if mode=='before' else 'agent is not signed in'),failure
+        p,port=start()
+        first_id=None
+        if not win:
+            sockets.extend(ws(port))
+            failure=await_until(lambda:next((e for e in events if terminal(e)),None),'login failure')
+            show(scenario='free model, login returned without credentials',outcome=failure['outcome'],stage=failure['stage'],reason=failure['reason'],diagnostic=failure['errorExcerpt'])
+            assert (failure['outcome'],failure['stage'],failure['reason'])==('failed','verify','not_ready')
+            assert failure['errorExcerpt']==('agent reported no usable state' if mode=='before' else 'agent is not signed in')
+            first_id=failure['attemptId']
         (root/'hold-login').touch()
-        sockets.extend(ws(port))
-        await_until(lambda:(root/'login-running').exists(),'PTY login started')
-        command=await_until(lambda:next((e for e in events if e['outcome']=='command_started' and e['attemptId']!=failure['attemptId']),None),'second command_started')
+        sockets.extend(ws(port,'codex' if win else 'opencode'))
+        await_until(lambda:(root/'login-running').exists(),'native PTY login started',100)
+        command=await_until(lambda:next((e for e in events if e['outcome']=='command_started' and e['attemptId']!=first_id),None),'second command_started')
         aid=command['attemptId']
         if win:
             # Attach a helper to this application's private console; do not send Ctrl+C to the CI runner.
@@ -98,12 +106,15 @@ with tempfile.TemporaryDirectory() as d:
                         if e.get('name')=='cli_harness_setup' and props.get('attemptId')==aid and props not in rows:rows.append(props)
             return rows
         if mode=='after':
-            await_until(lambda:any(terminal(e) for e in traces()),'observed interruption')
+            await_until(lambda:any(e['attemptId']==aid and terminal(e) for e in events),'interruption acknowledged at the loopback receiver')
         rows=traces(); ends=[e for e in rows if terminal(e)]
         show(scenario=('Ctrl+C' if win else 'SIGTERM')+' while PTY login still in flight; app restarted',last_stage='command',terminal_events=[(e['outcome'],e['errorExcerpt']) for e in ends])
         if mode=='after':assert [(e['outcome'],e['errorExcerpt']) for e in ends]==[('interrupted','setup command task ended before a result')],ends
         else: assert not ends,ends
         show(result='PASS',production_traffic=False)
+    except BaseException:
+        show(debug='synthetic fixture only',event_names=sorted(set(received_names)),setup_rows=[(e['outcome'],e['stage'],e['reason'],e['errorExcerpt']) for e in events],marker=(root/'login-running').exists(),outbox_files=sum(1 for path in root.rglob('*.json') if 'telemetry' in str(path).lower()),app_exit=[p.poll() for p in servers])
+        raise
     finally:
         for obj in sockets:
             try:obj.close()
