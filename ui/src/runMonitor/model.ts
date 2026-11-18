@@ -346,7 +346,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   else if (pre) {
     etaElapsed = !monitor;
     eta = monitor ? m.run_eta_none() : m.run_elapsed({ duration: durationText(now - run.createdAt) });
-  } else if (settingUp) {
+  } else if (settingUp && (setup?.startsAt != null || !etaFloor)) {
     const startsAt = setup?.startsAt;
     if (startsAt != null) eta = startsAt > now ? m.run_setup_starts_in({ duration: remainingText(startsAt - now) }) : m.run_setup_starting();
   } else if (open && limitEndsAt !== null) {
@@ -427,7 +427,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     sentence,
     headline,
     eta,
-    leftMs,
+    leftMs: settingUp ? null : leftMs,
     etaFloor,
     etaDetail,
     etaStrong: etaStrong && !lastSeen,

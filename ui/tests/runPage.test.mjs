@@ -126,6 +126,24 @@ test("a starting run draws none of its view's blocks", async () => {
   assert.equal(container.querySelector("dl"), null);
 });
 
+test("a timed counter shows its floor during setup before the first metric", async () => {
+  const estimate = { loMs: 330_000, midMs: 600_000, hiMs: 900_000, at: now, floor: true, pending: false, pastLimitMs: null };
+  const setup = { stage: null, line: null, startsAt: null };
+  const monitor = {
+    ...pipeline(), source: "detected", setup, estimate, latest: {}, headline: null,
+    phases: [{ name: "", of: 10, unit: "chunks", priorMs: null, startedAt: now - 600_000, endedAt: null }],
+    stageOrder: { index: 0, count: null, first: null },
+    progress: { phase: 0, done: 9, segments: [{ weight: 1, fill: 0.9 }], whole: 0.9, lastAt: now, stallMs: 0 },
+    viewFrom: { ...pipeline().viewFrom, isDefault: true },
+    view: { ...pipeline().view, headline: [], blocks: [] },
+  };
+  const { container } = await overview([run("r2", { monitor: summary(monitor, { setup, estimate }) })], () => monitor);
+  const page = container.querySelector('[role="group"]');
+  assert.match(text(page), /9 of 10 chunks/);
+  assert.match(text(page), /At least 5m left/);
+  assert.ok(text(page).includes(m.run_page_no_signals()));
+});
+
 test("a view with nothing to draw says why: nothing found in the log yet, nothing found at all, or a view set to show nothing", async () => {
   const empty = (viewFrom) => ({ ...pipeline(), view: { ...pipeline().view, blocks: [{ heatmap: "loss" }] }, viewFrom: { ...pipeline().viewFrom, ...viewFrom } });
   const said = async (runs, monitor) => text((await overview(runs, () => monitor)).container);

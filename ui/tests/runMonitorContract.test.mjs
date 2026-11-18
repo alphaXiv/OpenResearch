@@ -223,6 +223,7 @@ test("the line says its time is elapsed, and why there is no estimate in its des
 test("a detected counter times only its stage and promises no whole-run finish", async () => {
   for (const full of [true, false]) {
     const view = model("detected", full);
+    assert.equal(bare(view.eta), states.detected.expect.eta);
     assert.equal(view.leftMs, null);
     assert.equal(view.etaDetail, "");
     assert.equal(view.bar.whole, null);

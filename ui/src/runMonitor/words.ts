@@ -53,8 +53,10 @@ export function captionProgress(progress: Progress, phases: Phase[], openLimitMs
 export function estimateWords(estimate: Estimate, now: number, limit: { endsAt: number; ms: number } | null, stallMs: number): { eta: string; detail: string; strong: boolean; leftMs: number | null } {
   const remaining = (ms: number) => Math.max(0, ms - (now - estimate.at));
   if (estimate.floor) {
-    const left = remaining(estimate.midMs ?? 0);
     const stages = estimate.untimed ?? [];
+    const left = stages.length
+      ? remaining(estimate.midMs ?? 0)
+      : 1000 * Math.floor(remaining(estimate.loMs ?? 0) / 1000);
     return {
       eta: left > 0 ? m.run_eta_floor({ duration: remainingText(left) }) : "",
       detail: stages.length ? m.run_eta_untimed({ stages: autoDir(stages.join(", ")) }) : "",
