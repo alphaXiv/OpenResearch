@@ -547,6 +547,8 @@ fn safe_error_excerpt_with_step(output: &str, step: Option<InstallStep>) -> Opti
     let mut excerpt = step.map_or_else(String::new, |step| step.label().to_owned());
     for phrase in PHRASES
         .iter()
+        .copied()
+        .chain(crate::local::harness::cursor::CursorStatusError::ALL.map(|e| e.excerpt()))
         .filter(|phrase| output.contains(&phrase.to_ascii_lowercase()))
     {
         let separator = if excerpt.is_empty() { "" } else { "; " };
