@@ -11,7 +11,7 @@ Araştırma ajanları için yerel öncelikli harness ve çalışma alanı.
 <a href="https://github.com/alphaXiv/OpenResearch/blob/main/LICENSE"><img src="https://img.shields.io/github/license/alphaXiv/OpenResearch?style=flat-square" alt="Lisans" /></a>
 </p>
 
-<p><a href="README.md">English</a> · <a href="README.es.md">Español</a> · <a href="README.ko.md">한국어</a> · <a href="README.zh.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.ru.md">Русский</a> · <a href="README.tr.md">Türkçe</a></p>
+<p><a href="README.md">English</a> · <a href="README.es.md">Español</a> · <a href="README.ko.md">한국어</a> · <a href="README.zh.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.ru.md">Русский</a> · <a href="README.tr.md">Türkçe</a> · <a href="README.vi.md">Tiếng Việt</a></p>
 
 <p><img src=".github/readme-assets/openresearch-demo.gif" alt="OpenResearch masaüstü uygulaması: bir ajan, bir eğitim çalıştırmasını teşhis etmek için alphaXiv'de arama yapıyor, ardından Trackio grafiklerini ve sonuç görsellerini açıyor" width="680" /></p>
 
