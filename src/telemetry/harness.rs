@@ -268,7 +268,7 @@ impl InstallStep {
 
 pub(crate) struct SetupAttempt {
     id: uuid::Uuid,
-    pub(crate) install_step: Option<InstallStep>,
+    install_step: std::sync::Mutex<Option<InstallStep>>,
     harness: String,
     action: &'static str,
     trigger: &'static str,
@@ -279,7 +279,7 @@ impl SetupAttempt {
     pub(crate) fn new(harness: &str, action: &'static str, trigger: &'static str) -> Self {
         let attempt = Self {
             id: uuid::Uuid::new_v4(),
-            install_step: None,
+            install_step: Default::default(),
             harness: harness.into(),
             action,
             trigger,
@@ -316,6 +316,12 @@ impl SetupAttempt {
         );
     }
 
+    pub(crate) fn set_install_step(&self, step: InstallStep) {
+        if let Ok(mut current) = self.install_step.lock() {
+            *current = Some(step);
+        }
+    }
+
     fn error_excerpt(
         &self,
         outcome: &str,
@@ -326,7 +332,11 @@ impl SetupAttempt {
         // A failed command may be credited after verification if it installed a runnable copy.
         let failed_command = (outcome == "failed" && stage == "command")
             || (outcome == "succeeded" && exit_code.is_some_and(|code| code != 0));
-        let step = self.install_step.filter(|_| failed_command);
+        let step = if failed_command {
+            self.install_step.lock().ok().and_then(|step| *step)
+        } else {
+            None
+        };
         safe_error_excerpt_with_step(output.unwrap_or_default(), step)
     }
 }
@@ -554,13 +564,13 @@ mod tests {
     use super::*;
     #[test]
     fn install_failures_name_the_step_even_without_an_allowed_error() {
-        let mut attempt = SetupAttempt {
+        let attempt = SetupAttempt {
             id: uuid::Uuid::new_v4(),
             harness: "opencode".into(),
             action: "update",
             trigger: "manual",
             started: std::time::Instant::now(),
-            install_step: None,
+            install_step: Default::default(),
         };
         let noise = Some("native agent updater /home/private https://private.test/?token=abc");
         assert!(attempt
@@ -571,7 +581,7 @@ mod tests {
             InstallStep::NativeUpdater,
             InstallStep::ManagedCopy,
         ] {
-            attempt.install_step = Some(step);
+            attempt.set_install_step(step);
             assert_eq!(
                 attempt
                     .error_excerpt("failed", "command", Some(1), noise)
