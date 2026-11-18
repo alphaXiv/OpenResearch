@@ -1395,6 +1395,7 @@ impl Store {
             "ALTER TABLE local_projects ADD COLUMN paper_id TEXT",
             "ALTER TABLE local_projects ADD COLUMN github_sync_enabled INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE local_projects ADD COLUMN workspace_state_json TEXT",
+            "ALTER TABLE local_projects ADD COLUMN icon_json TEXT",
             "ALTER TABLE local_experiments ADD COLUMN chat_session_id TEXT",
             "ALTER TABLE local_experiments ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE ssh_host_tests ADD COLUMN tools_found INTEGER NOT NULL DEFAULT 0",
@@ -2576,7 +2577,7 @@ impl Store {
     ) -> Result<bool> {
         let tx = self.begin()?;
         let inserted = tx.execute(
-            &format!("INSERT OR IGNORE INTO local_projects ({PROJECT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"),
+            &format!("INSERT OR IGNORE INTO local_projects ({PROJECT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"),
             params![
                 project.id,
                 project.name,
@@ -2590,6 +2591,7 @@ impl Store {
                 project.paper_id,
                 project.created_at,
                 project.updated_at,
+                project.icon.as_ref().map(|icon| icon.to_string()),
             ],
         )?;
         if inserted == 0 {
@@ -2701,15 +2703,7 @@ impl Store {
     }
 
     pub fn create_local_project(&self, p: &LocalProject) -> Result<()> {
-        self.conn.execute(
-            &format!("INSERT INTO local_projects ({PROJECT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"),
-            params![
-                p.id, p.name, p.slug, p.github_owner, p.github_repo,
-                p.github_sync_enabled, p.baseline_branch, p.repo_path, p.run_command, p.paper_id,
-                p.created_at, p.updated_at,
-            ],
-        )?;
-        Ok(())
+        insert_local_project(&self.conn, p)
     }
 
     pub fn get_local_project(&self, id: &str) -> Result<Option<LocalProject>> {
@@ -3461,7 +3455,7 @@ impl Store {
         self.conn.execute(
             "UPDATE local_projects SET name = ?2, slug = ?3, github_owner = ?4, github_repo = ?5,
                     github_sync_enabled = ?6, baseline_branch = ?7, repo_path = ?8,
-                    run_command = ?9, paper_id = ?10, updated_at = ?11
+                    run_command = ?9, paper_id = ?10, updated_at = ?11, icon_json = ?12
              WHERE id = ?1",
             params![
                 p.id,
@@ -3475,6 +3469,7 @@ impl Store {
                 p.run_command,
                 p.paper_id,
                 now_ms(),
+                p.icon.as_ref().map(|icon| icon.to_string()),
             ],
         )?;
         Ok(())
@@ -3751,6 +3746,31 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// Top-level chats with an experiment run in flight, wherever they fall in the sidebar's paging.
+    /// Top-level chats still at work: with an experiment running, or among `live`,
+    /// the chats whose agent or delegates the server sees working.
+    pub fn sidebar_chat_sessions_at_work(
+        &self,
+        archived: Option<bool>,
+        live: &[&str],
+    ) -> Result<Vec<StoredChatSession>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {CHAT_SESSION_COLS} FROM chat_sessions
+             WHERE {TOP_LEVEL_CHATS} AND (?1 IS NULL OR archived = ?1)
+               AND (id IN (
+                 SELECT chat_session_id FROM runs
+                 WHERE status IN ('submitting', 'starting', 'running')
+                 UNION SELECT s.chat_session_id FROM run_subscriptions s
+                 JOIN runs r ON r.id = s.run_id
+                 WHERE r.status IN ('submitting', 'starting', 'running')
+               ) OR id IN (SELECT value FROM json_each(?2)))
+             ORDER BY updated_at DESC, id DESC"
+        ))?;
+        let live = serde_json::to_string(live)?;
+        let rows = stmt.query_map(params![archived, live], row_to_chat_session)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     pub fn side_chats_of(&self, parent_id: &str) -> Result<Vec<String>> {
         let mut stmt = self
             .conn
@@ -3988,14 +4008,7 @@ impl Store {
         session_ids: &[String],
     ) -> Result<()> {
         let tx = self.begin_immediate()?;
-        tx.execute(
-            &format!("INSERT INTO local_projects ({PROJECT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"),
-            params![
-                p.id, p.name, p.slug, p.github_owner, p.github_repo,
-                p.github_sync_enabled, p.baseline_branch, p.repo_path, p.run_command, p.paper_id,
-                p.created_at, p.updated_at,
-            ],
-        )?;
+        insert_local_project(&tx, p)?;
         for id in session_ids {
             tx.execute(
                 "UPDATE chat_sessions SET project_id = ?2 WHERE id = ?1",
@@ -6444,7 +6457,20 @@ const SELECT_RUN: &str = "SELECT id, experiment_id, project_id, status, backend_
                                  chat_session_id, cancel_reason FROM runs";
 
 const PROJECT_COLS: &str = "id, name, slug, github_owner, github_repo, github_sync_enabled, \
-                            baseline_branch, repo_path, run_command, paper_id, created_at, updated_at";
+                            baseline_branch, repo_path, run_command, paper_id, created_at, updated_at, icon_json";
+
+/// The one insert of a project row, so every column `PROJECT_COLS` names gets its value.
+fn insert_local_project(conn: &rusqlite::Connection, p: &LocalProject) -> Result<()> {
+    conn.execute(
+        &format!("INSERT INTO local_projects ({PROJECT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"),
+        params![
+            p.id, p.name, p.slug, p.github_owner, p.github_repo,
+            p.github_sync_enabled, p.baseline_branch, p.repo_path, p.run_command, p.paper_id,
+            p.created_at, p.updated_at, p.icon.as_ref().map(|icon| icon.to_string()),
+        ],
+    )?;
+    Ok(())
+}
 
 const EXPERIMENT_COLS: &str = "id, project_id, parent_experiment_id, slug, branch_name, \
                                title, description, run_command, agent_status, created_at, \
@@ -9653,6 +9679,7 @@ pub(crate) mod tests {
                     repo_path: dir.join(id).to_string_lossy().into_owned(),
                     run_command: None,
                     paper_id: None,
+                    icon: None,
                     created_at: 1,
                     updated_at: 2,
                 })
@@ -9835,6 +9862,50 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn project_icon_survives_updates_that_predate_it() {
+        let dir = std::env::temp_dir().join(format!("orx-store-icon-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let mut project = LocalProject {
+            id: "project".into(),
+            name: "Project".into(),
+            slug: "project".into(),
+            github_owner: String::new(),
+            github_repo: String::new(),
+            github_sync_enabled: false,
+            baseline_branch: "main".into(),
+            repo_path: dir.join("project").to_string_lossy().into_owned(),
+            run_command: None,
+            paper_id: None,
+            icon: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        store.create_local_project(&project).unwrap();
+        project.icon = Some(serde_json::json!({ "file": "assets/logo.png", "color": "teal" }));
+        store.update_local_project(&project).unwrap();
+
+        // The update an older orx runs names only the columns it knows.
+        store
+            .conn
+            .execute(
+                "UPDATE local_projects SET name = 'Renamed' WHERE id = 'project'",
+                [],
+            )
+            .unwrap();
+        let read = store.get_local_project("project").unwrap().unwrap();
+        assert_eq!(read.name, "Renamed");
+        assert_eq!(read.icon, project.icon);
+
+        project.icon = None;
+        store.update_local_project(&project).unwrap();
+        assert_eq!(
+            store.get_local_project("project").unwrap().unwrap().icon,
+            None
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn ui_state_singleton_seeds_existing_projects_and_latest_session() {
         let dir =
             std::env::temp_dir().join(format!("orx-store-ui-migrate-{}", uuid::Uuid::new_v4()));
@@ -9851,6 +9922,7 @@ pub(crate) mod tests {
                 repo_path: dir.join("project").to_string_lossy().into_owned(),
                 run_command: None,
                 paper_id: None,
+                icon: None,
                 created_at: 1,
                 updated_at: 1,
             })
@@ -10933,6 +11005,7 @@ pub(crate) mod tests {
             repo_path: std::env::temp_dir().join(id).to_string_lossy().into_owned(),
             run_command: None,
             paper_id: None,
+            icon: None,
             created_at: 1,
             updated_at: 1,
         }
@@ -11383,6 +11456,62 @@ pub(crate) mod tests {
             store.list_sidebar_chat_sessions(None, None).unwrap()[0].id,
             "chat_064"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sidebar_finds_chats_with_runs_in_flight_by_owner_or_subscription() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-store-sidebar-runs-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        for id in ["owner", "subscriber", "finished", "archived", "idle"] {
+            let mut session = chat_session_fixture(id);
+            session.archived = id == "archived";
+            store.create_chat_session(&session).unwrap();
+        }
+        store
+            .upsert_run(&run_fixture("run_owned", "running", Some("owner")))
+            .unwrap();
+        store
+            .upsert_run(&run_fixture("run_shared", "starting", None))
+            .unwrap();
+        store.subscribe_run("run_shared", "subscriber", 1).unwrap();
+        store
+            .upsert_run(&run_fixture("run_done", "done", Some("finished")))
+            .unwrap();
+        store
+            .upsert_run(&run_fixture("run_archived", "starting", Some("archived")))
+            .unwrap();
+
+        let ids = |archived| {
+            let mut ids: Vec<String> = store
+                .sidebar_chat_sessions_at_work(archived, &[])
+                .unwrap()
+                .into_iter()
+                .map(|session| session.id)
+                .collect();
+            ids.sort();
+            ids
+        };
+        assert_eq!(ids(Some(false)), ["owner", "subscriber"]);
+        assert_eq!(ids(Some(true)), ["archived"]);
+        assert_eq!(ids(None), ["archived", "owner", "subscriber"]);
+
+        // A chat the server sees working counts too, once and only if it is top-level.
+        store
+            .create_chat_session(&chat_session_fixture("delegate"))
+            .unwrap();
+        store
+            .record_chat_delegate("delegate", "idle", false)
+            .unwrap();
+        let live: Vec<String> = store
+            .sidebar_chat_sessions_at_work(Some(false), &["idle", "owner", "delegate"])
+            .unwrap()
+            .into_iter()
+            .map(|session| session.id)
+            .collect();
+        assert_eq!(live.len(), 3, "{live:?}");
+        assert!(live.contains(&"idle".to_string()) && !live.contains(&"delegate".to_string()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -12282,6 +12411,7 @@ pub(crate) mod tests {
                     repo_path: dir.join(id).to_string_lossy().into_owned(),
                     run_command: None,
                     paper_id: None,
+                    icon: None,
                     created_at: 1,
                     updated_at: 1,
                 })
@@ -12399,6 +12529,7 @@ pub(crate) mod tests {
                 repo_path: dir.join("project").to_string_lossy().into_owned(),
                 run_command: None,
                 paper_id: None,
+                icon: None,
                 created_at: 1,
                 updated_at: 1,
             })

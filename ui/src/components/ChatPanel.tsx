@@ -22,6 +22,8 @@ import { WorkspaceDomContext } from "../WorkspaceDom";
 import { useWorkspace } from "../workspace";
 
 import { Dialog } from "@base-ui/react/dialog";
+import { Menu } from "@base-ui/react/menu";
+import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { EscapeScope } from "./EscapeScope";
 import { commandRegion, subscribeCommandRegion } from "../keyboardRegion";
 import { ChatSearch } from "./ChatSearch";
@@ -31,13 +33,14 @@ import { LibraryPicker } from "./LibraryPicker";
 import { ProjectInfoCard } from "./ProjectInfoCard";
 import { NoProjectGroupHeader, PendingProjectMove, ProjectProposalCard, projectLabel, projectProposal, useCreateProject, type ProjectProposal } from "./NoProject";
 import { mutCreateScratchProject } from "../queries/projects";
+import { ProjectIconTile } from "./ProjectIcon";
 import { SessionHoverCard } from "./SessionHoverCard";
 import { AgentMessageCard } from "./AgentMessageCard";
 import { DelegateCard } from "./DelegateCard";
 import { EnvRequestCard } from "./EnvRequestCard";
 import { delegateStatus, delegatesOf, type DelegateStatus } from "../delegates";
 import { taskLocation } from "../workspaceState";
-import { fitSidebarRows, sidebarGroup, sidebarRowHeight, type SidebarRow } from "../sidebarLayout";
+import { DONE_PREVIEW_HEIGHT, fitSidebarRows, sidebarGroup, sidebarRowHeight, type SidebarRow } from "../sidebarLayout";
 import { useVirtualizer, defaultRangeExtractor, elementScroll, measureElement as measureVirtualElement, type Range as VirtualRange } from "@tanstack/react-virtual";
 import { markLiveUpdate } from "../queries/live";
 import {
@@ -104,10 +107,13 @@ import {
   FileText,
   FlaskConical,
   FolderPlus,
+  SquarePen,
+  CircleCheck,
   Globe,
   Gauge,
-  HelpCircle,
   Hourglass,
+  Undo2,
+  HelpCircle,
   Goal,
   LibraryBig,
   Lightbulb,
@@ -131,6 +137,8 @@ import {
 } from "lucide-react";
 
 import { BrandMark } from "./Wordmark";
+import { HarnessLogo, ModelMark } from "./HarnessLogo";
+import { chatStatus, chatStatusWorking, type ChatStatus } from "../chatStatus";
 import {
   type ChatSessionPatch,
   DEMO_FIGURE_SESSION_ID,
@@ -145,6 +153,7 @@ import {
   reconcileReasoning,
   reconcileServiceTier,
   fmtDuration,
+  timeAgo,
   RejectedResponseError,
   modelLabel,
   type FirstActionSurface,
@@ -158,6 +167,7 @@ import {
   type OrxSource,
   type Autonomy,
   type ChatSession,
+  type ChatActiveRun,
   type CitedMessage,
   type ChatSearchHit,
   type Harness,
@@ -231,7 +241,7 @@ import { ChatLinksContext, type ChatLinks } from "./ChatLinks";
 import { CITED_ID, messageRef } from "../agentMessages";
 import { PlanStrip } from "./PlanStrip";
 import { useComposerFocus } from "./useComposerFocus";
-import { ExperimentRunBanner } from "./ExperimentRunBanner";
+import { BackgroundTaskBanner, ExperimentRunBanner } from "./ExperimentRunBanner";
 import { SettingsHeader, harnessSetupPath, type SettingsTab } from "./SettingsPage";
 import { SkillMenu } from "./SkillMenu";
 import { MentionMenu, type MentionMatch } from "./MentionMenu";
@@ -915,6 +925,7 @@ const PROMPT_ACTIONS_CLASS_NAME = "prompt-actions flex flex-wrap gap-2";
 
 const NO_MESSAGES: ChatMessage[] = [];
 const EMPTY_SESSIONS: ChatSession[] = [];
+const EMPTY_RUNS: ChatActiveRun[] = [];
 type DelegateRow = { session: ChatSession; status: DelegateStatus };
 const EMPTY_DELEGATES: DelegateRow[] = [];
 const EMPTY_RECOVERY_OVERRIDES = {};
@@ -5214,6 +5225,9 @@ const Transcript = memo(function Transcript({
 
 type SessionFilter = "active" | "archived" | "all";
 
+const SIDEBAR_GROUPINGS = ["projects", "list", "inbox"] as const;
+type SidebarGrouping = (typeof SIDEBAR_GROUPINGS)[number];
+
 /** Whether the rail's current filter shows a session in this archived state. */
 const matchesFilter = (filter: SessionFilter, archived: boolean) =>
   filter === "all" ? true : filter === "archived" ? archived : !archived;
@@ -5234,8 +5248,8 @@ function SessionFilterMenu({
 }: {
   value: SessionFilter;
   onChange: (next: SessionFilter) => void;
-  grouping: "projects" | "list";
-  onGroupingChange: (next: "projects" | "list") => void;
+  grouping: SidebarGrouping;
+  onGroupingChange: (next: SidebarGrouping) => void;
 }) {
   const { open, setOpen, ref } = usePopover();
   return (
@@ -5243,7 +5257,7 @@ function SessionFilterMenu({
       <Tooltip interactive content={m.chat_panel_filter_sessions()}>
         <IconButton size="small"
           className="rail-filter-btn text-subtext"
-          active={value !== "active"}
+          active={grouping !== "inbox" && value !== "active"}
           aria-label={m.chat_panel_filter_sessions()}
           onClick={() => setOpen((v) => !v)}
         >
@@ -5253,27 +5267,29 @@ function SessionFilterMenu({
       {open && (
         <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-40 p-1 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down align-right">
           <div className={MENU_LABEL}>{m.sidebar_group_by()}</div>
-          {(["projects", "list"] as const).map((mode) => (
+          {SIDEBAR_GROUPINGS.map((mode) => (
             <MenuItem key={mode} onClick={() => { onGroupingChange(mode); setOpen(false); }}>
-              <span>{mode === "projects" ? m.projects_home_projects() : m.sidebar_one_list()}</span>
+              <span>{mode === "projects" ? m.projects_home_projects() : mode === "list" ? m.sidebar_one_list() : m.sidebar_inbox()}</span>
               {grouping === mode && <Check size={14} />}
             </MenuItem>
           ))}
-          <div className={MENU_SEPARATOR} />
-          <div className={MENU_LABEL}>{m.sidebar_filter()}</div>
-          {SESSION_FILTERS.map((f) => (
-            <MenuItem
-              key={f.id}
+          {grouping !== "inbox" && <>
+            <div className={MENU_SEPARATOR} />
+            <div className={MENU_LABEL}>{m.sidebar_filter()}</div>
+            {SESSION_FILTERS.map((f) => (
+              <MenuItem
+                key={f.id}
 
-              onClick={() => {
-                onChange(f.id);
-                setOpen(false);
-              }}
-            >
-              <span>{f.label()}</span>
-              {value === f.id && <Check size={14} />}
-            </MenuItem>
-          ))}
+                onClick={() => {
+                  onChange(f.id);
+                  setOpen(false);
+                }}
+              >
+                <span>{f.label()}</span>
+                {value === f.id && <Check size={14} />}
+              </MenuItem>
+            ))}
+          </>}
         </div>
       )}
       <EscapeScope enabled={open} onEscape={() => setOpen(false)} />
@@ -5295,6 +5311,54 @@ function TitleReveal({ title, animate }: { title: string; animate: boolean }) {
   return <span className="title-reveal">{title}</span>;
 }
 
+/** The right of an inbox row's second line: an icon and what the chat is doing, timed from when it began. */
+function InboxStatus({ status, unread }: { status: ChatStatus; unread: boolean }) {
+  const timed = status.kind === "running" || status.kind === "queued" || status.kind === "background" || (status.kind === "working" && status.since !== null);
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), timed ? 1000 : 30_000);
+    return () => window.clearInterval(timer);
+  }, [timed]);
+
+  const elapsed = "since" in status && status.since !== null ? fmtDuration(now - status.since) : "";
+  const [icon, label, tone, tip] = (() => {
+    switch (status.kind) {
+      case "input":
+        return [<HelpCircle size={12} />, m.chat_status_input(), "text-accent-purple", null];
+      case "running":
+        return [
+          <FlaskConical size={12} className="motion-safe:animate-[or-experiment-pulse_3s_ease-in-out_infinite]" />,
+          m.chat_status_running({ duration: elapsed }), "text-accent-green",
+          status.runs > 1 ? m.chat_status_experiments_running({ count: fmtNumber(status.runs) }) : m.chat_experiment_running(),
+        ];
+      case "queued":
+        return [<Clock size={12} />, m.chat_status_queued({ duration: elapsed }), "text-subtext", m.chat_status_waiting_compute()];
+      case "working":
+        return [<span className="busy-dot" />, elapsed ? m.chat_status_working_for({ duration: elapsed }) : m.chat_status_working(), "text-subtext", null];
+      case "background":
+        return [
+          <Hourglass size={12} />, m.chat_status_background({ duration: elapsed }), "text-accent-blue",
+          status.tasks > 1 ? m.chat_status_background_tasks({ count: fmtNumber(status.tasks) }) : m.chat_status_background_task(),
+        ];
+      case "limited":
+        return [<Gauge size={12} />, m.chat_status_limited(), "text-accent-amber", null];
+      case "failed":
+        return [<TriangleAlert size={12} />, m.chat_status_failed(), "text-accent-red", status.error && cleanToolError(status.error)];
+      case "done":
+        return unread
+          ? [<CircleCheck size={12} />, m.chat_status_done(), "text-accent-green", timeAgo(status.since)]
+          : [null, timeAgo(status.since), "text-muted", null];
+    }
+  })();
+  const body = (
+    <span className={`flex shrink-0 items-center gap-1.5 tabular-nums ${tone}`}>
+      {icon && <span className="inline-flex size-3 items-center justify-center" aria-hidden="true">{icon}</span>}
+      {label}
+    </span>
+  );
+  return tip ? <Tooltip content={tip} className="shrink-0">{body}</Tooltip> : body;
+}
+
 /** One Recents row. Hover swaps the timestamp for a three-dot menu with
  * Rename, Archive/Unarchive, and Delete (Claude-desktop style). Rename turns
  * the title into an inline input. */
@@ -5304,26 +5368,33 @@ function SessionRow({
   unread,
   busy,
   waiting,
-  experimentRunning,
+  runs,
+  variant,
   revealTitle,
   onOpen,
   onRename,
   onSetArchived,
   onMoveToProject,
   onDelete,
+  onProjectSettings,
   onOpenExperiment,
   modelName,
+  project,
   projectName,
   harnessLogo,
   cardWarmUntil,
 }: {
   session: ChatSession;
+  project: Project;
   active: boolean;
   unread: boolean;
   busy: boolean;
   /** An actionable question or held approval needs the user's attention. */
   waiting: boolean;
-  experimentRunning: boolean;
+  /** The chat's experiment runs in flight. */
+  runs: readonly ChatActiveRun[];
+  /** `inbox`: title and agent, then project and what the chat is doing. `done`: one line, restored from its hover button. */
+  variant: "list" | "inbox" | "done";
   /** Nonce set while this row's freshly auto-generated title should play its
    * reveal; it doubles as the remount key so a second retitle replays it.
    * Undefined the rest of the time (static title). */
@@ -5334,13 +5405,20 @@ function SessionRow({
   /** Makes the chat a project of its own; labelled for a chat without one. */
   onMoveToProject?: { label: string; run: () => void };
   onDelete: () => void;
+  onProjectSettings: () => void;
   onOpenExperiment: (projectId: string, experimentId: string) => void;
   modelName: string | null;
   projectName?: string;
   harnessLogo?: string;
   cardWarmUntil: React.RefObject<number>;
 }) {
-  const { open, setOpen, ref } = usePopover();
+  const ref = useRef<HTMLDivElement>(null);
+  const inbox = variant === "inbox";
+  const plain = variant === "list";
+  /** Where the row's menu opens: the cursor for a right-click, the kebab for a click. */
+  const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null);
+  const open = menuAt !== null;
+  const experimentRunning = runs.length > 0;
   const title = session.title?.trim() || m.chat_untitled();
   const sessionDescription = `${title} · ${harnessLabel(session.harness, session.harnessName)}${modelName ? ` · ${modelName}` : ""}`;
   const [editing, setEditing] = useState(false);
@@ -5415,6 +5493,31 @@ function SessionRow({
     }
   }, [editing]);
 
+  const titleInput = (
+    <input
+      ref={inputRef}
+      className={!plain
+        ? "-my-1 -ms-1.5 h-6 min-w-0 flex-1 rounded-sm border border-focus-border bg-background ps-1.5 text-text outline-none [font:inherit]"
+        : "session-title-input"}
+      aria-label={m.chat_panel_session_title()}
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onClick={(e) => e.stopPropagation()}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") {
+          e.preventDefault();
+          commit();
+        } else if (e.key === "Escape") {
+          e.stopPropagation();
+          e.preventDefault();
+          setEditing(false);
+        }
+      }}
+    />
+  );
+
   // Not a <button>: the kebab is a real button and can't nest inside one.
   return (
     <div
@@ -5445,25 +5548,25 @@ function SessionRow({
           showCard();
         }
       }}
-      onContextMenu={(event) => {
-        if (editing) return;
-        event.preventDefault();
-        closeCard();
-        setOpen(true);
-      }}
       onBlur={(event) => {
         if (!ref.current?.contains(event.relatedTarget) && !cardRef.current?.contains(event.relatedTarget)) dismissed.current = false;
         scheduleClose();
       }}
-      className={`session-row relative flex items-center gap-2 w-full h-8.5 text-start ps-2.5 pe-1.5 rounded-md text-sm text-text cursor-pointer select-none [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium [&_.session-dot:empty]:hidden [&_.session-dot]:w-4 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title]:[mask-image:linear-gradient(to_right,black_calc(100%_-_16px),transparent)] [&_.session-title]:whitespace-nowrap [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:size-6 [&_.session-menu-btn]:-mx-1 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-visible_.session-menu-btn]:inline-flex [&_.session-menu-btn:focus-within]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&.card-open_.session-menu-btn]:inline-flex [&:hover_.session-dot]:hidden [&:focus-visible_.session-dot]:hidden [&:has(.session-menu-btn:focus-within)_.session-dot]:hidden [&.menu-open_.session-dot]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-accent-teal [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-accent-blue [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:absolute [&_.session-title-input]:inset-0 [&_.session-title-input]:size-full [&_.session-title-input]:py-0 [&_.session-title-input]:ps-0 [&_.session-title-input]:pe-[9px] [&_.session-title-input]:indent-[9px] [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-focus-border [&_.session-title-input]:rounded-md [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-dot]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""} ${anchor ? "card-open" : ""}  ${
+      className={`session-row relative flex items-center gap-2 w-full ${inbox ? "inbox h-12.5" : variant === "done" ? "h-8" : "h-8.5"} text-start px-2.25 rounded-md text-sm text-text cursor-pointer select-none [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium [&_.session-dot:empty]:hidden [&_.session-dot]:w-4 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title]:[mask-image:linear-gradient(to_right,black_calc(100%_-_16px),transparent)] [&_.session-title]:whitespace-nowrap [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:size-6 [&_.session-menu-btn]:-mx-1 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-visible_.session-menu-btn]:inline-flex [&_.session-menu-btn:focus-within]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&.card-open_.session-menu-btn]:inline-flex [&:hover_.session-dot]:hidden [&:focus-visible_.session-dot]:hidden [&:has(.session-menu-btn:focus-within)_.session-dot]:hidden [&.menu-open_.session-dot]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-accent-teal [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-accent-blue [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:absolute [&_.session-title-input]:inset-0 [&_.session-title-input]:size-full [&_.session-title-input]:py-0 [&_.session-title-input]:ps-0 [&_.session-title-input]:pe-[9px] [&_.session-title-input]:indent-[9px] [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-focus-border [&_.session-title-input]:rounded-md [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-dot]:hidden [&_.session-done-btn]:hidden [&:hover_.session-done-btn]:inline-flex [&:focus-visible_.session-done-btn]:inline-flex [&_.session-done-btn:focus-visible]:inline-flex [&_.session-done-btn:focus-within]:inline-flex [&:has(.session-done-btn:focus-within)_.session-logo]:hidden [&.card-open_.session-done-btn]:inline-flex [&:has(.session-done-btn):hover_.session-logo]:hidden [&:has(.session-done-btn):focus-visible_.session-logo]:hidden [&:has(.session-done-btn:focus-visible)_.session-logo]:hidden [&.card-open:has(.session-done-btn)_.session-logo]:hidden [&.editing_.session-done-btn]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""} ${anchor ? "card-open" : ""}  ${
         editing ? "editing" : ""
         }`}
+      onContextMenu={(e) => {
+        if (editing) return;
+        e.preventDefault();
+        closeCard();
+        setMenuAt({ x: e.clientX, y: e.clientY });
+      }}
       onClick={() => {
         // While editing, a body click is a no-op; blur/Enter/Esc drive it.
         if (editing) return;
         // With the menu open, a body click just dismisses it — switching
         // sessions underneath an open menu would leave it orphaned.
-        if (open) setOpen(false);
+        if (open) setMenuAt(null);
         else { closeCard(); onOpen(); }
       }}
       onKeyDown={(e) => {
@@ -5479,34 +5582,72 @@ function SessionRow({
           closeCard();
           // Mirror the click branch: dismiss an open menu instead of
           // navigating underneath it.
-          if (open) setOpen(false);
+          if (open) setMenuAt(null);
           else onOpen();
         }
       }}
     >
-      {editing ? (
-        <input
-          ref={inputRef}
-          className="session-title-input"
-          aria-label={m.chat_panel_session_title()}
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onClick={(e) => e.stopPropagation()}
-          onBlur={commit}
-          onKeyDown={(e) => {
-            e.stopPropagation();
-            if (e.key === "Enter") {
-              e.preventDefault();
-              commit();
-            } else if (e.key === "Escape") {
-              e.stopPropagation();
-              e.preventDefault();
-              setEditing(false);
-            }
-          }}
-        />
+      {variant === "done" ? <>
+        <ProjectIconTile project={project} size="sm" />
+        {editing ? titleInput : (
+          <span className={`session-title ${unread ? "text-title-unread" : "text-title-read"}`} onDoubleClick={startEditing}>
+            <TitleReveal key={revealTitle ?? "static"} title={title} animate={revealTitle !== undefined} />
+          </span>
+        )}
+        {!editing && <span className="session-logo shrink-0 text-xs tabular-nums text-muted">{timeAgo(session.updatedAt)}</span>}
+        {!editing && (
+          <Tooltip content={m.chat_inbox_restore()} className="session-done-btn -my-1 -me-1 shrink-0">
+            <button
+              className="inline-flex size-6 items-center justify-center rounded-sm text-subtext hover:bg-panel hover:text-text"
+              aria-label={m.chat_inbox_restore()}
+              onClick={(e) => {
+                e.stopPropagation();
+                closeCard();
+                onSetArchived(false);
+              }}
+            >
+              <Undo2 size={14} aria-hidden="true" />
+            </button>
+          </Tooltip>
+        )}
+      </> : editing && plain ? titleInput : inbox ? (
+        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <div className="flex items-center gap-2">
+            {editing ? titleInput : (
+              <span className={`session-title ${unread || waiting ? "text-title-unread" : "text-title-read"}`} onDoubleClick={startEditing}>
+                <TitleReveal key={revealTitle ?? "static"} title={title} animate={revealTitle !== undefined} />
+              </span>
+            )}
+            <span className="session-logo inline-flex w-4 shrink-0 items-center justify-center">
+              {session.model
+                ? <ModelMark model={{ id: session.model, displayName: modelName ?? undefined }} harness={session.harness} size={14} />
+                : <HarnessLogo harness={session.harness} logo={harnessLogo} size={14} />}
+            </span>
+            {!session.archived && !editing && (
+              <button
+                className="session-done-btn -my-1 -me-1 h-6 shrink-0 items-center gap-1 rounded-sm px-1.5 text-xs text-subtext hover:bg-panel hover:text-text"
+                aria-label={m.chat_inbox_mark_done()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  closeCard();
+                  onSetArchived(true);
+                }}
+              >
+                <Check size={12} aria-hidden="true" />
+                {m.chat_inbox_done_action()}
+              </button>
+            )}
+          </div>
+          <div className="flex items-center gap-2 text-xs text-subtext">
+            <span className="flex min-w-0 flex-1 items-center gap-1.5">
+              <ProjectIconTile project={project} size="sm" />
+              {!project.scratch && <span className="truncate">{projectName}</span>}
+            </span>
+            <InboxStatus status={chatStatus(session, busy, waiting, runs)} unread={unread} />
+          </div>
+        </div>
       ) : (
-        <span className="session-title">
+        <span className="session-title" onDoubleClick={startEditing}>
           <TitleReveal
             key={revealTitle ?? "static"}
             title={title}
@@ -5514,36 +5655,37 @@ function SessionRow({
           />
         </span>
       )}
-      {experimentRunning && !editing && (
+      {plain && experimentRunning && !editing && (
         <Tooltip content={m.chat_experiment_running()} className="shrink-0 text-accent-green">
           <FlaskConical size={14} className="motion-safe:animate-[or-experiment-pulse_3s_ease-in-out_infinite]" aria-label={m.chat_experiment_running()} />
         </Tooltip>
       )}
-      {waiting && !editing && (
+      {plain && waiting && !editing && (
         <Tooltip content={m.chat_panel_waiting_for_your_input()} className="shrink-0 text-accent-amber">
           <HelpCircle size={14} aria-hidden="true" />
         </Tooltip>
       )}
-      <span className="session-dot">
+      {plain && <span className="session-dot">
         {busy && !waiting ? (
           <span className="busy-dot" />
         ) : (
           unread && !waiting && <span className="unread-dot" />
         )}
-      </span>
-      <Tooltip interactive content={m.chat_panel_session_options()} className="session-menu-btn">
+      </span>}
+      {plain && <Tooltip interactive content={m.chat_panel_session_options()} className="session-menu-btn">
         <button
           className="flex w-full h-full items-center justify-center"
           aria-label={m.chat_panel_session_options()}
           onClick={(e) => {
             e.stopPropagation();
             closeCard();
-            setOpen((v) => !v);
+            const button = e.currentTarget.getBoundingClientRect();
+            setMenuAt(open ? null : { x: button.left, y: button.bottom + 4 });
           }}
         >
           <MoreHorizontal size={14} />
         </button>
-      </Tooltip>
+      </Tooltip>}
       {anchor && !open && !editing && (
         <SessionHoverCard
           session={session}
@@ -5558,54 +5700,78 @@ function SessionRow({
           onLeave={() => { cardWarmUntil.current = Date.now() + 500; pointerInside.current = false; scheduleClose(); }}
           onOpenExperiment={(projectId, experimentId) => { closeCard(); onOpenExperiment(projectId, experimentId); }}
           onReturnToRow={() => ref.current?.focus()}
-          onContinue={() => { closeCard(); ref.current?.querySelector<HTMLButtonElement>(".session-menu-btn button")?.focus(); }}
+          onContinue={() => {
+            closeCard();
+            const next = ref.current?.querySelector<HTMLButtonElement>(".session-menu-btn button, .session-done-btn");
+            if (next) next.focus();
+            else ref.current?.focus();
+          }}
         />
       )}
-      {open && (
-        <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down session-menu">
-          <MenuItem
-            onClick={(e) => {
-              e.stopPropagation();
-              setOpen(false);
-              startEditing();
-            }}
-          >
-            <span>{m.chat_panel_rename()}</span>
-          </MenuItem>
-          <MenuItem
-            onClick={(e) => {
-              e.stopPropagation();
-              setOpen(false);
-              onSetArchived(!session.archived);
-            }}
-          >
-            <span>{session.archived ? m.chat_unarchive() : m.chat_archive()}</span>
-          </MenuItem>
-          {onMoveToProject && (
-            <MenuItem
-              onClick={(e) => {
-                e.stopPropagation();
-                setOpen(false);
-                onMoveToProject.run();
-              }}
-            >
-              <span>{onMoveToProject.label}</span>
-            </MenuItem>
-          )}
-          <MenuItem danger
-            onClick={(e) => {
-              e.stopPropagation();
-              setOpen(false);
-              onDelete();
-            }}
-          >
-            <span>{m.chat_panel_delete()}</span>
-          </MenuItem>
-        </div>
+      {menuAt && (
+        <SessionMenu
+          at={menuAt}
+          label={title}
+          archiveLabel={!plain
+            ? session.archived ? m.chat_inbox_restore() : m.chat_inbox_mark_done()
+            : session.archived ? m.chat_unarchive() : m.chat_archive()}
+          onClose={() => setMenuAt(null)}
+          onRename={startEditing}
+          onSetArchived={() => onSetArchived(!session.archived)}
+          onMoveToProject={onMoveToProject}
+          onProjectSettings={project.scratch ? undefined : onProjectSettings}
+          onDelete={onDelete}
+        />
       )}
-      <EscapeScope enabled={open} onEscape={() => setOpen(false)} />
       <EscapeScope enabled={!!anchor && !editing && !open} exclusive={false} onEscape={() => { dismissed.current = true; if (cardRef.current?.contains(document.activeElement)) ref.current?.focus(); closeCard(); }} />
     </div>
+  );
+}
+
+/** A chat's actions, opened at a point: the cursor, or below the row's kebab. */
+function SessionMenu({ at, label, archiveLabel, onClose, onRename, onSetArchived, onMoveToProject, onProjectSettings, onDelete }: {
+  at: { x: number; y: number };
+  label: string;
+  archiveLabel: string;
+  onClose: () => void;
+  onRename: () => void;
+  onSetArchived: () => void;
+  onMoveToProject?: { label: string; run: () => void };
+  /** Absent for a chat without a project, which has no settings of its own. */
+  onProjectSettings?: () => void;
+  onDelete: () => void;
+}) {
+  const { portalContainer } = useContext(WorkspaceDomContext);
+  const item = <MenuItem size="compact" className="data-highlighted:bg-surface" />;
+  return (
+    <DirectionProvider direction={typeof document !== "undefined" && document.documentElement.dir === "rtl" ? "rtl" : "ltr"}>
+      <Menu.Root open modal={false} onOpenChange={(open) => { if (!open) onClose(); }}>
+        <Menu.Portal container={portalContainer}>
+          <Menu.Positioner
+            positionMethod="fixed"
+            anchor={{ getBoundingClientRect: () => new DOMRect(at.x, at.y, 0, 0) }}
+            side="bottom"
+            align="start"
+            collisionPadding={8}
+            className="z-100"
+          >
+            <Menu.Popup
+              aria-label={label}
+              className="option-menu min-w-44 max-h-(--available-height) overflow-y-auto rounded-md border border-border bg-background p-1 shadow-menu outline-none"
+              onClick={(event) => event.stopPropagation()}
+              onContextMenu={(event) => event.preventDefault()}
+            >
+              <Menu.Item nativeButton render={item} onClick={onRename}>{m.chat_panel_rename()}</Menu.Item>
+              <Menu.Item nativeButton render={item} onClick={onSetArchived}>{archiveLabel}</Menu.Item>
+              {onMoveToProject && <Menu.Item nativeButton render={item} onClick={onMoveToProject.run}>{onMoveToProject.label}</Menu.Item>}
+              {onProjectSettings && <Menu.Item nativeButton render={item} onClick={onProjectSettings}>{m.sidebar_project_settings()}</Menu.Item>}
+              <Menu.Separator className="my-1 border-t border-border" />
+              <Menu.Item nativeButton render={<MenuItem size="compact" danger className="data-highlighted:bg-surface" />} onClick={onDelete}>{m.chat_panel_delete()}</Menu.Item>
+            </Menu.Popup>
+          </Menu.Positioner>
+        </Menu.Portal>
+      </Menu.Root>
+    </DirectionProvider>
   );
 }
 
@@ -5621,6 +5787,26 @@ interface SidebarActions {
   setArchived: (session: ChatSession, archived: boolean) => void;
   moveToProject: (session: ChatSession, project: Project) => void;
   remove: (session: ChatSession) => void;
+}
+
+const RAIL_MOVE_MS = 380;
+const RAIL_FADE_MS = 180;
+/** Eases in gently, then settles on a long tail. */
+const RAIL_CURVE = [0.47, 0.44, 0, 1] as const;
+const RAIL_EASE = `cubic-bezier(${RAIL_CURVE.join(", ")})`;
+
+/** `RAIL_EASE` at time `t`, to sample what a row overlaps along the way. */
+function railEase(t: number) {
+  const [x1, y1, x2, y2] = RAIL_CURVE;
+  const at = (a: number, b: number, s: number) => 3 * a * s * (1 - s) ** 2 + 3 * b * s ** 2 * (1 - s) + s ** 3;
+  let low = 0;
+  let high = 1;
+  for (let i = 0; i < 24; i++) {
+    const mid = (low + high) / 2;
+    if (at(x1, x2, mid) < t) low = mid;
+    else high = mid;
+  }
+  return at(y1, y2, (low + high) / 2);
 }
 
 // Sidebar rows skip the panel's per-keystroke renders: `actions` is a stable ref
@@ -5650,7 +5836,7 @@ const SidebarSessionRow = memo(function SidebarSessionRow({
   actions,
   project,
   ...row
-}: Omit<React.ComponentProps<typeof SessionRow>, "onOpen" | "onOpenExperiment" | "onRename" | "onSetArchived" | "onMoveToProject" | "onDelete"> & {
+}: Omit<React.ComponentProps<typeof SessionRow>, "onOpen" | "onOpenExperiment" | "onRename" | "onSetArchived" | "onMoveToProject" | "onDelete" | "onProjectSettings"> & {
   actions: React.RefObject<SidebarActions>;
   project: Project;
 }) {
@@ -5659,6 +5845,7 @@ const SidebarSessionRow = memo(function SidebarSessionRow({
   return (
     <SessionRow
       {...row}
+      project={project}
       onOpen={() => actions.current.openSession(session, project)}
       onOpenExperiment={(projectId, experimentId) => actions.current.openExperiment(session, projectId, experimentId)}
       onRename={(title) => actions.current.rename(session, title)}
@@ -5668,6 +5855,7 @@ const SidebarSessionRow = memo(function SidebarSessionRow({
         run: () => actions.current.moveToProject(session, project),
       }}
       onDelete={() => actions.current.remove(session)}
+      onProjectSettings={() => actions.current.openProjectSettings(project)}
     />
   );
 });
@@ -5866,10 +6054,17 @@ export function ChatPanel({
   const navigate = useNavigate();
   const createProject = useCreateProject();
   const { data: sidebarProjects = [] } = useQuery({ ...listProjectsQuery(), enabled: !embedded });
+  const latestProject = sidebarProjects.reduce<Project | undefined>((latest, project) => project.scratch || (latest && project.updatedAt <= latest.updatedAt) ? latest : project, undefined);
   const { data: projectActivity = [] } = useQuery({ ...listProjectActivityQuery(), enabled: !embedded });
-  const [sidebarGrouping, setSidebarGrouping] = useState<"projects" | "list">(() => {
-    try { return localStorage.getItem("sidebar-grouping") === "list" ? "list" : "projects"; }
+  const [sidebarGrouping, setSidebarGrouping] = useState<SidebarGrouping>(() => {
+    try { return SIDEBAR_GROUPINGS.find((mode) => mode === localStorage.getItem("sidebar-grouping")) ?? "projects"; }
     catch { return "projects"; }
+  });
+  const [collapsedInbox, setCollapsedInbox] = useState<string[]>(() => {
+    try {
+      const stored: unknown = JSON.parse(localStorage.getItem("sidebar-inbox-collapsed") ?? '["done"]');
+      return Array.isArray(stored) ? stored.filter((id): id is string => typeof id === "string") : [];
+    } catch { return []; }
   });
   const machineSuffix = runtime.kind === "ssh" ? `:${encodeURIComponent(runtime.session.host)}` : "";
   const pinnedProjectsKey = `sidebar-pinned-projects${machineSuffix}`;
@@ -5916,7 +6111,7 @@ export function ChatPanel({
     ...sidebarProjects.filter((project) => !project.scratch)
       .sort((a, b) => Number(pinnedProjects.includes(b.id)) - Number(pinnedProjects.includes(a.id)) || byRecency(a, b)),
   ];
-  const candidateLimit = sidebarGrouping === "list" || sidebarExpanded ? sortedProjects.length : Math.max(1, Math.ceil(railHeight / 36));
+  const candidateLimit = sidebarGrouping !== "projects" || sidebarExpanded ? sortedProjects.length : Math.max(1, Math.ceil(railHeight / 36));
   let shownProjects = sortedProjects.slice(0, candidateLimit);
   const shownCurrent = currentProject?.scratch ? scratchGroup : currentProject;
   if (shownCurrent && !shownProjects.includes(shownCurrent)) {
@@ -5933,8 +6128,29 @@ export function ChatPanel({
     })),
   });
   const flatSessions = useInfiniteQuery({
-    ...listSidebarChatSessionsQuery(sessionFilter),
-    enabled: !embedded && sidebarGrouping === "list",
+    ...listSidebarChatSessionsQuery(sidebarGrouping === "inbox" ? "active" : sessionFilter),
+    enabled: !embedded && sidebarGrouping !== "projects",
+  });
+  const doneExpanded = sidebarGrouping === "inbox" && !collapsedInbox.includes("done");
+  // Done is a place to look something up, not a view to stay in: opening a chat or clicking away closes it.
+  const closeDone = useCallback(() => setCollapsedInbox((collapsed) => {
+    if (collapsed.includes("done")) return collapsed;
+    const next = [...collapsed, "done"];
+    try { localStorage.setItem("sidebar-inbox-collapsed", JSON.stringify(next)); } catch {}
+    return next;
+  }), []);
+  useEffect(() => {
+    if (!doneExpanded) return;
+    const away = (event: PointerEvent) => {
+      if (event.target instanceof Element && event.target.closest("[data-done-area], [role=menu], [role=dialog], [data-session-hover-card]")) return;
+      closeDone();
+    };
+    document.addEventListener("pointerdown", away, true);
+    return () => document.removeEventListener("pointerdown", away, true);
+  }, [doneExpanded, closeDone]);
+  const doneSessions = useInfiniteQuery({
+    ...listSidebarChatSessionsQuery("archived"),
+    enabled: !embedded && doneExpanded,
   });
   const sessionsOptions = useMemo(() => listChatSessionsQuery(projectId), [projectId]);
   const { data: sessions = EMPTY_SESSIONS, isSuccess: sessionsLoaded } = useQuery(sessionsOptions);
@@ -6067,7 +6283,12 @@ export function ChatPanel({
   const planModeOverrideRef = useRef<boolean | null>(null);
   const queuedPlanOverrideSeen = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const { data: activeRuns = [] } = useQuery(listChatActiveRunsQuery());
+  const { data: activeRuns = EMPTY_RUNS } = useQuery(listChatActiveRunsQuery());
+  const runsBySession = useMemo(() => {
+    const bySession = new Map<string, ChatActiveRun[]>();
+    for (const item of activeRuns) bySession.set(item.sessionId, [...bySession.get(item.sessionId) ?? [], item]);
+    return bySession;
+  }, [activeRuns]);
   const [state, dispatch, historyQuery] = useChatState(projectId, mainView === "chat" ? activeId : null);
   const { data: harnesses = EMPTY_HARNESSES } = useQuery(getHarnessesQuery());
   const modelName = useModelName();
@@ -8078,28 +8299,72 @@ export function ChatPanel({
     const error = queries.some((query) => query.error);
     if (!visible.length) sidebarRows.push({ kind: "status", project, pending, error, retry: () => { for (const query of queries) void query.refetch(); } });
   });
-  if (sidebarGrouping === "list") {
-    const flat = flatSessions.data?.pages.flatMap((page) => page.sessions) ?? [];
+  const listedChats = (listed: readonly ChatSession[], archived: boolean | null) => {
+    const byId = new Map(listed.map((session) => [session.id, session]));
     const selected = sessions.find((session) => session.id === activeId);
-    if (selected && !selected.delegate && !flat.some((session) => session.id === selected.id)) flat.push(selected);
-    flat.filter((session) => !deletedSessionIds.has(session.id)).sort((a, b) => b.updatedAt - a.updatedAt).forEach((session) => {
+    if (selected && !selected.delegate && !byId.has(selected.id) && (archived === null || selected.archived === archived)) byId.set(selected.id, selected);
+    return [...byId.values()].filter((session) => !deletedSessionIds.has(session.id)).sort((a, b) => b.updatedAt - a.updatedAt).flatMap((session) => {
       const project = sidebarProjects.find((project) => project.id === session.projectId);
-      if (project) sidebarRows.push({ kind: "chat", project, session });
+      return project ? [{ project, session }] : [];
     });
-    const project = currentProject ?? sidebarProjects[0];
-    if (project && (!sidebarRows.length || flatSessions.isFetchingNextPage || flatSessions.isError)) {
-      sidebarRows.push({ kind: "status", project, pending: flatSessions.isPending || flatSessions.isFetchingNextPage, error: flatSessions.isError,
-        retry: () => { void (flatSessions.isFetchNextPageError ? flatSessions.fetchNextPage() : flatSessions.refetch()); } });
+  };
+  const statusProject = currentProject ?? sidebarProjects[0];
+  const pushListStatus = (query: typeof flatSessions, empty: boolean, emptyText?: string) => {
+    if (statusProject && (empty || query.isFetchingNextPage || query.isError)) {
+      sidebarRows.push({ kind: "status", project: statusProject, pending: query.isPending || query.isFetchingNextPage, error: query.isError, empty: emptyText,
+        retry: () => { void (query.isFetchNextPageError ? query.fetchNextPage() : query.refetch()); } });
     }
+  };
+  // Rows past this index belong to Working and Done; paging the open chats only needs to keep up with the rows above it.
+  let inboxEnd = 0;
+  const flatListed = flatSessions.data?.pages.flatMap((page) => page.sessions) ?? EMPTY_SESSIONS;
+  if (sidebarGrouping === "list") {
+    listedChats(flatListed, null).forEach(({ project, session }) => sidebarRows.push({ kind: "chat", project, session }));
+    pushListStatus(flatSessions, !sidebarRows.length);
+  } else if (sidebarGrouping === "inbox") {
+    const open = listedChats(flatListed, false);
+    const working = open.filter(({ project, session }) =>
+      chatStatusWorking(chatStatus(session, sessionBusy(project, session), sessionWaiting(session), runsBySession.get(session.id) ?? EMPTY_RUNS)));
+    // Newest first by creation, so streaming updates don't reshuffle what's running.
+    working.sort((a, b) => b.session.createdAt - a.session.createdAt);
+    open.filter((chat) => !working.includes(chat)).forEach(({ project, session }) => sidebarRows.push({ kind: "inbox", project, session }));
+    pushListStatus(flatSessions, !open.length);
+    inboxEnd = sidebarRows.length;
+
+    const workingCollapsed = collapsedInbox.includes("working");
+    if (working.length) {
+      sidebarRows.push({ kind: "section", section: "working", collapsed: workingCollapsed, count: working.length });
+      if (!workingCollapsed) working.forEach(({ project, session }) => sidebarRows.push({ kind: "inbox", project, session }));
+    }
+    sidebarRows.push({ kind: "section", section: "done", collapsed: !doneExpanded, count: 0 });
+    const doneStart = sidebarRows.length;
+    if (doneExpanded) {
+      const done = listedChats(doneSessions.data?.pages.flatMap((page) => page.sessions) ?? EMPTY_SESSIONS, true);
+      done.forEach(({ project, session }) => sidebarRows.push({ kind: "done", project, session }));
+      pushListStatus(doneSessions, !done.length, m.chat_inbox_done_empty());
+    }
+
+    // Mid-archive a chat is briefly in both lists; it stays where it was until the other list catches up.
+    const seen = new Set<string>();
+    const unique = sidebarRows.filter((row) => !("session" in row) || (!seen.has(row.session.id) && Boolean(seen.add(row.session.id))));
+    sidebarRows.splice(0, sidebarRows.length, ...unique);
+
+    // Holds Working and a preview of Done at the rail's foot while the inbox is short; scrolling closes the gap first.
+    const heightOf = (rows: SidebarRow[]) => rows.reduce((total, row) => total + sidebarRowHeight(row), 0);
+    const height = heightOf(sidebarRows.slice(0, doneStart)) + Math.min(heightOf(sidebarRows.slice(doneStart)), DONE_PREVIEW_HEIGHT);
+    if (height < railHeight) sidebarRows.splice(inboxEnd, 0, { kind: "spacer", height: railHeight - height });
   }
-  const sidebarScrollable = sidebarGrouping === "list" || sidebarExpanded;
+  const sidebarScrollable = sidebarGrouping !== "projects" || sidebarExpanded;
+  const inboxPinned = sidebarScrollable && sidebarRows[inboxEnd]?.kind === "spacer";
   const initialRows = fitSidebarRows(sidebarRows, railHeight, activeId);
   const hasHiddenProjects = initialRows.length < sidebarRows.length || shownProjects.length < sortedProjects.length;
   const defaultRows = sidebarGrouping === "projects" && hasHiddenProjects
     ? fitSidebarRows(sidebarRows, Math.max(0, railHeight - 38), activeId) : initialRows;
   const showProjectMore = sidebarGrouping === "projects" && !sidebarExpanded && hasHiddenProjects;
   const defaultRowsHeight = defaultRows.reduce((height, row) => height + sidebarRowHeight(row), 0);
-  const sidebarRowKey = (row: SidebarRow) => row.kind === "chat" ? row.session.id : `${row.kind}:${sidebarGroup(row.project)}`;
+  const sidebarRowKey = (row: SidebarRow) => row.kind === "chat" || row.kind === "inbox" || row.kind === "done" ? row.session.id
+    : row.kind === "section" ? `section:${row.section}` : row.kind === "spacer" ? row.kind
+    : row.kind === "status" ? `status:${row.project.id}:${row.empty ?? ""}` : `${row.kind}:${sidebarGroup(row.project)}`;
   const sidebarVirtualizer = useVirtualizer({
     useFlushSync: false,
     count: sidebarRows.length,
@@ -8107,34 +8372,181 @@ export function ChatPanel({
     getItemKey: (index) => sidebarRowKey(sidebarRows[index]),
     estimateSize: (index) => sidebarRowHeight(sidebarRows[index]),
     overscan: 5,
-    // Keeps a row scrolled into view clear of the rail's 0.75rem edge fades.
-    scrollPaddingStart: 12,
-    scrollPaddingEnd: 12,
     rangeExtractor: (range) => {
-      const indexes = defaultRangeExtractor(range);
+      // Pinned inbox rows and section headers stay on screen wherever the list is scrolled.
+      const pinned = sidebarRows.flatMap((row, index) => row.kind === "section" || (inboxPinned && index < inboxEnd) ? [index] : []);
+      const indexes = [...new Set([...pinned, ...railFlightIndexes, ...defaultRangeExtractor(range)])].sort((a, b) => a - b);
       const focused = sidebarRows.findIndex((row) => sidebarRowKey(row) === focusedSidebarRow);
       return focused < 0 || indexes.includes(focused) ? indexes : [...indexes, focused].sort((a, b) => a - b);
     },
     enabled: sidebarScrollable && railOpen && !embedded,
   });
 
+  let railTop = 0;
+  const railTops = sidebarRows.map((row) => (railTop += sidebarRowHeight(row)) - sidebarRowHeight(row));
+  // Rows glide between places, fade in when new and fade out where they were when gone.
+  const railLayout = new Map(sidebarRows.map((row, index) => [sidebarRowKey(row), { row, top: railTops[index] }]));
+  const railCommitted = useRef<{ grouping: SidebarGrouping; layout: typeof railLayout; scrollTop: number } | null>(null);
+  const railGhosts = useRef(new Map<string, { row: SidebarRow; top: number }>());
+  const [, setRailGhostsSettled] = useState(0);
+  const railReducedMotion = typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const railSameList = railCommitted.current?.grouping === sidebarGrouping && sidebarScrollable && !railReducedMotion;
+  if (!railSameList) railGhosts.current.clear();
+  // A row leaving the screen stays mounted until it has slid out of view.
+  const railFlight = useRef(new Map<string, number>());
+  // Where a row that left and came back in a later update was last drawn, to slide from.
+  const railReturns = useRef(new Map<string, number>());
+  const now = performance.now();
+  for (const [key, until] of railFlight.current) if (until < now) railFlight.current.delete(key);
+  for (const [key, ghost] of railGhosts.current) {
+    if (!railLayout.has(key)) continue;
+    railGhosts.current.delete(key);
+    railReturns.current.set(key, ghost.top);
+    railFlight.current.set(key, now + RAIL_MOVE_MS);
+  }
+  if (railSameList) {
+    const viewTop = sidebarVirtualizer.scrollOffset ?? 0;
+    for (const [key, was] of railCommitted.current?.layout ?? []) {
+      const onScreen = was.top < viewTop + railHeight && was.top + sidebarRowHeight(was.row) > viewTop;
+      if (!onScreen || was.row.kind === "spacer") continue;
+      const next = railLayout.get(key);
+      if (!next) railGhosts.current.set(key, was);
+      else if (next.top !== was.top) railFlight.current.set(key, now + RAIL_MOVE_MS);
+    }
+  }
+  const railFlightIndexes = sidebarRows.flatMap((row, index) => railFlight.current.has(sidebarRowKey(row)) ? [index] : []);
   const sidebarVirtualItems = sidebarVirtualizer.getVirtualItems();
+
+  // A section just opened scrolls into view far enough to show its first rows.
+  const railReveal = useRef<"working" | "done" | null>(null);
+  // Where each row was last drawn at rest, from the top of the rail's viewport.
+  const railRest = useRef(new Map<string, number>());
+  useLayoutEffect(() => {
+    const previous = railCommitted.current;
+    const body = railBodyRef.current;
+    railCommitted.current = { grouping: sidebarGrouping, layout: railLayout, scrollTop: body?.scrollTop ?? 0 };
+    if (!body) return;
+
+    const reveal = railReveal.current;
+    const start = sidebarRows.findIndex((row) => row.kind === "section" && row.section === reveal);
+    if (reveal && start >= 0) {
+      railReveal.current = null;
+      let end = start;
+      while (end + 1 < sidebarRows.length && sidebarRows[end + 1].kind !== "section") end++;
+      const sectionTop = railTops[start];
+      const shown = Math.min(railTops[end] + sidebarRowHeight(sidebarRows[end]), sectionTop + sidebarRowHeight(sidebarRows[start]) + DONE_PREVIEW_HEIGHT);
+      const target = Math.min(sectionTop, shown + railStickyBottom(reveal) - body.clientHeight);
+      if (target > body.scrollTop) body.scrollTo({ top: target, behavior: railReducedMotion ? "instant" : "smooth" });
+    }
+
+    // Rows are measured where they are drawn, so a row held by `sticky` moves from where it sits, not from its slot in the list.
+    const viewTop = body.getBoundingClientRect().top;
+    syncRailPins();
+    const pinned = [...railPins.current?.querySelectorAll<HTMLElement>("[data-pin]") ?? []].filter((pin) => pin.style.visibility === "visible");
+    const shown = [
+      ...[...body.querySelectorAll<HTMLElement>("[data-rail-key]")].filter((el) => el.style.visibility !== "hidden").map((el) => ({ el, key: el.dataset.railKey! })),
+      ...pinned.map((el) => ({ el, key: `section:${el.dataset.pin}` })),
+    ];
+    const rows = shown.map(({ el, key }) => {
+      const transform = el.getAnimations().length ? getComputedStyle(el).transform : "none";
+      const drawn = transform === "none" ? 0 : new DOMMatrixReadOnly(transform).m42;
+      return { el, key, drawn, at: el.getBoundingClientRect().top - viewTop - drawn };
+    });
+    const before = railRest.current;
+    railRest.current = new Map(rows.map(({ key, at }) => [key, at]));
+
+    const settled = (layout: typeof railLayout) => [...layout.values()].some(({ row }) => "session" in row);
+    if (!previous || previous.grouping !== sidebarGrouping || previous.layout === railLayout || !settled(previous.layout)) return;
+    const changed = previous.layout.size !== railLayout.size || [...railLayout].some(([key, { top }]) => previous.layout.get(key)?.top !== top);
+    if (!changed) return;
+    if (railReducedMotion) return;
+
+    const delay = 0;
+
+    const moves: { el: HTMLElement; key: string; at: number; offset: number; from: number | undefined }[] = [];
+    for (const { el, key, drawn, at } of rows) {
+      const known = previous.layout.get(key)?.top;
+      const returning = railReturns.current.get(key);
+      const was = returning !== undefined ? returning - previous.scrollTop : before.get(key) ?? (known === undefined ? undefined : known - previous.scrollTop);
+      if (was === undefined) {
+        el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: RAIL_FADE_MS, delay, easing: "ease-out", fill: "backwards" });
+        continue;
+      }
+      // Start from where the row is drawn now, so a move that interrupts another doesn't jump.
+      moves.push({ el, key, at, offset: was + drawn - at, from: returning ?? known });
+    }
+
+    const move = { duration: RAIL_MOVE_MS, delay, easing: RAIL_EASE, fill: "backwards" } as const;
+    const heightOf = (key: string) => sidebarRowHeight(railLayout.get(key)!.row);
+    const offsets = new Map(moves.map(({ key, offset }) => [key, offset]));
+    for (const { el, key, at, offset, from } of moves) {
+      if (Math.abs(offset) < 0.5) continue;
+      el.getAnimations().forEach((animation) => animation.cancel());
+      el.animate([{ transform: `translateY(${offset}px)` }, { transform: "none" }], move);
+
+      // A row passing several others goes behind them: faint where it overlaps them, whole in the gap it lands in.
+      // Rows a mover slides past each pass it once; only the mover passes several.
+      const to = railLayout.get(key)!.top;
+      const passed = from === undefined ? 0 : [...railLayout].filter(([other, { top }]) => {
+        const otherWas = previous.layout.get(other)?.top;
+        return other !== key && otherWas !== undefined && (otherWas < from) !== (top < to);
+      }).length;
+      if (passed < 2) continue;
+      const height = heightOf(key);
+      const frames = Array.from({ length: 25 }, (_, step) => {
+        const progress = railEase(step / 24);
+        const top = at + offset * (1 - progress);
+        const covered = rows.reduce((sum, other) => {
+          if (other.key === key) return sum;
+          const otherTop = other.at + (offsets.get(other.key) ?? 0) * (1 - progress);
+          return sum + Math.max(0, Math.min(top + height, otherTop + heightOf(other.key)) - Math.max(top, otherTop));
+        }, 0);
+        return { offset: step / 24, opacity: 1 - 0.8 * Math.min(1, covered / height) };
+      });
+      el.animate(frames, { ...move, easing: "linear" });
+    }
+
+    railReturns.current.clear();
+
+    // A list that got shorter at its end clamps the scroll; leaving rows hold their place on screen.
+    const scrolled = previous ? previous.scrollTop - body.scrollTop : 0;
+    for (const el of body.querySelectorAll<HTMLElement>("[data-rail-ghost]:not([data-fading])")) {
+      el.dataset.fading = "";
+      const key = el.dataset.railGhost!;
+      const held = `translateY(${-scrolled}px)`;
+      el.animate([{ opacity: 1, transform: held }, { opacity: 0, transform: held }], { duration: RAIL_FADE_MS / 2, easing: "ease-out", fill: "forwards" }).finished.then(() => {
+        railGhosts.current.delete(key);
+        setRailGhostsSettled((settled) => settled + 1);
+      }, () => {});
+    }
+
+    if (railFlight.current.size) {
+      const landed = window.setTimeout(() => setRailGhostsSettled((settled) => settled + 1), RAIL_MOVE_MS + 20);
+      return () => window.clearTimeout(landed);
+    }
+  });
   const pendingSidebarFocus = useRef<number | null>(null);
   useLayoutEffect(() => {
     if (pendingSidebarFocus.current === null) return;
-    const row = railBodyRef.current?.querySelector<HTMLElement>(`[data-index="${pendingSidebarFocus.current}"] [data-sidebar-keyboard-row]`);
+    // A pinned header has a copy in the list and one at the rail's foot; focus the one showing.
+    const rows = railBodyRef.current?.parentElement?.querySelectorAll<HTMLElement>(`[data-index="${pendingSidebarFocus.current}"] [data-sidebar-keyboard-row]`) ?? [];
+    const row = [...rows].find((el) => getComputedStyle(el).visibility !== "hidden");
     if (row) {
       pendingSidebarFocus.current = null;
       row.focus();
     }
   });
-  const lastVisibleIndex = sidebarVirtualItems.at(-1)?.index ?? -1;
+  // The visible range, not the rendered rows: pinned headers are always rendered.
+  const lastVisibleIndex = sidebarVirtualizer.range?.endIndex ?? -1;
+  const listEnd = sidebarGrouping === "inbox" ? inboxEnd : sidebarRows.length;
   useEffect(() => {
-    if (sidebarGrouping === "list" && railOpen && !embedded && lastVisibleIndex >= sidebarRows.length - 6
-      && flatSessions.hasNextPage && !flatSessions.isFetching && !flatSessions.isError) {
-      void flatSessions.fetchNextPage();
-    }
-  }, [sidebarGrouping, railOpen, embedded, lastVisibleIndex, sidebarRows.length, flatSessions.hasNextPage, flatSessions.isFetching, flatSessions.isError, flatSessions.fetchNextPage]);
+    if (!railOpen || embedded || sidebarGrouping === "projects") return;
+    const page = (query: typeof flatSessions, end: number) => {
+      if (lastVisibleIndex >= end - 6 && query.hasNextPage && !query.isFetching && !query.isError) void query.fetchNextPage();
+    };
+    page(flatSessions, listEnd);
+    if (sidebarGrouping === "inbox" && doneExpanded) page(doneSessions, sidebarRows.length);
+  }, [sidebarGrouping, railOpen, embedded, lastVisibleIndex, listEnd, flatSessions, doneExpanded, doneSessions, sidebarRows.length]);
   const sidebarActions = useRef<SidebarActions>(null!);
   sidebarActions.current = {
     toggleProjectCollapsed: (project) => {
@@ -8156,6 +8568,7 @@ export function ChatPanel({
       else void navigate({ to: "/projects/$projectId/tasks/new", params: { projectId: project.id } });
     },
     openSession: (s, project) => {
+      closeDone();
       onActiveSessionChange(s.id, { projectId: project.id });
       if (project.id === DEMO_PROJECT_ID) {
         markDemoSessionRead(s.id);
@@ -8185,16 +8598,205 @@ export function ChatPanel({
   const openRuntimeDetails = useCallback(() => onSelectMainView("openresearch"), [onSelectMainView]);
   const openSettings = useCallback(() => onSelectMainView("settings"), [onSelectMainView]);
 
+  /** How far above the rail's foot a section header pins: Working sits on Done's header. */
+  const railStickyBottom = (section: "working" | "done") => {
+    const done = section === "working" ? sidebarRows.find((row) => row.kind === "section" && row.section === "done") : undefined;
+    return done ? sidebarRowHeight(done) : 0;
+  };
+  const railGap = inboxPinned ? sidebarVirtualizer.measurementsCache[inboxEnd]?.size ?? 0 : 0;
+
+  // Section headers below the fold pin to the rail's foot in a layer outside the scroller, which fades
+  // the rows out beneath them; a mask, unlike a fill, works over the window material. Scrolling updates
+  // which are pinned straight from the scroll event, so the handoff doesn't wait for a render.
+  const railPins = useRef<HTMLDivElement>(null);
+  const railPinState = useRef({ rows: sidebarRows, tops: railTops });
+  railPinState.current = { rows: sidebarRows, tops: railTops };
+  const syncRailPins = useCallback(() => {
+    const body = railBodyRef.current;
+    const pins = railPins.current;
+    if (!body || !pins) return;
+    const { rows, tops } = railPinState.current;
+    const viewBottom = body.scrollTop + body.clientHeight;
+    const pinned = new Set<string>();
+    let below = 0;
+    for (let index = rows.length - 1; index >= 0; index--) {
+      const row = rows[index];
+      if (row.kind !== "section") continue;
+      if (tops[index] + sidebarRowHeight(row) <= viewBottom - below + 0.5) break;
+      pinned.add(row.section);
+      below += sidebarRowHeight(row);
+    }
+    // One copy of a header shows at a time: the pinned one, or the one in the list.
+    for (const pin of pins.querySelectorAll<HTMLElement>("[data-pin]")) {
+      const shown = pinned.has(pin.dataset.pin!);
+      pin.style.visibility = shown ? "visible" : "hidden";
+      const inList = body.querySelector<HTMLElement>(`[data-rail-key="section:${pin.dataset.pin}"]`);
+      if (!inList) continue;
+      inList.style.visibility = shown ? "hidden" : "";
+      const [from, to] = shown ? [inList, pin] : [pin, inList];
+      if (from.contains(document.activeElement)) to.querySelector<HTMLElement>("[data-sidebar-keyboard-row]")?.focus({ preventScroll: true });
+    }
+    body.style.setProperty("--rail-pinned", `${below}px`);
+    body.toggleAttribute("data-pinned", below > 0);
+  }, []);
+  useEffect(() => {
+    const body = railBodyRef.current;
+    body?.addEventListener("scroll", syncRailPins, { passive: true });
+    return () => body?.removeEventListener("scroll", syncRailPins);
+  }, [syncRailPins, railHeight]);
+
+  // Each row sits at the end of a wrapper that starts at the top of the list, so `sticky`
+  // can hold the inbox at the top while the gap below it closes.
+  // Wrappers stack in flow, each pulling the next back to the top with a negative margin;
+  // WebKit doesn't stick inside absolutely positioned boxes.
+  const placeRailRow = (row: SidebarRow, top: number, index: number, ghostKey?: string) => {
+    if (row.kind === "spacer") return null;
+    const key = sidebarRowKey(row);
+    const height = sidebarRowHeight(row);
+    const pinTop = !ghostKey && railGap > 0 && index < inboxEnd;
+    const wrapper = top + height + (pinTop ? railGap : 0);
+    return (
+      <div key={ghostKey ? `ghost:${ghostKey}` : key} className={`pointer-events-none ${ghostKey ? "absolute inset-x-0 top-0" : "relative"}`}
+        style={{ height: wrapper, marginBottom: ghostKey ? undefined : -wrapper }}>
+        {/* A spacer, not a margin: sticky keeps a row's margin box inside its wrapper. */}
+        <div style={{ height: top }} />
+        <div data-rail-key={ghostKey ? undefined : key} data-rail-ghost={ghostKey} inert={Boolean(ghostKey)}
+          data-done-area={row.kind === "done" || (row.kind === "section" && row.section === "done") ? "" : undefined}
+          className={`${pinTop ? "sticky" : "relative"} ${ghostKey ? "" : "pointer-events-auto"}`}
+          style={{ height, top: pinTop ? top : undefined }}>
+          {renderRailRow({ row, top, index })}
+        </div>
+      </div>
+    );
+  };
+
+  const renderRailRow = ({ row, top, index }: { row: SidebarRow; top: number; index: number }) => {
+    if (row.kind === "spacer") return null;
+    if (row.kind === "section") {
+      const setCollapsed = (collapsed: boolean) => {
+        const next = collapsed ? [...collapsedInbox, row.section] : collapsedInbox.filter((id) => id !== row.section);
+        setCollapsedInbox(next);
+        try { localStorage.setItem("sidebar-inbox-collapsed", JSON.stringify(next)); } catch {}
+      };
+      const toggle = () => {
+        const body = railBodyRef.current;
+        // A header pinned to the rail's foot opens and shows its section instead of folding it away unseen.
+        const pinned = body && top + sidebarRowHeight(row) > body.scrollTop + body.clientHeight - railStickyBottom(row.section) + 1;
+        if (row.collapsed || pinned) {
+          setCollapsed(false);
+          railReveal.current = row.section;
+          if (!row.collapsed) setRailGhostsSettled((settled) => settled + 1);
+          return;
+        }
+        setCollapsed(true);
+      };
+      return (
+        <div key={sidebarRowKey(row)} data-index={index} className="relative" style={{ height: sidebarRowHeight(row) }}
+          onFocusCapture={() => setFocusedSidebarRow(sidebarRowKey(row))}>
+          <button data-sidebar-keyboard-row aria-expanded={!row.collapsed} onClick={toggle}
+            className="group/section flex h-full w-full items-end gap-1 rounded-md px-2.25 pb-1.5 text-start text-sm font-medium text-subtext hover:text-text">
+            <span>{row.section === "working" ? m.chat_inbox_working() : m.chat_inbox_done()}</span>
+            {row.section === "working" && row.collapsed && <span className="tabular-nums text-muted">{fmtNumber(row.count)}</span>}
+            <ChevronRight size={14} aria-hidden="true"
+              className={`mb-px shrink-0 text-muted transition-transform duration-120 ease-standard motion-reduce:transition-none ${row.collapsed ? "" : "rotate-90"}`} />
+            <span aria-hidden="true" className="mb-2.5 ms-1.5 h-px flex-1 bg-border-variant" />
+          </button>
+        </div>
+      );
+    }
+    const sessionRow = (project: Project, s: ChatSession, variant: "list" | "inbox" | "done") => {
+      const sessionHarness = sessionAcpHarness(s, selectionHarness(harnesses, s));
+      const sessionModel = sessionHarness?.models.find((model) => model.id === s.model);
+      return (
+        <SidebarSessionRow
+          key={s.id}
+          actions={sidebarActions}
+          project={project}
+          session={s}
+          cardWarmUntil={cardWarmUntil}
+          projectName={sidebarGrouping !== "projects" ? projectLabel(project) : undefined}
+          harnessLogo={sessionHarness?.logo}
+          modelName={modelName(s) ?? (sessionModel ? harnessModelLabel(sessionModel) : s.model)}
+          active={s.id === activeId && mainView === "chat"}
+          unread={unreadSessionIds.has(s.id)}
+          busy={sessionBusy(project, s)}
+          waiting={sessionWaiting(s)}
+          runs={runsBySession.get(s.id) ?? EMPTY_RUNS}
+          variant={variant}
+          revealTitle={titleReveals.get(s.id)}
+        />
+      );
+    };
+    const project = row.project;
+    const s = row.kind === "chat" || row.kind === "inbox" || row.kind === "done" ? row.session : null;
+    return (
+      <div
+        key={sidebarRowKey(row)}
+        data-index={index}
+        onFocusCapture={() => setFocusedSidebarRow(sidebarRowKey(row))}
+        onBlurCapture={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget) && !(event.relatedTarget instanceof Element && event.relatedTarget.closest(`[data-session-hover-card="${sidebarRowKey(row)}"]`))) setFocusedSidebarRow(null);
+        }}
+        className="relative"
+        style={{ height: sidebarRowHeight(row) }}
+      >
+        {row.kind === "project" && project.scratch ? (
+          <div className="group h-9 flex items-end gap-1 rounded-md px-2.25 text-text">
+            <NoProjectGroupHeader
+              collapsed={row.collapsed}
+              busy={row.busy}
+              onToggleCollapsed={() => sidebarActions.current.toggleProjectCollapsed(project)}
+              onNewChat={() => sidebarActions.current.newProjectChat(project)}
+            />
+          </div>
+        ) : row.kind === "project" ? (
+          <div className="group h-9 flex items-end gap-1 rounded-md px-2.25 text-text">
+            <SidebarProjectCard
+              actions={sidebarActions}
+              project={project}
+              chatCount={projectActivity.find((activity) => activity.projectId === project.id)?.totalAgents}
+              collapsed={row.collapsed}
+              busy={row.busy}
+              pinned={pinnedProjects.includes(project.id)}
+            />
+          </div>
+        ) : s ? (
+          <div className={sidebarGrouping === "projects" ? "ms-5.5" : undefined}>
+            {sessionRow(project, s, row.kind === "inbox" ? "inbox" : row.kind === "done" ? "done" : "list")}
+          </div>
+        ) : row.kind === "more" ? (
+          <Button variant="ghost" size="small" className="ms-5.5 font-normal text-subtext" aria-expanded={sidebarGroup(project) in chatLimits} onClick={() => {
+            const group = sidebarGroup(project);
+            setChatLimits((current) => {
+              const next = { ...current };
+              if (group in next) delete next[group];
+              else next[group] = Infinity;
+              return next;
+            });
+          }}>
+            {sidebarGroup(project) in chatLimits ? m.common_show_less() : m.common_show_more()}
+          </Button>
+        ) : row.kind === "status" && (
+          <div className={`flex h-full items-center px-2.25 text-sm text-subtext ${sidebarGrouping === "projects" ? "ms-5.5" : ""}`}>
+            {row.error ? <Button size="small" onClick={row.retry}>{m.app_retry()}</Button>
+              : row.pending ? <Spinner />
+                : row.empty ?? (sessionFilter === "archived" ? m.chat_no_archived_sessions() : m.chat_no_sessions_yet())}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const rail = (
-    <aside style={mobileRail ? undefined : { width: railWidth }} className="session-rail relative shrink-0 flex flex-col bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:pt-0 [&_.rail-body]:pb-0 [&_.rail-body]:ps-2 [&_.rail-body]:pe-1 border-e border-e-border overflow-visible">
+    <aside style={mobileRail ? undefined : { width: railWidth }} className="session-rail relative shrink-0 flex flex-col bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:pt-0 [&_.rail-body]:pb-0 [&_.rail-body]:ps-1 [&_.rail-body]:pe-1 border-e border-e-border overflow-visible">
       {!mobileRail && <div
         className="rail-resizer absolute -end-1 top-0 bottom-0 w-1.5 z-30 cursor-col-resize [&:hover]:bg-resizer-hover [&:active]:bg-resizer-hover"
         onPointerDown={onResizeRail}
       />}
       {railHeader}
-      <div className="rail-section-head flex items-center justify-between shrink-0 pt-3.5 pe-3.5 pb-0 ps-4.5">
+      <div className="rail-section-head flex items-center justify-between shrink-0 pt-3.5 pe-2 pb-0 ps-3.25">
         <div className="rail-section-label p-0 text-sm font-medium text-subtext">
-          {sidebarGrouping === "projects" ? m.projects_home_projects() : m.chat_all_sessions()}
+          {sidebarGrouping === "projects" ? m.projects_home_projects() : sidebarGrouping === "list" ? m.chat_all_sessions() : m.sidebar_inbox()}
         </div>
         <div className="rail-section-actions flex items-center gap-1">
           {sidebarGrouping === "list" && <Tooltip interactive content={m.chat_panel_new_chat()} className="rounded-sm">
@@ -8202,7 +8804,11 @@ export function ChatPanel({
               <Plus size={16} aria-hidden="true" />
             </IconButton>
           </Tooltip>}
-          {onNewProject && <Tooltip interactive content={m.projects_home_new_project()} className="rounded-sm">
+          {sidebarGrouping === "inbox" ? latestProject && <Tooltip interactive content={m.chat_panel_new_chat()} className="rounded-sm">
+            <IconButton size="small" className="text-subtext" aria-label={`${m.chat_panel_new_chat()} · ${latestProject.name}`} onClick={() => sidebarActions.current.newProjectChat(latestProject)}>
+              <SquarePen size={16} className="text-subtext" />
+            </IconButton>
+          </Tooltip> : onNewProject && <Tooltip interactive content={m.projects_home_new_project()} className="rounded-sm">
             <IconButton size="small" className="text-subtext" aria-label={m.projects_home_new_project()} onClick={onNewProject}>
               <FolderPlus size={16} className="text-subtext" />
             </IconButton>
@@ -8216,14 +8822,13 @@ export function ChatPanel({
           }} />
         </div>
       </div>
-      <div className="relative flex-1 min-h-0">
-      <div ref={setRailBody} tabIndex={-1} className={`rail-body h-full overflow-x-hidden ${!sidebarScrollable ? "overflow-y-hidden" : (sidebarVirtualizer.scrollOffset ?? 0) > 0 ? "overflow-y-auto mask-y-from-[calc(100%-0.75rem)]" : "overflow-y-auto mask-b-from-[calc(100%-0.75rem)]"}`}
+      <div className="relative flex-1 min-h-0"
         onKeyDown={(event) => {
           if (event.defaultPrevented || event.nativeEvent.isComposing || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
           const target = event.target;
-          if (!(target instanceof HTMLElement) || (target !== event.currentTarget && !target.hasAttribute("data-sidebar-keyboard-row"))) return;
+          if (!(target instanceof HTMLElement) || (target !== railBodyRef.current && !target.hasAttribute("data-sidebar-keyboard-row"))) return;
           const rows = sidebarScrollable ? sidebarRows : defaultRows;
-          const indexes = rows.flatMap((row, index) => row.kind === "project" || row.kind === "chat" ? [index] : []);
+          const indexes = rows.flatMap((row, index) => row.kind === "project" || row.kind === "chat" || row.kind === "inbox" || row.kind === "section" || row.kind === "done" ? [index] : []);
           if (indexes.length === 0) return;
           const rowIndex = Number(target.closest("[data-index]")?.getAttribute("data-index") ?? -1);
           const position = indexes.indexOf(rowIndex);
@@ -8246,89 +8851,28 @@ export function ChatPanel({
           if (index === rowIndex) return;
           pendingSidebarFocus.current = index;
           setFocusedSidebarRow(sidebarRowKey(rows[index]));
-          if (sidebarScrollable) sidebarVirtualizer.scrollToIndex(index, { align: "auto" });
+          const body = railBodyRef.current;
+          if (sidebarScrollable && body && rows[index].kind !== "section") {
+            // Keep the row clear of the headers pinned over the rail's foot.
+            const covered = Number.parseFloat(body.style.getPropertyValue("--rail-pinned")) || 0;
+            const top = railTops[index];
+            const bottom = top + sidebarRowHeight(rows[index]);
+            if (top < body.scrollTop) body.scrollTop = top;
+            else if (bottom > body.scrollTop + body.clientHeight - covered) body.scrollTop = bottom - body.clientHeight + covered;
+          }
         }}>
+      <div ref={setRailBody} tabIndex={-1}
+        className={`rail-body h-full overflow-x-hidden ${sidebarScrollable ? "overflow-y-auto" : "overflow-y-hidden"} data-pinned:mask-b-from-[calc(100%-var(--rail-pinned)-0.75rem)] data-pinned:mask-b-to-[calc(100%-var(--rail-pinned)+0.25rem)]`}>
         <div className="relative" style={{ height: (sidebarScrollable ? sidebarVirtualizer.getTotalSize() : defaultRowsHeight) + (showProjectMore ? 38 : 0) + (sidebarExpandedAll ? 46 : 0) }}>
-          {(sidebarScrollable
-            ? sidebarVirtualItems.map((item) => ({ row: sidebarRows[item.index], top: item.start, index: item.index }))
-            : defaultRows.map((row, index) => ({ row, top: 0, index }))
-          ).map(({ row, top, index }) => {
-            const project = row.project;
-            const s = row.kind === "chat" ? row.session : null;
-            const sessionHarness = s ? sessionAcpHarness(s, selectionHarness(harnesses, s)) : undefined;
-            const sessionModel = sessionHarness?.models.find((model) => model.id === s?.model);
-            return (
-              <div
-                key={sidebarRowKey(row)}
-                data-index={index}
-                onFocusCapture={() => setFocusedSidebarRow(sidebarRowKey(row))}
-                onBlurCapture={(event) => {
-                  if (!event.currentTarget.contains(event.relatedTarget) && !(event.relatedTarget instanceof Element && event.relatedTarget.closest(`[data-session-hover-card="${sidebarRowKey(row)}"]`))) setFocusedSidebarRow(null);
-                }}
-                className={sidebarScrollable ? "absolute top-0 start-0 w-full" : "relative"}
-                style={{ height: sidebarRowHeight(row), top: sidebarScrollable ? top : undefined }}
-              >
-                {row.kind === "project" && project.scratch ? (
-                  <div className="group h-9 flex items-end gap-1 rounded-md px-2.5 text-text">
-                    <NoProjectGroupHeader
-                      collapsed={row.collapsed}
-                      busy={row.busy}
-                      onToggleCollapsed={() => sidebarActions.current.toggleProjectCollapsed(project)}
-                      onNewChat={() => sidebarActions.current.newProjectChat(project)}
-                    />
-                  </div>
-                ) : row.kind === "project" ? (
-                  <div className="group h-9 flex items-end gap-1 rounded-md px-2.5 text-text">
-                    <SidebarProjectCard
-                      actions={sidebarActions}
-                      project={project}
-                      chatCount={projectActivity.find((activity) => activity.projectId === project.id)?.totalAgents}
-                      collapsed={row.collapsed}
-                      busy={row.busy}
-                      pinned={pinnedProjects.includes(project.id)}
-                    />
-                  </div>
-                ) : s ? (
-                  <div className={sidebarGrouping === "projects" ? "ms-5.5" : undefined}>
-                    <SidebarSessionRow
-                      key={s.id}
-                      actions={sidebarActions}
-                      project={project}
-                      session={s}
-                      cardWarmUntil={cardWarmUntil}
-                      projectName={sidebarGrouping === "list" ? projectLabel(project) : undefined}
-                      harnessLogo={sessionHarness?.logo}
-                      modelName={modelName(s) ?? (sessionModel ? harnessModelLabel(sessionModel) : s.model)}
-                      active={s.id === activeId && mainView === "chat"}
-                      unread={unreadSessionIds.has(s.id)}
-                      busy={sessionBusy(project, s)}
-                      waiting={sessionWaiting(s)}
-                      experimentRunning={activeRuns.some((item) => item.sessionId === s.id)}
-                      revealTitle={titleReveals.get(s.id)}
-                    />
-                  </div>
-                ) : row.kind === "more" ? (
-                  <Button variant="ghost" size="small" className="ms-5.5 font-normal text-subtext" aria-expanded={sidebarGroup(project) in chatLimits} onClick={() => {
-                    const group = sidebarGroup(project);
-                    setChatLimits((current) => {
-                      const next = { ...current };
-                      if (group in next) delete next[group];
-                      else next[group] = Infinity;
-                      return next;
-                    });
-                  }}>
-                    {sidebarGroup(project) in chatLimits ? m.common_show_less() : m.common_show_more()}
-                  </Button>
-                ) : row.kind === "status" && (
-                  <div className={`flex h-full items-center px-2.5 text-sm text-subtext ${sidebarGrouping === "projects" ? "ms-5.5" : ""}`}>
-                    {row.error ? <Button size="small" onClick={row.retry}>{m.app_retry()}</Button>
-                      : row.pending ? <Spinner />
-                        : sessionFilter === "archived" ? m.chat_no_archived_sessions() : m.chat_no_sessions_yet()}
-                  </div>
-                )}
+          {sidebarScrollable
+            ? <>
+              {sidebarVirtualItems.map((item) => placeRailRow(sidebarRows[item.index], item.start, item.index))}
+              {/* Clipped, so leaving rows don't hold the list at its old height. */}
+              <div className="pointer-events-none absolute inset-0 overflow-hidden">
+                {[...railGhosts.current].map(([key, ghost]) => placeRailRow(ghost.row, ghost.top, -1, key))}
               </div>
-            );
-          })}
+            </>
+            : defaultRows.map((row, index) => renderRailRow({ row, top: 0, index }))}
           {(showProjectMore || sidebarExpandedAll) && (
             <div className="absolute start-0 flex h-9.5 w-full items-center pt-1" style={{ top: sidebarScrollable ? sidebarVirtualizer.getTotalSize() : defaultRowsHeight }}>
               <Button variant="ghost" size="small" className="text-subtext" aria-expanded={sidebarExpandedAll} onClick={() => {
@@ -8346,6 +8890,13 @@ export function ChatPanel({
           )}
         </div>
       </div>
+      {sidebarScrollable && (
+        <div ref={railPins} className="pointer-events-none absolute inset-x-0 bottom-0 ps-1 pe-1">
+          {sidebarRows.flatMap((row, index) => row.kind === "section" ? [
+            <div key={sidebarRowKey(row)} data-pin={row.section} data-done-area={row.section === "done" ? "" : undefined} className="pointer-events-auto invisible">{renderRailRow({ row, top: railTops[index], index })}</div>,
+          ] : [])}
+        </div>
+      )}
       </div>
       <StatusStrip runtime={runtime} onDetails={openRuntimeDetails} settingsOpen={mainView !== "chat" && mainView !== "project"} onSettings={openSettings} />
     </aside>
@@ -8668,6 +9219,7 @@ export function ChatPanel({
             onOpenRun={onOpenRun}
             onOpenExperiment={onOpenExperiment}
           />
+          {!busy && <BackgroundTaskBanner background={activeSession?.background} />}
           {/* Inside the composer so the composer's popovers (mode/model pickers,
             z 50 within this stacking context) layer above the strip — as a
             sibling, the composer's own z-index: 4 capped them below it. */}

@@ -22,6 +22,9 @@ pub struct LocalProject {
     pub run_command: Option<String>,
     /// arXiv or alphaXiv paper id the project starts from (versionless, e.g. `2401.12345`).
     pub paper_id: Option<String>,
+    /// The user's mark for the project; without one the UI draws its initials.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon: Option<serde_json::Value>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -65,6 +68,17 @@ impl LocalProject {
             paper_id: row.get(9)?,
             created_at: row.get(10)?,
             updated_at: row.get(11)?,
+            icon: row
+                .get::<_, Option<String>>(12)?
+                .map(|json| serde_json::from_str(&json))
+                .transpose()
+                .map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        12,
+                        rusqlite::types::Type::Text,
+                        error.into(),
+                    )
+                })?,
         })
     }
 }

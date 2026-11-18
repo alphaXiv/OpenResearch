@@ -32,6 +32,7 @@ export type ChatEvent =
   | { type: "sessionDeleted"; sessionId: string }
   | { type: "message"; sessionId: string; message: ChatMessage }
   | { type: "busy"; sessionId: string; busy: boolean }
+  | { type: "background"; sessionId: string }
   | { type: "usage"; sessionId: string; usage: ContextUsage }
   | { type: "queued"; sessionId: string; items: QueuedMessage[] }
   /** A different fork of a turn is now the branch on screen. */
@@ -409,6 +410,10 @@ export function createEvents(client: WorkspaceClient) {
             emitProjectActivityEvent();
             emitChat({ type: "busy", sessionId: d.sessionId, busy: d.busy });
           }
+        });
+        es.addEventListener("chat.background", (e) => {
+          const d = parse<{ sessionId: string }>(e as MessageEvent);
+          if (d?.sessionId) emitChat({ type: "background", sessionId: d.sessionId });
         });
         es.addEventListener("chat.usage", (e) => {
           const d = parse<{ sessionId: string; usage: ContextUsage }>(e as MessageEvent);

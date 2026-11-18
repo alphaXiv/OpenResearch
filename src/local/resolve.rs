@@ -55,6 +55,7 @@ mod tests {
             repo_path: "/tmp/repo".to_string(),
             run_command: None,
             paper_id: None,
+            icon: None,
             created_at: now,
             updated_at: now,
         }
