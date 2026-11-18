@@ -2981,8 +2981,7 @@ function ToolRow({
   );
 }
 
-/** Makes a whole disclosure row toggle, except clicks on a link or button in
- * its label; the row's own buttons opt in with `data-row-toggle`. */
+/** Toggles the row on click, unless a nested link or button without `data-row-toggle` was hit. */
 function toggleUnlessControl(toggle: () => void) {
   return (event: React.MouseEvent<HTMLElement>) => {
     const control = (event.target as Element).closest("a, button, [role='button']");
