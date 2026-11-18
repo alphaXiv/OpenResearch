@@ -6876,17 +6876,9 @@ impl ChatHost {
                     .unwrap_or(false);
                 if changed {
                     ctx.push_turn_failure(&kind, message.clone(), action);
-                }
-                if changed && ctx.retry_exhausted {
-                    crate::telemetry::capture(
-                        "chat_retry_exhausted",
-                        json!({
-                            "harness": ctx.harness,
-                            "owner": retry_owner,
-                            "reason": kind,
-                            "attempt": ctx.attempt_count,
-                        }),
-                    );
+                    if let Some(properties) = ctx.exhausted_retry_properties(&retry_owner, &kind) {
+                        crate::telemetry::capture("chat_retry_exhausted", properties);
+                    }
                 }
                 changed
             } else if let Ok(store) = Store::open() {
@@ -8459,6 +8451,7 @@ pub struct TurnCtx {
     retry_owner: Option<String>,
     retry_started_emitted: bool,
     retry_exhausted: bool,
+    setup_failure_reason: Option<&'static str>,
     orx_retry_started: Option<Instant>,
     orx_retry_count: u32,
     pub(crate) terminal_error: Option<(String, String)>,
@@ -8549,6 +8542,7 @@ fn turn_ctx_from_stored(
         retry_owner: None,
         retry_started_emitted: false,
         retry_exhausted: false,
+        setup_failure_reason: None,
         asking: None,
         orx_retry_started: None,
         orx_retry_count: 0,
@@ -8787,6 +8781,25 @@ impl TurnCtx {
         self.terminal_error = Some((kind.into(), message.into()));
     }
 
+    pub(crate) fn mark_setup_failure(&mut self, kind: &'static str, error: &crate::error::Error) {
+        self.setup_failure_reason = error
+            .downcast_ref::<crate::local::harness::SetupFailure>()
+            .map(|failure| failure.reason);
+        self.mark_delivery(DeliveryState::NotSent);
+        self.mark_terminal_failure(kind, error.to_string());
+    }
+
+    pub(crate) fn exhausted_retry_properties(&self, owner: &str, kind: &str) -> Option<Value> {
+        self.retry_exhausted.then(|| {
+            json!({
+                "harness": self.harness,
+                "owner": owner,
+                "reason": self.setup_failure_reason.unwrap_or(kind),
+                "attempt": self.attempt_count,
+            })
+        })
+    }
+
     pub fn schedule_orx_retry(&mut self, explicit: Option<Duration>) -> Option<(u32, Duration)> {
         let started = *self.orx_retry_started.get_or_insert_with(Instant::now);
         let retry_number = self.orx_retry_count + 1;
@@ -8801,7 +8814,7 @@ impl TurnCtx {
             return None;
         }
         self.orx_retry_count = retry_number;
-        Some((retry_number, delay))
+        Some((retry_number, crate::config::paced(delay)))
     }
 
     pub fn orx_retry_remaining(&self) -> Option<Duration> {
@@ -8955,6 +8968,7 @@ impl TurnCtx {
             retry_owner: None,
             retry_started_emitted: false,
             retry_exhausted: false,
+            setup_failure_reason: None,
             asking: None,
             orx_retry_started: None,
             orx_retry_count: 0,

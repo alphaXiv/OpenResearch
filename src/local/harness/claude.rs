@@ -2877,8 +2877,7 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
             Err(error) => {
                 ctx.host.claude.kill_session(&ctx.session_id).await;
                 let Some((retry_number, delay)) = ctx.schedule_orx_retry(None) else {
-                    ctx.mark_delivery(DeliveryState::NotSent);
-                    ctx.mark_terminal_failure("claude_setup", error.to_string());
+                    ctx.mark_setup_failure("claude_setup", &error);
                     return Err(error);
                 };
                 ctx.show_retry_status(
@@ -3376,6 +3375,41 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(5), run_attempt(&mut ctx, spec)).await;
         claude.shutdown().await;
         (ctx, attempt.expect("the turn ends"))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn signed_out_setup_exhaustion_reports_no_auth_detail() {
+        let mut ctx = TurnCtx::test_stub();
+        ctx.harness = "claude-code".into();
+        let probe = parse_auth_status(
+            Some(1),
+            br#"{"loggedIn":false,"authMethod":"none","apiProvider":"firstParty"}"#,
+            auth_barrier_sequence(),
+        );
+        ctx.host.claude.observe_auth_probe(&probe);
+        assert!(ctx
+            .exhausted_retry_properties("orx", "claude_setup")
+            .is_none());
+        let spec = SpawnSpec {
+            chat: ctx.host.clone(),
+            session_id: ctx.session_id.clone(),
+            repo: PathBuf::new(),
+            playbook: PathBuf::new(),
+            resume: None,
+            fork_at: None,
+            config: spawn_config(&ctx, NativeStore::Isolated),
+        };
+        assert!(run_attempt(&mut ctx, spec).await.is_err());
+        let (kind, local_message) = ctx.terminal_error.as_ref().unwrap();
+        assert_eq!(kind, "claude_setup");
+        assert!(!local_message.is_empty());
+        assert_eq!(
+            ctx.exhausted_retry_properties("orx", kind),
+            Some(json!({
+                "harness": "claude-code", "owner": "orx", "reason": "claude_setup_sign_in",
+                "attempt": ORX_MAX_ATTEMPTS
+            }))
+        );
     }
 
     fn texts(ctx: &TurnCtx) -> Vec<&str> {
