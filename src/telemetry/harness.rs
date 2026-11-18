@@ -477,6 +477,9 @@ const PHRASES: &[&str] = &[
     "ECONNRESET",
     // Fixed classifications `verify_reason` passes in; the ingested
     // `reason` allowlist has no vocabulary for which predicate failed.
+    "agent detection returned no result",
+    "agent account could not be prepared",
+    "agent executable path is unavailable",
     "agent is not installed",
     "agent is installed but failed to run",
     "agent is not signed in",
