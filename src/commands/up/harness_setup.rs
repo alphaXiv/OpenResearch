@@ -250,11 +250,9 @@ async fn run(
         let (program, mut args) = match request.action {
             Action::Install => return Err("Agent installation requires a managed release".into()),
             Action::Login | Action::Update => {
-                let Some(harness) = crate::local::harness::detect_harness(&request.harness).await
-                else {
-                    attempt.record("failed", "detect", Some("not_installed"), None, None);
-                    return Err("Agent not found. Install it, then retry.".into());
-                };
+                let harness = crate::local::harness::detect_harness(&request.harness).await;
+                let harness =
+                    harness.ok_or_else(|| SetupBlock::NoDetection.record(attempt, "detect"))?;
                 if request.harness == "claude-code"
                     && matches!(request.action, Action::Login)
                     && request.profile.is_none()
@@ -263,10 +261,8 @@ async fn run(
                     attempt.record("interrupted", "detect", Some("not_eligible"), None, None);
                     return Err("Claude Code account login is not applicable to the reported provider or auth state. Check its provider configuration and re-check the harness.".into());
                 }
-                let Some(bin) = harness.bin_path else {
-                    attempt.record("failed", "detect", Some("not_installed"), None, None);
-                    return Err("Agent not found. Install it, then retry.".into());
-                };
+                let bin =
+                    setup_program(&harness).map_err(|error| error.record(attempt, "detect"))?;
                 let (_, mut args) = if matches!(request.action, Action::Login) {
                     login_command(&request.harness)
                 } else {
@@ -283,7 +279,7 @@ async fn run(
                 {
                     args.push("--device-auth".into());
                 }
-                (bin, args)
+                (bin.to_owned(), args)
             }
         };
         let lease = if request.harness == "opencode" && matches!(request.action, Action::Login) {
@@ -335,13 +331,10 @@ async fn run(
             env.extend(MANAGED_ENV.map(|(key, value)| (key, value.into())));
         }
         if let Some(profile) = &request.profile {
-            match crate::local::agent_profiles::login_env(profile) {
-                Ok(profile_env) => env.extend(profile_env),
-                Err(error) => {
-                    attempt.record("failed", "detect", Some("not_installed"), None, None);
-                    return Err(error.to_string());
-                }
-            }
+            env.extend(
+                crate::local::agent_profiles::login_env(profile)
+                    .map_err(|error| SetupBlock::Profile(error).record(attempt, "detect"))?,
+            );
         }
         let login = matches!(request.action, Action::Login);
         let mut screen = TerminalScreen {
@@ -382,8 +375,10 @@ async fn run(
             );
             return Err(failure.message);
         }
+        let harness = harness.ok_or_else(|| SetupBlock::NoDetection.record(attempt, "verify"))?;
+        setup_program(&harness).map_err(|error| error.record(attempt, "verify"))?;
         attempt.record("succeeded", "verify", None, None, None);
-        return harness.ok_or_else(|| "Agent not found. Install it, then retry.".into());
+        return Ok(harness);
     }
     let verified = setup_verified(request, harness.as_ref());
     if let Some(failure) = command_failure {
@@ -874,6 +869,46 @@ async fn was_installed(harness: &str) -> bool {
         .is_some_and(|h| h.installed && h.bin_path.is_some())
 }
 
+/// Only the fixed diagnosis goes on the wire. A failed profile preparation can name
+/// a private local path in the message shown to the user.
+#[derive(Debug)]
+enum SetupBlock {
+    NoDetection,
+    NotInstalled,
+    NoPath,
+    Profile(crate::error::Error),
+}
+
+impl SetupBlock {
+    fn diagnostic(&self) -> (&'static str, &'static str) {
+        match self {
+            Self::NoDetection => ("not_ready", "agent detection returned no result"),
+            Self::NotInstalled => ("not_installed", "agent is not installed"),
+            Self::NoPath => ("not_ready", "agent executable path is unavailable"),
+            Self::Profile(_) => ("not_ready", "agent account could not be prepared"),
+        }
+    }
+
+    fn record(self, attempt: &SetupAttempt, stage: &str) -> String {
+        let (reason, detail) = self.diagnostic();
+        attempt.record("failed", stage, Some(reason), None, Some(detail));
+        match self {
+            Self::NoDetection => "Could not check the agent. Re-check your coding agents, then retry.".into(),
+            Self::NotInstalled => "Agent not found. Install it, then retry.".into(),
+            Self::NoPath => "Could not locate the installed agent's executable. Re-check your coding agents, then retry.".into(),
+            Self::Profile(error) => error.to_string(),
+        }
+    }
+}
+
+fn setup_program(harness: &crate::local::harness::HarnessInfo) -> Result<&str, SetupBlock> {
+    harness.bin_path.as_deref().ok_or(if harness.installed {
+        SetupBlock::NoPath
+    } else {
+        SetupBlock::NotInstalled
+    })
+}
+
 /// The ingested reason, plus a fixed phrase naming which predicate failed —
 /// `not_ready` alone cannot tell a stale executable from a signed-out CLI.
 /// The phrase is one of `safe_error_excerpt`'s allowlisted literals, so it
@@ -883,9 +918,12 @@ fn verify_reason(
     harness: Option<&crate::local::harness::HarnessInfo>,
 ) -> (&'static str, &'static str) {
     use crate::local::harness::HarnessAuthState;
-    let Some(h) = harness.filter(|h| h.installed) else {
-        return ("not_installed", "agent is not installed");
+    let Some(h) = harness else {
+        return SetupBlock::NoDetection.diagnostic();
     };
+    if !h.installed {
+        return SetupBlock::NotInstalled.diagnostic();
+    }
     if h.install_broken {
         return ("not_ready", "agent is installed but failed to run");
     }
@@ -1189,7 +1227,10 @@ mod tests {
             verify_reason(Action::Install, h)
         }
         let mut h = blank_harness();
-        assert_eq!(reason(None).0, "not_installed");
+        assert_eq!(
+            reason(None),
+            ("not_ready", "agent detection returned no result")
+        );
         assert_eq!(reason(Some(&h)).0, "not_installed");
         h.installed = true;
         h.install_broken = true;
@@ -1247,7 +1288,10 @@ mod tests {
                 }
             }
         }
-        assert_eq!(verify_reason(Action::Install, None).0, "not_installed");
+        assert_eq!(
+            verify_reason(Action::Install, None),
+            ("not_ready", "agent detection returned no result")
+        );
     }
 
     #[test]
