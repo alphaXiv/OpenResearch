@@ -8,6 +8,7 @@ import { versusOf } from "../../../runMonitor/model";
 import type { ChartBlock, Point, RunMonitor, SignalSpec, ViewBlock } from "../../../runMonitor/types";
 import { useBoxSize } from "../useBoxSize";
 import { chartOf, type ChartData, type Series } from "./series";
+import { midSentence } from "./Stats";
 
 /** Path segments for one line; a missing value (NaN on the wire) breaks it. */
 function pathOf(points: Point[], x: (value: number) => number, y: (value: number) => number): string {
@@ -140,6 +141,9 @@ function rangeLine(name: string | null | undefined, lo: number, hi: number, labe
 /** Wide enough apart to mark each point, as a run that reports once a round or an eval is. */
 const DOT_SPACING = 14;
 
+/** How near a landmark, in pixels along each axis, the pointer reads it out instead of the step beneath it. */
+const SNAP = 12;
+
 /** About how wide a character of an axis label is, to thin labels that would collide. */
 const CHAR_WIDTH = 6.5;
 
@@ -181,7 +185,7 @@ function Readout({ at, width, outside, onDismiss, children }: { at: number; widt
  */
 export function Chart({ monitor, block, size, live, height = 160 }: { monitor: RunMonitor; block: ChartBlock & Pick<ViewBlock, "phase">; size: "strip" | "page"; live: boolean; height?: number }) {
   const [ref, box] = useBoxSize<HTMLDivElement>();
-  const [pointer, setPointer] = useState<{ at: number; keyboard: boolean } | null>(null);
+  const [pointer, setPointer] = useState<{ at: number; y: number | null; keyboard: boolean } | null>(null);
   const dismiss = useCallback(() => setPointer(null), []);
   const hover = pointer?.at ?? null;
   const data = chartOf(monitor, block);
@@ -195,6 +199,12 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
   const yLog = block.yScale === "log";
   const mark = categories ? "bars" : block.mark === "points" ? "points" : "line";
 
+  const current = monitor.phases[monitor.progress?.phase ?? monitor.stageOrder.index ?? -1];
+  const phase = block.phase === undefined ? current : monitor.phases.find((one) => one.name === block.phase);
+  const ours = block.phase === undefined || phase === current;
+  /** The steps the chart's stage counts; the run's total is the current stage's, never another's. */
+  const total = ours ? monitor.x.max : monitor.x.name === "step" ? phase?.of ?? null : null;
+  const unstarted = !ours && phase !== undefined && phase.startedAt === null && !phase.skipped;
   const known = (points: Point[]) => points.filter((point): point is [number, number] => point[1] !== null && Number.isFinite(point[1]));
   const reported = known(data.series.flatMap((line) => line.points));
 
@@ -206,7 +216,7 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
     // Over steps the axis spans the run's own total, or what it has reached; the parent's line is cut at its edge.
     const own = known(data.series.filter((line) => !line.ghost).flatMap((line) => line.points)).map((point) => point[0]);
     const theirs = known(data.series.filter((line) => line.ghost).flatMap((line) => line.points)).map((point) => point[0]);
-    const reach = monitor.x.max !== null ? Math.max(monitor.x.max, ...own) : own.length > 0 ? Math.max(1, ...own) : null;
+    const reach = total !== null ? Math.max(total, ...own) : own.length > 0 ? Math.max(1, ...own) : null;
     const spanned = block.xRange === "parent" || own.length === 0 ? [...own, ...theirs] : own;
     if (xLog) [x0, x1] = spanned.length > 0 ? span(spanned, true) : [1, 10];
     else [x0, x1] = [Math.min(0, ...spanned), block.xRange === "parent" || reach === null ? Math.max(reach ?? 1, ...theirs) : reach];
@@ -215,8 +225,10 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
     ...line,
     points: line.points.filter(([at]) => at >= x0 && at <= x1),
   }));
+  /** A noisy signal's own curve is drawn smoothed, its reports faint beneath. */
+  const smoothOf = (line: Series) => table || mark !== "line" || line.ghost ? undefined : signals[line.y]?.smooth;
   const series = table || mark !== "line" ? samples : data.series.map((line) => {
-    const smooth = line.ghost ? undefined : signals[line.y]?.smooth;
+    const smooth = smoothOf(line);
     let level: number | null = null;
     const points = smooth ? line.points.map(([at, value]): Point => {
       if (value === null) return [at, null];
@@ -227,7 +239,8 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
   });
   const drawn = known(series.flatMap((line) => line.points));
   const visible = samples === series ? drawn : known(samples.flatMap((line) => line.points));
-  const nothing = rows === 0 ? (live ? m.run_block_no_rows() : m.run_block_no_rows_ended()) : live ? m.run_block_no_points() : m.run_block_no_points_ended();
+  const nothing = unstarted ? (live ? m.run_block_stage_not_started({ stage: autoDir(phase.name) }) : m.run_block_stage_never_started({ stage: autoDir(phase.name) }))
+    : rows === 0 ? (live ? m.run_block_no_rows() : m.run_block_no_rows_ended()) : live ? m.run_block_no_points() : m.run_block_no_points_ended();
   /** Nothing of this run's own to draw; a table's chart may still show the parent's under the words that say so. */
   const blank = table ? !series.some((line) => !line.ghost && line.points.some((point) => point[1] !== null)) : drawn.length === 0;
   const empty = blank && notes.length > 0 && rows !== 0 ? notes.join(" ") : nothing;
@@ -244,8 +257,6 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
   const yCaption = [ySpec?.unit !== "%" ? ySpec?.unit : null, yLog ? m.run_chart_log() : null].filter(Boolean).join(", ");
   const number = new Intl.NumberFormat(getLocale(), { maximumFractionDigits: 4 });
   const compact = new Intl.NumberFormat(getLocale(), { notation: "compact", maximumFractionDigits: 1 });
-  const phase = block.phase === undefined ? monitor.phases[monitor.progress?.phase ?? monitor.stageOrder.index ?? -1]
-    : monitor.phases.find((phase) => phase.name === block.phase);
   const elapsed = !table && (monitor.x.name === "elapsed" || (monitor.x.name === "step" && /^(s|sec|secs|second|seconds)$/i.test(phase?.unit ?? "")));
   const coordinate = elapsed ? m.run_chart_elapsed() : monitor.x.name;
   /** A tick on a table's axis reads as its signal does, scaled and in percent, at the size of the tick. */
@@ -311,40 +322,52 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
       : <circle key={index} cx={x(px)} cy={y(py)} r={radius} fill={line.color} stroke="var(--base)" strokeWidth={radius > 3 ? 2 : 1} />
   ));
 
-  const landmarks = mark === "line" && !table && !series.some((line) => line.ghost) ? owned.flatMap((line) => {
+  /** Each own line's first report and its best one, where the line has no parent to read against. */
+  const landmarks = mark === "line" && !table && !series.some((line) => line.ghost) ? samples.flatMap((line) => {
     const values = known(line.points);
     const first = values[0];
+    if (!first) return [];
     const better = signals[line.y]?.better;
     const best = better && values.reduce((best, point) => (better === "lower" ? point[1] < best[1] : point[1] > best[1]) ? point : best, first);
-    const startLabel = m.run_chart_start({ label: autoDir(line.label) });
-    const bestLabel = m.run_stat_best({ label: autoDir(line.label) });
-    return first ? [
-      { line, point: first, best: best === first, label: best === first ? `${startLabel} · ${bestLabel}` : startLabel },
-      ...(best && best !== first ? [{ line, point: best, best: true, label: bestLabel }] : []),
-    ] : [];
+    const label = autoDir(midSentence(line.label));
+    const start = { line, point: first, best: false, name: m.run_chart_start({ label }) };
+    if (!best) return [start];
+    const top = { line, point: best, best: true, name: better === "lower" ? m.run_chart_lowest({ label }) : m.run_chart_highest({ label }) };
+    return best === first ? [top] : [start, top];
   }) : [];
   const marks = <>
-    {!table && monitor.x.max !== null && <line x1={x(monitor.x.max)} x2={x(monitor.x.max)} y1={margin.top} y2={margin.top + innerHeight} stroke="var(--border)" strokeDasharray="2 3" />}
-    {landmarks.map(({ line, point, best, label }) => <circle key={`${line.name}:${best}`} cx={x(point[0])} cy={y(point[1])} r={best ? 3.5 : 3} fill={best ? line.color : "var(--surface)"} stroke={line.color} strokeWidth="1.5"><title>{label}: {ltr(fmtSignal(signals[line.y], point[1]))}</title></circle>)}
+    {!table && total !== null && <line x1={x(total)} x2={x(total)} y1={margin.top} y2={margin.top + innerHeight} stroke="var(--border)" strokeDasharray="2 3" />}
+    {landmarks.map(({ line, point, best }) => <circle key={`${line.name}:${best}`} cx={x(point[0])} cy={y(point[1])} r={best ? 3.5 : 3} fill={best ? line.color : "var(--surface)"} stroke={line.color} strokeWidth="1.5" />)}
   </>;
 
   const readout = hover === null || drawn.length === 0 ? null : (() => {
     const at = categories ? Math.round(x0 + ((hover - margin.start) / innerWidth) * (x1 - x0)) : null;
     const position = (hover - margin.start) / innerWidth;
-    const target = at ?? (xLog ? Math.exp(Math.log(x0) + position * (Math.log(x1) - Math.log(x0))) : x0 + position * (x1 - x0));
-    const hits = samples.flatMap((line) => {
+    const height = pointer?.y ?? null;
+    const reach = (one: (typeof landmarks)[number]) => [Math.abs(x(one.point[0]) - hover), Math.abs(y(one.point[1]) - height!)];
+    const near = height === null ? [] : landmarks.filter((one) => reach(one).every((offset) => offset <= SNAP));
+    const landmark = near.sort((a, b) => Math.hypot(...reach(a)) - Math.hypot(...reach(b)))[0];
+    const target = landmark?.point[0] ?? at ?? (xLog ? Math.exp(Math.log(x0) + position * (Math.log(x1) - Math.log(x0))) : x0 + position * (x1 - x0));
+    const hits = samples.flatMap((line, index) => {
       const point = at === null ? nearest(line.points, target) : line.points.find(([px]) => px === at);
-      return point && point[1] !== null && (at !== null || (pointer?.keyboard && !line.ghost) || Math.abs(x(point[0]) - hover) <= 40) ? [{ line, point }] : [];
+      const within = line.points.length > 0 && target >= line.points[0][0] && target <= line.points[line.points.length - 1][0];
+      if (!point || point[1] === null || !(at !== null || within || (pointer?.keyboard && !line.ghost) || Math.abs(x(point[0]) - hover) <= 40)) return [];
+      const level = smoothOf(line) ? series[index].points.find(([px]) => px === point[0])?.[1] ?? null : null;
+      return [{ line, point, level }];
     });
     if (hits.length === 0) return null;
     const mine = hits.filter((hit) => !hit.line.ghost);
-    const anchor = (mine.length > 0 ? mine : hits).reduce((best, hit) => Math.abs(x(hit.point[0]) - hover) < Math.abs(x(best.point[0]) - hover) ? hit : best);
-    return { hits, anchor };
+    const anchor = landmark ? hits.find((hit) => hit.line === landmark.line)! : (mine.length > 0 ? mine : hits).reduce((best, hit) => Math.abs(x(hit.point[0]) - hover) < Math.abs(x(best.point[0]) - hover) ? hit : best);
+    /** The landmarks at the readout's step, on lines that report there. */
+    const named = landmarks.filter((one) => one.point[0] === anchor.point[0] && hits.some((hit) => hit.line === one.line && hit.point[0] === one.point[0]));
+    return { hits, anchor, named };
   })();
-  const readoutTitle = (anchor: { line: Series; point: Point }) => {
+  const readoutTitle = ({ anchor, named }: NonNullable<typeof readout>) => {
     if (categories) return categories[anchor.point[0]];
-    if (!table) return `${autoDir(coordinate)} ${ltr(xLabel(anchor.point[0]))}`;
-    return `${xName(anchor.line)} ${withUnit(signals[anchor.line.x], anchor.point[0])}`;
+    if (table) return `${xName(anchor.line)} ${withUnit(signals[anchor.line.x], anchor.point[0])}`;
+    const where = `${autoDir(coordinate)} ${ltr(xLabel(anchor.point[0]))}`;
+    if (named.length === 0) return where;
+    return m.run_chart_at({ value: new Intl.ListFormat(getLocale(), { type: "conjunction" }).format(named.map((one) => one.name)), x: where });
   };
   const readoutValue = (line: Series, point: Point, anchor: Point) => {
     const value = table ? withUnit(signals[line.y], point[1]) : fmtSignal(signals[line.y], point[1]);
@@ -352,13 +375,14 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
     return m.run_chart_at({ value, x: table ? withUnit(signals[line.x], point[0]) : xLabel(point[0]) });
   };
 
-  const readoutRows = readout?.hits.map(({ line, point }) => ({
+  const readoutRows = readout?.hits.map(({ line, point, level }) => ({
     line,
     name: !line.ghost ? line.label : series.filter((one) => one.ghost).length > 1 ? m.run_chart_parent_line({ label: line.label }) : m.run_chart_parent(),
     value: readoutValue(line, point, readout.anchor.point),
+    smoothed: level === null ? null : m.run_chart_smoothed({ value: fmtSignal(signals[line.y], level) }),
     measure: yName !== null && line.label !== yName ? yName : null,
   }));
-  const spoken = readout && readoutRows && `${readoutTitle(readout.anchor)}: ${readoutRows.map((row) => `${row.name} ${row.measure ? `${row.measure} ` : ""}${row.value}`).join(", ")}`;
+  const spoken = readout && readoutRows && `${readoutTitle(readout)}: ${readoutRows.map((row) => `${row.name} ${row.measure ? `${row.measure} ` : ""}${row.value}${row.smoothed ? `, ${row.smoothed}` : ""}`).join(", ")}`;
 
   const own = known(samples.filter((line) => !line.ghost).flatMap((line) => line.points));
   const stops = [...new Set((own.length > 0 ? own : visible).map((point) => point[0]))].sort((a, b) => a - b);
@@ -367,12 +391,13 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
     role: "group",
     "aria-label": m.run_chart_scrub(),
     onMouseMove: (event: MouseEvent<HTMLDivElement>) => {
-      const position = event.clientX - event.currentTarget.getBoundingClientRect().left;
-      setPointer(position >= margin.start && position <= margin.start + innerWidth ? { at: position, keyboard: false } : null);
+      const box = event.currentTarget.getBoundingClientRect();
+      const position = event.clientX - box.left;
+      setPointer(position >= margin.start && position <= margin.start + innerWidth ? { at: position, y: event.clientY - box.top, keyboard: false } : null);
     },
     onMouseLeave: () => setPointer((current) => current?.keyboard ? current : null),
     onFocus: (event: FocusEvent<HTMLDivElement>) => {
-      if (pointer === null && stops.length > 0 && event.currentTarget.matches(":focus-visible")) setPointer({ at: x(stops[stops.length - 1]), keyboard: true });
+      if (pointer === null && stops.length > 0 && event.currentTarget.matches(":focus-visible")) setPointer({ at: x(stops[stops.length - 1]), y: null, keyboard: true });
     },
     onBlur: dismiss,
     onKeyDown: (event: KeyboardEvent<HTMLDivElement>) => {
@@ -386,7 +411,7 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
       const next = { ArrowLeft: here - 1, ArrowRight: here + 1, Home: 0, End: stops.length - 1 }[event.key];
       if (next === undefined || stops.length === 0) return;
       event.preventDefault();
-      setPointer({ at: x(stops[Math.max(0, Math.min(stops.length - 1, next))]), keyboard: true });
+      setPointer({ at: x(stops[Math.max(0, Math.min(stops.length - 1, next))]), y: null, keyboard: true });
     },
   };
   const focusRing = (
@@ -397,18 +422,28 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
     />
   );
 
+  /** The cursor stands at the step the readout reads, never between reports. */
+  const cursorAt = readout && x(readout.anchor.point[0]);
   const cursor = readout && <>
-    <line x1={hover!} x2={hover!} y1={margin.top} y2={margin.top + innerHeight} stroke="var(--border)" />
-    {mark !== "bars" && readout.hits.map(({ line, point }) => <circle key={line.name} cx={x(point[0])} cy={y(point[1]!)} r="4" fill={line.color} stroke="var(--base)" strokeWidth="2" />)}
+    <line x1={cursorAt!} x2={cursorAt!} y1={margin.top} y2={margin.top + innerHeight} stroke="var(--border)" />
+    {mark !== "bars" && readout.hits.map(({ line, point, level }) => (
+      <g key={line.name}>
+        {level !== null && <circle cx={x(point[0])} cy={y(point[1]!)} r="3" fill={line.color} stroke="var(--base)" strokeWidth="1.5" />}
+        <circle cx={x(point[0])} cy={y(level ?? point[1]!)} r="4" fill={line.color} stroke="var(--base)" strokeWidth="2" />
+      </g>
+    ))}
   </>;
   const readoutView = readout && readoutRows && (
-    <Readout at={hover!} width={width} outside={!page} onDismiss={dismiss}>
-      <b className="font-medium text-text">{readoutTitle(readout.anchor)}</b>
-      {readoutRows.map(({ line, name, value, measure }) => (
-        <span key={line.name} className="flex items-center gap-1.5">
-          <svg width="12" height="2" className="shrink-0"><line x1="0" x2="12" y1="1" y2="1" stroke={line.color} strokeWidth="2" strokeDasharray={line.ghost ? "3 2" : undefined} /></svg>
-          {name}
-          <b className="ms-auto ps-3 font-medium tabular-nums text-text">{measure && <span className="font-normal text-ink-subtext">{measure} </span>}{value}</b>
+    <Readout at={cursorAt!} width={width} outside={!page} onDismiss={dismiss}>
+      <b className="font-medium text-text">{readoutTitle(readout)}</b>
+      {readoutRows.map(({ line, name, value, smoothed, measure }) => (
+        <span key={line.name} className="flex flex-col">
+          <span className="flex items-center gap-1.5">
+            <svg width="12" height="2" className="shrink-0"><line x1="0" x2="12" y1="1" y2="1" stroke={line.color} strokeWidth="2" strokeDasharray={line.ghost ? "3 2" : undefined} /></svg>
+            {name}
+            <b className="ms-auto ps-3 font-medium tabular-nums text-text">{measure && <span className="font-normal text-ink-subtext">{measure} </span>}{value}</b>
+          </span>
+          {smoothed && <span className="text-end tabular-nums">{smoothed}</span>}
         </span>
       ))}
     </Readout>
@@ -424,17 +459,19 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
             {width > 0 && ranged && <line x1={margin.start} x2={margin.start + innerWidth} y1={margin.top + innerHeight} y2={margin.top + innerHeight} stroke="var(--border-variant)" />}
             {width > 0 && mark === "bars" && bars(true)}
             {width > 0 && mark === "points" && series.map((line) => <g key={line.name}>{points(line, 2.5)}</g>)}
-            {width > 0 && mark === "line" && series.map((line) => line.points.length > 0 && (
-              <path
-                key={line.name}
-                d={pathOf(line.points, x, y)}
-                fill="none"
-                stroke={line.color}
-                strokeWidth={line.ghost ? 1.5 : 1.75}
-                strokeDasharray={line.ghost ? "4 3" : undefined}
-                strokeLinejoin="round"
-                strokeLinecap="round"
-              />
+            {width > 0 && mark === "line" && series.map((line, index) => line.points.length > 0 && (
+              <g key={line.name}>
+                {smoothOf(line) && <path d={pathOf(samples[index].points, x, y)} fill="none" stroke={line.color} strokeWidth="1" opacity="0.3" strokeLinejoin="round" />}
+                <path
+                  d={pathOf(line.points, x, y)}
+                  fill="none"
+                  stroke={line.color}
+                  strokeWidth={line.ghost ? 1.5 : 1.75}
+                  strokeDasharray={line.ghost ? "4 3" : undefined}
+                  strokeLinejoin="round"
+                  strokeLinecap="round"
+                />
+              </g>
             ))}
             {width > 0 && marks}
             {width > 0 && !table && mark === "line" && lead && last && last[1] !== null && <circle cx={x(last[0])} cy={y(last[1])} r="3" fill={lead.color} stroke="var(--base)" strokeWidth="1.5" />}
@@ -455,7 +492,7 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
   }
 
   const xCaption = table ? [xSpec?.unit ?? (lead ? xName(lead) : null), xLog ? m.run_chart_log() : null].filter(Boolean).join(", ") : xLog ? `${coordinate}, ${m.run_chart_log()}` : coordinate;
-  const dotted = (line: Series) => !line.ghost && line.points.length > 0 && line.points.length * DOT_SPACING <= innerWidth;
+  const dotted = (line: Series) => !line.ghost && !smoothOf(line) && line.points.length > 0 && line.points.length * DOT_SPACING <= innerWidth;
   const captionStart = margin.start + innerWidth + margin.end - 2 - xCaption.length * CHAR_WIDTH;
   /** Over steps the ticks are as they always were; elsewhere a tick whose label would run into another or the caption goes. */
   const spaced = (values: number[]) => {
@@ -468,7 +505,8 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
       return true;
     });
   };
-  const xTicks = categories ? [] : spaced(xLog ? logTicks(x0, x1, width < 420 ? 3 : 5) : ticks(x0, x1, width < 420 ? 3 : 5));
+  /** An axis with nothing on it and no total to span reads no steps. */
+  const xTicks = categories || (drawn.length === 0 && (table || total === null)) ? [] : spaced(xLog ? logTicks(x0, x1, width < 420 ? 3 : 5) : ticks(x0, x1, width < 420 ? 3 : 5));
   /** A table's line keeps its full ink under its points, which are its data, not samples along it. */
   const dim = (line: Series) => !table && dotted(line);
   const yTicks = yLog ? logTicks(y0, y1, 4) : ticks(y0, y1, 4);
@@ -506,8 +544,9 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
           {blank && <text x={margin.start + innerWidth / 2} y={margin.top + innerHeight / 2} textAnchor="middle" fill="var(--subtext)">{empty}</text>}
           {mark === "bars" && bars(false)}
           {mark === "points" && series.map((line) => <g key={line.name}>{points(line, 3.5)}</g>)}
-          {mark === "line" && series.map((line) => line.points.length > 0 && (
+          {mark === "line" && series.map((line, index) => line.points.length > 0 && (
             <g key={line.name}>
+              {smoothOf(line) && <path d={pathOf(samples[index].points, x, y)} fill="none" stroke={line.color} strokeWidth="1.25" opacity="0.3" strokeLinejoin="round" />}
               <path
                 d={pathOf(line.points, x, y)}
                 fill="none"

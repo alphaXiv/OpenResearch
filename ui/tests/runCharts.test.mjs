@@ -136,7 +136,7 @@ test("elapsed chart axes and readouts say durations for elapsed points and timed
     assert.match(text(pointer), /^elapsed 43s/i);
     const box = chartOf(strip).parentElement;
     await press("ArrowRight", box);
-    assert.match(text(box.querySelector('[role="status"]')), /^elapsed 5m:/i);
+    assert.match(text(box.querySelector('[role="status"]')), /(?:^|at )elapsed 5m:/i, "the last point, the lowest, is named");
 
     const page = await draw(monitor, block);
     assert.ok(labels(page).some((label) => /^elapsed$/i.test(label)));
@@ -157,8 +157,8 @@ test("a readout uses reports under a smoothed line and a clipped parent", async 
     const box = chartOf(chart).parentElement;
     await press("End", box);
     const readout = text(box.querySelector("[popover]"));
-    assert.match(readout, /^step 10Train loss6(?:\.0+)?$/, readout);
-    assert.match(text(box.querySelector('[role="status"]')), /^step 10: Train loss 6(?:\.0+)?$/);
+    assert.match(readout, /^step 10Train loss6(?:\.0+)?smoothed 4(?:\.0+)?$/, readout);
+    assert.match(text(box.querySelector('[role="status"]')), /^step 10: Train loss 6(?:\.0+)?, smoothed 4(?:\.0+)?$/);
     assert.ok(chartOf(chart).querySelector("path[stroke-dasharray]"), "the parent curve is still drawn");
   }
 });
@@ -174,7 +174,7 @@ test("a strip's keyboard entry reads the run's own latest point with every line 
   const said = text(box.querySelector("[popover]"));
   assert.match(said, new RegExp(`^step ${latest}(?!\\d)`), `the parent runs on to ${monitor.x.max}, but the run is at ${latest}: ${said}`);
   assert.equal(said.match(/parent/g)?.length, 2, said);
-  assert.match(said, /Val loss[\d.]+Train loss[\d.]+$/, `the run's own lines are there too: ${said}`);
+  assert.match(said, /Val loss[\d.]+Train loss[\d.]+(smoothed [\d.]+)?$/, `the run's own lines are there too: ${said}`);
 
   const ring = box.querySelector(":scope > span[aria-hidden]");
   const axis = [...chartOf(strip).querySelectorAll("line")].find((line) => line.getAttribute("stroke") === "var(--border-variant)");
@@ -403,15 +403,90 @@ test("a table reports signed numeric changes without a preferred direction", asy
   assert.ok(![...pending.querySelectorAll("th")].some((th) => text(th) === m.run_table_change()));
 });
 
-test("without a parent the chart marks its starting value and the best value in the declared direction", async () => {
+/** Where a path passes at `px`, read from the vertices it draws. */
+function yAt(path, px) {
+  const vertex = [...path.getAttribute("d").matchAll(/[ML]([\d.-]+) ([\d.-]+)/g)].find((one) => Math.abs(Number(one[1]) - px) < 0.1);
+  assert.ok(vertex, `the path has a vertex at ${px}`);
+  return Number(vertex[2]);
+}
+/** Moves the pointer over a chart to (`x`, `y`) pixels from its corner. */
+async function hover(container, x, y) {
+  const box = chartOf(container).parentElement;
+  await act(async () => box.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX: x, clientY: y })));
+  return box.querySelector("[popover]");
+}
+const lossOver = (series, signal) => {
   const base = fixture("finetune");
-  for (const [better, value] of [["lower", "2.00"], ["higher", "4.00"]]) {
-    const monitor = { ...base, parent: null, x: { name: "step", max: 10 }, latest: { loss: 3 }, series: { loss: [[0, 4], [1, 2], [2, 3]] },
-      view: { ...base.view, signals: { loss: { label: "Loss", digits: 2, better } } } };
+  return { ...base, parent: null, x: { name: "step", max: series.at(-1)[0] }, latest: { loss: series.at(-1)[1] }, series: { loss: series },
+    view: { ...base.view, signals: { loss: { label: "Loss", digits: 2, ...signal } } } };
+};
+/** Page geometry for an 800 px chart over steps: 38 px before the plot and 48 after. */
+const pageX = (step, max) => 38 + (step / max) * (800 - 38 - 48);
+
+test("a smoothed curve's hover rides the line it draws, marks its report on the faint line under it, and reads both", async () => {
+  const monitor = lossOver([[0, 2], [10, 6], [20, 2], [30, 6]], { smooth: 0.5 });
+  for (const size of ["page", "strip"]) {
+    const chart = await draw(monitor, { chart: ["loss"] }, size);
+    const svg = chartOf(chart);
+    const [raw, smooth] = svg.querySelectorAll("path");
+    assert.equal(raw.getAttribute("opacity"), "0.3", "the reports, faint under the smoothed curve");
+    const at = Number(smooth.getAttribute("d").match(/L([\d.]+) /)[1]);
+    const next = Number(smooth.getAttribute("d").match(/L[\d.]+ [\d.]+L([\d.]+) /)[1]);
+    const readout = await hover(chart, at + (next - at) * 0.4, 0);
+    assert.match(text(readout), /^step 10Loss6\.00smoothed 4\.00$/, `between two reports, the nearer one: ${text(readout)}`);
+    const cursor = [...svg.querySelectorAll("line")].find((line) => line.getAttribute("x1") === line.getAttribute("x2") && !line.getAttribute("stroke-dasharray"));
+    assert.equal(Number(cursor.getAttribute("x1")).toFixed(1), at.toFixed(1), "the cursor stands at the step it reads");
+    const marker = (r) => [...svg.querySelectorAll(`g > circle[r="${r}"]`)].find((circle) => Math.abs(Number(circle.getAttribute("cx")) - at) < 0.1);
+    assert.equal(Number(marker("4").getAttribute("cy")).toFixed(1), yAt(smooth, at).toFixed(1), "the marker lies on the smoothed curve");
+    assert.equal(Number(marker("3").getAttribute("cy")).toFixed(1), yAt(raw, at).toFixed(1), "and the report on the faint one");
+  }
+});
+
+test("a chart's start and best sit on the reports, and the pointer near either names it", async () => {
+  for (const [better, word, best] of [["lower", "Lowest", 2], ["higher", "Highest", 4]]) {
+    const values = better === "lower" ? [[0, 3], [1, 2], [2, 4]] : [[0, 3], [1, 4], [2, 2]];
+    const monitor = lossOver(values.map(([step, value]) => [step, value]), { better, smooth: 0.5 });
     const page = await draw(monitor, { chart: ["loss"] });
-    const marks = [...chartOf(page).querySelectorAll("circle title")].map(text);
-    assert.ok(marks.some((label) => label.includes(m.run_chart_start({ label: "Loss" })) && label.endsWith("4.00")));
-    assert.ok(marks.some((label) => label.includes(m.run_stat_best({ label: "Loss" })) && label.endsWith(value)));
+    const raw = chartOf(page).querySelector('path[opacity="0.3"]');
+    const landmark = chartOf(page).querySelector('circle[r="3.5"]');
+    const [cx, cy] = ["cx", "cy"].map((name) => Number(landmark.getAttribute(name)));
+    assert.equal(cy.toFixed(1), yAt(raw, cx).toFixed(1), "the best report sits on the line of reports");
+    assert.ok(!chartOf(page).querySelector("title"), "the readout names it, not a tooltip on a dot");
+
+    const readout = await hover(page, cx + 9, cy - 9);
+    assert.equal(text(readout).match(/^.*? at step \d+/)?.[0], `${word} loss at step 1`, text(readout));
+    assert.match(text(readout), new RegExp(`Loss${best}\\.00smoothed`));
+    const start = chartOf(page).querySelector('circle[r="3"]');
+    assert.match(text(await hover(page, Number(start.getAttribute("cx")) + 5, Number(start.getAttribute("cy")))), /^Starting loss at step 0/);
+  }
+});
+
+test("the pointer snaps to a landmark within reach along both axes, and to the nearest step beyond it", async () => {
+  const series = Array.from({ length: 101 }, (_, step) => [step, 1 + Math.abs(step - 50) / 50]);
+  const monitor = lossOver(series, { better: "lower" });
+  const page = await draw(monitor, { chart: ["loss"] });
+  const best = chartOf(page).querySelector('circle[r="3.5"]');
+  const [cx, cy] = ["cx", "cy"].map((name) => Number(best.getAttribute(name)));
+  assert.equal(cx.toFixed(1), pageX(50, 100).toFixed(1));
+  const titleAt = async (dx, dy) => text(await hover(page, cx + dx, cy + dy)).match(/^(.*? )?step \d+/)[0];
+  assert.equal(await titleAt(11, 11), "Lowest loss at step 50", "11 px off each way still reads the lowest");
+  assert.equal(await titleAt(-11, -6), "Lowest loss at step 50");
+  assert.equal(await titleAt(11, -60), "step 52", "far above it, the step under the pointer");
+  assert.equal(await titleAt(20, 0), "step 53", "past the reach, the step under the pointer");
+});
+
+test("arrow keys stop at a chart's landmarks and say what each is", async () => {
+  const monitor = lossOver([[0, 3], [1, 2], [2, 4]], { better: "lower" });
+  for (const size of ["page", "strip"]) {
+    const chart = await draw(monitor, { chart: ["loss"] }, size);
+    const box = chartOf(chart).parentElement;
+    const status = () => text(box.querySelector('[role="status"]'));
+    await press("Home", box);
+    assert.match(status(), /^Starting loss at step 0: Loss 3\.00$/);
+    await press("ArrowRight", box);
+    assert.match(status(), /^Lowest loss at step 1: Loss 2\.00$/);
+    await press("ArrowRight", box);
+    assert.match(status(), /^step 2: Loss 4\.00$/);
   }
 });
 
@@ -421,4 +496,26 @@ test("a chart can hide its parent curves at every size", async () => {
     const page = await draw(monitor, { chart: ["val_loss", "loss"], ghost: "false" }, size);
     assert.equal(chartOf(page).querySelectorAll("path[stroke-dasharray]").length, 0);
   }
+});
+
+test("a stage's chart spans its own stage's steps, and says the stage hasn't started before it has", async () => {
+  const base = fixture("running");
+  const stage = (name, of, started, ended) => ({ name, of, unit: null, priorMs: null, startedAt: started ? base.asOf - 60_000 : null, endedAt: ended ? base.asOf - 30_000 : null });
+  const block = { chart: ["loss"], phase: "train" };
+  const steps = (container) => labels(container).filter((label) => /^[\d,]+$/.test(label)).map((label) => Number(label.replaceAll(",", "")));
+
+  const labelling = { ...base, phases: [stage("label", 5000, true), stage("train", null, false)], progress: { ...base.progress, phase: 0 }, x: { name: "step", max: 5000 }, series: { loss: [] } };
+  const before = await draw(labelling, block);
+  assert.equal(name(before), "The train stage hasn't started yet");
+  assert.deepEqual(steps(before), [], "no steps to span: not the label stage's 5,000, nor a 0 to 1");
+  const counted = await draw({ ...labelling, phases: [stage("label", 5000, true), stage("train", 272, false)] }, block);
+  assert.equal(Math.max(...steps(counted)), 250, `a planned count spans train's own 272: ${steps(counted).join(" | ")}`);
+  assert.equal(name(await draw(labelling, block, "page", { live: false })), "The train stage never started");
+
+  const loss = Array.from({ length: 28 }, (_, index) => [index * 10, 2 - index / 20]);
+  const evaluating = { ...base, phases: [stage("label", 5000, true, true), stage("train", 272, true, true), stage("eval", 204, true)], progress: { ...base.progress, phase: 2 }, x: { name: "step", max: 204 }, series: { loss } };
+  const after = await draw(evaluating, block);
+  assert.equal(Math.max(...steps(after)), 250, `train's 272 steps, not eval's 204: ${steps(after).join(" | ")}`);
+  const end = [...chartOf(after).querySelectorAll("line[stroke-dasharray]")].find((line) => line.getAttribute("x1") === line.getAttribute("x2"));
+  assert.equal(Number(end.getAttribute("x1")).toFixed(1), (38 + 714).toFixed(1), "the stage's end marks its own total");
 });
