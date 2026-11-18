@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
+pub(crate) const REFOLD_FAILED: &str = "refold_failed";
+
 fn collection_lock(path: &Path) -> Result<Arc<tokio::sync::Mutex<()>>> {
     static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<tokio::sync::Mutex<()>>>>> = OnceLock::new();
     let mut locks = LOCKS
@@ -555,6 +557,19 @@ async fn collect_from(
         }
         let accepted = !changed || publish(&path, &snapshot)?;
         collected(data, &snapshot, now, changed, None, accepted)?;
+        if !accepted
+            && terminal
+            && eof
+            && kept.is_some()
+            && held.as_ref().is_some_and(|held| held.config_hash != hash)
+        {
+            availability(
+                data,
+                &run.id,
+                REFOLD_FAILED,
+                Some("The saved log covers less of the run than the previous reading. OpenResearch kept the previous metrics."),
+            )?;
+        }
         if stop {
             break;
         }
@@ -573,10 +588,12 @@ pub(crate) fn availability(
     std::fs::create_dir_all(&directory)?;
     let path = directory.join(format!("{run}.status.json"));
     let previous = read_availability(data, run)?;
-    if previous.as_ref().is_some_and(|v| {
-        v["state"] == "incomplete"
-            || v["state"] == "unavailable" && matches!(state, "cached" | "stale")
-    }) {
+    if state != REFOLD_FAILED
+        && previous.as_ref().is_some_and(|v| {
+            v["state"] == "incomplete"
+                || v["state"] == "unavailable" && matches!(state, "cached" | "stale")
+        })
+    {
         return Ok(());
     }
     let reason = reason.map(|text| {

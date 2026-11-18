@@ -976,6 +976,8 @@ impl Runtime {
     }
 
     async fn refold_signals(&self, row: &StoredRun, handle: Handle) -> Result<()> {
+        use super::adapters::signals::{availability, collect_kept, REFOLD_FAILED};
+
         let as_of = row.ended_at.unwrap_or(row.updated_at);
         let started = self
             .store()?
@@ -992,10 +994,13 @@ impl Runtime {
         let desired = || self.store()?.run_patterns(&run.id);
         let config = desired()?;
         let pass = async {
-            if crate::commands::up::api_v2::kept_log(&self.data_dir, &run.id)?.is_empty() {
-                return Ok(true);
+            if crate::commands::up::api_v2::kept_log(&self.data_dir, &run.id)?
+                .iter()
+                .all(|range| range.len == 0)
+            {
+                return Ok(None);
             }
-            super::adapters::signals::collect_kept(
+            collect_kept(
                 &self.data_dir,
                 &run,
                 self.engine.clock.wall_ms(),
@@ -1005,23 +1010,48 @@ impl Runtime {
                 desired,
             )
             .await
+            .map(Some)
         };
-        match pass.await {
-            Ok(true) => self.store()?.finish_signal_refold(&run.id, &config)?,
-            Ok(false) => self.store()?.retry_signal_collections_now(Some(&run.id))?,
-            Err(error) => {
-                eprintln!(
-                    "orx up: run {} could not be read again with its patterns: {error:#}",
-                    run.id
-                );
-                if missing_file(&error) {
-                    self.store()?.finish_signal_refold(&run.id, &config)?;
-                } else {
-                    self.store()?.defer_signal_collection(&run.id)?;
-                    return Ok(());
-                }
+        let reason = match pass.await {
+            Ok(Some(true)) => None,
+            Ok(Some(false)) => {
+                self.store()?.retry_signal_collections_now(Some(&run.id))?;
+                self.collect_now.notify_one();
+                return Ok(());
             }
+            Ok(None) => Some("This run has no saved log to read again with the new patterns.".into()),
+            Err(error) if missing_file(&error) => Some(format!(
+                "This run's saved log is missing and couldn't be read again with the new patterns. {error:#}"
+            )),
+            Err(error) => {
+                let notify = {
+                    let store = self.store()?;
+                    let tx = store.begin_immediate()?;
+                    if store.run_patterns(&run.id)? != config {
+                        return Ok(());
+                    }
+                    let notify = store.defer_signal_collection(&run.id)?;
+                    tx.commit()?;
+                    notify
+                };
+                let reason = format!(
+                    "Couldn't read the saved log again with the new patterns. {error:#}"
+                );
+                availability(&self.data_dir, &run.id, REFOLD_FAILED, Some(&reason))?;
+                if notify {
+                    self.engine.attention(
+                        &run.id,
+                        "signal-refold",
+                        &format!("[orx] Run `{}`. {reason} OpenResearch is retrying hourly.", run.id),
+                    )?;
+                }
+                return Ok(());
+            }
+        };
+        if let Some(reason) = reason {
+            availability(&self.data_dir, &run.id, REFOLD_FAILED, Some(&reason))?;
         }
+        self.store()?.finish_signal_refold(&run.id, &config)?;
         self.collect_now.notify_one();
         Ok(())
     }
@@ -3924,6 +3954,102 @@ mod tests {
         let updated = runtime.held_signals("run").unwrap().unwrap();
         assert_ne!(updated.generation, held.generation);
         assert_eq!(updated.latest["score"].as_f64(), Some(3.0));
+    }
+
+    #[tokio::test]
+    async fn a_failed_pattern_replay_reports_why_the_old_metrics_are_still_shown() {
+        use crate::engine::view::{etag, set, Source};
+
+        let log = b"::orx:: {\"step\":1,\"m\":{\"loss\":2}}\nscore 1\n::orx:: {\"step\":2,\"m\":{\"loss\":1}}\n";
+        for (failure, expected) in [
+            ("missing", "no saved log"),
+            ("short", "covers less"),
+            ("unreadable", "saved log"),
+        ] {
+            let dir = crate::local::git::TemporaryDirectory::new("orx-refold-failure").unwrap();
+            let runtime = gone_host(dir.path());
+            keep(dir.path(), &[(0, log, true)]);
+            runtime.collect_finished("run").await.unwrap();
+            assert!(settled(&runtime));
+            let store = Store::open_at(dir.path().to_path_buf()).unwrap();
+            store
+                .create_local_experiment(&crate::local::model::LocalExperiment {
+                    id: "exp".into(),
+                    project_id: "project".into(),
+                    parent_experiment_id: None,
+                    slug: "exp".into(),
+                    branch_name: "orx/exp".into(),
+                    title: None,
+                    description: None,
+                    run_command: "train".into(),
+                    agent_status: "idle".into(),
+                    created_at: 1,
+                    updated_at: 1,
+                    chat_session_id: None,
+                    archived: false,
+                })
+                .unwrap();
+            match failure {
+                "missing" => {
+                    super::super::adapters::signals::settle_incomplete(
+                        dir.path(),
+                        "run",
+                        "The host lost the end of the log",
+                    )
+                    .unwrap();
+                    keep(dir.path(), &[]);
+                }
+                "short" => keep(dir.path(), &[(0, &log[..40], true)]),
+                _ => std::fs::write(
+                    dir.path().join("run-logs/run.log.part.json"),
+                    "invalid JSON",
+                )
+                .unwrap(),
+            }
+            set(
+                &store,
+                "exp",
+                &etag(None),
+                None,
+                Some(&json!([{"regex": "^score (?P<score>\\d+)$"}])),
+                None,
+                &Source {
+                    file: None,
+                    patterns: Some("pattern.json"),
+                    config: None,
+                },
+            )
+            .unwrap();
+
+            runtime.collect_finished("run").await.unwrap();
+            let run = store.get_run("run").unwrap().unwrap();
+            let (_, view) = super::super::monitor::monitor(&store, &run).unwrap();
+            assert_eq!(view["latest"]["loss"], 1);
+            assert!(
+                view["availability"]["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.contains(expected)),
+                "{failure}: {}",
+                view["availability"]
+            );
+            assert_eq!(settled(&runtime), failure != "unreadable");
+            if failure == "unreadable" {
+                for _ in 0..7 {
+                    store.retry_signal_collections_now(Some("run")).unwrap();
+                    runtime.collect_finished("run").await.unwrap();
+                }
+                let notices = signal_notices(&runtime, "signal-refold");
+                assert_eq!(notices.len(), 1);
+                assert!(notices[0].contains("saved log"));
+                std::fs::remove_file(dir.path().join("run-logs/run.log.part.json")).unwrap();
+                store.retry_signal_collections_now(Some("run")).unwrap();
+                runtime.collect_finished("run").await.unwrap();
+                let (_, view) = super::super::monitor::monitor(&store, &run).unwrap();
+                assert_eq!(view["latest"]["score"].as_f64(), Some(1.0));
+                assert_eq!(view["availability"]["reason"], serde_json::Value::Null);
+                assert!(settled(&runtime));
+            }
+        }
     }
 
     #[tokio::test]

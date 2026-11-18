@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { writeFile } from 'node:fs/promises'
+import { rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { expect as baseExpect, send, test } from '../src/test.ts'
 
@@ -199,7 +199,7 @@ for (let step = 1; step <= 20; step++) {
     await info.attach('before', { body: await page.screenshot(), contentType: 'image/png' })
   })
 
-  await test.step('mid-run, a new view and patterns redraw both, reading what the log already said', async () => {
+  const runId = await test.step('mid-run, a new view and patterns redraw both, reading what the log already said', async () => {
     // Each surface records the moment it first shows the change, so the delay is measured, not polled.
     await page.evaluate(() => {
       const seen: Record<string, number> = {}
@@ -279,11 +279,36 @@ for (let step = 1; step <= 20; step++) {
     const delays = Object.fromEntries(Object.entries(seen).map(([name, at]) => [name, at - setAt]))
     info.annotations.push({ type: 'shown after the view was set (ms)', description: JSON.stringify(delays) })
     await info.attach('after', { body: await page.screenshot(), contentType: 'image/png' })
+    return runId
   })
 
+  await page.setViewportSize({ width: 1440, height: 1000 })
+  await banner.getByRole('button', { name: /Eval/ }).hover()
+  await page.getByRole('dialog').getByRole('link', { name: /Eval/ }).click()
   agent.script('finished with status **done**', [{ say: 'Eval finished.' }])
   await writeFile(path.join(dir, 'later'), 'go\n')
   await expect(page.getByText('Eval finished.', { exact: true })).toBeVisible()
+
+  await test.step('an ended run with no saved log explains why it still shows the previous values', async () => {
+    await expect.poll(async () => {
+      const response = await page.request.get(`${orx.url}/api/runs/${runId}/monitor`)
+      return response.json()
+    }).toMatchObject({ availability: { state: 'live' }, latest: { acc: 0.7 } })
+    const savedLog = path.join(orx.root, 'home/.local/share/openresearch/run-logs', `${runId}.ranges.json`)
+    await expect.poll(() => stat(savedLog).then(() => true, () => false)).toBe(true)
+    await rm(savedLog)
+    writeFileSync(path.join(dir, 'empty-patterns.json'), '[]')
+    agent.script('Clear the saved patterns.', [
+      { run: `orx exp view set "$(cat ${dir}/id)" --pattern ${dir}/empty-patterns.json > ${dir}/clear-patterns.txt` },
+      { say: 'Patterns cleared.' },
+    ])
+    await send(page, 'Clear the saved patterns.')
+    await expect(page.getByText('Patterns cleared.', { exact: true })).toBeVisible()
+    await expect(latest.getByRole('paragraph').filter({ hasText: /no saved log to read again/ })).toBeVisible()
+    await expect(latest.getByRole('img', { name: 'Eval accuracy 0.70' })).toBeVisible()
+    expect(readFileSync(path.join(dir, 'clear-patterns.txt'), 'utf8')).toContain('finished runs with saved logs')
+    await info.attach('replay-unavailable', { body: await page.screenshot(), contentType: 'image/png' })
+  })
 })
 
 test('a missing run report wakes the agent once and its live view can be repaired', async ({ page, project, agent, orx }) => {

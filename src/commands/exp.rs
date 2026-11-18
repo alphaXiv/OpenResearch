@@ -229,14 +229,14 @@ async fn view(command: ViewCommand) -> Result<()> {
             };
             let first = what[..1].to_uppercase();
             println!(
-                "\u{2713} {first}{} saved on experiment {exp_id}; its runs are drawn with them now.",
+                "\u{2713} {first}{} saved on experiment {exp_id}.",
                 &what[1..],
             );
             if given("rules") {
                 println!("Runs launched from now on check these rules; a run already going keeps the rules it was launched with.");
             }
             if list.is_some() {
-                println!("Its runs' logs are read again with the patterns; check one with `orx exp view check RUN`.");
+                println!("The patterns apply to live logs and to finished runs with saved logs. Check a run with `orx exp view check RUN`.");
             }
             let pending: Vec<&str> = saved["pending"]
                 .as_array()

@@ -2,7 +2,7 @@
 //! from the fold's checkpoint, the estimator and the run's lifecycle, evaluated on the server and
 //! numbered by `rev`, which only grows and survives restarts through `run_monitor_state`.
 
-use super::adapters::signals::cached_status;
+use super::adapters::signals::{cached_status, REFOLD_FAILED};
 use super::estimate;
 use super::Phase;
 use crate::error::{anyhow, Context, Result};
@@ -346,9 +346,10 @@ fn availability(fold: &Fold, life: &Lifecycle, now: i64) -> (&'static str, Optio
         .is_some_and(|s| s.coverage.reasons.iter().any(|r| r == "rebuilding"));
     match status["state"].as_str() {
         Some("unavailable") => ("unavailable", reason),
+        Some(REFOLD_FAILED) => ("stale", reason),
         _ if rebuilding => (
             "rebuilding",
-            Some("The run's log was replaced, so orx is reading it again.".into()),
+            Some("OpenResearch is reading the log again. The previous metrics are shown until it catches up.".into()),
         ),
         Some("stale") => ("stale", reason),
         Some("incomplete") => ("live", reason),
@@ -3158,22 +3159,32 @@ fn signal_notes(
     let mut notes = Vec::new();
     let reported = snapshot.is_some_and(Snapshot::has_signals);
     if let Some(reason) = availability["reason"].as_str() {
-        notes.push(match availability["state"].as_str() {
-            Some("incomplete") => format!(
+        if availability["state"] == REFOLD_FAILED {
+            notes.push(reason.to_owned());
+            if let Some(at) = availability["retryAt"].as_i64() {
+                notes.push(format!(
+                    "Reading the saved log again at {}.",
+                    crate::telemetry::iso8601_utc(at)
+                ));
+            }
+        } else {
+            notes.push(match availability["state"].as_str() {
+                Some("incomplete") => format!(
                 "Signal collection could not finish. Read any saved output with `orx logs {run}`."
             ),
-            Some("unavailable") => format!(
-                "Signal data could not be read. Read any saved output with `orx logs {run}`."
-            ),
-            _ => match availability["retryAt"].as_i64() {
-                Some(at) => format!(
-                    "Final signal collection is retrying; next attempt at {}.",
-                    crate::telemetry::iso8601_utc(at)
+                Some("unavailable") => format!(
+                    "Signal data could not be read. Read any saved output with `orx logs {run}`."
                 ),
-                None => "Signal collection is delayed; orx keeps retrying.".to_owned(),
-            },
-        });
-        notes.push(format!("Error details: {reason}"));
+                _ => match availability["retryAt"].as_i64() {
+                    Some(at) => format!(
+                        "Final signal collection is retrying; next attempt at {}.",
+                        crate::telemetry::iso8601_utc(at)
+                    ),
+                    None => "Signal collection is delayed; orx keeps retrying.".to_owned(),
+                },
+            });
+            notes.push(format!("Error details: {reason}"));
+        }
     } else if availability["retryAt"].is_i64() {
         notes.push(READING_FINAL_LOG.to_owned());
     } else if !reported && reading {

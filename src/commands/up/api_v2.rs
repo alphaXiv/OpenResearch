@@ -1212,10 +1212,13 @@ pub(crate) struct KeptRange {
 
 pub(crate) fn kept_ranges(data_dir: &std::path::Path, run: &str) -> Result<Vec<KeptRange>> {
     let path = data_dir.join("run-logs").join(format!("{run}.ranges.json"));
-    match std::fs::read(path) {
-        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+    match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .with_context(|| format!("Read the saved log ranges in {}", path.display())),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(error) => Err(error.into()),
+        Err(error) => {
+            Err(error).with_context(|| format!("Read saved log ranges in {}", path.display()))
+        }
     }
 }
 
@@ -1251,10 +1254,14 @@ pub(crate) fn kept_log(data_dir: &std::path::Path, run: &str) -> Result<Vec<Kept
         let bytes = match std::fs::read(&marker) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("Read partial log range in {}", marker.display()))
+            }
         };
         let (ident, offset, synced): (crate::engine::FileIdent, u64, u64) =
-            serde_json::from_slice(&bytes)?;
+            serde_json::from_slice(&bytes)
+                .with_context(|| format!("Read the partial log range in {}", marker.display()))?;
         let part = directory.join(format!("{run}.{suffix}.part"));
         let written = match std::fs::metadata(&part) {
             Ok(metadata) => metadata.len(),
@@ -1343,7 +1350,8 @@ pub(crate) fn kept_page(
         file.seek(SeekFrom::Start(cursor - kept.offset))?;
         let previous = bytes.len();
         bytes.resize(previous + (end - cursor) as usize, 0);
-        file.read_exact(&mut bytes[previous..])?;
+        file.read_exact(&mut bytes[previous..])
+            .with_context(|| format!("Read kept log {} at byte {cursor}", kept.file.display()))?;
         cursor = end;
         eof = kept.eof && cursor == kept.offset + kept.len;
         if cursor == range.end || eof {
