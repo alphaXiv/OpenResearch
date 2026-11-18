@@ -15,7 +15,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-          ref: a196cfab95dc740aa25695524d29d457438e21e1
+          ref: 8e1e1745bdabc23353f207d79b06ee9222317001
           path: candidate
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
