@@ -7215,19 +7215,19 @@ impl Store {
         let cancel_reason = run
             .cancel_reason
             .as_deref()
-            .filter(|_| run.status == "cancelled");
+            .filter(|text| run.status == "cancelled" && !text.trim().is_empty());
         let result = run
             .result_markdown
             .as_deref()
             .filter(|text| !text.trim().is_empty());
         let reason = match (cancel_reason, result) {
-            (Some(cancel), Some(result)) => format!("{cancel} {result}"),
-            (None, None) if run.status == "failed" => match last_error(&log) {
-                Some(line) => format!("Last error in the log: `{line}`"),
-                None => "unavailable".into(),
-            },
-            (cancel, result) => cancel.or(result).unwrap_or("unavailable").into(),
-        };
+            (Some(cancel), Some(result)) => Some(format!("{cancel} {result}")),
+            (None, None) if run.status == "failed" => {
+                last_error(&log).map(|line| format!("Last error in the log: `{line}`"))
+            }
+            (cancel, result) => cancel.or(result).map(str::to_owned),
+        }
+        .map_or_else(String::new, |reason| format!("Reason: {reason}\n"));
         let mut facts = String::new();
         if run.status == "cancelled" {
             let actor = match self.run_stop(&run.id) {
@@ -7271,15 +7271,31 @@ impl Store {
                     )
                     .filter_map(serde_json::Value::as_str)
                     .collect();
-                facts.push_str("Last headline/chart values:\n");
+                if !names.is_empty() {
+                    facts.push_str("Last headline/chart values:\n");
+                }
                 for name in names {
+                    let latest = monitor["latest"].get(name);
                     let point = monitor["series"][name]
                         .as_array()
-                        .and_then(|points| points.last());
-                    if let Some(point) = point {
+                        .and_then(|points| points.last())
+                        .and_then(|point| {
+                            let value = if point[1].is_null() {
+                                latest?
+                                    .as_str()
+                                    .filter(|value| {
+                                        matches!(*value, "NaN" | "Infinity" | "-Infinity")
+                                    })?
+                                    .to_owned()
+                            } else {
+                                point[1].to_string()
+                            };
+                            Some((&point[0], value))
+                        });
+                    if let Some((at, value)) = point {
                         let axis = monitor["x"]["name"].as_str().unwrap_or("step");
-                        facts.push_str(&format!("{name} = {} at {axis} {}\n", point[1], point[0]));
-                    } else if let Some(value) = monitor["latest"].get(name) {
+                        facts.push_str(&format!("{name} = {value} at {axis} {at}\n"));
+                    } else if let Some(value) = latest {
                         facts.push_str(&format!("{name} = {value} (step unavailable)\n"));
                     } else if let Some(value) = monitor["rows"]
                         .as_object()
@@ -7302,7 +7318,7 @@ impl Store {
         let view = crate::plane::Run::from_store(self, run)?;
         let status = view.display_status();
         Ok(format!(
-            "[orx] Run `{}` finished with status **{}**.\nExit code: {code}\nDuration: {duration}\nReason: {reason}\n{facts}\nRecent log:\n{tail}",
+            "[orx] Run `{}` finished with status **{}**.\nExit code: {code}\nDuration: {duration}\n{reason}{facts}\nRecent log:\n{tail}",
             run.id, status,
         ))
     }
@@ -8015,6 +8031,35 @@ pub(crate) mod tests {
         store.queue_signal_collection(&run.id).unwrap();
         let body = store.terminal_notice_body(&run).unwrap();
         assert!(!body.contains("final log is still being read"), "{body}");
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn terminal_notices_leave_out_empty_facts_and_keep_a_nonfinite_value() {
+        let (dir, store) = engine_fixture();
+        let mut run = run_fixture("notice-facts", "done", None);
+        store.upsert_run(&run).unwrap();
+        let body = store.terminal_notice_body(&run).unwrap();
+        assert!(!body.contains("\nReason:"), "{body}");
+        assert!(!body.contains("Last headline/chart values"), "{body}");
+
+        run.status = "cancelled".into();
+        let mut snapshot = orx_signals::Snapshot::new(&run.id, "1-7", "facts");
+        snapshot.feed(
+            b"::orx:: {\"step\":18,\"m\":{\"loss\":1.5}}\n::orx:: {\"step\":19,\"m\":{\"loss\":NaN}}\n",
+            true, 1000, true,
+        ).unwrap();
+        let path = dir.join("run-signals");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(
+            path.join("notice-facts.json"),
+            serde_json::to_vec(&snapshot).unwrap(),
+        )
+        .unwrap();
+        let body = store.terminal_notice_body(&run).unwrap();
+        assert!(body.contains("loss = NaN at step 19"), "{body}");
+        assert!(!body.contains("loss = null"), "{body}");
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }
