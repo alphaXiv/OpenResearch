@@ -11,6 +11,7 @@ import { clockText } from "../../runMonitor/words";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../../tabPreview";
 import { useWorkspace } from "../../workspace";
 import { Button } from "../ui";
+import { confirmStop } from "./confirmStop";
 
 /** A flag's evidence, and whose move it is. What the agent decides is said in the chat, not here. */
 export function Issue({ model, flag, agent, onOpenRun }: {
@@ -39,10 +40,15 @@ export function Issue({ model, flag, agent, onOpenRun }: {
     "aria-disabled": locked || undefined,
     className: "aria-disabled:cursor-default aria-disabled:opacity-45",
     onClick: (event: MouseEvent<HTMLButtonElement>) => {
+      if (locked) return;
       const button = event.currentTarget;
-      chooseFlag(workspace, model.run, flag.id, value, () => {
-        if (button.isConnected) button.focus();
-      });
+      if (value === "stop") {
+        confirmStop(workspace.dialogs, model.name, () => chooseFlag(workspace, model.run, flag.id, value));
+      } else {
+        void chooseFlag(workspace, model.run, flag.id, value, () => {
+          if (button.isConnected) button.focus();
+        });
+      }
     },
   });
 
@@ -65,7 +71,7 @@ export function Issue({ model, flag, agent, onOpenRun }: {
       ))}
       {model.needsChoice ? (
         <div className="mt-2.5 flex flex-wrap items-center gap-2" aria-describedby={evidence ? evidenceId : undefined}>
-          {model.live && <Button size="small" variant="danger" {...pick("stop")}><CircleStop size={14} />{m.experiments_stop_run()}</Button>}
+          {model.live && <Button size="small" variant="danger" aria-haspopup="dialog" {...pick("stop")}><CircleStop size={14} />{m.experiments_stop_run()}</Button>}
           <Button size="small" {...pick("keep")}>{model.live ? m.run_flag_keep_going() : m.run_flag_keep_result()}</Button>
           <Button size="small" {...pick("ask")}>{agent === null ? m.run_flag_ask_unnamed() : m.run_flag_ask({ agent: name })}</Button>
           <span className="ms-auto text-xs text-ink-subtext">{model.live ? m.run_flag_until_you_choose() : (agent === null ? m.run_flag_ended_choose_unnamed() : m.run_flag_ended_choose({ agent: name }))}</span>

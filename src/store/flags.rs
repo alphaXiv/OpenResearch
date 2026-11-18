@@ -178,7 +178,11 @@ impl Store {
 
     /// [`Self::raise_flags`] inside a caller's transaction. A flag whose fingerprint the run has
     /// raised before is not raised again; another run of the experiment raises it afresh.
-    pub(crate) fn append_flags(&self, flags: &[NewFlag], now: i64) -> Result<Vec<Raise>> {
+    pub(crate) fn append_flags<'a>(
+        &self,
+        flags: impl IntoIterator<Item = &'a NewFlag>,
+        now: i64,
+    ) -> Result<Vec<Raise>> {
         let mut raised = Vec::new();
         for flag in flags {
             let stopped: bool = self.conn.query_row(

@@ -2,7 +2,6 @@ import { ChevronRight } from "lucide-react";
 import { autoDir, fmtNumber, ltr } from "../../i18n";
 import { m } from "../../paraglide/messages.js";
 import { getLocale } from "../../paraglide/runtime.js";
-import { ruleText } from "../../runMonitor/model";
 import type { RunOutcome, RunRule } from "../../runMonitor/types";
 
 /** The rules the run was launched with, which OpenResearch checks with no model; the one that stopped it is marked. */
@@ -21,7 +20,7 @@ export function Rules({ rules, outcome }: { rules: RunRule[]; outcome: RunOutcom
         {rules.map((rule) => (
           <li key={rule.name} className="leading-snug">
             <span className="font-medium">{autoDir(rule.name)}</span>{" "}
-            <span>{ruleText(rule)}</span>{" "}
+            <span>{autoDir(rule.text)}</span>{" "}
             <span className="whitespace-nowrap text-ink-subtext">· {rule.does === "stop" ? m.run_rule_stops() : m.run_rule_asks()}</span>
             {rule.name === stopper && <span className="ms-2 whitespace-nowrap font-medium text-ink-orange">{m.run_rule_stopped_this()}</span>}
           </li>

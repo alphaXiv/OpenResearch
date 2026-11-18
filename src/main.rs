@@ -822,14 +822,6 @@ pub struct ExpRunArgs {
     /// Launch even when another run is already in flight for this experiment.
     #[arg(long)]
     pub force: bool,
-    /// Stop when reported spend reaches this many US dollars or a projection exceeds it: a
-    /// rule named `budget`, checked with the experiment's other rules.
-    ///
-    /// Rentals use reported spend only. All rules act only while `orx up` is running and
-    /// the workspace machine is awake.
-    #[arg(long, value_name = "USD", value_parser = parse_budget)]
-    #[serde(default)]
-    pub budget: Option<f64>,
     /// Internal attribution forwarded through the local orx up API.
     #[arg(skip)]
     pub chat_session_id: Option<String>,
@@ -856,13 +848,6 @@ pub struct ExpRunArgs {
     #[arg(skip)]
     #[serde(default)]
     pub caller_compute_settings: Option<crate::commands::up::LaunchSettings>,
-}
-
-fn parse_budget(given: &str) -> std::result::Result<f64, String> {
-    let usd: f64 = given.trim().trim_start_matches('$').parse().map_err(|_| {
-        format!("--budget must be a finite USD amount greater than zero (got {given})")
-    })?;
-    engine::rules::budget(usd).map(|_| usd)
 }
 
 /// Markers the native agent CLIs export to their shells; nested agents are `unknown`.

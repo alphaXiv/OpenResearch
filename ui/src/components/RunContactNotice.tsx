@@ -1,3 +1,4 @@
+import { useQuery } from "@tanstack/react-query";
 import { useWorkspace } from "../workspace";
 import { mutAbandonRun, mutCancelRun, mutCleanupRun } from "../queries/projects";
 import { mutRetryEngineHost } from "../queries/settings";
@@ -11,8 +12,9 @@ import { runAbandonable, runActive, runApiProvider, runConnectHost, runNotice, t
 import { statusLabel } from "./StatusBadge";
 import { Button } from "./ui";
 import { cn } from "./ui/cn";
+import { confirmStop } from "./run/confirmStop";
 
-type NoticeRun = Parameters<typeof runNotice>[0] & Pick<Run, "id" | "projectId" | "host">;
+type NoticeRun = Parameters<typeof runNotice>[0] & Pick<Run, "id" | "projectId" | "experimentId" | "host">;
 
 const TONES = {
   warning: "text-accent-amber",
@@ -78,11 +80,12 @@ export function runNoticeCopy(notice: RunNotice, nextRetryMs: number | null, pro
 /** What a run's status alone can't say: lost contact, a pending cancel, or an abandoned job's pending kill. */
 export function RunContactNotice({ run, className }: { run: NoticeRun; className?: string }) {
   const workspace = useWorkspace();
-  const { showConfirmDialog } = useWorkspace().dialogs;
-  const { requestHostConnect } = useWorkspace().events;
-  const { useEngineHosts } = workspace.queries;
+  const { showConfirmDialog } = workspace.dialogs;
+  const { requestHostConnect } = workspace.events;
+  const { useEngineHosts, listExperimentsQuery } = workspace.queries;
 
   const hosts = useEngineHosts();
+  const experiment = useQuery(listExperimentsQuery(run.projectId)).data?.find((row) => row.id === run.experimentId);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const notice = runNotice(run);
@@ -102,6 +105,12 @@ export function RunContactNotice({ run, className }: { run: NoticeRun; className
   const retryHost = waitsOnUnreachable && engineHost?.status === "backoff" && engineHost.class === "key" ? engineHost.alias : null;
   const stopAgain = notice.kind === "cancel_unconfirmed";
   const abandonable = runAbandonable(run);
+
+  const stop = () => confirmStop(
+    workspace.dialogs,
+    experiment?.title || experiment?.slug || run.experimentId,
+    () => mutCancelRun.runAsHeadlessPromise(workspace, run, {}),
+  );
 
   async function act(action: () => Promise<void>) {
     setBusy(true);
@@ -138,12 +147,12 @@ export function RunContactNotice({ run, className }: { run: NoticeRun; className
             </Button>
           )}
           {rentalBilling && (
-            <Button size="small" variant="ghost" disabled={busy} onClick={() => void act(() => mutCancelRun.runAsHeadlessPromise(workspace, run, {}))}>
+            <Button size="small" variant="ghost" disabled={busy} aria-haspopup="dialog" onClick={stop}>
               <CircleStop size={14} />{m.run_stop_box()}
             </Button>
           )}
           {stopAgain && (
-            <Button size="small" variant="ghost" disabled={busy} onClick={() => void act(() => mutCancelRun.runAsHeadlessPromise(workspace, run, {}))}>
+            <Button size="small" variant="ghost" disabled={busy} aria-haspopup="dialog" onClick={stop}>
               <CircleStop size={14} />{m.run_stop_again()}
             </Button>
           )}
@@ -153,7 +162,7 @@ export function RunContactNotice({ run, className }: { run: NoticeRun; className
             </Button>
           )}
           {abandonable && (
-            <Button size="small" variant="ghost" className="text-accent-red" onClick={() => showConfirmDialog({
+            <Button size="small" variant="ghost" className="text-primary" aria-haspopup="dialog" onClick={() => showConfirmDialog({
               title: m.run_abandon_title(),
               description: <>{run.contact?.type === "unreachable" && <>{m.run_abandon_unreachable()} </>}{m.run_abandon_effect()}</>,
               destructive: true,

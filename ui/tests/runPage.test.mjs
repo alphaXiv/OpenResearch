@@ -98,13 +98,13 @@ test("the rules a run was launched with are listed as checked with no model, the
   const rules = [
     { name: "nan-loss", text: "Stop when the loss is NaN.", does: "stop" },
     { name: "plateau", text: "Ask when val loss stops improving.", does: "ask" },
-    { name: "budget", text: null, does: "stop", budgetUsd: 5 },
+    { name: "budget", text: "Stop at $5 spent.", does: "stop" },
   ];
   const monitor = { ...pipeline(), rules };
   const outcome = { by: "rule", at: now, rule: rules[2], reason: "it would cost up to $41.20 by its end, past its $5.00 budget" };
   const stopped = run("r2", { status: "cancelled", endedAt: now, outcome, monitor: summary(monitor, { tone: "stopped" }) });
   const { container } = await overview([stopped], () => monitor);
-  const budget = m.run_rule_reported_spend({ budget: "$5.00" });
+  const budget = rules[2].text;
   assert.ok(text(container).includes(`${budget} ${m.run_rule_detail({ text: "", name: "budget" }).trim()}`), text(container));
   const details = [...container.querySelectorAll("details")].find((element) => text(element.querySelector("summary")) === m.run_rules_summary_other({ count: "3" }));
   assert.ok(details, "the rules are a disclosure of their own");

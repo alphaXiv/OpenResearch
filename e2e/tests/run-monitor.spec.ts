@@ -128,6 +128,31 @@ const steps = async (page: Page, orx: Orx, runId: string) => {
   return { monitor, x: (monitor.series.loss ?? []).map(([x]: [number]) => x) as number[] }
 }
 
+test('Stop asks before cancelling a running experiment', async ({ page, project, agent, orx }) => {
+  const run = payload(orx, 'stop-run', ['finish'], "gate('finish')")
+  agent.script('Stopped by: the user.', [{ say: 'The run was stopped.' }])
+  const banner = await launch(page, agent, project, 'Training', run.command)
+  const stop = banner.getByRole('button', { name: 'Stop the run', exact: true })
+  const dialog = page.getByRole('dialog', { name: /Stop.*Training/ })
+  const cancellations: string[] = []
+  page.on('request', request => {
+    if (request.method() === 'POST' && request.url().endsWith('/cancel')) cancellations.push(request.url())
+  })
+
+  await stop.click()
+  await expect(dialog.getByRole('button', { name: 'Cancel', exact: true })).toBeFocused()
+  await page.keyboard.press('Escape')
+  await expect(dialog).toBeHidden()
+  await expect(stop).toBeFocused()
+  expect(cancellations).toEqual([])
+
+  await stop.click()
+  await dialog.getByRole('button', { name: 'Stop run', exact: true }).click()
+  await expect(dialog).toBeHidden()
+  await expect(page.getByText('The run was stopped.', { exact: true })).toBeVisible()
+  expect(cancellations).toHaveLength(1)
+})
+
 test('planned finalization keeps completed training from claiming zero time left', async ({ page, project, agent, orx }, info) => {
   test.slow()
   const run = payload(orx, 'finalization', ['validation', 'checkpoint', 'save'], `

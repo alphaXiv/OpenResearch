@@ -7551,21 +7551,22 @@ mod tests {
             "does": "stop", "when": {"kind": "nonFinite", "signal": "loss", "reports": 3}});
         let plateau = json!({"name": "plateau", "text": "Ask when val loss stops improving.", "does": "ask",
             "when": {"kind": "noImprovement", "signal": "val_loss", "min": 0.01, "reports": 4, "better": "lower"}});
-        let saved = configure("exp", json!({"rules": [nan, plateau]}));
-        assert_eq!(saved["rules"], json!([nan, plateau]));
+        let spend = json!({"name": "spend", "text": "Stop when the run reports $5 spent.", "does": "stop",
+            "when": {"kind": "costAbove", "usd": 5.0}});
+        let saved = configure("exp", json!({"rules": [nan, plateau, spend]}));
+        assert_eq!(saved["rules"], json!([nan, plateau, spend]));
         assert_eq!(saved["plan"], json!([]));
         f.child("child", "exp");
-        let launched = |run: &str, experiment: &str, budget: Option<f64>| {
+        let launched = |run: &str, experiment: &str| {
             let settings = f.store.run_monitor_json(experiment).unwrap();
             let config =
-                crate::engine::rules::freeze(experiment, settings.as_deref(), budget, false)
-                    .unwrap();
+                crate::engine::rules::freeze(experiment, settings.as_deref(), false).unwrap();
             f.run_in(run, experiment, "running", local());
             f.store.set_run_monitor_config(run, config.as_deref());
         };
-        launched("r1", "child", Some(5.0));
+        launched("r1", "child");
         configure("child", json!({"rules": []}));
-        launched("r2", "child", None);
+        launched("r2", "child");
 
         let (_, monitor) =
             super::monitor(&f.store, &f.store.get_run("r1").unwrap().unwrap()).unwrap();
@@ -7574,14 +7575,14 @@ mod tests {
             json!([
                 {"name": "nan-loss", "text": "Stop when the loss is NaN on 3 reports in a row.", "does": "stop"},
                 {"name": "plateau", "text": "Ask when val loss stops improving.", "does": "ask"},
-                {"name": "budget", "text": null, "does": "stop", "budgetUsd": 5.0},
+                {"name": "spend", "text": "Stop when the run reports $5 spent.", "does": "stop"},
             ])
         );
         let rules: Vec<_> = status_line(&monitor, "rules").split('·').collect();
         assert_eq!(rules.len(), 3);
         mentions(rules[0], &["nan-loss", "stops"]);
         mentions(rules[1], &["plateau", "wakes", "agent"]);
-        mentions(rules[2], &["budget", "stops", "$5.00"]);
+        mentions(rules[2], &["spend", "stops", "$5.00"]);
         let (_, later) =
             super::monitor(&f.store, &f.store.get_run("r2").unwrap().unwrap()).unwrap();
         assert_eq!(later["rules"], json!([]));
@@ -8277,7 +8278,7 @@ mod tests {
             "spent",
             "exp",
             local(),
-            json!([{"name": "budget", "does": "stop", "when": {"kind": "costAbove", "usd": 5}}]),
+            json!([{"name": "budget", "text": "Stop at $5 spent.", "does": "stop", "when": {"kind": "costAbove", "usd": 5}}]),
         );
         let lines = [(T0, r#"::orx:: {"step":1,"of":100,"spend":5}"#.to_owned())];
         f.collect(&Snapshot {
@@ -8353,7 +8354,7 @@ mod tests {
             "r1",
             "exp",
             local(),
-            json!([{"name": "budget", "does": "stop", "when": {"kind": "costAbove", "usd": 8}}]),
+            json!([{"name": "budget", "text": "Stop at $8 spent.", "does": "stop", "when": {"kind": "costAbove", "usd": 8}}]),
         );
         let mut snapshot = Snapshot::new("r1", "1-1", "g1");
         for (from, through, extra) in [(0, 64, 0.0), (65, 65, 0.0), (66, 66, 0.25), (67, 67, 0.25)]

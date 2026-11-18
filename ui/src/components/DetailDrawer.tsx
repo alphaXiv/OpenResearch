@@ -1,6 +1,6 @@
-import { useMutate } from "@clo/react-mutation";
 import { useWorkspace } from "../workspace";
 import { mutCancelRun } from "../queries/projects";
+import { confirmStop } from "./run/confirmStop";
 import { m } from "../paraglide/messages.js";
 import { ChartLine, ChevronDown, CircleStop, ExternalLink, ScrollText } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -122,7 +122,6 @@ function TerminalView({
   const { useTrackioRuns } = useWorkspace().queries;
   const workspace = useWorkspace();
   const { trackioRunUrl } = workspace.api;
-  const cancel = useMutate(mutCancelRun);
   const [historyOpen, setHistoryOpen] = useState(false);
   const historyRef = useRef<HTMLDivElement>(null);
 
@@ -138,7 +137,6 @@ function TerminalView({
     ? trackioRunUrl(trackio, selectedRun.id, { theme })
     : null;
   const display = selectedRun && runDisplay(selectedRun);
-  const error = cancel.error === undefined ? null : cancel.error instanceof Error ? cancel.error.message : String(cancel.error);
   // expRuns is newest-first, so the oldest run is #1. Number a run by its
   // position from the end of the list.
   const runNumber = (id: string) => {
@@ -157,21 +155,16 @@ function TerminalView({
   }, [historyOpen]);
 
   function stop() {
-    if (selectedRun) cancel.run(workspace, selectedRun);
+    if (selectedRun) confirmStop(workspace.dialogs, experiment.title || experiment.slug, () => mutCancelRun.runAsHeadlessPromise(workspace, selectedRun, {}));
   }
 
   return (
     <div className="term-view absolute inset-0 flex flex-col bg-background z-20">
-      <div className="term-bar flex items-center gap-2 h-10 py-0 px-2.5 border-b border-b-border shrink-0 [&_.error]:text-sm [&_.error]:text-accent-red [&_.btn]:inline-flex [&_.btn]:items-center [&_.btn]:gap-1">
+      <div className="term-bar flex items-center gap-2 h-10 py-0 px-2.5 border-b border-b-border shrink-0 [&_.btn]:inline-flex [&_.btn]:items-center [&_.btn]:gap-1">
         <div className="term-title min-w-0 text-sm font-semibold text-text overflow-hidden text-ellipsis whitespace-nowrap" title={experiment.title || experiment.slug}>
           {experiment.title || experiment.slug}
         </div>
         <span className="flex-1" />
-        {error && (
-          <span className="error" role="alert">
-            {error}
-          </span>
-        )}
         {view === "trackio" ? (
           <>
             {trackioUrl && (
@@ -208,7 +201,7 @@ function TerminalView({
           </Button>
         )}
         {selectedRun && runStoppable(selectedRun) && (
-          <Button size="small" variant="ghost" onClick={stop}>
+          <Button size="small" variant="ghost" aria-haspopup="dialog" onClick={stop}>
             <CircleStop size={14} />
             {m.common_stop()}
           </Button>

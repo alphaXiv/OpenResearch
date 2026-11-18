@@ -109,6 +109,26 @@ impl Store {
         runs: &[(&str, &str, &str)],
         now: i64,
     ) -> Result<i64> {
+        let chat_exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM chat_sessions WHERE id = ?1)",
+            [chat_session_id],
+            |row| row.get(0),
+        )?;
+        if !chat_exists {
+            return Err(anyhow!(
+                "Cannot record a watcher look for deleted chat {chat_session_id}"
+            ));
+        }
+
+        let mut exists = tx.prepare_cached("SELECT EXISTS(SELECT 1 FROM runs WHERE id = ?1)")?;
+        for (run, _, _) in runs {
+            if !exists.query_row([run], |row| row.get::<_, bool>(0))? {
+                return Err(anyhow!(
+                    "Cannot record a watcher look for deleted run {run}"
+                ));
+            }
+        }
+
         tx.execute(
             "INSERT INTO watch_looks (chat_session_id, kind, state, reason, created_at)
              VALUES (?1, ?2, 'prepared', ?3, ?4)",
@@ -149,10 +169,32 @@ impl Store {
         flags: &[NewFlag],
     ) -> Result<()> {
         let tx = self.begin_immediate()?;
+        let updated = tx.execute(
+            "UPDATE watch_looks SET state = ?2, done_at = ?3, usage_json = ?4, error = ?5,
+                    summary_template = ?6, summary_text = ?7
+             WHERE id = ?1",
+            params![
+                id,
+                state,
+                now,
+                usage.map(serde_json::to_string).transpose()?,
+                error,
+                summary.map(|s| s.0),
+                summary.map(|s| s.1),
+            ],
+        )?;
+        if updated == 0 {
+            return Ok(());
+        }
+
+        let runs = self.watch_look_runs(id)?;
+        let flags = flags
+            .iter()
+            .filter(|flag| runs.iter().any(|row| row.run_id == flag.run_id));
         // A look's flag on a run with one still open joins that one, as what the look noted.
-        let raised = self.append_flags(flags, now)?;
+        let raised = self.append_flags(flags.clone(), now)?;
         let mut noted = BTreeSet::new();
-        for (flag, raise) in flags.iter().zip(raised) {
+        for (flag, raise) in flags.zip(raised) {
             if raise == Raise::Stopped {
                 noted.insert(flag.run_id.as_str());
                 continue;
@@ -179,20 +221,6 @@ impl Store {
             }
             noted.insert(flag.run_id.as_str());
         }
-        tx.execute(
-            "UPDATE watch_looks SET state = ?2, done_at = ?3, usage_json = ?4, error = ?5,
-                    summary_template = ?6, summary_text = ?7
-             WHERE id = ?1",
-            params![
-                id,
-                state,
-                now,
-                usage.map(serde_json::to_string).transpose()?,
-                error,
-                summary.map(|s| s.0),
-                summary.map(|s| s.1),
-            ],
-        )?;
         for result in results {
             tx.execute(
                 "UPDATE watch_look_runs SET result = ?3, template = ?4, text = ?5, whole = ?6,

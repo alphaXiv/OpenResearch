@@ -352,7 +352,7 @@ An agent declares rules beside an experiment's stage plan (`orx exp view set
 --config`, `src/engine/rules.rs`): each names one bounded condition on what a run
 reports, never an expression, and stops the run or raises a flag. A child
 experiment starts with a copy, and a run freezes the rules it was launched with,
-so editing them changes only later runs; `--budget` adds one. A projected-finish
+so editing them changes only later runs. A projected-finish
 rule requires a time limit in the launch intent. Only `orx up`
 checks them, in the projection's pass, while the run is running, contact is
 live and collection confirms a current, caught-up checkpoint. Each pass counts the
@@ -382,7 +382,9 @@ Haiku one-shot on Claude Code, the GPT Luna Codex's own catalog offers on Codex,
 and on any other agent none until the user picks one. A look is a one-shot with
 no tools: Claude Code's are switched off by flag, Codex's by its feature switches
 with a turn that starts one anyway stopped and its answer refused. A harness that
-cannot promise that is not used.
+cannot promise that is not used. Deleting a run removes its watch counts and its
+part of each look in the same transaction. A shared look lasts as long as one
+of its runs remains, and deleting the chat that took it removes the look.
 
 Every few seconds a pass reads each live run's new log lines for these checks
 and the tripwires, only up to where the run's fold has read, as its checkpoint

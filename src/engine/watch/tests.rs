@@ -679,6 +679,9 @@ async fn a_reply_that_holds_a_credential_is_never_sent_back_in_a_retry() {
 fn a_look_orx_stopped_after_sending_is_interrupted_and_never_sent_again() {
     let dir = std::env::temp_dir().join(format!("orx-watch-{}", uuid::Uuid::new_v4()));
     let store = Store::open_at(dir).unwrap();
+    chat(&store, "chat", "claude-code");
+    run(&store, "a", "Depth 6", "chat", LOG);
+    run(&store, "b", "Depth 8", "chat", LOG);
     let sent = look(&store, "chat", "ceiling", &[("a", "r1"), ("b", "r2")]);
     let waiting = look(&store, "chat", "manual", &[("a", "r1")]);
     assert!(store.watch_look_sent(sent).unwrap());
@@ -710,6 +713,8 @@ fn the_send_claim_checks_that_watching_is_still_on() {
         return;
     }
     let store = Store::open().unwrap();
+    chat(&store, "chat", "claude-code");
+    run(&store, "a", "Depth 6", "chat", LOG);
     let id = look(&store, "chat", "ceiling", &[("a", "r1")]);
     store.set_run_watching(false).unwrap();
 

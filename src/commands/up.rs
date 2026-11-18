@@ -1402,7 +1402,7 @@ pub(crate) fn run_outcome(store: &Store, run: &StoredRun) -> Option<Value> {
     };
     let mut outcome = json!({"by": stop.by, "at": stop.at, "reason": stop.reason});
     if let Some(rule) = stop.rule {
-        outcome["rule"] = match crate::engine::rules::parse_rule(&rule, true) {
+        outcome["rule"] = match crate::engine::rules::parse_rule(&rule) {
             Ok(rule) => rule.shown(),
             Err(_) => rule,
         };
@@ -3262,7 +3262,6 @@ struct CreateRunReq {
     disk: Option<i64>,
     #[serde(default)]
     force: bool,
-    budget: Option<f64>,
     chat_session_id: Option<String>,
     agent_origin: Option<String>,
     /// Absent from dashboard callers; checked against orx up's own config dir.
@@ -3299,7 +3298,6 @@ impl CreateRunReq {
             exclude: self.exclude,
             sbatch_args: self.sbatch_args,
             force: self.force,
-            budget: self.budget,
             chat_session_id: self.chat_session_id,
             agent_origin: self.agent_origin,
             forwarded: true,

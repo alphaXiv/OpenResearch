@@ -553,7 +553,7 @@ async fn hello(
     }
     let proof = crate::commands::remote_host::hello_proof(&api.token, &api.instance, &query.nonce);
     Ok(Json(
-        json!({"instance":api.instance, "proto":2, "version":env!("CARGO_PKG_VERSION"), "proof":proof, "runBudget":true}),
+        json!({"instance":api.instance, "proto":2, "version":env!("CARGO_PKG_VERSION"), "proof":proof}),
     ))
 }
 

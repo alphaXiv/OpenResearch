@@ -676,47 +676,14 @@ impl ApiClient {
         path: &str,
         body: Option<&serde_json::Value>,
     ) -> Result<serde_json::Value> {
-        self.json_requiring(method, path, body, None).await
-    }
-
-    async fn json_requiring(
-        &self,
-        method: reqwest::Method,
-        path: &str,
-        body: Option<&serde_json::Value>,
-        capability: Option<(&str, &str)>,
-    ) -> Result<serde_json::Value> {
-        let send = async |client: &Self| {
-            if let Some((field, flag)) = capability {
-                let nonce = uuid::Uuid::new_v4().to_string();
-                let hello = async {
-                    client
-                        .request(reqwest::Method::GET, "hello")
-                        .query(&[("nonce", nonce)])
-                        .timeout(Duration::from_secs(3))
-                        .send()
-                        .await?
-                        .error_for_status()?
-                        .json::<serde_json::Value>()
-                        .await
-                }
-                .await
-                .with_context(|| {
-                    format!("Could not check whether the OpenResearch server supports {flag}")
-                })?;
-                if hello[field].as_bool() != Some(true) {
-                    return Err(anyhow!(
-                        "This OpenResearch server does not support {flag}. Restart it with the current version of orx before launching the run."
-                    ));
-                }
-            }
+        let request = |client: &Self| {
             let mut request = client.request(method.clone(), path);
             if let Some(body) = body {
                 request = request.json(body);
             }
-            Ok(request.send().await)
+            request
         };
-        let response = send(self).await?;
+        let response = request(self).send().await;
         let retry = match &response {
             Ok(response) => response.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE,
             Err(error) => {
@@ -725,7 +692,7 @@ impl ApiClient {
         };
         let response = if retry {
             drop(response);
-            send(&Self::discover().await?).await??
+            request(&Self::discover().await?).send().await?
         } else {
             response?
         };
@@ -796,11 +763,10 @@ impl ApiClient {
             .map(|identity| serde_json::to_string(&identity))
             .transpose()?;
         let run: Run = serde_json::from_value(
-            self.json_requiring(
+            self.json(
                 reqwest::Method::POST,
                 "runs",
-                Some(&serde_json::to_value(&args)?),
-                args.budget.map(|_| ("runBudget", "--budget")),
+                Some(&serde_json::to_value(args)?),
             )
             .await?,
         )?;

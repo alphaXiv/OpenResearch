@@ -11,8 +11,6 @@ const MAX_TEXT: usize = 280;
 const MAX_SECONDS: u64 = 30 * 24 * 3600;
 const KINDS: &str =
     "nonFinite, compare, noImprovement, worseThanParent, noProgress, costAbove, projectedFinishPastLimit";
-/// The rule `orx exp run --budget` adds.
-const BUDGET: &str = "budget";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Does {
@@ -71,8 +69,8 @@ pub(crate) enum When {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Rule {
     pub name: String,
-    /// The agent's words for the rule; none for the budget orx adds, which the page words.
-    pub text: Option<String>,
+    /// The agent's words for the rule.
+    pub text: String,
     pub does: Does,
     pub when: When,
 }
@@ -128,25 +126,18 @@ impl Rule {
                     || matches!(self.when, When::NoImprovement { .. })
             });
         }
-        let mut rule = json!({
+        json!({
             "name": self.name,
             "does": match self.does { Does::Stop => "stop", Does::Ask => "ask" },
+            "text": self.text,
             "when": when,
-        });
-        if let Some(text) = &self.text {
-            rule["text"] = json!(text);
-        }
-        rule
+        })
     }
 
     /// What the page and status show of the rule: its name, words and action.
     pub(crate) fn shown(&self) -> Value {
         let mut shown = self.json();
         shown.as_object_mut().map(|rule| rule.remove("when"));
-        shown["text"] = json!(self.text);
-        if let When::CostAbove { usd } = self.when {
-            shown["budgetUsd"] = json!(usd);
-        }
         shown
     }
 }
@@ -167,27 +158,8 @@ fn better_name(better: Better) -> &'static str {
     }
 }
 
-/// The rule `orx exp run --budget USD` adds, or why the amount cannot be one.
-pub(crate) fn budget(usd: f64) -> Result<Rule, String> {
-    if !(usd.is_finite() && usd > 0.0) {
-        return Err(format!(
-            "--budget must be a finite USD amount greater than zero (got {usd})"
-        ));
-    }
-    Ok(Rule {
-        name: BUDGET.into(),
-        text: None,
-        does: Does::Stop,
-        when: When::CostAbove { usd },
-    })
-}
-
 /// Rules as an agent declared them, each checked, or the first mistake in its own words.
 pub(crate) fn parse(value: &Value) -> Result<Vec<Rule>, String> {
-    parse_rules(value, false)
-}
-
-fn parse_rules(value: &Value, allow_generated_budget: bool) -> Result<Vec<Rule>, String> {
     let rules = value
         .as_array()
         .ok_or("\"rules\" must be a list of rules")?;
@@ -199,11 +171,9 @@ fn parse_rules(value: &Value, allow_generated_budget: bool) -> Result<Vec<Rule>,
     }
     let mut parsed: Vec<Rule> = Vec::new();
     for (index, rule) in rules.iter().enumerate() {
-        let rule = parse_rule(rule, allow_generated_budget).map_err(|why| {
-            match rule["name"].as_str() {
-                Some(name) => format!("rules[{index}] ({name}): {why}"),
-                None => format!("rules[{index}]: {why}"),
-            }
+        let rule = parse_rule(rule).map_err(|why| match rule["name"].as_str() {
+            Some(name) => format!("rules[{index}] ({name}): {why}"),
+            None => format!("rules[{index}]: {why}"),
         })?;
         if parsed.iter().any(|seen| seen.name == rule.name) {
             return Err(format!(
@@ -216,7 +186,7 @@ fn parse_rules(value: &Value, allow_generated_budget: bool) -> Result<Vec<Rule>,
     Ok(parsed)
 }
 
-pub(crate) fn parse_rule(value: &Value, allow_generated_budget: bool) -> Result<Rule, String> {
+pub(crate) fn parse_rule(value: &Value) -> Result<Rule, String> {
     let rule = value
         .as_object()
         .ok_or("give {\"name\", \"text\", \"does\", \"when\"}")?;
@@ -246,16 +216,11 @@ pub(crate) fn parse_rule(value: &Value, allow_generated_budget: bool) -> Result<
         .and_then(Value::as_object)
         .ok_or("\"when\" must be an object with a \"kind\" field")?;
     let when = parse_when(when)?;
-    let generated_budget = allow_generated_budget
-        && name == BUDGET
-        && does == Does::Stop
-        && matches!(when, When::CostAbove { .. });
     let text = match rule.get("text") {
-        None | Some(Value::Null) if generated_budget => None,
         Some(Value::String(text))
             if !text.trim().is_empty() && text.chars().count() <= MAX_TEXT =>
         {
-            Some(text.trim().to_owned())
+            text.trim().to_owned()
         }
         _ => {
             return Err(format!(
@@ -408,25 +373,13 @@ pub(crate) fn stored(experiment: &str, raw: Option<&str>) -> crate::error::Resul
     }
 }
 
-/// What a run launched now freezes: the experiment's rules, and the budget it was launched with.
-/// `None` when it has no rules.
+/// What a run launched now freezes: the experiment's rules, or `None` when it has none.
 pub(crate) fn freeze(
     experiment: &str,
     settings: Option<&str>,
-    budget_usd: Option<f64>,
     has_time_limit: bool,
 ) -> crate::error::Result<Option<String>> {
-    let mut rules = stored(experiment, settings)?;
-    if let Some(usd) = budget_usd {
-        rules.retain(|rule| rule.name != BUDGET);
-        let budget = budget(usd).map_err(|why| crate::error::anyhow!("{why}"))?;
-        if rules.len() == MAX_RULES {
-            crate::error::bail!(
-                "Experiment {experiment} already has {MAX_RULES} rules. Remove a rule with `orx exp view set {experiment} --config PATH` or launch without `--budget`."
-            );
-        }
-        rules.push(budget);
-    }
+    let rules = stored(experiment, settings)?;
     if let Some(rule) = rules
         .iter()
         .find(|rule| !has_time_limit && rule.when == When::FinishPastLimit)
@@ -447,7 +400,7 @@ pub(crate) fn frozen(run: &str, config: Option<&str>) -> crate::error::Result<Ve
     };
     let config: Value = serde_json::from_str(config)
         .map_err(|error| crate::error::anyhow!("Run {run}'s rules are unreadable: {error}"))?;
-    parse_rules(&config["rules"], true)
+    parse(&config["rules"])
         .map_err(|why| crate::error::anyhow!("Run {run}'s rules: {why}. Update orx to check them."))
 }
 
@@ -961,69 +914,9 @@ mod tests {
     }
 
     #[test]
-    fn a_declared_budget_rule_requires_text() {
-        let rule =
-            json!({"name": "budget", "does": "stop", "when": {"kind": "costAbove", "usd": 5}});
-        let missing = parse(&json!([rule])).unwrap_err();
-        assert!(missing.contains("\"text\""), "{missing}");
-
-        let mut rule = rule;
-        rule["text"] = Value::Null;
-        let null = parse(&json!([rule])).unwrap_err();
-        assert!(null.contains("\"text\""), "{null}");
-    }
-
-    #[test]
-    fn a_budget_is_a_rule_that_stops_the_run_and_replaces_a_declared_one() {
-        assert_eq!(
-            budget(f64::NAN).unwrap_err(),
-            "--budget must be a finite USD amount greater than zero (got NaN)"
-        );
-        assert!(budget(0.0).unwrap_err().contains("(got 0)"));
-        let settings = json!({"rules": [
-            {"name": "nan", "text": "Stop at NaN.", "does": "stop", "when": {"kind": "nonFinite", "signal": "loss"}},
-            {"name": "budget", "text": "Old.", "does": "ask", "when": {"kind": "costAbove", "usd": 1}},
-        ]})
-        .to_string();
-        let frozen_rules = freeze("exp", Some(&settings), Some(5.0), false)
-            .unwrap()
-            .unwrap();
-        let rules = frozen("run", Some(&frozen_rules)).unwrap();
-        assert_eq!(rules.len(), 2);
-        assert_eq!(rules[1], budget(5.0).unwrap());
-        assert_eq!(rules[1].shown()["budgetUsd"], 5.0);
-        assert_eq!(freeze("exp", None, None, false).unwrap(), None);
-        assert_eq!(frozen("run", None).unwrap(), vec![]);
-    }
-
-    #[test]
-    fn a_budget_cannot_push_a_launch_over_the_rule_limit() {
-        let mut rules: Vec<_> = (0..MAX_RULES)
-            .map(|i| {
-                json!({"name": format!("rule-{i}"), "text": "Check loss.", "does": "stop",
-                "when": {"kind": "nonFinite", "signal": "loss"}})
-            })
-            .collect();
-        let settings = json!({"rules": rules}).to_string();
-        assert!(freeze("exp", Some(&settings), None, false).is_ok());
-        assert!(freeze("exp", Some(&settings), Some(5.0), false)
-            .unwrap_err()
-            .to_string()
-            .contains("--budget"));
-
-        rules[0]["name"] = json!("budget");
-        let settings = json!({"rules": rules}).to_string();
-        let frozen_rules = freeze("exp", Some(&settings), Some(5.0), false).unwrap();
-        assert_eq!(
-            frozen("run", frozen_rules.as_deref()).unwrap().len(),
-            MAX_RULES
-        );
-    }
-
-    #[test]
     fn a_rule_a_newer_orx_declared_stops_a_launch_with_what_to_do() {
         let settings = json!({"rules": [{"name": "r", "text": "t", "does": "stop", "when": {"kind": "lossAbove", "value": 3}}]});
-        let error = freeze("exp", Some(&settings.to_string()), None, false)
+        let error = freeze("exp", Some(&settings.to_string()), false)
             .unwrap_err()
             .to_string();
         assert!(
@@ -1042,7 +935,7 @@ mod tests {
             "name": "deadline", "text": "This would run too long.", "does": "stop",
             "when": {"kind": "projectedFinishPastLimit"}
         }]});
-        let config = freeze("exp", Some(&settings.to_string()), None, true).unwrap();
+        let config = freeze("exp", Some(&settings.to_string()), true).unwrap();
         let rules = frozen("run", config.as_deref()).unwrap();
         assert!(matches!(&rules[..], [rule] if rule.when == When::FinishPastLimit));
     }

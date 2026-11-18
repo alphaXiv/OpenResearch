@@ -30,11 +30,9 @@ export interface Sentence {
 /** A rule the run was launched with, which orx checks on each report with no model. */
 export interface RunRule {
   name: string;
-  /** The agent's words for it; null for the budget orx adds, which the page words. */
-  text: string | null;
+  /** The agent's words for it. */
+  text: string;
   does: "stop" | "ask";
-  /** A budget rule's amount, in US dollars. */
-  budgetUsd?: number;
 }
 
 export interface SignalSpec {

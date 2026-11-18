@@ -351,7 +351,7 @@ const mutFlagChoice = mutations.define({
 });
 
 /** Answers a flag unless an answer is already on its way; `onRefused` hears a failure while the presser is still on screen. */
-export function chooseFlag(ws: Workspace, run: Pick<api.Run, "id">, flagId: string, choice: FlagAnswer, onRefused: () => void) {
+export async function chooseFlag(ws: Workspace, run: Pick<api.Run, "id">, flagId: string, choice: FlagAnswer, onRefused?: () => void) {
   const options = ws.queries.flagChoiceQuery(run.id, flagId);
   const { queryKey } = options;
   const current = ws.queryClient.getQueryData(queryKey);
@@ -367,18 +367,19 @@ export function chooseFlag(ws: Workspace, run: Pick<api.Run, "id">, flagId: stri
   ws.setScopedQueryData(queryKey, { sending: choice, requests, error: null });
   // Observed until the server answers, so the lock is never collected while its request is out.
   const release = new QueryObserver(ws.queryClient, options).subscribe(() => {});
-  mutFlagChoice.runWithOptions(ws, run, flagId, choice, requestId, {
-    onError: (error) => {
-      ws.setScopedQueryData(queryKey, { sending: null, requests, error: error instanceof Error ? error.message : String(error) });
-      onRefused();
-    },
-    onSuccessData: () => {
-      const remaining = { ...requests };
-      delete remaining[choice];
-      ws.setScopedQueryData(queryKey, { sending: null, requests: remaining, error: null });
-    },
-    onSettled: release,
-  });
+  try {
+    await mutFlagChoice.runAsHeadlessPromise(ws, run, flagId, choice, requestId, {});
+    const remaining = { ...requests };
+    delete remaining[choice];
+    ws.setScopedQueryData(queryKey, { sending: null, requests: remaining, error: null });
+  } catch (error) {
+    const detail = onRefused ? (error instanceof Error ? error.message : String(error)) : null;
+    ws.setScopedQueryData(queryKey, { sending: null, requests, error: detail });
+    if (!onRefused) throw error;
+    onRefused();
+  } finally {
+    release();
+  }
 }
 
 export const mutCleanupRun = mutations.define({

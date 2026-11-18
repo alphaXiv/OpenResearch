@@ -78,11 +78,13 @@
   --color-mark-green: var(--mark-green);
   --color-mark-blue: var(--mark-blue);
   --color-danger-notice-border: color-mix(in srgb, var(--accent-red) 35%, var(--border-variant));
-  --color-primary-hover: color-mix(in oklab, var(--primary) 88%, var(--text));
-  --color-primary-active: color-mix(in oklab, var(--primary) 80%, var(--text));
+  --color-button-hover: var(--button-hover);
+  --color-button-active: var(--button-active);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-active: var(--primary-active);
   --color-stop-hover: color-mix(in oklab, var(--surface) 88%, var(--text));
-  --color-danger-hover: color-mix(in oklab, var(--accent-red) 8%, transparent);
-  --color-danger-active: color-mix(in oklab, var(--accent-red) 14%, transparent);
+  --color-danger-hover: var(--danger-hover);
+  --color-danger-active: var(--danger-active);
   --color-plan-caret: color-mix(in oklab, var(--base) 35%, var(--text));
   /* The model feed's nudge, tinted by the `--nudge-from` and `--nudge-to` colors the feed sets. */
   --color-nudge-start: color-mix(in oklab, var(--nudge-from) 18%, var(--base));
@@ -179,6 +181,12 @@
   --title-unread: #000000;
   --muted: #a1a1a1;
   --primary: #9a2036;
+  --button-hover: rgb(0 0 0 / 10%);
+  --button-active: rgb(0 0 0 / 16%);
+  --primary-hover: #7c1a2c;
+  --primary-active: #671625;
+  --danger-hover: #f7dadc;
+  --danger-active: #f4cccf;
   --border: #d4d4d4;
   --border-variant: #e5e5e5;
 
@@ -298,6 +306,12 @@
   --title-unread: #ffffff;
   --muted: #737373;
   --primary: #ffb3ad;
+  --button-hover: rgb(255 255 255 / 12%);
+  --button-active: rgb(255 255 255 / 18%);
+  --primary-hover: #ffc8c2;
+  --primary-active: #ffd8d4;
+  --danger-hover: #47272b;
+  --danger-active: #513036;
   --lineage: #8eafd2;
   --border: #404040;
   --border-variant: #303030;

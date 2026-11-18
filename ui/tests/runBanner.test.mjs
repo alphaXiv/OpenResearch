@@ -26,7 +26,7 @@ const run = (id, extra = {}) => ({
 const item = (value) => ({ sessionId: "s", run: value, experimentName: value.id, experimentSlug: `lr-${value.id}`, runNo: 1, runCount: 1 });
 
 /** Serves today's server for one chat's runs; every request is kept. */
-function backend({ uiState = { onboardingCompleted: true }, monitors = { r1: running } } = {}) {
+function backend({ uiState = { onboardingCompleted: true }, monitors = { r1: running }, flagRefusal } = {}) {
   const requests = [];
   serve((path, init) => {
     const request = `${init.method ?? "GET"} ${path}`;
@@ -37,7 +37,10 @@ function backend({ uiState = { onboardingCompleted: true }, monitors = { r1: run
     const monitor = /^GET \/api\/runs\/([^/]+)\/monitor$/.exec(request);
     if (monitor) return monitors[monitor[1]];
     if (/^POST \/api\/runs\/[^/]+\/cancel$/.test(request)) return { ok: true };
-    if (/^POST \/api\/runs\/[^/]+\/flag$/.test(request)) return { flag: { ...flagged.flags[0], state: "kept" }, run: run("r1") };
+    if (/^POST \/api\/runs\/[^/]+\/flag$/.test(request)) {
+      const refusal = flagRefusal?.();
+      return refusal ? Response.json({ error: refusal }, { status: 409 }) : { flag: { ...flagged.flags[0], state: "kept" }, run: run("r1") };
+    }
     if (/^POST \/api\/chat\/sessions\/s\/shown-runs\/[^/]+\/dismiss$/.test(request)) return { dismissed: true };
   });
   return requests;
@@ -105,14 +108,33 @@ test("the remembered level opens the line, and a run waiting for a choice opens 
   assert.ok(find("pre", "::orx::"), "the choices and evidence show once the monitor has them");
 });
 
-test("Stop sends exactly one cancel", async () => {
+test("Stop asks first, with Cancel focused; Escape and Cancel keep the run, and Stop run sends one cancel", async () => {
   const requests = backend();
   await banner([run("r1")]);
   await settle();
-  const stop = button(m.run_stop());
-  await act(async () => { stop.click(); stop.click(); });
+  const cancels = () => requests.filter((r) => r.request === "POST /api/runs/r1/cancel").length;
+  const dialog = () => document.querySelector('[role="dialog"]');
+
+  await click(button(m.run_stop()));
+  assert.ok(dialog().textContent.replace(/[⁦-⁩]/g, "").includes(m.run_stop_title({ name: "r1" })), "the title names the run");
+  assert.ok(dialog().textContent.includes(m.run_stop_effect()));
+  assert.equal(document.activeElement, find('[role="dialog"] button', m.common_cancel()));
+  assert.equal(cancels(), 0, "opening the dialog stops nothing");
+  await press("Escape");
   await settle();
-  assert.equal(requests.filter((r) => r.request === "POST /api/runs/r1/cancel").length, 1);
+  assert.equal(dialog(), null);
+  assert.equal(cancels(), 0, "Escape keeps the run");
+
+  await click(button(m.run_stop()));
+  await click(find('[role="dialog"] button', m.common_cancel()));
+  assert.equal(cancels(), 0, "Cancel keeps the run");
+
+  await click(button(m.run_stop()));
+  const confirm = find('[role="dialog"] button', m.experiments_stop_run());
+  await act(async () => confirm.click());
+  await act(async () => confirm.click());
+  await settle();
+  assert.equal(cancels(), 1, "a second press while the first is out sends nothing");
 });
 
 test("against an older server the line reads from the run's status and never asks for its monitor", async () => {
@@ -375,6 +397,30 @@ test("an ended run is dismissed for every window, and Keep going answers the fla
   assert.equal(requests.find((r) => r.request === "POST /api/runs/r1/flag").body.flagId, "f1");
 });
 
+test("a flag's Stop run asks first and keeps the dialog open when the server refuses", async () => {
+  let refusal = "The run's machine is offline.";
+  const requests = backend({ monitors: { r1: flagged }, flagRefusal: () => refusal });
+  await banner([run("r1", { monitor: summary({ tone: "flag", flag: { id: "f1", state: "waiting", mode: "copilot" } }) })]);
+  await settle();
+  const answers = () => requests.filter((r) => r.request === "POST /api/runs/r1/flag").map((r) => r.body.choice);
+  const strip = () => [...document.querySelectorAll("button")].find((element) => element.textContent.includes(m.experiments_stop_run()) && !element.closest('[role="dialog"]'));
+
+  await click(strip());
+  assert.ok(document.querySelector('[role="dialog"]').textContent.includes(m.run_stop_effect()));
+  await press("Escape");
+  await settle();
+  assert.deepEqual(answers(), []);
+
+  await click(strip());
+  await click(find('[role="dialog"] button', m.experiments_stop_run()));
+  assert.ok(document.querySelector('[role="dialog"]').textContent.includes(refusal));
+
+  refusal = null;
+  await click(find('[role="dialog"] button', m.experiments_stop_run()));
+  assert.deepEqual(answers(), ["stop", "stop"]);
+  assert.equal(document.querySelector('[role="dialog"]'), null);
+});
+
 test("lost contact puts the contact words on the line, Connect beside them, and the notice's actions in the strip", async () => {
   backend({ uiState: { onboardingCompleted: true, runBanner: "line" } });
   const workspace = createWorkspace("test");
@@ -565,7 +611,9 @@ test("a choice on its way is never forgotten, however long its answer takes, and
   // Its own workspace: a second request would queue behind the first, and must not hold up later tests.
   const workspace = createWorkspace("pending");
   const { queryKey } = workspace.queries.flagChoiceQuery("r1", "f1");
-  const keep = () => act(async () => chooseFlag(workspace, { id: "r1" }, "f1", "keep", () => {}));
+  const keep = () => act(async () => {
+    void chooseFlag(workspace, { id: "r1" }, "f1", "keep", () => {});
+  });
   await keep();
   await act(async () => t.mock.timers.tick(2 * 3_600_000));
   await keep();

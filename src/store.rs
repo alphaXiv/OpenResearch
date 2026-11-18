@@ -1668,6 +1668,19 @@ impl Store {
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_run_monitor_state AFTER DELETE ON runs BEGIN DELETE FROM run_monitor_state WHERE run_id = OLD.id; END;")?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_run_monitor_events AFTER DELETE ON runs BEGIN DELETE FROM run_monitor_events WHERE run_id = OLD.id; END;")?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_run_watch_counts AFTER DELETE ON runs BEGIN DELETE FROM watch_counts WHERE run_id = OLD.id; END;")?;
+        schema.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS delete_run_watch_looks AFTER DELETE ON runs BEGIN
+                 DELETE FROM watch_look_runs WHERE run_id = OLD.id;
+             END;
+             CREATE TRIGGER IF NOT EXISTS delete_chat_watch_looks AFTER DELETE ON chat_sessions BEGIN
+                 DELETE FROM watch_look_runs WHERE look_id IN (SELECT id FROM watch_looks WHERE chat_session_id = OLD.id);
+                 DELETE FROM watch_looks WHERE chat_session_id = OLD.id;
+             END;
+             CREATE TRIGGER IF NOT EXISTS delete_empty_watch_look AFTER DELETE ON watch_look_runs BEGIN
+                 DELETE FROM watch_looks WHERE id = OLD.look_id
+                   AND NOT EXISTS (SELECT 1 FROM watch_look_runs WHERE look_id = OLD.look_id);
+             END;",
+        )?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_project_env_vars AFTER DELETE ON local_projects BEGIN DELETE FROM project_env_vars WHERE project_id = OLD.id; END;")?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_log_collection AFTER DELETE ON runs BEGIN DELETE FROM log_collections WHERE run_id = OLD.id; END;")?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_steer_receipts AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_steer_receipts WHERE session_id = OLD.id; END;")?;
@@ -10134,6 +10147,113 @@ pub(crate) mod tests {
             .is_file());
         store.delete_local_project("malformed").unwrap();
         assert!(!dir.join("local-runs/malformed-run").exists());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn watcher_history_is_deleted_with_its_chat_its_runs_and_their_project() {
+        let dir = std::env::temp_dir().join(format!("orx-watch-delete-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        project_with_run_artifacts(&store, "p", "kept", &"d".repeat(64));
+        project_with_run_artifacts(&store, "q", "gone", &"e".repeat(64));
+        store
+            .conn
+            .execute(
+                "INSERT INTO local_experiments (id, project_id, slug, branch_name, title, description,
+                   run_command, agent_status, created_at, updated_at)
+                 VALUES ('experiment', 'q', 'e', 'orx/e', NULL, NULL, '', 'idle', 1, 1)",
+                [],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE runs SET experiment_id = 'other' WHERE id = 'kept'",
+                [],
+            )
+            .unwrap();
+        for chat in ["mine", "theirs"] {
+            let mut session = chat_session_fixture(chat);
+            session.project_id = "p".into();
+            store.create_chat_session(&session).unwrap();
+        }
+        for run in ["kept", "gone"] {
+            store.set_watch_count(run, "warning", 1, 20, "0-0").unwrap();
+        }
+        let look = |chat: &str, runs: &[&str]| {
+            let rows: Vec<_> = runs.iter().map(|run| (*run, *run, "subject")).collect();
+            let tx = store.begin_immediate().unwrap();
+            let id =
+                Store::prepare_watch_look(&tx, chat, "change", "a test asked", &rows, 1).unwrap();
+            tx.commit().unwrap();
+            id
+        };
+        let looked_at = |run: &str| -> Vec<i64> {
+            let looks = store.run_watch_looks(run, 10).unwrap();
+            looks.into_iter().map(|(look, _)| look.id).collect()
+        };
+        let mine = look("mine", &["kept", "gone"]);
+        look("mine", &["gone"]);
+        let theirs = look("theirs", &["kept"]);
+        let shared = look("theirs", &["kept", "gone"]);
+        let only_gone = look("theirs", &["gone"]);
+
+        store.delete_chat_session("mine").unwrap();
+        assert!(store.watch_look(mine).unwrap().is_none());
+        assert!(store.watch_look_runs(mine).unwrap().is_empty());
+        assert_eq!(looked_at("kept"), [theirs, shared]);
+        assert_eq!(looked_at("gone"), [shared, only_gone]);
+
+        store
+            .delete_local_experiment("experiment", || Ok(()))
+            .unwrap();
+        assert!(store.watch_look(only_gone).unwrap().is_none());
+        assert!(store.watch_look(shared).unwrap().is_some());
+        let left: Vec<_> = store
+            .watch_look_runs(shared)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.run_id)
+            .collect();
+        assert_eq!(left, ["kept"]);
+        assert_eq!(looked_at("kept"), [theirs, shared]);
+        assert!(store.watch_counts("gone").unwrap().is_empty());
+        assert_eq!(store.watch_counts("kept").unwrap().len(), 1);
+
+        let tx = store.begin_immediate().unwrap();
+        assert!(Store::prepare_watch_look(
+            &tx,
+            "mine",
+            "change",
+            "a stale plan",
+            &[("kept", "r1", "subject")],
+            2,
+        )
+        .is_err());
+        assert!(Store::prepare_watch_look(
+            &tx,
+            "theirs",
+            "change",
+            "a stale plan",
+            &[("gone", "r1", "subject")],
+            2,
+        )
+        .is_err());
+        tx.commit().unwrap();
+        assert_eq!(looked_at("kept"), [theirs, shared]);
+        assert!(looked_at("gone").is_empty());
+
+        store.delete_local_project("p").unwrap();
+        for table in ["watch_looks", "watch_look_runs", "watch_counts"] {
+            let rows: i64 = store
+                .conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(rows, 0, "{table}");
+        }
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }

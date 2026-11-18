@@ -880,12 +880,8 @@ where
     let has_time_limit = launch.options["timeout_seconds"]
         .as_i64()
         .is_some_and(|seconds| seconds > 0);
-    let monitor_config = crate::engine::rules::freeze(
-        &experiment.id,
-        settings.as_deref(),
-        args.budget,
-        has_time_limit,
-    )?;
+    let monitor_config =
+        crate::engine::rules::freeze(&experiment.id, settings.as_deref(), has_time_limit)?;
     store.reserve_run_telemetry(&run_id, identity.as_ref(), report.as_ref())?;
     let branch = experiment.branch_name.clone();
     insert(Submission {
@@ -1232,7 +1228,6 @@ echo ok
             exclude: None,
             sbatch_args: Vec::new(),
             force: false,
-            budget: None,
             chat_session_id: None,
             invocation_context: None,
             agent_origin: None,

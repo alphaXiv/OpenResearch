@@ -4,8 +4,8 @@ import { statusLabel } from "../components/StatusBadge";
 import { autoDir, fmtNumber, ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
 import { runActive, runApiProvider, runConnectHost, runDisplay, runNotice, runStoppable, type RunNotice } from "../runDisplay";
-import { fillSentence, fmtMagnitude, fmtSignal, fmtUsd, plainSentence, tokensOf } from "./format";
-import type { Bindings, Flag, FlagState, RunMonitor, RunMonitorSummary, RunRule, ShownRun, SignalSpec, SignalValue, Signals, Versus, VersusBy } from "./types";
+import { fillSentence, fmtMagnitude, fmtSignal, plainSentence, tokensOf } from "./format";
+import type { Bindings, Flag, FlagState, RunMonitor, RunMonitorSummary, ShownRun, SignalSpec, SignalValue, Signals, Versus, VersusBy } from "./types";
 import { tickText } from "./journal";
 import { stagePosition } from "./stages";
 import { capitalized, captionProgress, clockText, costWords, durationText, estimateWords, progressWords, remainingText } from "./words";
@@ -410,7 +410,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   const pace = monitor?.pace ?? null;
   const disagrees = monitor?.disagrees ?? null;
   const note = tone === "revising" ? m.run_flag_revising({ agent: autoDir(agent) })
-    : tone === "stopped" && outcome?.by === "rule" && outcome.rule ? m.run_rule_detail({ text: ruleText(outcome.rule), name: autoDir(outcome.rule.name) })
+    : tone === "stopped" && outcome?.by === "rule" && outcome.rule ? m.run_rule_detail({ text: autoDir(outcome.rule.text), name: autoDir(outcome.rule.name) })
     : tone === "stopped" && outcome?.by === "agent" ? (outcome.reason ? m.run_stop_reason({ agent: autoDir(agent), reason: autoDir(outcome.reason) }) : m.run_rule_reason_in_chat())
     : tone === "failed" && logError ? m.run_failed_log_error({ line: quoted(logError) })
     : disagrees ? m.run_plan_disagrees({ of: ltr(fmtNumber(disagrees.of)), unit: autoDir(disagrees.unit ?? m.run_plan_steps()), stage: autoDir(disagrees.stage), rows: ltr(fmtNumber(disagrees.rows)) })
@@ -469,11 +469,6 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     canStop: runStoppable(run) && tone !== "revising",
     canDismiss: shown && !live && tone !== "revising" && !(notice && UNDISMISSABLE.has(notice.kind)),
   };
-}
-
-/** What a rule checks: the agent's words, or for the budget orx adds, its own. */
-export function ruleText(rule: RunRule): string {
-  return rule.text !== null ? autoDir(rule.text) : m.run_rule_reported_spend({ budget: ltr(fmtUsd(rule.budgetUsd ?? 0)) });
 }
 
 function headlineOf(monitor: RunMonitor | null, summary: NonNullable<Run["monitor"]>["headline"], bindings: Bindings, signals: Signals, sentenceTemplate: string | null, live: boolean): RunModel["headline"] {
