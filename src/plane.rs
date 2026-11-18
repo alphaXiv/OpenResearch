@@ -263,14 +263,22 @@ pub(crate) fn reason_words(text: &str) -> String {
     }
     if let Some((code, said)) = message
         .strip_prefix("Provisioning failed: ")
-        .and_then(|message| message.split_once(": "))
-        .filter(|(code, _)| code.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'))
+        .and_then(|message| message.split_once(':'))
+        .filter(|(code, _)| {
+            !code.is_empty() && code.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+        })
     {
-        return if code == "provider_error" {
-            "The provider couldn't start the box. Launch again.".into()
-        } else {
-            said.to_owned()
-        };
+        let said = said.trim();
+        if code == "provider_error"
+            && matches!(
+                said,
+                "" | "The provider could not provision this box."
+                    | "The provider could not provision this instance. Please try again."
+            )
+        {
+            return "The provider couldn't start the box. Launch again.".into();
+        }
+        return if said.is_empty() { code } else { said }.to_owned();
     }
     message
 }
@@ -416,6 +424,14 @@ mod tests {
             run.failure_detail().as_deref(),
             Some("reason: — (no message recorded — see `orx logs r1`)")
         );
+    }
+
+    #[test]
+    fn a_provisioning_failure_keeps_the_providers_detail() {
+        let detail = "This machine has only 200 GB of disk. Request a smaller disk.";
+        let reason = format!("Provisioning failed: provider_error: {detail}");
+        let run = Run::from(&stored_run("failed", Some(&reason)));
+        assert!(run.failure_detail().unwrap().contains(detail));
     }
 
     #[test]

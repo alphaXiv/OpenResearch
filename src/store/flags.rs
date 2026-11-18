@@ -90,8 +90,7 @@ impl Store {
     /// end reaches the chat as its own notice, and the wake would ask to stop what has stopped.
     pub(crate) fn retire_stale_flag_wakes(&self, now: i64) -> Result<()> {
         self.conn.execute(
-            "UPDATE run_notices SET retired_at = ?1, next_delivery_at = NULL,
-                    delivery_error = 'The run ended before its flag reached the chat'
+            "UPDATE run_notices SET retired_at = ?1, next_delivery_at = NULL, delivery_error = NULL
              WHERE kind = ?2 AND delivered_at IS NULL AND retired_at IS NULL AND client_turn_id IS NULL
                AND EXISTS(SELECT 1 FROM runs r WHERE r.id = run_notices.run_id
                           AND r.ended_at IS NOT NULL AND r.ended_at >= run_notices.created_at)",
@@ -392,5 +391,56 @@ impl Store {
         }
         tx.commit()?;
         Ok(Chosen::Recorded)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::local::git::TemporaryDirectory;
+    use crate::store::tests::run_fixture;
+    use serde_json::json;
+
+    #[test]
+    fn a_flag_superseded_by_the_result_is_not_a_delivery_error() {
+        let dir = TemporaryDirectory::new("orx-flag-retirement").unwrap();
+        let store = Store::open_at(dir.path().to_path_buf()).unwrap();
+        store.put_chat_session("owner", "claude-code", None);
+        let mut run = run_fixture("run", "running", Some("owner"));
+        store.upsert_run(&run).unwrap();
+        let flag = NewFlag {
+            run_id: run.id.clone(),
+            body: json!({"id": "f1"}),
+            wakes: vec![("owner".into(), "Review the flag".into())],
+            noted: Vec::new(),
+            only_if_clear: true,
+        };
+        assert_eq!(store.raise_flags(&[flag], 2).unwrap(), [Raise::Raised]);
+
+        run.status = "done".into();
+        run.ended_at = Some(3);
+        run.updated_at = 3;
+        store.upsert_run(&run).unwrap();
+        store
+            .insert_run_notice(&run.id, "owner", TERMINAL, TERMINAL, "Finished", 3)
+            .unwrap();
+        let batch = store.run_notice_batch_at("owner", 4).unwrap();
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].kind, TERMINAL);
+        let turn = &batch[0].client_turn_id;
+        let chat = store.get_chat_session("owner").unwrap().unwrap();
+        let carried = crate::engine::flags::carry_cut_flags(&store, &chat, turn, 4).unwrap();
+        assert_eq!(carried.len(), 1);
+        store.put_chat_turn("owner", turn, "running", 4);
+        store
+            .update_chat_turn_progress(turn, "running", "accepted", 4, None)
+            .unwrap();
+        store
+            .mark_run_notice_batch_delivered("owner", turn, 4)
+            .unwrap();
+        let notices = store.run_flag_notices(&run.id).unwrap();
+        assert!(notices[0].retired);
+        assert!(notices[1].delivered);
+        assert_eq!(store.run_notice_error(&run.id).unwrap(), None);
     }
 }

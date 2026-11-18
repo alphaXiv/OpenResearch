@@ -480,11 +480,11 @@ What became of a flag is read back, never stored: its choices in the run's
 journal and the notice and turn that carried it give its state. An Agentic flag
 is raised, then waking, then the agent is looking. A cut or retired review goes
 with the chat's next turn. A completed review without a choice wakes the agent
-once more, and if that review also finishes without a choice, orx records the
-flag as kept and says why in the journal. Keep and Stop are available in the
-expanded card during an automatic review. An agent's `--ask` and a Copilot flag
-wait for the user, who sees the available choices in the strip and an amber
-mark on the chat's row.
+once more. When the owning Independent chat finishes that second review without
+a choice, orx records the flag as kept and says why in the journal. Keep and Stop
+are available in the expanded card during an automatic review. An agent's `--ask`
+and a Copilot flag wait for the user, who sees the available choices in the strip
+and an amber mark on the chat's row.
 `orx exp flag RUN --flag ID --keep|--ask|--stop` and the strip send one choice;
 a repeated request id answers as the first did, and a settled flag, or one on a
 run that ended or whose stop was accepted, is refused. Keep going settles it and

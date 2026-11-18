@@ -988,6 +988,7 @@ test('an Independent flag gets one reminder then closes when both reviews leave 
   await capture('closed')
   await openRunPage(page, banner, /Training/)
   const watch = page.locator('section', { has: page.getByRole('heading', { name: 'Watch', exact: true }) })
+  await watch.getByRole('button', { name: /A new kind of error in the log/ }).press('Enter')
   await expect(watch).toContainText('left it unsettled twice.')
   await run.open('end')
   await expect(page.getByText('Training finished.', { exact: true })).toBeVisible()

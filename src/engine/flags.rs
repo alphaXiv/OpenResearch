@@ -166,7 +166,14 @@ pub(crate) fn read(store: &Store, run: &StoredRun) -> Result<Vec<Value>> {
                 match last {
                     Some(last) if autonomous && needs_redelivery(last) => "raised",
                     Some(last) if autonomous && last.turn.as_deref() == Some("completed") => {
-                        "waking"
+                        let reminder = format!("{WATCH_FLAG}:{id}:{REMIND}");
+                        if run.chat_session_id.as_deref() == Some(last.chat_session_id.as_str())
+                            || notice(&reminder).is_none()
+                        {
+                            "waking"
+                        } else {
+                            "waiting"
+                        }
                     }
                     Some(last) if autonomous && last.retired => {
                         if last.delivered {
@@ -243,7 +250,7 @@ pub(crate) fn carry_cut_flags(
                     .iter()
                     .any(|notice| notice.chat_session_id == chat.id && notice.dedupe == reminder)
                 {
-                    remind(&run, id)
+                    remind(&run, id, &chat.id)
                 } else {
                     wake(&run, flag, false)
                 };
@@ -265,7 +272,7 @@ fn unrouted(events: &[FlagEvent]) -> impl Iterator<Item = (&str, &Value)> {
     })
 }
 
-/// A completed review gets one reminder. When both turns finish without a choice, keep the run.
+/// A completed review gets one reminder. Only the owning Independent chat can keep by default.
 pub(crate) fn follow_up_flags(store: &Store, now: i64) -> Result<()> {
     for run_id in store.flag_follow_up_runs(None)? {
         let Some(run) = store.get_run(&run_id)? else {
@@ -297,6 +304,9 @@ pub(crate) fn follow_up_flags(store: &Store, now: i64) -> Result<()> {
                     .iter()
                     .any(|notice| notice.chat_session_id == chat && notice.dedupe == dedupe)
                 {
+                    if run.chat_session_id.as_deref() != Some(chat) {
+                        continue;
+                    }
                     let keep = crate::store::FlagChoice {
                         run_id: run_id.clone(),
                         body: json!({
@@ -309,7 +319,8 @@ pub(crate) fn follow_up_flags(store: &Store, now: i64) -> Result<()> {
                         == crate::store::Chosen::Recorded;
                     break;
                 }
-                changed |= store.remind_flag(&run_id, chat, id, &dedupe, &remind(&run, id), now)?;
+                changed |=
+                    store.remind_flag(&run_id, chat, id, &dedupe, &remind(&run, id, chat), now)?;
             }
         }
         if changed {
@@ -320,7 +331,7 @@ pub(crate) fn follow_up_flags(store: &Store, now: i64) -> Result<()> {
 }
 
 /// The frozen text that reminds a chat's agent of a flag its last turn left open.
-fn remind(run: &StoredRun, flag_id: &str) -> String {
+fn remind(run: &StoredRun, flag_id: &str, chat: &str) -> String {
     let (id, exp) = (&run.id, &run.experiment_id);
     let settle = format!("orx exp flag {id} --flag {flag_id}");
     let choices = if Phase::parse(&run.status).is_some_and(Phase::is_terminal) {
@@ -336,13 +347,17 @@ fn remind(run: &StoredRun, flag_id: &str) -> String {
              To stop it: {settle} --stop --reason 'your confirmed reason'"
         )
     };
+    let after = if run.chat_session_id.as_deref() == Some(chat) {
+        "\nIf this turn also ends with the flag open, orx keeps the run as it is and records that\n\
+         you left the flag unsettled."
+    } else {
+        ""
+    };
     format!(
         "[orx] Your last turn ended without settling flag {flag_id} on run {id} (experiment {exp}).\n\
          Read: orx exp status {exp} --run {id}; orx logs {id}\n\
          {choices}\n\
-         To leave it to the user: {settle} --ask --reason '…'\n\
-         If this turn also ends with the flag open, orx keeps the run as it is and records that\n\
-         you left the flag unsettled."
+         To leave it to the user: {settle} --ask --reason '…'{after}"
     )
 }
 
@@ -542,4 +557,45 @@ pub(crate) fn status_line(flag: &Value) -> String {
         _ => "open".into(),
     };
     format!("flag     {detail}{lines}  (flag {id}, {state})")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::local::git::TemporaryDirectory;
+    use crate::store::{tests::run_fixture, Raise};
+
+    #[test]
+    fn a_subscribers_unsettled_reviews_leave_the_flag_open() {
+        for owner in [Some("owner"), None] {
+            let dir = TemporaryDirectory::new("orx-flag-owner").unwrap();
+            let store = Store::open_at(dir.path().to_path_buf()).unwrap();
+            store.put_chat_session("owner", "claude-code", Some("copilot"));
+            store.put_chat_session("subscriber", "claude-code", None);
+            let run = run_fixture("run", "running", owner);
+            store.upsert_run(&run).unwrap();
+            store.subscribe_run(&run.id, "subscriber", 1).unwrap();
+            let flag = new_flag(&store, &run, json!({"id": "f1", "at": 1}), true).unwrap();
+            assert_eq!(store.raise_flags(&[flag], 1).unwrap(), [Raise::Raised]);
+
+            for now in [2, 3] {
+                let batch = store.run_notice_batch_at("subscriber", now).unwrap();
+                assert_eq!(batch.len(), 1);
+                let turn = &batch[0].client_turn_id;
+                store
+                    .mark_run_notice_batch_delivered("subscriber", turn, now)
+                    .unwrap();
+                store.put_chat_turn("subscriber", turn, "completed", now);
+                follow_up_flags(&store, now).unwrap();
+            }
+
+            assert!(store
+                .run_notice_batch_at("subscriber", 4)
+                .unwrap()
+                .is_empty());
+            let flags = read(&store, &run).unwrap();
+            assert_eq!(flags[0]["state"], "waiting", "owner: {owner:?}");
+            assert!(flags[0].get("choice").is_none());
+        }
+    }
 }
