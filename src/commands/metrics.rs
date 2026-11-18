@@ -11,6 +11,7 @@ pub async fn run(args: crate::MetricsArgs) -> Result<()> {
     // Dropped at exit, which stops a local dashboard this command had to start.
     let local = std::sync::Arc::new(trackio::LocalServer::default());
     let mut reports = Vec::new();
+    let mut text = Vec::new();
     for id in &args.run_ids {
         let run = crate::local::resolve::resolve_run(&store, id)?;
         let project = store.get_local_project(&run.project_id)?.ok_or_else(|| {
@@ -20,20 +21,17 @@ pub async fn run(args: crate::MetricsArgs) -> Result<()> {
                 store.data_dir().display()
             )
         })?;
-        let report = trackio::run_metrics(
-            &local,
-            trackio::project_for(&project.slug),
-            run.id,
-            &args.metrics,
-            args.points,
-        )
-        .await;
+        let tracker = trackio::project_for(&store, project)?;
+        let report =
+            trackio::run_metrics(&local, &tracker, run.id, &args.metrics, args.points).await;
+        if !args.json {
+            text.push(render(&report, &tracker.target));
+        }
         reports.push(report);
     }
     if args.json {
         println!("{}", serde_json::to_string_pretty(&reports)?);
     } else {
-        let text: Vec<String> = reports.iter().map(render).collect();
         print!("{}", text.join("\n"));
     }
     if reports
@@ -45,7 +43,7 @@ pub async fn run(args: crate::MetricsArgs) -> Result<()> {
     Ok(())
 }
 
-fn render(report: &RunMetrics) -> String {
+fn render(report: &RunMetrics, tracker: &trackio::Target) -> String {
     let mut out = String::new();
     let _ = write!(
         out,
@@ -61,7 +59,7 @@ fn render(report: &RunMetrics) -> String {
     }
     let Some(steps) = report.logged_steps else {
         if report.dashboard_url.is_none() && report.errors.is_empty() {
-            let _ = match trackio::target() {
+            let _ = match tracker {
                 trackio::Target::Space(id) => writeln!(
                     out,
                     "Space {id} does not exist yet, or HF_TOKEN cannot see it; Trackio creates it on the first logged run."

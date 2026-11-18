@@ -38,7 +38,7 @@ impl Api for VercelAccount {
             serde_json::from_value(intent.launch.options.clone()).map_err(api::rejected)?;
         spec.name = vercel::sandbox_name(&intent.run.id);
         spec.tags.insert("or_run".into(), intent.run.id.clone());
-        spec.env.extend(crate::config::launch_env(&intent.run.id));
+        spec.env.extend(crate::config::launch_env(&intent.run).map_err(api::rejected)?);
         vercel::strip_credentials(&mut spec.env);
         vercel::ensure_env().await.map_err(api::rejected)?;
         let submitted = vercel::run_job(&spec, Some(fence)).await.map_err(api::launch_error)?;

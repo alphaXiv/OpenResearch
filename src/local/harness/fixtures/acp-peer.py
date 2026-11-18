@@ -20,9 +20,32 @@ startup = "pi v1.5.0\n---\nSkills: none\n"
 # Like pi-acp, the startup modes send a chunk after session/new, before the agent's turn.
 # It goes out when the prompt arrives, so it always reaches the client inside its turn.
 pending = None
+bom = mode == "transport-bom"
 
 
 def send(value):
+    global bom
+    if mode in ["transport-crlf", "transport-fragments", "transport-blank", "transport-noise", "transport-bom"]:
+        encoded = json.dumps(dict(jsonrpc="2.0", **value), ensure_ascii=False).encode("utf-8")
+        if mode == "transport-crlf":
+            encoded += b"\r\n"
+        elif mode == "transport-blank":
+            encoded = b"\n" + encoded + b"\n\n"
+        elif mode == "transport-noise":
+            encoded = b" \r\n[dotenv@17.2.0] injecting env (0)\nnpm notice banner\r\n" + encoded + b"\n\t\n"
+        else:
+            encoded += b"\n"
+        if bom:
+            encoded = b"\xef\xbb\xbf" + encoded
+            bom = False
+        if mode == "transport-fragments":
+            for byte in encoded:
+                sys.stdout.buffer.write(bytes([byte]))
+                sys.stdout.buffer.flush()
+        else:
+            sys.stdout.buffer.write(encoded)
+            sys.stdout.buffer.flush()
+        return
     print(json.dumps(dict(jsonrpc="2.0", **value)), flush=True)
 
 
@@ -67,6 +90,10 @@ if mode == "replay":
 
 for line in sys.stdin:
     request = json.loads(line)
+    # orx answers output it could not parse with an error for a null id.
+    if "error" in request and request.get("id") is None:
+        print(f"unexpected error from orx: {line}", file=sys.stderr, flush=True)
+        sys.exit(9)
     method = request.get("method")
     params = request.get("params", {})
     if method:
@@ -85,8 +112,21 @@ for line in sys.stdin:
             assert os.environ["ORX_CHAT_HARNESS"].startswith("acp:")
         assert params["clientCapabilities"]["fs"] == {"readTextFile": True, "writeTextFile": True}
         assert params["clientCapabilities"]["terminal"] is True
+        if mode == "gated-init":
+            with socket.create_connection(("127.0.0.1", int(value))) as gate:
+                gate.recv(1)
+        if mode == "stderr-init":
+            sys.stdout.buffer.write(b"\n")
+            sys.stdout.buffer.flush()
+            final_line = "\u4ee3\u7406 " * (200 if value == "long" else 1) + "final-startup-cause"
+            sys.stderr.buffer.write(b"discarded-prefix:" + b"x" * 65536 + b"\xff" + ("\n" + final_line + "\n").encode("utf-8"))
+            sys.stderr.buffer.flush()
+            sys.exit(7)
         if mode == "crash-init":
             sys.exit(3)
+        if mode == "shapeless-init":
+            reply(request, dict(agentCapabilities={}))
+            continue
         if mode == "stalled-init":
             signal_stall()
             continue
@@ -94,7 +134,7 @@ for line in sys.stdin:
             send(dict(id=request["id"], error=dict(code=-32000, message="Authentication required")))
         else:
             reply(request, dict(protocolVersion=2 if mode == "incompatible" else 1,
-                                agentInfo=dict(name="Deterministic ACP peer", version="1.0"),
+                                agentInfo=dict(name="\u4ee3\u7406\U0001f338" if mode == "transport-fragments" else "Deterministic ACP peer", version="1.0"),
                                 agentCapabilities=dict(loadSession=mode != "no-resume", **({"sessionCapabilities": {"resume": {}}} if mode in ["resume", "alphaxiv-resume"] else {"sessionCapabilities": {"resume": {}, "list": {}}} if mode == "unlisted" else {}),
                                                        **({"sessionCapabilities": {"delete": {}}} if mode in ["delete", "slow-delete"] else {}))))
     elif method == "session/new":
@@ -155,6 +195,15 @@ for line in sys.stdin:
         full = params["prompt"][0]["text"]
         text = full.split("ACP_TEST:", 1)[-1]
         if text == "crash":
+            if mode in ["stderr-turn", "invalid-utf8-turn"]:
+                print("final-turn-cause", file=sys.stderr, flush=True)
+            if mode == "invalid-utf8-turn":
+                sys.stdout.buffer.write(b"\xff\n")
+                sys.stdout.buffer.flush()
+            if mode == "transport-noise":
+                print("discarded-prefix:" + "x" * 65536, flush=True)
+                update(dict(sessionUpdate="agent_message_chunk", content=dict(type="text", text="crashing")))
+                print("\u4ee3\u7406 final-stdout-banner", flush=True)
             sys.exit(4)
         if text == "error":
             send(dict(id=request["id"], error=dict(code=-32603, message="Model overloaded")))
@@ -170,6 +219,25 @@ for line in sys.stdin:
         # A command in a session of its own, as agy starts each of its commands, and a helper in the agent's own session.
         if text in ["detached", "attached"]:
             children[text] = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"], start_new_session=text == "detached")
+            reply(request, dict(stopReason="end_turn"))
+            continue
+        if text == "detached-stderr":
+            code = """import socket, sys
+with socket.create_connection(('127.0.0.1', int(sys.argv[1]))) as gate:
+    gate.sendall(b'ready')
+    gate.recv(1)
+    sys.stderr.write('detached command is still writable\\n')
+    sys.stderr.flush()
+    gate.sendall(b'writable')
+"""
+            if mode == "orphan-stderr":
+                subprocess.run([sys.executable, "-c",
+                                "import subprocess, sys; subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2]], start_new_session=True)",
+                                code, value], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, check=True)
+            else:
+                children[text] = subprocess.Popen([sys.executable, "-c", code, value],
+                                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                                  start_new_session=True)
             reply(request, dict(stopReason="end_turn"))
             continue
         if text == "end-detached":

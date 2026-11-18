@@ -3458,8 +3458,7 @@ async fn ensure_codex_pre_accept(
                     .any(|code| detail.contains(code));
                 let retry = retryable.then(|| ctx.schedule_orx_retry(None)).flatten();
                 let Some((retry_number, delay)) = retry else {
-                    ctx.mark_delivery(DeliveryState::NotSent);
-                    ctx.mark_terminal_failure("codex_setup", error.to_string());
+                    ctx.mark_setup_failure("codex_setup", &error);
                     return Err(error);
                 };
                 ctx.show_retry_status(
@@ -6958,6 +6957,7 @@ requires_openai_auth = false
             note: note.map(str::to_string),
             annotations: Vec::new(),
             from: None,
+            env: Vec::new(),
         }
     }
 
@@ -7224,6 +7224,73 @@ requires_openai_auth = false
             plan: Some("the plan".into()),
             synthesized: true,
             ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_binary_setup_exhaustion_reports_no_local_path() {
+        if !crate::config::in_test_child(&["ORX_TEST_SPEEDUP"]) {
+            return;
+        }
+        std::env::set_var("ORX_TEST_SPEEDUP", "1000");
+        let mut ctx = TurnCtx::test_stub();
+        ctx.harness = "codex".into();
+        assert!(ctx
+            .exhausted_retry_properties("orx", "codex_setup")
+            .is_none());
+        assert!(ensure_codex_pre_accept(&mut ctx, NativeStore::Isolated)
+            .await
+            .is_err());
+        let (kind, local_message) = ctx.terminal_error.as_ref().unwrap();
+        assert_eq!(kind, "codex_setup");
+        assert!(!local_message.is_empty());
+        assert_eq!(
+            ctx.exhausted_retry_properties("orx", kind),
+            Some(json!({
+                "harness": "codex", "owner": "orx", "reason": "codex_setup_binary",
+                "attempt": ORX_MAX_ATTEMPTS
+            }))
+        );
+    }
+
+    #[tokio::test]
+    async fn initialize_rejection_is_only_reported_after_retries_run_out() {
+        if !crate::config::in_test_child(&["ORX_TEST_SPEEDUP"]) {
+            return;
+        }
+        std::env::set_var("ORX_TEST_SPEEDUP", "1000");
+        let bin = crate::config::test_home().join(".local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        for (code, retries) in [(-32600, false), (-32001, true)] {
+            let reply =
+                json!({"id": 1, "error": {"code": code, "message": "private fixture marker"}});
+            #[cfg(unix)]
+            orx_test_support::write_executable(
+                bin.join("codex"),
+                format!("#!/bin/sh\nIFS= read -r request\nprintf '%s\\n' '{reply}'\n"),
+                0o755,
+            )
+            .unwrap();
+            #[cfg(windows)]
+            std::fs::write(
+                bin.join("codex.cmd"),
+                format!("@echo off\r\nset /p request=\r\necho {reply}\r\n"),
+            )
+            .unwrap();
+            let mut ctx = TurnCtx::test_stub();
+            ctx.harness = "codex".into();
+            assert!(ensure_codex_pre_accept(&mut ctx, NativeStore::Isolated)
+                .await
+                .is_err());
+            let (kind, local_message) = ctx.terminal_error.as_ref().unwrap();
+            assert!(local_message.contains("private fixture marker"));
+            assert_eq!(
+                ctx.exhausted_retry_properties("orx", kind),
+                retries.then(|| json!({
+                    "harness": "codex", "owner": "orx", "reason": "codex_setup_initialize",
+                    "attempt": ORX_MAX_ATTEMPTS
+                }))
+            );
         }
     }
 
