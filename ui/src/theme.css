@@ -231,6 +231,9 @@
   /* Shared reading width for chat, markdown, and plan surfaces. The appearance
      setting may widen it or remove the cap. */
   --readable-col: 840px;
+  --readable-wide: 1100px;
+  /* The side gap `full` keeps instead of a cap. */
+  --readable-offset: 4rem;
   --border-strong: var(--border);
   --focus: color-mix(in oklab, var(--text) 60%, var(--base));
   --focus-border: color-mix(in oklab, var(--text) 40%, var(--border));
@@ -259,11 +262,37 @@
 /* The chat width setting. `full` keeps a fixed side offset instead of a cap, so
    a wide pane (or a zoomed-out page) widens the text rather than the margins. */
 :root[data-chat-width="wide"] {
-  --readable-col: 1100px;
+  --readable-col: var(--readable-wide);
 }
 
 :root[data-chat-width="full"] {
-  --readable-col: calc(100% - 4rem);
+  --readable-col: calc(100% - var(--readable-offset));
+}
+
+/* The chat heading sits in a grid whose side gutters hold the rail toggle, so its
+   `100%` is the middle cell, not the pane: every percentage measure inside it
+   shrinks by those gutters, and the title drifts in from the text below it. In the
+   wider modes the header is therefore measured against the row itself (100cqi) and
+   centered by hand, because grid auto-margins cannot center an item that is wider
+   than its area. `balanced` keeps today's geometry; only the modes this setting
+   adds opt in. */
+:root[data-chat-width="wide"] .chat-heading-row,
+:root[data-chat-width="full"] .chat-heading-row {
+  container-type: inline-size;
+}
+
+:root[data-chat-width="wide"] .chat-heading-row > .chat-header {
+  --chat-header-width: min(var(--readable-wide), 100cqi - var(--readable-offset));
+  width: var(--chat-header-width);
+  max-width: none;
+  margin-inline: calc((100% - var(--chat-header-width)) / 2);
+}
+
+:root[data-chat-width="full"] .chat-heading-row > .chat-header {
+  --chat-header-width: calc(100cqi - var(--readable-offset));
+  width: var(--chat-header-width);
+  max-width: none;
+  margin-inline: calc((100% - var(--chat-header-width)) / 2);
 }
 
 /* Outranks the bare `:root { color-scheme: light dark }` in PDF.js's stylesheet. */
