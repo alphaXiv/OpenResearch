@@ -472,7 +472,7 @@ pub(crate) async fn install(
             }
             return place(&unpacked, &target).await;
         }
-        fetch(release, &download, progress).await?;
+        fetch(&client()?, release, &download, progress).await?;
         let (from, into, format) = (download.clone(), unpacked.clone(), release.format.clone());
         let name = harness.to_string();
         tokio::task::spawn_blocking(move || unpack(&name, &format, &from, &into))
@@ -615,17 +615,32 @@ async fn sweep_staging(parent: &Path) {
 }
 
 async fn fetch(
+    client: &reqwest::Client,
     release: &Release,
     path: &Path,
     progress: &mut (dyn FnMut(u64, Option<u64>) + Send),
 ) -> Result<()> {
-    let response = client()?
+    let result = fetch_once(client, release, path, progress).await;
+    if wait_to_retry(&result).await {
+        return fetch_once(client, release, path, progress).await;
+    }
+    result
+}
+
+async fn fetch_once(
+    client: &reqwest::Client,
+    release: &Release,
+    path: &Path,
+    progress: &mut (dyn FnMut(u64, Option<u64>) + Send),
+) -> Result<()> {
+    let response = client
         .get(&release.url)
         .send()
         .await
         .and_then(reqwest::Response::error_for_status)
         .with_context(|| format!("Could not download {}", release.url))?;
     let total = response.content_length();
+    progress(0, total);
     let mut file = tokio::fs::File::create(path)
         .await
         .with_context(|| format!("Could not create {}", path.display()))?;
@@ -787,16 +802,36 @@ async fn place(unpacked: &Path, target: &Path) -> Result<()> {
 }
 
 async fn get_json(client: &reqwest::Client, url: &str) -> Result<Value> {
-    client
-        .get(url)
-        .header("accept", "application/json")
-        .send()
-        .await
-        .and_then(reqwest::Response::error_for_status)
-        .with_context(|| format!("Could not reach {url}"))?
-        .json()
-        .await
-        .with_context(|| format!("Could not read {url}"))
+    let get = || async {
+        client
+            .get(url)
+            .header("accept", "application/json")
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            .with_context(|| format!("Could not reach {url}"))?
+            .json()
+            .await
+            .with_context(|| format!("Could not read {url}"))
+    };
+    let result = get().await;
+    if wait_to_retry(&result).await {
+        return get().await;
+    }
+    result
+}
+
+// Only the idempotent GET is repeated, never an install, a refusal or an integrity failure.
+async fn wait_to_retry<T>(result: &Result<T>) -> bool {
+    let timeout = result.as_ref().is_err_and(|error| {
+        error
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(reqwest::Error::is_timeout)
+    });
+    if timeout {
+        tokio::time::sleep(crate::config::paced(Duration::from_millis(500))).await;
+    }
+    timeout
 }
 
 fn client() -> Result<reqwest::Client> {
@@ -946,6 +981,113 @@ mod tests {
         std::fs::remove_dir_all(base.join("2.99.0")).unwrap();
         assert_eq!(installed("opencode"), None);
         std::fs::remove_dir_all(base.join("1.99.0")).unwrap();
+    }
+
+    // Serve a partial body without EOF: a real reqwest read timeout, not a synthetic error.
+    async fn release_server(
+        responses: &'static [(u16, &'static [u8], usize)],
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use axum::{
+            body::{Body, Bytes},
+            http::Response,
+            routing::get,
+            Router,
+        };
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let requests = calls.clone();
+        let app = Router::new().fallback(get(move || {
+            let (status, body, length) = responses[requests
+                .fetch_add(1, Ordering::SeqCst)
+                .min(responses.len() - 1)];
+            async move {
+                if status == 0 {
+                    return futures::future::pending().await;
+                }
+                let chunks = futures::stream::once(async {
+                    Ok::<_, std::io::Error>(Bytes::from_static(body))
+                });
+                let body = if body.len() < length {
+                    Body::from_stream(chunks.chain(futures::stream::pending()))
+                } else {
+                    Body::from_stream(chunks)
+                };
+                Response::builder()
+                    .status(status)
+                    .header("Content-Length", length)
+                    .body(body)
+                    .unwrap()
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (url, calls, server)
+    }
+
+    fn short_read_client() -> reqwest::Client {
+        crate::net::loopback_client()
+            .read_timeout(Duration::from_millis(250))
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn release_metadata_recovers_one_timeout_but_not_a_refusal() {
+        use std::sync::atomic::Ordering;
+        let client = short_read_client();
+        type Case = (&'static [(u16, &'static [u8], usize)], usize, bool);
+        const CASES: &[Case] = &[
+            (&[(0, b"", 0), (200, b"{}", 2)], 2, true),
+            (&[(200, b"{", 2), (200, b"{}", 2)], 2, true),
+            (&[(200, b"{", 2)], 2, false),
+            (&[(403, b"", 0)], 1, false),
+        ];
+        for &(responses, expected_calls, succeeds) in CASES {
+            let (url, count, server) = release_server(responses).await;
+            let result = get_json(&client, &url).await;
+            assert_eq!(result.is_ok(), succeeds, "{result:?}");
+            assert_eq!(count.load(Ordering::SeqCst), expected_calls);
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn release_download_restarts_from_zero_and_checks_the_new_bytes() {
+        use std::sync::atomic::Ordering;
+        // The first response leaves longer, unrelated bytes in the staging file.
+        let (url, count, server) = release_server(&[(200, b"stale", 9), (200, b"ok", 2)]).await;
+        let dir = crate::local::git::TemporaryDirectory::new("orx-download-retry").unwrap();
+        let path = dir.path().join("download");
+        let mut release = Release {
+            version: semver::Version::new(2, 0, 0),
+            url,
+            sha256: format!("sha512:{:x}", sha2::Sha512::digest(b"ok")),
+            format: Format::TarGz,
+        };
+        let client = short_read_client();
+        fetch(&client, &release, &path, &mut |_, _| {})
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"ok");
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+        release.sha256 = "wrong".into();
+        assert!(fetch(&client, &release, &path, &mut |_, _| {})
+            .await
+            .is_err());
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            3,
+            "integrity failures are not retried"
+        );
+        server.abort();
     }
 
     #[tokio::test]
