@@ -146,7 +146,7 @@ fn migrate(source: &Path, target: &Path, copy: bool) -> Result<()> {
     Ok(())
 }
 
-fn copy_verified(source: &Path, target: &Path) -> Result<()> {
+pub(super) fn copy_verified(source: &Path, target: &Path) -> Result<()> {
     std::fs::create_dir(target)?;
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;

@@ -61,6 +61,8 @@ export interface Project {
   path: string;
   githubEnabled: boolean;
   githubUrl?: string | null;
+  /** A chat without a project yet: orx keeps its code until the user makes it a project. */
+  scratch?: boolean;
   /** Absolute path of the project's artifacts directory, non-canonical to
    *  match paths agents inline into chat. */
   artifactsDir: string;
@@ -1761,6 +1763,8 @@ export interface ChatSession {
   awaitingInput?: boolean;
   id: string;
   projectId: string;
+  /** A project the user asked this chat to move into once its turn ends. */
+  pendingProject?: { name: string; path: string } | null;
   harness: HarnessId;
   /** The account the chat runs on, when it's one OpenResearch keeps. */
   profile?: string | null;
@@ -2295,6 +2299,19 @@ export function createApi(
     get<{ paper: ResolvedPaper }>(`/api/papers/resolve?id=${encodeURIComponent(id)}`, signal).then(
       (r) => r.paper,
     );
+
+  /** The project a new chat without a project starts in. */
+  const createScratchProject = () =>
+    post<{ project: Project }>("/api/projects/scratch", {}).then((r) => r.project);
+
+  /** Make a chat a project of its own at `path`, now or, while it runs, once its turn ends. */
+  const moveChatToProject = (sessionId: string, body: { name: string; path: string }) =>
+    post<{ pending: true } | { pending: false; project: Project }>(`/api/chat/sessions/${sessionId}/project`, body);
+
+  const cancelChatProjectMove = (sessionId: string) =>
+    writeResponse(`/api/chat/sessions/${sessionId}/project`, { method: "DELETE" }).then(async (r) => {
+      if (!r.ok) throw new Error((await r.json().catch(() => null))?.error ?? `cancel failed (${r.status})`);
+    });
 
   const updateProject = (projectId: string, body: { runCommand?: string; name?: string }) =>
     patch<{ project: Project }>(`/api/projects/${projectId}`, body).then((r) => r.project);
@@ -3299,6 +3316,9 @@ export function createApi(
     repoAccess,
     resolvePaper,
     updateProject,
+    createScratchProject,
+    moveChatToProject,
+    cancelChatProjectMove,
     prewarmStarterPrompts,
     getProjectStarterPrompts,
     deleteProject,

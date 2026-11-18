@@ -22,7 +22,7 @@ Your working directory is **your own git worktree** of the project's repository,
 private to this chat session.
 
 - Project id: `{id}`
-{publication_line}
+{folder_line}{publication_line}
 {paper_line}- alphaXiv: the alphaXiv tools, such as `discover_papers` and `list_library`,
   research papers and researchers and read the user's library. Library tools
   need alphaXiv sign-in on the computer running this chat. Without alphaXiv

@@ -12,6 +12,7 @@ pub mod delegation;
 pub mod env_request;
 pub(crate) mod handoff;
 pub mod news;
+pub mod project_move;
 pub(crate) mod subagent;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -1376,9 +1377,13 @@ pub fn session_json_with(store: Option<&Store>, s: &StoredChatSession, busy: boo
             models
         })
         .filter(|models| models.as_array().is_some_and(|models| !models.is_empty()));
+    let pending_project = store
+        .and_then(|store| store.chat_project_move(&s.id).ok().flatten())
+        .map(|(name, path)| json!({ "name": name, "path": path }));
     json!({
         "id": s.id,
         "projectId": s.project_id,
+        "pendingProject": pending_project,
         "harness": s.harness,
         "profile": s.profile_id,
         "harnessName": acp.as_ref().map(|state| state.launch.name.as_str()),
@@ -3055,6 +3060,8 @@ pub struct ChatHost {
     /// prepared but has not reached atomic durable admission yet.
     pending_client_turns: std::sync::Mutex<HashMap<(String, String), PendingClientTurn>>,
     queue_dispatch_suppressed: std::sync::Mutex<HashSet<String>>,
+    /// Whether a project move may be waiting, so most turn ends skip the store.
+    project_moves_waiting: std::sync::atomic::AtomicBool,
     queue_dispatch_cancelled: std::sync::Mutex<HashSet<String>>,
     /// Sink for mid-turn steering text, present only while a capable harness is running.
     steering: std::sync::Mutex<HashMap<String, SteerSink>>,
@@ -4009,6 +4016,8 @@ impl ChatHost {
             queue_persistence: std::sync::Mutex::new(()),
             pending_client_turns: std::sync::Mutex::new(HashMap::new()),
             queue_dispatch_suppressed: std::sync::Mutex::new(HashSet::new()),
+            // Until the first pass reads the store, a move from before a restart may wait.
+            project_moves_waiting: std::sync::atomic::AtomicBool::new(true),
             queue_dispatch_cancelled: std::sync::Mutex::new(HashSet::new()),
             steering: std::sync::Mutex::new(HashMap::new()),
             pending_steers: std::sync::Mutex::new(HashMap::new()),
@@ -7086,6 +7095,14 @@ impl ChatHost {
             json!({ "sessionId": session_id, "busy": busy }),
         );
         self.start_slot_holder(session_id, next).await;
+        if !busy
+            && self
+                .project_moves_waiting
+                .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            let host = self.clone();
+            tokio::spawn(async move { host.apply_project_moves().await });
+        }
     }
 
     /// Records what a resident Claude child wrote on its own after its turn

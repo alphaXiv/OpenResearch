@@ -1,3 +1,4 @@
+import { projectLabel } from "./NoProject";
 import { memo, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -190,7 +191,7 @@ export const ChatSearch = memo(function ChatSearch({ projectId, sessionId, proje
                   className={`absolute inset-x-0 cursor-pointer px-3 py-2 ${selected === row.index ? "bg-surface" : "hover:bg-panel"}`} style={{ top: row.start, height: row.size }}
                   onPointerDown={(event) => event.preventDefault()} onClick={() => open(row.index)}>
                   <div className="flex h-5 items-center gap-2 overflow-hidden text-xs text-subtext"><span className="min-w-0 flex-1 truncate">{currentScope !== "chat" ? hit.chatTitle || m.chat_untitled() : hit.role === "user" ? m.chat_export_you() : assistantLabel}</span>
-                    {currentScope === "all" && project && <span className="max-w-28 truncate">{project.name}</span>}
+                    {currentScope === "all" && project && <span className="max-w-28 truncate">{projectLabel(project)}</span>}
                     {hit.archived && <span>{m.chat_panel_archived()}</span>}{!hit.onActiveBranch && <span>{m.chat_search_other_branch()}</span>}
                     <time className="shrink-0 text-muted" dateTime={new Date(hit.createdAt).toISOString()}>{time.format(hit.createdAt)}</time>
                   </div>

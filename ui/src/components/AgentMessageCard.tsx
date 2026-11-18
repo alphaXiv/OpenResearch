@@ -64,7 +64,8 @@ function SentCard({ part, onOpenFile, onOpenRun }: Props) {
   const { kind, from } = part.orx;
   const text = part.text ?? "";
   const chat = kind === "monitoring" || !from ? undefined : links?.chat(from);
-  const sender = kind === "monitoring"
+  // Without a sender, orx itself wrote it.
+  const sender = kind === "monitoring" || !from
     ? m.agent_message_openresearch()
     : chat?.title || m.agent_message_other_chat();
   const icon = kind === "monitoring"

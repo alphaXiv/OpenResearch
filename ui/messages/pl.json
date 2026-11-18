@@ -2178,5 +2178,22 @@
   "settings_env_set_in_project": "Ustawiono w tym projekcie",
   "settings_env_project_heading": "Tylko w {project}",
   "settings_env_project_note": "Dostają je tylko agenci i uruchomienia tego projektu. Zastępują zmienną o tej samej nazwie powyżej.",
-  "settings_env_project_empty": "Ten projekt nie ma jeszcze zmiennych. Dodaj je tutaj albo agent może o nie poprosić."
+  "settings_env_project_empty": "Ten projekt nie ma jeszcze zmiennych. Dodaj je tutaj albo agent może o nie poprosić.",
+  "no_project": "Bez projektu",
+  "no_project_new_chat": "Nowy czat bez projektu",
+  "create_project_button": "Utwórz projekt",
+  "create_project_title": "Utwórz projekt",
+  "create_project_confirm": "Utwórz projekt",
+  "create_project_folder_has_files": "Ten folder zawiera już pliki. Wybierz inną lokalizację.",
+  "create_project_created": "Utworzono",
+  "create_project_review": "Przejrzyj…",
+  "activity_proposed_project": "Zaproponowano projekt {name}",
+  "chat_delete_scratch_session_confirm": "Usunąć „{title}”?\n\nTen czat nie ma projektu, więc historia rozmowy, czaty poboczne i pliki zostaną trwale usunięte.",
+  "create_project_move_title": "Przenieś do nowego projektu",
+  "create_project_pending": "Przeniesienie do {name} po zakończeniu tej tury",
+  "create_project_pending_cancel": "Anuluj przeniesienie",
+  "create_project_folder_description": "Wybrany folder dostaje zatwierdzoną pracę z tego czatu, a czat jest kontynuowany w nowym projekcie. Niezatwierdzone pliki zostają przy czacie, dopóki ich nie zatwierdzi.",
+  "create_project_split_description": "Wybrany folder dostaje historię {project} i commity tego czatu, a czat jest kontynuowany w nowym projekcie z plikami bez zmian. {project} zachowa własną kopię.",
+  "create_project_menu": "Utwórz projekt…",
+  "create_project_move_menu": "Przenieś do nowego projektu…"
 }
