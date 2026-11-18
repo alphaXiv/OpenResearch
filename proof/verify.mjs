@@ -58,7 +58,7 @@ async function exercise(binary,label,build,expected) {
     assert.equal(post.status,200,'create synthetic account: '+post.status);const {id}=await post.json();assert.match(id,/^codex-[a-z0-9]{10}$/);
     const deleted=await fetch(base+'/api/agent-profiles/'+id,{method:'DELETE',headers:{Origin:base}});assert.equal(deleted.status,200,'delete disposable profile');
     const event=new Promise(resolve=>failedEvent=resolve);
-    const ws=new WebSocket(base.replace('http:','ws:')+'/api/harnesses/setup?'+new URLSearchParams({harness:'codex',action:'login',profile:id}));
+    const ws=new WebSocket(base.replace('http:','ws:')+'/api/harnesses/setup?'+new URLSearchParams({harness:'codex',action:'login',profile:id}), {headers:{Origin:base}});
     const message=await limited(new Promise((resolve,reject)=>{
       ws.addEventListener('message',ev=>{if(typeof ev.data==='string'){const m=JSON.parse(ev.data);if(m.type==='error')resolve(m.error);}});
       ws.addEventListener('error',()=>reject(new Error('setup socket failed')));
