@@ -2882,6 +2882,7 @@ fn read_facts(store: &Store, run: &StoredRun) -> Result<Value> {
     let (model, state, why) = match &watching {
         Watching::Selected { label, .. } => (Some(label.clone()), "on", None),
         Watching::Unfollowed => (None, "none", None),
+        Watching::Unavailable(why) => (None, watching.state(), Some(why.clone())),
         other => (None, other.state(), Some(not_watched(other))),
     };
     let with =
@@ -2941,7 +2942,14 @@ pub(crate) fn status_lines(watch: &Value, bindings: &Value, signals: &Value) -> 
         None => {}
     }
     if let Some(why) = watch["why"].as_str() {
-        lines.push(format!("watch    {why}"));
+        if watch["state"] == "no_model" {
+            lines.push(format!(
+                "watch    {}",
+                not_watched(&Watching::Unavailable(why.into()))
+            ));
+        } else {
+            lines.push(format!("watch    {why}"));
+        }
     }
     if let Some(with) = watch["with"].as_object() {
         let others = with["others"].as_u64().unwrap_or(0);

@@ -332,3 +332,20 @@ test("opening an older run reads that run's monitor and journal instead of the l
   assert.ok(requests.includes("/api/runs/r1/monitor"));
   assert.ok(!requests.includes("/api/runs/r2/monitor"));
 });
+
+test("a run page explains when its chat has no watching model or sign-in", async () => {
+  for (const watch of [
+    { state: "needs_pick", why: null },
+    { state: "no_model", why: "Sign in to Claude Code on this workspace" },
+  ]) {
+    const monitor = pipeline();
+    monitor.watch = { ...monitor.watch, ...watch, looks: [], model: null };
+    const { container, unmount } = await overview([run("r2", { monitor: summary(monitor) })], () => monitor);
+    const section = [...container.querySelectorAll("section")].find((section) => section.querySelector("h2")?.textContent === m.run_watch_heading());
+    assert.ok(section);
+    assert.match(text(section), /^WatchNot watched/);
+    if (watch.why) assert.ok(text(section).includes(watch.why));
+    assert.ok(![...section.querySelectorAll("button")].some((button) => text(button) === m.run_watch_look_now()));
+    await unmount();
+  }
+});

@@ -602,6 +602,11 @@ gate('done')
     await themes(page, details, info, `plain-page-${width}`)
   }
 
+  const watch = page.locator('section', { has: page.getByRole('heading', { name: 'Watch', exact: true }) })
+  await expect(watch).toContainText("This chat's agent has no watching model")
+  await expect(watch.getByRole('button', { name: 'Look now' })).toHaveCount(0)
+  await themes(page, watch, info, 'watch-no-model')
+
   await run.open('done')
   await agent.reached(hold)
   await expect(details).toContainText('Done in')

@@ -109,10 +109,7 @@ export function WatchSection({ run, chatSessionId, now, className }: { run: Run;
   const { getRunMonitorQuery } = useWorkspace().queries;
   // Only what the watch says: the section redraws when a look lands, not with every new point.
   const monitor = useQuery({ ...getRunMonitorQuery(run.id), enabled: false, select: (data) => ({ watch: data.watch, view: data.view, brief: data.brief, flags: data.flags }) }).data;
-  // Shown where there is something to read or do: looks, flags, or watching the user turned off. A run whose chat has
-  // no watching model reads its stage and progress as its sentence, and there is no model to pick here yet.
-  const quiet = monitor && ["none", "needs_pick", "no_model"].includes(monitor.watch.state) && monitor.watch.looks.length === 0
-    && !monitor.flags.length;
+  const quiet = monitor?.watch.state === "none" && monitor.watch.looks.length === 0 && !monitor.flags.length;
   if (!monitor || quiet) return null;
   return (
     <section className={className}>
