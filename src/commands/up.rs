@@ -11689,6 +11689,7 @@ mod tests {
             collapsed_model_sections: Vec::new(),
             model_sightings: None,
             seen_nudges: Vec::new(),
+            created_at: None,
             preferred_agent: Some(StoredAgentSelection {
                 profile: None,
                 harness: "codex".into(),
@@ -11730,6 +11731,7 @@ mod tests {
             collapsed_model_sections: Vec::new(),
             model_sightings: None,
             seen_nudges: Vec::new(),
+            created_at: None,
         };
         let catalog = json!({"harnesses": [{"id":"claude-code", "agentReady":true,"defaultModel":"opus",
             "models":[{"id":"opus"}], "options":{"defaultPermissionMode":"plan", "reasoningLevels":[{"id":"default"}]}}]});
@@ -11787,6 +11789,7 @@ mod tests {
             collapsed_model_sections: Vec::new(),
             model_sightings: None,
             seen_nudges: Vec::new(),
+            created_at: None,
         };
         let catalog = json!({"harnesses":[
             {"id":"codex", "agentReady":true, "models":[], "options":{}},
