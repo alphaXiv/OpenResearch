@@ -15843,6 +15843,60 @@ done
     }
 
     #[test]
+    fn a_hand_off_leaves_a_turn_without_a_checkpoint_for_the_next_start_to_resume() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let store = Store::open().unwrap();
+            let host = Arc::new(ChatHost::new(
+                Arc::new(crate::local::opencode::AgentHost::new(None)),
+                Arc::new(crate::local::codex::CodexHost::new()),
+                Arc::new(crate::local::claude::ClaudeHost::new()),
+            ));
+            let session_id = "handed-off-chat";
+            session(&store, session_id);
+            assert!(host.claim_durable_turn(session_id));
+            let turn = crate::store::StoredChatTurn {
+                id: "turn-unchecked".into(),
+                session_id: session_id.into(),
+                user_message_id: None,
+                assistant_message_id: "answer-unchecked".into(),
+                client_turn_id: "client-unchecked".into(),
+                request_hash: "task".into(),
+                prepared_input: "task".into(),
+                settings_json: "{}".into(),
+                state: "running".into(),
+                delivery_state: "not_sent".into(),
+                attempt_count: 1,
+                next_retry_at: None,
+                error_kind: None,
+                error_message: None,
+                recovery_action: None,
+                recovered_by_turn_id: None,
+                created_at: now_ms(),
+                updated_at: now_ms(),
+            };
+            store.admit_chat_turn(None, &turn).unwrap();
+            host.turns.lock().await.insert(
+                session_id.into(),
+                TurnState::Active(ActiveTurn {
+                    handle: tokio::spawn(std::future::pending()),
+                    message_id: turn.assistant_message_id.clone(),
+                    turn_id: turn.id.clone(),
+                }),
+            );
+
+            host.hand_off().await;
+
+            let resumable = store.chat_turns_to_resume().unwrap();
+            assert_eq!(resumable.len(), 1, "{resumable:?}");
+            assert_eq!(resumable[0].id, turn.id);
+            assert_eq!(resumable[0].recovery_action.as_deref(), Some("retry"));
+        });
+    }
+
+    #[test]
     fn stop_for_shutdown_stops_active_and_retrying_turns_while_preserving_continue_recovery() {
         if !crate::config::in_test_child(&[]) {
             return;
