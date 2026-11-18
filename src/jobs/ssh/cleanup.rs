@@ -165,6 +165,11 @@ fn host_script(
         } else {
             "rm -rf -- \"$d\""
         };
+        let remove = if run.engine {
+            format!("{{ {remove}; }} && {{ r=${{d%/runs/*}}/run-signals; for f in \"$r/{id}.json\" \"$r/{id}.config.json\" \"$r/{id}.lock\" \"$r/{id}.corrupt-\"*.json \"$r/{id}.tmp-\"* \"$r/{id}.config.tmp-\"*; do [ ! -e \"$f\" ] && [ ! -L \"$f\" ] || rm -f -- \"$f\" || exit 1; done; }}",id=run.run_id)
+        } else {
+            remove.into()
+        };
         // `v` is `busy`, or why the run cannot be shown to have ended.
         let liveness = if run.engine {
             match &run.slurm_job {
@@ -532,6 +537,18 @@ mod tests {
             slurm_run("finished", "42"),
             slurm_run("unknown", "43"),
         ];
+
+        let signals = root.join("run-signals");
+        std::fs::create_dir_all(&signals).unwrap();
+        for id in ["busy", "done", "finished"] {
+            for suffix in [".json", ".lock", ".corrupt-1.json", ".tmp-1"] {
+                std::fs::write(
+                    signals.join(format!("{id}{suffix}")),
+                    b"private measurements",
+                )
+                .unwrap();
+            }
+        }
         let out = crate::process::command("bash")
             .args([
                 "-c",
@@ -579,6 +596,16 @@ mod tests {
         );
         for (id, kept) in [("elsewhere", true), ("queued", true), ("finished", false)] {
             assert_eq!(root.join("runs").join(id).exists(), kept, "{id}");
+        }
+
+        for id in ["busy", "done", "finished"] {
+            for suffix in [".json", ".lock", ".corrupt-1.json", ".tmp-1"] {
+                assert_eq!(
+                    signals.join(format!("{id}{suffix}")).exists(),
+                    id == "busy",
+                    "{id}{suffix}"
+                );
+            }
         }
         let mut left: Vec<_> = std::fs::read_dir(&sources)
             .unwrap()
@@ -675,6 +702,71 @@ mod tests {
             // The host copy goes either way; only the container's copy keeps the run queued.
             assert!(!dir.exists());
         }
+    }
+
+    #[cfg(unix)]
+    fn run_cleanup_over_ssh(server: &orx_test_support::Sshd) -> Outcome {
+        let run = RemoteRun {
+            dir: format!(".orx/engine/runs/{RUN}"),
+            slurm: true,
+            slurm_job: Some("7".into()),
+            engine: true,
+            ..run(RUN, None, true)
+        };
+        let bin = server.home().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        orx_test_support::write_executable(bin.join("squeue"), "#!/bin/sh\nexit 0\n", 0o700)
+            .unwrap();
+        let batch = [run];
+        let script = host_script(&batch, &BTreeSet::new(), &BTreeSet::new());
+        let output = server
+            .run(&format!(
+                "PATH=\"$HOME/bin:$PATH\" bash -c {}",
+                sh_quote(&script)
+            ))
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        parse_outcomes(&batch, &String::from_utf8(output.stdout).unwrap())
+            .pop()
+            .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_cleanup_reports_a_run_directory_removal_failure() {
+        let server = orx_test_support::Sshd::start().unwrap();
+        let home = server.home();
+        let directory = home.join(format!(".orx/engine/runs/{RUN}"));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::create_dir(home.join("bin")).unwrap();
+        orx_test_support::write_executable(
+            home.join("bin/rm"),
+            "#!/bin/sh\ncase \"$1\" in -rf) echo 'rm: Permission denied' >&2; exit 1;; esac\nexec /bin/rm \"$@\"\n",
+            0o700,
+        ).unwrap();
+
+        assert_eq!(
+            run_cleanup_over_ssh(&server),
+            Outcome::Failed("rm: Permission denied".into())
+        );
+        assert!(directory.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_cleanup_reclaims_abandoned_signal_config_writes() {
+        let server = orx_test_support::Sshd::start().unwrap();
+        let signals = server.home().join(".orx/engine/run-signals");
+        std::fs::create_dir_all(&signals).unwrap();
+        let temporary = signals.join(format!("{RUN}.config.tmp-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&temporary, b"partial config").unwrap();
+
+        assert_eq!(run_cleanup_over_ssh(&server), Outcome::Removed);
+        assert!(!temporary.exists());
     }
 
     #[test]

@@ -617,6 +617,11 @@ async fn cancellation_labels_agree_in_runs_status_and_wait() {
                 "{args:?}: {}",
                 diagnostics(&output)
             );
+            assert!(
+                !stdout(&output).contains("(idle)"),
+                "a status never calls an experiment idle beside its run's state: {}",
+                diagnostics(&output)
+            );
             if unconfirmed {
                 assert!(
                     diagnostics(&output).contains(note.unwrap()),
@@ -745,6 +750,38 @@ async fn abandon_says_the_cancel_stays_pending_only_once_the_server_accepts() {
     assert!(accepted.status.success(), "{}", diagnostics(&accepted));
     assert!(stdout(&accepted).contains("cancel stays pending"));
     server.abort();
+}
+
+#[test]
+fn launch_refuses_a_time_limit_rule_when_the_run_has_no_limit() {
+    let sandbox = Sandbox::new();
+    sandbox.project("echo done\n");
+    let config = sandbox.root.join("rules.json");
+    std::fs::write(
+        &config,
+        r#"{"rules":[{"name":"too-slow","text":"Stop if the run will miss its deadline.","does":"stop","when":{"kind":"projectedFinishPastLimit"}}]}"#,
+    )
+    .unwrap();
+    let saved = sandbox.run(&[
+        "exp",
+        "view",
+        "set",
+        "exp",
+        "--config",
+        config.to_str().unwrap(),
+    ]);
+    assert!(saved.status.success(), "{}", diagnostics(&saved));
+
+    let launched = sandbox.run(&["exp", "run", "exp", "--backend", "local"]);
+    assert!(!launched.status.success(), "{}", diagnostics(&launched));
+    let error = String::from_utf8_lossy(&launched.stderr);
+    assert!(error.contains("too-slow"), "{error}");
+    assert!(error.contains("time limit"), "{error}");
+    let runs: u64 = sandbox
+        .db()
+        .query_row("SELECT count(*) FROM runs", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(runs, 0);
 }
 
 #[test]

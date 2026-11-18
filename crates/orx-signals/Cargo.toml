@@ -1,0 +1,15 @@
+[package]
+name = "orx-signals"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[package.metadata.dist]
+dist = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+base64 = "0.22"
+regex = { version = "1", default-features = false, features = ["std", "unicode-perl", "perf"] }
+sha2 = "0.10"

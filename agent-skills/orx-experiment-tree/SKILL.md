@@ -23,6 +23,10 @@ train/evaluation command and compute-specific requirements; ask only if the
 project setup leaves these or the chosen workflow unclear. Record the durable
 setup and execution recipe in the project's run command.
 
+Make the baseline followable before its first launch: its stages, the
+measures that answer the question, and the view that draws them. Load
+`orx-experiment-runs` and follow it; children inherit all of it.
+
 ## Provisional until it answers — repair, don't branch
 
 Every node exists to establish a baseline or test a hypothesis. A run that dies
@@ -105,7 +109,9 @@ intended flow — do **not** edit a frozen node or rewrite the run command:
    different rounds into one batch — that's what produces the flat fan.
 3. **Create the round as a bush, and pick its parent deliberately.** All of this
    round's options are **siblings under one parent** — the title is the idea, the
-   description is the concrete change you'll make on that node's branch. The parent is:
+   description is the concrete change you'll make on that node's branch. The user
+   reads the title beside the run's progress, among its siblings: keep it short,
+   the setting that varies first ("Depth 4 at 2e15 FLOPs", "LR 3e-4"). The parent is:
    - the **baseline**, only for the very first round (nothing has been won yet); or
    - the **previous round's confirmed winner**, for every round after — so this
      round's changes build *on top of* the last gain instead of resetting to the

@@ -109,6 +109,7 @@ import { WorktreeTab, type WorktreeView } from "./components/WorktreeTab";
 import { ArtifactsTab, findArtifactEntry } from "./components/ArtifactsTab";
 import { ClosableTab } from "./components/ClosableTab";
 import { TabStrip } from "./components/TabStrip";
+import type { LogSeek } from "./logWindow";
 import { DetailDrawer, type ExperimentView } from "./components/DetailDrawer";
 import { FileViewer, type FileScrollPosition } from "./components/FileViewer";
 import { confirmFileDiscard, FileBufferSession } from "./fileSync";
@@ -284,7 +285,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   } = useWorkspace();
   const { useProjectWorkspace, inheritNewTaskWorkspace, getCachedProjectWorkspace } = useWorkspace().projects;
   const { globalWorkspaceWriter, getRememberedGlobalWorkspace } = useWorkspace().persistence;
-  const { useOrxEvents, onChatEvent } = useWorkspace().events;
+  const { onChatEvent } = useWorkspace().events;
 
   const router = useRouter();
   const location = useRouterState({ select: (state) => state.location });
@@ -304,9 +305,13 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const [lineJump, setLineJump] = useState(0);
   // The href and the jump bump can both land before the pane carrying the new
   // line, so keying on them alone spends the request on the previous line.
-  const visitKey = `${location.href}\n${JSON.stringify(pane ?? null)}\n${lineJump}`;
+  const paneKey = JSON.stringify(pane ?? null);
+  const visitKey = `${location.href}\n${paneKey}\n${lineJump}`;
   const lineVisit = useRef({ key: "", value: 0 });
   if (lineVisit.current.key !== visitKey) lineVisit.current = { key: visitKey, value: lineVisit.current.value + 1 };
+  // Counts changes of pane alone: the href can land a render before the pane it carries.
+  const paneVisit = useRef({ key: paneKey, value: 0 });
+  if (paneVisit.current.key !== paneKey) paneVisit.current = { key: paneKey, value: paneVisit.current.value + 1 };
   const rightTab = useMemo<RightTab>(() => {
     const tab = pane ? paneTab(pane) : "experiments";
     return typeof tab === "object" && "path" in tab && tab.line && consumedLine !== lineVisit.current.value
@@ -363,24 +368,14 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const experimentsQuery = useQuery(listExperimentsQuery(projectId));
   const experiments = experimentsQuery.data ?? [];
   const experimentDataReady = !experimentsQuery.isPending;
-  const [runDataReady, setRunDataReady] = useState(false);
   const runsQuery = useQuery(listRunsQuery(projectId));
   const runs = runsQuery.data ?? [];
+  const runDataReady = !runsQuery.isPending;
   // Latest runs/experiments, read by the stable openRunLogs/openFileTab so
   // evidence chips resolve ids without re-creating the callbacks on every poll
   // (they feed the memoized transcript, which needs stable props).
   const runsRef = useRef(runs);
   runsRef.current = runs;
-  // A first-seen running row may be a snapshot; only baseline-new ids or observed edges are live.
-  const observedRunsRef = useRef(new Map<string, Run>());
-  const liveRunIdsRef = useRef(new Set<string>());
-  const observedRunsProjectRef = useRef<string | null>(null);
-  const runsBaselineReadyRef = useRef(false);
-  const baselineRunsRef = useRef(new Map<string, Run>());
-  const streamingRunsRef = useRef(new Set<string>());
-  const autoOpenRunsRef = useRef(new Map<string, Run>());
-  const pendingFirstRunningRunsRef = useRef(new Map<string, Run>());
-  const runsVisitRef = useRef(0);
   const experimentsRef = useRef(experiments);
   experimentsRef.current = experiments;
   const artifactsQuery = useQuery(getArtifactsQuery(projectId));
@@ -430,6 +425,10 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   // Right-panel tab strip: closable home and working tabs. The same experiment
   // can keep both its overview and terminal open.
   const [tabHistory, setTabHistory] = useState<RightTab[]>([]);
+  // Taken by the opened run's log viewer, and only on the pane its open lands on: any other navigation or open drops it.
+  const [logSeek, setLogSeek] = useState<(LogSeek & { runId: string; visit: number }) | null>(null);
+  const openLogSeek = logSeek?.visit === paneVisit.current.value ? logSeek : null;
+  const takeLogSeek = useCallback((taken: LogSeek) => setLogSeek((current) => current === taken ? null : current), []);
   const [experimentsTabOpen, setExperimentsTabOpen] = useState(false);
   const [filesTabOpen, setFilesTabOpen] = useState(false);
   const [artifactsTabOpen, setArtifactsTabOpen] = useState(false);
@@ -585,6 +584,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
 
   const openRightTab = useCallback((tab: ContentTab, intent: TabOpenIntent, runId?: string, focus = true) => {
     const key = rightTabKey(tab);
+    setLogSeek(null);
     if (focus) {
       pendingViewFocus.current = null;
       pendingTabFocus.current = key;
@@ -905,7 +905,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     view: ExperimentView = "overview",
     intent: TabOpenIntent = "preview",
     runId?: string,
-    focus = true,
   ) => {
     reportFirstAction("open_experiment");
     const tab = { id, view };
@@ -913,71 +912,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     if (view !== "overview" && isDemoProjectId(projectIdRef.current)) {
       setPanelWidth((width) => Math.max(width, sideChatPanelWidth()));
     }
-    openRightTab(tab, intent, runId, focus);
+    openRightTab(tab, intent, runId);
   }, [openRightTab]);
-
-  const openStreamingRun = useCallback((run: Run) => {
-    const navigation = navigationRef.current;
-    if (!navigation.isTask || (navigation.pane &&
-      !(navigation.pane.kind === "home" && navigation.pane.view === "experiments"))) return;
-    openExperimentTab(run.experimentId, "terminal", "preview", run.id, false);
-  }, [openExperimentTab]);
-
-  const loadRunsBaseline = useCallback((baselineProjectId: string) => {
-    runsBaselineReadyRef.current = false;
-    baselineRunsRef.current.clear();
-    pendingFirstRunningRunsRef.current.clear();
-    const runsVisit = ++runsVisitRef.current;
-    queryClient.fetchQuery({ ...listRunsQuery(baselineProjectId), staleTime: 0 })
-      .then((loadedRuns) => {
-        if (
-          projectIdRef.current !== baselineProjectId ||
-          observedRunsProjectRef.current !== baselineProjectId ||
-          runsVisitRef.current !== runsVisit
-        ) return;
-        baselineRunsRef.current = new Map(loadedRuns.map((run) => [run.id, run]));
-        const autoOpenRuns = [...pendingFirstRunningRunsRef.current.values()].filter(
-          (liveRun) => {
-            const baselineRun = baselineRunsRef.current.get(liveRun.id);
-            return (
-              !baselineRun ||
-              (baselineRun.status !== "running" && baselineRun.updatedAt <= liveRun.updatedAt)
-            );
-          },
-        );
-        pendingFirstRunningRunsRef.current.clear();
-        for (const run of loadedRuns) {
-          const observed = observedRunsRef.current.get(run.id);
-          if (!observed || observed.updatedAt < run.updatedAt) {
-            observedRunsRef.current.set(run.id, run);
-          }
-        }
-        runsBaselineReadyRef.current = true;
-        setRunDataReady(true);
-        for (const run of autoOpenRuns) {
-          if (streamingRunsRef.current.has(run.id)) openStreamingRun(run);
-          else autoOpenRunsRef.current.set(run.id, run);
-        }
-      })
-      .catch(() => {
-        if (runsVisitRef.current === runsVisit) {
-          pendingFirstRunningRunsRef.current.clear();
-          setRunDataReady(true);
-        }
-      });
-  }, [openStreamingRun]);
-
-  // Per-project data. Harness agents spawn lazily on the first chat message.
-  useEffect(() => {
-    if (!projectId) return;
-    observedRunsProjectRef.current = projectId;
-    observedRunsRef.current.clear();
-    liveRunIdsRef.current.clear();
-    streamingRunsRef.current.clear();
-    autoOpenRunsRef.current.clear();
-    loadRunsBaseline(projectId);
-    return () => { runsVisitRef.current++; };
-  }, [loadRunsBaseline, projectId]);
 
   const openArtifactsTab = useCallback(() => {
     setArtifactsTabOpen(true);
@@ -1004,63 +940,28 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     else setTerminalStartedFor((current) => (current === terminalKey ? current : null));
   }, [panelOpen, rightTab, terminalKey]);
 
-  // Live store updates.
-  useOrxEvents({
-    onRunLog: (event) => {
-      // Engine runs announce growth with an empty delta at the new length.
-      const produced = event.dataBase64 !== "" || event.offset > 0;
-      if (!produced || streamingRunsRef.current.has(event.runId)) return;
-      streamingRunsRef.current.add(event.runId);
-      const run = autoOpenRunsRef.current.get(event.runId);
-      if (!run) return;
-      autoOpenRunsRef.current.delete(event.runId);
-      openStreamingRun(run);
-    },
-    onReconnect: () => {
-      const id = projectIdRef.current;
-      if (!id) return;
-      observedRunsProjectRef.current = id;
-      observedRunsRef.current.clear();
-      liveRunIdsRef.current.clear();
-      streamingRunsRef.current.clear();
-      autoOpenRunsRef.current.clear();
-      loadRunsBaseline(id);
-    },
-    onRun: (run) => {
-      if (
-        run.projectId !== projectIdRef.current ||
-        run.projectId !== observedRunsProjectRef.current
-      ) return;
-      const previous = observedRunsRef.current.get(run.id);
-      const previouslyLive = liveRunIdsRef.current.has(run.id);
-      if (previous && previous.updatedAt > run.updatedAt) return;
-      observedRunsRef.current.set(run.id, run);
-      liveRunIdsRef.current.add(run.id);
-      if (run.status !== "running" || previous?.status === "running") return;
-      const baselineRun = baselineRunsRef.current.get(run.id);
-      const newSinceBaseline =
-        runsBaselineReadyRef.current &&
-        (!baselineRun || baselineRun.updatedAt <= run.updatedAt);
-      if ((previouslyLive && previous) || newSinceBaseline) {
-        if (streamingRunsRef.current.has(run.id)) openStreamingRun(run);
-        else autoOpenRunsRef.current.set(run.id, run);
-      } else if (!runsBaselineReadyRef.current) pendingFirstRunningRunsRef.current.set(run.id, run);
-    },
-  });
-
   // Stable identity: in TreeView's layout-memo deps, so an inline arrow would
   // recompute the graph on every render.
   const showProjectScope = useCallback(() => setScope("project"), []);
+
+  const openRunPage = useCallback((run: Run, intent: TabOpenIntent) => {
+    openExperimentTab(run.experimentId, "overview", intent, run.id);
+  }, [openExperimentTab]);
 
   // A `<run>` evidence chip in chat opens that run's logs — the only evidence
   // channel for a metric. Run ids are globally unique, so resolve the run to its
   // experiment and open the terminal view focused on it.
   const openRunLogs = useCallback(
-    (runId: string, intent: TabOpenIntent = "preview") => {
+    (runId: string, intent: TabOpenIntent = "preview", seek?: LogSeek) => {
       const matches = runsRef.current.filter((run) => run.id === runId || run.id.startsWith(runId));
       const run = matches.length === 1 ? matches[0] : null;
       if (!run) return;
+
+      const from = navigationRef.current.pane;
+      const here = from?.kind === "experiment" && from.experimentId === run.experimentId && from.view === "terminal" && from.runId === run.id;
+      const opens = experimentsRef.current.some((experiment) => experiment.id === run.experimentId);
       openExperimentTab(run.experimentId, "terminal", intent, run.id);
+      if (seek && opens) setLogSeek({ ...seek, runId: run.id, visit: paneVisit.current.value + (here ? 0 : 1) });
     },
     [openExperimentTab],
   );
@@ -2089,6 +1990,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             onSelectMainView={(view) => { setMobileRailOpen(false); selectMainView(view); }}
             onOpenFile={openChatFile}
             onOpenRun={openRunLogs}
+            onOpenRunPage={openRunPage}
             runExperimentName={runExperimentName}
             chatInfo={chatInfo}
             onOpenMessage={openMessage}
@@ -2534,7 +2436,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                       onOpenFile={(path, sessionId, line, exp, ref, intent) =>
                         openFromRightTab(sideTab, () => openChatFile(path, sessionId, line, exp, ref, intent))
                       }
-                      onOpenRun={(runId, intent) => openFromRightTab(sideTab, () => openRunLogs(runId, intent))}
+                      onOpenRun={(runId, intent, seek) => openFromRightTab(sideTab, () => openRunLogs(runId, intent, seek))}
+                      onOpenRunPage={(run, intent) => openFromRightTab(sideTab, () => openRunPage(run, intent))}
                       runExperimentName={runExperimentName}
                       chatInfo={chatInfo}
                       onOpenMessage={openMessage}
@@ -2663,15 +2566,16 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                     runs={runs}
                     selectedRunId={selectedRunId}
                     onSelectRun={setSelectedRunId}
+                    logSeek={openLogSeek}
+                    onLogSeekTaken={takeLogSeek}
                     parentExperiment={
                       experiments.find(
                         (experiment) => experiment.id === tabExperiment.parentExperimentId,
                       ) ?? null
                     }
                     onOpenView={(view, runId, intent) => {
-                      openFromRightTab(expTab, () =>
-                        openExperimentTab(tabExperiment.id, view, intent, runId),
-                      );
+                      if (view !== expTab.view) promoteRightTab(expTab);
+                      openExperimentTab(tabExperiment.id, view, intent, runId);
                     }}
                     onOpenCode={(view, intent) =>
                       openFromRightTab(expTab, () =>

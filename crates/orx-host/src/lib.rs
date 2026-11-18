@@ -9,6 +9,8 @@ pub mod log;
 pub mod platform;
 mod rental;
 pub mod server;
+pub mod signals;
+mod signals_rpc;
 pub mod wrapper;
 
 use serde::{de::DeserializeOwned, Serialize};
@@ -103,17 +105,7 @@ pub fn lock(path: &Path) -> io::Result<Option<File>> {
 }
 
 pub fn run_dir(root: &Path, run: &str) -> io::Result<PathBuf> {
-    if run.is_empty()
-        || run.len() > 200
-        || !run
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "invalid run id",
-        ));
-    }
+    signals::validate_run(run)?;
     Ok(root.join("runs").join(run))
 }
 

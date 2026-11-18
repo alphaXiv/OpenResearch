@@ -8,6 +8,8 @@ import { runActive, runDisplay, runStoppable } from "../runDisplay";
 import { StatusBadge } from "./StatusBadge";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { IconButton, Tooltip } from "./ui";
+import { confirmStop } from "./run/confirmStop";
+import { useWorkspace } from "../workspace";
 import { ArchiveMenu, type ArchiveActions } from "./ArchiveMenu";
 import { Rail, type HistoryOrder, type Placed } from "./ExperimentLineage";
 import { buildHistoryNodes, laneCount, layoutChronological, layoutLineage } from "./experimentLineageModel";
@@ -41,7 +43,7 @@ export function ExperimentsTable({
   onDelete: (id: string) => void;
   onCancel: (runId: string) => Promise<void>;
 }) {
-  const [cancelError, setCancelError] = useState<string | null>(null);
+  const { dialogs } = useWorkspace();
   const listRef = useRef<HTMLDivElement>(null);
   const [placed, setPlaced] = useState<Placed[]>([]);
   const rows = useMemo(() => {
@@ -89,22 +91,8 @@ export function ExperimentsTable({
     );
   }
 
-  async function requestCancel(runId: string) {
-    setCancelError(null);
-    try {
-      await onCancel(runId);
-    } catch (cause) {
-      setCancelError(cause instanceof Error ? cause.message : String(cause));
-    }
-  }
-
   return (
     <div className="experiments-table-wrap absolute inset-0 overflow-auto bg-background @container">
-      {cancelError && (
-        <div className="experiments-table-error py-2 px-3 text-accent-red text-sm border-b border-b-border" role="alert">
-          {m.experiments_table_stop_failed()} {cancelError}
-        </div>
-      )}
       <div ref={listRef} data-keyboard-list className="experiments-table relative w-full text-sm bg-background" role="list" aria-label={m.experiments_table_experiments()}>
         {showLineage && <Rail placed={placed} height={lastPlaced ? lastPlaced.top + lastPlaced.height : 0} path={NO_HIGHLIGHT} selectedId={null} />}
         {rows.map((row) => {
@@ -192,7 +180,8 @@ export function ExperimentsTable({
                       size="small"
                       variant="filled"
                       aria-label={m.common_stop()}
-                      onClick={() => void requestCancel(liveRun.id)}
+                      aria-haspopup="dialog"
+                      onClick={() => confirmStop(dialogs, experiment.title || experiment.slug, () => onCancel(liveRun.id))}
                     >
                       <CircleStop size={16} />
                     </IconButton>

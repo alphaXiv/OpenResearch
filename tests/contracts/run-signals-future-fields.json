@@ -1,0 +1,10 @@
+{
+  "plan": [{"phase": "train", "of": 3500, "unit": "steps", "futureStage": {"optional": true}}],
+  "metricReports": {
+    "latency": {
+      "seen": 1,
+      "futureWindow": [0, 10],
+      "tail": [{"x": 3100.0, "value": 0.1, "nonFinite": false, "futureReport": "tag"}]
+    }
+  }
+}

@@ -1,6 +1,7 @@
 pub(crate) mod api;
 pub mod local;
 pub mod openresearch;
+pub(crate) mod signals;
 pub mod slurm;
 pub mod ssh;
 

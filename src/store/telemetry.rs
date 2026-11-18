@@ -1480,6 +1480,109 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn claude_usage_starts_at_zero_for_each_process() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-process-usage").unwrap();
+        let store = Store::open_at(dir.path().to_path_buf()).unwrap();
+
+        let sample = |input, output, read, write, micros| {
+            vec![(
+                "claude-haiku-5-5".to_string(),
+                None,
+                TokenUsage {
+                    input_tokens: Some(input),
+                    output_tokens: Some(output),
+                    cache_read_tokens: Some(read),
+                    cache_write_tokens: Some(write),
+                    reasoning_tokens: Some(0),
+                },
+                Some(Cost {
+                    micros,
+                    currency: "USD".into(),
+                }),
+            )]
+        };
+
+        store
+            .begin_usage_execution("old", "old-turn", "claude-code")
+            .unwrap();
+        store
+            .begin_native_usage_attempt("old", "a:", "claude-code", None)
+            .unwrap();
+        store
+            .replace_native_usage_aggregate(
+                "old",
+                "a:",
+                "claude-code",
+                "native",
+                &sample(100, 10, 0, 100, 100),
+            )
+            .unwrap();
+
+        let (host, client) = crate::local::claude::tests::echo_worker("process-usage").await;
+        crate::local::claude::tests::serve_turn(&host, &client).await;
+
+        store
+            .begin_usage_execution("fresh", "fresh-turn", "claude-code")
+            .unwrap();
+        store.conn.execute_batch("PRAGMA query_only = ON").unwrap();
+        assert!(client
+            .begin_usage_attempt(&store, "fresh", "a:", Some("native"))
+            .is_err());
+        store.conn.execute_batch("PRAGMA query_only = OFF").unwrap();
+
+        client
+            .begin_usage_attempt(&store, "fresh", "a:", Some("native"))
+            .unwrap();
+        store
+            .replace_native_usage_aggregate(
+                "fresh",
+                "a:",
+                "claude-code",
+                "native",
+                &sample(120, 20, 120, 0, 200),
+            )
+            .unwrap();
+
+        store
+            .begin_usage_execution("next", "next-turn", "claude-code")
+            .unwrap();
+        client
+            .begin_usage_attempt(&store, "next", "a:", Some("native"))
+            .unwrap();
+        store
+            .replace_native_usage_aggregate(
+                "next",
+                "a:",
+                "claude-code",
+                "native",
+                &sample(140, 30, 120, 20, 300),
+            )
+            .unwrap();
+
+        let costs: Vec<(String, i64)> = store
+            .conn
+            .prepare(
+                "SELECT execution_id,cost_micros FROM chat_usage_samples ORDER BY execution_id",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            costs,
+            vec![
+                ("fresh".into(), 200),
+                ("next".into(), 100),
+                ("old".into(), 100)
+            ]
+        );
+
+        host.shutdown().await;
+    }
+
     #[test]
     fn cumulative_baselines_exclude_resume_history_and_replace_repeated_snapshots() {
         let dir = std::env::temp_dir().join(format!("orx-baselines-{}", uuid::Uuid::new_v4()));

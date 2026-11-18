@@ -108,7 +108,7 @@ fn embed_host_binaries(required: bool) {
                 )
             });
             assert!(
-                !bytes.is_empty() && bytes.len() <= 4 * 1024 * 1024,
+                !bytes.is_empty() && bytes.len() <= 8 * 1024 * 1024,
                 "Invalid orx-host size: {}",
                 path.display()
             );

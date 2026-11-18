@@ -20,6 +20,11 @@ test("an experiment times from its earliest start, and waits as queued until one
     { kind: "queued", since: 15, runs: 2 });
 });
 
+test("a run kept on show after it ended no longer counts as the chat's work", () => {
+  assert.deepEqual(chatStatus(session(null), false, false, [run("done", 10, 20), run("failed", 5)]), { kind: "done", since: 500 });
+  assert.deepEqual(chatStatus(session(null), false, false, [run("cancelled", 10, 20), run("running", 30, 40)]), { kind: "running", since: 40, runs: 1 });
+});
+
 test("a busy chat whose turn isn't listed yet shows working without a timer", () => {
   assert.deepEqual(chatStatus(session(turn("completed")), true, false, []), { kind: "working", since: null });
 });

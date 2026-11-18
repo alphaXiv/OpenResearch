@@ -7,7 +7,7 @@ import { useEffect, useState } from "react";
 import { useRuntime } from "./RemoteRuntime";
 
 import { clearReadDemoSessions } from "./demoSessionState";
-import { globalResumeLocation, projectResumeLocation } from "./routeResume";
+import { globalResumeLocation, needsOnboarding, projectResumeLocation } from "./routeResume";
 import { m } from "./paraglide/messages.js";
 import { Onboarding } from "./components/Onboarding";
 import { ProjectsEmptyState } from "./components/ProjectsHome";
@@ -49,7 +49,7 @@ function Resume({ projectId }: { projectId?: string }) {
   useEffect(() => {
     let current = true;
     setError(null);
-    void (projectId ? projectResumeLocation(projectId, workspace) : globalResumeLocation(workspace))
+    void (projectId ? projectResumeLocation(projectId, workspace) : globalResumeLocation(workspace, runtime.kind))
       .then((href) => { if (current) void navigate({ href, replace: true }); })
       .catch((cause: unknown) => {
         if (!current) return;
@@ -58,7 +58,7 @@ function Resume({ projectId }: { projectId?: string }) {
         else setError(cause instanceof Error ? cause : new Error(String(cause)));
       });
     return () => { current = false; };
-  }, [projectId, attempt, navigate, workspace]);
+  }, [projectId, attempt, navigate, runtime.kind, workspace]);
   return <>{error ? <RouteFailure error={error} reset={() => setAttempt((value) => value + 1)} /> : <RoutePending />}{error && <WorkspaceConnection runtime={runtime} corner />}</>;
 }
 
@@ -77,11 +77,7 @@ export function ProjectsPage() {
   const projects = projectsQuery.data;
   const state = stateQuery.data;
   const noProjects = projects?.length === 0;
-  const onboarded = state?.onboardingCompleted ?? false;
-  // The walkthrough is a one-time setup, so the persisted flag gates it and not
-  // the project count: onboarding installs a demo project, and counting projects
-  // replayed the whole walkthrough the moment that demo was deleted.
-  const onboarding = runtime.kind === "local" && noProjects && !onboarded;
+  const onboarding = runtime.kind === "local" && state && projects && needsOnboarding(state, projects);
   const agentSetup = runtime.kind === "ssh" && noProjects && !state?.preferredAgent;
   const error = projectsQuery.error ?? stateQuery.error;
   const retry = () => { void projectsQuery.refetch(); void stateQuery.refetch(); };
