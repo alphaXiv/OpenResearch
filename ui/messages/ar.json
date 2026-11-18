@@ -321,6 +321,7 @@
   "settings_chat_width_balanced": "متوازن",
   "settings_chat_width_wide": "واسع",
   "settings_chat_width_full": "عرض كامل",
+  "settings_chat_width_storage_unavailable": "هذا المتصفح يمنع حفظ الإعدادات، لذا يُطبَّق عرض المحادثة حتى إعادة تحميل الصفحة فقط.",
   "settings_language_description": "اختر لغة الواجهة على هذا الجهاز.",
   "settings_language_heading": "اللغة",
   "settings_page_account": "الحساب",

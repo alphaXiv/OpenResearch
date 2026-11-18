@@ -321,6 +321,7 @@
   "settings_chat_width_balanced": "संतुलित",
   "settings_chat_width_wide": "चौड़ा",
   "settings_chat_width_full": "पूरी चौड़ाई",
+  "settings_chat_width_storage_unavailable": "यह ब्राउज़र सहेजी गई सेटिंग्स को रोकता है, इसलिए चैट की चौड़ाई केवल पेज दोबारा लोड होने तक लागू रहेगी।",
   "settings_language_description": "इस डिवाइस पर इंटरफ़ेस की भाषा चुनें।",
   "settings_language_heading": "भाषा",
   "settings_page_account": "खाता",

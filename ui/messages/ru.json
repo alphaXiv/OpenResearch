@@ -321,6 +321,7 @@
   "settings_chat_width_balanced": "Сбалансированная",
   "settings_chat_width_wide": "Широкая",
   "settings_chat_width_full": "Во всю ширину",
+  "settings_chat_width_storage_unavailable": "Этот браузер блокирует сохранение настроек, поэтому ширина чата действует только до перезагрузки страницы.",
   "settings_language_description": "Выберите язык интерфейса на этом устройстве.",
   "settings_language_heading": "Язык",
   "settings_page_account": "Аккаунт",

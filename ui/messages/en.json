@@ -321,6 +321,7 @@
   "settings_chat_width_balanced": "Balanced",
   "settings_chat_width_wide": "Wide",
   "settings_chat_width_full": "Full width",
+  "settings_chat_width_storage_unavailable": "This browser blocks saved settings, so the chat width applies only until you reload.",
   "settings_language_description": "Choose the language for the interface on this device.",
   "settings_language_heading": "Language",
   "settings_page_account": "Account",

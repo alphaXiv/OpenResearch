@@ -321,6 +321,7 @@
   "settings_chat_width_balanced": "Cân bằng",
   "settings_chat_width_wide": "Rộng",
   "settings_chat_width_full": "Toàn chiều rộng",
+  "settings_chat_width_storage_unavailable": "Trình duyệt này chặn việc lưu cài đặt, nên độ rộng trò chuyện chỉ áp dụng cho đến khi bạn tải lại trang.",
   "settings_language_description": "Chọn ngôn ngữ cho giao diện trên thiết bị này.",
   "settings_language_heading": "Ngôn ngữ",
   "settings_page_account": "Tài khoản",

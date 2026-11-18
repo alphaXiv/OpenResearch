@@ -321,6 +321,7 @@
   "settings_chat_width_balanced": "Zrównoważona",
   "settings_chat_width_wide": "Szeroka",
   "settings_chat_width_full": "Pełna szerokość",
+  "settings_chat_width_storage_unavailable": "Ta przeglądarka blokuje zapisywanie ustawień, więc szerokość czatu działa tylko do przeładowania strony.",
   "settings_language_description": "Wybierz język interfejsu na tym urządzeniu.",
   "settings_language_heading": "Język",
   "settings_page_account": "Konto",

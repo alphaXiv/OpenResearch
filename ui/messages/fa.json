@@ -321,6 +321,7 @@
   "settings_chat_width_balanced": "متعادل",
   "settings_chat_width_wide": "پهن",
   "settings_chat_width_full": "تمام‌عرض",
+  "settings_chat_width_storage_unavailable": "این مرورگر ذخیرهٔ تنظیمات را مسدود می‌کند، بنابراین عرض گفتگو فقط تا بارگذاری مجدد صفحه اعمال می‌شود.",
   "settings_language_description": "زبان رابط کاربری را در این دستگاه انتخاب کنید.",
   "settings_language_heading": "زبان",
   "settings_page_account": "حساب",

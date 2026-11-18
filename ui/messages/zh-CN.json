@@ -321,6 +321,7 @@
   "settings_chat_width_balanced": "适中",
   "settings_chat_width_wide": "宽",
   "settings_chat_width_full": "全宽",
+  "settings_chat_width_storage_unavailable": "此浏览器阻止保存设置，因此聊天宽度仅在重新加载前生效。",
   "settings_language_description": "选择此设备上的界面语言。",
   "settings_language_heading": "语言",
   "settings_page_account": "账户",

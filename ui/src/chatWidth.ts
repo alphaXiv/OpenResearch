@@ -1,4 +1,6 @@
 import { useSyncExternalStore } from "react";
+import { showAlert } from "./components/ui/Toast";
+import { m } from "./paraglide/messages.js";
 
 /** How wide text columns run: a capped measure, or `full` to follow the pane. */
 export type ChatWidth = "balanced" | "wide" | "full";
@@ -15,9 +17,20 @@ function readStoredChatWidth(): ChatWidth {
   try {
     return parseChatWidth(localStorage.getItem(STORAGE_KEY));
   } catch {
-    // localStorage may be unavailable (private mode, etc.); use the default.
+    // localStorage may be unavailable (private mode, etc.). The default applies,
+    // but the choice cannot persist, so say so instead of failing silently.
+    warnStorageUnavailable();
     return "balanced";
   }
+}
+
+let storageWarningShown = false;
+
+/** One warning per session: every write after the first would repeat it. */
+function warnStorageUnavailable(): void {
+  if (storageWarningShown) return;
+  storageWarningShown = true;
+  showAlert(m.settings_chat_width_storage_unavailable(), "warning");
 }
 
 let chatWidth = readStoredChatWidth();
@@ -41,7 +54,8 @@ export function setChatWidth(next: ChatWidth): void {
   try {
     localStorage.setItem(STORAGE_KEY, next);
   } catch {
-    // Non-fatal: the in-memory preference still applies for this session.
+    // The in-memory preference still applies for this session.
+    warnStorageUnavailable();
   }
   applyChatWidth(next);
   for (const listener of listeners) listener();

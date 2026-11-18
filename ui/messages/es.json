@@ -321,6 +321,7 @@
   "settings_chat_width_balanced": "Equilibrado",
   "settings_chat_width_wide": "Amplio",
   "settings_chat_width_full": "Ancho completo",
+  "settings_chat_width_storage_unavailable": "Este navegador bloquea los ajustes guardados, así que el ancho del chat solo se aplica hasta que recargues la página.",
   "settings_language_description": "Elige el idioma de la interfaz en este dispositivo.",
   "settings_language_heading": "Idioma",
   "settings_page_account": "Cuenta",

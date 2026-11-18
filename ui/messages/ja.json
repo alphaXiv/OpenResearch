@@ -321,6 +321,7 @@
   "settings_chat_width_balanced": "標準",
   "settings_chat_width_wide": "広い",
   "settings_chat_width_full": "全幅",
+  "settings_chat_width_storage_unavailable": "このブラウザは設定の保存をブロックしているため、チャット幅は再読み込みまでのみ適用されます。",
   "settings_language_description": "このデバイスの画面表示に使用する言語を選択してください。",
   "settings_language_heading": "言語",
   "settings_page_account": "アカウント",

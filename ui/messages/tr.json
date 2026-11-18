@@ -321,6 +321,7 @@
   "settings_chat_width_balanced": "Dengeli",
   "settings_chat_width_wide": "Geniş",
   "settings_chat_width_full": "Tam genişlik",
+  "settings_chat_width_storage_unavailable": "Bu tarayıcı kayıtlı ayarlara izin vermiyor; sohbet genişliği yalnızca sayfayı yenileyene kadar geçerli.",
   "settings_language_description": "Bu cihazdaki arayüz için dili seçin.",
   "settings_language_heading": "Dil",
   "settings_page_account": "Hesap",

@@ -295,6 +295,15 @@
   margin-inline: calc((100% - var(--chat-header-width)) / 2);
 }
 
+/* The widened header reaches into the rail toggle's gutter, and its background and
+   `z-4` would otherwise cover the button's edge and swallow clicks there. Lift the
+   toggle above it; both sit on the same background, so nothing changes visually. */
+:root[data-chat-width="wide"] .chat-heading-row > .sidebar-toggle,
+:root[data-chat-width="full"] .chat-heading-row > .sidebar-toggle {
+  position: relative;
+  z-index: 5;
+}
+
 /* Outranks the bare `:root { color-scheme: light dark }` in PDF.js's stylesheet. */
 :root[data-theme="light"] {
   color-scheme: light;

@@ -19,3 +19,17 @@ test("a chosen chat width reaches the document and storage", () => {
   assert.equal(document.documentElement.dataset.chatWidth, "balanced");
   assert.equal(localStorage.getItem("orx:chat-width"), "balanced");
 });
+
+test("a blocked storage write still applies the width for this session", () => {
+  const original = localStorage.setItem.bind(localStorage);
+  localStorage.setItem = () => {
+    throw new Error("blocked");
+  };
+  try {
+    setChatWidth("wide");
+    assert.equal(document.documentElement.dataset.chatWidth, "wide");
+  } finally {
+    localStorage.setItem = original;
+  }
+  setChatWidth("balanced");
+});
