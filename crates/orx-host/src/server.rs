@@ -214,10 +214,19 @@ impl Host {
                                 summary.state = wrapper::read_error(error);
                                 summary
                             });
-                        if !watch
-                            .iter()
-                            .any(|(run, old)| run == name && old == &summary)
-                        {
+                        if !watch.iter().any(|(run, old)| {
+                            if run != name {
+                                return false;
+                            }
+                            if old.signals.is_none() {
+                                return old
+                                    == &Summary {
+                                        signals: None,
+                                        ..summary.clone()
+                                    };
+                            }
+                            old == &summary
+                        }) {
                             changes.push((name.clone(), summary));
                         }
                     }
