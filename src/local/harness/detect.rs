@@ -289,6 +289,8 @@ pub struct HarnessInfo {
     #[serde(skip)]
     pub auth_observation: Option<super::claude::AuthProbe>,
     #[serde(skip)]
+    pub(crate) cursor_status_error: Option<super::cursor::CursorStatusError>,
+    #[serde(skip)]
     pub claude_ultracode: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
@@ -358,6 +360,7 @@ impl HarnessInfo {
             login_eligible: false,
             auth_check_failed: false,
             auth_observation: None,
+            cursor_status_error: None,
             claude_ultracode: false,
             account: None,
             account_name: None,

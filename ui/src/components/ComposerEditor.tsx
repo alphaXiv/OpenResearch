@@ -273,7 +273,7 @@ function chips(source: () => ChipSource): Extension {
 }
 
 const composerTheme = EditorView.theme({
-  "&": { color: "var(--text)", maxHeight: "40vh", padding: "var(--editor-pad-y) 0" },
+  "&": { color: "var(--text)", padding: "var(--editor-pad-y) 0" },
   "&.cm-focused": { outline: "none" },
   ".cm-scroller": { fontFamily: "inherit", lineHeight: "1.5", overflow: "auto" },
   // WebKit can retain an empty horizontal scrollbar gutter after the draft shrinks.
@@ -321,12 +321,12 @@ function storedHeight(key: string): number | null {
   }
 }
 
-/** Dragged heights stop short of crowding out the transcript. */
+/** The draft grows, and can be dragged, up to this height, then scrolls inside the box. */
 function maxHeight(dom: HTMLElement): number {
   const pane = dom.closest<HTMLElement>(".chat-pane");
   const composer = dom.closest<HTMLElement>(".composer");
   const chrome = composer ? composer.offsetHeight - dom.offsetHeight : 0;
-  return Math.max(MIN_HEIGHT, ((pane?.clientHeight ?? window.innerHeight) - chrome) * 0.6);
+  return Math.max(MIN_HEIGHT, ((pane?.clientHeight ?? window.innerHeight) - chrome) * 0.8);
 }
 
 export interface ComposerEditorHandle {
@@ -512,7 +512,7 @@ export function ComposerEditor({
     if (!dom) return;
     const clamped = height === null ? null : Math.min(height, heightLimit);
     dom.style.minHeight = clamped === null ? "" : `${clamped}px`;
-    dom.style.maxHeight = `min(${heightLimit}px, max(40vh, ${clamped ?? MIN_HEIGHT}px))`;
+    dom.style.maxHeight = `${clamped ?? heightLimit}px`;
   }, [height, heightLimit]);
 
   useEffect(() => {

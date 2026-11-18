@@ -8183,12 +8183,12 @@ export function ChatPanel({
             </div>
           </div>
         ) : !threadMounted && (activeSession?.sideParentSessionId || sideParentSessionId) ? (
-          <div className="chat-empty flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center text-subtext">
+          <div className="chat-empty min-h-0 flex flex-1 flex-col items-center justify-center-safe gap-3 overflow-y-auto px-8 before:h-5 before:shrink-0 after:h-5 after:shrink-0 text-center text-subtext">
             <MessagesSquare size={22} />
             <p className="m-0 text-balance">{m.side_chat_empty()}</p>
           </div>
         ) : !threadMounted ? (
-          <div className="chat-empty flex-1 flex flex-col items-center justify-center text-text p-8 text-center [&_h2]:m-0 [&_h2]:text-5xl [&_h2]:font-medium [&_h2]:tracking-tight [&_h2]:text-text">
+          <div className="chat-empty min-h-0 flex-1 flex flex-col items-center justify-center-safe overflow-y-auto text-text px-8 before:h-8 before:shrink-0 after:h-8 after:shrink-0 text-center [&_h2]:m-0 [&_h2]:text-5xl [&_h2]:font-medium [&_h2]:tracking-tight [&_h2]:text-text">
             <div className="chat-empty-mark w-10.5 h-10.5 mb-5.5 [&_svg]:block [&_svg]:w-full [&_svg]:h-full">
               <BrandMark />
             </div>

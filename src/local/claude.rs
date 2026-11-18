@@ -48,7 +48,7 @@ use crate::local::harness::claude::{
     claude_permission_mode, uses_permission_bridge, write_mcp_config, write_settings,
     CLAUDE_ENTRYPOINT,
 };
-use crate::local::harness::{HarnessAuthState, PermissionMode};
+use crate::local::harness::{HarnessAuthState, PermissionMode, SetupFailure};
 use crate::local::native_store::NativeStore;
 
 /// Ceiling on a control request's response wait. Control requests (`set_model`)
@@ -789,7 +789,12 @@ async fn stop_client_at(client: Arc<ClaudeClient>, reason: &str, now: Instant, i
 /// is the health signal.
 async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<ClaudeClient>> {
     let bin = spec.config.bin.clone().ok_or_else(|| {
-        anyhow!("claude not found on PATH — install Claude Code and run `claude` once to sign in")
+        SetupFailure::tag(
+            "claude_setup_binary",
+            anyhow!(
+                "claude not found on PATH — install Claude Code and run `claude` once to sign in"
+            ),
+        )
     })?;
     let mut cmd = crate::process::tokio_command(&bin);
     cmd.args([
@@ -924,9 +929,12 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
     #[cfg(unix)]
     cmd.process_group(0);
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| anyhow!("Could not spawn {}: {}", bin.display(), e))?;
+    let mut child = cmd.spawn().map_err(|e| {
+        SetupFailure::tag(
+            "claude_setup_spawn",
+            anyhow!("Could not spawn {}: {}", bin.display(), e),
+        )
+    })?;
     #[cfg(unix)]
     let process_group_id = child
         .id()
@@ -1363,7 +1371,8 @@ impl ClaudeHost {
         }
         let profile = spec.config.profile.is_some();
         if let Some(id) = spec.config.profile.as_deref() {
-            crate::local::agent_profiles::prepare(id, "claude-code")?;
+            crate::local::agent_profiles::prepare(id, "claude-code")
+                .map_err(|e| SetupFailure::tag("claude_setup_profile", e))?;
         }
         let mut auth = self.auth_snapshot();
         if !profile && auth.state == HarnessAuthState::Unknown && !auth.runtime_rejected {
@@ -1379,26 +1388,28 @@ impl ClaudeHost {
                     auth.method,
                     auth.provider.as_deref(),
                 );
-                return Err(
-                    if crate::local::harness::claude::login_eligible_state(
-                        auth.state,
-                        auth.method,
-                        auth.provider.as_deref(),
-                        auth.credential_conflict,
-                    ) {
-                        crate::local::harness::SignedOut(note.into()).into()
-                    } else {
-                        anyhow!("{note}")
-                    },
-                );
+                let error = if crate::local::harness::claude::login_eligible_state(
+                    auth.state,
+                    auth.method,
+                    auth.provider.as_deref(),
+                    auth.credential_conflict,
+                ) {
+                    crate::local::harness::SignedOut(note.into()).into()
+                } else {
+                    anyhow!("{note}")
+                };
+                return Err(SetupFailure::tag("claude_setup_sign_in", error));
             }
             HarnessAuthState::Unsupported => {
-                return Err(anyhow!("Claude Code 2.1.211 or newer is required"));
+                return Err(SetupFailure::tag(
+                    "claude_setup_version",
+                    anyhow!("Claude Code 2.1.211 or newer is required"),
+                ));
             }
             HarnessAuthState::Unknown => {
-                return Err(anyhow!(
+                return Err(SetupFailure::tag("claude_setup_auth_check", anyhow!(
                     "Claude Code authentication could not be verified — run `claude auth status`, then re-check the agent"
-                ));
+                )));
             }
             HarnessAuthState::Ready => {}
         }
