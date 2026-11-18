@@ -105,7 +105,7 @@ impl Engine {
             }
             Err(LaunchError::Rejected { reason }) => {
                 self.commit(run_id, |phase, state| {
-                    end_attempt(attempt, phase, state, Some(reason))
+                    end_attempt(attempt, phase, state, Some(reason.clone()))
                 })?;
             }
             Err(LaunchError::Blocked { contact }) => {
@@ -116,7 +116,7 @@ impl Engine {
                         && state.submission_attempt == attempt
                         && state.cancel_accepted_at.is_none()
                     {
-                        Change::contact(contact)
+                        Change::contact(contact.clone())
                     } else {
                         end_attempt(attempt, phase, state, None)
                     }
@@ -135,7 +135,7 @@ impl Engine {
         handle: Handle,
     ) -> Result<()> {
         self.commit(run_id, |phase, state| Change {
-            handle: Some((attempt, handle)),
+            handle: Some((attempt, handle.clone())),
             contact: (!is_tombstone(phase, &state.contact)).then_some(Contact::Live),
             ..Change::default()
         })?;
@@ -231,7 +231,7 @@ impl Engine {
                         if is_tombstone(phase, &state.contact) {
                             Change::default()
                         } else {
-                            Change::contact(contact)
+                            Change::contact(contact.clone())
                         }
                     })
                 }
@@ -261,7 +261,10 @@ impl Engine {
             if is_tombstone(phase, &state.contact) {
                 return Change::default();
             }
-            Change::contact(Contact::Unreconciled { since: now, detail })
+            Change::contact(Contact::Unreconciled {
+                since: now,
+                detail: detail.clone(),
+            })
         })
     }
 

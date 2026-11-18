@@ -272,7 +272,7 @@ pub fn log_path(data_dir: &Path, run_id: &str) -> PathBuf {
 
 /// A locally tracked run. `backend_json` stores the backend descriptor used by
 /// the detached supervisor.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StoredRun {
     pub id: String,
@@ -297,6 +297,12 @@ pub struct StoredRun {
     /// CLI-launched runs. This records attribution; wake-ups are
     /// separately and explicitly registered in `chat_run_wakeups`.
     pub chat_session_id: Option<String>,
+}
+
+pub(crate) struct TerminalEvidence {
+    tail: String,
+    last_error: Option<String>,
+    signals: String,
 }
 
 pub const TERMINAL: &str = "terminal";
@@ -6706,7 +6712,8 @@ impl Store {
             .map(|_| open_lifecycle_lock_at(&self.run_lock_path(CANCEL_LOCK, run_id)?))
             .transpose()?;
         let _guard = lock.as_mut().map(|lock| lock.write()).transpose()?;
-        let tx = self.begin_immediate()?;
+        // The freshness check reads the checkpoint and settings before acquiring the write lock.
+        let tx = self.begin()?;
         let contact = tx
             .query_row(
                 "SELECT contact FROM runs WHERE id = ?1 AND status = 'running'
@@ -7079,6 +7086,17 @@ impl Store {
 
     /// Run under the engine lock after legacy delivery stops and before notice production.
     pub fn migrate_run_wakeups(&self) -> Result<()> {
+        let needed: bool = self.conn.query_row(
+            "SELECT user_version != 2 OR EXISTS (
+                SELECT 1 FROM chat_run_wakeups WHERE engine_migrated = 0
+             ) FROM pragma_user_version",
+            [],
+            |row| row.get(0),
+        )?;
+        if !needed {
+            return Ok(());
+        }
+
         let tx = self.begin_immediate()?;
         let wakeups = {
             let mut stmt = tx.prepare(
@@ -7191,6 +7209,10 @@ impl Store {
     }
 
     pub fn terminal_notice_body(&self, run: &StoredRun) -> Result<String> {
+        self.render_terminal_notice(run, self.terminal_evidence(run)?)
+    }
+
+    pub(crate) fn terminal_evidence(&self, run: &StoredRun) -> Result<TerminalEvidence> {
         let log = self.recent_log(&run.id, TERMINAL_LOG_SCAN)?;
         // Progress records are for orx; the agent reads the log a person would.
         let records = log
@@ -7216,49 +7238,7 @@ impl Store {
                 run.id
             ));
         }
-        let code = run
-            .exit_code
-            .map(|code| code.to_string())
-            .unwrap_or_else(|| "unavailable".into());
-        let duration = run
-            .ended_at
-            .map(|ended| format!("{} ms", ended.saturating_sub(run.created_at).max(0)))
-            .unwrap_or_else(|| "unavailable".into());
-        let cancel_reason = run
-            .cancel_reason
-            .as_deref()
-            .filter(|text| run.status == "cancelled" && !text.trim().is_empty());
-        let result = run
-            .result_markdown
-            .as_deref()
-            .filter(|text| !text.trim().is_empty());
-        let reason = match (cancel_reason, result) {
-            (Some(cancel), Some(result)) => Some(format!("{cancel} {result}")),
-            (None, None) if run.status == "failed" => {
-                last_error(&log).map(|line| format!("Last error in the log: `{line}`"))
-            }
-            (cancel, result) => cancel.or(result).map(str::to_owned),
-        }
-        .map_or_else(String::new, |reason| format!("Reason: {reason}\n"));
-        let mut facts = String::new();
-        if run.status == "cancelled" {
-            let actor = match self.run_stop(&run.id) {
-                Ok(Some(stop)) => match stop.by {
-                    StopBy::User => "the user".into(),
-                    StopBy::Agent => "the agent".into(),
-                    StopBy::Rule => format!(
-                        "rule {}",
-                        stop.rule
-                            .as_ref()
-                            .and_then(|rule| rule["name"].as_str())
-                            .unwrap_or("(unnamed)")
-                    ),
-                },
-                Ok(None) => "unknown (no stop attribution was recorded)".into(),
-                Err(error) => format!("unknown ({error:#})"),
-            };
-            facts.push_str(&format!("Stopped by: {actor}.\n"));
-        }
+        let mut signals = String::new();
         match crate::engine::monitor::offline(self, run, now_ms()) {
             Ok(monitor) => {
                 let view = &monitor["view"];
@@ -7284,7 +7264,7 @@ impl Store {
                     .filter_map(serde_json::Value::as_str)
                     .collect();
                 if !names.is_empty() {
-                    facts.push_str("Last headline/chart values:\n");
+                    signals.push_str("Last headline/chart values:\n");
                 }
                 for name in names {
                     let latest = monitor["latest"].get(name);
@@ -7306,9 +7286,9 @@ impl Store {
                         });
                     if let Some((at, value)) = point {
                         let axis = monitor["x"]["name"].as_str().unwrap_or("step");
-                        facts.push_str(&format!("{name} = {value} at {axis} {at}\n"));
+                        signals.push_str(&format!("{name} = {value} at {axis} {at}\n"));
                     } else if let Some(value) = latest {
-                        facts.push_str(&format!("{name} = {value} (step unavailable)\n"));
+                        signals.push_str(&format!("{name} = {value} (step unavailable)\n"));
                     } else if let Some(value) = monitor["rows"]
                         .as_object()
                         .into_iter()
@@ -7317,21 +7297,78 @@ impl Store {
                             rows.as_array()?.iter().rev().find_map(|row| row.get(name))
                         })
                     {
-                        facts.push_str(&format!("{name} = {value} (step unavailable)\n"));
+                        signals.push_str(&format!("{name} = {value} (step unavailable)\n"));
                     } else {
-                        facts.push_str(&format!("{name}: no value reported\n"));
+                        signals.push_str(&format!("{name}: no value reported\n"));
                     }
                 }
             }
-            Err(error) => facts.push_str(&format!(
+            Err(error) => signals.push_str(&format!(
                 "Headline/chart values could not be read: {error:#}\n"
             )),
         }
-        let view = crate::plane::Run::from_store(self, run)?;
+        Ok(TerminalEvidence {
+            tail,
+            last_error: last_error(&log).map(str::to_owned),
+            signals,
+        })
+    }
+
+    pub(crate) fn render_terminal_notice(
+        &self,
+        run: &StoredRun,
+        evidence: TerminalEvidence,
+    ) -> Result<String> {
+        let code = run
+            .exit_code
+            .map(|code| code.to_string())
+            .unwrap_or_else(|| "unavailable".into());
+        let duration = run
+            .ended_at
+            .map(|ended| format!("{} ms", ended.saturating_sub(run.created_at).max(0)))
+            .unwrap_or_else(|| "unavailable".into());
+        let cancel_reason = run
+            .cancel_reason
+            .as_deref()
+            .filter(|text| run.status == "cancelled" && !text.trim().is_empty());
+        let result = run
+            .result_markdown
+            .as_deref()
+            .filter(|text| !text.trim().is_empty());
+        let reason = match (cancel_reason, result) {
+            (Some(cancel), Some(result)) => Some(format!("{cancel} {result}")),
+            (None, None) if run.status == "failed" => evidence
+                .last_error
+                .map(|line| format!("Last error in the log: `{line}`")),
+            (cancel, result) => cancel.or(result).map(str::to_owned),
+        }
+        .map_or_else(String::new, |reason| format!("Reason: {reason}\n"));
+        let mut facts = String::new();
+        if run.status == "cancelled" {
+            let actor = match self.run_stop(&run.id) {
+                Ok(Some(stop)) => match stop.by {
+                    StopBy::User => "the user".into(),
+                    StopBy::Agent => "the agent".into(),
+                    StopBy::Rule => format!(
+                        "rule {}",
+                        stop.rule
+                            .as_ref()
+                            .and_then(|rule| rule["name"].as_str())
+                            .unwrap_or("(unnamed)")
+                    ),
+                },
+                Ok(None) => "unknown (no stop attribution was recorded)".into(),
+                Err(error) => format!("unknown ({error:#})"),
+            };
+            facts.push_str(&format!("Stopped by: {actor}.\n"));
+        }
+        facts.push_str(&evidence.signals);
+        let view = crate::plane::Run::with_store_state(self, run)?;
         let status = view.display_status();
         Ok(format!(
             "[orx] Run `{}` finished with status **{}**.\nExit code: {code}\nDuration: {duration}\n{reason}{facts}\nRecent log:\n{tail}",
             run.id, status,
+            tail = evidence.tail,
         ))
     }
 }

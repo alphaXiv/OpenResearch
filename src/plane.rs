@@ -61,17 +61,7 @@ impl From<&StoredRun> for Run {
 
 impl Run {
     pub(crate) fn from_store(store: &Store, stored: &StoredRun) -> Result<Self> {
-        let mut run = Self::from(stored);
-        if let Some(state) = store.engine_run_state(&stored.id)? {
-            run.cancelling |= state.cancel_accepted_at.is_some()
-                && !crate::engine::Phase::parse(&stored.status)
-                    .is_some_and(crate::engine::Phase::is_terminal);
-            run.contact = state.contact;
-            run.cancel_unconfirmed = state.cancel_unconfirmed;
-            run.waiting_reason = state.waiting_reason;
-        }
-        run.cancel_error = crate::commands::up::api_v2::cancel_error(&stored.id);
-        run.host = crate::commands::up::run_host(store, stored)?;
+        let mut run = Self::with_store_state(store, stored)?;
         let silent = run
             .result_markdown
             .as_deref()
@@ -87,6 +77,21 @@ impl Run {
                         .map(str::to_owned)
                 });
         }
+        Ok(run)
+    }
+
+    pub(crate) fn with_store_state(store: &Store, stored: &StoredRun) -> Result<Self> {
+        let mut run = Self::from(stored);
+        if let Some(state) = store.engine_run_state(&stored.id)? {
+            run.cancelling |= state.cancel_accepted_at.is_some()
+                && !crate::engine::Phase::parse(&stored.status)
+                    .is_some_and(crate::engine::Phase::is_terminal);
+            run.contact = state.contact;
+            run.cancel_unconfirmed = state.cancel_unconfirmed;
+            run.waiting_reason = state.waiting_reason;
+        }
+        run.cancel_error = crate::commands::up::api_v2::cancel_error(&stored.id);
+        run.host = crate::commands::up::run_host(store, stored)?;
         Ok(run)
     }
 

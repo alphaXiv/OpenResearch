@@ -743,6 +743,53 @@ async fn a_death_seen_while_a_cancel_is_verified_waits_for_the_verdict() {
     assert_eq!(f.status("dropped"), "failed");
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn a_terminal_notice_waiting_for_its_log_does_not_hold_the_writer() {
+    use std::io::Write;
+    use std::os::unix::ffi::OsStrExt;
+
+    let f = Fixture::new();
+    f.running("run").await;
+    let manifest = f.dir.join("run-logs/run.ranges.json");
+    let fifo = std::ffi::CString::new(manifest.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+
+    std::thread::scope(|scope| {
+        let observer = scope.spawn(|| {
+            f.engine.observe(
+                "run",
+                Observation::Exited {
+                    finished_at: None,
+                    code: Some(0),
+                    signal: None,
+                },
+            )
+        });
+        let mut log = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&manifest)
+            .unwrap();
+        let (done, written) = std::sync::mpsc::channel();
+        let dir = f.dir.clone();
+        let writer = scope.spawn(move || {
+            let result = Store::open_at(dir)
+                .and_then(|store| store.set_project_env("proj", "OTHER_WRITER", "ok"));
+            let _ = done.send(());
+            result
+        });
+        let measured = written.recv_timeout(Duration::from_secs(1));
+        log.write_all(b"[]").unwrap();
+        drop(log);
+        observer.join().unwrap().unwrap();
+        writer.join().unwrap().unwrap();
+        assert!(measured.is_ok(), "the log reader held SQLite's write lock");
+    });
+
+    assert_eq!(f.status("run"), "done");
+    assert_eq!(f.kinds(), [TERMINAL]);
+}
+
 /// A cancel registered between an observation's arrival and its terminal decision still wins.
 #[tokio::test]
 async fn a_cancel_registered_just_before_a_terminal_commit_is_honored() {
