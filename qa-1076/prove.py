@@ -9,6 +9,7 @@ assert mode in ('before','after')
 win=os.name=='nt'
 events=[]
 received_names=[]
+queue_reported=threading.Event()
 class Receiver(BaseHTTPRequestHandler):
     def do_POST(self):
         raw=self.rfile.read(int(self.headers.get('Content-Length','0')))
@@ -30,10 +31,10 @@ def await_until(check, label, timeout=55):
         if result:return result
         time.sleep(.05)
     raise RuntimeError('timed out: '+label)
-def ws(port,harness='opencode'):
+def ws(port,harness='opencode',action='login'):
     s=socket.create_connection(('127.0.0.1',port)); f=s.makefile('rb')
     key=base64.b64encode(os.urandom(16)).decode()
-    req=f'GET /api/harnesses/setup?harness={harness}&action=login HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n'
+    req=f'GET /api/harnesses/setup?harness={harness}&action={action} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n'
     s.sendall(req.encode()); status=f.readline(); assert b' 101 ' in status,status
     while f.readline().strip(): pass
     if win:
@@ -50,6 +51,9 @@ def ws(port,harness='opencode'):
                     if n>1048576:raise AssertionError('unexpected frame size')
                     data=f.read(n)
                     if kind==8:return
+                    if kind==1:
+                        frame=json.loads(data)
+                        if frame.get('type')=='queue' and frame.get('waiting') is True:queue_reported.set()
                     reply=(bytes([27])+b'[1;1R') if kind==2 and bytes([27])+b'[6n' in data else (data if kind==9 else None)
                     if reply is not None:
                         mask=os.urandom(4);op=10 if kind==9 else 2
@@ -84,8 +88,8 @@ with tempfile.TemporaryDirectory() as d:
         env.update(USERPROFILE=d, APPDATA=d+'/roaming', LOCALAPPDATA=d+'/local', TEMP=d, TMP=d, FIXTURE_PY=sys.executable,FIXTURE_SCRIPT=str(fixture))
         env['PATH']=str(root/'bin')+os.pathsep+os.path.join(os.environ['SYSTEMROOT'],'System32')
     assert subprocess.check_output([binary,'version','--build-channel'],env=env,text=True).strip()=='production'
-    show(revision=mode,platform=platform.system()+' '+platform.machine(),app='unmodified orx',transport='setup WebSocket and localhost telemetry HTTP',external_fixture=('native Codex; login in progress' if win else 'OpenCode 2.3; free model, no authenticated providers'))
-    servers=[]; sockets=[]
+    show(revision=mode,platform=platform.system()+' '+platform.machine(),app='unmodified orx',transport='setup WebSocket and localhost telemetry HTTP',external_fixture=('native Codex; managed install already queued' if win else 'OpenCode 2.3; free model, no authenticated providers'))
+    servers=[]; sockets=[]; lock_file=None
     def start():
         port=unused_port(); log=open(root/f'{port}.log','w')
         p=subprocess.Popen([binary,'up','--no-browser','--port',str(port)],env=env,cwd=d,stdin=subprocess.DEVNULL,stdout=log,stderr=log,creationflags=(subprocess.CREATE_NEW_CONSOLE if win else 0))
@@ -100,9 +104,18 @@ with tempfile.TemporaryDirectory() as d:
             assert (failure['outcome'],failure['stage'],failure['reason'])==('failed','verify','not_ready')
             assert failure['errorExcerpt']==('agent reported no usable state' if mode=='before' else 'agent is not signed in')
             first_id=failure['attemptId']
-        (root/'hold-login').touch()
-        sockets.extend(ws(port,'codex' if win else 'opencode'))
-        await_until(lambda:(root/'login-running').exists(),'native PTY login started',100)
+        if win:
+            # Hold the same per-installation lock that another managed setup owns. The
+            # app must report its actual queue state before the test interrupts anything.
+            import msvcrt
+            lock=root/'config'/'openresearch'/'managed-agents.lock';lock.parent.mkdir(parents=True,exist_ok=True)
+            lock_file=open(lock,'a+b');lock_file.seek(0);msvcrt.locking(lock_file.fileno(),msvcrt.LK_NBLCK,1)
+            sockets.extend(ws(port,'codex','install'))
+            await_until(queue_reported.is_set,'Windows managed install visibly queued')
+        else:
+            (root/'hold-login').touch()
+            sockets.extend(ws(port))
+            await_until(lambda:(root/'login-running').exists(),'native PTY login started',100)
         command=await_until(lambda:next((e for e in events if e['outcome']=='command_started' and e['attemptId']!=first_id),None),'second command_started')
         aid=command['attemptId']
         if win:
@@ -128,12 +141,12 @@ with tempfile.TemporaryDirectory() as d:
         if mode=='after':
             await_until(lambda:any(e['attemptId']==aid and terminal(e) for e in events),'interruption acknowledged at the loopback receiver')
         rows=traces(); ends=[e for e in rows if terminal(e)]
-        show(scenario=('Ctrl+C' if win else 'SIGTERM')+' while PTY login still in flight; app restarted',last_stage='command',terminal_events=[(e['outcome'],e['errorExcerpt']) for e in ends])
+        show(scenario=('Ctrl+C while managed install visibly queued; app restarted' if win else 'SIGTERM while PTY login still in flight; app restarted'),last_stage='command',terminal_events=[(e['outcome'],e['errorExcerpt']) for e in ends])
         if mode=='after':assert [(e['outcome'],e['errorExcerpt']) for e in ends]==[('interrupted','setup command task ended before a result')],ends
         else: assert not ends,ends
         show(result='PASS',production_traffic=False)
     except BaseException:
-        show(debug='synthetic fixture only',event_names=sorted(set(received_names)),setup_rows=[(e['outcome'],e['stage'],e['reason'],e['errorExcerpt']) for e in events],marker=(root/'login-running').exists(),outbox_files=sum(1 for path in root.rglob('*.json') if 'telemetry' in str(path).lower()),app_exit=[p.poll() for p in servers])
+        show(debug='synthetic fixture only',event_names=sorted(set(received_names)),setup_rows=[(e['outcome'],e['stage'],e['reason'],e['errorExcerpt']) for e in events],marker=(root/'login-running').exists(),queued=queue_reported.is_set(),outbox_files=sum(1 for path in root.rglob('*.json') if 'telemetry' in str(path).lower()),app_exit=[p.poll() for p in servers])
         raise
     finally:
         for obj in sockets:
@@ -148,4 +161,5 @@ with tempfile.TemporaryDirectory() as d:
         for obj in sockets:
             try:obj.close()
             except OSError:pass
+        if lock_file is not None:lock_file.close()
         collector.shutdown()
