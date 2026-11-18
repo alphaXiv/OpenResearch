@@ -187,6 +187,8 @@ past that point are fetched again, which resume it if they return the same and
 are another log if not. Corrupt checkpoints are
 retained with their path in diagnostics and rebuilt from readable raw bytes.
 Replayed bytes without payload or bar times do not invent timing observations.
+When patterns are saved after a run ends, replay places otherwise untimed
+chart points across its elapsed time by their positions in the saved log.
 The first phase starts when the payload started, as the host recorded it, even
 on a first scan. Payload `t` gives only durations, within a stretch where it
 does not fall: a relaunched process starts a new one, and its first report's

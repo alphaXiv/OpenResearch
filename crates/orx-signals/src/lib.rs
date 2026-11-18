@@ -409,6 +409,28 @@ impl Snapshot {
         now: i64,
         observed: bool,
     ) -> Result<(), String> {
+        self.feed_frames(bytes, terminal, now, observed, None)
+    }
+
+    /// Estimates elapsed chart coordinates from saved log offsets without observing a clock.
+    pub fn feed_replay(
+        &mut self,
+        bytes: &[u8],
+        terminal: bool,
+        now: i64,
+        seconds_per_byte: f64,
+    ) -> Result<(), String> {
+        self.feed_frames(bytes, terminal, now, false, Some(seconds_per_byte))
+    }
+
+    fn feed_frames(
+        &mut self,
+        bytes: &[u8],
+        terminal: bool,
+        now: i64,
+        observed: bool,
+        seconds_per_byte: Option<f64>,
+    ) -> Result<(), String> {
         if !bytes.is_empty() && self.extra.get("terminal").and_then(Value::as_bool) == Some(true) {
             return Err("cannot append bytes after terminal EOF; start a new generation".into());
         }
@@ -441,7 +463,14 @@ impl Snapshot {
                         self.buffer_byte(&mut pending, byte);
                         framing.push(byte);
                     } else {
-                        self.frame(&pending, now, observed, false, &mut row_bytes);
+                        self.frame(
+                            &pending,
+                            now,
+                            observed,
+                            false,
+                            &mut row_bytes,
+                            seconds_per_byte,
+                        );
                         pending.clear();
                         framing = Framing::default();
                     }
@@ -469,7 +498,14 @@ impl Snapshot {
             self.finish_dropped(&mut pending);
         }
         if terminal && !pending.is_empty() && !self.cursor.dropping {
-            self.frame(&pending, now, observed, true, &mut row_bytes);
+            self.frame(
+                &pending,
+                now,
+                observed,
+                true,
+                &mut row_bytes,
+                seconds_per_byte,
+            );
             pending.clear();
             self.cursor.frame_start = self.cursor.offset;
         }
@@ -551,6 +587,7 @@ impl Snapshot {
         observed: bool,
         terminal: bool,
         row_bytes: &mut usize,
+        seconds_per_byte: Option<f64>,
     ) {
         if std::str::from_utf8(bytes).is_err() && bytes.windows(7).any(|w| w == b"::orx::") {
             self.diagnose(
@@ -564,10 +601,11 @@ impl Snapshot {
         let text = strip_ansi(bytes, self.cursor.frame_start == 0);
         let text = text.as_str();
         self.note_line(text);
+        let replay_elapsed = seconds_per_byte.map(|scale| self.cursor.frame_start as f64 * scale);
         if let Some(json) = text.strip_prefix("::orx:: ") {
             match parse(json) {
                 Ok(Value::Object(record)) => {
-                    self.record(record, now, observed, "declared", row_bytes)
+                    self.record(record, now, observed, "declared", row_bytes, replay_elapsed)
                 }
                 Ok(_) => self.diagnose(
                     "invalid_record",
@@ -601,13 +639,13 @@ impl Snapshot {
                     hit.matched += 1;
                     hit.first.get_or_insert_with(|| (line, text.to_owned()));
                 }
-                self.record(record, now, observed, "pattern", row_bytes);
+                self.record(record, now, observed, "pattern", row_bytes, replay_elapsed);
             } else if self
                 .phases
                 .last()
                 .is_none_or(|p| p.source != "declared" && p.source != "pattern")
             {
-                self.detect(text, now, observed, row_bytes);
+                self.detect(text, now, observed, row_bytes, replay_elapsed);
             }
         }
     }
@@ -632,6 +670,7 @@ impl Snapshot {
         observed: bool,
         source: &str,
         row_bytes: &mut usize,
+        replay_elapsed: Option<f64>,
     ) {
         record.retain(|k, _| {
             matches!(
@@ -836,7 +875,20 @@ impl Snapshot {
         // An out-of-order report has no step to plot at, and once the run counts steps a value
         // from a stage without them has no place on that axis: either is only the latest.
         let counts_steps = self.phases.iter().any(|phase| phase.done.is_some());
-        let x = x.filter(|_| !out_of_order && (stage.is_some() || !counts_steps));
+        // An elapsed chart from the beginning of the replay does not belong on the step axis.
+        if replay_elapsed.is_some()
+            && counts_steps
+            && self.series_stages.is_empty()
+            && !self.series.is_empty()
+        {
+            self.series.clear();
+            self.series_widths.clear();
+            self.first_series_stages.clear();
+            self.series_rev += 1;
+        }
+        let on_axis = !out_of_order && (stage.is_some() || !counts_steps);
+        let x = x.filter(|_| on_axis);
+        let plot_x = x.or(replay_elapsed.filter(|_| on_axis));
         let coordinated = record.contains_key("step") && !out_of_order;
         // In the order printed, so a new table's columns read as the run wrote them.
         let mut cells = Map::new();
@@ -884,7 +936,7 @@ impl Snapshot {
                     }
                     self.latest.insert(name.clone(), value.clone());
                     self.record_metric(name, x, value);
-                    let Some(x) = x else {
+                    let Some(x) = plot_x else {
                         continue;
                     };
                     let first_stage = self.phases.last().map(|phase| phase.occurrence);
@@ -1157,7 +1209,14 @@ impl Snapshot {
         );
     }
 
-    fn detect(&mut self, text: &str, now: i64, observed: bool, row_bytes: &mut usize) {
+    fn detect(
+        &mut self,
+        text: &str,
+        now: i64,
+        observed: bool,
+        row_bytes: &mut usize,
+        replay_elapsed: Option<f64>,
+    ) {
         let line = message(text.trim());
         let has_bar = line.contains('|');
         let text = line.rsplit_once('|').map_or(line, |(_, tail)| tail.trim());
@@ -1242,7 +1301,7 @@ impl Snapshot {
         if let Some(time) = time {
             record.insert("t".into(), Value::from(time));
         }
-        self.record(record, now, observed, "detected", row_bytes);
+        self.record(record, now, observed, "detected", row_bytes, replay_elapsed);
     }
 }
 

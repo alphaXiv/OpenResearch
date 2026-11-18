@@ -8,6 +8,7 @@ use orx_signals::{Config, Patterns, Snapshot};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::time::Duration;
 
 fn collection_lock(path: &Path) -> Result<Arc<tokio::sync::Mutex<()>>> {
     static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<tokio::sync::Mutex<()>>>>> = OnceLock::new();
@@ -128,9 +129,21 @@ pub(crate) async fn collect_kept(
     now: i64,
     as_of: i64,
     deadline: tokio::time::Instant,
+    run_duration: Option<Duration>,
     desired: impl Fn() -> Result<Config>,
 ) -> Result<bool> {
-    collect_from(data, None, run, true, now, Some((as_of, deadline)), desired).await
+    let kept = KeptFold {
+        as_of,
+        deadline,
+        run_duration,
+    };
+    collect_from(data, None, run, true, now, Some(kept), desired).await
+}
+
+struct KeptFold {
+    as_of: i64,
+    deadline: tokio::time::Instant,
+    run_duration: Option<Duration>,
 }
 
 async fn page(
@@ -225,7 +238,7 @@ async fn collect_from(
     run: &WatchedRun,
     terminal: bool,
     now: i64,
-    kept: Option<(i64, tokio::time::Instant)>,
+    kept: Option<KeptFold>,
     desired: impl Fn() -> Result<Config>,
 ) -> Result<bool> {
     validate_run(&run.id)?;
@@ -326,14 +339,31 @@ async fn collect_from(
         return Ok(false);
     };
     let identity: String = ident.clone().into();
+    let seconds_per_byte = match (kept.as_ref().and_then(|k| k.run_duration), len) {
+        (Some(duration), Some(len))
+            if len > 0
+                && crate::commands::up::api_v2::kept_log(data, &run.id)?
+                    .last()
+                    .is_some_and(|range| range.eof) =>
+        {
+            Some(duration.as_secs_f64() / len as f64)
+        }
+        _ => None,
+    };
     let mut old = held.clone();
-    let reconfigured = held.as_ref().is_some_and(|held| held.config_hash != hash);
+    let refolding = held.as_ref().is_some_and(|held| {
+        held.config_hash != hash
+            || seconds_per_byte.is_some()
+                && !held.latest.is_empty()
+                && held.series.is_empty()
+                && held.phases.iter().all(|phase| phase.done.is_none())
+    });
     let mut resume = match &held {
-        Some(held) => !reconfigured && continues(data, backend, run, held, &ident, len).await?,
+        Some(held) => !refolding && continues(data, backend, run, held, &ident, len).await?,
         None => false,
     };
     if let Some(mut held) = held.clone().filter(|held| {
-        !resume && !reconfigured && kept.is_some() && held.has_signals() && !rebuilding(held)
+        !resume && !refolding && kept.is_some() && held.has_signals() && !rebuilding(held)
     }) {
         // The kept bytes are not the log the held checkpoint read: it stands, read no further.
         if desired()? != config {
@@ -361,13 +391,14 @@ async fn collect_from(
     // A fold the laptop continues keeps the clock the checkpoint was written on.
     let offset = clock(data, &run.id)?.map_or(0, |(host, laptop)| host - laptop);
     let folded_at = now + offset;
-    let kept = kept.map(|(as_of, deadline)| (as_of + offset, deadline));
+    // A kept log ended with the run; a page read carries no time the log last changed.
+    let end = kept.as_ref().map_or(folded_at, |kept| kept.as_of + offset);
     let mut snapshot = if resume {
         old.unwrap()
     } else {
         Snapshot::new(&run.id, &identity, &uuid::Uuid::new_v4().to_string())
     };
-    if !resume && !reconfigured && held.as_ref().is_some_and(Snapshot::has_signals) {
+    if !resume && !refolding && held.as_ref().is_some_and(Snapshot::has_signals) {
         note_replaced(&mut snapshot, len.unwrap_or(0));
     }
     let patterns = (!config.patterns.is_empty())
@@ -440,23 +471,23 @@ async fn collect_from(
                 snapshot.coverage.add_reason("missing_suffix");
             }
         }
-        snapshot
-            .feed(&bytes, terminal && eof, folded_at, observed)
-            .map_err(|e| anyhow!(e))?;
+        match seconds_per_byte {
+            Some(scale) => snapshot.feed_replay(&bytes, terminal && eof, folded_at, scale),
+            None => snapshot.feed(&bytes, terminal && eof, folded_at, observed),
+        }
+        .map_err(|e| anyhow!(e))?;
 
         // A kept fold is local work: it yields at its deadline instead of holding up other runs,
         // and publishes once per pass. A fetched page is published as it lands.
         let stop = eof
-            || match kept {
-                Some((_, deadline)) => tokio::time::Instant::now() >= deadline,
+            || match &kept {
+                Some(kept) => tokio::time::Instant::now() >= kept.deadline,
                 None => read == 4,
             };
         if !stop && kept.is_some() {
             tokio::task::yield_now().await;
             continue;
         }
-        // A kept log ended with the run; a page read carries no time the log last changed.
-        let end = kept.map_or(folded_at, |(as_of, _)| as_of);
         if eof {
             snapshot.remove_reason("catching_up");
             snapshot.reached_end(end);
@@ -870,7 +901,10 @@ mod collection_tests {
         as_of: i64,
         deadline: tokio::time::Instant,
     ) -> Result<bool> {
-        super::collect_kept(data, run, now, as_of, deadline, || Ok(Config::default())).await
+        super::collect_kept(data, run, now, as_of, deadline, None, || {
+            Ok(Config::default())
+        })
+        .await
     }
 
     #[test]

@@ -893,11 +893,10 @@ impl Runtime {
                 return Ok(());
             };
             let data_as_of = run.ended_at.unwrap_or(self.engine.clock.wall_ms());
-            let kept_as_of = run.ended_at.unwrap_or(run.updated_at);
-            let run = WatchedRun { id: run.id, handle };
             if refold {
-                return self.refold_signals(&run, kept_as_of).await;
+                return self.refold_signals(&run, handle).await;
             }
+            let run = WatchedRun { id: run.id, handle };
             let backend = self.backend_for(&Key::of_handle(&run.handle)?)?;
             if !self.store()?.log_output_collected(run_id)? {
                 if !self
@@ -976,7 +975,20 @@ impl Runtime {
         collected
     }
 
-    async fn refold_signals(&self, run: &WatchedRun, as_of: i64) -> Result<()> {
+    async fn refold_signals(&self, row: &StoredRun, handle: Handle) -> Result<()> {
+        let as_of = row.ended_at.unwrap_or(row.updated_at);
+        let started = self
+            .store()?
+            .engine_run_state(&row.id)?
+            .and_then(|state| state.started_at)
+            .unwrap_or(row.created_at);
+        let duration = u64::try_from(as_of.saturating_sub(started))
+            .ok()
+            .map(Duration::from_millis);
+        let run = WatchedRun {
+            id: row.id.clone(),
+            handle,
+        };
         let desired = || self.store()?.run_patterns(&run.id);
         let config = desired()?;
         let pass = async {
@@ -985,10 +997,11 @@ impl Runtime {
             }
             super::adapters::signals::collect_kept(
                 &self.data_dir,
-                run,
+                &run,
                 self.engine.clock.wall_ms(),
                 as_of,
                 tokio::time::Instant::now() + crate::config::paced(Duration::from_secs(2)),
+                duration,
                 desired,
             )
             .await
@@ -1057,6 +1070,7 @@ impl Runtime {
                         now,
                         data_as_of,
                         deadline,
+                        None,
                         desired,
                     );
                     match pass.await {
@@ -3842,7 +3856,9 @@ mod tests {
         let runtime = gone_host(dir.path());
         let mut log = b"::orx:: {\"m\":{\"existing\":1}}\n".to_vec();
         log.resize(768 * 1024, b'\n');
-        log.extend_from_slice(b"METRIC score 42\n");
+        for score in 35..=42 {
+            log.extend_from_slice(format!("METRIC score {score}\n").as_bytes());
+        }
         keep(dir.path(), &[(0, &log, true)]);
         for _ in 0..8 {
             if settled(&runtime) {
@@ -3925,6 +3941,20 @@ mod tests {
         let snapshot = runtime.held_signals("run").unwrap().unwrap();
         assert_eq!(snapshot.latest["score"].as_f64(), Some(42.0));
         assert!(settled(&runtime));
+        let (_, monitor) = {
+            let store = runtime.store().unwrap();
+            let run = store.get_run("run").unwrap().unwrap();
+            super::super::monitor::monitor(&store, &run).unwrap()
+        };
+        assert_eq!(monitor["x"]["name"], "elapsed");
+        let points = monitor["series"]["score"].as_array().unwrap();
+        assert_eq!(points.len(), 8);
+        for (point, value) in points.iter().zip(35..=42) {
+            assert_eq!(point[1].as_f64(), Some(f64::from(value)));
+        }
+        assert!(points
+            .windows(2)
+            .all(|pair| { pair[0][0].as_f64().unwrap() < pair[1][0].as_f64().unwrap() }));
 
         {
             let store = runtime.store().unwrap();
@@ -4262,6 +4292,7 @@ mod tests {
             6000,
             6000,
             tokio::time::Instant::now(),
+            None,
             || Ok(orx_signals::Config::default()),
         )
         .await
