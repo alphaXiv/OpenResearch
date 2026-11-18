@@ -228,7 +228,8 @@
   /* Sits above the highlighted text, so a light translucent veil keeps selected syntax readable.
      Literal rgb, not color-mix: macOS 11 WebKit would drop the selection entirely. */
   --editor-selection: rgb(22 22 22 / 12%);
-  /* Shared reading width for chat, markdown, and plan surfaces. */
+  /* Shared reading width for chat, markdown, and plan surfaces. The appearance
+     setting may widen it or remove the cap. */
   --readable-col: 840px;
   --border-strong: var(--border);
   --focus: color-mix(in oklab, var(--text) 60%, var(--base));
@@ -253,6 +254,16 @@
   --syntax-cyan: #56b6c2;
   --syntax-purple: #a626a4;
   --syntax-blue: #4078f2;
+}
+
+/* The chat width setting. `full` keeps a fixed side offset instead of a cap, so
+   a wide pane (or a zoomed-out page) widens the text rather than the margins. */
+:root[data-chat-width="wide"] {
+  --readable-col: 1100px;
+}
+
+:root[data-chat-width="full"] {
+  --readable-col: calc(100% - 4rem);
 }
 
 /* Outranks the bare `:root { color-scheme: light dark }` in PDF.js's stylesheet. */
