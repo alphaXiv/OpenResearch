@@ -124,6 +124,9 @@ for line in sys.stdin:
             sys.exit(7)
         if mode == "crash-init":
             sys.exit(3)
+        if mode == "shapeless-init":
+            reply(request, dict(agentCapabilities={}))
+            continue
         if mode == "stalled-init":
             signal_stall()
             continue

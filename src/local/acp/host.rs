@@ -7,7 +7,6 @@ use std::time::Instant;
 use agent_client_protocol::schema::{v1::RequestPermissionRequest, ProtocolVersion};
 use agent_client_protocol::{Agent, ConnectionTo, Responder, UntypedMessage};
 use futures::{future, AsyncBufReadExt, StreamExt};
-use serde::de::IgnoredAny;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
@@ -619,9 +618,10 @@ impl Host {
         self.clients.lock().unwrap().retain(|_, slot| {
             Arc::strong_count(slot) > 1
                 || slot.try_lock().map_or(true, |saved| {
+                    // Kept until cleanup ends, so the chat cannot relaunch beside a stopping agent.
                     saved
                         .as_ref()
-                        .is_some_and(|client| client.closed.borrow().is_none())
+                        .is_some_and(|client| client.closed.has_changed().is_ok())
                 })
         });
     }
@@ -787,7 +787,7 @@ pub(super) async fn spawn(
             move |line| {
                 let discarded = match &line {
                     Ok(text) if text.trim().is_empty() => return future::ready(None),
-                    Ok(text) if serde_json::from_str::<IgnoredAny>(text).is_err() => text.as_str(),
+                    Ok(text) if serde_json::from_str::<Value>(text).is_err() => text.as_str(),
                     Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
                         "(a line that is not UTF-8)"
                     }
@@ -1023,7 +1023,12 @@ pub(super) async fn spawn(
                         anyhow!(error).context("closed its connection")
                     }
                     Err(error) => {
-                        let cause = error.data.as_ref().and_then(Value::as_str).unwrap_or(&error.message);
+                        // The SDK nests a cause under `data.data` (a failed task) or `data.error` (a bad reply).
+                        let mut data = error.data.as_ref();
+                        while let Some(Value::Object(fields)) = data {
+                            data = fields.get("data").or_else(|| fields.get("error"));
+                        }
+                        let cause = data.and_then(Value::as_str).unwrap_or(&error.message);
                         let message = format!("connection failed: {cause}");
                         anyhow!(error).context(message)
                     }
@@ -1036,11 +1041,6 @@ pub(super) async fn spawn(
             Some(error) => format!("{} {error}.", launch.name),
             None => format!("{} was stopped.", launch.name),
         }));
-        let observed_exit = match process.child.try_wait() {
-            Ok(Some(status)) => status.to_string(),
-            Ok(None) => "still running when the connection ended".into(),
-            Err(error) => format!("could not read the exit status: {error}"),
-        };
         task_io.cancel_permissions();
         task_io.events.lock().unwrap().take();
         // Windows has no sessions to tell detached commands apart.
@@ -1050,7 +1050,7 @@ pub(super) async fn spawn(
             crate::local::chat::kill_agent_tree(process.id.take()).await;
         }
         let _ = process.child.kill().await;
-        let cleanup_exit = match process.child.wait().await {
+        let exit = match process.child.wait().await {
             Ok(status) => status.to_string(),
             Err(error) => format!("could not reap the process: {error}"),
         };
@@ -1102,8 +1102,7 @@ pub(super) async fn spawn(
                 "arguments": launch.arguments,
                 "pid": agent_pid,
                 "error": format!("{error:#}"),
-                "exitBeforeCleanup": observed_exit,
-                "exitAfterCleanup": cleanup_exit,
+                "exit": exit,
                 "stderr": stderr,
                 "stderrReadError": stderr_read.and_then(Result::err),
                 "discardedStdout": discarded_stdout.lock().unwrap().trim_end(),
@@ -1429,8 +1428,7 @@ mod tests {
         assert!(stderr.ends_with("代理 final-startup-cause"));
         assert!(error.contains("代理 final-startup-cause"), "{error}");
         assert!(!error.contains("xxxx"), "{error}");
-        assert!(log["exitBeforeCleanup"].is_string());
-        assert!(log["exitAfterCleanup"].is_string());
+        assert!(log["exit"].is_string());
         assert!(log["stderrReadError"].is_null());
         #[cfg(unix)]
         {
@@ -2074,7 +2072,7 @@ exec "$@""#
     #[tokio::test]
     async fn failed_initialization_and_process_death_are_explicit() {
         let host = Arc::new(Host::default());
-        for mode in ["incompatible", "auth-init", "crash-init"] {
+        for mode in ["incompatible", "auth-init", "crash-init", "shapeless-init"] {
             let error = host
                 .get(mode, &definition(mode), &std::env::temp_dir())
                 .await
@@ -2084,6 +2082,9 @@ exec "$@""#
             if mode == "incompatible" {
                 assert!(error.contains("stable v1"), "{error}");
                 assert!(error.contains("Incompatible ACP protocol"), "{error}");
+            }
+            if mode == "shapeless-init" {
+                assert!(error.contains("protocolVersion"), "{error}");
             }
         }
         let client = new_client(&host, "crash").await;
