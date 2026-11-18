@@ -24,6 +24,8 @@ const TICK: Duration = Duration::from_millis(250);
 /// How long after the child's exit a stop still kills its group: later, the group id may name
 /// a recycled process.
 const LEFTOVER_WINDOW: Duration = Duration::from_secs(30);
+/// How long a new attachment waits for the previous one to finish what it sent.
+const TAKEOVER_GRACE: Duration = Duration::from_secs(1);
 const CURSOR_QUERY: &[u8] = b"\x1b[6n";
 
 pub(crate) struct Spawned {
@@ -420,6 +422,18 @@ fn attach(shared: &Arc<Shared>, mut stream: TcpStream, hello: Hello) {
     // Taken with the switch, so every cursor query before `next` has been answered.
     let (generation, welcome) = {
         let mut state = shared.lock();
+        // What a predecessor sent before letting go comes first; one still holding on is cut off.
+        let deadline = Instant::now() + TAKEOVER_GRACE;
+        while state.stream.is_some() {
+            let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                break;
+            };
+            state = shared
+                .changed
+                .wait_timeout(state, left)
+                .unwrap_or_else(|p| p.into_inner())
+                .0;
+        }
         shared.answer_cursor_query(&mut state);
         state.generations += 1;
         if let Some(previous) = state.stream.replace(registered) {

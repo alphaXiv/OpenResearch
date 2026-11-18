@@ -418,6 +418,29 @@ fn a_new_attachment_replaces_the_old_one() {
     new.read_exit();
 }
 
+#[test]
+fn a_successor_hears_after_everything_its_predecessor_sent() {
+    let dir = scratch();
+    let endpoint = start(&dir, &spec("cat", pipes(), LOSSLESS, 60));
+    let mut old = Link::attach(&endpoint, 0);
+    old.input(b"first\n");
+    let (output, _) = old.read_until(|output| contains(output, "first"));
+    // Enough that the keeper is still reading them when the successor says hello.
+    let filler = [b'x'; 4096];
+    for _ in 0..64 {
+        old.ack(output.len() as u64);
+        old.input(&filler);
+    }
+    old.input(b"\nlast\n");
+    drop(old);
+
+    let mut new = Link::attach(&endpoint, 0);
+    assert_eq!(new.welcome.start, output.len() as u64);
+    new.read_until(|output| contains(output, "last"));
+    new.control(&Control::Stop);
+    new.read_exit();
+}
+
 #[cfg(unix)]
 #[test]
 fn a_dead_keeper_takes_its_child_with_it() {
