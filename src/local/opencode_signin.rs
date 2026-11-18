@@ -92,7 +92,7 @@ impl Drop for Server {
 async fn catalog(server: &Server, resource: &str) -> Result<Value> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
-        if !server.endpoint.plugins_active().await? {
+        if !server.endpoint.plugins_active(deadline).await? {
             if tokio::time::Instant::now() >= deadline {
                 return Err(anyhow!(
                     "OpenCode's plugins didn't start within 30 seconds, so its sign-ins are incomplete. Re-check OpenCode."

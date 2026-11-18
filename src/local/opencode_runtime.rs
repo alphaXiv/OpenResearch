@@ -205,13 +205,14 @@ pub(crate) struct AgentEndpoint {
 }
 
 impl AgentEndpoint {
-    pub(crate) async fn check_health(&mut self) -> Result<bool> {
+    /// Whether the server answers as OpenCode 2; on a busy machine each request may take seconds, up to `deadline`.
+    pub(crate) async fn check_health(&mut self, deadline: tokio::time::Instant) -> Result<bool> {
         // The readiness route moved: /api/health (<=2.0.3) -> /api/status
         // (2.0.4-2.0.5) -> /api/info (2.0.6+). Unknown routes can serve SPA
         // HTML with a 200, so require JSON `version`; /api/health answering
         // marks the pre-2.0.4 layout (export/generate off /api/experimental).
         for path in ["/api/info", "/api/status", "/api/health"] {
-            let response = self.get(path).send().await?;
+            let response = self.get(path, deadline).send().await?;
             if response.status() == reqwest::StatusCode::NOT_FOUND {
                 continue;
             }
@@ -231,25 +232,36 @@ impl AgentEndpoint {
 
     /// Whether OpenCode's plugins have activated. Until then its integration list lacks the sign-ins plugins add,
     /// such as GitHub Copilot's, and shows generic API keys instead. A version with no plugin list counts as active.
-    pub async fn plugins_active(&self) -> Result<bool> {
-        let response = self.get("/api/plugin").send().await?;
-        let status = response.status();
-        if status == reqwest::StatusCode::NOT_FOUND {
-            return Ok(true);
+    /// The first request boots the server's location, which takes seconds on a busy machine, so only `deadline`
+    /// bounds the wait; no answer by then counts as not yet active.
+    pub async fn plugins_active(&self, deadline: tokio::time::Instant) -> Result<bool> {
+        let answer = async {
+            let response = self.get("/api/plugin", deadline).send().await?;
+            let status = response.status();
+            if status == reqwest::StatusCode::NOT_FOUND {
+                return Ok(true);
+            }
+            if status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+                return Ok(false);
+            }
+            let body: serde_json::Value = response.error_for_status()?.json().await?;
+            Ok::<_, reqwest::Error>(
+                body["data"]
+                    .as_array()
+                    .is_some_and(|plugins| !plugins.is_empty()),
+            )
         }
-        if status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
-            return Ok(false);
+        .await;
+        match answer {
+            Err(error) if error.is_timeout() => Ok(false),
+            answer => Ok(answer?),
         }
-        let body: serde_json::Value = response.error_for_status()?.json().await?;
-        Ok(body["data"]
-            .as_array()
-            .is_some_and(|plugins| !plugins.is_empty()))
     }
 
-    fn get(&self, path: &str) -> reqwest::RequestBuilder {
+    fn get(&self, path: &str, deadline: tokio::time::Instant) -> reqwest::RequestBuilder {
         self.client
             .get(format!("{}{path}", self.base_url))
-            .timeout(Duration::from_secs(2))
+            .timeout(deadline.saturating_duration_since(tokio::time::Instant::now()))
     }
 
     pub fn v2_export_path(&self, session: &str) -> String {
@@ -394,7 +406,7 @@ async fn await_ready(
         if let Some(status) = exited()? {
             return Err(anyhow!("OpenCode exited during startup ({status})"));
         }
-        if endpoint.check_health().await.unwrap_or(false) {
+        if endpoint.check_health(deadline).await.unwrap_or(false) {
             return Ok(endpoint);
         }
         if tokio::time::Instant::now() >= deadline {
@@ -687,6 +699,18 @@ mod tests {
         for (app, ready, legacy) in [
             // 2.0.6+: /api/info only.
             (Router::new().route("/api/info", get(info)), true, false),
+            // A busy machine answers after seconds.
+            (
+                Router::new().route(
+                    "/api/info",
+                    get(move || async move {
+                        tokio::time::sleep(Duration::from_millis(2500)).await;
+                        info().await
+                    }),
+                ),
+                true,
+                false,
+            ),
             // 2.0.4-2.0.5: /api/status only.
             (Router::new().route("/api/status", get(status)), true, false),
             // 2.0.0-2.0.3: /api/health only, the legacy route layout.
@@ -737,7 +761,8 @@ mod tests {
                 legacy_v2_api: false,
             };
             let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-            assert_eq!(endpoint.check_health().await.unwrap(), ready);
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            assert_eq!(endpoint.check_health(deadline).await.unwrap(), ready);
             assert_eq!(endpoint.legacy_v2_api, legacy);
             let prefix = if legacy { "/api" } else { "/api/experimental" };
             assert_eq!(

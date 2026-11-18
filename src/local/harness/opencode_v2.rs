@@ -1410,12 +1410,13 @@ async fn discover_models_within(
 ) -> Result<(Value, Value)> {
     let mut catalog = None;
     let mut plugins_pending = false;
-    let result = tokio::time::timeout(timeout, async {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let result = tokio::time::timeout_at(deadline, async {
         if endpoint.legacy_v2_api {
             post(endpoint, "/api/plugin/await-activation", &json!({})).await?;
         }
         loop {
-            if !endpoint.legacy_v2_api && !endpoint.plugins_active().await? {
+            if !endpoint.legacy_v2_api && !endpoint.plugins_active(deadline).await? {
                 plugins_pending = true;
                 tokio::time::sleep(retry).await;
                 continue;
@@ -1968,6 +1969,47 @@ mod tests {
                 assert_eq!(error, "OpenCode model discovery timed out");
             } else {
                 assert!(error.starts_with("OpenCode plugins did not finish activating"));
+            }
+        }
+    }
+
+    /// The first `/api/plugin` boots OpenCode's location; on a busy machine it answers after
+    /// seconds, and only the discovery deadline may give up on it.
+    #[tokio::test]
+    async fn discovery_waits_for_a_slow_first_plugin_answer() {
+        use axum::{routing::get, Json, Router};
+
+        for (answer_after, budget) in [
+            (Duration::from_millis(2500), Duration::from_secs(10)),
+            (Duration::from_secs(60), Duration::from_millis(200)),
+        ] {
+            let app = Router::new()
+                .route(
+                    "/api/plugin",
+                    get(move || async move {
+                        tokio::time::sleep(answer_after).await;
+                        Json(json!({"data":[{"id":"fixture"}]}))
+                    }),
+                )
+                .route(
+                    "/api/model",
+                    get(|| async { Json(json!({"data":[{"id":"model"}]})) }),
+                )
+                .route(
+                    "/api/integration",
+                    get(|| async { Json(json!({"data":[]})) }),
+                );
+            let (endpoint, server) = catalog_server(app, false).await;
+            let result = discover_models_within(&endpoint, budget, RETRY).await;
+            server.abort();
+            if answer_after < budget {
+                assert_eq!(result.unwrap().0["data"][0]["id"], "model");
+            } else {
+                let error = result.unwrap_err().to_string();
+                assert!(
+                    error.starts_with("OpenCode plugins did not finish activating"),
+                    "{error}"
+                );
             }
         }
     }

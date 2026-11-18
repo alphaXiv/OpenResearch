@@ -1099,9 +1099,10 @@ impl AgentHost {
         drop(kept.take_stdout());
         let keeper = kept.handle();
         let mut endpoint = resident.endpoint()?;
-        let answered = tokio::time::timeout(ADOPT_TIMEOUT, async {
+        let deadline = tokio::time::Instant::now() + ADOPT_TIMEOUT;
+        let answered = tokio::time::timeout_at(deadline, async {
             while keeper.try_wait().is_none() {
-                if endpoint.check_health().await.unwrap_or(false) {
+                if endpoint.check_health(deadline).await.unwrap_or(false) {
                     return true;
                 }
                 tokio::time::sleep(Duration::from_millis(200)).await;
