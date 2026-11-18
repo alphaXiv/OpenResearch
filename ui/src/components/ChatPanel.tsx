@@ -2809,10 +2809,12 @@ function TurnStatusRow({
     : reportedCause && Object.hasOwn(FAILURE_LABEL, reportedCause) ? reportedCause
     : isModelAccessLimitPart(part) ? "model_unavailable" : usageLimited ? "usage_limit" : temporaryApiError ? "network" : undefined;
   const agent = input && failure?.agent(input);
-  const label = cause ? FAILURE_LABEL[cause](agent && (agent.profile?.name ?? harnessDisplayName(agent))) : m.chat_turn_incomplete();
+  const errorMessage = cleanToolError(part.state?.error || "");
+  const errorHeadline = errorMessage.split("\n", 1)[0].trim();
+  const label = cause ? FAILURE_LABEL[cause](agent && (agent.profile?.name ?? harnessDisplayName(agent)))
+    : errorHeadline || m.chat_turn_incomplete();
   const Icon = cause === "network" ? WifiOff : cause === "overloaded" ? Hourglass : cause === "sign_in" ? LogIn : cause === "usage_limit" ? Gauge : TriangleAlert;
   const quiet = cause === "network" || cause === "overloaded";
-  const errorMessage = cleanToolError(part.state?.error || "");
   const fixLabel = cause && FIX_LABEL[cause];
   const fix = fixLabel && input && failure?.fix(cause, input);
   // While the agent is signed out, only signing in, here or in the composer, sends the turn again.
@@ -3996,7 +3998,10 @@ export const Message = memo(function Message({
   }
   const responses = responseMessages ?? [message];
   const localErrors = responses.filter((turn) => turn.id.startsWith(`${LOCAL_PREFIX}senderr-`));
-  const responseTurns = responses.filter((turn) => !turn.id.startsWith(`${LOCAL_PREFIX}senderr-`)).map(splitResponseTurn);
+  const sent = responses.filter((turn) => !turn.id.startsWith(`${LOCAL_PREFIX}senderr-`));
+  const responseTurns = sent.map(splitResponseTurn);
+  let latestResponse = sent.length - 1;
+  while (latestResponse > 0 && !startsTurn(sent[latestResponse])) latestResponse--;
   const turns = responseTurns.map((turn) => turn.message);
   const response = splitResponseParts(turns, predictTextTail, replies);
   const predictingAnswer = predictTextTail && response.answerMessageId === message.id;
@@ -4022,7 +4027,7 @@ export const Message = memo(function Message({
         onOpenSubagent,
         predictTextTail,
       }} />}
-      {responseTurns.map(({ message: turn, turnStatus, usageLimit, temporaryApiError }) => turnStatus && (
+      {responseTurns.map(({ message: turn, turnStatus, usageLimit, temporaryApiError }, index) => turnStatus && (
         <TurnStatusRow
           key={turn.id}
           part={turnStatus}
@@ -4030,8 +4035,8 @@ export const Message = memo(function Message({
           temporaryApiError={temporaryApiError}
           busy={busy}
           recovering={recoveringTurnId === turnStatus.state?.input?.turnId}
-          onRecover={onRecover}
-          failure={failure}
+          onRecover={index === latestResponse ? onRecover : undefined}
+          failure={index === latestResponse ? failure : undefined}
         />
       ))}
       {localErrors.map((turn) => (
@@ -4245,6 +4250,17 @@ function AssistantTurn({ messages, response, options }: {
       </div>
     </>
   );
+}
+
+const TURN_MARKER_TOOLS = new Set(["provider_switch", "compacted"]);
+
+/** Whether `message` belongs to a turn that takes an earlier failed turn's place: shell
+ * exchanges, local send errors, agent switches, compactions and standalone approvals start none. */
+function startsTurn(message: ChatMessage) {
+  if (message.id.startsWith(LOCAL_PREFIX)) return false;
+  if (message.role === "user") return !shellExchangePart(message);
+  return !message.parts.every((part) => (part.tool && TURN_MARKER_TOOLS.has(part.tool))
+    || (part.type === "prompt" && part.prompt?.kind === "permission"));
 }
 
 function shellExchangePart(message: ChatMessage): ChatPart | null {
@@ -4871,6 +4887,9 @@ const Transcript = memo(function Transcript({
     },
     [messages, activePermissionId],
   );
+  // A later agent turn takes a failed turn's place; shell exchanges and local send errors start none.
+  let latestTurnRow = visibleMessages.length - 1;
+  while (latestTurnRow > 0 && !visibleMessages[latestTurnRow].some(startsTurn)) latestTurnRow--;
   // Each delegate sits under the turn that started it: the last row begun before it was.
   const delegatesByRow = useMemo(() => {
     const rows = new Map<number, DelegateRow[]>();
@@ -5150,6 +5169,7 @@ const Transcript = memo(function Transcript({
         // A session owns one turn slot, so one recovery disables every status
         // card until its durable admission resolves.
         const recoveryDisabled = busy || recoveringTurnId !== null;
+        const latest = item.index === latestTurnRow;
         return (
           <div
             key={rowId}
@@ -5208,8 +5228,8 @@ const Transcript = memo(function Transcript({
             onOpenSubagent={onOpenSubagent}
             busy={recoveryDisabled}
             recoveringTurnId={recoveringTurnId}
-            onRecover={onRecover}
-            failure={failure}
+            onRecover={latest ? onRecover : undefined}
+            failure={latest ? failure : undefined}
             skills={skills}
             predictTextTail={busy && m === activeMessage && m.role === "assistant"}
           />
