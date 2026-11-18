@@ -5843,34 +5843,59 @@ fn spawn_claude_auth_monitor(
 
 // --- env var settings -------------------------------------------------------
 
-/// Everything in `~/.openresearch/env`, values masked. `inProcessEnv` flags
-/// keys that are also set in orx up's own environment (which wins at runtime).
-fn env_settings_json() -> Value {
-    let vars: Vec<Value> = crate::config::list_synced_env()
-        .iter()
-        .map(|(key, value)| {
-            let plain = crate::local::trackio::plain_value(key, value);
-            json!({
-                "key": key,
-                "maskedValue": mask_token(plain.as_deref().unwrap_or(value)),
-                "value": plain,
-                "inProcessEnv": std::env::var_os(key).is_some(),
-            })
-        })
-        .collect();
-    json!({ "vars": vars })
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EnvQuery {
+    project_id: Option<String>,
 }
 
-async fn env_settings() -> ApiResult {
-    tokio::task::spawn_blocking(|| Ok(Json(env_settings_json())))
+/// `~/.openresearch/env`, values masked, and with a project its own variables.
+/// `inProcessEnv` flags keys also set in orx up's own environment, which wins
+/// for agents.
+fn env_settings_json(project_id: Option<&str>) -> Result<Value> {
+    let store = Store::open()?;
+    let descriptions = store.env_descriptions()?;
+    let row = |key: &str, value: &str, description: Option<&String>| {
+        let plain = crate::local::trackio::plain_value(key, value);
+        json!({
+            "key": key,
+            "maskedValue": mask_token(plain.as_deref().unwrap_or(value)),
+            "value": plain,
+            "description": description,
+            "inProcessEnv": std::env::var_os(key).is_some(),
+        })
+    };
+    let vars: Vec<Value> = crate::config::list_synced_env()
+        .iter()
+        .map(|(key, value)| row(key, value, descriptions.get(key)))
+        .collect();
+    let mut body = json!({ "vars": vars });
+    if let Some(project_id) = project_id {
+        body["projectVars"] = store
+            .project_env(project_id)?
+            .iter()
+            .map(|var| row(&var.key, &var.value, var.description.as_ref()))
+            .collect();
+    }
+    Ok(body)
+}
+
+async fn env_settings(Query(scope): Query<EnvQuery>) -> ApiResult {
+    tokio::task::spawn_blocking(move || Ok(Json(env_settings_json(scope.project_id.as_deref())?)))
         .await
         .map_err(|e| ApiError::from(anyhow!("env task failed: {e}")))?
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SetEnvVarReq {
     key: String,
-    value: String,
+    /// Absent keeps the saved value, to change only the description.
+    value: Option<String>,
+    /// Absent keeps the saved description; empty clears it.
+    description: Option<String>,
+    /// Saves the variable for this project instead of every project.
+    project_id: Option<String>,
 }
 
 fn valid_env_key(key: &str) -> bool {
@@ -5879,37 +5904,75 @@ fn valid_env_key(key: &str) -> bool {
         && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-async fn set_env_var(Json(req): Json<SetEnvVarReq>) -> ApiResult {
-    let key = req.key.trim().to_string();
-    let value = req.value.trim().to_string();
-    if !valid_env_key(&key) {
-        return Err(bad_request(
-            "key must be letters, digits or _, not starting with a digit",
+/// Why `key` cannot be saved, in words for the user.
+pub(super) fn env_key_error(key: &str) -> Option<String> {
+    if !valid_env_key(key) {
+        return Some(format!(
+            "{key} is not a variable name: use letters, digits or _, not starting with a digit."
         ));
     }
-    if crate::local::shell_env::IMPORTED.contains(&key.as_str()) {
-        return Err(bad_request(format!(
-            "{key} is reserved by OpenResearch. To change it, set {key} in your shell and restart OpenResearch."
-        )));
+    crate::local::shell_env::IMPORTED.contains(&key).then(|| {
+        format!("{key} is reserved by OpenResearch. To change it, set {key} in your shell and restart OpenResearch.")
+    })
+}
+
+async fn set_env_var(Json(req): Json<SetEnvVarReq>) -> ApiResult {
+    let key = req.key.trim().to_string();
+    if let Some(error) = env_key_error(&key) {
+        return Err(bad_request(error));
     }
-    if value.is_empty() {
+    let value = req.value.map(|value| value.trim().to_string());
+    if value.as_deref() == Some("") {
         return Err(bad_request("value is required"));
     }
+    if value.is_none() && req.description.is_none() {
+        return Err(bad_request("give a value, a description, or both"));
+    }
     tokio::task::spawn_blocking(move || {
-        crate::config::write_synced_env_var(&key, &value)?;
-        Ok(Json(env_settings_json()))
+        let store = Store::open()?;
+        let project = req.project_id.as_deref();
+        if let Some(project) = project {
+            if store.get_local_project(project)?.is_none() {
+                return Err(ApiError(StatusCode::NOT_FOUND, "project not found".into()));
+            }
+        }
+        let saved = match project {
+            Some(project) => store.project_env(project)?.iter().any(|var| var.key == key),
+            None => crate::config::synced_env_var(&key).is_some(),
+        };
+        if value.is_none() && !saved {
+            return Err(bad_request(format!("{key} has no value to describe yet")));
+        }
+        if let Some(value) = &value {
+            match project {
+                Some(project) => store.set_project_env(project, &key, value)?,
+                None => crate::config::write_synced_env_var(&key, value)?,
+            }
+        }
+        if let Some(description) = &req.description {
+            store.describe_env(project, &key, description, false)?;
+        }
+        Ok(Json(env_settings_json(project)?))
     })
     .await
     .map_err(|e| ApiError::from(anyhow!("env task failed: {e}")))?
 }
 
-async fn delete_env_var(Path(key): Path<String>) -> ApiResult {
+async fn delete_env_var(Path(key): Path<String>, Query(scope): Query<EnvQuery>) -> ApiResult {
     if !valid_env_key(&key) {
         return Err(bad_request("invalid key"));
     }
     tokio::task::spawn_blocking(move || {
-        crate::config::remove_synced_env_var(&key)?;
-        Ok(Json(env_settings_json()))
+        let store = Store::open()?;
+        let project = scope.project_id.as_deref();
+        match project {
+            Some(project) => store.delete_project_env(project, &key)?,
+            None => {
+                crate::config::remove_synced_env_var(&key)?;
+                store.describe_env(None, &key, "", false)?;
+            }
+        }
+        Ok(Json(env_settings_json(project)?))
     })
     .await
     .map_err(|e| ApiError::from(anyhow!("env task failed: {e}")))?
@@ -10622,13 +10685,15 @@ struct RespondReq {
     note: Option<String>,
     #[serde(default)]
     annotations: Vec<local::chat::TextAnnotation>,
+    #[serde(default)]
+    env: Vec<local::chat::env_request::EnvAnswer>,
 }
 
 fn default_true() -> bool {
     true
 }
 
-/// Answer an interactive prompt (plan / permission / question) on a session.
+/// Answer an interactive prompt (plan / permission / question / env) on a session.
 async fn respond_chat(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -10650,6 +10715,7 @@ async fn respond_chat(
                 .filter(|annotation| !annotation.text.trim().is_empty())
                 .collect(),
             from: None,
+            env: req.env,
         })
         .await
         .map_err(bad_request)?;
@@ -11113,6 +11179,90 @@ pub(crate) async fn spa(uri: Uri) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn variables_save_for_a_project_or_every_project_with_their_descriptions() {
+        let project = format!("proj_{}", uuid::Uuid::new_v4().simple());
+        let key = format!("ORX_TEST_API_{}", uuid::Uuid::new_v4().simple());
+        Store::open()
+            .unwrap()
+            .create_local_project(&crate::store::tests::local_project_fixture(&project))
+            .unwrap();
+        let set = |value: Option<&str>, description: Option<&str>, project_id: Option<&str>| {
+            set_env_var(Json(SetEnvVarReq {
+                key: key.clone(),
+                value: value.map(str::to_string),
+                description: description.map(str::to_string),
+                project_id: project_id.map(str::to_string),
+            }))
+        };
+        let row = |body: &Value, list: &str| {
+            body[list]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["key"] == key.as_str())
+                .cloned()
+        };
+
+        let error = set(None, Some("Where runs log"), Some(&project))
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST, "{}", error.1);
+        let error = set(Some("x"), None, Some("proj_missing"))
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, StatusCode::NOT_FOUND);
+
+        let Json(body) = set(Some("sweeps"), None, Some(&project)).await.unwrap();
+        assert!(
+            row(&body, "vars").is_none(),
+            "a project's variable stays out of every project's"
+        );
+        let Json(body) = set(None, Some("Where runs log"), Some(&project))
+            .await
+            .unwrap();
+        assert_eq!(
+            row(&body, "projectVars").unwrap()["description"],
+            "Where runs log"
+        );
+
+        let Json(body) = set(Some("everywhere"), Some("Shared key"), None)
+            .await
+            .unwrap();
+        assert_eq!(row(&body, "vars").unwrap()["description"], "Shared key");
+        assert!(body.get("projectVars").is_none());
+
+        let Json(body) = env_settings(Query(EnvQuery {
+            project_id: Some(project.clone()),
+        }))
+        .await
+        .unwrap();
+        assert!(row(&body, "vars").is_some() && row(&body, "projectVars").is_some());
+
+        let Json(body) = delete_env_var(
+            Path(key.clone()),
+            Query(EnvQuery {
+                project_id: Some(project.clone()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(row(&body, "projectVars").is_none());
+        assert!(
+            row(&body, "vars").is_some(),
+            "deleting the project's copy keeps every project's"
+        );
+        let Json(body) = delete_env_var(Path(key.clone()), Query(EnvQuery { project_id: None }))
+            .await
+            .unwrap();
+        assert!(row(&body, "vars").is_none());
+        assert!(!Store::open()
+            .unwrap()
+            .env_descriptions()
+            .unwrap()
+            .contains_key(&key));
+    }
 
     async fn event_text(events: Vec<Event>) -> String {
         let stream = futures::stream::iter(events.into_iter().map(Ok::<_, Infallible>));
