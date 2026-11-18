@@ -1873,6 +1873,7 @@
   "library_open_alphaxiv": "alphaXiv 열기",
   "chat_resize_composer": "메시지 상자 크기 조정",
   "chat_resize_composer_hint": "드래그하여 크기를 조정합니다. 두 번 클릭하여 재설정합니다.",
+  "chat_resize_question": "질문 크기 조정",
   "remote_machine_switcher": "머신 전환: {machine}",
   "remote_machine_switcher_status": "머신 전환: {machine} ({status})",
   "remote_machine_connected": "연결됨",

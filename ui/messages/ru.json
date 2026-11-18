@@ -1873,6 +1873,7 @@
   "library_open_alphaxiv": "Открыть alphaXiv",
   "chat_resize_composer": "Изменить размер поля сообщения",
   "chat_resize_composer_hint": "Перетащите, чтобы изменить размер. Дважды щёлкните, чтобы сбросить.",
+  "chat_resize_question": "Изменить размер вопроса",
   "remote_machine_switcher": "Переключить машину: {machine}",
   "remote_machine_switcher_status": "Переключить машину: {machine} ({status})",
   "remote_machine_connected": "Подключено",

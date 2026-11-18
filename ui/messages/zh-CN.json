@@ -1873,6 +1873,7 @@
   "library_open_alphaxiv": "打开 alphaXiv",
   "chat_resize_composer": "调整消息框大小",
   "chat_resize_composer_hint": "拖动以调整大小。双击以重置。",
+  "chat_resize_question": "调整问题大小",
   "remote_machine_switcher": "切换机器: {machine}",
   "remote_machine_switcher_status": "切换机器: {machine}（{status}）",
   "remote_machine_connected": "已连接",

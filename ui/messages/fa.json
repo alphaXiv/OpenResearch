@@ -1873,6 +1873,7 @@
   "library_open_alphaxiv": "باز کردن alphaXiv",
   "chat_resize_composer": "تغییر اندازه کادر پیام",
   "chat_resize_composer_hint": "برای تغییر اندازه بکشید. برای بازنشانی دوبار کلیک کنید.",
+  "chat_resize_question": "تغییر اندازه پرسش",
   "remote_machine_switcher": "تغییر دستگاه: {machine}",
   "remote_machine_switcher_status": "تغییر دستگاه: {machine} ({status})",
   "remote_machine_connected": "متصل",

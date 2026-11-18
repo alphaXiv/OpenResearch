@@ -1873,6 +1873,7 @@
   "library_open_alphaxiv": "فتح alphaXiv",
   "chat_resize_composer": "تغيير حجم مربع الرسالة",
   "chat_resize_composer_hint": "اسحب لتغيير الحجم. انقر نقرًا مزدوجًا لإعادة الضبط.",
+  "chat_resize_question": "تغيير حجم السؤال",
   "remote_machine_switcher": "تبديل الجهاز: {machine}",
   "remote_machine_switcher_status": "تبديل الجهاز: {machine} ({status})",
   "remote_machine_connected": "متصل",
