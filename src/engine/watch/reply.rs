@@ -59,6 +59,76 @@ pub(super) struct Read {
     pub errors: Vec<String>,
 }
 
+impl Read {
+    pub(super) fn limit_counts(&mut self, runs: &[Bindable]) {
+        let mut accepted = BTreeSet::new();
+        let mut reserve = |template: Option<&str>, own: Option<&str>| {
+            let Some(template) = template else {
+                return true;
+            };
+            let fresh: BTreeSet<_> = tokens(template, own.is_none())
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|(_, token)| {
+                    let Token::Count(run, pattern) = token else {
+                        return None;
+                    };
+                    let run = run.as_deref().or(own)?;
+                    let run = runs.iter().find(|bound| bound.key == run)?;
+                    (!run.counts.contains(&pattern)).then_some((run.key, pattern))
+                })
+                .collect();
+            let total = accepted.union(&fresh);
+            if total.clone().count() > MAX_NEW_COUNTS
+                || runs.iter().any(|run| {
+                    total.clone().filter(|(key, _)| *key == run.key).count()
+                        > MAX_NEW_COUNTS_PER_RUN
+                })
+            {
+                return false;
+            }
+            accepted.extend(fresh);
+            true
+        };
+        let message = format!(
+            "counts at most {MAX_NEW_COUNTS_PER_RUN} new patterns a run and {MAX_NEW_COUNTS} a look"
+        );
+        self.runs.retain(|key, answer| {
+            let template = match answer {
+                Answer::Line { template, .. } => Some(template.as_str()),
+                Answer::Same => runs
+                    .iter()
+                    .find(|run| run.key == key)
+                    .and_then(|run| run.sentence),
+                Answer::Silent => None,
+            };
+            if reserve(template, Some(key)) {
+                return true;
+            }
+            self.errors.push(format!("{key}: {message}"));
+            if let Answer::Line {
+                flag: true,
+                template,
+                evidence,
+            } = answer
+            {
+                *template = template.replace("**", "").replace(['{', '}'], "");
+                evidence.clear();
+                self.salvaged.insert(key.clone());
+                return true;
+            }
+            false
+        });
+        if let Some(Answer::Line { template, .. }) = &self.summary {
+            if reserve(Some(template), None) {
+                return;
+            }
+            self.summary = None;
+            self.errors.push(format!("summary: {message}"));
+        }
+    }
+}
+
 /// A token inside `{…}`: whose, and what it reads.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(in crate::engine) enum Token {
@@ -195,7 +265,6 @@ pub(super) fn read(
             }
         }
     }
-    let mut new_counts = 0;
     for run in runs {
         let answer = given.and_then(|given| given.get(run.key));
         // A run's own sentence may name the run as the summary does; it reads the same without.
@@ -213,17 +282,7 @@ pub(super) fn read(
                     matches!(token, Token::Versus(_, name) if !run.versus.contains(name))
                 })
             });
-            let checked = check_line(template, false, runs, Some(run), render)?;
-            let fresh = checked
-                .iter()
-                .filter(|pattern| !run.counts.contains(*pattern))
-                .count();
-            if fresh > MAX_NEW_COUNTS_PER_RUN || new_counts + fresh > MAX_NEW_COUNTS {
-                return Err(format!(
-                    "counts at most {MAX_NEW_COUNTS_PER_RUN} new patterns a run and {MAX_NEW_COUNTS} a look"
-                ));
-            }
-            new_counts += fresh;
+            check_line(template, false, runs, Some(run), render)?;
             line_valid = true;
             Ok(())
         }) {
@@ -279,13 +338,14 @@ pub(super) fn read(
             object.get("summary"),
             bounds.sentence,
             bounds.setup,
-            &mut |template| check_line(template, true, runs, None, render).map(|_| ()),
+            &mut |template| check_line(template, true, runs, None, render),
         ) {
             Ok(answer) => read.summary = Some(answer),
             Err(error) => read.errors.push(format!("summary: {error}")),
         }
     }
 
+    read.limit_counts(runs);
     read
 }
 
@@ -415,7 +475,7 @@ fn check_line(
     runs: &[Bindable],
     own: Option<&Bindable>,
     render: &dyn Fn(Option<&str>, &Token) -> String,
-) -> Result<Vec<String>, String> {
+) -> Result<(), String> {
     if template.is_empty() {
         return Err("the sentence is empty".into());
     }
@@ -429,7 +489,6 @@ fn check_line(
     if found.len() > MAX_TOKENS {
         return Err(format!("use at most {MAX_TOKENS} tokens"));
     }
-    let mut patterns = Vec::new();
     for (range, token) in &found {
         let run = match token.run() {
             Some(key) => runs
@@ -472,7 +531,6 @@ fn check_line(
             }
             Token::Count(_, text) => {
                 pattern(text)?;
-                patterns.push(text.clone());
             }
         }
     }
@@ -560,7 +618,7 @@ fn check_line(
             "\"{number}\" is a number that still moves; write it as its token so it stays current"
         ));
     }
-    Ok(patterns)
+    Ok(())
 }
 
 /// The first number written in `text` that reads as one of `moving` does now. A number written
@@ -678,6 +736,37 @@ mod tests {
             Token::Label(key) => format!("Depth {key}"),
             Token::Count(..) => "12".into(),
             _ => "2.31".into(),
+        }
+    }
+
+    #[test]
+    fn a_summary_cannot_add_extra_counters_to_a_run_or_a_look() {
+        let run = run();
+        let runs = [
+            bind("r1", &run, false),
+            bind("r2", &run, false),
+            bind("r3", &run, false),
+        ];
+        let bounds = SummaryBounds {
+            sentence: None,
+            setup: true,
+        };
+        let second = r#"**{count:"c"}** and {count:"d"}."#;
+        for (line, second_run, allowed) in [
+            (
+                r#"{r1:count:"a"}, {r1:count:"b"}, {r2:count:"c"}, {r2:count:"d"}."#,
+                Some(second),
+                true,
+            ),
+            (r#"{r1:count:"e"}."#, None, false),
+            (r#"{r3:count:"e"}."#, Some(second), false),
+        ] {
+            let reply = json!({"runs": {"r1": {"status": "ok", "line": r#"**{count:"a"}** and {count:"b"}."#},
+                "r2": {"status": "ok", "line": second_run},
+                "r3": {"status": "ok", "line": null}},
+                "summary": {"status": "ok", "line": line}}).to_string();
+            let got = read(&reply, &runs, Some(&bounds), &|_, _| "1".into());
+            assert_eq!(got.summary.is_some(), allowed, "{got:?}");
         }
     }
 

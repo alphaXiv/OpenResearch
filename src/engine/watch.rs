@@ -2392,6 +2392,7 @@ async fn take(id: i64) -> Result<()> {
         }
         read.notes = checked.notes.or(read.notes);
         read.errors = checked.errors;
+        read.limit_counts(&bindable);
     }
     if !priced {
         if let Some(total) = &mut usage {
