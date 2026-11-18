@@ -1007,6 +1007,7 @@ async fn end_detached(client: &ClaudeClient, interrupt: bool) {
         .end_agent(input_closed && !interrupt, TERMINATION_TIMEOUT)
         .await
         .is_none()
+        && !keep::handing_off()
     {
         eprintln!(
             "orx up: timed out stopping Claude worker session={}",

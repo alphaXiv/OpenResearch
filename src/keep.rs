@@ -881,9 +881,11 @@ impl KeptHandle {
         tokio::time::timeout(timeout, self.wait()).await.ok()
     }
 
-    /// [`Self::stop`] for an agent CLI. With `close_input`, it gets a grace to exit on its own
-    /// once its input closes, then SIGTERM and another, since one killed outright can die
-    /// between rotating its sign-in token and saving it.
+    /// [`Self::stop`] for an agent CLI the keeper holds, not one from [`spawn_here`], which
+    /// gets no SIGTERM. With `close_input`, it gets a grace to exit on its
+    /// own once its input closes, then SIGTERM and another, since one killed outright can die
+    /// between rotating its sign-in token and saving it. Whether or not it exited, the stop
+    /// then ends what it left in its group.
     pub async fn end_agent(&self, close_input: bool, timeout: Duration) -> Option<Exit> {
         if handing_off() {
             return None;
@@ -891,13 +893,11 @@ impl KeptHandle {
         let grace = crate::config::paced(crate::process::AGENT_EXIT_GRACE);
         if close_input {
             self.close_stdin();
-            if let Ok(exit) = tokio::time::timeout(grace, self.wait()).await {
-                return Some(exit);
-            }
+            let _ = tokio::time::timeout(grace, self.wait()).await;
         }
-        self.signal(Signal::Terminate);
-        if let Ok(exit) = tokio::time::timeout(grace, self.wait()).await {
-            return Some(exit);
+        if self.try_wait().is_none() {
+            self.signal(Signal::Terminate);
+            let _ = tokio::time::timeout(grace, self.wait()).await;
         }
         self.stop(timeout).await
     }

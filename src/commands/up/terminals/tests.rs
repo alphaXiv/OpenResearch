@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::sync::atomic::Ordering;
 
 use axum::routing::{delete, get};
 use axum::Router;
@@ -378,4 +379,50 @@ fn left_behind(terminal_id: &str, reason: Option<&str>) -> String {
     let exit = json!({ "code": null, "signal": 9, "finishedAt": 1, "reason": reason });
     std::fs::write(dir.join(orx_keep::wire::EXIT_FILE), exit.to_string()).unwrap();
     id
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_terminal_starts_while_the_data_directory_moves() {
+    if !crate::config::in_test_child(&["SHELL"]) {
+        return;
+    }
+    let project = add_project("moving");
+    let state = crate::commands::up::tests::test_state();
+    let address = serve(state.clone()).await;
+
+    state
+        .data_dir_move_in_progress
+        .store(true, Ordering::SeqCst);
+    let mut refused = open(address, &project, "during").await;
+    assert_eq!(message(&mut refused).await["type"], "error");
+
+    // A move that begins while this terminal waits for the move's gate refuses it too.
+    state
+        .data_dir_move_in_progress
+        .store(false, Ordering::SeqCst);
+    let gate = state.data_dir_gate.clone().lock_owned().await;
+    let mut waiting = open(address, &project, "meanwhile").await;
+    state
+        .data_dir_move_in_progress
+        .store(true, Ordering::SeqCst);
+    drop(gate);
+    assert_eq!(message(&mut waiting).await["type"], "error");
+
+    assert!(terminal_keepers("during").is_empty());
+    assert!(terminal_keepers("meanwhile").is_empty());
+}
+
+#[tokio::test]
+async fn closing_a_tab_waits_for_its_terminal_to_finish_opening() {
+    let terminals = Terminals::default();
+    let opening = terminals.opening.lock().await;
+
+    let mut close = Box::pin(terminals.close("project", "tab"));
+    assert!(futures::poll!(&mut close).is_pending());
+    let mut close_where = Box::pin(terminals.close_where(|_, _| true));
+    assert!(futures::poll!(&mut close_where).is_pending());
+
+    drop(opening);
+    assert!(close.await);
+    close_where.await;
 }

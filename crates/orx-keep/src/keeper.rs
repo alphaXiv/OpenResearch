@@ -9,13 +9,21 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+/// The whole handshake, not each read: a sender that drips bytes must not hold a slot.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
+/// Connections allowed to be mid-handshake; more are dropped so strangers cannot exhaust threads.
+const MAX_HANDSHAKES: usize = 32;
 /// How long output the child's descendants still write may follow its exit.
 const EOF_GRACE: Duration = Duration::from_secs(2);
 const TICK: Duration = Duration::from_millis(250);
+/// How long after the child's exit a stop still kills its group: later, the group id may name
+/// a recycled process.
+const LEFTOVER_WINDOW: Duration = Duration::from_secs(30);
 const CURSOR_QUERY: &[u8] = b"\x1b[6n";
 
 pub(crate) struct Spawned {
@@ -25,6 +33,8 @@ pub(crate) struct Spawned {
     pub process: Box<dyn Process>,
     pub wait: Box<dyn FnOnce() -> Exit + Send>,
     pub answers_cursor_queries: bool,
+    /// Whether an `interrupt` is typed into the terminal as `\x03` rather than signalled.
+    pub types_interrupt: bool,
 }
 
 pub(crate) trait Process: Send + Sync {
@@ -147,12 +157,15 @@ impl State {
 struct Shared {
     state: Mutex<State>,
     changed: Condvar,
-    input: Mutex<Option<Box<dyn Write + Send>>>,
+    /// Feeds the thread writing to the child, so a child that does not read never holds up a frame.
+    input: Mutex<Option<Sender<Vec<u8>>>>,
     process: Box<dyn Process>,
     retain: Retain,
     token: String,
     child_pid: u32,
     answers_cursor_queries: bool,
+    types_interrupt: bool,
+    handshakes: AtomicUsize,
 }
 
 impl Shared {
@@ -162,15 +175,12 @@ impl Shared {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn write_input(&self, bytes: &[u8]) {
+    /// Queues bytes for the child, in order after those already queued.
+    fn write_input(&self, bytes: Vec<u8>) {
         let mut input = self.input.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(writer) = input.as_mut() {
-            // A child that closed its stdin has nothing left to read; dropping it says so.
-            if writer
-                .write_all(bytes)
-                .and_then(|_| writer.flush())
-                .is_err()
-            {
+        if let Some(queue) = input.as_ref() {
+            // The writer ends when the child closed its stdin; dropping the queue says so.
+            if queue.send(bytes).is_err() {
                 *input = None;
             }
         }
@@ -179,7 +189,21 @@ impl Shared {
     fn answer_cursor_query(&self, state: &mut State) {
         if state.cursor_query {
             state.cursor_query = false;
-            self.write_input(b"\x1b[1;1R");
+            self.write_input(b"\x1b[1;1R".to_vec());
+        }
+    }
+}
+
+/// Writes queued input to the child until the queue closes or the child stops reading. The
+/// queue holds whatever the one attached server sends, which the server buffers the same way.
+fn write_queued(mut writer: Box<dyn Write + Send>, queue: Receiver<Vec<u8>>) {
+    for bytes in queue {
+        if writer
+            .write_all(&bytes)
+            .and_then(|()| writer.flush())
+            .is_err()
+        {
+            return;
         }
     }
 }
@@ -191,6 +215,11 @@ fn serve(dir: &Path, spec: Spec, started: Started) -> io::Result<()> {
         spawned,
     } = started;
     let orphan = Duration::from_secs(spec.orphan_seconds);
+    let input = spawned.input.map(|writer| {
+        let (queue, queued) = mpsc::channel();
+        std::thread::spawn(move || write_queued(writer, queued));
+        queue
+    });
     let shared = Arc::new(Shared {
         state: Mutex::new(State {
             retained: VecDeque::new(),
@@ -208,12 +237,14 @@ fn serve(dir: &Path, spec: Spec, started: Started) -> io::Result<()> {
             cursor_query: false,
         }),
         changed: Condvar::new(),
-        input: Mutex::new(spawned.input),
+        input: Mutex::new(input),
         process: spawned.process,
         retain: spec.retain,
         token: spec.token,
         child_pid: spawned.pid,
         answers_cursor_queries: spawned.answers_cursor_queries,
+        types_interrupt: spawned.types_interrupt,
+        handshakes: AtomicUsize::new(0),
     });
 
     let reading = shared.clone();
@@ -229,9 +260,23 @@ fn serve(dir: &Path, spec: Spec, started: Started) -> io::Result<()> {
     });
     let accepting = shared.clone();
     std::thread::spawn(move || {
-        for stream in listener.incoming().flatten() {
+        for mut stream in listener.incoming().flatten() {
+            if accepting.handshakes.load(Ordering::Relaxed) >= MAX_HANDSHAKES {
+                continue;
+            }
+            accepting.handshakes.fetch_add(1, Ordering::Relaxed);
             let shared = accepting.clone();
-            std::thread::spawn(move || attach(&shared, stream));
+            let spawned = std::thread::Builder::new().spawn(move || {
+                let hello = handshake(&shared, &mut stream);
+                shared.handshakes.fetch_sub(1, Ordering::Relaxed);
+                if let Some(hello) = hello {
+                    attach(&shared, stream, hello);
+                }
+            });
+            // A failed spawn drops the connection; the next one may still find room.
+            if spawned.is_err() {
+                accepting.handshakes.fetch_sub(1, Ordering::Relaxed);
+            }
         }
     });
 
@@ -324,29 +369,50 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window == needle)
 }
 
-fn attach(shared: &Arc<Shared>, mut stream: TcpStream) {
-    let _ = stream.set_read_timeout(Some(HELLO_TIMEOUT));
-    let hello = match wire::read_frame(&mut stream) {
-        Ok((kind::HELLO, body)) => wire::parse::<Hello>(&body),
-        _ => return,
-    };
-    let hello = match hello {
-        Ok(hello) if hello.protocol == wire::PROTOCOL && hello.token == shared.token => hello,
-        Ok(hello) => {
-            let error = if hello.protocol != wire::PROTOCOL {
-                format!(
-                    "this keeper speaks protocol {}, not {}",
-                    wire::PROTOCOL,
-                    hello.protocol
-                )
-            } else {
-                "wrong token".to_string()
-            };
-            let _ = wire::write_frame(&mut stream, kind::REFUSED, &wire::json(&Refused { error }));
-            return;
+/// Reads against one deadline: `set_read_timeout` alone restarts on every read.
+struct Deadline<'a> {
+    stream: &'a TcpStream,
+    at: Instant,
+}
+
+impl Read for Deadline<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let left = self.at.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io::ErrorKind::TimedOut.into());
         }
-        Err(_) => return,
+        self.stream.set_read_timeout(Some(left))?;
+        self.stream.read(buf)
+    }
+}
+
+/// The valid hello a connection opens with; anyone else is dropped, or refused with a reason.
+fn handshake(shared: &Shared, stream: &mut TcpStream) -> Option<Hello> {
+    let mut reader = Deadline {
+        stream,
+        at: Instant::now() + HELLO_TIMEOUT,
     };
+    let hello = match wire::read_frame(&mut reader) {
+        Ok((kind::HELLO, body)) => wire::parse::<Hello>(&body).ok()?,
+        _ => return None,
+    };
+    if hello.protocol == wire::PROTOCOL && hello.token == shared.token {
+        return Some(hello);
+    }
+    let error = if hello.protocol != wire::PROTOCOL {
+        format!(
+            "this keeper speaks protocol {}, not {}",
+            wire::PROTOCOL,
+            hello.protocol
+        )
+    } else {
+        "wrong token".to_string()
+    };
+    let _ = wire::write_frame(stream, kind::REFUSED, &wire::json(&Refused { error }));
+    None
+}
+
+fn attach(shared: &Arc<Shared>, mut stream: TcpStream, hello: Hello) {
     let _ = stream.set_read_timeout(None);
     let (Ok(writer), Ok(registered)) = (stream.try_clone(), stream.try_clone()) else {
         return;
@@ -371,7 +437,12 @@ fn attach(shared: &Arc<Shared>, mut stream: TcpStream) {
         (state.attachment, welcome)
     };
     let sending = shared.clone();
-    std::thread::spawn(move || send(&sending, writer, generation, welcome));
+    let sender =
+        std::thread::Builder::new().spawn(move || send(&sending, writer, generation, welcome));
+    if sender.is_err() {
+        // Closing the connection ends the read loop below, which detaches this attachment.
+        let _ = stream.shutdown(Shutdown::Both);
+    }
 
     while let Ok((frame, body)) = wire::read_frame(&mut stream) {
         if shared.lock().attachment != generation {
@@ -380,7 +451,7 @@ fn attach(shared: &Arc<Shared>, mut stream: TcpStream) {
         match frame {
             kind::INPUT => {
                 shared.lock().cursor_query = false;
-                shared.write_input(&body);
+                shared.write_input(body);
             }
             kind::ACK => {
                 let Ok((offset, _)) = wire::split_offset(&body) else {
@@ -399,6 +470,9 @@ fn attach(shared: &Arc<Shared>, mut stream: TcpStream) {
             }
             kind::CONTROL => match wire::parse::<Control>(&body) {
                 Ok(Control::Resize { cols, rows }) => shared.process.resize(cols, rows),
+                Ok(Control::Signal {
+                    signal: Signal::Interrupt,
+                }) if shared.types_interrupt => shared.write_input(b"\x03".to_vec()),
                 Ok(Control::Signal { signal }) => shared.process.signal(signal),
                 Ok(Control::CloseStdin) => {
                     shared
@@ -409,6 +483,14 @@ fn attach(shared: &Arc<Shared>, mut stream: TcpStream) {
                 }
                 Ok(Control::Stop) => {
                     let mut state = shared.lock();
+                    // Held across the kill: the loop must not exit before what the child left is ended.
+                    if state
+                        .exit
+                        .as_ref()
+                        .is_some_and(|(_, at)| at.elapsed() < LEFTOVER_WINDOW)
+                    {
+                        shared.process.signal(Signal::Kill);
+                    }
                     state.stop = true;
                     shared.changed.notify_all();
                 }

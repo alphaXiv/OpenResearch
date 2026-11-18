@@ -188,6 +188,16 @@ impl Delegated {
     }
 
     async fn create(&self, request: CreateTerminalRequest) -> Result<Value> {
+        // A request replayed after a restart finds the command its predecessor started.
+        let id = request
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get(super::wire::REQUEST_META)?.as_str())
+            .ok_or_else(|| anyhow!("Terminal request has no identity"))?
+            .to_owned();
+        if self.terminals.lock().unwrap().contains_key(&id) {
+            return Ok(json!({"terminalId": id}));
+        }
         let cwd = request.cwd.as_deref().unwrap_or(&self.cwd);
         absolute(cwd)?;
         if request.command.is_empty() {
@@ -230,7 +240,6 @@ impl Delegated {
         if let Some((session_id, harness, port)) = &self.session {
             crate::local::chat::set_chat_session_env(&mut command, session_id, harness, *port)?;
         }
-        let id = uuid::Uuid::new_v4().to_string();
         let limit = request
             .output_byte_limit
             .unwrap_or(MAX_OUTPUT as u64)
@@ -335,6 +344,14 @@ fn absolute(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// What the wire adds to a `terminal/create`; each call is a new request.
+    fn stamped(mut params: Value) -> Value {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let request = NEXT.fetch_add(1, Ordering::Relaxed);
+        params["_meta"] = json!({ super::super::wire::REQUEST_META: format!("test:{request}") });
+        params
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn known_shell_commands_are_scoped_to_their_agents() {
@@ -342,13 +359,13 @@ mod tests {
         let request =
             json!({"sessionId":"s", "command":"printf 'DEVIN_SHELL_OK'; printf ' SECOND'"});
         assert!(delegated
-            .request("terminal/create", request.clone())
+            .request("terminal/create", stamped(request.clone()))
             .await
             .is_err());
         for agent in ["affogato", "grok"] {
             delegated.set_agent(agent);
             let created = delegated
-                .request("terminal/create", request.clone())
+                .request("terminal/create", stamped(request.clone()))
                 .await
                 .unwrap();
             let params = json!({"terminalId":created["terminalId"]});
@@ -372,7 +389,7 @@ mod tests {
         delegated.set_session("terminal-chat", "acp:test", Some(4901));
         delegated.set_agent("grok");
         let python = if cfg!(windows) { "python" } else { "python3" };
-        let created = delegated.request("terminal/create", json!({"sessionId":"s", "command":python, "args":["-c", "import os,sys;assert os.environ['ORX_CHAT_SESSION_ID']=='terminal-chat';assert os.environ['ORX_CHAT_HARNESS']=='acp:test';assert os.environ['ORX_LOCAL_SESSION']=='1';assert os.environ['ORX_UP_PORT']=='4901';print(sys.argv[1]);print(os.environ['ACP_TEST_VALUE']);sys.stdout.flush();import time;time.sleep(60)", "two words \"quoted\" $(untouched)"], "env":[{"name":"ACP_TEST_VALUE", "value":"native value"}, {"name":"ORX_CHAT_SESSION_ID", "value":"wrong-chat"}]})).await.unwrap();
+        let created = delegated.request("terminal/create", stamped(json!({"sessionId":"s", "command":python, "args":["-c", "import os,sys;assert os.environ['ORX_CHAT_SESSION_ID']=='terminal-chat';assert os.environ['ORX_CHAT_HARNESS']=='acp:test';assert os.environ['ORX_LOCAL_SESSION']=='1';assert os.environ['ORX_UP_PORT']=='4901';print(sys.argv[1]);print(os.environ['ACP_TEST_VALUE']);sys.stdout.flush();import time;time.sleep(60)", "two words \"quoted\" $(untouched)"], "env":[{"name":"ACP_TEST_VALUE", "value":"native value"}, {"name":"ORX_CHAT_SESSION_ID", "value":"wrong-chat"}]}))).await.unwrap();
         let params = json!({"terminalId":created["terminalId"]});
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
@@ -428,7 +445,7 @@ mod tests {
         let created = delegated
             .request(
                 "terminal/create",
-                json!({"sessionId":"s", "command":command, "env":[{"name":"PATH", "value":"bin"}]}),
+                stamped(json!({"sessionId":"s", "command":command, "env":[{"name":"PATH", "value":"bin"}]})),
             )
             .await
             .unwrap();
@@ -446,7 +463,7 @@ mod tests {
     #[tokio::test]
     async fn terminal_release_reaps_descendants() {
         let delegated = Delegated::new(&std::env::temp_dir());
-        let created = delegated.request("terminal/create", json!({"sessionId":"s", "command":"python3", "args":["-c", "import subprocess,sys,time; p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)']);print(p.pid,flush=True);time.sleep(60)"]})).await.unwrap();
+        let created = delegated.request("terminal/create", stamped(json!({"sessionId":"s", "command":"python3", "args":["-c", "import subprocess,sys,time; p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)']);print(p.pid,flush=True);time.sleep(60)"]}))).await.unwrap();
         let params = json!({"terminalId":created["terminalId"]});
         let pid: i32 = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
@@ -476,7 +493,7 @@ mod tests {
     #[tokio::test]
     async fn detached_pipe_does_not_block_exit_or_release() {
         let delegated = Delegated::new(&std::env::temp_dir());
-        let created = delegated.request("terminal/create", json!({"sessionId":"s", "command":"python3", "args":["-c", "import subprocess,sys; p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(5)'], start_new_session=True);print(p.pid,flush=True)"]})).await.unwrap();
+        let created = delegated.request("terminal/create", stamped(json!({"sessionId":"s", "command":"python3", "args":["-c", "import subprocess,sys; p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(5)'], start_new_session=True);print(p.pid,flush=True)"]}))).await.unwrap();
         let params = json!({"terminalId": created["terminalId"]});
         let exit = tokio::time::timeout(
             std::time::Duration::from_secs(3),
@@ -509,7 +526,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let script = format!("import sys,socket;sys.stderr.write('old!'*3);sys.stderr.flush();s=socket.create_connection(('127.0.0.1',{}));s.recv(1);sys.stdout.write('new!'*3);sys.stdout.flush()", listener.local_addr().unwrap().port());
         let delegated = Delegated::new(&std::env::temp_dir());
-        let created = delegated.request("terminal/create", json!({"sessionId":"s", "command":super::super::fake_agent_interpreter("python3"), "args":["-c",script], "outputByteLimit":8})).await.unwrap();
+        let created = delegated.request("terminal/create", stamped(json!({"sessionId":"s", "command":super::super::fake_agent_interpreter("python3"), "args":["-c",script], "outputByteLimit":8}))).await.unwrap();
         let params = json!({"terminalId":created["terminalId"]});
         let (mut release, _) = listener.accept().await.unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -552,7 +569,7 @@ mod tests {
             let created = original
                 .request(
                     "terminal/create",
-                    json!({"sessionId":"s", "command":python, "args":["-c", script]}),
+                    stamped(json!({"sessionId":"s", "command":python, "args":["-c", script]})),
                 )
                 .await
                 .unwrap();
@@ -598,6 +615,50 @@ mod tests {
             assert_eq!(output["output"], "COMMAND_ADOPTED");
             successor.request("terminal/release", params).await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn a_replayed_create_finds_the_command_its_predecessor_started() {
+        let mut original = Delegated::new(&std::env::temp_dir());
+        original.set_session("s", "acp:create-replay", None);
+        let request = stamped(
+            json!({"sessionId":"s", "command":super::super::fake_agent_interpreter("python3"), "args":["-c", "import time;time.sleep(60)"]}),
+        );
+        let created = original
+            .request("terminal/create", request.clone())
+            .await
+            .unwrap();
+        let id = created["terminalId"].as_str().unwrap().to_owned();
+        let keeper = original.terminals.lock().unwrap()[&id].keeper.clone();
+        keeper.detach();
+        let owner: Value = serde_json::from_slice(
+            &std::fs::read(crate::keep::root().join(keeper.id()).join("owner.json")).unwrap(),
+        )
+        .unwrap();
+
+        let mut successor = Delegated::new(&std::env::temp_dir());
+        successor.set_session("s", "acp:create-replay", None);
+        successor
+            .adopt(
+                keeper.id(),
+                owner["commandId"].as_str().unwrap().to_owned(),
+                owner["state"].clone(),
+            )
+            .await
+            .unwrap();
+        let replayed = successor.request("terminal/create", request).await.unwrap();
+
+        let started = std::fs::read_dir(crate::keep::root())
+            .unwrap()
+            .filter_map(|entry| std::fs::read(entry.ok()?.path().join("owner.json")).ok())
+            .filter(|owner| String::from_utf8_lossy(owner).contains("acp:create-replay"))
+            .count();
+        assert_eq!(replayed["terminalId"], created["terminalId"]);
+        assert_eq!(started, 1);
+        successor
+            .request("terminal/release", json!({"terminalId": id}))
+            .await
+            .unwrap();
     }
 
     #[test]

@@ -1,10 +1,10 @@
 use crate::keeper::{Process, Spawned};
 use crate::wire::{Exit, Signal, Spec, Stdio};
 use std::fs::OpenOptions;
-use std::io::{self, Write};
+use std::io;
 use std::os::windows::process::CommandExt;
 use std::process::Command;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock};
 use windows_sys::Win32::Foundation::{
     CloseHandle, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT,
 };
@@ -128,11 +128,7 @@ pub fn spawn(spec: &Spec) -> io::Result<Spawned> {
                 pid,
                 input,
                 output,
-                process: Box::new(Tree {
-                    pid,
-                    pty: None,
-                    writer: None,
-                }),
+                process: Box::new(Tree { pid, pty: None }),
                 wait: Box::new(move || {
                     let status = child.wait().ok();
                     Exit {
@@ -144,6 +140,7 @@ pub fn spawn(spec: &Spec) -> io::Result<Spawned> {
                     }
                 }),
                 answers_cursor_queries: false,
+                types_interrupt: false,
             })
         }
         Stdio::Pty { cols, rows } => {
@@ -177,17 +174,14 @@ pub fn spawn(spec: &Spec) -> io::Result<Spawned> {
             drop(pair.slave);
             let pid = child.process_id().unwrap_or_default();
             let output = pair.master.try_clone_reader().map_err(io::Error::other)?;
-            let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(
-                pair.master.take_writer().map_err(io::Error::other)?,
-            ));
+            let input = pair.master.take_writer().map_err(io::Error::other)?;
             Ok(Spawned {
                 pid,
-                input: Some(Box::new(SharedWriter(writer.clone()))),
+                input: Some(input),
                 output,
                 process: Box::new(Tree {
                     pid,
                     pty: Some(Mutex::new(pair.master)),
-                    writer: Some(writer),
                 }),
                 wait: Box::new(move || {
                     let status = child.wait().ok();
@@ -201,33 +195,15 @@ pub fn spawn(spec: &Spec) -> io::Result<Spawned> {
                 }),
                 // ConPTY holds the child's output until someone answers where the cursor is.
                 answers_cursor_queries: true,
+                types_interrupt: true,
             })
         }
-    }
-}
-
-struct SharedWriter(Arc<Mutex<Box<dyn Write + Send>>>);
-
-impl Write for SharedWriter {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0
-            .lock()
-            .map_err(|_| io::Error::other("terminal input poisoned"))?
-            .write(buf)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.0
-            .lock()
-            .map_err(|_| io::Error::other("terminal input poisoned"))?
-            .flush()
     }
 }
 
 struct Tree {
     pid: u32,
     pty: Option<Mutex<Box<dyn portable_pty::MasterPty + Send>>>,
-    writer: Option<Arc<Mutex<Box<dyn Write + Send>>>>,
 }
 
 impl Process for Tree {
@@ -246,16 +222,10 @@ impl Process for Tree {
 
     fn signal(&self, signal: Signal) {
         match signal {
-            Signal::Interrupt => match &self.writer {
-                Some(writer) => {
-                    if let Ok(mut writer) = writer.lock() {
-                        let _ = writer.write_all(b"\x03").and_then(|_| writer.flush());
-                    }
-                }
-                // SAFETY: the child leads its own process group on the keeper's console.
-                None => unsafe {
-                    GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, self.pid);
-                },
+            // A terminal's interrupt is typed as input instead, so it never reaches here.
+            // SAFETY: the child leads its own process group on the keeper's console.
+            Signal::Interrupt => unsafe {
+                GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, self.pid);
             },
             Signal::Terminate | Signal::Kill => self.kill_tree(),
             Signal::Unknown => {}

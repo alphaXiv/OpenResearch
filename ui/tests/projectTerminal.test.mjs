@@ -42,7 +42,6 @@ function sockets() {
   return opened;
 }
 
-const wait = (ms) => act(() => new Promise((resolve) => setTimeout(resolve, ms)));
 const status = (container) => container.querySelector('[role="status"]').textContent;
 const button = (container, label) => [...container.querySelectorAll("button")].find((item) => item.textContent === label);
 
@@ -56,8 +55,10 @@ async function shell(props = {}) {
   return { ...view, opened, get restarts() { return restarts; } };
 }
 
-test("a lost connection reconnects to the same shell, quietly at first", async () => {
+test("a lost connection reconnects to the same shell, quietly at first", async (t) => {
   const { container, opened } = await shell();
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const wait = (ms) => act(async () => t.mock.timers.tick(ms));
   assert.equal(opened.length, 1);
   assert.equal(opened[0].url.pathname, "/api/projects/project/terminal");
   assert.equal(opened[0].url.searchParams.get("terminalId"), "tab-1");
@@ -82,13 +83,14 @@ test("a lost connection reconnects to the same shell, quietly at first", async (
   assert.equal(JSON.parse(latest.sent[0]).type, "resize");
 });
 
-test("a shell that is gone says so and offers a new one", async () => {
+test("a shell that is gone says so and offers a new one", async (t) => {
   const view = await shell();
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const [socket] = view.opened;
   await act(() => { socket.open(); socket.say({ type: "gone" }); socket.drop(); });
   await settle();
   assert.equal(status(view.container), m.workspace_terminal_gone());
-  await wait(300);
+  await act(async () => t.mock.timers.tick(300));
   assert.equal(view.opened.length, 1);
   await act(() => button(view.container, m.workspace_terminal_restart()).click());
   assert.equal(view.restarts, 1);

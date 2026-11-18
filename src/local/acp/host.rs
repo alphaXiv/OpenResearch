@@ -1137,10 +1137,11 @@ async fn connect(
                         .lock()
                         .unwrap()
                         .insert(id.clone(), Permission { responder, options, auto_option });
+                    // A hand-off leaves it pending: the successor replays it from the keeper.
                     if !requests.emit(Event::Permission {
                         id: id.clone(),
                         request: request.params,
-                    }) {
+                    }) && !crate::keep::handing_off() {
                         if let Some(pending) = requests.permissions.lock().unwrap().remove(&id) {
                             let _ = pending
                                 .responder
@@ -2394,6 +2395,27 @@ exec "$@""#
             .unwrap();
         assert!(client.answer(&id, "opaque-once").is_err());
         host.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_permission_during_a_hand_off_is_not_cancelled_for_the_user() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let host = Arc::new(Host::default());
+        let client = new_client(&host, "chat").await;
+        drop(client.begin_turn());
+        crate::keep::hand_off();
+        let task_client = client.clone();
+        let task = tokio::spawn(async move { prompt(&task_client, "permission").await });
+
+        let answered = tokio::time::timeout(std::time::Duration::from_secs(2), task).await;
+
+        assert!(
+            answered.is_err(),
+            "the agent's permission request was answered"
+        );
+        client.wire.keeper.signal(crate::keep::Signal::Kill);
     }
 
     #[tokio::test]

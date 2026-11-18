@@ -53,7 +53,7 @@ frame from the server must be `HELLO` within 5 seconds.
 | Kind | Direction | Body |
 |---|---|---|
 | `0x01 HELLO` | server → keeper | JSON `{protocol, token, from}`. A valid hello makes this connection the attachment and closes any previous one. |
-| `0x02 INPUT` | server → keeper | Bytes written whole to the child's stdin or terminal before the next frame is read. |
+| `0x02 INPUT` | server → keeper | Bytes written whole to the child's stdin or terminal, after earlier input. A child that does not read holds up later input, never a later frame. |
 | `0x03 ACK` | server → keeper | `u64` offset. With `unacked` retention, output before it is released. |
 | `0x04 CONTROL` | server → keeper | JSON with `op`: `resize {cols, rows}`, `signal {signal}` (`interrupt`, `terminate`, `kill`), `closeStdin`, `stop`. |
 | `0x81 WELCOME` | keeper → server | JSON `{protocol, childPid, start, next}`: output frames follow from `start`, the later of `from` and the oldest retained byte. |
@@ -71,7 +71,10 @@ frame from the server must be `HELLO` within 5 seconds.
   each stopped as it is found and then killed, including ones in sessions of
   their own, then `SIGKILL` to the child's process group, all preceded by
   `SIGHUP` and 200 ms for a terminal; on Windows every member of the keeper's
-  job but the keeper. A child that already exited is not looked for again.
+  job but the keeper. A child that already exited is not looked for again: a
+  stop within 30 s of the exit sends `SIGKILL` to the child's process group, or
+  ends the job's members on Windows, and nothing else; a later one, whose group
+  id may name a recycled process, kills nothing.
   The keeper exits once the exit was sent to the attachment that asked, or
   right away if none is attached. `signal kill` reaches only the child's
   process group, so a command it started in a session of its own survives.

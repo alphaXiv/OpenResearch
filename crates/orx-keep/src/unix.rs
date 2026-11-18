@@ -91,6 +91,7 @@ pub fn spawn(spec: &Spec) -> io::Result<Spawned> {
                 }),
                 wait: Box::new(move || exit_of(child.wait())),
                 answers_cursor_queries: false,
+                types_interrupt: false,
             })
         }
         Stdio::Merged => {
@@ -119,6 +120,7 @@ pub fn spawn(spec: &Spec) -> io::Result<Spawned> {
                 }),
                 wait: Box::new(move || exit_of(child.wait())),
                 answers_cursor_queries: false,
+                types_interrupt: false,
             })
         }
         Stdio::Pty { cols, rows } => {
@@ -147,6 +149,7 @@ pub fn spawn(spec: &Spec) -> io::Result<Spawned> {
                 }),
                 wait: Box::new(move || exit_of(child.wait())),
                 answers_cursor_queries: false,
+                types_interrupt: false,
             })
         }
     }

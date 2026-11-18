@@ -54,13 +54,13 @@ pub async fn adopt_kept_work(chat: &Arc<ChatHost>, reachable: bool) -> Result<()
         match (entry.owner, entry.liveness) {
             // The page reattaches its terminals.
             (Record::Known(Owner::Terminal { .. }), _) => {}
-            // Whatever could not be read was logged; it stays as it is.
-            (Record::Unreadable, _) | (_, Liveness::Unknown) => {}
             (_, Liveness::Dead) => {
                 if let Err(error) = keep::remove(&entry.id) {
                     eprintln!("orx up: {error:#}");
                 }
             }
+            // Whatever could not be read was logged; it stays as it is.
+            (Record::Unreadable, _) | (_, Liveness::Unknown) => {}
             (
                 Record::Known(Owner::Agent {
                     harness,

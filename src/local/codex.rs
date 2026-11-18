@@ -426,6 +426,7 @@ impl CodexClient {
             .end_agent(input_closed && !interrupt, TERMINATION_TIMEOUT)
             .await
             .is_none()
+            && !keep::handing_off()
         {
             eprintln!("orx up: timed out reaping codex app-server");
         }
@@ -701,12 +702,13 @@ impl Drop for TurnRoute {
 /// Reader task: pump child stdout, route each line. On EOF every pending
 /// request fails and the live turn (if any) gets [`TurnEvent::Closed`].
 async fn read_loop(client: Arc<CodexClient>, stdout: KeptStdout) {
-    read_loop_at(client, stdout, 0).await;
+    read_loop_at(client, stdout, None).await;
 }
 
-async fn read_loop_at(client: Arc<CodexClient>, stdout: KeptStdout, offset: u64) {
+/// Reads from `resume_at`, or from wherever this attachment's output starts.
+async fn read_loop_at(client: Arc<CodexClient>, stdout: KeptStdout, resume_at: Option<u64>) {
     let mut lines = stdout.lines();
-    if let Err(error) = lines.skip_to(offset) {
+    if let Some(Err(error)) = resume_at.map(|offset| lines.skip_to(offset)) {
         eprintln!("codex resume offset: {error}");
         client.terminate().await;
         return;
@@ -807,6 +809,10 @@ async fn read_loop_at(client: Arc<CodexClient>, stdout: KeptStdout, offset: u64)
                     })
                 };
                 if !routed {
+                    // The next server replays it unanswered from the keeper.
+                    if keep::handing_off() {
+                        continue;
+                    }
                     // No turn is listening (raced an abort). Never leave the
                     // server hanging on a request nobody will answer — each
                     // kind gets the reply shape its method can parse.
@@ -899,6 +905,9 @@ async fn read_loop_at(client: Arc<CodexClient>, stdout: KeptStdout, offset: u64)
                 };
                 drop(turn);
                 if let Some(TurnEvent::Notification { method, params }) = unsent {
+                    if keep::handing_off() {
+                        continue;
+                    }
                     match crate::store::Store::open().and_then(|store| {
                         for (_, method, params) in &deferred_usage {
                             crate::local::harness::codex::record_unowned_in(
@@ -919,9 +928,6 @@ async fn read_loop_at(client: Arc<CodexClient>, stdout: KeptStdout, offset: u64)
                     }) {
                         Ok(()) => {
                             deferred_usage.clear();
-                            if keep::handing_off() {
-                                continue;
-                            }
                             if let Err(error) = client.saved_through(offset) {
                                 eprintln!("codex idle offset: {error:#}");
                                 break;
@@ -1178,7 +1184,7 @@ impl CodexHost {
             if adoption.resume_at.is_some() {
                 client.reader_ready.notified().await;
             }
-            read_loop_at(client, stdout, adoption.resume_at.unwrap_or(0)).await;
+            read_loop_at(client, stdout, adoption.resume_at).await;
         });
         Ok(())
     }
@@ -1997,6 +2003,30 @@ pub(crate) mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn a_request_during_a_hand_off_is_left_for_the_successor() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        keep::hand_off();
+        let client = test_client(
+            r#"IFS= read -r ping; printf '%s\n' '{"id":7,"method":"item/commandExecution/requestApproval","params":{}}' '{"id":1,"result":{}}'; sleep 600"#,
+            Instant::now(),
+            true,
+        )
+        .await;
+
+        // The response follows the request on the same stream, so the request has been handled.
+        client.request("ping", json!({})).await.unwrap();
+
+        let state = client.durable.lock().unwrap();
+        assert!(state.inbound.contains_key("7"));
+        assert!(state.outbox.is_empty());
+        drop(state);
+        client.child.signal(keep::Signal::Kill);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn idle_adoption_resends_an_unconfirmed_reply_before_accepting_requests() {
         for resume_at in [None, Some(0)] {
             let old = test_client(
@@ -2050,6 +2080,62 @@ pub(crate) mod tests {
             ));
             host.kill_session("chat").await;
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_idle_app_server_whose_output_was_acknowledged_is_adopted_alive() {
+        let mut command = crate::process::command("sh");
+        command.args([
+            "-c",
+            r#"printf '%s\n' '{"method":"thread/started","params":{}}'; IFS= read -r go; printf '%s\n' '{"method":"thread/started","params":{}}'; IFS= read -r request; printf '{"id":42,"result":{"request":%s}}\n' "$request"; sleep 600"#,
+        ]);
+        let mut child = keep::spawn(keep::Keep {
+            command: &command,
+            io: keep::Io::Pipes { stderr: None },
+            retain: keep::LOSSLESS,
+            owner: serde_json::Value::Null,
+        })
+        .await
+        .unwrap();
+        let mut lines = child.take_stdout().unwrap().lines();
+        let (_, acked) = lines.next_line().await.unwrap().unwrap();
+        let old = client_from_kept(child, "", ClientState::default()).unwrap();
+        old.keeper().ack(acked);
+        old.write_line(&json!({"go":true})).await.unwrap();
+        // The keeper reads the acknowledgement before the input that prompts this line.
+        lines.next_line().await.unwrap().unwrap();
+        let state = ClientState {
+            initialize: Some(json!({})),
+            next_id: 42,
+            thread: Some("thread".into()),
+            ..Default::default()
+        };
+        let keep_id = old.child.id().to_string();
+        old.child.detach();
+        drop(old);
+
+        let host = CodexHost::new();
+        host.adopt(crate::local::harness::Adoption {
+            keep_id,
+            session_id: "chat".into(),
+            state: serde_json::to_value(state).unwrap(),
+            resume_at: None,
+            commands: Vec::new(),
+        })
+        .await
+        .unwrap();
+        let client = host.client_for("chat").await.unwrap();
+        assert_eq!(client.keeper().start(), acked);
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.request("account/rateLimits/read", json!({})),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result["request"]["method"], "account/rateLimits/read");
+        host.kill_session("chat").await;
     }
 
     #[cfg(unix)]

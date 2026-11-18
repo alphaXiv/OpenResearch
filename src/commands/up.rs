@@ -5587,9 +5587,10 @@ pub(crate) async fn track_active(request: axum::extract::Request, next: Next) ->
     if IDLE_EXIT.load(Ordering::SeqCst) {
         return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
+    // A held approval is posted again by its tool call and finds its card, so a restart carries it over.
     if matches!(
         request.uri().path(),
-        "/api/events" | "/api/v2/events" | "/api/v2/hello"
+        "/api/events" | "/api/v2/events" | "/api/v2/hello" | "/api/internal/permissions"
     ) {
         return next.run(request).await;
     }
@@ -7960,7 +7961,7 @@ async fn project_terminal(
             let shell = interactive_shell();
             state
                 .terminals
-                .serve(socket, id, session_id, terminal_id, shell)
+                .serve(&state, socket, id, session_id, terminal_id, shell)
                 .await
         });
     }
@@ -12059,6 +12060,30 @@ mod tests {
         DRAINING.store(false, Ordering::SeqCst);
         result.unwrap();
         assert_eq!(ACTIVE.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_held_approval_does_not_hold_off_a_restart() {
+        use tower::ServiceExt;
+
+        let _guard = ACTIVE_TEST_LOCK.lock().await;
+        let app = Router::new()
+            .route(
+                "/api/internal/permissions",
+                post(std::future::pending::<()>),
+            )
+            .route("/api/other", post(std::future::pending::<()>))
+            .layer(middleware::from_fn(track_active));
+        for (path, counted) in [("/api/internal/permissions", 0), ("/api/other", 1)] {
+            let request = axum::http::Request::builder()
+                .method("POST")
+                .uri(path)
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let mut held = Box::pin(app.clone().oneshot(request));
+            assert!(futures::poll!(&mut held).is_pending());
+            assert_eq!(ACTIVE.load(Ordering::SeqCst), counted, "{path}");
+        }
     }
 
     #[tokio::test]

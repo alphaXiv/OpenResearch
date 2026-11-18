@@ -132,6 +132,45 @@ async fn dropping_a_kept_child_ends_it() {
         .expect("the child ends with its last handle");
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn ending_an_agent_that_exited_also_ends_what_it_left_behind() {
+    let mut command = crate::process::command("sh");
+    command.args([
+        "-c",
+        "trap '' TERM; sleep 300 >/dev/null 2>&1 & echo $!; cat >/dev/null",
+    ]);
+    let mut kept = spawn(Keep {
+        command: &command,
+        io: Io::Pipes { stderr: None },
+        retain: LOSSLESS,
+        owner: Value::Null,
+    })
+    .await
+    .unwrap();
+    let mut lines = kept.take_stdout().unwrap().lines();
+    let (pid, _) = next(&mut lines).await;
+    let pid: i32 = pid.trim().parse().unwrap();
+    let alive = |pid: i32| unsafe { libc::kill(pid, 0) } == 0;
+    assert!(alive(pid));
+
+    let exit = kept
+        .handle()
+        .end_agent(true, Duration::from_secs(10))
+        .await
+        .expect("the agent exits once its input closes");
+    assert_eq!(exit.reason, None);
+
+    let gone = async {
+        while alive(pid) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), gone)
+        .await
+        .expect("what the agent left in its group ends with it");
+}
+
 #[tokio::test]
 async fn output_ends_with_the_exit_and_flush_waits_for_the_keeper() {
     let mut kept = kept_cat(Value::Null).await;

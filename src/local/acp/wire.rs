@@ -2,12 +2,15 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::sync::{Notify, Semaphore};
 
 use crate::error::Result;
 use crate::keep::{Kept, KeptHandle};
+
+/// The `_meta` key carrying a `terminal/create` request's identity, which survives a replay.
+pub(super) const REQUEST_META: &str = "orxRequest";
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub(crate) struct State {
@@ -270,8 +273,25 @@ pub(super) fn connect(
                             continue;
                         }
                         let mut pending = value.clone();
-                        pending["_orxOffset"] = request_offset;
+                        pending["_orxOffset"] = request_offset.clone();
                         incoming.state.lock().unwrap().inbound.insert(key, pending);
+                        if value["method"] == "terminal/create" {
+                            let identity = format!("{}:{request_offset}", incoming.keeper.id());
+                            let meta = value
+                                .get_mut("params")
+                                .and_then(Value::as_object_mut)
+                                .map(|params| params.entry("_meta").or_insert_with(|| json!({})))
+                                .map(|meta| {
+                                    if !meta.is_object() {
+                                        *meta = json!({});
+                                    }
+                                    meta
+                                })
+                                .and_then(Value::as_object_mut);
+                            if let Some(meta) = meta {
+                                meta.insert(REQUEST_META.into(), identity.into());
+                            }
+                        }
                     } else {
                         let key = id
                             .as_str()

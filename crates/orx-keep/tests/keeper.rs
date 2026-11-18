@@ -1,7 +1,7 @@
 #![allow(clippy::disallowed_methods)]
 
 use orx_keep::wire::{self, kind, Control, Endpoint, Exit, Hello, Retain, Spec, Stdio, Welcome};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -192,6 +192,24 @@ fn input_reaches_the_child_and_its_output_comes_back() {
 }
 
 #[test]
+fn a_child_that_never_reads_cannot_hold_up_a_stop() {
+    let dir = scratch();
+    let mut spec = spec("sleep", pipes(), LOSSLESS, 60);
+    spec.args.push("60".into());
+    let endpoint = start(&dir, &spec);
+    let mut link = Link::attach(&endpoint, 0);
+    // More than any pipe holds, so the keeper's write to the child blocks.
+    link.input(&vec![b'x'; 1 << 20]);
+    link.input(b"after");
+    let stopping = Instant::now();
+    link.control(&Control::Stop);
+    let (_, exit) = link.read_exit();
+    assert_eq!(exit.reason.as_deref(), Some("stopped"));
+    assert!(stopping.elapsed() < Duration::from_secs(5));
+    wait_for("the keeper to exit", || !keeper_alive(&dir));
+}
+
+#[test]
 fn a_reattached_server_gets_everything_since_its_last_ack_without_gaps() {
     let dir = scratch();
     let endpoint = start(&dir, &spec("spam", pipes(), LOSSLESS, 60));
@@ -286,6 +304,71 @@ fn a_wrong_token_is_refused() {
     let mut link = Link::attach(&endpoint, 0);
     link.control(&Control::Stop);
     link.read_exit();
+}
+
+/// Whether the keeper has closed `stream`, waiting up to `wait` for it to say so.
+fn closed_within(stream: &mut TcpStream, wait: Duration) -> bool {
+    stream.set_read_timeout(Some(wait)).unwrap();
+    match stream.read(&mut [0; 1]) {
+        Ok(read) => read == 0,
+        Err(error) => !matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ),
+    }
+}
+
+#[test]
+fn strangers_cannot_hold_unlimited_handshakes_open() {
+    let dir = scratch();
+    let endpoint = start(&dir, &spec("cat", pipes(), LOSSLESS, 60));
+    let mut idle: Vec<TcpStream> = (0..256)
+        .map(|_| TcpStream::connect(("127.0.0.1", endpoint.port)).unwrap())
+        .collect();
+    // The keeper waits five seconds on each hello it admits and drops the rest at once, so
+    // one quick pass finishes inside that wait.
+    let mut dropped = 0;
+    for stream in &mut idle {
+        dropped += usize::from(closed_within(stream, Duration::from_millis(10)));
+    }
+    assert!(
+        dropped >= 256 - 64,
+        "only {dropped} idle connections dropped"
+    );
+
+    drop(idle);
+    wait_for("the keeper to admit a real attachment", || {
+        let Ok(mut stream) = TcpStream::connect(("127.0.0.1", endpoint.port)) else {
+            return false;
+        };
+        let hello = Hello {
+            protocol: wire::PROTOCOL,
+            token: TOKEN.into(),
+            from: 0,
+        };
+        wire::write_frame(&mut stream, kind::HELLO, &wire::json(&hello)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        matches!(wire::read_frame(&mut stream), Ok((kind::WELCOME, _)))
+    });
+}
+
+#[test]
+fn a_hello_dripped_slowly_is_dropped_at_the_deadline() {
+    let dir = scratch();
+    let endpoint = start(&dir, &spec("cat", pipes(), LOSSLESS, 60));
+    let mut stream = TcpStream::connect(("127.0.0.1", endpoint.port)).unwrap();
+    // A length announcing a body that never completes, one byte every half second.
+    let started = Instant::now();
+    let announced = 1000u32.to_le_bytes();
+    let mut sent = 0;
+    while !closed_within(&mut stream, Duration::from_millis(500)) {
+        assert!(started.elapsed() < Duration::from_secs(9), "never dropped");
+        let _ = stream.write_all(announced.get(sent..=sent).unwrap_or(&[0]));
+        sent += 1;
+    }
+    assert!(started.elapsed() >= Duration::from_secs(4));
 }
 
 #[test]

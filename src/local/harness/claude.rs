@@ -3225,16 +3225,18 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
                 // Released steers already run as queued messages. The child
                 // replays one when the model reads it, which records it; a
                 // failed write means the child is gone and the turn errors out.
+                // Checkpointed before the write, so a hand-off that cuts it short
+                // leaves the successor holding the steer, released if never read.
                 if ctx.host.steer_pending(&ctx.session_id, &steer.id) {
+                    let host = ctx.host.clone();
+                    progress
+                        .steers
+                        .retain(|sent| host.steer_pending(&ctx.session_id, &sent.id));
+                    progress.steers.push(steer.clone());
+                    checkpoint(ctx, keeper, applied, &progress);
                     if client.send_steer(&steer).await.is_err() {
                         ctx.host.release_steer(&ctx.session_id, &steer.id);
-                    } else {
-                        let host = ctx.host.clone();
-                        progress
-                            .steers
-                            .retain(|sent| host.steer_pending(&ctx.session_id, &sent.id));
-                        progress.steers.push(steer);
-                        checkpoint(ctx, keeper, applied, &progress);
+                        progress.steers.retain(|sent| sent.id != steer.id);
                     }
                 }
                 continue;

@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::mpsc;
 
-use super::{apply_resize, close_socket, send_terminal_error, DEFAULT_PTY_SIZE};
+use super::{apply_resize, close_socket, send_terminal_error, AppState, DEFAULT_PTY_SIZE};
 use crate::error::{anyhow, Result};
 use crate::keep::{
     self, Exit, Io, Keep, Kept, KeptHandle, KeptStdin, KeptStdout, Liveness, Owner, Record, Retain,
@@ -92,13 +92,17 @@ impl Terminals {
     /// Serves one page's socket for terminal `id`, starting the shell when there is none.
     pub(super) async fn serve(
         &self,
+        state: &AppState,
         mut socket: WebSocket,
         project_id: String,
         session_id: Option<String>,
         id: String,
         shell: (String, Vec<String>),
     ) {
-        match self.open(&project_id, session_id, &id, shell).await {
+        match self
+            .open_unless_moving(state, &project_id, session_id, &id, shell)
+            .await
+        {
             Ok(Opened::Live(terminal, subscription)) => terminal.view(socket, subscription).await,
             Ok(Opened::Ended(message)) => {
                 let _ = socket.send(Message::Text(message.to_string().into())).await;
@@ -106,6 +110,23 @@ impl Terminals {
             }
             Err(error) => send_terminal_error(&mut socket, error).await,
         }
+    }
+
+    /// A data-directory move refuses while a terminal's keeper lives there, so a shell may only
+    /// start while none is under way, and the move's check must then find it.
+    async fn open_unless_moving(
+        &self,
+        state: &AppState,
+        project_id: &str,
+        session_id: Option<String>,
+        id: &str,
+        shell: (String, Vec<String>),
+    ) -> Result<Opened> {
+        let moving = |state| super::reject_if_moving(state).map_err(|error| anyhow!(error.1));
+        moving(state)?;
+        let _data = state.data_dir_gate.lock().await;
+        moving(state)?;
+        self.open(project_id, session_id, id, shell).await
     }
 
     async fn open(
@@ -156,6 +177,8 @@ impl Terminals {
 
     /// Ends terminal `id` for good, as closing its tab does. False when it is another project's.
     pub(super) async fn close(&self, project_id: &str, id: &str) -> bool {
+        // Waits out an open in flight, which would otherwise start its shell after the tab is gone.
+        let opening = self.opening.lock().await;
         let terminal = {
             let mut live = self.live.lock().unwrap();
             match live.get(id) {
@@ -165,6 +188,7 @@ impl Terminals {
             }
         };
         self.ended.lock().unwrap().remove(id);
+        drop(opening);
         if let Some(terminal) = terminal {
             terminal.handle.stop(STOP_TIMEOUT).await;
         }
@@ -173,6 +197,7 @@ impl Terminals {
 
     /// Ends the terminals of a project or chat that is going away, before its folders do.
     pub(super) async fn close_where(&self, matches: impl Fn(&str, Option<&str>) -> bool) {
+        let opening = self.opening.lock().await;
         let closing: Vec<_> = {
             let mut live = self.live.lock().unwrap();
             let ids: Vec<_> = live
@@ -184,6 +209,7 @@ impl Terminals {
                 .collect();
             ids.iter().filter_map(|id| live.remove(id)).collect()
         };
+        drop(opening);
         futures::future::join_all(
             closing
                 .iter()
