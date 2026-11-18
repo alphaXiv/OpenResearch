@@ -67,6 +67,11 @@ export function foundProviderMark(provider: FoundProvider): AgentMark & { name: 
   return foundProviderLook(provider, known);
 }
 
+/** An agent or account listed while signed out, with a way to sign in: an account OpenResearch keeps, or an agent a chat on this machine ran on. */
+export function listedSignedOut(h: Harness) {
+  return h.id !== "opencode" && h.installed && !h.installBroken && h.authState === "needsLogin" && Boolean(h.profile || h.hasChats);
+}
+
 /**
  * The agents that can run a model now, in Settings' order, less those turned off but the one `kept` picks. OpenCode
  * stands behind its providers.

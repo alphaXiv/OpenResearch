@@ -37,7 +37,6 @@ for (const [signal, how, quitting] of [['SIGTERM', 'quits', 'quitting'], ['SIGKI
     await expect(page.getByText('Never sent.')).toBeHidden()
 
     agent.script('Profile the data loader.', [{ say: 'The loader spends most of its time decoding JPEGs.' }])
-    await page.getByText('This turn did not finish.').click()
     await page.getByRole('button', { name: 'Continue', exact: true }).click()
     await expect(page.getByText('The loader spends most of its time decoding JPEGs.')).toBeVisible()
     await expect(page.getByText('This turn did not finish.')).toBeHidden()
@@ -90,7 +89,6 @@ test('restarting into an update asks before stopping a working agent, whose turn
   await expect(page.getByText('Never sent.')).toBeHidden()
 
   agent.script('Profile the data loader.', [{ say: 'The loader spends most of its time decoding JPEGs.' }])
-  await page.getByText('This turn did not finish.').click()
   await page.getByRole('button', { name: 'Continue', exact: true }).click()
   await expect(page.getByText('The loader spends most of its time decoding JPEGs.')).toBeVisible()
 })

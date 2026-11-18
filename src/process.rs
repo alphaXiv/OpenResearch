@@ -59,6 +59,108 @@ pub fn tokio_command(program: impl AsRef<OsStr>) -> tokio::process::Command {
     command(program).into()
 }
 
+/// How long an agent CLI gets, at each step of ending it, to exit on its own.
+const AGENT_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Waits for an agent CLI whose input the caller closed to exit on its own, then
+/// [`ask_agent_to_stop`]s it. The caller kills what is left.
+///
+/// Killed outright, an agent can die between rotating its sign-in token and saving the
+/// new one, and the token left on disk no longer works: the user is signed out.
+pub(crate) async fn let_agent_exit(child: &mut tokio::process::Child, group: Option<u32>) {
+    if !exits_within_grace(child).await {
+        ask_agent_to_stop(child, group).await;
+    }
+}
+
+/// Sends SIGTERM to an agent CLI's process group (or the child alone, without one) and
+/// waits a moment for it to exit. Windows has no such request, so there it does nothing.
+pub(crate) async fn ask_agent_to_stop(child: &mut tokio::process::Child, group: Option<u32>) {
+    #[cfg(unix)]
+    {
+        let target = match group {
+            Some(group) => i32::try_from(group).ok().map(|group| -group),
+            None => child.id().and_then(|pid| i32::try_from(pid).ok()),
+        };
+        if let Some(target) = target {
+            // SAFETY: a negative target names a process group the child leads; a positive one, the child itself.
+            unsafe {
+                libc::kill(target, libc::SIGTERM);
+            }
+        }
+        exits_within_grace(child).await;
+    }
+    #[cfg(not(unix))]
+    let _ = (child, group);
+}
+
+/// [`let_agent_exit`] for a throwaway agent CLI the caller has its answer from and whose
+/// input it closed, reading what it still prints so a closed pipe never cuts its exit
+/// short. Dropping `child` kills whatever is left.
+pub(crate) async fn let_probe_exit(
+    mut child: tokio::process::Child,
+    mut output: impl tokio::io::AsyncRead + Unpin + Send + 'static,
+) {
+    let drain = tokio::spawn(async move {
+        let _ = tokio::io::copy(&mut output, &mut tokio::io::sink()).await;
+    });
+    let_agent_exit(&mut child, None).await;
+    drain.abort();
+}
+
+/// What an agent CLI printed and how it exited, if it finished by `deadline`; `None` when
+/// it did not, after [`ask_agent_to_stop`]ping it, since a CLI this slow may be saving a
+/// refreshed sign-in. Its output must be piped. Detached, so a caller that gives up never
+/// drops, and so kills, the child.
+pub(crate) async fn agent_output_by(
+    child: tokio::process::Child,
+    deadline: tokio::time::Instant,
+) -> Option<std::io::Result<std::process::Output>> {
+    tokio::spawn(output_by(child, deadline))
+        .await
+        .unwrap_or_else(|error| Some(Err(std::io::Error::other(error))))
+}
+
+async fn output_by(
+    mut child: tokio::process::Child,
+    deadline: tokio::time::Instant,
+) -> Option<std::io::Result<std::process::Output>> {
+    async fn read_all(pipe: Option<impl tokio::io::AsyncRead + Unpin>) -> std::io::Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        if let Some(mut pipe) = pipe {
+            tokio::io::AsyncReadExt::read_to_end(&mut pipe, &mut bytes).await?;
+        }
+        Ok(bytes)
+    }
+
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
+    let finished = tokio::time::timeout_at(deadline, async {
+        let (status, out, err) = tokio::join!(
+            child.wait(),
+            read_all(stdout.as_mut()),
+            read_all(stderr.as_mut())
+        );
+        Ok(std::process::Output {
+            status: status?,
+            stdout: out?,
+            stderr: err?,
+        })
+    })
+    .await;
+    if finished.is_err() {
+        ask_agent_to_stop(&mut child, None).await;
+    }
+    finished.ok()
+}
+
+async fn exits_within_grace(child: &mut tokio::process::Child) -> bool {
+    let grace = crate::config::paced(AGENT_EXIT_GRACE);
+    tokio::time::timeout(grace, child.wait())
+        .await
+        .is_ok_and(|status| status.is_ok())
+}
+
 /// Waits for a child, killing and reaping it when the deadline expires.
 #[cfg(any(not(unix), test))]
 pub(crate) fn wait_with_timeout(

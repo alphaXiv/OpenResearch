@@ -57,7 +57,8 @@ import {
 import { useMutate } from "@clo/react-mutation";
 
 import { nativeOptions, sessionAcpHarness } from "../acp";
-import { deriveComposerSelection, selectionHarness, withAutoReviewer } from "../modelSelection";
+import { deriveComposerSelection, harnessDisplayName, harnessKey, selectionHarness, withAutoReviewer } from "../modelSelection";
+import { useAgentSignIn } from "./HarnessSetupDialog";
 
 import { RemoteConnectionStrip, useRemoteConnection } from "../RemoteRuntime";
 
@@ -103,9 +104,11 @@ import {
   Globe,
   Gauge,
   HelpCircle,
+  Hourglass,
   Goal,
   LibraryBig,
   Lightbulb,
+  LogIn,
   MessageSquareQuote,
   MessagesSquare,
   MoreHorizontal,
@@ -147,6 +150,8 @@ import {
   type ChatMessage,
   type AlphaXivFolder,
   type ChatPart,
+  type ChatToolState,
+  type FailureCause,
   type OrxSource,
   type Autonomy,
   type ChatSession,
@@ -2623,11 +2628,40 @@ function squashToolParts(parts: ChatPart[]): SquashedToolPart[] {
   return squashed;
 }
 
+type FailureInput = NonNullable<ChatToolState["input"]>;
+
+/** How a chat answers a failed turn: the agent or account it ran on, and what fixes a cause here, if anything does. */
+export interface FailureActions {
+  agent: (input: FailureInput) => Harness | undefined;
+  fix: (cause: FailureCause, input: FailureInput) => (() => void) | undefined;
+}
+
+const FAILURE_LABEL: Record<FailureCause, (agent?: string) => string> = {
+  sign_in: (agent) => agent ? m.chat_failure_signed_out({ name: autoDir(agent) }) : m.onboarding_not_signed_in(),
+  usage_limit: () => m.chat_session_limit_reached(),
+  credits: () => m.chat_failure_credits(),
+  model_unavailable: () => m.chat_model_unavailable(),
+  context_full: () => m.chat_failure_context_full(),
+  overloaded: () => m.chat_failure_overloaded(),
+  network: () => m.chat_panel_temporary_api_error(),
+};
+
+const FIX_LABEL: Partial<Record<FailureCause, () => string>> = {
+  sign_in: () => m.harness_setup_login(),
+  model_unavailable: () => m.model_picker_choose_model(),
+  context_full: () => m.usage_compact(),
+};
+
+function isSignInFailure(part: ChatPart) {
+  return part.state?.input?.cause === "sign_in";
+}
+
 function TurnStatusRow({
   part,
   busy,
   recovering,
   onRecover,
+  failure,
   usageLimited = false,
   temporaryApiError = false,
 }: {
@@ -2637,6 +2671,7 @@ function TurnStatusRow({
   busy: boolean;
   recovering: boolean;
   onRecover?: (turnId: string, action: "retry" | "continue") => void;
+  failure?: FailureActions;
 }) {
   const input = part.state?.input;
   const nextRetryAt = input?.nextRetryAt ?? null;
@@ -2663,34 +2698,61 @@ function TurnStatusRow({
   }
   const action = parseRecoveryAction(input?.recoveryAction);
   const turnId = input?.turnId;
-  const label = isModelAccessLimitPart(part)
-    ? m.chat_model_unavailable()
-    : usageLimited ? m.chat_session_limit_reached()
-    : temporaryApiError ? m.chat_panel_temporary_api_error() : m.chat_turn_incomplete();
-  const Icon = temporaryApiError ? WifiOff : usageLimited ? Gauge : TriangleAlert;
-  const errorMessage = cleanToolError(part.state?.error || m.chat_turn_incomplete());
+  const reportedCause = input?.cause;
+  const cause = isSignInFailure(part) ? "sign_in"
+    : reportedCause && Object.hasOwn(FAILURE_LABEL, reportedCause) ? reportedCause
+    : isModelAccessLimitPart(part) ? "model_unavailable" : usageLimited ? "usage_limit" : temporaryApiError ? "network" : undefined;
+  const agent = input && failure?.agent(input);
+  const label = cause ? FAILURE_LABEL[cause](agent && (agent.profile?.name ?? harnessDisplayName(agent))) : m.chat_turn_incomplete();
+  const Icon = cause === "network" ? WifiOff : cause === "overloaded" ? Hourglass : cause === "sign_in" ? LogIn : cause === "usage_limit" ? Gauge : TriangleAlert;
+  const quiet = cause === "network" || cause === "overloaded";
+  const errorMessage = cleanToolError(part.state?.error || "");
+  const fixLabel = cause && FIX_LABEL[cause];
+  const fix = fixLabel && input && failure?.fix(cause, input);
+  // While the agent is signed out, only signing in, here or in the composer, sends the turn again.
+  const waitsForSignIn = cause === "sign_in" && agent?.authState === "needsLogin";
+  const recover = onRecover && turnId && (action === "retry" || action === "continue") && cause !== "usage_limit" && !waitsForSignIn
+    ? action
+    : undefined;
   return (
-    <Disclosure id={`${part.id}:${turnId ?? ""}`} className="turn-usage-limit group/limit mt-4 text-base text-subtext">
-      <summary className="flex w-fit max-w-full items-center gap-2 cursor-pointer list-none rounded-sm focus-visible:outline-2 focus-visible:outline-focus [&::-webkit-details-marker]:hidden">
-        <Icon size={18} className={temporaryApiError ? "shrink-0 text-subtext" : "shrink-0 text-accent-red"} aria-hidden="true" />
-        <span>{label}</span>
-        <ChevronRight size={16} className="shrink-0 text-text transition-transform duration-120 ease-standard group-open/limit:rotate-90 motion-reduce:transition-none" aria-hidden="true" />
-      </summary>
-      <pre className="mt-2 rounded-md bg-surface p-2 text-sm font-mono whitespace-pre-wrap wrap-anywhere">
-        {errorMessage}
-      </pre>
-      {!usageLimited && onRecover && turnId && (action === "retry" || action === "continue") && (
-        <Button
-          type="button"
-          size="small"
-          className="mt-2"
-          disabled={busy || recovering}
-          onClick={() => onRecover(turnId, action)}
-        >
-          {recovering ? m.chat_starting() : action === "retry" ? m.app_retry() : m.chat_continue()}
-        </Button>
+    <div className="turn-failure mt-4 text-base text-subtext">
+      <div className="flex items-center justify-between gap-3">
+        <p className="m-0 flex items-center gap-2">
+          <Icon size={18} className={quiet ? "shrink-0 text-subtext" : "shrink-0 text-accent-red"} aria-hidden="true" />
+          <span>{label}</span>
+        </p>
+        {cause === "sign_in" && fix && (
+          <Button type="button" size="small" variant="primary" className="shrink-0" disabled={busy || recovering} onClick={fix} aria-haspopup="dialog">
+            {m.harness_setup_login()}
+          </Button>
+        )}
+      </div>
+      {((fix && cause !== "sign_in") || recover) && (
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          {fix && fixLabel && cause !== "sign_in" && (
+            <Button type="button" size="small" variant="primary" disabled={busy || recovering} onClick={fix}>
+              {fixLabel()}
+            </Button>
+          )}
+          {recover && turnId && (
+            <Button type="button" size="small" disabled={busy || recovering} onClick={() => onRecover?.(turnId, recover)}>
+              {recovering ? m.chat_starting() : recover === "retry" ? m.app_retry() : m.chat_continue()}
+            </Button>
+          )}
+        </div>
       )}
-    </Disclosure>
+      {errorMessage && errorMessage !== label && (
+        <Disclosure id={`${part.id}:${turnId ?? ""}`} className="group/limit mt-2">
+          <summary className="flex w-fit max-w-full items-center gap-1.5 cursor-pointer list-none rounded-sm text-sm focus-visible:outline-2 focus-visible:outline-focus [&::-webkit-details-marker]:hidden">
+            <ChevronRight size={14} className="shrink-0 text-text transition-transform duration-120 ease-standard group-open/limit:rotate-90 motion-reduce:transition-none" aria-hidden="true" />
+            <span>{m.onboarding_error_details()}</span>
+          </summary>
+          <pre className="mt-2 rounded-md bg-surface p-2 text-sm font-mono whitespace-pre-wrap wrap-anywhere">
+            {errorMessage}
+          </pre>
+        </Disclosure>
+      )}
+    </div>
   );
 }
 
@@ -3611,6 +3673,7 @@ export const Message = memo(function Message({
   busy = false,
   recoveringTurnId,
   onRecover,
+  failure,
   skills,
   predictTextTail = false,
   forkCount,
@@ -3644,6 +3707,7 @@ export const Message = memo(function Message({
   busy?: boolean;
   recoveringTurnId?: string | null;
   onRecover?: (turnId: string, action: "retry" | "continue") => void;
+  failure?: FailureActions;
   /** Known slash-skills, for rendering a `/name` token as a command chip. */
   skills?: SkillInfo[];
   predictTextTail?: boolean;
@@ -3843,6 +3907,7 @@ export const Message = memo(function Message({
           busy={busy}
           recovering={recoveringTurnId === turnStatus.state?.input?.turnId}
           onRecover={onRecover}
+          failure={failure}
         />
       ))}
       {localErrors.map((turn) => (
@@ -4610,6 +4675,7 @@ const Transcript = memo(function Transcript({
   onOpenSubagent,
   recoveringTurnId,
   onRecover,
+  failure,
   skills,
   delegates,
   onOpenDelegate,
@@ -4646,6 +4712,7 @@ const Transcript = memo(function Transcript({
   onOpenSubagent?: OpenSubagent;
   recoveringTurnId?: string | null;
   onRecover?: (turnId: string, action: "retry" | "continue") => void;
+  failure?: FailureActions;
   skills?: SkillInfo[];
   /** Chats this one delegated to, oldest first. */
   delegates: DelegateRow[];
@@ -5007,6 +5074,7 @@ const Transcript = memo(function Transcript({
             busy={recoveryDisabled}
             recoveringTurnId={recoveringTurnId}
             onRecover={onRecover}
+            failure={failure}
             skills={skills}
             predictTextTail={busy && m === activeMessage && m.role === "assistant"}
           />
@@ -7490,6 +7558,37 @@ export function ChatPanel({
     },
     [workspace, activeId, recoveryOverrides, reseedSession],
   );
+  const signIn = useAgentSignIn();
+  const agentName = activeHarness?.profile?.name ?? (activeHarness && harnessDisplayName(activeHarness));
+  const composerSignedOut = activeHarness?.authState === "needsLogin" && (activeHarness.id !== "claude-code" || Boolean(activeHarness.profile) || activeHarness.loginEligible);
+  const signedOutTurn = composerSignedOut && messages.at(-1)?.parts.find((part) => part.id === "turn-recovery" && isSignInFailure(part));
+  const signInTurn = signedOutTurn ? signedOutTurn.state?.input : undefined;
+  const signInRecovery = parseRecoveryAction(signInTurn?.recoveryAction);
+  // Without a sign-in here, the composer keeps the agent's note and its command.
+  const composerSignIn = composerSignedOut ? signIn(activeHarness, () => {
+    if (signInTurn?.turnId && (signInRecovery === "retry" || signInRecovery === "continue")) {
+      void recoverFailedTurn(signInTurn.turnId, signInRecovery);
+    }
+  }) : undefined;
+  /** The agent or account a failure ran on; a failure saved before it was named is the chat's own. */
+  const failedAgent = (input: FailureInput) => input.harness
+    ? selectionHarness(harnesses, { harness: input.harness, profile: input.profile ?? null }) ?? (input.harness === activeHarness?.id ? activeHarness : undefined)
+    : activeHarness;
+  const failureActions: FailureActions | undefined = activeHarness && {
+    agent: failedAgent,
+    fix: (cause, input) => {
+      if (cause === "sign_in") {
+        const agent = failedAgent(input);
+        const action = parseRecoveryAction(input.recoveryAction);
+        // A ready agent may still hold the token the turn saw rejected, so Sign in stays beside Retry.
+        if (agent && harnessKey(agent) === harnessKey(activeHarness) && composerSignIn) return undefined;
+        return signIn(agent, () => { if (input.turnId && (action === "retry" || action === "continue")) void recoverFailedTurn(input.turnId, action); });
+      }
+      if (cause === "model_unavailable") return () => setModelPickerRequest((request) => request + 1);
+      if (cause === "context_full" && activeHarness.supportsCompaction) return () => void compactSession();
+      return undefined;
+    },
+  };
 
   const forkTurn = useCallback(
     (messageId: string, text: string) => {
@@ -8208,6 +8307,7 @@ export function ChatPanel({
                   onOpenSubagent={openSubagent}
                   recoveringTurnId={recoveringTurnId}
                   onRecover={recoverFailedTurn}
+                  failure={failureActions}
                   skills={transcriptSkills}
                   delegates={delegates}
                   onOpenDelegate={onOpenDelegate}
@@ -8437,9 +8537,16 @@ export function ChatPanel({
                   </button>
                 </div>
               )}
-              {activeHarness && !activeHarness.agentReady && (
-                <div className="composer-harness-warning py-2 px-3 text-subtext text-sm leading-normal border-b border-b-border-variant [&_strong]:text-accent-amber [&_strong]:font-medium [&_code]:font-mono [&_code]:text-text">
-                  {activeHarness.catalogPending ? (
+              {activeHarness && (composerSignIn || !activeHarness.agentReady) && (
+                <div className={`composer-harness-warning text-subtext text-sm leading-normal border-b border-b-border-variant [&_strong]:text-accent-amber [&_strong]:font-medium [&_code]:font-mono [&_code]:text-text ${composerSignIn ? "p-1.5 ps-3" : "py-2 px-3"}`}>
+                  {composerSignIn ? (
+                    <div className="flex items-center gap-3">
+                      <span className="flex-1" role="status">{m.chat_failure_signed_out({ name: autoDir(agentName ?? activeHarness.name) })}</span>
+                      <Button type="button" size="small" variant="primary" className="shrink-0" onClick={composerSignIn} disabled={busy || recoveringTurnId !== null} aria-haspopup="dialog">
+                        {m.harness_setup_login()}
+                      </Button>
+                    </div>
+                  ) : activeHarness.catalogPending ? (
                     <span>{activeHarness.name} — {m.onboarding_checking()}</span>
                   ) : (
                     <>
@@ -8531,7 +8638,9 @@ export function ChatPanel({
                       : composerSelection
                         ? activeHarness?.agentReady
                           ? m.chat_message_harness({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
-                          : m.chat_harness_unavailable({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
+                          : composerSignIn
+                            ? m.add_agent_sign_in_title({ name: autoDir(agentName ?? activeHarness?.name ?? "") })
+                            : m.chat_harness_unavailable({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
                         : m.chat_ask_agent_placeholder()
                   }
                   plain={bashMode && !asking}

@@ -710,13 +710,14 @@ async fn cursor_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
     cmd.env("CURSOR_CONFIG_DIR", &cursor_home);
     cmd.env("CURSOR_DATA_DIR", &cursor_home);
     cmd.env("NO_COLOR", "1");
-    let out = tokio::time::timeout(request.timeout, async {
-        let mut child = cmd.spawn()?;
-        send_prompt(&mut child, &message).await?;
-        Ok::<_, crate::error::Error>(child.wait_with_output().await?)
-    })
-    .await
-    .map_err(|_| anyhow!("timed out after {}s", request.timeout.as_secs()))??;
+    let deadline = tokio::time::Instant::now() + request.timeout;
+    let mut child = cmd.spawn()?;
+    tokio::time::timeout_at(deadline, send_prompt(&mut child, &message))
+        .await
+        .map_err(|_| anyhow!("timed out after {}s", request.timeout.as_secs()))??;
+    let out = crate::process::agent_output_by(child, deadline)
+        .await
+        .ok_or_else(|| anyhow!("timed out after {}s", request.timeout.as_secs()))??;
     if !out.status.success() {
         let detail = cursor_cli_error(&String::from_utf8_lossy(&out.stderr));
         return Err(match detail {

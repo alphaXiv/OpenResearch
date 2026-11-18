@@ -389,8 +389,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     state.opencode_signins.shutdown().await;
     state.remote_sessions.shutdown().await;
     agent.shutdown().await;
-    codex.shutdown().await;
-    claude.shutdown().await;
+    tokio::join!(codex.shutdown(), claude.shutdown());
     state.chat.acp.shutdown().await;
     state.chat.release_turn_leases();
     if let Some(server) = control_server {
@@ -7617,6 +7616,12 @@ async fn relay_pty(
                             return None;
                         }
                     }
+                    if let Some(code) = update.user_code {
+                        let frame = json!({ "type": "signin", "userCode": code }).to_string();
+                        if socket.send(Message::Text(frame.into())).await.is_err() {
+                            return None;
+                        }
+                    }
                     if update.failure.is_some() {
                         return Some(Ok(portable_pty::ExitStatus::with_exit_code(1)));
                     }
@@ -8751,9 +8756,15 @@ async fn harness_snapshot(Path(id): Path<String>) -> ApiResult {
 
 async fn list_harnesses(State(state): State<AppState>, Query(q): Query<HarnessQuery>) -> ApiResult {
     let mut payload = harnesses_payload(&state, &q).await;
-    let hidden = Store::open()?.ui_state()?.hidden_agents;
+    let store = Store::open()?;
+    let hidden = store.ui_state()?.hidden_agents;
+    let used = store.chat_agents_used()?;
     for entry in payload["harnesses"].as_array_mut().into_iter().flatten() {
         entry["off"] = json!(local::model_routes::turned_off(entry, &hidden));
+        let profile = entry["profile"]["id"].as_str();
+        entry["hasChats"] = json!(used
+            .iter()
+            .any(|(harness, used)| entry["id"] == harness.as_str() && used.as_deref() == profile));
         if entry["id"] == "opencode" && entry["profile"].is_null() {
             entry["offProviders"] = json!(local::model_routes::off_providers(entry, &hidden));
         }
