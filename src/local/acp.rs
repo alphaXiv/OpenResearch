@@ -341,64 +341,21 @@ pub fn remove(id: &str) -> Result<()> {
 }
 
 pub async fn test_connection(definition: &Definition) -> Result<serde_json::Value> {
-    use agent_client_protocol::schema::ProtocolVersion;
-    use agent_client_protocol::{Agent, ByteStreams, ConnectionTo};
-    use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
-
     definition.validate()?;
-    let executable = executable_path(&definition.executable)
-        .unwrap_or_else(|| std::path::PathBuf::from(&definition.executable));
-    let mut command = crate::local::harness::managed::command(&executable);
-    command
-        .args(&definition.arguments)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true);
-    #[cfg(unix)]
-    command.process_group(0);
-    let child = command.spawn().map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            crate::error::anyhow!("Executable not found. Install the agent on the machine running OpenResearch, or enter its absolute path.")
-        } else {
-            crate::error::anyhow!("Could not start the ACP agent: {error}")
-        }
+    let cwd = std::env::current_dir().map_err(|error| {
+        crate::error::anyhow!(
+            "Could not read the working directory for {}: {error}",
+            definition.name
+        )
     })?;
-    let mut process = OwnedProcess {
-        id: child.id(),
-        child,
-    };
-    let transport = ByteStreams::new(
-        process
-            .child
-            .stdin
-            .take()
-            .expect("piped stdin")
-            .compat_write(),
-        process.child.stdout.take().expect("piped stdout").compat(),
-    );
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
-        agent_client_protocol::Client.builder().connect_with(
-            transport,
-            |connection: ConnectionTo<Agent>| async move {
-                connection.send_request(initialization()).block_task().await
-            },
-        ),
-    )
-    .await;
-    crate::local::chat::kill_shell_group(process.id.take());
-    let _ = process.child.kill().await;
-    let _ = process.child.wait().await;
-    let initialized = result.map_err(|_| {
-        crate::error::anyhow!("ACP initialization timed out. Check the executable and arguments.")
-    })??;
-    if initialized.protocol_version != ProtocolVersion::V1 {
-        bail!("Incompatible ACP protocol. This backend supports stable ACP v1.");
-    }
-    Ok(
-        serde_json::json!({"status": "connected", "agentInfo": initialized.agent_info, "capabilities": initialized.agent_capabilities}),
-    )
+    let client = host::spawn(definition, &cwd, &definition.id, None, None).await?;
+    let result = serde_json::json!({
+        "status": "connected",
+        "agentInfo": client.initialized["agentInfo"],
+        "capabilities": client.initialized["agentCapabilities"],
+    });
+    client.shutdown().await;
+    Ok(result)
 }
 
 /// A private temporary working directory, removed on drop.
@@ -685,13 +642,15 @@ async fn prompt_once(
                     .downcast_ref::<agent_client_protocol::Error>()
                     .is_some_and(agent_client_protocol::is_incoming_transport_closed);
                 if exited {
-                    anyhow!("{name} exited before answering")
+                    error
                 } else {
                     anyhow!("{name} could not answer: {error}")
                 }
             })?,
             event = events.recv() => {
-                let event = event.ok_or_else(|| anyhow!("{name} exited before answering"))?;
+                let Some(event) = event else {
+                    return Err(client.connection_error().await);
+                };
                 one_shot_event(client, event, &mut startup, &mut answer);
             }
         }
@@ -1200,7 +1159,7 @@ mod tests {
         assert_eq!(crashes.len(), 1, "{crashes:?}");
         let crash = crashes.into_iter().next().unwrap();
         assert!(
-            crash.contains("Peer") && crash.contains("exited"),
+            crash.contains("Peer") && crash.contains("closed"),
             "{crash}"
         );
         assert!(!crash.contains("transport"), "{crash}");
