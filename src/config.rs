@@ -743,10 +743,15 @@ pub fn saved_project_env(
     store: &crate::store::Store,
     project_id: &str,
 ) -> Result<std::collections::HashMap<String, String>> {
-    let project_vars = store.project_env(project_id)?;
+    Ok(merge_saved_env(store.project_env(project_id)?))
+}
+
+pub fn merge_saved_env(
+    project_vars: Vec<crate::store::ProjectEnvVar>,
+) -> std::collections::HashMap<String, String> {
     let mut env: std::collections::HashMap<_, _> = list_synced_env().into_iter().collect();
     env.extend(project_vars.into_iter().map(|var| (var.key, var.value)));
-    Ok(env)
+    env
 }
 
 pub fn saved_run_env(

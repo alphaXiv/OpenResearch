@@ -14,6 +14,7 @@ mod env;
 pub(crate) mod search;
 mod telemetry;
 pub(crate) use costs::{BilledRun, Per, Quote};
+pub(crate) use env::ProjectEnvVar;
 pub(crate) use telemetry::{Cost, InvocationIdentity, SampleCost, TokenUsage};
 
 use std::path::{Path, PathBuf};
@@ -10869,10 +10870,19 @@ pub(crate) mod tests {
 
     #[test]
     fn acp_first_turn_repairs_missing_state_without_redirecting_native_sessions() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+
+        let preset = crate::local::acp::presets().remove(0).launch;
+        let mut saved = preset.clone();
+        saved.id = format!("acp:{}", uuid::Uuid::new_v4());
+        crate::local::acp::save(saved, true).unwrap();
+
         let dir = std::env::temp_dir().join(format!("orx-acp-repair-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
         let mut session = chat_session_fixture("legacy-demo");
-        session.harness = crate::local::acp::presets()[0].launch.id.clone();
+        session.harness = preset.id;
         store.create_chat_session(&session).unwrap();
         store
             .conn

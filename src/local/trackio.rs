@@ -40,6 +40,7 @@ pub fn target(env: &HashMap<String, String>) -> Target {
 pub struct ProjectTracker {
     pub name: String,
     pub target: Target,
+    hf_token: Option<String>,
 }
 
 /// Where the project's jobs log to Trackio.
@@ -47,10 +48,16 @@ pub fn project_for(
     store: &crate::store::Store,
     project: super::model::LocalProject,
 ) -> crate::error::Result<ProjectTracker> {
-    let mut saved = crate::config::saved_project_env(store, &project.id)?;
+    let variables = store.project_env(&project.id)?;
+    let hf_token = variables
+        .iter()
+        .find(|var| var.key == "HF_TOKEN")
+        .map(|var| var.value.clone());
+    let mut saved = crate::config::merge_saved_env(variables);
     Ok(ProjectTracker {
         name: saved.remove(PROJECT).unwrap_or(project.slug),
         target: target(&saved),
+        hf_token,
     })
 }
 
@@ -553,7 +560,10 @@ async fn dashboard(
 ) -> Result<Option<Dashboard>, String> {
     match &project.target {
         Target::Space(id) => {
-            let token = crate::jobs::huggingface::resolve_token().ok();
+            let token = project
+                .hf_token
+                .clone()
+                .or_else(|| crate::jobs::huggingface::resolve_token().ok());
             // Not created yet is the normal first-use state, not a failure.
             let Some(space) = cached_space(id, token.as_deref()).await? else {
                 return Ok(None);
@@ -1141,6 +1151,82 @@ mod tests {
             .unwrap();
         let tracker = project_for(&store, project()).unwrap();
         assert!(matches!(tracker.target, Target::Space(id) if id == "org/trackio"));
+    }
+
+    #[tokio::test]
+    async fn project_space_uses_the_saved_token_and_falls_back_to_the_local_account() {
+        use crate::store::Store;
+        use axum::extract::Path;
+        use axum::http::{HeaderMap, StatusCode};
+        use axum::routing::get;
+
+        if !crate::config::in_test_child(&["HF_ENDPOINT", "HF_TOKEN"]) {
+            return;
+        }
+        let owners = Arc::new(Mutex::new(Vec::new()));
+        let base = stub(
+            axum::Router::new()
+                .route(
+                    "/api/whoami-v2",
+                    get(|headers: HeaderMap| async move {
+                        let owner = match headers["authorization"].to_str().unwrap() {
+                            "Bearer project-token" => "project-owner",
+                            "Bearer local-token" => "local-owner",
+                            _ => panic!("an unexpected token was sent"),
+                        };
+                        axum::Json(json!({ "name": owner }))
+                    }),
+                )
+                .route(
+                    "/api/spaces/{owner}/metrics",
+                    get({
+                        let owners = owners.clone();
+                        move |Path(owner): Path<String>, headers: HeaderMap| async move {
+                            let expected = match owner.as_str() {
+                                "project-owner" => "Bearer project-token",
+                                "local-owner" => "Bearer local-token",
+                                _ => panic!("an unexpected owner was requested"),
+                            };
+                            assert_eq!(headers["authorization"], expected);
+                            owners.lock().unwrap().push(owner);
+                            StatusCode::NOT_FOUND
+                        }
+                    }),
+                ),
+        )
+        .await;
+        std::env::set_var("HF_ENDPOINT", base);
+        std::env::set_var("HF_TOKEN", "local-token");
+        crate::config::write_synced_env_var("HF_TOKEN", "synced-token").unwrap();
+
+        let store = Store::open().unwrap();
+        let project = || crate::store::tests::local_project_fixture("private-space");
+        store.create_local_project(&project()).unwrap();
+        store
+            .set_project_env("private-space", SPACE_ID, "metrics")
+            .unwrap();
+        store
+            .set_project_env("private-space", "HF_TOKEN", "project-token")
+            .unwrap();
+        let local = Arc::new(LocalServer::default());
+
+        let tracker = project_for(&store, project()).unwrap();
+        assert!(project_runs(&local, tracker)
+            .await
+            .unwrap()
+            .dashboard_url
+            .is_none());
+        store
+            .delete_project_env("private-space", "HF_TOKEN")
+            .unwrap();
+        let tracker = project_for(&store, project()).unwrap();
+        assert!(project_runs(&local, tracker)
+            .await
+            .unwrap()
+            .dashboard_url
+            .is_none());
+
+        assert_eq!(*owners.lock().unwrap(), ["project-owner", "local-owner"]);
     }
 
     #[test]
