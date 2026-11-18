@@ -257,7 +257,7 @@ pub trait Harness: Send + Sync {
         HarnessOptions::none()
     }
 
-    /// Generate a short (≤6 words) session title from the session's first user
+    /// Generate a short (1-4 word) session title from the session's first user
     /// message with a short-lived child, using the session model for OpenCode.
     /// `None` = failed; the caller keeps the first-line placeholder.
     ///
