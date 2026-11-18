@@ -26,7 +26,7 @@ const ANNOUNCED_MS = 2_000;
 
 /** What a screen reader hears when a run's words, state or freshness change; a number refilling is never news. */
 function useAnnouncement(models: RunModel[], names: string[] | null): string {
-  const seen = useRef<Map<string, { tone: string; words: string; stale: string | null }> | null>(null);
+  const seen = useRef<Map<string, { tone: string; words: string; stale: string | null; waiting: string | null }> | null>(null);
   const [announcement, setAnnouncement] = useState("");
   useEffect(() => {
     const first = seen.current === null;
@@ -39,15 +39,21 @@ function useAnnouncement(models: RunModel[], names: string[] | null): string {
       // A finished run's own words already say it finished.
       const change = model.sentence.key === "end:done" ? "" : `${model.status}. `;
       const text = plainSentence([model.sentence.text, !model.live && model.sentence.watcher ? model.eta : ""].filter(Boolean).join(" · "));
-      if (!first && (!before || before.tone !== model.tone)) news.push(`${prefix}${change}${text}`);
-      else if (!first && before.stale !== stale) {
-        const lastSeen = model.stale;
-        const separator = lastSeen && /[.。۔।][\u2066-\u2069]*$/u.test(lastSeen.why) ? " " : ". ";
-        news.push(prefix + (lastSeen ? `${lastSeen.why}${separator}${lastSeen.age}.` : text));
+      if (first) continue;
+      if (!before || before.tone !== model.tone) news.push(`${prefix}${change}${text}`);
+      else if (before.words !== model.sentence.key || (before.stale && !stale)) news.push(prefix + text);
+      if (model.stale && before?.stale !== stale) {
+        const separator = /[.。۔।][\u2066-\u2069]*$/u.test(model.stale.why) ? " " : ". ";
+        news.push(`${prefix}${model.stale.why}${separator}${model.stale.age}.`);
       }
-      else if (!first && before.words !== model.sentence.key) news.push(prefix + text);
+      if (model.needsChoice && before?.waiting !== model.flag?.id) news.push(`${prefix}${m.chat_run_needs_attention()}.`);
     }
-    seen.current = new Map(models.map((model) => [model.run.id, { tone: model.tone, words: model.sentence.key, stale: model.stale?.state ?? null }]));
+    seen.current = new Map(models.map((model) => [model.run.id, {
+      tone: model.tone,
+      words: model.sentence.key,
+      stale: model.stale?.state ?? null,
+      waiting: model.needsChoice ? model.flag?.id ?? null : null,
+    }]));
     const left = [...previous.keys()].some((id) => !seen.current?.has(id));
     if (news.length > 0) setAnnouncement(news.join(" "));
     else if (left) setAnnouncement("");

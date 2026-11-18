@@ -693,6 +693,36 @@ test("a degraded line names its state and reason on hover, focus and to a screen
   assert.equal(plain(status()), `${why} ${age}.`, "said once");
 });
 
+test("a flag handback announces that the run needs attention even when the warning stays the same", async () => {
+  const looking = { ...flagged, flags: [{ ...flagged.flags[0], state: "agent_looking" }] };
+  backend({ monitors: { r1: looking } });
+  const workspace = createWorkspace("test");
+  const { queryKey } = workspace.queries.getRunMonitorQuery("r1");
+  workspace.setScopedQueryData(queryKey, looking);
+  await banner([waitingRun()], { workspace });
+  await settle();
+  assert.equal(status(), "");
+
+  await act(async () => workspace.setScopedQueryData(queryKey, { ...flagged, rev: flagged.rev + 1 }));
+  await settle();
+  assert.ok(named(m.run_flag_keep_going()));
+  assert.ok(plain(status()).includes(m.chat_run_needs_attention()), status());
+});
+
+test("a state change and a freshness change in one update both reach the live region", async () => {
+  backend();
+  const view = await banner([run("r1")]);
+  await settle();
+
+  const reason = "The run's log could not be read.";
+  const monitor = summary({ tone: "failed", sentence: null, rev: running.rev + 1, unavailable: reason });
+  await view.update([run("r1", { status: "failed", endedAt: now, monitor })]);
+  await settle();
+  assert.ok(plain(status()).includes(m.status_failed()), status());
+  assert.ok(plain(status()).includes(reason), status());
+  assert.ok(plain(status()).includes(plain(m.status_last_seen({ time: fmtClock(now) }))), status());
+});
+
 test("shown runs without a summary draw their terminal status at both levels without fetching a monitor", async () => {
   for (const status of ["done", "failed", "cancelled"]) {
     const requests = backend();
