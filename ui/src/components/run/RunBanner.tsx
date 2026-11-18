@@ -101,7 +101,7 @@ export function RunBanner({ sessionId, agent, onOpenRun, onOpenRunPage }: {
   // The remembered level says whether a summary opens to its rows.
   const rows = listed ?? (waiting.length > 0 || remembered === "strip");
   const isOpen = (id: string) => single ? singleLevel === "strip" : rows && openId === id;
-  // A lone run reads its monitor at either level, so its line keeps the watcher's ticks; several read only the open row's.
+  // A lone run reads its monitor at either level; several read only the open row's.
   const reads = (run: Run) => shown && (single || isOpen(run.id));
 
   const retryAt = (item: ShownRun) => {

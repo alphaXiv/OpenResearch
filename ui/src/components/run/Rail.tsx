@@ -3,9 +3,9 @@ import { Tooltip } from "../ui";
 import { cn } from "../ui/cn";
 
 /**
- * The bar, always an underline: stages are segments, and each look the watcher took is a tick standing on it,
- * amber where it flagged something. With `hover`, a tick shows what was said at that look. A page draws it as a `bar`
- * in the flow, under its stages.
+ * The bar, always an underline: stages are segments. A page draws it as a `bar` in the flow, under its stages, where
+ * each look the watcher took is a tick standing on it, amber where it flagged something; with `hover`, a tick shows
+ * what was said at that look.
  */
 export function Rail({ model, kind, hover = false }: { model: RunModel; kind: "edge" | "thick" | "bar"; hover?: boolean }) {
   if (model.run.status === "done") return null;
