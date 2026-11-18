@@ -19,6 +19,8 @@ use std::time::Duration;
 /// silence means the laptop has not watched the run.
 const STALE_AFTER_MS: i64 = 90_000;
 
+const READING_FINAL_LOG: &str = "The final log is still being read.";
+
 /// The monitor route's bound; larger series are paged.
 const MAX_BODY: usize = 4 * 1024 * 1024;
 
@@ -350,6 +352,7 @@ fn availability(fold: &Fold, life: &Lifecycle, now: i64) -> (&'static str, Optio
         ),
         Some("stale") => ("stale", reason),
         Some("incomplete") => ("live", reason),
+        _ if life.retry_at.is_some() => ("stale", Some(READING_FINAL_LOG.into())),
         _ => match status["lastCollectedAt"].as_i64() {
             Some(at) if life.live() && now - at > STALE_AFTER_MS => (
                 "stale",
@@ -3164,6 +3167,8 @@ fn signal_notes(
             },
         });
         notes.push(format!("Error details: {reason}"));
+    } else if availability["retryAt"].is_i64() {
+        notes.push(READING_FINAL_LOG.to_owned());
     } else if !reported && reading {
         notes.push("No metrics found in the log yet.".to_owned());
     }
@@ -4416,6 +4421,38 @@ mod tests {
         f.signals(&late);
         let (monitor, _) = monitor_at(&f, &run, T0 + 901_000);
         assert_eq!(monitor["progress"]["whole"], 1.0, "{}", monitor["progress"]);
+    }
+
+    #[test]
+    fn an_ended_run_reports_pending_final_collection_until_its_signals_land() {
+        let f = Fixture::new("orx-monitor-final-log");
+        let run = f.run("done", local());
+        let now = T0 + 700_000;
+        f.store.queue_signal_collection(&run.id).unwrap();
+
+        let (_, published) = monitor(&f.store, &run).unwrap();
+        let offline = offline(&f.store, &run, now).unwrap();
+        for body in [&published, &offline] {
+            assert_eq!(body["availability"]["state"], "stale");
+            assert!(body["availability"]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("final log"));
+            let status = body["statusText"].as_str().unwrap();
+            assert!(status.contains("final log"), "{status}");
+            assert!(!status.contains("No metrics found"), "{status}");
+        }
+
+        f.signals(&folded(&declared(0..=2, 4)));
+        let (_, body) = monitor(&f.store, &run).unwrap();
+        assert!(body["latest"]["loss"].is_number());
+        assert!(body["statusText"].as_str().unwrap().contains("final log"));
+
+        f.store.finish_signal_collection(&run.id).unwrap();
+        let (_, body) = monitor(&f.store, &run).unwrap();
+        assert_eq!(body["availability"]["state"], "live");
+        assert!(body["latest"]["loss"].is_number());
+        assert!(!body["statusText"].as_str().unwrap().contains("final log"));
     }
 
     #[test]
