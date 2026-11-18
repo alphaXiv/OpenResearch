@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           persist-credentials: false
       - name: Check product source and download real baseline binaries
         env:
@@ -25,7 +25,7 @@ jobs:
           unzip -q "$RUNNER_TEMP/baseline.zip" -d "$RUNNER_TEMP/baseline"
           if ! test -f "$RUNNER_TEMP/baseline/orx"; then
             find "$RUNNER_TEMP/baseline" -name '*.tar.gz' -exec tar xzf '{}' -C "$RUNNER_TEMP/baseline" \;
-            cp "$(find "$RUNNER_TEMP/baseline" -type f -name orx | head -1)" "$RUNNER_TEMP/baseline/orx"
+            test -f "$RUNNER_TEMP/baseline/orx"
           fi
           chmod +x "$RUNNER_TEMP/baseline/orx"
           gh api 'repos/alphaXiv/OpenResearch/actions/artifacts/14383180091/zip' > "$RUNNER_TEMP/hosts.zip"
