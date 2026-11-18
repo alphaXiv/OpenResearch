@@ -1902,9 +1902,6 @@ pub(crate) fn shown(
     }
     let empty = Map::new();
     let terminal = super::Phase::parse(&run.status).is_some_and(super::Phase::is_terminal);
-    let versus = monitor["versus"][if terminal { "final" } else { "step" }]
-        .as_object()
-        .unwrap_or(&empty);
     let comparison = |name: &str, by: Option<&str>| {
         let by = by
             .or_else(|| signals[name]["vs"].as_str())
@@ -1918,16 +1915,11 @@ pub(crate) fn shown(
             .as_f64()
             .map(|step| format!("; step={step}"))
             .unwrap_or_default();
-        let difference = super::watch::fill_values(
-            &format!("{{{name}.vs}}"),
-            &Value::Null,
-            signals,
-            comparisons,
-        );
+        let difference = super::watch::versus_text(Some(vs), &signals[name]);
         format!("{name}; vs={by}; parent={parent}{step}; difference={difference}")
     };
     let fill = |text: &str| {
-        super::watch::fill_values(text, &summary["bindings"], signals, versus).replace("**", "")
+        super::watch::fill_values(text, &summary["bindings"], signals).replace("**", "")
     };
     lines.push(match summary["sentence"]["template"].as_str() {
         Some(template) => format!("Watcher: {}", fill(template)),
@@ -2136,8 +2128,7 @@ pub(crate) fn shown(
             lines.push(format!("  rows: {}", monitor["rows"][table]));
         }
         if let Some(template) = block["text"].as_str() {
-            let text =
-                super::watch::fill_values(template, &monitor["latest"], signals, &Map::new());
+            let text = super::watch::fill_values(template, &monitor["latest"], signals);
             lines.push(format!("Text{scope}: {}", text.replace("**", "")));
             for name in text_signals(template).expect("compiled view text") {
                 if monitor["latest"][&name].is_null() {

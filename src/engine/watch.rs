@@ -1459,12 +1459,12 @@ fn count_of(run: &Now, pattern: &str) -> Option<u64> {
     run.body["counts"][pattern].as_u64()
 }
 
-/// What a sentence's tokens read now, as the page fills them.
+/// The monitor bindings and any counts this look just backfilled.
 fn bindings(run: &Now) -> Value {
-    let mut bindings = run.body["latest"].as_object().cloned().unwrap_or_default();
-    for (name, vs) in run.body["versus"]["step"].as_object().into_iter().flatten() {
-        bindings.insert(format!("{name}.vs"), vs.clone());
-    }
+    let mut bindings = run.summary["bindings"]
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
     for (pattern, count) in run.body["counts"].as_object().into_iter().flatten() {
         bindings.insert(
             format!("count:{}", Value::from(pattern.as_str())),
@@ -1896,7 +1896,7 @@ fn render(run: &Now, token: &reply::Token) -> String {
             super::monitor::value_text(&run.body["latest"][name], &signals[name])
         }
         reply::Token::Versus(_, name) => {
-            versus_text(Some(&run.body["versus"]["step"][name]), &signals[name])
+            versus_text(run.summary["bindings"].get(token.binding()), &signals[name])
         }
         reply::Token::Count(_, pattern) => {
             count_of(run, pattern).map_or_else(|| "—".into(), |n| n.to_string())
@@ -2065,18 +2065,10 @@ async fn take(id: i64) -> Result<()> {
                         .ok()
                         .flatten()
                 });
-                let mut said = json!({
+                let said = json!({
                     "label": experiment.map(|e| e.display_name().to_owned()),
                     "state": summary["tone"],
                 });
-                let live = matches!(summary["tone"].as_str(), Some("running" | "starting"));
-                said[if live { "valuesNow" } else { "valuesAtItsEnd" }] =
-                    json!(summary["bindings"].as_object().map(|bindings| {
-                        bindings
-                            .iter()
-                            .map(|(name, value)| (name, value.get("d").unwrap_or(value)))
-                            .collect::<BTreeMap<_, _>>()
-                    }));
                 Some((run.run.id.clone(), said))
             })
             .collect()
@@ -2217,9 +2209,13 @@ async fn take(id: i64) -> Result<()> {
     let versus: BTreeMap<&str, BTreeSet<String>> = keyed
         .iter()
         .map(|(key, run)| {
-            let names = run.body["versus"]["step"]
+            let names = run.summary["bindings"]
                 .as_object()
-                .map_or_else(BTreeSet::new, |vs| vs.keys().cloned().collect());
+                .into_iter()
+                .flatten()
+                .filter(|(_, value)| value.is_object())
+                .filter_map(|(key, _)| key.strip_suffix(".vs").map(str::to_owned))
+                .collect();
             (key.as_str(), names)
         })
         .collect();
@@ -2928,18 +2924,13 @@ fn read_facts(store: &Store, run: &StoredRun) -> Result<Value> {
 
 /// What `orx exp status` says of the watch: the sentence as it reads now, by what and when, and
 /// the summary of the other runs its last look covered; else why the run is not watched.
-pub(crate) fn status_lines(
-    watch: &Value,
-    bindings: &Value,
-    signals: &Value,
-    versus: &Map<String, Value>,
-) -> Vec<String> {
+pub(crate) fn status_lines(watch: &Value, bindings: &Value, signals: &Value) -> Vec<String> {
     let mut lines = Vec::new();
     let model = watch["model"].as_str().unwrap_or("the watcher");
     let looks = watch["looks"].as_array().map_or(0, Vec::len);
     match watch["sentence"]["template"].as_str() {
         Some(template) => {
-            let filled = fill_values(template, bindings, signals, versus).replace("**", "");
+            let filled = fill_values(template, bindings, signals).replace("**", "");
             let at = watch["sentence"]["t"]
                 .as_i64()
                 .map(super::monitor::clock_text)
@@ -2979,17 +2970,12 @@ pub(crate) fn status_lines(
 }
 
 /// A template filled from a summary's bindings, as the page fills it, in English.
-pub(crate) fn fill_values(
-    template: &str,
-    bindings: &Value,
-    signals: &Value,
-    versus: &Map<String, Value>,
-) -> String {
+pub(crate) fn fill_values(template: &str, bindings: &Value, signals: &Value) -> String {
     filled(template, false, |token| match token {
         reply::Token::Signal(_, name) => {
             super::monitor::value_text(&bindings[name], &signals[name])
         }
-        reply::Token::Versus(_, name) => versus_text(versus.get(name), &signals[name]),
+        reply::Token::Versus(_, name) => versus_text(bindings.get(token.binding()), &signals[name]),
         reply::Token::Count(..) => bindings[token.binding()]
             .as_u64()
             .map_or_else(|| "—".into(), |n| n.to_string()),
@@ -2998,7 +2984,7 @@ pub(crate) fn fill_values(
 }
 
 /// A comparison with the parent as a `{signal.vs}` token reads.
-fn versus_text(vs: Option<&Value>, spec: &Value) -> String {
+pub(super) fn versus_text(vs: Option<&Value>, spec: &Value) -> String {
     let Some(vs) = vs.filter(|vs| vs.is_object()) else {
         return "—".into();
     };

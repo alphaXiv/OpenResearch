@@ -190,8 +190,9 @@ How a run meets its parent is yours to choose, per experiment:
 
 - **`vs`** on `stats`, `table`, or a `signal` as its default: `step` compares
   with the parent at the same stage and step, `final` with the value the parent
-  ended with. Left out, it is `step` while the run goes and `final` once it
-  ends. Use `final` when the parent's result is the bar to clear, `step` when
+  ended with. A signal's `final` comparison is available once both runs end.
+  Left out, it is `step` while the run goes and `final` once it ends. Use
+  `final` when the parent's result is the bar to clear, `step` when
   the question is the path (does it learn faster?). A table compares only with
   `vs`; `vs="parent"` takes the default.
 - **`ghost="parent"`** (the default) draws the parent's same series dashed

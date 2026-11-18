@@ -1316,15 +1316,19 @@ fn classifier_run(
     row
 }
 
+fn epochs(store: &Store, run: &StoredRun, values: &[(f64, f64)]) {
+    epochs_in(store, run, "train", values);
+}
+
 /// The run's log and its fold after `epochs`, as the classifier prints them, of 150.
-fn epochs(store: &Store, run: &StoredRun, epochs: &[(f64, f64)]) {
+fn epochs_in(store: &Store, run: &StoredRun, stage: &str, epochs: &[(f64, f64)]) {
     // A live run is projected at most once a second: each report is projected a minute on.
     let projected_at = crate::store::now_ms() + 60_000 * epochs.len() as i64;
     let mut snapshot = orx_signals::Snapshot::new(&run.id, "1-7", "g1");
     let mut log = String::new();
     for (index, (loss, acc)) in epochs.iter().enumerate() {
         let line = format!(
-            "::orx:: {{\"step\":{},\"of\":150,\"phase\":\"train\",\"unit\":\"epochs\",\"m\":{{\"loss\":{loss},\"test_acc\":{acc}}}}}\n",
+            "::orx:: {{\"step\":{},\"of\":150,\"phase\":\"{stage}\",\"unit\":\"epochs\",\"m\":{{\"loss\":{loss},\"test_acc\":{acc}}}}}\n",
             index + 1
         );
         let at = projected_at - (epochs.len() - index) as i64 * 1000;
@@ -1344,6 +1348,84 @@ fn epochs(store: &Store, run: &StoredRun, epochs: &[(f64, f64)]) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     crate::engine::adapters::signals::publish(&path, &snapshot).unwrap();
     super::super::monitor::advance(store, run, projected_at).unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_live_replay_compares_only_at_the_matching_step() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let store = Store::open().unwrap();
+    chat(&store, "chat", "claude-code");
+    let parent = classifier_run(&store, "parent", None, "done", "chat");
+    epochs(&store, &parent, &[(2.0, 0.4), (1.0, 0.6), (0.5, 0.8)]);
+    let mut child = classifier_run(&store, "child", Some("parent"), "running", "chat");
+    let renamed = classifier_run(&store, "renamed", Some("parent"), "running", "chat");
+    let calls_dir = crate::config::home_dir().unwrap().join("claude-calls");
+    let compare = r#"{"runs":{"r1":{"status":"ok","line":"Loss **{loss}**, {loss.vs}."}}}"#;
+    fake_claude(
+        &calls_dir,
+        &[
+            r#"{"runs":{"r1":{"status":"ok","line":"Loss **{loss}**."}}}"#,
+            compare,
+            compare,
+            compare,
+        ],
+    );
+
+    epochs_in(&store, &renamed, "replay", &[(2.0, 0.4)]);
+    take(look(&store, "chat", "manual", &[("renamed", "r1")]))
+        .await
+        .unwrap();
+    let digest = |call| {
+        let prompt = std::fs::read_to_string(calls_dir.join(format!("prompt-{call}"))).unwrap();
+        serde_json::from_str::<Value>(prompt.strip_prefix(DIGEST_PREAMBLE).unwrap()).unwrap()
+    };
+    let sent = digest(1);
+    assert!(sent["runs"][0]["signals"]["loss"]["vsParentAtThisStep"].is_null());
+    assert!(sent["parents"][0]["run"]["valuesAtItsEnd"].is_null());
+
+    let mut replay = Vec::new();
+    for (index, point) in [(2.0, 0.4), (1.0, 0.6)].into_iter().enumerate() {
+        replay.push(point);
+        epochs(&store, &child, &replay);
+        take(look(&store, "chat", "manual", &[("child", "r1")]))
+            .await
+            .unwrap();
+        let sent = digest(index + 2);
+        assert_eq!(
+            sent["runs"][0]["signals"]["loss"]["vsParentAtThisStep"],
+            "level with the parent"
+        );
+        let journal = store.run_watch_looks(&child.id, 1).unwrap();
+        assert!(journal[0]
+            .1
+            .text
+            .as_deref()
+            .unwrap()
+            .contains("level with the parent"));
+    }
+
+    child.status = "done".into();
+    child.ended_at = Some(crate::store::now_ms());
+    store.upsert_run(&child).unwrap();
+    epochs(&store, &child, &replay);
+    take(look(&store, "chat", "terminal", &[("child", "r1")]))
+        .await
+        .unwrap();
+    let sent = digest(4);
+    assert_eq!(
+        sent["runs"][0]["signals"]["loss"]["vsParentAtItsEnd"],
+        "0.5000 worse than the parent"
+    );
+    let journal = store.run_watch_looks(&child.id, 1).unwrap();
+    assert!(journal[0]
+        .1
+        .text
+        .as_deref()
+        .unwrap()
+        .contains("0.5000 worse than the parent"));
 }
 
 #[tokio::test]

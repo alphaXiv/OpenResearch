@@ -105,7 +105,7 @@ data, results or wait; flag threats to validity/comparison. No progress, reassur
 After setup, lead with the headline/chart value. Moving numbers use {signal},
 {signal.vs} (includes "the parent"), or {count:"regex"} (log matches since launch).
 Write "Loss **{loss}**, {loss.vs}."; never append "the parent" or "than the parent" after .vs.
-Tokens bind "signals", never "alsoLogged". Use .vs only with "vsParentAtThisStep".
+Tokens bind "signals", never "alsoLogged". Use .vs only with "vsParentAtThisStep" or "vsParentAtItsEnd".
 A missing/non-comparable parent is never trouble. In-run references are not parents.
 Fixed numbers, zero, a check's 0 or 1, and values unchanged since first reported may be literal.
 A sentence with no number needs no bold. Otherwise exactly one figure is **bold**; place {signal.vs} beside its value. Live tokens mean now,
@@ -514,9 +514,14 @@ fn run_json(
                 entry[key] = json!(text);
             }
         }
-        let vs = &run.body["versus"]["step"][name];
+        let vs = &run.summary["bindings"][format!("{name}.vs")];
         if vs.is_object() {
-            entry["vsParentAtThisStep"] = json!(super::versus_text(Some(vs), spec));
+            let key = if vs["step"].is_number() {
+                "vsParentAtThisStep"
+            } else {
+                "vsParentAtItsEnd"
+            };
+            entry[key] = json!(super::versus_text(Some(vs), spec));
         }
         if bound.contains(name) {
             entry["points"] = points(run.body, name, trim.points);

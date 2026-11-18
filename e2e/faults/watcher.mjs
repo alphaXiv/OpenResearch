@@ -50,7 +50,7 @@ for (const run of digest.runs) {
     continue
   }
   const signals = Object.entries(run.signals ?? {})
-  const compared = signals.find(([, signal]) => signal.vsParentAtThisStep)
+  const compared = signals.find(([, signal]) => signal.vsParentAtThisStep || signal.vsParentAtItsEnd)
   const [name, signal] = compared ?? signals[0] ?? []
   const label = signal?.label ?? name
   runs[run.key] = !name

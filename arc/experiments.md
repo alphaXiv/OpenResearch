@@ -310,8 +310,8 @@ stops or retries the run. Unavailable or rebuilding evidence waits for collectio
 A run compares with its parent experiment's latest run that finished with
 signals, else its newest with signals, for each signal whose view declares
 which way is better: at the same stage and step, interpolated only between
-steps both reported, and, while its stage has no steps, against what an
-ended parent reported last; a table's column is no result to compare.
+steps the parent reported, or, once both runs end, against what the parent
+reported last. A table's column is no result to compare.
 Anything else is no comparison, never a level one. A parent's checkpoint is read once and held; a live one is taken from its
 own projection.
 
@@ -403,8 +403,9 @@ A look's request, system prompt and digest together, is held to 4,096 tokens,
 counted as two bytes a token, and never past 16 KiB; so is its retry, with the
 reply it answers. It holds the brief, each run's progress, signals and last
 three sentences, and its new log lines, new kinds of warning first, repeats said
-once with their count. A run's first lines go to the first look that has room
-for them once every run's new lines are in, and to no later one. When it is too
+once with their count. It uses the monitor's signal comparisons. A run's first
+lines go to the first look that has room once every run's new lines are in,
+and to no later one. When it is too
 long, older points go first, then earlier sentences, values no signal names, the
 watcher's notes past 512 bytes, each brief past 1 KiB (its least needed labels
 first), the signals no sentence reads, and then notes and briefs again; the
