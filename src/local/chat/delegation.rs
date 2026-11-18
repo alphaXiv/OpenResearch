@@ -404,6 +404,23 @@ impl PendingPrompt {
             &self.prompt.kind
         }
     }
+
+    /// What the user must do in the chat, as in "waits for the user to …".
+    pub fn awaits(&self) -> String {
+        if self.kind() == "env" {
+            let names: Vec<String> = self
+                .prompt
+                .variables
+                .iter()
+                .map(|var| format!("`{}`", var.name))
+                .collect();
+            return format!("set {}", names.join(", "));
+        }
+        format!(
+            "approve {}",
+            self.prompt.tool.as_deref().unwrap_or("a step")
+        )
+    }
 }
 
 /// The oldest open card. Claude's approval bridge puts each card in an
@@ -472,9 +489,9 @@ pub fn status(
             question_text(&target.id, &model, pending)
         }
         (Some(pending), _, _) => format!(
-            "Chat `{}` ({model}) waits for the user to approve {} in that chat.",
+            "Chat `{}` ({model}) waits for the user to {} in that chat.",
             target.id,
-            pending.prompt.tool.as_deref().unwrap_or("a step")
+            pending.awaits()
         ),
         (None, true, _) => format!("Chat `{}` ({model}) is working.", target.id),
         (None, false, Some(turn)) => {
@@ -777,10 +794,16 @@ mod tests {
         for (parent, mode, child, expected) in [
             ("claude-code", "acceptEdits", "codex", "ask"),
             ("claude-code", "auto", "codex", "approve-for-me"),
-            ("claude-code", "auto", "opencode", "auto-approve"),
+            ("claude-code", "auto", "opencode", "auto"),
+            (
+                "claude-code",
+                "bypassPermissions",
+                "opencode",
+                "auto-approve",
+            ),
             ("claude-code", "plan", "codex", "ask"),
             ("codex", "full-access", "claude-code", "bypassPermissions"),
-            ("opencode", "default", "claude-code", "manual"),
+            ("opencode", "manual", "claude-code", "manual"),
         ] {
             let got = delegate_permission(&chat(parent, mode), child).unwrap();
             assert_eq!(got.as_deref(), Some(expected), "{parent} {mode} → {child}");
@@ -862,7 +885,7 @@ mod tests {
     fn a_released_delegate_stops_telling_its_parent_and_stands_alone() {
         let dir = std::env::temp_dir().join(format!("orx-release-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
-        let child = chat("opencode", "default");
+        let child = chat("opencode", "manual");
         let mut parent = child.clone();
         parent.id = "chat_root".into();
         parent.side_parent_session_id = None;
@@ -888,7 +911,7 @@ mod tests {
     fn a_question_is_news_before_the_turn_that_asked_it() {
         let dir = std::env::temp_dir().join(format!("orx-news-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
-        let child = chat("opencode", "default");
+        let child = chat("opencode", "manual");
         let mut parent = child.clone();
         parent.id = "chat_root".into();
         parent.side_parent_session_id = None;

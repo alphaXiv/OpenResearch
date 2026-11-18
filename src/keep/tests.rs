@@ -150,7 +150,7 @@ async fn output_ends_with_the_exit_and_flush_waits_for_the_keeper() {
 
 #[tokio::test]
 async fn a_child_held_here_answers_like_a_kept_one_without_a_keeper() {
-    let mut held = spawn_here(&mut cat().into()).unwrap();
+    let mut held = spawn_here(&mut cat().into(), None).unwrap();
     let mut stdin = held.take_stdin().unwrap();
     let mut lines = held.take_stdout().unwrap().lines();
     stdin.write_all(b"one\n").await.unwrap();
@@ -171,11 +171,11 @@ async fn a_child_held_here_answers_like_a_kept_one_without_a_keeper() {
 
 #[tokio::test]
 async fn a_child_held_here_ends_when_stopped_or_let_go() {
-    let held = spawn_here(&mut cat().into()).unwrap();
+    let held = spawn_here(&mut cat().into(), None).unwrap();
     let exit = held.handle().stop(Duration::from_secs(10)).await.unwrap();
     assert_eq!(exit.reason.as_deref(), Some("stopped"));
 
-    let held = spawn_here(&mut cat().into()).unwrap();
+    let held = spawn_here(&mut cat().into(), None).unwrap();
     let pid = held.handle().pid();
     held.handle().detach();
     drop(held);

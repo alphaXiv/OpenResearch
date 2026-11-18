@@ -6,17 +6,6 @@ mod delegated;
 pub mod host;
 pub(crate) mod wire;
 
-struct OwnedProcess {
-    child: tokio::process::Child,
-    id: Option<u32>,
-}
-
-impl Drop for OwnedProcess {
-    fn drop(&mut self) {
-        crate::local::chat::kill_shell_group(self.id);
-    }
-}
-
 fn initialization() -> agent_client_protocol::schema::v1::InitializeRequest {
     use agent_client_protocol::schema::{
         v1::{ClientCapabilities, FileSystemCapabilities, InitializeRequest},
@@ -209,17 +198,23 @@ pub fn presets() -> Vec<Preset> {
         .collect()
 }
 
+/// Registration stays independent of executable discovery so chat dispatch never walks PATH.
 pub fn registered_definitions() -> Vec<Definition> {
-    register_definitions(definitions())
+    let mut saved = definitions();
+    saved.extend(presets().into_iter().map(|preset| preset.launch));
+    saved
 }
 
-fn register_definitions(saved: Vec<Definition>) -> Vec<Definition> {
+/// The registered launches minus presets a saved agent already launches.
+pub(super) fn catalog_definitions() -> Vec<Definition> {
+    let mut saved = definitions();
     let presets: Vec<Definition> = presets()
         .into_iter()
         .map(|preset| preset.launch)
         .filter(|launch| !saved.iter().any(|saved| same_launch(saved, launch)))
         .collect();
-    saved.into_iter().chain(presets).collect()
+    saved.extend(presets);
+    saved
 }
 
 pub fn same_launch(a: &Definition, b: &Definition) -> bool {
@@ -336,64 +331,21 @@ pub fn remove(id: &str) -> Result<()> {
 }
 
 pub async fn test_connection(definition: &Definition) -> Result<serde_json::Value> {
-    use agent_client_protocol::schema::ProtocolVersion;
-    use agent_client_protocol::{Agent, ByteStreams, ConnectionTo};
-    use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
-
     definition.validate()?;
-    let executable = executable_path(&definition.executable)
-        .unwrap_or_else(|| std::path::PathBuf::from(&definition.executable));
-    let mut command = crate::local::harness::managed::command(&executable);
-    command
-        .args(&definition.arguments)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true);
-    #[cfg(unix)]
-    command.process_group(0);
-    let child = command.spawn().map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            crate::error::anyhow!("Executable not found. Install the agent on the machine running OpenResearch, or enter its absolute path.")
-        } else {
-            crate::error::anyhow!("Could not start the ACP agent: {error}")
-        }
+    let cwd = std::env::current_dir().map_err(|error| {
+        crate::error::anyhow!(
+            "Could not read the working directory for {}: {error}",
+            definition.name
+        )
     })?;
-    let mut process = OwnedProcess {
-        id: child.id(),
-        child,
-    };
-    let transport = ByteStreams::new(
-        process
-            .child
-            .stdin
-            .take()
-            .expect("piped stdin")
-            .compat_write(),
-        process.child.stdout.take().expect("piped stdout").compat(),
-    );
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
-        agent_client_protocol::Client.builder().connect_with(
-            transport,
-            |connection: ConnectionTo<Agent>| async move {
-                connection.send_request(initialization()).block_task().await
-            },
-        ),
-    )
-    .await;
-    crate::local::chat::kill_shell_group(process.id.take());
-    let _ = process.child.kill().await;
-    let _ = process.child.wait().await;
-    let initialized = result.map_err(|_| {
-        crate::error::anyhow!("ACP initialization timed out. Check the executable and arguments.")
-    })??;
-    if initialized.protocol_version != ProtocolVersion::V1 {
-        bail!("Incompatible ACP protocol. This backend supports stable ACP v1.");
-    }
-    Ok(
-        serde_json::json!({"status": "connected", "agentInfo": initialized.agent_info, "capabilities": initialized.agent_capabilities}),
-    )
+    let client = host::spawn_here(definition, &cwd, &definition.id).await?;
+    let result = serde_json::json!({
+        "status": "connected",
+        "agentInfo": client.initialized["agentInfo"],
+        "capabilities": client.initialized["agentCapabilities"],
+    });
+    client.shutdown().await;
+    Ok(result)
 }
 
 /// A private temporary working directory, removed on drop.
@@ -681,13 +633,15 @@ async fn prompt_once(
                     .downcast_ref::<agent_client_protocol::Error>()
                     .is_some_and(agent_client_protocol::is_incoming_transport_closed);
                 if exited {
-                    anyhow!("{name} exited before answering")
+                    error
                 } else {
                     anyhow!("{name} could not answer: {error}")
                 }
             })?,
             event = events.recv() => {
-                let event = event.ok_or_else(|| anyhow!("{name} exited before answering"))?;
+                let Some(event) = event else {
+                    return Err(client.connection_error().await);
+                };
                 one_shot_event(client, event, &mut startup, &mut answer);
             }
         }
@@ -1196,7 +1150,7 @@ mod tests {
         assert_eq!(crashes.len(), 1, "{crashes:?}");
         let crash = crashes.into_iter().next().unwrap();
         assert!(
-            crash.contains("Peer") && crash.contains("exited"),
+            crash.contains("Peer") && crash.contains("closed"),
             "{crash}"
         );
         assert!(!crash.contains("transport"), "{crash}");
@@ -1291,50 +1245,66 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn saved_launch_suppresses_preset_without_losing_customization() {
+    fn registration_keeps_launches_without_inspecting_executables() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+
+        let preset = presets().remove(0).launch;
+        let mut saved = preset.clone();
+        saved.id = format!("acp:{}", uuid::Uuid::new_v4());
+        saved.executable = std::path::absolute("/orx-uninspected-agent")
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        save(saved.clone(), true).unwrap();
+
+        let registered = registered_definitions();
+        assert_eq!(registered.first(), Some(&saved));
+        assert!(registered.contains(&preset));
+        for id in [&saved.id, &preset.id, "claude-code", "codex"] {
+            assert!(crate::local::harness::is_chat_harness(id));
+            assert!(crate::local::harness::chat_harness(id).is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn catalog_hides_duplicate_presets_without_hiding_their_ids() {
+        use crate::local::harness::{detect_harness, detect_harness_snapshot};
+
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+
         let preset = presets().remove(0).launch;
         let mut saved = preset.clone();
         saved.id = format!("acp:{}", uuid::Uuid::new_v4());
         saved.name = "My DeepSeek".into();
-        if let Some(path) = executable_path(&saved.executable) {
-            saved.executable = path.to_string_lossy().into_owned();
-        }
+        save(saved.clone(), true).unwrap();
 
         let mut second = saved.clone();
         second.id = format!("acp:{}", uuid::Uuid::new_v4());
         second.name = "Another DeepSeek".into();
-        let registered = register_definitions(vec![saved.clone(), second.clone()]);
-        assert_eq!(&registered[..2], &[saved.clone(), second]);
-        let matched = registered
-            .iter()
-            .find(|item| same_launch(item, &preset))
-            .unwrap();
-        assert_eq!(matched, &saved);
-        assert!(!registered.iter().any(|item| item.id == preset.id));
+        save(second.clone(), true).unwrap();
+
+        let catalog = catalog_definitions();
+        assert_eq!(&catalog[..2], &[saved.clone(), second.clone()]);
+        assert!(!catalog.contains(&preset));
+        assert!(registered_definitions().contains(&preset));
+        assert!(detect_harness_snapshot(&preset.id).await.is_some());
+        assert!(detect_harness(&preset.id).await.is_some());
 
         saved.arguments.push("--other".into());
-        let refreshed = register_definitions(vec![saved.clone()]);
-        assert!(refreshed.contains(&saved));
-        assert_eq!(
-            refreshed
-                .iter()
-                .find(|item| same_launch(item, &preset))
-                .unwrap()
-                .id,
-            preset.id
-        );
-        assert_eq!(
-            register_definitions(vec![])
-                .iter()
-                .find(|item| same_launch(item, &preset))
-                .unwrap()
-                .id,
-            preset.id
-        );
+        save(saved, false).unwrap();
+        assert!(!catalog_definitions().contains(&preset));
+        remove(&second.id).unwrap();
+        assert!(catalog_definitions().contains(&preset));
     }
 
-    #[test]
-    fn preset_registration_refreshes_executable_paths() {
+    #[tokio::test]
+    async fn catalog_refreshes_executable_paths_without_changing_registration() {
+        use crate::local::harness::detect_harness_snapshot;
+
         if !crate::config::in_test_child(&[]) {
             return;
         }
@@ -1348,10 +1318,14 @@ for line in sys.stdin:
         saved.id = format!("acp:{}", uuid::Uuid::new_v4());
         saved.executable = binary.to_string_lossy().into_owned();
         std::env::set_var("PATH", root.path());
+        save(saved.clone(), true).unwrap();
 
-        assert!(register_definitions(vec![saved.clone()])
-            .iter()
-            .any(|definition| definition.id == preset.id));
+        let registered = registered_definitions();
+        assert_eq!(registered.first(), Some(&saved));
+        assert!(registered.contains(&preset));
+        assert!(catalog_definitions().contains(&preset));
+        let info = detect_harness_snapshot(&preset.id).await.unwrap();
+        assert!(!info.installed);
 
         std::fs::write(&binary, "").unwrap();
         #[cfg(unix)]
@@ -1360,16 +1334,18 @@ for line in sys.stdin:
             std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
 
-        let registered = register_definitions(vec![saved.clone()]);
-        assert_eq!(registered.first(), Some(&saved));
-        assert!(!registered
-            .iter()
-            .any(|definition| definition.id == preset.id));
+        assert_eq!(registered_definitions(), registered);
+        assert!(!catalog_definitions().contains(&preset));
+        for id in [&preset.id, &saved.id] {
+            assert!(detect_harness_snapshot(id).await.unwrap().installed);
+        }
 
         std::fs::remove_file(binary).unwrap();
-        assert!(register_definitions(vec![saved])
-            .iter()
-            .any(|definition| definition.id == preset.id));
+        assert_eq!(registered_definitions(), registered);
+        assert!(catalog_definitions().contains(&preset));
+        for id in [&preset.id, &saved.id] {
+            assert!(!detect_harness_snapshot(id).await.unwrap().installed);
+        }
     }
 
     #[tokio::test]

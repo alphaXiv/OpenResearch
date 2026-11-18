@@ -313,6 +313,12 @@ async fn hf_live_launcher_is_fenced_before_recovery_and_never_created_twice() {
     let Some(root) = isolated().await else {
         return;
     };
+    let trackio_project = crate::local::trackio::PROJECT;
+    crate::config::write_synced_env_vars(&[
+        (trackio_project, "run-metrics"),
+        ("WANDB_API_KEY", "test-value"),
+    ])
+    .unwrap();
     let python = crate::config::config_dir().join("envs/huggingface/bin/python");
     script(
         &python,
@@ -380,6 +386,9 @@ exec sleep 120
     let submitted: Value =
         serde_json::from_slice(&std::fs::read(root.join("submission.json")).unwrap()).unwrap();
     assert_eq!(submitted["labels"]["or_run"], "run");
+    assert_eq!(submitted["environment"][trackio_project], "run-metrics");
+    assert!(submitted["environment"].get("WANDB_API_KEY").is_none());
+    assert!(submitted["secrets"].get("WANDB_API_KEY").is_none());
     assert_eq!(
         std::fs::read_to_string(root.join("created"))
             .unwrap()

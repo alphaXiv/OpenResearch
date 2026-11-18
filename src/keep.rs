@@ -500,14 +500,36 @@ pub async fn attach(id: &str) -> Result<Kept> {
     ))
 }
 
+/// How a kept child ended, for a message.
+pub fn describe_exit(exit: &Exit) -> String {
+    match (exit.reason.as_deref(), exit.code, exit.signal) {
+        (Some("lost"), _, _) => "its keeper is gone".into(),
+        (Some("orphaned"), _, _) => "ended while no orx server was attached".into(),
+        (Some("stopped"), _, _) => "stopped".into(),
+        (_, Some(code), _) => format!("exit code {code}"),
+        (_, _, Some(signal)) => format!("signal {signal}"),
+        _ => "exit status unknown".into(),
+    }
+}
+
 /// Starts `command` as this server's own child, behind a kept child's interface: for short
-/// work a restart waits for instead of handing off. Its stdin and stdout are pipes, stderr is
-/// dropped, and it ends with its last handle or with this server.
-pub fn spawn_here(command: &mut tokio::process::Command) -> Result<Kept> {
+/// work a restart waits for instead of handing off. Its stdin and stdout are pipes, stderr
+/// appends to the file, if any, and it ends with its last handle or with this server.
+pub fn spawn_here(command: &mut tokio::process::Command, stderr: Option<&Path>) -> Result<Kept> {
+    let stderr = match stderr {
+        Some(path) => std::process::Stdio::from(
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .map_err(|error| anyhow!("Could not open {}: {error}", path.display()))?,
+        ),
+        None => std::process::Stdio::null(),
+    };
     command
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stderr(stderr)
         .kill_on_drop(true);
     #[cfg(unix)]
     command.process_group(0);
@@ -857,6 +879,27 @@ impl KeptHandle {
         }
         self.0.request_stop();
         tokio::time::timeout(timeout, self.wait()).await.ok()
+    }
+
+    /// [`Self::stop`] for an agent CLI. With `close_input`, it gets a grace to exit on its own
+    /// once its input closes, then SIGTERM and another, since one killed outright can die
+    /// between rotating its sign-in token and saving it.
+    pub async fn end_agent(&self, close_input: bool, timeout: Duration) -> Option<Exit> {
+        if handing_off() {
+            return None;
+        }
+        let grace = crate::config::paced(crate::process::AGENT_EXIT_GRACE);
+        if close_input {
+            self.close_stdin();
+            if let Ok(exit) = tokio::time::timeout(grace, self.wait()).await {
+                return Some(exit);
+            }
+        }
+        self.signal(Signal::Terminate);
+        if let Ok(exit) = tokio::time::timeout(grace, self.wait()).await {
+            return Some(exit);
+        }
+        self.stop(timeout).await
     }
 
     /// Lets go without ending the child, for a successor to attach to.

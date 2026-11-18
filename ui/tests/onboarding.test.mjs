@@ -30,7 +30,7 @@ test("an existing project resumes instead of walking through onboarding again", 
   assert.equal(location.pathname, "/projects/p/tasks/new");
 });
 
-test("creating a project from the empty state opens it", async () => {
+test("a publishing failure during project creation opens the project's settings", async () => {
   const created = { id: "new id", name: "Fresh" };
   const projects = [];
   const page = await projectsPage(projects, { onboardingCompleted: true }, {
@@ -52,7 +52,8 @@ test("creating a project from the empty state opens it", async () => {
   await act(() => document.querySelector('[role="dialog"] form').requestSubmit());
   await settle();
 
-  assert.equal(location.pathname, "/projects/new%20id/settings/projects");
+  assert.equal(location.pathname, "/projects/new%20id/settings/project");
+  assert.ok(find("h2", m.settings_page_git_hub_publishing()));
   assert.match(document.body.textContent, /publish failed/);
 });
 

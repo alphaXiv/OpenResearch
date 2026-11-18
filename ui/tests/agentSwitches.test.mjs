@@ -34,6 +34,18 @@ test("each account and OpenCode provider turns off on its own, unless it is the 
   assert.deepEqual(keys({ harness: "opencode", profile: null, model: "tinker/inkling" }), ["codex", "opencode:opencode", "opencode:tinker"]);
 });
 
+test("the model feed's hosted models run under Free Models, with OpenCode's own", () => {
+  const opencode = harness("opencode", {
+    models: [model("opencode/free"), model("openresearch-k3v9q2/research-1"), model("tinker/inkling")],
+    foundProviders: [{ id: "tinker", sources: ["config"], removable: true }],
+  });
+  const offered = pickerAgents([opencode], [], []).flatMap((agent) => agentOffers(agent)).map((offer) => `${offer.tile.key} ${offer.model.id}`);
+  assert.deepEqual(offered, ["opencode:opencode opencode/free", "opencode:opencode openresearch-k3v9q2/research-1", "opencode:tinker tinker/inkling"]);
+
+  const onlyHosted = harness("opencode", { models: [model("openresearch-k3v9q2/research-1")], foundProviders: [] });
+  assert.deepEqual(pickerAgents([onlyHosted], [], []).map((agent) => agent.key), ["opencode:opencode"]);
+});
+
 test("a provider found in OpenCode is named and marked by what it points at", async () => {
   const { foundProviderMark } = await import("../src/components/pickerAgents.tsx");
   const { guessLogo, hostLogo } = await import("../src/components/providerIdentity.tsx");

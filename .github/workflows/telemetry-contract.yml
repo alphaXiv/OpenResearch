@@ -36,5 +36,6 @@ jobs:
           ORX_EMBED_HOST_DIR: ${{ github.workspace }}/target/host-binaries
         run: |
           set -o pipefail
+          cargo test --locked --bin orx telemetry::tests::install_failure_steps_reach_the_collector -- --ignored --exact
           cargo test --locked telemetry::tests::production_contract_is_accepted -- --ignored --exact 2>&1 | tee /tmp/telemetry-contract.log
           grep -q "test telemetry::tests::production_contract_is_accepted ... ok" /tmp/telemetry-contract.log

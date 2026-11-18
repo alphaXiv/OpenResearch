@@ -1,5 +1,16 @@
-//! V2 admits prompts before execution finishes; reconcile its durable projection.
+//! V2 admits prompts before execution finishes. Its export holds finished steps; the event
+//! stream carries the step in flight.
+use std::pin::Pin;
+
+use futures::stream::BoxStream;
+use futures::{FutureExt, StreamExt, TryStreamExt};
+
+use serde::{Deserialize, Serialize};
+
 use super::*;
+use crate::error::Context;
+use crate::keep::KeptHandle;
+use crate::local::chat::Resume;
 use crate::local::opencode::AgentEndpoint;
 
 async fn get(endpoint: &AgentEndpoint, path: &str) -> Result<Value> {
@@ -129,12 +140,13 @@ pub(super) async fn run_turn(
     if let Some(model) = model {
         post(&endpoint, &format!("{path}/model"), &json!({"model":model})).await?;
     }
+    let events = subscribe(&endpoint).await?;
     let before = get(&endpoint, &endpoint.v2_export_path(&native_id)).await?;
     let previous: HashSet<String> = messages(&before)?
         .iter()
         .filter_map(|m| m["id"].as_str().map(str::to_owned))
         .collect();
-    let turn = V2Turn {
+    let checkpoint = Checkpoint {
         prompt_id: format!("msg_{}", uuid::Uuid::new_v4().simple()),
     };
     ctx.persist_delivery(DeliveryState::Unknown)?;
@@ -142,69 +154,67 @@ pub(super) async fn run_turn(
     let admission = post(
         &endpoint,
         &format!("{path}/prompt"),
-        &json!({"id":turn.prompt_id,"text":ctx.text}),
+        &json!({"id":checkpoint.prompt_id,"text":ctx.text}),
     )
     .await;
     if admission.is_ok() {
         ctx.persist_delivery(DeliveryState::Accepted)?;
     }
-    let state = Checkpoint {
+    let mut turn = Turn {
+        endpoint: &endpoint,
         keeper: &keeper,
-        turn: &turn,
+        checkpoint: &checkpoint,
+        native_id: &native_id,
+        path: &path,
+        delivered: false,
+        previous: &previous,
+        steps: Vec::new(),
+        recorded: HashSet::new(),
+        surfaced: HashSet::new(),
     };
-    state.commit(ctx);
-    follow(
-        ctx,
-        &endpoint,
-        &native_id,
-        state,
-        previous,
-        HashSet::new(),
-        admission,
-    )
-    .await
+    turn.commit(ctx)?;
+    let answered = ctx.host.prompt_answered.subscribe();
+    turn.reconcile(ctx).await?;
+    // A rejected prompt starts no execution, so no event would ever end this wait.
+    let ended = admission.is_err() && turn.idle().await?;
+    turn.follow(ctx, events, answered, ended, admission).await
 }
 
-/// What a V2 turn checkpoints beside its transcript; the server's durable projection holds the
+/// What a turn checkpoints beside its transcript; the export and the pending requests hold the
 /// rest.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct V2Turn {
+struct Checkpoint {
     prompt_id: String,
 }
 
-#[derive(Clone, Copy)]
-struct Checkpoint<'a> {
-    keeper: &'a KeptHandle,
-    turn: &'a V2Turn,
-}
-
-impl Checkpoint<'_> {
-    /// Commits the transcript with the turn's checkpoint. The server's own output carries
-    /// nothing a turn applies, so the checkpoint sits where this attachment's output starts.
-    fn commit(self, ctx: &mut TurnCtx) {
-        if let Err(error) = ctx.flush_at(self.keeper, self.keeper.start(), self.turn) {
-            eprintln!("orx up: could not save turn {}: {error:#}", ctx.turn_id);
-        }
-    }
-}
-
-/// Goes on with a turn a previous server left running: its prompt's place in the projection
-/// marks which messages are the turn's, and the transcript's cards are the requests surfaced.
-pub(super) async fn resume_turn(
-    ctx: &mut TurnCtx,
-    resume: Resume,
-    endpoint: &AgentEndpoint,
-    keeper: &KeptHandle,
-    native_id: &str,
-) -> Result<()> {
-    let turn: V2Turn = serde_json::from_value(resume.state)
+/// Goes on with a turn a previous server left running on this chat's kept server: its prompt's
+/// place in the export marks which messages are the turn's, and the transcript's cards are the
+/// requests already surfaced.
+pub(super) async fn resume_turn(ctx: &mut TurnCtx, resume: Resume) -> Result<()> {
+    let (endpoint, keeper) = ctx
+        .host
+        .opencode
+        .server_for(&ctx.session_id)
+        .await
+        .filter(|(_, keeper)| keeper.id() == resume.keep_id)
+        .ok_or_else(|| {
+            anyhow!("The OpenCode server this turn ran on stopped while orx restarted")
+        })?;
+    let native_id = ctx
+        .native_session_id
+        .clone()
+        .ok_or_else(|| anyhow!("This OpenCode turn has no session to resume"))?;
+    let checkpoint: Checkpoint = serde_json::from_value(resume.state)
         .map_err(|error| anyhow!("This OpenCode turn has an unreadable checkpoint: {error}"))?;
-    let projection = get(endpoint, &endpoint.v2_export_path(native_id)).await?;
+    let path = format!("/api/session/{native_id}");
+    // Subscribed before reading back, so nothing between the two is missed.
+    let events = subscribe(&endpoint).await?;
+    let projection = get(&endpoint, &endpoint.v2_export_path(&native_id)).await?;
     let previous: HashSet<String> = messages(&projection)?
         .iter()
         .filter_map(|m| m["id"].as_str())
-        .take_while(|id| *id != turn.prompt_id)
+        .take_while(|id| *id != checkpoint.prompt_id)
         .map(str::to_owned)
         .collect();
     let surfaced = ctx
@@ -213,96 +223,371 @@ pub(super) async fn resume_turn(
         .iter()
         .filter_map(|part| part.prompt.as_ref()?.native_id.clone())
         .collect();
-    let state = Checkpoint {
-        keeper,
-        turn: &turn,
+    let mut turn = Turn {
+        endpoint: &endpoint,
+        keeper: &keeper,
+        checkpoint: &checkpoint,
+        native_id: &native_id,
+        path: &path,
+        delivered: false,
+        previous: &previous,
+        steps: Vec::new(),
+        recorded: HashSet::new(),
+        surfaced,
     };
-    follow(ctx, endpoint, native_id, state, previous, surfaced, Ok(())).await
+    let answered = ctx.host.prompt_answered.subscribe();
+    // The stream no longer carries the delivery a previous server may have seen.
+    let (projection, _) = turn.reconcile(ctx).await?;
+    turn.delivered = turn.holds_prompt(&projection)?;
+    let ended = turn.idle().await?;
+    turn.follow(ctx, events, answered, ended, Ok(())).await
 }
 
-async fn follow(
-    ctx: &mut TurnCtx,
-    endpoint: &AgentEndpoint,
-    native_id: &str,
-    state: Checkpoint<'_>,
-    previous: HashSet<String>,
-    mut surfaced: HashSet<String>,
-    admission: Result<()>,
-) -> Result<()> {
-    let path = format!("/api/session/{native_id}");
-    let prompt_id = state.turn.prompt_id.as_str();
-    let mut recorded = HashSet::new();
-    let mut was_idle = false;
-    loop {
-        // ponytail: full projected history polling; switch to paged durable log if long chats make this costly.
-        let projection = get(endpoint, &endpoint.v2_export_path(native_id)).await?;
-        let current = messages(&projection)?;
-        let delivered = current.iter().any(|m| m["id"].as_str() == Some(prompt_id));
-        merge_projection(ctx, endpoint, native_id, current, &previous, &mut recorded).await?;
-        if delivered && ctx.delivery_state() != DeliveryState::Accepted {
-            ctx.persist_delivery(DeliveryState::Accepted)?;
+const FINAL_READS: usize = 3;
+
+/// OpenCode's event bus. Text deltas and the step in flight reach only this stream; the export
+/// gains an assistant message when its step ends.
+async fn subscribe(endpoint: &AgentEndpoint) -> Result<Events> {
+    use tokio::io::AsyncBufReadExt;
+    let response = endpoint
+        .client
+        .get(format!("{}/api/event", endpoint.base_url))
+        .send()
+        .await?
+        .error_for_status()?;
+    let body = response.bytes_stream().map_err(std::io::Error::other);
+    let lines = tokio::io::BufReader::new(tokio_util::io::StreamReader::new(body)).lines();
+    let events = futures::stream::try_unfold(lines, |mut lines| async move {
+        while let Some(line) = lines.next_line().await? {
+            if let Some(data) = line.strip_prefix("data:") {
+                let event: Value = serde_json::from_str(data.trim())
+                    .with_context(|| format!("OpenCode sent an unreadable event: {data}"))?;
+                return Ok(Some((event, lines)));
+            }
         }
-        prompts(ctx, endpoint, &path, &mut surfaced).await?;
-        let inbox = get(endpoint, &format!("{path}/inbox")).await?;
-        let queued = inbox["data"]
-            .as_array()
-            .ok_or_else(|| anyhow!("OpenCode V2 inbox response is invalid"))?
-            .iter()
-            .any(|item| item["id"].as_str() == Some(prompt_id));
-        let active = get(endpoint, "/api/session/active").await?;
-        let running = active["data"]
-            .as_object()
-            .ok_or_else(|| anyhow!("OpenCode V2 active response is invalid"))?
-            .contains_key(native_id);
-        if observed_idle(&mut was_idle, queued, running) {
-            let final_projection = get(endpoint, &endpoint.v2_export_path(native_id)).await?;
-            let final_messages = messages(&final_projection)?;
-            let delivered = delivered
-                || final_messages
-                    .iter()
-                    .any(|m| m["id"].as_str() == Some(prompt_id));
-            let answered = merge_projection(
-                ctx,
-                endpoint,
-                native_id,
-                final_messages,
-                &previous,
-                &mut recorded,
-            )
-            .await?;
-            let outcome = final_projection
+        Ok(None)
+    });
+    let mut events = events.boxed().peekable();
+    // Headers can precede the feed's registration; an event before then is not delivered.
+    let connected = tokio::time::timeout(Duration::from_secs(10), events.next())
+        .await
+        .map_err(|_| anyhow!("OpenCode's event stream did not confirm the connection"))?;
+    match connected {
+        Some(Ok(event)) if event["type"] == "server.connected" => Ok(events),
+        _ => Err(anyhow!(
+            "OpenCode's event stream did not begin with a connection"
+        )),
+    }
+}
+
+/// What an event changed in the steps in flight.
+enum Folded<'a> {
+    Text { part: String, delta: &'a str },
+    Step(usize),
+}
+
+/// Folds this session's step events into the export's assistant message shape, so the step in
+/// flight renders with the part ids the export will give it.
+fn fold<'a>(steps: &mut Vec<Value>, native_id: &str, event: &'a Value) -> Option<Folded<'a>> {
+    let data = &event["data"];
+    if data["sessionID"].as_str() != Some(native_id) {
+        return None;
+    }
+    let id = data["assistantMessageID"].as_str()?;
+    let kind = event["type"].as_str()?.strip_prefix("session.")?;
+    if kind == "step.started" {
+        steps.retain(|step| step["id"] != id);
+        steps.push(json!({
+            "id": id, "type": "assistant", "agent": data["agent"], "model": data["model"],
+            "content": [],
+        }));
+        return Some(Folded::Step(steps.len() - 1));
+    }
+    let index = steps.iter().position(|step| step["id"] == id)?;
+    let content = steps[index]["content"].as_array_mut()?;
+    let (block, event_kind) = kind.split_once('.')?;
+    if let ("text" | "reasoning", "started") = (block, event_kind) {
+        content.push(json!({"type": block, "text": ""}));
+        return Some(Folded::Step(index));
+    }
+    if let "text" | "reasoning" = block {
+        let ordinal = data["ordinal"].as_u64()? as usize;
+        let (position, entry) = content
+            .iter_mut()
+            .enumerate()
+            .filter(|(_, entry)| entry["type"] == block)
+            .nth(ordinal)?;
+        return match event_kind {
+            "delta" => {
+                let delta = data["delta"].as_str()?;
+                let text = entry["text"].as_str().unwrap_or_default();
+                entry["text"] = json!(format!("{text}{delta}"));
+                Some(Folded::Text {
+                    part: format!("{id}:{position}"),
+                    delta,
+                })
+            }
+            "ended" => {
+                entry["text"] = data["text"].clone();
+                Some(Folded::Step(index))
+            }
+            _ => None,
+        };
+    }
+    let call = data["id"].as_str()?;
+    if kind == "tool.input.started" {
+        content.push(json!({
+            "type": "tool", "id": call, "name": data["name"],
+            "state": {"status": "streaming", "input": ""},
+        }));
+        return Some(Folded::Step(index));
+    }
+    let tool = content
+        .iter_mut()
+        .find(|entry| entry["type"] == "tool" && entry["id"] == call)?;
+    let state = &mut tool["state"];
+    match kind {
+        "tool.input.delta" => {
+            let input = state["input"].as_str().unwrap_or_default();
+            state["input"] = json!(format!("{input}{}", data["delta"].as_str()?));
+        }
+        "tool.called" => *state = json!({"status": "running", "input": data["input"]}),
+        "tool.progress" => state["metadata"] = data["metadata"].clone(),
+        "tool.success" | "tool.failed" => {
+            let input = state["input"].take();
+            *state = json!({
+                "status": if kind == "tool.success" { "completed" } else { "error" },
+                "input": input, "content": data["content"], "metadata": data["metadata"],
+            });
+            if let Some(error) = data.get("error") {
+                state["error"] = error.clone();
+            }
+        }
+        _ => return None,
+    }
+    Some(Folded::Step(index))
+}
+
+type Events = futures::stream::Peekable<BoxStream<'static, Result<Value>>>;
+
+/// One prompt's view of its session: the export for finished steps, `steps` for those in flight.
+struct Turn<'a> {
+    endpoint: &'a AgentEndpoint,
+    /// The server's keeper, which the turn checkpoints against.
+    keeper: &'a KeptHandle,
+    checkpoint: &'a Checkpoint,
+    native_id: &'a str,
+    path: &'a str,
+    /// Whether the event stream has said OpenCode took the prompt out of its inbox to run it.
+    delivered: bool,
+    previous: &'a HashSet<String>,
+    steps: Vec<Value>,
+    recorded: HashSet<String>,
+    surfaced: HashSet<String>,
+}
+
+impl Turn<'_> {
+    /// Commits the transcript with the turn's checkpoint. The server's own output carries
+    /// nothing a turn applies, so the checkpoint sits where this attachment's output starts.
+    fn commit(&self, ctx: &mut TurnCtx) -> Result<()> {
+        ctx.flush_at(self.keeper, self.keeper.start(), self.checkpoint)
+    }
+
+    /// Follows the session's events until the prompt's execution ends, then reads its outcome.
+    async fn follow(
+        &mut self,
+        ctx: &mut TurnCtx,
+        mut events: Events,
+        mut answered: tokio::sync::broadcast::Receiver<String>,
+        mut ended: bool,
+        admission: Result<()>,
+    ) -> Result<()> {
+        let prompt_id = self.checkpoint.prompt_id.as_str();
+        let mut failure = None;
+        let mut stopped = false;
+        let mut stale = false;
+        while !ended {
+            let event = tokio::select! {
+                event = events.next() => event,
+                _ = ctx.flush_due() => {
+                    self.commit(ctx)?;
+                    continue;
+                }
+                answer = answered.recv() => {
+                    // A local answer can activate a conditional form field; the card is resolved
+                    // only after the harness replies, so adopt it before looking again.
+                    if !matches!(&answer, Ok(session) if *session != ctx.session_id) {
+                        self.commit(ctx)?;
+                        self.reconcile(ctx).await?;
+                    }
+                    continue;
+                }
+            };
+            let Some(Ok(event)) = event else {
+                events = subscribe(self.endpoint).await.map_err(|error| {
+                    anyhow!("OpenCode stopped streaming this chat's events: {error}")
+                })?;
+                let (projection, _) = self.reconcile(ctx).await?;
+                self.delivered |= self.holds_prompt(&projection)?;
+                ended = self.idle().await?;
+                continue;
+            };
+            let kind = event["type"].as_str().unwrap_or_default();
+            let data = &event["data"];
+            match fold(&mut self.steps, self.native_id, &event) {
+                Some(Folded::Text { part, delta }) => ctx.append_part_text(&part, delta),
+                Some(Folded::Step(index)) => {
+                    for (part, _) in projected_parts(&self.steps[index]) {
+                        ctx.upsert_part(part);
+                    }
+                }
+                None if kind == "session.inbox.delivered"
+                    && data["inboxID"].as_str() == Some(prompt_id) =>
+                {
+                    self.delivered = true;
+                    stale = true;
+                }
+                None if data["sessionID"].as_str() == Some(self.native_id)
+                    && matches!(
+                        kind,
+                        "session.execution.succeeded"
+                            | "session.execution.failed"
+                            | "session.execution.interrupted"
+                    ) =>
+                {
+                    ended = self.finished(ctx).await?;
+                    if ended {
+                        failure = data.get("error").map(error_text);
+                        stopped = kind == "session.execution.interrupted";
+                    }
+                }
+                // A failed step is only terminal once no retry follows, which the next event says.
+                None if kind == "session.step.failed" => stale = false,
+                None => {
+                    stale |= event.get("durable").is_some()
+                        || kind == "session.retry.scheduled"
+                        || kind.starts_with("permission.")
+                        || kind.starts_with("form.");
+                }
+            }
+            if stale && Pin::new(&mut events).peek().now_or_never().is_none() {
+                self.reconcile(ctx).await?;
+                stale = false;
+            }
+            ctx.maybe_flush_at(self.keeper, self.keeper.start(), self.checkpoint);
+        }
+        self.steps.clear();
+        for read in 0..FINAL_READS {
+            // The export can trail the event that ended the execution.
+            if read > 0 {
+                tokio::time::sleep(crate::config::paced(Duration::from_millis(100))).await;
+            }
+            let (projection, answered) = self.reconcile(ctx).await?;
+            let delivered = self.holds_prompt(&projection)?;
+            let outcome = projection
                 .pointer("/data/info/outcome")
                 .and_then(Value::as_str);
-            if delivered && answered && matches!(outcome, Some("succeeded" | "interrupted")) {
+            // Declining a permission or question interrupts the execution without an export outcome.
+            if delivered
+                && answered
+                && (stopped || matches!(outcome, Some("succeeded" | "interrupted")))
+            {
                 ctx.persist_delivery(DeliveryState::Accepted)?;
                 ctx.mark_final_text_tail();
                 return Ok(());
             }
-            if delivered && outcome == Some("failed") {
+            if let (true, Some(message)) = (delivered, &failure) {
                 // Failures before a step (e.g. an unavailable model) leave no assistant message.
-                if let Ok(Some(message)) = execution_failure(endpoint, native_id).await {
-                    ctx.mark_native_retry_exhausted();
-                    ctx.mark_terminal_failure("opencode_terminal", &message);
-                    return Err(anyhow!("OpenCode V2: {message}"));
-                }
+                ctx.mark_native_retry_exhausted();
+                ctx.mark_terminal_failure("opencode_terminal", message);
+                return Err(anyhow!("OpenCode V2: {message}"));
             }
-            if let Err(error) = admission {
-                return Err(error);
-            }
-            return Err(anyhow!(
-                "OpenCode V2 became idle without completing this prompt"
-            ));
         }
-        state.commit(ctx);
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        admission?;
+        Err(anyhow!(
+            "OpenCode V2 became idle without completing this prompt"
+        ))
     }
-}
 
-fn observed_idle(was_idle: &mut bool, queued: bool, running: bool) -> bool {
-    let idle = !queued && !running;
-    let settled = *was_idle && idle;
-    *was_idle = idle;
-    settled
+    /// Merges the export and the steps it does not hold yet, then surfaces pending requests.
+    async fn reconcile(&mut self, ctx: &mut TurnCtx) -> Result<(Value, bool)> {
+        let projection = get(self.endpoint, &self.endpoint.v2_export_path(self.native_id)).await?;
+        let mut current = messages(&projection)?.clone();
+        self.steps.retain(|step| {
+            !current.iter().any(|message| {
+                message["id"] == step["id"]
+                    && message
+                        .pointer("/time/completed")
+                        .is_some_and(|time| !time.is_null())
+            })
+        });
+        for step in &self.steps {
+            match current
+                .iter_mut()
+                .find(|message| message["id"] == step["id"])
+            {
+                Some(message) => *message = step.clone(),
+                None => current.push(step.clone()),
+            }
+        }
+        let answered = merge_projection(
+            ctx,
+            self.endpoint,
+            self.native_id,
+            &current,
+            self.previous,
+            &mut self.recorded,
+        )
+        .await?;
+        if self.holds_prompt(&projection)? && ctx.delivery_state() != DeliveryState::Accepted {
+            ctx.persist_delivery(DeliveryState::Accepted)?;
+        }
+        let surfaced = self.surfaced.len();
+        prompts(ctx, self.endpoint, self.path, &mut self.surfaced).await?;
+        // A card renders at once, and an answer orx gave is checkpointed after it was sent.
+        if self.surfaced.len() > surfaced {
+            self.commit(ctx)?;
+        }
+        Ok((projection, answered))
+    }
+
+    fn holds_prompt(&self, projection: &Value) -> Result<bool> {
+        Ok(messages(projection)?
+            .iter()
+            .any(|message| message["id"].as_str() == Some(self.checkpoint.prompt_id.as_str())))
+    }
+
+    /// Whether an execution's end is this prompt's. The export can hold the prompt before the
+    /// stream has delivered an earlier execution's end, so only the stream's own order, or a
+    /// prompt that never left the inbox's reach, says so.
+    async fn finished(&mut self, ctx: &mut TurnCtx) -> Result<bool> {
+        if self.delivered {
+            return Ok(true);
+        }
+        if self.queued().await? {
+            return Ok(false);
+        }
+        let (projection, _) = self.reconcile(ctx).await?;
+        Ok(!self.holds_prompt(&projection)?)
+    }
+
+    async fn queued(&self) -> Result<bool> {
+        let inbox = get(self.endpoint, &format!("{}/inbox", self.path)).await?;
+        Ok(inbox["data"]
+            .as_array()
+            .ok_or_else(|| anyhow!("OpenCode V2 inbox response is invalid"))?
+            .iter()
+            .any(|item| item["id"].as_str() == Some(self.checkpoint.prompt_id.as_str())))
+    }
+
+    async fn idle(&self) -> Result<bool> {
+        let active = get(self.endpoint, "/api/session/active").await?;
+        let running = active["data"]
+            .as_object()
+            .ok_or_else(|| anyhow!("OpenCode V2 active response is invalid"))?
+            .contains_key(self.native_id);
+        Ok(!running && !self.queued().await?)
+    }
 }
 
 async fn merge_projection(
@@ -430,32 +715,6 @@ fn messages(projection: &Value) -> Result<&Vec<Value>> {
         .ok_or_else(|| anyhow!("OpenCode V2 history response is invalid"))
 }
 
-async fn execution_failure(endpoint: &AgentEndpoint, native_id: &str) -> Result<Option<String>> {
-    let log = endpoint
-        .client
-        .get(format!(
-            "{}/api/experimental/session/{native_id}/log",
-            endpoint.base_url
-        ))
-        .timeout(Duration::from_secs(10))
-        .send()
-        .await?
-        .error_for_status()?
-        .text()
-        .await?;
-    Ok(last_execution_failure(&log))
-}
-
-/// The error of the last `session.execution.failed` event in a replayed SSE session log.
-fn last_execution_failure(log: &str) -> Option<String> {
-    log.lines()
-        .rev()
-        .filter_map(|line| line.strip_prefix("data:"))
-        .filter_map(|data| serde_json::from_str::<Value>(data.trim()).ok())
-        .find(|event| event["type"] == "session.execution.failed")
-        .map(|event| error_text(&event["data"]["error"]))
-}
-
 fn error_text(error: &Value) -> String {
     error
         .get("message")
@@ -535,6 +794,124 @@ fn projected_parts(message: &Value) -> Vec<(WirePart, &Value)> {
         .collect()
 }
 
+const REVIEW_TIMEOUT: Duration = Duration::from_secs(30);
+const REVIEW_TARGET_LIMIT: usize = 2000;
+
+/// Who reviews Auto's requests, in the order tried: the user's setting, then the
+/// chat's own model. A chat on a local model keeps its commands on this
+/// machine, so it never reaches the setting's.
+fn reviewers(chat: Option<&str>, configured: Option<&str>, chat_is_local: bool) -> Vec<String> {
+    let configured = configured.filter(|_| !chat_is_local);
+    configured
+        .into_iter()
+        .chain(chat.filter(|chat| Some(*chat) != configured))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Whether a model's provider is known to serve from another machine: the
+/// server lists it with a base URL that is not on loopback. Anything unknown
+/// keeps the chat's own model, so a local chat's commands stay local.
+async fn serves_remotely(endpoint: &AgentEndpoint, model: &str) -> bool {
+    let Some((provider, _)) = model.split_once('/') else {
+        return false;
+    };
+    let Ok(providers) = get(endpoint, "/api/provider").await else {
+        return false;
+    };
+    providers["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|entry| entry["id"].as_str() == Some(provider))
+        .and_then(|entry| entry["settings"]["baseURL"].as_str())
+        .is_some_and(|url| !is_loopback_url(url))
+}
+
+/// Auto's reviewer: whether the first of `models` that answers calls one
+/// request safe. A read-only shell command passes unasked; anything but a plain
+/// SAFE, a request too long to read whole, and any failure of every model,
+/// leaves the request to the user.
+async fn review(endpoint: &AgentEndpoint, models: &[String], user: &str, request: &Value) -> bool {
+    let action = request["action"].as_str().unwrap_or_default();
+    let target = request["metadata"]["input"]["command"]
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            request["resources"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
+    if action == "shell" && super::super::plan_gate::command_is_readonly(&target) {
+        return true;
+    }
+    if target.chars().count() > REVIEW_TARGET_LIMIT {
+        return false;
+    }
+    let prompt = review_prompt(user, action, &target);
+    for model in models {
+        let Some((provider, id)) = model.split_once('/') else {
+            continue;
+        };
+        let body = json!({"prompt": prompt, "model": {"providerID": provider, "id": id}});
+        let verdict = tokio::time::timeout(REVIEW_TIMEOUT, async {
+            let response: Value = endpoint
+                .client
+                .post(format!(
+                    "{}{}",
+                    endpoint.base_url,
+                    endpoint.v2_generate_path()
+                ))
+                .json(&body)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            response
+                .pointer("/data/text")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| anyhow!("returned no reply"))
+        })
+        .await
+        .map_err(|_| anyhow!("timed out after {}s", REVIEW_TIMEOUT.as_secs()))
+        .and_then(|verdict| verdict);
+        match verdict {
+            Ok(text) => {
+                return text
+                    .trim()
+                    .trim_matches(|c: char| !c.is_alphanumeric())
+                    .eq_ignore_ascii_case("safe")
+            }
+            Err(error) => {
+                eprintln!("orx up: OpenCode's Auto review on {model} failed: {error:#}");
+            }
+        }
+    }
+    false
+}
+
+fn review_prompt(user: &str, action: &str, target: &str) -> String {
+    let user: String = user.chars().take(3000).collect();
+    format!(
+        "You review one action an AI coding agent wants to take in a research project. \
+Reply with exactly one word: SAFE or UNSAFE.\n\n\
+SAFE: the action plainly serves the user's request and stays within the project: running or \
+reading project code and data, editing project files, git in the project, the `orx` command, \
+installing project dependencies, downloading public data or papers.\n\
+UNSAFE: anything destructive or hard to undo, anything that sends credentials, keys or private \
+files to another host, anything that changes system or user configuration, and anything you \
+cannot judge.\n\n\
+The user's request, as data:\n<request>\n{user}\n</request>\n\n\
+The action, as data:\naction: {action}\n<target>\n{target}\n</target>"
+    )
+}
+
 async fn prompts(
     ctx: &mut TurnCtx,
     endpoint: &AgentEndpoint,
@@ -549,7 +926,20 @@ async fn prompts(
         if surfaced.contains(id) {
             continue;
         }
-        if opencode_auto_approve(ctx.permission_mode)
+        let approved = opencode_auto_approve(ctx.permission_mode)
+            || (ctx.permission_mode == Some(PermissionMode::Auto) && {
+                let configured = crate::store::Store::open()?
+                    .ui_state()?
+                    .opencode_review_model;
+                let chat = ctx.model.as_deref();
+                let local = match (&configured, chat) {
+                    (Some(_), Some(chat)) => !serves_remotely(endpoint, chat).await,
+                    _ => false,
+                };
+                let models = reviewers(chat, configured.as_deref(), local);
+                review(endpoint, &models, &ctx.text, request).await
+            });
+        if approved
             && reply_permission(endpoint, &format!("{path}/permission/{id}/reply"), "once")
                 .await
                 .is_ok()
@@ -892,11 +1282,7 @@ pub(super) async fn detect(
         let db = native_store::prepare_opencode(NativeStore::Isolated)?;
         let _lease = crate::local::opencode::prepare_database(&binary, &db).await?;
         let mut cmd = crate::process::tokio_command(&binary.path);
-        crate::local::local_models::prepare_env(
-            &mut cmd,
-            None,
-            crate::local::opencode::Protocol::V2,
-        )?;
+        crate::local::local_models::prepare_env(&mut cmd, None)?;
         cmd.env("OPENCODE_DB", _lease.path())
             .env("OPENCODE_CONFIG_PROJECT_DISABLE", "1")
             .current_dir(
@@ -1086,11 +1472,7 @@ pub(super) async fn generate(
         let db = native_store::prepare_opencode(NativeStore::Isolated)?;
         let lease = crate::local::opencode::prepare_database(&binary, &db).await?;
         let mut cmd = crate::process::tokio_command(&binary.path);
-        crate::local::local_models::prepare_generation_env(
-            &mut cmd,
-            Some(&model),
-            binary.protocol,
-        )?;
+        crate::local::local_models::prepare_generation_env(&mut cmd, Some(&model))?;
         cmd.env("OPENCODE_DB", lease.path())
             .env("OPENCODE_CONFIG_PROJECT_DISABLE", "1")
             .current_dir(std::env::temp_dir());
@@ -1154,6 +1536,160 @@ mod tests {
         })));
     }
 
+    #[tokio::test]
+    async fn auto_review_approves_only_a_plain_safe_and_never_on_failure() {
+        use axum::{http::StatusCode, response::IntoResponse, routing::post, Json, Router};
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Mutex,
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let reply = Arc::new(Mutex::new(None::<String>));
+        let prompt = Arc::new(Mutex::new(Value::Null));
+        let app = Router::new().route(
+            "/api/experimental/generate",
+            post({
+                let (calls, reply, prompt) = (calls.clone(), reply.clone(), prompt.clone());
+                move |Json(body): Json<Value>| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    *prompt.lock().unwrap() = body;
+                    let reply = reply.lock().unwrap().clone();
+                    async move {
+                        match reply {
+                            Some(text) => Json(json!({"data":{"text":text}})).into_response(),
+                            None => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+                        }
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = AgentEndpoint {
+            base_url: format!("http://{}", listener.local_addr().unwrap()),
+            client: crate::net::loopback_client().build().unwrap(),
+            legacy_v2_api: false,
+        };
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let push = json!({
+            "action":"shell", "resources":["git push origin main"],
+            "metadata":{"input":{"command":"git push origin main"}}
+        });
+
+        for (text, approved) in [
+            (Some("SAFE"), true),
+            (Some(" safe. "), true),
+            (Some("UNSAFE"), false),
+            (Some("SAFE, but only after a backup"), false),
+            (None, false),
+        ] {
+            *reply.lock().unwrap() = text.map(str::to_owned);
+            let verdict = review(
+                &endpoint,
+                &["cloud/selected".into()],
+                "push my branch",
+                &push,
+            )
+            .await;
+            assert_eq!(verdict, approved, "{text:?}");
+        }
+        let body = prompt.lock().unwrap().clone();
+        assert_eq!(body["model"], json!({"providerID":"cloud","id":"selected"}));
+        let text = body["prompt"].as_str().unwrap();
+        assert!(text.contains("push my branch") && text.contains("git push origin main"));
+
+        let asked = calls.load(Ordering::SeqCst);
+        let status = json!({"action":"shell", "metadata":{"input":{"command":"git status"}}});
+        assert!(review(&endpoint, &[], "", &status).await);
+        assert!(!review(&endpoint, &[], "push my branch", &push).await);
+        assert_eq!(calls.load(Ordering::SeqCst), asked);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_request_too_long_to_read_whole_is_never_approved_and_remote_means_a_known_remote_url(
+    ) {
+        use axum::{routing::get, routing::post, Json, Router};
+        let app = Router::new()
+            .route(
+                "/api/experimental/generate",
+                post(|| async { Json(json!({"data":{"text":"SAFE"}})) }),
+            )
+            .route(
+                "/api/provider",
+                get(|| async {
+                    Json(json!({"data":[
+                        {"id":"cloud","settings":{"baseURL":"https://api.example.com/v1"}},
+                        {"id":"local","settings":{"baseURL":"http://127.0.0.1:1234/v1"}},
+                        {"id":"bare","settings":{}}
+                    ]}))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = AgentEndpoint {
+            base_url: format!("http://{}", listener.local_addr().unwrap()),
+            client: crate::net::loopback_client().build().unwrap(),
+            legacy_v2_api: false,
+        };
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let long = json!({"action":"shell", "resources":[format!("make {}", "x".repeat(REVIEW_TARGET_LIMIT))]});
+        assert!(!review(&endpoint, &["cloud/m".into()], "build", &long).await);
+        let short = json!({"action":"shell", "resources":["make all"]});
+        assert!(review(&endpoint, &["cloud/m".into()], "build", &short).await);
+
+        assert!(serves_remotely(&endpoint, "cloud/model").await);
+        for model in ["local/model", "bare/model", "unlisted/model", "nomodel"] {
+            assert!(!serves_remotely(&endpoint, model).await, "{model}");
+        }
+        server.abort();
+    }
+
+    #[test]
+    fn the_reviewer_is_the_setting_then_the_chat_and_a_local_chat_keeps_its_own() {
+        let list = |chat, configured, local| reviewers(chat, configured, local);
+        assert_eq!(list(Some("a/chat"), None, false), ["a/chat"]);
+        assert_eq!(
+            list(Some("a/chat"), Some("b/small"), false),
+            ["b/small", "a/chat"]
+        );
+        assert_eq!(list(Some("a/chat"), Some("a/chat"), false), ["a/chat"]);
+        assert_eq!(
+            list(Some("orx-local-x/qwen"), Some("b/small"), true),
+            ["orx-local-x/qwen"]
+        );
+        assert_eq!(list(None, Some("b/small"), false), ["b/small"]);
+        assert!(list(None, None, false).is_empty());
+    }
+
+    #[tokio::test]
+    async fn auto_review_falls_back_to_the_chats_model_when_the_setting_fails() {
+        use axum::{
+            extract::Json as Body, http::StatusCode, response::IntoResponse, routing::post, Json,
+            Router,
+        };
+        let app = Router::new().route(
+            "/api/experimental/generate",
+            post(|Body(body): Body<Value>| async move {
+                if body["model"]["providerID"] == "gone" {
+                    StatusCode::BAD_GATEWAY.into_response()
+                } else {
+                    Json(json!({"data":{"text":"SAFE"}})).into_response()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = AgentEndpoint {
+            base_url: format!("http://{}", listener.local_addr().unwrap()),
+            client: crate::net::loopback_client().build().unwrap(),
+            legacy_v2_api: false,
+        };
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let push = json!({"action":"shell", "resources":["git push origin main"]});
+        let models = ["gone/small".to_owned(), "cloud/chat".to_owned()];
+        assert!(review(&endpoint, &models, "push", &push).await);
+        assert!(!review(&endpoint, &models[..1], "push", &push).await);
+        server.abort();
+    }
+
     #[test]
     fn v2_permission_card_shows_command() {
         let request = json!({
@@ -1195,7 +1731,6 @@ mod tests {
             let endpoint = AgentEndpoint {
                 base_url: format!("http://{}", listener.local_addr().unwrap()),
                 client: crate::net::loopback_client().build().unwrap(),
-                protocol: crate::local::opencode::Protocol::V2,
                 legacy_v2_api: legacy,
             };
             let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -1219,6 +1754,7 @@ mod tests {
                     note: None,
                     annotations: Vec::new(),
                     from: None,
+                    env: Vec::new(),
                 };
                 reply(&ctx, &endpoint, &prompt, &answer).await.unwrap();
             }
@@ -1252,7 +1788,6 @@ mod tests {
             let endpoint = AgentEndpoint {
                 base_url: format!("http://{}", listener.local_addr().unwrap()),
                 client: crate::net::loopback_client().build().unwrap(),
-                protocol: crate::local::opencode::Protocol::V2,
                 legacy_v2_api: legacy,
             };
             let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -1275,6 +1810,7 @@ mod tests {
                 note: Some("Skipped".into()),
                 annotations: Vec::new(),
                 from: None,
+                env: Vec::new(),
             };
             let result = reply(&ctx, &endpoint, &prompt, &answer).await;
             server.abort();
@@ -1290,7 +1826,6 @@ mod tests {
         let endpoint = AgentEndpoint {
             base_url: format!("http://{}", listener.local_addr().unwrap()),
             client: crate::net::loopback_client().build().unwrap(),
-            protocol: crate::local::opencode::Protocol::V2,
             legacy_v2_api: legacy,
         };
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -1567,54 +2102,52 @@ mod tests {
         );
     }
 
-    #[test]
-    fn execution_failure_comes_from_the_last_failed_log_event() {
-        let event = |seq: u64, kind: &str, data: Value| {
-            let event = json!({"id":format!("evt_{seq}"),"created":seq,"type":kind,
-                "durable":{"aggregateID":"ses_test","seq":seq,"version":1},"data":data});
-            format!("data: {event}\r\n\r\n")
-        };
-        let failed = |message: &str| json!({"sessionID":"ses_test","error":{"type":"provider.no-route","message":message}});
-        let log = [
-            event(
-                1,
-                "session.execution.started",
-                json!({"sessionID":"ses_test"}),
-            ),
-            event(
-                2,
-                "session.execution.failed",
-                failed("Model unavailable: a/old"),
-            ),
-            event(
-                3,
-                "session.execution.failed",
-                failed("Model unavailable: opencode-go/deepseek-v4.1-flash"),
-            ),
-            format!(
-                "data: {}\n\n",
-                json!({"type":"log.synced","aggregateID":"ses_test","seq":3})
-            ),
-        ]
-        .concat();
-        assert_eq!(
-            last_execution_failure(&log).as_deref(),
-            Some("Model unavailable: opencode-go/deepseek-v4.1-flash")
+    #[tokio::test]
+    async fn the_step_in_flight_renders_as_the_export_later_does() {
+        use axum::{routing::get, Router};
+        let app = Router::new().route(
+            "/api/event",
+            get(|| async {
+                (
+                    [("content-type", "text/event-stream")],
+                    include_str!("fixtures/opencode-turn-events.sse"),
+                )
+            }),
         );
-        assert_eq!(
-            last_execution_failure(&event(1, "session.execution.succeeded", json!({}))),
-            None
-        );
-    }
+        let (endpoint, server) = catalog_server(app, false).await;
+        let export: Value =
+            serde_json::from_str(include_str!("fixtures/opencode-turn-export.json")).unwrap();
+        let native_id = export
+            .pointer("/data/info/id")
+            .and_then(Value::as_str)
+            .unwrap();
 
-    #[test]
-    fn one_idle_snapshot_cannot_finish_a_just_admitted_prompt() {
-        let mut idle = false;
-        assert!(!observed_idle(&mut idle, false, false));
-        assert!(!observed_idle(&mut idle, false, true));
-        assert!(!observed_idle(&mut idle, true, false));
-        assert!(!observed_idle(&mut idle, false, false));
-        assert!(observed_idle(&mut idle, false, false));
+        let mut events = subscribe(&endpoint).await.unwrap();
+        let mut steps = Vec::new();
+        let mut streamed = std::collections::HashMap::<String, String>::new();
+        while let Some(event) = events.next().await {
+            let event = event.unwrap();
+            if let Some(Folded::Text { part, delta }) = fold(&mut steps, native_id, &event) {
+                streamed.entry(part).or_default().push_str(delta);
+            }
+        }
+        server.abort();
+
+        let shown = |message: &Value| -> Vec<Value> {
+            projected_parts(message)
+                .into_iter()
+                .map(|(part, _)| serde_json::to_value(part).unwrap())
+                .collect()
+        };
+        let finished: Vec<_> = messages(&export).unwrap()[1..3]
+            .iter()
+            .flat_map(shown)
+            .collect();
+        let live: Vec<_> = steps.iter().flat_map(shown).collect();
+        assert_eq!(live, finished);
+        for part in finished.iter().filter(|part| part["kind"] == "text") {
+            assert_eq!(part["text"], streamed[part["id"].as_str().unwrap()]);
+        }
     }
 
     #[test]
@@ -1734,5 +2267,170 @@ mod catalog_tests {
         assert_eq!(with(json!(["text"])), Some(false));
         assert_eq!(with(json!([])), None);
         assert_eq!(image_input(&json!({})), None);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod restart_tests {
+    use super::*;
+    use axum::{
+        routing::{get, post},
+        Json, Router,
+    };
+    use std::sync::{Arc, Mutex};
+
+    fn permission(id: &str) -> Value {
+        json!({"id":id,"action":"shell","resources":["ls"],"metadata":{"input":{}}})
+    }
+
+    #[test]
+    fn a_resumed_turn_finishes_from_the_export_without_prompting_again() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let prompted = Arc::new(Mutex::new(false));
+            let running = Arc::new(Mutex::new(true));
+            let listed = Arc::new(tokio::sync::Notify::new());
+            let (send, events) = tokio::sync::mpsc::unbounded_channel::<String>();
+            let events = Arc::new(Mutex::new(Some(events)));
+            let export = json!({"data":{"info":{"outcome":"succeeded"},"messages":[
+                {"id":"msg_earlier","type":"assistant","time":{"completed":1},
+                    "content":[{"type":"text","text":"an earlier answer"}]},
+                {"id":"msg_prompt","type":"user"},
+                {"id":"msg_reply","type":"assistant","time":{"completed":2},
+                    "content":[{"type":"text","text":"the answer"}]}
+            ]}});
+            let empty = || async { Json(json!({"data":[]})) };
+            let app = Router::new()
+                .route(
+                    "/api/event",
+                    get(move || {
+                        let rx = events.lock().unwrap().take().expect("one subscription");
+                        let connected = r#"{"type":"server.connected"}"#.to_owned();
+                        let stream = futures::stream::once(async move { connected })
+                            .chain(futures::stream::unfold(rx, |mut rx| async move {
+                                Some((rx.recv().await?, rx))
+                            }))
+                            .map(|line| Ok::<_, std::io::Error>(format!("data: {line}\n\n")));
+                        async move { axum::body::Body::from_stream(stream) }
+                    }),
+                )
+                .route(
+                    "/api/experimental/session/native/export",
+                    get(move || {
+                        let body = export.clone();
+                        async move { Json(body) }
+                    }),
+                )
+                .route("/api/session/native/inbox", get(empty))
+                .route(
+                    "/api/session/native/permission",
+                    get({
+                        let listed = listed.clone();
+                        move || {
+                            listed.notify_one();
+                            async {
+                                Json(json!({"data":[permission("per_before"), permission("per_gap")]}))
+                            }
+                        }
+                    }),
+                )
+                .route("/api/session/native/form", get(empty))
+                .route(
+                    "/api/session/active",
+                    get({
+                        let running = running.clone();
+                        move || {
+                            let running = *running.lock().unwrap();
+                            async move {
+                                Json(if running {
+                                    json!({"data":{"native":{}}})
+                                } else {
+                                    json!({"data":{}})
+                                })
+                            }
+                        }
+                    }),
+                )
+                .route(
+                    "/api/session/native/prompt",
+                    post({
+                        let prompted = prompted.clone();
+                        move || {
+                            *prompted.lock().unwrap() = true;
+                            async { Json(json!({})) }
+                        }
+                    }),
+                );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let root = crate::local::git::TemporaryDirectory::new("orx-opencode-resume").unwrap();
+            let mut ctx = TurnCtx::test_stub();
+            ctx.host
+                .opencode
+                .serve_for_test(&ctx.session_id, port, root.path())
+                .await;
+            let (_, keeper) = ctx.host.opencode.server_for(&ctx.session_id).await.unwrap();
+            // What the previous server had streamed and committed before it restarted.
+            ctx.native_session_id = Some("native".into());
+            ctx.upsert_part(WirePart::text("msg_reply:0", "the ans"));
+            ctx.upsert_part(WirePart::prompt(
+                "per_before",
+                permission_card(&permission("per_before"), "per_before"),
+            ));
+            ctx.resume = Some(Resume {
+                keep_id: keeper.id().into(),
+                offset: keeper.start(),
+                state: json!({"promptId": "msg_prompt"}),
+            });
+
+            let driver = async {
+                listed.notified().await;
+                *running.lock().unwrap() = false;
+                send.send(
+                    json!({"type":"session.execution.succeeded","data":{"sessionID":"native"}})
+                        .to_string(),
+                )
+                .unwrap();
+            };
+            let (result, ()) = tokio::join!(super::super::run_turn(&mut ctx), driver);
+            result.unwrap();
+
+            assert!(!*prompted.lock().unwrap(), "the prompt is never sent again");
+            let ids: Vec<&str> = ctx.assistant.parts.iter().map(|p| p.id.as_str()).collect();
+            assert_eq!(ids, ["msg_reply:0", "per_before", "per_gap"]);
+            assert_eq!(ctx.assistant.parts[0].text.as_deref(), Some("the answer"));
+            let checkpoint = crate::store::Store::open()
+                .unwrap()
+                .chat_turn_checkpoint(&ctx.turn_id)
+                .unwrap()
+                .expect("the card the resumed turn surfaced is checkpointed");
+            assert_eq!(checkpoint.keep_id, keeper.id());
+            let state: Value = serde_json::from_str(&checkpoint.state_json).unwrap();
+            assert_eq!(state["harness"]["promptId"], "msg_prompt");
+        });
+    }
+
+    #[test]
+    fn a_turn_whose_server_died_in_the_gap_fails_for_recovery() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let mut ctx = TurnCtx::test_stub();
+            ctx.native_session_id = Some("native".into());
+            ctx.resume = Some(Resume {
+                keep_id: "gone".into(),
+                offset: 0,
+                state: json!({"promptId": "msg_prompt"}),
+            });
+            let error = super::super::run_turn(&mut ctx).await.unwrap_err();
+            assert!(
+                error.to_string().contains("stopped while orx restarted"),
+                "{error}"
+            );
+        });
     }
 }

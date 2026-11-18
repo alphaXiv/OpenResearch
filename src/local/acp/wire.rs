@@ -28,6 +28,8 @@ pub(crate) struct Wire {
     pub durable: std::sync::atomic::AtomicBool,
     pub response: Notify,
     checkpoint: Notify,
+    /// The newest stdout that was not a message, for a failure's diagnostics.
+    pub discarded: Mutex<String>,
 }
 
 impl Wire {
@@ -105,6 +107,7 @@ pub(super) fn connect(
         durable: std::sync::atomic::AtomicBool::new(false),
         response: Notify::new(),
         checkpoint: Notify::new(),
+        discarded: Mutex::new(String::new()),
     });
     let (library, bridge) = tokio::io::duplex(1024 * 1024);
     let (reader, mut writer) = tokio::io::split(bridge);
@@ -231,12 +234,12 @@ pub(super) fn connect(
                             incoming.processed();
                             continue;
                         }
-                        next = lines.next_line() => next?,
+                        next = next_message(&mut lines, &incoming.discarded) => next?,
                     };
-                    let Some((line, offset)) = next else {
+                    let Some(next) = next else {
                         break;
                     };
-                    (serde_json::from_str::<Value>(&line)?, offset)
+                    next
                 };
                 incoming
                     .offset
@@ -307,6 +310,37 @@ pub(super) fn connect(
         let _ = ended.send(());
     });
     Ok((wire, library, receiver))
+}
+
+/// The agent's next JSON-RPC message and the offset after it. The SDK answers every line that
+/// is not JSON with a parse error, and some agents exit on it, so other lines are set aside.
+async fn next_message(
+    lines: &mut crate::keep::KeptLines,
+    discarded: &Mutex<String>,
+) -> Result<Option<(Value, u64)>> {
+    while let Some((mut line, offset)) = lines.next_line().await? {
+        // Windows PowerShell starts a redirected stream with a byte-order mark.
+        if line.starts_with('\u{feff}') {
+            line.drain(..'\u{feff}'.len_utf8());
+        }
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(value) = serde_json::from_str(&line) {
+            return Ok(Some((value, offset)));
+        }
+        let mut tail = discarded.lock().unwrap();
+        tail.push_str(&line);
+        tail.push('\n');
+        let mut start = tail
+            .len()
+            .saturating_sub(super::host::MAX_OUTPUT_TAIL_BYTES);
+        while !tail.is_char_boundary(start) {
+            start += 1;
+        }
+        tail.drain(..start);
+    }
+    Ok(None)
 }
 
 #[cfg(test)]

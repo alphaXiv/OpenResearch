@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Package an `orx` built with `--features desktop` into OpenResearch-<arch>.AppImage,
 # bundling WebKitGTK so the app runs without it installed. Run on the oldest
-# glibc to support (CI uses Ubuntu 22.04) with libwebkit2gtk-4.1-dev and
-# patchelf installed.
+# glibc to support (CI uses Ubuntu 22.04) with libwebkit2gtk-4.1-dev,
+# libgstreamer1.0-dev and patchelf installed.
 #
 #   scripts/build-linux-appimage.sh <orx binary> <output dir>
 set -euo pipefail

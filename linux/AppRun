@@ -9,7 +9,7 @@ export APPDIR="${APPDIR:-"$(dirname "$(realpath "$0")")"}"
 # The session's values of what this script and the hook below override, as
 # `=<value>` or `-` for unset, so orx can hand them back to the host programs it
 # opens (shell_env::host_gui_env; keep the two lists in step).
-for var in GDK_BACKEND GDK_PIXBUF_MODULE_FILE GI_TYPELIB_PATH GIO_EXTRA_MODULES \
+for var in LD_LIBRARY_PATH GDK_BACKEND GDK_PIXBUF_MODULE_FILE GI_TYPELIB_PATH GIO_EXTRA_MODULES \
   GIO_MODULE_DIR GSETTINGS_SCHEMA_DIR GTK_DATA_PREFIX GTK_EXE_PREFIX GTK_IM_MODULE_FILE GTK_PATH \
   GTK_THEME XDG_DATA_DIRS; do
   if [ -n "${!var+set}" ]; then
@@ -19,26 +19,53 @@ for var in GDK_BACKEND GDK_PIXBUF_MODULE_FILE GI_TYPELIB_PATH GIO_EXTRA_MODULES 
   fi
 done
 
-# linuxdeploy-plugin-gtk's hook points GTK at the bundled modules and schemas.
-for hook in "$APPDIR"/apprun-hooks/*.sh; do
-  if [ -e "$hook" ]; then
-    # shellcheck disable=SC1090
-    . "$hook"
-  fi
-done
-# Let GTK choose the session's backend unless the user selected one; the plugin
-# forces X11 even in a Wayland session.
-case "$ORX_HOST_GDK_BACKEND" in
-  =*) export GDK_BACKEND="${ORX_HOST_GDK_BACKEND#=}" ;;
-  -) unset GDK_BACKEND ;;
-esac
-# Only the bundled GIO modules (TLS): the host's need a newer GLib than the image's.
-export GIO_MODULE_DIR="$APPDIR/usr/lib/gio/modules"
-unset GIO_EXTRA_MODULES
+cd "$APPDIR/usr"
+system_lib=
+# Resolve the host library without loading the bundled WebKit first.
+ldconfig_bin="$(command -v ldconfig || true)"
+if [ -z "$ldconfig_bin" ]; then
+  for candidate in /sbin/ldconfig /usr/sbin/ldconfig; do
+    if [ -x "$candidate" ]; then ldconfig_bin="$candidate"; break; fi
+  done
+fi
+if [ -n "$ldconfig_bin" ]; then
+  system_webkit="$("$ldconfig_bin" -p 2>/dev/null | awk '$1 == "libwebkit2gtk-4.1.so.0" { sub(/^.*=>[[:space:]]*/, ""); print }')"
+  while IFS= read -r library; do
+    [ -f "$library" ] || continue
+    directory="$(dirname "$library")"
+    case "$directory/" in "$APPDIR/"*) continue ;; esac
+    if LD_LIBRARY_PATH="$directory${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+      LD_BIND_NOW=1 ORX_TELEMETRY_ENV=off "$APPDIR/usr/bin/orx" version >/dev/null 2>&1; then
+      system_lib="$directory"
+      break
+    fi
+  done <<< "$system_webkit"
+fi
+if [ -n "$system_lib" ]; then
+  export LD_LIBRARY_PATH="$system_lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  export ORX_APPIMAGE_RUNTIME=system
+else
+  # linuxdeploy-plugin-gtk's hook points GTK at the bundled modules and schemas.
+  for hook in "$APPDIR"/apprun-hooks/*.sh; do
+    if [ -e "$hook" ]; then
+      # shellcheck disable=SC1090
+      . "$hook"
+    fi
+  done
+  # Let GTK choose the session's backend unless the user selected one; the plugin
+  # forces X11 even in a Wayland session.
+  case "$ORX_HOST_GDK_BACKEND" in
+    =*) export GDK_BACKEND="${ORX_HOST_GDK_BACKEND#=}" ;;
+    -) unset GDK_BACKEND ;;
+  esac
+  # Only the bundled GIO modules (TLS): the host's need a newer GLib than the image's.
+  export GIO_MODULE_DIR="$APPDIR/usr/lib/gio/modules"
+  unset GIO_EXTRA_MODULES
+  export ORX_APPIMAGE_RUNTIME=bundled
+fi
 
 # scripts/build-linux-appimage.sh rewrote libwebkit2gtk's /usr paths to ././,
 # so WebKit finds its bundled helper processes relative to this directory.
-cd "$APPDIR/usr"
 link=()
 # Any position: AppImage integrators keep the bundled entry's `app` before %u.
 shopt -s nocasematch

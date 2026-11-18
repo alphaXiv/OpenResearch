@@ -257,11 +257,23 @@ fn is_readonly_producer(stage: &str) -> bool {
 
 /// True iff the stage runs one of the [`PURE_CONSUMERS`]. Args are arbitrary:
 /// redirection/substitution/background were already rejected per-token, and
-/// none of these programs writes without a redirect.
+/// none of these programs writes without a redirect, bar the two that take an
+/// output file as an argument.
 fn is_pure_consumer(tokens: &[&str]) -> bool {
-    match tokens.first() {
-        Some(program) => PURE_CONSUMERS.contains(program),
-        None => false,
+    let Some((program, args)) = tokens.split_first() else {
+        return false;
+    };
+    match *program {
+        // `-o`/`--output` writes a file and `--compress-program` runs one. Any
+        // short cluster holding `o` and any `--o…`/`--co…` abbreviation gates.
+        "sort" => !args.iter().any(|arg| {
+            arg.starts_with("--o")
+                || arg.starts_with("--co")
+                || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('o'))
+        }),
+        // A second operand is the file it writes.
+        "uniq" => args.iter().filter(|arg| !arg.starts_with('-')).count() <= 1,
+        program => PURE_CONSUMERS.contains(&program),
     }
 }
 
@@ -640,6 +652,7 @@ mod tests {
         // Consumers stand alone and pipe among themselves.
         assert!(allowed("wc -l README.md"));
         assert!(allowed("cat notes.md | grep TODO | sort | uniq"));
+        assert!(allowed("sort -u names.txt | uniq -c | head"));
         // Pipelines and sequences compose.
         assert!(allowed("orx runs | head -5; echo ok && git status"));
         // No-space pipes parse the same way the shell parses them.
@@ -657,6 +670,13 @@ mod tests {
         assert!(!allowed("| head")); // no producer
         assert!(!allowed("cargo metadata | head")); // unknown producer
         assert!(!allowed("head -1 f | orx runs")); // orx is not a consumer
+                                                   // `sort` and `uniq` take an output file as an argument.
+        assert!(!allowed("sort -o important.txt /dev/null"));
+        assert!(!allowed("sort --output=important.txt names.txt"));
+        assert!(!allowed("sort -ro important.txt names.txt"));
+        assert!(!allowed("sort --compress-program=sh names.txt"));
+        assert!(!allowed("uniq source.txt important.txt"));
+        assert!(!allowed("cat names.txt | sort -o important.txt"));
     }
 
     #[test]

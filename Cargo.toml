@@ -14,6 +14,12 @@ default-members = [".", "tests/support", "crates/orx-host-proto", "crates/orx-ho
 [target.'cfg(unix)'.dev-dependencies]
 orx-test-support = { path = "tests/support" }
 
+[[example]]
+name = "gstorxprobe"
+path = "tests/fixtures/media_fault_plugin.rs"
+crate-type = ["cdylib"]
+required-features = ["desktop"]
+
 [[bin]]
 name = "orx"
 path = "src/main.rs"
@@ -22,7 +28,7 @@ path = "src/main.rs"
 # The Linux desktop app: a glibc build linking WebKitGTK (see linux/). Off by
 # default so the static musl CLI builds stay free of GTK. macOS and Windows
 # always build the app.
-desktop = ["dep:tao", "dep:wry", "dep:gtk", "dep:webkit2gtk", "dep:png"]
+desktop = ["dep:tao", "dep:wry", "dep:gtk", "dep:webkit2gtk", "dep:png", "dep:gstreamer"]
 
 [dependencies]
 tower = { version = "0.5", features = ["util"] }
@@ -131,6 +137,8 @@ wry = { version = "0.57", optional = true }
 gtk = { version = "0.18", optional = true }
 webkit2gtk = { version = "2.0", optional = true }
 png = { version = "0.18", optional = true }
+# Typed GStreamer API for the isolated Linux media check.
+gstreamer = { version = "0.21", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # muda builds the menu bar, and objc2-app-kit's NSAlert backs `window.confirm`.

@@ -5,6 +5,7 @@ import {
   useContext,
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useRef,
   useState,
@@ -15,14 +16,19 @@ import { useWorkspace } from "../workspace";
 import { cn } from "./ui/cn";
 import { type DialogContentProps } from "../dialog";
 import { DialogContent, DialogTitle } from "./ui";
+import { SkillsTab } from "./SkillsTab";
+import { confirmDeleteProject } from "./ProjectInfoCard";
+import { useFileManagerLabel } from "./useFileManagerLabel";
+import { mutUpdateProject } from "../queries/projects";
 import { formatAcpCommand } from "../acp";
 import { TARGET_LABELS } from "../computeTargets";
 import { AcpAuthDialog } from "./AcpAuthDialog";
 import { accountErrorMessage, OpenResearchAccount } from "./OpenResearchAccount";
 import { OpenResearchSshKey } from "./OpenResearchSshKey";
-import { HarnessSetupDialog } from "./HarnessSetupDialog";
+import { HarnessSetupDialog, useAgentSignIn } from "./HarnessSetupDialog";
+import { RefreshAgents, useAgentRefresh } from "./RefreshAgents";
 import { AcpHarnessDialog } from "./AcpHarnessDialog";
-import { AddAgentDialog, canConfigureHarness, ChoiceGrid, keyKind, OpenCodeSignInDialog, opencodeMajor, opencodeVersion, providerRank, providerTile, RECOMMENDED_TILES, sortHarnesses, TileMark, type AddedAgent } from "./AddAgentDialog";
+import { AddAgentDialog, canConfigureHarness, ChoiceGrid, keyKind, OpenCodeSignInDialog, opencodeVersion, providerRank, providerTile, RECOMMENDED_TILES, sortHarnesses, TileMark, type AddedAgent } from "./AddAgentDialog";
 import { AgentIconButton, AgentIconTile, type Logo } from "./AgentIcon";
 import type { SetupAction } from "./harnessSetupState";
 import { OpenCodeKeyDialog } from "./OpenCodeKeyDialog";
@@ -59,16 +65,17 @@ import {
 import { mutDeleteOverleafSession, mutDeleteOverleafToken, mutSaveOverleafSession, mutSaveOverleafToken } from "../queries/overleaf";
 
 import { worstPerAlias } from "../engineHosts";
+import { navigateKeyboardRow } from "../keyboardNavigation";
 import { runActive, runDisplay } from "../runDisplay";
 
 import {
   ArrowLeft,
   ArrowRight,
   ChevronDown,
-  Cpu,
   ExternalLink,
   Info,
   Link2,
+  MessageSquare,
   Monitor,
   Moon,
   Plus,
@@ -95,6 +102,7 @@ import {
   type FoundProvider,
   type Project,
   type AgentIcon,
+  modelLabel,
   tidyModelName,
   type Harness,
   type HarnessModel,
@@ -122,7 +130,7 @@ import {
 import { releaseNotesUrl, useRestartApp, useUpdateStatus } from "./UpdateBanner";
 import { useColoredMarkdown, useThemePreference, type ThemePreference } from "../theme";
 import { m } from "../paraglide/messages.js";
-import { fmtBytes, fmtClock, fmtMemory, ltr } from "../i18n";
+import { autoDir, fmtBytes, fmtClock, fmtMemory, ltr } from "../i18n";
 import { setLocale, useLocale } from "../locale";
 import { isLocale, type Locale } from "../paraglide/runtime.js";
 import { TokenForm } from "./GitTokenForm";
@@ -134,7 +142,7 @@ import { OptionPicker } from "./ModelPicker";
 import { useDebouncedValue } from "./NewProjectForm";
 import { Popover } from "@base-ui/react/popover";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
-import { endpointMark, foundProviderMark, FREE_MODELS_MARK, harnessMark, pickerAgents, providerMark } from "./pickerAgents";
+import { endpointMark, foundProviderMark, FREE_MODELS_MARK, harnessMark, listedSignedOut, pickerAgents, providerMark } from "./pickerAgents";
 import { BrandMark, logoMark, ModelMark, modelLab } from "./HarnessLogo";
 import { agentModelLines, harnessKey, keptInstall, modelsAvailable } from "../modelSelection";
 import { ModelSettings } from "./ModelSettings";
@@ -400,9 +408,9 @@ export function harnessSetupPath(h: Harness, setup: HarnessSetupCommands | undef
 function AgentsTab({ remote }: { remote: boolean }) {
   return (
     <>
-      <h2>{m.settings_page_harnesses()}</h2>
       <AgentList remote={remote} />
       <NestedDelegationRow />
+      <AutoReviewerRow />
       <ModelSettings heading={<h3 className={cn(SECTION_CLASS_NAME, "mt-8")}>{m.settings_models()}</h3>} />
     </>
   );
@@ -431,7 +439,8 @@ export function AgentList({ remote, onboarding }: {
   const { workspaceKey, queryClient, api } = workspace;
 
   const harnessesOptions = getHarnessesQuery();
-  const { data: harnesses = null, isError: harnessesError, isFetching: harnessesFetching } = useQuery(harnessesOptions);
+  const { data: harnesses = null, error: harnessesError, isFetching: harnessesFetching } = useQuery(harnessesOptions);
+  const refresh = useAgentRefresh();
   const providersOptions = getOpenCodeProvidersQuery();
   const providers = useQuery(providersOptions);
   const endpointsOptions = getLocalModelsQuery();
@@ -439,8 +448,8 @@ export function AgentList({ remote, onboarding }: {
   const [active, setActive] = useState<string | null>(null);
   /** The row an open Add agent dialog set up, which lists once the dialog finishes. */
   const [adding, setAdding] = useState<string | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
   const setupRun = useCommandRun();
+  const signIn = useAgentSignIn();
   const setupCommands = useQuery(getHarnessSetupCommandsQuery());
   const definitions = useQuery(listAcpHarnessesQuery());
   const presets = useQuery({ queryKey: workspaceKey("getAcpPresets"), queryFn: api.listAcpPresets });
@@ -450,17 +459,13 @@ export function AgentList({ remote, onboarding }: {
     catch (error) { showAlert(error instanceof Error ? error.message : String(error), "error"); }
   };
 
-  const load = (refresh: boolean, retryRejected = false) => {
-    setRefreshing(true);
-    refreshHarnesses(refresh, retryRejected)
-      .catch(() => {})
-      .finally(() => setRefreshing(false));
+  const load = (retryRejected = false) => {
+    void refreshHarnesses(true, retryRejected).catch(() => {});
   };
 
   const orderedHarnesses = sortHarnesses(harnesses ?? []);
   const opencode = orderedHarnesses.find((h) => h.id === "opencode");
   const records = [...(providers.data ?? [])].sort((a, b) => providerRank(a) - providerRank(b));
-  const opencode1 = opencodeMajor(opencode) === 1;
   // What was added here shows with whatever is wrong with it; an agent merely found on this computer shows only while
   // it works, and Add agent sets up the rest. OpenCode stands behind its providers, showing only for a fault they hit.
   const works = (h: Harness) => h.agentReady && !h.authCheckFailed;
@@ -472,12 +477,13 @@ export function AgentList({ remote, onboarding }: {
   const found: FoundProvider[] = !opencode?.installed ? []
     : opencode.foundProviders ?? [...new Set(signIns)].filter((id) => id && !recorded(id)).map((id) => ({ id, sources: ["catalog"], removable: false }));
   const kept = (h: Harness) => Boolean(h.profile || keptInstall(h) || definitions.data?.some((definition) => definition.id === h.id));
-  // An account or install shows once signed in: Add agent signs it in, and an expired one goes until the user adds it again.
-  const signedIn = (h: Harness) => !(h.profile || keptInstall(h)) || h.authState !== "needsLogin";
+  // An account, or an agent research ran on here, stays while signed out with a way to sign in again. One that never
+  // ran any shows once Add agent signs it in.
+  const signedIn = (h: Harness) => !(h.profile || keptInstall(h)) || h.authState !== "needsLogin" || listedSignedOut(h);
   const rows = orderedHarnesses
     .filter((h) => harnessKey(h) !== adding && signedIn(h))
-    .filter((h) => kept(h)
-      || (h.id === "opencode" ? (records.length > 0 || found.length > 0) && (h.installBroken || h.needsConfigRepair || opencode1 || (!h.agentReady && !h.catalogPending)) : works(h)))
+    .filter((h) => kept(h) || listedSignedOut(h)
+      || (h.id === "opencode" ? (records.length > 0 || found.length > 0) && (h.installBroken || h.needsConfigRepair || (!h.agentReady && !h.catalogPending)) : works(h)))
     .filter((h, index, all) => h.profile || !h.setupUrl || all.findIndex((other) => other.setupUrl === h.setupUrl) === index);
   const offersFreeModels = opencode?.installed && !opencode.installBroken;
   const freeModels = opencode?.models.filter((model) => model.id.startsWith("opencode/")) ?? [];
@@ -492,7 +498,7 @@ export function AgentList({ remote, onboarding }: {
       definition,
       onSaved: (id) => {
         onboarding?.onAdded({ harness: id });
-        load(true, true);
+        load(true);
       },
     },
     onConfirm: (save) => save(),
@@ -575,7 +581,7 @@ export function AgentList({ remote, onboarding }: {
     // Something always runs a chat: turning off the last other agent turns the free models back on.
     const freeModelsBack = !on && !othersOn(key) && !uiState.opencodeFreeModels;
     // The agents say which are off, and the free models' list depends on their switch, so both reload.
-    const reload = freeModelsBack ? () => load(true) : () => void queryClient.invalidateQueries({ queryKey: getHarnessesQuery().queryKey });
+    const reload = freeModelsBack ? () => load() : () => void queryClient.invalidateQueries({ queryKey: getHarnessesQuery().queryKey });
     mutUpdateUiState.runWithOptions(workspace, { hiddenAgents, ...(freeModelsBack ? { opencodeFreeModels: true } : {}) }, { onSuccessData: reload });
   };
   const freeModelsLocked = !othersOn();
@@ -609,6 +615,10 @@ export function AgentList({ remote, onboarding }: {
     const commands = setupCommands.data?.[h.id];
     const status = harnessStatus(h);
     const signedOut = !h.catalogPending && (!h.agentReady || Boolean(h.authCheckFailed));
+    const openSignIn = h.authState === "needsLogin" ? signIn(h) : undefined;
+    const signInButton = openSignIn && (
+      <Button size="small" onClick={openSignIn} aria-haspopup="dialog">{m.harness_setup_login()}</Button>
+    );
     if (h.profile) {
       const profile = h.profile;
       const remove = () => confirmRemove(profile.name, () => api.removeAgentProfile(profile.id));
@@ -621,7 +631,7 @@ export function AgentList({ remote, onboarding }: {
           detail={signedOut ? status.label : [h.accountName ?? h.account, h.plan].filter(Boolean).join(" · ") || status.label}
           warn={signedOut}
           off={turnedOff.has(profile.id)}
-          action={agentSwitch(profile.id, profile.name)}
+          action={<>{signInButton}{agentSwitch(profile.id, profile.name)}</>}
           logo={profile.logo}
           onRemove={remove}
           onSave={saver((changes) => api.updateAgent(profile.id, changes), harnessesOptions.queryKey)}
@@ -641,11 +651,9 @@ export function AgentList({ remote, onboarding }: {
       );
     }
     const acp = definitions.data?.find((definition) => definition.id === h.id);
-    const update = h.id === "opencode" && opencode1 && !remote;
-    const action = update || (!h.agentReady && !h.catalogPending && !h.id.startsWith("acp:") && Boolean(canConfigureHarness(h, remote, commands)));
+    const action = !openSignIn && !h.agentReady && !h.catalogPending && !h.id.startsWith("acp:") && Boolean(canConfigureHarness(h, remote, commands));
     const noModels = h.agentReady && !h.models.length;
-    const detail = h.id === "opencode" && opencode1 ? m.settings_opencode_update_needed()
-      : h.authCheckFailed || !h.agentReady
+    const detail = h.authCheckFailed || !h.agentReady
         ? status.label
         : noModels ? m.settings_no_models()
         : [h.accountName, h.plan].filter(Boolean).join(" · ") ||
@@ -669,12 +677,13 @@ export function AgentList({ remote, onboarding }: {
         name={name}
         detail={detail}
         off={switchable && turnedOff.has(h.id)}
-        warn={update || Boolean(h.authCheckFailed) || (!h.agentReady && !h.catalogPending) || noModels}
+        warn={Boolean(h.authCheckFailed) || (!h.agentReady && !h.catalogPending) || noModels}
         action={<>
+          {signInButton}
           {action && (
-            <Button size="small" onClick={() => openSetup(h, update ? { action: "upgrade" } : {})} disabled={!commands} aria-haspopup="dialog">
+            <Button size="small" onClick={() => openSetup(h)} disabled={!commands} aria-haspopup="dialog">
               <SquareTerminal size={14} />
-              {update || h.authState === "unsupported" ? m.harness_setup_update() : m.harness_setup_install()}
+              {h.authState === "unsupported" ? m.harness_setup_update() : m.harness_setup_install()}
             </Button>
           )}
           {switchable && agentSwitch(h.id, name)}
@@ -690,7 +699,6 @@ export function AgentList({ remote, onboarding }: {
             {acp && <><Button size="small" onClick={() => openAcp(acp)}>{m.activity_edit()}</Button><Button size="small" onClick={remove} aria-haspopup="dialog">{m.chat_panel_remove()}</Button></>}
           </div>
         )}
-        {update && <p className="mt-0 mb-3 text-sm text-subtext">{m.opencode_update_description({ version: opencodeVersion(h) ?? "1" })}</p>}
         <div className={cn(KV_CLASS_NAME, "[&_.v]:text-sm")}>
           {(acp || !h.managed) && (
             <>
@@ -801,7 +809,7 @@ export function AgentList({ remote, onboarding }: {
       harnessReady={opencode?.agentReady ?? false}
       availableModels={opencode?.models.map((model) => model.id) ?? []}
       checking={harnessesFetching || (opencode?.catalogPending ?? false)}
-      unknown={harnessesError}
+      unknown={Boolean(harnessesError)}
       disabled={remote}
       off={turnedOff.has(`opencode:${connection.id}`)}
       action={agentSwitch(`opencode:${connection.id}`, connection.name)}
@@ -876,7 +884,7 @@ export function AgentList({ remote, onboarding }: {
     <>
       <h3 className={cn(SECTION_CLASS_NAME, "mt-0")}>{m.onboarding_installed()}</h3>
       {/* Shown as on while OpenCode installs: onboarding waits for it before a first chat that needs it. */}
-      <FreeModelsRow expandable={false} models={freeModels} locked={freeModelsLocked} install={offersFreeModels || onboarding.freeModels.installing ? undefined : onboarding.freeModels} onChange={() => load(true)} />
+      <FreeModelsRow expandable={false} models={freeModels} locked={freeModelsLocked} install={offersFreeModels || onboarding.freeModels.installing ? undefined : onboarding.freeModels} onChange={() => load()} />
       {rows.map(harnessRow)}
       {records.filter((provider) => listed(provider.id)).map(providerRow)}
       {found.filter((provider) => listed(provider.id)).map(foundRow)}
@@ -894,7 +902,7 @@ export function AgentList({ remote, onboarding }: {
     <p className="text-sm text-subtext">{m.harness_none_added()}</p>
   ) : (
     <div className="mt-5">
-      {offersFreeModels && <FreeModelsRow models={freeModels} locked={freeModelsLocked} onChange={() => load(true)} />}
+      {offersFreeModels && <FreeModelsRow models={freeModels} locked={freeModelsLocked} onChange={() => load()} />}
       {rows.map(harnessRow)}
       {records.filter((provider) => listed(provider.id)).map(providerRow)}
       {found.filter((provider) => listed(provider.id)).map(foundRow)}
@@ -902,23 +910,22 @@ export function AgentList({ remote, onboarding }: {
     </div>
   );
 
+  const catalogError = !harnesses && harnessesError;
+  const retry = catalogError || (onboarding && (refresh.isPending || refresh.error));
+  const refreshLabel = retry ? m.app_retry() : onboarding ? null : m.settings_page_refresh();
+
   return (
     <>
-      {!onboarding && (
-        <div className="my-3 flex flex-wrap items-center gap-2">
-          {addButton}
-          <Button onClick={() => load(true, true)} disabled={refreshing}>
-            <RefreshCw size={12} className={refreshing ? "animate-[spin_0.9s_linear_infinite]" : ""} /> {m.settings_page_refresh()}
-          </Button>
-        </div>
-      )}
+      {catalogError && !refresh.error && <p role="alert" className="text-sm text-accent-red">{catalogError.message}</p>}
+      <div className="my-3 flex flex-wrap items-start gap-2 empty:hidden">
+        {!onboarding && addButton}
+        <RefreshAgents refresh={refresh} label={refreshLabel} />
+      </div>
       {definitions.isError && <p role="alert" className="text-sm text-accent-red">{m.acp_definitions_load_failed()} <Button variant="ghost" onClick={() => void definitions.refetch()}>{m.app_retry()}</Button></p>}
-      {!harnesses && harnessesError ? (
-        <p role="alert" className="text-sm text-accent-red">{m.harness_setup_load_failed()} <Button variant="ghost" onClick={() => load(true, true)}>{m.app_retry()}</Button></p>
-      ) : !harnesses ? (
+      {harnesses ? list : !catalogError && (
         <LoadingRow><Spinner /> {m.settings_page_detecting_harnesses()}</LoadingRow>
-      ) : list}
-      {setupRun.run && <CommandRunTerminal run={setupRun.run} onComplete={() => load(true, true)} onClose={setupRun.clear} />}
+      )}
+      {setupRun.run && <CommandRunTerminal run={setupRun.run} onComplete={() => load(true)} onClose={setupRun.clear} />}
     </>
   );
 }
@@ -1209,6 +1216,48 @@ function NestedDelegationRow() {
         aria-label={m.settings_nested_subagents()}
         onClick={() => mutUpdateUiState.run(workspace, { nestedDelegation: !uiState.nestedDelegation })}
       />
+    </div>
+  );
+}
+
+/** The model that reviews OpenCode's Auto requests; the chat's own until one is picked. */
+function AutoReviewerRow() {
+  const workspace = useWorkspace();
+  const { data: uiState } = useQuery(workspace.queries.getUiStateQuery());
+  const { data: harnesses } = useQuery(workspace.queries.getHarnessesQuery());
+  const opencode = harnesses?.find((h) => h.id === "opencode");
+  if (!uiState || !opencode?.agentReady) return null;
+  const labels = opencode.models.map((model) => tidyModelName(model.displayName ?? modelLabel(model.id)));
+  const choices = [
+    { id: "", label: m.settings_auto_reviewer_same() },
+    ...opencode.models.map((model, index) => ({
+      id: model.id,
+      label: labels.filter((label) => label === labels[index]).length > 1 ? `${labels[index]} · ${model.id.split("/")[0]}` : labels[index],
+    })),
+  ];
+  return (
+    <div className={cn(PROJECT_DEFAULT_ROW_CLASS_NAME, "mt-4")}>
+      <div>
+        <div className="project-default-title text-base font-medium">{m.settings_auto_reviewer()}</div>
+        <p>{m.settings_auto_reviewer_description()}</p>
+      </div>
+      <div className="w-64 shrink-0">
+        <OptionPicker
+          choices={choices}
+          value={uiState.opencodeReviewModel ?? ""}
+          searchPlaceholder={m.model_picker_search_models()}
+          title={m.settings_auto_reviewer()}
+          header={m.settings_auto_reviewer()}
+          renderIcon={(choice) => {
+            const model = opencode.models.find((item) => item.id === choice.id);
+            return model ? <ModelMark model={model} harness="opencode" size={16} /> : <MessageSquare size={16} className="block shrink-0 text-muted" aria-hidden="true" />;
+          }}
+          variant="field"
+          floating
+          dropDown
+          onSelect={(id) => mutUpdateUiState.run(workspace, { opencodeReviewModel: id })}
+        />
+      </div>
     </div>
   );
 }
@@ -2944,7 +2993,7 @@ function BackendDetailPage({
           <span className="flex h-10 w-10 flex-none items-center justify-center">
             <BackendLogo kind={TARGET_KIND[target.id]} size={36} />
           </span>
-          <h1 className="m-0 min-w-0 text-2xl">{TARGET_LABELS[target.id]()}</h1>
+          <h2 className="m-0 min-w-0 text-2xl">{TARGET_LABELS[target.id]()}</h2>
         </div>
         {isDefault && (
           <Badge className="flex-none">
@@ -3103,7 +3152,6 @@ function ComputeTab({
 
   return (
     <>
-      <h1 tabIndex={-1}>{m.settings_page_compute()}</h1>
       <p className="settings-sub mt-0 mx-0 mb-4.5 text-base leading-relaxed text-text">
         {m.settings_page_connect_compute_backends_and_choose_where_new_runs()}
       </p>
@@ -3401,13 +3449,55 @@ function showEnvError(name: string, err: unknown) {
   showAlert(message.includes(name) ? message : `${name}: ${message}`, "error");
 }
 
+/** A saved variable's description, edited in place. */
+function EnvDescription({ name, description, projectId }: { name: string; description: string; projectId?: string }) {
+  const workspace = useWorkspace();
+
+  const [value, setValue] = useState(description);
+  // Reset during render: an effect would also rerun when a hidden machine is shown and erase the edit.
+  const [shown, setShown] = useState(description);
+  if (shown !== description) {
+    setShown(description);
+    setValue(description);
+  }
+
+  function save() {
+    if (value.trim() === description) return;
+    mutSetEnvVar.runWithOptions(workspace, { key: name, description: value.trim(), projectId }, {
+      onError: (err) => { setValue(description); showEnvError(name, err); },
+    });
+  }
+
+  return (
+    <Input
+      variant="inline"
+      className="h-6 text-sm text-subtext"
+      value={value}
+      onChange={(e) => setValue(e.target.value)}
+      onBlur={save}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") e.currentTarget.blur();
+        if (e.key === "Escape") setValue(description);
+      }}
+      placeholder={m.settings_env_add_description()}
+      aria-label={m.settings_env_description_of({ name: ltr(name) })}
+    />
+  );
+}
+
 /** One variable row. Set: masked value + delete. Unset: inline value input. */
 function EnvRow({
   name,
   entry,
+  projectId,
+  setInProject = false,
 }: {
   name: string;
   entry: EnvVar | undefined;
+  /** The project this row's variable belongs to; none for every project's. */
+  projectId?: string;
+  /** The open project saves its own value under this name. */
+  setInProject?: boolean;
 }) {
   const workspace = useWorkspace();
 
@@ -3428,9 +3518,10 @@ function EnvRow({
     if (!value.trim() || saving || (plain && !dirty)) return;
     setSaving(true);
     try {
-      const vars = await mutSetEnvVar.runAsHeadlessPromise(workspace, name, value.trim(), {});
+      const saved = await mutSetEnvVar.runAsHeadlessPromise(workspace, { key: name, value: value.trim(), projectId }, {});
       // The server may normalize a plain value back to what was already stored.
-      setValue(plain ? vars.find((v) => v.key === name)?.value ?? "" : "");
+      const vars = projectId ? saved.projectVars : saved.vars;
+      setValue(plain ? vars?.find((v) => v.key === name)?.value ?? "" : "");
     } catch (err) {
       showEnvError(name, err);
     } finally {
@@ -3440,18 +3531,22 @@ function EnvRow({
 
   function remove() {
     if (saving) return;
-    mutDeleteEnvVar.runWithOptions(workspace, name, { onError: (err) => showEnvError(name, err) });
+    mutDeleteEnvVar.runWithOptions(workspace, name, projectId, { onError: (err) => showEnvError(name, err) });
   }
 
   return (
     <>
       <tr>
-        <td className="font-mono text-sm">{name}</td>
+        <td>
+          <div className="font-mono text-sm">{name}</div>
+          {entry && <EnvDescription name={name} description={entry.description ?? ""} projectId={projectId} />}
+        </td>
         <td className="text-base text-subtext">
           {entry && !plain ? (
             <>
               {entry.maskedValue}
               {entry.inProcessEnv && <Badge>{m.settings_page_overridden_by_env()}</Badge>}
+              {!entry.inProcessEnv && setInProject && <Badge>{m.settings_env_set_in_project()}</Badge>}
             </>
           ) : (
             <Input
@@ -3474,6 +3569,7 @@ function EnvRow({
             />
           )}
           {plain && entry?.inProcessEnv && <Badge>{m.settings_page_overridden_by_env()}</Badge>}
+          {plain && !entry?.inProcessEnv && setInProject && <Badge>{m.settings_env_set_in_project()}</Badge>}
         </td>
         <td>
           {entry && !(plain && dirty && value.trim()) ? (
@@ -3501,8 +3597,8 @@ function EnvRow({
   );
 }
 
-/** The in-table row for a new custom variable (opened by “Add variable”). */
-function AddVarRow({ onDone }: { onDone: () => void }) {
+/** The in-table row for a new custom variable (opened by "Add variable"). */
+function AddVarRow({ projectId, onDone }: { projectId?: string; onDone: () => void }) {
   const workspace = useWorkspace();
 
   const [key, setKey] = useState("");
@@ -3513,7 +3609,7 @@ function AddVarRow({ onDone }: { onDone: () => void }) {
     if (!key.trim() || !value.trim() || saving) return;
     setSaving(true);
     try {
-      await mutSetEnvVar.runAsHeadlessPromise(workspace, key.trim(), value.trim(), {});
+      await mutSetEnvVar.runAsHeadlessPromise(workspace, { key: key.trim(), value: value.trim(), projectId }, {});
       onDone();
     } catch (err) {
       showEnvError(key.trim(), err);
@@ -3587,11 +3683,16 @@ function AddVarRow({ onDone }: { onDone: () => void }) {
   );
 }
 
-function EnvVarsSection() {
-  const varsQuery = useQuery(useWorkspace().queries.getEnvVarsQuery());
-  const vars = varsQuery.data ?? null;
-  const loadError = vars ? null : varsQuery.error?.message ?? null;
+const ENV_TABLE_CLASS_NAME = "env-table w-full table-fixed border-collapse text-base [&_td:first-child]:w-[32%] [&_td:first-child]:wrap-anywhere [&_.badge]:ms-2 [&_td]:h-12 [&_td]:pt-0 [&_td]:pe-2.5 [&_td]:pb-0 [&_td]:ps-0 [&_td]:align-middle [&_td]:border-b [&_td]:border-b-border-variant [&_tr:last-child_td]:border-b-0 [&_td:last-child]:w-29 [&_td:last-child]:whitespace-nowrap [&_td:last-child]:text-end [&_td[colspan]]:whitespace-normal [&_td[colspan]]:text-start [&_.icon-btn]:ms-2 [&_.icon-btn]:align-middle";
+
+function EnvVarsSection({ project }: { project: Project | null }) {
+  const varsQuery = useQuery(useWorkspace().queries.getEnvVarsQuery(project?.id));
+  const settings = varsQuery.data ?? null;
+  const vars = settings?.vars ?? null;
+  const projectVars = settings?.projectVars ?? [];
+  const loadError = settings ? null : varsQuery.error?.message ?? null;
   const [adding, setAdding] = useState(false);
+  const [addingToProject, setAddingToProject] = useState(false);
 
   // Recommended keys first (fixed order), then custom variables in file order.
   const customKeys =
@@ -3619,13 +3720,14 @@ function EnvVarsSection() {
             <Spinner /> {m.settings_page_loading()}
           </LoadingRow>
         ) : (
-          <table className="env-table w-full table-fixed border-collapse text-base [&_td:first-child]:w-[32%] [&_td:first-child]:wrap-anywhere [&_.badge]:ms-2 [&_td]:h-12 [&_td]:pt-0 [&_td]:pe-2.5 [&_td]:pb-0 [&_td]:ps-0 [&_td]:align-middle [&_td]:border-b [&_td]:border-b-border-variant [&_tr:last-child_td]:border-b-0 [&_td:last-child]:w-29 [&_td:last-child]:whitespace-nowrap [&_td:last-child]:text-end [&_td[colspan]]:whitespace-normal [&_td[colspan]]:text-start [&_.icon-btn]:ms-2 [&_.icon-btn]:align-middle">
+          <table className={ENV_TABLE_CLASS_NAME}>
             <tbody>
               {names.map((name) => (
                 <EnvRow
                   key={name}
                   name={name}
                   entry={vars.find((v) => v.key === name)}
+                  setInProject={projectVars.some((v) => v.key === name)}
                 />
               ))}
               {adding && (
@@ -3642,6 +3744,33 @@ function EnvVarsSection() {
           />
         )}
       </div>
+      {project && settings && (
+        <>
+          <h2 dir="auto" className="mt-8">{m.settings_env_project_heading({ project: autoDir(project.name) })}</h2>
+          <div className="mb-4.5 flex items-center justify-between gap-4">
+            <p className="m-0 text-base leading-relaxed text-text">{m.settings_env_project_note()}</p>
+            <Button size="small" className="shrink-0" onClick={() => setAddingToProject(true)} disabled={addingToProject}>
+              <Plus size={12} /> {m.settings_page_add_variable()}
+            </Button>
+          </div>
+          <div className={SETTINGS_CARD_CLASS_NAME}>
+            {projectVars.length === 0 && !addingToProject ? (
+              <p className="m-0 text-base text-subtext">{m.settings_env_project_empty()}</p>
+            ) : (
+              <table className={ENV_TABLE_CLASS_NAME}>
+                <tbody>
+                  {projectVars.map((entry) => (
+                    <EnvRow key={entry.key} name={entry.key} entry={entry} projectId={project.id} />
+                  ))}
+                  {addingToProject && (
+                    <AddVarRow projectId={project.id} onDone={() => setAddingToProject(false)} />
+                  )}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </>
+      )}
     </>
   );
 }
@@ -4140,17 +4269,11 @@ function InstallCliRow({
 function GithubSettings({ remote }: { remote: boolean }) {
   const workspace = useWorkspace();
   const {
-    listProjectsQuery,
     getProjectDefaultsQuery,
     githubAccountQuery,
     githubOrganizationsQuery,
-    getProjectGitStatusQuery,
   } = workspace.queries;
   const { queryClient } = workspace;
-
-  const projectsQuery = useQuery(listProjectsQuery());
-  const [selectedProjectId, setSelectedProjectId] = useState("");
-  const selectedProject = projectsQuery.data?.find((project) => project.id === selectedProjectId);
 
   const settingsQuery = useQuery(getProjectDefaultsQuery());
   const settings = settingsQuery.data ?? null;
@@ -4162,7 +4285,6 @@ function GithubSettings({ remote }: { remote: boolean }) {
 
   const load = async () => {
     await settingsQuery.refetch({ cancelRefetch: false });
-    if (selectedProjectId) await queryClient.invalidateQueries(getProjectGitStatusQuery(selectedProjectId));
     await Promise.all([
       queryClient.invalidateQueries(githubAccountQuery()),
       queryClient.invalidateQueries(githubOrganizationsQuery()),
@@ -4220,27 +4342,6 @@ function GithubSettings({ remote }: { remote: boolean }) {
           )}
           <CommandRunTerminal run={gh.run} onComplete={() => void load()} onClose={gh.clear} />
           {error && <div className="error">{error}</div>}
-          <div className="mt-6">
-            <div className="mb-2 text-sm font-medium">{m.settings_github_manage_project()}</div>
-            <OptionPicker
-              variant="field"
-              dropDown
-              title={m.settings_github_manage_project()}
-              value={selectedProjectId}
-              choices={[
-                { id: "", label: m.settings_github_choose_project() },
-                ...(projectsQuery.data ?? []).map((project) => ({ id: project.id, label: project.name })),
-              ]}
-              onSelect={setSelectedProjectId}
-            />
-            {projectsQuery.error && (
-              <div className="mt-2 text-sm text-text">
-                <p className="m-0">{projectsQuery.error.message}</p>
-                <Button size="small" onClick={() => void projectsQuery.refetch()}>{m.app_retry()}</Button>
-              </div>
-            )}
-            {selectedProject && <GitTab key={selectedProject.id} project={selectedProject} />}
-          </div>
         </div>
       )}
     </>
@@ -4370,7 +4471,7 @@ function OverleafCard() {
 
 // --- git -----------------------------------------------------------------------
 
-export function GitTab({ project }: { project: Project | null }) {
+export function GitTab({ project }: { project: Project }) {
   const { portalContainer } = useContext(WorkspaceDomContext);
 
   const workspace = useWorkspace();
@@ -4381,7 +4482,7 @@ export function GitTab({ project }: { project: Project | null }) {
     githubOrganizationsQuery,
   } = workspace.queries;
 
-  const statusQuery = useQuery({ ...getProjectGitStatusQuery(project?.id ?? ""), enabled: Boolean(project) });
+  const statusQuery = useQuery(getProjectGitStatusQuery(project.id));
   const status = statusQuery.data ?? null;
   const [saving, setSaving] = useState(false);
   const [actionError, setError] = useState<string | null>(null);
@@ -4422,7 +4523,6 @@ export function GitTab({ project }: { project: Project | null }) {
 
   const enableSync = (owner?: string) => {
     setOwnerMenuOpen(false);
-    if (!project) return;
     setSaving(true);
     setError(null);
     mutEnableProjectGithub.runWithOptions(workspace, project.id, owner === githubLogin ? undefined : owner, {
@@ -4433,9 +4533,7 @@ export function GitTab({ project }: { project: Project | null }) {
 
   return (
     <>
-      {!project ? (
-        <div className={SETTINGS_CARD_CLASS_NAME}><p className={SETTINGS_NOTE_CLASS_NAME}>{m.settings_page_open_a_project_to_inspect_its_repository_and()}</p></div>
-      ) : error && !status ? (
+      {error && !status ? (
         <div className="error">{error}</div>
       ) : !status ? (
         <div className="mt-4 min-h-22" role="status" aria-label={m.settings_page_loading()} aria-busy="true">
@@ -4880,8 +4978,8 @@ function InstanceHistory({ projectId, onBack }: { projectId?: string; onBack: ()
       <button type="button" className="settings-back inline-flex items-center gap-1.5 mt-0 mx-0 mb-4.5 text-subtext text-sm font-medium [&:hover]:text-text" onClick={onBack}>
         <ArrowLeft size={14} /> {m.settings_page_back_to_compute()}
       </button>
-      <div className="settings-head-row flex items-center justify-between gap-2.5 [&_h1]:m-0">
-        <h1>{m.settings_page_instance_history()}</h1>
+      <div className="settings-head-row flex items-center justify-between gap-2.5 [&_h2]:m-0">
+        <h2>{m.settings_page_instance_history()}</h2>
         <Button size="small" onClick={load} disabled={refreshing}>
           <RefreshCw size={12} className={refreshing ? "animate-[spin_0.9s_linear_infinite]" : ""} /> {m.settings_page_refresh()}
         </Button>
@@ -4898,34 +4996,123 @@ function InstanceHistory({ projectId, onBack }: { projectId?: string; onBack: ()
 
 // --- embedded view -----------------------------------------------------------
 
-type SettingsNavItem = {
+type SettingsTabItem = {
   id: Tab;
   label: () => string;
-  icon: React.ReactNode;
   activeTabs: Tab[];
 };
 
-const SETTINGS_SECTIONS: Tab[] = ["projects", "harnesses", "storage"];
-
-/** Primary rail entries. Configuration sections share the Settings entry. */
-export const SETTINGS_NAV: SettingsNavItem[] = [
-  {
-    id: "compute",
-    label: m.settings_page_compute,
-    icon: <Cpu size={16} />,
-    activeTabs: ["compute", "openresearch", "instances"],
-  },
-  { id: "environment", label: m.settings_page_environment, icon: <SquareTerminal size={16} />, activeTabs: ["environment"] },
-  {
-    id: "settings",
-    label: m.settings_page_settings,
-    icon: <Settings size={16} />,
-    activeTabs: ["settings", ...SETTINGS_SECTIONS],
-  },
+const SETTINGS_TABS: SettingsTabItem[] = [
+  { id: "settings", label: m.settings_page_settings, activeTabs: ["settings", "storage"] },
+  { id: "agents", label: m.settings_page_harnesses, activeTabs: ["agents"] },
+  { id: "compute", label: m.settings_page_compute, activeTabs: ["compute", "openresearch", "instances"] },
+  { id: "integrations", label: m.settings_page_integrations, activeTabs: ["integrations"] },
+  { id: "environment", label: m.settings_page_environment, activeTabs: ["environment"] },
 ];
 
-function isSettingsSection(tab: Tab): boolean {
-  return SETTINGS_SECTIONS.includes(tab);
+export function SettingsHeader({ active, onSelect, leading }: { active: Tab; onSelect: (tab: Tab) => void; leading: ReactNode }) {
+  return (
+    <header className="mx-auto flex w-full max-w-readable shrink-0 flex-col gap-2 px-8 pt-2">
+      <div className="flex items-center gap-2">
+        {leading}
+        <h1 tabIndex={-1} className="m-0 text-3xl font-semibold text-text">{m.settings_page_settings()}</h1>
+      </div>
+      <div
+        role="tablist"
+        aria-label={m.settings_page_settings()}
+        className="flex items-center gap-1 overflow-x-auto border-b border-border py-1 [scrollbar-width:none]"
+        onKeyDown={navigateKeyboardRow}
+      >
+        {SETTINGS_TABS.map((item) => {
+          const selected = item.activeTabs.includes(active);
+          return (
+            <button
+              key={item.id}
+              type="button"
+              role="tab"
+              aria-selected={selected}
+              tabIndex={selected ? 0 : -1}
+              data-keyboard-horizontal-item
+              className={cn("relative inline-flex h-9 shrink-0 items-center whitespace-nowrap rounded-md px-3 text-sm hover:text-text focus-visible:outline-2 focus-visible:outline-focus focus-visible:-outline-offset-2", selected ? "font-medium text-text after:absolute after:inset-x-3 after:-bottom-1.25 after:h-0.5 after:bg-text" : "text-subtext")}
+              onClick={() => onSelect(item.id)}
+            >
+              {item.label()}
+            </button>
+          );
+        })}
+      </div>
+    </header>
+  );
+}
+
+/** One project's name, folder, GitHub publishing and deletion. */
+function ProjectSettings({ project, onRemoved }: { project: Project; onRemoved: () => void }) {
+  const workspace = useWorkspace();
+  const revealLabel = useFileManagerLabel();
+  const nameId = useId();
+  const deleteRef = useRef<HTMLButtonElement>(null);
+
+  const [draft, setDraft] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const name = draft ?? project.name;
+  const trimmed = name.trim();
+  const changed = trimmed !== "" && trimmed !== project.name;
+
+  const rename = () => {
+    if (!changed || saving) return;
+    setSaving(true);
+    setError(null);
+    mutUpdateProject.runWithOptions(workspace, project.id, { name: trimmed }, {
+      onSuccessUi: () => setDraft(null),
+      onError: (err) => setError(err instanceof Error ? err.message : String(err)),
+      onSettled: () => setSaving(false),
+    });
+  };
+  const reveal = () => {
+    void workspace.api.revealFileInManager(project.id, ".").catch((err: unknown) => showAlert(err instanceof Error ? err.message : String(err), "error"));
+  };
+
+  return (
+    <>
+      <h1 tabIndex={-1}>{m.sidebar_project_settings()}</h1>
+      <div className="settings-stack mt-4.5">
+        <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+          <div className={SETTINGS_CARD_CLASS_NAME}>
+            <form className={`${PROJECT_DEFAULT_ROW_CLASS_NAME} flex-wrap gap-y-2`} onSubmit={(event) => { event.preventDefault(); rename(); }}>
+              <label htmlFor={nameId} className="project-default-title text-base font-medium">{m.new_project_form_project_name()}</label>
+              <div className="flex min-w-0 flex-1 justify-end gap-2">
+                <Input id={nameId} value={name} disabled={saving} onChange={(event) => setDraft(event.target.value)} className="w-72 min-w-0" />
+                <Button type="submit" disabled={!changed || saving}>{saving && <Spinner />}{m.common_save()}</Button>
+              </div>
+            </form>
+            {error && <p role="alert" className="mt-2 mb-0 text-sm text-accent-red">{error}</p>}
+            <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
+              <div className="min-w-0">
+                <div className="project-default-title text-base font-medium">{m.sidebar_source_folder()}</div>
+                <p dir="auto" className="break-all">{project.repoPath}</p>
+              </div>
+              <Button type="button" className="shrink-0" onClick={reveal}>{revealLabel}</Button>
+            </div>
+          </div>
+        </section>
+        <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+          <h2>{m.settings_page_git_hub_publishing()}</h2>
+          <div className={cn(SETTINGS_CARD_CLASS_NAME, "mt-3 [&>:first-child]:mt-0")}><GitTab project={project} /></div>
+        </section>
+        <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+          <div className={SETTINGS_CARD_CLASS_NAME}>
+            <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
+              <div className="project-default-title text-base font-medium">{m.projects_home_delete_project_action()}</div>
+              <Button type="button" variant="danger" ref={deleteRef} className="shrink-0" onClick={() => confirmDeleteProject(workspace, project, deleteRef, onRemoved)}>
+                {m.projects_home_delete_project_action()}
+              </Button>
+            </div>
+          </div>
+        </section>
+      </div>
+    </>
+  );
 }
 
 /** One settings section's content, shown in the middle pane in place of chat. */
@@ -4933,14 +5120,16 @@ export function SettingsView({
   tab,
   project,
   onSelectTab,
+  onProjectRemoved,
   remote = false,
 }: {
   tab: Tab;
   project: Project | null;
   onSelectTab: (tab: Tab) => void;
+  onProjectRemoved: () => void;
   remote?: boolean;
 }) {
-  const showsSettings = tab === "settings" || isSettingsSection(tab);
+  const showsSettings = tab === "settings" || tab === "storage";
   const sectionRef = useRef<HTMLElement>(null);
   useLayoutEffect(() => {
     const section = sectionRef.current;
@@ -4961,36 +5150,53 @@ export function SettingsView({
   }, [tab, project?.id]);
 
   return (
-    <div className="settings-view max-w-readable my-0 mx-auto pt-6 px-8 pb-15 [&_h1]:mt-0 [&_h1]:mx-0 [&_h1]:mb-1.5 [&_h1]:text-3xl [&_>_.error]:text-accent-red [&_>_.error]:text-base [&_>_.error]:whitespace-pre-wrap [&_>_.error]:mt-0 [&_>_.error]:mx-0 [&_>_.error]:mb-3">
+    <div className="settings-view max-w-readable my-0 mx-auto pt-4 px-8 pb-15 [&_h1]:mt-0 [&_h1]:mx-0 [&_h1]:mb-1.5 [&_h1]:text-3xl [&_>_.error]:text-accent-red [&_>_.error]:text-base [&_>_.error]:whitespace-pre-wrap [&_>_.error]:mt-0 [&_>_.error]:mx-0 [&_>_.error]:mb-3">
       {showsSettings && (
+        <div className="settings-stack">
+          <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+            <AppearanceTab />
+          </section>
+          {!remote && (
+            <section ref={tab === "storage" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+              <StorageTab />
+            </section>
+          )}
+          <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+            <TelemetryTab />
+          </section>
+          {!remote && (
+            <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+              <UpdatesTab />
+            </section>
+          )}
+        </div>
+      )}
+      {tab === "project" && project && <ProjectSettings key={project.id} project={project} onRemoved={onProjectRemoved} />}
+      {tab === "agents" && (
         <>
-          <h1 tabIndex={-1}>{m.settings_page_settings()}</h1>
+          <p className="mt-0 mx-0 mb-5 text-base leading-relaxed text-text">{m.settings_agents_intro()}</p>
           <div className="settings-stack mt-4.5">
             <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-              <AppearanceTab />
-            </section>
-            <section ref={tab === "projects" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-              <GithubSettings remote={remote} />
-            </section>
-            <section ref={tab === "harnesses" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
               <AgentsTab remote={remote} />
+            </section>
+            <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+              <h2>{m.skills_tab_customize()}</h2>
+              <p className="mt-0 mx-0 mb-5 text-base leading-relaxed text-text">{m.skills_overview_description()}</p>
+              <SkillsTab />
+            </section>
+          </div>
+        </>
+      )}
+      {tab === "integrations" && (
+        <>
+          <p className="mt-0 mx-0 mb-5 text-base leading-relaxed text-text">{m.settings_integrations_intro()}</p>
+          <div className="settings-stack mt-4.5">
+            <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+              <GithubSettings remote={remote} />
             </section>
             <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
               <OverleafCard />
             </section>
-            {!remote && (
-              <section ref={tab === "storage" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-                <StorageTab />
-              </section>
-            )}
-            <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-              <TelemetryTab />
-            </section>
-            {!remote && (
-              <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-                <UpdatesTab />
-              </section>
-            )}
           </div>
         </>
       )}
@@ -5005,19 +5211,14 @@ export function SettingsView({
       {tab === "openresearch" && (
         <>
           <button type="button" className="settings-back mb-6 inline-flex items-center gap-2 text-sm font-medium text-subtext hover:text-text" onClick={() => onSelectTab("compute")}><ArrowLeft size={16} /> {m.settings_page_back_to_compute()}</button>
-          <h1>OpenResearch</h1>
+          <h2>OpenResearch</h2>
           <div className="mt-6 font-sans text-base text-text"><OpenResearchSection remote={remote} /></div>
         </>
       )}
       {tab === "instances" && (
         <InstanceHistory projectId={project?.id} onBack={() => onSelectTab("compute")} />
       )}
-      {tab === "environment" && (
-        <>
-          <h1>{m.settings_page_environment()}</h1>
-          <EnvVarsSection />
-        </>
-      )}
+      {tab === "environment" && <EnvVarsSection project={project} />}
     </div>
   );
 }

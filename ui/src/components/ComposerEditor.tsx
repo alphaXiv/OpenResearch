@@ -45,6 +45,7 @@ import { WorkspaceDomContext } from "../WorkspaceDom";
 import { FileTypeIcon } from "./FileTypeIcon";
 import { HarnessLogo } from "./HarnessLogo";
 import { LitSourceLogo } from "./LitSourceLogo";
+import { ResizeHandle } from "./ResizeHandle";
 import { CommandIcon, SkillPreviewCard } from "./SkillChips";
 
 /** What the draft's tokens resolve to; a token that resolves to nothing stays text. */
@@ -272,7 +273,7 @@ function chips(source: () => ChipSource): Extension {
 }
 
 const composerTheme = EditorView.theme({
-  "&": { color: "var(--text)", maxHeight: "40vh", padding: "var(--editor-pad-y) 0" },
+  "&": { color: "var(--text)", padding: "var(--editor-pad-y) 0" },
   "&.cm-focused": { outline: "none" },
   ".cm-scroller": { fontFamily: "inherit", lineHeight: "1.5", overflow: "auto" },
   // WebKit can retain an empty horizontal scrollbar gutter after the draft shrinks.
@@ -310,7 +311,6 @@ function isComposing(event: KeyboardEvent): boolean {
 
 /** One 24px line plus the 10px padding above and below; a shorter box would scroll an empty draft. */
 const MIN_HEIGHT = 44;
-const KEYBOARD_STEP = 24;
 
 function storedHeight(key: string): number | null {
   try {
@@ -321,12 +321,12 @@ function storedHeight(key: string): number | null {
   }
 }
 
-/** Dragged heights stop short of crowding out the transcript. */
+/** The draft grows, and can be dragged, up to this height, then scrolls inside the box. */
 function maxHeight(dom: HTMLElement): number {
   const pane = dom.closest<HTMLElement>(".chat-pane");
   const composer = dom.closest<HTMLElement>(".composer");
   const chrome = composer ? composer.offsetHeight - dom.offsetHeight : 0;
-  return Math.max(MIN_HEIGHT, ((pane?.clientHeight ?? window.innerHeight) - chrome) * 0.6);
+  return Math.max(MIN_HEIGHT, ((pane?.clientHeight ?? window.innerHeight) - chrome) * 0.8);
 }
 
 export interface ComposerEditorHandle {
@@ -512,7 +512,7 @@ export function ComposerEditor({
     if (!dom) return;
     const clamped = height === null ? null : Math.min(height, heightLimit);
     dom.style.minHeight = clamped === null ? "" : `${clamped}px`;
-    dom.style.maxHeight = `min(${heightLimit}px, max(40vh, ${clamped ?? MIN_HEIGHT}px))`;
+    dom.style.maxHeight = `${clamped ?? heightLimit}px`;
   }, [height, heightLimit]);
 
   useEffect(() => {
@@ -541,8 +541,6 @@ export function ComposerEditor({
     };
   }, []);
 
-  const resizeBy = (start: number, delta: number) =>
-    setHeight(Math.round(Math.min(Math.max(start + delta, MIN_HEIGHT), heightLimit)));
   const currentHeight = () => viewRef.current?.dom.getBoundingClientRect().height ?? MIN_HEIGHT;
 
   useImperativeHandle(ref, () => ({
@@ -637,46 +635,15 @@ export function ComposerEditor({
         if (event.target instanceof Element && event.target.closest("[data-chip]")) scheduleClose();
       }}
     >
-      {/* Positioned against the composer box, so it rides the box's top edge. */}
-      <div
-        role="separator"
-        aria-orientation="horizontal"
-        aria-label={m.chat_resize_composer()}
-        aria-valuemin={MIN_HEIGHT}
-        aria-valuemax={Number.isFinite(heightLimit) ? Math.round(heightLimit) : undefined}
-        aria-valuenow={Math.round(height ?? MIN_HEIGHT)}
-        title={m.chat_resize_composer_hint()}
-        tabIndex={0}
-        className="group/resize absolute inset-x-0 -top-1.5 z-3 flex h-3 cursor-row-resize touch-none items-center justify-center outline-none"
-        onPointerDown={(event) => {
-          event.preventDefault();
-          event.currentTarget.setPointerCapture(event.pointerId);
-          const startY = event.clientY;
-          const start = currentHeight();
-          const move = (moveEvent: PointerEvent) => resizeBy(start, startY - moveEvent.clientY);
-          const stop = () => {
-            window.removeEventListener("pointermove", move);
-            window.removeEventListener("pointerup", stop);
-            window.removeEventListener("pointercancel", stop);
-          };
-          window.addEventListener("pointermove", move);
-          window.addEventListener("pointerup", stop);
-          window.addEventListener("pointercancel", stop);
-        }}
-        onDoubleClick={() => setHeight(null)}
-        onKeyDown={(event) => {
-          if (event.key === "ArrowUp" || event.key === "ArrowDown") {
-            event.preventDefault();
-            const current = currentHeight();
-            resizeBy(event.key === "ArrowUp" ? current : Math.min(height ?? MIN_HEIGHT, current), event.key === "ArrowUp" ? KEYBOARD_STEP : -KEYBOARD_STEP);
-          } else if (event.key === "Home") {
-            event.preventDefault();
-            setHeight(null);
-          }
-        }}
-      >
-        <span className="h-1 w-10 rounded-full bg-muted opacity-0 transition-opacity group-hover/resize:opacity-100 group-focus-visible/resize:opacity-100 group-active/resize:opacity-100" />
-      </div>
+      {/* Rides the top edge of the composer box, or of the answer field under a question. */}
+      <ResizeHandle
+        label={m.chat_resize_composer()}
+        height={height}
+        min={MIN_HEIGHT}
+        max={heightLimit}
+        measure={currentHeight}
+        onChange={setHeight}
+      />
       {hovered && hoveredSkill && (
         <SkillPreviewCard
           id={previewId}

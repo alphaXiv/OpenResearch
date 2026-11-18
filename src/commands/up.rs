@@ -53,7 +53,7 @@ mod agent_tools;
 pub(crate) mod api_v2;
 pub(crate) mod compute_settings;
 mod harness_setup;
-mod model_feed;
+pub(crate) mod model_feed;
 mod network;
 mod search;
 mod terminals;
@@ -259,7 +259,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
 
     spawn_agent_preflight(state.clone());
     spawn_agent_updates(state.clone());
-    model_feed::spawn_refresh(state.chat.clone());
+    model_feed::spawn_refresh(state.clone());
     search::spawn_backfill(state.clone());
     // A fresh install's demo worktree takes ~15 sequential git spawns — build
     // it while the onboarding screen is up instead of inside the confirm click.
@@ -449,8 +449,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     state.terminals.shutdown().await;
     if !hand_off {
         agent.shutdown().await;
-        codex.shutdown().await;
-        claude.shutdown().await;
+        tokio::join!(codex.shutdown(), claude.shutdown());
         state.chat.acp.shutdown().await;
         local::chat::stop_kept(|_| true, "orx up stopped").await;
     }
@@ -5849,7 +5848,8 @@ async fn begin_restart(
 }
 
 /// Once a day, keep each agent orx can install current: through the user's own
-/// updater, else with orx's copy (`harness_setup::keep_current`).
+/// updater, else with orx's copy (`harness_setup::keep_current`). OpenCode is
+/// installed when missing, for its free models.
 fn spawn_agent_updates(state: AppState) {
     tokio::spawn(async move {
         // Startup detection's probes go first.
@@ -5866,8 +5866,9 @@ fn spawn_agent_updates(state: AppState) {
 
 /// One pass of [`spawn_agent_updates`]. An agent signed out on every account
 /// is left alone, so its vendor's release feed hears only from agents in use;
-/// one whose sign-in is unknown is still kept current. A runtime follows the
-/// agent that installs it.
+/// one whose sign-in is unknown is still kept current. OpenCode is never left
+/// alone, since its free models need no sign-in. A runtime follows the agent
+/// that installs it.
 async fn update_agents<F>(state: &AppState, keep_current: impl Fn(&'static str) -> F)
 where
     F: std::future::Future<Output = crate::error::Result<bool>>,
@@ -5899,8 +5900,9 @@ where
             })
             .map(|entry| &entry["authState"])
             .collect();
-        let signed_out =
-            !auth_states.is_empty() && auth_states.iter().all(|state| *state == "needsLogin");
+        let signed_out = harness != "opencode"
+            && !auth_states.is_empty()
+            && auth_states.iter().all(|state| *state == "needsLogin");
         if signed_out {
             continue;
         }
@@ -6035,34 +6037,59 @@ fn spawn_claude_auth_monitor(
 
 // --- env var settings -------------------------------------------------------
 
-/// Everything in `~/.openresearch/env`, values masked. `inProcessEnv` flags
-/// keys that are also set in orx up's own environment (which wins at runtime).
-fn env_settings_json() -> Value {
-    let vars: Vec<Value> = crate::config::list_synced_env()
-        .iter()
-        .map(|(key, value)| {
-            let plain = crate::local::trackio::plain_value(key, value);
-            json!({
-                "key": key,
-                "maskedValue": mask_token(plain.as_deref().unwrap_or(value)),
-                "value": plain,
-                "inProcessEnv": std::env::var_os(key).is_some(),
-            })
-        })
-        .collect();
-    json!({ "vars": vars })
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EnvQuery {
+    project_id: Option<String>,
 }
 
-async fn env_settings() -> ApiResult {
-    tokio::task::spawn_blocking(|| Ok(Json(env_settings_json())))
+/// `~/.openresearch/env`, values masked, and with a project its own variables.
+/// `inProcessEnv` flags keys also set in orx up's own environment, which wins
+/// for agents.
+fn env_settings_json(project_id: Option<&str>) -> Result<Value> {
+    let store = Store::open()?;
+    let descriptions = store.env_descriptions()?;
+    let row = |key: &str, value: &str, description: Option<&String>| {
+        let plain = crate::local::trackio::plain_value(key, value);
+        json!({
+            "key": key,
+            "maskedValue": mask_token(plain.as_deref().unwrap_or(value)),
+            "value": plain,
+            "description": description,
+            "inProcessEnv": std::env::var_os(key).is_some(),
+        })
+    };
+    let vars: Vec<Value> = crate::config::list_synced_env()
+        .iter()
+        .map(|(key, value)| row(key, value, descriptions.get(key)))
+        .collect();
+    let mut body = json!({ "vars": vars });
+    if let Some(project_id) = project_id {
+        body["projectVars"] = store
+            .project_env(project_id)?
+            .iter()
+            .map(|var| row(&var.key, &var.value, var.description.as_ref()))
+            .collect();
+    }
+    Ok(body)
+}
+
+async fn env_settings(Query(scope): Query<EnvQuery>) -> ApiResult {
+    tokio::task::spawn_blocking(move || Ok(Json(env_settings_json(scope.project_id.as_deref())?)))
         .await
         .map_err(|e| ApiError::from(anyhow!("env task failed: {e}")))?
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SetEnvVarReq {
     key: String,
-    value: String,
+    /// Absent keeps the saved value, to change only the description.
+    value: Option<String>,
+    /// Absent keeps the saved description; empty clears it.
+    description: Option<String>,
+    /// Saves the variable for this project instead of every project.
+    project_id: Option<String>,
 }
 
 fn valid_env_key(key: &str) -> bool {
@@ -6071,37 +6098,75 @@ fn valid_env_key(key: &str) -> bool {
         && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-async fn set_env_var(Json(req): Json<SetEnvVarReq>) -> ApiResult {
-    let key = req.key.trim().to_string();
-    let value = req.value.trim().to_string();
-    if !valid_env_key(&key) {
-        return Err(bad_request(
-            "key must be letters, digits or _, not starting with a digit",
+/// Why `key` cannot be saved, in words for the user.
+pub(super) fn env_key_error(key: &str) -> Option<String> {
+    if !valid_env_key(key) {
+        return Some(format!(
+            "{key} is not a variable name: use letters, digits or _, not starting with a digit."
         ));
     }
-    if crate::local::shell_env::IMPORTED.contains(&key.as_str()) {
-        return Err(bad_request(format!(
-            "{key} is reserved by OpenResearch. To change it, set {key} in your shell and restart OpenResearch."
-        )));
+    crate::local::shell_env::IMPORTED.contains(&key).then(|| {
+        format!("{key} is reserved by OpenResearch. To change it, set {key} in your shell and restart OpenResearch.")
+    })
+}
+
+async fn set_env_var(Json(req): Json<SetEnvVarReq>) -> ApiResult {
+    let key = req.key.trim().to_string();
+    if let Some(error) = env_key_error(&key) {
+        return Err(bad_request(error));
     }
-    if value.is_empty() {
+    let value = req.value.map(|value| value.trim().to_string());
+    if value.as_deref() == Some("") {
         return Err(bad_request("value is required"));
     }
+    if value.is_none() && req.description.is_none() {
+        return Err(bad_request("give a value, a description, or both"));
+    }
     tokio::task::spawn_blocking(move || {
-        crate::config::write_synced_env_var(&key, &value)?;
-        Ok(Json(env_settings_json()))
+        let store = Store::open()?;
+        let project = req.project_id.as_deref();
+        if let Some(project) = project {
+            if store.get_local_project(project)?.is_none() {
+                return Err(ApiError(StatusCode::NOT_FOUND, "project not found".into()));
+            }
+        }
+        let saved = match project {
+            Some(project) => store.project_env(project)?.iter().any(|var| var.key == key),
+            None => crate::config::synced_env_var(&key).is_some(),
+        };
+        if value.is_none() && !saved {
+            return Err(bad_request(format!("{key} has no value to describe yet")));
+        }
+        if let Some(value) = &value {
+            match project {
+                Some(project) => store.set_project_env(project, &key, value)?,
+                None => crate::config::write_synced_env_var(&key, value)?,
+            }
+        }
+        if let Some(description) = &req.description {
+            store.describe_env(project, &key, description, false)?;
+        }
+        Ok(Json(env_settings_json(project)?))
     })
     .await
     .map_err(|e| ApiError::from(anyhow!("env task failed: {e}")))?
 }
 
-async fn delete_env_var(Path(key): Path<String>) -> ApiResult {
+async fn delete_env_var(Path(key): Path<String>, Query(scope): Query<EnvQuery>) -> ApiResult {
     if !valid_env_key(&key) {
         return Err(bad_request("invalid key"));
     }
     tokio::task::spawn_blocking(move || {
-        crate::config::remove_synced_env_var(&key)?;
-        Ok(Json(env_settings_json()))
+        let store = Store::open()?;
+        let project = scope.project_id.as_deref();
+        match project {
+            Some(project) => store.delete_project_env(project, &key)?,
+            None => {
+                crate::config::remove_synced_env_var(&key)?;
+                store.describe_env(None, &key, "", false)?;
+            }
+        }
+        Ok(Json(env_settings_json(project)?))
     })
     .await
     .map_err(|e| ApiError::from(anyhow!("env task failed: {e}")))?
@@ -7027,6 +7092,8 @@ struct SetUiStateReq {
     preferred_autonomy: Option<Autonomy>,
     nested_delegation: Option<bool>,
     opencode_free_models: Option<bool>,
+    /// `provider/model`, or empty for the chat's own.
+    opencode_review_model: Option<String>,
     favorite_models: Option<Vec<String>>,
     hidden_models: Option<Vec<String>>,
     hidden_agents: Option<Vec<String>>,
@@ -7063,6 +7130,21 @@ async fn set_ui_state(
     }
     if let Some(workspace) = &req.workspace {
         workspace.validate().map_err(bad_request)?;
+    }
+    let review_model = req
+        .opencode_review_model
+        .take()
+        .map(|model| model.trim().to_owned());
+    if review_model.as_deref().is_some_and(|model| {
+        !model.is_empty()
+            && (model.len() > 200
+                || model
+                    .split_once('/')
+                    .is_none_or(|(provider, id)| provider.is_empty() || id.is_empty()))
+    }) {
+        return Err(bad_request(
+            "The Auto reviewer must be a model in provider/model form",
+        ));
     }
     let switched = req.hidden_agents.is_some();
     let lists = [
@@ -7178,6 +7260,11 @@ async fn set_ui_state(
         }
         if let Some(offered) = req.opencode_free_models {
             store.set_opencode_free_models(offered)?;
+        }
+        if let Some(model) = &review_model {
+            store.set_opencode_review_model(
+                Some(model.as_str()).filter(|model| !model.is_empty()),
+            )?;
         }
         for (column, list, ..) in lists {
             if let Some(list) = list {
@@ -7763,6 +7850,12 @@ async fn relay_pty(
                     }
                     if let Some(url) = update.url {
                         let frame = json!({ "type": "signin", "url": url }).to_string();
+                        if socket.send(Message::Text(frame.into())).await.is_err() {
+                            return None;
+                        }
+                    }
+                    if let Some(code) = update.user_code {
+                        let frame = json!({ "type": "signin", "userCode": code }).to_string();
                         if socket.send(Message::Text(frame.into())).await.is_err() {
                             return None;
                         }
@@ -8388,7 +8481,6 @@ async fn local_runtime() -> Json<Value> {
 }
 
 enum OpenCodeError {
-    V1,
     /// Why a model server listed no models, by a code the dashboard tells apart.
     Unlisted(&'static str, String),
     Api(ApiError),
@@ -8397,8 +8489,11 @@ enum OpenCodeError {
 impl IntoResponse for OpenCodeError {
     fn into_response(self) -> Response {
         match self {
-            Self::V1 => (StatusCode::CONFLICT, Json(json!({"error":"Update OpenCode to add or change providers, or use OpenResearch's copy.","code":"opencode1"}))).into_response(),
-            Self::Unlisted(code, message) => (StatusCode::BAD_REQUEST, Json(json!({"error":message,"code":code}))).into_response(),
+            Self::Unlisted(code, message) => (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":message,"code":code})),
+            )
+                .into_response(),
             Self::Api(error) => error.into_response(),
         }
     }
@@ -8418,28 +8513,8 @@ impl From<ApiError> for OpenCodeError {
 
 type OpenCodeResult = std::result::Result<Json<Value>, OpenCodeError>;
 
-fn opencode_v2(protocol: local::opencode::Protocol) -> std::result::Result<(), OpenCodeError> {
-    if protocol == local::opencode::Protocol::V1 {
-        return Err(OpenCodeError::V1);
-    }
-    Ok(())
-}
-
-async fn require_opencode_v2() -> std::result::Result<local::opencode::ResolvedBinary, OpenCodeError>
-{
-    let binary = local::opencode::resolve_binary().await?;
-    opencode_v2(binary.protocol)?;
-    Ok(binary)
-}
-
-/// OpenCode 1 is read-only here, so a change needs OpenCode 2. Without OpenCode a
-/// change still saves, since installing it brings OpenCode 2.
-async fn opencode_for_change(
-) -> std::result::Result<Option<local::opencode::ResolvedBinary>, OpenCodeError> {
-    match local::opencode::resolve_binary().await {
-        Ok(binary) => opencode_v2(binary.protocol).map(|()| Some(binary)),
-        Err(_) => Ok(None),
-    }
+async fn require_opencode() -> std::result::Result<local::opencode::ResolvedBinary, OpenCodeError> {
+    Ok(local::opencode::resolve_binary().await?)
 }
 
 async fn list_local_models() -> OpenCodeResult {
@@ -8447,7 +8522,6 @@ async fn list_local_models() -> OpenCodeResult {
 }
 
 async fn discover_local_models(Json(req): Json<local::local_models::Probe>) -> OpenCodeResult {
-    opencode_for_change().await?;
     let listing =
         local::local_models::listing(&req)
             .await
@@ -8481,7 +8555,6 @@ async fn connect_local_model(
     State(state): State<AppState>,
     Json(req): Json<local::local_models::Connect>,
 ) -> OpenCodeResult {
-    opencode_for_change().await?;
     let (model, created) = local::local_models::connect(req)
         .await
         .map_err(|e| bad_request(e.to_string()))?;
@@ -8534,7 +8607,7 @@ async fn add_opencode_provider(
     State(state): State<AppState>,
     Json(req): Json<local::local_models::AddProvider>,
 ) -> OpenCodeResult {
-    let binary = opencode_for_change().await?;
+    let binary = local::opencode::resolve_binary().await.ok();
     let id = local::local_models::add_provider(binary.as_ref(), req)
         .await
         .map_err(|e| bad_request(e.to_string()))?;
@@ -8553,7 +8626,6 @@ async fn replace_opencode_key(
     Path(id): Path<String>,
     Json(req): Json<SaveOpenCodeKeyReq>,
 ) -> OpenCodeResult {
-    opencode_for_change().await?;
     if !local::local_models::providers()?.contains_key(&id) {
         return Err(not_found("provider").into());
     }
@@ -8607,7 +8679,7 @@ async fn remove_opencode_provider(
             record.credential,
             local::local_models::ProviderCredential::Oauth
         ) {
-            local::opencode_signin::sign_out(&require_opencode_v2().await?, &id).await?;
+            local::opencode_signin::sign_out(&require_opencode().await?, &id).await?;
         }
     }
     local::local_models::remove_provider(&id)?;
@@ -8616,7 +8688,7 @@ async fn remove_opencode_provider(
 }
 
 async fn list_opencode_integrations() -> OpenCodeResult {
-    let binary = require_opencode_v2().await?;
+    let binary = require_opencode().await?;
     Ok(Json(local::opencode_signin::integrations(&binary).await?))
 }
 
@@ -8624,7 +8696,7 @@ async fn start_opencode_signin(
     State(state): State<AppState>,
     Json(req): Json<local::opencode_signin::SignIn>,
 ) -> OpenCodeResult {
-    let binary = require_opencode_v2().await?;
+    let binary = require_opencode().await?;
     Ok(Json(
         state
             .opencode_signins
@@ -8952,9 +9024,15 @@ async fn harness_snapshot(Path(id): Path<String>) -> ApiResult {
 
 async fn list_harnesses(State(state): State<AppState>, Query(q): Query<HarnessQuery>) -> ApiResult {
     let mut payload = harnesses_payload(&state, &q).await;
-    let hidden = Store::open()?.ui_state()?.hidden_agents;
+    let store = Store::open()?;
+    let hidden = store.ui_state()?.hidden_agents;
+    let used = store.chat_agents_used()?;
     for entry in payload["harnesses"].as_array_mut().into_iter().flatten() {
         entry["off"] = json!(local::model_routes::turned_off(entry, &hidden));
+        let profile = entry["profile"]["id"].as_str();
+        entry["hasChats"] = json!(used
+            .iter()
+            .any(|(harness, used)| entry["id"] == harness.as_str() && used.as_deref() == profile));
         if entry["id"] == "opencode" && entry["profile"].is_null() {
             entry["offProviders"] = json!(local::model_routes::off_providers(entry, &hidden));
         }
@@ -9153,7 +9231,7 @@ async fn test_acp_harness(Json(input): Json<AcpHarnessInput>) -> ApiResult {
 /// and serves the cache with it patched in.
 async fn harnesses_payload(state: &AppState, q: &HarnessQuery) -> Value {
     let mut payload = detected_harnesses(state, q).await;
-    model_feed::offer_unlisted_releases(&mut payload);
+    model_feed::annotate_models(&mut payload);
     payload
 }
 
@@ -10879,13 +10957,15 @@ struct RespondReq {
     note: Option<String>,
     #[serde(default)]
     annotations: Vec<local::chat::TextAnnotation>,
+    #[serde(default)]
+    env: Vec<local::chat::env_request::EnvAnswer>,
 }
 
 fn default_true() -> bool {
     true
 }
 
-/// Answer an interactive prompt (plan / permission / question) on a session.
+/// Answer an interactive prompt (plan / permission / question / env) on a session.
 async fn respond_chat(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -10907,6 +10987,7 @@ async fn respond_chat(
                 .filter(|annotation| !annotation.text.trim().is_empty())
                 .collect(),
             from: None,
+            env: req.env,
         })
         .await
         .map_err(bad_request)?;
@@ -11435,6 +11516,90 @@ mod tests {
         });
     }
 
+    #[tokio::test]
+    async fn variables_save_for_a_project_or_every_project_with_their_descriptions() {
+        let project = format!("proj_{}", uuid::Uuid::new_v4().simple());
+        let key = format!("ORX_TEST_API_{}", uuid::Uuid::new_v4().simple());
+        Store::open()
+            .unwrap()
+            .create_local_project(&crate::store::tests::local_project_fixture(&project))
+            .unwrap();
+        let set = |value: Option<&str>, description: Option<&str>, project_id: Option<&str>| {
+            set_env_var(Json(SetEnvVarReq {
+                key: key.clone(),
+                value: value.map(str::to_string),
+                description: description.map(str::to_string),
+                project_id: project_id.map(str::to_string),
+            }))
+        };
+        let row = |body: &Value, list: &str| {
+            body[list]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["key"] == key.as_str())
+                .cloned()
+        };
+
+        let error = set(None, Some("Where runs log"), Some(&project))
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST, "{}", error.1);
+        let error = set(Some("x"), None, Some("proj_missing"))
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, StatusCode::NOT_FOUND);
+
+        let Json(body) = set(Some("sweeps"), None, Some(&project)).await.unwrap();
+        assert!(
+            row(&body, "vars").is_none(),
+            "a project's variable stays out of every project's"
+        );
+        let Json(body) = set(None, Some("Where runs log"), Some(&project))
+            .await
+            .unwrap();
+        assert_eq!(
+            row(&body, "projectVars").unwrap()["description"],
+            "Where runs log"
+        );
+
+        let Json(body) = set(Some("everywhere"), Some("Shared key"), None)
+            .await
+            .unwrap();
+        assert_eq!(row(&body, "vars").unwrap()["description"], "Shared key");
+        assert!(body.get("projectVars").is_none());
+
+        let Json(body) = env_settings(Query(EnvQuery {
+            project_id: Some(project.clone()),
+        }))
+        .await
+        .unwrap();
+        assert!(row(&body, "vars").is_some() && row(&body, "projectVars").is_some());
+
+        let Json(body) = delete_env_var(
+            Path(key.clone()),
+            Query(EnvQuery {
+                project_id: Some(project.clone()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(row(&body, "projectVars").is_none());
+        assert!(
+            row(&body, "vars").is_some(),
+            "deleting the project's copy keeps every project's"
+        );
+        let Json(body) = delete_env_var(Path(key.clone()), Query(EnvQuery { project_id: None }))
+            .await
+            .unwrap();
+        assert!(row(&body, "vars").is_none());
+        assert!(!Store::open()
+            .unwrap()
+            .env_descriptions()
+            .unwrap()
+            .contains_key(&key));
+    }
+
     async fn event_text(events: Vec<Event>) -> String {
         let stream = futures::stream::iter(events.into_iter().map(Ok::<_, Infallible>));
         let bytes = axum::body::to_bytes(Sse::new(stream).into_response().into_body(), 8192)
@@ -11647,6 +11812,7 @@ mod tests {
             preferred_autonomy: Some(Autonomy::Copilot),
             nested_delegation: false,
             opencode_free_models: true,
+            opencode_review_model: None,
             favorite_models: Vec::new(),
             hidden_models: Vec::new(),
             hidden_agents: Vec::new(),
@@ -11687,6 +11853,7 @@ mod tests {
             preferred_agent: None,
             nested_delegation: false,
             opencode_free_models: true,
+            opencode_review_model: None,
             favorite_models: Vec::new(),
             hidden_models: Vec::new(),
             hidden_agents: Vec::new(),
@@ -11743,6 +11910,7 @@ mod tests {
             preferred_autonomy: None,
             nested_delegation: false,
             opencode_free_models: true,
+            opencode_review_model: None,
             favorite_models: Vec::new(),
             hidden_models: Vec::new(),
             hidden_agents: Vec::new(),
@@ -12010,6 +12178,7 @@ mod tests {
                 preferred_autonomy: None,
                 nested_delegation: None,
                 opencode_free_models: None,
+                opencode_review_model: None,
                 favorite_models: None,
                 hidden_models: None,
                 hidden_agents: None,
@@ -12329,7 +12498,7 @@ mod tests {
         );
         assert_eq!(
             preferred_permission_mode("opencode", Some("plan".into())).as_deref(),
-            Some("default")
+            Some("auto-approve")
         );
     }
 
@@ -12754,22 +12923,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn opencode_v1_provider_routes_report_upgrade() {
-        let response = opencode_v2(local::opencode::Protocol::V1)
-            .err()
-            .unwrap()
-            .into_response();
-        assert_eq!(response.status(), StatusCode::CONFLICT);
-        let bytes = axum::body::to_bytes(response.into_body(), 4096)
-            .await
-            .unwrap();
-        let body: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(body["code"], "opencode1");
-        assert!(body["error"].as_str().unwrap().contains("Update OpenCode"));
-        assert!(opencode_v2(local::opencode::Protocol::V2).is_ok());
-    }
-
-    #[tokio::test]
     async fn daily_update_pass_skips_agents_signed_out_on_every_account() {
         if !crate::config::in_test_child(&[]) {
             return;
@@ -12805,7 +12958,7 @@ mod tests {
         .await;
 
         let expected: Vec<_> = local::harness::managed::harnesses()
-            .filter(|harness| !["opencode", "dsh", "pi-acp", "pi"].contains(harness))
+            .filter(|harness| !["dsh", "pi-acp", "pi"].contains(harness))
             .collect();
         assert_eq!(checked.into_inner().unwrap(), expected);
     }
@@ -12824,7 +12977,7 @@ mod tests {
             .unwrap();
         *state.harnesses.lock().await = Some((
             expired,
-            json!({"harnesses":[{"id":"opencode","authState":"needsLogin"}]}),
+            json!({"harnesses":[{"id":"codex","authState":"needsLogin"}]}),
         ));
         let checked = std::sync::Mutex::new(Vec::new());
 
@@ -12834,7 +12987,7 @@ mod tests {
         })
         .await;
 
-        assert!(checked.into_inner().unwrap().contains(&"opencode"));
+        assert!(checked.into_inner().unwrap().contains(&"codex"));
     }
 
     #[tokio::test]
@@ -12957,6 +13110,77 @@ mod tests {
             .await
         });
         address
+    }
+
+    #[tokio::test]
+    async fn removed_codex_account_fails_the_setup_socket_not_install_detection() {
+        use futures::StreamExt;
+        use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message as Frame};
+        if !crate::config::in_test_child(&["PATH"]) {
+            return;
+        }
+        #[cfg(unix)]
+        std::env::set_var(
+            "PATH",
+            orx_test_support::agentless_path(&crate::config::config_dir()),
+        );
+        #[cfg(windows)]
+        {
+            // A signed-out npm-style shim, not a CLI from the runner's account.
+            let bin = crate::config::config_dir().join("agent-stand-ins");
+            std::fs::create_dir_all(&bin).unwrap();
+            std::fs::write(bin.join("codex.cmd"), "@echo off\r\nif \"%1\"==\"--version\" (echo codex-cli 0.200.0 & exit /b 0)\r\nexit /b 1\r\n").unwrap();
+            std::env::set_var("PATH", bin);
+        }
+        let (send, events) = std::sync::mpsc::channel();
+        crate::telemetry::TEST_CAPTURE.set(send).unwrap();
+        let profile = local::agent_profiles::create("codex", "Disposable", None).unwrap();
+        local::agent_profiles::remove(&profile).unwrap();
+        let address = serve(router(test_state(), None, up_remote::Reach::Loopback)).await;
+        let mut request = format!(
+            "ws://{address}/api/harnesses/setup?harness=codex&action=login&profile={profile}"
+        )
+        .into_client_request()
+        .unwrap();
+        request
+            .headers_mut()
+            .insert("origin", format!("http://{address}").parse().unwrap());
+        let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(10), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let Frame::Text(text) = frame else {
+            panic!("expected the setup error, got {frame:?}")
+        };
+        let result: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(result["type"], "error");
+        assert!(
+            result["error"]
+                .as_str()
+                .unwrap()
+                .contains("account was removed"),
+            "{result}"
+        );
+        let setup: Vec<_> = events
+            .try_iter()
+            .filter(|(name, _)| name == "harness_setup")
+            .map(|(_, properties)| properties)
+            .collect();
+        assert_eq!(setup.len(), 2, "{setup:?}");
+        assert_eq!(setup[0]["outcome"], "started");
+        let failure = &setup[1];
+        assert_eq!(failure["attemptId"], setup[0]["attemptId"]);
+        assert_eq!(failure["harness"], "codex");
+        assert_eq!(failure["action"], "login");
+        assert_eq!(failure["outcome"], "failed");
+        assert_eq!(failure["stage"], "detect");
+        assert_eq!(failure["reason"], "not_ready");
+        assert_eq!(
+            failure["errorExcerpt"],
+            "agent account could not be prepared"
+        );
     }
 
     /// A dashboard whose openresearch.sh is a fake that serves one project's `.orx` file under

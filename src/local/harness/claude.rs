@@ -402,17 +402,24 @@ async fn claude_models_response(bin: PathBuf, home: Option<PathBuf>) -> Option<V
 
 /// One control request on a throwaway `--print` stream-json child: spawn,
 /// write the request, read until its `control_response` (skipping stream
-/// noise), kill the child. The inner `Err` is the response the CLI sent
-/// instead of an answer.
+/// noise), then close its input and let it exit, since it may be saving a
+/// sign-in it refreshed. The inner `Err` is the response the CLI sent instead
+/// of an answer.
 async fn claude_control(
     bin: PathBuf,
     home: Option<PathBuf>,
     request: Value,
 ) -> std::result::Result<std::result::Result<Value, Value>, Unanswered> {
-    // Acquire the spawn lane before the deadline — queue time must not spend
-    // the child's execution budget.
-    let permit = super::detect::detect_spawn_permit().await;
-    let fut = async move {
+    // Detached: a caller that gives up must not drop, and so kill, a child saving a sign-in.
+    let (answered, answer) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        // Acquire the spawn lane before the deadline — queue time must not spend
+        // the child's execution budget.
+        let permit = super::detect::detect_spawn_permit().await;
+        if answered.is_closed() {
+            return;
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
         let mut cmd = crate::process::tokio_command(&bin);
         cmd.args([
             "--print",
@@ -426,50 +433,70 @@ async fn claude_control(
         profile_env(&mut cmd, home.as_deref());
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true);
-        let (mut child, _permit) = super::detect::spawn_with_permit(cmd, permit)
-            .await
-            .map_err(Unanswered::Spawn)?;
-        let mut stdin = child.stdin.take().ok_or(Unanswered::Closed)?;
-        let mut lines = BufReader::new(child.stdout.take().ok_or(Unanswered::Closed)?).lines();
-
-        use tokio::io::AsyncWriteExt;
-        let req = serde_json::json!({
-            "type": "control_request",
-            "request_id": "orx_control",
-            "request": request,
-        });
-        let mut line = req.to_string();
-        line.push('\n');
-        stdin
-            .write_all(line.as_bytes())
-            .await
-            .map_err(|_| Unanswered::Closed)?;
-
-        while let Ok(Some(line)) = lines.next_line().await {
-            let Ok(v) = serde_json::from_str::<Value>(&line) else {
-                continue;
-            };
-            if v.get("type").and_then(Value::as_str) != Some("control_response") {
-                continue;
+            .stderr(Stdio::null());
+        let spawned =
+            tokio::time::timeout_at(deadline, super::detect::spawn_with_permit(cmd, permit)).await;
+        let (mut child, permit) = match spawned {
+            Ok(Ok(spawned)) => spawned,
+            Ok(Err(error)) => {
+                let _ = answered.send(Err(Unanswered::Spawn(error)));
+                return;
             }
-            let Some(resp) = v.get("response") else {
-                continue;
-            };
-            if resp.get("request_id").and_then(Value::as_str) != Some("orx_control") {
-                continue;
+            Err(_) => {
+                let _ = answered.send(Err(Unanswered::TimedOut));
+                return;
             }
-            return Ok(match resp.get("subtype").and_then(Value::as_str) {
-                Some("success") => Ok(resp.get("response").cloned().unwrap_or(Value::Null)),
-                _ => Err(resp.clone()),
+        };
+        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+            let _ = answered.send(Err(Unanswered::Closed));
+            return;
+        };
+        let mut lines = BufReader::new(stdout).lines();
+
+        // The block owns `stdin`, so the child's input closes as soon as it answers.
+        let reply = tokio::time::timeout_at(deadline, async {
+            let mut stdin = stdin;
+            use tokio::io::AsyncWriteExt;
+            let req = serde_json::json!({
+                "type": "control_request",
+                "request_id": "orx_control",
+                "request": request,
             });
-        }
-        Err(Unanswered::Closed)
-    };
-    tokio::time::timeout(Duration::from_secs(15), fut)
+            let mut line = req.to_string();
+            line.push('\n');
+            stdin
+                .write_all(line.as_bytes())
+                .await
+                .map_err(|_| Unanswered::Closed)?;
+
+            while let Ok(Some(line)) = lines.next_line().await {
+                let Ok(v) = serde_json::from_str::<Value>(&line) else {
+                    continue;
+                };
+                if v.get("type").and_then(Value::as_str) != Some("control_response") {
+                    continue;
+                }
+                let Some(resp) = v.get("response") else {
+                    continue;
+                };
+                if resp.get("request_id").and_then(Value::as_str) != Some("orx_control") {
+                    continue;
+                }
+                return Ok(match resp.get("subtype").and_then(Value::as_str) {
+                    Some("success") => Ok(resp.get("response").cloned().unwrap_or(Value::Null)),
+                    _ => Err(resp.clone()),
+                });
+            }
+            Err(Unanswered::Closed)
+        })
         .await
-        .unwrap_or(Err(Unanswered::TimedOut))
+        .unwrap_or(Err(Unanswered::TimedOut));
+        let _ = answered.send(reply);
+        crate::process::let_probe_exit(child, lines.into_inner()).await;
+        // The lane stays taken until the child is gone.
+        drop(permit);
+    });
+    answer.await.unwrap_or(Err(Unanswered::Closed))
 }
 
 /// The account's plan limits from `get_usage`, which Claude Code marks
@@ -755,6 +782,85 @@ mod plan_tests {
             r#"{"type":"control_response","response":{"subtype":"success","request_id":"orx_control","response":{"rate_limits_available":false,"rate_limits":null}}}"#,
         );
         assert_eq!(read_plan(api_key, None).await, Read::NoPlan);
+    }
+
+    /// A named pipe the test and a fake agent hand signals through, so neither waits on the clock.
+    #[cfg(unix)]
+    fn fifo(dir: &std::path::Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        let status = crate::process::command("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        path
+    }
+
+    /// What the fake agent writes into `fifo`; a writer that never comes fails the test.
+    #[cfg(unix)]
+    async fn read_fifo(fifo: &std::path::Path) -> String {
+        let fifo = fifo.to_path_buf();
+        tokio::time::timeout(
+            Duration::from_secs(60),
+            tokio::task::spawn_blocking(move || std::fs::read_to_string(fifo).unwrap()),
+        )
+        .await
+        .expect("the fake agent never wrote")
+        .unwrap()
+    }
+
+    #[cfg(unix)]
+    async fn write_fifo(fifo: &std::path::Path) {
+        let fifo = fifo.to_path_buf();
+        tokio::task::spawn_blocking(move || std::fs::write(fifo, "go\n").unwrap())
+            .await
+            .unwrap();
+    }
+
+    const NO_PLAN: &str = r#"{"type":"control_response","response":{"subtype":"success","request_id":"orx_control","response":{"rate_limits_available":false,"rate_limits":null}}}"#;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_plan_read_lets_claude_finish_saving_its_sign_in() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-claude-probe").unwrap();
+        let saved = fifo(dir.path(), "credentials");
+        let fake = dir.path().join("claude");
+        // Answers, then saves only once its input closes, as Claude Code finishes a refresh.
+        let script = format!(
+            "#!/bin/sh\nread request\necho '{NO_PLAN}'\ncat >/dev/null\necho refreshed > '{}'\n",
+            saved.display()
+        );
+        orx_test_support::write_executable(&fake, script, 0o755).unwrap();
+
+        assert_eq!(read_plan(fake, None).await, Read::NoPlan);
+
+        // The answer comes back first; the child goes on to exit on its own.
+        assert_eq!(read_fifo(&saved).await, "refreshed\n");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_plan_read_given_up_on_still_lets_claude_finish_saving() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-claude-cancel").unwrap();
+        let started = fifo(dir.path(), "started");
+        let go = fifo(dir.path(), "go");
+        let saved = fifo(dir.path(), "credentials");
+        let fake = dir.path().join("claude");
+        // Answers only after the caller has stopped waiting, then saves once its input closes.
+        let script = format!(
+            "#!/bin/sh\nread request\necho started > '{}'\nread go < '{}'\necho '{NO_PLAN}'\ncat >/dev/null\necho refreshed > '{}'\n",
+            started.display(),
+            go.display(),
+            saved.display()
+        );
+        orx_test_support::write_executable(&fake, script, 0o755).unwrap();
+
+        let read = tokio::spawn(read_plan(fake, None));
+        assert_eq!(read_fifo(&started).await, "started\n");
+        read.abort();
+        write_fifo(&go).await;
+
+        assert_eq!(read_fifo(&saved).await, "refreshed\n");
     }
 
     #[cfg(unix)]
@@ -1076,10 +1182,10 @@ async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
     // Plain text only — an ANSI-colorizing CLI (or a synced FORCE_COLOR) would
     // otherwise write escape codes straight into the reply.
     cmd.env("NO_COLOR", "1");
-    let fut = cmd.output();
-    let out = tokio::time::timeout(request.timeout, fut)
+    let deadline = tokio::time::Instant::now() + request.timeout;
+    let out = crate::process::agent_output_by(cmd.spawn()?, deadline)
         .await
-        .map_err(|_| anyhow!("timed out after {}s", request.timeout.as_secs()))??;
+        .ok_or_else(|| anyhow!("timed out after {}s", request.timeout.as_secs()))??;
     if !out.status.success() {
         // `-p` prints request failures (bad model, signed out) on stdout; stderr is diagnostics.
         return Err(super::one_shot_exit_error(
@@ -1994,17 +2100,24 @@ fn result_text(content: &Value) -> String {
 /// mid-turn synthetic `user` event (a tool_result) can't collide: those carry
 /// `tool_result` blocks, never a single text block equal to the prompt.
 fn replays_user_message(event: &Value, text: &str) -> bool {
+    replayed_text(event) == Some(text)
+}
+
+/// The text of a `user` event shaped like a replayed stdin message.
+fn replayed_text(event: &Value) -> Option<&str> {
     if event.get("type").and_then(Value::as_str) != Some("user") {
-        return false;
+        return None;
     }
-    match event.pointer("/message/content") {
-        Some(Value::String(content)) => content == text,
-        Some(Value::Array(blocks)) => {
-            blocks.len() == 1
-                && blocks[0].get("type").and_then(Value::as_str) == Some("text")
-                && blocks[0].get("text").and_then(Value::as_str) == Some(text)
+    match event.pointer("/message/content")? {
+        Value::String(content) => Some(content),
+        Value::Array(blocks) if blocks.len() == 1 => {
+            let block = &blocks[0];
+            if block.get("type").and_then(Value::as_str) != Some("text") {
+                return None;
+            }
+            block.get("text").and_then(Value::as_str)
         }
-        _ => false,
+        _ => None,
     }
 }
 
@@ -2521,6 +2634,13 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
             }
         }
         Some("user") => {
+            // The replay of a steer marks where the model read it.
+            if let Some(text) = replayed_text(event).filter(|_| subagent_parent(event).is_none()) {
+                if let Some(steer) = ctx.host.pending_steer_sent_as(&ctx.session_id, text) {
+                    ctx.record_steer(&steer);
+                }
+                return false;
+            }
             // Synthetic tool-result turns: complete the matching tool part. A
             // sub-agent's tool_result carries the bare `tool_use_id`; its part
             // lives in the spawning Task part's children under the namespaced id.
@@ -2877,6 +2997,9 @@ struct Progress {
     prompt: Option<String>,
     /// The turn's result is applied; only a segment already under way can extend it.
     finishing: bool,
+    /// Steers written to the child that it may not have read yet.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    steers: Vec<crate::local::chat::SteerMessage>,
 }
 
 /// Commits the transcript with a checkpoint at `applied`.
@@ -2914,6 +3037,16 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
                 .resume_turn(&ctx.session_id, &resume.keep_id)
                 .await
                 .ok_or_else(|| anyhow!("Claude Code stopped before this turn could resume"))?;
+            let sent = std::mem::take(&mut progress.steers);
+            match ctx.host.hold_steers(&ctx.session_id, sent) {
+                Ok(held) => progress.steers = held,
+                // They run as queued messages instead.
+                Err(error) => eprintln!(
+                    "orx up: could not hold the steers turn {} sent before the restart: {error:#}",
+                    ctx.turn_id
+                ),
+            }
+            route.client().hold_steers(&progress.steers);
             (route, rx, Some(progress))
         }
         None if resumed_alone => {
@@ -2943,9 +3076,17 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
                 }
                 Err(error) => {
                     ctx.host.claude.kill_session(&ctx.session_id).await;
-                    let Some((retry_number, delay)) = ctx.schedule_orx_retry(None) else {
-                        ctx.mark_delivery(DeliveryState::NotSent);
-                        ctx.mark_terminal_failure("claude_setup", error.to_string());
+                    let signed_out = error.downcast_ref::<super::SignedOut>().is_some();
+                    let retry = (!signed_out)
+                        .then(|| ctx.schedule_orx_retry(None))
+                        .flatten();
+                    let Some((retry_number, delay)) = retry else {
+                        let kind = if signed_out {
+                            "claude_signed_out"
+                        } else {
+                            "claude_setup"
+                        };
+                        ctx.mark_setup_failure(kind, &error);
                         return Err(error);
                     };
                     ctx.show_retry_status(
@@ -3047,7 +3188,11 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
                         apply_event(ctx, &mut progress.turn, &line);
                         applied = offset;
                     }
-                    _ => break None,
+                    Some(TurnEvent::Closed) => {
+                        ctx.host.claude.kill_session(&ctx.session_id).await;
+                        break None;
+                    }
+                    None => break None,
                 }
             };
             let Some(init) = next_segment else {
@@ -3077,17 +3222,19 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
                 continue;
             }
             Waited::Steer(steer) => {
-                // A failed write means the child is gone and this turn is about
-                // to error out — park the text so it survives into the next one.
-                match client.send_user_message(&steer.text).await {
-                    Ok(()) => {
-                        ctx.record_steer(&steer, true);
+                // Released steers already run as queued messages. The child
+                // replays one when the model reads it, which records it; a
+                // failed write means the child is gone and the turn errors out.
+                if ctx.host.steer_pending(&ctx.session_id, &steer.id) {
+                    if client.send_steer(&steer).await.is_err() {
+                        ctx.host.release_steer(&ctx.session_id, &steer.id);
+                    } else {
+                        let host = ctx.host.clone();
+                        progress
+                            .steers
+                            .retain(|sent| host.steer_pending(&ctx.session_id, &sent.id));
+                        progress.steers.push(steer);
                         checkpoint(ctx, keeper, applied, &progress);
-                    }
-                    Err(_) => {
-                        if let Err(error) = ctx.host.park_steer(&ctx.session_id, steer) {
-                            ctx.push_error(format!("Could not preserve steering message: {error}"));
-                        }
                     }
                 }
                 continue;
@@ -3109,7 +3256,7 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
             }
             Waited::Event(Err(_)) => {
                 commit_attempt_session(ctx, &progress.turn);
-                ctx.host.claude.kill_session(&ctx.session_id).await;
+                ctx.host.claude.interrupt_session(&ctx.session_id).await;
                 let _ = ctx.flush();
                 let (what, hint) = if progress.saw_event {
                     (
@@ -3314,13 +3461,23 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     };
     let mut retry_count = 0;
     let mut state;
+    let mut signed_out = false;
     loop {
         // Always resume from the last known-good session id. An auth-failed
         // process can emit a synthetic init id that has no persisted history.
         let mut spec = base_spec.clone();
         spec.resume = resume.clone();
         let (attempt, failed_generation) = run_attempt(ctx, spec).await?;
-        if !attempt.auth_failed || ctx.profile.is_some() {
+        if !attempt.auth_failed {
+            state = attempt;
+            break;
+        }
+        if ctx.profile.is_some() {
+            signed_out = true;
+            ctx.push_error(
+                "Claude Code is signed out of this account. Sign in to it again, then retry this message."
+                    .to_string(),
+            );
             state = attempt;
             break;
         }
@@ -3368,7 +3525,16 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
             continue;
         }
 
+        signed_out = login_eligible_state(
+            snapshot.state,
+            snapshot.method,
+            snapshot.provider.as_deref(),
+            snapshot.credential_conflict,
+        );
         let detail = match auth {
+            HarnessAuthState::NeedsLogin if signed_out => {
+                "Claude Code is signed out. Sign in with `claude auth login`, then retry this message."
+            }
             HarnessAuthState::NeedsLogin => {
                 "Claude Code authentication needs attention. Check `claude auth status`, then retry this message."
             }
@@ -3410,7 +3576,12 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
             .rev()
             .find_map(|part| part.state.as_ref()?.error.clone())
             .unwrap_or_else(|| "Claude Code reported a terminal turn error".into());
-        ctx.mark_terminal_failure("claude_terminal", message);
+        let kind = if signed_out {
+            "claude_signed_out"
+        } else {
+            "claude_terminal"
+        };
+        ctx.mark_terminal_failure(kind, message);
     }
     let _ = ctx.flush();
     Ok(())
@@ -3605,6 +3776,112 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn a_steer_the_child_had_not_read_before_a_restart_is_recorded_once_where_it_reads_it() {
+        use crate::local::claude::tests::{
+            adopt_in, chat_with, leave_for_successor, ready_host, scripted_worker, type_line,
+        };
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        // The steer waits unread in the child's input until GO.
+        let script = r#"while IFS= read -r line; do
+            case "$line" in
+            *'"type":"user"'*)
+                if [ -z "$prompt" ]; then
+                    prompt="$line"
+                    printf '%s\n' "$line" '{"type":"system","subtype":"init","session_id":"native"}' '{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}'
+                fi ;;
+            GO)
+                printf '%s\n' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"files"}]}}' '{"type":"user","isReplay":true,"message":{"role":"user","content":[{"type":"text","text":"stop"}]}}' '{"type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"STOPPED"}]}}' '{"type":"result","subtype":"success","session_id":"native"}' ;;
+            esac
+        done"#;
+        let session = format!("resume-{}", uuid::Uuid::new_v4());
+        let store = crate::store::Store::open().unwrap();
+        crate::local::chat::steering_tests::add_chat_session(&store, &session);
+        let host = ready_host();
+        let chat = chat_with(&host);
+        let worker = scripted_worker(&host, &session, script, Arc::downgrade(&chat)).await;
+        let mut ctx = resumable_ctx(&chat, &session, "the prompt");
+        let (steer_tx, steering) =
+            crate::local::chat::SteerReceiver::for_test(chat.clone(), &session);
+        ctx.steering = Some(steering);
+        let spec = worker_spec(&ctx, &worker);
+        let (turn_id, message_id) = (ctx.turn_id.clone(), ctx.assistant.id.clone());
+        let first = tokio::spawn(async move { run_attempt(&mut ctx, spec).await.map(|_| ()) });
+        type Saved = (crate::store::StoredTurnCheckpoint, Vec<WirePart>);
+        let saved = || -> Option<Saved> {
+            let checkpoint = store.chat_turn_checkpoint(&turn_id).unwrap()?;
+            let parts: Vec<WirePart> = store
+                .get_chat_message(&message_id)
+                .unwrap()
+                .map(|message| serde_json::from_str(&message.parts_json).unwrap())
+                .unwrap_or_default();
+            Some((checkpoint, parts))
+        };
+        async fn reaches(saved: impl Fn() -> Option<Saved>, ready: impl Fn(&Saved) -> bool) {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while !saved().is_some_and(|saved| ready(&saved)) {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("the turn reaches its checkpoint");
+        }
+        reaches(&saved, |(_, parts)| {
+            parts.iter().any(|part| part.id == "t1")
+        })
+        .await;
+        let steer = crate::local::chat::SteerMessage {
+            id: format!("q_{}", uuid::Uuid::new_v4().simple()),
+            display: "stop".into(),
+            text: "stop".into(),
+            client_turn_id: None,
+            orx: None,
+            sent_at: 1,
+        };
+        chat.queue_steer(&session, &steer, &store).unwrap();
+        steer_tx.send(steer).unwrap();
+        reaches(&saved, |(checkpoint, _)| {
+            checkpoint.state_json.contains("\"steers\"")
+        })
+        .await;
+        first.abort();
+        let _ = first.await;
+        leave_for_successor(&worker);
+
+        let (checkpoint, parts) = saved().unwrap();
+        let successor = chat_with(&ready_host());
+        let adopted = adopt_in(&successor, &worker, Some(checkpoint.offset))
+            .await
+            .unwrap();
+        let mut ctx = resumable_ctx(&successor, &session, "the prompt, rendered anew");
+        ctx.assistant.parts = parts;
+        ctx.restore_checkpoint(&checkpoint).unwrap();
+        type_line(&adopted, "GO").await;
+        let spec = worker_spec(&ctx, &adopted);
+        let attempt =
+            tokio::time::timeout(Duration::from_secs(10), run_attempt(&mut ctx, spec)).await;
+        successor.claude.shutdown().await;
+        attempt.expect("the resumed turn ends").unwrap();
+
+        let steers: Vec<_> = ctx
+            .assistant
+            .parts
+            .iter()
+            .filter(|part| part.kind == "steer")
+            .map(|part| part.text.as_deref())
+            .collect();
+        assert_eq!(steers, [Some("stop")]);
+        assert_eq!(texts(&ctx), ["stop", "STOPPED"]);
+        assert!(successor.queued_items(&session).is_empty());
+        assert!(store
+            .list_queued_chat_messages_for_session(&session)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn a_turn_checkpointed_before_its_echo_resumes_without_sending_the_prompt_again() {
         // The prompt waits unread until GO, as a slow --resume start up would leave it.
         let script = r#"while IFS= read -r line; do
@@ -3628,12 +3905,94 @@ mod tests {
         assert_eq!(ctx.delivery_state(), DeliveryState::Accepted);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn signed_out_setup_exhaustion_reports_no_auth_detail() {
+        let mut ctx = TurnCtx::test_stub();
+        ctx.harness = "claude-code".into();
+        let probe = parse_auth_status(
+            Some(1),
+            br#"{"loggedIn":false,"authMethod":"none","apiProvider":"bedrock"}"#,
+            auth_barrier_sequence(),
+        );
+        ctx.host.claude.observe_auth_probe(&probe);
+        assert!(ctx
+            .exhausted_retry_properties("orx", "claude_setup")
+            .is_none());
+        let spec = SpawnSpec {
+            chat: ctx.host.clone(),
+            session_id: ctx.session_id.clone(),
+            repo: PathBuf::new(),
+            playbook: PathBuf::new(),
+            resume: None,
+            fork_at: None,
+            config: spawn_config(&ctx, NativeStore::Isolated),
+        };
+        assert!(run_attempt(&mut ctx, spec).await.is_err());
+        let (kind, local_message) = ctx.terminal_error.as_ref().unwrap();
+        assert_eq!(kind, "claude_setup");
+        assert!(!local_message.is_empty());
+        assert_eq!(
+            ctx.exhausted_retry_properties("orx", kind),
+            Some(json!({
+                "harness": "claude-code", "owner": "orx", "reason": "claude_setup_sign_in",
+                "attempt": ORX_MAX_ATTEMPTS
+            }))
+        );
+    }
+
     fn texts(ctx: &TurnCtx) -> Vec<&str> {
         ctx.assistant
             .parts
             .iter()
             .filter_map(|part| part.text.as_deref())
             .collect()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn a_signed_out_claude_fails_the_turn_once_without_sending_it() {
+        let claude = Arc::new(crate::local::claude::ClaudeHost::new());
+        let signed_out = parse_auth_status(
+            Some(1),
+            br#"{"loggedIn":false,"authMethod":"none","apiProvider":"firstParty"}"#,
+            1,
+        );
+        assert!(claude.observe_auth_probe(&signed_out));
+        let mut ctx = TurnCtx::test_stub();
+        ctx.host = Arc::new(crate::local::chat::ChatHost::new(
+            Arc::new(crate::local::opencode::AgentHost::new(None)),
+            Arc::new(crate::local::codex::CodexHost::new()),
+            claude.clone(),
+        ));
+        ctx.text = "hello".into();
+        let spec = SpawnSpec {
+            chat: ctx.host.clone(),
+            session_id: ctx.session_id.clone(),
+            repo: PathBuf::new(),
+            playbook: PathBuf::new(),
+            resume: None,
+            fork_at: None,
+            config: crate::local::claude::SpawnConfig {
+                permission_mode: None,
+                effort: None,
+                model: None,
+                native_store: NativeStore::Isolated,
+                profile: None,
+                alphaxiv_signed_in: false,
+                bridge_active: false,
+                bin: None,
+            },
+        };
+
+        let started = tokio::time::Instant::now();
+        let attempt = run_attempt(&mut ctx, spec).await;
+
+        assert!(attempt.is_err());
+        // No retry: the first would wait out at least 750ms of backoff.
+        assert!(started.elapsed() < Duration::from_millis(750));
+        assert_eq!(ctx.delivery_state(), DeliveryState::NotSent);
+        let (kind, _) = ctx.terminal_error.clone().unwrap();
+        assert_eq!(kind, "claude_signed_out");
     }
 
     #[cfg(unix)]
@@ -4059,6 +4418,7 @@ mod tests {
             note: note.map(str::to_string),
             annotations: Vec::new(),
             from: None,
+            env: Vec::new(),
         }
     }
 
@@ -4278,6 +4638,55 @@ mod tests {
             }
         }
         state
+    }
+
+    #[test]
+    fn a_steer_is_recorded_where_the_model_reads_it() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let mut ctx = TurnCtx::test_stub();
+        let mut state = TurnState::default();
+        let store = crate::store::Store::open().unwrap();
+        crate::local::chat::steering_tests::add_chat_session(&store, &ctx.session_id);
+        let steer = crate::local::chat::SteerMessage {
+            id: "q_stop".into(),
+            display: "stop".into(),
+            text: "stop".into(),
+            client_turn_id: None,
+            orx: None,
+            sent_at: 1,
+        };
+        ctx.host
+            .queue_steer(&ctx.session_id, &steer, &store)
+            .unwrap();
+        for event in [
+            serde_json::json!({"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"sleep 20"}}]}}),
+            serde_json::json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"done"}]}}),
+        ] {
+            apply_event(&mut ctx, &mut state, &event);
+        }
+        assert!(ctx.assistant.parts.iter().all(|part| part.kind != "steer"));
+        assert_eq!(
+            ctx.host.queued_items(&ctx.session_id)[0]["dispatchState"],
+            "steering"
+        );
+
+        apply_event(
+            &mut ctx,
+            &mut state,
+            &serde_json::json!({"type":"user","isReplay":true,"message":{"role":"user","content":[{"type":"text","text":"stop"}]}}),
+        );
+        let last = ctx.assistant.parts.last().unwrap();
+        assert_eq!(
+            (last.kind.as_str(), last.text.as_deref()),
+            ("steer", Some("stop"))
+        );
+        assert!(ctx.host.queued_items(&ctx.session_id).is_empty());
+        assert!(store
+            .list_queued_chat_messages_for_session(&ctx.session_id)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

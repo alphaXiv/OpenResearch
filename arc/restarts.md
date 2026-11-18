@@ -41,6 +41,7 @@ When a server starts, every turn still running resumes if its keeper is alive an
 
 - **A side effect is checkpointed after it happens.** An answer written to an agent (an approval, a file read, a terminal result) is followed by a checkpoint. A successor that resumes before it answers the request again, which an agent ignores; one that never answered would leave the agent waiting forever.
 - **Requests in flight survive.** An agent's request that the checkpoint holds unanswered is answered by the successor; an approval reappears as the same card. orx's own requests still awaiting an answer are in the checkpoint too, so their answers are recognized, and a successor numbers new requests where its predecessor's cannot collide.
+- **Unread steers stay with the turn.** A steer written to an agent is in the checkpoint until the agent reads it; a successor holds it again, so the agent reading it records it in place rather than the queue running it a second time.
 
 ## Idle agents are adopted
 

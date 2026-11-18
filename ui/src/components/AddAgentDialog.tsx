@@ -2,9 +2,8 @@ import { useWorkspace } from "../workspace";
 import { mutUpdateUiState } from "../queries/settings";
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from "react";
 import { useQuery, type QueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Check, ChevronDown, CircleCheck, Copy, CreditCard, KeyRound, Laptop, Link2, Plus, RefreshCw, Search, TriangleAlert } from "lucide-react";
+import { ArrowLeft, Check, ChevronDown, CircleCheck, CreditCard, KeyRound, Laptop, Link2, Plus, Search, TriangleAlert } from "lucide-react";
 import {
-  OpenCode1Error,
   harnessModelLabel,
   tidyModelName,
   type AcpDefinition,
@@ -19,7 +18,6 @@ import {
   type OpenCodeSignIn,
 } from "../api";
 import type { DialogContentProps } from "../dialog";
-import { copyToClipboard } from "../clipboard";
 import { fmtNumber, ltr } from "../i18n";
 
 import { m } from "../paraglide/messages.js";
@@ -27,9 +25,10 @@ import { agentModelLines, modelsAvailable } from "../modelSelection";
 import { AcpAuth } from "./AcpAuthDialog";
 import { AgentIconButton, BRAND_ICON } from "./AgentIcon";
 import { BrandMark, HarnessLogo, logoMark, ModelMark, type Brand } from "./HarnessLogo";
-import { HarnessSetup, SignInSteps } from "./HarnessSetupDialog";
+import { DeviceCode, HarnessSetup, SignInSteps } from "./HarnessSetupDialog";
 import { EndpointMark, LocalModelGuide, useLocalModelForm } from "./LocalModelSetup";
 import { renderNote } from "./agentNote";
+import { RefreshAgents, useAgentRefresh } from "./RefreshAgents";
 import { Button, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, Input, Spinner, Switch } from "./ui";
 import { cn } from "./ui/cn";
 
@@ -42,8 +41,11 @@ export function sortHarnesses(harnesses: Harness[]) {
 export function canConfigureHarness(harness: Harness, remote: boolean, commands?: HarnessSetupCommands) {
   if (harness.needsConfigRepair) return false;
   if (harness.id.startsWith("acp:") && harness.installed && !harness.adapterMissing) return true;
-  if (remote || !commands || (harness.logo === "zcode-acp-server" && !harness.installed && !harness.adapterMissing)) return false;
-  return !harness.installed || harness.installBroken || harness.adapterMissing || harness.authState === "unsupported" || (harness.authState === "needsLogin" && (harness.id !== "claude-code" || harness.loginEligible));
+  if (!commands || (harness.logo === "zcode-acp-server" && !harness.installed && !harness.adapterMissing)) return false;
+  const signIn = harness.authState === "needsLogin" && (harness.id !== "claude-code" || harness.loginEligible);
+  // A remote machine signs its agents in here; installing or updating one is the machine's own setup.
+  if (remote) return signIn && harness.installed && !harness.installBroken && !harness.adapterMissing;
+  return !harness.installed || harness.installBroken || harness.adapterMissing || harness.authState === "unsupported" || signIn;
 }
 
 /** OpenCode's version as the server reads it, from output like `opencode v2.2.5` or `1.18.35`. */
@@ -262,6 +264,8 @@ const STEPS: Step[] = ["provider", "signin", "name"];
  * sign-in or endpoint model the user already had, which leaving keeps. */
 type Saved =
   | { kind: "profile"; id: string; name: string }
+  /** The user's own Claude Code or Codex, signed in here as their first account; leaving keeps it. */
+  | { kind: "own"; name: string }
   | { kind: "provider"; id: string; name: string; replaced?: boolean }
   | { kind: "endpoint"; id: string; model: string; name: string; replaced: boolean };
 
@@ -303,8 +307,6 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
   /** What OpenCode asks before a sign-in starts, such as GitHub's deployment type. */
   const [questions, setQuestions] = useState<{ signIn: OAuthSignIn; from: AgentTile; fields: OpenCodeFormField[] } | null>(null);
   const [answers, setAnswers] = useState<Record<string, OpenCodeAnswer>>({});
-  /** A request OpenCode 1 refused, until it's updated. */
-  const [refused, setRefused] = useState(false);
   const [name, setName] = useState("");
   /** Null until the user picks one: the tile's mark on its colour. */
   const [icon, setIcon] = useState<AgentIcon | null>(null);
@@ -335,7 +337,6 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
     enabled: opencodeReady && (expanded || method?.kind === "opencode" || method?.kind === "oauth"),
     staleTime: 60_000,
   });
-  const needsOpenCode2 = refused || opencodeMajor(opencode) === 1 || integrations.error instanceof OpenCode1Error;
   const listing = tile?.methods.find((signIn) => signIn.kind === "opencode");
   const entry = listing && integrations.data?.find((item) => item.id === listing.id);
   // How OpenCode signs in to a provider from its list, sign-ins before keys.
@@ -367,10 +368,12 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
   const customAcp: AgentTile = { id: "custom-acp", name: m.harness_custom_acp(), mark: { icon: "custom" }, methods: [] };
 
   const methodHarness = method ? harnessFor(method) : undefined;
+  const recheck = useAgentRefresh(methodHarness?.id ?? "opencode", step);
   // An agent already working when its sign-in began stays listed; one this dialog signs in waits for it to finish.
   const workingAtStart = useRef(new Map<string, boolean>());
   if (methodHarness && !workingAtStart.current.has(methodHarness.id)) workingAtStart.current.set(methodHarness.id, methodHarness.agentReady && !methodHarness.authCheckFailed);
   const adding = saved?.kind === "profile" ? saved.id
+    : saved?.kind === "own" ? methodHarness?.id ?? null
     : saved && !saved.replaced ? `opencode:${saved.id}`
     : (method?.kind === "agent" || method?.kind === "native") && methodHarness && !workingAtStart.current.get(methodHarness.id) ? methodHarness.id : null;
   useEffect(() => onAdding?.(adding), [adding]);
@@ -389,7 +392,7 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
   useEffect(() => {
     const target = bodyRef.current?.querySelector<HTMLElement>("input:not([type=hidden]), [data-autofocus]") ?? bodyRef.current;
     target?.focus();
-  }, [step, method, ways.length, needsOpenCode2]);
+  }, [step, method, ways.length]);
 
   // Saved keys and endpoints reach OpenCode's catalog only once it re-checks. Before paint, so the step never
   // shows the catalog from before the sign-in.
@@ -406,13 +409,12 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
     setError(null);
     try { await action(); }
     catch (cause) {
-      if (cause instanceof OpenCode1Error) setRefused(true);
-      else setError(cause instanceof Error ? cause.message : String(cause));
+      setError(cause instanceof Error ? cause.message : String(cause));
     }
     finally { setBusy(false); }
   };
 
-  /** Claude Code and Codex always sign in to an account of OpenResearch's own. */
+  /** Claude Code and Codex sign in to an account of OpenResearch's own beside the user's own install, once that works. */
   const createProfile = (signIn: Extract<SignIn, { kind: "profile" }>, from: AgentTile) => run(async () => {
     // Named as the agent is elsewhere, so a second Codex account reads "Codex 2" rather than its tile's "OpenAI Codex".
     const agentName = harnesses.find((h) => h.id === signIn.harness && !h.profile)?.name ?? from.name;
@@ -438,10 +440,20 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
     setName(recordName);
   });
   /** What a sign-in does first, once OpenCode can take it. */
-  const begin = (signIn: SignIn | null, from: AgentTile, canSignIn = opencodeReady && !needsOpenCode2) => {
-    if (signIn?.kind === "profile" && !remote) {
-      const create = () => createProfile(signIn, from);
-      void (signIn.harness === "claude-code" ? warnFirst(create, () => leave("provider")) : create());
+  const begin = (signIn: SignIn | null, from: AgentTile, canSignIn = opencodeReady) => {
+    if (signIn?.kind === "profile") {
+      // The first account is the user's own install's: it signs in there, and OpenResearch keeps no copy.
+      const own = harnesses.find((h) => h.id === signIn.harness && !h.profile);
+      // A Claude Code its provider signs in elsewhere takes no account login of its own.
+      const ownSignIn = own && !own.authenticated && (!own.installed || own.id !== "claude-code" || own.loginEligible);
+      const start = ownSignIn
+        ? () => {
+          const name = own.label?.name ?? own.name;
+          setSaved({ kind: "own", name });
+          setName(name);
+        }
+        : () => createProfile(signIn, from);
+      void (signIn.harness === "claude-code" ? warnFirst(start, () => leave("provider")) : start());
     }
     if (signIn?.kind === "oauth" && canSignIn) void startOAuth(signIn, from);
   };
@@ -538,15 +550,15 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
     const trimmed = name.trim();
     if (saved && (trimmed !== saved.name || icon || pinnedLogo)) {
       const changes = { ...(trimmed !== saved.name ? { name: trimmed } : {}), ...(icon ? { icon } : {}), ...(pinnedLogo ? { logo: pinnedLogo } : {}) };
-      await api.updateAgent(saved.kind === "profile" ? saved.id : `opencode:${saved.id}`, changes);
+      await api.updateAgent(saved.kind === "profile" ? saved.id : saved.kind === "own" ? methodHarness?.id ?? "" : `opencode:${saved.id}`, changes);
     }
     const hiddenAgents = uiState.data?.hiddenAgents ?? [];
-    const turnedOn = method?.kind === "agent" || method?.kind === "native" ? methodHarness?.id : undefined;
+    const turnedOn = method?.kind === "agent" || method?.kind === "native" || saved?.kind === "own" ? methodHarness?.id : undefined;
     if (turnedOn && hiddenAgents.includes(turnedOn)) mutUpdateUiState.run(workspace, { hiddenAgents: hiddenAgents.filter((id) => id !== turnedOn) });
     if (tile?.id === "opencode-go" && uiState.data?.opencodeFreeModels && hideFreeModels)
       mutUpdateUiState.runWithOptions(workspace, { opencodeFreeModels: false }, { onSuccessData: () => void refreshHarness("opencode").catch(() => {}) });
     confirm(saved?.kind === "profile" && method?.kind === "profile" ? { harness: method.harness, profile: saved.id }
-      : backedByOpenCode ? { harness: "opencode", ...(saved ? { provider: saved.id } : {}) }
+      : backedByOpenCode ? { harness: "opencode", ...(saved && saved.kind !== "own" ? { provider: saved.id } : {}) }
         : { harness: methodHarness?.id ?? "opencode" });
   });
 
@@ -595,13 +607,12 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
         : m.add_agent_sign_in_title({ name: tile.name });
   const logo = (size: number) => tile?.id === "endpoint" || (tile?.id === "local" && localFound) ? <EndpointMark server={endpoint.server} size={size} /> : tile && <TileMark tile={tile} size={size} />;
 
-  /** OpenCode 2 is there to sign in with, or what it takes to get it. */
+  /** OpenCode is there to sign in with, or what it takes to get it. */
   const opencodeGate = (): ReactNode => {
-    if (opencodeReady && !needsOpenCode2) return null;
+    if (opencodeReady) return null;
     const commands = setupCommands.data?.opencode;
     if (remote || !opencode || !commands) return <p className="m-0 text-sm text-subtext">{m.settings_needs_opencode()}</p>;
-    const ready = () => { setRefused(false); if (tile) begin(method, tile, true); };
-    if (needsOpenCode2) return <OpenCodeUpdate key="opencode-update" opencode={opencode} commands={commands} disabled={isDisabled} onReady={ready} />;
+    const ready = () => { if (tile) begin(method, tile, true); };
     return <HarnessSetup key="opencode-install" harness={opencode} commands={commands} action="install" disabled={isDisabled} onReady={ready} />;
   };
 
@@ -748,16 +759,17 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
     const commands = setupCommands.data?.[methodHarness.id];
     const starting = <p role="status" className="m-0 flex items-center gap-2 text-sm text-subtext"><Spinner />{m.harness_setup_signin_starting()}</p>;
     body = signedIn ? <SignedIn />
-      : remote || setupCommands.isError ? <AgentSignIn harness={methodHarness} remote={remote} disabled={isDisabled} onReady={() => {}} onEdit={() => {}} />
+      // A remote machine signs agents in here; installing one there is its own setup's.
+      : setupCommands.isError || (remote && !methodHarness.installed) ? <AgentSignIn harness={methodHarness} remote={remote} disabled={isDisabled} onReady={() => {}} onEdit={() => {}} />
         : !commands ? starting
-        : saved?.kind === "profile" ? (
+        : saved?.kind === "profile" || saved?.kind === "own" ? (
           <HarnessSetup
-            key={saved.id}
+            key={saved.kind === "profile" ? saved.id : saved.kind}
             harness={methodHarness}
             commands={commands}
             // Installing, updating, or repairing the agent comes first; the sign-in is the account's.
             action={methodHarness.installed && !methodHarness.installBroken && methodHarness.authState !== "unsupported" ? "login" : undefined}
-            profile={saved.id}
+            profile={saved.kind === "profile" ? saved.id : undefined}
             disabled={isDisabled}
             onReady={() => { setSignedIn(true); setStep("name"); }}
           />
@@ -790,6 +802,8 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
       saved?.kind === "provider" ? opencode?.models.filter((model) => model.id.startsWith(`${saved.id}/`)) ?? []
         : saved?.kind === "endpoint" ? opencode?.models.filter((model) => model.id === `${saved.id}/${saved.model}`) ?? []
           : (profileEntry ?? methodHarness)?.models ?? [];
+    const noModels = modelsReady && listed.length === 0;
+    const recheckLabel = noModels || recheck.isPending || recheck.error ? m.onboarding_re_check() : null;
     body = <div className="space-y-5">
       {saved && (
         <div className="flex items-end gap-3">
@@ -809,20 +823,20 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
           </label>
         </div>
       )}
-      {backedByOpenCode && !opencodeReady ? (
-        <p className="m-0 text-sm text-subtext">{m.settings_needs_opencode()}</p>
-      ) : !modelsReady ? (
-        <p role="status" className="m-0 flex items-center gap-2 text-sm text-subtext"><Spinner />{m.add_agent_models_loading()}</p>
-      ) : listed.length > 0 ? (
-        <ModelList models={listed} harness={methodHarness?.id} owner={saved?.kind === "provider" ? saved.name : undefined} />
-      ) : (
-        <p role="status" className="m-0 text-sm text-accent-amber">
-          {saved?.kind === "endpoint" ? m.local_models_config_restricted() : backedByOpenCode ? m.add_agent_models_none() : m.settings_no_models()}{" "}
-          <Button variant="ghost" size="small" onClick={() => { setChecking(true); void refreshHarness(methodHarness?.id ?? "opencode").catch(() => {}).finally(() => setChecking(false)); }}>
-            <RefreshCw size={14} />{m.onboarding_re_check()}
-          </Button>
-        </p>
-      )}
+      <div className="space-y-2">
+        {backedByOpenCode && !opencodeReady ? (
+          <p className="m-0 text-sm text-subtext">{m.settings_needs_opencode()}</p>
+        ) : !modelsReady ? (
+          <p role="status" className="m-0 flex items-center gap-2 text-sm text-subtext"><Spinner />{m.add_agent_models_loading()}</p>
+        ) : noModels ? (
+          <p role="status" className="m-0 text-sm text-accent-amber">
+            {saved?.kind === "endpoint" ? m.local_models_config_restricted() : backedByOpenCode ? m.add_agent_models_none() : m.settings_no_models()}
+          </p>
+        ) : (
+          <ModelList models={listed} harness={methodHarness?.id} owner={saved?.kind === "provider" ? saved.name : undefined} />
+        )}
+        <RefreshAgents refresh={recheck} disabled={disabled} label={recheckLabel} />
+      </div>
       {tile.id === "opencode-go" && uiState.data?.opencodeFreeModels && (
         <div className="flex items-center gap-3">
           <div className="min-w-0 flex-1">
@@ -835,7 +849,7 @@ export function AddAgentDialog({ remote, host, tile: opening, hideRecommended = 
       {backedByOpenCode && opencodeReady && <p className="m-0 text-xs text-subtext">{m.settings_runs_on_opencode({ version: opencodeVersion(opencode) ?? "2" })}</p>}
     </div>;
     const label = saved ? name.trim() : tile.name;
-    primary = <Button variant="primary" disabled={!modelsReady || !label || disabled} onClick={() => void finish()}>
+    primary = <Button variant="primary" disabled={!modelsReady || !label || disabled || recheck.isPending} onClick={() => void finish()}>
       {busy && <Spinner />}{m.add_agent_finish({ name: label })}
     </Button>;
   }
@@ -1104,12 +1118,7 @@ function OAuthPanel({ signIn, disabled, onComplete, onRetry }: {
   const deviceCode = signIn.mode === "auto" ? /\bcode:?\s+([A-Z0-9]{3,}(?:-[A-Z0-9]{3,})+)\b/i.exec(signIn.instructions)?.[1] : undefined;
   return <div className="flex flex-col gap-3">
     <SignInSteps url={signIn.url} message={deviceCode ? m.add_agent_oauth_device_steps : signIn.mode === "code" ? m.harness_setup_signin_steps_code : m.harness_setup_signin_steps} />
-    {deviceCode ? (
-      <div className="flex items-center gap-2">
-        <code className="flex h-8 items-center rounded-md border border-border bg-surface px-3 font-mono text-lg tracking-widest select-all">{deviceCode}</code>
-        <Button data-autofocus onClick={() => void copyToClipboard(deviceCode)}><Copy size={14} aria-hidden="true" />{m.md_copy()}</Button>
-      </div>
-    ) : signIn.mode === "auto" && signIn.instructions && <p className="m-0 text-sm text-subtext select-text wrap-anywhere">{renderNote(signIn.instructions)}</p>}
+    {deviceCode ? <DeviceCode code={deviceCode} /> : signIn.mode === "auto" && signIn.instructions && <p className="m-0 text-sm text-subtext select-text wrap-anywhere">{renderNote(signIn.instructions)}</p>}
     {signIn.mode === "code" && !ended && (
       <form className="grid gap-1.5" onSubmit={(event) => { event.preventDefault(); void send(); }}>
         <label htmlFor={codeId} className="text-sm text-subtext">{m.harness_setup_signin_code()}</label>
@@ -1157,22 +1166,6 @@ export function OpenCodeSignInDialog({ name, first, start, confirm, cancel, isDi
   </DialogContent>;
 }
 
-/** OpenCode 1 can't add providers. */
-function OpenCodeUpdate({ opencode, commands, disabled, onReady }: {
-  opencode: Harness;
-  commands: HarnessSetupCommands;
-  disabled: boolean;
-  onReady: () => void;
-}) {
-  const [updating, setUpdating] = useState(false);
-  if (updating) return <HarnessSetup harness={opencode} commands={commands} action="upgrade" disabled={disabled} onReady={onReady} />;
-  return <form className="space-y-3" onSubmit={(event) => { event.preventDefault(); setUpdating(true); }}>
-    <p className="m-0 text-sm font-medium">{m.opencode_update_title()}</p>
-    <p className="m-0 text-sm text-subtext">{m.opencode_update_description({ version: opencodeVersion(opencode) ?? "1" })}</p>
-    <Button type="submit" variant="primary" data-autofocus disabled={disabled}>{m.opencode_update()}</Button>
-  </form>;
-}
-
 /** An agent's own setup: install, then its sign-in; or what blocks it here. */
 function AgentSignIn({ harness, commands, remote, disabled, definition, formId, onReady, onEdit }: {
   harness: Harness;
@@ -1184,9 +1177,8 @@ function AgentSignIn({ harness, commands, remote, disabled, definition, formId, 
   onReady: () => void;
   onEdit: (definition: AcpDefinition) => void;
 }) {
-  const { refreshHarnesses } = useWorkspace().queries;
   const [auth, setAuth] = useState<Harness | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
+  const refresh = useAgentRefresh();
 
   if (auth || (harness.id.startsWith("acp:") && harness.installed && !harness.adapterMissing)) {
     return <AcpAuth harness={auth ?? harness} remote={remote} disabled={disabled} formId={formId} onReady={onReady} />;
@@ -1199,12 +1191,10 @@ function AgentSignIn({ harness, commands, remote, disabled, definition, formId, 
     <p className="m-0 text-sm text-subtext" role="status">
       {needsZCode ? m.harness_zcode_required() : renderNote(harness.agentNote) ?? m.harness_install_help({ name: harness.name })}
     </p>
-    <div className="flex flex-wrap items-center gap-2">
-      <Button onClick={() => { setRefreshing(true); void refreshHarnesses(true, true).catch(() => {}).finally(() => setRefreshing(false)); }} disabled={refreshing}>
-        <RefreshCw size={14} />{m.settings_page_refresh()}
-      </Button>
+    <div className="flex flex-wrap items-start gap-2">
+      <RefreshAgents refresh={refresh} disabled={disabled} />
       {harness.setupUrl && (
-        <a href={needsZCode ? "https://zcode.z.ai/en/docs/install" : harness.setupUrl} target="_blank" rel="noreferrer" className="text-sm text-accent-blue-strong underline">{m.acp_setup_docs()}</a>
+        <a href={needsZCode ? "https://zcode.z.ai/en/docs/install" : harness.setupUrl} target="_blank" rel="noreferrer" className="py-1.5 text-sm text-accent-blue-strong underline">{m.acp_setup_docs()}</a>
       )}
       {definition && !harness.setupUrl && <Button onClick={() => onEdit(definition)}>{m.activity_edit()}</Button>}
     </div>

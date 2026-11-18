@@ -21,6 +21,7 @@ use crate::keep::KeptHandle;
 
 use crate::error::{anyhow, Context, Result};
 use crate::local::git;
+use crate::local::harness::PermissionMode;
 use crate::local::model::LocalProject;
 use crate::local::native_store::{self, NativeStore};
 use crate::store;
@@ -29,10 +30,10 @@ use crate::store;
 mod runtime;
 pub(crate) use runtime::{
     prepare_database, resolve_binary, resolve_binary_at, start_server, user_binary, AgentEndpoint,
-    Protocol, ResolvedBinary, ServerChild,
+    ResolvedBinary, ServerChild,
 };
 
-/// The harness id kept servers are recorded under, for both protocols.
+/// The harness id kept servers are recorded under.
 const HARNESS: &str = "opencode";
 
 /// Playbook path inside the session worktree; opencode re-reads it every turn,
@@ -98,7 +99,6 @@ pub fn agent_log_path() -> PathBuf {
 fn opencode_config_json(
     model: Option<&str>,
     instructions: &str,
-    plugin: Option<&str>,
     mcp: Option<&crate::local::chat::delegation::McpServer>,
 ) -> Result<String> {
     let mut cfg = json!({
@@ -121,9 +121,6 @@ fn opencode_config_json(
         // A name of orx's own keeps a user's `alphaxiv` server from merging into this one.
         "mcp":{"orx_alphaxiv":{"type":"local", "command":[crate::paths::spawnable_exe()?, "alphaxiv-mcp"], "timeout":300000}},
     });
-    if let Some(plugin) = plugin {
-        cfg["plugin"] = json!([plugin]);
-    }
     if let Some(model) = model {
         cfg["model"] = json!(model);
     }
@@ -381,23 +378,11 @@ fn write_agent_files(
     model: Option<&str>,
     session_id: &str,
     up_port: Option<u16>,
-    protocol: Protocol,
 ) -> Result<(PathBuf, Option<PathBuf>)> {
     // Source of truth for the session-skills dir is the harness trait.
     use crate::local::harness::Harness;
     let skills_dir = crate::local::harness::opencode::OpenCode.session_skills_dir();
     let (repo, playbook) = ensure_playbook(project, session_id, skills_dir)?;
-    let plugin = if protocol == Protocol::V1 {
-        let path = repo.join(".openresearch/agent/invocation.mjs");
-        std::fs::write(&path, include_str!("opencode_invocation.mjs"))?;
-        Some(
-            reqwest::Url::from_file_path(&path)
-                .map_err(|_| anyhow!("Invalid invocation plugin path"))?
-                .to_string(),
-        )
-    } else {
-        None
-    };
     let mcp = up_port
         .map(|port| crate::local::chat::delegation::mcp_server(session_id, port))
         .transpose()?;
@@ -409,19 +394,14 @@ fn write_agent_files(
             .join("opencode.json");
         std::fs::write(
             &path,
-            opencode_config_json(
-                model,
-                &playbook.to_string_lossy(),
-                plugin.as_deref(),
-                mcp.as_ref(),
-            )?,
+            opencode_config_json(model, &playbook.to_string_lossy(), mcp.as_ref())?,
         )
         .map_err(|e| anyhow!("Could not write {}: {}", path.display(), e))?;
         Some(path)
     } else {
         std::fs::write(
             repo.join("opencode.json"),
-            opencode_config_json(model, PLAYBOOK_REL, plugin.as_deref(), mcp.as_ref())?,
+            opencode_config_json(model, PLAYBOOK_REL, mcp.as_ref())?,
         )
         .map_err(|e| anyhow!("Could not write opencode.json: {}", e))?;
         None
@@ -442,7 +422,6 @@ pub struct AgentStatus {
     pub session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    pub protocol: Protocol,
 }
 
 /// What a kept server's `owner.json` records: everything [`AgentHost::ensure`] compares to
@@ -461,15 +440,14 @@ struct Resident {
     database: PathBuf,
     base_url: String,
     legacy_v2_api: bool,
-    password: Option<String>,
+    password: String,
 }
 
 impl Resident {
     fn endpoint(&self) -> Result<AgentEndpoint> {
         Ok(AgentEndpoint {
             base_url: self.base_url.clone(),
-            client: runtime::server_client(self.password.as_deref())?,
-            protocol: self.binary.protocol,
+            client: runtime::server_client(&self.password)?,
             legacy_v2_api: self.legacy_v2_api,
         })
     }
@@ -503,7 +481,6 @@ impl AgentChild {
             project_id: Some(self.resident.project_id.clone()),
             session_id: Some(self.session_id.clone()),
             model: self.resident.model.clone(),
-            protocol: self.resident.binary.protocol,
         }
     }
 
@@ -532,9 +509,8 @@ async fn spawn_agent(
     let (repo, config_override) = {
         let (project, model) = (project.clone(), model.map(str::to_string));
         let session = session_id.to_string();
-        let protocol = binary.protocol;
         tokio::task::spawn_blocking(move || {
-            write_agent_files(&project, model.as_deref(), &session, up_port, protocol)
+            write_agent_files(&project, model.as_deref(), &session, up_port)
         })
         .await
         .map_err(|e| anyhow!("agent file task failed: {e}"))??
@@ -548,7 +524,7 @@ async fn spawn_agent(
     cmd.current_dir(&repo);
     // This orx first on PATH (the agent shells out to plain `orx`), the imported
     // shell environment, and the dashboard's Environment tab vars.
-    crate::local::local_models::prepare_generation_env(&mut cmd, model, binary.protocol)?;
+    prepare_chat_env(&mut cmd, model, session_id)?;
     let config = launch_config(&cmd);
     cmd.env("OPENCODE_DB", database.path())
         .env("OPENCODE_DISABLE_AUTOUPDATE", "1");
@@ -607,6 +583,43 @@ async fn spawn_agent(
     })
 }
 
+/// What a permission mode makes ask: everything that changes something in
+/// Manual, shell commands and anything outside the worktree in Auto, which orx
+/// then reviews, and nothing in Full access.
+fn asks(mode: PermissionMode) -> &'static [&'static str] {
+    match mode {
+        PermissionMode::Ask => &[
+            "edit",
+            "bash",
+            "webfetch",
+            "websearch",
+            "external_directory",
+        ],
+        PermissionMode::Auto => &["bash", "external_directory"],
+        _ => &[],
+    }
+}
+
+/// The server's environment: its models, and what its chat's mode asks. The mode
+/// rides the inline config, not the worktree's config file, which side chats and
+/// delegates share and OpenCode reloads live; a mode switch changes the inline
+/// config, which restarts the server.
+fn prepare_chat_env(
+    cmd: &mut tokio::process::Command,
+    model: Option<&str>,
+    session_id: &str,
+) -> Result<()> {
+    use crate::local::harness::{effective_permission_id, permission_mode_for};
+    crate::local::local_models::prepare_generation_env(cmd, model)?;
+    let stored = crate::store::Store::open()?
+        .get_chat_session(session_id)?
+        .and_then(|session| session.permission_mode);
+    let mode = effective_permission_id("opencode", stored.as_deref())
+        .and_then(|id| permission_mode_for("opencode", &id))
+        .unwrap_or(PermissionMode::Bypass);
+    crate::local::local_models::merge_permission_asks(cmd, asks(mode))
+}
+
 /// A digest of the inline config `cmd` passes, so a changed provider key restarts the server
 /// without the key being recorded.
 fn launch_config(cmd: &tokio::process::Command) -> Option<String> {
@@ -627,33 +640,26 @@ async fn verify_generation_models_with_timeout(
     model: &str,
     timeout: Duration,
 ) -> Result<()> {
-    let path = match endpoint.protocol {
-        Protocol::V1 => "/agent",
-        Protocol::V2 => "/api/agent",
-    };
+    let path = "/api/agent";
     let mut mismatch = None;
     tokio::time::timeout(timeout, async {
         loop {
             let response: Value = endpoint.client.get(format!("{}{path}", endpoint.base_url))
                 .send().await?.error_for_status()?.json().await?;
-            let agents = match endpoint.protocol {
-                Protocol::V1 => response.as_array(),
-                Protocol::V2 => response.get("data").and_then(Value::as_array),
-            }.ok_or_else(|| anyhow!("OpenCode returned no effective agent configuration"))?;
+            let agents = response.get("data").and_then(Value::as_array)
+                .ok_or_else(|| anyhow!("OpenCode returned no effective agent configuration"))?;
             if agents.is_empty() {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 continue;
             }
             mismatch = None;
             for name in ["title", "compaction"] {
-                let id_key = if endpoint.protocol == Protocol::V1 { "name" } else { "id" };
-                let Some(agent) = agents.iter().find(|agent| agent[id_key] == name) else {
+                let Some(agent) = agents.iter().find(|agent| agent["id"] == name) else {
                     continue;
                 };
                 let configured = agent.get("model");
-                let model_key = if endpoint.protocol == Protocol::V1 { "modelID" } else { "id" };
                 let actual = configured.and_then(|value| Some(format!("{}/{}",
-                    value.get("providerID")?.as_str()?, value.get(model_key)?.as_str()?)));
+                    value.get("providerID")?.as_str()?, value.get("id")?.as_str()?)));
                 if actual.as_deref() != Some(model) {
                     mismatch = Some(name);
                     break;
@@ -836,13 +842,12 @@ impl AgentHost {
         let Some(endpoint) = self.endpoint_for(session_id).await else {
             return Ok(());
         };
-        let path = match endpoint.protocol {
-            Protocol::V1 => format!("/session/{native_id}/abort"),
-            Protocol::V2 => format!("/api/session/{native_id}/interrupt"),
-        };
         endpoint
             .client
-            .post(format!("{}{path}", endpoint.base_url))
+            .post(format!(
+                "{}/api/session/{native_id}/interrupt",
+                endpoint.base_url
+            ))
             .timeout(Duration::from_secs(2))
             .json(&json!({}))
             .send()
@@ -956,20 +961,7 @@ impl AgentHost {
             return Ok(SummarizeOutcome::ModelChanged);
         }
         verify_generation_models(&endpoint, model.unwrap_or_default()).await?;
-        if endpoint.protocol == Protocol::V2 {
-            compact_v2(&endpoint, native_id, provider, model_id).await?;
-            return Ok(SummarizeOutcome::Compacted);
-        }
-        endpoint
-            .client
-            .post(format!(
-                "{}/session/{native_id}/summarize",
-                endpoint.base_url
-            ))
-            .json(&json!({ "providerID": provider, "modelID": model_id }))
-            .send()
-            .await?
-            .error_for_status()?;
+        compact_v2(&endpoint, native_id, provider, model_id).await?;
         Ok(SummarizeOutcome::Compacted)
     }
 
@@ -1019,17 +1011,8 @@ impl AgentHost {
         } = runtime;
         let model = self.selected_model(model);
         let database_path = native_store::opencode_database::normalize_path(&database_path)?;
-        if binary.protocol == Protocol::V1 {
-            let path = database_path.clone();
-            drop(
-                tokio::task::spawn_blocking(move || {
-                    native_store::opencode_database::DatabaseLease::acquire(&path, 1)
-                })
-                .await??,
-            );
-        }
         let mut current = crate::process::tokio_command(&binary.path);
-        crate::local::local_models::prepare_generation_env(&mut current, model, binary.protocol)?;
+        prepare_chat_env(&mut current, model, session_id)?;
         let config = launch_config(&current);
         {
             let mut guard = self.inner.lock().await;
@@ -1133,9 +1116,9 @@ impl AgentHost {
                 resident.base_url
             ));
         }
-        let (path, major) = (resident.database.clone(), resident.binary.protocol.major());
+        let path = resident.database.clone();
         let database = tokio::task::spawn_blocking(move || {
-            native_store::opencode_database::DatabaseLease::acquire(&path, major)
+            native_store::opencode_database::DatabaseLease::acquire(&path, 2)
         })
         .await??;
         if database.requires_migration() {
@@ -1214,7 +1197,7 @@ impl Resident {
             database: native_store::opencode_database::normalize_path(database).unwrap(),
             base_url: format!("http://127.0.0.1:{port}"),
             legacy_v2_api: false,
-            password: None,
+            password: "test".into(),
         }
     }
 }
@@ -1223,26 +1206,9 @@ impl Resident {
 impl AgentHost {
     /// Routes `session_id` to an OpenCode API on `port`, with a kept `sleep` standing in for the
     /// server; the record it keeps is the one a successor adopts.
-    pub(crate) async fn serve_for_test(&self, session_id: &str, port: u16, root: &std::path::Path) {
-        self.serve_version_for_test(session_id, port, root, "1.19.0")
-            .await;
-    }
-
-    pub(crate) async fn serve_v2_for_test(&self, session_id: &str, port: u16, root: &Path) {
-        self.serve_version_for_test(session_id, port, root, "2.0.12")
-            .await;
-    }
-
-    async fn serve_version_for_test(
-        &self,
-        session_id: &str,
-        port: u16,
-        root: &Path,
-        version: &str,
-    ) {
+    pub(crate) async fn serve_for_test(&self, session_id: &str, port: u16, root: &Path) {
         let path = root.join("opencode");
-        let script = format!("#!/bin/sh\necho {version}\n");
-        orx_test_support::write_executable(&path, &script, 0o700).unwrap();
+        orx_test_support::write_executable(&path, "#!/bin/sh\necho 2.0.12\n", 0o700).unwrap();
         let binary = runtime::resolve_binary_at(path).await.unwrap();
         let resident = Resident::for_test(binary, port, &root.join("opencode.db"), None);
         self.insert_for_test(session_id, resident).await;
@@ -1259,11 +1225,8 @@ impl AgentHost {
         })
         .await
         .unwrap();
-        let database = native_store::opencode_database::DatabaseLease::acquire(
-            &resident.database,
-            resident.binary.protocol.major(),
-        )
-        .unwrap();
+        let database =
+            native_store::opencode_database::DatabaseLease::acquire(&resident.database, 2).unwrap();
         let keeper = kept.handle();
         self.inner.lock().await.insert(
             session_id.into(),
@@ -1288,7 +1251,7 @@ mod tests {
     #[test]
     fn alphaxiv_server_has_its_own_name_and_asks_before_writes() {
         let cfg: Value =
-            serde_json::from_str(&opencode_config_json(None, "p.md", None, None).unwrap()).unwrap();
+            serde_json::from_str(&opencode_config_json(None, "p.md", None).unwrap()).unwrap();
         assert!(cfg["mcp"].get("alphaxiv").is_none());
         assert_eq!(cfg["mcp"]["orx_alphaxiv"]["command"][1], "alphaxiv-mcp");
         assert_eq!(cfg["permission"]["orx_alphaxiv_*"], "allow");
@@ -1300,10 +1263,26 @@ mod tests {
     }
 
     #[test]
+    fn each_mode_asks_for_what_it_gates() {
+        assert!(asks(PermissionMode::Bypass).is_empty());
+        assert_eq!(asks(PermissionMode::Auto), ["bash", "external_directory"]);
+        assert_eq!(
+            asks(PermissionMode::Ask),
+            [
+                "edit",
+                "bash",
+                "webfetch",
+                "websearch",
+                "external_directory"
+            ]
+        );
+    }
+
+    #[test]
     fn shared_config_names_the_orx_server_env_without_any_chats_values() {
         let server = crate::local::chat::delegation::mcp_server("chat_a", 4900).unwrap();
         let config: Value =
-            serde_json::from_str(&opencode_config_json(None, "p.md", None, Some(&server)).unwrap())
+            serde_json::from_str(&opencode_config_json(None, "p.md", Some(&server)).unwrap())
                 .unwrap();
         let environment = &config["mcp"]["orx"]["environment"];
         assert_eq!(environment["ORX_SESSION_ID"], "{env:ORX_SESSION_ID}");
@@ -1311,7 +1290,7 @@ mod tests {
         assert!(!config.to_string().contains("chat_a"));
         assert_eq!(config["permission"]["task"], "deny");
         let without: Value =
-            serde_json::from_str(&opencode_config_json(None, "p.md", None, None).unwrap()).unwrap();
+            serde_json::from_str(&opencode_config_json(None, "p.md", None).unwrap()).unwrap();
         assert_eq!(without["permission"]["task"], "allow");
         assert!(without["mcp"].get("orx").is_none());
     }
@@ -1345,30 +1324,38 @@ mod tests {
         };
         let fixture = git::TemporaryDirectory::new("orx-resident-model").unwrap();
         let path = fixture.path().join("opencode");
-        orx_test_support::write_executable(&path, "#!/bin/sh\necho 1.19.0\n", 0o700).unwrap();
+        orx_test_support::write_executable(&path, "#!/bin/sh\necho 2.0.1\n", 0o700).unwrap();
         let binary = resolve_binary_at(path).await.unwrap();
         let database_path = fixture.path().join("opencode.db");
         let requests = Arc::new(AtomicUsize::new(0));
         let count = requests.clone();
         let compacted = Arc::new(AtomicUsize::new(0));
         let summaries = compacted.clone();
-        let app = Router::new().route(
-            "/agent",
-            get(move || {
-                count.fetch_add(1, Ordering::SeqCst);
-                async {
-                    Json(json!([
-                        {"name":"title","model":{"providerID":"cloud","modelID":"selected"}},
-                        {"name":"compaction","model":{"providerID":"cloud","modelID":"selected"}}
-                    ]))
-                }
-            }),
-        ).route("/session/native/summarize", post(move |Json(body): Json<Value>| {
-            summaries.fetch_add(1, Ordering::SeqCst);
-            async move {
-                assert_eq!(body, json!({"providerID":"cloud","modelID":"selected"}));
-            }
-        }));
+        let app = Router::new()
+            .route(
+                "/api/agent",
+                get(move || {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    async {
+                        Json(json!({"data":[
+                            {"id":"title","model":{"providerID":"cloud","id":"selected"}},
+                            {"id":"compaction","model":{"providerID":"cloud","id":"selected"}}
+                        ]}))
+                    }
+                }),
+            )
+            .route("/api/session/native/model", post(|| async {}))
+            .route(
+                "/api/session/native/compact",
+                post(move || {
+                    summaries.fetch_add(1, Ordering::SeqCst);
+                    async { Json(json!({"data":{"id":"compaction"}})) }
+                }),
+            )
+            .route(
+                "/api/session/native/message/compaction",
+                get(|| async { Json(json!({"data":{"status":"completed"}})) }),
+            );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -1421,8 +1408,7 @@ mod tests {
 
     fn config_for(binary: &ResolvedBinary, model: &str) -> Option<String> {
         let mut cmd = crate::process::tokio_command(&binary.path);
-        crate::local::local_models::prepare_generation_env(&mut cmd, Some(model), binary.protocol)
-            .unwrap();
+        crate::local::local_models::prepare_generation_env(&mut cmd, Some(model)).unwrap();
         launch_config(&cmd)
     }
 
@@ -1436,7 +1422,7 @@ mod tests {
         tokio::runtime::Runtime::new().unwrap().block_on(async {
             let fixture = git::TemporaryDirectory::new("orx-resident-config").unwrap();
             let path = fixture.path().join("opencode");
-            orx_test_support::write_executable(&path, "#!/bin/sh\necho 1.19.0\n", 0o700).unwrap();
+            orx_test_support::write_executable(&path, "#!/bin/sh\necho 2.0.1\n", 0o700).unwrap();
             let binary = resolve_binary_at(path).await.unwrap();
             let database_path = fixture.path().join("opencode.db");
             let write_key = |key: &str| {
@@ -1447,12 +1433,12 @@ mod tests {
             };
             write_key("sk-old");
             let app = Router::new().route(
-                "/agent",
+                "/api/agent",
                 get(|| async {
-                    Json(json!([
-                        {"name":"title","model":{"providerID":"cloud","modelID":"selected"}},
-                        {"name":"compaction","model":{"providerID":"cloud","modelID":"selected"}}
-                    ]))
+                    Json(json!({"data":[
+                        {"id":"title","model":{"providerID":"cloud","id":"selected"}},
+                        {"id":"compaction","model":{"providerID":"cloud","id":"selected"}}
+                    ]}))
                 }),
             );
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1562,63 +1548,46 @@ mod tests {
     #[tokio::test]
     async fn effective_agent_models_reject_overrides_but_allow_disabled_agents() {
         use axum::{routing::get, Json, Router};
-        for protocol in [Protocol::V1, Protocol::V2] {
-            for (models, expected) in [
-                (vec!["selected", "selected"], true),
-                (vec!["managed", "selected"], false),
-                (vec![], true),
-            ] {
-                let agents: Vec<_> = ["title", "compaction"]
-                    .iter()
-                    .zip(models)
-                    .map(|(name, model)| {
-                        if protocol == Protocol::V1 {
-                            json!({"name":name,"model":{"providerID":"custom","modelID":model}})
-                        } else {
-                            json!({"id":name,"model":{"providerID":"custom","id":model}})
-                        }
-                    })
-                    .chain(std::iter::once(json!({"id":"build","name":"build"})))
-                    .collect();
-                let body = if protocol == Protocol::V1 {
-                    json!(agents)
-                } else {
-                    json!({"data":agents})
-                };
-                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-                let endpoint = AgentEndpoint {
-                    base_url: format!("http://{}", listener.local_addr().unwrap()),
-                    client: crate::net::loopback_client().build().unwrap(),
-                    protocol,
-                    legacy_v2_api: false,
-                };
-                let app = Router::new().route(
-                    if protocol == Protocol::V1 {
-                        "/agent"
-                    } else {
-                        "/api/agent"
-                    },
-                    get(move || {
-                        let body = body.clone();
-                        async move { Json(body) }
-                    }),
-                );
-                let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-                let result = verify_generation_models_with_timeout(
-                    &endpoint,
-                    "custom/selected",
-                    Duration::from_secs(1),
-                )
-                .await;
-                assert_eq!(result.is_ok(), expected, "{result:?}");
-                if !expected {
-                    assert!(result
-                        .unwrap_err()
-                        .to_string()
-                        .contains("effective title model"));
-                }
-                server.abort();
+        for (models, expected) in [
+            (vec!["selected", "selected"], true),
+            (vec!["managed", "selected"], false),
+            (vec![], true),
+        ] {
+            let agents: Vec<_> = ["title", "compaction"]
+                .iter()
+                .zip(models)
+                .map(|(name, model)| json!({"id":name,"model":{"providerID":"custom","id":model}}))
+                .chain(std::iter::once(json!({"id":"build","name":"build"})))
+                .collect();
+            let body = json!({"data":agents});
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = AgentEndpoint {
+                base_url: format!("http://{}", listener.local_addr().unwrap()),
+                client: crate::net::loopback_client().build().unwrap(),
+                legacy_v2_api: false,
+            };
+            let app = Router::new().route(
+                "/api/agent",
+                get(move || {
+                    let body = body.clone();
+                    async move { Json(body) }
+                }),
+            );
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let result = verify_generation_models_with_timeout(
+                &endpoint,
+                "custom/selected",
+                Duration::from_secs(1),
+            )
+            .await;
+            assert_eq!(result.is_ok(), expected, "{result:?}");
+            if !expected {
+                assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("effective title model"));
             }
+            server.abort();
         }
     }
 
@@ -1630,47 +1599,36 @@ mod tests {
             Arc,
         };
 
-        for protocol in [Protocol::V1, Protocol::V2] {
-            let polls = Arc::new(AtomicUsize::new(0));
-            let count = polls.clone();
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let endpoint = AgentEndpoint {
-                base_url: format!("http://{}", listener.local_addr().unwrap()),
-                client: crate::net::loopback_client().build().unwrap(),
-                protocol,
-                legacy_v2_api: false,
-            };
-            let path = if protocol == Protocol::V1 {
-                "/agent"
-            } else {
-                "/api/agent"
-            };
-            let app = Router::new().route(path, get(move || {
+        let polls = Arc::new(AtomicUsize::new(0));
+        let count = polls.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = AgentEndpoint {
+            base_url: format!("http://{}", listener.local_addr().unwrap()),
+            client: crate::net::loopback_client().build().unwrap(),
+            legacy_v2_api: false,
+        };
+        let app = Router::new().route(
+            "/api/agent",
+            get(move || {
                 let count = count.clone();
                 async move {
                     let poll = count.fetch_add(1, Ordering::SeqCst);
                     let model = if poll == 1 { "managed" } else { "selected" };
                     let agents = if poll == 0 {
                         json!([])
-                    } else if protocol == Protocol::V1 {
-                        json!([{"name":"title","model":{"providerID":"custom","modelID":model}}])
                     } else {
                         json!([{"id":"title","model":{"providerID":"custom","id":model}}])
                     };
-                    Json(if protocol == Protocol::V1 { agents } else { json!({"data":agents}) })
+                    Json(json!({"data":agents}))
                 }
-            }));
-            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-            verify_generation_models_with_timeout(
-                &endpoint,
-                "custom/selected",
-                Duration::from_secs(5),
-            )
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        verify_generation_models_with_timeout(&endpoint, "custom/selected", Duration::from_secs(5))
             .await
             .unwrap();
-            assert_eq!(polls.load(Ordering::SeqCst), 3);
-            server.abort();
-        }
+        assert_eq!(polls.load(Ordering::SeqCst), 3);
+        server.abort();
     }
 
     #[tokio::test]
@@ -1699,7 +1657,6 @@ mod tests {
             let endpoint = AgentEndpoint {
                 base_url: format!("http://{}", listener.local_addr().unwrap()),
                 client: crate::net::loopback_client().build().unwrap(),
-                protocol: Protocol::V2,
                 legacy_v2_api: false,
             };
             let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -1812,18 +1769,30 @@ mod tests {
         }
         use axum::{routing::get, Router};
         tokio::runtime::Runtime::new().unwrap().block_on(async {
-            let app = Router::new().route("/global/health", get(|| async { "ok" }));
+            let app = Router::new().route(
+                "/api/info",
+                get(|| async { axum::Json(json!({"version": "2.0.12"})) }),
+            );
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let port = listener.local_addr().unwrap().port();
             tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
             let fixture = git::TemporaryDirectory::new("orx-adopt-opencode").unwrap();
             let path = fixture.path().join("opencode");
-            orx_test_support::write_executable(&path, "#!/bin/sh\necho 1.19.0\n", 0o700).unwrap();
+            orx_test_support::write_executable(&path, "#!/bin/sh\necho 2.0.12\n", 0o700).unwrap();
             let binary = resolve_binary_at(path).await.unwrap();
             let database_path = fixture.path().join("opencode.db");
-            let mut current = crate::process::tokio_command(&binary.path);
-            crate::local::local_models::prepare_generation_env(&mut current, None, binary.protocol)
+            rusqlite::Connection::open(&database_path)
+                .unwrap()
+                .execute_batch(
+                    "CREATE TABLE session_v2 (id TEXT PRIMARY KEY, directory TEXT);
+                    CREATE TABLE session_message (id TEXT, session_id TEXT, data TEXT);
+                    CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT);
+                    CREATE TABLE migration (id TEXT PRIMARY KEY, time_completed INTEGER);
+                    INSERT INTO migration VALUES ('20260910120000_clear_v1_session_permission', 1);",
+                )
                 .unwrap();
+            let mut current = crate::process::tokio_command(&binary.path);
+            crate::local::local_models::prepare_generation_env(&mut current, None).unwrap();
             let resident = Resident {
                 config: launch_config(&current),
                 ..Resident::for_test(binary.clone(), port, &database_path, None)

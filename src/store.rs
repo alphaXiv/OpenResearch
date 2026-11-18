@@ -10,9 +10,11 @@
 
 mod acp;
 mod costs;
+mod env;
 pub(crate) mod search;
 mod telemetry;
 pub(crate) use costs::{BilledRun, Per, Quote};
+pub(crate) use env::ProjectEnvVar;
 pub(crate) use telemetry::{Cost, InvocationIdentity, SampleCost, TokenUsage};
 
 use std::path::{Path, PathBuf};
@@ -650,17 +652,16 @@ pub struct ReadyChatSubscription {
 const CHAT_SUBSCRIPTION_CLAIM_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Each subscription with its target's latest turn and whether the target is
-/// idle after it: done, and with nothing queued unless a stop held the queue.
+/// idle after it: done, with nothing queued.
 const LATEST_SUBSCRIBED_TURNS: &str = "subscribed AS (
     SELECT s.subscriber_session_id, s.target_session_id, s.paused, s.told_turn_id,
            s.told_prompt_id, s.claim_token, s.claimed_at, s.created_at,
            t.id AS turn_id, t.state,
            t.assistant_message_id, t.updated_at,
-           t.state = 'interrupted'
-               OR (t.state IN ('completed', 'failed') AND NOT EXISTS (
-                   SELECT 1 FROM chat_queued_messages q
-                   WHERE q.session_id = s.target_session_id
-               )) AS idle
+           t.state IN ('completed', 'failed', 'interrupted') AND NOT EXISTS (
+               SELECT 1 FROM chat_queued_messages q
+               WHERE q.session_id = s.target_session_id
+           ) AS idle
     FROM chat_subscriptions s
     LEFT JOIN chat_turns t ON t.id = (
         SELECT id FROM chat_turns WHERE session_id = s.target_session_id
@@ -1363,6 +1364,18 @@ impl Store {
                 launch_json TEXT NOT NULL,
                 configuration_json TEXT NOT NULL DEFAULT '[]'
             );
+            CREATE TABLE IF NOT EXISTS project_env_vars (
+                project_id  TEXT NOT NULL,
+                key         TEXT NOT NULL,
+                value       TEXT NOT NULL,
+                description TEXT,
+                created_at  INTEGER NOT NULL,
+                PRIMARY KEY (project_id, key)
+            );
+            CREATE TABLE IF NOT EXISTS env_var_descriptions (
+                key         TEXT PRIMARY KEY,
+                description TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS ui_state (
                 id                       INTEGER PRIMARY KEY CHECK (id = 1),
                 onboarding_completed     INTEGER NOT NULL DEFAULT 0,
@@ -1434,6 +1447,7 @@ impl Store {
             "ALTER TABLE runs ADD COLUMN notify_cursor TEXT",
             "ALTER TABLE runs ADD COLUMN started_at INTEGER",
             "ALTER TABLE ui_state ADD COLUMN opencode_free_models INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE ui_state ADD COLUMN opencode_review_model TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN profile_id TEXT",
             "ALTER TABLE ui_state ADD COLUMN preferred_profile TEXT",
             "ALTER TABLE ui_state ADD COLUMN favorite_models TEXT",
@@ -1470,6 +1484,7 @@ impl Store {
             "CREATE INDEX IF NOT EXISTS idx_chat_messages_native_ids
              ON chat_messages(base_native_session_id, result_native_session_id, session_id);",
         )?;
+        schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_project_env_vars AFTER DELETE ON local_projects BEGIN DELETE FROM project_env_vars WHERE project_id = OLD.id; END;")?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_log_collection AFTER DELETE ON runs BEGIN DELETE FROM log_collections WHERE run_id = OLD.id; END;")?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_steer_receipts AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_steer_receipts WHERE session_id = OLD.id; END;")?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_invocation_identities AFTER DELETE ON chat_sessions BEGIN DELETE FROM native_invocation_identities WHERE session_id = OLD.id; END;")?;
@@ -1545,7 +1560,7 @@ impl Store {
         );
         let _ = conn.execute(
             "UPDATE chat_sessions
-             SET plan_mode = 1, permission_mode = 'default'
+             SET plan_mode = 1, permission_mode = 'auto-approve'
              WHERE harness = 'opencode' AND permission_mode = 'plan'",
             [],
         );
@@ -1558,11 +1573,11 @@ impl Store {
             ("codex", "bypass", "full-access"),
             ("codex", "accept-edits", "ask"),
             ("codex", "acceptEdits", "ask"),
-            ("opencode", "auto", "default"),
+            ("opencode", "default", "auto-approve"),
             ("opencode", "bypass", "auto-approve"),
-            ("opencode", "ask", "default"),
-            ("opencode", "accept-edits", "default"),
-            ("opencode", "acceptEdits", "default"),
+            ("opencode", "ask", "auto-approve"),
+            ("opencode", "accept-edits", "auto-approve"),
+            ("opencode", "acceptEdits", "auto-approve"),
         ] {
             let _ = conn.execute(
                 "UPDATE chat_sessions SET permission_mode = ?3
@@ -1585,10 +1600,10 @@ impl Store {
             [],
         );
         let _ = conn.execute(
-            "UPDATE chat_sessions SET permission_mode = 'default'
+            "UPDATE chat_sessions SET permission_mode = 'auto-approve'
              WHERE harness = 'opencode'
                AND (permission_mode IS NULL OR permission_mode NOT IN
-                    ('default', 'auto-approve'))",
+                    ('manual', 'auto', 'auto-approve'))",
             [],
         );
         // Seed before normalizing preferences: on the first open of an older
@@ -1617,7 +1632,7 @@ impl Store {
             [],
         );
         let _ = conn.execute(
-            "UPDATE ui_state SET preferred_permission_mode = 'default'
+            "UPDATE ui_state SET preferred_permission_mode = 'auto-approve'
              WHERE preferred_harness = 'opencode' AND preferred_permission_mode = 'plan'",
             [],
         );
@@ -1633,7 +1648,7 @@ impl Store {
             ("claude-code", "bypass", "bypassPermissions"),
             ("codex", "auto", "approve-for-me"),
             ("codex", "bypass", "full-access"),
-            ("opencode", "auto", "default"),
+            ("opencode", "default", "auto-approve"),
             ("opencode", "bypass", "auto-approve"),
         ] {
             let _ = conn.execute(
@@ -1656,9 +1671,9 @@ impl Store {
             [],
         );
         let _ = conn.execute(
-            "UPDATE ui_state SET preferred_permission_mode = 'default'
+            "UPDATE ui_state SET preferred_permission_mode = 'auto-approve'
              WHERE preferred_harness = 'opencode'
-               AND preferred_permission_mode NOT IN ('default', 'auto-approve')",
+               AND preferred_permission_mode NOT IN ('manual', 'auto', 'auto-approve')",
             [],
         );
         // NOTE: `reasoning_level` deliberately has NO migration for issue #123,
@@ -1711,7 +1726,8 @@ impl Store {
                     preferred_permission_mode, preferred_reasoning_level, workspace_state_json,
                     preferred_autonomy, nested_delegation, opencode_free_models, preferred_profile,
                     favorite_models, hidden_models, model_section_order,
-                    collapsed_model_sections, model_sightings, hidden_agents, seen_nudges
+                    collapsed_model_sections, model_sightings, hidden_agents, seen_nudges,
+                    opencode_review_model
              FROM ui_state WHERE id = 1",
             [],
             |row| {
@@ -1748,6 +1764,7 @@ impl Store {
                         .and_then(Autonomy::from_id),
                     nested_delegation: row.get(9)?,
                     opencode_free_models: row.get(10)?,
+                    opencode_review_model: row.get(19)?,
                     favorite_models: list(12)?,
                     hidden_models: list(13)?,
                     hidden_agents: list(17)?,
@@ -1821,6 +1838,14 @@ impl Store {
         self.conn.execute(
             &format!("UPDATE ui_state SET {column} = ?1 WHERE id = 1"),
             params![serde_json::to_string(value)?],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_opencode_review_model(&self, model: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE ui_state SET opencode_review_model = ?1 WHERE id = 1",
+            params![model],
         )?;
         Ok(())
     }
@@ -3792,6 +3817,23 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// Each agent and account (`profile_id`) a chat on this machine ran a turn on. Seeded
+    /// chats, such as the demo's, never ran one. An agent a chat switched away from counts as
+    /// its own install, since a switch records the agent of its earlier messages but no account.
+    pub fn chat_agents_used(&self) -> Result<Vec<(String, Option<String>)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT harness, profile_id FROM chat_sessions AS s
+             WHERE native_session_id IS NOT NULL
+                OR EXISTS (SELECT 1 FROM chat_turns WHERE session_id = s.id)
+             UNION
+             SELECT m.native_harness, NULL FROM chat_messages AS m
+             JOIN chat_sessions AS s ON s.id = m.session_id
+             WHERE m.native_harness IS NOT NULL AND m.native_harness != s.harness",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     /// Project totals include archived sessions so the agent count reflects
     /// every agent that has worked on the project, not only the visible rail.
     pub fn list_project_activity_summaries(&self) -> Result<Vec<ProjectActivitySummary>> {
@@ -5356,6 +5398,8 @@ pub struct StoredUiState {
     pub nested_delegation: bool,
     /// Whether OpenCode's free models are offered beside the user's own.
     pub opencode_free_models: bool,
+    /// The `provider/model` that reviews OpenCode's Auto requests; none means the chat's own.
+    pub opencode_review_model: Option<String>,
     /// The model families the picker lists first, by the key the picker gives each.
     pub favorite_models: Vec<String>,
     /// Models turned off in the picker and for delegates: a canonical id, plus `:free` for its free tier.
@@ -6517,7 +6561,7 @@ fn real_path_under<'a>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -9746,6 +9790,7 @@ mod tests {
                 preferred_autonomy: None,
                 nested_delegation: false,
                 opencode_free_models: true,
+                opencode_review_model: None,
                 favorite_models: Vec::new(),
                 hidden_models: Vec::new(),
                 hidden_agents: Vec::new(),
@@ -9768,6 +9813,9 @@ mod tests {
         store.set_tour_completed(true).unwrap();
         store.set_preferred_agent(&selection).unwrap();
         store.set_preferred_autonomy(Autonomy::Copilot).unwrap();
+        store
+            .set_opencode_review_model(Some("openai/gpt-6-mini"))
+            .unwrap();
         store
             .set_ui_json("favorite_models", &["claude opus", "gpt sol"])
             .unwrap();
@@ -9802,6 +9850,7 @@ mod tests {
                 preferred_autonomy: Some(Autonomy::Copilot),
                 nested_delegation: false,
                 opencode_free_models: true,
+                opencode_review_model: Some("openai/gpt-6-mini".into()),
                 favorite_models: vec!["claude opus".into(), "gpt sol".into()],
                 hidden_models: vec!["gpt-6".into(), "deepseek-r1:free".into()],
                 hidden_agents: vec!["codex".into()],
@@ -9952,8 +10001,12 @@ mod tests {
                 ("codex_bypass", "codex", "bypass"),
                 ("codex_invalid", "codex", "retired-mode"),
                 ("open_plan", "opencode", "plan"),
+                ("open_default", "opencode", "default"),
+                ("open_ask", "opencode", "ask"),
+                ("open_manual", "opencode", "manual"),
                 ("open_auto", "opencode", "auto"),
                 ("open_bypass", "opencode", "bypass"),
+                ("open_invalid", "opencode", "retired-mode"),
             ] {
                 let mut session = chat_session_fixture(id);
                 session.harness = harness.into();
@@ -9973,9 +10026,13 @@ mod tests {
         assert_eq!(state("codex_auto"), ("approve-for-me".into(), false));
         assert_eq!(state("codex_bypass"), ("full-access".into(), false));
         assert_eq!(state("codex_invalid"), ("approve-for-me".into(), false));
-        assert_eq!(state("open_plan"), ("default".into(), true));
-        assert_eq!(state("open_auto"), ("default".into(), false));
+        assert_eq!(state("open_plan"), ("auto-approve".into(), true));
+        assert_eq!(state("open_default"), ("auto-approve".into(), false));
+        assert_eq!(state("open_ask"), ("auto-approve".into(), false));
+        assert_eq!(state("open_manual"), ("manual".into(), false));
+        assert_eq!(state("open_auto"), ("auto".into(), false));
         assert_eq!(state("open_bypass"), ("auto-approve".into(), false));
+        assert_eq!(state("open_invalid"), ("auto-approve".into(), false));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -10893,7 +10950,24 @@ mod tests {
         assert!(store.get_chat_session("second").unwrap().is_none());
     }
 
-    fn chat_session_fixture(id: &str) -> StoredChatSession {
+    pub(crate) fn local_project_fixture(id: &str) -> LocalProject {
+        LocalProject {
+            id: id.into(),
+            name: id.into(),
+            slug: id.into(),
+            github_owner: String::new(),
+            github_repo: String::new(),
+            github_sync_enabled: false,
+            baseline_branch: "main".into(),
+            repo_path: std::env::temp_dir().join(id).to_string_lossy().into_owned(),
+            run_command: None,
+            paper_id: None,
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    pub(crate) fn chat_session_fixture(id: &str) -> StoredChatSession {
         StoredChatSession {
             profile_id: None,
             id: id.into(),
@@ -10923,11 +10997,56 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_counts_as_used_only_once_a_chat_ran_a_turn_on_it() {
+        let dir = std::env::temp_dir().join(format!("orx-agents-used-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        // Seeded like the demo's: messages, but no turn and no native session.
+        store
+            .create_chat_session(&chat_session_fixture("seeded"))
+            .unwrap();
+        let mut resumed = chat_session_fixture("resumed");
+        resumed.harness = "codex".into();
+        resumed.native_session_id = Some("thread-1".into());
+        store.create_chat_session(&resumed).unwrap();
+        let mut account = chat_session_fixture("account");
+        account.profile_id = Some("claude-work".into());
+        store.create_chat_session(&account).unwrap();
+        store.conn.execute("INSERT INTO chat_turns (id, session_id, assistant_message_id, client_turn_id, request_hash, prepared_input, settings_json, state, delivery_state, created_at, updated_at) VALUES ('turn', 'account', 'assistant', 'ct', 'hash', 'task', '{}', 'failed', 'not_sent', 1, 1)", []).unwrap();
+        // Ran on Cursor, then switched to Codex: the switch stamps Cursor on its messages.
+        let mut switched = chat_session_fixture("switched");
+        switched.harness = "codex".into();
+        store.create_chat_session(&switched).unwrap();
+        store.conn.execute("INSERT INTO chat_messages (id, session_id, role, parts_json, created_at, native_harness) VALUES ('earlier', 'switched', 'user', '[]', 1, 'cursor')", []).unwrap();
+
+        let mut used = store.chat_agents_used().unwrap();
+        used.sort();
+        assert_eq!(
+            used,
+            [
+                ("claude-code".to_string(), Some("claude-work".to_string())),
+                ("codex".to_string(), None),
+                ("cursor".to_string(), None),
+            ]
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn acp_first_turn_repairs_missing_state_without_redirecting_native_sessions() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+
+        let preset = crate::local::acp::presets().remove(0).launch;
+        let mut saved = preset.clone();
+        saved.id = format!("acp:{}", uuid::Uuid::new_v4());
+        crate::local::acp::save(saved, true).unwrap();
+
         let dir = std::env::temp_dir().join(format!("orx-acp-repair-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
         let mut session = chat_session_fixture("legacy-demo");
-        session.harness = crate::local::acp::presets()[0].launch.id.clone();
+        session.harness = preset.id;
         store.create_chat_session(&session).unwrap();
         store
             .conn
@@ -11460,7 +11579,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    fn run_fixture(id: &str, status: &str, chat_session_id: Option<&str>) -> StoredRun {
+    pub(crate) fn run_fixture(id: &str, status: &str, chat_session_id: Option<&str>) -> StoredRun {
         StoredRun {
             id: id.into(),
             experiment_id: "exp_1".into(),

@@ -1,4 +1,4 @@
-import { reconcileReasoning, reconcileServiceTier, type AgentSelection, type Harness, type HarnessModel } from "./api";
+import { modelLabel, reconcileReasoning, reconcileServiceTier, tidyModelName, type AgentSelection, type Harness, type HarnessModel, type OptionChoice } from "./api";
 import { groupModelLines } from "./modelLines.ts";
 import { fmtNumber } from "./i18n";
 import { m } from "./paraglide/messages.js";
@@ -29,6 +29,14 @@ export function modelsAvailable(count: number) {
 export function agentModelLines(harness: string, models: HarnessModel[]) {
   const lines = groupModelLines(models.filter((model) => !model.parsed.superseded).map((model) => ({ tile: harness, model })));
   return [...lines.filter((line) => !line.older), ...lines.filter((line) => line.older)];
+}
+
+/** OpenCode's Auto names who reviews: the chat's own model, or the one picked in Settings. A chat on a local model
+ * (one a local server was connected for) always reviews with its own. */
+export function withAutoReviewer(choices: OptionChoice[], harness: Harness | undefined, reviewModel: string | null | undefined, chatModel: string | null | undefined): OptionChoice[] {
+  if (harness?.id !== "opencode") return choices;
+  const named = reviewModel && !chatModel?.startsWith("orx-local-") && tidyModelName(harness.models.find((model) => model.id === reviewModel)?.displayName ?? modelLabel(reviewModel));
+  return choices.map((choice) => choice.id !== "auto" ? choice : { ...choice, description: named ? m.opencode_auto_model({ model: named }) : m.opencode_auto_same_model() });
 }
 
 /** An account OpenResearch keeps reads "Claude Code · Work", or its own name when that already says the agent. */

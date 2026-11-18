@@ -33,10 +33,19 @@ pub struct Model {
 /// Aggregators resell other providers' models and come last by default.
 const AGGREGATORS: &[&str] = &["openrouter"];
 
-/// Whether a native model id names a free tier (`opencode/…-free`,
-/// OpenRouter's `…:free`).
+/// The prefix openresearch.sh gives every endpoint its model feed hosts, which OpenCode runs as a provider.
+pub const HOSTED_PROVIDER_PREFIX: &str = "openresearch-";
+
+/// Whether a native model id is served by an endpoint the model feed hosts.
+pub fn hosted(id: &str) -> bool {
+    id.split_once('/')
+        .is_some_and(|(provider, _)| provider.starts_with(HOSTED_PROVIDER_PREFIX))
+}
+
+/// Whether a native model id names a free tier (`opencode/…-free`, OpenRouter's `…:free`) or a model the feed
+/// hosts, which are free whatever the endpoint calls them.
 pub fn free(id: &str) -> bool {
-    id.ends_with("-free") || id.ends_with(":free")
+    id.ends_with("-free") || id.ends_with(":free") || hosted(id)
 }
 
 /// The provider-neutral id of a native model id: vendor prefixes, dated
@@ -939,6 +948,8 @@ mod tests {
         assert!(free("openrouter/deepseek/deepseek-r1:free"));
         assert!(free("opencode/deepseek-v4.1-flash-free"));
         assert!(!free("opencode-go/deepseek-v4.1-flash"));
+        assert!(free("openresearch-gw88j0/glm-5.3"));
+        assert!(!free("openresearch/glm-5.3"));
     }
 
     #[test]
