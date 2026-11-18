@@ -829,12 +829,7 @@ const PLAN_RESOLVED_CLASS_NAME = [
 
 const USER_MESSAGE_BUBBLE_CLASS_NAME = "bg-panel rounded-2xl py-2.5 px-4 text-base leading-normal whitespace-pre-wrap wrap-anywhere";
 
-/**
- * Moves a send into place: the new message rises from the composer, what the send pushed up glides there
- * instead of jumping, and `fading` fades in once the message settles. Waits for `arrived` to find the new
- * elements, recomputes every frame against wherever the pin and late row measurements put them, and lets go
- * the moment the user scrolls.
- */
+/** Rises a send from the composer, re-measured every frame because the pin and late row measurements keep moving it. */
 function riseIntoPlace(
   threadRef: React.RefObject<HTMLElement | null>,
   innerRef: React.RefObject<HTMLElement | null>,
@@ -7055,8 +7050,7 @@ export function ChatPanel({
     setSettingsError(null);
   }, [activeId]);
 
-  // Until the route reaches the created chat, the launch belongs to the new-chat route it started on;
-  // once the user leaves either, it is over.
+  // A launch belongs to its new-chat route until the created chat's route takes over, and ends once the user leaves either.
   const launchHere = mainView === "chat" && launch?.projectId === projectId
     && (activeId === launch.sessionId || (activeId === null && !launch.reached));
   if (launch && !launch.left && !launchHere) setLaunch({ ...launch, left: true });
@@ -7068,7 +7062,6 @@ export function ChatPanel({
   const statusLine = firstTurnStarting ? (activeSession?.sideParentSessionId || sideParentSessionId ? m.chat_starting() : m.chat_setting_up_worktree())
     : busy && !awaitingInput && !hasPendingTailTool && !hasStreamingText ? m.chat_thinking() : null;
   const statusLineRef = useRef<HTMLDivElement>(null);
-  /** The message just sent and the status line under it, once both are on screen. */
   /** Finds the message a send just added, and keeps finding it as the server's copy replaces the local one. */
   const sentTail = () => {
     let sent: string | null = null;
