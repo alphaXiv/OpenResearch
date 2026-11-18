@@ -1249,7 +1249,7 @@
         "stageOrder": {
           "index": 0,
           "count": null,
-          "first": null
+          "first": 0
         },
         "progress": {
           "phase": 0,
@@ -1298,11 +1298,7 @@
         "sentence": null,
         "flagId": null,
         "flags": [],
-        "setup": {
-          "line": "train: 100%| 4/4 [00:04<00:00, 1.00it/s]",
-          "stage": null,
-          "startsAt": null
-        },
+        "setup": null,
         "disagrees": null,
         "revising": false,
         "brief": [],
@@ -1318,7 +1314,7 @@
         "stageOrder": {
           "index": 0,
           "count": null,
-          "first": null
+          "first": 0
         },
         "stage": {
           "name": "",
@@ -1334,11 +1330,7 @@
         "estimate": null,
         "limitEndsAt": null,
         "flag": null,
-        "setup": {
-          "line": "train: 100%| 4/4 [00:04<00:00, 1.00it/s]",
-          "stage": null,
-          "startsAt": null
-        },
+        "setup": null,
         "generation": "g1",
         "asOf": 1794444425000,
         "segments": [
@@ -1648,7 +1640,7 @@
         "stageOrder": {
           "index": 3,
           "count": null,
-          "first": null
+          "first": 0
         },
         "progress": {
           "phase": 3,
@@ -1697,11 +1689,7 @@
         "sentence": null,
         "flagId": null,
         "flags": [],
-        "setup": {
-          "line": null,
-          "stage": null,
-          "startsAt": null
-        },
+        "setup": null,
         "disagrees": null,
         "revising": false,
         "brief": [],
@@ -1717,7 +1705,7 @@
         "stageOrder": {
           "index": 3,
           "count": null,
-          "first": null
+          "first": 0
         },
         "stage": {
           "name": "",
@@ -1733,11 +1721,7 @@
         "estimate": null,
         "limitEndsAt": null,
         "flag": null,
-        "setup": {
-          "line": null,
-          "stage": null,
-          "startsAt": null
-        },
+        "setup": null,
         "generation": "g1",
         "asOf": 1794444320000,
         "segments": [
@@ -2727,7 +2711,7 @@
         "stageOrder": {
           "index": 0,
           "count": null,
-          "first": null
+          "first": 0
         },
         "progress": {
           "phase": 0,
@@ -2784,11 +2768,7 @@
         "sentence": null,
         "flagId": null,
         "flags": [],
-        "setup": {
-          "line": "chunk 3/10 done, 372s",
-          "stage": null,
-          "startsAt": null
-        },
+        "setup": null,
         "disagrees": null,
         "revising": false,
         "brief": [],
@@ -2804,7 +2784,7 @@
         "stageOrder": {
           "index": 0,
           "count": null,
-          "first": null
+          "first": 0
         },
         "stage": {
           "name": "",
@@ -2827,11 +2807,7 @@
         },
         "limitEndsAt": null,
         "flag": null,
-        "setup": {
-          "line": "chunk 3/10 done, 372s",
-          "stage": null,
-          "startsAt": null
-        },
+        "setup": null,
         "generation": "g1",
         "asOf": 1794444318000,
         "rev": 1

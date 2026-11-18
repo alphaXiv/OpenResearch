@@ -146,7 +146,7 @@ test("unknown whole-run progress reads the step, the time so far and why there i
       assert.ok(!bare(`${view.progress} ${view.eta}`).includes(fmtPercent(1)), `${name} ${full}: ${view.progress} ${view.eta}`);
     }
   }
-  assert.equal(bare(model("full").sentence.text), `${m.run_stage_setup()} · ${capital(bare(m.run_progress_steps({ done: "4", of: "4" })))}`);
+  assert.equal(bare(model("full").sentence.text), `${m.status_running()} · ${capital(bare(m.run_progress_steps({ done: "4", of: "4" })))}`);
   const { container } = await banner("full");
   const text = bare(container.textContent);
   assert.ok(!text.includes(bare(m.run_eta_no_total())), text);
@@ -237,7 +237,8 @@ test("a detected counter times only its stage and promises no whole-run finish",
   for (const full of [true, false]) {
     const view = model("detected", full);
     assert.equal(bare(view.eta), bare(m.run_eta_floor({ duration: states.detected.expect.duration })));
-    assert.equal(view.leftMs, null);
+    assert.equal(view.leftMs, states.detected.monitor.estimate.midMs);
+    assert.equal(view.etaFloor, true);
     assert.equal(view.etaDetail, m.run_eta_log_floor_detail());
     assert.equal(view.bar.whole, null);
   }

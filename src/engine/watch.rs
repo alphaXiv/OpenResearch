@@ -1332,6 +1332,13 @@ fn series(body: &Value, name: &str) -> Vec<(f64, f64)> {
 }
 
 fn in_setup(body: &Value) -> bool {
+    if body["stageOrder"]["count"].is_null()
+        && body["stageOrder"]["first"].is_u64()
+        && body["progress"]["done"].is_number()
+        && body["setup"].is_null()
+    {
+        return false;
+    }
     body["view"]["headline"]
         .as_array()
         .into_iter()

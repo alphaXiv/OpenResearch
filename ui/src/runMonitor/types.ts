@@ -170,7 +170,7 @@ export interface Flag {
   noted?: { at: number; text: string; lookId: string }[];
 }
 
-/** A live run before the view's first headline or chart point. */
+/** A live run before its first displayed point or detected work. */
 export interface Setup {
   /** Trimmed; null when it printed nothing or only a credential. */
   line: string | null;
@@ -185,7 +185,7 @@ export interface StageOrder {
   index: number | null;
   /** Null without a declared plan. */
   count: number | null;
-  /** The run's first displayed point stage, or its earlier run's matching stage. */
+  /** The first displayed point or detected work stage, or an earlier run's matching stage. */
   first: number | null;
 }
 

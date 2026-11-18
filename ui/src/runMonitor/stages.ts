@@ -11,12 +11,17 @@ export function stagePosition(order: StageOrder | null | undefined, settingUp: b
   };
 }
 
-/** The phases before the first displayed point share one Setup stage. */
+/** Preparation shares one Setup stage when there is any to fold. */
 export function foldedStages(monitor: RunMonitor, model: RunModel) {
   if (monitor.phases.length === 0) return null;
 
   const order = monitor.stageOrder;
   const first = order.first ?? (model.live ? (order.index ?? -1) + 1 : monitor.phases.length);
+  const phases = monitor.phases.slice(first).map((phase) => phase.name ? phase : { ...phase, name: m.run_stage_run() });
+  const showCurrent = !model.pre && model.run.status !== "done";
+  if (first === 0 && order.count === null && monitor.setup == null) {
+    return { phases, current: showCurrent ? order.index : null, names: [] };
+  }
   const setup = monitor.phases.slice(0, first);
   const ends = setup.flatMap((phase) => phase.endedAt === null ? [] : [phase.endedAt]);
   const ended = ends.length > 0 && setup.every((phase) => phase.skipped || phase.endedAt !== null);
@@ -34,8 +39,7 @@ export function foldedStages(monitor: RunMonitor, model: RunModel) {
     skipped: setup.length > 0 && setup.every((phase) => phase.skipped),
   };
   const position = stagePosition(order, monitor.setup != null);
-  const current = model.pre || model.run.status === "done" ? null : position?.index ?? null;
+  const current = showCurrent ? position?.index ?? null : null;
   const names = setup.map((phase) => phase.name).filter((name) => name && name.toLowerCase() !== phase.name.toLowerCase());
-  const phases = monitor.phases.slice(first).map((phase) => phase.name ? phase : { ...phase, name: m.run_stage_run() });
   return { phases: [phase, ...phases], current, names };
 }

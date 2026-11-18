@@ -1195,6 +1195,14 @@ fn evaluate(
             .iter()
             .any(|name| s.series.get(*name).is_some_and(|points| !points.is_empty()))
     });
+    let first_detected = snapshot.filter(|_| !planned).and_then(|snapshot| {
+        let phase = snapshot
+            .phases
+            .iter()
+            .position(|phase| phase.source == "detected" && phase.done.is_some())?;
+        stages.iter().position(|stage| stage.phase == Some(phase))
+    });
+    let has_work = has_point || first_detected.is_some();
     let matching_stage = |prior: &Snapshot, index: usize| {
         let name = &prior.phases[index].name;
         let occurrence = prior.phases[..index]
@@ -1208,7 +1216,7 @@ fn evaluate(
             .nth(occurrence)
             .map(|(index, _)| index)
     };
-    let setup = (started && life.live() && fold.error.is_none() && !has_point).then(|| {
+    let setup = (started && life.live() && fold.error.is_none() && !has_work).then(|| {
         let line = snapshot
             .map(|s| s.last_line.as_str())
             .filter(|line| !line.is_empty() && find_secret(line).is_none());
@@ -1278,6 +1286,9 @@ fn evaluate(
             None => Some(0),
             Some(phase) => stages.iter().position(|stage| stage.phase == Some(phase)),
         })
+        .into_iter()
+        .chain(first_detected)
+        .min()
         .or_else(|| {
             if !life.live() {
                 return None;
@@ -1326,7 +1337,7 @@ fn evaluate(
         );
     }
     let mut watch = life.watch.clone();
-    if has_point && watch["sentence"]["setup"] == true {
+    if has_work && watch["sentence"]["setup"] == true {
         watch["sentence"] = Value::Null;
     }
     let sentence = watch["sentence"].clone();
@@ -4252,7 +4263,7 @@ mod tests {
         );
         assert_eq!(
             setting_up("progress", &["Epoch 1/10", "Epoch 2/10"], "running"),
-            guess(Value::Null)
+            Value::Null
         );
         assert_eq!(
             setting_up(
@@ -6397,6 +6408,33 @@ mod tests {
             current(&f.store, &child).unwrap().unwrap().summary()["stageOrder"],
             monitor["stageOrder"]
         );
+    }
+
+    #[test]
+    fn a_plain_progress_bar_is_work_without_a_stage_plan_or_metrics() {
+        let f = Fixture::new("orx-monitor-plain-progress");
+        let run = f.run("running", local());
+        let mut snapshot = Snapshot::new("r1", "1-1", "g1");
+        snapshot
+            .feed(
+                b"step 00005/00100 | loss 4.2\nstep 00010/00100 | loss 4.0\n",
+                true,
+                T0 + 1_000,
+                true,
+            )
+            .unwrap();
+        f.collect(&snapshot);
+
+        let (body, _) = monitor_at(&f, &run, T0 + 1_000);
+        assert_eq!(body["progress"]["done"], 10.0);
+        assert!(body["setup"].is_null(), "{}", body["setup"]);
+        assert_eq!(
+            body["stageOrder"],
+            json!({"index": 0, "count": null, "first": 0})
+        );
+        let summary = current(&f.store, &run).unwrap().unwrap().summary().clone();
+        assert!(summary["setup"].is_null());
+        assert_eq!(summary["stageOrder"], body["stageOrder"]);
     }
 
     #[test]

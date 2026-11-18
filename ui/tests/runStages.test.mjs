@@ -82,3 +82,16 @@ test("an unnamed reported counter has a readable label in the stage card", () =>
   assert.equal(stages.phases[1].name, "Run");
   assert.equal(stages.current, 1);
 });
+
+test("inferred progress reads as the run's only stage", () => {
+  const data = monitor();
+  data.phases = [phase("", 0, null, null, 100, "steps")];
+  data.stageOrder = { index: 0, count: null, first: 0 };
+  data.progress = { ...data.progress, phase: 0, done: 10 };
+  data.sentence = null;
+  const row = model(data);
+  assert.equal(plain(row.sentence.text), "Running · Step 10 of 100");
+  const stages = foldedStages(data, row);
+  assert.deepEqual(stages.phases.map((phase) => phase.name), ["Run"]);
+  assert.equal(stages.current, 0);
+});
