@@ -55,7 +55,7 @@ try {
 
 function writeArtifact(source, name, output) {
   const bytes = readFileSync(source)
-  if (!bytes.length || bytes.length > 4 * 1024 * 1024) throw new Error(`${name} must be between 1 byte and 4 MiB`)
+  if (!bytes.length || bytes.length > 8 * 1024 * 1024) throw new Error(`${name} must be between 1 byte and 8 MiB`)
   mkdirSync(output, { recursive: true })
   copyFileSync(source, join(output, name))
   console.log(`${name}: ${bytes.length} bytes`)

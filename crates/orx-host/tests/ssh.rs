@@ -133,7 +133,7 @@ impl Remote {
                 return receipt;
             }
             assert!(Instant::now() < deadline, "{summary:?}");
-            let Response::Changes { runs } = self.request(Request::Changes {
+            let Response::Changes { runs, .. } = self.request(Request::Changes {
                 watch: vec![(run.into(), summary.clone())],
                 follow_logs: vec![run.into()],
                 wait_ms: 2000,
@@ -181,6 +181,34 @@ impl Drop for Remote {
 }
 
 #[test]
+fn a_legacy_change_feed_waits_on_a_quiet_run() {
+    let mut remote = Remote::new();
+    let summary = remote.launch("quiet", r#"printf '::orx:: {"step":1,"of":10}\n'"#);
+    let receipt = remote.finish("quiet", summary);
+    let Response::Inspect { mut summary, .. } = remote.request(Request::Inspect {
+        run: "quiet".into(),
+    }) else {
+        panic!();
+    };
+    assert!(
+        matches!(&summary.state, RunState::Exited { receipt: observed } if *observed == receipt)
+    );
+    assert!(summary.signals.take().is_some());
+    summary.log_len = None;
+
+    let started = Instant::now();
+    let Response::Changes { runs, .. } = remote.request(Request::Changes {
+        watch: vec![("quiet".into(), summary)],
+        follow_logs: vec![],
+        wait_ms: 100,
+    }) else {
+        panic!();
+    };
+    assert!(runs.is_empty(), "{runs:?}");
+    assert!(started.elapsed() >= Duration::from_millis(100));
+}
+
+#[test]
 fn run_feed_paged_logs_and_double_fork_cancel_over_real_ssh() {
     let mut remote = Remote::new();
     let script = r#"printf 'first\n'
@@ -207,7 +235,7 @@ sleep 60
         .parse()
         .unwrap();
     let process = platform::process(pid).unwrap();
-    let Response::Changes { runs } = remote.request(Request::Changes {
+    let Response::Changes { runs, .. } = remote.request(Request::Changes {
         watch: vec![("run1".into(), summary)],
         follow_logs: vec!["run1".into()],
         wait_ms: 1000,
@@ -636,6 +664,7 @@ exit 0
         }
     );
     let mut watch = Summary {
+        signals: None,
         started_at: None,
         state: RunState::Exited { receipt },
         log_len: None,
@@ -645,7 +674,7 @@ exit 0
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         assert!(Instant::now() < deadline);
-        let Response::Changes { runs } = remote.request(Request::Changes {
+        let Response::Changes { runs, .. } = remote.request(Request::Changes {
             watch: vec![("daemon".into(), watch.clone())],
             follow_logs: vec![],
             wait_ms: 1000,

@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -131,13 +131,6 @@ struct SearchHit {
     archived: bool,
     on_active_branch: bool,
     snippet: String,
-}
-
-pub(super) fn initialize(conn: &Connection) -> Result<()> {
-    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
-    tx.execute_batch(include_str!("search.sql"))?;
-    tx.commit()?;
-    Ok(())
 }
 
 impl Store {
@@ -872,7 +865,7 @@ mod tests {
                     .upsert_chat_message(&message(&format!("message-{i}"), "chat", "older history"))
                     .unwrap();
             }
-            initialize(&store.conn).unwrap();
+            let store = Store::open_at(store.data_dir.clone()).unwrap();
             assert!(store.backfill_chat_search().unwrap());
             let through: i64 = store
                 .conn
@@ -921,7 +914,7 @@ mod tests {
                     .unwrap(),
                 249
             );
-            initialize(&reopened.conn).unwrap();
+            let reopened = Store::open_at(reopened.data_dir.clone()).unwrap();
             assert!(!reopened.backfill_chat_search().unwrap());
             assert_eq!(
                 reopened
@@ -992,7 +985,7 @@ mod tests {
                 .conn
                 .execute("UPDATE chat_messages SET parts_json = 'not json'", [])
                 .unwrap();
-            initialize(&store.conn).unwrap();
+            let store = Store::open_at(store.data_dir.clone()).unwrap();
             for (id, parts) in [
                 ("string", "[\"abc\"]"),
                 ("children", "[{\"type\":\"tool\",\"children\":\"x\"}]"),
@@ -1093,7 +1086,7 @@ mod tests {
                     .unwrap();
             }
             tx.commit().unwrap();
-            initialize(&store.conn).unwrap();
+            let store = Store::open_at(store.data_dir.clone()).unwrap();
             let start = std::time::Instant::now();
             let mut longest = std::time::Duration::ZERO;
             loop {

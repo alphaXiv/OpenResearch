@@ -4,7 +4,7 @@ import { act, createElement } from "react";
 import { RunContactNotice } from "../src/components/RunContactNotice.tsx";
 import { fmtClock } from "../src/i18n.ts";
 import { m } from "../src/paraglide/messages.js";
-import { render, serve, settle } from "./render.mjs";
+import { find, render, serve, settle } from "./render.mjs";
 
 const plain = (text) => text.replace(/[⁦-⁩]/g, "");
 const unreachable = { type: "unreachable", since: 100, cause: "Operation timed out" };
@@ -85,6 +85,9 @@ test("pending and unverified cancels say why", async () => {
   assert.deepEqual(unverified.lines, [m.status_cancellation_pending(), "2 processes still running"]);
   assert.deepEqual(unverified.buttons, [m.run_stop_again(), m.run_abandon()]);
   await unverified.click(m.run_stop_again());
+  assert.ok(!unverified.requests.includes("POST /api/runs/run/cancel"));
+  await act(async () => find('[role="dialog"] button', m.experiments_stop_run()).click());
+  await settle();
   assert.ok(unverified.requests.includes("POST /api/runs/run/cancel"));
 
   const refused = await notice({ cancelling: true, cancelError: "Ray stop_job: HTTP 500" });
@@ -154,11 +157,15 @@ test("a cancelled tombstone retains its survivor proof while host authentication
   assert.deepEqual(view.buttons, [m.settings_connect(), m.run_stop_now()]);
 });
 
-test("lost contact with a rented box warns about billing and Stop box cancels it", async () => {
+test("lost contact with a rented box warns about billing and Stop box cancels it once confirmed", async () => {
   for (const contact of [unreachable, needsAuth]) {
     const view = await notice({ contact, backend: { kind: "openresearch_job" } });
     assert.ok(view.lines.includes(m.run_notice_rental_billing()));
     await view.click(m.run_stop_box());
+    assert.ok(document.querySelector('[role="dialog"]').textContent.includes(m.run_stop_effect()));
+    assert.ok(!view.requests.includes("POST /api/runs/run/cancel"));
+    await act(async () => find('[role="dialog"] button', m.experiments_stop_run()).click());
+    await settle();
     assert.ok(view.requests.includes("POST /api/runs/run/cancel"));
   }
   for (const extra of [

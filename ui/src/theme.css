@@ -64,12 +64,27 @@
   --color-focus-ring: var(--focus-ring);
   --color-border-hover-strong: color-mix(in oklab, var(--border) 55%, var(--text));
   --color-danger-outline: color-mix(in oklab, var(--accent-red) 55%, transparent);
+  /* Run tones as text reach 4.5:1 in both themes. */
+  --color-ink-teal: color-mix(in srgb, var(--accent-teal) 75%, var(--text));
+  --color-ink-amber: var(--ink-amber);
+  --color-ink-orange: color-mix(in srgb, var(--accent-orange) 80%, var(--text));
+  --color-ink-red: color-mix(in srgb, var(--accent-red) 70%, var(--text));
+  --color-ink-green: color-mix(in srgb, var(--accent-green) 60%, var(--text));
+  --color-ink-purple: color-mix(in srgb, var(--accent-purple) 80%, var(--text));
+  /* Secondary words over a run's strip and line, which sit on the surface: 4.5:1 in both themes. */
+  --color-ink-subtext: color-mix(in srgb, var(--subtext) 85%, var(--text));
+  --color-mark-teal: var(--mark-teal);
+  --color-mark-amber: var(--mark-amber);
+  --color-mark-green: var(--mark-green);
+  --color-mark-blue: var(--mark-blue);
   --color-danger-notice-border: color-mix(in srgb, var(--accent-red) 35%, var(--border-variant));
-  --color-primary-hover: color-mix(in oklab, var(--primary) 88%, var(--text));
-  --color-primary-active: color-mix(in oklab, var(--primary) 80%, var(--text));
+  --color-button-hover: var(--button-hover);
+  --color-button-active: var(--button-active);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-active: var(--primary-active);
   --color-stop-hover: color-mix(in oklab, var(--surface) 88%, var(--text));
-  --color-danger-hover: color-mix(in oklab, var(--accent-red) 8%, transparent);
-  --color-danger-active: color-mix(in oklab, var(--accent-red) 14%, transparent);
+  --color-danger-hover: var(--danger-hover);
+  --color-danger-active: var(--danger-active);
   --color-plan-caret: color-mix(in oklab, var(--base) 35%, var(--text));
   /* The model feed's nudge, tinted by the `--nudge-from` and `--nudge-to` colors the feed sets. */
   --color-nudge-start: color-mix(in oklab, var(--nudge-from) 18%, var(--base));
@@ -169,6 +184,12 @@
   --title-unread: #000000;
   --muted: #a1a1a1;
   --primary: #9a2036;
+  --button-hover: rgb(0 0 0 / 10%);
+  --button-active: rgb(0 0 0 / 16%);
+  --primary-hover: #7c1a2c;
+  --primary-active: #671625;
+  --danger-hover: #f7dadc;
+  --danger-active: #f4cccf;
   --border: #d4d4d4;
   --border-variant: #e5e5e5;
 
@@ -178,6 +199,7 @@
   --accent-blue: #3a8dff;
   --lineage: #527aa3;
   --accent-amber: #da9100;
+  --ink-amber: #935800;
   --accent-green: #5eb64c;
   --accent-purple: #9c5cff;
   --accent-indigo: #5b5bd6;
@@ -195,6 +217,11 @@
   --skill-blue-subtle: #d9e9fb;
   --skill-blue-slash: #7fa6d2;
   --accent-purple-subtle: #f5f0ff;
+  /* A run's tone as a mark (dot, tick, bar): mixed toward the text colour to 3:1 on panel, surface and amber-subtle in both themes. */
+  --mark-teal: color-mix(in srgb, var(--accent-teal) 95%, var(--text));
+  --mark-amber: color-mix(in srgb, var(--accent-amber) 80%, var(--text));
+  --mark-green: color-mix(in srgb, var(--accent-green) 80%, var(--text));
+  --mark-blue: color-mix(in srgb, var(--accent-blue) 95%, var(--text));
 
   --dots-muted: #e3e3e3;
   --dots-strong: #bdbdbd;
@@ -284,12 +311,19 @@
   --title-unread: #ffffff;
   --muted: #737373;
   --primary: #ffb3ad;
+  --button-hover: rgb(255 255 255 / 12%);
+  --button-active: rgb(255 255 255 / 18%);
+  --primary-hover: #ffc8c2;
+  --primary-active: #ffd8d4;
+  --danger-hover: #47272b;
+  --danger-active: #513036;
   --lineage: #8eafd2;
   --border: #404040;
   --border-variant: #303030;
   --border-strong: #5a5a5a;
 
   --accent-amber: #e67e22;
+  --ink-amber: #f0a64b;
 
   --accent-green-subtle: #1c2b18;
   --accent-amber-subtle: #302a0d;

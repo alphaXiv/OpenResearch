@@ -50,7 +50,7 @@ test('Done offers to stop a chat’s experiment and its cancellation leaves the 
   ])
   await project.open(page)
   await send(page, 'Run the long baseline.')
-  const running = page.getByRole('status').filter({ hasText: 'Experiment running' })
+  const running = page.getByRole('button', { name: 'Stop the run' })
   // The local backend starts the job through orx-host.
   await expect(running).toBeVisible({ timeout: 30_000 })
   await expect(page.getByText('The long baseline is running.', { exact: true })).toBeVisible()

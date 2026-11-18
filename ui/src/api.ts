@@ -8,6 +8,7 @@ import type { GlobalWorkspace, ProjectWorkspace } from "./workspaceState";
 import { m } from "./paraglide/messages.js";
 import { getLocale } from "./paraglide/runtime.js";
 import { fmtNumber } from "./i18n";
+import type { ChatShownRun, Flag, RunMonitor, RunMonitorSummary, RunOutcome } from "./runMonitor/types";
 
 export { fmtNumber } from "./i18n";
 
@@ -118,8 +119,6 @@ export interface Run {
   backend?: Record<string, unknown> | null;
   command?: string | null;
   commitSha?: string | null;
-  /** The chat that started the run; absent from an older orx up. */
-  chatSessionId?: string | null;
   resultMarkdown?: string | null;
   createdAt: number;
   updatedAt: number;
@@ -138,12 +137,24 @@ export interface Run {
   host: string | null;
   /** Why the run's latest notice batch was given up on, never reaching its chat. */
   noticeError?: string | null;
+  /** The chat that launched the run; absent from an older server and for a run started outside a chat. */
+  chatSessionId?: string | null;
   /** Copying a finished run's log to this computer; both are absent once the log is kept. */
   logCollection?: "pending" | "failed";
   logCollectionError?: string;
+  /** Absent from an older server. */
+  monitor?: RunMonitorSummary | null;
+  /** Who stopped a cancelled run, once that is known. */
+  outcome?: RunOutcome | null;
 }
 
 export class RejectedResponseError extends Error {}
+
+export class LookTooSoonError extends RejectedResponseError {
+  constructor(message: string, readonly notBefore: number) {
+    super(message);
+  }
+}
 
 /** Why a model server listed no models: nothing answered, it wants an API key, or it has no models. */
 export class UnlistedError extends RejectedResponseError {
@@ -192,6 +203,8 @@ export interface UiState {
   nestedDelegation: boolean;
   /** Whether OpenCode's free models are offered beside the user's own. */
   opencodeFreeModels: boolean;
+  /** Whether a cheap model looks at runs; absent from an older server, which has no watcher. */
+  runWatching?: boolean;
   /** The `provider/model` that reviews OpenCode's Auto requests; null is the chat's own. */
   opencodeReviewModel: string | null;
   /** The model families the picker lists first. */
@@ -203,6 +216,8 @@ export interface UiState {
   /** The picker's lab sections in the user's order; labs it doesn't name follow in the picker's own. */
   modelSectionOrder: string[];
   collapsedModelSections: string[];
+  /** How much of one run shows above the composer; absent from an older server, which doesn't keep it. */
+  runBanner?: RunBannerLevel;
   /** The model feed nudges the user dismissed, by id. Absent from a server too old to keep them. */
   seenNudges?: string[];
   /** When this copy first opened its store, in ms; null for one older than the field, absent from a server too old to say. */
@@ -230,6 +245,8 @@ export interface ModelNudge {
   /** Hex colors of its gradient, and of its model mark; the text color when `icon` is absent. */
   colors: { from: string; to: string; icon?: string };
 }
+
+export type RunBannerLevel = "line" | "strip";
 
 /** How much of the research the agent owns before checking in. */
 export type Autonomy = "copilot" | "agentic";
@@ -1994,8 +2011,8 @@ export function backendDetail(backend: Run["backend"]): string {
   if (!backend) return "";
   if (typeof backend.flavor === "string" && backend.flavor) return backend.flavor;
   if (typeof backend.manifest === "string" && backend.manifest) return backend.manifest;
-  // Ray's namespace is the whole Jobs URL — too long for a badge.
-  if (backendKind(backend) === "ray_job") return "";
+  // Ray's namespace is the whole Jobs URL, too long for a badge; OpenResearch's is the paying organization's id.
+  if (backendKind(backend) === "ray_job" || backendKind(backend) === "openresearch_job") return "";
   if (typeof backend.namespace === "string" && backend.namespace) {
     const container = backend.sshContainer;
     if (container && typeof container === "object" && "reference" in container && typeof container.reference === "string") {
@@ -2148,6 +2165,8 @@ export function createApi(
                 : null;
             throw new FileChangedError(message, currentVersion, parsed.exists);
           }
+          if (res.status === 409 && "notBefore" in parsed && typeof parsed.notBefore === "number")
+            throw new LookTooSoonError(message, parsed.notBefore);
           if (res.status === 400 && "code" in parsed && (parsed.code === "unreachable" || parsed.code === "needsKey" || parsed.code === "noModels"))
             throw new UnlistedError(message, parsed.code);
           if (res.status === 400 && "fields" in parsed && typeof parsed.fields === "object" && parsed.fields !== null)
@@ -2241,6 +2260,9 @@ export function createApi(
       `/api/projects/${projectId}/files/file?path=${encodeURIComponent(path)}`,
     );
 
+  const runImageUrl = (runId: string, path: string, version: string) =>
+    url(`/api/runs/${encodeURIComponent(runId)}/media?path=${encodeURIComponent(path)}&v=${encodeURIComponent(version)}`);
+
   /** Image parts store a server-minted file name; this is where it's served. */
   const chatAttachmentUrl = (name: string) =>
     url(`/api/chat/attachments/${encodeURIComponent(name)}`);
@@ -2277,6 +2299,8 @@ export function createApi(
     hiddenAgents?: string[];
     modelSectionOrder?: string[];
     collapsedModelSections?: string[];
+    runBanner?: RunBannerLevel;
+    runWatching?: boolean;
     seenNudges?: string[];
   }) => post<UiState>("/api/settings/ui-state", body);
 
@@ -3316,6 +3340,26 @@ export function createApi(
   const listChatActiveRuns = (signal?: AbortSignal) =>
     get<ChatActiveRun[]>("/api/chat/active-runs", signal);
 
+  /** Null from an older server, which has only active runs. */
+  const listChatShownRuns = async (signal?: AbortSignal) => {
+    const response = await fetch("/api/chat/shown-runs?includeFailures=true", { signal });
+    if (response.status === 404) return null;
+    const data = await json<ChatShownRun[] | { runs: ChatShownRun[]; failedSessions: string[] }>(response);
+    return Array.isArray(data) ? { runs: data } : data;
+  };
+
+  const getRunMonitor = (runId: string, signal?: AbortSignal) =>
+    get<RunMonitor>(`/api/runs/${encodeURIComponent(runId)}/monitor`, signal);
+
+  const chooseRunFlag = (runId: string, choice: { flagId: string; choice: "stop" | "keep" | "ask"; requestId: string }) =>
+    post<{ flag: Flag; run: Run }>(`/api/runs/${encodeURIComponent(runId)}/flag`, choice);
+
+  const lookNow = (runId: string) =>
+    post<{ lookId: string; state: string }>(`/api/runs/${encodeURIComponent(runId)}/look`);
+
+  const dismissShownRun = (sessionId: string, runId: string) =>
+    post<{ dismissed: true }>(`/api/chat/sessions/${encodeURIComponent(sessionId)}/shown-runs/${encodeURIComponent(runId)}/dismiss`);
+
   const getSubagentTranscript = (sessionId: string, partId: string, signal?: AbortSignal) =>
     get<ChatPart | null>(`/api/chat/sessions/${sessionId}/subagent?partId=${encodeURIComponent(partId)}`, signal);
 
@@ -3325,6 +3369,7 @@ export function createApi(
     overleafUploadUrl,
     trackioRunUrl,
     artifactUrl,
+    runImageUrl,
     chatAttachmentUrl,
     listProjects,
     listProjectActivity,
@@ -3551,6 +3596,11 @@ export function createApi(
     sendOpenCodeSignInCode,
     cancelOpenCodeSignIn,
     listChatActiveRuns,
+    listChatShownRuns,
+    getRunMonitor,
+    dismissShownRun,
+    lookNow,
+    chooseRunFlag,
     getSubagentTranscript,
   };
 }

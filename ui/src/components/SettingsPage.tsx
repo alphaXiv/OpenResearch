@@ -1,3 +1,4 @@
+import { localMachineSummary } from "../localMachine";
 import { useMachines } from "../machineSelection";
 import { useSignIn } from "./AccountChip";
 import { confirmOpenResearchSignOut } from "./confirmOpenResearchSignOut";
@@ -113,7 +114,6 @@ import {
   type LocalModelConnection,
   type OpenCodeProvider,
   type K8sSettings,
-  type LocalMachine,
   type VercelPlan,
   type RayPreflight,
   type TrackioPreflight,
@@ -132,7 +132,7 @@ import {
 import { releaseNotesUrl, useRestartApp, useUpdateStatus } from "./UpdateBanner";
 import { useColoredMarkdown, useThemePreference, type ThemePreference } from "../theme";
 import { m } from "../paraglide/messages.js";
-import { autoDir, fmtBytes, fmtClock, fmtMemory, ltr } from "../i18n";
+import { autoDir, fmtBytes, fmtClock, ltr } from "../i18n";
 import { setLocale, useLocale } from "../locale";
 import { isLocale, type Locale } from "../paraglide/runtime.js";
 import { TokenForm } from "./GitTokenForm";
@@ -412,6 +412,7 @@ function AgentsTab({ remote }: { remote: boolean }) {
     <>
       <AgentList remote={remote} />
       <NestedDelegationRow />
+      <RunWatchingRow />
       <AutoReviewerRow />
       <ModelSettings heading={<h3 className={cn(SECTION_CLASS_NAME, "mt-8")}>{m.settings_models()}</h3>} />
     </>
@@ -1217,6 +1218,27 @@ function NestedDelegationRow() {
         checked={uiState.nestedDelegation}
         aria-label={m.settings_nested_subagents()}
         onClick={() => mutUpdateUiState.run(workspace, { nestedDelegation: !uiState.nestedDelegation })}
+      />
+    </div>
+  );
+}
+
+/** Whether a cheap model watches runs; an older server has no watcher, and no row. */
+function RunWatchingRow() {
+  const workspace = useWorkspace();
+  const { data: uiState } = useQuery(workspace.queries.getUiStateQuery());
+  if (uiState?.runWatching === undefined) return null;
+  return (
+    <div className={cn(PROJECT_DEFAULT_ROW_CLASS_NAME, "mt-4")}>
+      <div>
+        <div className="project-default-title text-base font-medium">{m.settings_run_watching()}</div>
+        <p>{m.settings_run_watching_sends()}</p>
+      </div>
+      <Switch
+        type="button"
+        checked={uiState.runWatching}
+        aria-label={m.settings_run_watching()}
+        onClick={() => mutUpdateUiState.run(workspace, { runWatching: !uiState.runWatching })}
       />
     </div>
   );
@@ -2494,17 +2516,6 @@ function PreflightBadge({ test }: { test: "testing" | { reachable: boolean } | n
   if (test === "testing") return <Badge>{m.settings_page_testing()}</Badge>;
   if (test.reachable) return <Badge variant="success">{m.settings_page_reachable()}</Badge>;
   return <Badge variant="error">{m.settings_page_failed()}</Badge>;
-}
-
-// --- compute (local) --------------------------------------------------------------
-
-function localMachineSummary(hw: LocalMachine) {
-  const processor = hw.chip ?? `${hw.os}/${hw.arch}`;
-  const memory = hw.memBytes === null ? null : fmtMemory(hw.memBytes);
-  const gpu = hw.gpus.length === 0 ? null : m.settings_gpu_count({ count: hw.gpus.length });
-  return [processor, hw.cpuCount > 0 ? m.settings_cpu_cores({ count: hw.cpuCount }) : null, memory, gpu]
-    .filter(Boolean)
-    .join(" · ");
 }
 
 // --- compute (openresearch) ---------------------------------------------------------

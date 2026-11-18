@@ -65,7 +65,7 @@ export async function renderChat(path, { sessions = [session("s")], transcripts 
     "GET /api/projects": () => ({ projects }),
     "GET /api/projects/activity": () => ({ activity: [] }),
     "GET /api/chat/sessions": (_, url) => ({ sessions: sessions.filter((row) => url.includes(`projectId=${row.projectId}`)) }),
-    "GET /api/chat/active-runs": () => [],
+    "GET /api/chat/shown-runs": () => [],
     "GET /api/harnesses": () => ({ harnesses }),
     "GET /api/harnesses/setup/commands": () => ({}),
     "GET /api/skills": () => ({ skills: [] }),
