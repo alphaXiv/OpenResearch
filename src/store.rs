@@ -3747,23 +3747,27 @@ impl Store {
     }
 
     /// Top-level chats with an experiment run in flight, wherever they fall in the sidebar's paging.
-    pub fn sidebar_chat_sessions_with_active_runs(
+    /// Top-level chats still at work: with an experiment running, or among `live`,
+    /// the chats whose agent or delegates the server sees working.
+    pub fn sidebar_chat_sessions_at_work(
         &self,
         archived: Option<bool>,
+        live: &[&str],
     ) -> Result<Vec<StoredChatSession>> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {CHAT_SESSION_COLS} FROM chat_sessions
              WHERE {TOP_LEVEL_CHATS} AND (?1 IS NULL OR archived = ?1)
-               AND id IN (
+               AND (id IN (
                  SELECT chat_session_id FROM runs
                  WHERE status IN ('submitting', 'starting', 'running')
                  UNION SELECT s.chat_session_id FROM run_subscriptions s
                  JOIN runs r ON r.id = s.run_id
                  WHERE r.status IN ('submitting', 'starting', 'running')
-               )
+               ) OR id IN (SELECT value FROM json_each(?2)))
              ORDER BY updated_at DESC, id DESC"
         ))?;
-        let rows = stmt.query_map(params![archived], row_to_chat_session)?;
+        let live = serde_json::to_string(live)?;
+        let rows = stmt.query_map(params![archived, live], row_to_chat_session)?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
@@ -11481,7 +11485,7 @@ pub(crate) mod tests {
 
         let ids = |archived| {
             let mut ids: Vec<String> = store
-                .sidebar_chat_sessions_with_active_runs(archived)
+                .sidebar_chat_sessions_at_work(archived, &[])
                 .unwrap()
                 .into_iter()
                 .map(|session| session.id)
@@ -11492,6 +11496,22 @@ pub(crate) mod tests {
         assert_eq!(ids(Some(false)), ["owner", "subscriber"]);
         assert_eq!(ids(Some(true)), ["archived"]);
         assert_eq!(ids(None), ["archived", "owner", "subscriber"]);
+
+        // A chat the server sees working counts too, once and only if it is top-level.
+        store
+            .create_chat_session(&chat_session_fixture("delegate"))
+            .unwrap();
+        store
+            .record_chat_delegate("delegate", "idle", false)
+            .unwrap();
+        let live: Vec<String> = store
+            .sidebar_chat_sessions_at_work(Some(false), &["idle", "owner", "delegate"])
+            .unwrap()
+            .into_iter()
+            .map(|session| session.id)
+            .collect();
+        assert_eq!(live.len(), 3, "{live:?}");
+        assert!(live.contains(&"idle".to_string()) && !live.contains(&"delegate".to_string()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

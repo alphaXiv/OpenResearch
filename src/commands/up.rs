@@ -9649,15 +9649,21 @@ async fn list_chat_sessions(
             .last()
             .filter(|_| has_more)
             .map(|session| json!({ "updatedAt": session.updated_at, "id": session.id }));
+        let busy = state.chat.busy_sessions().await;
+        let background = state.chat.waiting_on().await?;
+        // Working shows every chat at work, however far down the list it has fallen.
         if before.is_none() {
-            for session in store.sidebar_chat_sessions_with_active_runs(q.archived)? {
+            let live: Vec<&str> = busy
+                .iter()
+                .chain(background.keys())
+                .map(String::as_str)
+                .collect();
+            for session in store.sidebar_chat_sessions_at_work(q.archived, &live)? {
                 if !sessions.iter().any(|listed| listed.id == session.id) {
                     sessions.push(session);
                 }
             }
         }
-        let busy = state.chat.busy_sessions().await;
-        let background = state.chat.waiting_on().await?;
         let sessions: Vec<Value> = sessions
             .iter()
             .map(|session| {
