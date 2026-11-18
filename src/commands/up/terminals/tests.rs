@@ -229,7 +229,8 @@ async fn read_unanswered(socket: &mut Socket, needle: &[u8]) -> Vec<u8> {
             }
         }
     };
-    tokio::time::timeout(Duration::from_secs(10), read)
+    // The first keeper waits on the test build of orx-host.
+    tokio::time::timeout(Duration::from_secs(120), read)
         .await
         .unwrap_or_else(|_| {
             panic!(
