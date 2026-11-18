@@ -177,12 +177,11 @@ impl std::fmt::Debug for RentalLeaseCapability {
 
 /// A sandbox as returned by `POST /sandboxes`. Mirrors the API's `zSandbox`;
 /// fields are nullable while a box is still provisioning.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Sandbox {
     pub id: String,
     pub organization_id: String,
-    pub project_id: Option<String>,
     pub ssh_hostname: Option<String>,
     pub ssh_port: Option<i64>,
     pub ssh_username: Option<String>,
@@ -203,6 +202,41 @@ pub struct Sandbox {
     pub gpu: Option<String>,
     pub gpu_count: Option<i64>,
     pub vcpu_count: Option<i64>,
+    /// Live SSH sessions on the box; only `GET /sandboxes` reports them.
+    #[serde(default)]
+    pub connections: Vec<SandboxConnection>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxConnection {
+    pub user_id: String,
+    pub cwd: Option<String>,
+}
+
+impl Sandbox {
+    /// What OpenResearch says went wrong with a box that is `failed`, `offline` or `dead`.
+    pub fn failure(&self) -> Option<String> {
+        match self.status.as_str() {
+            "failed" => Some(format!(
+                "{}: {}",
+                self.failure_code.as_deref().unwrap_or("provider_error"),
+                self.failure_message
+                    .as_deref()
+                    .unwrap_or("The provider could not provision this box.")
+            )),
+            "offline" | "dead" => Some(format!(
+                "box {} went {}{}",
+                self.id,
+                self.status,
+                self.provision_warnings
+                    .as_deref()
+                    .map(|warnings| format!(": {warnings}"))
+                    .unwrap_or_default()
+            )),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -212,8 +246,7 @@ pub struct SandboxEnvelope {
     pub rental_lease: Option<RentalLeaseCapability>,
 }
 
-/// `GET /sandboxes` — each row is a `Sandbox` (the extra `connections` the
-/// dashboard renders is ignored on deserialize).
+/// `GET /sandboxes` — each row is a `Sandbox`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ListSandboxes {
     pub sandboxes: Vec<Sandbox>,
@@ -2747,7 +2780,6 @@ mod tests {
         let sb = parsed.sandbox;
         assert_eq!(sb.id, "sb_1");
         assert_eq!(sb.status, "provisioning");
-        assert_eq!(sb.project_id, None);
         assert_eq!(sb.ssh_hostname, None);
         assert_eq!(sb.provider_name.as_deref(), Some("runpod"));
         assert_eq!(sb.gpu.as_deref(), Some("H100_SXM"));

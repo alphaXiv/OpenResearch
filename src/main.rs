@@ -481,6 +481,9 @@ pub struct InstanceCreateArgs {
 pub struct InstanceListArgs {
     /// Organization id (from `orx orgs`).
     pub org_id: String,
+    /// Emit the instance records as JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Debug)]
