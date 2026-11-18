@@ -4464,7 +4464,7 @@ const STEER_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// codex rejects `turn/steer` on review and compaction turns, and older
 /// app-servers lack the method — those answer definitively, so the message
-/// parks for the next turn. A transport failure or timeout answers nothing:
+/// runs as a queued one after the turn. A transport failure or timeout answers nothing:
 /// codex may already have applied the text, so re-running it as a fresh turn
 /// could execute the instruction twice. Say so instead.
 async fn steer_turn(
@@ -4475,11 +4475,12 @@ async fn steer_turn(
     steer: SteerMessage,
 ) {
     let Some(turn_id) = turn_id else {
-        if let Err(error) = ctx.host.park_steer(&ctx.session_id, steer) {
-            ctx.push_error(format!("Could not preserve steering message: {error}"));
-        }
+        ctx.host.release_steer(&ctx.session_id, &steer.id);
         return;
     };
+    if !ctx.host.steer_pending(&ctx.session_id, &steer.id) {
+        return;
+    }
     let answered = client
         .try_request_with_timeout(
             "turn/steer",
@@ -4491,17 +4492,12 @@ async fn steer_turn(
             STEER_TIMEOUT,
         )
         .await;
+    // codex reads an accepted steer at once, so its answer marks the spot.
     match answered {
-        Ok(Ok(_)) => ctx.record_steer(&steer, true),
-        Ok(Err(_)) => {
-            if let Err(error) = ctx.host.park_steer(&ctx.session_id, steer) {
-                ctx.push_error(format!("Could not preserve steering message: {error}"));
-            }
-        }
+        Ok(Ok(_)) => ctx.record_steer(&steer),
+        Ok(Err(_)) => ctx.host.release_steer(&ctx.session_id, &steer.id),
         Err(e) => {
-            // Record it anyway: the composer is already cleared, so this is
-            // the only copy of what the user typed.
-            ctx.record_steer(&steer, false);
+            ctx.record_steer(&steer);
             ctx.push_error(format!("codex did not confirm the steering message ({e})"));
         }
     }

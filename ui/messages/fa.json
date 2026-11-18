@@ -1044,6 +1044,7 @@
   "chat_pasted_image": "تصویر جای‌گذاری‌شده",
   "chat_type_custom_answer": "پاسخ دلخواه را بنویسید…",
   "chat_steer_placeholder": "راهنمایی {harness}… ({shortcut} برای افزودن به صف)",
+  "chat_steering": "در حال راهنمایی…",
   "chat_message_harness": "پیام به {harness}… (/ برای فرمان‌ها و مهارت‌ها، ! برای شل)",
   "chat_harness_unavailable": "در حال حاضر {harness} در دسترس نیست — انتخاب‌گر مدل را باز کنید",
   "chat_ask_agent_placeholder": "از عامل پژوهش بپرسید… (/ برای فرمان‌ها و مهارت‌ها، ! برای شل)",

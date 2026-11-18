@@ -1050,6 +1050,7 @@
   "chat_pasted_image": "पेस्ट की गई इमेज",
   "chat_type_custom_answer": "अपना जवाब टाइप करें…",
   "chat_steer_placeholder": "{harness} को दिशा दें… (कतार में लगाने के लिए {shortcut})",
+  "chat_steering": "दिशा दी जा रही है…",
   "chat_message_harness": "{harness} को संदेश भेजें… (कमांड और स्किल के लिए /, शेल के लिए !)",
   "chat_harness_unavailable": "{harness} उपलब्ध नहीं है — मॉडल पिकर खोलें",
   "chat_ask_agent_placeholder": "शोध एजेंट से पूछें… (कमांड और स्किल के लिए /, शेल के लिए !)",
