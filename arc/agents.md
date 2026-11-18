@@ -43,7 +43,11 @@ at a time, and announces the result with `usage.changed`; `POST
 /api/usage/refresh` re-reads them all. An account now signed in as someone else
 drops its snapshot. A running chat whose
 agent says its limits moved re-reads its account. A failed read keeps the last
-values beside the reason; an API key or a sign-out has no plan. A Codex reset is spent
+values beside the reason; an API key or a sign-out has no plan, and a subscription
+token whose limits can't be read is a plan without limits. For an account that
+may be on a plan, orx knows only what its tokens would cost at API prices, so the
+dashboard leaves its spend out of the week and the chat, and shows none while the
+plans are unread. A Codex reset is spent
 the same way, through `account/rateLimitResetCredit/consume` with the
 dashboard's key for that click, so a retry never spends two, and then
 re-reads that account.
