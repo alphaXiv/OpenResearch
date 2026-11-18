@@ -2189,6 +2189,8 @@
   "run_stage_with_look": "{stage}. {sentence}",
   "run_output_lines_one": "Строк вывода на данный момент: {count}.",
   "run_output_lines_other": "Строк вывода на данный момент: {count}.",
+  "run_output_matching_one": "Пока {count} строка, похожая на \"{pattern}\".",
+  "run_output_matching_other": "Пока {count} строк, похожих на \"{pattern}\".",
   "run_card_host": "Хост",
   "run_card_processor": "Процессор",
   "run_card_cores": "Ядра",

@@ -65,10 +65,16 @@ export const tokensOf = (template: string) => new Set([...template.matchAll(TOKE
 
 /** A watcher's sentence with each token filled from the live values; `**` marks stay for the renderer. */
 export function fillSentence(template: string, bindings: Bindings, signals: Signals): string {
-  const outputLines = bindings['count:"."'];
-  if (template === '**{count:"."}** lines of output so far.' && typeof outputLines === "number") {
-    const message = new Intl.PluralRules(getLocale()).select(outputLines) === "one" ? m.run_output_lines_one : m.run_output_lines_other;
-    return message({ count: `**${ltr(number(0).format(outputLines))}**` });
+  const lineCount = /^\*\*\{(count:"(?:[^"\\]|\\.)*")\}\*\* lines (?:of output|like "([\s\S]*)") so far\.$/u.exec(template);
+  if (lineCount) {
+    const [, key, pattern] = lineCount;
+    const value = bindings[key];
+    if (typeof value === "number") {
+      const one = new Intl.PluralRules(getLocale()).select(value) === "one";
+      const count = `**${ltr(number(0).format(value))}**`;
+      if (pattern === undefined) return (one ? m.run_output_lines_one : m.run_output_lines_other)({ count });
+      return (one ? m.run_output_matching_one : m.run_output_matching_other)({ count, pattern: autoDir(pattern) });
+    }
   }
 
   // A later step can lose the parent comparison the watcher had when it wrote this clause.

@@ -2189,6 +2189,8 @@
   "run_stage_with_look": "{stage}. {sentence}",
   "run_output_lines_one": "Hasta ahora, {count} línea de salida.",
   "run_output_lines_other": "Hasta ahora, {count} líneas de salida.",
+  "run_output_matching_one": "Hasta ahora, {count} línea como \"{pattern}\".",
+  "run_output_matching_other": "Hasta ahora, {count} líneas como \"{pattern}\".",
   "run_card_host": "Host",
   "run_card_processor": "Procesador",
   "run_card_cores": "Núcleos",

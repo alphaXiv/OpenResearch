@@ -2189,6 +2189,8 @@
   "run_stage_with_look": "{stage}. {sentence}",
   "run_output_lines_one": "تا اینجا {count} خط خروجی.",
   "run_output_lines_other": "تا اینجا {count} خط خروجی.",
+  "run_output_matching_one": "تا اینجا {count} خط شبیه \"{pattern}\" دیده شده است.",
+  "run_output_matching_other": "تا اینجا {count} خط شبیه \"{pattern}\" دیده شده است.",
   "run_card_host": "میزبان",
   "run_card_processor": "پردازنده",
   "run_card_cores": "هسته‌ها",

@@ -2189,6 +2189,8 @@
   "run_stage_with_look": "{stage}। {sentence}",
   "run_output_lines_one": "अब तक आउटपुट की {count} पंक्ति।",
   "run_output_lines_other": "अब तक आउटपुट की {count} पंक्तियाँ।",
+  "run_output_matching_one": "अब तक \"{pattern}\" जैसी {count} लाइन।",
+  "run_output_matching_other": "अब तक \"{pattern}\" जैसी {count} लाइनें।",
   "run_card_host": "होस्ट",
   "run_card_processor": "प्रोसेसर",
   "run_card_cores": "कोर",

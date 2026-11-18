@@ -2189,6 +2189,8 @@
   "run_stage_with_look": "{stage}. {sentence}",
   "run_output_lines_one": "Dotychczas wypisano {count} wiersz.",
   "run_output_lines_other": "Dotychczasowa liczba wierszy wyjścia to {count}.",
+  "run_output_matching_one": "Do tej pory {count} wiersz podobny do \"{pattern}\".",
+  "run_output_matching_other": "Do tej pory {count} wierszy podobnych do \"{pattern}\".",
   "run_card_host": "Host",
   "run_card_processor": "Procesor",
   "run_card_cores": "Rdzenie",

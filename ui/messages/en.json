@@ -2189,6 +2189,8 @@
   "run_stage_with_look": "{stage}. {sentence}",
   "run_output_lines_one": "{count} line of output so far.",
   "run_output_lines_other": "{count} lines of output so far.",
+  "run_output_matching_one": "{count} line like \"{pattern}\" so far.",
+  "run_output_matching_other": "{count} lines like \"{pattern}\" so far.",
   "run_card_host": "Host",
   "run_card_processor": "Processor",
   "run_card_cores": "Cores",

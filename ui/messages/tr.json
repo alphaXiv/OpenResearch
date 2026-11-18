@@ -2189,6 +2189,8 @@
   "run_stage_with_look": "{stage}. {sentence}",
   "run_output_lines_one": "Şu ana kadar {count} satır çıktı.",
   "run_output_lines_other": "Şu ana kadar {count} satır çıktı.",
+  "run_output_matching_one": "Şu ana kadar \"{pattern}\" benzeri {count} satır var.",
+  "run_output_matching_other": "Şu ana kadar \"{pattern}\" benzeri {count} satır var.",
   "run_card_host": "Sunucu",
   "run_card_processor": "İşlemci",
   "run_card_cores": "Çekirdekler",

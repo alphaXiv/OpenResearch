@@ -65,3 +65,11 @@ test("the output line count updates its grammar and uses the app locale", (t) =>
   assert.equal(line(1), "Hasta ahora, **1** línea de salida.");
   assert.equal(line(2), "Hasta ahora, **2** líneas de salida.");
 });
+
+test("a count of matching log lines uses the singular and plural forms", () => {
+  const key = `count:${JSON.stringify('error "OOM"')}`;
+  const template = `**{${key}}** lines like "Traceback (most recent call last)" so far.`;
+  const line = (count) => bare(fillSentence(template, { [key]: count }, {}));
+  assert.equal(line(1), '**1** line like "Traceback (most recent call last)" so far.');
+  assert.equal(line(2), '**2** lines like "Traceback (most recent call last)" so far.');
+});

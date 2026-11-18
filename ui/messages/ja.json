@@ -2189,6 +2189,8 @@
   "run_stage_with_look": "{stage}。{sentence}",
   "run_output_lines_one": "これまでの出力は{count}行です。",
   "run_output_lines_other": "これまでの出力は{count}行です。",
+  "run_output_matching_one": "これまでに「{pattern}」に似た行が{count}行あります。",
+  "run_output_matching_other": "これまでに「{pattern}」に似た行が{count}行あります。",
   "run_card_host": "ホスト",
   "run_card_processor": "プロセッサ",
   "run_card_cores": "コア",

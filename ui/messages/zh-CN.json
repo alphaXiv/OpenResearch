@@ -2189,6 +2189,8 @@
   "run_stage_with_look": "{stage}。{sentence}",
   "run_output_lines_one": "目前已输出 {count} 行。",
   "run_output_lines_other": "目前已输出 {count} 行。",
+  "run_output_matching_one": "目前有 {count} 行类似“{pattern}”的输出。",
+  "run_output_matching_other": "目前有 {count} 行类似“{pattern}”的输出。",
   "run_card_host": "主机",
   "run_card_processor": "处理器",
   "run_card_cores": "核心",

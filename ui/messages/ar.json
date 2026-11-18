@@ -2189,6 +2189,8 @@
   "run_stage_with_look": "{stage}. {sentence}",
   "run_output_lines_one": "{count} سطر من المخرجات حتى الآن.",
   "run_output_lines_other": "عدد أسطر المخرجات حتى الآن {count}.",
+  "run_output_matching_one": "حتى الآن، {count} سطر يشبه \"{pattern}\".",
+  "run_output_matching_other": "حتى الآن، {count} أسطر تشبه \"{pattern}\".",
   "run_card_host": "المضيف",
   "run_card_processor": "المعالج",
   "run_card_cores": "الأنوية",

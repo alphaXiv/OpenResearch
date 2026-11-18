@@ -2189,6 +2189,8 @@
   "run_stage_with_look": "{stage}. {sentence}",
   "run_output_lines_one": "지금까지 출력된 줄은 {count}개입니다.",
   "run_output_lines_other": "지금까지 출력된 줄은 {count}개입니다.",
+  "run_output_matching_one": "지금까지 \"{pattern}\"와 비슷한 줄이 {count}개 있습니다.",
+  "run_output_matching_other": "지금까지 \"{pattern}\"와 비슷한 줄이 {count}개 있습니다.",
   "run_card_host": "호스트",
   "run_card_processor": "프로세서",
   "run_card_cores": "코어",
