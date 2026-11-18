@@ -29,6 +29,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use crate::error::{anyhow, Result};
 use crate::local::agent_lifecycle::{IdlePolicy, REAPER_INTERVAL};
 use crate::local::harness::codex::{find_codex, find_codex_required};
+use crate::local::harness::SetupFailure;
 use crate::local::native_store::{self, NativeStore};
 
 /// Ceiling on a request's response wait — generous because `thread/start`
@@ -886,13 +887,15 @@ impl CodexHost {
             None => native_store::prepare_codex(native_store),
         })
         .await
-        .map_err(|error| anyhow!("Codex config preparation failed: {error}"))??;
+        .map_err(|error| anyhow!("Codex config preparation failed: {error}"))?
+        .map_err(|e| SetupFailure::tag("codex_setup_agent_home", e))?;
         let host = self.clone();
         let session = session_id.to_string();
         let spawn_profile = profile.clone();
         let selected = find_codex();
         self.ensure_with_spawn(session_id, native_store, profile, selected, async move {
-            let bin = find_codex_required()?;
+            let bin =
+                find_codex_required().map_err(|e| SetupFailure::tag("codex_setup_binary", e))?;
             Ok(move || {
                 spawn_client(
                     &session,
@@ -959,7 +962,7 @@ impl CodexHost {
             let client = match spawn() {
                 Ok(client) => client,
                 Err(error) => {
-                    let _ = ready_tx.send(Err(error));
+                    let _ = ready_tx.send(Err(SetupFailure::tag("codex_setup_spawn", error)));
                     return;
                 }
             };
@@ -972,7 +975,7 @@ impl CodexHost {
                 .await
                 .insert(session.clone(), client.clone());
             let initialized = tokio::select! {
-                result = handshake(&client) => result,
+                result = handshake(&client) => result.map_err(|e| SetupFailure::tag("codex_setup_initialize", e)),
                 _ = &mut accepted_rx => Err(anyhow!("Codex startup was cancelled")),
             };
             if let Err(error) = initialized {

@@ -119,6 +119,26 @@ pub enum TurnOutcome {
     Completed,
 }
 
+/// Attach a fixed diagnostic to a setup error without replacing its local detail.
+#[derive(Debug)]
+pub(crate) struct SetupFailure {
+    pub reason: &'static str,
+    message: String,
+}
+
+impl SetupFailure {
+    pub(crate) fn tag(reason: &'static str, error: crate::error::Error) -> crate::error::Error {
+        let message = error.to_string();
+        error.context(Self { reason, message })
+    }
+}
+
+impl std::fmt::Display for SetupFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 #[derive(Debug)]
 pub struct TurnFailure {
     pub kind: &'static str,
