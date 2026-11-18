@@ -19,6 +19,7 @@ use std::time::Duration;
 /// silence means the laptop has not watched the run.
 const STALE_AFTER_MS: i64 = 90_000;
 
+const FINAL_LOG_GRACE_MS: i64 = 15_000;
 const READING_FINAL_LOG: &str = "The final log is still being read.";
 
 /// The monitor route's bound; larger series are paged.
@@ -268,6 +269,12 @@ impl Lifecycle {
         self.run.ended_at.unwrap_or(self.run.updated_at)
     }
 
+    fn final_log_warning_due(&self, now: i64) -> bool {
+        self.retry_at.is_some()
+            && !self.live()
+            && now.saturating_sub(self.end()) >= FINAL_LOG_GRACE_MS
+    }
+
     fn ends_at(&self) -> Option<i64> {
         self.timeout_ms
             .filter(|_| self.started())
@@ -353,7 +360,10 @@ fn availability(fold: &Fold, life: &Lifecycle, now: i64) -> (&'static str, Optio
         ),
         Some("stale") => ("stale", reason),
         Some("incomplete") => ("live", reason),
-        _ if life.retry_at.is_some() => ("stale", Some(READING_FINAL_LOG.into())),
+        _ if life.retry_at.is_some() => (
+            "stale",
+            life.final_log_warning_due(now).then(|| READING_FINAL_LOG.into()),
+        ),
         _ => match status["lastCollectedAt"].as_i64() {
             Some(at) if life.live() && now - at > STALE_AFTER_MS => (
                 "stale",
@@ -362,6 +372,17 @@ fn availability(fold: &Fold, life: &Lifecycle, now: i64) -> (&'static str, Optio
             _ => ("live", None),
         },
     }
+}
+
+/// The result notice checks collection when its chat is ready to receive it.
+pub(crate) fn terminal_signal_note(store: &Store, run: &str) -> Result<Option<String>> {
+    let status = super::adapters::signals::read_availability(store.data_dir(), run)?;
+    if let Some(reason) = status.as_ref().and_then(|value| value["reason"].as_str()) {
+        return Ok(Some(reason.to_owned()));
+    }
+    Ok(store
+        .signal_collection_pending(run)?
+        .then(|| READING_FINAL_LOG.to_owned()))
 }
 
 /// The default view, derived from the order in which the run first reported each signal.
@@ -2345,9 +2366,11 @@ fn project(
     let [checkpoint, status] = signal_paths(store.data_dir(), &run.id);
     let stamps = [stamp_of(&checkpoint), stamp_of(&status)];
     // What a failed projection showed is never kept as if nothing changed.
-    let same_life = held
-        .as_ref()
-        .filter(|held| held.failed.is_none() && held.life_key == life_key);
+    let same_life = held.as_ref().filter(|held| {
+        held.failed.is_none()
+            && held.life_key == life_key
+            && life.final_log_warning_due(held.evaluated_at) == life.final_log_warning_due(now)
+    });
     let media = same_life
         .map(|held| super::media::project(store, run, &life.kind, &held.projection.body["view"]));
     let same_media = same_life.filter(|held| media.as_ref() == held.projection.body.get("media"));
@@ -4515,6 +4538,21 @@ mod tests {
         let run = f.run("done", local());
         let now = T0 + 700_000;
         f.store.queue_signal_collection(&run.id).unwrap();
+
+        let ended = run.ended_at.unwrap();
+        let (early, _) = monitor_at(&f, &run, ended + 14_999);
+        assert_eq!(early["availability"]["state"], "stale");
+        assert!(early["availability"]["reason"].is_null());
+        assert!(!early["statusText"]
+            .as_str()
+            .unwrap()
+            .contains("No metrics found"));
+        let (late, event) = monitor_at(&f, &run, ended + 15_000);
+        assert_eq!(late["availability"]["reason"], READING_FINAL_LOG);
+        assert!(
+            event.is_some(),
+            "the view hears about the delay even while collection is idle"
+        );
 
         let (_, published) = monitor(&f.store, &run).unwrap();
         let offline = offline(&f.store, &run, now).unwrap();

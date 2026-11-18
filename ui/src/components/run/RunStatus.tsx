@@ -48,6 +48,10 @@ export function RunStatus({ model, label, descriptionId, onOpenRunPage, expanded
   const behind = data && monitorBehind(model.run.monitor, data);
   const stages = data && !behind ? foldedStages(data, model) : null;
   const progress = data?.progress;
+  const availability = data?.availability;
+  const availabilityNote = availability && availability.state !== "live"
+    ? availability.reason ?? (!model.live && availability.state === "stale" ? null : m.run_view_stale())
+    : null;
   const count = data && progress?.done != null ? autoDir(plainSentence(capitalized(progressWords(data.phases[progress.phase], progress.done)))) : "";
   const time = [model.eta, model.etaDetail].filter(Boolean).join(" · ") || (!model.live ? model.sentence.text : "");
   const untimed = [...(data?.estimate?.untimed ?? model.run.monitor?.estimate?.untimed ?? [])].sort((a, b) => b.length - a.length);
@@ -123,7 +127,7 @@ export function RunStatus({ model, label, descriptionId, onOpenRunPage, expanded
               {monitor?.status === "error" ? <div className="mt-2.5 text-xs text-ink-subtext" role="alert">
                 {m.run_monitor_load_failed()} <Button size="small" variant="ghost" onClick={monitor.retry}><RefreshCw size={13} />{m.app_retry()}</Button>
               </div> : monitor?.status === "loading" || behind ? <p className="m-0 mt-2.5 text-xs text-ink-subtext" role="status">{m.common_loading()}</p> : data && <>
-                {data.availability.state !== "live" && <p className="m-0 mt-2.5 text-xs text-ink-subtext">{data.availability.reason ?? m.run_view_stale()}</p>}
+                {availabilityNote && <p className="m-0 mt-2.5 text-xs text-ink-subtext">{autoDir(availabilityNote)}</p>}
                 {data.availability.state !== "unavailable" && stages && <div className="mt-2.5 border-t border-border-variant pt-2.5">
                   <Phases model={model} phases={stages.phases} current={stages.current} progress={count} setupNames={stages.names} className="flex-col gap-y-2" />
                 </div>}

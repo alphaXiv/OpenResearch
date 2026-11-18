@@ -57,6 +57,7 @@ export function RunPage({ run, name, chatSessionId, now }: { run: Run; name: str
   const age = model.live && model.sentence.at !== null ? model.sentence.at : null;
   const blocks = data?.view.blocks.filter((block) => drawsAt(block, "page")) ?? [];
   const canSayEmpty = !failed && data?.availability.state === "live";
+  const stale = model.stale && [model.stale.why, model.stale.age].filter(Boolean).join(" · ");
   const empty = !canSayEmpty || blocks.length > 0 ? null
     : !data.viewFrom.isDefault ? m.run_page_view_empty()
     : model.live ? m.run_page_no_signals()
@@ -74,12 +75,12 @@ export function RunPage({ run, name, chatSessionId, now }: { run: Run; name: str
           </span>
         </p>
       )}
-      {model.stale && !failed && <p className="m-0 mt-1.5 text-xs text-ink-subtext">{model.stale.why} · {model.stale.age}</p>}
+      {stale && !failed && <p className="m-0 mt-1.5 text-xs text-ink-subtext">{stale}</p>}
       {model.note && <p className="m-0 mt-1.5 text-sm text-ink-subtext">{model.note}</p>}
       {model.flag?.record && <Issue model={model} flag={model.flag.record} agent={run.chatSessionId ? agent : null} />}
       {failed && (
         <div className="mt-2 flex items-center gap-2 text-xs text-ink-subtext">
-          {model.stale ? `${model.stale.why} · ${model.stale.age}` : m.run_monitor_load_failed()}
+          {stale ?? m.run_monitor_load_failed()}
           <Button size="small" variant="ghost" onClick={monitor.retry}><RefreshCw size={13} />{m.app_retry()}</Button>
         </div>
       )}

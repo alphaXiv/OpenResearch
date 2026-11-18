@@ -7294,9 +7294,6 @@ impl Store {
                         facts.push_str(&format!("{name}: no value reported\n"));
                     }
                 }
-                if let Some(reason) = monitor["availability"]["reason"].as_str() {
-                    facts.push_str(&format!("Signal availability: {reason}\n"));
-                }
             }
             Err(error) => facts.push_str(&format!(
                 "Headline/chart values could not be read: {error:#}\n"
@@ -8007,6 +8004,17 @@ pub(crate) mod tests {
             assert!(body.contains("val_bpb = 1.940825 at step 100"), "{body}");
             assert!(!body.contains("val_bpb = 1.940825 at step 123"), "{body}");
         }
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_queued_terminal_body_does_not_freeze_a_pending_signal_read() {
+        let (dir, store) = engine_fixture();
+        let run = store.get_run("failed").unwrap().unwrap();
+        store.queue_signal_collection(&run.id).unwrap();
+        let body = store.terminal_notice_body(&run).unwrap();
+        assert!(!body.contains("final log is still being read"), "{body}");
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }

@@ -57,7 +57,9 @@ export function RunLine({ model, agent, label, onToggle, onOpenRunPage, expanded
   const whyId = useId();
   const { stale } = model;
   // The time slot explains itself: why the view stopped, or what the time means.
-  const time = expanded && stale ? null : stale ? { text: stale.age, why: stale.why, tip: `${stale.why} · ${stale.age}` }
+  const time = expanded && stale ? null
+    : stale?.age ? { text: stale.age, why: stale.why, tip: `${stale.why} · ${stale.age}` }
+    : stale ? { text: stale.why, why: "", tip: "" }
     : model.eta ? { text: model.eta, why: model.etaDetail, tip: `${model.eta} · ${model.etaDetail}` }
     : null;
   const { text, title } = label ?? { text: model.name, title: model.name };
@@ -74,7 +76,7 @@ export function RunLine({ model, agent, label, onToggle, onOpenRunPage, expanded
             <span className="whitespace-nowrap tabular-nums text-ink-subtext">{time.text}</span>
             <span id={whyId} hidden>{time.why}</span>
           </Tooltip>
-        ) : <span className="shrink-0 whitespace-nowrap tabular-nums text-ink-subtext">{time.text}</span>)}
+        ) : <span className={cn("whitespace-nowrap tabular-nums text-ink-subtext", stale ? "max-w-3/5 shrink-0 truncate" : "shrink-0")}>{time.text}</span>)}
         <Controls model={model} expandable={expandable} expanded={expanded} onToggle={onToggle} />
       </div>
       {children}

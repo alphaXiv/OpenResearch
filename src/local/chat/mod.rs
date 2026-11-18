@@ -10084,7 +10084,7 @@ async fn send_run_notice_batch(
         }
     }
     let result = chat
-        .send_message_showing(session_id, run_notice_request(notices, guard))
+        .send_message_showing(session_id, run_notice_request(&store, notices, guard)?)
         .await;
     if result.is_err() && store.get_chat_session(session_id)?.is_none() {
         return Err(PermanentRunNoticeError("Chat was deleted".into()).into());
@@ -10092,11 +10092,14 @@ async fn send_run_notice_batch(
     result
 }
 
-/// Frozen bodies keep the admission hash stable across later run and chat changes.
-fn run_notice_request(notices: &[crate::store::RunNotice], guard: TurnGuard) -> SendTurnRequest {
+/// Once the turn is admitted, its prepared input is authoritative for retries.
+fn run_notice_request(
+    store: &Store,
+    notices: &[crate::store::RunNotice],
+    guard: TurnGuard,
+) -> Result<SendTurnRequest> {
     let text = crate::engine::flags::batch_text(notices.iter().map(|notice| notice.body.as_str()));
-
-    SendTurnRequest {
+    let mut request = SendTurnRequest {
         messages: vec![AnnotatedText {
             text,
             annotations: Vec::new(),
@@ -10115,7 +10118,41 @@ fn run_notice_request(notices: &[crate::store::RunNotice], guard: TurnGuard) -> 
         client_turn_id: Some(notices[0].client_turn_id.clone()),
         request_hash: None,
         continuation: false,
+    };
+    let bodies: Vec<_> = notices
+        .iter()
+        .map(|notice| {
+            let mut body = std::borrow::Cow::Borrowed(notice.body.as_str());
+            if notice.kind == crate::store::TERMINAL {
+                let availability =
+                    crate::engine::monitor::terminal_signal_note(store, &notice.run_id)
+                        .unwrap_or_else(|error| {
+                            Some(format!(
+                                "Could not check final signal collection: {error:#}"
+                            ))
+                        });
+                if let Some(reason) = availability {
+                    body.to_mut()
+                        .push_str(&format!("\n\nSignal availability: {reason}"));
+                }
+            }
+            body
+        })
+        .collect();
+    if bodies
+        .iter()
+        .any(|body| matches!(body, std::borrow::Cow::Owned(_)))
+    {
+        request.request_hash = Some(turn_request_hash(
+            &request.messages,
+            &request.transcript,
+            &request.overrides,
+            &request.images,
+        )?);
+        request.messages[0].text =
+            crate::engine::flags::batch_text(bodies.iter().map(|body| body.as_ref()));
     }
+    Ok(request)
 }
 
 /// Returns the chats whose turn slot was taken; whoever holds it reports `chat.busy` false on release.
@@ -13588,6 +13625,51 @@ mod run_wakeup_tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn terminal_notice_reads_collection_when_the_chat_can_take_it() {
+        let (store, dir) = temp_store("terminal-collection");
+        session(&store, "owner");
+        let run = run("done");
+        store.upsert_run(&run).unwrap();
+        store.queue_signal_collection(&run.id).unwrap();
+        let body = store.terminal_notice_body(&run).unwrap();
+        store
+            .insert_run_notice(
+                &run.id,
+                "owner",
+                crate::store::TERMINAL,
+                "terminal",
+                &body,
+                1,
+            )
+            .unwrap();
+        let notices = store.run_notice_batch("owner").unwrap();
+        let text = || async {
+            let host = notice_host();
+            let guard =
+                TurnGuard::claim_idle(&host, "owner", TurnState::Reserved { turn_id: None })
+                    .await
+                    .unwrap();
+            let request = run_notice_request(&store, &notices, guard).unwrap();
+            request.messages[0].text.clone()
+        };
+        assert!(text().await.contains("final log is still being read"));
+        store.finish_signal_collection(&run.id).unwrap();
+        assert!(!text().await.contains("Signal availability"));
+        let status = dir.join("run-signals");
+        std::fs::create_dir_all(&status).unwrap();
+        std::fs::write(
+            status.join("run_x.status.json"),
+            r#"{"state":"incomplete","reason":"The host no longer has this log"}"#,
+        )
+        .unwrap();
+        assert!(text()
+            .await
+            .contains("Signal availability: The host no longer has this log"));
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn outbox_crash_retry_freezes_batches_and_coalesces_only_when_idle() {
         const CHILD: &str = "ORX_TEST_CHAT_OUTBOX";
         if std::env::var_os(CHILD).is_none() {
@@ -13685,7 +13767,7 @@ mod run_wakeup_tests {
                     .await
                     .unwrap();
             let submitted = host
-                .send_message_showing("owner", run_notice_request(&frozen, guard))
+                .send_message_showing("owner", run_notice_request(&store, &frozen, guard).unwrap())
                 .await
                 .unwrap();
             assert!(matches!(submitted, TurnSubmission::Started(_)));

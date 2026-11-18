@@ -82,7 +82,7 @@ export interface RunModel {
   /** Lost contact, a pending cancel and the like, worded by `runNoticeCopy`. */
   notice: RunNotice | null;
   /** The run's view is older than it looks: when it was last seen, and in its state's own words why. */
-  stale: { state: "stale" | "rebuilding" | "unavailable" | "failed"; age: string; why: string } | null;
+  stale: { state: "stale" | "rebuilding" | "unavailable" | "failed"; age: string | null; why: string } | null;
   connectHost: string | null;
   canStop: boolean;
   canDismiss: boolean;
@@ -227,6 +227,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   const shownAsOf = monitor?.asOf ?? run.monitor?.asOf ?? now;
   const degraded = failing !== null || monitorFailed || availability !== "live";
   const live = runActive(run.status);
+  const finalizing = !live && failing === null && !monitorFailed && (availability === "stale" || availability === "rebuilding");
   const pre = run.status === "submitting" || run.status === "starting";
   const display = runDisplay(run);
 
@@ -331,9 +332,9 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   let leftMs: RunModel["leftMs"] = null;
   // Time since the run started, where it has no time left to show, said as that.
   let etaElapsed = false;
-  const lastSeen = tone === "lost" || degraded;
+  const frozen = tone === "lost" || degraded;
   // What a run has cost only grows, so it keeps showing while the facts wait for the monitor to catch up.
-  const cost = !pre && sameGeneration?.cost ? costWords(sameGeneration.cost, live, lastSeen) : "";
+  const cost = !pre && sameGeneration?.cost ? costWords(sameGeneration.cost, live, frozen && !finalizing) : "";
   const ended = run.status === "done" ? m.run_done_in({ duration: durationText(elapsed) })
     : tone === "failed" ? m.run_failed_after({ duration: durationText(elapsed) })
     : tone === "stopped" || tone === "revising" ? m.run_eta_stopped_at({ duration: durationText(elapsed) })
@@ -378,7 +379,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   }
   const said = sentence.key.startsWith("auto:") || sentence.key.startsWith("look:") || sentence.key.startsWith("end:");
   const caption = run.status === "done" ? "" : pre ? m.run_not_started()
-    : progress && (notice || degraded) ? m.run_progress_last_seen({ progress: autoDir(progressText ?? "") })
+    : !finalizing && progress && (notice || degraded) ? m.run_progress_last_seen({ progress: autoDir(progressText ?? "") })
     : progress ? captionProgress({ ...progress, whole }, phases, open && limit ? limit.ms : null, elapsed, said)
     : "";
 
@@ -414,8 +415,12 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   }[staleState]();
   const why = failing ?? (!monitorFailed ? source?.reason : null) ?? null;
   const reason = why ? autoDir(why) : null;
-  const stale = degraded ? { state: staleState, age: m.status_last_seen({ time: clockText(shownAsOf) }), why: [words, reason].filter(Boolean).join(" · ") } : null;
-  const timeLabel = stale?.age ?? eta;
+  const stale = degraded && (!finalizing || reason || staleState === "rebuilding") ? {
+    state: staleState,
+    age: finalizing ? null : m.status_last_seen({ time: clockText(shownAsOf) }),
+    why: finalizing && reason ? reason : [words, reason].filter(Boolean).join(" · "),
+  } : null;
+  const timeLabel = stale?.age ?? stale?.why ?? eta;
 
   return {
     run,
@@ -433,10 +438,10 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     leftMs: settingUp ? null : leftMs,
     etaFloor,
     etaDetail,
-    etaStrong: etaStrong && !lastSeen,
+    etaStrong: etaStrong && !frozen,
     progress: caption,
     cost,
-    bar: { segments, whole, frozen: tone === "lost" || degraded, label: barLabel([sentence.text, caption, timeLabel, etaElapsed ? etaDetail : ""]) },
+    bar: { segments, whole, frozen, label: barLabel([sentence.text, caption, timeLabel, etaElapsed ? etaDetail : ""]) },
     ticks,
     flag,
     flagDetail: flag?.record?.detail ? autoDir(fillSentence(flag.record.detail, bindings, signals)) : null,

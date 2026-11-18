@@ -55,18 +55,19 @@ export function RunStrip({ model, monitor, agent, label, open, onToggle, onOpenR
   const flag = model.flag?.record;
   const notice = model.notice && model.notice.kind !== "cancelling";
   const hero = model.live && Boolean(chart || model.headline || monitor?.status === "loading");
-  const expanded = open && Boolean(hero || flag || model.note || notice || monitor?.status === "error");
+  const expanded = open && Boolean(hero || flag || model.note || notice || model.stale && !model.live || monitor?.status === "error");
+  const stale = model.stale && [model.stale.why, model.stale.age].filter(Boolean).join(" · ");
 
   return (
     <RunLine model={model} agent={agent} label={label} onToggle={onToggle} onOpenRunPage={onOpenRunPage} expanded={expanded} expandable={!open || expanded || monitor?.status === "loading"}>
       {expanded && <div className="px-3 pb-3">
         {notice && <RunContactNotice run={model.run} className="mt-1.5" />}
-        {model.stale && monitor?.status !== "error" && <p className="m-0 mt-1.5 text-xs text-ink-subtext">{model.stale.why} · {model.stale.age}</p>}
+        {stale && monitor?.status !== "error" && <p className="m-0 mt-1.5 text-xs text-ink-subtext">{stale}</p>}
         {model.note && <p className={cn("m-0 text-xs text-ink-subtext", !notice && !model.stale ? "-mt-0.5" : "mt-1.5")}>{model.note}</p>}
         {flag && !model.sentence.watcher && model.flagDetail && <p className="m-0 mt-1.5 text-sm"><Sentence text={model.flagDetail} tone={model.tone} /></p>}
         {flag && <Issue model={model} flag={flag} agent={agent} onOpenRun={onOpenRun} />}
         {monitor?.status === "error" && <div className="mt-1.5 flex items-center gap-2 text-xs text-ink-subtext">
-          {model.stale ? `${model.stale.why} · ${model.stale.age}` : m.run_monitor_load_failed()}
+          {stale ?? m.run_monitor_load_failed()}
           <Button size="small" variant="ghost" onClick={monitor.retry}><RefreshCw size={13} />{m.app_retry()}</Button>
         </div>}
         {hero && !flag && <Hero model={model} monitor={data} block={chart} />}

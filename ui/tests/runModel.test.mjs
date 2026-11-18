@@ -198,6 +198,22 @@ test("a view that is stale, rebuilding or unavailable reads like lost contact, e
   assert.ok(!words.has(failed.stale.why));
 });
 
+test("finalizing an ended run is quiet during grace and never says when it was last seen", () => {
+  const ended = run({ status: "done", endedAt: now });
+  const pending = { state: "stale", reason: null };
+  const delayed = { ...pending, reason: "The final log is still being read." };
+  const read = (availability, full) => model({ ...ended, monitor: summary({ availability }) }, {
+    monitor: full ? { ...running, availability } : null,
+  });
+  for (const full of [true, false]) {
+    assert.equal(read(pending, full).stale, null);
+    const slow = read(delayed, full);
+    assert.equal(bare(slow.stale.why), delayed.reason);
+    assert.equal(slow.stale.age, null);
+    assert.match(slow.text, /^Done in /);
+  }
+});
+
 test("a run with no total and no limit shows elapsed time, says why there is no estimate and fills nothing", () => {
   const open = { ...running, phases: [{ ...running.phases[0], of: null }], estimate: null, limit: null, progress: { ...running.progress, whole: null, segments: [{ weight: 1, fill: null }] } };
   const line = model(run(), { monitor: open, at: now });
