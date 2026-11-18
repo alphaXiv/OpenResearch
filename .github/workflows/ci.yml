@@ -14,7 +14,6 @@ jobs:
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
       ORX_OFFICIAL_RELEASE_BUILD: '1'
-      ORX_EMBED_HOST_DIR: ${{ runner.temp }}/orx-hosts
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -37,6 +36,8 @@ jobs:
           node-version: 22
       - name: Exercise the same workflow on unmodified commits
         shell: bash
+        env:
+          ORX_EMBED_HOST_DIR: ${{ runner.temp }}/orx-hosts
         run: |
           set -euo pipefail
           for pair in 'base 2567ddf9eb09c6acedc150e6f5c82e5b1b0262a1' 'fixed 1c3f67869058440272aa505eb008ae4385860edb' 'origin 9bbd3555d56d2383007df7128d3ce111a772f644'; do
