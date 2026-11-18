@@ -7228,9 +7228,10 @@ requires_openai_auth = false
 
     #[tokio::test]
     async fn missing_binary_setup_exhaustion_reports_no_local_path() {
-        if !crate::config::in_test_child(&[]) {
+        if !crate::config::in_test_child(&["ORX_TEST_SPEEDUP"]) {
             return;
         }
+        std::env::set_var("ORX_TEST_SPEEDUP", "1000");
         let mut ctx = TurnCtx::test_stub();
         ctx.harness = "codex".into();
         assert!(ctx
@@ -7253,9 +7254,10 @@ requires_openai_auth = false
 
     #[tokio::test]
     async fn initialize_rejection_is_only_reported_after_retries_run_out() {
-        if !crate::config::in_test_child(&[]) {
+        if !crate::config::in_test_child(&["ORX_TEST_SPEEDUP"]) {
             return;
         }
+        std::env::set_var("ORX_TEST_SPEEDUP", "1000");
         let bin = crate::config::test_home().join(".local/bin");
         std::fs::create_dir_all(&bin).unwrap();
         for (code, retries) in [(-32600, false), (-32001, true)] {

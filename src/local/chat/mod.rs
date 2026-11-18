@@ -8729,7 +8729,7 @@ impl TurnCtx {
             return None;
         }
         self.orx_retry_count = retry_number;
-        Some((retry_number, delay))
+        Some((retry_number, crate::config::paced(delay)))
     }
 
     pub fn orx_retry_remaining(&self) -> Option<Duration> {
