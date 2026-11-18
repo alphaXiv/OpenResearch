@@ -280,14 +280,14 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   const stageLabel = position?.index != null && position.count !== null
     ? m.run_stage_position({ stage: autoDir(name), position: ltr(`${fmtNumber(position.index + 1)}/${fmtNumber(position.count)}`) })
     : autoDir(name);
-  const count = stageDone === null ? "" : capitalized(progressWords(stagePhase, stageDone));
+  const count = progressText === null ? "" : autoDir(capitalized(progressText));
   const logLine = setup?.line;
-  const detail = stageDone !== null
-    ? settingUp && rawName && rawName !== m.run_stage_setup() ? `${autoDir(rawName)} ${count}` : count
-    : settingUp && rawName ? m.run_stage_started({ stage: autoDir(rawName) })
+  const setupStage = settingUp && rawName && rawName !== m.run_stage_setup() ? autoDir(rawName) : "";
+  const setupDetail = settingUp && rawName ? m.run_stage_started({ stage: autoDir(rawName) })
       : logLine && !/^\s*(?:[{}\[\]]|["']?[\w.-]+["']?\s*[:=])/.test(logLine) ? quoted(logLine) : "";
-  const statusText = detail ? `${stageLabel} · ${detail}` : stageLabel;
-  const stageSlots = { name: stageDone === null ? statusText : stageLabel, count: stageDone === null ? "" : detail };
+  const detail = count ? setupStage : setupDetail;
+  const stageSlots = { name: detail ? `${autoDir(stageLabel)} · ${autoDir(detail)}` : count ? `${autoDir(stageLabel)} ·` : stageLabel, count };
+  const statusText = [stageSlots.name, count].filter(Boolean).join(" ");
   const stageKey = `${settingUp ? "setup" : "stage"}:${order?.index ?? rawName}:${order?.first ?? ""}:${order?.count ?? ""}`;
   const recorded = monitor ? monitor.sentence : summary?.sentence ?? null;
   const watched = live && recorded && now - recorded.t <= 3 * 60_000 ? recorded : null;
@@ -309,13 +309,13 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     const text = !progressText || tone === "done" ? ""
       : outcome?.by === "user" ? m.run_auto_by_you({ progress: autoDir(progressText) })
       : m.run_auto_at({ progress: autoDir(progressText) });
-    sentence = { text, key: `end:${tone}`, at: null };
+    sentence = { text, stage: text ? { name: "", count: autoDir(text) } : undefined, key: `end:${tone}`, at: null };
   } else if (pre) {
     sentence = { text: m.status_starting(), key: "pre:starting", at: null };
   } else if (watched) {
     speaking = watched.template;
     const watcher = fillSentence(watched.template, bindings, signals);
-    const text = m.run_stage_with_look({ stage: statusText.replace(/[.。۔।]+$/u, ""), sentence: autoDir(watcher) });
+    const text = m.run_stage_with_look({ stage: autoDir(statusText.replace(/[.。۔।]+$/u, "")), sentence: autoDir(watcher) });
     sentence = { text, watcher, stage: stageSlots, key: `look:${stageKey}:${watched.template}`, at: watched.t };
   } else {
     sentence = { text: statusText, stage: stageSlots, key: `auto:${stageKey}`, at: null };

@@ -17,16 +17,18 @@ import { WorkspaceDomContext } from "../../WorkspaceDom";
 import { RunDiffStat } from "../RunDiffStat";
 import { EscapeScope } from "../EscapeScope";
 import { Button } from "../ui";
+import { cn } from "../ui/cn";
 import { Phases } from "./blocks/Phases";
 import { Lead } from "./Lead";
 import { Sentence } from "./Sentence";
 import { useRunMonitors } from "./useRunMonitor";
 
-export function RunStatus({ model, label, descriptionId, onOpenRunPage }: {
+export function RunStatus({ model, label, descriptionId, onOpenRunPage, expanded = false }: {
   model: RunModel;
   label?: string;
   descriptionId?: string;
   onOpenRunPage?: (run: Run, intent: TabOpenIntent) => void;
+  expanded?: boolean;
 }) {
   const { portalContainer } = useContext(WorkspaceDomContext);
   const [open, setOpen] = useState(false);
@@ -51,6 +53,7 @@ export function RunStatus({ model, label, descriptionId, onOpenRunPage }: {
   const footer = autoDir(model.settingUp || !model.live ? time : m.run_whole_time({ time: autoDir(time) }));
   const footerNames = untimed.length ? new RegExp(`(${untimed.map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`, "g") : null;
   const stage = model.sentence.stage;
+  const wrapWarning = expanded && model.tone === "flag";
   const status = plainSentence([label, model.lead, model.sentence.text].filter(Boolean).join(" · "));
 
   // Focus returns before closing so it cannot reopen the focus-triggered popover.
@@ -74,15 +77,15 @@ export function RunStatus({ model, label, descriptionId, onOpenRunPage }: {
           onKeyDown={onKeyDown}
           aria-label={m.run_status_for({ status: autoDir(status), name: autoDir(model.name) })}
           aria-describedby={descriptionId}
-          className="flex min-h-6 min-w-0 flex-1 items-center overflow-hidden whitespace-nowrap rounded-xs text-start focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:outline-offset-2"
+          className="flex min-h-6 min-w-0 flex-1 items-center overflow-hidden rounded-xs text-start whitespace-nowrap focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:outline-offset-2"
         >
-          {label && <span className="me-1 min-w-0 shrink truncate text-ink-subtext">{autoDir(label)} · </span>}
+          {label && <span className="me-1 max-w-1/4 shrink-0 truncate text-ink-subtext">{autoDir(label)} · </span>}
           <Lead model={model} />
           {stage ? <>
-            <span className="min-w-0 shrink truncate"><Sentence text={stage.name} tone={model.tone} /></span>
-            {stage.count && <span className="ms-1 shrink-0"><span aria-hidden="true">· </span><Sentence text={stage.count} tone={model.tone} /></span>}
+            {stage.name && <span className="min-w-0 shrink truncate"><Sentence text={stage.name} tone={model.tone} /></span>}
+            {stage.count && <span className={cn("shrink-0", stage.name && "ms-1")}><Sentence text={stage.count} tone={model.tone} /></span>}
             {model.sentence.watcher && <span className="min-w-0 flex-1 basis-0 truncate"><Sentence text={m.run_stage_with_look({ stage: "", sentence: autoDir(model.sentence.watcher) })} tone={model.tone} /></span>}
-          </> : <span className="min-w-0 truncate"><Sentence text={model.sentence.text} tone={model.tone} /></span>}
+          </> : <span className={cn("min-w-0", wrapWarning ? "wrap-anywhere whitespace-normal" : "truncate")}><Sentence text={model.sentence.text} tone={model.tone} /></span>}
         </Popover.Trigger>
         <Popover.Portal container={portalContainer}>
           <Popover.Positioner side="top" align="start" anchor={() => trigger.current?.closest<HTMLElement>("[data-run-frame]") ?? trigger.current} sideOffset={6} collisionPadding={12} className="z-50">

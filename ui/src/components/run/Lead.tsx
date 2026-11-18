@@ -4,5 +4,5 @@ import { cn } from "../ui/cn";
 /** The state a run ended in, or is in, before its sentence. */
 export function Lead({ model, stop = false }: { model: RunModel; stop?: boolean }) {
   if (!model.lead) return null;
-  return <span className={cn("font-medium", TONE_INK[model.tone])}>{model.lead}{stop ? ". " : "\u00a0"}</span>;
+  return <span className={cn("font-medium", TONE_INK[model.tone], !stop && "min-w-0 shrink truncate")}>{model.lead}{stop ? ". " : "\u00a0"}</span>;
 }

@@ -654,6 +654,19 @@ for (let step = 1; step <= ${total}; step++) {
       await expect(rows.nth(index)).toContainText(said(label))
     }
     await themes(page, banner, info, 'summary-rows')
+
+    await page.clock.setFixedTime(Date.now() + 30_000)
+    await page.setViewportSize({ width: 420, height: 860 })
+    await expect(banner).toContainText('No progress for')
+    for (const { title, label } of runs.slice(0, 3)) {
+      const clipped = await named(title).evaluate((trigger, short) => {
+        const label = Array.from(trigger.children).find((element) => element.textContent.replace(/[⁦-⁩]/g, '').trim() === `${short} ·`)
+        return label ? label.scrollWidth - label.clientWidth : Infinity
+      }, label)
+      expect(clipped).toBeLessThanOrEqual(1)
+    }
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.clock.setFixedTime(Date.now())
   })
 
   await test.step('the summary folds to one line over every bar, and opens back to its rows', async () => {
