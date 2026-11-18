@@ -94,12 +94,13 @@ fn report(plan: &[orx_signals::Stage], parent: Option<&orx_signals::Snapshot>) -
             })?;
             let parent_unit = previous.and_then(|p| p.unit.as_deref());
             let unit = stage.unit.as_deref();
-            let (ms, explanation) = match stage.of {
+            let explanation = match stage.of {
                 Some(of) => {
-                    let each = prior
+                    prior
                         .per_unit_ms
                         .filter(|each| *each > 0.0)
                         .ok_or("no completed parent count to scale")?;
+                    let each = prior.ms / of;
                     let unit = unit.or(parent_unit).unwrap_or("units");
                     let per_unit = if each < 1.0 {
                         "under 1 ms".to_owned()
@@ -108,17 +109,14 @@ fn report(plan: &[orx_signals::Stage], parent: Option<&orx_signals::Snapshot>) -
                     } else {
                         duration(each)
                     };
-                    (
-                        each * of,
-                        format!("{of} {unit}; the parent took {per_unit} each"),
-                    )
+                    format!("{of} {unit}; the parent took {per_unit} each")
                 }
-                None => (prior.ms, "(as the parent)".into()),
+                None => "(as the parent)".into(),
             };
-            if !ms.is_finite() {
+            if !prior.ms.is_finite() {
                 return Err("scaled duration exceeds the supported range");
             }
-            Ok((ms, explanation))
+            Ok((prior.ms, explanation))
         })();
         match timing {
             Ok((ms, explanation)) => {
@@ -227,6 +225,34 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("Total: about 6 s"), "{text}");
+    }
+
+    #[test]
+    fn sizing_matches_the_live_prior_when_the_parent_finishes_below_its_total() {
+        let mut parent = orx_signals::Snapshot::new("parent", "log", "generation");
+        parent
+            .feed(
+                b"::orx:: {\"phase\":\"train\",\"step\":0,\"of\":100,\"unit\":\"steps\"}\n",
+                false,
+                0,
+                true,
+            )
+            .unwrap();
+        parent
+            .feed(b"::orx:: {\"step\":80}\n", true, 100_000, true)
+            .unwrap();
+        let plan = orx_signals::plan(&json!([{"phase":"train", "of":100, "unit":"steps"}]), false)
+            .unwrap();
+        let stages = estimate::stages(
+            &plan,
+            None,
+            false,
+            &[(&parent, true, estimate::TimedBy::Parent)],
+        );
+        assert_eq!(stages[0].prior.unwrap().ms, 100_000.0);
+
+        let text = report(&plan, Some(&parent));
+        assert!(text.contains("Total: about 1 min 40 s"), "{text}");
     }
 
     #[test]
