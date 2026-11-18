@@ -6,9 +6,10 @@ import { DetailDrawer } from "../src/components/DetailDrawer.tsx";
 import { RunBanner } from "../src/components/run/RunBanner.tsx";
 import { fmtClock } from "../src/i18n.ts";
 import { m } from "../src/paraglide/messages.js";
+import { QueryEvents } from "../src/queries/Events.tsx";
 import { chooseFlag } from "../src/queries/projects.ts";
 import { createWorkspace } from "../src/workspace.tsx";
-import { find, press, render, serve, settle } from "./render.mjs";
+import { find, press, render, serve, settle, streams } from "./render.mjs";
 
 const fixture = (name) => JSON.parse(readFileSync(new URL(`./fixtures/runMonitor/${name}.json`, import.meta.url), "utf8"));
 const running = fixture("running");
@@ -285,6 +286,42 @@ test("eight runs all open and each read its monitor once", async () => {
   assert.ok(list.compareDocumentPosition(button(m.run_show_less())) & Node.DOCUMENT_POSITION_PRECEDING, "and comes first in Tab order");
 });
 
+test("an artifact change refreshes only open rows in view in a list of eight runs", async (t) => {
+  const ids = Array.from({ length: 8 }, (_, index) => `r${index + 1}`);
+  const monitor = { ...running, media: { "samples/*.png": { items: [], error: { kind: "unreadable" } } } };
+  const requests = backend({ monitors: Object.fromEntries(ids.map((id) => [id, monitor])) });
+  const workspace = createWorkspace("test");
+  await render(createElement(QueryEvents), workspace);
+  let intersect;
+  const observed = new Set();
+  t.mock.method(IntersectionObserver.prototype, "observe", function (target) {
+    intersect = this.callback;
+    observed.add(target);
+    intersect([{ target, isIntersecting: true }]);
+  });
+  await several(ids.map((id, index) => sweep(id, index + 2)), { workspace });
+  await settle();
+  await click(rows()[1].querySelector(`button[aria-label="${m.run_show_less()}"]`));
+  const offscreen = [...observed].slice(3).map((target) => ({ target, isIntersecting: false }));
+  await act(async () => intersect?.(offscreen));
+  await settle();
+
+  requests.length = 0;
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
+  await act(async () => t.mock.timers.tick(15_000));
+  const artifactsChanged = () => act(async () => streams[0].dispatchEvent(new MessageEvent("files.updated", { data: '{"projectId":"p"}' })));
+  await artifactsChanged();
+  await act(async () => t.mock.timers.tick(15_000));
+  await settle();
+  const reads = () => requests.map(({ request }) => request).filter((request) => request.endsWith("/monitor")).sort();
+  assert.deepEqual(reads(), ["GET /api/runs/r1/monitor", "GET /api/runs/r3/monitor"]);
+
+  requests.length = 0;
+  await act(async () => intersect([{ target: offscreen.at(-1).target, isIntersecting: true }]));
+  await settle();
+  assert.deepEqual(reads(), ["GET /api/runs/r8/monitor"], "a row refreshes when scrolled back into view");
+});
+
 test("a summary lists its runs in the order they were launched", async () => {
   backend({ monitors: {} });
   const launched = (id, depth, at) => ({ ...sweep(id, depth), run: run(id, { createdAt: at }) });
@@ -332,11 +369,8 @@ test("a summary says who needs attention first, and a run waiting for a choice o
   assert.ok(button(m.run_show_each()));
 
   monitors.r2 = { ...flagged, flags: [{ ...flagged.flags[0], detail: flagged.flags[0].template }] };
-  const waiting = run("r2", { monitor: summary({ tone: "flag", sentence: flagged.sentence, bindings: { loss: "NaN" }, flag: { id: "f1", state: "waiting", mode: "copilot" }, rev: flagged.rev }) });
+  const waiting = run("r2", { monitor: summary({ tone: "flag", sentence: flagged.sentence, bindings: { loss: "NaN" }, flag: { id: "f1", state: "waiting", text: "Loss is NaN." }, rev: flagged.rev }) });
   await act(async () => workspace.queryClient.setQueryData(workspace.queries.listChatShownRunsQuery().queryKey, { source: "shown", runs: [sweep("r1", 4), { ...sweep("r2", 6), run: waiting }] }));
-  await settle();
-  // The rows read their monitors before the remembered level arrived; the catch-up reads the flag's again.
-  await act(async () => workspace.queryClient.refetchQueries({ queryKey: workspace.queries.getRunMonitorQuery("r2").queryKey }));
   await settle();
   const warning = "Loss is NaN.";
   assert.equal(plain(find("[data-run-frame]").textContent).split(warning).length - 1, 1);
@@ -499,7 +533,7 @@ test("a flag shows when its review is queued, waking the agent or being read, in
   for (const [state, stripStatus, lineStatus] of states) {
     const monitor = { ...flagged, flags: [{ ...flagged.flags[0], state }] };
     backend({ monitors: { r1: monitor } });
-    const view = await banner([waitingRun()]);
+    const view = await banner([run("r1", { monitor: summary({ tone: "flag", flag: { id: "f1", state } }) })]);
     await settle();
     assert.ok(plain(view.container.textContent).includes(stripStatus), state);
     if (state !== "agent_looking") assert.ok(!plain(view.container.textContent).includes(m.run_flag_reading({ agent: "Claude" })), state);
@@ -507,6 +541,7 @@ test("a flag shows when its review is queued, waking the agent or being read, in
     assert.ok(plain(view.container.textContent).includes(lineStatus), state);
     if (state !== "agent_looking") assert.ok(!plain(view.container.textContent).includes(m.run_agent_looking({ agent: "Claude" })), state);
     await view.unmount();
+    window.sessionStorage.clear();
   }
 });
 
@@ -626,7 +661,9 @@ test("a choice on its way is never forgotten, however long its answer takes, and
 
 test("a run its newest source says is waiting for a choice opens its strip, whatever its older summary says", async () => {
   backend({ uiState: { onboardingCompleted: true, runBanner: "line" }, monitors: { r1: flagged } });
-  await banner([run("r1", { monitor: summary({ rev: flagged.rev - 1, flag: null }) })]);
+  const workspace = createWorkspace("test");
+  workspace.queryClient.setQueryData(workspace.queries.getRunMonitorQuery("r1").queryKey, flagged);
+  await banner([run("r1", { monitor: summary({ rev: flagged.rev - 1, flag: null }) })], { workspace });
   await settle();
   assert.ok(button(m.run_show_less()), "the strip opened by itself");
   assert.ok(named(m.run_flag_keep_going()));
@@ -654,20 +691,20 @@ test("a monitor that can't be refreshed keeps its chart and says so once, how ol
   assert.ok(container.querySelector('[role="progressbar"]'), "the bar stays below the chart");
 });
 
-test("a failed first read freezes the closed line and Retry brings back its countdown", async () => {
+test("a closed line uses its summary until opening reads the monitor, and Retry restores the countdown", async () => {
   const monitors = { r1: Response.json({ error: "The monitor is down." }, { status: 500 }) };
-  backend({ uiState: { onboardingCompleted: true, runBanner: "line" }, monitors });
+  const requests = backend({ uiState: { onboardingCompleted: true, runBanner: "line" }, monitors });
   const estimate = { ...running.estimate, at: now };
   const { container } = await banner([run("r1", { monitor: summary({ estimate }) })]);
   await settle();
   const line = container.querySelector('[role="group"]');
-  const trigger = line.querySelector('button[aria-haspopup="dialog"]');
-  const description = document.getElementById(trigger.getAttribute("aria-describedby"));
-  assert.ok(description?.textContent.includes(m.run_monitor_load_failed()));
+  assert.match(plain(line.textContent), /\d+[mh].*left/);
+  assert.ok(!requests.some(({ request }) => request.endsWith("/monitor")));
+  await click(button(m.run_show_more()));
+  assert.ok(plain(line.textContent).includes(m.run_monitor_load_failed()));
   assert.doesNotMatch(plain(line.textContent), /\d+[mh].*left/);
   assert.equal(plain(status()), `${m.run_monitor_load_failed()} ${plain(m.status_last_seen({ time: fmtClock(now) }))}.`);
 
-  await click(button(m.run_show_more()));
   monitors.r1 = { ...running, estimate };
   await click(named(m.app_retry()));
   assert.match(plain(line.textContent), /\d+[mh].*left/);
@@ -783,18 +820,12 @@ test("summaries faster than the catch-up keep the chart and read the monitor aga
 });
 
 test("a degraded line names its state and reason on hover, focus and to a screen reader, and announces the change once", async () => {
-  const stale = { ...running, availability: { state: "rebuilding", reason: "The run's log moved.", omitted: {} } };
-  let monitor = running;
-  serve((path) => {
-    if (path === "/api/settings/ui-state") return { onboardingCompleted: true, runBanner: "line" };
-    if (path === "/api/compute/hosts") return [];
-    if (path === "/api/runs/r1/monitor") return monitor;
-  });
-  const workspace = createWorkspace("test");
-  const { container } = await banner([run("r1", { monitor: summary({ rev: running.rev }) })], { workspace });
+  backend({ uiState: { onboardingCompleted: true, runBanner: "line" } });
+  const initial = summary({ asOf: running.asOf });
+  const stale = { ...initial, availability: { state: "rebuilding", reason: "The run's log moved." } };
+  const { container, update } = await banner([run("r1", { monitor: initial })]);
   await settle();
-  monitor = stale;
-  await act(async () => workspace.queryClient.refetchQueries({ queryKey: workspace.queries.getRunMonitorQuery("r1").queryKey }));
+  await update([run("r1", { monitor: stale })]);
   await settle();
   const why = `${m.run_view_rebuilding()} · The run's log moved.`;
   const age = m.status_last_seen({ time: plain(fmtClock(running.asOf)) });
@@ -806,7 +837,7 @@ test("a degraded line names its state and reason on hover, focus and to a screen
   assert.equal(plain(status()), `${why} ${age}.`);
   assert.ok(!plain(container.textContent).includes(m.run_eta_left({ duration: "" }).trim()), "no time left");
 
-  await act(async () => workspace.queryClient.refetchQueries({ queryKey: workspace.queries.getRunMonitorQuery("r1").queryKey }));
+  await update([run("r1", { monitor: { ...stale, rev: stale.rev + 1 } })]);
   await settle();
   assert.equal(plain(status()), `${why} ${age}.`, "said once");
 });

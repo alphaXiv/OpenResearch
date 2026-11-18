@@ -475,6 +475,16 @@ test("the pointer snaps to a landmark within reach along both axes, and to the n
   assert.equal(await titleAt(20, 0), "step 53", "past the reach, the step under the pointer");
 });
 
+test("hovering the lowest loss reads the finite report after NaN at the same step", async () => {
+  const monitor = lossOver([[0, 3], [1, "NaN"], [1, 2], [2, 4]], { better: "lower", smooth: 0.5 });
+  monitor.series.validation = [[0, 5], [1, 4], [2, 3]];
+  monitor.view.signals.validation = { label: "Validation", digits: 2 };
+  const page = await draw(monitor, { chart: ["loss", "validation"] });
+  const best = chartOf(page).querySelector('circle[r="3.5"]');
+  const [cx, cy] = ["cx", "cy"].map((name) => Number(best.getAttribute(name)));
+  assert.match(text(await hover(page, cx, cy)), /^Lowest loss at step 1Loss2\.00smoothed 2\.50Validation4\.00$/);
+});
+
 test("arrow keys stop at a chart's landmarks and say what each is", async () => {
   const monitor = lossOver([[0, 3], [1, 2], [2, 4]], { better: "lower" });
   for (const size of ["page", "strip"]) {

@@ -123,6 +123,26 @@ test("the journal says who settled a flag and how, under the look that raised it
   await view.unmount();
 });
 
+test("a later look repeating an Independent flag keeps the flag's outcome under the original look", async () => {
+  const template = "Loss jumped to **{loss}**.";
+  const looks = [
+    look("1", now - 30_000, template, { said: "flag" }),
+    look("2", now - 10_000, template, { said: "same", bindings: { loss: 3.1 } }),
+  ];
+  serveApp();
+  const { container } = await render(createElement(Watch, {
+    monitor: { ...monitor({ looks }), flags: [{
+      id: "f1", source: "look", lookId: "1", mode: "agentic", state: "kept", at: looks[0].at, whole: 0.1,
+      template, detail: template, evidence: null, choice: { by: "agent", c: "keep", at: now - 5_000, unsettled: true },
+    }] },
+    runId: running.runId, agent: "Claude", tone: "running", live: true, now,
+  }));
+  await settle();
+  assert.equal(container.querySelectorAll("li > button[aria-expanded]").length, 2);
+  const flag = await expand(container, /Loss jumped to 2\.60/);
+  assert.ok(text(flag).includes(m.run_watch_kept_unsettled({ agent: "Claude" })));
+});
+
 test("a look that left out a credential says where, once, on its own row", async () => {
   const note = "The watcher was not shown line 12 of the log: it holds what looks like a Hugging Face token. Replace that credential, and stop the run printing it.";
   const looks = [

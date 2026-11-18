@@ -77,7 +77,8 @@ export function RunBanner({ sessionId, agent, onOpenRun, onOpenRunPage }: {
   const { getUiStateQuery, getRunMonitorQuery, listChatShownRunsQuery, useEngineHosts } = workspace.queries;
   const list = useQuery(listChatShownRunsQuery());
   const listFailed = list.isError || list.data?.failedSessions?.includes(sessionId);
-  const remembered = useQuery(getUiStateQuery()).data?.runBanner ?? "strip";
+  const preference = useQuery(getUiStateQuery());
+  const remembered = preference.data?.runBanner ?? "strip";
   const hosts = useEngineHosts();
   const section = useRef<HTMLElement>(null);
   const refocus = useRef<string | null>(null);
@@ -92,6 +93,7 @@ export function RunBanner({ sessionId, agent, onOpenRun, onOpenRunPage }: {
   });
   const [listed, setListed] = useState<boolean | null>(null);
   const [now, setNow] = useState(Date.now);
+  const [visible, setVisible] = useState<ReadonlySet<string>>(() => new Set());
 
   // In the order they were launched, so a sweep reads as the agent started it and a new run joins at the end.
   const runs = (list.data?.runs ?? []).filter((item) => item.sessionId === sessionId).sort((a, b) => a.run.createdAt - b.run.createdAt);
@@ -113,10 +115,32 @@ export function RunBanner({ sessionId, agent, onOpenRun, onOpenRunPage }: {
     const host = hostForRun(hosts, item.run);
     return host?.status === "backoff" ? host.nextRetryMs : null;
   };
-  // A folded card still reads its monitor, to know whether it has anything to unfold.
-  const monitors = useRunMonitors(runs.map((item) => item.run), () => shown && (single || rows));
+  const observed = single || rows ? runs.map(({ run }) => run.id).join(" ") : "";
+  useLayoutEffect(() => {
+    const banner = section.current;
+    const inView = new Set<string>();
+    if (!banner || !observed) {
+      setVisible(inView);
+      return;
+    }
+    const observer = new IntersectionObserver((entries) => {
+      for (const { target, isIntersecting } of entries) {
+        const id = target.getAttribute("data-run");
+        if (!id) continue;
+        if (isIntersecting) inView.add(id);
+        else inView.delete(id);
+      }
+      setVisible(new Set(inView));
+    });
+    if (single) observer.observe(banner);
+    else banner.querySelectorAll("[data-run]").forEach((row) => observer.observe(row));
+    return () => observer.disconnect();
+  }, [observed, single]);
+
+  const monitors = useRunMonitors(runs.map((item) => item.run), (run) =>
+    shown && !preference.isPending && (single || rows) && isOpen(run.id) && visible.has(run.id));
   const models = runs.map((item, index) => {
-    const read = shown ? monitors[index] : null;
+    const read = shown && isOpen(item.run.id) && (single || rows) ? monitors[index] : null;
     return runModel({
       item,
       monitor: read && read.status !== "loading" ? read.data : null,
@@ -212,7 +236,7 @@ export function RunBanner({ sessionId, agent, onOpenRun, onOpenRunPage }: {
   };
 
   return (
-    <section ref={section} aria-label={m.run_banner_label()} onKeyDown={onKeyDown}>
+    <section ref={section} data-run={single ? runs[0].run.id : undefined} aria-label={m.run_banner_label()} onKeyDown={onKeyDown}>
       <div role="status" className="sr-only">{announcement}</div>
       {listFailed && (
         <div className="mb-2.5 flex min-h-9 items-center gap-2 rounded-lg border border-border bg-surface py-1 ps-3 pe-1.5 text-sm text-ink-subtext">

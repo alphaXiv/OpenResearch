@@ -401,10 +401,15 @@ test("a failed run says why in the words the CLI and the agent's notice use, nev
 
 test("a run that never started runs no clock: no time since it was created, and no stage it failed in", () => {
   const reason = "There was no L40S free to rent. Try another GPU, or launch again.";
-  const never = model(run({ status: "failed", startedAt: null, createdAt: now - 13_000, endedAt: now, resultMarkdown: reason, monitor: summary({ tone: "failed", sentence: null, stageOrder: { index: null, count: 4, first: null } }) }));
+  const empty = summary({ tone: "failed", sentence: null, whole: null, headline: null, bindings: {}, stageOrder: { index: null, count: 4, first: null } });
+  const failed = { status: "failed", startedAt: null, createdAt: now - 13_000, endedAt: now, resultMarkdown: reason, monitor: empty };
+  const never = model(run(failed));
   assert.ok(never.neverStarted);
   assert.equal(never.text, reason);
   assert.equal(never.eta, m.run_not_started());
+  assert.ok(!model(run({ ...failed, resultMarkdown: null })).neverStarted, "no recorded failure reason");
+  assert.ok(!model(run({ ...failed, monitor: { ...empty, logError: "Worker exited" } })).neverStarted, "the log recorded an error");
+  assert.ok(!model(run({ ...failed, monitor: { ...empty, bindings: { loss: 0 } } })).neverStarted, "the run reported a metric");
   assert.ok(!model(run({ status: "failed", startedAt: null, endedAt: now, exitCode: 1 })).neverStarted, "a run that exited ran, whether or not it reported a start");
   assert.ok(!model(run({ status: "starting", startedAt: null })).neverStarted);
 });

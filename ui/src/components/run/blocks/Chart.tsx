@@ -349,17 +349,20 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
     const landmark = near.sort((a, b) => Math.hypot(...reach(a)) - Math.hypot(...reach(b)))[0];
     const target = landmark?.point[0] ?? at ?? (xLog ? Math.exp(Math.log(x0) + position * (Math.log(x1) - Math.log(x0))) : x0 + position * (x1 - x0));
     const hits = samples.flatMap((line, index) => {
-      const point = at === null ? nearest(line.points, target) : line.points.find(([px]) => px === at);
+      const point = landmark?.line === line ? landmark.point : at === null ? nearest(line.points, target) : line.points.find(([px]) => px === at);
       const within = line.points.length > 0 && target >= line.points[0][0] && target <= line.points[line.points.length - 1][0];
       if (!point || point[1] === null || !(at !== null || within || (pointer?.keyboard && !line.ghost) || Math.abs(x(point[0]) - hover) <= 40)) return [];
-      const level = smoothOf(line) ? series[index].points.find(([px]) => px === point[0])?.[1] ?? null : null;
+      const levels = series[index].points;
+      const leadingEdge = levels[0]?.[0] < line.points[0][0] ? 1 : 0;
+      const level = smoothOf(line) ? levels[line.points.indexOf(point) + leadingEdge]?.[1] ?? null : null;
       return [{ line, point, level }];
     });
     if (hits.length === 0) return null;
     const mine = hits.filter((hit) => !hit.line.ghost);
-    const anchor = landmark ? hits.find((hit) => hit.line === landmark.line)! : (mine.length > 0 ? mine : hits).reduce((best, hit) => Math.abs(x(hit.point[0]) - hover) < Math.abs(x(best.point[0]) - hover) ? hit : best);
+    const anchor = hits.find((hit) => hit.point === landmark?.point)
+      ?? (mine.length > 0 ? mine : hits).reduce((best, hit) => Math.abs(x(hit.point[0]) - hover) < Math.abs(x(best.point[0]) - hover) ? hit : best);
     /** The landmarks at the readout's step, on lines that report there. */
-    const named = landmarks.filter((one) => one.point[0] === anchor.point[0] && hits.some((hit) => hit.line === one.line && hit.point[0] === one.point[0]));
+    const named = landmarks.filter((one) => one.point[0] === anchor.point[0] && hits.some((hit) => hit.point === one.point));
     return { hits, anchor, named };
   })();
   const readoutTitle = ({ anchor, named }: NonNullable<typeof readout>) => {

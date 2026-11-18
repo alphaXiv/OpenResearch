@@ -236,7 +236,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   const live = runActive(run.status);
   const finalizing = !live && failing === null && !monitorFailed && (availability === "stale" || availability === "rebuilding");
   const pre = run.status === "submitting" || run.status === "starting";
-  const neverStarted = runNeverStarted(run);
+  const neverStarted = runNeverStarted(run, fetched);
   const display = runDisplay(run);
 
   const pageOnly = runNotice(run);

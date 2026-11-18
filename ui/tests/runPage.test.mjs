@@ -380,7 +380,7 @@ test("a run page explains when its chat has no watching model or sign-in", async
 });
 
 test("a run that never started says why where its sentence goes and says once that it never started, with no stages, clock or charts", async () => {
-  const monitor = { ...pipeline(), progress: { ...pipeline().progress, phase: 0, done: null }, stageOrder: { index: null, count: 5, first: null }, latest: {}, series: {}, estimate: null };
+  const monitor = { ...pipeline(), progress: null, stageOrder: { index: null, count: 5, first: null }, latest: {}, series: {}, estimate: null };
   const reason = "There was no L40S free to rent. Try another GPU, or launch again.";
   const never = run("r2", { status: "failed", startedAt: null, endedAt: now - 1_000, resultMarkdown: reason, monitor: summary(monitor, { tone: "failed" }) });
   const { container } = await overview([never], () => monitor);
@@ -393,6 +393,21 @@ test("a run that never started says why where its sentence goes and says once th
   assert.ok(!/Failed after/.test(text(latest)), text(latest));
   const row = text(container.querySelector(".experiment-run-history button"));
   assert.ok(row.includes(reason) && row.includes("—"), row);
+});
+
+test("a Ray run that failed between polls keeps its metric charts and duration", async () => {
+  const monitor = pipeline();
+  const failed = run("r2", {
+    status: "failed", startedAt: null, exitCode: null, endedAt: now,
+    backend: { kind: "ray_job", jobId: "r2" }, resultMarkdown: "The job failed.",
+    monitor: summary(monitor, { tone: "failed", bindings: monitor.latest }),
+  });
+  const { container } = await overview([failed], () => monitor);
+  const latest = [...container.querySelectorAll("section")].find((section) => section.querySelector("h2")?.textContent === m.experiment_latest_run());
+  assert.ok(text(latest).includes(failed.resultMarkdown));
+  assert.ok(!text(latest).includes(m.run_page_never_started()));
+  assert.ok(latest.querySelector('section[aria-label="Train loss"] svg[role="img"]'));
+  assert.ok(latest.querySelector(`[title="${m.experiment_overview_duration()}"]`));
 });
 
 test("run history says why each failed run failed: the provider's words, else the log's last error", async () => {

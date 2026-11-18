@@ -1,4 +1,5 @@
 import type { Run, RunContact, RunStatus } from "./api";
+import type { RunMonitor } from "./runMonitor/types";
 
 export type RunDisplayStatus =
   | RunStatus
@@ -52,9 +53,14 @@ export function runActive(status: RunStatus): status is ActiveRunStatus {
   return status === "submitting" || status === "starting" || status === "running";
 }
 
-/** Ended before it ran its command: nothing reported a start and nothing exited. */
-export function runNeverStarted(run: Pick<Run, "status" | "startedAt" | "exitCode">): boolean {
-  return run.status === "failed" && run.startedAt == null && run.exitCode == null;
+export function runNeverStarted(run: Pick<Run, "status" | "startedAt" | "exitCode" | "backend" | "resultMarkdown" | "monitor" | "logCollection">, monitor?: RunMonitor | null): boolean {
+  if (run.status !== "failed" || run.startedAt != null || run.exitCode != null || !run.resultMarkdown?.trim()) return false;
+  if (run.backend?.jobId != null || run.backend?.handle != null || run.logCollection) return false;
+
+  const summary = run.monitor;
+  return summary?.stage == null && summary?.headline?.value == null && !summary?.logError && !summary?.setup?.line
+    && !Object.values(summary?.bindings ?? {}).some((value) => value != null)
+    && monitor?.progress == null && !monitor?.logError && !Object.values(monitor?.latest ?? {}).some((value) => value != null);
 }
 
 function runCancelling(run: RunState): boolean {

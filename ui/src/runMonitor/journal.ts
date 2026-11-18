@@ -41,7 +41,7 @@ export function journalRows(looks: Look[]): JournalRow[] {
     // A look that kept silent changed nothing a reader sees.
     if ((look.said === "new" || look.said === "same") && look.template === null && !look.text && !ownRow(look)) continue;
     const last = rows.at(-1);
-    const keeps = last && look.said !== "flag" && last.look.said !== "error" && last.look.said !== "interrupted"
+    const keeps = last && look.said !== "flag" && last.look.said !== "flag" && last.look.said !== "error" && last.look.said !== "interrupted"
       && !ownRow(look) && !ownRow(last.look) && look.template !== null && look.template === last.look.template;
     if (keeps) {
       last.since ??= last.look;

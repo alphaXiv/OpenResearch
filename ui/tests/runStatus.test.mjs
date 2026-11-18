@@ -178,9 +178,9 @@ test("a rented box is named by the GPU it was rented for, never by the paying or
 
 test("a run that never started lists no stage as the one it failed in", async () => {
   const run = { status: "failed", startedAt: null, endedAt: now, resultMarkdown: "The provider couldn't start the box. Launch again." };
-  await status(null, { progress: { ...base.progress, phase: 0, done: null }, stageOrder: { index: null, count: 4, first: null } }, { run });
+  await status(null, { progress: null, latest: {}, series: {}, stageOrder: { index: null, count: 4, first: null } }, { run });
   const card = document.querySelector('[role="dialog"]');
-  assert.equal(card.querySelector("ol"), null);
+  assert.ok(!card.querySelector("ol"));
   assert.equal(card.querySelector('[aria-current="step"]'), null);
   assert.ok(card.textContent.includes(run.resultMarkdown), card.textContent);
   assert.ok(card.textContent.includes(m.run_not_started()), card.textContent);

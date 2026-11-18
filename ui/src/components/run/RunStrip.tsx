@@ -62,12 +62,14 @@ export function RunStrip({ model, monitor, agent, label, open, onToggle, onOpenR
   const notice = model.notice && model.notice.kind !== "cancelling";
   const hero = !flag && (chart || model.headline?.known);
   const content = Boolean(hero || flag || model.note || notice || model.stale && !model.live || monitor?.status === "error");
-  const expanded = open && content;
+  const mayHaveContent = monitor?.status === "loading"
+    && (model.flag !== null || model.live && !model.pre && model.run.monitor?.setup == null);
+  const expanded = open && (content || mayHaveContent);
   const stale = model.stale && [model.stale.why, model.stale.age].filter(Boolean).join(" · ");
 
   return (
-    <RunLine model={model} agent={agent} label={label} onToggle={onToggle} onOpenRunPage={onOpenRunPage} expanded={expanded} expandable={content}>
-      {expanded && <div className="px-3 pb-3">
+    <RunLine model={model} agent={agent} label={label} onToggle={onToggle} onOpenRunPage={onOpenRunPage} expanded={expanded} expandable={content || mayHaveContent}>
+      {expanded && content && <div className="px-3 pb-3">
         {notice && <RunContactNotice run={model.run} className="mt-1.5" />}
         {stale && monitor?.status !== "error" && <p className="m-0 mt-1.5 text-xs text-ink-subtext">{stale}</p>}
         {model.note && <p className={cn("m-0 text-xs text-ink-subtext", !notice && !model.stale ? "-mt-0.5" : "mt-1.5")}>{model.note}</p>}
