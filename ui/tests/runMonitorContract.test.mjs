@@ -431,16 +431,17 @@ test("a failed run that recorded no message says the last error its log names, q
   assert.equal(silent.note, null);
 });
 
-test("a floor counted down to nothing reads as no estimate, naming the stages no earlier run timed", () => {
-  const { monitor } = states.planned;
+test("the floor expires below one second at the midpoint", () => {
+  const { monitor } = states.detected;
   for (const full of [true, false]) {
-    const later = runModel({
-      item: { sessionId: "s", run: runOf("planned"), experimentName: null, experimentSlug: "baseline" },
-      monitor: full ? monitor : null, shown: true, agent: "Claude", now: monitor.estimate.at + monitor.estimate.loMs - 999, nextRetryMs: null,
-    });
-    assert.equal(later.eta, "No estimate", `full: ${full}`);
-    assert.match(bare(later.etaDetail), /eval.*not timed/, `full: ${full}`);
-    assert.equal(later.leftMs, null, `full: ${full}`);
+    for (const [left, eta] of [[1000, "At least 1s left"], [999, "No estimate"]]) {
+      const later = runModel({
+        item: { sessionId: "s", run: runOf("detected"), experimentName: null, experimentSlug: "baseline" },
+        monitor: full ? monitor : null, shown: true, agent: "Claude", now: monitor.estimate.at + monitor.estimate.midMs - left, nextRetryMs: null,
+      });
+      assert.equal(bare(later.eta), eta, `full: ${full}`);
+      assert.equal(later.etaDetail, m.run_eta_log_floor_detail(), `full: ${full}`);
+    }
   }
 });
 

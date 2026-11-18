@@ -2810,7 +2810,7 @@
         "revising": false,
         "brief": [],
         "rules": [],
-        "statusText": "baseline  running  30%  3 of 10 chunks  [run r1]\neta      At least 21s left (timed from progress in the log; more work may follow it)\nsignals  Last collected at 2026-11-12T00:45:18.000Z.\nsignals  Data as of 2026-11-12T00:45:18.000Z.",
+        "statusText": "baseline  running  30%  3 of 10 chunks  [run r1]\neta      At least 42s left (timed from progress in the log; more work may follow it)\nsignals  Last collected at 2026-11-12T00:45:18.000Z.\nsignals  Data as of 2026-11-12T00:45:18.000Z.",
         "rev": 1,
         "seriesRev": 1,
         "series": {}
@@ -2854,9 +2854,9 @@
         "rev": 1
       },
       "expect": {
-        "eta": "At least 21s left",
+        "eta": "At least 42s left",
         "range": null,
-        "cli": "At least 21s left (timed from progress in the log; more work may follow it)",
+        "cli": "At least 42s left (timed from progress in the log; more work may follow it)",
         "stage": "3 of 10 chunks"
       }
     },
@@ -3004,7 +3004,7 @@
         "revising": false,
         "brief": [],
         "rules": [],
-        "statusText": "baseline  running  train · step 5 of 10  [run r1]\neta      At least 4s left (no earlier run timed eval)\nstages   ✓ download 4s · ● train · ○ eval\nsignals  loss 0.5\nsignals  Last collected at 2026-11-12T00:45:09.000Z.\nsignals  Data as of 2026-11-12T00:45:09.000Z.",
+        "statusText": "baseline  running  train · step 5 of 10  [run r1]\neta      At least 5s left (no earlier run timed eval)\nstages   ✓ download 4s · ● train · ○ eval\nsignals  loss 0.5\nsignals  Last collected at 2026-11-12T00:45:09.000Z.\nsignals  Data as of 2026-11-12T00:45:09.000Z.",
         "rev": 1,
         "seriesRev": 1,
         "series": {
@@ -3090,9 +3090,9 @@
         "rev": 1
       },
       "expect": {
-        "eta": "At least 4s left",
+        "eta": "At least 5s left",
         "range": null,
-        "cli": "At least 4s left (no earlier run timed eval)",
+        "cli": "At least 5s left (no earlier run timed eval)",
         "stage": "train · step 5 of 10"
       }
     },

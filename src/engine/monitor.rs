@@ -2868,6 +2868,7 @@ fn eta_text(life: &Lifecycle, snapshot: Option<&Snapshot>, facts: &StatusFacts) 
                 .collect();
             // Past its estimate with no progress since, a run is late, never "0s left".
             let mid = estimate["midMs"].as_i64().unwrap_or(0);
+            let mid_left = mid - gone;
             if !floor && mid > 0 && mid <= gone {
                 let due = now - gone + mid;
                 return Some(with_cost(
@@ -2881,7 +2882,7 @@ fn eta_text(life: &Lifecycle, snapshot: Option<&Snapshot>, facts: &StatusFacts) 
                 ));
             }
             // A floor counted down to nothing promises nothing: what is left is unknown.
-            if floor && lo == "0s" {
+            if floor && mid_left < 1_000 {
                 return Some(with_cost(
                     if untimed.is_empty() {
                         "No estimate (timed from progress in the log; more work may follow it)"
@@ -2924,11 +2925,11 @@ fn eta_text(life: &Lifecycle, snapshot: Option<&Snapshot>, facts: &StatusFacts) 
                     short(stall)
                 ));
             }
-            // A floor is true only at the estimate's low end: a bar may finish fast with nothing after it.
+            let duration = short(mid_left.max(1_000));
             let left = if floor {
-                format!("At least {lo} left")
+                format!("At least {duration} left")
             } else {
-                format!("{} left", short((mid - gone).max(1_000)))
+                format!("{duration} left")
             };
             if detail.is_empty() {
                 left
@@ -6551,23 +6552,29 @@ mod tests {
     }
 
     #[test]
-    fn a_counter_whose_time_left_ran_out_promises_nothing() {
-        let f = Fixture::new("orx-monitor-floor-out");
-        let run = f.run("running", local());
-        f.collect(&folded(
+    fn a_counter_floor_expires_below_one_second_at_the_midpoint() {
+        let snapshot = folded(
             &(1..=3)
                 .map(|n| (T0 + 6_000 * n, format!("chunk {n}/10 done, {}s", 124 * n)))
                 .collect::<Vec<_>>(),
-        ));
-        f.collected(T0 + 60_000);
-        let (monitor, _) = monitor_at(&f, &run, T0 + 60_000);
-        let text = monitor["statusText"].as_str().unwrap();
-        assert!(
-            text.contains(
-                "\neta      No estimate (timed from progress in the log; more work may follow it)"
-            ),
-            "{text}"
         );
+        for (now, eta) in [
+            (T0 + 59_000, "At least 1s left"),
+            (T0 + 59_001, "No estimate"),
+        ] {
+            let f = Fixture::new("orx-monitor-floor-out");
+            let run = f.run("running", local());
+            f.collect(&snapshot);
+            f.collected(now);
+            let (monitor, _) = monitor_at(&f, &run, now);
+            let text = monitor["statusText"].as_str().unwrap();
+            assert!(
+                text.contains(&format!(
+                    "\neta      {eta} (timed from progress in the log; more work may follow it)"
+                )),
+                "{text}"
+            );
+        }
     }
 
     #[test]
@@ -8626,8 +8633,8 @@ mod tests {
                 T0 + 18_000,
                 T0 + 18_000,
                 json!({
-                    "eta": "At least 21s left", "range": null,
-                    "cli": "At least 21s left (timed from progress in the log; more work may follow it)",
+                    "eta": "At least 42s left", "range": null,
+                    "cli": "At least 42s left (timed from progress in the log; more work may follow it)",
                     "stage": "3 of 10 chunks",
                 }),
             ),
@@ -8644,8 +8651,8 @@ mod tests {
                 T0 + 9_000,
                 T0 + 9_000,
                 json!({
-                    "eta": "At least 4s left", "range": null,
-                    "cli": "At least 4s left (no earlier run timed eval)",
+                    "eta": "At least 5s left", "range": null,
+                    "cli": "At least 5s left (no earlier run timed eval)",
                     "stage": "train · step 5 of 10",
                 }),
             ),

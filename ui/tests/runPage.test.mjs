@@ -127,7 +127,7 @@ test("a starting run draws none of its view's blocks", async () => {
 });
 
 test("a timed counter shows its floor during setup before the first metric", async () => {
-  const estimate = { loMs: 330_000, midMs: 600_000, hiMs: 900_000, at: now, floor: true, pending: false, pastLimitMs: null };
+  const estimate = { loMs: 330_000, midMs: 630_000, hiMs: 900_000, at: now, floor: true, pending: false, pastLimitMs: null };
   const setup = { stage: null, line: null, startsAt: null };
   const monitor = {
     ...pipeline(), source: "detected", setup, estimate, latest: {}, headline: null,
@@ -140,7 +140,7 @@ test("a timed counter shows its floor during setup before the first metric", asy
   const { container } = await overview([run("r2", { monitor: summary(monitor, { setup, estimate }) })], () => monitor);
   const page = container.querySelector('[role="group"]');
   assert.match(text(page), /9 of 10 chunks/);
-  assert.match(text(page), /At least 5m left/);
+  assert.match(text(page), /At least 10m left/);
   assert.match(text(page), /Timed from progress in the log\. More work may follow\./);
   assert.ok(text(page).includes(m.run_page_no_signals()));
 });

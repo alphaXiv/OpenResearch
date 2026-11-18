@@ -95,16 +95,16 @@ test("an unfinished stage read says it is loading", async () => {
 test("the whole-run line shows a floor and names stages with no timing", async () => {
   await status(null, { estimate: { loMs: 3_840_000, midMs: 3_900_000, hiMs: 4_000_000, at: now, pending: false, pastLimitMs: null, floor: true, untimed: ["sweep"] } });
   const card = find('[role="dialog"]');
-  assert.match(bare(card.textContent), /Whole run: At least 1h 4m left.*sweep not timed/);
+  assert.match(bare(card.textContent), /Whole run: At least 1h 5m left.*sweep not timed/);
 });
 
-test("a timed floor counts down its low end on full and summary rows", () => {
+test("a timed floor counts down its midpoint on full and summary rows", () => {
   const estimate = { loMs: 11 * 60_000, midMs: 22 * 60_000, hiMs: 36 * 60_000, at: now, floor: true, pending: false, pastLimitMs: null, untimed: ["eval"] };
   for (const full of [true, false]) {
     const run = { id: "r", status: "running", createdAt: now, startedAt: now, updatedAt: now, contact: null, backend: { kind: "local" }, monitor: { generation: base.generation, rev: base.rev, asOf: base.asOf, estimate } };
     const model = runModel({ item: { sessionId: "s", run }, monitor: full ? { ...base, estimate } : null, shown: true, agent: "Claude", now: now + 60_000, nextRetryMs: null });
-    assert.equal(model.leftMs, 10 * 60_000);
-    assert.match(bare(model.eta), /10m/);
+    assert.equal(model.leftMs, 21 * 60_000);
+    assert.match(bare(model.eta), /21m/);
     assert.match(bare(model.etaDetail), /eval/);
   }
 });

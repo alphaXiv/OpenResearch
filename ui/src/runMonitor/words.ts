@@ -53,18 +53,17 @@ export function captionProgress(progress: Progress, phases: Phase[], openLimitMs
 export function estimateWords(estimate: Estimate, now: number, limit: { endsAt: number; ms: number } | null, stallMs: number): { eta: string; detail: string; strong: boolean; leftMs: number | null } {
   const remaining = (ms: number) => Math.max(0, ms - (now - estimate.at));
   if (estimate.pending || estimate.midMs === null) return { eta: m.run_eta_estimating(), detail: m.run_eta_needs_steps(), strong: false, leftMs: null };
+  const mid = remaining(estimate.midMs);
   if (estimate.floor) {
     const stages = estimate.untimed ?? [];
-    const left = remaining(estimate.loMs ?? 0);
-    const timed = left >= 1000;
+    const timed = mid >= 1000;
     return {
-      eta: timed ? m.run_eta_floor({ duration: durationText(left) }) : m.run_eta_no_estimate(),
+      eta: timed ? m.run_eta_floor({ duration: durationText(mid) }) : m.run_eta_no_estimate(),
       detail: stages.length ? m.run_eta_untimed({ stages: autoDir(stages.join(", ")) }) : m.run_eta_log_floor_detail(),
       strong: timed,
-      leftMs: timed ? left : null,
+      leftMs: timed ? mid : null,
     };
   }
-  const mid = remaining(estimate.midMs);
   const stalled = stallMs > 0 ? m.run_eta_stalled({ duration: durationText(stallMs) }) : null;
   // Past its estimate with no progress since, a run is late, never "0s left".
   if (estimate.midMs > 0 && mid === 0) {
