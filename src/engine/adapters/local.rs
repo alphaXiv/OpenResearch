@@ -187,7 +187,8 @@ impl Local {
                 crate::compute::TENSORBOARD_LOGDIR.into(),
                 dir.join("tensorboard").to_string_lossy().into_owned(),
             );
-            env.extend(crate::local::trackio::local_run_env());
+            let trackio_env = crate::local::trackio::local_run_env(&env);
+            env.extend(trackio_env);
             crate::local::shell_env::export_to(|key, value| {
                 env.insert(key.into(), value.to_string_lossy().into_owned());
             });

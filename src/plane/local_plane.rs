@@ -3,7 +3,7 @@
 use std::time::{Duration, Instant};
 
 use super::{CreateExperimentSpec, DescInput, ProjectEdit, Run, RunListing};
-use crate::error::{anyhow, Result};
+use crate::error::{anyhow, Context, Result};
 use crate::local::model::{LocalExperiment, LocalProject};
 use crate::store::Store;
 use crate::ExpRunArgs;
@@ -287,8 +287,8 @@ impl LocalPlane {
         crate::local::apply_compute_default(&mut args.backend, &mut args.flavor);
         let backend = args.backend.get_or_insert_with(|| "local".into()).clone();
         crate::compute::validate_run_args(&args)?;
-        warn_unreachable_trackio(&backend);
         let experiment = self.experiment()?;
+        warn_unreachable_trackio(&self.store, &experiment.project_id, &backend)?;
         if let Some(warning) = self
             .store
             .get_local_project(&experiment.project_id)?
@@ -448,12 +448,14 @@ fn project_wait_progress(total: usize, in_flight: usize) {
     }
 }
 
-fn warn_unreachable_trackio(backend: &str) {
+fn warn_unreachable_trackio(store: &Store, project_id: &str, backend: &str) -> Result<()> {
     use crate::local::trackio::{self, Target};
     if !crate::compute::backend(backend).is_ok_and(|b| b.capabilities().remote) {
-        return;
+        return Ok(());
     }
-    match trackio::target() {
+    let saved = crate::config::saved_project_env(store, project_id)
+        .with_context(|| format!("Couldn't read project {project_id}'s Trackio settings."))?;
+    match trackio::target(&saved) {
         Target::Server(url) if trackio::is_local_only(&url) => eprintln!(
             "warning: {} is {url}, which a {backend} run may not reach, so its Trackio metrics may not arrive. Save an address the remote machine can reach.",
             trackio::SERVER_URL
@@ -466,6 +468,7 @@ fn warn_unreachable_trackio(backend: &str) {
         ),
         _ => {}
     }
+    Ok(())
 }
 
 /// True when `error` is a transient SQLite lock ("database is locked") —

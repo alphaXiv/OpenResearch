@@ -1463,7 +1463,7 @@ pub(super) async fn trackio_run_metrics(
             .ok_or_else(|| not_found("project"))?;
         crate::local::trackio::project_for(&store, project)?
     };
-    let metrics = crate::local::trackio::run_metrics(&state.trackio, project, run, &[], 48).await;
+    let metrics = crate::local::trackio::run_metrics(&state.trackio, &project, run, &[], 48).await;
     Ok(Json(json!(metrics)))
 }
 

@@ -211,7 +211,7 @@ mod tests {
         assert_eq!(env[trackio::PROJECT], "project-tracker");
         assert_eq!(env[crate::config::RUN_ID_ENV], run.id);
         assert_eq!(
-            trackio::project_for(&store, project).unwrap(),
+            trackio::project_for(&store, project).unwrap().name,
             env[trackio::PROJECT]
         );
     }
