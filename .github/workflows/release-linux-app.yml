@@ -96,6 +96,16 @@ jobs:
           persist-credentials: false
           ref: ${{ needs.check.outputs.source-sha }}
 
+      - name: Take AppImage tools from the workflow revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.workflow_sha }}
+          path: packaging-workflow
+          sparse-checkout: |
+            linux
+            scripts
+
       - name: Remove checked-in UI
         if: needs.check.outputs.release-run-id != ''
         run: rm -rf ui/dist
@@ -120,9 +130,19 @@ jobs:
       - name: Install WebKitGTK and packaging tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev file patchelf xvfb xdotool
+          # LLVM's headers on Ubuntu 22.04 runners conflict with GStreamer's libunwind-dev.
+          sudo apt-get remove -y libunwind-14-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libgstreamer1.0-dev librsvg2-dev file patchelf xvfb xauth xdotool python3 imagemagick gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav
 
       # The runner's preinstalled stable toolchain, as release-macos-app.yml uses.
+      - name: Build the media fault fixture when supported by the release source
+        env:
+          ORX_EMBED_HOST_DIR: ${{ github.workspace }}/target/host-binaries
+        run: |
+          if [ -f tests/fixtures/media_fault_plugin.rs ]; then
+            ORX_OFFICIAL_RELEASE_BUILD=1 cargo build --release --locked --features desktop --example gstorxprobe
+          fi
+
       - name: Build the production orx
         env:
           ORX_EMBED_HOST_DIR: ${{ github.workspace }}/target/host-binaries
@@ -134,14 +154,50 @@ jobs:
         run: test "$(target/release/orx version --build-channel)" = production
 
       - name: Package the AppImage
-        run: scripts/build-linux-appimage.sh target/release/orx app-dist
+        run: |
+          packaging-workflow/scripts/build-linux-appimage.sh target/release/orx app-dist
 
-      # Otherwise the host's WebKit would stand in for a broken bundled one.
-      - name: Remove WebKitGTK from the runner
+      - name: Smoke-test the system runtime
+        run: |
+          packaging-workflow/scripts/smoke-test-linux-appimage.sh app-dist/OpenResearch-${{ matrix.arch }}.AppImage system
+          PATH=/usr/bin:/bin packaging-workflow/scripts/smoke-test-linux-appimage.sh app-dist/OpenResearch-${{ matrix.arch }}.AppImage system
+
+      - name: Check media-check crash and timeout isolation
+        run: |
+          ulimit -c 0
+          if [ -f tests/fixtures/media_fault_plugin.rs ]; then
+            for fault in abort hang; do
+              packaging-workflow/scripts/smoke-test-linux-appimage.sh app-dist/OpenResearch-${{ matrix.arch }}.AppImage "system-$fault" target/release/examples
+            done
+          fi
+
+      - name: Remove media plugins with system WebKit installed
+        run: sudo dpkg --remove --force-depends gstreamer1.0-plugins-good
+
+      - name: Check that missing media does not block the dashboard
+        run: packaging-workflow/scripts/smoke-test-linux-appimage.sh app-dist/OpenResearch-${{ matrix.arch }}.AppImage system-disabled
+
+      - name: Restore media plugins
+        run: sudo apt-get install -y gstreamer1.0-plugins-good
+
+      - name: Remove the system WebKit
         run: sudo apt-get remove -y libwebkit2gtk-4.1-0 libjavascriptcoregtk-4.1-0
 
-      - name: Smoke-test the AppImage
-        run: scripts/smoke-test-linux-appimage.sh app-dist/OpenResearch-${{ matrix.arch }}.AppImage
+      - name: Smoke-test the bundled fallback
+        run: |
+          packaging-workflow/scripts/smoke-test-linux-appimage.sh app-dist/OpenResearch-${{ matrix.arch }}.AppImage bundled
+          ulimit -c 0
+          if [ -f tests/fixtures/media_fault_plugin.rs ]; then
+            for fault in abort hang; do
+              packaging-workflow/scripts/smoke-test-linux-appimage.sh app-dist/OpenResearch-${{ matrix.arch }}.AppImage "bundled-$fault" target/release/examples
+            done
+          fi
+
+      - name: Remove the system media plugins
+        run: sudo apt-get remove -y gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav
+
+      - name: Check the dashboard without media
+        run: packaging-workflow/scripts/smoke-test-linux-appimage.sh app-dist/OpenResearch-${{ matrix.arch }}.AppImage bundled-disabled
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

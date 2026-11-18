@@ -172,6 +172,10 @@ enum Command {
     #[command(name = "invocation-gate", hide = true)]
     InvocationGate,
 
+    #[cfg(all(desktop_app, target_os = "linux"))]
+    #[command(name = "check-media", hide = true)]
+    CheckMedia,
+
     /// Internal: orx's stdio MCP server, which every agent harness spawns:
     /// Claude's permission bridge and the orchestration tools, relayed to the
     /// running `orx up`. `mcp-gate`, its old name, stays for configs an older
@@ -1340,6 +1344,14 @@ async fn run_cli() {
         Cli::command().print_help().ok();
         return;
     };
+    #[cfg(all(desktop_app, target_os = "linux"))]
+    if matches!(command, Command::CheckMedia) {
+        if let Err(error) = commands::app::media::check() {
+            eprintln!("orx check-media: {error:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if ends_with_its_stdout(&command) {
         output::end_when_stdout_closes();
     }
@@ -1601,6 +1613,8 @@ fn should_capture_command(command: &Command) -> bool {
 /// variant name so renames don't silently break analytics continuity.
 fn command_name(command: &Command) -> &'static str {
     match command {
+        #[cfg(all(desktop_app, target_os = "linux"))]
+        Command::CheckMedia => "check-media",
         Command::Login(_) => "login",
         Command::Logout => "logout",
         Command::Alphaxiv(_) => "alphaxiv",
@@ -1701,6 +1715,8 @@ async fn dispatch(command: Command) -> error::Result<()> {
         Command::InvocationGate => unreachable!("handled before dispatch"),
         Command::Mcp => commands::mcp::run().await,
         Command::AntigravityGate => commands::mcp::run_antigravity().await,
+        #[cfg(all(desktop_app, target_os = "linux"))]
+        Command::CheckMedia => unreachable!("handled before dispatch"),
         Command::AlphaxivMcp => unreachable!("handled before dispatch"),
         Command::PublishBranch(_) => unreachable!("handled before dispatch"),
         Command::RemoteHost(_) => unreachable!("handled before dispatch"),

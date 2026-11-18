@@ -1,5 +1,12 @@
-//! V2 admits prompts before execution finishes; reconcile its durable projection.
+//! V2 admits prompts before execution finishes. Its export holds finished steps; the event
+//! stream carries the step in flight.
+use std::pin::Pin;
+
+use futures::stream::BoxStream;
+use futures::{FutureExt, StreamExt, TryStreamExt};
+
 use super::*;
+use crate::error::Context;
 use crate::local::opencode::AgentEndpoint;
 
 async fn get(endpoint: &AgentEndpoint, path: &str) -> Result<Value> {
@@ -129,6 +136,7 @@ pub(super) async fn run_turn(
     if let Some(model) = model {
         post(&endpoint, &format!("{path}/model"), &json!({"model":model})).await?;
     }
+    let mut events = subscribe(&endpoint).await?;
     let before = get(&endpoint, &endpoint.v2_export_path(&native_id)).await?;
     let previous: HashSet<String> = messages(&before)?
         .iter()
@@ -146,87 +154,345 @@ pub(super) async fn run_turn(
     if admission.is_ok() {
         ctx.persist_delivery(DeliveryState::Accepted)?;
     }
-    let mut surfaced = HashSet::new();
-    let mut recorded = HashSet::new();
-    let mut was_idle = false;
-    loop {
-        // ponytail: full projected history polling; switch to paged durable log if long chats make this costly.
-        let projection = get(&endpoint, &endpoint.v2_export_path(&native_id)).await?;
-        let current = messages(&projection)?;
-        let delivered = current.iter().any(|m| m["id"].as_str() == Some(&prompt_id));
-        merge_projection(
-            ctx,
-            &endpoint,
-            &native_id,
-            current,
-            &previous,
-            &mut recorded,
-        )
-        .await?;
-        if delivered && ctx.delivery_state() != DeliveryState::Accepted {
-            ctx.persist_delivery(DeliveryState::Accepted)?;
-        }
-        prompts(ctx, &endpoint, &path, &mut surfaced).await?;
-        let inbox = get(&endpoint, &format!("{path}/inbox")).await?;
-        let queued = inbox["data"]
-            .as_array()
-            .ok_or_else(|| anyhow!("OpenCode V2 inbox response is invalid"))?
-            .iter()
-            .any(|item| item["id"].as_str() == Some(&prompt_id));
-        let active = get(&endpoint, "/api/session/active").await?;
-        let running = active["data"]
-            .as_object()
-            .ok_or_else(|| anyhow!("OpenCode V2 active response is invalid"))?
-            .contains_key(&native_id);
-        if observed_idle(&mut was_idle, queued, running) {
-            let final_projection = get(&endpoint, &endpoint.v2_export_path(&native_id)).await?;
-            let final_messages = messages(&final_projection)?;
-            let delivered = delivered
-                || final_messages
-                    .iter()
-                    .any(|m| m["id"].as_str() == Some(&prompt_id));
-            let answered = merge_projection(
-                ctx,
-                &endpoint,
-                &native_id,
-                final_messages,
-                &previous,
-                &mut recorded,
-            )
-            .await?;
-            let outcome = final_projection
-                .pointer("/data/info/outcome")
-                .and_then(Value::as_str);
-            if delivered && answered && matches!(outcome, Some("succeeded" | "interrupted")) {
-                ctx.persist_delivery(DeliveryState::Accepted)?;
-                ctx.mark_final_text_tail();
-                return Ok(());
+    let mut turn = Turn {
+        endpoint: &endpoint,
+        native_id: &native_id,
+        path: &path,
+        prompt_id: &prompt_id,
+        delivered: false,
+        previous: &previous,
+        steps: Vec::new(),
+        recorded: HashSet::new(),
+        surfaced: HashSet::new(),
+    };
+    let mut answered = ctx.host.prompt_answered.subscribe();
+    turn.reconcile(ctx).await?;
+    // A rejected prompt starts no execution, so no event would ever end this wait.
+    let mut ended = admission.is_err() && turn.idle().await?;
+    let mut failure = None;
+    let mut stopped = false;
+    let mut stale = false;
+    while !ended {
+        let event = tokio::select! {
+            event = events.next() => event,
+            _ = ctx.flush_due() => {
+                ctx.flush()?;
+                continue;
             }
-            if delivered && outcome == Some("failed") {
-                // Failures before a step (e.g. an unavailable model) leave no assistant message.
-                if let Ok(Some(message)) = execution_failure(&endpoint, &native_id).await {
-                    ctx.mark_native_retry_exhausted();
-                    ctx.mark_terminal_failure("opencode_terminal", &message);
-                    return Err(anyhow!("OpenCode V2: {message}"));
+            answer = answered.recv() => {
+                // A local answer can activate a conditional form field; the card is resolved
+                // only after the harness replies, so adopt it before looking again.
+                if !matches!(&answer, Ok(session) if *session != ctx.session_id) {
+                    ctx.flush()?;
+                    turn.reconcile(ctx).await?;
+                }
+                continue;
+            }
+        };
+        let Some(Ok(event)) = event else {
+            events = subscribe(&endpoint).await.map_err(|error| {
+                anyhow!("OpenCode stopped streaming this chat's events: {error}")
+            })?;
+            let (projection, _) = turn.reconcile(ctx).await?;
+            turn.delivered |= turn.holds_prompt(&projection)?;
+            ended = turn.idle().await?;
+            continue;
+        };
+        let kind = event["type"].as_str().unwrap_or_default();
+        let data = &event["data"];
+        match fold(&mut turn.steps, &native_id, &event) {
+            Some(Folded::Text { part, delta }) => ctx.append_part_text(&part, delta),
+            Some(Folded::Step(index)) => {
+                for (part, _) in projected_parts(&turn.steps[index]) {
+                    ctx.upsert_part(part);
                 }
             }
-            if let Err(error) = admission {
-                return Err(error);
+            None if kind == "session.inbox.delivered"
+                && data["inboxID"].as_str() == Some(prompt_id.as_str()) =>
+            {
+                turn.delivered = true;
+                stale = true;
             }
-            return Err(anyhow!(
-                "OpenCode V2 became idle without completing this prompt"
-            ));
+            None if data["sessionID"].as_str() == Some(native_id.as_str())
+                && matches!(
+                    kind,
+                    "session.execution.succeeded"
+                        | "session.execution.failed"
+                        | "session.execution.interrupted"
+                ) =>
+            {
+                ended = turn.finished(ctx).await?;
+                if ended {
+                    failure = data.get("error").map(error_text);
+                    stopped = kind == "session.execution.interrupted";
+                }
+            }
+            // A failed step is only terminal once no retry follows, which the next event says.
+            None if kind == "session.step.failed" => stale = false,
+            None => {
+                stale |= event.get("durable").is_some()
+                    || kind == "session.retry.scheduled"
+                    || kind.starts_with("permission.")
+                    || kind.starts_with("form.");
+            }
         }
-        ctx.flush()?;
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        if stale && Pin::new(&mut events).peek().now_or_never().is_none() {
+            turn.reconcile(ctx).await?;
+            stale = false;
+        }
+        ctx.maybe_flush();
+    }
+    turn.steps.clear();
+    for read in 0..FINAL_READS {
+        // The export can trail the event that ended the execution.
+        if read > 0 {
+            tokio::time::sleep(crate::config::paced(Duration::from_millis(100))).await;
+        }
+        let (projection, answered) = turn.reconcile(ctx).await?;
+        let delivered = messages(&projection)?
+            .iter()
+            .any(|m| m["id"].as_str() == Some(&prompt_id));
+        let outcome = projection
+            .pointer("/data/info/outcome")
+            .and_then(Value::as_str);
+        // Declining a permission or question interrupts the execution without an export outcome.
+        if delivered
+            && answered
+            && (stopped || matches!(outcome, Some("succeeded" | "interrupted")))
+        {
+            ctx.persist_delivery(DeliveryState::Accepted)?;
+            ctx.mark_final_text_tail();
+            return Ok(());
+        }
+        if let (true, Some(message)) = (delivered, &failure) {
+            // Failures before a step (e.g. an unavailable model) leave no assistant message.
+            ctx.mark_native_retry_exhausted();
+            ctx.mark_terminal_failure("opencode_terminal", message);
+            return Err(anyhow!("OpenCode V2: {message}"));
+        }
+    }
+    admission?;
+    Err(anyhow!(
+        "OpenCode V2 became idle without completing this prompt"
+    ))
+}
+
+const FINAL_READS: usize = 3;
+
+/// OpenCode's event bus. Text deltas and the step in flight reach only this stream; the export
+/// gains an assistant message when its step ends.
+async fn subscribe(
+    endpoint: &AgentEndpoint,
+) -> Result<futures::stream::Peekable<BoxStream<'static, Result<Value>>>> {
+    use tokio::io::AsyncBufReadExt;
+    let response = endpoint
+        .client
+        .get(format!("{}/api/event", endpoint.base_url))
+        .send()
+        .await?
+        .error_for_status()?;
+    let body = response.bytes_stream().map_err(std::io::Error::other);
+    let lines = tokio::io::BufReader::new(tokio_util::io::StreamReader::new(body)).lines();
+    let events = futures::stream::try_unfold(lines, |mut lines| async move {
+        while let Some(line) = lines.next_line().await? {
+            if let Some(data) = line.strip_prefix("data:") {
+                let event: Value = serde_json::from_str(data.trim())
+                    .with_context(|| format!("OpenCode sent an unreadable event: {data}"))?;
+                return Ok(Some((event, lines)));
+            }
+        }
+        Ok(None)
+    });
+    let mut events = events.boxed().peekable();
+    // Headers can precede the feed's registration; an event before then is not delivered.
+    let connected = tokio::time::timeout(Duration::from_secs(10), events.next())
+        .await
+        .map_err(|_| anyhow!("OpenCode's event stream did not confirm the connection"))?;
+    match connected {
+        Some(Ok(event)) if event["type"] == "server.connected" => Ok(events),
+        _ => Err(anyhow!(
+            "OpenCode's event stream did not begin with a connection"
+        )),
     }
 }
 
-fn observed_idle(was_idle: &mut bool, queued: bool, running: bool) -> bool {
-    let idle = !queued && !running;
-    let settled = *was_idle && idle;
-    *was_idle = idle;
-    settled
+/// What an event changed in the steps in flight.
+enum Folded<'a> {
+    Text { part: String, delta: &'a str },
+    Step(usize),
+}
+
+/// Folds this session's step events into the export's assistant message shape, so the step in
+/// flight renders with the part ids the export will give it.
+fn fold<'a>(steps: &mut Vec<Value>, native_id: &str, event: &'a Value) -> Option<Folded<'a>> {
+    let data = &event["data"];
+    if data["sessionID"].as_str() != Some(native_id) {
+        return None;
+    }
+    let id = data["assistantMessageID"].as_str()?;
+    let kind = event["type"].as_str()?.strip_prefix("session.")?;
+    if kind == "step.started" {
+        steps.retain(|step| step["id"] != id);
+        steps.push(json!({
+            "id": id, "type": "assistant", "agent": data["agent"], "model": data["model"],
+            "content": [],
+        }));
+        return Some(Folded::Step(steps.len() - 1));
+    }
+    let index = steps.iter().position(|step| step["id"] == id)?;
+    let content = steps[index]["content"].as_array_mut()?;
+    let (block, event_kind) = kind.split_once('.')?;
+    if let ("text" | "reasoning", "started") = (block, event_kind) {
+        content.push(json!({"type": block, "text": ""}));
+        return Some(Folded::Step(index));
+    }
+    if let "text" | "reasoning" = block {
+        let ordinal = data["ordinal"].as_u64()? as usize;
+        let (position, entry) = content
+            .iter_mut()
+            .enumerate()
+            .filter(|(_, entry)| entry["type"] == block)
+            .nth(ordinal)?;
+        return match event_kind {
+            "delta" => {
+                let delta = data["delta"].as_str()?;
+                let text = entry["text"].as_str().unwrap_or_default();
+                entry["text"] = json!(format!("{text}{delta}"));
+                Some(Folded::Text {
+                    part: format!("{id}:{position}"),
+                    delta,
+                })
+            }
+            "ended" => {
+                entry["text"] = data["text"].clone();
+                Some(Folded::Step(index))
+            }
+            _ => None,
+        };
+    }
+    let call = data["id"].as_str()?;
+    if kind == "tool.input.started" {
+        content.push(json!({
+            "type": "tool", "id": call, "name": data["name"],
+            "state": {"status": "streaming", "input": ""},
+        }));
+        return Some(Folded::Step(index));
+    }
+    let tool = content
+        .iter_mut()
+        .find(|entry| entry["type"] == "tool" && entry["id"] == call)?;
+    let state = &mut tool["state"];
+    match kind {
+        "tool.input.delta" => {
+            let input = state["input"].as_str().unwrap_or_default();
+            state["input"] = json!(format!("{input}{}", data["delta"].as_str()?));
+        }
+        "tool.called" => *state = json!({"status": "running", "input": data["input"]}),
+        "tool.progress" => state["metadata"] = data["metadata"].clone(),
+        "tool.success" | "tool.failed" => {
+            let input = state["input"].take();
+            *state = json!({
+                "status": if kind == "tool.success" { "completed" } else { "error" },
+                "input": input, "content": data["content"], "metadata": data["metadata"],
+            });
+            if let Some(error) = data.get("error") {
+                state["error"] = error.clone();
+            }
+        }
+        _ => return None,
+    }
+    Some(Folded::Step(index))
+}
+
+/// One prompt's view of its session: the export for finished steps, `steps` for those in flight.
+struct Turn<'a> {
+    endpoint: &'a AgentEndpoint,
+    native_id: &'a str,
+    path: &'a str,
+    prompt_id: &'a str,
+    /// Whether the event stream has said OpenCode took the prompt out of its inbox to run it.
+    delivered: bool,
+    previous: &'a HashSet<String>,
+    steps: Vec<Value>,
+    recorded: HashSet<String>,
+    surfaced: HashSet<String>,
+}
+
+impl Turn<'_> {
+    /// Merges the export and the steps it does not hold yet, then surfaces pending requests.
+    async fn reconcile(&mut self, ctx: &mut TurnCtx) -> Result<(Value, bool)> {
+        let projection = get(self.endpoint, &self.endpoint.v2_export_path(self.native_id)).await?;
+        let mut current = messages(&projection)?.clone();
+        self.steps.retain(|step| {
+            !current.iter().any(|message| {
+                message["id"] == step["id"]
+                    && message
+                        .pointer("/time/completed")
+                        .is_some_and(|time| !time.is_null())
+            })
+        });
+        for step in &self.steps {
+            match current
+                .iter_mut()
+                .find(|message| message["id"] == step["id"])
+            {
+                Some(message) => *message = step.clone(),
+                None => current.push(step.clone()),
+            }
+        }
+        let answered = merge_projection(
+            ctx,
+            self.endpoint,
+            self.native_id,
+            &current,
+            self.previous,
+            &mut self.recorded,
+        )
+        .await?;
+        if self.holds_prompt(&projection)? && ctx.delivery_state() != DeliveryState::Accepted {
+            ctx.persist_delivery(DeliveryState::Accepted)?;
+        }
+        prompts(ctx, self.endpoint, self.path, &mut self.surfaced).await?;
+        Ok((projection, answered))
+    }
+
+    fn holds_prompt(&self, projection: &Value) -> Result<bool> {
+        Ok(messages(projection)?
+            .iter()
+            .any(|message| message["id"].as_str() == Some(self.prompt_id)))
+    }
+
+    /// Whether an execution's end is this prompt's. The export can hold the prompt before the
+    /// stream has delivered an earlier execution's end, so only the stream's own order, or a
+    /// prompt that never left the inbox's reach, says so.
+    async fn finished(&mut self, ctx: &mut TurnCtx) -> Result<bool> {
+        if self.delivered {
+            return Ok(true);
+        }
+        if self.queued().await? {
+            return Ok(false);
+        }
+        let (projection, _) = self.reconcile(ctx).await?;
+        Ok(!self.holds_prompt(&projection)?)
+    }
+
+    async fn queued(&self) -> Result<bool> {
+        let inbox = get(self.endpoint, &format!("{}/inbox", self.path)).await?;
+        Ok(inbox["data"]
+            .as_array()
+            .ok_or_else(|| anyhow!("OpenCode V2 inbox response is invalid"))?
+            .iter()
+            .any(|item| item["id"].as_str() == Some(self.prompt_id)))
+    }
+
+    async fn idle(&self) -> Result<bool> {
+        let active = get(self.endpoint, "/api/session/active").await?;
+        let running = active["data"]
+            .as_object()
+            .ok_or_else(|| anyhow!("OpenCode V2 active response is invalid"))?
+            .contains_key(self.native_id);
+        Ok(!running && !self.queued().await?)
+    }
 }
 
 async fn merge_projection(
@@ -352,32 +618,6 @@ fn messages(projection: &Value) -> Result<&Vec<Value>> {
         .pointer("/data/messages")
         .and_then(Value::as_array)
         .ok_or_else(|| anyhow!("OpenCode V2 history response is invalid"))
-}
-
-async fn execution_failure(endpoint: &AgentEndpoint, native_id: &str) -> Result<Option<String>> {
-    let log = endpoint
-        .client
-        .get(format!(
-            "{}/api/experimental/session/{native_id}/log",
-            endpoint.base_url
-        ))
-        .timeout(Duration::from_secs(10))
-        .send()
-        .await?
-        .error_for_status()?
-        .text()
-        .await?;
-    Ok(last_execution_failure(&log))
-}
-
-/// The error of the last `session.execution.failed` event in a replayed SSE session log.
-fn last_execution_failure(log: &str) -> Option<String> {
-    log.lines()
-        .rev()
-        .filter_map(|line| line.strip_prefix("data:"))
-        .filter_map(|data| serde_json::from_str::<Value>(data.trim()).ok())
-        .find(|event| event["type"] == "session.execution.failed")
-        .map(|event| error_text(&event["data"]["error"]))
 }
 
 fn error_text(error: &Value) -> String {
@@ -1418,6 +1658,7 @@ mod tests {
                     note: None,
                     annotations: Vec::new(),
                     from: None,
+                    env: Vec::new(),
                 };
                 reply(&ctx, &endpoint, &prompt, &answer).await.unwrap();
             }
@@ -1473,6 +1714,7 @@ mod tests {
                 note: Some("Skipped".into()),
                 annotations: Vec::new(),
                 from: None,
+                env: Vec::new(),
             };
             let result = reply(&ctx, &endpoint, &prompt, &answer).await;
             server.abort();
@@ -1764,54 +2006,52 @@ mod tests {
         );
     }
 
-    #[test]
-    fn execution_failure_comes_from_the_last_failed_log_event() {
-        let event = |seq: u64, kind: &str, data: Value| {
-            let event = json!({"id":format!("evt_{seq}"),"created":seq,"type":kind,
-                "durable":{"aggregateID":"ses_test","seq":seq,"version":1},"data":data});
-            format!("data: {event}\r\n\r\n")
-        };
-        let failed = |message: &str| json!({"sessionID":"ses_test","error":{"type":"provider.no-route","message":message}});
-        let log = [
-            event(
-                1,
-                "session.execution.started",
-                json!({"sessionID":"ses_test"}),
-            ),
-            event(
-                2,
-                "session.execution.failed",
-                failed("Model unavailable: a/old"),
-            ),
-            event(
-                3,
-                "session.execution.failed",
-                failed("Model unavailable: opencode-go/deepseek-v4.1-flash"),
-            ),
-            format!(
-                "data: {}\n\n",
-                json!({"type":"log.synced","aggregateID":"ses_test","seq":3})
-            ),
-        ]
-        .concat();
-        assert_eq!(
-            last_execution_failure(&log).as_deref(),
-            Some("Model unavailable: opencode-go/deepseek-v4.1-flash")
+    #[tokio::test]
+    async fn the_step_in_flight_renders_as_the_export_later_does() {
+        use axum::{routing::get, Router};
+        let app = Router::new().route(
+            "/api/event",
+            get(|| async {
+                (
+                    [("content-type", "text/event-stream")],
+                    include_str!("fixtures/opencode-turn-events.sse"),
+                )
+            }),
         );
-        assert_eq!(
-            last_execution_failure(&event(1, "session.execution.succeeded", json!({}))),
-            None
-        );
-    }
+        let (endpoint, server) = catalog_server(app, false).await;
+        let export: Value =
+            serde_json::from_str(include_str!("fixtures/opencode-turn-export.json")).unwrap();
+        let native_id = export
+            .pointer("/data/info/id")
+            .and_then(Value::as_str)
+            .unwrap();
 
-    #[test]
-    fn one_idle_snapshot_cannot_finish_a_just_admitted_prompt() {
-        let mut idle = false;
-        assert!(!observed_idle(&mut idle, false, false));
-        assert!(!observed_idle(&mut idle, false, true));
-        assert!(!observed_idle(&mut idle, true, false));
-        assert!(!observed_idle(&mut idle, false, false));
-        assert!(observed_idle(&mut idle, false, false));
+        let mut events = subscribe(&endpoint).await.unwrap();
+        let mut steps = Vec::new();
+        let mut streamed = std::collections::HashMap::<String, String>::new();
+        while let Some(event) = events.next().await {
+            let event = event.unwrap();
+            if let Some(Folded::Text { part, delta }) = fold(&mut steps, native_id, &event) {
+                streamed.entry(part).or_default().push_str(delta);
+            }
+        }
+        server.abort();
+
+        let shown = |message: &Value| -> Vec<Value> {
+            projected_parts(message)
+                .into_iter()
+                .map(|(part, _)| serde_json::to_value(part).unwrap())
+                .collect()
+        };
+        let finished: Vec<_> = messages(&export).unwrap()[1..3]
+            .iter()
+            .flat_map(shown)
+            .collect();
+        let live: Vec<_> = steps.iter().flat_map(shown).collect();
+        assert_eq!(live, finished);
+        for part in finished.iter().filter(|part| part["kind"] == "text") {
+            assert_eq!(part["text"], streamed[part["id"].as_str().unwrap()]);
+        }
     }
 
     #[test]

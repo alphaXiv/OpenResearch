@@ -708,7 +708,24 @@ export interface EnvVar {
   maskedValue: string;
   /** Set only for non-secret keys, which are shown and edited in the clear. */
   value?: string | null;
+  description?: string | null;
   inProcessEnv: boolean;
+}
+
+export interface EnvSettings {
+  vars: EnvVar[];
+  /** The project's own variables, when one was asked for. */
+  projectVars?: EnvVar[];
+}
+
+export interface EnvVarChange {
+  key: string;
+  /** Omitted keeps the saved value. */
+  value?: string;
+  /** Omitted keeps the saved description; empty clears it. */
+  description?: string;
+  /** Saves it for this project instead of every project. */
+  projectId?: string;
 }
 
 /** Where `source` says the resolved data dir came from. `env` means the
@@ -1375,6 +1392,8 @@ export interface Harness {
   label?: AgentLabel;
   /** The user turned this agent or account off in Settings. On OpenCode, `offProviders` says which providers are. */
   off?: boolean;
+  /** A chat on this machine ran on this agent or account; absent from servers that predate it. */
+  hasChats?: boolean;
   /** On OpenCode: the providers set up in the user's own OpenCode. */
   foundProviders?: FoundProvider[];
   /** On OpenCode: the providers whose models the user turned off. */
@@ -1530,6 +1549,8 @@ export function tidyModelName(name: string): string {
 
 // --- chat (unified harness sessions) ------------------------------------------
 
+export type FailureCause = "sign_in" | "usage_limit" | "credits" | "model_unavailable" | "context_full" | "overloaded" | "network";
+
 export interface ChatToolState {
   status: "running" | "completed" | "error";
   input?: {
@@ -1543,6 +1564,11 @@ export interface ChatToolState {
     nextRetryAt?: number | null;
     turnId?: string;
     errorKind?: string;
+    /** Why the turn failed, in terms of what the user does next; absent when nothing says, and from older servers. */
+    cause?: FailureCause | null;
+    /** The agent and account the failed turn ran on; absent from older servers. */
+    harness?: HarnessId;
+    profile?: string | null;
     recoveryAction?: "retry" | "continue";
     [k: string]: unknown;
   };
@@ -1559,7 +1585,7 @@ export interface ChatQuestionOption {
 /** An interactive request the user acts on before the harness continues. */
 export interface ChatPrompt {
   nativeChoices?: { id: string; label: string; kind: string }[];
-  kind: "plan" | "permission" | "question";
+  kind: "plan" | "permission" | "question" | "env";
   resolved: boolean;
   plan?: string;
   /** plan: card synthesized from the turn's final text (no ExitPlanMode call). */
@@ -1583,6 +1609,29 @@ export interface ChatPrompt {
   /** Backend resume routing id. Presence marks a HELD mid-turn card (the
    * turn is blocked open waiting on this answer); absent on end-turn cards. */
   nativeId?: string;
+  /** env: the variables the agent asks the user to set. `question` holds its reason. */
+  variables?: EnvRequestVar[];
+}
+
+export type EnvScope = "global" | "project";
+
+export interface EnvRequestVar {
+  name: string;
+  description?: string;
+  /** A secret is typed masked and omitted from the tool result. */
+  secret: boolean;
+  /** A regex the value should match; a mismatch only warns. */
+  pattern?: string;
+  example?: string;
+  /** Answer echo: where the user saved it. Absent when left unset. */
+  savedTo?: EnvScope;
+}
+
+export interface EnvAnswer {
+  name: string;
+  value: string;
+  scope: EnvScope;
+  mismatched: boolean;
 }
 
 export interface ChatPart {
@@ -1762,7 +1811,7 @@ export interface ChatSession {
     state: string | null;
     answer: string | null;
     error: string | null;
-    asking: "question" | "permission" | "plan" | null;
+    asking: "question" | "permission" | "plan" | "env" | null;
   } | null;
   createdAt: number;
   updatedAt: number;
@@ -1835,12 +1884,16 @@ export interface TurnOptions {
   reasoningLevel?: string | null;
 }
 
-/** A message the user sent while a turn was running, parked to run next. */
+/**
+ * A message the user sent while a turn was running, parked to run next, or
+ * (`steering`) handed to that turn and not yet read by its agent.
+ */
 export interface QueuedMessage {
   id: string;
   text: string;
+  orx?: OrxSource | null;
   planMode?: boolean;
-  dispatchState?: "queued" | "retrying" | "blocked";
+  dispatchState?: "queued" | "retrying" | "blocked" | "steering";
   nextRetryAt?: number | null;
   error?: string | null;
 }
@@ -1873,6 +1926,8 @@ export interface PromptAnswer {
   answers?: string[];
   note?: string;
   annotations?: ChatTextAnnotation[];
+  /** Values saved from an env card. */
+  env?: EnvAnswer[];
 }
 
 // --- helpers shared across views --------------------------------------------
@@ -2603,16 +2658,16 @@ export function createApi(
   const saveVercelSetup = (setup: { token: string | null; teamId: string; projectId: string | null; newProject: string | null }) =>
     post<VercelSettings>("/api/settings/vercel", setup);
 
-  const getEnvVars = (signal?: AbortSignal) =>
-    get<{ vars: EnvVar[] }>("/api/settings/env", signal).then((r) => r.vars);
+  const envScope = (projectId?: string) => projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
 
-  const setEnvVar = (key: string, value: string) =>
-    post<{ vars: EnvVar[] }>("/api/settings/env", { key, value }).then((r) => r.vars);
+  const getEnvVars = (projectId?: string, signal?: AbortSignal) =>
+    get<EnvSettings>(`/api/settings/env${envScope(projectId)}`, signal);
 
-  const deleteEnvVar = (key: string) =>
-    writeResponse(`/api/settings/env/${encodeURIComponent(key)}`, { method: "DELETE" })
-      .then((r) => json<{ vars: EnvVar[] }>(r))
-      .then((r) => r.vars);
+  const setEnvVar = (change: EnvVarChange) => post<EnvSettings>("/api/settings/env", change);
+
+  const deleteEnvVar = (key: string, projectId?: string) =>
+    writeResponse(`/api/settings/env/${encodeURIComponent(key)}${envScope(projectId)}`, { method: "DELETE" })
+      .then((r) => json<EnvSettings>(r));
 
   const getDataDir = (signal?: AbortSignal) => get<DataDirSettings>("/api/settings/data-dir", signal);
 

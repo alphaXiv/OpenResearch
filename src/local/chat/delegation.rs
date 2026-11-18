@@ -396,6 +396,23 @@ impl PendingPrompt {
             &self.prompt.kind
         }
     }
+
+    /// What the user must do in the chat, as in "waits for the user to …".
+    pub fn awaits(&self) -> String {
+        if self.kind() == "env" {
+            let names: Vec<String> = self
+                .prompt
+                .variables
+                .iter()
+                .map(|var| format!("`{}`", var.name))
+                .collect();
+            return format!("set {}", names.join(", "));
+        }
+        format!(
+            "approve {}",
+            self.prompt.tool.as_deref().unwrap_or("a step")
+        )
+    }
 }
 
 /// The oldest open card. Claude's approval bridge puts each card in an
@@ -464,9 +481,9 @@ pub fn status(
             question_text(&target.id, &model, pending)
         }
         (Some(pending), _, _) => format!(
-            "Chat `{}` ({model}) waits for the user to approve {} in that chat.",
+            "Chat `{}` ({model}) waits for the user to {} in that chat.",
             target.id,
-            pending.prompt.tool.as_deref().unwrap_or("a step")
+            pending.awaits()
         ),
         (None, true, _) => format!("Chat `{}` ({model}) is working.", target.id),
         (None, false, Some(turn)) => {

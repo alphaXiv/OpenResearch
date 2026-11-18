@@ -27,6 +27,10 @@ through its CLI; profiles check theirs in parallel in the second pass. Adding,
 renaming or removing an account, provider or endpoint re-checks only the agent
 it changes.
 
+The registry lists saved launches and presets without searching for executables.
+The agent catalog hides presets whose launch matches a saved agent. Existing
+chats can still check and run either launch.
+
 **Plan limits come from the agents themselves.** For each Claude Code and Codex
 sign-in that may be on a subscription, the user's own and each profile's, one
 request answers: Claude's `get_usage` control request on a throwaway child in
@@ -129,8 +133,12 @@ providers.
 
 Adding an agent commits on its last step. Profiles, providers and endpoints
 saved on the way can be removed again when the add dialog is discarded, and
-Settings lists them only once it finishes. An account or an agent OpenResearch
-installed lists only while it is signed in; Add agent signs it in again.
+Settings lists them only once it finishes. The first Claude Code or Codex added
+signs in the user's own install; only one added beside a working install becomes
+a profile. A signed-out profile, or an agent a chat on this machine ran on, stays
+in Settings and the model picker, where Sign in opens that account. An agent no
+chat used shows once Add agent signs it in. Remote Codex sign-in uses a device
+code the user can enter from their browser.
 
 The providers differ in shape, and the interface absorbs three:
 
@@ -140,11 +148,15 @@ The providers differ in shape, and the interface absorbs three:
 | resident server per chat | OpenCode | posts to `opencode serve` in the chat's worktree |
 | child per turn | Cursor, older Codex (`codex exec`) | a print-mode process resuming the native session by id |
 
+Setup checks and chats use the same ACP launcher. orx skips stdout lines that are not JSON, such as banners and notices, rather than answering each with a parse error that some agents exit on. A connection failure names the local log that holds the launch, exit observations, and the last of its stderr and skipped stdout.
+
 A resident agent restarts with its native session resumed when a setting it started with changes or when it crashes. Resident children also restart after an interrupt or a switch to another fork, and idle ones are released (`src/local/agent_lifecycle.rs`); the next message resumes them. A child with background work still running is not idle: Claude Code resumes on its own when a background task finishes, and orx records what it writes then as a turn with no user message; until then orx refuses to switch, retry or edit a fork, which would stop the child and land its reply on the wrong branch. An ACP agent counts as busy while a command it runs in a terminal orx opened for it, or one it started in a session of its own as agy does, has not exited, since agents report no end to a command between turns; a switch to another fork still restarts it and stops those commands. A task that never ends, such as a dev server, keeps its child until the chat stops or restarts it, on low-memory machines too. Stopping a resident child also stops the commands it started in their own sessions. Windows has no sessions to tell those commands apart, so there an ACP agent's own commands keep nothing and releasing it stops them.
+
+**Claude Code and Codex get time to save a refreshed sign-in.** A refresh can retire the token on disk before its replacement is saved. When retiring an idle chat worker or an answered probe, orx closes its input and waits for it to exit. If it is still running, orx sends SIGTERM on Unix before forcing it to stop (`src/process.rs`). Stopping a Claude Code turn, a wedged turn or a quit sends SIGTERM at once, since closed input would let the turn finish first. Every stop and probe runs detached from its caller, so one that gives up never kills a child or leaves it unreachable. OpenCode exits on SIGTERM as it would on SIGKILL, so its servers stop as before.
 
 Antigravity speaks ACP (`agy acp`) but finishes background work in turns of its own that no client sees, so its `Stop` hook holds the turn open until agy's inbox reports the command, timer or subagent back, then lets agy continue; a daemon never reports, so it holds nothing. agy ends a turn it gave up on as a normal end of turn, so the turn fails with the error the hook saw, or with the network failure in agy's log when agy never reached Google.
 
-An agent either ends its turn on a question and takes the answer as the next message, or pauses and takes the answer over the live connection. Agents that accept input mid-turn take steering directly; otherwise a message sent during a turn waits in the chat's queue.
+An agent either ends its turn on a question and takes the answer as the next message, or pauses and takes the answer over the live connection. Agents that accept input mid-turn take steering directly; otherwise a message sent during a turn waits in the chat's queue. A steer is queued too until the agent reads it, which places it in the transcript; if the agent's process ends first, it runs as a queued message.
 
 Compaction is native where the harness supports it; otherwise a one-shot summary of the conversation reseeds a fresh native session.
 
@@ -216,6 +228,7 @@ OpenCode runs local inference over connections to OpenAI-compatible servers (`sr
 - **Skills.** Bundled (`agent-skills/`) and user-uploaded skills are written into the worktree's native skills folder before each turn, so they never drift from the binary; OpenCode gets them when its server starts. Skills the project or the user's agent already has are found by the agent itself.
 - **The `orx` CLI.** The running `orx`'s directory goes first on `PATH`, and on Unix shell hooks keep it first after the user's startup files, so the agent runs the dashboard's version. The environment names the chat, the dashboard's port, the server's bearer and its data directory, which is how `orx exp run` records its chat and every `orx` the agent runs opens the store the dashboard serves.
 - **alphaXiv tools.** `orx alphaxiv-mcp` (`src/commands/alphaxiv_mcp.rs`) passes an allowlist of tools to Claude Code, Codex, OpenCode, Antigravity and ACP agents; Cursor uses `orx alphaxiv library`. Tokens stay in orx ([storage](storage.md)); on an SSH host the attached laptop's sign-in counts ([remote](remote.md)). A sign-in change restarts a resident agent on its next turn with its session resumed. Write tools carry an ask rule, but Antigravity and ACP agents get no per-tool rule and `codex exec` cannot prompt, so there the agent's own policy decides.
+- **Saved variables.** The agent starts with `~/.openresearch/env` and its project's own variables over it, unless the shell that started orx already sets the name. Through `request_env` on `orx mcp` (`src/local/chat/env_request.rs`) it asks the user for more on a held card in its chat; the answer is written where the user chose, and on Unix the chat's shell hooks source what was saved mid-turn, so the agent's next command sees it. A secret's value is never in the transcript or the tool's result.
 - **Turn context.** Autonomy and the goal ride the turn as context blocks, so changing them never restarts the agent.
 
 ## Permissions
@@ -256,6 +269,8 @@ When a dashboard starts or a lease expires, every turn still marked running has 
 | accepted, unknown | continue | asks the agent to carry on; replaying could repeat work |
 
 **Nothing is replayed without the user.** An adapter retries on its own only before the prompt is accepted, within a bounded budget. A continued turn resumes the native session; if that session is gone, the agent gets a bounded snapshot of orx's transcript with instructions not to repeat completed tool actions. An ACP agent's session is gone when the agent says so or no longer lists it.
+
+**A failed turn says why in the user's terms.** The server classifies the agent's error, including errors saved before the cause field existed. The chat names the cause and keeps the raw error in the details. If a Claude Code sign-out is known before sending, the turn fails immediately. Sign in opens the agent's login and then recovers the turn according to its delivery state.
 
 Queued messages are persisted before they are acknowledged and run in order as each turn ends, so a restart loses none; Stop ends the running turn and the queue runs next, and a queued message leaves only when the user removes it. A quitting dashboard starts no turn, queued ones included, and gives up its leases on the way out, so the next start recovers its turns at once. Adapters that read a child's output interrupt a turn silent past a generous watchdog, which waits while an ACP agent reports a command running; OpenCode's adapters have none.
 

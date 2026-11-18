@@ -69,6 +69,16 @@ attachments. In a reply to the user, a ref or a chat id shows as a link to it.
 A message that starts with `[orx]` comes from orx or another chat's agent, not
 the user.
 
+## Keys and settings
+
+When code or a run needs an API key, a token or a setting such as a tracker's
+project name, call the `orx` MCP tool `request_env` with each variable's name,
+what it is and where the user finds it, and for a key the pattern it should
+match. The user types each value on a card in this chat. It reaches your shell,
+your runs and later chats. The tool result omits secret values. Never ask for
+a key in chat or write one into the repository. Request only what every run
+shares, never a knob that varies one experiment.
+
 ## Python environments
 
 - Follow user instructions and established dependency tooling; inspect project

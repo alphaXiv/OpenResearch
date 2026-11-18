@@ -386,32 +386,56 @@ pub(crate) async fn codex_luna(profile: Option<&str>) -> Result<Option<(String, 
 /// One request on a throwaway `codex app-server`: `initialize` →
 /// `initialized` (the handshake `local::codex` uses, incl. `experimentalApi`,
 /// which the v2 surface needs), the request, then its whole response, a
-/// JSON-RPC error included.
+/// JSON-RPC error included. Its input then closes and it exits on its own,
+/// since it may be saving a sign-in it refreshed.
 async fn codex_rpc(
     bin: &Path,
     home: Option<&Path>,
     method: &str,
     params: Value,
 ) -> std::result::Result<Value, Unanswered> {
-    // Acquire the spawn lane before the deadline — queue time must not spend
-    // the child's execution budget.
-    let permit = super::detect::detect_spawn_permit().await;
-    let fut = async move {
-        let mut cmd = crate::process::tokio_command(bin);
+    let (bin, home, method) = (
+        bin.to_path_buf(),
+        home.map(Path::to_path_buf),
+        method.to_string(),
+    );
+    // Detached: a caller that gives up must not drop, and so kill, a child saving a sign-in.
+    let (answered, answer) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        // Acquire the spawn lane before the deadline — queue time must not spend
+        // the child's execution budget.
+        let permit = super::detect::detect_spawn_permit().await;
+        if answered.is_closed() {
+            return;
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        let mut cmd = crate::process::tokio_command(&bin);
         cmd.arg("app-server")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true);
+            .stderr(Stdio::null());
         prepare_env(&mut cmd);
-        if let Some(home) = home {
+        if let Some(home) = &home {
             cmd.env("CODEX_HOME", home);
         }
-        let (mut child, _permit) = super::detect::spawn_with_permit(cmd, permit)
-            .await
-            .map_err(Unanswered::Spawn)?;
-        let mut stdin = child.stdin.take().ok_or(Unanswered::Closed)?;
-        let mut lines = BufReader::new(child.stdout.take().ok_or(Unanswered::Closed)?).lines();
+        let spawned =
+            tokio::time::timeout_at(deadline, super::detect::spawn_with_permit(cmd, permit)).await;
+        let (mut child, permit) = match spawned {
+            Ok(Ok(spawned)) => spawned,
+            Ok(Err(error)) => {
+                let _ = answered.send(Err(Unanswered::Spawn(error)));
+                return;
+            }
+            Err(_) => {
+                let _ = answered.send(Err(Unanswered::TimedOut));
+                return;
+            }
+        };
+        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+            let _ = answered.send(Err(Unanswered::Closed));
+            return;
+        };
+        let mut lines = BufReader::new(stdout).lines();
 
         use tokio::io::AsyncWriteExt;
         async fn send(
@@ -440,34 +464,42 @@ async fn codex_rpc(
             Err(Unanswered::Closed)
         }
 
-        send(
-            &mut stdin,
-            serde_json::json!({
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "clientInfo": {
-                        "name": "orx",
-                        "title": "OpenResearch",
-                        "version": env!("CARGO_PKG_VERSION"),
+        // The block owns `stdin`, so the child's input closes as soon as it answers.
+        let reply = tokio::time::timeout_at(deadline, async {
+            let mut stdin = stdin;
+            send(
+                &mut stdin,
+                serde_json::json!({
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "clientInfo": {
+                            "name": "orx",
+                            "title": "OpenResearch",
+                            "version": env!("CARGO_PKG_VERSION"),
+                        },
+                        "capabilities": { "experimentalApi": true },
                     },
-                    "capabilities": { "experimentalApi": true },
-                },
-            }),
-        )
-        .await?;
-        recv(&mut lines, 1).await?;
-        send(&mut stdin, serde_json::json!({ "method": "initialized" })).await?;
-        send(
-            &mut stdin,
-            serde_json::json!({ "id": 2, "method": method, "params": params }),
-        )
-        .await?;
-        recv(&mut lines, 2).await
-    };
-    tokio::time::timeout(Duration::from_secs(15), fut)
+                }),
+            )
+            .await?;
+            recv(&mut lines, 1).await?;
+            send(&mut stdin, serde_json::json!({ "method": "initialized" })).await?;
+            send(
+                &mut stdin,
+                serde_json::json!({ "id": 2, "method": method, "params": params }),
+            )
+            .await?;
+            recv(&mut lines, 2).await
+        })
         .await
-        .unwrap_or(Err(Unanswered::TimedOut))
+        .unwrap_or(Err(Unanswered::TimedOut));
+        let _ = answered.send(reply);
+        crate::process::let_probe_exit(child, lines.into_inner()).await;
+        // The lane stays taken until the child is gone.
+        drop(permit);
+    });
+    answer.await.unwrap_or(Err(Unanswered::Closed))
 }
 
 const RATE_LIMITS: &str = "account/rateLimits/read";
@@ -1354,85 +1386,94 @@ async fn codex_exec_one_shot(
         OneShotQuality::Standard => "medium",
     };
     let message = format!("{}\n\n{}", request.system, request.prompt);
-    let fut = async {
-        let mut cmd = crate::process::tokio_command(bin);
-        cmd.args(["exec", "--ephemeral", "--json", "--skip-git-repo-check"])
-            .args(["-c", "sandbox_mode=\"read-only\""])
-            .args(["-c", "approval_policy=\"never\""])
-            .args(["-c", &format!("model_reasoning_effort=\"{effort}\"")])
-            .args(request.model.iter().flat_map(|model| ["-m", model]))
-            // A one-shot needs no MCP: booting the user's servers for a
-            // single request would cost far more than the request itself.
-            .args(["-c", "mcp_servers={}"])
-            // Nor skills: the plugin catalog alone injected ~6k prompt tokens
-            // (24.3k → 18k input measured) into a request that ignores it.
-            .args(["-c", "features.plugins=false"])
-            // Nor the user's hooks, which would run on every request.
-            .args(["-c", "features.hooks=false"]);
-        if tool_free {
-            cmd.args(NO_TOOLS.iter().flat_map(|switch| ["-c", switch]));
-        }
-        cmd.arg(&message)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            // Hermetic: run outside any repo so the child doesn't ingest the
-            // server cwd's AGENTS.md into a request that carries its own context.
-            .current_dir(std::env::temp_dir());
-        prepare_env(&mut cmd);
-        let (home, name) = match request.profile {
-            Some(id) => (crate::local::agent_profiles::prepare(id, "codex")?, id),
-            None => (native_store::prepare_codex(NativeStore::Isolated)?, "codex"),
-        };
-        let sqlite = native_store::codex_home(NativeStore::Isolated);
-        // A one-shot brings its own context: the user's AGENTS.md and skills would add
-        // thousands of tokens to every request.
-        cmd.env(
-            "CODEX_HOME",
-            native_store::prepare_codex_one_shot(&home, name)?,
-        );
-        cmd.args([
-            "-c",
-            &format!("sqlite_home={}", native_store::toml_string(&sqlite)),
-        ]);
-        // Plain text only — an ANSI-colorizing CLI (or a synced FORCE_COLOR)
-        // would otherwise write escape codes straight into the reply.
-        cmd.env("NO_COLOR", "1");
-        let mut child = cmd.spawn()?;
-        let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
+    let mut cmd = crate::process::tokio_command(bin);
+    cmd.args(["exec", "--ephemeral", "--json", "--skip-git-repo-check"])
+        .args(["-c", "sandbox_mode=\"read-only\""])
+        .args(["-c", "approval_policy=\"never\""])
+        .args(["-c", &format!("model_reasoning_effort=\"{effort}\"")])
+        .args(request.model.iter().flat_map(|model| ["-m", model]))
+        // A one-shot needs no MCP: booting the user's servers for a
+        // single request would cost far more than the request itself.
+        .args(["-c", "mcp_servers={}"])
+        // Nor skills: the plugin catalog alone injected ~6k prompt tokens
+        // (24.3k → 18k input measured) into a request that ignores it.
+        .args(["-c", "features.plugins=false"])
+        // Nor the user's hooks, which would run on every request.
+        .args(["-c", "features.hooks=false"]);
+    if tool_free {
+        cmd.args(NO_TOOLS.iter().flat_map(|switch| ["-c", switch]));
+    }
+    cmd.arg(&message)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        // Hermetic: run outside any repo so the child doesn't ingest the
+        // server cwd's AGENTS.md into a request that carries its own context.
+        .current_dir(std::env::temp_dir());
+    prepare_env(&mut cmd);
+    let (home, name) = match request.profile {
+        Some(id) => (crate::local::agent_profiles::prepare(id, "codex")?, id),
+        None => (native_store::prepare_codex(NativeStore::Isolated)?, "codex"),
+    };
+    let sqlite = native_store::codex_home(NativeStore::Isolated);
+    // A one-shot brings its own context: the user's AGENTS.md and skills would add
+    // thousands of tokens to every request.
+    cmd.env(
+        "CODEX_HOME",
+        native_store::prepare_codex_one_shot(&home, name)?,
+    );
+    cmd.args([
+        "-c",
+        &format!("sqlite_home={}", native_store::toml_string(&sqlite)),
+    ]);
+    // Plain text only — an ANSI-colorizing CLI (or a synced FORCE_COLOR)
+    // would otherwise write escape codes straight into the reply.
+    cmd.env("NO_COLOR", "1");
+    let deadline = tokio::time::Instant::now() + request.timeout;
+    let timeout = request.timeout.as_secs();
+    let mut child = cmd.spawn()?;
+    let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
+    // Detached: a caller that gives up must not drop, and so kill, a child saving a sign-in.
+    let (status, last, error, usage) = tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
         // Keep the last agent message: a chatty run may narrate before it
         // answers, and the reply is what it settled on.
         let mut last = None;
         let mut error = None;
         let mut usage = None;
-        while let Ok(Some(line)) = lines.next_line().await {
-            if tool_free {
-                if let Some(refusal) = exec_line_tool(&line) {
-                    let _ = child.kill().await;
-                    return Err(anyhow!("{refusal}"));
+        let finished = tokio::time::timeout_at(deadline, async {
+            while let Ok(Some(line)) = lines.next_line().await {
+                if tool_free {
+                    if let Some(refusal) = exec_line_tool(&line) {
+                        let _ = child.kill().await;
+                        return Err(anyhow!("{refusal}"));
+                    }
+                }
+                if let Some(text) = exec_line_agent_message(&line) {
+                    last = Some(text);
+                } else if let Some(message) = exec_line_error(&line) {
+                    error = Some(message);
+                } else if let Some(used) = exec_line_usage(&line) {
+                    usage = Some(used);
                 }
             }
-            if let Some(text) = exec_line_agent_message(&line) {
-                last = Some(text);
-            } else if let Some(message) = exec_line_error(&line) {
-                error = Some(message);
-            } else if let Some(used) = exec_line_usage(&line) {
-                usage = Some(used);
-            }
-        }
-        let status = child.wait().await?;
-        match (status.success(), last, error) {
-            (true, Some(text), _) => Ok(OneShotReply { text, usage }),
-            (_, _, Some(message)) => Err(anyhow!("{message}")),
-            (true, None, None) => Err(anyhow!("returned no reply")),
-            (false, _, None) => Err(anyhow!("{status}")),
-        }
-    };
-    tokio::time::timeout(request.timeout, fut)
-        .await
-        .map_err(|_| anyhow!("timed out after {}s", request.timeout.as_secs()))?
+            Ok(child.wait().await?)
+        })
+        .await;
+        let Ok(status) = finished else {
+            crate::process::ask_agent_to_stop(&mut child, None).await;
+            return Err(anyhow!("timed out after {timeout}s"));
+        };
+        Ok((status?, last, error, usage))
+    })
+    .await??;
+    match (status.success(), last, error) {
+        (true, Some(text), _) => Ok(OneShotReply { text, usage }),
+        (_, _, Some(message)) => Err(anyhow!("{message}")),
+        (true, None, None) => Err(anyhow!("returned no reply")),
+        (false, _, None) => Err(anyhow!("{status}")),
+    }
 }
 
 /// Why a tool-free turn must stop at this line: it started something other than words, or the
@@ -3595,8 +3636,7 @@ async fn ensure_codex_pre_accept(
                     .any(|code| detail.contains(code));
                 let retry = retryable.then(|| ctx.schedule_orx_retry(None)).flatten();
                 let Some((retry_number, delay)) = retry else {
-                    ctx.mark_delivery(DeliveryState::NotSent);
-                    ctx.mark_terminal_failure("codex_setup", error.to_string());
+                    ctx.mark_setup_failure("codex_setup", &error);
                     return Err(error);
                 };
                 ctx.show_retry_status(
@@ -4602,7 +4642,7 @@ const STEER_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// codex rejects `turn/steer` on review and compaction turns, and older
 /// app-servers lack the method — those answer definitively, so the message
-/// parks for the next turn. A transport failure or timeout answers nothing:
+/// runs as a queued one after the turn. A transport failure or timeout answers nothing:
 /// codex may already have applied the text, so re-running it as a fresh turn
 /// could execute the instruction twice. Say so instead.
 async fn steer_turn(
@@ -4613,11 +4653,12 @@ async fn steer_turn(
     steer: SteerMessage,
 ) {
     let Some(turn_id) = turn_id else {
-        if let Err(error) = ctx.host.park_steer(&ctx.session_id, steer) {
-            ctx.push_error(format!("Could not preserve steering message: {error}"));
-        }
+        ctx.host.release_steer(&ctx.session_id, &steer.id);
         return;
     };
+    if !ctx.host.steer_pending(&ctx.session_id, &steer.id) {
+        return;
+    }
     let answered = client
         .try_request_with_timeout(
             "turn/steer",
@@ -4629,17 +4670,12 @@ async fn steer_turn(
             STEER_TIMEOUT,
         )
         .await;
+    // codex reads an accepted steer at once, so its answer marks the spot.
     match answered {
-        Ok(Ok(_)) => ctx.record_steer(&steer, true),
-        Ok(Err(_)) => {
-            if let Err(error) = ctx.host.park_steer(&ctx.session_id, steer) {
-                ctx.push_error(format!("Could not preserve steering message: {error}"));
-            }
-        }
+        Ok(Ok(_)) => ctx.record_steer(&steer),
+        Ok(Err(_)) => ctx.host.release_steer(&ctx.session_id, &steer.id),
         Err(e) => {
-            // Record it anyway: the composer is already cleared, so this is
-            // the only copy of what the user typed.
-            ctx.record_steer(&steer, false);
+            ctx.record_steer(&steer);
             ctx.push_error(format!("codex did not confirm the steering message ({e})"));
         }
     }
@@ -5253,7 +5289,7 @@ mod tests {
                     case "$request" in *"$expected"*) ;; *) exit 1 ;; esac
                 done
                 printf '%s\n' '{"id":1,"result":{"thread":{"id":"saved-thread"},"model":"saved-model"}}'
-                sleep 600
+                cat >/dev/null
             "#,
         );
         let setup = codex_thread_setup(
@@ -5297,7 +5333,7 @@ mod tests {
     #[tokio::test]
     async fn compaction_refuses_a_different_resumed_thread() {
         let client = crate::local::codex::tests::rpc_test_client(
-            r#"IFS= read -r request; printf '%s\n' '{"id":1,"result":{"thread":{"id":"different-thread"},"model":"wrong-model"}}'; sleep 600"#,
+            r#"IFS= read -r request; printf '%s\n' '{"id":1,"result":{"thread":{"id":"different-thread"},"model":"wrong-model"}}'; cat >/dev/null"#,
         );
         let outcome = tokio::time::timeout(
             Duration::from_secs(2),
@@ -7164,6 +7200,7 @@ requires_openai_auth = false
             note: note.map(str::to_string),
             annotations: Vec::new(),
             from: None,
+            env: Vec::new(),
         }
     }
 
@@ -7430,6 +7467,73 @@ requires_openai_auth = false
             plan: Some("the plan".into()),
             synthesized: true,
             ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_binary_setup_exhaustion_reports_no_local_path() {
+        if !crate::config::in_test_child(&["ORX_TEST_SPEEDUP"]) {
+            return;
+        }
+        std::env::set_var("ORX_TEST_SPEEDUP", "1000");
+        let mut ctx = TurnCtx::test_stub();
+        ctx.harness = "codex".into();
+        assert!(ctx
+            .exhausted_retry_properties("orx", "codex_setup")
+            .is_none());
+        assert!(ensure_codex_pre_accept(&mut ctx, NativeStore::Isolated)
+            .await
+            .is_err());
+        let (kind, local_message) = ctx.terminal_error.as_ref().unwrap();
+        assert_eq!(kind, "codex_setup");
+        assert!(!local_message.is_empty());
+        assert_eq!(
+            ctx.exhausted_retry_properties("orx", kind),
+            Some(json!({
+                "harness": "codex", "owner": "orx", "reason": "codex_setup_binary",
+                "attempt": ORX_MAX_ATTEMPTS
+            }))
+        );
+    }
+
+    #[tokio::test]
+    async fn initialize_rejection_is_only_reported_after_retries_run_out() {
+        if !crate::config::in_test_child(&["ORX_TEST_SPEEDUP"]) {
+            return;
+        }
+        std::env::set_var("ORX_TEST_SPEEDUP", "1000");
+        let bin = crate::config::test_home().join(".local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        for (code, retries) in [(-32600, false), (-32001, true)] {
+            let reply =
+                json!({"id": 1, "error": {"code": code, "message": "private fixture marker"}});
+            #[cfg(unix)]
+            orx_test_support::write_executable(
+                bin.join("codex"),
+                format!("#!/bin/sh\nIFS= read -r request\nprintf '%s\\n' '{reply}'\n"),
+                0o755,
+            )
+            .unwrap();
+            #[cfg(windows)]
+            std::fs::write(
+                bin.join("codex.cmd"),
+                format!("@echo off\r\nset /p request=\r\necho {reply}\r\n"),
+            )
+            .unwrap();
+            let mut ctx = TurnCtx::test_stub();
+            ctx.harness = "codex".into();
+            assert!(ensure_codex_pre_accept(&mut ctx, NativeStore::Isolated)
+                .await
+                .is_err());
+            let (kind, local_message) = ctx.terminal_error.as_ref().unwrap();
+            assert!(local_message.contains("private fixture marker"));
+            assert_eq!(
+                ctx.exhausted_retry_properties("orx", kind),
+                retries.then(|| json!({
+                    "harness": "codex", "owner": "orx", "reason": "codex_setup_initialize",
+                    "attempt": ORX_MAX_ATTEMPTS
+                }))
+            );
         }
     }
 

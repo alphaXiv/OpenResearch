@@ -1,12 +1,14 @@
 import { useWorkspace } from "../workspace";
 import type { DialogContentProps } from "../dialog";
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
-import { ChevronDown } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { ChevronDown, Copy } from "lucide-react";
 import type { Harness, HarnessSetupCommands } from "../api";
 import { fmtBytes } from "../i18n";
 import { m } from "../paraglide/messages.js";
 import { selectionHarness } from "../modelSelection";
 import { isRecord } from "../workspaceState";
+import { copyToClipboard } from "../clipboard";
 
 import { HarnessLogo } from "./HarnessLogo";
 import { ProgressBar } from "./ProgressBar";
@@ -26,6 +28,26 @@ type SetupProps = {
   onReady?: (harness: Harness) => void;
   onAuth?: (harness: Harness) => void;
 };
+
+/**
+ * Opens the sign-in of `h`, an agent or one of its accounts, in a dialog, and runs `onReady` once it is signed in.
+ * Undefined when it can't sign in here: not installed, or a Claude Code whose provider signs it in elsewhere.
+ */
+export function useAgentSignIn() {
+  const workspace = useWorkspace();
+  const { data: commands } = useQuery(workspace.queries.getHarnessSetupCommandsQuery());
+  return (h: Harness | undefined, onReady?: (harness: Harness) => void) => {
+    const setup = h && commands?.[h.id];
+    if (!h || !setup?.login || !h.installed || h.installBroken || h.needsConfigRepair) return undefined;
+    if (h.id === "claude-code" && !h.profile && h.authState === "needsLogin" && !h.loginEligible) return undefined;
+    return () => workspace.dialogs.showCustomDialog({
+      component: HarnessSetupDialog,
+      props: { harness: h, commands: setup, action: "login" as const, profile: h.profile?.id, onReady },
+      onConfirm: () => {},
+      onCancel: "close",
+    });
+  };
+}
 
 /** These sign-ins send their page's address, so their terminal can stay out of the way. */
 const PAGE_SIGN_INS = new Set(["claude-code", "codex", "cursor"]);
@@ -198,6 +220,11 @@ function progressFrame(value: unknown): Progress | null {
   return { received: value.received, total: typeof value.total === "number" ? value.total : null };
 }
 
+/** `type: queue` frames: whether the attempt waits for another install or update to finish. */
+function queueFrame(value: unknown): boolean | null {
+  return isRecord(value) && value.type === "queue" && typeof value.waiting === "boolean" ? value.waiting : null;
+}
+
 function DownloadBar({ progress }: { progress: Progress | null }) {
   const label = !progress ? undefined
     : progress.total === null ? (progress.received < 512 * 1024 ? undefined : fmtBytes(progress.received))
@@ -216,6 +243,7 @@ function InstallProgress({ path, agent, running, onComplete, onError }: {
 }) {
   const { socketUrl } = useWorkspace();
   const [progress, setProgress] = useState<Progress | null>(null);
+  const [queued, setQueued] = useState(false);
   const events = useRef({ onComplete, onError });
   events.current = { onComplete, onError };
 
@@ -234,7 +262,9 @@ function InstallProgress({ path, agent, running, onComplete, onError }: {
       let value: unknown;
       try { value = JSON.parse(event.data); } catch { return; }
       const next = progressFrame(value);
+      const waiting = queueFrame(value);
       if (next) setProgress(next);
+      else if (waiting !== null) setQueued(waiting);
       else if (isRecord(value) && value.type === "complete") end();
       else if (isRecord(value) && value.type === "error") end(typeof value.error === "string" ? value.error : m.harness_setup_failed());
     };
@@ -250,7 +280,7 @@ function InstallProgress({ path, agent, running, onComplete, onError }: {
   if (!running) return null;
   return (
     <div className="mt-1">
-      <p role="status" className="m-0 text-sm">{m.harness_setup_installing({ agent })}</p>
+      <p role="status" className="m-0 text-sm">{queued ? m.harness_setup_queued() : m.harness_setup_installing({ agent })}</p>
       <DownloadBar progress={progress} />
     </div>
   );
@@ -265,6 +295,16 @@ export function SignInSteps({ url, message }: { url: string; message: (inputs: {
       <a href={url} target="_blank" rel="noreferrer" className="text-accent-blue-strong underline">{m.harness_setup_signin_page()}</a>
       {after}
     </p>
+  );
+}
+
+/** The one-time code a device sign-in's page asks for, to copy there. */
+export function DeviceCode({ code }: { code: string }) {
+  return (
+    <div className="flex items-center gap-2">
+      <code dir="ltr" className="flex h-8 items-center rounded-md border border-border bg-surface px-3 font-mono text-lg tracking-widest select-all">{code}</code>
+      <Button data-autofocus onClick={() => void copyToClipboard(code)}><Copy size={14} aria-hidden="true" />{m.md_copy()}</Button>
+    </div>
   );
 }
 
@@ -289,9 +329,12 @@ function SetupRun({ path, label, command, running, signIn, status, expanded, onC
   const terminalId = useId();
   const [open, setOpen] = useState(expanded);
   const [url, setUrl] = useState<string | null>(null);
+  /** The one-time code a device sign-in's page asks for. */
+  const [userCode, setUserCode] = useState<string | null>(null);
   const [code, setCode] = useState("");
   const [sent, setSent] = useState(false);
   const [progress, setProgress] = useState<Progress | null>(null);
+  const [queued, setQueued] = useState(false);
   const sendRef = useRef<((message: object) => void) | null>(null);
 
   const send = () => {
@@ -300,6 +343,7 @@ function SetupRun({ path, label, command, running, signIn, status, expanded, onC
     setSent(true);
   };
   const line: ReactNode = !running ? null
+    : queued ? m.harness_setup_queued()
     : !signIn ? status
       : signIn.page && !url ? m.harness_setup_signin_starting()
         : sent ? m.harness_setup_signin_checking_code()
@@ -308,7 +352,8 @@ function SetupRun({ path, label, command, running, signIn, status, expanded, onC
   return (
     <div className="mt-1 flex flex-col gap-3">
       {running && signIn && !signIn.page && <p className="m-0 text-sm">{m.acp_sign_in_help({ name: signIn.agent })}</p>}
-      {running && url && signIn?.page && <SignInSteps url={url} message={signIn.code ? m.harness_setup_signin_steps_code : m.harness_setup_signin_steps} />}
+      {running && url && signIn?.page && <SignInSteps url={url} message={userCode ? m.add_agent_oauth_device_steps : signIn.code ? m.harness_setup_signin_steps_code : m.harness_setup_signin_steps} />}
+      {running && url && userCode && <DeviceCode code={userCode} />}
       {running && url && signIn?.code && (
         <form className="grid gap-1.5" onSubmit={(event) => { event.preventDefault(); send(); }}>
           <label htmlFor={`${terminalId}-code`} className="text-sm text-subtext">{m.harness_setup_signin_code()}</label>
@@ -354,7 +399,10 @@ function SetupRun({ path, label, command, running, signIn, status, expanded, onC
             onComplete={(value) => {
               const next = progressFrame(value);
               if (next) setProgress(next);
+              const waiting = queueFrame(value);
+              if (waiting !== null) setQueued(waiting);
               if (isRecord(value) && value.type === "signin" && typeof value.url === "string") setUrl(value.url);
+              if (isRecord(value) && value.type === "signin" && typeof value.userCode === "string") setUserCode(value.userCode);
               if (!isRecord(value) || value.type !== "complete") return false;
               onComplete();
               return true;

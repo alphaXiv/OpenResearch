@@ -1,6 +1,6 @@
 //! The harness compatibility layer: one `Harness` trait that every coding-agent
 //! integration (Claude Code, Codex, OpenCode, Cursor, Antigravity) implements, plus the
-//! single `registry()` that every consumer iterates.
+//! shared registry for dispatch and discovery.
 //!
 //! A harness can offer up to three capabilities, and no harness is required to
 //! offer all of them:
@@ -14,7 +14,7 @@
 //!   shim so the agent auto-discovers the CLI.
 //!
 //! Adding a harness is one new file with one `impl Harness` and one line
-//! in `registry()`; the dispatch, the ID list, the detection sweep, and the
+//! in the registry; the dispatch, the ID list, the detection sweep, and the
 //! skill installer all pick it up with no further edits.
 
 pub(crate) mod acp;
@@ -120,11 +120,152 @@ pub enum TurnOutcome {
     Completed,
 }
 
+/// Attach a fixed diagnostic to a setup error without replacing its local detail.
+#[derive(Debug)]
+pub(crate) struct SetupFailure {
+    pub reason: &'static str,
+    message: String,
+}
+
+impl SetupFailure {
+    pub(crate) fn tag(reason: &'static str, error: crate::error::Error) -> crate::error::Error {
+        let message = error.to_string();
+        error.context(Self { reason, message })
+    }
+}
+
+impl std::fmt::Display for SetupFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 #[derive(Debug)]
 pub struct TurnFailure {
     pub kind: &'static str,
     pub message: String,
     pub delivery: DeliveryState,
+}
+
+/// An agent or account refused a turn because it is signed out, which no retry fixes.
+#[derive(Debug)]
+pub struct SignedOut(pub String);
+
+impl std::fmt::Display for SignedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for SignedOut {}
+
+/// Why a turn failed, in terms of what the user does next; the chat shows each its own way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureCause {
+    SignIn,
+    UsageLimit,
+    Credits,
+    ModelUnavailable,
+    ContextFull,
+    Overloaded,
+    Network,
+}
+
+/// What a failed turn's cause is, read from its kind, the `codexErrorInfo` Codex attaches to
+/// its message, and the agents' own wording. `None` when nothing says.
+pub(crate) fn failure_cause(kind: &str, message: &str) -> Option<FailureCause> {
+    match kind {
+        "claude_signed_out" => return Some(FailureCause::SignIn),
+        "claude_usage_limit" => return Some(FailureCause::UsageLimit),
+        "server_overloaded" => return Some(FailureCause::Overloaded),
+        _ => {}
+    }
+    let text = message.to_lowercase();
+    let says = |phrases: &[&str]| phrases.iter().any(|phrase| text.contains(phrase));
+    // A rejected key is fixed by replacing it; signing in again would change nothing. A
+    // provider behind OpenCode or ACP has no sign-in of the agent's own to offer.
+    let api_key = says(&[
+        "invalid api key",
+        "incorrect api key",
+        "invalid_api_key",
+        "x-api-key",
+    ]);
+    let signs_in = ["claude_", "codex_", "cursor_"]
+        .iter()
+        .any(|agent| kind.starts_with(agent));
+    if signs_in
+        && !api_key
+        && says(&[
+            "please run /login",
+            "oauth token has expired",
+            "authentication_error",
+            "\"httpstatuscode\":401",
+            "401 unauthorized",
+            "\"unauthorized\"",
+            "sign in again",
+            "signing in again",
+            "log in again",
+            "not logged in",
+            "authentication required",
+        ])
+    {
+        Some(FailureCause::SignIn)
+    } else if says(&[
+        "credit balance is too low",
+        "insufficient_quota",
+        "insufficient credits",
+        "insufficient balance",
+    ]) {
+        Some(FailureCause::Credits)
+    } else if says(&[
+        "usagelimitexceeded",
+        "hit your usage limit",
+        "hit your session limit",
+        "usage limit reached",
+    ]) {
+        Some(FailureCause::UsageLimit)
+    } else if says(&[
+        "named models unavailable",
+        "zcode turn failed: 1113",
+        "issue with the selected model",
+        "model_not_found",
+        "model is not supported",
+        "does not have access to model",
+    ]) {
+        Some(FailureCause::ModelUnavailable)
+    } else if says(&[
+        "prompt is too long",
+        "context_length_exceeded",
+        "contextwindowexceeded",
+        "maximum context length",
+    ]) {
+        Some(FailureCause::ContextFull)
+    } else if says(&[
+        "overloaded_error",
+        "serveroverloaded",
+        "server is overloaded",
+        "currently overloaded",
+        "ratelimitexceeded",
+        "rate_limit_error",
+        "too many requests",
+    ]) {
+        Some(FailureCause::Overloaded)
+    } else if says(&[
+        "connection to the api was lost",
+        "responsestreamdisconnected",
+        "httpconnectionfailed",
+        "econnreset",
+        "etimedout",
+        "enotfound",
+        "eai_again",
+        "socket hang up",
+        "typeerror: fetch failed",
+    ]) {
+        Some(FailureCause::Network)
+    } else {
+        None
+    }
 }
 
 impl TurnFailure {
@@ -258,7 +399,7 @@ pub trait Harness: Send + Sync {
         HarnessOptions::none()
     }
 
-    /// Generate a short (≤6 words) session title from the session's first user
+    /// Generate a short (1-4 word) session title from the session's first user
     /// message with a short-lived child, using the session model for OpenCode.
     /// `None` = failed; the caller keeps the first-line placeholder.
     ///
@@ -475,9 +616,12 @@ pub fn permission_id_for_mode(harness_id: &str, mode: PermissionMode) -> Option<
         .map(|choice| choice.id)
 }
 
-/// The one registry. Every consumer — chat dispatch, detection sweep, the
-/// create-session allowlist, and the skill installer — iterates this.
+/// Harness registration for dispatch, the session allowlist, and skills.
 pub fn registry() -> Vec<Box<dyn Harness>> {
+    registry_with_acp(crate::local::acp::registered_definitions())
+}
+
+fn registry_with_acp(definitions: Vec<crate::local::acp::Definition>) -> Vec<Box<dyn Harness>> {
     let mut harnesses: Vec<Box<dyn Harness>> = vec![
         Box::new(claude::ClaudeCode),
         Box::new(codex::Codex),
@@ -486,7 +630,7 @@ pub fn registry() -> Vec<Box<dyn Harness>> {
         Box::new(antigravity::Antigravity),
     ];
     harnesses.extend(
-        crate::local::acp::registered_definitions()
+        definitions
             .into_iter()
             .map(|definition| Box::new(acp::Acp(definition)) as Box<dyn Harness>),
     );
@@ -666,10 +810,7 @@ async fn detect_one(harness: &dyn Harness, snapshot: bool) -> Option<HarnessInfo
 }
 
 pub async fn detect_harness(id: &str) -> Option<HarnessInfo> {
-    let harness = registry()
-        .into_iter()
-        .find(|h| h.id() == id && h.supports_chat())?;
-    detect_one(harness.as_ref(), false).await
+    detect_one(chat_harness(id)?.as_ref(), false).await
 }
 
 /// The snapshot pass of [`detect_harness`] (see [`Harness::detect_snapshot`]).
@@ -677,22 +818,25 @@ pub async fn detect_harness_snapshot(id: &str) -> Option<HarnessInfo> {
     detect_one(chat_harness(id)?.as_ref(), true).await
 }
 
-/// Detect every chat-capable harness, in registry order. This is what the
-/// `orx up` dashboard renders in its harness picker.
+/// The dashboard's detected harness catalog, in registry order.
 pub async fn detect_harnesses() -> Vec<HarnessInfo> {
     detect_all(false).await
+}
+
+fn catalog_harnesses() -> impl Iterator<Item = Box<dyn Harness>> {
+    registry_with_acp(crate::local::acp::catalog_definitions())
+        .into_iter()
+        .filter(|h| h.supports_chat())
 }
 
 /// The full pass, yielding each harness as its own probes finish instead of
 /// in a batch. Callers that can commit entries individually unblock a ready
 /// agent on its own clock rather than the slowest sibling's — the onboarding
 /// gate is per-entry (`agentReady && !catalogPending`), so the catalog fill
-/// should not be. Items carry the harness's registry index so the caller can
-/// restore registry order for the final payload.
+/// should not be. Items carry their catalog index so the caller can restore
+/// the order for the final payload.
 pub fn detect_harnesses_each() -> impl futures::Stream<Item = (usize, HarnessInfo)> {
-    registry()
-        .into_iter()
-        .filter(|h| h.supports_chat())
+    catalog_harnesses()
         .enumerate()
         .map(|(i, h)| async move { detect_one(h.as_ref(), false).await.map(|info| (i, info)) })
         .collect::<futures::stream::FuturesUnordered<_>>()
@@ -708,10 +852,8 @@ pub async fn detect_harnesses_snapshot() -> Vec<HarnessInfo> {
 }
 
 async fn detect_all(snapshot: bool) -> Vec<HarnessInfo> {
-    let futures = registry()
-        .into_iter()
-        .filter(|h| h.supports_chat())
-        .map(|h| async move { detect_one(h.as_ref(), snapshot).await });
+    let futures =
+        catalog_harnesses().map(|h| async move { detect_one(h.as_ref(), snapshot).await });
     futures::future::join_all(futures)
         .await
         .into_iter()
@@ -1087,5 +1229,38 @@ mod tests {
             Some(ORX_RETRY_BUDGET + Duration::from_millis(1))
         )
         .is_none());
+    }
+
+    #[test]
+    fn a_failed_turn_names_the_cause_its_agent_reported() {
+        use FailureCause::*;
+        let codex_401 = "unexpected status 401 Unauthorized: Missing bearer or basic authentication in header, url: https://api.openai.com/v1/responses\n\ncodexErrorInfo: {\"httpConnectionFailed\":{\"httpStatusCode\":401}}";
+        for (kind, message, cause) in [
+            ("claude_signed_out", "Sign in with `claude auth login`, then re-check this agent.", Some(SignIn)),
+            ("claude_terminal", "claude: Not logged in · Please run /login", Some(SignIn)),
+            ("claude_terminal", "claude: OAuth token has expired. Please obtain a new token or refresh your existing token.", Some(SignIn)),
+            ("codex_terminal", codex_401, Some(SignIn)),
+            ("codex_terminal", "Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.", Some(SignIn)),
+            ("cursor_terminal", "Authentication required. Please run 'agent login' first, or set CURSOR_API_KEY environment variable.", Some(SignIn)),
+            ("claude_usage_limit", "You've hit your session limit · resets 3pm", Some(UsageLimit)),
+            ("codex_terminal", "You've hit your usage limit. Try again at 3:00 PM.\n\ncodexErrorInfo: \"usageLimitExceeded\"", Some(UsageLimit)),
+            ("claude_terminal", "claude: Credit balance is too low", Some(Credits)),
+            ("opencode_terminal", "You exceeded your current quota, please check your plan and billing details. insufficient_quota", Some(Credits)),
+            ("claude_terminal", "claude: There's an issue with the selected model (claude-x). It may not exist or you may not have access to it. Run /model to pick a different model.", Some(ModelUnavailable)),
+            ("claude_terminal", "claude: Prompt is too long", Some(ContextFull)),
+            ("codex_terminal", "Codex ran out of room in the model's context window.\n\ncodexErrorInfo: \"contextWindowExceeded\"", Some(ContextFull)),
+            ("claude_terminal", "claude: API Error: 529 {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}", Some(Overloaded)),
+            ("server_overloaded", "Codex is at capacity", Some(Overloaded)),
+            ("codex_terminal", "stream disconnected before completion\n\ncodexErrorInfo: {\"responseStreamDisconnected\":{\"httpStatusCode\":null}}", Some(Network)),
+            ("claude_terminal", "claude: Invalid API key · Please run /login", None),
+            ("codex_terminal", "unexpected status 401 Unauthorized: Incorrect API key provided: sk-abc", None),
+            ("opencode_terminal", "401 Unauthorized: authentication_error", None),
+            ("claude_terminal", "claude: API Error: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"invalid x-api-key\"}}", None),
+            ("claude_terminal", "claude: The tool output was overloaded with rows, so it was truncated", None),
+            ("claude_setup", "Claude Code 2.1.211 or newer is required", None),
+            ("adapter_error", "claude exited mid-turn; see /root/.local/share/openresearch/agent-claude.log", None),
+        ] {
+            assert_eq!(failure_cause(kind, message), cause, "{kind}: {message}");
+        }
     }
 }

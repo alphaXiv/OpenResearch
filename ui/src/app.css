@@ -20,7 +20,7 @@
 }
 
 /* The sidebar's bottom-start corner is the window's own on macOS and Windows 11. The status
-   strip's first segment sits 4px in from it, so its corner is the window's radius less 4px. */
+   strip's bottom-start segment sits 4px in from it, so its corner is the window's radius less 4px. */
 :root {
   --strip-corner: var(--radius-md);
 }
@@ -553,7 +553,6 @@
   .workspace-mobile-nav button[aria-pressed="true"] { background: var(--surface); color: var(--text); }
   .mobile-rail-dialog { width: min(320px, calc(100vw - 40px)); padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); background: var(--base); }
   .mobile-rail-dialog .session-rail { width: 100%; height: 100%; }
-  .session-rail .rail-nav-item { min-height: 44px; }
   .workspace-body .right-pane, .workspace-body .right-pane.max {
     position: fixed;
     inset: env(safe-area-inset-top) 0 calc(var(--workspace-mobile-nav-height) + env(safe-area-inset-bottom));

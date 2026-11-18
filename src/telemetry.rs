@@ -994,6 +994,12 @@ fn cancel_pending() {
     }
 }
 
+/// Observe events at the telemetry boundary in an isolated router test, without
+/// enabling network sends or changing the user's telemetry preference.
+#[cfg(test)]
+pub(crate) static TEST_CAPTURE: OnceLock<std::sync::mpsc::Sender<(String, serde_json::Value)>> =
+    OnceLock::new();
+
 /// Queue an event on disk, spawn the send, and register its handle for the
 /// single exit-time flush. Crucially does NOT await the flush window here —
 /// awaiting inline would delay the caller's next `println!` (the "✓ …" success
@@ -1001,6 +1007,14 @@ fn cancel_pending() {
 /// telemetry is disabled. Deliberately not `async` beyond the spawn: nothing to
 /// await.
 pub(crate) fn capture(event: impl Into<String>, extra: serde_json::Value) {
+    #[cfg(test)]
+    let event = {
+        let event = event.into();
+        if let Some(events) = TEST_CAPTURE.get() {
+            let _ = events.send((event.clone(), extra.clone()));
+        }
+        event
+    };
     if let Some(handle) = spawn_event(event, extra) {
         register_pending(handle);
     }
@@ -2042,6 +2056,70 @@ mod tests {
             }
         }
         bytes
+    }
+
+    #[tokio::test]
+    #[ignore = "run by the official-build telemetry gate; destination is loopback"]
+    async fn install_failure_steps_reach_the_collector() {
+        use axum::{http::StatusCode, routing::post, Json, Router};
+        use harness::{InstallStep, SetupAttempt};
+
+        if !crate::config::in_test_child(TELEMETRY_ENV) {
+            return;
+        }
+        assert_eq!(build_channel(), "production");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let host = format!("http://{}", listener.local_addr().unwrap());
+        std::env::set_var("ORX_TELEMETRY_HOST", &host);
+        assert_eq!(telemetry_host(), host);
+        let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let app = Router::new().route(
+            ANALYTICS_PATH,
+            post(move |Json(payload): Json<serde_json::Value>| {
+                let sent = sent.clone();
+                async move {
+                    for event in payload["events"].as_array().unwrap() {
+                        assert_eq!(event["name"], "cli_harness_setup");
+                        let p = &event["properties"];
+                        if p["outcome"] == "failed" {
+                            sent.send(p["errorExcerpt"].clone()).unwrap();
+                        }
+                    }
+                    StatusCode::ACCEPTED
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        for (step, expected) in [
+            (None, serde_json::Value::Null),
+            (
+                Some(InstallStep::ReleaseLookup),
+                json!("managed release lookup"),
+            ),
+            (
+                Some(InstallStep::NativeUpdater),
+                json!("native agent updater"),
+            ),
+            (Some(InstallStep::ManagedCopy), json!("managed agent copy")),
+        ] {
+            let attempt = SetupAttempt::new("opencode", "update", "manual");
+            if let Some(step) = step {
+                attempt.set_install_step(step);
+            }
+            attempt.record(
+                "failed",
+                "command",
+                Some("exit_nonzero"),
+                Some(1),
+                Some("private.test/?token=secret"),
+            );
+            let observed = tokio::time::timeout(std::time::Duration::from_secs(5), received.recv())
+                .await
+                .unwrap();
+            assert_eq!(observed, Some(expected));
+        }
+        flush_pending().await;
+        server.abort();
     }
 
     #[tokio::test]

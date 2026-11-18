@@ -24,7 +24,7 @@ const click = async (element) => {
   await settle();
 };
 
-/** Opens the GitHub settings for one project; each route below answers a request and records it. */
+/** Opens one project's settings; each route below answers a request and records it. */
 async function gitSettings({
   git = () => gitStatus(),
   access = () => ({ canPush: true }),
@@ -50,10 +50,7 @@ async function gitSettings({
       return enabling();
     },
   });
-  await renderApp("/projects/p/settings/projects");
-  const projectPicker = document.querySelector(`button[title="${m.settings_github_manage_project()}"]`);
-  await click(projectPicker);
-  await click([...projectPicker.parentElement.querySelectorAll("button")].find((button) => button.textContent === project.name));
+  await renderApp("/projects/p/settings/project");
   const enable = () => find("button", m.repository_enable_syncing()) ?? find("button", m.common_checking());
   return {
     enabled,
@@ -135,6 +132,9 @@ test("cached owner choices stay visible without a loading placeholder during ref
   let refresh = false;
   const held = (reply) => () => refresh ? pending() : reply();
   const view = await gitSettings({ account: held(() => ({ login: "example-user" })), organizations: held(() => ({ organizations: ["research-org"] })) });
+  await click(view.enable());
+  await click(view.enable());
+  assert.ok(!view.picker());
   refresh = true;
   const owners = { predicate: ({ queryKey }) => queryKey[2] === "githubAccount" || queryKey[2] === "githubOrganizations" };
   await act(async () => { for (const client of clients) void client.invalidateQueries(owners); });

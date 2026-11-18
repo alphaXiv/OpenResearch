@@ -249,8 +249,26 @@ fn detect_payload(
     payload
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum InstallStep {
+    ReleaseLookup,
+    NativeUpdater,
+    ManagedCopy,
+}
+
+impl InstallStep {
+    fn label(self) -> &'static str {
+        match self {
+            Self::ReleaseLookup => "managed release lookup",
+            Self::NativeUpdater => "native agent updater",
+            Self::ManagedCopy => "managed agent copy",
+        }
+    }
+}
+
 pub(crate) struct SetupAttempt {
     id: uuid::Uuid,
+    install_step: std::sync::Mutex<Option<InstallStep>>,
     harness: String,
     action: &'static str,
     trigger: &'static str,
@@ -261,6 +279,7 @@ impl SetupAttempt {
     pub(crate) fn new(harness: &str, action: &'static str, trigger: &'static str) -> Self {
         let attempt = Self {
             id: uuid::Uuid::new_v4(),
+            install_step: Default::default(),
             harness: harness.into(),
             action,
             trigger,
@@ -268,6 +287,13 @@ impl SetupAttempt {
         };
         attempt.record("started", "detect", None, None, None);
         attempt
+    }
+
+    pub(crate) async fn command<T>(&self, work: impl std::future::Future<Output = T>) -> T {
+        observe_command(work, |outcome, detail| {
+            self.record(outcome, "command", None, None, detail);
+        })
+        .await
     }
 
     pub(crate) fn record(
@@ -292,10 +318,60 @@ impl SetupAttempt {
                 "attemptId": self.id.to_string(), "harness": self.harness, "action": self.action, "trigger": self.trigger,
                 "outcome": outcome, "stage": stage, "reason": reason,
                 "exitCode": exit_code, "durationMs": self.started.elapsed().as_millis().min(9_007_199_254_740_991) as u64,
-                "errorExcerpt": output.and_then(safe_error_excerpt),
+                "errorExcerpt": self.error_excerpt(outcome, stage, exit_code, output),
             }),
         );
     }
+
+    pub(crate) fn set_install_step(&self, step: InstallStep) {
+        if let Ok(mut current) = self.install_step.lock() {
+            *current = Some(step);
+        }
+    }
+
+    fn error_excerpt(
+        &self,
+        outcome: &str,
+        stage: &str,
+        exit_code: Option<u32>,
+        output: Option<&str>,
+    ) -> Option<String> {
+        // A failed command may be credited after verification if it installed a runnable copy.
+        let failed_command = (outcome == "failed" && stage == "command")
+            || (outcome == "succeeded" && exit_code.is_some_and(|code| code != 0));
+        let step = if failed_command {
+            self.install_step.lock().ok().and_then(|step| *step)
+        } else {
+            None
+        };
+        safe_error_excerpt_with_step(output.unwrap_or_default(), step)
+    }
+}
+
+/// A dropped future is an observed interruption, not evidence the agent command failed.
+async fn observe_command<T>(
+    work: impl std::future::Future<Output = T>,
+    report: impl Fn(&'static str, Option<&'static str>),
+) -> T {
+    struct Pending<F: FnOnce()>(Option<F>);
+    impl<F: FnOnce()> Drop for Pending<F> {
+        fn drop(&mut self) {
+            if let Some(report) = self.0.take() {
+                report();
+            }
+        }
+    }
+
+    report("command_started", None);
+    let mut pending = Pending(Some(|| {
+        report(
+            "interrupted",
+            Some("setup command task ended before a result"),
+        );
+    }));
+    let result = work.await;
+    pending.0.take();
+    result
 }
 
 #[cfg(test)]
@@ -380,8 +456,13 @@ pub(crate) mod contract {
     pub(crate) const MAX_ERROR_EXCERPT: usize = 1024;
 }
 
+pub(crate) const MANAGED_LOOKUP: &str = "Managed release lookup failed";
+pub(crate) const MANAGED_INSTALL: &str = "Managed release installation failed";
+
 // Fail closed: only fixed diagnostic phrases from output can leave the machine, never arbitrary tokens.
 const PHRASES: &[&str] = &[
+    MANAGED_LOOKUP,
+    MANAGED_INSTALL,
     "Could not resolve host",
     "Could not resolve proxy",
     "Failed to connect",
@@ -405,6 +486,38 @@ const PHRASES: &[&str] = &[
     "Could not reach",
     "does not match its published SHA-256",
     "Could not unpack the download",
+    "The download is not zstd",
+    "Could not run the downloaded",
+    "did not answer `--version`",
+    "failed `--version`",
+    "Could not look up the latest Claude Code release",
+    "Could not read the latest Claude Code release",
+    "returned something other than a version",
+    "The download was interrupted",
+    "Could not move the release into",
+    "OpenCode is in use",
+    "Couldn't create",
+    "Couldn't open",
+    "Couldn't lock",
+    // What reqwest, hyper and rustls say under those, which is the actual cause.
+    "dns error",
+    "failed to lookup address information",
+    "No such host is known",
+    "tcp connect error",
+    "actively refused it",
+    "did not properly respond after a period of time",
+    "forcibly closed by the remote host",
+    "connection closed before message completed",
+    "invalid peer certificate",
+    "UnknownIssuer",
+    "certificate not valid for name",
+    "certificate expired",
+    "error decoding response body",
+    "HTTP status client error (403",
+    "HTTP status client error (404",
+    "HTTP status client error (407",
+    "HTTP status client error (429",
+    "HTTP status server error",
     // .NET's network faults, which PowerShell installers print.
     "The remote name could not be resolved",
     "The operation has timed out",
@@ -452,8 +565,12 @@ const PHRASES: &[&str] = &[
     "ECONNRESET",
     // Fixed classifications `verify_reason` passes in; the ingested
     // `reason` allowlist has no vocabulary for which predicate failed.
+    "agent detection returned no result",
+    "agent account could not be prepared",
+    "agent executable path is unavailable",
     "agent is not installed",
     "agent is installed but failed to run",
+    "setup command task ended before a result",
     "agent is not signed in",
     "agent sign-in could not be verified",
     "agent version is unsupported",
@@ -462,7 +579,12 @@ const PHRASES: &[&str] = &[
     "agent reported no usable state",
 ];
 
+#[cfg(test)]
 fn safe_error_excerpt(output: &str) -> Option<String> {
+    safe_error_excerpt_with_step(output, None)
+}
+
+fn safe_error_excerpt_with_step(output: &str, step: Option<InstallStep>) -> Option<String> {
     let output = output
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -471,9 +593,11 @@ fn safe_error_excerpt(output: &str) -> Option<String> {
     // Ingestion caps `errorExcerpt` and rejects the whole event over it, so
     // stop joining before the limit rather than lose the attempt.
     const MAX: usize = contract::MAX_ERROR_EXCERPT;
-    let mut excerpt = String::new();
+    let mut excerpt = step.map_or_else(String::new, |step| step.label().to_owned());
     for phrase in PHRASES
         .iter()
+        .copied()
+        .chain(crate::local::harness::cursor::CursorStatusError::ALL.map(|e| e.excerpt()))
         .filter(|phrase| output.contains(&phrase.to_ascii_lowercase()))
     {
         let separator = if excerpt.is_empty() { "" } else { "; " };
@@ -489,6 +613,100 @@ fn safe_error_excerpt(output: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn only_an_observed_command_drop_adds_an_interruption() {
+        let events = std::cell::RefCell::new(Vec::new());
+        let observe = |outcome, detail: Option<&'static str>| {
+            events
+                .borrow_mut()
+                .push((outcome, detail.and_then(safe_error_excerpt)));
+        };
+
+        // Never polled: setup did not reach its command.
+        drop(observe_command(std::future::pending::<()>(), observe));
+        assert!(events.borrow().is_empty());
+
+        let mut command = Box::pin(observe_command(std::future::pending::<()>(), observe));
+        assert!(futures::poll!(&mut command).is_pending());
+        drop(command);
+        assert_eq!(
+            *events.borrow(),
+            vec![
+                ("command_started", None),
+                (
+                    "interrupted",
+                    Some("setup command task ended before a result".to_owned())
+                ),
+            ]
+        );
+
+        for result in [Ok(()), Err("disconnected")] {
+            events.borrow_mut().clear();
+            assert_eq!(
+                observe_command(std::future::ready(result), observe).await,
+                result
+            );
+            assert_eq!(*events.borrow(), vec![("command_started", None)]);
+        }
+    }
+
+    #[test]
+    fn install_failures_name_the_step_even_without_an_allowed_error() {
+        let attempt = SetupAttempt {
+            id: uuid::Uuid::new_v4(),
+            harness: "opencode".into(),
+            action: "update",
+            trigger: "manual",
+            started: std::time::Instant::now(),
+            install_step: Default::default(),
+        };
+        let noise = Some("native agent updater /home/private https://private.test/?token=abc");
+        assert!(attempt
+            .error_excerpt("failed", "command", Some(1), noise)
+            .is_none());
+        for step in [
+            InstallStep::ReleaseLookup,
+            InstallStep::NativeUpdater,
+            InstallStep::ManagedCopy,
+        ] {
+            attempt.set_install_step(step);
+            assert_eq!(
+                attempt
+                    .error_excerpt("failed", "command", Some(1), noise)
+                    .as_deref(),
+                Some(step.label())
+            );
+            assert_eq!(
+                attempt
+                    .error_excerpt("succeeded", "verify", Some(1), None)
+                    .as_deref(),
+                Some(step.label())
+            );
+            assert!(attempt
+                .error_excerpt("succeeded", "verify", Some(0), None)
+                .is_none());
+            assert_eq!(
+                attempt
+                    .error_excerpt("failed", "verify", None, Some("agent is not signed in"))
+                    .as_deref(),
+                Some("agent is not signed in")
+            );
+            let diagnostic = attempt
+                .error_excerpt(
+                    "failed",
+                    "command",
+                    None,
+                    Some("Permission denied: /secret"),
+                )
+                .unwrap();
+            assert_eq!(diagnostic, format!("{}; Permission denied", step.label()));
+            let longest = attempt
+                .error_excerpt("failed", "command", Some(1), Some(&PHRASES.join(" ")))
+                .unwrap();
+            assert!(longest.len() <= contract::MAX_ERROR_EXCERPT);
+        }
+    }
+
     #[test]
     fn detect_payload_batches_pass_and_probe_events_on_one_fill_id() {
         let fill_id = uuid::Uuid::new_v4();
@@ -721,6 +939,46 @@ mod tests {
             )
             .as_deref(),
             Some("stdin is not a terminal")
+        );
+    }
+
+    #[test]
+    fn a_managed_download_keeps_the_network_cause_without_the_url() {
+        let url = "https://registry.npmjs.org/@opencode%2fcli-windows-x64/latest?token=secret";
+        for (cause, expected) in [
+            (
+                "client error (Connect): dns error: No such host is known. (os error 11001)",
+                "Could not reach; dns error; No such host is known",
+            ),
+            (
+                "client error (Connect): tcp connect error: No connection could be made because the target machine actively refused it. (os error 10061)",
+                "Could not reach; tcp connect error; actively refused it",
+            ),
+            (
+                "client error (Connect): invalid peer certificate: UnknownIssuer",
+                "Could not reach; invalid peer certificate; UnknownIssuer",
+            ),
+            (
+                "client error (SendRequest): connection closed before message completed",
+                "Could not reach; connection closed before message completed",
+            ),
+        ] {
+            let output = format!("Could not reach {url}: error sending request for url ({url}): {cause}");
+            assert_eq!(safe_error_excerpt(&output).as_deref(), Some(expected), "{output}");
+        }
+        assert_eq!(
+            safe_error_excerpt(&format!(
+                "Could not reach {url}: HTTP status client error (403 rate limit exceeded) for url ({url})"
+            ))
+            .as_deref(),
+            Some("Could not reach; HTTP status client error (403")
+        );
+        assert_eq!(
+            safe_error_excerpt(
+                "Could not move the release into C:\\Users\\person\\.cache\\openresearch\\managed-agents\\opencode\\2.3.0: Access is denied. (os error 5)"
+            )
+            .as_deref(),
+            Some("Access is denied; Could not move the release into")
         );
     }
 

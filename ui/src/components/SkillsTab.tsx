@@ -539,20 +539,9 @@ function LatexTemplatesCard() {
   );
 }
 
-/** Middle-pane Customize tab — what the agent brings to every session: the
- * skills it can invoke (uploaded here or mirrored from the user's coding
- * agents) and the LaTeX templates it writes papers into. Everything applies to
- * every project. */
+/** What the agent brings to every session: the skills it can invoke (uploaded
+ * here or mirrored from the user's coding agents) and the LaTeX templates it
+ * writes papers into. Everything applies to every project. */
 export function SkillsTab() {
-  return (
-    <div className="settings-view max-w-readable my-0 mx-auto pt-6 px-8 pb-15 [&_h1]:mt-0 [&_h1]:mx-0 [&_h1]:mb-1.5 [&_h1]:text-3xl">
-      <h1>{m.skills_tab_customize()}</h1>
-      <p className="mt-0 mx-0 mb-5 text-base leading-relaxed text-text">
-        {m.skills_overview_description()}
-      </p>
-
-      <SkillsCard />
-      <LatexTemplatesCard />
-    </div>
-  );
+  return <><SkillsCard /><LatexTemplatesCard /></>;
 }

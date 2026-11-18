@@ -106,7 +106,6 @@ import { SubagentTab } from "./components/SubagentTab";
 import { CodeTab, type CodeView } from "./components/CodeTab";
 import { WorktreeTab, type WorktreeView } from "./components/WorktreeTab";
 import { ArtifactsTab, findArtifactEntry } from "./components/ArtifactsTab";
-import { SkillsTab } from "./components/SkillsTab";
 import { ClosableTab } from "./components/ClosableTab";
 import { TabStrip } from "./components/TabStrip";
 import type { LogSeek } from "./logWindow";
@@ -290,7 +289,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const router = useRouter();
   const location = useRouterState({ select: (state) => state.location });
   const destination = parseDestination(location.pathname);
-  const mainView = destination?.kind === "skills" ? "skills" : destination?.kind === "settings" ? destination.section ?? "settings" : "chat";
+  const mainView = destination?.kind === "skills" ? "agents" : destination?.kind === "settings" ? destination.section ?? "settings" : "chat";
   const rememberedSessionRef = useRef<string | null>(null);
   const rememberedProjectRef = useRef(projectId);
   if (rememberedProjectRef.current !== projectId) {
@@ -340,12 +339,12 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const setProjectId = useCallback((id: string | null) => {
     void router.navigate({ href: id ? `/projects/${encodeURIComponent(id)}` : "/projects" });
   }, [router]);
-  const setMainView = useCallback((view: "chat" | "skills" | SettingsTab) => {
+  const setMainView = useCallback((view: "chat" | SettingsTab) => {
     if (!projectId) return;
     if (view === "chat") {
       const id = rememberedSessionRef.current;
       void router.navigate({ href: taskLocation(projectId, id, getTaskWorkspace(workspaceRef.current, id ?? "new")?.active) });
-    } else void router.navigate({ href: `/projects/${encodeURIComponent(projectId)}/${view === "skills" ? "skills" : `settings/${view}`}` });
+    } else void router.navigate({ href: `/projects/${encodeURIComponent(projectId)}/settings/${view}` });
   }, [router, projectId]);
 
   const locale = useLocale();
@@ -496,7 +495,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       }
     }
     if (pendingViewFocus.current && pendingViewFocus.current === mainView) {
-      const view = bodyRef.current?.querySelector<HTMLElement>(".settings-view-scroll h1");
+      const view = bodyRef.current?.querySelector<HTMLElement>(".chat-pane h1");
       if (view) {
         view.focus();
         pendingViewFocus.current = null;
@@ -846,7 +845,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     [projectId],
   );
   useEffect(() => {
-    if (mainView !== "chat" && mainView !== "skills") reportFirstAction("open_settings");
+    if (mainView !== "chat") reportFirstAction("open_settings");
   }, [mainView, reportFirstAction]);
 
   const openExperimentsTab = useCallback((replace = false) => {
@@ -1546,7 +1545,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
 
   const focusOpenedView = (view: "settings" | "compute") => {
     pendingTabFocus.current = null;
-    const currentView = mainView === view ? bodyRef.current?.querySelector<HTMLElement>(".settings-view-scroll h1") : null;
+    const currentView = mainView === view ? bodyRef.current?.querySelector<HTMLElement>(".chat-pane h1") : null;
     if (currentView) currentView.focus();
     pendingViewFocus.current = currentView ? null : view;
     selectMainView(view);
@@ -1678,7 +1677,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   };
 
   function onProjectCreated(project: Project, publicationError: string | null) {
-    void router.navigate({ href: `/projects/${encodeURIComponent(project.id)}${publicationError ? "/settings/projects" : ""}` });
+    void router.navigate({ href: `/projects/${encodeURIComponent(project.id)}${publicationError ? "/settings/project" : ""}` });
     if (publicationError) {
       showAlert(publicationError, "error");
     }
@@ -2013,14 +2012,13 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             preferredAutonomy={uiState.preferredAutonomy ?? DEFAULT_AUTONOMY}
             onPreferredAutonomyChange={persistPreferredAutonomy}
           >
-            {mainView === "skills" ? (
-              <SkillsTab />
-            ) : mainView !== "chat" ? (
+            {mainView !== "chat" ? (
               <SettingsView
                 remote={runtime.kind === "ssh"}
                 tab={mainView}
                 project={activeProject}
                 onSelectTab={selectMainView}
+                onProjectRemoved={() => setProjectId(null)}
               />
             ) : null}
           </ChatPanel>

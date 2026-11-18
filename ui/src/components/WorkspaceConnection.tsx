@@ -85,7 +85,8 @@ export function WorkspaceConnection({
   const triggerName = status
     ? m.remote_machine_switcher_status({ machine, status })
     : m.remote_machine_switcher({ machine });
-  const triggerShape = corner ? "rounded-none px-2.5 py-1.5" : "h-7 flex-1 rounded-md px-2";
+  // Bottom row of the status strip, in the window's corner (app.css, --strip-corner).
+  const triggerShape = corner ? "gap-1.5 rounded-none px-2.5 py-1.5" : "h-9 flex-1 gap-2.5 rounded-md rounded-es-(--strip-corner) px-2";
   const triggerTone = corner
     ? current
       ? "border-accent-blue-border bg-accent-blue-subtle text-accent-blue-strong hover:border-accent-blue"
@@ -297,12 +298,12 @@ export function WorkspaceConnection({
               <Menu.Trigger
                 data-machine-switcher
                 aria-label={triggerName}
-                className={`flex min-w-0 items-center gap-1.5 border text-start transition-[background,border-color] duration-120 ease-standard focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:outline-offset-2 ${triggerShape} ${triggerTone}`}
+                className={`flex min-w-0 items-center border text-start transition-[background,border-color] duration-120 ease-standard focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:outline-offset-2 ${triggerShape} ${triggerTone}`}
               >
-                {offline ? <CloudOff size={14} className="shrink-0" aria-hidden="true" />
-                  : current?.state === "connecting" ? <Spinner className="size-3.5 border-accent-blue-border border-t-accent-blue-strong" />
-                  : current?.state === "disconnected" ? <Unplug size={14} className="shrink-0" aria-hidden="true" />
-                    : <RemoteIcon size={14} className={`shrink-0 ${current ? "" : "text-subtext"}`} />}
+                {offline ? <CloudOff size={corner ? 14 : 16} className="shrink-0" aria-hidden="true" />
+                  : current?.state === "connecting" ? <Spinner className={`${corner ? "size-3.5" : "size-4"} border-accent-blue-border border-t-accent-blue-strong`} />
+                  : current?.state === "disconnected" ? <Unplug size={corner ? 14 : 16} className="shrink-0" aria-hidden="true" />
+                    : <RemoteIcon size={corner ? 14 : 16} className={`shrink-0 ${current ? "" : "text-subtext"}`} />}
                 {corner ? <span className="flex min-w-0 flex-col">
                   <span dir="auto" className="truncate text-sm leading-tight">{label}</span>
                   {caption && <span className="truncate text-xs leading-tight">{caption}</span>}

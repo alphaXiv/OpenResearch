@@ -11,6 +11,9 @@ pub(in crate::commands::up) struct SignInPage {
     hosts: &'static [&'static str],
     history: String,
     url_sent: bool,
+    /// The page sent asks for a one-time code the CLI prints, as a device sign-in does.
+    device: bool,
+    user_code_sent: bool,
     code_sent: bool,
     failure: Option<String>,
 }
@@ -20,6 +23,8 @@ pub(in crate::commands::up) struct SignInPage {
 pub(in crate::commands::up) struct SignInUpdate {
     /// The page to open, the first time all of it has been printed.
     pub url: Option<String>,
+    /// The one-time code a device sign-in's page asks for, the first time it is printed.
+    pub user_code: Option<String>,
     /// The CLI refused the pasted code, in words for the user.
     pub failure: Option<String>,
 }
@@ -43,6 +48,8 @@ impl SignInPage {
             hosts,
             history: String::new(),
             url_sent: false,
+            device: false,
+            user_code_sent: false,
             code_sent: false,
             failure: None,
         })
@@ -64,6 +71,14 @@ impl SignInPage {
         if !self.url_sent {
             update.url = self.link().or_else(|| self.plain_url(usize::from(cols)));
             self.url_sent = update.url.is_some();
+            self.device = update
+                .url
+                .as_deref()
+                .is_some_and(|url| url.trim_end_matches('/').ends_with("/device"));
+        }
+        if self.device && !self.user_code_sent {
+            update.user_code = device_code(&screen_text(&self.history, false));
+            self.user_code_sent = update.user_code.is_some();
         }
         if self.code_sent && self.failure.is_none() {
             self.failure = rejected_code(&screen_text(&self.history, true));
@@ -149,6 +164,24 @@ impl SignInPage {
         }
         None
     }
+}
+
+/// A device sign-in's one-time code, such as `ABCD-12345`, printed as a word of its own.
+fn device_code(text: &str) -> Option<String> {
+    let end = text.rfind(char::is_whitespace)?;
+    text[..end]
+        .split_whitespace()
+        .find(|word| {
+            word.split_once('-').is_some_and(|(left, right)| {
+                [left, right].iter().all(|half| {
+                    (4..=5).contains(&half.len())
+                        && half
+                            .chars()
+                            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+                })
+            })
+        })
+        .map(str::to_string)
 }
 
 fn url_char(c: char) -> bool {
@@ -280,6 +313,35 @@ mod tests {
         let output = format!("Starting local login server on http://localhost:1455.\nIf your browser did not open, navigate to this URL to authenticate:\n\n{url}\n");
         let mut page = SignInPage::for_login("codex").unwrap();
         assert_eq!(feed(&mut page, &[&output]).0, Some(url));
+    }
+
+    #[test]
+    fn reads_the_code_a_device_sign_in_asks_for() {
+        // Codex 0.169's `login --device-auth`.
+        let output = "Follow these steps to sign in with ChatGPT using device code authorization:\n\n1. Open this link in your browser and sign in to your account\n   \x1b[94mhttps://auth.openai.com/codex/device\x1b[0m\n\n2. Enter this one-time code \x1b[90m(expires in 15 minutes)\x1b[0m\n   \x1b[94mQ7RW-K2M9P\x1b[0m\n\n";
+        let mut page = SignInPage::for_login("codex").unwrap();
+        let cut = output.find("2. Enter").unwrap();
+        let first = page.observe(&output.as_bytes()[..cut], 80);
+        assert_eq!(
+            first.url.as_deref(),
+            Some("https://auth.openai.com/codex/device")
+        );
+        assert_eq!(first.user_code, None);
+        let code_end = output.find("9P").unwrap() + 1;
+        let second = page.observe(&output.as_bytes()[cut..code_end], 80);
+        assert_eq!(second.user_code, None);
+        let third = page.observe(&output.as_bytes()[code_end..], 80);
+        assert_eq!(third.user_code.as_deref(), Some("Q7RW-K2M9P"));
+        assert_eq!(page.observe(b"\n", 80).user_code, None);
+
+        // A redirect sign-in's page asks for no code.
+        let mut page = SignInPage::for_login("codex").unwrap();
+        let update = page.observe(
+            b"navigate to https://auth.openai.com/oauth/authorize?x=1 \nAB12-CD34\n",
+            80,
+        );
+        assert!(update.url.is_some());
+        assert_eq!(update.user_code, None);
     }
 
     #[test]

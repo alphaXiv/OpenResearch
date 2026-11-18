@@ -339,6 +339,7 @@ impl Ssh {
         }
         let options: LaunchOptions =
             serde_json::from_value(intent.launch.options.clone()).map_err(rejected)?;
+        let mut env = crate::config::launch_env(&intent.run).map_err(rejected)?;
         let metadata = BackendDescriptor::parse(&intent.run.backend_json).map_err(rejected)?;
         if let Some(sha) = &metadata.source_digest {
             let path = metadata
@@ -352,7 +353,6 @@ impl Ssh {
                 .await?;
             self.pin_source(&intent.run.id, sha, cancelled).await?;
         }
-        let mut env = crate::config::launch_env(&intent.run.id);
         env.extend(options.env);
         let env: BTreeMap<_, _> = crate::jobs::default_python_env(&env).into_iter().collect();
         let run_sh = options.run_sh.unwrap_or_else(|| intent.run.command.clone());

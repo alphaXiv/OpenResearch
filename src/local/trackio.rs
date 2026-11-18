@@ -27,19 +27,38 @@ pub enum Target {
     Local,
 }
 
-pub fn target() -> Target {
-    if let Some(id) = synced_env_var(SPACE_ID) {
-        return Target::Space(id);
+pub fn target(env: &HashMap<String, String>) -> Target {
+    if let Some(id) = env.get(SPACE_ID) {
+        return Target::Space(id.clone());
     }
-    match synced_env_var(SERVER_URL).and_then(|raw| base_url(&raw)) {
+    match env.get(SERVER_URL).and_then(|url| base_url(url)) {
         Some(url) => Target::Server(url),
         None => Target::Local,
     }
 }
 
-/// The Trackio project an orx project's runs log to: the saved one, else the orx project's slug.
-pub fn project_for(orx_project_slug: &str) -> String {
-    synced_env_var(PROJECT).unwrap_or_else(|| orx_project_slug.to_string())
+pub struct ProjectTracker {
+    pub name: String,
+    pub target: Target,
+    hf_token: Option<String>,
+}
+
+/// Where the project's jobs log to Trackio.
+pub fn project_for(
+    store: &crate::store::Store,
+    project: super::model::LocalProject,
+) -> crate::error::Result<ProjectTracker> {
+    let variables = store.project_env(&project.id)?;
+    let hf_token = variables
+        .iter()
+        .find(|var| var.key == "HF_TOKEN")
+        .map(|var| var.value.clone());
+    let mut saved = crate::config::merge_saved_env(variables);
+    Ok(ProjectTracker {
+        name: saved.remove(PROJECT).unwrap_or(project.slug),
+        target: target(&saved),
+        hf_token,
+    })
 }
 
 /// The value the Environment page may show and edit in the clear; `None` keeps it masked.
@@ -102,8 +121,8 @@ pub fn local_dir() -> Option<PathBuf> {
 }
 
 /// Pins a local run's `TRACKIO_DIR` to the directory the local dashboard reads.
-pub fn local_run_env() -> Option<(String, String)> {
-    if !matches!(target(), Target::Local) {
+pub fn local_run_env(env: &HashMap<String, String>) -> Option<(String, String)> {
+    if !matches!(target(env), Target::Local) {
         return None;
     }
     Some((DIR.to_string(), local_dir()?.to_string_lossy().into_owned()))
@@ -212,9 +231,12 @@ impl Preflight {
 
 /// The Settings check for whichever destination is saved.
 pub async fn check() -> Result<Preflight, String> {
-    match target() {
+    let saved = crate::config::list_synced_env().into_iter().collect();
+    match target(&saved) {
         Target::Space(id) => Ok(space_preflight(&id).await),
-        Target::Server(base) => Ok(preflight(&base, synced_env_var(WRITE_TOKEN).as_deref()).await),
+        Target::Server(base) => {
+            Ok(preflight(&base, saved.get(WRITE_TOKEN).map(String::as_str)).await)
+        }
         Target::Local => Err(format!("Save {SPACE_ID} or an http(s) {SERVER_URL} first.")),
     }
 }
@@ -532,12 +554,18 @@ struct Dashboard {
 }
 
 /// The dashboard `project` logs to; `None` when nothing has logged yet (no local data, or no Space yet).
-async fn dashboard(local: &Arc<LocalServer>, project: &str) -> Result<Option<Dashboard>, String> {
-    match target() {
+async fn dashboard(
+    local: &Arc<LocalServer>,
+    project: &ProjectTracker,
+) -> Result<Option<Dashboard>, String> {
+    match &project.target {
         Target::Space(id) => {
-            let token = crate::jobs::huggingface::resolve_token().ok();
+            let token = project
+                .hf_token
+                .clone()
+                .or_else(|| crate::jobs::huggingface::resolve_token().ok());
             // Not created yet is the normal first-use state, not a failure.
-            let Some(space) = cached_space(&id, token.as_deref()).await? else {
+            let Some(space) = cached_space(id, token.as_deref()).await? else {
                 return Ok(None);
             };
             Ok(Some(Dashboard {
@@ -547,11 +575,11 @@ async fn dashboard(local: &Arc<LocalServer>, project: &str) -> Result<Option<Das
             }))
         }
         Target::Server(base) => Ok(Some(Dashboard {
-            base,
+            base: base.clone(),
             bearer: None,
             private_repo: None,
         })),
-        Target::Local if has_local_project(project) => Ok(Some(Dashboard {
+        Target::Local if has_local_project(&project.name) => Ok(Some(Dashboard {
             base: local.url().await?,
             bearer: None,
             private_repo: None,
@@ -575,12 +603,12 @@ pub struct ProjectRuns {
 /// The dashboard for `project` and which runs have logged to it.
 pub async fn project_runs(
     local: &Arc<LocalServer>,
-    project: String,
+    project: ProjectTracker,
 ) -> Result<ProjectRuns, String> {
     let Some(dashboard) = dashboard(local, &project).await? else {
         return Ok(ProjectRuns {
             dashboard_url: None,
-            project,
+            project: project.name,
             runs: Vec::new(),
             dashboard_sign: None,
         });
@@ -589,10 +617,10 @@ pub async fn project_runs(
         (Some(repo), Some(token)) => Some(space_sign(repo, token).await?),
         _ => None,
     };
-    let runs = run_names(&dashboard.base, &project, dashboard.bearer.as_deref()).await?;
+    let runs = run_names(&dashboard.base, &project.name, dashboard.bearer.as_deref()).await?;
     Ok(ProjectRuns {
         dashboard_url: Some(dashboard.base),
-        project,
+        project: project.name,
         runs,
         dashboard_sign,
     })
@@ -687,14 +715,14 @@ fn summarize(name: &str, rows: &[Value], series_points: usize) -> Option<MetricS
 /// What `run` logged to Trackio, summarized for an agent to read.
 pub async fn run_metrics(
     local: &Arc<LocalServer>,
-    project: String,
+    project: &ProjectTracker,
     run: String,
     filters: &[String],
     series_points: usize,
 ) -> RunMetrics {
     let mut out = RunMetrics {
         run,
-        project,
+        project: project.name.clone(),
         dashboard_url: None,
         logged_steps: None,
         last_step: None,
@@ -705,7 +733,7 @@ pub async fn run_metrics(
         other_metrics: Vec::new(),
         errors: Vec::new(),
     };
-    let dashboard = match dashboard(local, &out.project).await {
+    let dashboard = match dashboard(local, project).await {
         Ok(Some(dashboard)) => dashboard,
         Ok(None) => return out,
         Err(error) => {
@@ -1055,6 +1083,150 @@ mod tests {
             run_names(&base, "p", None).await.unwrap(),
             ["r1", "run-a", "r2"]
         );
+    }
+
+    #[tokio::test]
+    async fn project_metrics_read_the_saved_server_and_name() {
+        use crate::store::Store;
+        use axum::http::HeaderMap;
+        use axum::routing::post;
+
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let global = stub(axum::Router::new()).await;
+        let base = stub(
+            axum::Router::new()
+                .route(
+                    "/api/get_runs_for_project",
+                    post(
+                        |headers: HeaderMap, axum::Json(body): axum::Json<Value>| async move {
+                            assert!(!headers.contains_key("authorization"));
+                            assert_eq!(body["project"], "project-metrics");
+                            axum::Json(json!({ "data": [{ "id": "run" }] }))
+                        },
+                    ),
+                )
+                .route(
+                    "/api/get_run_summary",
+                    post(|axum::Json(body): axum::Json<Value>| async move {
+                        assert_eq!(body["project"], "project-metrics");
+                        assert_eq!(body["run"], "run");
+                        axum::Json(json!({ "data": { "num_logs": 10 } }))
+                    }),
+                )
+                .route(
+                    "/api/get_alerts",
+                    post(|| async { axum::Json(json!({ "data": [] })) }),
+                ),
+        )
+        .await;
+        crate::config::write_synced_env_vars(&[
+            (SERVER_URL, &global),
+            (PROJECT, "global-metrics"),
+            ("HF_TOKEN", "test-token"),
+        ])
+        .unwrap();
+        let store = Store::open().unwrap();
+        let project = || crate::store::tests::local_project_fixture("metrics-project");
+        store.create_local_project(&project()).unwrap();
+        store
+            .set_project_env("metrics-project", SERVER_URL, &base)
+            .unwrap();
+        store
+            .set_project_env("metrics-project", PROJECT, "project-metrics")
+            .unwrap();
+
+        let local = Arc::new(LocalServer::default());
+        let tracker = project_for(&store, project()).unwrap();
+        let metrics = run_metrics(&local, &tracker, "run".into(), &[], 48).await;
+        assert_eq!(metrics.logged_steps, Some(10));
+        assert!(metrics.errors.is_empty());
+        let runs = project_runs(&local, tracker).await.unwrap();
+        assert_eq!(runs.runs, ["run"]);
+        assert_eq!(runs.dashboard_url.as_deref(), Some(base.as_str()));
+
+        store
+            .set_project_env("metrics-project", SPACE_ID, "org/trackio")
+            .unwrap();
+        let tracker = project_for(&store, project()).unwrap();
+        assert!(matches!(tracker.target, Target::Space(id) if id == "org/trackio"));
+    }
+
+    #[tokio::test]
+    async fn project_space_uses_the_saved_token_and_falls_back_to_the_local_account() {
+        use crate::store::Store;
+        use axum::extract::Path;
+        use axum::http::{HeaderMap, StatusCode};
+        use axum::routing::get;
+
+        if !crate::config::in_test_child(&["HF_ENDPOINT", "HF_TOKEN"]) {
+            return;
+        }
+        let owners = Arc::new(Mutex::new(Vec::new()));
+        let base = stub(
+            axum::Router::new()
+                .route(
+                    "/api/whoami-v2",
+                    get(|headers: HeaderMap| async move {
+                        let owner = match headers["authorization"].to_str().unwrap() {
+                            "Bearer project-token" => "project-owner",
+                            "Bearer local-token" => "local-owner",
+                            _ => panic!("an unexpected token was sent"),
+                        };
+                        axum::Json(json!({ "name": owner }))
+                    }),
+                )
+                .route(
+                    "/api/spaces/{owner}/metrics",
+                    get({
+                        let owners = owners.clone();
+                        move |Path(owner): Path<String>, headers: HeaderMap| async move {
+                            let expected = match owner.as_str() {
+                                "project-owner" => "Bearer project-token",
+                                "local-owner" => "Bearer local-token",
+                                _ => panic!("an unexpected owner was requested"),
+                            };
+                            assert_eq!(headers["authorization"], expected);
+                            owners.lock().unwrap().push(owner);
+                            StatusCode::NOT_FOUND
+                        }
+                    }),
+                ),
+        )
+        .await;
+        std::env::set_var("HF_ENDPOINT", base);
+        std::env::set_var("HF_TOKEN", "local-token");
+        crate::config::write_synced_env_var("HF_TOKEN", "synced-token").unwrap();
+
+        let store = Store::open().unwrap();
+        let project = || crate::store::tests::local_project_fixture("private-space");
+        store.create_local_project(&project()).unwrap();
+        store
+            .set_project_env("private-space", SPACE_ID, "metrics")
+            .unwrap();
+        store
+            .set_project_env("private-space", "HF_TOKEN", "project-token")
+            .unwrap();
+        let local = Arc::new(LocalServer::default());
+
+        let tracker = project_for(&store, project()).unwrap();
+        assert!(project_runs(&local, tracker)
+            .await
+            .unwrap()
+            .dashboard_url
+            .is_none());
+        store
+            .delete_project_env("private-space", "HF_TOKEN")
+            .unwrap();
+        let tracker = project_for(&store, project()).unwrap();
+        assert!(project_runs(&local, tracker)
+            .await
+            .unwrap()
+            .dashboard_url
+            .is_none());
+
+        assert_eq!(*owners.lock().unwrap(), ["project-owner", "local-owner"]);
     }
 
     #[test]

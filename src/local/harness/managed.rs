@@ -67,14 +67,16 @@ pub(crate) fn lock_installations() -> Result<crate::file_lock::FileLock> {
 /// [`lock_installations`], or `None` while another install or removal holds it.
 pub(crate) fn try_lock_installations() -> Result<Option<crate::file_lock::FileLock>> {
     let root = crate::config::config_dir();
-    std::fs::create_dir_all(&root)?;
+    std::fs::create_dir_all(&root)
+        .with_context(|| format!("Couldn't create {}", root.display()))?;
     let path = root.join("managed-agents.lock");
     let lock = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
-        .open(&path)?;
+        .open(&path)
+        .with_context(|| format!("Couldn't open {}", path.display()))?;
     match lock.try_lock() {
         Ok(()) => Ok(Some(crate::file_lock::FileLock::new(lock))),
         Err(std::fs::TryLockError::WouldBlock) => Ok(None),
@@ -975,6 +977,40 @@ mod tests {
         assert_eq!(v2.sha256, "sha512:deadbeef");
         let renamed = opencode_release(&client, &registry, "linux-x64").await;
         assert!(renamed.is_err());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn claude_archive_failures_have_a_safe_diagnostic() {
+        use axum::{routing::get, Router};
+        let directory = crate::local::git::TemporaryDirectory::new("orx-install-excerpt").unwrap();
+        let private = "private-install-fixture";
+        let app = Router::new().route("/{name}", get(|| async { "not a zstd archive" }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let release = Release {
+            version: semver::Version::new(0, 0, 179),
+            url: format!("http://{}/{private}", listener.local_addr().unwrap()),
+            sha256: format!("{:x}", Sha256::digest(b"not a zstd archive")),
+            format: Format::Zstd(String::new()),
+        };
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let error = install("claude-code", &release, &mut |_, _| {}, None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            crate::telemetry::harness::excerpt_for_test(&format!("{error:#}")).as_deref(),
+            Some("The download is not zstd")
+        );
+        let bin = directory.path().join(private);
+        std::fs::write(&bin, b"not an executable").unwrap();
+        let error = verify("claude-code", &bin, &release.version)
+            .await
+            .unwrap_err();
+        assert!(
+            crate::telemetry::harness::excerpt_for_test(&format!("{error:#}"))
+                .unwrap()
+                .contains("Could not run the downloaded")
+        );
         server.abort();
     }
 
