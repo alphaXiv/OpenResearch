@@ -205,6 +205,67 @@ fn missing_unknown_and_removed_flags() {
 }
 
 #[test]
+fn a_terminal_notice_stays_pending_until_the_agent_previews_the_log() {
+    let sandbox = Sandbox::new();
+    let run_id = "run-result-notice";
+    sandbox.seed_run(run_id);
+    let db = rusqlite::Connection::open(sandbox.data_dir().join("orx.db")).unwrap();
+    let preview = || {
+        sandbox
+            .command()
+            .env("ORX_CHAT_SESSION_ID", "chat")
+            .args(["logs", run_id])
+            .output()
+            .unwrap()
+    };
+    let delivered = || {
+        db.query_row(
+            "SELECT delivered_at IS NOT NULL FROM run_notices WHERE run_id = ?1",
+            [run_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap()
+    };
+    db.execute(
+        "INSERT INTO run_notices (run_id, chat_session_id, kind, dedupe, body, created_at)
+         VALUES (?1, 'chat', 'terminal', 'terminal', 'finished', 1)",
+        [run_id],
+    )
+    .unwrap();
+
+    let missing = preview();
+    assert!(missing.stdout.is_empty(), "{missing:?}");
+    assert!(!delivered(), "missing log consumed the notice");
+
+    let path = sandbox.write_log(run_id, b"completed\n");
+    let tail = path.with_extension("tail.log");
+    let ranges = serde_json::json!([
+        {"offset":100,"len":10,"file":tail,"ident":"1-2","eof":true}
+    ]);
+    let manifest = path.with_extension("ranges.json");
+    std::fs::write(&manifest, ranges.to_string()).unwrap();
+    assert!(!preview().status.success());
+    assert!(!delivered(), "unreadable kept tail consumed the notice");
+
+    std::fs::write(&tail, b"kept tail\n").unwrap();
+    let kept = preview();
+    assert!(kept.status.success(), "{kept:?}");
+    assert!(lossy_stdout(&kept).contains("kept tail"));
+    assert!(delivered());
+
+    db.execute(
+        "UPDATE run_notices SET delivered_at = NULL WHERE run_id = ?1",
+        [run_id],
+    )
+    .unwrap();
+    std::fs::remove_file(manifest).unwrap();
+    let ordinary = preview();
+    assert!(ordinary.status.success(), "{ordinary:?}");
+    assert!(lossy_stdout(&ordinary).contains("completed"));
+    assert!(delivered());
+}
+
+#[test]
 fn large_kept_log_previews_tail_and_identifies_both_ranges_and_missing_middle() {
     use std::io::{Seek, SeekFrom, Write};
 

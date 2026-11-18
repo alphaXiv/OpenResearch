@@ -268,16 +268,6 @@ pub(crate) fn resolve_experiment(store: Store, exp_id: &str) -> Result<LocalPlan
     })
 }
 
-pub(crate) fn resolve_run(store: Store, run_id: &str) -> Result<LocalPlane> {
-    crate::local::resolve::resolve_run(&store, run_id)?;
-    Ok(LocalPlane {
-        store,
-        project: None,
-        experiment: None,
-        id: run_id.to_string(),
-    })
-}
-
 mod checkout_hint;
 pub(crate) mod local_plane;
 
