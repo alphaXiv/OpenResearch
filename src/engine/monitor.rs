@@ -1479,11 +1479,12 @@ fn watch_body(watch: &Value) -> Value {
     body
 }
 
-/// `rev` and `seriesRev` as last published, the fold revision they came from, and the summary
-/// they numbered, which lists an ended run without reading its checkpoint.
+/// The revisions, lifecycle phase and summary last published, which list an ended run
+/// without reading its checkpoint.
 #[derive(Clone)]
 struct Published {
     generation: String,
+    phase: Option<Phase>,
     fold_rev: u64,
     rev: u64,
     series_rev: u64,
@@ -1500,6 +1501,7 @@ impl Published {
                 .as_str()
                 .unwrap_or_default()
                 .to_owned(),
+            phase: value["phase"].as_str().and_then(Phase::parse),
             fold_rev: value["foldRev"].as_u64().unwrap_or_default(),
             rev: summary["rev"].as_u64().unwrap_or_default(),
             series_rev: value["seriesRev"].as_u64().unwrap_or_default(),
@@ -1510,6 +1512,7 @@ impl Published {
 
     fn json(&self) -> Value {
         json!({
+            "phase": self.phase.map(Phase::as_str),
             "foldRev": self.fold_rev,
             "seriesRev": self.series_rev,
             "hash": self.hash,
@@ -1874,36 +1877,59 @@ pub(crate) fn install_events(sink: impl Fn(String, Arc<Value>) + Send + Sync + '
 /// read only when it is opened. `None` for an ended run that never published a monitor.
 pub(crate) fn current(store: &Store, run: &StoredRun) -> Result<Option<Arc<Projection>>> {
     let now = crate::store::now_ms();
-    let phase = Phase::parse(&run.status);
-    let settled =
-        |summary: &Value| !phase.is_some_and(Phase::is_terminal) || summary["tone"] == tone(phase);
+    let ended = Phase::parse(&run.status).filter(|phase| phase.is_terminal());
+    let settled = |published: &Published| {
+        if ended.is_none() {
+            return true;
+        }
+        if published.phase != ended {
+            return false;
+        }
+        // Projection reports any errors reading the state behind a flag or revision.
+        match published.summary["tone"].as_str() {
+            Some("revising") => store.run_revising(run).is_ok_and(|revising| revising),
+            Some("flag") => super::flags::read(store, run).is_ok_and(|flags| {
+                let saved = &published.summary["flag"];
+                super::flags::open(&flags).is_some_and(|flag| {
+                    flag["id"] == saved["id"] && flag["state"] == saved["state"]
+                })
+            }),
+            _ => published.summary["tone"] == tone(ended),
+        }
+    };
     let slot = cache()?.slots.get(&key(store, &run.id)).cloned();
     if let Some(held) = slot.map(|slot| slot.held()).transpose()?.flatten() {
-        let retry = held.failed.is_some() && now - held.evaluated_at >= interval(1);
-        if !retry && settled(held.projection.summary()) {
+        let reusable = if held.failed.is_some() {
+            now - held.evaluated_at < interval(1)
+                && (ended.is_none() || held.projection.summary()["tone"] == tone(ended))
+        } else {
+            settled(&held.projection.published)
+        };
+        if reusable {
             return Ok(Some(held.projection.clone()));
         }
         return reprojected(store, run, now).map(Some);
     }
-    if !phase.is_some_and(Phase::is_terminal) {
+    if ended.is_none() {
         return reprojected(store, run, now).map(Some);
     }
     let published = store
         .run_monitor_state(&run.id)?
         .and_then(|state| Published::read(&state["published"]))
         .filter(|published| published.summary.is_object());
-    if published.as_ref().is_some_and(|p| !settled(&p.summary)) {
+    let Some(published) = published else {
+        return Ok(None);
+    };
+    if !settled(&published) {
         return reprojected(store, run, now).map(Some);
     }
-    Ok(published.map(|published| {
-        Arc::new(Projection {
-            summary: published.summary.clone(),
-            body: Value::Null,
-            snapshot: None,
-            published,
-            slices: 0,
-        })
-    }))
+    Ok(Some(Arc::new(Projection {
+        summary: published.summary.clone(),
+        body: Value::Null,
+        snapshot: None,
+        published,
+        slices: 0,
+    })))
 }
 
 /// [`advance`], or what it showed when it failed: a projection that says so.
@@ -2237,6 +2263,7 @@ fn publish(
     }
     let published = published.unwrap_or_else(|| Published {
         generation: String::new(),
+        phase: None,
         fold_rev: 0,
         rev: 0,
         series_rev: 0,
@@ -2362,14 +2389,17 @@ fn project(
     let mut summary = evaluated.summary;
     let mut body = evaluated.body;
     // A recovery is published, so readers told of the failure hear it ended.
-    let unchanged = previous
-        .as_ref()
-        .filter(|p| p.hash == hash && held.as_ref().is_none_or(|held| held.failed.is_none()));
+    let unchanged = previous.as_ref().filter(|p| {
+        p.phase == life.phase
+            && p.hash == hash
+            && held.as_ref().is_none_or(|held| held.failed.is_none())
+    });
     let (published, event) = match unchanged {
         Some(previous) => (previous.clone(), None),
         None => {
             let base = previous.clone().unwrap_or(Published {
                 generation: String::new(),
+                phase: None,
                 fold_rev: 0,
                 rev: 0,
                 series_rev: 0,
@@ -2420,6 +2450,7 @@ fn project(
             summary["rev"] = json!(rev);
             let published = Published {
                 generation: generation.clone(),
+                phase: life.phase,
                 fold_rev,
                 rev,
                 series_rev,
@@ -4739,6 +4770,92 @@ mod tests {
             .filter(|(data, _)| data == f.dir.path())
             .count();
         assert!(held <= ENDED_HELD, "{held} ended runs held");
+    }
+
+    #[test]
+    fn a_cold_list_of_flagged_finished_runs_reads_no_checkpoints() {
+        use crate::store::NewFlag;
+
+        let f = Fixture::new("orx-monitor-flagged-history");
+        let flag = |id: &str| NewFlag {
+            run_id: id.into(),
+            body: json!({"id": "f1", "source": "look", "text": "Loss rose."}),
+            wakes: vec![],
+            noted: vec![],
+            only_if_clear: false,
+        };
+        let template = f.run_named("r0", "done", local());
+        f.store.raise_flags(&[flag("r0")], T0).unwrap();
+        let checkpoint = folded(&declared(0..=1000, 1000));
+        f.signals(&Snapshot {
+            run_id: "r0".into(),
+            ..checkpoint.clone()
+        });
+        let projection = advance(&f.store, &template, T0).unwrap();
+        assert_eq!(projection.summary()["tone"], "flag");
+        let stored = f.store.run_monitor_state("r0").unwrap().unwrap();
+        let history = f.store.begin().unwrap();
+        let runs: Vec<_> = (1..=250)
+            .map(|i| {
+                let id = format!("flagged{i}");
+                let run = f.run_named(&id, "done", local());
+                f.store.append_flags(&[flag(&id)], T0).unwrap();
+                f.signals(&Snapshot {
+                    run_id: id.clone(),
+                    ..checkpoint.clone()
+                });
+                f.store.put_run_monitor_state(&id, &stored);
+                run
+            })
+            .collect();
+        history.commit().unwrap();
+
+        let reads = CHECKPOINT_READS.with(std::cell::Cell::get);
+        let started = std::time::Instant::now();
+        for run in &runs {
+            let listed = current(&f.store, run).unwrap().unwrap();
+            assert_eq!(listed.summary()["tone"], "flag");
+        }
+        let opened = CHECKPOINT_READS.with(std::cell::Cell::get) - reads;
+        eprintln!(
+            "cold list of {} finished runs: {:?}, {opened} checkpoint reads",
+            runs.len(),
+            started.elapsed()
+        );
+        assert_eq!(opened, 0);
+    }
+
+    #[test]
+    fn a_finished_runs_flag_returns_to_waiting_when_its_agent_turn_ends() {
+        let f = Fixture::new("orx-monitor-finished-flag");
+        let run = f.run("running", local());
+        let chat = "chat";
+        f.store.put_chat_session(chat, "claude-code", None);
+        f.store.subscribe_run(&run.id, chat, T0).unwrap();
+        let body = json!({"id": "f1", "source": "look", "text": "Loss rose."});
+        let flag = super::super::flags::new_flag(&f.store, &run, body, true).unwrap();
+        f.store.raise_flags(&[flag], T0).unwrap();
+        let notices = f.store.run_notice_batch_at(chat, T0 + 1).unwrap();
+        let turn = &notices[0].client_turn_id;
+        f.store.put_chat_turn(chat, turn, "running", T0 + 1);
+        f.store
+            .mark_run_notice_batch_delivered(chat, turn, T0 + 1)
+            .unwrap();
+
+        let run = f.run("done", local());
+        f.signals(&folded(&declared(0..=10, 100)));
+        let published = advance(&f.store, &run, T0 + 600_000).unwrap();
+        assert_eq!(published.summary()["flag"]["state"], "agent_looking");
+        f.restart();
+        let reads = CHECKPOINT_READS.with(std::cell::Cell::get);
+        let listed = current(&f.store, &run).unwrap().unwrap();
+        assert_eq!(listed.summary()["flag"]["state"], "agent_looking");
+        assert_eq!(CHECKPOINT_READS.with(std::cell::Cell::get), reads);
+
+        f.store
+            .conn_execute_for_tests("UPDATE chat_turns SET state = 'completed'");
+        let listed = current(&f.store, &run).unwrap().unwrap();
+        assert_eq!(listed.summary()["flag"]["state"], "waiting");
     }
 
     /// The laptop hands each checkpoint it publishes to the projection, so many live runs
@@ -7819,6 +7936,7 @@ mod tests {
     fn a_revising_run_is_watched_until_its_revision_ends() {
         let f = Fixture::new("orx-monitor-revising");
         let run = f.run("cancelled", local());
+        f.signals(&folded(&declared(0..=10, 100)));
         let tone = || current(&f.store, &run).unwrap().unwrap().summary()["tone"].clone();
         advance(&f.store, &run, T0).unwrap();
         assert_eq!(tone(), "stopped");
@@ -7829,9 +7947,14 @@ mod tests {
         assert_eq!(tone(), "revising");
         let (_, monitor) = super::monitor(&f.store, &run).unwrap();
         assert_eq!(monitor["revising"], true);
+        f.restart();
+        let reads = CHECKPOINT_READS.with(std::cell::Cell::get);
+        assert_eq!(tone(), "revising");
+        assert_eq!(CHECKPOINT_READS.with(std::cell::Cell::get), reads);
 
         f.store
             .conn_execute_for_tests("UPDATE chat_turns SET state = 'completed' WHERE id = 'turn'");
+        assert_eq!(tone(), "stopped");
         let watched = watch(&f.store, None, watched, None).unwrap();
         assert!(!watched.contains("r1"));
         assert_eq!(tone(), "stopped");
