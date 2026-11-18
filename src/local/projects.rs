@@ -1733,10 +1733,8 @@ mod tests {
 
         assert_ne!(created.id, project.id);
         assert!(!created.is_scratch());
-        assert_eq!(
-            std::fs::read_to_string(target.join("probe.py")).unwrap(),
-            "print(2)\n"
-        );
+        // Git's own copy: a Windows checkout ends lines with CRLF.
+        assert_eq!(git_output(&target, &["show", "HEAD:probe.py"]), "print(2)");
         assert_eq!(
             git_output(&target, &["log", "--format=%s"]),
             "probe\nignore data\ninitial"
