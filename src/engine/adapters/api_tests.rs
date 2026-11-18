@@ -484,7 +484,8 @@ async fn ray_submission_id_survives_lost_response_and_observations_are_batched()
         adapter.observe(&runs, Duration::from_secs(2)).await.len(),
         2
     );
-    *response.lock().unwrap() = json!({"status":"SUCCEEDED", "start_time":1234, "end_time":4567});
+    *response.lock().unwrap() =
+        json!({"status":"FAILED", "start_time":1234, "end_time":4567, "driver_exit_code":17});
     clock.advance(Duration::from_secs(10));
     let observations = adapter.observe(&runs, Duration::from_secs(2)).await;
     assert!(observations.iter().any(|(_, observation)| matches!(
@@ -497,19 +498,24 @@ async fn ray_submission_id_survives_lost_response_and_observations_are_batched()
     for (id, observation) in observations {
         engine.observe(&id, observation).unwrap();
     }
-    assert_eq!(engine.load("run").unwrap().0.ended_at, Some(4567));
+    let (row, state) = engine.load("run").unwrap();
+    assert_eq!(row.status, "failed");
+    assert_eq!(row.exit_code, Some(17));
+    assert_eq!(row.ended_at, Some(4567));
+    assert_eq!(state.started_at, Some(1234));
     server.abort();
     drop(engine);
     std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn provider_terminal_observations_keep_source_finish_times_and_exit_codes() {
+fn provider_terminal_observations_keep_source_times_and_exit_codes() {
     for (stage, code, expected) in [
         (
             "FAILED",
             Some(17),
             Observation::Exited {
+                started_at: Some(100),
                 finished_at: Some(123),
                 code: Some(17),
                 signal: None,
@@ -519,6 +525,7 @@ fn provider_terminal_observations_keep_source_finish_times_and_exit_codes() {
             "CANCELLED",
             Some(137),
             Observation::Cancelled {
+                started_at: Some(100),
                 finished_at: Some(123),
                 code: Some(137),
                 signal: None,
@@ -528,6 +535,7 @@ fn provider_terminal_observations_keep_source_finish_times_and_exit_codes() {
             "FAILED",
             None,
             Observation::Failed {
+                started_at: Some(100),
                 finished_at: Some(123),
                 reason: "FAILED".into(),
             },
@@ -3637,6 +3645,7 @@ async fn hf_exit_evidence_requires_the_provider_failure_format() {
             Some(code) => assert_eq!(
                 observation,
                 Observation::Exited {
+                    started_at: None,
                     finished_at: None,
                     code: Some(code),
                     signal: None
@@ -3645,6 +3654,7 @@ async fn hf_exit_evidence_requires_the_provider_failure_format() {
             None => assert_eq!(
                 observation,
                 Observation::Failed {
+                    started_at: None,
                     finished_at: None,
                     reason: message.into()
                 }

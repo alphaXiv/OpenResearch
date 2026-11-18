@@ -271,6 +271,7 @@ async fn phase_moves_only_forward_and_one_terminal_notice_survives_a_crash() {
         .observe(
             "run",
             Observation::Exited {
+                started_at: None,
                 finished_at: None,
                 code: Some(3),
                 signal: None,
@@ -284,6 +285,7 @@ async fn phase_moves_only_forward_and_one_terminal_notice_survives_a_crash() {
         .observe(
             "run",
             Observation::Cancelled {
+                started_at: None,
                 finished_at: None,
                 code: None,
                 signal: None,
@@ -301,6 +303,7 @@ async fn phase_moves_only_forward_and_one_terminal_notice_survives_a_crash() {
         .observe(
             "run",
             Observation::Exited {
+                started_at: None,
                 finished_at: None,
                 code: Some(0),
                 signal: None,
@@ -330,6 +333,7 @@ async fn a_frozen_batch_keeps_its_members_and_later_notices_wait_for_the_next() 
         .observe(
             "a",
             Observation::Exited {
+                started_at: None,
                 finished_at: None,
                 code: Some(0),
                 signal: None,
@@ -342,6 +346,7 @@ async fn a_frozen_batch_keeps_its_members_and_later_notices_wait_for_the_next() 
         .observe(
             "b",
             Observation::Exited {
+                started_at: None,
                 finished_at: None,
                 code: Some(0),
                 signal: None,
@@ -487,6 +492,7 @@ async fn cancel_during_submission_rides_the_launch() {
         .observe(
             "run",
             Observation::Cancelled {
+                started_at: None,
                 finished_at: None,
                 code: None,
                 signal: None,
@@ -723,6 +729,7 @@ async fn a_death_seen_while_a_cancel_is_verified_waits_for_the_verdict() {
         })
     ));
     let died = Observation::Failed {
+        started_at: None,
         finished_at: None,
         reason: "process died without an exit code".into(),
     };
@@ -760,6 +767,7 @@ async fn a_terminal_notice_waiting_for_its_log_does_not_hold_the_writer() {
             f.engine.observe(
                 "run",
                 Observation::Exited {
+                    started_at: None,
                     finished_at: None,
                     code: Some(0),
                     signal: None,
@@ -808,6 +816,7 @@ async fn a_cancel_registered_just_before_a_terminal_commit_is_honored() {
     std::thread::scope(|scope| {
         let observer = scope.spawn(|| {
             let died = Observation::Failed {
+                started_at: None,
                 finished_at: None,
                 reason: "process died without an exit code".into(),
             };
@@ -903,6 +912,7 @@ async fn a_verified_cancel_receipt_keeps_its_exit_code() {
         .observe(
             "run",
             Observation::Cancelled {
+                started_at: None,
                 finished_at: None,
                 code: Some(0),
                 signal: None,
@@ -950,6 +960,7 @@ async fn accepted_cancels_classify_nonzero_exits_after_restart() {
                 .observe(
                     "run",
                     Observation::Exited {
+                        started_at: None,
                         finished_at: Some(123),
                         code,
                         signal,
@@ -982,6 +993,7 @@ async fn accepted_cancels_do_not_replace_wrapper_or_legacy_stop_proof() {
             .observe(
                 "run",
                 Observation::Exited {
+                    started_at: None,
                     finished_at: None,
                     code: Some(137),
                     signal: None,
@@ -1010,6 +1022,7 @@ async fn nonzero_exit_after_abandon_keeps_cleanup_pending() {
         .observe(
             "run",
             Observation::Exited {
+                started_at: None,
                 finished_at: None,
                 code: Some(137),
                 signal: None,
@@ -1086,11 +1099,13 @@ async fn abandon_tells_the_chat_once_and_keeps_the_kill_pending_until_the_job_is
     for observation in [
         Observation::Running { started_at: None },
         Observation::Exited {
+            started_at: None,
             finished_at: None,
             code: Some(0),
             signal: None,
         },
         Observation::Failed {
+            started_at: None,
             finished_at: None,
             reason: "receipt unreadable".into(),
         },
@@ -1106,6 +1121,7 @@ async fn abandon_tells_the_chat_once_and_keeps_the_kill_pending_until_the_job_is
         .observe(
             "submitted",
             Observation::Cancelled {
+                started_at: None,
                 finished_at: None,
                 code: None,
                 signal: None,
@@ -1295,6 +1311,7 @@ async fn an_adopted_tombstone_is_adopted_again_after_a_restart() {
         .observe(
             "abandoned",
             Observation::Cancelled {
+                started_at: None,
                 finished_at: None,
                 code: None,
                 signal: None,
@@ -1374,6 +1391,7 @@ async fn runs_an_old_supervisor_holds_are_watched_and_never_written() {
         .observe(
             "held",
             Observation::Exited {
+                started_at: None,
                 finished_at: None,
                 code: Some(0),
                 signal: None,
@@ -1452,6 +1470,7 @@ async fn an_old_cli_cancel_is_accepted_once_under_its_lock_and_survives_withdraw
         .observe(
             "pending",
             Observation::Cancelled {
+                started_at: None,
                 finished_at: None,
                 code: None,
                 signal: None,
@@ -1482,6 +1501,7 @@ async fn reordered_feed_reports_never_move_a_phase_backwards() {
         (
             "run".to_string(),
             Observation::Exited {
+                started_at: None,
                 finished_at: None,
                 code: Some(0),
                 signal: None,
@@ -1495,6 +1515,7 @@ async fn reordered_feed_reports_never_move_a_phase_backwards() {
         (
             "other".to_string(),
             Observation::Failed {
+                started_at: None,
                 finished_at: None,
                 reason: "OOM".into(),
             },
@@ -2092,6 +2113,7 @@ async fn final_notify_survives_a_restart_inside_the_rate_window() {
         .observe(
             "run",
             Observation::Exited {
+                started_at: None,
                 finished_at: None,
                 code: Some(0),
                 signal: None,
@@ -2226,6 +2248,7 @@ async fn receipt_time_uses_the_source_clock_and_falls_back_to_observation_time()
             .observe(
                 id,
                 Observation::Exited {
+                    started_at: None,
                     code: Some(0),
                     signal: None,
                     finished_at,
@@ -2242,6 +2265,7 @@ async fn receipt_time_uses_the_source_clock_and_falls_back_to_observation_time()
         .observe(
             "provider-failed",
             Observation::Failed {
+                started_at: None,
                 finished_at: Some(5678),
                 reason: "provider failure".into(),
             },
@@ -2278,6 +2302,7 @@ async fn receipt_time_uses_the_source_clock_and_falls_back_to_observation_time()
         .observe(
             "rollback",
             Observation::Exited {
+                started_at: None,
                 code: Some(0),
                 signal: None,
                 finished_at: Some(-100),
@@ -2667,6 +2692,7 @@ async fn an_ended_run_drops_its_waiting_reason() {
         .observe(
             "run",
             Observation::Failed {
+                started_at: None,
                 finished_at: None,
                 reason: "Box provisioning failed".into(),
             },

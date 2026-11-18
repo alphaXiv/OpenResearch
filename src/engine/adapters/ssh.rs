@@ -536,6 +536,7 @@ pub(super) fn observations(run: String, summary: &Summary) -> Vec<(String, Obser
         }
         RunState::Exited { receipt } if receipt.reason == ExitReason::SpawnFailed => {
             Observation::Failed {
+                started_at: None,
                 finished_at: receipt.finished_at,
                 reason: match &receipt.detail {
                     Some(detail) => format!("The run couldn't start: {detail}"),
@@ -546,11 +547,13 @@ pub(super) fn observations(run: String, summary: &Summary) -> Vec<(String, Obser
             }
         }
         RunState::Exited { receipt } => Observation::Exited {
+            started_at: None,
             finished_at: receipt.finished_at,
             code: receipt.code,
             signal: receipt.signal,
         },
         RunState::Failed { reason } => Observation::Failed {
+            started_at: None,
             finished_at: None,
             reason: reason.clone(),
         },
@@ -558,6 +561,7 @@ pub(super) fn observations(run: String, summary: &Summary) -> Vec<(String, Obser
             reason: reason.clone(),
         },
         RunState::Cancelled { .. } => Observation::Cancelled {
+            started_at: None,
             finished_at: None,
             code: None,
             signal: None,
@@ -719,6 +723,7 @@ impl Backend for Ssh {
                         }
                         if let Some(code) = inspection.exit_code {
                             Observation::Exited {
+                                started_at: None,
                                 finished_at: None,
                                 code: Some(code),
                                 signal: None,

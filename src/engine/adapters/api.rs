@@ -713,20 +713,24 @@ pub fn stage(
 ) -> Observation {
     match stage {
         "COMPLETED" | "ERROR" | "FAILED" if exit_code.is_some() => Observation::Exited {
+            started_at,
             finished_at,
             code: exit_code,
             signal: None,
         },
         "COMPLETED" => Observation::Exited {
+            started_at,
             finished_at,
             code: Some(0),
             signal: None,
         },
         "ERROR" | "FAILED" => Observation::Failed {
+            started_at,
             finished_at,
             reason: message.unwrap_or_else(|| stage.into()),
         },
         "CANCELED" | "CANCELLED" => Observation::Cancelled {
+            started_at,
             finished_at,
             code: exit_code,
             signal: None,
@@ -861,6 +865,7 @@ mod tests {
             self.inspecting.fetch_sub(1, Ordering::SeqCst);
             Ok(if self.terminal.load(Ordering::SeqCst) {
                 Observation::Exited {
+                    started_at: None,
                     code: Some(0),
                     signal: None,
                     finished_at: None,

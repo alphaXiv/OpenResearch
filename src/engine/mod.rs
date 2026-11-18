@@ -101,11 +101,13 @@ pub enum Observation {
         started_at: Option<i64>,
     },
     Exited {
+        started_at: Option<i64>,
         finished_at: Option<i64>,
         code: Option<i32>,
         signal: Option<i32>,
     },
     Cancelled {
+        started_at: Option<i64>,
         finished_at: Option<i64>,
         code: Option<i32>,
         signal: Option<i32>,
@@ -117,6 +119,7 @@ pub enum Observation {
         note: Option<Vec<u32>>,
     },
     Failed {
+        started_at: Option<i64>,
         finished_at: Option<i64>,
         reason: String,
     },

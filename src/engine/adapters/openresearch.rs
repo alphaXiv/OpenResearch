@@ -319,6 +319,7 @@ impl OpenResearch {
             return Ok(vec![(
                 watched.id.clone(),
                 Observation::Failed {
+                    started_at: None,
                     finished_at: None,
                     reason: "OpenResearch returned no supported rental lease; the box was deleted"
                         .into(),
@@ -331,6 +332,7 @@ impl OpenResearch {
                 Ok(vec![(
                     watched.id.clone(),
                     Observation::Failed {
+                        started_at: None,
                         finished_at: None,
                         reason: format!("Provisioning failed: {reason}"),
                     },
@@ -395,6 +397,7 @@ impl OpenResearch {
                 Response::InspectLegacy { inspection } => {
                     let observation = if let Some(code) = inspection.exit_code {
                         Observation::Exited {
+                            started_at: None,
                             finished_at: None,
                             code: Some(code),
                             signal: None,
@@ -549,6 +552,7 @@ impl OpenResearch {
                 self.engine.observe(
                     &run.id,
                     Observation::Failed {
+                        started_at: None,
                         finished_at: None,
                         reason,
                     },
@@ -635,6 +639,7 @@ impl OpenResearch {
         if let Some(host) = unreached_host {
             let reason = self.unreached_reason(descriptor, &host, failure).await?;
             let failed = Observation::Failed {
+                started_at: None,
                 finished_at: None,
                 reason,
             };
@@ -1173,6 +1178,7 @@ mod tests {
             .observe(
                 "run",
                 Observation::Exited {
+                    started_at: None,
                     finished_at: None,
                     code: Some(0),
                     signal: None,

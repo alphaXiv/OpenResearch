@@ -30,8 +30,7 @@ pub(super) struct Bindable<'a> {
     pub signals: &'a Value,
     /// Signals compared with the parent now.
     pub versus: &'a BTreeSet<String>,
-    /// Each signal's points, which a trend needs two of.
-    pub series: &'a Value,
+    pub shown_signals: &'a Value,
     pub live: bool,
     /// Patterns already counted for this run.
     pub counts: &'a BTreeSet<String>,
@@ -561,10 +560,11 @@ fn check_trend(
 ) -> Result<(), String> {
     static TREND: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let trend = TREND.get_or_init(|| {
-        regex::Regex::new(r"(?i-u)\b(?:rising|falling|climbing|dropping|declining|decreasing|increasing|improving|worsening|(?:trending|going) (?:up|down))\b")
+        regex::Regex::new(r"(?i-u)\b(?:(?<up>rising|climbing|increasing|(?:trending|going) up)|(?<down>falling|dropping|declining|decreasing|(?:trending|going) down)|(?<better>improving)|worsening)\b")
             .expect("fixed trend pattern")
     });
-    for word in trend.find_iter(template) {
+    for direction in trend.captures_iter(template) {
+        let word = direction.get(0).expect("whole trend match");
         if found.iter().any(|(range, _)| range.contains(&word.start()))
             || template[word.start()..]
                 .get(.."falling back".len())
@@ -602,9 +602,40 @@ fn check_trend(
                 run.key
             ));
         }
-        if run.series[name].as_array().map_or(0, Vec::len) < 2 {
+        let mut points = run.shown_signals[name]["points"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|point| {
+                let x = point[0].as_f64()?;
+                let y = point[1].as_f64()?;
+                (x.is_finite() && y.is_finite()).then_some(y)
+            });
+        let (Some(first), Some(last)) = (points.next(), points.next_back()) else {
             return Err(format!(
                 "{{{name}}} needs two readings before you can describe a trend"
+            ));
+        };
+        let rises = if direction.name("up").is_some() {
+            true
+        } else if direction.name("down").is_some() {
+            false
+        } else {
+            let improves = direction.name("better").is_some();
+            match run.shown_signals[name]["better"].as_str() {
+                Some("higher") => improves,
+                Some("lower") => !improves,
+                _ => {
+                    return Err(format!(
+                        "{{{name}}} needs a better direction to judge improvement"
+                    ))
+                }
+            }
+        };
+        if !(if rises { last > first } else { last < first }) {
+            return Err(format!(
+                "the readings shown for {{{name}}} do not support '{}'",
+                word.as_str()
             ));
         }
     }
@@ -877,7 +908,7 @@ mod tests {
 
     struct Run {
         signals: Value,
-        series: Value,
+        shown_signals: Value,
         live: bool,
         versus: BTreeSet<String>,
         counts: BTreeSet<String>,
@@ -888,7 +919,7 @@ mod tests {
     fn run() -> Run {
         Run {
             signals: json!({"loss": {"label": "Loss"}, "val_loss": {"label": "Val loss", "better": "lower"}}),
-            series: json!({"loss": [[1, 2.6], [2, 2.31]], "val_loss": [[2, 2.41]]}),
+            shown_signals: json!({"loss": {"points": [[1, 2.6], [2, 2.31]]}, "val_loss": {"points": [[2, 2.41]], "better": "lower"}}),
             live: true,
             versus: ["val_loss".to_owned()].into(),
             counts: BTreeSet::new(),
@@ -901,7 +932,7 @@ mod tests {
         Bindable {
             key,
             signals: &run.signals,
-            series: &run.series,
+            shown_signals: &run.shown_signals,
             live: run.live,
             versus: &run.versus,
             counts: &run.counts,
@@ -1090,6 +1121,44 @@ mod tests {
             let checked = read(&reply.to_string(), &[bind("r1", &run, true)], None, &render);
             assert!(!checked.errors.is_empty(), "{:?}", checked.errors);
             assert!(checked.runs.is_empty(), "{:?}", checked.errors);
+        }
+    }
+
+    #[test]
+    fn the_readings_shown_must_support_the_claimed_trend() {
+        let mut run = run();
+        run.shown_signals["loss"] = json!({"points": [[1, 1.0], [2, 2.0]], "better": "lower"});
+        for (trend, accepted) in [
+            ("falling", false),
+            ("improving", false),
+            ("trending up", true),
+            ("worsening", true),
+        ] {
+            for status in ["ok", "flag"] {
+                let line = format!("Loss **{{loss}}** and {trend}.");
+                let reply = json!({"runs": {"r1": {"status": status, "line": line}}});
+                let checked = read(
+                    &reply.to_string(),
+                    &[bind("r1", &run, false)],
+                    None,
+                    &render,
+                );
+                assert_eq!(
+                    checked.runs.contains_key("r1"),
+                    accepted,
+                    "{reply}: {checked:?}"
+                );
+            }
+        }
+        for points in [json!([[1, null], [2, 2.0]]), json!([[1, 2.0], [2, 2.0]])] {
+            run.shown_signals["loss"]["points"] = points;
+            let checked = read(
+                r#"{"runs":{"r1":{"status":"ok","line":"Loss **{loss}** and rising."}}}"#,
+                &[bind("r1", &run, false)],
+                None,
+                &render,
+            );
+            assert!(checked.runs.is_empty(), "{checked:?}");
         }
     }
 
@@ -1307,7 +1376,7 @@ mod tests {
             let reply = json!({"runs": {"r1": {"status": "ok", "line": text}}}).to_string();
             read(&reply, &[bind("r1", &run, false)], None, &render).errors
         };
-        assert!(line("Loss **{loss}**, climbing since step 20.").is_empty());
+        assert!(line("Loss **{loss}**, falling since step 20.").is_empty());
         assert!(line("Loss **{loss}** with 20 warnings.")[0].contains("\"20\""));
         assert!(!line("Loss **{loss}** at step 340.").is_empty());
     }

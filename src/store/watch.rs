@@ -164,11 +164,13 @@ impl Store {
         now: i64,
         usage: Option<&crate::local::harness::OneShotUsage>,
         error: Option<&str>,
-        summary: Option<(&str, &str)>,
+        summary: Option<(&str, &str, usize)>,
         results: &[LookResult],
         flags: &[NewFlag],
     ) -> Result<()> {
         let tx = self.begin_immediate()?;
+        let runs = self.watch_look_runs(id)?;
+        let summary = summary.filter(|&(_, _, size)| size == runs.len());
         let updated = tx.execute(
             "UPDATE watch_looks SET state = ?2, done_at = ?3, usage_json = ?4, error = ?5,
                     summary_template = ?6, summary_text = ?7
@@ -187,7 +189,6 @@ impl Store {
             return Ok(());
         }
 
-        let runs = self.watch_look_runs(id)?;
         let flags = flags
             .iter()
             .filter(|flag| runs.iter().any(|row| row.run_id == flag.run_id));

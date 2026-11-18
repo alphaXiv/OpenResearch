@@ -940,6 +940,7 @@ fn never_started(store: &Store, run: &StoredRun) -> Result<bool> {
     let ended =
         Phase::parse(&run.status).is_some_and(|phase| phase.is_terminal() && phase != Phase::Done);
     Ok(ended
+        && run.exit_code.is_none()
         && super::is_engine_row(run)
         && store
             .engine_run_state(&run.id)?
@@ -2404,6 +2405,31 @@ async fn take(id: i64) -> Result<()> {
     let system = digest::system(versus.values().any(|names| !names.is_empty()));
     let fixed = system.len() + DIGEST_PREAMBLE.len();
     let digest = digest::build(&shared, &digest_runs, digest::room(fixed + MAX_CORRECTION));
+    let digest_text = digest.body.to_string();
+    let bindable: Vec<reply::Bindable> = digest.body["runs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|shown| {
+            let key = shown["key"].as_str()?;
+            let run = keyed.get(key)?;
+            Some(reply::Bindable {
+                key,
+                signals: &run.body["view"]["signals"],
+                versus: &versus[key],
+                shown_signals: &shown["signals"],
+                live: run.live(),
+                counts: &counted[key],
+                moving: &movings[key],
+                step: run.summary["stage"]["done"].as_f64().filter(|_| run.live()),
+                excerpts: digest.excerpts.get(key).map_or(&[][..], Vec::as_slice),
+                sentence: previous[&run.run.id]
+                    .last()
+                    .map(|(template, _)| template.as_str()),
+                setup: in_setup(&run.body),
+            })
+        })
+        .collect();
 
     let mut usage: Option<OneShotUsage> = None;
     let mut priced = true;
@@ -2413,7 +2439,7 @@ async fn take(id: i64) -> Result<()> {
     let mut failure = None;
     let mut auth_failed = false;
     for attempt in ["look", "retry"] {
-        let prompt = format!("{DIGEST_PREAMBLE}{}{correction}", digest.text);
+        let prompt = format!("{DIGEST_PREAMBLE}{digest_text}{correction}");
         if system.len() + prompt.len() > digest::room(0) {
             failure = Some(format!(
                 "The {attempt} exceeded the watcher's {}-token request budget.",
@@ -2425,6 +2451,20 @@ async fn take(id: i64) -> Result<()> {
         let allowed = {
             let store = Store::open()?;
             let tx = store.begin_immediate()?;
+            let expected = if sent.is_empty() { "prepared" } else { "sent" };
+            if store
+                .watch_look(id)?
+                .is_none_or(|look| look.state != expected)
+            {
+                return Ok(());
+            }
+            if store.watch_look_runs(id)? != rows {
+                if sent.is_empty() {
+                    // The prepared look will be read again with its surviving runs.
+                    return Ok(());
+                }
+                break;
+            }
             if store
                 .watch_auth_refusal(harness, profile.as_deref())?
                 .as_deref()
@@ -2439,9 +2479,6 @@ async fn take(id: i64) -> Result<()> {
             } else {
                 store.ui_state()?.run_watching
             };
-            if !allowed && sent.is_empty() && store.ui_state()?.run_watching {
-                return Ok(());
-            }
             tx.commit()?;
             allowed
         };
@@ -2489,24 +2526,6 @@ async fn take(id: i64) -> Result<()> {
         } else {
             priced = false;
         }
-        let bindable: Vec<reply::Bindable> = keyed
-            .iter()
-            .map(|(key, run)| reply::Bindable {
-                key,
-                signals: &run.body["view"]["signals"],
-                versus: &versus[key.as_str()],
-                series: &run.body["series"],
-                live: run.live(),
-                counts: &counted[key.as_str()],
-                moving: &movings[key.as_str()],
-                step: run.summary["stage"]["done"].as_f64().filter(|_| run.live()),
-                excerpts: digest.excerpts.get(key).map_or(&[][..], Vec::as_slice),
-                sentence: previous[&run.run.id]
-                    .last()
-                    .map(|(template, _)| template.as_str()),
-                setup: in_setup(&run.body),
-            })
-            .collect();
         let checked = reply::read(
             &answer.text,
             &bindable,
@@ -2535,7 +2554,7 @@ async fn take(id: i64) -> Result<()> {
             let prefix = "\n\nYour reply was not accepted: ";
             let between = ".\nIt read: ";
             let suffix = "\nFix that and reply with the whole JSON, keeping tokens and bold.";
-            let room = digest::room(fixed + digest.text.len())
+            let room = digest::room(fixed + digest_text.len())
                 .min(MAX_CORRECTION)
                 .saturating_sub(prefix.len() + between.len() + suffix.len());
             if room == 0 {
@@ -2567,10 +2586,18 @@ async fn take(id: i64) -> Result<()> {
             total.cost_usd = None;
         }
     }
+    let remaining = Store::open()?.watch_look_runs(id)?;
+    if remaining.is_empty() {
+        return Ok(());
+    }
+    if remaining != rows {
+        read.summary = None;
+        read.notes = None;
+    }
     let now = crate::store::now_ms();
     let mut results = Vec::new();
     let mut flags = Vec::new();
-    for row in &rows {
+    for row in &remaining {
         let Some(run) = keyed.get(&row.key) else {
             continue;
         };
@@ -2754,7 +2781,9 @@ async fn take(id: i64) -> Result<()> {
         now,
         usage.as_ref(),
         error.as_deref(),
-        summary.as_ref().map(|(t, x)| (t.as_str(), x.as_str())),
+        summary
+            .as_ref()
+            .map(|(t, x)| (t.as_str(), x.as_str(), rows.len())),
         &results,
         &flags,
     )?;

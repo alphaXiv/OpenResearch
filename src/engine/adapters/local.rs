@@ -490,6 +490,7 @@ impl Backend for Local {
             let job = localbox::inspect_job(dir);
             let observation = if let Some(code) = job.exit_code {
                 Observation::Exited {
+                    started_at: None,
                     finished_at: None,
                     code: Some(code),
                     signal: None,
@@ -499,6 +500,7 @@ impl Backend for Local {
                 let never_started =
                     cfg!(windows) && matches!(dir.join("log").try_exists(), Ok(false));
                 Observation::Failed {
+                    started_at: None,
                     finished_at: None,
                     reason: if never_started {
                         "The run never started: OpenResearch stopped while launching it.".into()

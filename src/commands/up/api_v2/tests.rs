@@ -532,6 +532,7 @@ async fn wait_is_one_sse_request_completed_by_first_matching_bus_event() {
         .observe(
             "other",
             Observation::Exited {
+                started_at: None,
                 finished_at: None,
                 code: Some(0),
                 signal: None,
@@ -547,6 +548,7 @@ async fn wait_is_one_sse_request_completed_by_first_matching_bus_event() {
         .observe(
             "run",
             Observation::Exited {
+                started_at: None,
                 finished_at: None,
                 code: Some(0),
                 signal: None,
@@ -659,6 +661,7 @@ async fn project_wait_returns_drained_and_filters_other_projects() {
         .observe(
             "new",
             Observation::Exited {
+                started_at: None,
                 finished_at: None,
                 code: Some(0),
                 signal: None,
@@ -983,6 +986,7 @@ async fn cli_launch_and_cancel_use_the_server_and_kept_pages_span_file_boundarie
         .observe(
             "run",
             Observation::Exited {
+                started_at: None,
                 finished_at: None,
                 code: Some(0),
                 signal: None,
@@ -1020,6 +1024,7 @@ async fn project_wait_resync_excludes_already_completed_runs() {
         .observe(
             "run",
             Observation::Exited {
+                started_at: None,
                 finished_at: None,
                 code: Some(0),
                 signal: None,
@@ -1207,6 +1212,7 @@ async fn experiment_wait_excludes_older_completed_runs_after_subscribing() {
         .observe(
             "run",
             Observation::Exited {
+                started_at: None,
                 finished_at: None,
                 code: Some(0),
                 signal: None,
@@ -1246,6 +1252,7 @@ async fn experiment_wait_follows_new_launches_and_excludes_older_active_runs() {
             .observe(
                 id,
                 Observation::Exited {
+                    started_at: None,
                     finished_at: None,
                     code: Some(0),
                     signal: None,
@@ -1402,6 +1409,7 @@ async fn wait_and_follow_rediscover_and_rebuild_snapshots_when_the_sse_connectio
                                 .observe(
                                     "run",
                                     Observation::Exited {
+                                        started_at: None,
                                         finished_at: None,
                                         code: Some(0),
                                         signal: None,

@@ -149,13 +149,16 @@ fn observed(phase: Phase, contact: &Contact, observation: Observation, now: i64)
         Exited {
             code,
             signal,
+            started_at,
             finished_at,
         }
         | Cancelled {
             code,
             signal,
+            started_at,
             finished_at,
         } => Change {
+            started_at,
             finished_at,
             exit_code: code.map(i64::from),
             ..Change::terminal(
@@ -171,8 +174,10 @@ fn observed(phase: Phase, contact: &Contact, observation: Observation, now: i64)
         },
         Failed {
             reason,
+            started_at,
             finished_at,
         } => Change {
+            started_at,
             finished_at,
             ..Change::terminal(Phase::Failed, Some(reason))
         },
@@ -327,6 +332,7 @@ impl Engine {
             }
             let observation = match observation.clone() {
                 Observation::Exited {
+                    started_at,
                     finished_at,
                     code,
                     signal,
@@ -336,6 +342,7 @@ impl Engine {
                     && (code.is_some_and(|code| code != 0) || signal.is_some()) =>
                 {
                     Observation::Cancelled {
+                        started_at,
                         finished_at,
                         code,
                         signal,
@@ -343,6 +350,7 @@ impl Engine {
                 }
                 Observation::Gone { .. } if state.cancel_accepted_at.is_some() => {
                     Observation::Cancelled {
+                        started_at: None,
                         finished_at: None,
                         code: None,
                         signal: None,
@@ -520,9 +528,7 @@ impl Engine {
                     .max(run.created_at)
             });
             if moved && !recorded {
-                let started_at = change
-                    .started_at
-                    .filter(|_| phase == Phase::Running && super::is_engine_row(&run));
+                let started_at = change.started_at.filter(|_| super::is_engine_row(&run));
                 if phase.is_terminal() && super::handle_of(&run).is_some() {
                     store.queue_log_collection(run_id)?;
                     store.queue_signal_collection(run_id)?;
@@ -705,6 +711,7 @@ mod tests {
         for observation in [
             Observation::Running { started_at: None },
             Observation::Cancelled {
+                started_at: None,
                 finished_at: None,
                 code: None,
                 signal: None,

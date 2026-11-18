@@ -230,7 +230,7 @@ pub(super) struct Shared<'a> {
 
 /// The digest as sent, and the log excerpts each run's evidence may cite.
 pub(super) struct Digest {
-    pub text: String,
+    pub body: Value,
     pub excerpts: BTreeMap<String, Vec<(u64, u64)>>,
     /// What the digest left out for holding what looks like a credential, by run key; a place
     /// with no key is in what the digest says of every run.
@@ -1015,9 +1015,8 @@ pub(super) fn build(shared: &Shared, runs: &[Run], room: usize) -> Digest {
             });
         });
     }
-    let text = serde_json::to_string(&digest).unwrap_or_default();
     Digest {
-        text,
+        body: digest,
         excerpts,
         withheld,
         omitted,
@@ -1171,7 +1170,7 @@ mod tests {
             &runs,
             room,
         );
-        let request = system(true).len() + digest.text.len();
+        let request = system(true).len() + digest.body.to_string().len();
         assert!(
             request <= MAX_TOKENS * BYTES_PER_TOKEN,
             "{request} bytes is past {MAX_TOKENS} tokens"
@@ -1193,7 +1192,8 @@ mod tests {
             room,
         );
         assert!(
-            one.text
+            one.body
+                .to_string()
                 .contains("Train loss **{loss}**, falling steadily as it has for 0 looks now."),
             "one run keeps its three sentences"
         );
@@ -1325,12 +1325,12 @@ mod tests {
             &runs,
             room,
         );
-        let request = system(true).len() + digest.text.len();
+        let request = system(true).len() + digest.body.to_string().len();
         assert!(
             request <= MAX_TOKENS * BYTES_PER_TOKEN,
             "{request} bytes is past {MAX_TOKENS} tokens"
         );
-        let sent: Value = serde_json::from_str(&digest.text).unwrap();
+        let sent = &digest.body;
         for (index, run) in sent["runs"].as_array().unwrap().iter().enumerate() {
             assert!(
                 !run["log"]["sinceLastLook"].as_array().unwrap().is_empty(),
@@ -1340,7 +1340,7 @@ mod tests {
             );
         }
         assert!(
-            digest.text.contains("disk full"),
+            digest.body.to_string().contains("disk full"),
             "the third run's new error is sent"
         );
         let cut = &digest.omitted["r3"];
@@ -1348,7 +1348,7 @@ mod tests {
             assert!(cut.contains(&said.to_owned()), "{cut:?}");
         }
         if std::env::var_os("ORX_PRINT_DIGEST").is_some() {
-            println!("DIGEST {}", digest.text);
+            println!("DIGEST {}", digest.body);
         }
 
         // A look that showed the first lines once does not send them again, so a quiet run's new
@@ -1375,7 +1375,7 @@ mod tests {
             std::slice::from_ref(&alone),
             room,
         );
-        assert!(one.heads.contains("r1") && one.text.contains("firstLines"));
+        assert!(one.heads.contains("r1") && !one.body["runs"][0]["log"]["firstLines"].is_null());
         let seen = LogRead {
             head: Vec::new(),
             head_shown: true,
@@ -1393,7 +1393,7 @@ mod tests {
             }],
             room,
         );
-        assert!(!again.text.contains("firstLines"));
+        assert!(again.body["runs"][0]["log"]["firstLines"].is_null());
     }
 
     #[test]
@@ -1429,7 +1429,7 @@ mod tests {
             }],
             MAX_BYTES,
         );
-        let sent: Value = serde_json::from_str(&digest.text).unwrap();
+        let sent = &digest.body;
         assert_eq!(
             sent["runs"][0]["signals"]["test_acc"],
             json!({"now": 10.4, "label": "Test accuracy", "unit": "%", "better": "higher", "points": []})
@@ -1478,7 +1478,7 @@ mod tests {
             }],
             MAX_BYTES,
         );
-        assert!(!digest.text.contains("hf_"), "{}", digest.text);
+        assert!(!digest.body.to_string().contains("hf_"), "{}", digest.body);
         let places: Vec<&Place> = digest.withheld.iter().map(|w| &w.place).collect();
         for place in [
             "the experiment's watch brief",

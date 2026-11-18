@@ -2390,6 +2390,7 @@ mod tests {
         backend.0.feed.lock().unwrap().push_back((
             "finished".into(),
             Observation::Exited {
+                started_at: None,
                 finished_at: None,
                 code: Some(0),
                 signal: None,
@@ -2864,6 +2865,7 @@ mod tests {
             .observe(
                 "run",
                 Observation::Exited {
+                    started_at: None,
                     finished_at: None,
                     code: Some(0),
                     signal: None,
@@ -3041,6 +3043,7 @@ mod tests {
         let observations = vec![(
             "run".into(),
             Observation::Exited {
+                started_at: None,
                 finished_at: None,
                 code: Some(0),
                 signal: None,
@@ -3738,6 +3741,7 @@ mod tests {
             .observe(
                 "run",
                 Observation::Exited {
+                    started_at: None,
                     finished_at: None,
                     code: Some(0),
                     signal: None,
@@ -5103,6 +5107,7 @@ mod tests {
         backend.log.feed.lock().unwrap().push_back((
             "run".into(),
             Observation::Exited {
+                started_at: None,
                 finished_at: None,
                 code: Some(0),
                 signal: None,

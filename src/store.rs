@@ -1687,6 +1687,7 @@ impl Store {
                  DELETE FROM watch_looks WHERE chat_session_id = OLD.id;
              END;
              CREATE TRIGGER IF NOT EXISTS delete_empty_watch_look AFTER DELETE ON watch_look_runs BEGIN
+                 UPDATE watch_looks SET summary_template = NULL, summary_text = NULL WHERE id = OLD.look_id;
                  DELETE FROM watch_looks WHERE id = OLD.look_id
                    AND NOT EXISTS (SELECT 1 FROM watch_look_runs WHERE look_id = OLD.look_id);
              END;",
@@ -10320,6 +10321,28 @@ pub(crate) mod tests {
         let theirs = look("theirs", &["kept"]);
         let shared = look("theirs", &["kept", "gone"]);
         let only_gone = look("theirs", &["gone"]);
+        let usage = crate::local::harness::OneShotUsage {
+            cost_usd: Some(0.002),
+            ..Default::default()
+        };
+        store
+            .finish_watch_look(
+                shared,
+                "done",
+                2,
+                Some(&usage),
+                None,
+                Some(("{gone} leads.", "The finished run leads.", 2)),
+                &[],
+                &[],
+            )
+            .unwrap();
+        assert!(store
+            .watch_look(shared)
+            .unwrap()
+            .unwrap()
+            .summary_text
+            .is_some());
 
         store.delete_chat_session("mine").unwrap();
         assert!(store.watch_look(mine).unwrap().is_none());
@@ -10331,7 +10354,10 @@ pub(crate) mod tests {
             .delete_local_experiment("experiment", || Ok(()))
             .unwrap();
         assert!(store.watch_look(only_gone).unwrap().is_none());
-        assert!(store.watch_look(shared).unwrap().is_some());
+        let retained = store.watch_look(shared).unwrap().unwrap();
+        assert!(retained.summary_template.is_none());
+        assert!(retained.summary_text.is_none());
+        assert_eq!(retained.usage, Some(usage));
         let left: Vec<_> = store
             .watch_look_runs(shared)
             .unwrap()

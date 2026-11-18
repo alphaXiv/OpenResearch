@@ -444,47 +444,85 @@ async fn a_reply_that_breaks_the_contract_is_asked_for_once_more_with_why() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn switching_watching_off_while_the_model_answers_blocks_the_retry() {
+async fn a_retry_requires_watching_and_the_original_look_membership() {
     if !crate::config::in_test_child(&[]) {
         return;
     }
-    let calls_dir = crate::config::home_dir().unwrap().join("claude-calls");
-    let rejected = r#"{"runs":{"r1":{"status":"ok","line":37}}}"#;
-    fake_claude(&calls_dir, &[rejected, rejected]);
-    let ready = calls_dir.join("ready");
-    let resume = calls_dir.join("resume");
-    assert!(crate::process::command("mkfifo")
-        .args([&ready, &resume])
-        .status()
-        .unwrap()
-        .success());
     let store = Store::open().unwrap();
-    chat(&store, "chat", "claude-code");
-    run(&store, "a", "Depth 6", "chat", LOG);
-    let id = look(&store, "chat", "ceiling", &[("a", "r1")]);
+    for chat_id in ["off", "deleted-run", "deleted-chat"] {
+        let calls_dir = crate::config::home_dir().unwrap().join(chat_id);
+        let rejected = r#"{"runs":{"r1":{"status":"ok","line":37},"r2":{"status":"ok","line":"B is running."},"r3":{"status":"ok","line":"C is running."}},"summary":{"status":"ok","line":"{r1} leads all three."}}"#;
+        fake_claude(&calls_dir, &[rejected, rejected]);
+        let ready = calls_dir.join("ready");
+        let resume = calls_dir.join("resume");
+        assert!(crate::process::command("mkfifo")
+            .args([&ready, &resume])
+            .status()
+            .unwrap()
+            .success());
+        let a = format!("{chat_id}-a");
+        let b = format!("{chat_id}-b");
+        let c = format!("{chat_id}-c");
+        chat(&store, chat_id, "claude-code");
+        run(&store, &a, "A", chat_id, LOG);
+        run(&store, &b, "B", chat_id, LOG);
+        run(&store, &c, "C", chat_id, LOG);
+        let now = crate::store::now_ms();
+        store
+            .set_engine_phase(&a, "running", "done", Some(now), Some(0), None)
+            .unwrap();
+        let id = look(
+            &store,
+            chat_id,
+            "ceiling",
+            &[(&a, "r1"), (&b, "r2"), (&c, "r3")],
+        );
 
-    let turn_off = async {
-        let signal = tokio::time::timeout(
-            Duration::from_secs(15),
-            crate::process::tokio_command("cat")
-                .arg(ready)
-                .kill_on_drop(true)
-                .output(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        assert!(signal.status.success());
-        store.set_run_watching(false).unwrap();
-        std::fs::write(resume, b"resume\n").unwrap();
-    };
-    let (result, ()) = tokio::join!(take(id), turn_off);
-    result.unwrap();
+        let change_state = async {
+            let signal = tokio::time::timeout(
+                Duration::from_secs(15),
+                crate::process::tokio_command("cat")
+                    .arg(&ready)
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(signal.status.success());
+            match chat_id {
+                "off" => store.set_run_watching(false).unwrap(),
+                "deleted-run" => store
+                    .delete_local_experiment(&format!("exp-{a}"), || Ok(()))
+                    .unwrap(),
+                "deleted-chat" => store.delete_chat_session(chat_id).unwrap(),
+                _ => unreachable!(),
+            }
+            std::fs::write(resume, b"resume\n").unwrap();
+        };
+        let (result, ()) = tokio::join!(take(id), change_state);
+        result.unwrap();
 
-    assert_eq!(calls(&calls_dir), 1);
-    let missed = store.watch_look(id).unwrap().unwrap();
-    assert_eq!(missed.state, "error");
-    assert_eq!(missed.usage.unwrap().cost_usd, Some(0.002));
+        assert_eq!(calls(&calls_dir), 1, "{chat_id}");
+        if chat_id == "deleted-chat" {
+            assert!(store.watch_look(id).unwrap().is_none());
+        } else {
+            let settled = store.watch_look(id).unwrap().unwrap();
+            assert_eq!(settled.usage.unwrap().cost_usd, Some(0.002));
+            if chat_id == "deleted-run" {
+                let rows = store.watch_look_runs(id).unwrap();
+                assert_eq!(
+                    rows.iter()
+                        .map(|row| row.run_id.as_str())
+                        .collect::<Vec<_>>(),
+                    [&b, &c]
+                );
+                assert!(rows.iter().all(|row| row.result.as_deref() == Some("line")));
+                assert!(chat_summary(&store, chat_id).unwrap()["summary"].is_null());
+            }
+        }
+        store.set_run_watching(true).unwrap();
+    }
 }
 
 #[cfg(unix)]
@@ -1399,6 +1437,41 @@ fn epochs_in(store: &Store, run: &StoredRun, stage: &str, epochs: &[(f64, f64)])
 
 #[cfg(unix)]
 #[tokio::test]
+async fn a_trend_that_disappears_when_points_are_rounded_is_retried() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let dir = crate::config::home_dir().unwrap().join("claude-calls");
+    fake_claude(
+        &dir,
+        &[
+            r#"{"runs":{"r1":{"status":"ok","line":"Loss **{loss}** and rising."}}}"#,
+            r#"{"runs":{"r1":{"status":"ok","line":"Loss holds at **{loss}**."}}}"#,
+        ],
+    );
+    let store = Store::open().unwrap();
+    chat(&store, "chat", "claude-code");
+    let run = classifier_run(&store, "a", None, "running", "chat");
+    epochs(&store, &run, &[(2.00001, 0.5), (2.00002, 0.5)]);
+    let id = look(&store, "chat", "change", &[("a", "r1")]);
+
+    take(id).await.unwrap();
+
+    let prompt = std::fs::read_to_string(dir.join("prompt-1")).unwrap();
+    let shown: Value = serde_json::from_str(prompt.strip_prefix(DIGEST_PREAMBLE).unwrap()).unwrap();
+    let points = &shown["runs"][0]["signals"]["loss"]["points"];
+    assert_eq!(points.as_array().unwrap().len(), 2);
+    assert_eq!(points[0][1], points[1][1]);
+    assert_eq!(calls(&dir), 2);
+    let rows = store.watch_look_runs(id).unwrap();
+    assert_eq!(
+        rows[0].template.as_deref(),
+        Some("Loss holds at **{loss}**.")
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn a_live_replay_compares_only_at_the_matching_step() {
     if !crate::config::in_test_child(&[]) {
         return;
@@ -1672,7 +1745,7 @@ fn a_row_that_falls_to_zero_asks_for_a_look_and_its_sentence_may_say_so() {
         key: "r1",
         signals: &signals,
         versus: &versus,
-        series: &signals,
+        shown_signals: &signals,
         live: true,
         counts: &counts,
         moving: &moving,
@@ -2752,23 +2825,23 @@ async fn a_run_that_ended_before_it_started_gets_no_look() {
         return;
     }
     let dir = crate::config::home_dir().unwrap().join("claude-calls");
-    fake_claude(&dir, &[r#"{"runs":{"r1":{"status":"ok","line":"Done."}}}"#]);
+    fake_claude(
+        &dir,
+        &[r#"{"runs":{"r1":{"status":"ok","line":"Done."},"r2":{"status":"ok","line":"Done."}}}"#],
+    );
     let store = Store::open().unwrap();
     chat(&store, "chat", "claude-code");
     let now = crate::store::now_ms();
-    for (id, started) in [("never", None), ("ran", Some(now - 180_000))] {
+    for (id, started, exit) in [
+        ("never", None, None),
+        ("ran", Some(now - 180_000), None),
+        ("exited", None, Some(1)),
+    ] {
         let mut row = run(&store, id, id, "chat", "");
         row.backend_json = r#"{"kind":"engine"}"#.into();
         store.upsert_run(&row).unwrap();
         assert!(store
-            .set_engine_phase(
-                id,
-                "running",
-                "failed",
-                Some(now - 120_000),
-                Some(1),
-                started
-            )
+            .set_engine_phase(id, "running", "failed", Some(now - 120_000), exit, started)
             .unwrap());
     }
 
@@ -2777,12 +2850,11 @@ async fn a_run_that_ended_before_it_started_gets_no_look() {
     while let Some(task) = state.looks.join_next().await {
         task.unwrap();
     }
-    let final_looks = store.run_watch_looks("ran", JOURNAL).unwrap();
-    assert_eq!(
-        final_looks.len(),
-        1,
-        "a run that started gets its last look"
-    );
+    for run in ["ran", "exited"] {
+        let final_looks = store.run_watch_looks(run, JOURNAL).unwrap();
+        assert_eq!(final_looks.len(), 1, "{run} gets its last look");
+        assert_eq!(final_looks[0].1.result.as_deref(), Some("line"), "{run}");
+    }
     let never = store.get_run("never").unwrap().unwrap();
     assert!(matches!(
         look_now(&store, &never),
