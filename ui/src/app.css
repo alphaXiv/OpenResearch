@@ -153,12 +153,14 @@
   animation: tool-running-shimmer-icon 1.75s ease-in-out infinite;
 }
 
-.tool-group-summary .tool-group-label {
+.tool-group-summary .tool-group-label,
+.tool-group-summary .tool-kind-icon {
   transition: color 120ms ease;
 }
 
 .tool-group-summary:hover .tool-group-label,
-.tool-group-summary:hover .tool-chevron {
+.tool-group-summary:hover .tool-chevron,
+.tool-group-summary:hover .tool-kind-icon {
   color: var(--text);
 }
 
