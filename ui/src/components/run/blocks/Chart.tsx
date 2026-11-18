@@ -330,9 +330,9 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
     return `${xName(anchor.line)} ${withUnit(signals[anchor.line.x], anchor.point[0])}`;
   };
   const readoutValue = (line: Series, point: Point, anchor: Point) => {
-    if (!table) return fmtSignal(signals[line.y], point[1]);
-    const value = withUnit(signals[line.y], point[1]);
-    return categories || point[0] === anchor[0] ? value : m.run_chart_at({ value, x: withUnit(signals[line.x], point[0]) });
+    const value = table ? withUnit(signals[line.y], point[1]) : fmtSignal(signals[line.y], point[1]);
+    if (categories || point[0] === anchor[0]) return value;
+    return m.run_chart_at({ value, x: table ? withUnit(signals[line.x], point[0]) : xLabel(point[0]) });
   };
 
   const readoutRows = readout?.hits.map(({ line, point }) => ({

@@ -107,6 +107,20 @@ test("a strip's chart names its axes in one line, reads out under the pointer, a
   assert.equal(text(status), "");
 });
 
+test("a readout never gives a value beside a step it wasn't recorded at", async () => {
+  const monitor = fixture("finetune");
+  const block = monitor.view.blocks[0];
+  const strip = await draw(monitor, block, "strip");
+  const box = chartOf(strip).parentElement;
+  await act(async () => box.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX: 300 })));
+  const said = text(box.querySelector("[popover]"));
+  const [, step] = said.match(/^step ([\d,.]+)/) ?? [];
+  assert.ok(step, said);
+  const parents = said.match(/parent[\d.]+ at [\d,.]+/g) ?? [];
+  assert.equal(parents.length, 2, `the parent samples every 100 steps, so each of its values names its own step: ${said}`);
+  assert.ok(parents.every((one) => !one.endsWith(` at ${step}`)), said);
+});
+
 test("a readout stays under the pointer while the run adds points", async () => {
   const monitor = fixture("finetune");
   const block = monitor.view.blocks[0];
