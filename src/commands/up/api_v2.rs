@@ -373,6 +373,18 @@ pub(crate) fn notices_queued(chats: Vec<String>) {
     }
 }
 
+pub(crate) fn flag_turn_changed(store: &Store, turn_id: &str) {
+    let Ok(api) = installed() else { return };
+    match store.flag_notice_runs_for_turn(turn_id) {
+        Ok(runs) => {
+            for run_id in runs {
+                api.engine.bus.publish(RunEvent::FlagReview { run_id });
+            }
+        }
+        Err(error) => eprintln!("orx up: could not refresh flags for turn {turn_id}: {error:#}"),
+    }
+}
+
 /// See [`Engine::cancel_error`]; none when the engine isn't running in this process.
 pub(crate) fn cancel_error(run_id: &str) -> Option<String> {
     installed().ok()?.engine.cancel_error(run_id)
@@ -1994,6 +2006,7 @@ async fn events(
                         RunEvent::Notices { .. }
                         | RunEvent::Host { .. }
                         | RunEvent::Monitor { .. }
+                        | RunEvent::FlagReview { .. }
                         | RunEvent::LogCollection { .. },
                     ) => continue,
                     Err(broadcast::error::RecvError::Closed) => return None,

@@ -11257,7 +11257,7 @@ async fn event_loop(
                 }
                 continue;
             }
-            Some(Ok(RunEvent::Notices { .. })) => continue,
+            Some(Ok(RunEvent::Notices { .. } | RunEvent::FlagReview { .. })) => continue,
             Some(Err(RecvError::Closed)) => {
                 runs = None;
                 continue;
@@ -11416,7 +11416,9 @@ fn run_events(
                 &json!({ "run": ApiRun::new(store, &run)? }),
             )]);
         }
-        Some(RunEvent::Grew { .. } | RunEvent::Notices { .. }) => return Ok(Vec::new()),
+        Some(RunEvent::Grew { .. } | RunEvent::Notices { .. } | RunEvent::FlagReview { .. }) => {
+            return Ok(Vec::new())
+        }
     };
     let mut out = Vec::new();
     if event.is_none() {

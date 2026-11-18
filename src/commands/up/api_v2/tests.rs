@@ -573,6 +573,64 @@ async fn wait_is_one_sse_request_completed_by_first_matching_bus_event() {
 }
 
 #[tokio::test]
+async fn accepting_a_flag_wake_updates_the_monitor_without_waiting_for_a_tick() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let f = Fixture::new().await;
+    std::env::set_var("ORX_DATA_DIR", &f.api.data_dir);
+    f.insert("run", "exp", "project", "done");
+    let store = Store::open().unwrap();
+    let chat = "flag-chat";
+    let now = crate::store::now_ms();
+    store.put_chat_session(chat, "claude-code", None);
+    store.subscribe_run("run", chat, now).unwrap();
+    let run = store.get_run("run").unwrap().unwrap();
+    let flag = crate::engine::flags::new_flag(
+        &store,
+        &run,
+        json!({"id": "f1", "template": "The loss rose.", "source": "look"}),
+        true,
+    )
+    .unwrap();
+    store.raise_flags(&[flag], now).unwrap();
+    let batch = store.run_notice_batch_at(chat, now).unwrap();
+    let turn = &batch[0].client_turn_id;
+    store.put_chat_turn(chat, turn, "running", now);
+    let prior = crate::engine::monitor::advance(&store, &run, now).unwrap();
+    assert_eq!(prior.summary()["flag"]["state"], "waking");
+
+    install(f.api.clone()).unwrap();
+    let mut events = f.api.engine.bus.subscribe();
+    let (stop, stopped) = tokio::sync::watch::channel(());
+    let task = tokio::spawn(crate::engine::monitor::keep_current(
+        f.api.engine.clone(),
+        stopped,
+    ));
+    tokio::task::yield_now().await;
+    store
+        .update_chat_turn_progress(turn, "running", "accepted", 1, None)
+        .unwrap();
+    events
+        .try_recv()
+        .expect("turn acceptance must wake the monitor");
+    let published = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let RunEvent::Monitor { run_id, event } = events.recv().await.unwrap() {
+                if run_id == "run" && event["flags"][0]["state"] == "agent_looking" {
+                    break event;
+                }
+            }
+        }
+    })
+    .await
+    .expect("the flag wake's turn acceptance must publish the monitor");
+    assert_eq!(published["flagId"], "f1");
+    drop(stop);
+    task.await.unwrap();
+}
+
+#[tokio::test]
 async fn project_wait_returns_drained_and_filters_other_projects() {
     let f = Fixture::new().await;
     f.insert("old", "exp", "project", "done");

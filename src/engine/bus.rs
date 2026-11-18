@@ -23,6 +23,10 @@ pub enum RunEvent {
     Notices {
         chats: Vec<String>,
     },
+    /// The turn carrying the run's flag was accepted.
+    FlagReview {
+        run_id: String,
+    },
     Grew {
         run_id: String,
         file: super::LogFile,

@@ -1959,7 +1959,7 @@ pub(crate) async fn keep_current(
             _ = stop.changed() => return,
             _ = tick.tick() => None,
             event = events.recv() => match event {
-                Ok(RunEvent::Changed { run_id, .. } | RunEvent::LogCollection { run_id }) => Some(run_id),
+                Ok(RunEvent::Changed { run_id, .. } | RunEvent::LogCollection { run_id } | RunEvent::FlagReview { run_id }) => Some(run_id),
                 Err(RecvError::Closed) => return,
                 _ => continue,
             },

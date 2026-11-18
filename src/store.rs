@@ -5385,7 +5385,7 @@ impl Store {
         attempt_count: i64,
         next_retry_at: Option<i64>,
     ) -> Result<()> {
-        self.conn.execute(
+        let changed = self.conn.execute(
             "UPDATE chat_turns SET state = ?2, delivery_state = ?3, attempt_count = ?4,
                  next_retry_at = ?5, updated_at = ?6
              WHERE id = ?1 AND state IN ('preparing', 'retrying', 'running')",
@@ -5398,6 +5398,9 @@ impl Store {
                 now_ms()
             ],
         )?;
+        if changed != 0 && state == "running" && delivery_state == "accepted" {
+            crate::commands::up::api_v2::flag_turn_changed(self, id);
+        }
         Ok(())
     }
 

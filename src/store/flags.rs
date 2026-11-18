@@ -148,6 +148,16 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    pub(crate) fn flag_notice_runs_for_turn(&self, turn_id: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT n.run_id FROM chat_turns t
+             JOIN run_notices n ON n.chat_session_id = t.session_id AND n.client_turn_id = t.client_turn_id
+             WHERE t.id = ?1 AND n.kind = ?2 AND n.retired_at IS NULL",
+        )?;
+        let runs = stmt.query_map(params![turn_id, WATCH_FLAG], |row| row.get(0))?;
+        Ok(runs.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     /// Appends each flag that still applies, with the notices that wake its chats, in one
     /// transaction. Returns what became of each.
     pub(crate) fn raise_flags(&self, flags: &[NewFlag], now: i64) -> Result<Vec<Raise>> {

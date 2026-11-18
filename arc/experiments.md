@@ -326,8 +326,9 @@ A rebuilding checkpoint reads as rebuilding, never as lost contact.
 `rev` and `seriesRev` only grow, across restarts too: `run_monitor_state` keeps
 a pointer to what was last published and the summary it numbered, never the
 monitor. Only `orx up` publishes, from one task that projects live runs each
-second, at once on a lifecycle change, and every ten seconds for what time alone
-moves. A checkpoint the laptop publishes is handed to the projection in memory,
+second, at once when a run changes state or an agent accepts its flag review,
+and every ten seconds for what time alone moves. A checkpoint the laptop
+publishes is handed to the projection in memory,
 so the hot path never reads one back, and a status rewrite that changes nothing
 the projection reads projects nothing. Readers never wait on a projection under
 way: they get the last one published. An ended run is listed from its stored
