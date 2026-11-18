@@ -8084,7 +8084,7 @@ export function ChatPanel({
             </div>
           </div>
         ) : !threadMounted && (activeSession?.sideParentSessionId || sideParentSessionId) ? (
-          <div className="chat-empty flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center text-subtext">
+          <div className="chat-empty min-h-0 flex flex-1 flex-col items-center justify-center-safe gap-3 overflow-y-auto px-8 before:h-5 before:shrink-0 after:h-5 after:shrink-0 text-center text-subtext">
             <MessagesSquare size={22} />
             <p className="m-0 text-balance">{m.side_chat_empty()}</p>
           </div>
