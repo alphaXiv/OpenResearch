@@ -3,6 +3,7 @@ import { RefreshCw } from "lucide-react";
 import { autoDir } from "../../i18n";
 import { m } from "../../paraglide/messages.js";
 import type { LogSeek } from "../../logWindow";
+import { plainSentence } from "../../runMonitor/format";
 import type { RunModel } from "../../runMonitor/model";
 import type { ChartBlock, RunMonitor } from "../../runMonitor/types";
 import type { TabOpenIntent } from "../../tabPreview";
@@ -18,6 +19,7 @@ import { RunLine, type RunLabel } from "./RunLine";
 import { Sentence } from "./Sentence";
 
 type OpenRun = (runId: string, intent: TabOpenIntent, seek?: LogSeek) => void;
+const words = (text: string) => plainSentence(text).replace(/[\u2066-\u2069]/g, "");
 
 export type StripMonitor = { status: "loading" } | { status: "error"; retry: () => void; data: RunMonitor | null } | { status: "ready"; data: RunMonitor } | null;
 
@@ -53,6 +55,7 @@ export function RunStrip({ model, monitor, agent, label, open, onToggle, onOpenR
   const phase = data?.progress ? data.phases[data.progress.phase]?.name : undefined;
   const chart = open && model.live ? data?.view.blocks.find((block): block is ChartBlock => "chart" in block && (!block.phase || block.phase === phase) && seriesOf(data, block).some((line) => !line.ghost && line.points.filter(([, y]) => y !== null).length >= 2)) : undefined;
   const flag = model.flag?.record;
+  const flagDetail = model.flagDetail && words(model.flagDetail) !== words(model.sentence.text) ? model.flagDetail : null;
   const notice = model.notice && model.notice.kind !== "cancelling";
   const hero = model.live && Boolean(chart || model.headline || monitor?.status === "loading");
   const expanded = open && Boolean(hero || flag || model.note || notice || monitor?.status === "error");
@@ -63,7 +66,7 @@ export function RunStrip({ model, monitor, agent, label, open, onToggle, onOpenR
         {notice && <RunContactNotice run={model.run} className="mt-1.5" />}
         {model.stale && monitor?.status !== "error" && <p className="m-0 mt-1.5 text-xs text-ink-subtext">{model.stale.why} · {model.stale.age}</p>}
         {model.note && <p className={cn("m-0 text-xs text-ink-subtext", !notice && !model.stale ? "-mt-0.5" : "mt-1.5")}>{model.note}</p>}
-        {flag && model.flagDetail && model.flagDetail !== model.sentence.text && <p className="m-0 mt-1.5 text-sm"><Sentence text={model.flagDetail} tone={model.tone} /></p>}
+        {flag && flagDetail && <p className="m-0 mt-1.5 text-sm"><Sentence text={flagDetail} tone={model.tone} /></p>}
         {flag && <Issue model={model} flag={flag} agent={agent} onOpenRun={onOpenRun} />}
         {monitor?.status === "error" && <div className="mt-1.5 flex items-center gap-2 text-xs text-ink-subtext">
           {model.stale ? `${model.stale.why} · ${model.stale.age}` : m.run_monitor_load_failed()}

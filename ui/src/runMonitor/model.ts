@@ -73,7 +73,7 @@ export interface RunModel {
   ticks: { id: string; at: number; flag: boolean; text: string }[];
   /** The unsettled flag as the newest source states it; `record` is its evidence and words, once a monitor has them. */
   flag: { id: string; state: FlagState; record: Flag | null } | null;
-  /** What the watcher found, in full, while the flag is unsettled; the strip says it in place of the sentence. */
+  /** What the watcher found, in full, while the flag is unsettled. */
   flagDetail: string | null;
   /** A Copilot flag waits on the user; the strip opens by itself. */
   needsChoice: boolean;
@@ -430,7 +430,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     bar: { segments, whole, frozen: tone === "lost" || degraded, label: barLabel([sentence.text, caption, timeLabel, etaElapsed ? etaDetail : ""]) },
     ticks,
     flag,
-    flagDetail: flag?.record?.detail ? fillSentence(flag.record.detail, bindings, signals) : null,
+    flagDetail: flag?.record?.detail ? autoDir(fillSentence(flag.record.detail, bindings, signals)) : null,
     needsChoice,
     looking,
     note,

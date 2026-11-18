@@ -323,6 +323,14 @@ test("a flag's detail keeps its counts live in the strip", async () => {
   assert.ok([...document.querySelectorAll("[role=group] span")].some((p) => p.textContent.replace(/[⁦-⁩]/g, "").startsWith("43 items came back HTTP 429.")));
 });
 
+test("an expanded flag says its warning once when the detail repeats it", async () => {
+  const flag = { ...flagged.flags[0], detail: "Loss is NaN." };
+  backend({ monitors: { r1: { ...flagged, flags: [flag] } } });
+  const { container } = await banner([waitingRun()]);
+  await settle();
+  assert.equal(plain(container.querySelector("[role=group]").textContent).split("Loss is NaN.").length, 2);
+});
+
 const plain = (text) => text.replace(/[⁦-⁩]/g, "");
 const named = (label) => [...document.querySelectorAll("button")].find((element) => plain(element.textContent) === plain(label)) ?? null;
 const waitingRun = () => run("r1", { monitor: summary({ tone: "flag", flag: { id: "f1", state: "waiting", mode: "copilot" } }) });
