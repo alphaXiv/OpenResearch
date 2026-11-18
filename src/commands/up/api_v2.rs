@@ -1459,11 +1459,16 @@ async fn set_view(
         if body.patterns.is_some() {
             api.commands.collect_signals_now();
         }
-        let now = crate::store::now_ms();
-        for run in store.list_runs_by_experiment(&id)? {
-            if let Err(error) = crate::engine::monitor::advance(&store, &run, now) {
-                eprintln!("orx up: run {} after its view changed: {error:#}", run.id);
+        match store.list_runs_by_experiment(&id) {
+            Ok(runs) => {
+                let now = crate::store::now_ms();
+                for run in runs {
+                    if let Err(error) = crate::engine::monitor::advance(&store, &run, now) {
+                        eprintln!("orx up: run {} after its view changed: {error:#}", run.id);
+                    }
+                }
             }
+            Err(error) => eprintln!("orx up: experiment {id} after its view changed: {error:#}"),
         }
         Ok(saved)
     })

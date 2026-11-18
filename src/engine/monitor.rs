@@ -6667,6 +6667,104 @@ mod tests {
     }
 
     #[test]
+    fn saving_settings_acknowledges_the_edit_with_an_unreadable_view() {
+        use crate::engine::view::{etag, set, Source};
+
+        let f = Fixture::new("orx-settings-save");
+        let previous = f
+            .store
+            .patch_run_monitor_json("exp", &etag(None), |_| {
+                Ok(json!({"view": "<view><future-block/></view>"}).to_string())
+            })
+            .unwrap()
+            .unwrap();
+        let plan = json!([{"phase": "eval"}]);
+        let saved = set(
+            &f.store,
+            "exp",
+            &etag(Some(&previous)),
+            None,
+            None,
+            Some(&json!({"plan": plan})),
+            &Source {
+                file: None,
+                patterns: None,
+                config: Some("plan.json"),
+            },
+        );
+        let raw = f.store.run_monitor_json("exp").unwrap().unwrap();
+        let settings: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(settings["plan"], plan);
+        assert_eq!(settings["view"], "<view><future-block/></view>");
+        let saved = saved.unwrap();
+        assert_eq!(saved["etag"], etag(Some(&raw)));
+        assert_eq!(saved["plan"], plan);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reading_a_view_gets_all_settings_from_before_a_concurrent_save() {
+        use crate::engine::view::{described, etag};
+        use std::io::Write;
+        use std::os::unix::ffi::OsStrExt;
+
+        let f = Fixture::new("orx-settings-read");
+        let run = f.run("running", local());
+        let previous = f
+            .store
+            .patch_run_monitor_json("exp", &etag(None), |_| {
+                Ok(json!({"plan": [{"phase": "train"}]}).to_string())
+            })
+            .unwrap()
+            .unwrap();
+        let token = etag(Some(&previous));
+        let [path, _] = signal_paths(f.dir.path(), &run.id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+
+        let data = f.dir.path().to_owned();
+        let writer = std::thread::spawn({
+            let token = token.clone();
+            move || {
+                // Opening the pipe waits until the reader starts deriving the default view.
+                let mut pipe = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+                let saved = Store::open_at(data)
+                    .unwrap()
+                    .patch_run_monitor_json("exp", &token, |_| {
+                        Ok(json!({
+                            "view": "<view />",
+                            "plan": [{"phase": "eval"}],
+                            "patterns": [{"regex": "^eval (?P<accuracy>\\d+)$"}]
+                        })
+                        .to_string())
+                    })
+                    .unwrap()
+                    .unwrap();
+                let mut snapshot = Snapshot::new(&run.id, "1-1", "g1");
+                snapshot
+                    .feed(b"::orx:: {\"m\":{\"loss\":2}}\n", false, T0, true)
+                    .unwrap();
+                pipe.write_all(&serde_json::to_vec(&snapshot).unwrap())
+                    .unwrap();
+                saved
+            }
+        });
+        let first = described(&f.store, "exp");
+        let saved = writer.join().unwrap();
+        let first = first.unwrap();
+        assert_eq!(first["etag"], token);
+        assert_eq!(first["isDefault"], true);
+        assert_eq!(first["plan"], json!([{"phase": "train"}]));
+        assert_eq!(first["patterns"], json!([]));
+        let second = described(&f.store, "exp").unwrap();
+        assert_eq!(second["etag"], etag(Some(&saved)));
+        assert_eq!(second["markup"], "<view />");
+        assert_eq!(second["plan"], json!([{"phase": "eval"}]));
+        assert_eq!(second["patterns"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
     fn saving_a_plan_refuses_each_mistake_in_its_own_words() {
         let f = Fixture::new("orx-monitor-plan-save");
         let invalid = |answer: Result<Value, crate::engine::view::Refusal>| match answer {

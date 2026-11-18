@@ -1411,8 +1411,9 @@ pub(crate) fn raw_etag(store: &crate::store::Store, id: &str) -> Result<String, 
 /// `GET /api/experiments/:id/view`: the saved markup and its tree, or the default orx draws
 /// from the newest run's first signal.
 pub(crate) fn described(store: &crate::store::Store, id: &str) -> Result<Value, Refusal> {
-    let mut described = view_of(store, id)?;
+    experiment_of(store, id)?;
     let raw = store.run_monitor_json(id)?;
+    let mut described = view_of(store, id, raw.as_deref())?;
     described["patterns"] = json!(stored_patterns(id, raw.as_deref())?.patterns);
     described["plan"] = json!(stored_plan(id, raw.as_deref())?);
     let rules = super::rules::stored(id, raw.as_deref())?;
@@ -1432,11 +1433,9 @@ pub(crate) fn described(store: &crate::store::Store, id: &str) -> Result<Value, 
     Ok(described)
 }
 
-fn view_of(store: &crate::store::Store, id: &str) -> Result<Value, Refusal> {
-    experiment_of(store, id)?;
-    let raw = store.run_monitor_json(id)?;
-    let etag = etag(raw.as_deref());
-    if let Some(markup) = stored(id, raw.as_deref())? {
+fn view_of(store: &crate::store::Store, id: &str, raw: Option<&str>) -> Result<Value, Refusal> {
+    let etag = etag(raw);
+    if let Some(markup) = stored(id, raw)? {
         let tree = compile(&markup)
             .map_err(|problem| {
                 Refusal::Failed(problem.text(
@@ -1474,13 +1473,17 @@ pub(crate) fn set(
     source: &Source,
 ) -> Result<Value, Refusal> {
     experiment_of(store, id)?;
-    let (seen, newest) = seen_on(store, id)?;
+    let (seen, newest) = if markup.is_some() || given.is_some() {
+        seen_on(store, id)?
+    } else {
+        (Seen::default(), None)
+    };
     let check_fix = |flag: String| match &newest {
         Some(run) => format!("Run `orx exp view check {run} {flag}`."),
         None => format!("Run `orx exp view set {id} {flag}`."),
     };
     let mut pending = Vec::new();
-    if let Some(markup) = markup {
+    let tree = if let Some(markup) = markup {
         let compiled = compile(markup).map_err(|problem| {
             let fix = match source.file {
                 Some(_) => check_fix(source.flag()),
@@ -1494,7 +1497,10 @@ pub(crate) fn set(
                 &format!("Run `orx exp view set {id} {}`.", source.flag()),
             ))
         })?;
-    }
+        Some(compiled.tree)
+    } else {
+        None
+    };
     let config = match given {
         Some(given) => {
             let file = source.patterns.unwrap_or("PATH");
@@ -1561,13 +1567,32 @@ pub(crate) fn set(
         }
         Ok(Value::Object(settings).to_string())
     })?;
-    if saved.is_none() {
+    let Some(saved) = saved else {
         return Err(Refusal::Changed(format!(
             "Experiment {id} changed while saving its view. Run `orx exp view get {id}` and retry."
         )));
+    };
+    let mut settings: Map<String, Value> =
+        serde_json::from_str(&saved).expect("saved run settings serialize a JSON object");
+    let markup = settings.remove("view");
+    let mut answer = json!({
+        "markup": markup.as_ref().and_then(Value::as_str),
+        "isDefault": markup.as_ref().and_then(Value::as_str).is_none(),
+        "fromExperimentId": id,
+        "etag": etag(Some(&saved)),
+        "pending": pending,
+    });
+    if let Some(tree) = tree {
+        answer["tree"] = tree;
     }
-    let mut answer = described(store, id)?;
-    answer["pending"] = json!(pending);
+    for key in ["patterns", "plan", "rules"] {
+        answer[key] = settings.remove(key).unwrap_or_else(|| json!([]));
+    }
+    for key in ["brief", "watch"] {
+        if let Some(value) = settings.remove(key).filter(Value::is_object) {
+            answer[key] = value;
+        }
+    }
     Ok(answer)
 }
 
