@@ -3486,6 +3486,7 @@ mod tests {
             baseline_branch: "main".into(),
             run_command: None,
             paper_id: None,
+            icon: None,
             created_at: 1,
             updated_at: 1,
         };

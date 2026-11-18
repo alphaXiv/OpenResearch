@@ -39,3 +39,37 @@ test("a chat's sidebar row shows the flask while a run runs and the warning whil
   assert.equal(row("Chat b").querySelector(".session-title").hasAttribute("data-overflow"), false);
   assert.equal(row("Chat c").querySelector(".session-title").hasAttribute("data-overflow"), true);
 });
+
+test("in the inbox, a chat whose run flag waits keeps its warning in Working, and an ended run leaves its chat in the inbox", async () => {
+  const sessions = [session("a"), session("b"), session("d")];
+  localStorage.setItem("sidebar-grouping", "inbox");
+  try {
+    await renderChat("/projects/p/tasks/a", {
+      sessions,
+      routes: {
+        "GET /api/chat/sessions": (_, url) => ({
+          sessions: url.includes("scope=sidebar") ? url.includes("archived=true") ? [] : sessions : sessions.filter((row) => url.includes(`projectId=${row.projectId}`)),
+        }),
+        "GET /api/chat/shown-runs": () => [
+          { sessionId: "a", run: run("r1"), experimentName: null, experimentSlug: "one", runNo: 1, runCount: 1 },
+          { sessionId: "b", run: run("r2", { id: "f", state: "waiting", mode: "copilot" }), experimentName: null, experimentSlug: "two", runNo: 1, runCount: 1 },
+          { sessionId: "d", run: { ...run("r4"), status: "done" }, experimentName: null, experimentSlug: "four", runNo: 1, runCount: 1 },
+        ],
+        "GET /api/compute/hosts": () => [],
+      },
+    });
+    const working = [...document.querySelectorAll("button[aria-expanded]")].find((button) => button.textContent.startsWith(m.chat_inbox_working()));
+    assert.ok(working, "a Working section");
+    const below = (title) => Boolean(working.compareDocumentPosition(row(title)) & Node.DOCUMENT_POSITION_FOLLOWING);
+
+    assert.ok(below("Chat a") && below("Chat b"));
+    assert.equal(below("Chat d"), false);
+    assert.deepEqual(marks("Chat b"), [m.chat_run_needs_attention(), m.chat_experiment_running()]);
+    assert.ok(row("Chat b").getAttribute("aria-label").includes(m.chat_run_needs_attention()));
+    assert.ok(row("Chat b").querySelector(".session-title").classList.contains("text-ink-amber"));
+    assert.equal(row("Chat a").querySelector(".session-title").classList.contains("text-ink-amber"), false);
+    assert.equal(row("Chat d").querySelector(".session-title").classList.contains("text-ink-amber"), false);
+  } finally {
+    localStorage.removeItem("sidebar-grouping");
+  }
+});

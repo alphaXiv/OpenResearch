@@ -487,7 +487,7 @@ function headlineOf(monitor: RunMonitor | null, summary: NonNullable<Run["monito
 export type SessionRunMark = "waiting" | "flagged" | "running" | null;
 
 /** What a chat's sidebar row shows of its runs: the warning while a flag is unsettled, else the flask while one runs. */
-export function sessionRunMark(runs: ShownRun[], sessionId: string): SessionRunMark {
+export function sessionRunMark(runs: readonly ShownRun[], sessionId: string): SessionRunMark {
   const own = runs.filter((item) => item.sessionId === sessionId);
   const flags = own.flatMap((item) => item.run.monitor?.flag ? [item.run.monitor.flag] : []);
   if (flags.some((flag) => flag.state === "waiting")) return "waiting";
