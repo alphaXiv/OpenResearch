@@ -1591,10 +1591,8 @@ mod tests {
         );
         assert!(!Path::new(&scratch.repo_path).exists());
         // The folder holds what the chat committed, and nothing orx committed for it.
-        assert_eq!(
-            std::fs::read_to_string(target.join("fib.py")).unwrap(),
-            "print(1)\n"
-        );
+        assert_eq!(git_output(&target, &["show", "HEAD:fib.py"]), "print(1)");
+        assert!(target.join("fib.py").exists());
         assert_eq!(git_output(&target, &["log", "-1", "--format=%s"]), "fib");
         // The chat keeps working in its worktree, its unsaved work intact.
         assert_eq!(
