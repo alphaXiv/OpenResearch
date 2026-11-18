@@ -118,6 +118,8 @@ export interface Run {
   backend?: Record<string, unknown> | null;
   command?: string | null;
   commitSha?: string | null;
+  /** The chat that started the run; absent from an older orx up. */
+  chatSessionId?: string | null;
   resultMarkdown?: string | null;
   createdAt: number;
   updatedAt: number;
@@ -1817,7 +1819,12 @@ export interface ChatSession {
   activeLeafId: string | null;
   contextUsage?: ContextUsage;
   /** Tasks the agent left running after its turn, which it resumes to report; in the session lists. */
-  background?: { count: number; since: number } | null;
+  background?: {
+    count: number;
+    since: number;
+    /** Each task, or each delegate chat (`chat`) at work; absent from an older orx up. */
+    tasks?: { id: string; name: string; chat?: boolean }[];
+  } | null;
   /** The chat's most recent turn, in the session lists. */
   lastTurn?: {
     state: string;
@@ -3268,6 +3275,12 @@ export function createApi(
   const interruptChat = (sessionId: string) =>
     post<{ ok: boolean }>(`/api/chat/sessions/${sessionId}/interrupt`);
 
+  const stopAndArchiveChat = (sessionId: string) =>
+    post<ChatSession>(`/api/chat/sessions/${sessionId}/stop-and-archive`);
+
+  const stopBackgroundTask = (sessionId: string, taskId: string) =>
+    post<{ ok: boolean }>(`/api/chat/sessions/${sessionId}/background/${encodeURIComponent(taskId)}/stop`);
+
   const respondChat = (sessionId: string, answer: PromptAnswer) =>
     post<{ ok: boolean }>(`/api/chat/sessions/${sessionId}/respond`, answer);
   const getLocalModels = (signal?: AbortSignal) => get<LocalModelConnection[]>("/api/local-models", signal);
@@ -3515,6 +3528,8 @@ export function createApi(
     forkChatTurn,
     selectChatBranch,
     interruptChat,
+    stopAndArchiveChat,
+    stopBackgroundTask,
     respondChat,
     getLocalModels,
     discoverLocalModels,

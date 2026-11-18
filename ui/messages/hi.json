@@ -2217,11 +2217,13 @@
   "chat_status_background": "प्रतीक्षा में {duration}",
   "chat_status_background_task": "बैकग्राउंड कार्य चल रहा है",
   "chat_status_background_tasks": "{count} बैकग्राउंड कार्य चल रहे हैं",
-  "chat_background_resumes": "पूरा होने पर एजेंट यह चैट फिर से शुरू करता है",
   "chat_status_done": "हो गया",
   "sidebar_project_settings": "प्रोजेक्ट सेटिंग्स",
   "chat_inbox_done_action": "हो गया",
   "chat_inbox_mark_done": "पूरा हुआ चिह्नित करें",
+  "chat_inbox_stop_done_title": "रोकें और पूरा चिह्नित करें?",
+  "chat_inbox_stop_done_description": "इस चैट में अभी भी काम चल रहा है। इसे पूरा चिह्नित करने से एजेंट, उसके बैकग्राउंड टास्क, उसके शुरू किए प्रयोग और वे चैट रुक जाएँगी जिन्हें उसने काम सौंपा था।",
+  "chat_inbox_stop_done_confirm": "रोकें और पूरा चिह्नित करें",
   "chat_inbox_restore": "पुनर्स्थापित करें",
   "chat_inbox_done_empty": "जिन चैट को आप पूरा हुआ चिह्नित करेंगे, वे यहां दिखेंगी।"
 }

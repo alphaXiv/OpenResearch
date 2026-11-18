@@ -2217,11 +2217,13 @@
   "chat_status_background": "Czeka {duration}",
   "chat_status_background_task": "Zadanie w tle trwa",
   "chat_status_background_tasks": "Zadania w tle: {count}",
-  "chat_background_resumes": "Agent wróci do tego czatu, gdy się zakończy",
   "chat_status_done": "Gotowe",
   "sidebar_project_settings": "Ustawienia projektu",
   "chat_inbox_done_action": "Gotowe",
   "chat_inbox_mark_done": "Oznacz jako gotowe",
+  "chat_inbox_stop_done_title": "Zatrzymać i oznaczyć jako gotowe?",
+  "chat_inbox_stop_done_description": "W tym czacie nadal trwa praca. Oznaczenie go jako gotowego zatrzyma agenta, jego zadania w tle, uruchomione przez niego eksperymenty i czaty, którym zlecił pracę.",
+  "chat_inbox_stop_done_confirm": "Zatrzymaj i oznacz jako gotowe",
   "chat_inbox_restore": "Przywróć",
   "chat_inbox_done_empty": "Tu pojawią się czaty oznaczone jako gotowe."
 }

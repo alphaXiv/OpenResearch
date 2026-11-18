@@ -2217,11 +2217,13 @@
   "chat_status_background": "Bekliyor {duration}",
   "chat_status_background_task": "Arka plan görevi çalışıyor",
   "chat_status_background_tasks": "{count} arka plan görevi çalışıyor",
-  "chat_background_resumes": "Bittiğinde ajan bu sohbete geri döner",
   "chat_status_done": "Bitti",
   "sidebar_project_settings": "Proje ayarları",
   "chat_inbox_done_action": "Bitti",
   "chat_inbox_mark_done": "Bitti olarak işaretle",
+  "chat_inbox_stop_done_title": "Durdurulsun ve bitti olarak işaretlensin mi?",
+  "chat_inbox_stop_done_description": "Bu sohbette hâlâ çalışan iş var. Bitti olarak işaretlemek ajanı, arka plan görevlerini, başlattığı deneyleri ve iş devrettiği sohbetleri durdurur.",
+  "chat_inbox_stop_done_confirm": "Durdur ve bitti olarak işaretle",
   "chat_inbox_restore": "Geri yükle",
   "chat_inbox_done_empty": "Bitti olarak işaretlediğiniz sohbetler burada görünür."
 }

@@ -152,6 +152,9 @@
   --surface-bright: #ffffff;
   /* Fills over the sidebar material (app.css). Literal rgb, not color-mix: macOS 11 WebKit. */
   --material-veil: rgb(255 255 255 / 40%);
+  /* `--border` and `--border-variant` over `--base`, translucent so they tint the material too. */
+  --material-border: rgb(0 0 0 / 17%);
+  --material-border-variant: rgb(0 0 0 / 10%);
   --material-hover: color-mix(in srgb, var(--text) 6%, transparent);
   --material-selected: color-mix(in srgb, var(--text) 11%, transparent);
   --highlight: #e5e5e5;
@@ -262,6 +265,8 @@
 
 :root[data-theme="dark"] {
   --material-veil: rgb(24 24 24 / 40%);
+  --material-border: rgb(255 255 255 / 17%);
+  --material-border-variant: rgb(255 255 255 / 10%);
   --base: #181818;
   --canvas: #1c1c1c;
   --panel: #2b2b2b;

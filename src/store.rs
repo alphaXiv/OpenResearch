@@ -6157,9 +6157,30 @@ impl Store {
     ) -> Result<bool> {
         Ok(self.conn.execute(
             "INSERT INTO run_notices (run_id, chat_session_id, kind, dedupe, body, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(run_id, chat_session_id, dedupe) DO NOTHING",
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6 WHERE NOT EXISTS (
+                SELECT 1 FROM run_notices WHERE run_id = ?1 AND chat_session_id = ?2 AND dedupe = 'chat-done'
+             ) ON CONFLICT(run_id, chat_session_id, dedupe) DO NOTHING",
             params![run_id, chat_session_id, kind, dedupe, body, created_at],
         )? == 1)
+    }
+
+    /// Dismiss run updates for the chat that asked to stop the run and go to Done.
+    pub(crate) fn dismiss_run_notices(&self, run_id: &str, chat: &str, now: i64) -> Result<()> {
+        let tx = self.begin_immediate()?;
+        tx.execute(
+            "INSERT INTO run_notices (run_id, chat_session_id, kind, dedupe, body, created_at, delivered_at)
+             VALUES (?1, ?2, 'chat-done', 'chat-done', '', ?3, ?3)
+             ON CONFLICT(run_id, chat_session_id, dedupe) DO NOTHING",
+            params![run_id, chat, now],
+        )?;
+        // An assigned batch must keep the body used to compute its turn's request hash.
+        tx.execute(
+            "DELETE FROM run_notices WHERE run_id = ?1 AND chat_session_id = ?2
+             AND delivered_at IS NULL AND client_turn_id IS NULL",
+            params![run_id, chat],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub(crate) fn queue_cancel_settled_notice(
@@ -7860,6 +7881,38 @@ pub(crate) mod tests {
         assert!(!pending.blocks_quit());
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn dismissed_run_notices_do_not_wake_the_chat() {
+        let dir = std::env::temp_dir().join(format!("orx-told-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+
+        store.dismiss_run_notices("cancelled", "owner", 1).unwrap();
+        assert!(!store
+            .insert_run_notice("cancelled", "owner", TERMINAL, TERMINAL, "cancelled", 2)
+            .unwrap());
+        assert!(!store
+            .insert_run_notice(
+                "cancelled",
+                "owner",
+                ATTENTION,
+                "cancel-stopped",
+                "stopped",
+                3
+            )
+            .unwrap());
+        store
+            .insert_run_notice("ended", "owner", TERMINAL, TERMINAL, "done", 1)
+            .unwrap();
+        store.dismiss_run_notices("ended", "owner", 2).unwrap();
+        assert!(store.pending_run_notice_sessions().unwrap().is_empty());
+
+        store
+            .insert_run_notice("cancelled", "subscriber", TERMINAL, TERMINAL, "done", 1)
+            .unwrap();
+        assert_eq!(store.pending_run_notice_sessions().unwrap(), ["subscriber"]);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
