@@ -1,0 +1,67 @@
+name: Native setup wire evidence (1076)
+on:
+  push:
+    branches: [verify/1076-platform-setup-wire]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: 14382284364
+            from: OpenResearch-Canary-orx.exe
+            suffix: '.exe'
+          - os: macos-latest
+            artifact: 14382007670
+            from: orx
+            suffix: ''
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Confirm identical product sources and genuine release inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT: ${{ matrix.artifact }}
+        run: |
+          git diff --exit-code 12cc022e76df89f0aee4a46ebc999fea69a9f74b -- src crates Cargo.lock Cargo.toml build.rs
+          mkdir -p proof-baseline proof-hosts
+          gh api "repos/alphaXiv/OpenResearch/actions/artifacts/$ARTIFACT/zip" > baseline.zip
+          unzip -q baseline.zip -d proof-baseline
+          gh api 'repos/alphaXiv/OpenResearch/actions/artifacts/14383180091/zip' > hosts.zip
+          unzip -q hosts.zip -d proof-hosts
+          ls -l proof-baseline proof-hosts
+          chmod +x "proof-baseline/${{ matrix.from }}"
+      - run: rustup toolchain install --no-self-update
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          shared-key: check
+          save-if: false
+      - name: Build exact candidate without signing or publishing
+        env:
+          ORX_OFFICIAL_RELEASE_BUILD: '1'
+          ORX_EMBED_HOST_DIR: ${{ github.workspace }}/proof-hosts
+        run: cargo build --locked --bin orx
+      - name: Verify the real application and collect loopback wire evidence
+        run: |
+          set -o pipefail
+          mkdir -p proof-traces
+          python3 -u qa-1076/prove.py "proof-baseline/${{ matrix.from }}" before | tee proof-traces/before.txt
+          python3 -u qa-1076/prove.py "target/debug/orx${{ matrix.suffix }}" after | tee proof-traces/after.txt
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: native-1076-${{ matrix.os }}
+          path: proof-traces
+          retention-days: 30
+          if-no-files-found: warn
