@@ -26,6 +26,16 @@ fn collection_lock(path: &Path) -> Result<Arc<tokio::sync::Mutex<()>>> {
     Ok(lock)
 }
 
+fn checkpoint_lock(path: &Path) -> std::io::Result<fd_lock::RwLock<std::fs::File>> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    Ok(fd_lock::RwLock::new(
+        options.open(path.with_extension("lock"))?,
+    ))
+}
+
 /// The laptop's one place to publish a run's checkpoint, and whether `snapshot` is now the
 /// published one. A checkpoint is never replaced by one that knows less: another generation
 /// that covers fewer bytes is a rebuild, kept as a staging checkpoint beside the published one
@@ -33,11 +43,7 @@ fn collection_lock(path: &Path) -> Result<Arc<tokio::sync::Mutex<()>>> {
 /// ends first, it stands marked as not read to the end and the staging one goes. Identity is
 /// not compared: a spool refetched with other bytes keeps it.
 pub(crate) fn publish(path: &Path, snapshot: &Snapshot) -> std::io::Result<bool> {
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true).write(true).create(true).truncate(false);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let mut lock = fd_lock::RwLock::new(options.open(path.with_extension("lock"))?);
+    let mut lock = checkpoint_lock(path)?;
     let _guard = lock.try_write()?;
     let staging = path.with_extension("replay");
     let held = load(path)?;
@@ -247,16 +253,32 @@ async fn collect_from(
     let path = std::fs::canonicalize(directory)?.join(format!("{}.json", run.id));
     let lock = collection_lock(&path)?;
     let _guard = lock.lock().await;
-    let previous = load(&path);
-    let previous = match previous {
-        Ok(value) => value,
+    let previous = match load(&path) {
         Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
-            let damaged = path.with_extension(format!("corrupt-{}.json", uuid::Uuid::new_v4()));
-            std::fs::rename(&path, &damaged)?;
-            eprintln!("run {}: {error}; retained at {}", run.id, damaged.display());
-            None
+            let mut lock = checkpoint_lock(&path)?;
+            let _guard = lock.try_write()?;
+            // A scanner whose caller timed out can still have published in the meantime.
+            match load(&path) {
+                Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                    let reason = format!(
+                        "Couldn't read the saved progress in {}. OpenResearch is trying to rebuild it from the run log.",
+                        path.display()
+                    );
+                    availability(data, &run.id, "unavailable", Some(&reason))?;
+                    let damaged =
+                        path.with_extension(format!("corrupt-{}.json", uuid::Uuid::new_v4()));
+                    std::fs::rename(&path, &damaged)?;
+                    eprintln!(
+                        "orx up: run {}: unreadable signal checkpoint. {error}. Retained at {}",
+                        run.id,
+                        damaged.display()
+                    );
+                    None
+                }
+                result => result?,
+            }
         }
-        Err(error) => return Err(error.into()),
+        result => result?,
     };
     let previous_error = previous
         .as_ref()
@@ -544,10 +566,10 @@ pub(crate) fn availability(
     std::fs::create_dir_all(&directory)?;
     let path = directory.join(format!("{run}.status.json"));
     let previous = read_availability(data, run)?;
-    if previous
-        .as_ref()
-        .is_some_and(|v| v["state"] == "incomplete")
-    {
+    if previous.as_ref().is_some_and(|v| {
+        v["state"] == "incomplete"
+            || v["state"] == "unavailable" && matches!(state, "cached" | "stale")
+    }) {
         return Ok(());
     }
     let reason = reason.map(|text| {
@@ -580,7 +602,12 @@ fn collected(
     let run = &snapshot.run_id;
     let previous = read_availability(data, run)?.unwrap_or_else(|| serde_json::json!({}));
     let mut status = previous.clone();
-    if status["state"] != "incomplete" || snapshot.source_complete() {
+    let recovered = match status["state"].as_str() {
+        Some("incomplete") => snapshot.source_complete(),
+        Some("unavailable") => accepted,
+        _ => true,
+    };
+    if recovered {
         status["state"] = serde_json::json!("cached");
         status["reason"] = serde_json::Value::Null;
     }

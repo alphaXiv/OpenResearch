@@ -1365,8 +1365,13 @@ fn evaluate(
         "generation": generation,
         "asOf": as_of,
     });
-    if fold.error.is_some() {
-        summary["unavailable"] = json!(SIGNALS_UNREADABLE);
+    if state == "unavailable" {
+        let message = if fold.error.is_some() {
+            SIGNALS_UNREADABLE
+        } else {
+            reason.as_deref().unwrap_or(SIGNALS_UNREADABLE)
+        };
+        summary["unavailable"] = json!(message);
     }
     // A plan's stages, so a line's underline is segmented without the full monitor.
     if started && (planned && stages.len() > 1 || whole.is_none()) {
@@ -2308,8 +2313,10 @@ fn project(
     if let Some(held) = same_media {
         let recent = now - held.evaluated_at < interval(1);
         let idle = !life.live() || now - held.evaluated_at < interval(10);
-        // A live run's changes wait for the next second; an ended run's last ones are few.
-        if held.stamps == stamps && (recent || idle) || recent && life.live() {
+        // New points wait for the next second; losing or recovering a checkpoint does not.
+        let throttle =
+            life.live() && stamps[0].is_some() && held.fold.status["state"] != "unavailable";
+        if (recent || idle) && held.stamps == stamps || recent && throttle {
             return Ok(Some((held.projection.clone(), None)));
         }
     }

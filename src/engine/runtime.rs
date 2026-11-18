@@ -4531,6 +4531,97 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_corrupt_live_checkpoint_stays_unavailable_until_rebuilt() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-live-unreadable").unwrap();
+        let runtime = launched_signal_run(dir.path());
+        let now = runtime.engine.clock.wall_ms();
+        runtime
+            .engine
+            .observe(
+                "run",
+                Observation::Running {
+                    started_at: Some(now - 2_000),
+                },
+            )
+            .unwrap();
+        let job = dir.path().join("local-runs/run");
+        std::fs::create_dir_all(&job).unwrap();
+        let log = job.join("log");
+        std::fs::write(&log, b"::orx:: {\"step\":10}\n").unwrap();
+        let watched = [WatchedRun {
+            id: "run".into(),
+            handle: Handle::Local {
+                dir: job.to_str().unwrap().into(),
+            },
+        }];
+        let backend = runtime.backend_for(&Key::Local).unwrap();
+        let collect = || async {
+            assert!(
+                !runtime
+                    .collect_signals(backend.as_ref(), &watched, Duration::from_secs(5), &mut 0)
+                    .await
+            );
+        };
+        let projection = || {
+            let store = runtime.store().unwrap();
+            let run = store.get_run("run").unwrap().unwrap();
+            super::super::monitor::advance(&store, &run, now).unwrap()
+        };
+
+        collect().await;
+        let first = projection().monitor();
+        assert_eq!(first["progress"]["done"].as_f64(), Some(10.0));
+        let path = runtime.signals_path("run");
+        std::fs::write(&path, b"{broken").unwrap();
+        std::fs::remove_file(&log).unwrap();
+
+        collect().await;
+        let pending = projection();
+        let unreadable = pending.monitor();
+        assert_eq!(unreadable["availability"]["state"], "unavailable");
+        assert!(unreadable["availability"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("run.json")));
+        assert!(unreadable["progress"].is_null());
+        assert!(unreadable["statusText"]
+            .as_str()
+            .is_some_and(|text| text.contains("run.json") && !text.contains("step 10")));
+        assert_eq!(
+            pending.summary()["unavailable"],
+            unreadable["availability"]["reason"]
+        );
+
+        std::fs::create_dir(&log).unwrap();
+        collect().await;
+        assert_eq!(
+            projection().monitor()["availability"],
+            unreadable["availability"]
+        );
+        let retained: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .starts_with("run.corrupt-")
+            })
+            .collect();
+        assert_eq!(retained.len(), 1);
+        assert_eq!(std::fs::read(&retained[0]).unwrap(), b"{broken");
+
+        std::fs::remove_dir(&log).unwrap();
+        std::fs::write(&log, b"::orx:: {\"step\":11}\n").unwrap();
+        collect().await;
+        let rebuilt = projection().monitor();
+        assert_eq!(rebuilt["availability"]["state"], "live");
+        assert!(rebuilt["availability"]["reason"].is_null());
+        assert_eq!(rebuilt["progress"]["done"].as_f64(), Some(11.0));
+        assert_ne!(rebuilt["generation"], first["generation"]);
+    }
+
     /// A checkpoint that cannot be read, in place or set aside as corrupt, is unknown: the run
     /// settles incomplete naming it, and says so.
     #[tokio::test]

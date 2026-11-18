@@ -184,8 +184,9 @@ latest values and bounded history together. A restart resumes that checkpoint;
 a replaced or shortened log starts a new generation. A spool cut back to where
 its provider continues is the exception: its checkpoint stands while the bytes
 past that point are fetched again, which resume it if they return the same and
-are another log if not. Corrupt checkpoints are
-retained with their path in diagnostics and rebuilt from readable raw bytes.
+are another log if not. Collection retains corrupt checkpoints and logs where
+it put them. The laptop reports the saved progress as unreadable until a
+replacement has been written from the log.
 Replayed bytes without payload or bar times do not invent timing observations.
 When patterns are saved after a run ends, replay places otherwise untimed
 chart points across its elapsed time by their positions in the saved log.
