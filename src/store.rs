@@ -1081,9 +1081,15 @@ impl Store {
         })
     }
 
-    /// Read the initialized store without acquiring its WAL write lock.
+    /// Read the store without acquiring its WAL write lock, creating it first if it doesn't exist.
     pub(crate) fn open_read_only(dir: PathBuf) -> Result<Self> {
         let db = dir.join("orx.db");
+        let exists = db
+            .try_exists()
+            .with_context(|| format!("Could not read {}", db.display()))?;
+        if !exists {
+            return Self::open_at_with_move_lock(dir, data_dir_move_lock_path(), BUSY_TIMEOUT);
+        }
         let conn = Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .with_context(|| format!("Could not open {}", db.display()))?;
         conn.busy_timeout(BUSY_TIMEOUT)?;

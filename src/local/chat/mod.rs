@@ -10809,7 +10809,6 @@ mod session_env_tests {
         let synced = crate::config::test_home().join(".openresearch/env");
         std::fs::create_dir_all(synced.parent().unwrap()).unwrap();
         std::fs::write(&synced, "export ORX_DATA_DIR='/elsewhere'\n").unwrap();
-        crate::store::Store::open().unwrap();
         let mut cmd = crate::process::tokio_command("agent");
         super::prepare_env(&mut cmd);
         super::set_chat_session_env(&mut cmd, "session", "claude", None).unwrap();
@@ -10824,7 +10823,6 @@ mod session_env_tests {
 
     #[test]
     fn each_harness_keeps_its_native_invocation_context() {
-        crate::store::Store::open().unwrap();
         for harness in [
             "claude-code",
             "codex",
