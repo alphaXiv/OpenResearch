@@ -793,17 +793,20 @@ impl ApiClient {
         filter: crate::commands::up::api_v2::Filter,
         deadline: Instant,
     ) -> Result<()> {
-        let waiting_on = std::cell::Cell::new("a run state change");
+        let waiting_on = std::cell::RefCell::new(format!(
+            "the OpenResearch server at 127.0.0.1:{} to answer. Ask the user to check that OpenResearch is running",
+            self.server.port
+        ));
         tokio::time::timeout_at(deadline.into(), self.follow(&filter, deadline, &waiting_on))
             .await
-            .unwrap_or_else(|_| Err(anyhow!("Timed out waiting for {}.", waiting_on.get())))
+            .unwrap_or_else(|_| Err(anyhow!("Timed out waiting for {}.", waiting_on.borrow())))
     }
 
     async fn follow(
         &self,
         filter: &crate::commands::up::api_v2::Filter,
         deadline: Instant,
-        waiting_on: &std::cell::Cell<&'static str>,
+        waiting_on: &std::cell::RefCell<String>,
     ) -> Result<()> {
         use futures::StreamExt;
         let mut client = self.clone();
@@ -811,6 +814,7 @@ impl ApiClient {
         let mut last_status = None;
         loop {
             let mut events = client.events(filter, Some(deadline)).await?;
+            *waiting_on.borrow_mut() = "a run state change".into();
             loop {
                 let Some(event) = events.next().await else {
                     break;
@@ -889,9 +893,8 @@ impl ApiClient {
                 }
             }
             drop(events);
-            waiting_on.set("the OpenResearch server to start");
+            *waiting_on.borrow_mut() = "the OpenResearch server to start".into();
             client = Self::discover().await?;
-            waiting_on.set("a run state change");
         }
     }
 

@@ -2606,7 +2606,8 @@ async fn cli_wait_times_out_when_the_server_never_answers_the_event_stream() {
     let f = Fixture::new().await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mut descriptor = f.descriptor.clone();
-    descriptor.port = listener.local_addr().unwrap().port();
+    let port = listener.local_addr().unwrap().port();
+    descriptor.port = port;
     let app = axum::Router::new().route(
         "/api/v2/events",
         axum::routing::get(std::future::pending::<&'static str>),
@@ -2627,10 +2628,11 @@ async fn cli_wait_times_out_when_the_server_never_answers_the_event_stream() {
     )
     .await
     .expect("the wait outlived its own deadline");
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("Timed out waiting for a run state change"));
+    let error = result.unwrap_err().to_string();
+    assert!(
+        error.contains("Timed out") && error.contains(&format!("127.0.0.1:{port}")),
+        "{error}"
+    );
     server.abort();
 }
 
