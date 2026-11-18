@@ -124,6 +124,15 @@ fn look(store: &Store, chat: &str, kind: &str, runs: &[(&str, &str)]) -> i64 {
     id
 }
 
+async fn instrumentation(seen: &mut Seen, run: &Now, now: i64) -> Result<Option<String>> {
+    let store = Mutex::new(Store::open()?);
+    super::instrumentation(&store, seen, run, now)
+        .await?
+        .map(|notice| notice.queue(&lock(&store), &run.run.id, &run.run.experiment_id, now))
+        .transpose()
+        .map(Option::flatten)
+}
+
 const LOG: &str = "config: depth=4 width=512\nWARNING --depth 8 overrides DEPTH; using 4\nstep 100 loss 2.1\nretrying shard 3 (timed out)\nretrying shard 4 (timed out)\n";
 
 #[cfg(unix)]
@@ -1091,7 +1100,8 @@ async fn a_pass_reads_only_the_log_the_fold_has_read() {
     };
     let mut seen = Seen::default();
     let scanned = |seen: &Seen| seen.scan.as_ref().unwrap().offset;
-    scan(&mut seen, &folded_to(LOG.len())).await;
+    let scanning = Mutex::new(Store::open().unwrap());
+    scan(&scanning, &mut seen, &folded_to(LOG.len())).await;
     assert_eq!(scanned(&seen), LOG.len() as u64);
     store
         .set_watch_count("a", "ERROR", 0, LOG.len() as u64, "1-7")
@@ -1099,13 +1109,18 @@ async fn a_pass_reads_only_the_log_the_fold_has_read() {
 
     let longer = format!("{LOG}ERROR train: checkpoint write failed\n");
     keep_log(&store, "a", &longer);
-    scan(&mut seen, &folded_to(LOG.len())).await;
+    scan(&scanning, &mut seen, &folded_to(LOG.len())).await;
     assert_eq!(
         scanned(&seen),
         LOG.len() as u64,
         "nothing past where the fold read is read"
     );
-    scan(&mut seen, &folded_to(longer.len())).await;
+    for (before, lines, offset, ident) in scan(&scanning, &mut seen, &folded_to(longer.len())).await
+    {
+        store
+            .advance_watch_count(&a.id, &before, lines, offset, &ident)
+            .unwrap();
+    }
     assert_eq!(scanned(&seen), longer.len() as u64);
     assert!(seen
         .scan
@@ -1465,7 +1480,13 @@ async fn a_run_far_worse_than_its_parent_at_the_same_step_is_flagged() {
     for reported in 1..=flipped.len() {
         epochs(&store, &child, &flipped[..reported]);
         let now = Now::read(&store, &child).unwrap();
-        trip::check(&mut seen, &now, crate::store::now_ms()).await;
+        trip::check(
+            &Mutex::new(Store::open().unwrap()),
+            &mut seen,
+            &now,
+            crate::store::now_ms(),
+        )
+        .await;
         let flags = super::super::flags::read(&store, &child).unwrap();
         assert_eq!(
             flags.len(),
@@ -1489,7 +1510,13 @@ async fn a_run_far_worse_than_its_parent_at_the_same_step_is_flagged() {
     for reported in 1..=trained.len() {
         epochs(&store, &healthy, &trained[..reported]);
         let now = Now::read(&store, &healthy).unwrap();
-        trip::check(&mut seen, &now, crate::store::now_ms()).await;
+        trip::check(
+            &Mutex::new(Store::open().unwrap()),
+            &mut seen,
+            &now,
+            crate::store::now_ms(),
+        )
+        .await;
     }
     assert!(super::super::flags::read(&store, &healthy)
         .unwrap()
@@ -1756,6 +1783,105 @@ async fn side_stats_wake_only_for_far_worse_parent_comparisons() {
     assert!(changes(&mut Seen::default(), &now, 0)
         .iter()
         .any(|reason| reason.contains("parent")));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn live_monitoring_leaves_time_for_another_store_writer() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+
+    let store = Store::open().unwrap();
+    let chat_id = "sweep";
+    chat(&store, chat_id, "claude-code");
+    let log = "warning: dataset cache is cold\n::orx:: {\"phase\":\"train\",\"step\":1,\"m\":{\"loss\":2}}\n::orx:: {\"step\":2,\"m\":{\"loss\":1}}\n";
+    let backend = crate::engine::adapters::local::Local::new(store.data_dir().join("local"));
+    let runs: Vec<_> = (0..4)
+        .map(|index| run(&store, &format!("sweep-{index}"), "Training", chat_id, log))
+        .collect();
+    for row in &runs {
+        let dir = store.data_dir().join(&row.id);
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("log"), log).unwrap();
+        let watched = crate::engine::WatchedRun {
+            id: row.id.clone(),
+            handle: crate::engine::Handle::Local {
+                dir: dir.to_string_lossy().into_owned(),
+            },
+        };
+        crate::engine::adapters::signals::collect(
+            store.data_dir(),
+            &backend,
+            &watched,
+            false,
+            crate::store::now_ms(),
+            || store.run_patterns(&row.id),
+        )
+        .await
+        .unwrap();
+        super::super::monitor::advance(&store, row, crate::store::now_ms()).unwrap();
+    }
+
+    let (start, started) = std::sync::mpsc::channel();
+    let (done, finished) = std::sync::mpsc::channel();
+    let writer = std::thread::spawn(move || {
+        let mut writes = Vec::new();
+        for () in started {
+            let started = std::time::Instant::now();
+            Store::open()
+                .and_then(|store| store.set_project_env("project", "ANOTHER_WRITER", "ok"))
+                .unwrap();
+            writes.push(started.elapsed());
+            let _ = done.send(());
+        }
+        writes
+    });
+
+    // Simulate descheduling a redundant open in the pass while it holds the schema lock.
+    let mut opened = 0;
+    crate::store::AFTER_SCHEMA_LOCK.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            opened += 1;
+            if opened <= 2 {
+                start.send(()).unwrap();
+            }
+            if opened == 2 {
+                let budget = Duration::from_secs(1);
+                let deadline = std::time::Instant::now() + budget;
+                assert!(
+                    finished.recv_timeout(budget).is_ok()
+                        && finished
+                            .recv_timeout(
+                                deadline.saturating_duration_since(std::time::Instant::now())
+                            )
+                            .is_ok(),
+                    "another writer should have 4s of busy-timeout headroom"
+                );
+            }
+        }));
+    });
+
+    let mut state = State::default();
+    let pass = pass(&mut state).await;
+    crate::store::AFTER_SCHEMA_LOCK.with(|hook| hook.borrow_mut().take());
+    let writes = writer.join().unwrap();
+    assert!(!writes.is_empty());
+    assert!(
+        writes
+            .iter()
+            .all(|elapsed| *elapsed < Duration::from_secs(1)),
+        "{writes:?}"
+    );
+    pass.unwrap();
+    assert_eq!(state.runs.len(), runs.len());
+    assert!(store.last_chat_watch_at(chat_id).unwrap().is_some());
+    for row in runs {
+        assert!(store
+            .last_notice_at(&row.id, "instrumentation")
+            .unwrap()
+            .is_some());
+    }
 }
 
 #[tokio::test]

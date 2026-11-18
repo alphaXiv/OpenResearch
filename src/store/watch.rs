@@ -56,6 +56,8 @@ pub(crate) struct LookResult {
 /// How many times a run's last look is taken before its failure stands.
 const TERMINAL_TRIES: i64 = 2;
 
+pub(crate) type WatchCount = (String, u64, u64, String);
+
 const SELECT_LOOK: &str = "SELECT id, chat_session_id, kind, state, reason, created_at, done_at,
         summary_template, summary_text, usage_json, error FROM watch_looks";
 
@@ -317,6 +319,15 @@ impl Store {
     }
 
     /// The chat's pending looks and those from `since` on, oldest first.
+    pub(crate) fn chat_has_watch_look_since(&self, chat: &str, since: i64) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM watch_looks WHERE chat_session_id = ?1
+               AND (created_at >= ?2 OR state IN ('prepared', 'sent')))",
+            params![chat, since],
+            |row| row.get(0),
+        )?)
+    }
+
     pub(crate) fn chat_watch_looks(
         &self,
         chat_session_id: &str,
@@ -381,7 +392,7 @@ impl Store {
     }
 
     /// How far each counted pattern has read the run's log: its count, the next byte, the log's identity.
-    pub(crate) fn watch_counts(&self, run_id: &str) -> Result<Vec<(String, u64, u64, String)>> {
+    pub(crate) fn watch_counts(&self, run_id: &str) -> Result<Vec<WatchCount>> {
         let mut stmt = self.conn.prepare(
             "SELECT pattern, lines, offset, ident FROM watch_counts WHERE run_id = ?1 ORDER BY pattern",
         )?;
@@ -394,6 +405,32 @@ impl Store {
             ))
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// A look's backfill may have advanced the cursor while the watcher read its log.
+    pub(crate) fn advance_watch_count(
+        &self,
+        run_id: &str,
+        before: &WatchCount,
+        lines: u64,
+        offset: u64,
+        ident: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE watch_counts SET lines = ?6, offset = ?7, ident = ?8
+             WHERE run_id = ?1 AND pattern = ?2 AND lines = ?3 AND offset = ?4 AND ident = ?5",
+            params![
+                run_id,
+                before.0,
+                before.1 as i64,
+                before.2 as i64,
+                before.3,
+                lines as i64,
+                offset as i64,
+                ident
+            ],
+        )?;
+        Ok(())
     }
 
     pub(crate) fn set_watch_count(

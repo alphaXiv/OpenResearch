@@ -12,12 +12,14 @@ use std::time::Duration;
 use futures::StreamExt;
 use serde_json::{json, Map, Value};
 
-use super::{ByteRange, LogPage, Phase};
+use super::{lock, ByteRange, LogPage, Phase};
 use crate::error::{anyhow, Result};
 use crate::local::harness::{
     sign_in_revision, OneShot, OneShotAuthError, OneShotQuality, OneShotUsage,
 };
-use crate::store::{LookResult, Store, StoredChatSession, StoredRun, WatchLook, WatchLookRun};
+use crate::store::{
+    LookResult, Store, StoredChatSession, StoredRun, WatchCount, WatchLook, WatchLookRun,
+};
 
 /// Ceilings on silence after a stage starts, in seconds: a look at least this often while the run
 /// keeps printing, ending in the experiment's `maxGapS`.
@@ -415,8 +417,37 @@ struct Seen {
     patterns_checked: Option<(String, String, Vec<bool>)>,
 }
 
-async fn instrumentation(seen: &mut Seen, run: &Now, now: i64) -> Result<Option<String>> {
-    const NOTICE: &str = "instrumentation";
+const INSTRUMENTATION: &str = "instrumentation";
+
+struct Instrumentation {
+    chat: String,
+    settings: Option<String>,
+    body: String,
+}
+
+impl Instrumentation {
+    fn queue(self, store: &Store, run: &str, experiment: &str, now: i64) -> Result<Option<String>> {
+        if store.run_monitor_json(experiment)? != self.settings {
+            return Ok(None);
+        }
+        let queued = store.insert_run_notice(
+            run,
+            &self.chat,
+            INSTRUMENTATION,
+            INSTRUMENTATION,
+            &self.body,
+            now,
+        )?;
+        Ok(queued.then_some(self.chat))
+    }
+}
+
+async fn instrumentation(
+    store: &Mutex<Store>,
+    seen: &mut Seen,
+    run: &Now,
+    now: i64,
+) -> Result<Option<Instrumentation>> {
     let ended = super::Phase::parse(&run.run.status).is_some_and(super::Phase::is_terminal);
     if !ended && (run.run.status != "running" || run.body["availability"]["state"] != "live") {
         return Ok(None);
@@ -438,42 +469,48 @@ async fn instrumentation(seen: &mut Seen, run: &Now, now: i64) -> Result<Option<
                 .values()
                 .any(|rows| rows.as_array().is_some_and(|rows| !rows.is_empty()))
         });
-    let store = Store::open()?;
-    let state = store.engine_run_state(&run.run.id)?;
-    if !ended
-        && (run.run.cancel_requested
-            || state
-                .as_ref()
-                .is_some_and(|state| state.cancel_accepted_at.is_some()))
-    {
-        return Ok(None);
-    }
-    let started = state
-        .and_then(|state| state.started_at)
-        .unwrap_or(run.run.created_at);
-    if !ended && !data && now.saturating_sub(started) < 120_000 {
-        return Ok(None);
-    }
-    if store.last_notice_at(&run.run.id, NOTICE)?.is_some() {
-        return Ok(None);
-    }
-    let chat = run
-        .run
-        .chat_session_id
-        .clone()
-        .or(store.run_subscribers(&run.run.id)?.into_iter().next());
-    let Some(chat) = chat else { return Ok(None) };
-    let raw = store.run_monitor_json(&run.run.experiment_id)?;
-    let current: Value = raw
-        .as_deref()
-        .map(serde_json::from_str)
-        .transpose()?
-        .unwrap_or(Value::Null);
-    if current != run.settings {
-        return Ok(None);
-    }
-    let patterns = super::view::stored_patterns(&run.run.experiment_id, raw.as_deref())?;
-    let snapshot = super::monitor::checkpoint(&store, &run.run.id)?;
+    let (chat, raw, patterns, snapshot) = {
+        let store = lock(store);
+        let state = store.engine_run_state(&run.run.id)?;
+        if !ended
+            && (run.run.cancel_requested
+                || state
+                    .as_ref()
+                    .is_some_and(|state| state.cancel_accepted_at.is_some()))
+        {
+            return Ok(None);
+        }
+        let started = state
+            .and_then(|state| state.started_at)
+            .unwrap_or(run.run.created_at);
+        if !ended && !data && now.saturating_sub(started) < 120_000 {
+            return Ok(None);
+        }
+        if store
+            .last_notice_at(&run.run.id, INSTRUMENTATION)?
+            .is_some()
+        {
+            return Ok(None);
+        }
+        let chat = run
+            .run
+            .chat_session_id
+            .clone()
+            .or(store.run_subscribers(&run.run.id)?.into_iter().next());
+        let Some(chat) = chat else { return Ok(None) };
+        let raw = store.run_monitor_json(&run.run.experiment_id)?;
+        let current: Value = raw
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()?
+            .unwrap_or(Value::Null);
+        if current != run.settings {
+            return Ok(None);
+        }
+        let patterns = super::view::stored_patterns(&run.run.experiment_id, raw.as_deref())?;
+        let snapshot = super::monitor::checkpoint(&store, &run.run.id)?;
+        (chat, raw, patterns, snapshot)
+    };
     if snapshot.as_ref().is_some_and(|snapshot| {
         snapshot
             .coverage
@@ -556,9 +593,6 @@ async fn instrumentation(seen: &mut Seen, run: &Now, now: i64) -> Result<Option<
         }
         return Ok(None);
     }
-    if store.run_monitor_json(&run.run.experiment_id)? != raw {
-        return Ok(None);
-    }
     let (id, experiment) = (&run.run.id, &run.run.experiment_id);
     let problems = problems
         .join("\n")
@@ -571,8 +605,11 @@ async fn instrumentation(seen: &mut Seen, run: &Now, now: i64) -> Result<Option<
          `orx exp cancel --run {id} --reason 'Fixing run reports'`, fix and commit the code, then relaunch. \
          This automatic check never stops the run and sends at most one warning for it."
     );
-    let queued = store.insert_run_notice(id, &chat, NOTICE, NOTICE, &body, now)?;
-    Ok(queued.then_some(chat))
+    Ok(Some(Instrumentation {
+        chat,
+        settings: raw,
+        body,
+    }))
 }
 
 fn wake() -> &'static tokio::sync::Notify {
@@ -715,8 +752,9 @@ fn owner(
 /// One pass: reads each watched run's log since its last look, and starts every look that is due.
 async fn pass(state: &mut State) -> Result<()> {
     let now = crate::store::now_ms();
+    let store = Mutex::new(Store::open()?);
     let (owned, unwatched, codex) = {
-        let store = Store::open()?;
+        let store = lock(&store);
         let mut candidates = store.list_active_runs()?;
         candidates.extend(store.runs_ended_since(now - paced_ms(3600))?);
         let mut chats: BTreeMap<String, Owned> = BTreeMap::new();
@@ -772,8 +810,7 @@ async fn pass(state: &mut State) -> Result<()> {
         .chain(unwatched.iter().map(|run| run.run.id.clone()))
         .collect();
     state.runs.retain(|run, _| read.contains(run));
-    let mut start = Vec::new();
-    let waiting: BTreeSet<String> = Store::open()?
+    let waiting: BTreeSet<String> = lock(&store)
         .prepared_watch_looks_chats()?
         .into_iter()
         .collect();
@@ -789,26 +826,44 @@ async fn pass(state: &mut State) -> Result<()> {
     let mut reads = Vec::new();
     for run in runs {
         let mut seen = state.runs.remove(&run.run.id).unwrap_or_default();
+        let store = &store;
         reads.push(async move {
-            scan(&mut seen, run).await;
-            let warned = instrumentation(&mut seen, run, now).await;
-            trip::check(&mut seen, run, now).await;
-            match warned {
-                Ok(Some(chat)) => crate::commands::up::api_v2::notices_queued(vec![chat]),
-                Ok(None) => {}
-                Err(error) => eprintln!(
-                    "orx up: checking run {}'s instrumentation: {error:#}",
-                    run.run.id
-                ),
-            }
-            (run.run.id.clone(), seen)
+            let counts = scan(store, &mut seen, run).await;
+            let warning = match instrumentation(store, &mut seen, run, now).await {
+                Ok(warning) => warning,
+                Err(error) => {
+                    eprintln!(
+                        "orx up: checking run {}'s instrumentation: {error:#}",
+                        run.run.id
+                    );
+                    None
+                }
+            };
+            trip::check(store, &mut seen, run, now).await;
+            (
+                run.run.id.clone(),
+                run.run.experiment_id.clone(),
+                seen,
+                counts,
+                warning,
+            )
         });
     }
-    let checked: Vec<(String, Seen)> = futures::stream::iter(reads)
+    let checked: Vec<_> = futures::stream::iter(reads)
         .buffer_unordered(READS_AT_ONCE)
         .collect()
         .await;
-    state.runs.extend(checked);
+    let mut updates = Vec::new();
+    for (run_id, experiment, seen, counts, warning) in checked {
+        state.runs.insert(run_id.clone(), seen);
+        if !counts.is_empty() || warning.is_some() {
+            updates.push((run_id, experiment, counts, warning));
+        }
+    }
+
+    let mut plans = Vec::new();
+    let mut start = Vec::new();
+    let store = lock(&store);
     for (chat_id, mut owned) in owned {
         for (run, why) in &mut owned.runs {
             if run.live() {
@@ -824,37 +879,45 @@ async fn pass(state: &mut State) -> Result<()> {
             continue;
         }
         if !waiting.contains(&chat_id) {
-            let store = Store::open()?;
-            let plans = due(&store, state, &owned, now)?;
-            if !plans.is_empty() {
-                let tx = store.begin_immediate()?;
-                // A manual look admitted during log reads invalidates this pass's run history.
-                if store.chat_watch_looks(&chat_id, now)?.is_empty() {
-                    for planned in plans {
-                        let rows: Vec<(&str, &str, &str)> = planned
-                            .runs
-                            .iter()
-                            .map(|(run, key, role)| (run.as_str(), key.as_str(), *role))
-                            .collect();
-                        Store::prepare_watch_look(
-                            &tx,
-                            &chat_id,
-                            planned.kind,
-                            &planned.reason,
-                            &rows,
-                            now,
-                        )?;
-                    }
-                }
-                tx.commit()?;
+            let due = due(&store, state, &owned, now)?;
+            if !due.is_empty() {
+                plans.push((chat_id.clone(), due));
             }
         }
         start.push(chat_id);
     }
+    if !updates.is_empty() || !plans.is_empty() {
+        let mut notified = Vec::new();
+        let tx = store.begin_immediate()?;
+        for (run, experiment, counts, warning) in updates {
+            for (before, lines, offset, ident) in counts {
+                store.advance_watch_count(&run, &before, lines, offset, &ident)?;
+            }
+            if let Some(warning) = warning {
+                notified.extend(warning.queue(&store, &run, &experiment, now)?);
+            }
+        }
+        for (chat, due) in plans {
+            // A manual look admitted during log reads invalidates this pass's run history.
+            if store.chat_has_watch_look_since(&chat, now)? {
+                continue;
+            }
+            for planned in due {
+                let rows: Vec<(&str, &str, &str)> = planned
+                    .runs
+                    .iter()
+                    .map(|(run, key, role)| (run.as_str(), key.as_str(), *role))
+                    .collect();
+                Store::prepare_watch_look(&tx, &chat, planned.kind, &planned.reason, &rows, now)?;
+            }
+        }
+        tx.commit()?;
+        crate::commands::up::api_v2::notices_queued(notified);
+    }
     // A look asked for by hand, or left prepared by a restart, in a chat this pass found no run of.
     start.extend(waiting);
     for chat in start {
-        let has = Store::open()?.prepared_watch_looks(&chat)?;
+        let has = store.prepared_watch_looks(&chat)?;
         let fresh = !has.is_empty()
             && state
                 .looking
@@ -868,9 +931,11 @@ async fn pass(state: &mut State) -> Result<()> {
     Ok(())
 }
 
+type CountAdvance = (WatchCount, u64, u64, String);
+
 /// Reads the run's log on from what the last pass read, up to [`SCAN`], noting new lines and
 /// kinds of warning the run has not printed before. Counted patterns catch up on the way.
-async fn scan(seen: &mut Seen, run: &Now) {
+async fn scan(store: &Mutex<Store>, seen: &mut Seen, run: &Now) -> Vec<CountAdvance> {
     let answered = run.answered();
     let (look, cursor) = answered.map_or((None, &Value::Null), |(look, row)| {
         (Some(look.id), &row.cursor)
@@ -950,7 +1015,7 @@ async fn scan(seen: &mut Seen, run: &Now) {
             }
         }
     }
-    count(run, &read_now, folded).await;
+    count(store, run, &read_now, folded).await
 }
 
 /// Whether the log from `offset` may hold bytes the fold has read past, which a pass reads.
@@ -971,17 +1036,24 @@ type Read = ((Option<String>, u64), (String, Vec<digest::Line>, u64));
 /// Brings each pattern the run's sentences count on through its log, [`SCAN`] at a time: one
 /// caught up with the scan counts the lines the scan just read, and one behind reads only
 /// what the fold has passed.
-async fn count(run: &Now, scanned: &[Read], folded: Option<&(String, u64)>) {
-    let counted = match Store::open().and_then(|store| store.watch_counts(&run.run.id)) {
+async fn count(
+    store: &Mutex<Store>,
+    run: &Now,
+    scanned: &[Read],
+    folded: Option<&(String, u64)>,
+) -> Vec<CountAdvance> {
+    let counted = lock(store).watch_counts(&run.run.id);
+    let counted = match counted {
         Ok(counted) => counted,
         Err(error) => {
             eprintln!(
                 "orx up: watcher: reading run {}'s counts: {error:#}",
                 run.run.id
             );
-            return;
+            return Vec::new();
         }
     };
+    let mut updates = Vec::new();
     for (pattern, lines, offset, ident) in counted {
         let Ok(regex) = reply::pattern(&pattern) else {
             continue;
@@ -1002,38 +1074,31 @@ async fn count(run: &Now, scanned: &[Read], folded: Option<&(String, u64)>) {
                 Err(_) => continue,
             },
         };
-        let (base, offset_from) = if expected == Some(read_ident.as_str()) {
-            (lines, offset)
-        } else {
-            (0, 0)
+        let (next_lines, next_offset) = match expected {
+            Some(expected) if expected != read_ident => (0, 0),
+            _ => {
+                let base = if expected == Some(read_ident) {
+                    lines
+                } else {
+                    0
+                };
+                let matched = read
+                    .iter()
+                    .filter(|line| regex.is_match(&line.text))
+                    .count() as u64;
+                (base + matched, to)
+            }
         };
-        if offset_from == 0 && expected.is_some() && expected != Some(read_ident.as_str()) {
-            // The log was replaced: count it again from its start on the next pass.
-            if let Err(error) = Store::open()
-                .and_then(|store| store.set_watch_count(&run.run.id, &pattern, 0, 0, read_ident))
-            {
-                eprintln!(
-                    "orx up: watcher: recounting {pattern} in run {}: {error:#}",
-                    run.run.id
-                );
-            }
-            continue;
-        }
-        let matched = read
-            .iter()
-            .filter(|line| regex.is_match(&line.text))
-            .count() as u64;
-        if let Ok(store) = Store::open() {
-            if let Err(error) =
-                store.set_watch_count(&run.run.id, &pattern, base + matched, to, read_ident)
-            {
-                eprintln!(
-                    "orx up: watcher: counting {pattern} in run {}: {error:#}",
-                    run.run.id
-                );
-            }
+        if (next_lines, next_offset, read_ident.as_str()) != (lines, offset, &ident) {
+            updates.push((
+                (pattern, lines, offset, ident),
+                next_lines,
+                next_offset,
+                read_ident.clone(),
+            ));
         }
     }
+    updates
 }
 
 /// How many lines of the run's log match `pattern`, counted from its start and kept counting

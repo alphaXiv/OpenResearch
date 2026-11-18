@@ -2008,6 +2008,7 @@ pub(crate) async fn keep_current(
     let mut tick = tokio::time::interval(crate::config::paced(Duration::from_secs(1)));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut watched = BTreeSet::new();
+    let mut store = None;
     loop {
         let changed = tokio::select! {
             _ = stop.changed() => return,
@@ -2022,13 +2023,30 @@ pub(crate) async fn keep_current(
         let held = watched.clone();
         let engine = engine.clone();
         let pass = tokio::task::spawn_blocking(move || {
-            watch(&Store::open()?, changed, held, Some(&engine))
+            let store = match store {
+                Some(store) => store,
+                None => Store::open()?,
+            };
+            let next = watch(&store, changed, held, Some(&engine));
+            Ok::<_, crate::error::Error>((store, next))
         })
         .await;
         match pass {
-            Ok(Ok(next)) => watched = next,
-            Ok(Err(error)) => eprintln!("orx up: run monitors: {error:#}"),
-            Err(error) => eprintln!("orx up: run monitors: {error}"),
+            Ok(Ok((held, next))) => {
+                store = Some(held);
+                match next {
+                    Ok(next) => watched = next,
+                    Err(error) => eprintln!("orx up: run monitors: {error:#}"),
+                }
+            }
+            Ok(Err(error)) => {
+                store = None;
+                eprintln!("orx up: opening the run monitors' store: {error:#}");
+            }
+            Err(error) => {
+                store = None;
+                eprintln!("orx up: run monitors: {error}");
+            }
         }
     }
 }

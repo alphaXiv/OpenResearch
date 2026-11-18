@@ -19,7 +19,7 @@ pub(crate) use costs::{BilledRun, Per, Quote};
 pub(crate) use env::ProjectEnvVar;
 pub(crate) use flags::{Chosen, FlagChoice, FlagEvent, FlagNotice, NewFlag, Raise, WATCH_FLAG};
 pub(crate) use telemetry::{Cost, InvocationIdentity, SampleCost, TokenUsage};
-pub(crate) use watch::{LookResult, WatchLook, WatchLookRun};
+pub(crate) use watch::{LookResult, WatchCount, WatchLook, WatchLookRun};
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -996,6 +996,12 @@ fn check_reader_floor(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static AFTER_SCHEMA_LOCK: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 pub struct Store {
     conn: Connection,
     data_dir: PathBuf,
@@ -1108,6 +1114,12 @@ impl Store {
         conn.busy_timeout(busy_timeout.saturating_sub(opened_at.elapsed()))?;
         let schema =
             rusqlite::Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate)?;
+        #[cfg(test)]
+        AFTER_SCHEMA_LOCK.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().as_mut() {
+                hook();
+            }
+        });
         schema.execute_batch(
             "CREATE TABLE IF NOT EXISTS store_metadata (
                 key TEXT PRIMARY KEY,

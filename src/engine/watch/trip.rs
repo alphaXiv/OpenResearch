@@ -334,14 +334,14 @@ async fn tail(run: &str) -> Option<(String, Vec<digest::Line>)> {
 }
 
 /// Raises each condition the run meets that it has not raised yet, while it has no open flag.
-pub(super) async fn check(seen: &mut Seen, run: &Now, now: i64) {
+pub(super) async fn check(store: &std::sync::Mutex<Store>, seen: &mut Seen, run: &Now, now: i64) {
     // What orx cannot see now flags nothing: lost contact says so on the run already.
     if !run.live() || run.body["availability"]["state"] != "live" {
         return;
     }
     compare(seen, run);
     if run.summary["flag"]["state"] == "raised" {
-        if let Err(error) = Store::open().and_then(|store| route(&store, &run.run)) {
+        if let Err(error) = route(&super::lock(store), &run.run) {
             eprintln!(
                 "orx up: waking run {}'s chats with its flag: {error:#}",
                 run.run.id
@@ -351,13 +351,9 @@ pub(super) async fn check(seen: &mut Seen, run: &Now, now: i64) {
     if !run.summary["flag"].is_null() {
         return;
     }
-    let covered: BTreeSet<(&str, String)> = Store::open()
-        .and_then(|store| {
-            super::super::rules::frozen(
-                &run.run.id,
-                store.run_monitor_config(&run.run.id)?.as_deref(),
-            )
-        })
+    let config = super::lock(store).run_monitor_config(&run.run.id);
+    let covered: BTreeSet<(&str, String)> = config
+        .and_then(|config| super::super::rules::frozen(&run.run.id, config.as_deref()))
         .unwrap_or_default()
         .into_iter()
         .filter_map(|rule| match rule.when {
@@ -441,7 +437,8 @@ pub(super) async fn check(seen: &mut Seen, run: &Now, now: i64) {
             "text": tripped.text,
             "evidence": evidence,
         });
-        let raised = Store::open().and_then(|store| {
+        let raised = (|| {
+            let store = super::lock(store);
             let flag = super::super::flags::new_flag(&store, &run.run, body, true)?;
             let chats = flag.wakes.iter().map(|(chat, _)| chat.clone()).collect();
             let raised = store.raise_flags(&[flag], now)?;
@@ -449,8 +446,8 @@ pub(super) async fn check(seen: &mut Seen, run: &Now, now: i64) {
                 super::super::monitor::advance(&store, &run.run, now)?;
                 crate::commands::up::api_v2::notices_queued(chats);
             }
-            Ok(raised.first().copied())
-        });
+            Ok::<_, crate::error::Error>(raised.first().copied())
+        })();
         match raised {
             // One flag at a time: the next condition waits until this one is settled.
             Ok(Some(Raise::Raised)) => {

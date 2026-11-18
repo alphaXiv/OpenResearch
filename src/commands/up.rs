@@ -11222,6 +11222,7 @@ async fn event_loop(
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut cursor = EventCursor::default();
     let mut first = true;
+    let mut store = None;
     loop {
         let event = if first {
             None
@@ -11268,24 +11269,28 @@ async fn event_loop(
             return;
         }
         let collected = tokio::task::spawn_blocking(move || {
+            let opening = store.is_none();
+            let connection = match store.map_or_else(Store::open, Ok) {
+                Ok(connection) => connection,
+                Err(error) => {
+                    eprintln!("orx up: could not open the dashboard event store: {error:#}");
+                    return (cursor, None, Vec::new());
+                }
+            };
             // A failed read is recovered by the next snapshot. A lagged receiver snapshots every run.
-            let mut batch = if event.is_none() {
-                collect_events(&mut cursor).unwrap_or_default()
+            let mut batch = if opening || event.is_none() {
+                collect_events(&connection, &mut cursor).unwrap_or_default()
             } else {
                 Vec::new()
             };
-            if first || event.is_some() {
-                let event = event.and_then(std::result::Result::ok);
-                batch.extend(
-                    Store::open()
-                        .and_then(|store| run_events(&store, &mut cursor, event))
-                        .unwrap_or_default(),
-                );
+            if opening || event.is_some() {
+                let event = event.filter(|_| !opening).and_then(std::result::Result::ok);
+                batch.extend(run_events(&connection, &mut cursor, event).unwrap_or_default());
             }
-            (cursor, batch)
+            (cursor, Some(connection), batch)
         })
         .await;
-        let (next, batch) = match collected {
+        let (next, connection, batch) = match collected {
             Ok(collected) => collected,
             Err(error) => {
                 eprintln!("orx up: could not collect dashboard events: {error}");
@@ -11293,6 +11298,7 @@ async fn event_loop(
             }
         };
         cursor = next;
+        store = connection;
         first = false;
         for ev in batch {
             if tx.send(ev).await.is_err() {
@@ -11308,7 +11314,7 @@ fn json_event(name: &str, data: &Value) -> Event {
 
 /// One non-run diff pass. On the first pass everything is "changed", so a fresh
 /// subscriber gets a full snapshot and needs no separate baseline fetches.
-fn collect_events(cursor: &mut EventCursor) -> Result<Vec<Event>> {
+fn collect_events(store: &Store, cursor: &mut EventCursor) -> Result<Vec<Event>> {
     let mut out = Vec::new();
 
     // Sampled far below the 2Hz loop — the updater works on the scale of
@@ -11328,7 +11334,6 @@ fn collect_events(cursor: &mut EventCursor) -> Result<Vec<Event>> {
         out.push(json_event("update.status", &json!(update)));
     }
 
-    let store = Store::open()?;
     for project in store.list_local_projects()? {
         if cursor.projects.get(&project.id) != Some(&project.updated_at) {
             cursor
@@ -11339,7 +11344,7 @@ fn collect_events(cursor: &mut EventCursor) -> Result<Vec<Event>> {
                 &json!({ "project": project_json(&project) }),
             ));
         }
-        push_experiment_events(&store, &project.id, cursor, &mut out)?;
+        push_experiment_events(store, &project.id, cursor, &mut out)?;
         // Artifacts appear live — anything written into the directory (by the
         // agent or the user) pings the UI to refetch the listing.
         let fp = local::files::fingerprint(&project);
@@ -11366,7 +11371,7 @@ fn collect_events(cursor: &mut EventCursor) -> Result<Vec<Event>> {
             cursor.tailed.remove(&run_id);
         }
     }
-    push_chat_run_events(&store, cursor, &mut out)?;
+    push_chat_run_events(store, cursor, &mut out)?;
     // Committed only now that the batch is certain to be returned.
     if let Some(update) = sampled_update {
         cursor.update = Some(update);
