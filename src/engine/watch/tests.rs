@@ -2470,3 +2470,38 @@ fn look_now_shares_the_chats_longest_gap_and_siblings_last_look() {
     assert_eq!(run_facts(&store, &row).unwrap()["floorUntil"], floor);
     assert!(matches!(look_now(&store, &row), Err(LookNow::TooSoon(at)) if at == floor));
 }
+
+#[tokio::test]
+async fn error_metrics_tallies_and_pattern_rows_do_not_raise_tripwires() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let store = Store::open().unwrap();
+    chat(&store, "chat", "opencode");
+    let healthy =
+        "errors so far 0\n0 errors\nMETRIC l2_error 1.37e-04\nerror_rate=0\nCASE sanity error\n";
+    let row = run(&store, "a", "A", "chat", healthy);
+    let patterns = json!([{"regex": "^CASE (?P<case>\\w+) (?P<outcome>\\w+)$", "row": "cases"}]);
+    super::super::view::set(
+        &store,
+        &row.experiment_id,
+        &super::super::view::etag(None),
+        None,
+        Some(&patterns),
+        None,
+        &super::super::view::Source {
+            file: None,
+            patterns: None,
+            config: None,
+        },
+    )
+    .unwrap();
+    let mut state = State::default();
+    pass(&mut state).await.unwrap();
+    assert!(super::super::flags::read(&store, &row).unwrap().is_empty());
+    keep_log(&store, "a", &format!("{healthy}Error: disk full\n"));
+    pass(&mut state).await.unwrap();
+    let flags = super::super::flags::read(&store, &row).unwrap();
+    assert_eq!(flags.len(), 1);
+    assert_eq!(flags[0]["evidence"]["from"], 6);
+}

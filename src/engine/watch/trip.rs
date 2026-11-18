@@ -5,8 +5,7 @@ use super::*;
 use crate::store::Raise;
 
 /// Words that make a kind of log line an error rather than a warning.
-const ERROR_WORDS: [&str; 9] = [
-    "error",
+const ERROR_WORDS: [&str; 8] = [
     "exception",
     "traceback",
     "fatal",
@@ -237,8 +236,20 @@ fn conditions(
             }
         }
     }
+    static ERROR: OnceLock<regex::Regex> = OnceLock::new();
+    static TALLY: OnceLock<regex::Regex> = OnceLock::new();
+    let error = ERROR.get_or_init(|| {
+        regex::Regex::new(r"\b(?:[Ee][Rr][Rr][Oo][Rr]|[A-Z][A-Za-z]*Error)\b").unwrap()
+    });
+    let tally = TALLY.get_or_init(|| {
+        regex::Regex::new(r"^\s*(?:\d+\s+errors?|errors?\s+(?:so far\s+)?[=:]?\s*\d+)\s*[.!]?\s*$")
+            .unwrap()
+    });
     for (kind, line) in scan.into_iter().flat_map(|scan| &scan.firsts) {
-        if !ERROR_WORDS.iter().any(|word| kind.contains(word)) {
+        let severe = ERROR_WORDS.iter().any(|word| kind.contains(word));
+        let named_error =
+            error.is_match(&line.text) && !tally.is_match(&line.text.to_ascii_lowercase());
+        if !(severe || named_error) {
             continue;
         }
         // The kind the line names, "torch.OutOfMemoryError", else its start; the evidence shows it whole.
@@ -355,12 +366,47 @@ pub(super) async fn check(seen: &mut Seen, run: &Now, now: i64) {
             _ => None,
         })
         .collect();
-    for tripped in conditions(seen, run, &covered, now) {
+    let tripped = conditions(seen, run, &covered, now);
+    let patterns = if tripped
+        .iter()
+        .any(|trip| matches!(trip.evidence, Evidence::Line(_)))
+        && run.settings["patterns"]
+            .as_array()
+            .is_some_and(|patterns| !patterns.is_empty())
+    {
+        let patterns = super::super::view::stored_patterns(
+            &run.run.experiment_id,
+            Some(&run.settings.to_string()),
+        )
+        .and_then(|config| {
+            orx_signals::Patterns::compile(&config)
+                .map_err(|error| anyhow!("Pattern {}: {}", error.index + 1, error.reason))
+        });
+        match patterns {
+            Ok(patterns) => Some(patterns),
+            Err(error) => {
+                eprintln!(
+                    "orx up: checking run {}'s error lines against its patterns: {error:#}",
+                    run.run.id
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    for tripped in tripped {
         if seen.tripped.contains(&tripped.fingerprint) {
             continue;
         }
         let evidence = match &tripped.evidence {
             Evidence::Line(line) => {
+                if patterns
+                    .as_ref()
+                    .is_some_and(|patterns| patterns.reads_row(&line.text))
+                {
+                    continue;
+                }
                 let ident = seen.scan.as_ref().and_then(|scan| scan.ident.clone());
                 evidence_of(&run.run.id, ident.as_deref(), &[line]).await
             }

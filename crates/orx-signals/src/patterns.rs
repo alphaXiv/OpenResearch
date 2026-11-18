@@ -197,6 +197,17 @@ impl Patterns {
         })
     }
 
+    /// Whether the first matching pattern treats the line as a table row.
+    pub fn reads_row(&self, line: &str) -> bool {
+        !line.contains("::orx::")
+            && self.record(line).is_some_and(|(_, record)| {
+                record
+                    .get("row")
+                    .and_then(Value::as_str)
+                    .is_some_and(crate::identifier)
+            })
+    }
+
     /// The record the first pattern matching `line` makes of it, and which pattern that is.
     pub(crate) fn record(&self, line: &str) -> Option<(usize, Map<String, Value>)> {
         self.list.iter().enumerate().find_map(|(index, compiled)| {
