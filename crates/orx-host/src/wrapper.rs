@@ -480,19 +480,28 @@ fn stop(
     let mut delay = crate::stop_duration(Duration::from_millis(250));
     loop {
         let (mut scan, no_children) = retry(dir, child, direct_status, |empty, _| {
-            let mut scan = platform::scan(Some(identity), tag, subreaper)?;
+            let mut scan = platform::scan_brief(Some(identity), tag, subreaper)?;
             scan.include(&known)?;
             Ok((scan, empty))
         })?;
         scan.complete &= !has_hook;
+        if scan.processes.is_empty() && no_children {
+            let (mut proof, reaped) = retry(dir, child, direct_status, |empty, _| {
+                let mut proof = platform::scan(Some(identity), tag, subreaper)?;
+                proof.include(&known)?;
+                Ok((proof, empty))
+            })?;
+            proof.complete &= !has_hook;
+            if proof.processes.is_empty() && reaped {
+                return Ok((proof, reaped));
+            }
+            scan = proof;
+        }
         known = scan
             .processes
             .iter()
             .map(platform::Process::survivor)
             .collect();
-        if scan.processes.is_empty() && no_children {
-            return Ok((scan, no_children));
-        }
         let killing = Instant::now() >= kill_at;
         if killed_at.is_some_and(|since: Instant| since.elapsed() >= kill_window) {
             return Ok((scan, no_children));
@@ -759,7 +768,7 @@ pub fn state(dir: &Path) -> io::Result<RunState> {
                 if !dir.join("cancel.sh").try_exists()? {
                     let tag = fs::read_to_string(dir.join("started"))?;
                     if !tag.trim().is_empty() {
-                        let mut scan = platform::scan(Some(&identity), tag.trim(), false)?;
+                        let mut scan = platform::scan_brief(Some(&identity), tag.trim(), false)?;
                         // A dead wrapper cannot escalate; cancel() sent TERM, so after the
                         // grace the kill falls to whoever observes the run.
                         let grace_over = match fs::metadata(dir.join("cancel.req")) {
@@ -777,7 +786,7 @@ pub fn state(dir: &Path) -> io::Result<RunState> {
                                     _ => {}
                                 }
                             }
-                            scan = platform::scan(Some(&identity), tag.trim(), false)?;
+                            scan = platform::scan_brief(Some(&identity), tag.trim(), false)?;
                         }
                         if scan.processes.is_empty() && scan.unreadable.is_empty() && !untagged {
                             return Ok(RunState::Lost {
@@ -840,7 +849,7 @@ pub fn cancel(dir: &Path) -> io::Result<CancelAck> {
     }
     if let Ok(tag) = fs::read_to_string(dir.join("started")) {
         if !tag.trim().is_empty() {
-            let mut scan = platform::scan(Some(&identity), tag.trim(), false)?;
+            let mut scan = platform::scan_brief(Some(&identity), tag.trim(), false)?;
             let known = latest_proof(dir)?.map_or_else(Vec::new, |proof| proof.processes);
             scan.include(&known)?;
             for process in &scan.processes {
