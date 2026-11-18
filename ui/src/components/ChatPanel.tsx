@@ -5158,6 +5158,7 @@ function SessionRow({
   onOpen,
   onRename,
   onSetArchived,
+  onMoveToProject,
   onDelete,
   onOpenExperiment,
   modelName,
@@ -5179,6 +5180,8 @@ function SessionRow({
   onOpen: () => void;
   onRename: (title: string) => void;
   onSetArchived: (archived: boolean) => void;
+  /** Makes the chat a project of its own; labelled for a chat without one. */
+  onMoveToProject?: { label: string; run: () => void };
   onDelete: () => void;
   onOpenExperiment: (projectId: string, experimentId: string) => void;
   modelName: string | null;
@@ -5290,6 +5293,12 @@ function SessionRow({
         if (event.target === event.currentTarget && !editing && !open) {
           showCard();
         }
+      }}
+      onContextMenu={(event) => {
+        if (editing) return;
+        event.preventDefault();
+        closeCard();
+        setOpen(true);
       }}
       onBlur={(event) => {
         if (!ref.current?.contains(event.relatedTarget) && !cardRef.current?.contains(event.relatedTarget)) dismissed.current = false;
@@ -5421,6 +5430,17 @@ function SessionRow({
           >
             <span>{session.archived ? m.chat_unarchive() : m.chat_archive()}</span>
           </MenuItem>
+          {onMoveToProject && (
+            <MenuItem
+              onClick={(e) => {
+                e.stopPropagation();
+                setOpen(false);
+                onMoveToProject.run();
+              }}
+            >
+              <span>{onMoveToProject.label}</span>
+            </MenuItem>
+          )}
           <MenuItem danger
             onClick={(e) => {
               e.stopPropagation();
@@ -5448,6 +5468,7 @@ interface SidebarActions {
   openExperiment: (session: ChatSession, projectId: string, experimentId: string) => void;
   rename: (session: ChatSession, title: string) => void;
   setArchived: (session: ChatSession, archived: boolean) => void;
+  moveToProject: (session: ChatSession, project: Project) => void;
   remove: (session: ChatSession) => void;
 }
 
@@ -5478,7 +5499,7 @@ const SidebarSessionRow = memo(function SidebarSessionRow({
   actions,
   project,
   ...row
-}: Omit<React.ComponentProps<typeof SessionRow>, "onOpen" | "onOpenExperiment" | "onRename" | "onSetArchived" | "onDelete"> & {
+}: Omit<React.ComponentProps<typeof SessionRow>, "onOpen" | "onOpenExperiment" | "onRename" | "onSetArchived" | "onMoveToProject" | "onDelete"> & {
   actions: React.RefObject<SidebarActions>;
   project: Project;
 }) {
@@ -5491,6 +5512,10 @@ const SidebarSessionRow = memo(function SidebarSessionRow({
       onOpenExperiment={(projectId, experimentId) => actions.current.openExperiment(session, projectId, experimentId)}
       onRename={(title) => actions.current.rename(session, title)}
       onSetArchived={(archived) => actions.current.setArchived(session, archived)}
+      onMoveToProject={session.pendingProject ? undefined : {
+        label: project.scratch ? m.create_project_menu() : m.create_project_move_menu(),
+        run: () => actions.current.moveToProject(session, project),
+      }}
       onDelete={() => actions.current.remove(session)}
     />
   );
@@ -7910,6 +7935,7 @@ export function ChatPanel({
     },
     rename,
     setArchived,
+    moveToProject: (s, project) => createProject(project, s),
     remove: (s) => void removeSession(s),
   };
   const openRuntimeDetails = useCallback(() => onSelectMainView("openresearch"), [onSelectMainView]);
@@ -8141,13 +8167,6 @@ export function ChatPanel({
                   <span className="min-w-0 truncate rounded-md border border-border bg-surface px-2.5 py-0.5 text-sm font-normal text-subtext" title={projectName}>
                     {projectName}
                   </span>
-                  {currentProject && !embedded && (
-                    <Tooltip interactive content={m.create_project_move_title()} className="rounded-md">
-                      <IconButton size="small" aria-label={m.create_project_move_title()} onClick={() => createProject(currentProject, activeSession)}>
-                        <FolderPlus size={14} />
-                      </IconButton>
-                    </Tooltip>
-                  )}
                 </>}
             </>}
           </div>

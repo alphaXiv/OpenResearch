@@ -2186,5 +2186,7 @@
   "create_project_pending": "このターンが終わると {name} に移動します",
   "create_project_pending_cancel": "移動を取り消す",
   "create_project_folder_description": "選んだフォルダーにはこのチャットのコミット済みの作業が入り、チャットは新しいプロジェクトで続きます。コミットしていないファイルは、コミットされるまでチャット側に残ります。",
-  "create_project_split_description": "選んだフォルダーには {project} の履歴とこのチャットのコミットが入り、チャットはファイルをそのままに新しいプロジェクトで続きます。{project} には元のコピーが残ります。"
+  "create_project_split_description": "選んだフォルダーには {project} の履歴とこのチャットのコミットが入り、チャットはファイルをそのままに新しいプロジェクトで続きます。{project} には元のコピーが残ります。",
+  "create_project_menu": "プロジェクトを作成…",
+  "create_project_move_menu": "新しいプロジェクトに移動…"
 }

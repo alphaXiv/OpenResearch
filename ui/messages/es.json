@@ -2186,5 +2186,7 @@
   "create_project_pending": "Pasa a {name} cuando termine este turno",
   "create_project_pending_cancel": "Cancelar el traslado",
   "create_project_folder_description": "La carpeta que elijas recibe el trabajo confirmado de este chat, y el chat continúa en el nuevo proyecto. Los archivos sin confirmar se quedan con el chat hasta que los confirme.",
-  "create_project_split_description": "La carpeta que elijas recibe el historial de {project} y los commits de este chat, y el chat continúa en el nuevo proyecto con sus archivos tal como están. {project} conserva su propia copia."
+  "create_project_split_description": "La carpeta que elijas recibe el historial de {project} y los commits de este chat, y el chat continúa en el nuevo proyecto con sus archivos tal como están. {project} conserva su propia copia.",
+  "create_project_menu": "Crear proyecto…",
+  "create_project_move_menu": "Mover a un proyecto nuevo…"
 }

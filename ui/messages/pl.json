@@ -2186,5 +2186,7 @@
   "create_project_pending": "Przeniesienie do {name} po zakończeniu tej tury",
   "create_project_pending_cancel": "Anuluj przeniesienie",
   "create_project_folder_description": "Wybrany folder dostaje zatwierdzoną pracę z tego czatu, a czat jest kontynuowany w nowym projekcie. Niezatwierdzone pliki zostają przy czacie, dopóki ich nie zatwierdzi.",
-  "create_project_split_description": "Wybrany folder dostaje historię {project} i commity tego czatu, a czat jest kontynuowany w nowym projekcie z plikami bez zmian. {project} zachowa własną kopię."
+  "create_project_split_description": "Wybrany folder dostaje historię {project} i commity tego czatu, a czat jest kontynuowany w nowym projekcie z plikami bez zmian. {project} zachowa własną kopię.",
+  "create_project_menu": "Utwórz projekt…",
+  "create_project_move_menu": "Przenieś do nowego projektu…"
 }
