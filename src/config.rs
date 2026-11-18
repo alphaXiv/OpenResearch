@@ -399,7 +399,10 @@ pub(crate) fn in_test_child(cleared: &[&str]) -> bool {
     let temp = std::env::temp_dir().join(format!("orx-test-child-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&temp).unwrap();
     let mut command = crate::process::command(std::env::current_exe().unwrap());
-    command.args(["--exact", test]).env(TEST_CHILD, test);
+    // Run exactly the selected test, including an explicitly selected release-only test.
+    command
+        .args(["--include-ignored", "--exact", test])
+        .env(TEST_CHILD, test);
     // The child's temp dir, home included, goes away with it.
     for var in ["TMPDIR", "TMP", "TEMP"] {
         command.env(var, &temp);

@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use super::{bad_request, AppState};
 use crate::local::harness::managed;
 use crate::store::human_bytes;
-use crate::telemetry::harness::SetupAttempt;
+use crate::telemetry::harness::{InstallStep, SetupAttempt, MANAGED_INSTALL, MANAGED_LOOKUP};
 
 mod sign_in;
 pub(super) use sign_in::SignInPage;
@@ -532,6 +532,7 @@ async fn managed_setup(
     let harness = request.harness.as_str();
     let user = managed::user_install(harness).await;
     let copy = managed::installed(harness);
+    attempt.set_install_step(InstallStep::ReleaseLookup);
     let release = managed::latest(harness).await;
     if let (Some((_, version)), Ok(release)) = (&user, &release) {
         if *version >= release.version {
@@ -546,6 +547,7 @@ async fn managed_setup(
     ) {
         let (_, args) = update_command(harness).expect("the selected agent has an updater");
         let program = bin.to_string_lossy().into_owned();
+        attempt.set_install_step(InstallStep::NativeUpdater);
         let (status, output) = run_in_terminal(
             socket,
             attempt,
@@ -569,7 +571,7 @@ async fn managed_setup(
     }
     let release = match release {
         Ok(release) => release,
-        Err(error) => return Ok(Some(install_failure(error))),
+        Err(error) => return Ok(Some(install_failure(MANAGED_LOOKUP, error))),
     };
     if let Some((bin, version)) = &copy {
         if current_copy(version, &release) && managed::verify(harness, bin, version).await.is_ok() {
@@ -578,12 +580,13 @@ async fn managed_setup(
         }
     }
     let host = (harness == "opencode").then_some(opencode_host);
+    attempt.set_install_step(InstallStep::ManagedCopy);
     match install_with_progress(socket, harness, &release, host).await {
         Some(Ok(_)) => {
             attempt.record("command_completed", "command", None, Some(0), None);
             Ok(None)
         }
-        Some(Err(error)) => Ok(Some(install_failure(error))),
+        Some(Err(error)) => Ok(Some(install_failure(MANAGED_INSTALL, error))),
         None => {
             attempt.record("interrupted", "command", Some("disconnected"), None, None);
             Err("Terminal disconnected".into())
@@ -592,11 +595,11 @@ async fn managed_setup(
 }
 
 /// The terminal prints the attempt's error itself, once the attempt ends.
-fn install_failure(error: crate::error::Error) -> CommandFailure {
+fn install_failure(step: &'static str, error: crate::error::Error) -> CommandFailure {
     let message = format!("{error:#}");
     CommandFailure {
         exit_code: 1,
-        output: message.clone(),
+        output: format!("{step}: {message}"),
         message,
     }
 }
@@ -885,7 +888,13 @@ fn verify_reason(
     match h.auth_state {
         HarnessAuthState::NeedsLogin => ("not_ready", "agent is not signed in"),
         // A credential the harness will actually send could not be verified.
-        HarnessAuthState::Unknown => ("not_ready", "agent sign-in could not be verified"),
+        HarnessAuthState::Unknown => (
+            "not_ready",
+            h.cursor_status_error
+                .map_or("agent sign-in could not be verified", |cause| {
+                    cause.excerpt()
+                }),
+        ),
         HarnessAuthState::Unsupported => ("not_ready", "agent version is unsupported"),
         HarnessAuthState::Ready if !h.agent_ready => ("not_ready", "agent has no usable model"),
         HarnessAuthState::Ready => ("not_ready", "agent reported no usable state"),
@@ -953,6 +962,19 @@ pub(super) fn append_output(output: &mut String, bytes: &[u8]) {
 mod tests {
 
     use super::*;
+
+    #[test]
+    fn managed_failure_keeps_its_step_without_sending_the_local_error() {
+        let private = "local-only vendor detail /private/person/vendor?token=private";
+        for step in [MANAGED_LOOKUP, MANAGED_INSTALL] {
+            let failure = install_failure(step, crate::error::anyhow!(private));
+            assert_eq!(failure.message, private);
+            assert_eq!(
+                crate::telemetry::harness::excerpt_for_test(&failure.output).as_deref(),
+                Some(step)
+            );
+        }
+    }
 
     #[tokio::test]
     async fn every_preset_has_a_managed_install_without_a_command() {
@@ -1119,6 +1141,7 @@ mod tests {
             login_eligible: false,
             auth_check_failed: false,
             auth_observation: None,
+            cursor_status_error: None,
             claude_ultracode: false,
             account: None,
             account_name: None,
@@ -1212,6 +1235,26 @@ mod tests {
             }
         }
         assert_eq!(verify_reason(None).0, "not_installed");
+    }
+
+    #[test]
+    fn unverifiable_cursor_status_keeps_only_a_fixed_probe_class() {
+        use crate::local::harness::cursor::CursorStatusError;
+        let mut h = blank_harness();
+        h.id = "cursor".into();
+        h.installed = true;
+        h.auth_state = crate::local::harness::HarnessAuthState::Unknown;
+        for cause in CursorStatusError::ALL {
+            h.cursor_status_error = Some(cause);
+            let (reason, detail) = verify_reason(Some(&h));
+            assert_eq!(reason, "not_ready");
+            assert_eq!(detail, cause.excerpt());
+            let output = format!("account=private@example.org {detail} secret-token");
+            assert_eq!(
+                crate::telemetry::harness::excerpt_for_test(&output).as_deref(),
+                Some(detail)
+            );
+        }
     }
 
     /// Only an install that produced a runnable binary where there was none
