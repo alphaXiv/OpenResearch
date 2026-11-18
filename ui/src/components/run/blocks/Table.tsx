@@ -80,40 +80,57 @@ function arrivedAfter(rows: Row[], newest: Row | undefined): number {
 }
 
 type Columns = { columns: string[]; signals: Signals; vs: boolean };
+type PageColumns = Columns & { showChange: boolean };
 
-const PageRow = memo(function PageRow({ row, parent, pending, index, columns, signals, vs, measure }: Line & Columns & { index?: number; measure?: (row: HTMLTableRowElement | null) => void }) {
+function hasChange(lines: Line[], column: string) {
+  return lines.some(({ row, parent }) => typeof row[column] === "number" && typeof parent === "number");
+}
+
+const PageRow = memo(function PageRow({ row, parent, pending, index, columns, signals, vs, showChange, measure }: Line & PageColumns & { index?: number; measure?: (row: HTMLTableRowElement | null) => void }) {
   const compare = columns[1];
   const value = row[compare];
-  const change = vs && typeof value === "number" && typeof parent === "number" ? versusOf(signals[compare], value - parent) : null;
+  const spec = signals[compare];
+  const diff = showChange && typeof value === "number" && typeof parent === "number" ? value - parent : null;
+  const change = diff === null ? null : versusOf(spec, diff);
+  const changeFormat = { label: compare, scale: spec?.scale, digits: spec?.digits, unit: spec?.unit, sign: true };
+
   return (
     <tr ref={measure} className="border-t border-border-variant" data-index={index} aria-rowindex={index === undefined ? undefined : index + 2}>
-      {columns.map((column, at) => (
-        <td key={column} className={cn("py-2 [overflow-wrap:anywhere]", at ? "ps-3 text-end tabular-nums" : "text-start", pending ? "text-ink-subtext" : "text-text")}>
-          {cellText(signals, column, row[column])}
-        </td>
-      ))}
+      {columns.map((column, at) => {
+        const text = cellText(signals, column, row[column]);
+        return (
+          <td key={column} title={text} className={cn("truncate py-2", at ? "ps-3 text-end tabular-nums" : "text-start", pending ? "text-ink-subtext" : "text-text")}>
+            {text}
+          </td>
+        );
+      })}
       {vs && <td className="py-2 ps-3 text-end tabular-nums text-ink-subtext">{cellText(signals, compare, parent)}</td>}
-      {vs && (
-        <td className="py-2 ps-3 text-end">
-          {change && (change.flat
-            ? <span className="text-ink-subtext">{m.run_level_with_parent()}</span>
-            : <Delta delta={{ down: change.d < 0, good: change.good, flat: false, magnitude: ltr(fmtMagnitude(signals[compare], change.mag)) }} said className="justify-end" />)}
+      {showChange && (
+        <td className="py-2 ps-3 text-end tabular-nums">
+          {change
+            ? <Delta delta={{ down: change.d < 0, good: change.good, flat: change.flat, magnitude: ltr(fmtMagnitude(spec, change.mag)) }} said className="justify-end" />
+            : diff !== null && ltr(fmtSignal(changeFormat, diff))}
         </td>
       )}
     </tr>
   );
 });
 
-function Head({ columns, signals, vs }: Columns) {
+function Head({ columns, signals, vs, showChange, multiple }: PageColumns & { multiple: boolean }) {
   const label = (column: string) => signals[column]?.label ?? column;
   return (
-    <thead className="sticky top-0 z-[1] bg-background">
-      <tr className="text-xs text-ink-subtext" aria-rowindex={1}>
-        {columns.map((column, index) => <th key={column} scope="col" className={cn("pb-1.5 font-normal", index ? "ps-3 text-end" : "text-start")}>{label(column)}</th>)}
-        {vs && <th scope="col" className="pb-1.5 ps-3 text-end font-normal">{m.run_chart_parent()}</th>}
-        {vs && <th scope="col" className="pb-1.5 ps-3 text-end font-normal">{m.run_table_change()}</th>}
-      </tr>
-    </thead>
+    <>
+      {!vs && multiple && <caption className="mb-1.5 text-start text-xs text-ink-subtext [.md_&]:px-3.5 [.md_&]:pt-1.5">{m.run_table_newest_first()}</caption>}
+      <thead className="sticky top-0 z-[1] bg-background">
+        <tr className="text-xs text-ink-subtext" aria-rowindex={1}>
+          {columns.map((column, index) => (
+            <th key={column} scope="col" className={cn("pb-1.5 font-normal", index ? "ps-3 text-end" : "text-start", index === 0 && columns.length === 2 && showChange && "w-1/3")}>{label(column)}</th>
+          ))}
+          {vs && <th scope="col" className="pb-1.5 ps-3 text-end font-normal">{m.run_chart_parent()}</th>}
+          {showChange && <th scope="col" className="pb-1.5 ps-3 text-end font-normal">{m.run_table_change()}</th>}
+        </tr>
+      </thead>
+    </>
   );
 }
 
@@ -135,6 +152,7 @@ function RowBox({ lines, rows, title, returned, onNewest, ...columns }: AllRowsP
   const box = useRef<HTMLDivElement>(null);
   const [held, setHeld] = useState<{ lines: Line[]; newest: Row | undefined } | null>(null);
   const shown = held?.lines ?? lines;
+  const showChange = hasChange(shown, columns.columns[1]);
   const arrived = held ? arrivedAfter(rows, held.newest) : 0;
 
   const virtualizer = useVirtualizer({
@@ -170,10 +188,10 @@ function RowBox({ lines, rows, title, returned, onNewest, ...columns }: AllRowsP
         className="max-h-96 overflow-y-auto rounded-sm [overflow-anchor:none] focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus"
       >
         <table className="w-full table-fixed border-collapse text-sm" aria-rowcount={shown.length + 1}>
-          <Head {...columns} />
+          <Head {...columns} showChange={showChange} multiple={shown.length > 1} />
           <tbody>
             {before > 0 && <tr aria-hidden="true" style={{ height: before }} />}
-            {items.map((item) => <PageRow key={item.key} {...shown[item.index]} {...columns} index={item.index} measure={virtualizer.measureElement} />)}
+            {items.map((item) => <PageRow key={item.key} {...shown[item.index]} {...columns} showChange={showChange} index={item.index} measure={virtualizer.measureElement} />)}
             {after > 0 && <tr aria-hidden="true" style={{ height: after }} />}
           </tbody>
         </table>
@@ -233,14 +251,16 @@ export function Table({ monitor, block, size, live, title }: { monitor: RunMonit
   }
 
   const newest = Math.max(1, block.last ?? NEWEST);
+  const shown = lines.slice(0, newest);
+  const showChange = hasChange(shown, block.columns[1]);
   const columns = { columns: block.columns, signals, vs };
   return (
     <div>
       {all ? <AllRows lines={lines} rows={rows} title={title} {...columns} /> : (
         <table className="w-full table-fixed border-collapse text-sm">
-          <Head {...columns} />
+          <Head {...columns} showChange={showChange} multiple={shown.length > 1} />
           <tbody>
-            {lines.slice(0, newest).map((line) => <PageRow key={keyOf(line.id)} {...line} {...columns} />)}
+            {shown.map((line) => <PageRow key={keyOf(line.id)} {...line} {...columns} showChange={showChange} />)}
           </tbody>
         </table>
       )}

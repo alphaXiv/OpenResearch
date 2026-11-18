@@ -2245,6 +2245,7 @@
   "run_table_change": "التغيّر",
   "run_table_show_all": "عرض كل الصفوف: {count}",
   "run_table_show_newest": "عرض الأحدث: {count}",
+  "run_table_newest_first": "الأحدث أولاً",
   "run_table_new_rows_one": "صفوف جديدة: {count}",
   "run_table_new_rows_other": "صفوف جديدة: {count}",
   "run_table_every_row": "{title}، كل الصفوف",

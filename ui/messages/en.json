@@ -2245,6 +2245,7 @@
   "run_table_change": "Change",
   "run_table_show_all": "Show all {count} rows",
   "run_table_show_newest": "Show the newest {count}",
+  "run_table_newest_first": "Newest first",
   "run_table_new_rows_one": "{count} new row",
   "run_table_new_rows_other": "{count} new rows",
   "run_table_every_row": "{title}, every row",

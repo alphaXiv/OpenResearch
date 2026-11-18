@@ -2245,6 +2245,7 @@
   "run_table_change": "変化",
   "run_table_show_all": "全{count}行を表示",
   "run_table_show_newest": "最新の{count}行を表示",
+  "run_table_newest_first": "新しい順",
   "run_table_new_rows_one": "新しい行 {count}件",
   "run_table_new_rows_other": "新しい行 {count}件",
   "run_table_every_row": "{title}（全行）",

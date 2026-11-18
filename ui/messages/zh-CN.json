@@ -2245,6 +2245,7 @@
   "run_table_change": "变化",
   "run_table_show_all": "显示全部 {count} 行",
   "run_table_show_newest": "显示最新 {count} 行",
+  "run_table_newest_first": "最新的在前",
   "run_table_new_rows_one": "{count} 个新行",
   "run_table_new_rows_other": "{count} 个新行",
   "run_table_every_row": "{title}，全部行",

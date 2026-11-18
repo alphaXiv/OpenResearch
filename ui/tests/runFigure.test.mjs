@@ -38,6 +38,19 @@ test("a figure citation draws the page chart and keeps the chip's open gesture",
   assert.ok(!container.querySelector("p div"), "block content does not nest in a paragraph");
 });
 
+test("a table citation tells the reader its most recent reports come first", async () => {
+  const block = { table: "eval", columns: ["task", "score"], title: "Eval" };
+  const monitor = {
+    ...fixture,
+    view: { ...fixture.view, blocks: [block] },
+    rows: { eval: [{ task: "arc", score: 0.7 }, { task: "piqa", score: 0.6 }, { task: "boolq", score: 0.5 }] },
+  };
+  const { container } = await message({ monitor });
+  const table = container.querySelector("table");
+  assert.equal(table.caption?.textContent, m.run_table_newest_first());
+  assert.deepEqual([...table.querySelectorAll("tbody tr")].map((row) => row.cells[0].textContent.replace(/[⁦-⁩]/g, "")), ["boolq", "piqa", "arc"]);
+});
+
 test("stats are the first block and update with the shared live query", async () => {
   const monitor = { ...fixture, view: { ...fixture.view, blocks: [{ stats: ["loss"] }, ...fixture.view.blocks] } };
   const { container, workspace } = await message({ monitor });

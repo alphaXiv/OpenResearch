@@ -2245,6 +2245,7 @@
   "run_table_change": "변화",
   "run_table_show_all": "{count}개 행 모두 보기",
   "run_table_show_newest": "최신 {count}개 보기",
+  "run_table_newest_first": "최신순",
   "run_table_new_rows_one": "새 행 {count}개",
   "run_table_new_rows_other": "새 행 {count}개",
   "run_table_every_row": "{title}, 모든 행",

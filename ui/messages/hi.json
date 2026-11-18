@@ -2245,6 +2245,7 @@
   "run_table_change": "बदलाव",
   "run_table_show_all": "सभी {count} पंक्तियाँ दिखाएँ",
   "run_table_show_newest": "नवीनतम {count} दिखाएँ",
+  "run_table_newest_first": "सबसे नए पहले",
   "run_table_new_rows_one": "{count} नई पंक्ति",
   "run_table_new_rows_other": "{count} नई पंक्तियाँ",
   "run_table_every_row": "{title}, सभी पंक्तियाँ",

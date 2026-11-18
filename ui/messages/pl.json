@@ -2245,6 +2245,7 @@
   "run_table_change": "Zmiana",
   "run_table_show_all": "Pokaż wszystkie wiersze: {count}",
   "run_table_show_newest": "Pokaż najnowsze: {count}",
+  "run_table_newest_first": "Od najnowszych",
   "run_table_new_rows_one": "Nowe wiersze: {count}",
   "run_table_new_rows_other": "Nowe wiersze: {count}",
   "run_table_every_row": "{title}, wszystkie wiersze",

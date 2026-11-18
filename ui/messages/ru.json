@@ -2245,6 +2245,7 @@
   "run_table_change": "Изменение",
   "run_table_show_all": "Показать все строки: {count}",
   "run_table_show_newest": "Показать последние: {count}",
+  "run_table_newest_first": "Сначала новые",
   "run_table_new_rows_one": "Новые строки: {count}",
   "run_table_new_rows_other": "Новые строки: {count}",
   "run_table_every_row": "{title}, все строки",

@@ -2245,6 +2245,7 @@
   "run_table_change": "تغییر",
   "run_table_show_all": "نمایش همه {count} ردیف",
   "run_table_show_newest": "نمایش {count} مورد جدیدتر",
+  "run_table_newest_first": "ابتدا جدیدترین‌ها",
   "run_table_new_rows_one": "{count} ردیف جدید",
   "run_table_new_rows_other": "{count} ردیف جدید",
   "run_table_every_row": "{title}، همه ردیف‌ها",

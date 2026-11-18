@@ -19,14 +19,15 @@ function fixture(name) {
   return view ? { ...monitor, view: view.view, viewFrom: { ...monitor.viewFrom, markup: view.markup } } : monitor;
 }
 // A chart sizes itself to its box, which happy-dom never lays out.
+let chartWidth = 800;
 for (const size of ["clientHeight", "clientWidth", "offsetHeight", "offsetWidth"]) {
-  Object.defineProperty(HTMLElement.prototype, size, { configurable: true, get: () => 800 });
+  Object.defineProperty(HTMLElement.prototype, size, { configurable: true, get: () => size.endsWith("Width") ? chartWidth : 800 });
 }
 
 /** What a reader sees, without the marks that keep numbers and names whole in either direction. */
 const text = (element) => element.textContent.replace(/[⁦-⁩]/g, "");
 const chartOf = (container) => container.querySelector('svg[role="img"]');
-const labels = (container) => [...chartOf(container).querySelectorAll("text")].map(text);
+const labels = (container) => [...chartOf(container).querySelectorAll("text, foreignObject")].map(text);
 const name = (container) => chartOf(container).getAttribute("aria-label").replace(/[⁦-⁩]/g, "");
 const with_ = (monitor, block) => ({ ...monitor, view: { ...monitor.view, blocks: [block] } });
 
@@ -213,12 +214,25 @@ test("bars stand one per category in the table's order, with the parent's level 
   assert.ok(ticks.includes("80%"), `a share reads in percent: ${ticks.join(" | ")}`);
   assert.equal(name(page), "Accuracy: algebra 84.2%, geometry 71.3%, number theory 76.8%, probability 80.1%, calculus 65.5%, combinatorics 58.7%");
 
-  const readout = await point(page, 38 + 714 / 6 / 2);
+  const readout = await point(page, 38 + 756 / 6 / 2);
   assert.match(text(readout), /^algebraParent81\.1%Accuracy84\.2%$/);
 
   const strip = await draw(monitor, block, "strip");
   assert.equal(chartOf(strip).querySelectorAll("rect").length, 6);
   assert.equal(strip.querySelectorAll("svg text").length, 0);
+});
+
+test("a narrow bars chart labels all four categories", async () => {
+  const base = fixture("evalbars");
+  const categories = ["algebra", "geometry", "proofs", "counting"].map((category, i) => ({ category, accuracy: 0.8 - i * 0.1 }));
+  const monitor = { ...base, rows: { categories }, parent: null };
+  chartWidth = 303;
+  try {
+    const page = await draw(monitor, monitor.view.blocks[0]);
+    assert.deepEqual(labels(page).filter((label) => /[a-z]/.test(label)), categories.map(({ category }) => category));
+  } finally {
+    chartWidth = 800;
+  }
 });
 
 test("a chart of a table with no rows says so, with a yet only while the run is going, over the parent's when there is one", async () => {
@@ -330,6 +344,22 @@ test("a table against the parent pairs the same report of each key at a step, an
   assert.deepEqual(cells(ended), ["sst2 85.0 90.0", "mnli — 70.0"], "once ended, beside where the parent ended");
   const asked = await draw(compared, { table: "eval", columns: ["task", "score"], vs: "final" });
   assert.deepEqual(cells(asked), cells(ended), "the table's own way wins");
+});
+
+test("a table reports signed numeric changes without a preferred direction", async () => {
+  const base = fixture("pipeline");
+  const monitor = {
+    ...base,
+    view: { ...base.view, signals: {} },
+    rows: { eval: [{ task: "winogrande", score: 0.597 }] },
+    parent: { ...base.parent, rows: { eval: [{ task: "winogrande", score: 0.577 }, { task: "sst2", score: 0.9 }] } },
+  };
+  const block = { table: "eval", columns: ["task", "score"], vs: "parent" };
+  const page = await draw(monitor, block);
+  assert.equal(text(page.querySelector("tbody tr td:last-child")), "+0.02");
+
+  const pending = await draw({ ...monitor, rows: {} }, block);
+  assert.ok(![...pending.querySelectorAll("th")].some((th) => text(th) === m.run_table_change()));
 });
 
 test("without a parent the chart marks its starting value and the best value in the declared direction", async () => {

@@ -2245,6 +2245,7 @@
   "run_table_change": "Değişim",
   "run_table_show_all": "{count} satırın tümünü göster",
   "run_table_show_newest": "En yeni {count} satırı göster",
+  "run_table_newest_first": "En yeniler önce",
   "run_table_new_rows_one": "{count} yeni satır",
   "run_table_new_rows_other": "{count} yeni satır",
   "run_table_every_row": "{title}, tüm satırlar",

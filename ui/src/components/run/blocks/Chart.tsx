@@ -247,7 +247,7 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
   const yRange = !page && drawn.length > 0 ? rangeLine(yName, Math.min(...ys), Math.max(...ys), yLabel, yLog) : "";
   /** A strip with room for its axes in a line under the plot, the two ranges at full length. */
   const ranged = !page && boxHeight >= 44 && !blank && (xRange.length + yRange.length) * CHAR_WIDTH + 12 <= width;
-  const margin = page ? { start: 38, end: 48, top: yCaption ? 22 : 8, bottom: 22 } : { start: 1, end: 5, top: 5, bottom: ranged ? 17 : 3 };
+  const margin = page ? { start: 38, end: categories ? 6 : 48, top: yCaption ? 22 : 8, bottom: 22 } : { start: 1, end: 5, top: 5, bottom: ranged ? 17 : 3 };
   const innerWidth = Math.max(1, width - margin.start - margin.end);
   const innerHeight = Math.max(1, boxHeight - margin.top - margin.bottom);
   let y0 = Math.min(...ys);
@@ -454,7 +454,6 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
   /** A table's line keeps its full ink under its points, which are its data, not samples along it. */
   const dim = (line: Series) => !table && dotted(line);
   const yTicks = yLog ? logTicks(y0, y1, 4) : ticks(y0, y1, 4);
-  const every = categories ? Math.max(1, Math.ceil((Math.max(...categories.map((word) => word.length)) * CHAR_WIDTH + 8) / slot)) : 1;
 
   const ends = table ? [] : series.flatMap((line) => {
     const end = [...line.points].reverse().find((point) => point[1] !== null);
@@ -480,8 +479,10 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
           {drawn.length > 0 && yCaption && <text x={margin.start - 6} y={10} textAnchor="start" fill="var(--subtext)">{yCaption}</text>}
           <line x1={margin.start} x2={margin.start + innerWidth} y1={margin.top + innerHeight} y2={margin.top + innerHeight} stroke="var(--border)" />
           {xTicks.map((value) => <text key={value} x={x(value)} y={boxHeight - 6} textAnchor="middle" fill="var(--subtext)">{xLabel(value)}</text>)}
-          {drawn.length > 0 && categories?.map((word, index) => index % every === 0 && (
-            <text key={index} x={x(index)} y={boxHeight - 6} textAnchor="middle" fill="var(--subtext)">{word}</text>
+          {drawn.length > 0 && categories?.map((word, index) => (
+            <foreignObject key={index} x={x(index) - slot / 2} y={boxHeight - 18} width={slot} height={18}>
+              <div dir="auto" className="truncate px-0.5 text-center text-xs text-subtext">{word}</div>
+            </foreignObject>
           ))}
           {!categories && <text x={margin.start + innerWidth + margin.end - 2} y={boxHeight - 6} textAnchor="end" fill="var(--subtext)">{xCaption}</text>}
           {blank && <text x={margin.start + innerWidth / 2} y={margin.top + innerHeight / 2} textAnchor="middle" fill="var(--subtext)">{empty}</text>}
