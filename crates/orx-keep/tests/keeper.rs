@@ -305,7 +305,8 @@ fn tail_retention_keeps_the_newest_output_and_never_holds_the_child() {
     });
     assert!(link.welcome.next - link.welcome.start <= 256);
     link.control(&Control::Stop);
-    link.read_exit();
+    // A reader that falls behind the tail skips ahead, so only the exit is certain.
+    while wire::read_frame(&mut link.stream).unwrap().0 != kind::EXIT {}
 }
 
 #[test]
