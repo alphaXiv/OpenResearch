@@ -77,6 +77,7 @@ pub async fn run(args: crate::ProjectArgs) -> Result<()> {
             print_skipped(&manifest.skipped);
             Ok(())
         }
+        ProjectCommand::Create { name, path } => propose(&name, path.as_deref()),
         ProjectCommand::Unpublish { project_id } => {
             let store = crate::store::Store::open()?;
             let project = crate::local::resolve::resolve_project(&store, &project_id)?;
@@ -155,4 +156,52 @@ fn print_skipped(skipped: &[String]) {
             crate::store::human_bytes(share::MAX_FILE_BYTES)
         );
     }
+}
+
+/// Proposes a project for the calling chat; the user creates it from the card
+/// the dashboard draws for this command.
+fn propose(name: &str, path: Option<&str>) -> Result<()> {
+    let session_id = std::env::var(crate::local::chat::CHAT_SESSION_ENV)
+        .ok()
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| {
+            anyhow!("orx project create makes the chat it runs in a project of its own; run it from that chat.")
+        })?;
+    let store = crate::store::Store::open_for_reading()?;
+    let session = store
+        .get_chat_session(&session_id)?
+        .ok_or_else(|| anyhow!("Chat {session_id} was not found."))?;
+    let moves = if store
+        .get_local_project(&session.project_id)?
+        .is_some_and(|project| project.is_scratch())
+    {
+        "the repository moves there with your commits"
+    } else {
+        "a new repository starts there from the project's history and your commits"
+    };
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(anyhow!("Give the project a name with --name."));
+    }
+    let place = match path {
+        Some(path) => {
+            let target = expand_path(path)?;
+            if target.exists() && (!target.is_dir() || std::fs::read_dir(&target)?.next().is_some())
+            {
+                return Err(anyhow!(
+                    "{} already exists and is not an empty folder; pass another --path.",
+                    target.display()
+                ));
+            }
+            format!("at {}", target.display())
+        }
+        None => "in ~/OpenResearch".to_string(),
+    };
+    println!(
+        "Proposed the project \"{name}\" {place}. The user reviews the name and folder in this chat and creates it; \
+         then {moves}, your worktree keeps every file, and the chat continues in that project. \
+         If you are mid-task when they do, the move waits for your turn to end and you are told when it happened. \
+         Tell the user the proposal is ready for their review."
+    );
+    Ok(())
 }

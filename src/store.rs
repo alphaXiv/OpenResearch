@@ -1345,6 +1345,12 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS idx_chat_subscriptions_target
                 ON chat_subscriptions(target_session_id);
+            CREATE TABLE IF NOT EXISTS chat_project_moves (
+                session_id   TEXT PRIMARY KEY,
+                name         TEXT NOT NULL,
+                path         TEXT NOT NULL,
+                requested_at INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS chat_turn_leases (
                 chat_session_id TEXT PRIMARY KEY,
                 claim_token     TEXT NOT NULL,
@@ -1604,6 +1610,7 @@ impl Store {
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_project_env_vars AFTER DELETE ON local_projects BEGIN DELETE FROM project_env_vars WHERE project_id = OLD.id; END;")?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_log_collection AFTER DELETE ON runs BEGIN DELETE FROM log_collections WHERE run_id = OLD.id; END;")?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_steer_receipts AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_steer_receipts WHERE session_id = OLD.id; END;")?;
+        schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_project_move AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_project_moves WHERE session_id = OLD.id; END;")?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_invocation_identities AFTER DELETE ON chat_sessions BEGIN DELETE FROM native_invocation_identities WHERE session_id = OLD.id; END;")?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_acp_session AFTER DELETE ON chat_sessions BEGIN DELETE FROM acp_sessions WHERE session_id = OLD.id; END;")?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_subscriptions AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_subscriptions WHERE subscriber_session_id = OLD.id OR target_session_id = OLD.id; END;")?;
@@ -3880,6 +3887,15 @@ impl Store {
         Ok(())
     }
 
+    /// A chat without a project becomes a project when the user names it.
+    pub fn restamp_local_project_created(&self, id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE local_projects SET created_at = ?2 WHERE id = ?1",
+            params![id, now_ms()],
+        )?;
+        Ok(())
+    }
+
     /// Bump updated_at only — records a visit for the recency sort and fires
     /// the SSE project.updated diff.
     pub fn touch_local_project(&self, id: &str) -> Result<()> {
@@ -4388,6 +4404,72 @@ impl Store {
             }
         }
         Ok((deleting, retained))
+    }
+
+    /// A new project the user asked a chat to move into once it is idle.
+    pub fn set_chat_project_move(&self, session_id: &str, name: &str, path: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO chat_project_moves (session_id, name, path, requested_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![session_id, name, path, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    pub fn chat_project_move(&self, session_id: &str) -> Result<Option<(String, String)>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT name, path FROM chat_project_moves WHERE session_id = ?1",
+                params![session_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?)
+    }
+
+    pub fn chat_project_move_sessions(&self) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT session_id FROM chat_project_moves")?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Removes the waiting move, returning it: whoever takes it owns it.
+    pub fn take_chat_project_move(&self, session_id: &str) -> Result<Option<(String, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("DELETE FROM chat_project_moves WHERE session_id = ?1 RETURNING name, path")?;
+        // Stepped to the end, so the delete has committed before the row is returned.
+        let rows = stmt
+            .query_map(params![session_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows.into_iter().next())
+    }
+
+    /// Creates `p` and moves chats, with their transcripts, into it at once.
+    pub fn create_local_project_for_chats(
+        &self,
+        p: &LocalProject,
+        session_ids: &[String],
+    ) -> Result<()> {
+        let tx = self.begin_immediate()?;
+        tx.execute(
+            &format!("INSERT INTO local_projects ({PROJECT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"),
+            params![
+                p.id, p.name, p.slug, p.github_owner, p.github_repo,
+                p.github_sync_enabled, p.baseline_branch, p.repo_path, p.run_command, p.paper_id,
+                p.created_at, p.updated_at,
+            ],
+        )?;
+        for id in session_ids {
+            tx.execute(
+                "UPDATE chat_sessions SET project_id = ?2 WHERE id = ?1",
+                params![id, p.id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn delete_chat_session(&self, id: &str) -> Result<()> {

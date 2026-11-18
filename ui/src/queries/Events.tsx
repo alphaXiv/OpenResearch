@@ -180,6 +180,12 @@ export function QueryEvents() {
             : { type: "activeLeaf", sessionId: event.sessionId, leafId: event.activeLeafId }, true);
       }
       if (event.type === "session" && !deletedSessionIds.has(event.session.id)) {
+        // A chat that moved into another project leaves its old project's list.
+        for (const [key, rows] of queryClient.getQueriesData<ChatSession[]>({ queryKey: [...scope, "listChatSessions"] })) {
+          if (key[3] !== event.session.projectId && rows?.some((row) => row.id === event.session.id)) {
+            queryClient.setQueryData(key, rows.filter((row) => row.id !== event.session.id));
+          }
+        }
         queryClient.setQueryData(listChatSessionsQuery(event.session.projectId).queryKey, (rows) => {
           if (!rows) return undefined;
           const old = rows.find((row) => row.id === event.session.id);
