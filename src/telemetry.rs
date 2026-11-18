@@ -994,6 +994,12 @@ fn cancel_pending() {
     }
 }
 
+/// Observe events at the telemetry boundary in an isolated router test, without
+/// enabling network sends or changing the user's telemetry preference.
+#[cfg(test)]
+pub(crate) static TEST_CAPTURE: OnceLock<std::sync::mpsc::Sender<(String, serde_json::Value)>> =
+    OnceLock::new();
+
 /// Queue an event on disk, spawn the send, and register its handle for the
 /// single exit-time flush. Crucially does NOT await the flush window here —
 /// awaiting inline would delay the caller's next `println!` (the "✓ …" success
@@ -1001,6 +1007,14 @@ fn cancel_pending() {
 /// telemetry is disabled. Deliberately not `async` beyond the spawn: nothing to
 /// await.
 pub(crate) fn capture(event: impl Into<String>, extra: serde_json::Value) {
+    #[cfg(test)]
+    let event = {
+        let event = event.into();
+        if let Some(events) = TEST_CAPTURE.get() {
+            let _ = events.send((event.clone(), extra.clone()));
+        }
+        event
+    };
     if let Some(handle) = spawn_event(event, extra) {
         register_pending(handle);
     }

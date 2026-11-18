@@ -322,7 +322,10 @@ async fn run(
             env.extend(MANAGED_ENV.map(|(key, value)| (key, value.into())));
         }
         if let Some(profile) = &request.profile {
-            env.extend(profile_env(profile).map_err(|error| error.record(attempt, "detect"))?);
+            env.extend(
+                crate::local::agent_profiles::login_env(profile)
+                    .map_err(|error| SetupBlock::Profile(error).record(attempt, "detect"))?,
+            );
         }
         attempt.record("command_started", "command", None, None, None);
         let login = matches!(request.action, Action::Login);
@@ -895,10 +898,6 @@ fn setup_program(harness: &crate::local::harness::HarnessInfo) -> Result<&str, S
     })
 }
 
-fn profile_env(profile: &str) -> Result<Vec<(&'static str, std::ffi::OsString)>, SetupBlock> {
-    crate::local::agent_profiles::login_env(profile).map_err(SetupBlock::Profile)
-}
-
 /// The ingested reason, plus a fixed phrase naming which predicate failed —
 /// `not_ready` alone cannot tell a stale executable from a signed-out CLI.
 /// The phrase is one of `safe_error_excerpt`'s allowlisted literals, so it
@@ -1179,42 +1178,6 @@ mod tests {
             models: Vec::new(),
             options: crate::local::harness::HarnessOptions::none(),
             found_providers: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn a_login_separates_a_missing_program_from_an_unavailable_account() {
-        if !crate::config::in_test_child(&[]) {
-            return;
-        }
-        let mut h = blank_harness();
-        let missing = setup_program(&h).unwrap_err();
-        h.installed = true;
-        let no_path = setup_program(&h).unwrap_err();
-        h.bin_path = Some("codex".into());
-        assert_eq!(setup_program(&h).unwrap(), "codex");
-        // Validly shaped profile, removed since the dialog opened. No agent is run.
-        let deleted_profile = profile_env("codex-012345abcd").unwrap_err();
-        for (error, reason, detail) in [
-            (missing, "not_installed", "agent is not installed"),
-            (no_path, "not_ready", "agent executable path is unavailable"),
-            (
-                deleted_profile,
-                "not_ready",
-                "agent account could not be prepared",
-            ),
-            (
-                SetupBlock::NoDetection,
-                "not_ready",
-                "agent detection returned no result",
-            ),
-        ] {
-            assert_eq!(error.diagnostic(), (reason, detail));
-            assert!(crate::telemetry::harness::contract::REASONS.contains(&reason));
-            assert_eq!(
-                crate::telemetry::harness::excerpt_for_test(detail).as_deref(),
-                Some(detail)
-            );
         }
     }
 
