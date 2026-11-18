@@ -130,7 +130,7 @@ import {
 import { releaseNotesUrl, useRestartApp, useUpdateStatus } from "./UpdateBanner";
 import { useColoredMarkdown, useThemePreference, type ThemePreference } from "../theme";
 import { m } from "../paraglide/messages.js";
-import { fmtBytes, fmtClock, fmtMemory, ltr } from "../i18n";
+import { autoDir, fmtBytes, fmtClock, fmtMemory, ltr } from "../i18n";
 import { setLocale, useLocale } from "../locale";
 import { isLocale, type Locale } from "../paraglide/runtime.js";
 import { TokenForm } from "./GitTokenForm";
@@ -3442,13 +3442,55 @@ function showEnvError(name: string, err: unknown) {
   showAlert(message.includes(name) ? message : `${name}: ${message}`, "error");
 }
 
+/** A saved variable's description, edited in place. */
+function EnvDescription({ name, description, projectId }: { name: string; description: string; projectId?: string }) {
+  const workspace = useWorkspace();
+
+  const [value, setValue] = useState(description);
+  // Reset during render: an effect would also rerun when a hidden machine is shown and erase the edit.
+  const [shown, setShown] = useState(description);
+  if (shown !== description) {
+    setShown(description);
+    setValue(description);
+  }
+
+  function save() {
+    if (value.trim() === description) return;
+    mutSetEnvVar.runWithOptions(workspace, { key: name, description: value.trim(), projectId }, {
+      onError: (err) => { setValue(description); showEnvError(name, err); },
+    });
+  }
+
+  return (
+    <Input
+      variant="inline"
+      className="h-6 text-sm text-subtext"
+      value={value}
+      onChange={(e) => setValue(e.target.value)}
+      onBlur={save}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") e.currentTarget.blur();
+        if (e.key === "Escape") setValue(description);
+      }}
+      placeholder={m.settings_env_add_description()}
+      aria-label={m.settings_env_description_of({ name: ltr(name) })}
+    />
+  );
+}
+
 /** One variable row. Set: masked value + delete. Unset: inline value input. */
 function EnvRow({
   name,
   entry,
+  projectId,
+  setInProject = false,
 }: {
   name: string;
   entry: EnvVar | undefined;
+  /** The project this row's variable belongs to; none for every project's. */
+  projectId?: string;
+  /** The open project saves its own value under this name. */
+  setInProject?: boolean;
 }) {
   const workspace = useWorkspace();
 
@@ -3469,9 +3511,10 @@ function EnvRow({
     if (!value.trim() || saving || (plain && !dirty)) return;
     setSaving(true);
     try {
-      const vars = await mutSetEnvVar.runAsHeadlessPromise(workspace, name, value.trim(), {});
+      const saved = await mutSetEnvVar.runAsHeadlessPromise(workspace, { key: name, value: value.trim(), projectId }, {});
       // The server may normalize a plain value back to what was already stored.
-      setValue(plain ? vars.find((v) => v.key === name)?.value ?? "" : "");
+      const vars = projectId ? saved.projectVars : saved.vars;
+      setValue(plain ? vars?.find((v) => v.key === name)?.value ?? "" : "");
     } catch (err) {
       showEnvError(name, err);
     } finally {
@@ -3481,18 +3524,22 @@ function EnvRow({
 
   function remove() {
     if (saving) return;
-    mutDeleteEnvVar.runWithOptions(workspace, name, { onError: (err) => showEnvError(name, err) });
+    mutDeleteEnvVar.runWithOptions(workspace, name, projectId, { onError: (err) => showEnvError(name, err) });
   }
 
   return (
     <>
       <tr>
-        <td className="font-mono text-sm">{name}</td>
+        <td>
+          <div className="font-mono text-sm">{name}</div>
+          {entry && <EnvDescription name={name} description={entry.description ?? ""} projectId={projectId} />}
+        </td>
         <td className="text-base text-subtext">
           {entry && !plain ? (
             <>
               {entry.maskedValue}
               {entry.inProcessEnv && <Badge>{m.settings_page_overridden_by_env()}</Badge>}
+              {!entry.inProcessEnv && setInProject && <Badge>{m.settings_env_set_in_project()}</Badge>}
             </>
           ) : (
             <Input
@@ -3515,6 +3562,7 @@ function EnvRow({
             />
           )}
           {plain && entry?.inProcessEnv && <Badge>{m.settings_page_overridden_by_env()}</Badge>}
+          {plain && !entry?.inProcessEnv && setInProject && <Badge>{m.settings_env_set_in_project()}</Badge>}
         </td>
         <td>
           {entry && !(plain && dirty && value.trim()) ? (
@@ -3542,8 +3590,8 @@ function EnvRow({
   );
 }
 
-/** The in-table row for a new custom variable (opened by “Add variable”). */
-function AddVarRow({ onDone }: { onDone: () => void }) {
+/** The in-table row for a new custom variable (opened by "Add variable"). */
+function AddVarRow({ projectId, onDone }: { projectId?: string; onDone: () => void }) {
   const workspace = useWorkspace();
 
   const [key, setKey] = useState("");
@@ -3554,7 +3602,7 @@ function AddVarRow({ onDone }: { onDone: () => void }) {
     if (!key.trim() || !value.trim() || saving) return;
     setSaving(true);
     try {
-      await mutSetEnvVar.runAsHeadlessPromise(workspace, key.trim(), value.trim(), {});
+      await mutSetEnvVar.runAsHeadlessPromise(workspace, { key: key.trim(), value: value.trim(), projectId }, {});
       onDone();
     } catch (err) {
       showEnvError(key.trim(), err);
@@ -3628,11 +3676,16 @@ function AddVarRow({ onDone }: { onDone: () => void }) {
   );
 }
 
-function EnvVarsSection() {
-  const varsQuery = useQuery(useWorkspace().queries.getEnvVarsQuery());
-  const vars = varsQuery.data ?? null;
-  const loadError = vars ? null : varsQuery.error?.message ?? null;
+const ENV_TABLE_CLASS_NAME = "env-table w-full table-fixed border-collapse text-base [&_td:first-child]:w-[32%] [&_td:first-child]:wrap-anywhere [&_.badge]:ms-2 [&_td]:h-12 [&_td]:pt-0 [&_td]:pe-2.5 [&_td]:pb-0 [&_td]:ps-0 [&_td]:align-middle [&_td]:border-b [&_td]:border-b-border-variant [&_tr:last-child_td]:border-b-0 [&_td:last-child]:w-29 [&_td:last-child]:whitespace-nowrap [&_td:last-child]:text-end [&_td[colspan]]:whitespace-normal [&_td[colspan]]:text-start [&_.icon-btn]:ms-2 [&_.icon-btn]:align-middle";
+
+function EnvVarsSection({ project }: { project: Project | null }) {
+  const varsQuery = useQuery(useWorkspace().queries.getEnvVarsQuery(project?.id));
+  const settings = varsQuery.data ?? null;
+  const vars = settings?.vars ?? null;
+  const projectVars = settings?.projectVars ?? [];
+  const loadError = settings ? null : varsQuery.error?.message ?? null;
   const [adding, setAdding] = useState(false);
+  const [addingToProject, setAddingToProject] = useState(false);
 
   // Recommended keys first (fixed order), then custom variables in file order.
   const customKeys =
@@ -3660,13 +3713,14 @@ function EnvVarsSection() {
             <Spinner /> {m.settings_page_loading()}
           </LoadingRow>
         ) : (
-          <table className="env-table w-full table-fixed border-collapse text-base [&_td:first-child]:w-[32%] [&_td:first-child]:wrap-anywhere [&_.badge]:ms-2 [&_td]:h-12 [&_td]:pt-0 [&_td]:pe-2.5 [&_td]:pb-0 [&_td]:ps-0 [&_td]:align-middle [&_td]:border-b [&_td]:border-b-border-variant [&_tr:last-child_td]:border-b-0 [&_td:last-child]:w-29 [&_td:last-child]:whitespace-nowrap [&_td:last-child]:text-end [&_td[colspan]]:whitespace-normal [&_td[colspan]]:text-start [&_.icon-btn]:ms-2 [&_.icon-btn]:align-middle">
+          <table className={ENV_TABLE_CLASS_NAME}>
             <tbody>
               {names.map((name) => (
                 <EnvRow
                   key={name}
                   name={name}
                   entry={vars.find((v) => v.key === name)}
+                  setInProject={projectVars.some((v) => v.key === name)}
                 />
               ))}
               {adding && (
@@ -3683,6 +3737,33 @@ function EnvVarsSection() {
           />
         )}
       </div>
+      {project && settings && (
+        <>
+          <h2 dir="auto" className="mt-8">{m.settings_env_project_heading({ project: autoDir(project.name) })}</h2>
+          <div className="mb-4.5 flex items-center justify-between gap-4">
+            <p className="m-0 text-base leading-relaxed text-text">{m.settings_env_project_note()}</p>
+            <Button size="small" className="shrink-0" onClick={() => setAddingToProject(true)} disabled={addingToProject}>
+              <Plus size={12} /> {m.settings_page_add_variable()}
+            </Button>
+          </div>
+          <div className={SETTINGS_CARD_CLASS_NAME}>
+            {projectVars.length === 0 && !addingToProject ? (
+              <p className="m-0 text-base text-subtext">{m.settings_env_project_empty()}</p>
+            ) : (
+              <table className={ENV_TABLE_CLASS_NAME}>
+                <tbody>
+                  {projectVars.map((entry) => (
+                    <EnvRow key={entry.key} name={entry.key} entry={entry} projectId={project.id} />
+                  ))}
+                  {addingToProject && (
+                    <AddVarRow projectId={project.id} onDone={() => setAddingToProject(false)} />
+                  )}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </>
+      )}
     </>
   );
 }
@@ -5130,7 +5211,7 @@ export function SettingsView({
       {tab === "instances" && (
         <InstanceHistory projectId={project?.id} onBack={() => onSelectTab("compute")} />
       )}
-      {tab === "environment" && <EnvVarsSection />}
+      {tab === "environment" && <EnvVarsSection project={project} />}
     </div>
   );
 }

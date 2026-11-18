@@ -38,13 +38,30 @@ const variable = (key) => ({ key, maskedValue: "••••", inProcessEnv: fal
 test("a deleted variable leaves the list at once and comes back when the server refuses", async () => {
   const { workspace, reply, set, get } = setup({ "/api/settings/env": { vars: [variable("A"), variable("B")] } });
   const options = workspace.queries.getEnvVarsQuery();
-  set(options, [variable("A"), variable("B")]);
+  set(options, { vars: [variable("A"), variable("B")] });
 
-  const deleted = mutDeleteEnvVar.runAsHeadlessPromise(workspace, "A", {});
-  assert.deepEqual(get(options).map((entry) => entry.key), ["B"]);
+  const deleted = mutDeleteEnvVar.runAsHeadlessPromise(workspace, "A", undefined, {});
+  assert.deepEqual(get(options).vars.map((entry) => entry.key), ["B"]);
   reply.resolve(refused("A is set by the environment."));
   await assert.rejects(deleted, { message: "A is set by the environment." });
-  assert.deepEqual(get(options).map((entry) => entry.key), ["A", "B"]);
+  assert.deepEqual(get(options).vars.map((entry) => entry.key), ["A", "B"]);
+});
+
+test("a project's variable leaves only that project's list, and a global save reaches every view", async () => {
+  const { workspace, reply, set, get } = setup();
+  const global = workspace.queries.getEnvVarsQuery();
+  const project = workspace.queries.getEnvVarsQuery("p");
+  set(global, { vars: [variable("A")] });
+  set(project, { vars: [variable("A")], projectVars: [variable("A"), variable("B")] });
+
+  const deleted = mutDeleteEnvVar.runAsHeadlessPromise(workspace, "A", "p", {});
+  assert.deepEqual(get(project).projectVars.map((entry) => entry.key), ["B"]);
+  assert.deepEqual(get(project).vars.map((entry) => entry.key), ["A"]);
+  assert.deepEqual(get(global).vars.map((entry) => entry.key), ["A"]);
+  reply.resolve({ vars: [variable("A"), variable("C")], projectVars: [variable("B")] });
+  await deleted;
+  assert.deepEqual(get(global).vars.map((entry) => entry.key), ["A", "C"]);
+  assert.deepEqual(get(project).projectVars.map((entry) => entry.key), ["B"]);
 });
 
 test("a new default destination shows at once and keeps the server's settings", async () => {

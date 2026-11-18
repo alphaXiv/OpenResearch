@@ -112,9 +112,10 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, events:
     }, queryClient);
   };
 
-  const getEnvVarsQuery = () => queryOptions({
-    queryKey: workspaceKey("getEnvVars"),
-    queryFn: ({ signal }) => api.getEnvVars(signal),
+  /** With a project, also that project's own variables. */
+  const getEnvVarsQuery = (projectId?: string) => queryOptions({
+    queryKey: workspaceKey("getEnvVars", projectId ?? null),
+    queryFn: ({ signal }) => api.getEnvVars(projectId, signal),
     staleTime: 300_000,
   });
 
@@ -553,11 +554,28 @@ export const mutRetryEngineHost = mutations.define({
   refetchOnSuccess: false,
 });
 
+/** Each cached env list, keyed by the project it shows (null for none). */
+function envViews(ws: Workspace) {
+  const family = ws.queries.getEnvVarsQuery().queryKey.slice(0, -1);
+  return ws.queryClient.getQueryCache().findAll({ queryKey: family })
+    .map((query) => ({ key: query.queryKey, projectId: query.queryKey.at(-1) as string | null }));
+}
+
+/** Shows a saved list everywhere it appears: the global one in every view, a project's in its own. */
+function showEnvSettings(ws: Workspace, projectId: string | undefined, saved: api.EnvSettings) {
+  for (const view of envViews(ws)) {
+    ws.queryClient.setQueryData<api.EnvSettings>(view.key, (shown) => shown && {
+      vars: saved.vars,
+      projectVars: view.projectId === projectId && saved.projectVars ? saved.projectVars : shown.projectVars,
+    });
+  }
+}
+
 export const mutSetEnvVar = mutations.define({
   id: "settings/env-set",
-  mutate: (ws: Workspace, key: string, value: string) => ws.api.setEnvVar(key, value),
-  optimistic({ args: [ws], onSuccess }) {
-    onSuccess((vars) => ws.setScopedQueryData(ws.queries.getEnvVarsQuery().queryKey, vars));
+  mutate: (ws: Workspace, change: api.EnvVarChange) => ws.api.setEnvVar(change),
+  optimistic({ args: [ws, change], onSuccess }) {
+    onSuccess((saved) => showEnvSettings(ws, change.projectId, saved));
   },
   key: ({ args: [ws] }) => [ws.identity, "env"],
   describe: "save the variable",
@@ -567,11 +585,18 @@ export const mutSetEnvVar = mutations.define({
 
 export const mutDeleteEnvVar = mutations.define({
   id: "settings/env-delete",
-  mutate: (ws: Workspace, key: string) => ws.api.deleteEnvVar(key),
-  optimistic({ helpers, args: [ws, key], onSuccess }) {
-    const options = ws.queries.getEnvVarsQuery();
-    helpers(ws.queryClient).arrayFilter(options, (entry) => entry.key !== key);
-    onSuccess((vars) => ws.setScopedQueryData(options.queryKey, vars));
+  mutate: (ws: Workspace, key: string, projectId?: string) => ws.api.deleteEnvVar(key, projectId),
+  optimistic({ args: [ws, key, projectId], onRestore, onSuccess }) {
+    const views = envViews(ws);
+    const before = views.map((view) => [view.key, ws.queryClient.getQueryData<api.EnvSettings>(view.key)] as const);
+    const drop = (vars: api.EnvVar[] | undefined) => vars?.filter((entry) => entry.key !== key);
+    for (const view of views) {
+      ws.queryClient.setQueryData<api.EnvSettings>(view.key, (shown) => shown && (projectId
+        ? view.projectId === projectId ? { ...shown, projectVars: drop(shown.projectVars) } : shown
+        : { ...shown, vars: drop(shown.vars) ?? [] }));
+    }
+    onRestore(() => { for (const [key, shown] of before) ws.queryClient.setQueryData(key, shown); });
+    onSuccess((saved) => showEnvSettings(ws, projectId, saved));
   },
   key: ({ args: [ws] }) => [ws.identity, "env"],
   describe: "delete the variable",

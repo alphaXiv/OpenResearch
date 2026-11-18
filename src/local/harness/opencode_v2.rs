@@ -170,6 +170,7 @@ pub(super) async fn run_turn(
     // A rejected prompt starts no execution, so no event would ever end this wait.
     let mut ended = admission.is_err() && turn.idle().await?;
     let mut failure = None;
+    let mut stopped = false;
     let mut stale = false;
     while !ended {
         let event = tokio::select! {
@@ -189,9 +190,9 @@ pub(super) async fn run_turn(
             }
         };
         let Some(Ok(event)) = event else {
-            events = subscribe(&endpoint)
-                .await
-                .context("OpenCode stopped streaming this chat's events")?;
+            events = subscribe(&endpoint).await.map_err(|error| {
+                anyhow!("OpenCode stopped streaming this chat's events: {error}")
+            })?;
             let (projection, _) = turn.reconcile(ctx).await?;
             turn.delivered |= turn.holds_prompt(&projection)?;
             ended = turn.idle().await?;
@@ -223,6 +224,7 @@ pub(super) async fn run_turn(
                 ended = turn.finished(ctx).await?;
                 if ended {
                     failure = data.get("error").map(error_text);
+                    stopped = kind == "session.execution.interrupted";
                 }
             }
             // A failed step is only terminal once no retry follows, which the next event says.
@@ -253,7 +255,11 @@ pub(super) async fn run_turn(
         let outcome = projection
             .pointer("/data/info/outcome")
             .and_then(Value::as_str);
-        if delivered && answered && matches!(outcome, Some("succeeded" | "interrupted")) {
+        // Declining a permission or question interrupts the execution without an export outcome.
+        if delivered
+            && answered
+            && (stopped || matches!(outcome, Some("succeeded" | "interrupted")))
+        {
             ctx.persist_delivery(DeliveryState::Accepted)?;
             ctx.mark_final_text_tail();
             return Ok(());
@@ -1652,6 +1658,7 @@ mod tests {
                     note: None,
                     annotations: Vec::new(),
                     from: None,
+                    env: Vec::new(),
                 };
                 reply(&ctx, &endpoint, &prompt, &answer).await.unwrap();
             }
@@ -1707,6 +1714,7 @@ mod tests {
                 note: Some("Skipped".into()),
                 annotations: Vec::new(),
                 from: None,
+                env: Vec::new(),
             };
             let result = reply(&ctx, &endpoint, &prompt, &answer).await;
             server.abort();
