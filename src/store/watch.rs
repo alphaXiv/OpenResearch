@@ -405,7 +405,8 @@ impl Store {
         ident: &str,
     ) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO watch_counts (run_id, pattern, lines, offset, ident) VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO watch_counts (run_id, pattern, lines, offset, ident)
+             SELECT id, ?2, ?3, ?4, ?5 FROM runs WHERE id = ?1
              ON CONFLICT(run_id, pattern) DO UPDATE SET lines = ?3, offset = ?4, ident = ?5",
             params![run_id, pattern, lines as i64, offset as i64, ident],
         )?;

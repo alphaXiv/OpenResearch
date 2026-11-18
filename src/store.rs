@@ -1628,6 +1628,7 @@ impl Store {
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_signal_collection AFTER DELETE ON runs BEGIN DELETE FROM signal_collections WHERE run_id = OLD.id; END;")?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_run_monitor_state AFTER DELETE ON runs BEGIN DELETE FROM run_monitor_state WHERE run_id = OLD.id; END;")?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_run_monitor_events AFTER DELETE ON runs BEGIN DELETE FROM run_monitor_events WHERE run_id = OLD.id; END;")?;
+        schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_run_watch_counts AFTER DELETE ON runs BEGIN DELETE FROM watch_counts WHERE run_id = OLD.id; END;")?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_project_env_vars AFTER DELETE ON local_projects BEGIN DELETE FROM project_env_vars WHERE project_id = OLD.id; END;")?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_log_collection AFTER DELETE ON runs BEGIN DELETE FROM log_collections WHERE run_id = OLD.id; END;")?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_steer_receipts AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_steer_receipts WHERE session_id = OLD.id; END;")?;
@@ -10011,6 +10012,12 @@ pub(crate) mod tests {
         project_with_run_artifacts(&store, "p", &run, &digest);
         project_with_run_artifacts(&store, "q", &sibling, &shared);
         store
+            .set_watch_count(&run, "warning", 1, 20, "0-0")
+            .unwrap();
+        store
+            .set_watch_count(&sibling, "warning", 2, 40, "0-0")
+            .unwrap();
+        store
             .conn
             .execute(
                 "INSERT INTO local_experiments (id, project_id, slug, branch_name, title, description,
@@ -10096,6 +10103,12 @@ pub(crate) mod tests {
             .join(format!("{digest}.tar"))
             .exists());
         assert!(store.get_run(&run).unwrap().is_none());
+        assert!(store.watch_counts(&run).unwrap().is_empty());
+        assert_eq!(store.watch_counts(&sibling).unwrap().len(), 1);
+        store
+            .set_watch_count(&run, "warning", 2, 40, "0-0")
+            .unwrap();
+        assert!(store.watch_counts(&run).unwrap().is_empty());
         assert!(dir
             .join("local-runs")
             .join(&sibling)
@@ -10116,6 +10129,9 @@ pub(crate) mod tests {
         let dir = std::env::temp_dir().join(format!("orx-remote-cleanup-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
         project_with_run_artifacts(&store, "p", "local", &"d".repeat(64));
+        store
+            .set_watch_count("local", "warning", 1, 20, "0-0")
+            .unwrap();
         store
             .conn
             .execute("UPDATE runs SET created_at = 10 WHERE id = 'local'", [])
@@ -10168,6 +10184,7 @@ pub(crate) mod tests {
             .execute("UPDATE runs SET status = 'done'", [])
             .unwrap();
         store.delete_local_project("p").unwrap();
+        assert!(store.watch_counts("local").unwrap().is_empty());
         // Deletion marks every SSH/Slurm run, including the newest and one waiting to retry.
         assert_eq!(
             due(&store),
