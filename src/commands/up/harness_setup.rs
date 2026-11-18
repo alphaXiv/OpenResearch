@@ -243,9 +243,8 @@ async fn run(
         && !matches!(request.action, Action::Login)
     {
         run_command = false;
-        attempt.record("command_started", "command", None, None, None);
-        command_failure =
-            managed_setup(socket, request, attempt, size, follow_up, &state.agent).await?;
+        let command = managed_setup(socket, request, attempt, size, follow_up, &state.agent);
+        command_failure = attempt.command(command).await?;
     }
     if run_command {
         let (program, mut args) = match request.action {
@@ -327,7 +326,6 @@ async fn run(
                     .map_err(|error| SetupBlock::Profile(error).record(attempt, "detect"))?,
             );
         }
-        attempt.record("command_started", "command", None, None, None);
         let login = matches!(request.action, Action::Login);
         let mut screen = TerminalScreen {
             completed: (login && request.harness == "antigravity")
@@ -336,7 +334,7 @@ async fn run(
                 .then(|| SignInPage::for_login(&request.harness))
                 .flatten(),
         };
-        let (status, output) = run_in_terminal(
+        let command = run_in_terminal(
             socket,
             attempt,
             size,
@@ -344,8 +342,8 @@ async fn run(
             (program, args),
             env,
             &mut screen,
-        )
-        .await?;
+        );
+        let (status, output) = attempt.command(command).await?;
         command_failure = match screen.sign_in.as_ref().and_then(SignInPage::failure) {
             Some(message) => Some(CommandFailure {
                 message: message.to_string(),
@@ -403,7 +401,7 @@ async fn run(
         attempt.record("succeeded", "verify", None, None, None);
         return Ok(harness);
     }
-    let (reason, detail) = verify_reason(harness.as_ref());
+    let (reason, detail) = verify_reason(request.action, harness.as_ref());
     attempt.record("failed", "verify", Some(reason), None, Some(detail));
     Err(harness
         .and_then(|h| h.agent_note)
@@ -906,6 +904,7 @@ fn setup_program(harness: &crate::local::harness::HarnessInfo) -> Result<&str, S
 /// The phrase is one of `safe_error_excerpt`'s allowlisted literals, so it
 /// classifies without widening the ingestion schema or leaking local text.
 fn verify_reason(
+    action: Action,
     harness: Option<&crate::local::harness::HarnessInfo>,
 ) -> (&'static str, &'static str) {
     use crate::local::harness::HarnessAuthState;
@@ -934,6 +933,9 @@ fn verify_reason(
                 }),
         ),
         HarnessAuthState::Unsupported => ("not_ready", "agent version is unsupported"),
+        HarnessAuthState::Ready if matches!(action, Action::Login) && !h.authenticated => {
+            ("not_ready", "agent is not signed in")
+        }
         HarnessAuthState::Ready if !h.agent_ready => ("not_ready", "agent has no usable model"),
         HarnessAuthState::Ready => ("not_ready", "agent reported no usable state"),
     }
@@ -1152,6 +1154,10 @@ mod tests {
         request.trigger = Trigger::Manual;
         request.action = Action::Login;
         assert!(!setup_verified(&request, Some(&h)));
+        assert_eq!(
+            verify_reason(request.action, Some(&h)),
+            ("not_ready", "agent is not signed in")
+        );
         h.authenticated = true;
         assert!(setup_verified(&request, Some(&h)));
         request.action = Action::Update;
@@ -1207,41 +1213,38 @@ mod tests {
     #[test]
     fn verify_reason_names_the_failed_predicate() {
         use crate::local::harness::HarnessAuthState as State;
+        fn reason(h: Option<&crate::local::harness::HarnessInfo>) -> (&'static str, &'static str) {
+            verify_reason(Action::Install, h)
+        }
         let mut h = blank_harness();
         assert_eq!(
-            verify_reason(None),
+            reason(None),
             ("not_ready", "agent detection returned no result")
         );
-        assert_eq!(verify_reason(Some(&h)).0, "not_installed");
+        assert_eq!(reason(Some(&h)).0, "not_installed");
         h.installed = true;
         h.install_broken = true;
         assert_eq!(
-            verify_reason(Some(&h)),
+            reason(Some(&h)),
             ("not_ready", "agent is installed but failed to run")
         );
         h.install_broken = false;
         h.auth_state = State::NeedsLogin;
-        assert_eq!(verify_reason(Some(&h)).1, "agent is not signed in");
+        assert_eq!(reason(Some(&h)).1, "agent is not signed in");
         // The API/OAuth conflict: distinguishable from a plain signed-out CLI.
         h.auth_state = State::Unknown;
-        assert_eq!(
-            verify_reason(Some(&h)).1,
-            "agent sign-in could not be verified"
-        );
+        assert_eq!(reason(Some(&h)).1, "agent sign-in could not be verified");
         h.auth_state = State::Unsupported;
-        assert_eq!(verify_reason(Some(&h)).1, "agent version is unsupported");
+        assert_eq!(reason(Some(&h)).1, "agent version is unsupported");
         // A refused database also reports Unsupported; it is not a stale install.
         h.needs_config_repair = true;
-        assert_eq!(
-            verify_reason(Some(&h)).1,
-            "agent configuration needs repair"
-        );
+        assert_eq!(reason(Some(&h)).1, "agent configuration needs repair");
         h.needs_config_repair = false;
         // Installed, signed in, but OpenCode has no usable model configured.
         h.auth_state = State::Ready;
-        assert_eq!(verify_reason(Some(&h)).1, "agent has no usable model");
+        assert_eq!(reason(Some(&h)).1, "agent has no usable model");
         h.agent_ready = true;
-        assert_eq!(verify_reason(Some(&h)).1, "agent reported no usable state");
+        assert_eq!(reason(Some(&h)).1, "agent reported no usable state");
     }
 
     /// `verify_reason` is the one site that computes a reason rather than
@@ -1266,7 +1269,7 @@ mod tests {
                         h.install_broken = broken;
                         h.agent_ready = ready;
                         h.needs_config_repair = repair;
-                        let (reason, detail) = verify_reason(Some(&h));
+                        let (reason, detail) = verify_reason(Action::Install, Some(&h));
                         assert!(contract::REASONS.contains(&reason), "{reason}");
                         let excerpt = crate::telemetry::harness::excerpt_for_test(detail);
                         assert_eq!(excerpt.as_deref(), Some(detail), "{detail}");
@@ -1276,7 +1279,7 @@ mod tests {
             }
         }
         assert_eq!(
-            verify_reason(None),
+            verify_reason(Action::Install, None),
             ("not_ready", "agent detection returned no result")
         );
     }
@@ -1290,7 +1293,7 @@ mod tests {
         h.auth_state = crate::local::harness::HarnessAuthState::Unknown;
         for cause in CursorStatusError::ALL {
             h.cursor_status_error = Some(cause);
-            let (reason, detail) = verify_reason(Some(&h));
+            let (reason, detail) = verify_reason(Action::Login, Some(&h));
             assert_eq!(reason, "not_ready");
             assert_eq!(detail, cause.excerpt());
             let output = format!("account=private@example.org {detail} secret-token");
