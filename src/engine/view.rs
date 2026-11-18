@@ -1606,10 +1606,10 @@ pub(crate) fn set(
     };
     let mut settings: Map<String, Value> =
         serde_json::from_str(&saved).expect("saved run settings serialize a JSON object");
-    let markup = settings.remove("view");
+    let markup = settings.get("view").and_then(Value::as_str);
     let mut answer = json!({
-        "markup": markup.as_ref().and_then(Value::as_str),
-        "isDefault": markup.as_ref().and_then(Value::as_str).is_none(),
+        "markup": markup,
+        "isDefault": markup.is_none(),
         "fromExperimentId": id,
         "etag": etag(Some(&saved)),
         "pending": pending,
@@ -1804,7 +1804,18 @@ pub(crate) fn shown(
     let number = |value: &Value| {
         value
             .as_f64()
-            .or_else(|| value.as_str()?.parse::<f64>().ok())
+            .or_else(|| {
+                let text = value.as_str()?.trim();
+                let radix = match text.as_bytes() {
+                    [b'0', b'x' | b'X', _, ..] => 16,
+                    [b'0', b'o' | b'O', _, ..] => 8,
+                    [b'0', b'b' | b'B', _, ..] => 2,
+                    _ => return text.parse::<f64>().ok(),
+                };
+                text[2..].chars().try_fold(0.0, |acc, digit| {
+                    Some(acc * f64::from(radix) + f64::from(digit.to_digit(radix)?))
+                })
+            })
             .filter(|n| n.is_finite())
     };
     let points = |pairs: Vec<(&Value, &Value)>, block: &Value| {
@@ -2002,45 +2013,89 @@ pub(crate) fn shown(
         .as_array()
         .into_iter()
         .flatten()
-        .find(|block| {
+        .filter(|block| {
             !terminal
                 && block["chart"].is_array()
                 && block["phase"]
                     .as_str()
                     .is_none_or(|name| Some(name) == phase)
-                && chart_series(block, monitor["x"]["name"].as_str().unwrap_or("step"))
-                    .iter()
-                    .any(|(x, y, _)| {
-                        let from = block["from"].as_str();
-                        if let (Some(table), Some(by)) = (
-                            from,
-                            block["by"]
-                                .as_str()
-                                .filter(|_| block["series"].as_array().is_none_or(Vec::is_empty)),
-                        ) {
-                            let mut groups = std::collections::BTreeMap::<String, usize>::new();
-                            for row in monitor["rows"][table].as_array().into_iter().flatten() {
-                                if number(&row[y]).is_some()
-                                    && (number(&row[x]).is_some()
-                                        || (block["mark"] == "bars" && !row[x].is_null()))
-                                {
-                                    let count = groups.entry(row[by].to_string()).or_default();
-                                    *count += 1;
-                                    if *count >= 2 {
-                                        return true;
-                                    }
-                                }
-                            }
-                            false
-                        } else {
-                            points(pairs(monitor, from, x, y), block).0 >= 2
+        })
+        .find_map(|block| {
+            let from = block["from"].as_str();
+            let axes = chart_series(block, monitor["x"]["name"].as_str().unwrap_or("step"));
+            let table = from.and_then(|from| monitor["rows"][from].as_array());
+            let by = block["by"].as_str().filter(|_| {
+                table.is_some() && block["series"].as_array().is_none_or(Vec::is_empty)
+            });
+            let same_group = |left: &Value, right: &Value| match left.as_f64() {
+                Some(left) => right.as_f64() == Some(left),
+                None => left == right,
+            };
+            let mut groups: Vec<Option<&Value>> = vec![None];
+            if let (Some(by), Some(rows)) = (by, table) {
+                groups.clear();
+                for row in rows {
+                    let group = &row[by];
+                    if !groups
+                        .iter()
+                        .flatten()
+                        .any(|other| same_group(group, other))
+                    {
+                        groups.push(Some(group));
+                        if groups.len() * axes.len() >= MAX_SERIES {
+                            break;
                         }
+                    }
+                }
+            }
+
+            let bars = block["mark"] == "bars";
+            let mut chart = Vec::new();
+            for (group, (x, y, _)) in groups
+                .into_iter()
+                .flat_map(|group| axes.iter().copied().map(move |axis| (group, axis)))
+                .take(MAX_SERIES)
+            {
+                let pairs = match (group, by, table) {
+                    (Some(group), Some(by), Some(rows)) => rows
+                        .iter()
+                        .filter(|row| same_group(&row[by], group))
+                        .map(|row| (&row[x], &row[y]))
+                        .collect(),
+                    _ => pairs(monitor, from, x, y),
+                };
+                let smooth = signals[y]["smooth"].as_f64().filter(|_| from.is_none());
+                let mut level = None;
+                let retained: Vec<_> = pairs
+                    .into_iter()
+                    .filter(|(raw_x, raw_y)| {
+                        let Some(mut y) = number(raw_y) else {
+                            return false;
+                        };
+                        if let Some(smooth) = smooth {
+                            y = level.map_or(y, |prior| prior + smooth * (y - prior));
+                            level = Some(y);
+                        }
+                        let shows_x = if bars {
+                            !raw_x.is_null()
+                        } else {
+                            number(raw_x).is_some_and(|x| block["xScale"] != "log" || x > 0.0)
+                        };
+                        shows_x && y.is_finite() && (block["yScale"] != "log" || y > 0.0)
                     })
+                    .collect();
+                chart.push((x, y, group, retained));
+            }
+
+            chart
+                .iter()
+                .any(|(_, _, _, points)| points.len() >= 2)
+                .then_some((block, chart))
         });
     let open_flag = super::flags::open(flags);
     if open_flag.is_some() {
         lines.push("Open card: flag evidence and actions.".into());
-    } else if let Some(block) = chart {
+    } else if let Some((block, chart)) = chart {
         lines.push("Open card: headline and one chart.".into());
         lines.push(
             match monitor["headline"]
@@ -2067,21 +2122,21 @@ pub(crate) fn shown(
                 "off"
             }
         ));
-        for (x, y, _) in chart_series(block, monitor["x"]["name"].as_str().unwrap_or("step")) {
-            let from = block["from"].as_str();
-            if !signals[y]["smooth"].is_null() {
+        for (x, y, group, retained) in chart {
+            if block["from"].is_null() && !signals[y]["smooth"].is_null() {
                 lines.push(format!(
                     "  {y}: retained readings before smoothing {}.",
                     signals[y]["smooth"]
                 ));
             }
-            let retained: Vec<_> = pairs(monitor, from, x, y)
-                .into_iter()
-                .filter(|(x, y)| {
-                    number(y).is_some()
-                        && (number(x).is_some() || (block["mark"] == "bars" && !x.is_null()))
-                })
-                .collect();
+            let label = match group {
+                Some(group) => format!(
+                    "{y} for {}={}",
+                    block["by"].as_str().unwrap_or_default(),
+                    value_text(group, &Value::Null)
+                ),
+                None => y.to_owned(),
+            };
             let values = retained
                 .iter()
                 .enumerate()
@@ -2098,7 +2153,7 @@ pub(crate) fn shown(
                 })
                 .collect::<Vec<_>>();
             lines.push(format!(
-                "  {y}: {} points: {}",
+                "  {label}: {} points: {}",
                 retained.len(),
                 values.join(", ")
             ));
@@ -2813,6 +2868,33 @@ mod tests {
             cancel_reason: None,
             chat_session_id: None,
         }
+    }
+
+    #[test]
+    fn view_show_skips_charts_the_strip_cannot_draw() {
+        let view = compile(
+            r#"<view>
+            <chart y="signed" y-scale="log" />
+            <chart from="parts" x="step" y="score" by="part" />
+            <chart y="loss" />
+        </view>"#,
+        )
+        .unwrap()
+        .tree;
+        let mut rows: Vec<_> = (0..9)
+            .map(|part| json!({"part": part, "step": 1, "score": 1}))
+            .collect();
+        rows.push(json!({"part": 8, "step": 2, "score": 2}));
+        let mut monitor = json!({
+            "view": view,
+            "series": {"signed": [[1, -1], [2, 0]], "loss": [[1, 2], [2, 1]]},
+            "rows": {"parts": rows},
+        });
+        let text = shown(&shown_run(), &monitor, &Value::Null, &[], None, None);
+        assert!(text.contains("Card chart: loss (loss)"), "{text}");
+        monitor["view"]["blocks"].as_array_mut().unwrap().remove(0);
+        let text = shown(&shown_run(), &monitor, &Value::Null, &[], None, None);
+        assert!(text.contains("Card chart: loss (loss)"), "{text}");
     }
 
     #[test]
