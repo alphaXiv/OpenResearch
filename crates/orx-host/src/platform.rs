@@ -135,11 +135,11 @@ pub(crate) struct ProcessTable {
 impl ProcessTable {
     /// Unreadable processes started before `born_after` are left out: they cannot carry a tag
     /// minted after them.
-    pub(crate) fn read(born_after: Option<u64>) -> io::Result<Self> {
+    pub(crate) fn read(born_after: Option<u64>, settle: Duration) -> io::Result<Self> {
         Ok(Self::from_pids(
             pids()?,
             born_after,
-            UNREADABLE_SETTLE,
+            settle,
             process,
             process_uid,
             environment,
@@ -277,6 +277,16 @@ impl ProcessTable {
 }
 
 pub fn scan(wrapper: Option<&ProcessIdentity>, tag: &str, subreaper: bool) -> io::Result<Scan> {
+    scan_within(wrapper, tag, subreaper, UNREADABLE_SETTLE)
+}
+
+/// `settle` bounds the wait for processes unreadable mid-fork, exec or exit.
+pub(crate) fn scan_within(
+    wrapper: Option<&ProcessIdentity>,
+    tag: &str,
+    subreaper: bool,
+    settle: Duration,
+) -> io::Result<Scan> {
     if let Some(wrapper) = wrapper {
         if wrapper.node != node()? || wrapper.boot_id != boot_id()? {
             return Err(io::Error::new(
@@ -286,7 +296,7 @@ pub fn scan(wrapper: Option<&ProcessIdentity>, tag: &str, subreaper: bool) -> io
         }
     }
     let born_after = wrapper.map(|wrapper| wrapper.starttime);
-    Ok(ProcessTable::read(born_after)?.select(wrapper, tag, subreaper))
+    Ok(ProcessTable::read(born_after, settle)?.select(wrapper, tag, subreaper))
 }
 
 pub fn signal(process: &Process, signal: i32) -> io::Result<()> {
@@ -778,7 +788,10 @@ mod tests {
         let child = std::process::Command::new("true").spawn().unwrap();
         let pid = child.id();
         std::thread::sleep(std::time::Duration::from_millis(200));
-        assert!(!ProcessTable::read(None).unwrap().unreadable.contains(&pid));
+        assert!(!ProcessTable::read(None, UNREADABLE_SETTLE)
+            .unwrap()
+            .unreadable
+            .contains(&pid));
         drop(child);
     }
 
@@ -800,7 +813,7 @@ mod tests {
             }
         }
         assert!(!other_uid.is_empty(), "test requires other-uid processes");
-        let table = ProcessTable::read(None).unwrap();
+        let table = ProcessTable::read(None, UNREADABLE_SETTLE).unwrap();
         assert!(other_uid.iter().all(|pid| !table.unreadable.contains(pid)));
         assert!(table.unreadable.is_empty(), "{:?}", table.unreadable);
     }
