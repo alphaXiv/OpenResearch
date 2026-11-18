@@ -11215,16 +11215,22 @@ async fn event_loop(
     tx: mpsc::Sender<Event>,
     mut runs: Option<tokio::sync::broadcast::Receiver<crate::engine::bus::RunEvent>>,
 ) {
+    use crate::engine::bus::RunEvent;
     use tokio::sync::broadcast::error::RecvError;
+    let period = Duration::from_millis(500);
+    let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut cursor = EventCursor::default();
     let mut first = true;
     loop {
-        if !first {
+        let event = if first {
+            None
+        } else {
             // An idle store never sends, so a failed send can't be the only
             // disconnect signal — watch the receiver side too or the loop
             // leaks per closed EventSource.
-            let event = tokio::select! {
-                _ = tokio::time::sleep(Duration::from_millis(500)) => None,
+            tokio::select! {
+                _ = tick.tick() => None,
                 _ = tx.closed() => return,
                 event = async {
                     match runs.as_mut() {
@@ -11232,42 +11238,61 @@ async fn event_loop(
                         None => std::future::pending().await,
                     }
                 } => Some(event),
-            };
-            let batch = match event {
-                None => None,
-                Some(Ok(event)) => Some(
-                    Store::open().and_then(|store| run_events(&store, &mut cursor, Some(event))),
-                ),
-                // Lagged: resynchronize every run from the store.
-                Some(Err(RecvError::Lagged(_))) => {
-                    Some(Store::open().and_then(|store| run_events(&store, &mut cursor, None)))
+            }
+        };
+        match &event {
+            Some(Ok(RunEvent::Monitor { event, .. })) => {
+                // The published monitor must reach the browser even if SQLite cannot supply its summary.
+                if tx.send(json_event("run.monitor", event)).await.is_err() {
+                    return;
                 }
-                Some(Err(RecvError::Closed)) => {
-                    runs = None;
-                    continue;
-                }
-            };
-            if let Some(batch) = batch {
-                for ev in batch.unwrap_or_default() {
-                    if tx.send(ev).await.is_err() {
-                        return;
-                    }
+            }
+            Some(Ok(RunEvent::Grew { run_id, len, .. })) => {
+                let event = json_event(
+                    "run.log",
+                    &json!({"runId": run_id, "dataBase64": "", "offset": len}),
+                );
+                if tx.send(event).await.is_err() {
+                    return;
                 }
                 continue;
             }
+            Some(Ok(RunEvent::Notices { .. })) => continue,
+            Some(Err(RecvError::Closed)) => {
+                runs = None;
+                continue;
+            }
+            _ => {}
         }
         if tx.is_closed() {
             return;
         }
-        // Store hiccups (locked db) just skip a tick.
-        let mut batch = collect_events(&mut cursor).unwrap_or_default();
-        if first {
-            batch.extend(
-                Store::open()
-                    .and_then(|store| run_events(&store, &mut cursor, None))
-                    .unwrap_or_default(),
-            );
-        }
+        let collected = tokio::task::spawn_blocking(move || {
+            // A failed read is recovered by the next snapshot. A lagged receiver snapshots every run.
+            let mut batch = if event.is_none() {
+                collect_events(&mut cursor).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            if first || event.is_some() {
+                let event = event.and_then(std::result::Result::ok);
+                batch.extend(
+                    Store::open()
+                        .and_then(|store| run_events(&store, &mut cursor, event))
+                        .unwrap_or_default(),
+                );
+            }
+            (cursor, batch)
+        })
+        .await;
+        let (next, batch) = match collected {
+            Ok(collected) => collected,
+            Err(error) => {
+                eprintln!("orx up: could not collect dashboard events: {error}");
+                return;
+            }
+        };
+        cursor = next;
         first = false;
         for ev in batch {
             if tx.send(ev).await.is_err() {
@@ -11376,31 +11401,22 @@ fn run_events(
         Some(RunEvent::Changed { run_id, .. } | RunEvent::LogCollection { run_id }) => {
             store.get_run(run_id)?.into_iter().collect()
         }
-        Some(RunEvent::Grew { run_id, len, .. }) => {
-            // A followed engine run's log grew on its host; the client refetches it.
-            return Ok(vec![json_event(
-                "run.log",
-                &json!({"runId": run_id, "dataBase64": "", "offset": len}),
-            )]);
-        }
         Some(RunEvent::Host { alias, root, state }) => {
             return Ok(vec![json_event(
                 "host.updated",
                 &api_v2::host_view(store, alias, root, state)?,
             )])
         }
-        Some(RunEvent::Notices { .. }) => return Ok(Vec::new()),
-        Some(RunEvent::Monitor { run_id, event }) => {
-            // Before the summary at the same `rev`, so the strip never trails the line.
-            let mut out = vec![json_event("run.monitor", event)];
-            if let Some(run) = store.get_run(run_id)? {
-                out.push(json_event(
-                    "run.updated",
-                    &json!({ "run": ApiRun::new(store, &run)? }),
-                ));
-            }
-            return Ok(out);
+        Some(RunEvent::Monitor { run_id, .. }) => {
+            let Some(run) = store.get_run(run_id)? else {
+                return Ok(Vec::new());
+            };
+            return Ok(vec![json_event(
+                "run.updated",
+                &json!({ "run": ApiRun::new(store, &run)? }),
+            )]);
         }
+        Some(RunEvent::Grew { .. } | RunEvent::Notices { .. }) => return Ok(Vec::new()),
     };
     let mut out = Vec::new();
     if event.is_none() {
@@ -11738,13 +11754,13 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 
-    /// The monitor's event goes first, then the summary at the same `rev`.
-    #[tokio::test]
-    async fn a_monitor_event_precedes_the_summary_at_its_rev() {
+    #[tokio::test(start_paused = true)]
+    async fn a_monitor_event_precedes_its_summary_even_when_the_store_is_busy() {
         use crate::engine::bus::RunEvent;
-        let directory =
-            std::env::temp_dir().join(format!("orx-monitor-sse-{}", uuid::Uuid::new_v4()));
-        let store = Store::open_at(directory.clone()).unwrap();
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let store = Store::open().unwrap();
         let run = StoredRun {
             id: "r".into(),
             experiment_id: "e".into(),
@@ -11763,25 +11779,44 @@ mod tests {
             chat_session_id: None,
         };
         store.upsert_run(&run).unwrap();
-        let rev = crate::engine::monitor::advance(&store, &run, 5)
-            .unwrap()
-            .summary()["rev"]
-            .clone();
-        let event = std::sync::Arc::new(json!({"runId": "r", "rev": rev}));
-        let mut cursor = EventCursor::default();
-        let events = run_events(
+        let bus = crate::engine::bus::Bus::new();
+        let (tx, mut rx) = mpsc::channel(16);
+        let stream = tokio::spawn(event_loop(tx, Some(bus.subscribe())));
+        let _initial = rx.recv().await.expect("initial dashboard snapshot");
+        while rx.try_recv().is_ok() {}
+
+        let flag = crate::engine::flags::new_flag(
             &store,
-            &mut cursor,
-            Some(RunEvent::Monitor {
-                run_id: "r".into(),
-                event,
-            }),
+            &run,
+            json!({"id": "f1", "source": "tripwire", "fingerprint": "error", "template": "An error."}),
+            true,
         )
         .unwrap();
-        let text = event_text(events).await;
-        let monitor = text.find("event: run.monitor").unwrap();
-        let updated = text.find("event: run.updated").unwrap();
-        assert!(monitor < updated, "{text}");
+        store.raise_flags(&[flag], 5).unwrap();
+        let (projection, monitor) = crate::engine::monitor::monitor(&store, &run).unwrap();
+        let rev = &projection.summary()["rev"];
+        assert_eq!(monitor["flagId"], "f1");
+
+        let writer = store.begin_immediate().unwrap();
+        bus.publish(RunEvent::Monitor {
+            run_id: run.id.clone(),
+            event: Arc::new(monitor),
+        });
+        let event = tokio::time::timeout(Duration::from_millis(100), rx.recv())
+            .await
+            .expect("the monitor needs no database read")
+            .unwrap();
+        drop(writer);
+
+        let updated = rx
+            .recv()
+            .await
+            .expect("run summary after the writer released");
+        drop(rx);
+        stream.await.unwrap();
+        let text = event_text(vec![event, updated]).await;
+        assert!(text.starts_with("event: run.monitor\n"), "{text}");
+        assert!(text.contains("\nevent: run.updated\n"), "{text}");
         let summary: Value = serde_json::from_str(
             text.lines()
                 .filter_map(|line| line.strip_prefix("data: "))
@@ -11789,9 +11824,8 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(summary["run"]["monitor"]["rev"], rev);
-        drop(store);
-        std::fs::remove_dir_all(directory).unwrap();
+        assert_eq!(&summary["run"]["monitor"]["rev"], rev);
+        assert_eq!(summary["run"]["monitor"]["flag"]["id"], "f1");
     }
 
     #[tokio::test]
