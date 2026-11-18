@@ -10294,16 +10294,25 @@ pub fn trusted_up_port() -> Result<Option<u16>> {
 
 /// Append-only stderr sink for a harness child (startup/debug diagnostics).
 pub fn harness_log(name: &str) -> Result<std::fs::File> {
-    let path = crate::store::data_dir().join(format!("agent-{name}.log"));
+    let path = harness_log_path(name);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| anyhow!("Could not create {}: {}", parent.display(), e))?;
     }
-    std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
         .open(&path)
         .map_err(|e| anyhow!("Could not open {}: {}", path.display(), e))
+}
+
+pub(crate) fn harness_log_path(name: &str) -> PathBuf {
+    crate::store::data_dir().join(format!("agent-{name}.log"))
 }
 
 #[cfg(test)]
