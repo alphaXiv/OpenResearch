@@ -85,6 +85,15 @@ test("runs lead only within one label group; unrelated runs are counted", () => 
   assert.equal(said([model("a", scored(1.3)), model("b", scored(1.2))], depths(4, 4)).text, count(2));
 });
 
+test("a tie for best reports the sweep's progress in either order", () => {
+  const models = [model("a", scored(1.2)), model("b", scored(1.2)), model("c", scored(1.3))];
+  const count = bare(m.run_summary_running({ count: "**3**" }));
+  assert.equal(said(models, depths(4, 6, 8)).text, count);
+  assert.equal(said([...models].reverse(), depths(8, 6, 4)).text, count);
+  const unique = [model("a", scored(1.2)), model("b", scored(1.3)), model("c", scored(1.3))];
+  assert.equal(said(unique, depths(4, 6, 8)).text, "4 leads at val bpb **1.20**");
+});
+
 test("once every run has finished the leader is said with that", () => {
   const done = { status: "done", endedAt: now };
   const models = [model("a", scored(1.3, { tone: "done" }), done), model("b", scored(1.2, { tone: "done" }), done)];

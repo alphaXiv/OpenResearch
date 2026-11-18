@@ -106,7 +106,9 @@ function leader(models: RunModel[]): RunModel | null {
   const ranked = headed.filter((model) => model.headline?.number !== null);
   if (ranked.length < 2) return null;
   const score = (model: RunModel) => (model.headline?.number ?? 0) * (first.better === "lower" ? 1 : -1);
-  return ranked.reduce((best, model) => score(model) < score(best) ? model : best);
+  const best = Math.min(...ranked.map(score));
+  const leaders = ranked.filter((model) => score(model) === best);
+  return leaders.length === 1 ? leaders[0] : null;
 }
 
 /**
