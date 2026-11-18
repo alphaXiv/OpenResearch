@@ -556,6 +556,59 @@ fn metric_only_records_do_not_invent_progress_or_historical_time() {
 }
 
 #[test]
+fn elapsed_series_uses_payload_deltas_across_clock_origins() {
+    let mut snapshot = fresh();
+    snapshot
+        .feed(
+            b"::orx:: {\"phase\":\"train\",\"t\":12000}\n::orx:: {\"t\":12004,\"m\":{\"loss\":4}}\n::orx:: {\"t\":12007,\"m\":{\"loss\":3}}\n",
+            false,
+            9000,
+            false,
+        )
+        .unwrap();
+    let saved = serde_json::to_vec(&snapshot).unwrap();
+    let mut snapshot: Snapshot = serde_json::from_slice(&saved).unwrap();
+    snapshot
+        .feed(
+            b"::orx:: {\"t\":300,\"m\":{\"loss\":2}}\n::orx:: {\"t\":302,\"m\":{\"loss\":1}}\n",
+            true,
+            9000,
+            false,
+        )
+        .unwrap();
+    assert_eq!(
+        snapshot.series["loss"],
+        [
+            (4.0, Some(4.0)),
+            (7.0, Some(3.0)),
+            (7.0, Some(2.0)),
+            (9.0, Some(1.0))
+        ]
+    );
+}
+
+#[test]
+fn elapsed_series_measures_from_the_first_report_on_either_fallback_clock() {
+    let first = b"Setup began\n::orx:: {\"m\":{\"loss\":4}}\n";
+    let second = b"::orx:: {\"m\":{\"loss\":3}}\n";
+    let mut live = fresh();
+    live.feed(first, false, 1000, true).unwrap();
+    live.feed(second, true, 4000, true).unwrap();
+    assert_eq!(live.series["loss"], [(0.0, Some(4.0)), (3.0, Some(3.0))]);
+
+    let mut replay = fresh();
+    replay.feed_replay(first, false, 4000, 1.0).unwrap();
+    replay.feed_replay(second, true, 4000, 1.0).unwrap();
+    assert_eq!(
+        replay.series["loss"],
+        [
+            (0.0, Some(4.0)),
+            ((first.len() - b"Setup began\n".len()) as f64, Some(3.0))
+        ]
+    );
+}
+
+#[test]
 fn declared_progress_does_not_inherit_a_detectors_clock() {
     let mut s = fresh();
     feed(&mut s, "10it [00:20, 0.5it/s]\r20it [00:40, 0.5it/s]\r");
@@ -1149,8 +1202,8 @@ fn a_series_on_the_step_axis_holds_one_stages_points() {
     );
     assert_eq!(
         timed.series["loss"],
-        [(1.0, Some(4.0)), (2.0, Some(3.0))],
-        "a run that never counts steps plots across its stages in time"
+        [(0.0, Some(4.0)), (1.0, Some(3.0))],
+        "a run that never counts steps plots elapsed time across its stages"
     );
     assert_eq!(
         timed.first_series_stages["loss"],

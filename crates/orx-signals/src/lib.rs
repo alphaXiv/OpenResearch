@@ -98,13 +98,22 @@ pub struct Timing {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_advance: Option<(usize, f64)>,
     pub last_log_at: Option<i64>,
-    pub origin_ms: Option<i64>,
     pub payload_t: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    elapsed_sample: Option<ElapsedSample>,
     /// When the payload started, as the host recorded it: the first phase's start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_ms: Option<i64>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct ElapsedSample {
+    x: f64,
+    payload: Option<f64>,
+    observed: Option<i64>,
+    replay: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -866,15 +875,9 @@ impl Snapshot {
                 self.bad_field("spend");
             }
         }
-        if observed && self.timing.origin_ms.is_none() {
-            self.timing.origin_ms = Some(now);
-        }
         let stage = self
             .progress()
             .and_then(|phase| Some((phase.done?, phase.occurrence)));
-        let x = stage.map(|(step, _)| step).or(time).or_else(|| {
-            observed.then(|| (now - self.timing.origin_ms.unwrap_or(now)) as f64 / 1000.0)
-        });
         // An out-of-order report has no step to plot at, and once the run counts steps a value
         // from a stage without them has no place on that axis: either is only the latest.
         let counts_steps = self.phases.iter().any(|phase| phase.done.is_some());
@@ -889,9 +892,13 @@ impl Snapshot {
             self.first_series_stages.clear();
             self.series_rev += 1;
         }
-        let on_axis = !out_of_order && (stage.is_some() || !counts_steps);
-        let x = x.filter(|_| on_axis);
-        let plot_x = x.or(replay_elapsed.filter(|_| on_axis));
+        let plot_x = if counts_steps {
+            self.timing.elapsed_sample = None;
+            stage.map(|(step, _)| step).filter(|_| !out_of_order)
+        } else {
+            self.elapsed_at(time, observed.then_some(now), replay_elapsed)
+        };
+        let x = plot_x.filter(|_| stage.is_some() || time.is_some() || observed);
         let coordinated = record.contains_key("step") && !out_of_order;
         // In the order printed, so a new table's columns read as the run wrote them.
         let mut cells = Map::new();
@@ -959,7 +966,7 @@ impl Snapshot {
                     // A relaunch redoes the step it resumes at: its value replaces the old one.
                     let redone = series
                         .last_mut()
-                        .filter(|last| origin && last.0 == x && **last != point);
+                        .filter(|last| stage.is_some() && origin && last.0 == x && **last != point);
                     if let Some(last) = redone {
                         *last = point;
                         self.series_rev += 1;
@@ -1036,6 +1043,40 @@ impl Snapshot {
                 self.bad_field("row");
             }
         }
+    }
+
+    fn elapsed_at(
+        &mut self,
+        payload: Option<f64>,
+        observed: Option<i64>,
+        replay: Option<f64>,
+    ) -> Option<f64> {
+        if payload.is_none() && observed.is_none() && replay.is_none() {
+            return None;
+        }
+        let x = self.timing.elapsed_sample.as_ref().map_or(0.0, |last| {
+            // Across payload clock origins, only the fallback clock can measure the gap.
+            let delta = payload
+                .zip(last.payload)
+                .filter(|(t, previous)| t >= previous)
+                .map(|(t, previous)| t - previous)
+                .or_else(|| {
+                    observed
+                        .zip(last.observed)
+                        .map(|(t, previous)| t.saturating_sub(previous) as f64 / 1000.0)
+                })
+                .or_else(|| replay.zip(last.replay).map(|(t, previous)| t - previous))
+                .unwrap_or_default()
+                .max(0.0);
+            (last.x + delta).min(f64::MAX)
+        });
+        self.timing.elapsed_sample = Some(ElapsedSample {
+            x,
+            payload,
+            observed,
+            replay,
+        });
+        Some(x)
     }
 
     fn reset_reports(&mut self) {
