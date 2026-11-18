@@ -1344,6 +1344,7 @@ mod tests {
             note: None,
             annotations: Vec::new(),
             from: None,
+            env: Vec::new(),
         };
         assert_eq!(plan_exit_transition(&prompt, &response("Yes")), Some(false));
         assert_eq!(plan_exit_transition(&prompt, &response("No")), Some(true));

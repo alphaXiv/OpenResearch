@@ -154,6 +154,8 @@ export function createInvalidation(client: WorkspaceClient) {
     }
     if (path.startsWith("/api/chat/")) {
       invalidate(["listSidebarChatSessions"], scope);
+      // An env card's answer saves variables.
+      if (path.endsWith("/respond")) invalidate(["getEnvVars"], scope);
       if (path === "/api/chat/sessions") invalidate(["getProjectStarterPrompts", "listProjectActivity"], scope);
       return;
     }
