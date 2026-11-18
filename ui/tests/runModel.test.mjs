@@ -83,7 +83,7 @@ test("an ended run leads with how it ended and offers Dismiss", () => {
   assert.ok(auto.canDismiss && !auto.canStop);
 
   const budget = ended({ outcome: { by: "rule", rule: { name: "budget", text: null, does: "stop", budgetUsd: 5 }, at: now } }, "stopped");
-  assert.equal(bare(budget.note), m.run_rule_detail({ text: m.run_rule_budget({ budget: "$5.00" }), name: "budget" }));
+  assert.equal(bare(budget.note), m.run_rule_detail({ text: m.run_rule_reported_spend({ budget: "$5.00" }), name: "budget" }));
   const byAgent = ended({ outcome: { by: "agent", at: now, reason: "Loss went NaN at step 410." } }, "stopped");
   assert.equal(byAgent.lead, m.status_auto_stopped());
   assert.equal(bare(byAgent.note), m.run_stop_reason({ agent: "Claude", reason: "Loss went NaN at step 410." }));

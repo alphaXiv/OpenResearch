@@ -450,7 +450,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
 
 /** What a rule checks: the agent's words, or for the budget orx adds, its own. */
 export function ruleText(rule: RunRule): string {
-  return rule.text !== null ? autoDir(rule.text) : m.run_rule_budget({ budget: ltr(fmtUsd(rule.budgetUsd ?? 0)) });
+  return rule.text !== null ? autoDir(rule.text) : m.run_rule_reported_spend({ budget: ltr(fmtUsd(rule.budgetUsd ?? 0)) });
 }
 
 function headlineOf(monitor: RunMonitor | null, summary: NonNullable<Run["monitor"]>["headline"], bindings: Bindings, signals: Signals, sentenceTemplate: string | null, live: boolean): RunModel["headline"] {

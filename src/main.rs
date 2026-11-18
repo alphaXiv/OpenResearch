@@ -822,8 +822,10 @@ pub struct ExpRunArgs {
     /// Launch even when another run is already in flight for this experiment.
     #[arg(long)]
     pub force: bool,
-    /// Stop the run once what it has cost, or would cost by its end, passes this many US
-    /// dollars: a rule named `budget`, checked with the experiment's other rules.
+    /// Stop when reported spend reaches this many US dollars or a projection exceeds it.
+    ///
+    /// Rentals use reported spend only. All rules act only while `orx up` is running and
+    /// the workspace machine is awake.
     #[arg(long, value_name = "USD", value_parser = parse_budget)]
     #[serde(default)]
     pub budget: Option<f64>,

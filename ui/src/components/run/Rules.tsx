@@ -16,7 +16,7 @@ export function Rules({ rules, outcome }: { rules: RunRule[]; outcome: RunOutcom
         <ChevronRight size={14} aria-hidden="true" className="shrink-0 motion-safe:transition-transform rtl:rotate-180 group-open:rotate-90 rtl:group-open:rotate-90" />
         {summary({ count: ltr(fmtNumber(rules.length)) })}
       </summary>
-      <p className="m-0 mt-2 text-xs text-ink-subtext">{m.run_rules_checked()}</p>
+      <p className="m-0 mt-2 text-xs text-ink-subtext">{m.run_rules_when_active()}</p>
       <ul className="m-0 mt-2 flex list-none flex-col gap-1.5 p-0">
         {rules.map((rule) => (
           <li key={rule.name} className="leading-snug">

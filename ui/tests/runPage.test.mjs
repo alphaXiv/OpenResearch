@@ -104,11 +104,11 @@ test("the rules a run was launched with are listed as checked with no model, the
   const outcome = { by: "rule", at: now, rule: rules[2], reason: "it would cost up to $41.20 by its end, past its $5.00 budget" };
   const stopped = run("r2", { status: "cancelled", endedAt: now, outcome, monitor: summary(monitor, { tone: "stopped" }) });
   const { container } = await overview([stopped], () => monitor);
-  const budget = m.run_rule_budget({ budget: "$5.00" });
+  const budget = m.run_rule_reported_spend({ budget: "$5.00" });
   assert.ok(text(container).includes(`${budget} ${m.run_rule_detail({ text: "", name: "budget" }).trim()}`), text(container));
   const details = [...container.querySelectorAll("details")].find((element) => text(element.querySelector("summary")) === m.run_rules_summary_other({ count: "3" }));
   assert.ok(details, "the rules are a disclosure of their own");
-  assert.ok(text(details).includes(m.run_rules_checked()));
+  assert.ok(text(details).includes(m.run_rules_when_active()));
   assert.deepEqual([...details.querySelectorAll("li")].map(text), [
     `nan-loss Stop when the loss is NaN. · ${m.run_rule_stops()}`,
     `plateau Ask when val loss stops improving. · ${m.run_rule_asks()}`,

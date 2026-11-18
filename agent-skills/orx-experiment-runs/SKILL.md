@@ -385,8 +385,12 @@ Ray, and Tinker launches with this rule are refused.
 
 `"stop"` cancels the run, which shows as Auto-stopped by that rule, and you
 are woken with what orx saw; `"ask"` raises a flag (§10) and the run goes on. `text` is
-what the user reads, so say the condition in your words. `orx exp run <expId>
---budget 5` adds a `budget` rule to that run.
+what the user reads, so say the condition in your words. Rules act only while
+`orx up` is running and the workspace machine is awake.
+
+`orx exp run <expId> --budget 5` adds a `budget` rule based on spend the script
+reports. It stops the run when reported spend reaches $5 or when an available
+projection exceeds $5. Rentals use reported spend only.
 
 When you stop a run yourself, say why: `orx exp cancel --run <runId> --reason
 '…'`. If the stopped run answered nothing and you are about to repair the same
