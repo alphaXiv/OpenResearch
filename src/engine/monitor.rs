@@ -1065,16 +1065,7 @@ fn evaluate(
                 .collect()
         })
     };
-    let (mut view, view_from, view_problem) = view_of(life, snapshot);
-    if !snapshot.is_some_and(|s| s.phases.iter().any(|p| !p.name.is_empty())) {
-        if let Some(blocks) = view["blocks"].as_array_mut() {
-            for block in blocks {
-                if let Some(block) = block.as_object_mut() {
-                    block.remove("phase");
-                }
-            }
-        }
-    }
+    let (view, view_from, view_problem) = view_of(life, snapshot);
     let parent_ended = life
         .parent
         .as_ref()
@@ -1200,6 +1191,12 @@ fn evaluate(
     let prior_view = (view_from["isDefault"] == true && blocks.is_empty())
         .then(|| default_view(earlier.or(parent)));
     let timing_view = prior_view.as_ref().unwrap_or(&view);
+    let planned_signal_blocks = blocks.iter().filter_map(|block| {
+        let phase = block["phase"].as_str()?;
+        let chart = block["chart"].is_array() && block.get("from").is_none();
+        let stats = block["stats"].is_array();
+        (chart || stats).then_some((phase, block))
+    });
     let displayed: Vec<&str> = timing_view["headline"]
         .as_array()
         .into_iter()
@@ -1224,6 +1221,13 @@ fn evaluate(
                                 .filter_map(|series| series["y"].as_str()),
                         )
                 }),
+        )
+        .chain(
+            planned_signal_blocks
+                .clone()
+                .filter(|(phase, _)| plan.iter().any(|stage| stage.phase == *phase))
+                .flat_map(|(_, block)| block["stats"].as_array().into_iter().flatten())
+                .filter_map(Value::as_str),
         )
         .collect();
     let has_point = snapshot.is_some_and(|s| {
@@ -1252,6 +1256,30 @@ fn evaluate(
             .nth(occurrence)
             .map(|(index, _)| index)
     };
+    let guess = if life.live() {
+        let historical = timed.iter().find_map(|(prior, _, _)| {
+            let Some(first) = first_point_stage(prior, &displayed)? else {
+                return Some(0);
+            };
+            matching_stage(prior, first)
+        });
+        let viewed = stages.iter().position(|stage| {
+            stage.planned
+                && !stage.skipped
+                && planned_signal_blocks
+                    .clone()
+                    .any(|(phase, _)| stage.name == phase)
+        });
+        historical.into_iter().chain(viewed).min().map(|first| {
+            if planned {
+                first.max(current.unwrap_or(0))
+            } else {
+                first
+            }
+        })
+    } else {
+        None
+    };
     let setup = (started && life.live() && fold.error.is_none() && !has_work).then(|| {
         let line = snapshot
             .map(|s| s.last_line.as_str())
@@ -1260,59 +1288,75 @@ fn evaluate(
             .and_then(|s| s.phases.last())
             .map(|phase| phase.name.as_str())
             .filter(|name| !name.is_empty());
-        let starts_at = timed.iter().find_map(|(prior, _, _)| {
-            let first = first_point_stage(prior, &displayed)?.unwrap_or(0);
-            let (from, end) = if let Some(current) = current {
-                let index = (0..prior.phases.len())
-                    .find(|index| matching_stage(prior, *index) == Some(current))?;
-                if index >= first {
-                    return Some(at);
-                }
-                let phase = snapshot?.phases.last()?;
-                let measured = output
-                    .as_ref()
-                    .and_then(|output| output.current_phase.as_ref())
-                    .and_then(|eta| eta.range.map(|range| laptop(eta.at) as f64 + range.mid_ms));
-                let end = if let Some(end) = measured {
-                    end
-                } else {
-                    let prior = stages[current].prior?;
-                    let end = if let Some(point) = input.points.last() {
-                        let total = input.phases[input.current].total?;
-                        let remaining = (1.0 - point.done / total).clamp(0.0, 1.0);
-                        let anchor = if input.placed { laptop(point.at) } else { at };
-                        anchor as f64 + prior.ms * remaining
-                    } else {
-                        laptop(phase.started_at? as f64) as f64 + prior.ms
-                    };
-                    if end <= at as f64 {
-                        return None;
-                    }
-                    end
-                };
-                (index + 1, end)
-            } else {
-                (0, life.start() as f64)
+        let current_end = || {
+            let Some(current) = current else {
+                return Some(life.start() as f64);
             };
-            let future: Option<f64> = prior
-                .phases
-                .iter()
-                .take(first)
-                .enumerate()
-                .skip(from)
-                .map(|(index, phase)| {
-                    let stage = matching_stage(prior, index).map(|index| &stages[index]);
-                    if stage.is_some_and(|stage| stage.skipped) {
-                        return Some(0.0);
+            if let Some(eta) = output.as_ref().and_then(|o| o.current_phase.as_ref()) {
+                if let Some(range) = eta.range {
+                    return Some(laptop(eta.at) as f64 + range.mid_ms);
+                }
+            }
+            let prior = stages[current].prior?;
+            let end = if let Some(point) = input.points.last() {
+                let total = input.phases[input.current].total?;
+                let remaining = (1.0 - point.done / total).clamp(0.0, 1.0);
+                let anchor = if input.placed { laptop(point.at) } else { at };
+                anchor as f64 + prior.ms * remaining
+            } else {
+                laptop(snapshot?.phases.last()?.started_at? as f64) as f64 + prior.ms
+            };
+            (end > at as f64).then_some(end)
+        };
+        let starts_at = if planned {
+            guess.and_then(|first| {
+                if current == Some(first) {
+                    let began = snapshot?.phases.last()?.started_at;
+                    return Some(began.map_or(at, |ms| laptop(ms as f64)) as f64);
+                }
+                let from = current.map_or(0, |current| current + 1);
+                let future: Option<f64> = stages[from..first]
+                    .iter()
+                    .map(|stage| {
+                        if stage.skipped {
+                            Some(0.0)
+                        } else {
+                            stage.prior.map(|prior| prior.ms)
+                        }
+                    })
+                    .sum();
+                Some(current_end()? + future?)
+            })
+        } else {
+            // Without a plan, only the earlier run knows which stages lie ahead.
+            timed.iter().find_map(|(prior, _, _)| {
+                let first = first_point_stage(prior, &displayed)?.unwrap_or(0);
+                let from = if let Some(current) = current {
+                    let index = (0..prior.phases.len())
+                        .find(|index| matching_stage(prior, *index) == Some(current))?;
+                    if index >= first {
+                        return Some(at as f64);
                     }
-                    stage
-                        .and_then(|stage| stage.prior.map(|prior| prior.ms))
-                        .or_else(|| Some((phase.ended_at? - phase.started_at?) as f64))
-                })
-                .sum();
-            let starts_at = end + future?;
-            starts_at.is_finite().then(|| starts_at.round() as i64)
-        });
+                    index + 1
+                } else {
+                    0
+                };
+                let future: Option<f64> = prior.phases[..first]
+                    .iter()
+                    .enumerate()
+                    .skip(from)
+                    .map(|(index, phase)| {
+                        matching_stage(prior, index)
+                            .and_then(|index| stages[index].prior.map(|prior| prior.ms))
+                            .or_else(|| Some((phase.ended_at? - phase.started_at?) as f64))
+                    })
+                    .sum();
+                Some(current_end()? + future?)
+            })
+        };
+        let starts_at = starts_at
+            .filter(|starts_at| starts_at.is_finite())
+            .map(|starts_at| starts_at.round() as i64);
         json!({ "line": line, "stage": stage, "startsAt": starts_at })
     });
 
@@ -1325,17 +1369,7 @@ fn evaluate(
         .into_iter()
         .chain(first_detected)
         .min()
-        .or_else(|| {
-            if !life.live() {
-                return None;
-            }
-            timed.iter().find_map(|(prior, _, _)| {
-                let Some(first) = first_point_stage(prior, &displayed)? else {
-                    return Some(0);
-                };
-                matching_stage(prior, first)
-            })
-        });
+        .or(guess);
     let stage_order = json!({
         "index": current,
         "count": planned.then_some(stages.len()),
@@ -1498,6 +1532,13 @@ fn evaluate(
         "rules": rules.iter().map(super::rules::Rule::shown).collect::<Vec<_>>(),
         "statusText": text,
     });
+    if !snapshot.is_some_and(|s| s.phases.iter().any(|p| !p.name.is_empty())) {
+        if let Some(blocks) = body["view"]["blocks"].as_array_mut() {
+            for block in blocks.iter_mut().filter_map(Value::as_object_mut) {
+                block.remove("phase");
+            }
+        }
+    }
     if !best.is_empty() {
         body["best"] = json!(best);
     }
@@ -2970,10 +3011,14 @@ fn eta_text(life: &Lifecycle, snapshot: Option<&Snapshot>, facts: &StatusFacts) 
                 .flatten()
                 .filter_map(Value::as_str)
                 .collect();
-            // Past its estimate with no progress since, a run is late, never "0s left".
+            // A run that reports in chunks can pass its midpoint between reports.
             let mid = estimate["midMs"].as_i64().unwrap_or(0);
             let mid_left = mid - gone;
             if !floor && mid > 0 && mid <= gone {
+                let hi = estimate["hiMs"].as_i64().unwrap_or(mid);
+                if facts.stall_ms.is_none_or(|ms| ms <= 0) && hi > gone {
+                    return Some(with_cost("Almost done".into(), facts.cost, false));
+                }
                 let due = now - gone + mid;
                 return Some(with_cost(
                     format!(
@@ -6554,6 +6599,173 @@ mod tests {
         );
     }
 
+    /// A parent planned without label and train, which got its first displayed point in eval, and
+    /// a child that plans both; `block` is the child's view of `dev_loss`.
+    fn labelled_child(f: &Fixture, block: &str) {
+        f.view(
+            "exp",
+            &format!(
+                "<signal name=\"wer\" better=\"lower\"/><signal name=\"dev_loss\" better=\"lower\"/>\
+                 <view headline=\"wer\">{block}<stats of=\"wer\"/></view>"
+            ),
+        );
+        let stages = |names: &[&str]| {
+            json!(names
+                .iter()
+                .map(|name| json!({"phase": name}))
+                .collect::<Vec<_>>())
+        };
+        plan(f, "exp", stages(&["install", "download", "eval"])).unwrap();
+        let parent = f.run_in("p1", "exp", "done", local());
+        f.collect(&Snapshot {
+            run_id: "p1".into(),
+            ..folded(&reports(&[
+                r#"{"phase":"install"}"#,
+                r#"{"phase":"download","step":0,"of":3}"#,
+                r#"{"step":3}"#,
+                r#"{"phase":"eval","step":0,"of":2}"#,
+                r#"{"step":2,"m":{"wer":0.05}}"#,
+            ]))
+        });
+        monitor_at(f, &parent, T0 + 700_000);
+        f.child("child", "exp");
+        plan(
+            f,
+            "child",
+            stages(&["install", "download", "label", "train", "eval"]),
+        )
+        .unwrap();
+    }
+
+    /// One report a second from `T0`.
+    fn reports(lines: &[&str]) -> Vec<(i64, String)> {
+        (0..)
+            .zip(lines)
+            .map(|(second, line)| (T0 + 1000 * second, format!("::orx:: {line}")))
+            .collect()
+    }
+
+    /// The stage order of a child run that has reported `lines`, at the second after the last.
+    fn order_after(f: &Fixture, id: &str, lines: &[&str]) -> Value {
+        let run = f.run_in(id, "child", "running", local());
+        f.collect(&Snapshot {
+            run_id: id.into(),
+            ..folded(&reports(lines))
+        });
+        let (monitor, _) = monitor_at(f, &run, T0 + 1000 * lines.len() as i64);
+        json!({"order": monitor["stageOrder"], "setup": monitor["setup"].is_object(), "startsAt": monitor["setup"]["startsAt"]})
+    }
+
+    const LABEL: [&str; 6] = [
+        r#"{"phase":"install"}"#,
+        r#"{"phase":"download","step":0,"of":3}"#,
+        r#"{"step":3}"#,
+        r#"{"phase":"label","step":0,"of":5}"#,
+        r#"{"step":2}"#,
+        r#"{"step":3}"#,
+    ];
+
+    #[test]
+    fn setup_ends_at_the_first_stage_the_view_charts_even_where_the_parent_had_none() {
+        let f = Fixture::new("orx-monitor-first-viewed");
+        labelled_child(&f, r#"<chart y="dev_loss" phase="train"/>"#);
+
+        let downloading = order_after(&f, "c0", &LABEL[..2]);
+        assert_eq!(
+            downloading["order"],
+            json!({"index": 1, "count": 5, "first": 3})
+        );
+        assert_eq!(
+            downloading["startsAt"],
+            Value::Null,
+            "no earlier run timed label, which comes before train"
+        );
+        let labelling = order_after(&f, "c1", &LABEL);
+        assert_eq!(
+            labelling,
+            json!({"order": {"index": 2, "count": 5, "first": 3}, "setup": true, "startsAt": T0 + 6_500}),
+            "train starts when label ends at its own pace"
+        );
+        let mut training = LABEL.to_vec();
+        training.push(r#"{"phase":"train","step":0,"of":272}"#);
+        let waiting = order_after(&f, "c2", &training);
+        assert_eq!(
+            waiting,
+            json!({"order": {"index": 3, "count": 5, "first": 3}, "setup": true, "startsAt": T0 + 6_000}),
+            "train began and has yet to report a point"
+        );
+
+        training.push(r#"{"step":16,"m":{"dev_loss":0.3}}"#);
+        assert_eq!(
+            order_after(&f, "c3", &training),
+            json!({"order": {"index": 3, "count": 5, "first": 3}, "setup": false, "startsAt": null}),
+            "the first point came where it was expected"
+        );
+
+        let mut missed = LABEL.to_vec();
+        missed.extend([
+            r#"{"phase":"train","step":0,"of":272}"#,
+            r#"{"phase":"eval","step":0,"of":2}"#,
+        ]);
+        assert_eq!(
+            order_after(&f, "c4", &missed)["order"],
+            json!({"index": 4, "count": 5, "first": 4}),
+            "train passed with no point, so the first comes no earlier than eval"
+        );
+    }
+
+    #[test]
+    fn a_phased_stat_can_end_setup_without_being_a_headline_or_chart() {
+        let f = Fixture::new("orx-monitor-first-stat");
+        labelled_child(&f, r#"<stats of="dev_loss" phase="train"/>"#);
+
+        let mut training = LABEL.to_vec();
+        training.push(r#"{"phase":"train","step":0,"of":272}"#);
+        let waiting = order_after(&f, "c1", &training);
+        assert_eq!(waiting["order"], json!({"index":3,"count":5,"first":3}));
+        assert_eq!(waiting["setup"], true);
+
+        training.push(r#"{"step":16,"m":{"dev_loss":0.3}}"#);
+        let reported = order_after(&f, "c2", &training);
+        assert_eq!(reported["order"], waiting["order"]);
+        assert_eq!(reported["setup"], false);
+    }
+
+    #[test]
+    fn a_view_that_names_no_stage_leaves_setup_to_end_where_the_parent_got_its_first_point() {
+        let f = Fixture::new("orx-monitor-first-parent");
+        labelled_child(&f, r#"<chart y="dev_loss"/>"#);
+
+        let labelling = order_after(&f, "c1", &LABEL);
+        assert_eq!(
+            labelling["order"],
+            json!({"index": 2, "count": 5, "first": 4})
+        );
+        let mut training = LABEL.to_vec();
+        training.extend([
+            r#"{"phase":"train","step":0,"of":272}"#,
+            r#"{"step":16,"m":{"dev_loss":0.3}}"#,
+        ]);
+        assert_eq!(
+            order_after(&f, "c3", &training)["order"],
+            json!({"index": 3, "count": 5, "first": 3}),
+            "a point can still correct the historical guess"
+        );
+
+        let mut evaluating = LABEL.to_vec();
+        evaluating.extend([
+            r#"{"phase":"train","step":0,"of":272}"#,
+            r#"{"step":272}"#,
+            r#"{"phase":"eval","step":0,"of":2}"#,
+            r#"{"step":1,"m":{"wer":0.04}}"#,
+        ]);
+        assert_eq!(
+            order_after(&f, "c2", &evaluating),
+            json!({"order": {"index": 4, "count": 5, "first": 4}, "setup": false, "startsAt": null}),
+            "the first point came where the parent's did"
+        );
+    }
+
     #[test]
     fn a_plain_progress_bar_is_work_without_a_stage_plan_or_metrics() {
         let f = Fixture::new("orx-monitor-plain-progress");
@@ -6833,6 +7045,45 @@ mod tests {
         assert!(text.contains("  eval \u{b7} step 4 of 10  "), "{text}");
         let summary = current(&f.store, &run).unwrap().unwrap().summary().clone();
         assert_eq!(summary["stage"]["of"], 10.0);
+    }
+
+    #[test]
+    fn a_run_that_reports_in_chunks_is_almost_done_past_its_midpoint_until_it_is_late() {
+        let monitor = |total, now| {
+            let snapshot = folded(
+                &(0..=3)
+                    .map(|n| {
+                        let step = 10 * n;
+                        let line =
+                            format!("::orx:: {{\"step\":{step},\"of\":{total},\"t\":{step}}}");
+                        (T0 + 10_000 * n, line)
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            let f = Fixture::new("orx-monitor-chunks");
+            let run = f.run("running", local());
+            f.collect(&snapshot);
+            f.collected(now);
+            monitor_at(&f, &run, now).0
+        };
+
+        let waiting = monitor(40, T0 + 40_200);
+        assert_eq!(status_line(&waiting, "eta"), "Almost done");
+        let late = monitor(40, T0 + 41_000);
+        mentions(
+            status_line(&late, "eta"),
+            &["No progress for 11s", "was due"],
+        );
+
+        let now = T0 + 130_200;
+        let stalled = monitor(130, now);
+        assert!(stalled["progress"]["stallMs"].as_i64().unwrap() > 0);
+        let estimate = &stalled["estimate"];
+        assert!(now < estimate["at"].as_i64().unwrap() + estimate["hiMs"].as_i64().unwrap());
+        mentions(
+            status_line(&stalled, "eta"),
+            &["No progress for", "was due"],
+        );
     }
 
     #[test]
