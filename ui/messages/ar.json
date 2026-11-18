@@ -1020,6 +1020,7 @@
   "chat_continue": "متابعة",
   "chat_turn_incomplete": "لم تكتمل هذه الجولة.",
   "chat_starting": "جارٍ البدء…",
+  "chat_setting_up_worktree": "جارٍ إعداد شجرة العمل…",
   "chat_collapse_tool_activity": "طيّ نشاط الأداة",
   "chat_expand_tool_activity": "توسيع نشاط الأداة",
   "chat_plan": "خطة",

@@ -1,5 +1,6 @@
 import { useMachines } from "../machineSelection";
 import { downloadFile } from "../download";
+import { flushSync } from "react-dom";
 import {
   Fragment,
   createContext,
@@ -62,7 +63,7 @@ import { useAgentSignIn } from "./HarnessSetupDialog";
 
 import { RemoteConnectionStrip, useRemoteConnection } from "../RemoteRuntime";
 
-import { LOCAL_ERROR_PART_ID, LOCAL_PREFIX, SHELL_TOOL } from "../queries/chatState";
+import { LOCAL_ERROR_PART_ID, LOCAL_PREFIX, SHELL_TOOL, optimisticUserMessage } from "../queries/chatState";
 import { CancelledError, useInfiniteQuery, useQueries, useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 
@@ -827,6 +828,84 @@ const PLAN_RESOLVED_CLASS_NAME = [
 ].join(" ");
 
 const USER_MESSAGE_BUBBLE_CLASS_NAME = "bg-panel rounded-2xl py-2.5 px-4 text-base leading-normal whitespace-pre-wrap wrap-anywhere";
+
+/** Rises a send from the composer, re-measured every frame because the pin and late row measurements keep moving it. */
+function riseIntoPlace(
+  threadRef: React.RefObject<HTMLElement | null>,
+  innerRef: React.RefObject<HTMLElement | null>,
+  arrived: (started: boolean) => { rising: HTMLElement[]; fading?: Element | null } | null,
+  waitMs: number,
+) {
+  if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+
+  const userScroll = ["wheel", "touchmove", "pointerdown", "keydown"] as const;
+  const giveUpAt = performance.now() + waitMs;
+  const raised = new Map<HTMLElement, number>();
+  let tail: { rising: HTMLElement[] } | null = null;
+  let from = innerRef.current?.getBoundingClientRect().top;
+  let listening: HTMLElement | null = null;
+  let start: number | null = null;
+  let pushed = 0;
+  let frame = 0;
+
+  const stop = () => {
+    cancelAnimationFrame(frame);
+    innerRef.current?.style.removeProperty("transform");
+    for (const element of raised.keys()) element.style.removeProperty("transform");
+    for (const type of userScroll) listening?.removeEventListener(type, stop);
+  };
+  const step = (now: number) => {
+    const thread = threadRef.current;
+    const inner = innerRef.current;
+    if (thread && listening !== thread) {
+      for (const type of userScroll) listening?.removeEventListener(type, stop);
+      for (const type of userScroll) thread.addEventListener(type, stop, { passive: true });
+      listening = thread;
+    }
+
+    const settled = inner ? inner.getBoundingClientRect().top - pushed : undefined;
+    const found = thread && inner ? arrived(start !== null) : null;
+    if (start === null) {
+      if (!found) {
+        // The frame the message lands in has not painted yet, so the last painted spot is where content glides from.
+        from = settled;
+        if (now < giveUpAt) frame = requestAnimationFrame(step);
+        else stop();
+        return;
+      }
+      start = now;
+      found.fading?.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 250, delay: 350, easing: "ease", fill: "backwards" });
+    }
+    // A fast reply can drop the status line mid-rise, and the server's copy replaces the sent row; both keep rising.
+    if (found) tail = found;
+    const [lead, ...others] = tail?.rising ?? [];
+    if (!thread || !inner || !lead?.isConnected || settled === undefined) return stop();
+    const rising = [lead, ...others.filter((element) => element.isConnected)];
+
+    const progress = Math.min(1, (now - start) / 600);
+    const remaining = 2 ** (-10 * progress);
+    const leadSettled = lead.getBoundingClientRect().top - pushed - (raised.get(lead) ?? 0);
+    const glide = Math.min(300, Math.max(0, (from ?? settled) - settled));
+    const rise = Math.min(300, Math.max(glide, thread.getBoundingClientRect().bottom - leadSettled));
+
+    pushed = glide * remaining;
+    inner.style.transform = `translateY(${pushed}px)`;
+    for (const element of raised.keys()) {
+      if (!rising.includes(element)) element.style.removeProperty("transform");
+    }
+    raised.clear();
+    const lift = (rise - glide) * remaining;
+    for (const element of rising) {
+      raised.set(element, lift);
+      element.style.transform = `translateY(${lift}px)`;
+    }
+
+    if (progress < 1) frame = requestAnimationFrame(step);
+    else stop();
+  };
+
+  frame = requestAnimationFrame(step);
+}
 
 const PROMPT_ACTIONS_CLASS_NAME = "prompt-actions flex flex-wrap gap-2";
 
@@ -3852,7 +3931,10 @@ export const Message = memo(function Message({
             </div>
           )}
         </div>
-        {forkCount !== undefined && (
+        {forkCount === undefined ? message.id.startsWith(LOCAL_PREFIX) && (
+          // Holds the controls' row so the server's copy of a just-sent message moves nothing below it.
+          <div aria-hidden="true" className="h-7" />
+        ) : (
           <ForkControls
             text={text}
             createdAt={message.createdAt}
@@ -4795,7 +4877,7 @@ const Transcript = memo(function Transcript({
     const response = user ? null : splitResponseParts(group, false);
     const parts = response?.answer ?? group[0].parts;
     const text = parts.filter((part) => part.type === "text" || part.type === "steer").map((part) => part.text ?? "").join("\n");
-    const width = scrollRef.current?.firstElementChild?.clientWidth ?? 760;
+    const width = scrollRef.current?.querySelector(".chat-thread-inner")?.clientWidth ?? 760;
     const columns = Math.max(20, Math.floor((width - 32) / 8));
     const lines = text.split("\n").reduce((total, line) => total + Math.max(1, Math.ceil(line.length / columns)), 0);
 
@@ -4812,6 +4894,7 @@ const Transcript = memo(function Transcript({
   }));
   // Offscreen rows keep their old height through a resize, so each height carries its measuring width.
   const measuredWidths = useRef(new Map<string, number>());
+  const transcriptColumn = scrollRef.current?.querySelector(".chat-thread-inner");
   const virtualizer = useVirtualizer({
     useFlushSync: false,
     count: visibleMessages.length,
@@ -4820,7 +4903,7 @@ const Transcript = memo(function Transcript({
     estimateSize,
     directDomUpdates: true,
     directDomUpdatesMode: "position",
-    scrollMargin: Number.parseFloat(scrollRef.current?.firstElementChild ? getComputedStyle(scrollRef.current.firstElementChild).paddingTop : "0") || 0,
+    scrollMargin: Number.parseFloat(transcriptColumn ? getComputedStyle(transcriptColumn).paddingTop : "0") || 0,
     initialMeasurementsCache,
     measureElement: (element, entry, instance) => {
       const id = element.getAttribute("data-message-id");
@@ -5932,6 +6015,8 @@ export function ChatPanel({
   const recoveringTurnRef = useRef(false);
   const activeLeafRef = useRef<string | null>(null);
   const preparingSend = useRef(false);
+  /** A new chat's first message, shown from send until its session can hold it. */
+  const [launch, setLaunch] = useState<{ projectId: string; sessionId: string | null; reached?: boolean; left?: boolean; message: ChatMessage } | null>(null);
   // Sessions whose title was just replaced by a harness-generated one, mapped
   // to a nonce that bumps per reveal so a second retitle remounts the spans and
   // replays the animation instead of sitting on a finished one.
@@ -6965,8 +7050,35 @@ export function ChatPanel({
     setSettingsError(null);
   }, [activeId]);
 
+  // A launch belongs to its new-chat route until the created chat's route takes over, and ends once the user leaves either.
+  const launchHere = mainView === "chat" && launch?.projectId === projectId
+    && (activeId === launch.sessionId || (activeId === null && !launch.reached));
+  if (launch && !launch.left && !launchHere) setLaunch({ ...launch, left: true });
+  else if (launch?.sessionId && !launch.reached && activeId === launch.sessionId) setLaunch({ ...launch, reached: true });
+  const launching = launch && !launch.left && launchHere ? launch : null;
+  const launchMessages = useMemo(() => launching ? [launching.message] : null, [launching?.message]);
+  // A chat's first turn sets up its checkout before the agent says anything.
+  const firstTurnStarting = launching !== null || (busy && allMessages.length === 1);
+  const statusLine = firstTurnStarting ? (activeSession?.sideParentSessionId || sideParentSessionId ? m.chat_starting() : m.chat_setting_up_worktree())
+    : busy && !awaitingInput && !hasPendingTailTool && !hasStreamingText ? m.chat_thinking() : null;
+  const statusLineRef = useRef<HTMLDivElement>(null);
+  /** Finds the message a send just added, and keeps finding it as the server's copy replaces the local one. */
+  const sentTail = () => {
+    let sent: string | null = null;
+    return (started: boolean) => {
+      const bubble = [...threadInnerRef.current?.querySelectorAll(".msg-user") ?? []].at(-1);
+      const row = bubble?.closest<HTMLElement>("[data-message-id]");
+      if (!bubble || !row) return null;
+      // Only the local copy starts a rise; after that, only a row with the same text, never another chat's prompt.
+      if (started ? bubble.textContent !== sent : !row.dataset.messageId?.startsWith(LOCAL_PREFIX)) return null;
+      sent = bubble.textContent;
+      const status = statusLineRef.current;
+      return { rising: status ? [row, status] : [row], fading: status };
+    };
+  };
+
   // Opening a session or returning from settings starts pinned at the latest messages.
-  const threadMounted = mainView === "chat" && (messages.length > 0 || busy);
+  const threadMounted = launching !== null || (mainView === "chat" && (messages.length > 0 || busy));
 
   // Keyed by project so a switch never shows another project's prompts; a
   // harness or model switch keeps them, and only a failed harness is retried.
@@ -7257,6 +7369,17 @@ export function ChatPanel({
         return;
       }
       const sid = activeId;
+      if (mode === "steer") {
+        const waiting = () => threadInnerRef.current?.querySelector(".msg-steer-pending");
+        const waitingBefore = waiting()?.childElementCount ?? 0;
+        riseIntoPlace(threadRef, threadInnerRef, () => {
+          const steers = waiting();
+          const label = steers?.lastElementChild;
+          const steer = label?.previousElementSibling;
+          if (!steers || steers.childElementCount <= waitingBefore || !(steer instanceof HTMLElement) || !(label instanceof HTMLElement)) return null;
+          return { rising: [steer, label], fading: waitingBefore === 0 ? label : null };
+        }, 3000);
+      }
       clearComposer();
       if (inSourceScope()) setSessionOverride({});
       const images: ChatImageAttachment[] = pending.map((a) => ({
@@ -7325,7 +7448,14 @@ export function ChatPanel({
       preparingSend.current = true;
       try {
         if (!sid) {
-          const session = await openNewSession(effective, independentPlanMode);
+          riseIntoPlace(threadRef, threadInnerRef, sentTail(), 500);
+          const launchMessage = optimisticUserMessage({
+            text: text || m.chat_asked_about_selection(),
+            attachments: pending.map((a) => ({ url: a.dataUrl, mediaType: a.mediaType, name: a.name })),
+            annotations: pendingAnnotations,
+          }, null);
+          setLaunch({ projectId, sessionId: null, message: launchMessage });
+          const session = await openNewSession(effective, independentPlanMode, launchMessage);
           sid = session.id;
           sourceSessionId = session.id;
           sourceStashKey = `${stashScope}${embedded ? `side:${session.id}` : session.id}`;
@@ -7345,10 +7475,13 @@ export function ChatPanel({
         await awaitHistory();
       } finally {
         preparingSend.current = false;
+        // Same tick as the optimistic message below, so the handoff never paints between them.
+        setLaunch(null);
       }
       if (!isCurrentScope(sessionsOptions.queryKey) || deletedSessionIds.has(sid)
         || (sideParentSessionId && deletedSessionIds.has(sideParentSessionId))) return;
       if (!(retry && mode === "steer")) {
+        if (activeId !== null && inSourceScope()) riseIntoPlace(threadRef, threadInnerRef, sentTail(), 500);
         dispatch({
           type: "optimisticUser",
           sessionId: sid,
@@ -7423,7 +7556,7 @@ export function ChatPanel({
   }
 
   /** Create the session a first message (or `!` command) lands in and open it. */
-  async function openNewSession(selection: ModelSelection, planMode: boolean | undefined) {
+  async function openNewSession(selection: ModelSelection, planMode: boolean | undefined, launchMessage?: ChatMessage) {
     const scope = composerScopeRef.current;
     const visit = projectVisitRef.current;
     let session = sideParentSessionId
@@ -7445,6 +7578,8 @@ export function ChatPanel({
       if (!queryClient.getQueryData(sessionsOptions.queryKey)) void syncSessionList(true);
     }
     if (isCurrentScope(sessionsOptions.queryKey) && projectVisitRef.current === visit && composerScopeRef.current === scope) {
+      // Synchronous, so no frame shows the new route without the launch it continues.
+      if (launchMessage) flushSync(() => setLaunch((current) => current?.message === launchMessage ? { ...current, sessionId: session.id } : current));
       onActiveSessionChangeRef.current(session.id, { replace: true });
       composerScopeRef.current = { ...scope, activeId: session.id };
     }
@@ -8158,6 +8293,7 @@ export function ChatPanel({
           </div>
         </div>
 
+        <span role="status" className="sr-only">{firstTurnStarting ? statusLine : null}</span>
         {findRequest !== null && <div className="relative z-30 shrink-0 px-4">
           <ChatSearch key={sessionsOptions.queryKey[1]} projectId={projectId} sessionId={activeId} projects={sidebarProjects} assistantLabel={assistantLabel} focusRequest={findRequest} embedded={embedded}
             onOpen={onOpenSearchHit} onClose={closeFind} branchReturn={branchReturn?.sessionId === activeId && !busy ? restoreSearchBranch : undefined}
@@ -8172,7 +8308,7 @@ export function ChatPanel({
             <p>{historyError.message}</p>
             <Button onClick={() => void historyQuery.refetch()}>{m.app_retry()}</Button>
           </div>
-        ) : contentLoading || historyLoading ? (
+        ) : (contentLoading || historyLoading) && !launching ? (
           <div className="chat-loading flex-1 min-h-0 overflow-hidden [scrollbar-gutter:stable_both-edges]" role="status" aria-label={m.chat_panel_loading_conversation()} aria-busy="true">
             <div aria-hidden="true" className="mx-auto flex h-full w-full max-w-readable flex-col gap-6 px-4 pb-8 pt-4 motion-safe:animate-pulse">
               <div className="ms-auto h-14 w-3/5 shrink-0 rounded-lg bg-panel" />
@@ -8281,6 +8417,8 @@ export function ChatPanel({
               transcriptSelection.dismiss();
             }}
           >
+            {/* Clips the launch rise at the composer, since a transform still extends the scroll range. */}
+            <div className="min-h-full overflow-y-clip">
             <div className="chat-thread-inner max-w-readable my-0 mx-auto pt-4 px-4 pb-8 flex flex-col gap-4" ref={threadInnerRef}>
               <ChatImageScope projectId={projectId} sessionId={activeId}>
                 <ChatLinksContext value={chatLinks}>
@@ -8290,9 +8428,9 @@ export function ChatPanel({
                   scrollToEndRef={scrollToEndRef}
                   stickToBottom={stickToBottom}
                   onPinToBottom={pinTranscriptToBottom}
-                  messages={messages}
-                  allMessages={allMessages}
-                  canFork={canFork}
+                  messages={launchMessages ?? messages}
+                  allMessages={launchMessages ?? allMessages}
+                  canFork={canFork && !launching}
                   onFork={forkTurn}
                   onSelectFork={selectBranch}
                   busy={busy}
@@ -8325,9 +8463,9 @@ export function ChatPanel({
               {busy && awaitingInput && (
                 <div className="flex items-center gap-2 text-subtext text-sm pt-0.5 px-0 pb-2 italic">{m.chat_panel_waiting_for_your_input()}</div>
               )}
-              {busy && !awaitingInput && !hasPendingTailTool && !hasStreamingText && (
-                <div className="text-base pt-0.5 px-1 pb-2">
-                  <span className="tool-running-shimmer">{m.chat_thinking()}</span>
+              {statusLine && (
+                <div ref={statusLineRef} className="text-base pt-0.5 px-1 pb-2">
+                  <span className="tool-running-shimmer">{statusLine}</span>
                 </div>
               )}
               {/* Below everything the turn shows until its agent reads them; each then moves to where it did. */}
@@ -8350,6 +8488,7 @@ export function ChatPanel({
                   <span role="status" className="tool-running-shimmer -mt-3 ms-auto px-1 text-xs">{m.chat_steering()}</span>
                 </div>
               )}
+            </div>
             </div>
           </div>
         )}
@@ -8510,7 +8649,7 @@ export function ChatPanel({
               </Tooltip>
             </div>
           )}
-          {!embedded && !activeId && onNewProject && (
+          {!embedded && !activeId && !launching && onNewProject && (
             <ComposerProjectPicker
               projects={sidebarProjects}
               activity={projectActivity}

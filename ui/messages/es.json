@@ -1021,6 +1021,7 @@
   "chat_continue": "Continuar",
   "chat_turn_incomplete": "Este turno no terminó.",
   "chat_starting": "Iniciando…",
+  "chat_setting_up_worktree": "Preparando el árbol de trabajo…",
   "chat_collapse_tool_activity": "Contraer actividad de herramientas",
   "chat_expand_tool_activity": "Expandir actividad de herramientas",
   "chat_plan": "Plan",
