@@ -358,6 +358,17 @@ pub(crate) fn set_github_default_prompt_seen(seen: bool) -> std::io::Result<()> 
     mutate_settings(|settings| settings.github_default_prompt_seen = Some(seen))
 }
 
+/// How this computer is signed in, as a label that names no account.
+fn sign_in() -> &'static str {
+    if crate::alphaxiv::signed_in() {
+        "alphaxiv"
+    } else if crate::config::credentials_present() {
+        "openresearch"
+    } else {
+        "none"
+    }
+}
+
 fn dashboard_locale() -> Option<String> {
     load_settings().and_then(|settings| settings.dashboard_locale)
 }
@@ -716,6 +727,7 @@ fn build_payload_with_id(
             "ci": is_ci(),
             // Hosted cloud agents were retired; released CLI installs are human-driven.
             "installKind": "human",
+            "signIn": sign_in(),
         },
         "events": [{
             "eventId": event_id.to_string(),
@@ -1051,6 +1063,7 @@ fn consent_payload(agreed: bool, distinct_id: &str, event_id: uuid::Uuid) -> ser
     if !agreed {
         if let Some(context) = payload["context"].as_object_mut() {
             context.remove("locale");
+            context.remove("signIn");
         }
     }
     payload
@@ -2369,7 +2382,17 @@ mod tests {
             payload["context"]["locale"] = json!("zh-CN");
             payload
         });
-        for payload in payloads.into_iter().chain(launch_payloads).chain(localized) {
+        let signed_in = ["alphaxiv", "openresearch", "none"].map(|state| {
+            let mut payload = build_payload("app_started", "cli-release-contract-test", json!({}));
+            payload["context"]["signIn"] = json!(state);
+            payload
+        });
+        for payload in payloads
+            .into_iter()
+            .chain(launch_payloads)
+            .chain(localized)
+            .chain(signed_in)
+        {
             assert_eq!(post_payload(&payload).await, DeliveryOutcome::Acknowledged);
         }
     }
@@ -2400,6 +2423,25 @@ mod tests {
     }
 
     #[test]
+    fn payload_context_reports_how_this_computer_is_signed_in() {
+        if !crate::config::in_test_child(TELEMETRY_ENV) {
+            return;
+        }
+        let sign_in =
+            || build_payload("app_started", "did", json!({}))["context"]["signIn"].clone();
+        assert_eq!(sign_in(), "none");
+        let config = crate::config::config_dir();
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(config.join("credentials.json"), "{}").unwrap();
+        assert_eq!(sign_in(), "openresearch");
+        std::fs::write(config.join("alphaxiv-forwarded.json"), "{}").unwrap();
+        assert_eq!(sign_in(), "alphaxiv");
+        std::fs::remove_file(config.join("alphaxiv-forwarded.json")).unwrap();
+        std::fs::write(config.join("alphaxiv.json"), "{}").unwrap();
+        assert_eq!(sign_in(), "alphaxiv");
+    }
+
+    #[test]
     fn consent_payload_carries_agreed_flag() {
         if !crate::config::in_test_child(TELEMETRY_ENV) {
             return;
@@ -2410,6 +2452,7 @@ mod tests {
             assert_eq!(p["events"][0]["name"], "cli_telemetry_consent");
             assert_eq!(p["events"][0]["properties"]["agreed"], agreed);
             assert_eq!(p["context"].get("locale").is_some(), agreed);
+            assert_eq!(p["context"].get("signIn").is_some(), agreed);
         }
     }
 
