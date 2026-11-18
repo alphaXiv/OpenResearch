@@ -112,7 +112,7 @@ impl Read {
                 evidence,
             } = answer
             {
-                *template = template.replace("**", "").replace(['{', '}'], "");
+                *template = plain_flag(template);
                 evidence.clear();
                 self.salvaged.insert(key.clone());
                 return true;
@@ -127,6 +127,12 @@ impl Read {
             self.errors.push(format!("summary: {message}"));
         }
     }
+}
+
+fn plain_flag(template: &str) -> String {
+    static TOKEN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let token = TOKEN.get_or_init(|| regex::Regex::new(r"\{[^{}]*\}").unwrap());
+    token.replace_all(template, "—").replace("**", "")
 }
 
 /// A token inside `{…}`: whose, and what it reads.
@@ -274,7 +280,7 @@ pub(super) fn read(
                 answer["line"] = Value::from(line.replace(&format!("{{{}:", run.key), "{"));
             }
         }
-        let mut line_valid = false;
+        let mut valid_template = None;
         let mut unsupported_comparison = false;
         match answer_of(answer.as_ref(), run.sentence, run.setup, &mut |template| {
             unsupported_comparison = tokens(template, false).is_ok_and(|tokens| {
@@ -282,9 +288,9 @@ pub(super) fn read(
                     matches!(token, Token::Versus(_, name) if !run.versus.contains(name))
                 })
             });
-            check_line(template, false, runs, Some(run), render)?;
-            line_valid = true;
-            Ok(())
+            let (template, length_error) = check_line(template, false, runs, Some(run), render)?;
+            valid_template = Some(template.clone());
+            length_error.map_or(Ok(template), Err)
         }) {
             Ok(Answer::Line {
                 flag,
@@ -317,11 +323,7 @@ pub(super) fn read(
             .and_then(|answer| answer["line"].as_str())
             .filter(|_| refused && flagged && !unsupported_comparison)
         {
-            let kept = if line_valid {
-                line.to_owned()
-            } else {
-                line.replace("**", "").replace(['{', '}'], "")
-            };
+            let kept = valid_template.unwrap_or_else(|| plain_flag(line));
             read.runs.insert(
                 run.key.to_owned(),
                 Answer::Line {
@@ -338,7 +340,10 @@ pub(super) fn read(
             object.get("summary"),
             bounds.sentence,
             bounds.setup,
-            &mut |template| check_line(template, true, runs, None, render),
+            &mut |template| {
+                let (template, length_error) = check_line(template, true, runs, None, render)?;
+                length_error.map_or(Ok(template), Err)
+            },
         ) {
             Ok(answer) => read.summary = Some(answer),
             Err(error) => read.errors.push(format!("summary: {error}")),
@@ -373,7 +378,7 @@ fn answer_of(
     value: Option<&Value>,
     previous: Option<&str>,
     setup: bool,
-    check: &mut dyn FnMut(&str) -> Result<(), String>,
+    check: &mut dyn FnMut(&str) -> Result<String, String>,
 ) -> Result<Answer, String> {
     if value.is_none() && setup {
         return Ok(Answer::Silent);
@@ -388,8 +393,16 @@ fn answer_of(
             return Err(format!("\"same\" takes no \"{key}\""));
         }
         let previous = previous.ok_or("there is no sentence yet to keep; write one")?;
-        check(previous)?;
-        return Ok(Answer::Same);
+        let template = check(previous)?;
+        return if template == previous {
+            Ok(Answer::Same)
+        } else {
+            Ok(Answer::Line {
+                flag: false,
+                template,
+                evidence: Vec::new(),
+            })
+        };
     }
     if let Some(key) = object
         .keys()
@@ -411,9 +424,8 @@ fn answer_of(
         .get("line")
         .and_then(Value::as_str)
         .ok_or("line is the sentence, as text")?
-        .trim()
-        .to_owned();
-    check(&template)?;
+        .trim();
+    let template = check(template)?;
     let evidence = match object.get("evidence") {
         None | Some(Value::Null) => Vec::new(),
         Some(Value::Array(items)) => items
@@ -475,7 +487,7 @@ fn check_line(
     runs: &[Bindable],
     own: Option<&Bindable>,
     render: &dyn Fn(Option<&str>, &Token) -> String,
-) -> Result<(), String> {
+) -> Result<(String, Option<String>), String> {
     if template.is_empty() {
         return Err("the sentence is empty".into());
     }
@@ -601,13 +613,6 @@ fn check_line(
             }
         }
     }
-    let shown = rendered.replace("**", "").graphemes(true).count();
-    let limit = if summary { 90 } else { MAX_GRAPHEMES };
-    if shown > limit {
-        return Err(format!(
-            "the sentence reads {shown} characters with its numbers filled; keep it to {limit}"
-        ));
-    }
     let moving: Vec<f64> = runs
         .iter()
         .flat_map(|run| run.moving.iter().copied())
@@ -618,7 +623,35 @@ fn check_line(
             "\"{number}\" is a number that still moves; write it as its token so it stays current"
         ));
     }
-    Ok(())
+    let shown = rendered.replace("**", "").graphemes(true).count();
+    let limit = if summary { 90 } else { MAX_GRAPHEMES };
+    if shown <= limit {
+        return Ok((template.to_owned(), None));
+    }
+
+    static TRAILING_COMPARISON: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let trailing = TRAILING_COMPARISON.get_or_init(|| {
+        regex::Regex::new(r"([,،，]\s*(?:\*\*\{[^{}]+\.vs\}\*\*|\{[^{}]+\.vs\}))[.!?…。۔؟।]?$")
+            .unwrap()
+    });
+    if let Some(clause) = trailing.captures(template).and_then(|found| found.get(1)) {
+        let shortened = format!(
+            "{}{}",
+            &template[..clause.start()],
+            &template[clause.end()..]
+        );
+        if let Ok((shortened, None)) = check_line(&shortened, summary, runs, own, render) {
+            return Ok((shortened, None));
+        }
+    }
+
+    // A flag with valid bindings can still be shown while a shorter sentence is requested.
+    Ok((
+        template.to_owned(),
+        Some(format!(
+            "the sentence reads {shown} characters with its numbers filled; keep it to {limit}"
+        )),
+    ))
 }
 
 /// The first number written in `text` that reads as one of `moving` does now. A number written
@@ -737,6 +770,24 @@ mod tests {
             Token::Count(..) => "12".into(),
             _ => "2.31".into(),
         }
+    }
+
+    #[test]
+    fn comparison_expansion_leaves_the_watchers_sentence() {
+        let run = run();
+        let got = read(
+            r#"{"runs":{"r1":{"status":"ok","line":"Val loss **{val_loss}**, {val_loss.vs}."}}}"#,
+            &[bind("r1", &run, false)],
+            None,
+            &|_, token| match token {
+                Token::Versus(..) => "0.2780 better than where the parent ended".into(),
+                _ => "2.31".into(),
+            },
+        );
+        assert!(got.errors.is_empty(), "{got:?}");
+        assert!(
+            matches!(&got.runs["r1"], Answer::Line { template, .. } if template == "Val loss **{val_loss}**.")
+        );
     }
 
     #[test]

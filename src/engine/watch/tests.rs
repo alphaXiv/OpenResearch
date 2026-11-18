@@ -2505,3 +2505,33 @@ async fn error_metrics_tallies_and_pattern_rows_do_not_raise_tripwires() {
     assert_eq!(flags.len(), 1);
     assert_eq!(flags[0]["evidence"]["from"], 6);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_fallback_flag_keeps_its_valid_count_even_with_an_overlong_sentence() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let dir = crate::config::home_dir().unwrap().join("claude-calls");
+    let alarm = "Traceback (most recent call last)";
+    let escaped = serde_json::to_string(&regex::escape(alarm)).unwrap();
+    let reply = json!({"runs": {"r1": {"status": "flag", "line":
+        format!("**{{count:{escaped}}}** lines like \"{alarm}\" so far.")}}})
+    .to_string();
+    fake_claude(&dir, &[&reply, &reply]);
+    let store = Store::open().unwrap();
+    chat(&store, "chat", "claude-code");
+    let log = format!(
+        "{alarm}:
+"
+    );
+    let mut row = run(&store, "a", "A", "chat", &log);
+    row.status = "failed".into();
+    store.upsert_run(&row).unwrap();
+    let id = look(&store, "chat", "terminal", &[("a", "r1")]);
+    take(id).await.unwrap();
+    let results = store.watch_look_runs(id).unwrap();
+    let text = results[0].text.as_deref().unwrap_or_default();
+    assert!(text.starts_with("**1**"), "{text}");
+    assert!(!text.contains("count:"));
+}
