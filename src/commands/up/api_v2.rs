@@ -375,14 +375,16 @@ pub(crate) fn notices_queued(chats: Vec<String>) {
 }
 
 pub(crate) fn flag_turn_changed(store: &Store, turn_id: &str) {
-    let Ok(api) = installed() else { return };
     match store.flag_notice_runs_for_turn(turn_id) {
-        Ok(runs) => {
-            for run_id in runs {
-                api.engine.bus.publish(RunEvent::FlagReview { run_id });
-            }
-        }
+        Ok(runs) => runs.into_iter().for_each(flag_changed),
         Err(error) => eprintln!("orx up: could not refresh flags for turn {turn_id}: {error:#}"),
+    }
+}
+
+/// Re-reads the run's flags for the page, when the engine runs here.
+pub(crate) fn flag_changed(run_id: String) {
+    if let Ok(api) = installed() {
+        api.engine.bus.publish(RunEvent::FlagReview { run_id });
     }
 }
 

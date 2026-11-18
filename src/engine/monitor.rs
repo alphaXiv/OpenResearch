@@ -5024,7 +5024,7 @@ mod tests {
     }
 
     #[test]
-    fn a_finished_runs_flag_returns_to_waiting_when_its_agent_turn_ends() {
+    fn a_finished_runs_flag_is_followed_up_when_its_agent_turn_ends() {
         let f = Fixture::new("orx-monitor-finished-flag");
         let run = f.run("running", local());
         let chat = "chat";
@@ -5053,7 +5053,7 @@ mod tests {
         f.store
             .conn_execute_for_tests("UPDATE chat_turns SET state = 'completed'");
         let listed = current(&f.store, &run).unwrap().unwrap();
-        assert_eq!(listed.summary()["flag"]["state"], "waiting");
+        assert_eq!(listed.summary()["flag"]["state"], "waking");
     }
 
     /// The laptop hands each checkpoint it publishes to the projection, so many live runs
@@ -8002,7 +8002,7 @@ mod tests {
         f.store.complete_chat_turn(turn).unwrap();
         watch(&f.store, None, watched, None).unwrap();
         let after = f.store.run_monitor_state(&run.id).unwrap().unwrap();
-        assert_eq!(after["published"]["summary"]["flag"]["state"], "waiting");
+        assert_eq!(after["published"]["summary"]["flag"]["state"], "waking");
     }
 
     #[test]

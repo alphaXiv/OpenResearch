@@ -464,7 +464,7 @@ the log lines it cites, by bytes, line numbers and the log's identity, and the
 look that raised it groups the flags of runs it saw together.
 
 A run has at most one open flag from a look or a tripwire, so a trouble that
-lasts wakes once; a tripwire condition is raised once a run. Keep going settles
+lasts keeps one flag open; a tripwire condition is raised once a run. Keep going settles
 that run's flag only: a later run of the experiment with the same cause is
 flagged again, since a missed problem costs more than an extra flag. The flag and the notices that
 wake each following Agentic chat are written in one transaction; a Copilot chat
@@ -472,14 +472,19 @@ is woken only when its user asks. A wake says the watcher saw only a digest and
 none of the chat, cites the lines and how to settle it, and is frozen when it is
 written; a chat past 70% of its context is compacted, in the turn slot the wake
 already holds, before it is sent. A wake not yet claimed when its run ends is
-withdrawn, since the run's end is its own notice; a flag raised on an ended run
-still wakes, to be weighed against the result.
+withdrawn and redelivered with the run's result, since its choice can no longer
+stop the run. A flag raised on an ended run still wakes, to be weighed against
+the result.
 
 What became of a flag is read back, never stored: its choices in the run's
 journal and the notice and turn that carried it give its state. An Agentic flag
-is raised, then waking, then the agent is looking; a turn that ends without
-settling it, an agent's `--ask` and a Copilot flag wait for the user, who sees
-Stop run, Keep going and Ask in the strip and an amber mark on the chat's row.
+is raised, then waking, then the agent is looking. A cut or retired review goes
+with the chat's next turn. A completed review without a choice wakes the agent
+once more, and if that review also finishes without a choice, orx records the
+flag as kept and says why in the journal. Keep and Stop are available in the
+expanded card during an automatic review. An agent's `--ask` and a Copilot flag
+wait for the user, who sees the available choices in the strip and an amber
+mark on the chat's row.
 `orx exp flag RUN --flag ID --keep|--ask|--stop` and the strip send one choice;
 a repeated request id answers as the first did, and a settled flag, or one on a
 run that ended or whose stop was accepted, is refused. Keep going settles it and

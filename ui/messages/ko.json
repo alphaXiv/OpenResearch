@@ -2128,6 +2128,7 @@
   "run_watch_noted": "{clock}의 표시가 열려 있는 동안 기록됨.",
   "run_watch_kept": "계속하기로 했습니다. 이 실행에서는 다시 알리지 않습니다.",
   "run_watch_kept_by": "{agent}이(가) 계속하기로 했습니다.",
+  "run_watch_kept_unsettled": "{agent}이(가) 두 번 결정하지 않아 그대로 유지했습니다.",
   "run_watch_stopped_you": "실행을 중지했습니다.",
   "run_watch_stopped_by": "{agent}이(가) 실행을 중지했습니다.",
   "run_watch_stopped_by_rule": "규칙 {name}이(가) 실행을 중지했습니다.",

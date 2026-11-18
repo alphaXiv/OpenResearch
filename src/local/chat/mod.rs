@@ -6888,7 +6888,7 @@ impl ChatHost {
         } else {
             DeliveryState::NotSent
         };
-        let turn = StoredChatTurn {
+        let mut turn = StoredChatTurn {
             id: turn_id.clone(),
             session_id: session.id.clone(),
             user_message_id: user_msg.as_ref().map(|message| message.id.clone()),
@@ -6918,23 +6918,6 @@ impl ChatHost {
             created_at,
             updated_at: created_at,
         };
-        let mut ctx = turn_ctx_from_stored(
-            self.clone(),
-            &store,
-            &session,
-            project,
-            &turn,
-            WireMessage {
-                id: assistant_message_id,
-                role: "assistant".into(),
-                parts: Vec::new(),
-                created_at: now_ms(),
-                completed_at: None,
-                parent_id: None,
-            },
-        )?;
-        ctx.delivery_state = delivery;
-        ctx.continuation = continuation;
         let mut turns = self.turns.lock().await;
         let Some(TurnState::Reserved { turn_id: reserved }) = turns.get_mut(session_id) else {
             drop(turns);
@@ -6942,7 +6925,51 @@ impl ChatHost {
             return Ok(TurnSubmission::NotStarted);
         };
         *reserved = Some(turn_id.clone());
-        match store.admit_chat_turn(stored_user.as_ref(), &turn)? {
+
+        let (ctx, admitted) = {
+            let tx = store.begin_immediate()?;
+            let flags = if continuation {
+                Vec::new()
+            } else {
+                crate::engine::flags::carry_cut_flags(
+                    &store,
+                    &session,
+                    &turn.client_turn_id,
+                    created_at,
+                )?
+            };
+            if !flags.is_empty() {
+                turn.prepared_input.push_str("\n\n");
+                turn.prepared_input
+                    .push_str(&crate::engine::flags::batch_text(
+                        flags.iter().map(String::as_str),
+                    ));
+            }
+
+            let mut ctx = turn_ctx_from_stored(
+                self.clone(),
+                &store,
+                &session,
+                project,
+                &turn,
+                WireMessage {
+                    id: assistant_message_id,
+                    role: "assistant".into(),
+                    parts: Vec::new(),
+                    created_at: now_ms(),
+                    completed_at: None,
+                    parent_id: None,
+                },
+            )?;
+            ctx.delivery_state = delivery;
+            ctx.continuation = continuation;
+            let admitted = Store::append_chat_turn(&tx, stored_user.as_ref(), &turn)?;
+            if matches!(admitted, ChatTurnAdmission::Inserted) {
+                tx.commit()?;
+            }
+            (ctx, admitted)
+        };
+        match admitted {
             ChatTurnAdmission::Inserted => {}
             ChatTurnAdmission::Existing(existing) => {
                 if let Some(pending) = pending_client_turn.take() {
@@ -10197,6 +10224,10 @@ async fn process_run_notices(
         return Ok(held);
     }
     store.expire_run_notice_batches(now_ms())?;
+    store.retire_stale_flag_wakes(now_ms())?;
+    if let Err(error) = crate::engine::flags::follow_up_flags(&store, now_ms()) {
+        eprintln!("orx up: run notices: following up flags: {error:#}");
+    }
     for session_id in store.pending_run_notice_sessions()? {
         if data_dir_move_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
             return Ok(held);
@@ -15769,6 +15800,301 @@ done
         assert!(reset_exhausted_queued_message(&message).is_some());
         message.dispatch_error = None;
         assert!(reset_exhausted_queued_message(&message).is_none());
+    }
+
+    /// The prompts the quiet agent of [`quiet_agent_chat`] was sent, oldest first.
+    fn prompts() -> Vec<String> {
+        std::fs::read_to_string(crate::store::data_dir().join("prompts.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    /// Chat `owner` at `autonomy` on an agent that ends every turn having done nothing, and a
+    /// running run it launched with one flag raised.
+    fn quiet_agent_chat(store: &Store, autonomy: Option<&str>) -> StoredRun {
+        let repo = crate::store::data_dir().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        crate::local::git::initialize_own_repository(&repo).unwrap();
+        store
+            .create_local_project(&crate::local::model::LocalProject {
+                id: "p1".into(),
+                name: "flags".into(),
+                slug: "flags".into(),
+                github_owner: String::new(),
+                github_repo: String::new(),
+                github_sync_enabled: false,
+                baseline_branch: "main".into(),
+                repo_path: repo.to_string_lossy().into_owned(),
+                run_command: None,
+                paper_id: None,
+                icon: None,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .unwrap();
+        session(store, "owner");
+        let mut launch = crate::local::acp::presets().remove(0).launch;
+        launch.executable = crate::local::acp::fake_agent_interpreter("python3");
+        launch.arguments = vec![
+            "-u".into(),
+            "-c".into(),
+            r#"
+import json, sys
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request['method']
+    if 'id' not in request:
+        continue
+    result = {}
+    if method == 'initialize':
+        result = {'protocolVersion':1, 'agentCapabilities':{'loadSession':True}}
+    elif method == 'session/new':
+        result = {'sessionId':'quiet', 'models': {
+            'currentModelId': 'fixture-model',
+            'availableModels': [{'modelId': 'fixture-model', 'name': 'Fixture Model'}],
+        }}
+    elif method == 'session/prompt':
+        text = '\n'.join(b.get('text', '') for b in request['params']['prompt'])
+        with open(sys.argv[1], 'a') as log:
+            log.write(json.dumps(text) + '\n')
+        result = {'stopReason':'end_turn'}
+    print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':result}), flush=True)
+"#
+            .into(),
+            crate::store::data_dir()
+                .join("prompts.jsonl")
+                .to_string_lossy()
+                .into_owned(),
+        ];
+        let tx = store.begin().unwrap();
+        tx.execute(
+            "UPDATE chat_sessions SET harness = ?1, model = 'fixture-model', autonomy = ?2",
+            rusqlite::params![launch.id, autonomy],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO acp_sessions (session_id, launch_json, configuration_json)
+             VALUES ('owner', ?1, '[]')",
+            [serde_json::to_string(&launch).unwrap()],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        let run = run("running");
+        store.upsert_run(&run).unwrap();
+        let body = json!({"id": "f1", "source": "tripwire", "kind": "error", "fingerprint": "error:boom",
+            "at": 1, "template": "A new kind of error in the log: **boom**.", "evidence": null, "whole": null});
+        let flag = crate::engine::flags::new_flag(store, &run, body, true).unwrap();
+        assert_eq!(
+            store.raise_flags(&[flag], 1).unwrap(),
+            [crate::store::Raise::Raised]
+        );
+        run
+    }
+
+    /// Delivers what the outbox has until the chat goes quiet.
+    async fn settle_all(host: &Arc<ChatHost>) {
+        let moving = std::sync::atomic::AtomicBool::new(false);
+        for _ in 0..6 {
+            settle_run_notices(host, &moving).await.unwrap();
+        }
+    }
+
+    fn flag(store: &Store, run: &StoredRun) -> Value {
+        crate::engine::flags::read(store, run).unwrap().remove(0)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_independent_agent_is_reminded_once_then_its_unsettled_flag_is_kept() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let store = Store::open().unwrap();
+        let run = quiet_agent_chat(&store, None);
+        settle_all(&notice_host()).await;
+
+        let prompts = prompts();
+        assert_eq!(prompts.len(), 2, "{prompts:#?}");
+        assert!(prompts[0].contains("Run run_x (experiment exp_1) was flagged for review."));
+        assert!(prompts[1].contains("Your last turn ended without settling flag f1"));
+        assert!(prompts[1].contains("orx exp flag run_x --flag f1 --stop"));
+        let flag = flag(&store, &run);
+        assert_eq!(flag["state"], "kept");
+        assert_eq!(
+            (&flag["choice"]["by"], &flag["choice"]["unsettled"]),
+            (&json!("agent"), &json!(true))
+        );
+        assert!(crate::engine::flags::status_line(&flag).contains("the agent left it unsettled"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_flag_whose_turn_a_restart_cut_goes_back_to_the_independent_agent() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let store = Store::open().unwrap();
+        let run = quiet_agent_chat(&store, None);
+        let carried = store.run_notice_batch("owner").unwrap();
+        let tx = store.begin().unwrap();
+        tx.execute(
+            "INSERT INTO chat_turns (id, session_id, assistant_message_id, client_turn_id, request_hash,
+                 prepared_input, settings_json, state, delivery_state, error_message, recovery_action,
+                 created_at, updated_at)
+             VALUES ('cut', 'owner', 'cut', ?1, '', '', '{}', 'failed', 'accepted',
+                     'ORX restarted before this turn finished', 'continue', 2, 2)",
+            [&carried[0].client_turn_id],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        store
+            .mark_run_notice_batch_delivered("owner", &carried[0].client_turn_id, 2)
+            .unwrap();
+        assert_eq!(flag(&store, &run)["state"], "raised");
+
+        let host = notice_host();
+        settle_all(&host).await;
+        assert!(prompts().is_empty());
+
+        let reply = host
+            .recover_turn("owner", "cut", "continue", RecoveryOverrides::default())
+            .await
+            .unwrap();
+        settle_all(&host).await;
+        let continued = store
+            .get_chat_turn("owner", &reply.turn_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(continued.state, "completed");
+        let prompts = prompts();
+        assert_eq!(prompts.len(), 2, "{prompts:#?}");
+        assert!(prompts[0].contains("was flagged for review"));
+        assert!(prompts[0].contains("orx exp flag run_x --flag f1 --keep"));
+        assert!(prompts[1].contains("Your last turn ended without settling flag f1"));
+        assert_eq!(flag(&store, &run)["state"], "kept");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_restart_retired_flag_rides_the_next_user_message() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+
+        let store = Store::open().unwrap();
+        let run = quiet_agent_chat(&store, None);
+        let carried = store.run_notice_batch("owner").unwrap();
+        store
+            .record_run_notice_failure(
+                "owner",
+                &carried[0].client_turn_id,
+                "Delivery was interrupted by restart",
+                true,
+                2,
+            )
+            .unwrap();
+        let host = notice_host();
+        settle_all(&host).await;
+        assert!(prompts().is_empty());
+        assert_eq!(flag(&store, &run)["state"], "raised");
+
+        let reply = host
+            .send_message(
+                "owner",
+                "Check the training run.".into(),
+                TurnOverrides::default(),
+                Vec::new(),
+                Vec::new(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        settle_all(&host).await;
+        let turn = store
+            .get_chat_turn("owner", &reply.turn_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(turn.state, "completed", "{:?}", turn.error_message);
+        let prompts = prompts();
+        assert_eq!(prompts.len(), 2, "{prompts:#?}");
+        assert!(prompts[0].contains("Check the training run."));
+        assert!(prompts[0].contains("was flagged for review"));
+        assert!(prompts[1].contains("ended without settling flag f1"));
+        assert_eq!(flag(&store, &run)["state"], "kept");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_flag_whose_run_ended_first_goes_to_the_independent_agent_with_its_result() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let store = Store::open().unwrap();
+        let mut run = quiet_agent_chat(&store, None);
+        run.status = "done".into();
+        run.ended_at = Some(2);
+        run.exit_code = Some(0);
+        store.upsert_run(&run).unwrap();
+        let result = store.terminal_notice_body(&run).unwrap();
+        store
+            .insert_run_notice(
+                &run.id,
+                "owner",
+                crate::store::TERMINAL,
+                "terminal",
+                &result,
+                2,
+            )
+            .unwrap();
+
+        settle_all(&notice_host()).await;
+        let prompts = prompts();
+        assert_eq!(prompts.len(), 2, "{prompts:#?}");
+        assert!(
+            prompts[0].contains("finished with status"),
+            "{}",
+            prompts[0]
+        );
+        assert!(
+            prompts[0].contains("was flagged for review"),
+            "{}",
+            prompts[0]
+        );
+        assert!(prompts[0].contains("has ended (done), so there is nothing to stop"));
+        assert!(!prompts[1].contains("--stop"), "{}", prompts[1]);
+        assert_eq!(flag(&store, &run)["state"], "kept");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_copilot_flag_waits_for_the_user_after_the_turn_they_asked_for() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let store = Store::open().unwrap();
+        let run = quiet_agent_chat(&store, Some("copilot"));
+        let host = notice_host();
+        settle_all(&host).await;
+        assert!(prompts().is_empty(), "a Copilot chat isn't woken");
+        let raised = flag(&store, &run);
+        assert_eq!(raised["state"], "waiting");
+
+        let ask = crate::store::FlagChoice {
+            run_id: run.id.clone(),
+            body: json!({"flagId": "f1", "c": "ask", "by": "user", "reason": null, "requestId": "r1"}),
+            wakes: vec![(
+                "owner".into(),
+                crate::engine::flags::wake(&run, &raised, true),
+            )],
+        };
+        assert_eq!(
+            store.record_flag_choices(&[ask], None, 3).unwrap(),
+            crate::store::Chosen::Recorded
+        );
+        settle_all(&host).await;
+        let prompts = prompts();
+        assert_eq!(prompts.len(), 1, "{prompts:#?}");
+        assert!(prompts[0].contains("The user asked you to look at a flag"));
+        assert_eq!(flag(&store, &run)["state"], "waiting");
     }
 }
 

@@ -2128,6 +2128,7 @@
   "run_watch_noted": "Отмечено, пока флажок от {clock} был открыт.",
   "run_watch_kept": "Вы решили продолжить. В этом запуске об этом больше не напомним.",
   "run_watch_kept_by": "{agent} решил продолжить.",
+  "run_watch_kept_unsettled": "Оставлено: {agent} дважды не принял решения.",
   "run_watch_stopped_you": "Вы остановили запуск.",
   "run_watch_stopped_by": "{agent} остановил запуск.",
   "run_watch_stopped_by_rule": "Правило {name} остановило запуск.",

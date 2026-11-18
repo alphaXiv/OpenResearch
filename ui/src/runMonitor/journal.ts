@@ -69,7 +69,7 @@ export function flagOutcome(flag: Flag, agent: string | null): string | null {
   if (!choice) return null;
   const name = autoDir(agent ?? m.chat_the_agent());
   const byYou = choice.by === "user";
-  if (flag.state === "kept") return byYou ? m.run_watch_kept() : m.run_watch_kept_by({ agent: name });
+  if (flag.state === "kept") return byYou ? m.run_watch_kept() : choice.unsettled ? m.run_watch_kept_unsettled({ agent: name }) : m.run_watch_kept_by({ agent: name });
   if (flag.state === "stopped") {
     if (byYou) return m.run_watch_stopped_you();
     if (choice.by === "agent") return m.run_watch_stopped_by({ agent: name });

@@ -2128,6 +2128,7 @@
   "run_watch_noted": "{clock} वाला चिह्न खुला रहते हुए दर्ज किया गया।",
   "run_watch_kept": "आपने जारी रखना चुना। यह रन इसे फिर नहीं उठाएगा।",
   "run_watch_kept_by": "{agent} ने जारी रखना चुना।",
+  "run_watch_kept_unsettled": "{agent} के दो बार बिना तय किए छोड़ने के बाद इसे रखा गया।",
   "run_watch_stopped_you": "आपने रन रोक दिया।",
   "run_watch_stopped_by": "{agent} ने रन रोक दिया।",
   "run_watch_stopped_by_rule": "नियम {name} ने रन रोक दिया।",

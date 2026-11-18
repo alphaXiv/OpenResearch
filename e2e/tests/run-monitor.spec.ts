@@ -934,6 +934,65 @@ test('an error flags the run and wakes its Agentic agent once, which confirms it
   })
 })
 
+test('an Independent flag gets one reminder then closes when both reviews leave it open', async ({ page, project, agent, orx }, info) => {
+  test.slow()
+  await page.request.post(`${orx.url}/api/settings/ui-state`, {
+    headers: { origin: orx.url }, data: { preferredAutonomy: 'agentic', runBanner: 'strip' },
+  })
+  const run = erring(orx, `unsettled-${project.id}`, [['err', 6, 'RuntimeError: One batch failed']])
+  const banner = await launch(page, agent, project, 'Training', run.command)
+  agent.script('was flagged for review', [
+    { hold: 'before-reading' },
+    { say: 'Reviewing the log.' },
+    { hold: 'reading', onCancel: 'exit' },
+  ])
+  agent.script('ended without settling flag', [
+    { say: 'I checked the run again.' },
+    { hold: 'reminder' },
+  ])
+  agent.script('finished with status', [{ say: 'Training finished.' }])
+
+  async function capture(name: string) {
+    for (const width of [1440, 420]) {
+      await page.setViewportSize({ width, height: 900 })
+      await keep(page, banner, `s9-${name}-${width}`)
+    }
+    await page.setViewportSize({ width: 1440, height: 900 })
+  }
+
+  await run.open('err')
+  await agent.reached('before-reading')
+  await expect(banner.locator('[data-run-frame]').getByRole('status')).toContainText('Waking')
+  await expect(banner.getByRole('button', { name: /^Ask / })).toHaveCount(0)
+  await capture('waking')
+  agent.release('before-reading')
+
+  await agent.reached('reading')
+  await expect(banner.locator('[data-run-frame]').getByRole('status')).toContainText('is reading the evidence')
+  await expect(banner.getByRole('button', { name: 'Keep going', exact: true })).toBeVisible()
+  await expect(banner.getByRole('button', { name: 'Stop run', exact: true })).toBeVisible()
+  await capture('reading')
+  await page.getByLabel('Stop', { exact: true }).click()
+  await expect(banner.locator('[data-run-frame]').getByRole('status')).toHaveText('Queued')
+  await expect(banner.getByRole('button', { name: /^Ask / })).toHaveCount(0)
+  await capture('queued')
+
+  agent.script('was flagged for review', [{ say: 'I continued reviewing the log.' }])
+  await send(page, 'Review the training log.')
+  await expect(page.getByText('I continued reviewing the log.', { exact: true })).toBeVisible()
+  await agent.reached('reminder')
+  await expect(banner.locator('[data-run-frame]').getByRole('status')).toContainText('is reading the evidence')
+  agent.release('reminder')
+  await expect(banner.getByRole('button', { name: 'Keep going', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('img', { name: 'A run was flagged' })).toHaveCount(0)
+  await capture('closed')
+  await openRunPage(page, banner, /Training/)
+  const watch = page.locator('section', { has: page.getByRole('heading', { name: 'Watch', exact: true }) })
+  await expect(watch).toContainText('left it unsettled twice.')
+  await run.open('end')
+  await expect(page.getByText('Training finished.', { exact: true })).toBeVisible()
+})
+
 test('a Copilot flag opens the strip with its evidence and waits: Keep going settles it, Ask sends it to the agent', async ({ page, project, agent, orx }, info) => {
   test.slow()
   const autonomy = (value: string) => page.request.post(`${orx.url}/api/settings/ui-state`, { headers: { origin: orx.url }, data: { preferredAutonomy: value, runBanner: 'strip' } })
@@ -977,7 +1036,11 @@ gate('finish')`)
       await expect(banner).toContainText('The run keeps going until you choose.')
       await expect(page.getByRole('img', { name: 'A run needs your attention' })).toBeVisible()
       await themes(page, banner, info, 'strip-copilot-flag')
-      await keep(page, banner, 'copilot-strip')
+      for (const width of [1440, 420]) {
+        await page.setViewportSize({ width, height: 900 })
+        await keep(page, banner, `s9-copilot-${width}`)
+      }
+      await page.setViewportSize({ width: 1440, height: 900 })
       await keep(page, page.locator('.session-row', { has: page.getByRole('img', { name: 'A run needs your attention' }) }), 'sidebar-amber', 90)
     })
 

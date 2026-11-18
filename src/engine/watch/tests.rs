@@ -287,9 +287,9 @@ async fn one_look_writes_each_runs_sentence_and_the_summary_through_the_agent_cl
 }
 
 /// What became of a flag, from its notice and the turn that carries it: raised, then waking,
-/// then the agent looking, then the user's to settle once the agent's turn ended without it.
+/// then the agent looking, then waking again once the agent's turn ended without settling it.
 #[test]
-fn a_flag_falls_to_the_user_when_the_agent_it_woke_settles_nothing() {
+fn a_flag_follows_the_turn_that_carries_it() {
     let dir = crate::local::git::TemporaryDirectory::new("orx-flag-states").unwrap();
     let store = Store::open_at(dir.path().to_path_buf()).unwrap();
     chat(&store, "chat", "claude-code");
@@ -313,7 +313,7 @@ fn a_flag_falls_to_the_user_when_the_agent_it_woke_settles_nothing() {
         .unwrap();
     assert_eq!(state(), "agent_looking");
     assert!(store.complete_chat_turn("t1").unwrap());
-    assert_eq!(state(), "waiting");
+    assert_eq!(state(), "waking");
 
     let again = json!({"id": "f2", "fingerprint": "stall:train:300", "source": "tripwire"});
     assert_eq!(

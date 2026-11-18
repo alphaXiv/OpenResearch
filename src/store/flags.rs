@@ -129,7 +129,8 @@ impl Store {
     pub(crate) fn run_flag_notices(&self, run_id: &str) -> Result<Vec<FlagNotice>> {
         let mut stmt = self.conn.prepare(
             "SELECT n.chat_session_id, n.dedupe, n.client_turn_id IS NOT NULL,
-                    n.delivered_at IS NOT NULL OR t.delivery_state IS 'accepted',
+                    (n.delivered_at IS NOT NULL OR t.delivery_state IS 'accepted')
+                        AND (instr(n.dedupe, ':resume:') = 0 OR t.delivery_state IS 'accepted'),
                     n.retired_at IS NOT NULL, t.state
              FROM run_notices n
              LEFT JOIN chat_turns t ON t.session_id = n.chat_session_id AND t.client_turn_id = n.client_turn_id
@@ -156,6 +157,79 @@ impl Store {
         )?;
         let runs = stmt.query_map(params![turn_id, WATCH_FLAG], |row| row.get(0))?;
         Ok(runs.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Runs with a flag no one chose on whose wake ended: retired, or its turn finished or failed.
+    pub(crate) fn flag_follow_up_runs(&self, chat: Option<&str>) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT n.run_id FROM run_notices n
+             JOIN runs r ON r.id = n.run_id
+             LEFT JOIN chat_turns t ON t.session_id = n.chat_session_id AND t.client_turn_id = n.client_turn_id
+             WHERE n.kind = ?1 AND r.cancel_requested = 0 AND r.cancel_accepted_at IS NULL
+               AND ((?2 IS NULL AND t.state = 'completed')
+                    OR (n.chat_session_id = ?2 AND (n.retired_at IS NOT NULL
+                        OR t.state = 'interrupted' OR (t.state = 'failed'
+                            AND (n.delivered_at IS NOT NULL OR t.delivery_state IS 'accepted')))))
+               AND NOT EXISTS (
+                   SELECT 1 FROM run_monitor_events e WHERE e.run_id = n.run_id AND e.kind = 'choice'
+                     AND (n.dedupe = ?1 || ':' || json_extract(e.body_json, '$.flagId')
+                          OR n.dedupe LIKE ?1 || ':' || json_extract(e.body_json, '$.flagId') || ':%'))",
+        )?;
+        let runs = stmt.query_map(params![WATCH_FLAG, chat], |row| row.get(0))?;
+        Ok(runs.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub(crate) fn remind_flag(
+        &self,
+        run: &str,
+        chat: &str,
+        flag: &str,
+        dedupe: &str,
+        body: &str,
+        now: i64,
+    ) -> Result<bool> {
+        let tx = self.begin_immediate()?;
+        let available: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runs r WHERE r.id = ?1
+                AND r.cancel_requested = 0 AND r.cancel_accepted_at IS NULL
+                AND NOT EXISTS (SELECT 1 FROM run_monitor_events e
+                    WHERE e.run_id = r.id AND e.kind = 'choice'
+                        AND json_extract(e.body_json, '$.flagId') = ?2))",
+            params![run, flag],
+            |row| row.get(0),
+        )?;
+        let inserted =
+            available && self.insert_run_notice(run, chat, WATCH_FLAG, dedupe, body, now)?;
+        tx.commit()?;
+        Ok(inserted)
+    }
+
+    /// An attached flag is excluded from the outbox and follows the new turn's delivery state.
+    pub(crate) fn attach_flag_notice(
+        &self,
+        run: &str,
+        chat: &str,
+        flag: &str,
+        body: &str,
+        client_turn_id: &str,
+        now: i64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO run_notices (run_id, chat_session_id, kind, dedupe, body, created_at,
+                                      client_turn_id, delivered_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?6)
+             ON CONFLICT(run_id, chat_session_id, dedupe) DO NOTHING",
+            params![
+                run,
+                chat,
+                WATCH_FLAG,
+                format!("{WATCH_FLAG}:{flag}:resume:{client_turn_id}"),
+                body,
+                now,
+                client_turn_id
+            ],
+        )?;
+        Ok(())
     }
 
     pub(crate) fn pending_flag_review_runs(&self) -> Result<Vec<String>> {
@@ -271,7 +345,12 @@ impl Store {
                 [&choice.run_id],
                 |row| row.get(0),
             )?;
-            if stopping || events.iter().filter(mine).any(settles) {
+            if stopping
+                || events
+                    .iter()
+                    .filter(mine)
+                    .any(|event| settles(event) || choice.body["unsettled"] == true)
+            {
                 if index == 0 {
                     return Ok(Chosen::Settled);
                 }
@@ -291,6 +370,21 @@ impl Store {
                          'choice', ?2, ?3)",
                 params![choice.run_id, now, choice.body.to_string()],
             )?;
+            if matches!(choice.body["c"].as_str(), Some("keep" | "stop")) {
+                self.conn.execute(
+                    "UPDATE run_notices SET retired_at = ?4
+                     WHERE run_id = ?1 AND kind = ?2
+                       AND (dedupe = ?3 OR dedupe = ?5)
+                       AND client_turn_id IS NULL AND delivered_at IS NULL AND retired_at IS NULL",
+                    params![
+                        choice.run_id,
+                        WATCH_FLAG,
+                        format!("{WATCH_FLAG}:{flag}"),
+                        now,
+                        format!("{WATCH_FLAG}:{flag}:remind")
+                    ],
+                )?;
+            }
             for (chat, body) in &choice.wakes {
                 let dedupe = format!("{WATCH_FLAG}:{flag}:{}", request.unwrap_or("ask"));
                 self.insert_run_notice(&choice.run_id, chat, WATCH_FLAG, &dedupe, body, now)?;

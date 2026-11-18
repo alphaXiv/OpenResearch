@@ -1,6 +1,9 @@
 //! Flags: a run that may be going wrong, raised by a look, a tripwire or a rule that asks. A flag
-//! never stops a run. An Agentic chat's agent is woken with it; a Copilot chat waits for the user.
-//! What became of a flag is its journal's choices and the notices that carried it, read back.
+//! never stops a run. An Agentic chat's agent is woken with it to settle it; a Copilot chat
+//! waits for the user. What became of a flag is its journal's choices and the notices that carried
+//! it, read back.
+
+use std::collections::BTreeSet;
 
 use serde_json::{json, Value};
 
@@ -65,7 +68,6 @@ fn carried(notice: &FlagNotice, asked: bool) -> &'static str {
         Some("preparing" | "retrying" | "running")
     );
     if notice.retired || (notice.delivered && !working) {
-        // The agent's turn ended, or never could start, without settling it: the user decides.
         "waiting"
     } else if notice.delivered {
         "agent_looking"
@@ -75,6 +77,24 @@ fn carried(notice: &FlagNotice, asked: bool) -> &'static str {
         "asking"
     } else {
         "raised"
+    }
+}
+
+const REMIND: &str = "remind";
+
+fn own(notice: &FlagNotice, flag: &str) -> bool {
+    let first = format!("{WATCH_FLAG}:{flag}");
+    notice.dedupe == first
+        || notice.dedupe.strip_prefix(&first).is_some_and(|suffix| {
+            suffix.strip_prefix(':') == Some(REMIND) || suffix.starts_with(":resume:")
+        })
+}
+
+fn needs_redelivery(notice: &FlagNotice) -> bool {
+    match notice.turn.as_deref() {
+        Some("preparing" | "retrying" | "running" | "completed") => false,
+        Some("interrupted") => true,
+        _ => notice.retired || notice.delivered || notice.dedupe.contains(":resume:"),
     }
 }
 
@@ -106,13 +126,15 @@ pub(crate) fn read(store: &Store, run: &StoredRun) -> Result<Vec<Value>> {
         None
     };
     let autonomous = home.as_ref().is_some_and(agentic);
+    let at_home = |notice: &&FlagNotice| {
+        home.as_ref()
+            .is_some_and(|chat| chat.id == notice.chat_session_id)
+    };
     let notice = |dedupe: &str| {
-        notices.iter().find(|notice| {
-            notice.dedupe == dedupe
-                && home
-                    .as_ref()
-                    .is_some_and(|chat| chat.id == notice.chat_session_id)
-        })
+        notices
+            .iter()
+            .filter(at_home)
+            .find(|notice| notice.dedupe == dedupe)
     };
     let mut flags = Vec::new();
     for event in events.iter().filter(|event| event.kind == "flag") {
@@ -136,11 +158,28 @@ pub(crate) fn read(store: &Store, run: &StoredRun) -> Result<Vec<Value>> {
                 notice(&format!("{WATCH_FLAG}:{id}:{request}"))
                     .map_or("asking", |notice| carried(notice, true))
             }
-            (None, None) => match notice(&format!("{WATCH_FLAG}:{id}")) {
-                Some(notice) => carried(notice, false),
-                None if autonomous && live => "raised",
-                None => "waiting",
-            },
+            (None, None) => {
+                let last = notices
+                    .iter()
+                    .filter(at_home)
+                    .rfind(|notice| own(notice, id));
+                match last {
+                    Some(last) if autonomous && needs_redelivery(last) => "raised",
+                    Some(last) if autonomous && last.turn.as_deref() == Some("completed") => {
+                        "waking"
+                    }
+                    Some(last) if autonomous && last.retired => {
+                        if last.delivered {
+                            "agent_looking"
+                        } else {
+                            "waking"
+                        }
+                    }
+                    Some(last) => carried(last, false),
+                    None if autonomous && live => "raised",
+                    None => "waiting",
+                }
+            }
         };
         let mut flag = event.body.clone();
         flag["detail"] = flag["template"].clone();
@@ -164,6 +203,9 @@ pub(crate) fn read(store: &Store, run: &StoredRun) -> Result<Vec<Value>> {
                     "at": choice.at,
                     "reason": choice.body["reason"],
                 });
+                if choice.body["unsettled"] == true {
+                    flag["choice"]["unsettled"] = json!(true);
+                }
             }
             (_, Some(stop)) => flag["choice"] = stop.clone(),
             _ => {}
@@ -171,6 +213,137 @@ pub(crate) fn read(store: &Store, run: &StoredRun) -> Result<Vec<Value>> {
         flags.push(flag);
     }
     Ok(flags)
+}
+
+/// Attach a cut flag to an already starting turn without starting another turn on its behalf.
+pub(crate) fn carry_cut_flags(
+    store: &Store,
+    chat: &StoredChatSession,
+    client_turn_id: &str,
+    now: i64,
+) -> Result<Vec<String>> {
+    if !agentic(chat) {
+        return Ok(Vec::new());
+    }
+
+    let mut bodies = Vec::new();
+    for run_id in store.flag_follow_up_runs(Some(&chat.id))? {
+        let Some(run) = store.get_run(&run_id)? else {
+            continue;
+        };
+        let events = store.run_flag_events(&run_id)?;
+        let notices = store.run_flag_notices(&run_id)?;
+        for (id, flag) in unrouted(&events) {
+            let latest = notices
+                .iter()
+                .rfind(|notice| notice.chat_session_id == chat.id && own(notice, id));
+            if latest.is_some_and(needs_redelivery) {
+                let reminder = format!("{WATCH_FLAG}:{id}:{REMIND}");
+                let body = if notices
+                    .iter()
+                    .any(|notice| notice.chat_session_id == chat.id && notice.dedupe == reminder)
+                {
+                    remind(&run, id)
+                } else {
+                    wake(&run, flag, false)
+                };
+                store.attach_flag_notice(&run_id, &chat.id, id, &body, client_turn_id, now)?;
+                bodies.push(body);
+            }
+        }
+    }
+    Ok(bodies)
+}
+
+fn unrouted(events: &[FlagEvent]) -> impl Iterator<Item = (&str, &Value)> {
+    events.iter().filter_map(|event| {
+        let id = event.body["id"].as_str().filter(|_| event.kind == "flag")?;
+        (!events
+            .iter()
+            .any(|event| event.kind == "choice" && event.body["flagId"] == id))
+        .then_some((id, &event.body))
+    })
+}
+
+/// A completed review gets one reminder. When both turns finish without a choice, keep the run.
+pub(crate) fn follow_up_flags(store: &Store, now: i64) -> Result<()> {
+    for run_id in store.flag_follow_up_runs(None)? {
+        let Some(run) = store.get_run(&run_id)? else {
+            continue;
+        };
+        let events = store.run_flag_events(&run_id)?;
+        let notices = store.run_flag_notices(&run_id)?;
+        let mut changed = false;
+        for (id, _) in unrouted(&events) {
+            let chats: BTreeSet<&str> = notices
+                .iter()
+                .filter(|notice| own(notice, id))
+                .map(|notice| notice.chat_session_id.as_str())
+                .collect();
+            let dedupe = format!("{WATCH_FLAG}:{id}:{REMIND}");
+            for chat in chats {
+                let latest = notices
+                    .iter()
+                    .rfind(|notice| notice.chat_session_id == chat && own(notice, id));
+                if !latest.is_some_and(|last| last.turn.as_deref() == Some("completed"))
+                    || !store
+                        .get_chat_session(chat)?
+                        .is_some_and(|chat| agentic(&chat))
+                {
+                    continue;
+                }
+
+                if notices
+                    .iter()
+                    .any(|notice| notice.chat_session_id == chat && notice.dedupe == dedupe)
+                {
+                    let keep = crate::store::FlagChoice {
+                        run_id: run_id.clone(),
+                        body: json!({
+                            "flagId": id, "c": "keep", "by": "agent", "reason": null,
+                            "requestId": format!("{id}:unsettled"), "unsettled": true,
+                        }),
+                        wakes: Vec::new(),
+                    };
+                    changed |= store.record_flag_choices(&[keep], None, now)?
+                        == crate::store::Chosen::Recorded;
+                    break;
+                }
+                changed |= store.remind_flag(&run_id, chat, id, &dedupe, &remind(&run, id), now)?;
+            }
+        }
+        if changed {
+            crate::commands::up::api_v2::flag_changed(run_id);
+        }
+    }
+    Ok(())
+}
+
+/// The frozen text that reminds a chat's agent of a flag its last turn left open.
+fn remind(run: &StoredRun, flag_id: &str) -> String {
+    let (id, exp) = (&run.id, &run.experiment_id);
+    let settle = format!("orx exp flag {id} --flag {flag_id}");
+    let choices = if Phase::parse(&run.status).is_some_and(Phase::is_terminal) {
+        format!(
+            "Run {id} has ended ({}), so there is nothing to stop. Settle the flag with your reason:\n\
+             \x20 {settle} --keep --reason '…'\n\
+             If its result does not stand, also fix experiment {exp} and run it again.",
+            run.status
+        )
+    } else {
+        format!(
+            "To keep it going: {settle} --keep --reason '…'\n\
+             To stop it: {settle} --stop --reason 'your confirmed reason'"
+        )
+    };
+    format!(
+        "[orx] Your last turn ended without settling flag {flag_id} on run {id} (experiment {exp}).\n\
+         Read: orx exp status {exp} --run {id}; orx logs {id}\n\
+         {choices}\n\
+         To leave it to the user: {settle} --ask --reason '…'\n\
+         If this turn also ends with the flag open, orx keeps the run as it is and records that\n\
+         you left the flag unsettled."
+    )
 }
 
 /// The newest flag no one has settled.
@@ -358,6 +531,9 @@ pub(crate) fn status_line(flag: &Value) -> String {
         _ => "someone".to_owned(),
     };
     let state = match flag["state"].as_str() {
+        Some("kept") if flag["choice"]["unsettled"] == true => {
+            "kept going: the agent left it unsettled".into()
+        }
         Some("kept") => format!("kept going by {}", by(&flag["choice"])),
         Some("stopped") => format!("stopped by {}", by(&flag["choice"])),
         Some("waiting") => "waits for the user".into(),

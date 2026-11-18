@@ -2128,6 +2128,7 @@
   "run_watch_noted": "Ghi nhận khi cờ từ {clock} vẫn đang mở.",
   "run_watch_kept": "Bạn đã chọn tiếp tục. Lượt chạy này sẽ không báo lại vấn đề này.",
   "run_watch_kept_by": "{agent} đã chọn tiếp tục.",
+  "run_watch_kept_unsettled": "Đã giữ sau khi {agent} hai lần để ngỏ mà không quyết định.",
   "run_watch_stopped_you": "Bạn đã dừng lượt chạy.",
   "run_watch_stopped_by": "{agent} đã dừng lượt chạy.",
   "run_watch_stopped_by_rule": "Quy tắc {name} đã dừng lượt chạy.",

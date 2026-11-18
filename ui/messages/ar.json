@@ -2128,6 +2128,7 @@
   "run_watch_noted": "سُجّل بينما كانت العلامة من {clock} مفتوحة.",
   "run_watch_kept": "اخترت المتابعة. لن يثيره هذا التشغيل مجددًا.",
   "run_watch_kept_by": "اختار {agent} المتابعة.",
+  "run_watch_kept_unsettled": "أُبقي عليه بعد أن تركه {agent} دون حسم مرتين.",
   "run_watch_stopped_you": "أوقفت التشغيل.",
   "run_watch_stopped_by": "أوقف {agent} التشغيل.",
   "run_watch_stopped_by_rule": "أوقفت القاعدة {name} التشغيل.",

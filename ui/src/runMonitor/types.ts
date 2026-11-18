@@ -162,6 +162,8 @@ export interface Flag {
     rule?: string | null;
     /** The run was stopped some other way, so this flag had nothing left to choose. */
     moot?: boolean;
+    /** Kept because the agent ended two turns without settling it. */
+    unsettled?: boolean;
   };
   /** What raised it: a look of the watcher, a check orx makes itself, or a rule that asks. */
   source: "look" | "tripwire" | "rule";

@@ -23,7 +23,8 @@ pub enum RunEvent {
     Notices {
         chats: Vec<String>,
     },
-    /// The turn carrying the run's flag was accepted.
+    /// The run's flags changed outside its monitor: a turn carrying one was accepted, or orx
+    /// followed one up.
     FlagReview {
         run_id: String,
     },

@@ -2128,6 +2128,7 @@
   "run_watch_noted": "在 {clock} 的标记未处理期间记录。",
   "run_watch_kept": "你选择了继续。此运行中不会再提示此问题。",
   "run_watch_kept_by": "{agent} 选择了继续。",
+  "run_watch_kept_unsettled": "{agent} 两次都没有处理，因此已保留。",
   "run_watch_stopped_you": "你停止了此次运行。",
   "run_watch_stopped_by": "{agent} 停止了此次运行。",
   "run_watch_stopped_by_rule": "规则 {name} 停止了此次运行。",

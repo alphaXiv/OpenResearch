@@ -2128,6 +2128,7 @@
   "run_watch_noted": "Zanotowane, gdy oznaczenie z {clock} było otwarte.",
   "run_watch_kept": "Wybrano kontynuację. To uruchomienie nie zgłosi tego ponownie.",
   "run_watch_kept_by": "{agent} wybrał kontynuację.",
+  "run_watch_kept_unsettled": "Zachowano po tym, jak {agent} dwukrotnie nie podjął decyzji.",
   "run_watch_stopped_you": "Zatrzymano uruchomienie.",
   "run_watch_stopped_by": "{agent} zatrzymał uruchomienie.",
   "run_watch_stopped_by_rule": "Reguła {name} zatrzymała uruchomienie.",

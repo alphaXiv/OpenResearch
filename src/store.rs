@@ -5112,6 +5112,7 @@ impl Store {
     /// idempotency key. A duplicate with the same request hash returns the
     /// existing row; a different payload is rejected without changing either
     /// the transcript or the turn.
+    #[cfg(test)]
     pub fn admit_chat_turn(
         &self,
         user_message: Option<&StoredChatMessage>,
@@ -5121,6 +5122,16 @@ impl Store {
             &self.conn,
             rusqlite::TransactionBehavior::Immediate,
         )?;
+        let admitted = Self::append_chat_turn(&tx, user_message, turn)?;
+        tx.commit()?;
+        Ok(admitted)
+    }
+
+    pub(crate) fn append_chat_turn(
+        tx: &rusqlite::Transaction<'_>,
+        user_message: Option<&StoredChatMessage>,
+        turn: &StoredChatTurn,
+    ) -> Result<ChatTurnAdmission> {
         let session_exists = tx
             .query_row(
                 "SELECT 1 FROM chat_sessions WHERE id = ?1",
@@ -5143,7 +5154,6 @@ impl Store {
             )
             .optional()?;
         if let Some(existing) = existing {
-            tx.commit()?;
             return Ok(if existing.request_hash == turn.request_hash {
                 ChatTurnAdmission::Existing(Box::new(existing))
             } else {
@@ -5156,7 +5166,6 @@ impl Store {
             |row| row.get(0),
         )?;
         if steer_exists {
-            tx.commit()?;
             return Ok(ChatTurnAdmission::Conflict);
         }
         if let Some(message) = user_message {
@@ -5214,7 +5223,6 @@ impl Store {
                 turn.updated_at,
             ],
         )?;
-        tx.commit()?;
         Ok(ChatTurnAdmission::Inserted)
     }
 

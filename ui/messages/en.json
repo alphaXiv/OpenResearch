@@ -2128,6 +2128,7 @@
   "run_watch_noted": "Noted while the flag from {clock} was open.",
   "run_watch_kept": "You chose to keep going. This run won't raise it again.",
   "run_watch_kept_by": "{agent} chose to keep going.",
+  "run_watch_kept_unsettled": "Kept after {agent} left it unsettled twice.",
   "run_watch_stopped_you": "You stopped the run.",
   "run_watch_stopped_by": "{agent} stopped the run.",
   "run_watch_stopped_by_rule": "Rule {name} stopped the run.",
