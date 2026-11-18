@@ -401,7 +401,7 @@ the user sees Revising until the next run starts.
 
 A cheap model looks at each run while it goes and writes the sentence on its
 line. It sees a digest: the run's numbers, its newest log lines and a brief
-you write; never the chat, the code or the whole log. Write the brief beside
+you write; never the chat, the repository or the whole log. Write the brief beside
 the plan in the config, in plain sentences, by label; children inherit it:
 
 ```json

@@ -2158,7 +2158,7 @@
   "run_brief_from_parent": "親の実行から",
   "run_brief_decided": "以前に決めたこと",
   "settings_run_watching": "実行を見守る",
-  "settings_run_watching_description": "何かが変わると、小さなモデルが各実行の短い要約を読み、入力欄の上の文を書きます。要約はエージェントのプロバイダーに送られます。チャットとコードは送られません。",
+  "settings_run_watching_sends": "何かが変わると、小さなモデルが各実行の短い要約を読み、入力欄の上の文を書きます。要約は実行ログの一部の行とともにエージェントのプロバイダーに送られます。チャット全体とリポジトリは送られません。",
   "run_eta_left": "残り {duration}",
   "run_eta_silent_for": "{duration} 進捗なし",
   "run_eta_was_due": "{clock} ごろ完了の見込みでした",

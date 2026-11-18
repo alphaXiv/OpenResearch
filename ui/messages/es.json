@@ -2158,7 +2158,7 @@
   "run_brief_from_parent": "De la ejecución madre",
   "run_brief_decided": "Decidido antes",
   "settings_run_watching": "Vigilar ejecuciones",
-  "settings_run_watching_description": "Un modelo pequeño lee un resumen breve de cada ejecución cuando algo cambia y escribe la frase sobre el editor. El resumen va al proveedor de tu agente; tu chat y tu código nunca.",
+  "settings_run_watching_sends": "Un modelo pequeño lee un resumen breve de cada ejecución cuando algo cambia y escribe la frase sobre el editor. El resumen, con líneas del log de la ejecución, va al proveedor de tu agente. Tu chat completo y tu repositorio nunca se envían.",
   "run_eta_left": "faltan {duration}",
   "run_eta_silent_for": "Sin avance desde hace {duration}",
   "run_eta_was_due": "debía terminar hacia las {clock}",

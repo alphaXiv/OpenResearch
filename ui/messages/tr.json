@@ -2158,7 +2158,7 @@
   "run_brief_from_parent": "Üst çalıştırmadan",
   "run_brief_decided": "Daha önce karar verilen",
   "settings_run_watching": "Çalıştırmaları izle",
-  "settings_run_watching_description": "Bir şey değiştiğinde küçük bir model her çalıştırmanın kısa bir özetini okur ve mesaj alanının üstündeki cümleyi yazar. Özet ajanınızın sağlayıcısına gider; sohbetiniz ve kodunuz asla.",
+  "settings_run_watching_sends": "Bir şey değiştiğinde küçük bir model her çalıştırmanın kısa bir özetini okur ve mesaj alanının üstündeki cümleyi yazar. Özet, çalıştırma günlüğünden satırlarla birlikte ajanınızın sağlayıcısına gider. Sohbetinizin tamamı ve deponuz asla gönderilmez.",
   "run_eta_left": "{duration} kaldı",
   "run_eta_silent_for": "{duration} süredir ilerleme yok",
   "run_eta_was_due": "yaklaşık {clock} civarında bitmesi bekleniyordu",

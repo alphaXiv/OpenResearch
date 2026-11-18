@@ -1232,7 +1232,7 @@ function RunWatchingRow() {
     <div className={cn(PROJECT_DEFAULT_ROW_CLASS_NAME, "mt-4")}>
       <div>
         <div className="project-default-title text-base font-medium">{m.settings_run_watching()}</div>
-        <p>{m.settings_run_watching_description()}</p>
+        <p>{m.settings_run_watching_sends()}</p>
       </div>
       <Switch
         type="button"

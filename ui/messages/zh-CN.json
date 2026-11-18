@@ -2158,7 +2158,7 @@
   "run_brief_from_parent": "来自父运行",
   "run_brief_decided": "先前的决定",
   "settings_run_watching": "看护运行",
-  "settings_run_watching_description": "有变化时，一个小模型会读取每次运行的简短摘要，并写出输入框上方的那句话。摘要会发送给你的智能体的提供商；你的对话和代码永远不会。",
+  "settings_run_watching_sends": "有变化时，一个小模型会读取每次运行的简短摘要，并写出输入框上方的那句话。摘要连同运行日志中的部分行会发送给你的智能体的提供商。完整对话和仓库永远不会发送。",
   "run_eta_left": "剩余 {duration}",
   "run_eta_silent_for": "已 {duration} 无进展",
   "run_eta_was_due": "原预计约 {clock} 完成",

@@ -2158,7 +2158,7 @@
   "run_brief_from_parent": "Z przebiegu nadrzędnego",
   "run_brief_decided": "Ustalone wcześniej",
   "settings_run_watching": "Obserwuj przebiegi",
-  "settings_run_watching_description": "Gdy coś się zmienia, mały model czyta krótkie podsumowanie każdego przebiegu i pisze zdanie nad polem wiadomości. Podsumowanie trafia do dostawcy Twojego agenta; czat i kod nigdy.",
+  "settings_run_watching_sends": "Gdy coś się zmienia, mały model czyta krótkie podsumowanie każdego przebiegu i pisze zdanie nad polem wiadomości. Podsumowanie, razem z wierszami z logu przebiegu, trafia do dostawcy Twojego agenta. Cały czat i repozytorium nigdy nie są wysyłane.",
   "run_eta_left": "zostało {duration}",
   "run_eta_silent_for": "Brak postępu od {duration}",
   "run_eta_was_due": "miał się skończyć około {clock}",
