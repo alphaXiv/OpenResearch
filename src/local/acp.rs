@@ -208,17 +208,23 @@ pub fn presets() -> Vec<Preset> {
         .collect()
 }
 
+/// Registration stays independent of executable discovery so chat dispatch never walks PATH.
 pub fn registered_definitions() -> Vec<Definition> {
-    register_definitions(definitions())
+    let mut saved = definitions();
+    saved.extend(presets().into_iter().map(|preset| preset.launch));
+    saved
 }
 
-fn register_definitions(saved: Vec<Definition>) -> Vec<Definition> {
+/// The registered launches minus presets a saved agent already launches.
+pub(super) fn catalog_definitions() -> Vec<Definition> {
+    let mut saved = definitions();
     let presets: Vec<Definition> = presets()
         .into_iter()
         .map(|preset| preset.launch)
         .filter(|launch| !saved.iter().any(|saved| same_launch(saved, launch)))
         .collect();
-    saved.into_iter().chain(presets).collect()
+    saved.extend(presets);
+    saved
 }
 
 pub fn same_launch(a: &Definition, b: &Definition) -> bool {
@@ -1289,50 +1295,66 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn saved_launch_suppresses_preset_without_losing_customization() {
+    fn registration_keeps_launches_without_inspecting_executables() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+
+        let preset = presets().remove(0).launch;
+        let mut saved = preset.clone();
+        saved.id = format!("acp:{}", uuid::Uuid::new_v4());
+        saved.executable = std::path::absolute("/orx-uninspected-agent")
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        save(saved.clone(), true).unwrap();
+
+        let registered = registered_definitions();
+        assert_eq!(registered.first(), Some(&saved));
+        assert!(registered.contains(&preset));
+        for id in [&saved.id, &preset.id, "claude-code", "codex"] {
+            assert!(crate::local::harness::is_chat_harness(id));
+            assert!(crate::local::harness::chat_harness(id).is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn catalog_hides_duplicate_presets_without_hiding_their_ids() {
+        use crate::local::harness::{detect_harness, detect_harness_snapshot};
+
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+
         let preset = presets().remove(0).launch;
         let mut saved = preset.clone();
         saved.id = format!("acp:{}", uuid::Uuid::new_v4());
         saved.name = "My DeepSeek".into();
-        if let Some(path) = executable_path(&saved.executable) {
-            saved.executable = path.to_string_lossy().into_owned();
-        }
+        save(saved.clone(), true).unwrap();
 
         let mut second = saved.clone();
         second.id = format!("acp:{}", uuid::Uuid::new_v4());
         second.name = "Another DeepSeek".into();
-        let registered = register_definitions(vec![saved.clone(), second.clone()]);
-        assert_eq!(&registered[..2], &[saved.clone(), second]);
-        let matched = registered
-            .iter()
-            .find(|item| same_launch(item, &preset))
-            .unwrap();
-        assert_eq!(matched, &saved);
-        assert!(!registered.iter().any(|item| item.id == preset.id));
+        save(second.clone(), true).unwrap();
+
+        let catalog = catalog_definitions();
+        assert_eq!(&catalog[..2], &[saved.clone(), second.clone()]);
+        assert!(!catalog.contains(&preset));
+        assert!(registered_definitions().contains(&preset));
+        assert!(detect_harness_snapshot(&preset.id).await.is_some());
+        assert!(detect_harness(&preset.id).await.is_some());
 
         saved.arguments.push("--other".into());
-        let refreshed = register_definitions(vec![saved.clone()]);
-        assert!(refreshed.contains(&saved));
-        assert_eq!(
-            refreshed
-                .iter()
-                .find(|item| same_launch(item, &preset))
-                .unwrap()
-                .id,
-            preset.id
-        );
-        assert_eq!(
-            register_definitions(vec![])
-                .iter()
-                .find(|item| same_launch(item, &preset))
-                .unwrap()
-                .id,
-            preset.id
-        );
+        save(saved, false).unwrap();
+        assert!(!catalog_definitions().contains(&preset));
+        remove(&second.id).unwrap();
+        assert!(catalog_definitions().contains(&preset));
     }
 
-    #[test]
-    fn preset_registration_refreshes_executable_paths() {
+    #[tokio::test]
+    async fn catalog_refreshes_executable_paths_without_changing_registration() {
+        use crate::local::harness::detect_harness_snapshot;
+
         if !crate::config::in_test_child(&[]) {
             return;
         }
@@ -1346,10 +1368,14 @@ for line in sys.stdin:
         saved.id = format!("acp:{}", uuid::Uuid::new_v4());
         saved.executable = binary.to_string_lossy().into_owned();
         std::env::set_var("PATH", root.path());
+        save(saved.clone(), true).unwrap();
 
-        assert!(register_definitions(vec![saved.clone()])
-            .iter()
-            .any(|definition| definition.id == preset.id));
+        let registered = registered_definitions();
+        assert_eq!(registered.first(), Some(&saved));
+        assert!(registered.contains(&preset));
+        assert!(catalog_definitions().contains(&preset));
+        let info = detect_harness_snapshot(&preset.id).await.unwrap();
+        assert!(!info.installed);
 
         std::fs::write(&binary, "").unwrap();
         #[cfg(unix)]
@@ -1358,16 +1384,18 @@ for line in sys.stdin:
             std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
 
-        let registered = register_definitions(vec![saved.clone()]);
-        assert_eq!(registered.first(), Some(&saved));
-        assert!(!registered
-            .iter()
-            .any(|definition| definition.id == preset.id));
+        assert_eq!(registered_definitions(), registered);
+        assert!(!catalog_definitions().contains(&preset));
+        for id in [&preset.id, &saved.id] {
+            assert!(detect_harness_snapshot(id).await.unwrap().installed);
+        }
 
         std::fs::remove_file(binary).unwrap();
-        assert!(register_definitions(vec![saved])
-            .iter()
-            .any(|definition| definition.id == preset.id));
+        assert_eq!(registered_definitions(), registered);
+        assert!(catalog_definitions().contains(&preset));
+        for id in [&preset.id, &saved.id] {
+            assert!(!detect_harness_snapshot(id).await.unwrap().installed);
+        }
     }
 
     #[tokio::test]

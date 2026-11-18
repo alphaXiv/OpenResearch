@@ -27,6 +27,10 @@ through its CLI; profiles check theirs in parallel in the second pass. Adding,
 renaming or removing an account, provider or endpoint re-checks only the agent
 it changes.
 
+The registry lists saved launches and presets without searching for executables.
+The agent catalog hides presets whose launch matches a saved agent. Existing
+chats can still check and run either launch.
+
 **Plan limits come from the agents themselves.** For each Claude Code and Codex
 sign-in that may be on a subscription, the user's own and each profile's, one
 request answers: Claude's `get_usage` control request on a throwaway child in
