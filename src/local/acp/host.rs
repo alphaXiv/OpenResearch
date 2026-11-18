@@ -2402,6 +2402,74 @@ exec "$@""#
         host.shutdown().await;
     }
 
+    /// What the agent hears about a prompt whose request the server dropped mid-turn.
+    async fn cancels_of_a_dropped_prompt(hand_off: bool) -> (Vec<Value>, Value) {
+        let record = crate::config::test_root().join(format!("acp-{}.jsonl", uuid::Uuid::new_v4()));
+        let mut definition = definition("normal");
+        definition
+            .arguments
+            .push(record.to_string_lossy().into_owned());
+        let host = Arc::new(Host::default());
+        let client = host
+            .get("chat", &definition, &std::env::temp_dir())
+            .await
+            .unwrap();
+        let session = client
+            .request(
+                "session/new",
+                json!({"cwd": std::env::temp_dir(), "mcpServers": []}),
+            )
+            .await
+            .unwrap();
+        client
+            .set_native_id(session["sessionId"].as_str().unwrap())
+            .unwrap();
+        drop(client.begin_turn());
+        if hand_off {
+            crate::keep::hand_off();
+        }
+        tokio::select! {
+            biased;
+            _ = prompt(&client, "hang") => panic!("the hanging prompt was answered"),
+            listed = client.request("session/list", json!({})) => { listed.unwrap(); }
+        }
+        // Messages reach the agent in order, so any cancel precedes this request.
+        client.request("session/list", json!({})).await.unwrap();
+
+        let recorded: Vec<Value> = std::fs::read_to_string(&record)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let prompt_id = recorded
+            .iter()
+            .find(|line| line["method"] == "session/prompt")
+            .unwrap()["id"]
+            .clone();
+        let cancels = recorded
+            .into_iter()
+            .filter(|line| line["method"] == "$/cancel_request")
+            .collect();
+        client.wire.keeper.signal(crate::keep::Signal::Kill);
+        (cancels, prompt_id)
+    }
+
+    #[tokio::test]
+    async fn a_dropped_request_is_cancelled_under_the_id_the_agent_saw() {
+        let (cancels, prompt_id) = cancels_of_a_dropped_prompt(false).await;
+        assert_eq!(cancels.len(), 1, "{cancels:?}");
+        assert_eq!(cancels[0]["params"]["requestId"], prompt_id);
+    }
+
+    #[tokio::test]
+    async fn a_hand_off_leaves_the_prompt_running_for_the_successor() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let (cancels, _) = cancels_of_a_dropped_prompt(true).await;
+        assert!(cancels.is_empty(), "{cancels:?}");
+    }
+
     #[tokio::test]
     async fn a_permission_during_a_hand_off_is_not_cancelled_for_the_user() {
         if !crate::config::in_test_child(&[]) {

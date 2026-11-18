@@ -133,6 +133,15 @@ pub(super) fn connect(
             let mut messages = tokio::io::BufReader::new(reader).lines();
             while let Some(line) = messages.next_line().await? {
                 let mut value: Value = serde_json::from_str(&line)?;
+                if value["method"] == "$/cancel_request" {
+                    // A server handing off drops its requests; the successor still wants them answered.
+                    if crate::keep::handing_off() {
+                        continue;
+                    }
+                    if let Some(id) = value.pointer_mut("/params/requestId") {
+                        *id = Value::String(format!("{base}:{id}"));
+                    }
+                }
                 let mut answer = false;
                 let mut answered_id = None;
                 if let Some(id) = value.get("id").cloned() {
