@@ -10159,7 +10159,7 @@ async fn process_run_notices(
             chat.compact_before_wake(&session_id).await;
         }
         match send_run_notice_batch(chat, &session_id, &notices, guard).await {
-            Ok(TurnSubmission::Started(_) | TurnSubmission::Existing(_)) => {
+            Ok(submission @ (TurnSubmission::Started(_) | TurnSubmission::Existing(_))) => {
                 if let Some(turn) =
                     store.get_chat_turn_by_client_id(&session_id, &notices[0].client_turn_id)?
                 {
@@ -10186,6 +10186,12 @@ async fn process_run_notices(
                             true,
                             now_ms(),
                         )?;
+                    } else {
+                        continue;
+                    }
+                    // Reconciling an existing reply releases a reservation without emitting busy.
+                    if matches!(submission, TurnSubmission::Existing(_)) {
+                        held.push(session_id);
                     }
                 }
             }
@@ -10193,18 +10199,20 @@ async fn process_run_notices(
             Err(err) => {
                 let permanent = is_client_turn_conflict(&err)
                     || err.downcast_ref::<PermanentRunNoticeError>().is_some();
-                if store.record_run_notice_failure(
+                if let Some(failures) = store.record_run_notice_failure(
                     &session_id,
                     &notices[0].client_turn_id,
                     &err.to_string(),
                     permanent,
                     now_ms(),
-                )? == Some(1)
-                {
-                    eprintln!(
-                        "orx up: run notices: batch {}: {err}",
-                        notices[0].client_turn_id
-                    );
+                )? {
+                    if failures == 1 {
+                        eprintln!(
+                            "orx up: run notices: batch {}: {err}",
+                            notices[0].client_turn_id
+                        );
+                    }
+                    held.push(session_id);
                 }
             }
         }
@@ -14076,6 +14084,50 @@ for line in sys.stdin:
             .unwrap()
             .is_some());
         let tx = store.begin().unwrap();
+        tx.execute(
+            "UPDATE run_notices SET delivered_at = NULL, retired_at = NULL, next_delivery_at = NULL
+             WHERE client_turn_id = ?1",
+            [&old_client],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        assert_eq!(
+            store.run_notice_batch("other").unwrap()[0].client_turn_id,
+            old_client
+        );
+        store
+            .insert_run_notice(
+                "run_x",
+                "other",
+                "terminal",
+                "after-reply",
+                "next result",
+                2,
+            )
+            .unwrap();
+        let before = count_turns();
+        let fresh = notice_host();
+        let watcher = tokio::spawn(watch_run_notices(
+            fresh.clone(),
+            bus.subscribe(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(Mutex::new(())),
+        ));
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while count_turns() == before
+                || !store.pending_run_notice_sessions().unwrap().is_empty()
+                || !fresh.busy_sessions().await.is_empty()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("acknowledging the previous reply must wake the next result");
+        watcher.abort();
+        let _ = watcher.await;
+        assert_eq!(count_turns(), before + 1);
+
+        let tx = store.begin().unwrap();
         tx.execute("DELETE FROM runs WHERE id = 'run_x'", [])
             .unwrap();
         tx.commit().unwrap();
@@ -14281,7 +14333,7 @@ for line in sys.stdin:
                 .unwrap()
                 .lines()
                 .count(),
-            7
+            8
         );
         for kind in ["engine", "ssh_job"] {
             let delegate = format!("delegate-{kind}");
