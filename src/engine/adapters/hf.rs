@@ -7,8 +7,25 @@ use async_trait::async_trait;
 
 pub struct HfAccount {
     pub namespace: String,
+    whoami: tokio::sync::Mutex<std::collections::HashMap<[u8; 32], hf::WhoAmI>>,
 }
 impl HfAccount {
+    pub fn new(namespace: String) -> Self {
+        Self {
+            namespace,
+            whoami: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    async fn unseen(&self, token: &str, id: &str) -> Result<Option<String>> {
+        use sha2::{Digest, Sha256};
+        let key: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+        let mut cache = self.whoami.lock().await;
+        if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry(key) {
+            entry.insert(hf::who(token).await?);
+        }
+        Ok(hf::unseen(&cache[&key], &self.namespace, id))
+    }
     fn id<'a>(&self, run: &'a WatchedRun) -> Result<&'a str> {
         api::id(run, "hf_job", Some(&self.namespace), None)
     }
@@ -76,7 +93,7 @@ impl Api for HfAccount {
         let token = hf::resolve_token()?;
         let id = self.id(run)?;
         let Some(job) = hf::inspect_job(&token, &self.namespace, id).await? else {
-            return Ok(match hf::unseen(&token, &self.namespace, id).await? {
+            return Ok(match self.unseen(&token, id).await? {
                 Some(cause) => Observation::NeedsAuth { cause },
                 None => api::stage("DELETED", None, None, None, None),
             });
@@ -93,7 +110,7 @@ impl Api for HfAccount {
         if hf::cancel_job(&token, &self.namespace, id).await? {
             return Ok(());
         }
-        match hf::unseen(&token, &self.namespace, id).await? {
+        match self.unseen(&token, id).await? {
             Some(cause) => Err(anyhow!(cause)),
             None => Ok(()),
         }
@@ -123,5 +140,61 @@ impl Api for HfAccount {
             tokio::time::timeout(window, follow).await
         };
         Ok(api::closed(outcome, received)?.is_some())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        extract::State,
+        http::{HeaderMap, StatusCode},
+        routing::get,
+        Json, Router,
+    };
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    #[tokio::test]
+    async fn missing_job_identity_is_cached_per_token_and_failures_retry() {
+        if !crate::config::in_test_child(&["HF_ENDPOINT"]) {
+            return;
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let app = Router::new()
+            .route("/api/whoami-v2", get(|State(calls): State<Arc<AtomicUsize>>, headers: HeaderMap| async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                match headers.get("authorization").and_then(|value| value.to_str().ok()) {
+                    Some("Bearer member") => (StatusCode::OK, Json(serde_json::json!({"name":"me", "orgs":[{"name":"org"}]}))),
+                    Some("Bearer other") => (StatusCode::OK, Json(serde_json::json!({"name":"other", "orgs":[]}))),
+                    _ => (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({}))),
+                }
+            }))
+            .with_state(calls.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        std::env::set_var(
+            "HF_ENDPOINT",
+            format!("http://{}", listener.local_addr().unwrap()),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let account = HfAccount::new("org".into());
+        std::env::set_var("HF_TOKEN", "member");
+        let run = WatchedRun {
+            id: "run".into(),
+            handle: api::test_handle("hf_job", Some("org"), None, vec!["job".into()]),
+        };
+        let (first, second) = tokio::join!(account.inspect(&run), account.inspect(&run));
+        assert!(matches!(first.unwrap(), Observation::Gone { .. }));
+        assert!(matches!(second.unwrap(), Observation::Gone { .. }));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let message = account.unseen("other", "three").await.unwrap().unwrap();
+        assert!(message.contains("three") && message.contains("other"));
+        assert!(account.unseen("member", "four").await.unwrap().is_none());
+        assert!(account.unseen("bad", "five").await.is_err());
+        assert!(account.unseen("bad", "six").await.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+        server.abort();
     }
 }
