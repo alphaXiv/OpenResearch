@@ -8850,4 +8850,74 @@ mod tests {
         );
         assert_eq!(page["next"], 499_995);
     }
+
+    #[test]
+    fn a_check_without_patterns_reads_the_checkpoint_not_the_log() {
+        let fixture = Fixture::new("check-without-patterns");
+        fixture.run("running", local());
+        let log = crate::store::log_path(fixture.dir.path(), "r1");
+        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+        std::fs::write(&log, "::orx:: {\"step\":1,\"m\":{\"loss\":2.5}}\n").unwrap();
+        let source = crate::engine::view::Source {
+            file: None,
+            patterns: None,
+            config: None,
+        };
+
+        let unfolded =
+            crate::engine::view::check(&fixture.store, "r1", None, None, &source).unwrap();
+
+        assert_eq!(unfolded["seen"]["signals"], json!([]));
+        fixture.collect(&folded(&[(
+            T0,
+            "::orx:: {\"step\":1,\"m\":{\"loss\":2.5}}".into(),
+        )]));
+        let collected =
+            crate::engine::view::check(&fixture.store, "r1", None, None, &source).unwrap();
+        assert_eq!(collected["seen"]["signals"], json!(["loss"]));
+    }
+
+    #[test]
+    fn a_run_without_steps_is_compared_with_its_parent_by_elapsed_time_between_its_reports() {
+        let f = Fixture::new("orx-rules-parent-elapsed");
+        let timed = |id: &str, points: &[(i64, f64)]| {
+            let lines: Vec<(i64, String)> = points
+                .iter()
+                .map(|(t, loss)| {
+                    let line = format!("::orx:: {{\"t\":{t},\"m\":{{\"loss\":{loss}}}}}");
+                    (T0 + t * 1000, line)
+                })
+                .collect();
+            f.collect(&Snapshot {
+                run_id: id.into(),
+                ..folded(&lines)
+            });
+            f.confirmed(id, lines.last().unwrap().0);
+        };
+        f.run_in("parent", "exp", "done", local());
+        timed("parent", &[(0, 1.0), (10, 2.0)]);
+        rules_at(&f, "parent", T0 + 11_000);
+        f.child("child", "exp");
+        ruled(
+            &f,
+            "r1",
+            "child",
+            local(),
+            json!([{"name": "diverging", "text": "Stop when the loss is more than 1 above the parent's.",
+                "does": "stop", "when": {"kind": "worseThanParent", "signal": "loss", "by": 1, "better": "lower"}}]),
+        );
+
+        timed("r1", &[(0, 1.0), (5, 2.6)]);
+        rules_at(&f, "r1", T0 + 6_000);
+
+        let stop = stopped_by(&f, "r1")
+            .expect("2.6 is 1.1 above the parent's 1.5 halfway between its reports");
+        assert!(
+            stop.reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("(2.6 against 1.5)"),
+            "{stop:?}"
+        );
+    }
 }

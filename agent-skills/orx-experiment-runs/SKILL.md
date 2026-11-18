@@ -45,9 +45,13 @@ orx.plan(["install", {"phase": "train", "of": iterations, "unit": "steps"}, "eva
 ```
 
 A stage that recurs is listed again where it recurs, never twice in a row.
-The bar times each stage by the parent's run of it. A stage the run reaches
-outside the plan shows as unplanned, and a planned stage it ends without shows
-as skipped: both mean the plan is wrong, so fix it.
+The bar times each stage by the experiment's own last run of it, else the
+parent's, scaled to this run's total; a run that counted the stage in another
+unit, or where only one of the two declared a total, times nothing, and the
+stage stays untimed. A stage the run reaches outside the plan shows as unplanned, and
+a planned stage it passes over, or finishes without, shows as skipped: both
+mean the plan is wrong, so fix it. A cancelled or failed run's later stages
+are only unreached.
 
 Save the plan in `plan.json`, omitting totals that only the run can know:
 
@@ -80,7 +84,8 @@ launch. A run reports with `::orx::` lines on its output:
 ::orx:: {"row":"tasks","m":{"task":"arc_easy","accuracy":0.62}}
 ```
 
-`phase` starts a stage, and omitted fields keep their last value. `step` is
+`phase` starts a stage with no step, total or unit until a report gives them;
+within a stage, omitted fields keep their last value. `step` is
 completed work out of `of`; `t` is seconds on any monotonic clock (only
 differences count); measures go in `m`; `row` adds a row to that table;
 `spend` is cumulative paid-service USD; `plan` is the stage list of section 2.
@@ -102,8 +107,12 @@ with run.phase("eval", total=22, unit="tasks") as p:
 run.spend(cumulative_usd)
 ```
 
-It reports from global rank zero, flushes a non-finite measure at once, and
-never marks a run finished. Resume with `progress(total=5000, start=3000)`.
+Only rank zero reports. The helper takes the rank from `rank=`, else `RANK` or
+`SLURM_PROCID`; under a launcher that sets neither, pass `rank=`, or every
+process reports and each row counts once per process. It flushes a non-finite
+measure at once, says on stderr when orx will ignore something it printed (a
+boolean, a list, a name like `val/loss`), and never marks a run finished.
+Resume with `progress(total=5000, start=3000)`.
 A shell script names the stages and relays the progress of tools it can't
 change; the Python it starts then calls `progress(total=…)` without `phase`:
 
@@ -143,7 +152,7 @@ orx exp view set <expId> --file view.xml
 | Element | Attributes |
 | --- | --- |
 | `signal` | `name`, `label`, `unit`, `digits` (0–12), `better="lower\|higher"`, `smooth` (above 0, at most 1; noisy curves only), `as="duration\|compact"`, `scale` (a factor, `100` for percent), `sign="true"`, `pick="latest\|best"` (`best` needs `better`), `vs`, `labels='{"1":"valid","0":"invalid"}'` |
-| `view` | `headline="a b"`: the first with a number is shown |
+| `view` | `headline="a b"`: the first with a number is shown; a signal that went wrong (not finite, or zero where the parent's is not) leads instead, wherever it is listed |
 | `chart` | `y="a b"`, `ghost="parent\|false"` (default `parent`), `x-range="run\|parent"`, `x-scale="log"`, `y-scale="log"`, `mark="line\|points\|bars"`; with `from="table"`, `x`/`y` are its columns, `by="column"` draws a series per value, and `<series x= y= label= ghost=/>` children give each series its own columns |
 | `stats` | `of="a b"`, `vs` |
 | `table` | `name`, `columns="a b"`, `last="5"`, `vs="parent\|step\|final"` |
@@ -156,9 +165,9 @@ A chart over signals uses reported steps when available and elapsed time otherwi
 Every block also takes `phase` (shown only during that stage) and `title`.
 Declare a `signal` for every measure the view names and every column the user
 should read by a label. One chart answers one question: measures on different
-scales get a chart each. At most 8 series a chart and three stats, the
-headline first. The strip shows the headline and the first active chart with
-two points. A result citation draws the view's first block (`orx-figures`).
+scales get a chart each. A chart draws at most 8 series and a stats block
+takes up to 32 names; show about three stats, the headline first. The strip
+shows the headline and the first active chart with two points. A result citation draws the view's first block (`orx-figures`).
 Use the result message for the interpretation of a particular run.
 
 ```xml
@@ -259,9 +268,11 @@ stored data, not the user's screen. Fix missing or unused charts now with
 `orx exp view set`; its changes apply while the run continues. Never defer a
 view fix to the next relaunch. Then run `view show` again to confirm the change.
 
-`view check` folds the real log and names missing reports, unmatched patterns
-and disagreements with the plan. If the log is still empty, check once more
-on your next turn after setup; never wait inside a turn for data.
+`view check` names missing reports, unmatched patterns and disagreements with
+the plan. With patterns, given or saved, it folds the real log; without, it
+reads what collection last saved, which can trail the log for a run's first
+seconds. If it has seen nothing yet, check once more on your next turn after
+setup; never wait inside a turn for data.
 
 Repair the view, plan or patterns with `view set`: they apply to the run in
 flight. A report missing from the code means cancelling, fixing and
@@ -334,15 +345,18 @@ Charts of table research (benchmarks, sweeps, tasks by size):
 [{"regex": "^(?P<dist>\\w+)\\s+(?P<n>\\d+)\\s+(?P<ref_ms>[\\d.]+)\\s+(?P<mine_ms>[\\d.]+)", "row": "timings"}]
 ```
 
-A pattern's rows go to a table of their own, apart from the rows the code
-reports, so the two never interleave.
+A pattern's rows go to the table its `row` names. Rows the code reports under
+the same name join that table, so a result both printed and reported counts
+twice: give a pattern's table a name the code does not use.
 
 ## 9. Rules that stop a run
 
 A run you would stop the moment you saw it, such as a NaN loss or a loss far
 above the parent's at the same step, gets a rule, so it stops without waiting
-for you. Rules sit beside the plan in the config, OpenResearch checks them on
-every report with no model, and a run keeps the rules it was launched with.
+for you. Rules sit beside the plan in the config, and a run keeps the rules it
+was launched with. OpenResearch checks them with no model each time it
+collects new reports, once over the whole batch: three NaNs and a finite loss
+collected together end the streak and stop nothing.
 Declare only what the task justifies: a stop ends the run, and a wrong rule
 costs a rerun.
 
@@ -357,7 +371,7 @@ run from an odd one.
 {"rules": [
   {"name": "nan-loss", "text": "Stop when the loss is NaN on 3 reports in a row.",
    "does": "stop", "when": {"kind": "nonFinite", "signal": "loss", "reports": 3}},
-  {"name": "diverging", "text": "Stop when the loss is 1 above the parent's at the same step, 3 reports running.",
+  {"name": "diverging", "text": "Stop when the loss is more than 1 above the parent's at the same step, 3 reports running.",
    "does": "stop", "when": {"kind": "worseThanParent", "signal": "loss", "by": 1, "better": "lower", "reports": 3}},
   {"name": "plateau", "text": "Ask when val loss improves by less than 0.01 over 4 evals.",
    "does": "ask", "when": {"kind": "noImprovement", "signal": "val_loss", "min": 0.01, "reports": 4, "better": "lower"}}
@@ -366,7 +380,9 @@ run from an odd one.
 
 The `kind` field names the condition. For `nonFinite`, `compare`, and
 `worseThanParent`, `reports` counts matches in a row and defaults to 1.
-`noImprovement` requires `reports` to set the size of its window.
+`worseThanParent` skips a report with nothing to compare (the parent has no
+value there, or either value is not a number): it neither extends nor breaks
+the streak. `noImprovement` requires `reports` to set the size of its window.
 
 | `when` | Trips when |
 | --- | --- |
@@ -375,8 +391,12 @@ The `kind` field names the condition. For `nonFinite`, `compare`, and
 | `{"kind": "worseThanParent", "signal": "loss", "by": 1, "better": "lower"}` | it is worse than the parent's run at the same step by more than `by` |
 | `{"kind": "noImprovement", "signal": "val_loss", "min": 0.01, "reports": 4, "better": "lower"}` | its best of the last `reports` beats the best before them by less than `min` |
 | `{"kind": "noProgress", "seconds": 600}` | no step was reported for that long |
-| `{"kind": "costAbove", "usd": 5}` | spend passed it, or the estimate says it will |
+| `{"kind": "costAbove", "usd": 5}` | spend reached it, or the estimate says it will pass it |
 | `{"kind": "projectedFinishPastLimit"}` | the estimate says the run ends after its time limit |
+
+The parent's "same step" is its value in the same stage at that step, or at
+the same elapsed time when the run reports no steps; between two of the
+parent's reports it is read off the line joining them.
 
 `projectedFinishPastLimit` requires a run with a time limit. OpenResearch,
 Hugging Face Jobs, Modal, Kubernetes, and Vercel supply one by default. For
@@ -419,8 +439,9 @@ the plan in the config, in plain sentences, by label; children inherit it:
 `worth_a_flag` is where you name what you would want to hear about; the more
 specific, the fewer false flags. A look comes when something changes (a
 number leaves its trend, a new kind of warning, a stage starts or ends) and,
-while output keeps coming, at least every `maxGapS` seconds; `minGapS` keeps
-looks apart. Leave `watch` out for the defaults (2 and 30 minutes); widen the
+while output keeps coming, at least every `maxGapS` seconds. `minGapS` keeps
+the looks changes bring apart; a look that ends a silence can come sooner.
+Leave `watch` out for the defaults (2 and 30 minutes); widen the
 gaps for a run of days, narrow `maxGapS` for one that may go wrong fast.
 
 A flag is the watcher, a rule that asks, or orx's own checks (a value that is

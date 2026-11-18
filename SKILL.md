@@ -102,7 +102,7 @@ group below has a module (`orx skill <name>`) with the full flags and rules.
 | `orx exp flag <runId> --flag <flagId> (--keep \| --ask \| --stop) [--reason "<why>"]` | Settle a flag that woke you, after reading the run yourself: keep it going, leave the choice to the user, or stop it; see `orx-experiment-runs`. |
 | `orx exp move/archive/unarchive/delete <localExpId>` | Re-parent, hide, restore, or permanently delete experiment nodes; see `orx-experiment-tree`. |
 | `orx exp desc <expId> [--set "<text>" \| --stdin]` | Read or overwrite the experiment's description. |
-| `orx exp view set <expId> [--file <view.xml>] [--pattern <patterns.json>] [--config <plan.json>]` / `view get <expId>` / `view check <runId>` | Set what an experiment's runs show and the stages they go through (copied into children), print it, or check it against a run's real log; see `orx-experiment-runs`. |
+| `orx exp view set <expId> [--file <view.xml>] [--pattern <patterns.json>] [--config <plan.json>]` / `view get <expId>` / `view check <runId>` | Set what an experiment's runs show and the stages they go through (copied into children), print it, or check it against what a run reported; see `orx-experiment-runs`. |
 
 To **read or edit** a node's code—including diffing what a run changed—use plain
 Git in the local session worktree. See the `orx-git` module.
