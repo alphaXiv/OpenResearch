@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useLayoutEffect, useState } from "react";
 import { m } from "../paraglide/messages.js";
 
 const KEYBOARD_STEP = 24;
@@ -23,8 +23,11 @@ export function ResizeHandle({
   measure: () => number;
   onChange: (height: number | null) => void;
 }) {
-  /** What the box measured when the grip last took focus, for a natural height. */
+  /** What the box measured when the grip last took focus or was reset, for a natural height. */
   const [measured, setMeasured] = useState<number | null>(null);
+  useLayoutEffect(() => {
+    if (height === null) setMeasured(measure());
+  }, [height]);
   const resizeBy = (start: number, delta: number) => onChange(Math.round(Math.min(Math.max(start + delta, min), max)));
 
   return (
