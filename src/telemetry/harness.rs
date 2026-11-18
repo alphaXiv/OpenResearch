@@ -499,6 +499,8 @@ fn safe_error_excerpt(output: &str) -> Option<String> {
     let mut excerpt = String::new();
     for phrase in PHRASES
         .iter()
+        .copied()
+        .chain(crate::local::harness::cursor::CursorStatusError::ALL.map(|e| e.excerpt()))
         .filter(|phrase| output.contains(&phrase.to_ascii_lowercase()))
     {
         let separator = if excerpt.is_empty() { "" } else { "; " };
