@@ -10,6 +10,7 @@ interface Window {
     pending(): { from: string; to: string; title: string; body: string } | null;
     show(state: { title: string; body: string; busy: boolean }, fade?: boolean): HTMLElement;
     actions(): HTMLElement | null;
+    details(): HTMLElement | null;
     end(): void;
     captions(names: { minimize: string; maximize: string; restore: string; close: string }): void;
   };

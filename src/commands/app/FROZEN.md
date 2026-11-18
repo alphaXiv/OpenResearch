@@ -39,9 +39,10 @@ every older window sends.
 
 | Surface | Contract |
 |---|---|
-| Start | `orx [--no-telemetry] up --app-window --port PORT`, from the window's own executable path, or on Linux `"$APPIMAGE" server` and the same arguments. The server binds `127.0.0.1:PORT`, opens no browser and restarts only when its page asks. Its fatal errors it shows in a native alert itself. |
+| Start | `orx [--no-telemetry] up --app-window --port PORT`, from the window's own executable path, or on Linux `"$APPIMAGE" server` and the same arguments. The server binds `127.0.0.1:PORT`, opens no browser and restarts only when its page asks. |
 | Lease | The server's stdin is a pipe whose other end the window holds and never writes. End of input or a broken pipe means the window is gone without quitting: the server hands its work off as for a restart and exits, and the next launch adopts it. |
-| Restart | A server restarting into an update keeps the lease and the port. On Unix it execs in place, so its pid stays. On Windows it starts its successor, which inherits stdin, names it in the runtime directory's `relaunch.json` as `{until, pid}` and exits; the successor publishes `server.json` with the same `pid`, which ends the announcement. A window follows each successor by that `pid`, from `relaunch.json` or, once it is gone, `server.json`, and treats an exit with no successor as the server gone. |
+| Stderr | A pipe the window reads to the end, and passes on to its own. The server shows no alert of its own: one that cannot go on writes why, for the user, as its last line and exits with status 1. |
+| Restart | A server restarting into an update keeps the lease and the port. On Unix it execs in place, so its pid stays. On Windows it starts its successor, which inherits stdin and stderr, names it in the runtime directory's `relaunch.json` as `{until, pid}` and exits with status 0; the successor publishes `server.json` with the same `pid`, which ends the announcement. A window opens each successor by that `pid` as soon as `relaunch.json` names it, while the server that named it still holds it, or, after the server's exit with status 0, from `server.json`; it reads the successor's exit as the server's, and treats an exit with status 0 and no successor as the server gone. |
 | `GET /api/pending-work` | `{agents, runs}`, as `PendingWork` in `ui/src/api.ts`. The window passes it whole to the page's close dialog, and lists what it can read in a native alert when the page cannot ask. Both lists empty means a quit interrupts nothing. |
 | `GET /api/app-window` | `{busy}`: whether quitting would interrupt work or close a page someone has open. A window with no page shown quits once this has been false for ten minutes. |
 | `POST /api/app-window/quit` | Answers `204`, asks the runs that need OpenResearch open to stop for at most ten seconds, stops everything else and exits. A window waits a while for the exit, then leaves anyway. |
@@ -52,3 +53,14 @@ Only a server started with `--app-window` has the `/api/app-window` routes.
 An app from before the window outlived its server relaunches into a newer build as a whole: with
 `ORX_APP_RELAUNCH_PORT=PORT` on every platform, and `ORX_RELAUNCH_WAIT_PID` on Windows, whose new
 window waits for that process to exit. A window keeps that port.
+
+## The page and the window
+
+After an update a window shows pages newer than itself, so the bridge between them only grows too.
+A window ignores a message it does not know.
+
+| Message | Contract |
+|---|---|
+| `orx:server-stopped` | A window event: the window's server exited and nothing took over. Its `detail` is `{reason, log}`: `reason` the server's last line on stderr when it exited with status 1, else `null`; `log` the rest of the end of its stderr, then how it exited. The page says why it stopped, offers to start it again or to quit, and says so with `server:asking`; a window that hears nothing within a second asks in a native alert instead. |
+| `server:start` | To the window: start the server again on the same port. The page reloads once a server answers. |
+| `app:quit` | To the window: quit, as the app's own Quit command does. |

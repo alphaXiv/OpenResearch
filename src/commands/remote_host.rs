@@ -1143,7 +1143,7 @@ pub(crate) fn served_version(data_dir: &Path) -> Option<String> {
     descriptor["version"].as_str().map(str::to_string)
 }
 
-fn runtime_path(data_dir: &Path, extension: &str) -> Result<PathBuf> {
+pub(crate) fn runtime_path(data_dir: &Path, extension: &str) -> Result<PathBuf> {
     #[cfg(unix)]
     let root = PathBuf::from(format!("/tmp/orx-{}", effective_uid()));
     #[cfg(unix)]

@@ -141,12 +141,15 @@ pub async fn run(args: UpArgs) -> Result<()> {
         Some(listener) => listener,
         None => tokio::net::TcpListener::bind((args.host, port))
             .await
-            .map_err(|error| {
-                anyhow!(
+            .map_err(|error| match error.kind() {
+                std::io::ErrorKind::AddrInUse => {
+                    anyhow!("Another program is using port {port}. Quit it and try again.")
+                }
+                _ => anyhow!(
                     "Could not bind {}: {}",
                     SocketAddr::new(args.host, port),
                     error
-                )
+                ),
             })?,
     };
     let actual_port = listener.local_addr()?.port();

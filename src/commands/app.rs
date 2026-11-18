@@ -49,8 +49,9 @@ pub fn launched_as_app_bundle() -> bool {
     is_bundle_exe_launch(&exe, std::env::args_os().next().as_deref())
 }
 
-/// Whether this process is the server a desktop window started, whose fatal errors no
-/// terminal shows.
+/// Whether this process is the server a desktop window started, which says why it stopped
+/// to the window rather than in an alert of its own.
+#[cfg(windows)]
 pub fn serves_window() -> bool {
     std::env::args_os().skip(1).any(|arg| arg == "--app-window")
 }
@@ -381,13 +382,7 @@ pub async fn run() {
                 .map(|a| a.port())
                 .unwrap_or(4791)
         });
-    let server = match start_server(port) {
-        Ok(server) => server,
-        Err(error) => {
-            crate::show_error_dialog(&format!("Could not start OpenResearch's server: {error}"));
-            return;
-        }
-    };
+    let server = start_server(port);
     #[cfg(target_os = "macos")]
     imp::run_event_loop(port, Some(server));
     #[cfg(not(target_os = "macos"))]
@@ -431,6 +426,7 @@ fn start_server(port: u16) -> std::io::Result<std::process::Child> {
     server
         .args(["up", "--app-window", "--port", &port.to_string()])
         .stdin(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .spawn()
 }
 
@@ -1042,13 +1038,20 @@ mod imp {
         /// The dashboard page finished loading and can take `orx:open-path`.
         PageReady,
         /// A close or quit that did not come through the window's own close event.
-        #[cfg(any(windows, target_os = "macos"))]
         Close,
         /// The page is showing the dialog a close asked it for.
         CloseAsked,
         CloseAnswer(super::CloseAnswer),
         /// The window's server exited, and no successor took over from it.
-        ServerExited,
+        ServerExited(ServerStop),
+        /// No page answered for the stopped server, so a native alert asks.
+        AskAfterStop(ServerStop),
+        /// The alert's answer: true to start the server again, false to quit.
+        StopAnswer(bool),
+        /// The page asks to start the server again after it stopped.
+        StartServer,
+        /// The page is showing the notice that the server stopped.
+        StoppedAsked,
         /// Tell a newly loaded page whether the window is maximized (Windows) or fullscreen (macOS).
         #[cfg(any(windows, target_os = "macos"))]
         SyncWindowState,
@@ -1091,6 +1094,8 @@ mod imp {
         /// Until the page says it is asking; after the deadline a native alert asks instead.
         Sent(Instant),
         Page,
+        /// A native alert asks.
+        Alert,
         /// A windowless close brought the window back, so the page can list the work once it loads;
         /// past the deadline a native alert asks instead.
         #[cfg(target_os = "macos")]
@@ -1099,7 +1104,7 @@ mod imp {
 
     pub(super) fn run_event_loop(
         port: u16,
-        server: Option<std::process::Child>,
+        server: Option<std::io::Result<std::process::Child>>,
         #[cfg(target_os = "linux")] media_available: bool,
         #[cfg(not(target_os = "macos"))] focus_requests: super::instance::FocusRequests,
         #[cfg(not(target_os = "macos"))] launch_path: Option<String>,
@@ -1126,7 +1131,14 @@ mod imp {
 
         if let Some(server) = server {
             let _ = SERVER_PORT.set(port);
-            watch_server(server, event_loop.create_proxy());
+            match server {
+                Ok(server) => watch_server(server, event_loop.create_proxy()),
+                Err(error) => {
+                    let _ = event_loop
+                        .create_proxy()
+                        .send_event(UserEvent::ServerExited(ServerStop::not_started(&error)));
+                }
+            }
         }
 
         if !external_server {
@@ -1157,19 +1169,7 @@ mod imp {
 
         let ready = event_loop.create_proxy();
         tokio::spawn(async move {
-            while tokio::net::TcpStream::connect((
-                if external_server {
-                    "localhost"
-                } else {
-                    "127.0.0.1"
-                },
-                port,
-            ))
-            .await
-            .is_err()
-            {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
+            serving(external_server, port).await;
             let _ = ready.send_event(UserEvent::ServerReady);
             tokio::time::sleep(Duration::from_secs(15)).await;
             let _ = ready.send_event(UserEvent::LoadTimedOut);
@@ -1372,6 +1372,15 @@ mod imp {
                     "close:asking" => {
                         let _ = proxy.send_event(UserEvent::CloseAsked);
                     }
+                    "server:start" => {
+                        let _ = proxy.send_event(UserEvent::StartServer);
+                    }
+                    "server:asking" => {
+                        let _ = proxy.send_event(UserEvent::StoppedAsked);
+                    }
+                    "app:quit" => {
+                        let _ = proxy.send_event(UserEvent::Close);
+                    }
                     "close:background" => {
                         let _ = proxy
                             .send_event(UserEvent::CloseAnswer(super::CloseAnswer::Background));
@@ -1516,6 +1525,10 @@ mod imp {
         let mut ask = Ask::No;
         let mut idle = crate::commands::up::api_v2::Idle::default();
         let started = Instant::now();
+        let mut server_running = !external_server;
+        // Until when the page has to say it shows the stopped server's notice.
+        let mut stopped_asked: Option<(Instant, ServerStop)> = None;
+        let proxy = event_loop.create_proxy();
         let mut links = DeepLinks {
             server_ready: false,
             page_ready,
@@ -1548,9 +1561,14 @@ mod imp {
                         *control_flow = ControlFlow::Wait;
                         close_window(external_server, false, &mut quit, &mut ask, &window, &webview, control_flow);
                     }
+                    if stopped_asked.as_ref().is_some_and(|(deadline, _)| *deadline <= Instant::now()) {
+                        if let Some((_, stop)) = stopped_asked.take() {
+                            let _ = proxy.send_event(UserEvent::AskAfterStop(stop));
+                        }
+                    }
                 }
                 Quit::Flushing => {
-                    if external_server {
+                    if external_server || !server_running {
                         *control_flow = ControlFlow::Exit;
                         return;
                     }
@@ -1570,7 +1588,8 @@ mod imp {
                     begin_quit(&mut quit, &window, &webview, control_flow);
                 }
             }
-            Event::UserEvent(UserEvent::ServerReady) if matches!(quit, Quit::No) => {
+            // A page that started the server again reloads itself once it answers.
+            Event::UserEvent(UserEvent::ServerReady) if matches!(quit, Quit::No) && !links.server_ready => {
                 if super::windowless() {
                     links.server_ready = true;
                     return;
@@ -1585,7 +1604,6 @@ mod imp {
                 window.set_visible(true);
                 window.set_focus();
             }
-            #[cfg(any(windows, target_os = "macos"))]
             Event::UserEvent(UserEvent::Close) => {
                 let page_ready = links.page_ready.get();
                 close_window(external_server, page_ready, &mut quit, &mut ask, &window, &webview, control_flow);
@@ -1603,8 +1621,66 @@ mod imp {
                 *control_flow = ControlFlow::Wait;
                 answer_close(answer, &mut quit, &window, &webview, control_flow);
             }
-            // The window is useless without its server, so the app goes with it.
-            Event::UserEvent(UserEvent::ServerExited) => *control_flow = ControlFlow::Exit,
+            Event::UserEvent(UserEvent::ServerExited(stop)) => {
+                server_running = false;
+                if !matches!(quit, Quit::No) {
+                    *control_flow = ControlFlow::Exit;
+                } else if links.page_ready.get() && !super::windowless() {
+                    let detail = serde_json::to_string(&stop).unwrap_or_else(|_| "null".into());
+                    let _ = webview.evaluate_script(&format!(
+                        "window.dispatchEvent(new CustomEvent('orx:server-stopped', {{ detail: {detail} }}));"
+                    ));
+                    let deadline = Instant::now() + Duration::from_secs(1);
+                    stopped_asked = Some((deadline, stop));
+                    *control_flow = ControlFlow::WaitUntil(deadline);
+                } else {
+                    let _ = proxy.send_event(UserEvent::AskAfterStop(stop));
+                }
+            }
+            Event::UserEvent(UserEvent::StoppedAsked) => stopped_asked = None,
+            Event::UserEvent(UserEvent::AskAfterStop(stop)) if !server_running && matches!(quit, Quit::No) => {
+                // The alert is a sheet on the window, which comes back for it.
+                #[cfg(target_os = "macos")]
+                {
+                    super::WINDOWLESS.send_replace(false);
+                    shown.set(true);
+                    window.set_visible(true);
+                }
+                ask_after_stop(&window, &stop);
+            }
+            Event::UserEvent(UserEvent::StopAnswer(restart)) if !server_running && matches!(quit, Quit::No) => {
+                if !restart {
+                    *control_flow = ControlFlow::Exit;
+                    return;
+                }
+                // The window loads the page it showed once the server answers, and until then
+                // holds the links and reopens that would load one.
+                let current = links.page_ready.get().then(|| webview.url().ok()).flatten();
+                links.pending = current
+                    .as_deref()
+                    .and_then(|url| url.strip_prefix(origin.as_str()))
+                    .filter(|path| path.starts_with('/'))
+                    .map(str::to_owned)
+                    .or(links.pending.take());
+                links.server_ready = false;
+                let _ = proxy.send_event(UserEvent::StartServer);
+            }
+            Event::UserEvent(UserEvent::StartServer) if !server_running && matches!(quit, Quit::No) => {
+                match super::start_server(port) {
+                    Ok(server) => {
+                        server_running = true;
+                        watch_server(server, proxy.clone());
+                        let ready = proxy.clone();
+                        tokio::spawn(async move {
+                            serving(false, port).await;
+                            let _ = ready.send_event(UserEvent::ServerReady);
+                        });
+                    }
+                    Err(error) => {
+                        let _ = proxy.send_event(UserEvent::ServerExited(ServerStop::not_started(&error)));
+                    }
+                }
+            }
             #[cfg(windows)]
             Event::UserEvent(UserEvent::SyncWindowState) => {
                 page_maximized = window.is_maximized();
@@ -1821,69 +1897,293 @@ mod imp {
         static EVENT_PROXY: RefCell<Option<tao::event_loop::EventLoopProxy<UserEvent>>> = const { RefCell::new(None) };
     }
 
-    /// For code on the main thread with no proxy of its own: AppKit's callbacks and a windowless close.
-    #[cfg(target_os = "macos")]
+    /// For code on the main thread with no proxy of its own: AppKit's callbacks, alerts and a windowless close.
     fn send_later(event: UserEvent) -> bool {
         EVENT_PROXY
             .with(|slot| slot.borrow().clone())
             .is_some_and(|proxy| proxy.send_event(event).is_ok())
     }
 
+    /// Why the window's server stopped, as its stderr and exit tell (FROZEN.md).
+    #[derive(Debug, serde::Serialize)]
+    struct ServerStop {
+        /// The server's own message for the user, from an exit it reported as an error.
+        reason: Option<String>,
+        /// The end of its stderr, then how it exited.
+        log: String,
+    }
+
+    impl ServerStop {
+        /// From the end of the server's stderr and its exit code and description, when known.
+        fn read(mut lines: Vec<String>, exit: Option<(Option<i32>, String)>) -> Self {
+            // Exit status 1 is orx's for an error it reported, as its last line; the dialog
+            // shows that line above the log, so the log leaves it out.
+            let mut reason = None;
+            if exit.as_ref().is_some_and(|(code, _)| *code == Some(1)) {
+                if let Some(last) = lines.iter().rposition(|line| !line.trim().is_empty()) {
+                    reason = Some(lines.remove(last));
+                }
+            }
+            lines.extend(exit.map(|(_, exit)| exit));
+            Self {
+                reason,
+                log: lines.join("\n"),
+            }
+        }
+
+        fn not_started(error: &std::io::Error) -> Self {
+            let reason = format!("Could not start OpenResearch's server: {error}");
+            eprintln!("openresearch app: {reason}");
+            Self {
+                reason: Some(reason),
+                log: String::new(),
+            }
+        }
+    }
+
+    /// Until the server at `port` takes connections.
+    async fn serving(external_server: bool, port: u16) {
+        let host = if external_server {
+            "localhost"
+        } else {
+            "127.0.0.1"
+        };
+        while tokio::net::TcpStream::connect((host, port)).await.is_err() {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// The lines of the server's stderr kept for [`ServerStop::log`].
+    const STOP_LOG_LINES: usize = 40;
+
+    #[derive(Default)]
+    struct StderrTail {
+        lines: std::collections::VecDeque<String>,
+        closed: bool,
+    }
+
+    /// Passes the server's stderr on to the window's own, keeping its last lines.
+    fn read_stderr(
+        stderr: std::process::ChildStderr,
+    ) -> std::sync::Arc<(std::sync::Mutex<StderrTail>, std::sync::Condvar)> {
+        use std::io::{BufRead as _, Write as _};
+
+        let tail = std::sync::Arc::new((
+            std::sync::Mutex::new(StderrTail::default()),
+            std::sync::Condvar::new(),
+        ));
+        let shared = tail.clone();
+        std::thread::spawn(move || {
+            let (kept, eof) = &*shared;
+            let mut reader = std::io::BufReader::new(stderr);
+            let mut line = Vec::new();
+            while reader
+                .read_until(b'\n', &mut line)
+                .is_ok_and(|read| read > 0)
+            {
+                let _ = std::io::stderr().write_all(&line);
+                let mut tail = kept.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                if tail.lines.len() == STOP_LOG_LINES {
+                    tail.lines.pop_front();
+                }
+                tail.lines
+                    .push_back(String::from_utf8_lossy(&line).trim_end().to_owned());
+                line.clear();
+            }
+            kept.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .closed = true;
+            eof.notify_all();
+        });
+        tail
+    }
+
     /// Waits on the window's server and, on Windows, on each successor it restarts into,
-    /// which inherits the lease, until the last one exits.
+    /// which inherits the lease and stderr, until the last one exits.
     fn watch_server(
         mut server: std::process::Child,
         proxy: tao::event_loop::EventLoopProxy<UserEvent>,
     ) {
         // Held while any server it was handed to runs: `wait` would close it first.
         let lease = server.stdin.take();
+        let stderr = server.stderr.take().map(read_stderr);
         #[cfg(windows)]
         let runtime = tokio::runtime::Handle::current();
         std::thread::spawn(move || {
             let _lease = lease;
             #[cfg(windows)]
-            let pid = server.id();
-            match server.wait() {
-                Ok(status) => eprintln!("openresearch app: the server exited: {status}"),
-                Err(error) => eprintln!("openresearch app: could not wait for the server: {error}"),
+            let status = follow_server(&server, &runtime);
+            #[cfg(not(windows))]
+            let status = match server.wait() {
+                Ok(status) => {
+                    eprintln!("openresearch app: the server exited: {status}");
+                    Some((status.code(), status.to_string()))
+                }
+                Err(error) => {
+                    eprintln!("openresearch app: could not wait for the server: {error}");
+                    None
+                }
+            };
+
+            let mut lines = Vec::new();
+            if let Some(shared) = stderr {
+                let (kept, eof) = &*shared;
+                let tail = kept.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                // What the server wrote before it exited is in the pipe already; a process it
+                // started may hold the pipe open past that.
+                let (tail, _) = eof
+                    .wait_timeout_while(tail, Duration::from_secs(1), |tail| !tail.closed)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                lines.extend(tail.lines.iter().cloned());
             }
-            #[cfg(windows)]
-            follow_successors(&runtime, pid);
-            let _ = proxy.send_event(UserEvent::ServerExited);
+            let _ = proxy.send_event(UserEvent::ServerExited(ServerStop::read(lines, status)));
         });
     }
 
     /// Windows has no exec, so a server restarts by starting its successor, naming it in
-    /// `relaunch.json` and exiting; the successor inherits the lease. Waits out each in turn.
+    /// `relaunch.json` and exiting 0; the successor inherits the lease. Waits out the server and
+    /// each successor in turn, returning the last one's exit. A successor is opened as soon as
+    /// it is named, while the server that started it still holds it, so one that fails at once
+    /// still reports how.
     #[cfg(windows)]
-    fn follow_successors(runtime: &tokio::runtime::Handle, mut exited: u32) {
-        while let Some(pid) = successor(runtime, exited) {
-            if let Err(error) = wait_for_exit(pid) {
-                eprintln!("openresearch app: could not follow the restarted server {pid}: {error}");
-                return;
-            }
-            exited = pid;
-        }
-    }
-
-    /// The server that took over from the one that exited, if one did.
-    #[cfg(windows)]
-    fn successor(runtime: &tokio::runtime::Handle, exited: u32) -> Option<u32> {
-        use crate::commands::remote_host::{canonical_data_dir, ServerDescriptor};
+    fn follow_server(
+        server: &std::process::Child,
+        runtime: &tokio::runtime::Handle,
+    ) -> Option<(Option<i32>, String)> {
+        use crate::commands::remote_host::{canonical_data_dir, runtime_path, ServerDescriptor};
+        use std::os::windows::{ffi::OsStrExt as _, io::AsRawHandle as _};
+        use windows_sys::Win32::Foundation::{INVALID_HANDLE_VALUE, WAIT_OBJECT_0};
+        use windows_sys::Win32::Storage::FileSystem::{
+            FindCloseChangeNotification, FindFirstChangeNotificationW, FindNextChangeNotification,
+            FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE,
+        };
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, WaitForMultipleObjects, INFINITE,
+        };
 
         let data_dir = canonical_data_dir()
             .map_err(|error| {
                 eprintln!("openresearch app: could not look for a restarted server: {error:#}")
             })
-            .ok()?;
-        if let Some(pid) =
-            ServerDescriptor::announced_successor(&data_dir).filter(|pid| *pid != exited)
-        {
-            return Some(pid);
+            .ok();
+        let relaunch = data_dir
+            .as_deref()
+            .and_then(|data_dir| runtime_path(data_dir, "relaunch.json").ok());
+        let runtime_dir = relaunch.as_deref().and_then(|path| {
+            Some(
+                path.parent()?
+                    .as_os_str()
+                    .encode_wide()
+                    .chain(Some(0))
+                    .collect::<Vec<_>>(),
+            )
+        });
+        // SAFETY: a NUL-terminated path; the handle is closed below.
+        let changes = runtime_dir
+            .map(|dir| unsafe {
+                FindFirstChangeNotificationW(
+                    dir.as_ptr(),
+                    0,
+                    FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE,
+                )
+            })
+            .filter(|changes| *changes != INVALID_HANDLE_VALUE);
+        // An announcement outlives a successor that failed before taking over, so one naming a
+        // server already followed, or one gone, is stale.
+        let announced = |followed: &[u32]| {
+            ServerDescriptor::announced_successor(data_dir.as_deref()?)
+                .filter(|successor| !followed.contains(successor))
+        };
+
+        let mut pid = server.id();
+        let mut process = match open_process(pid) {
+            Ok(process) => process,
+            Err(error) => {
+                eprintln!("openresearch app: could not wait for the server: {error}");
+                return None;
+            }
+        };
+        let mut followed = vec![pid];
+        let mut named = None;
+        let status = loop {
+            // An announcement first: the wait reports the lowest signaled handle.
+            let mut handles: Vec<_> = changes.into_iter().collect();
+            handles.push(process.as_raw_handle());
+            // SAFETY: every handle stays open across the wait.
+            let woke = unsafe {
+                WaitForMultipleObjects(handles.len() as u32, handles.as_ptr(), 0, INFINITE)
+            };
+            if let Some(changes) = changes.filter(|_| woke == WAIT_OBJECT_0) {
+                // SAFETY: the notification handle opened above.
+                unsafe { FindNextChangeNotification(changes) };
+                if named.is_none() {
+                    named = announced(&followed).and_then(|successor| {
+                        open_successor(successor)?
+                            .map_err(|error| {
+                                eprintln!("openresearch app: could not follow the restarted server {successor}: {error}")
+                            })
+                            .ok()
+                    });
+                }
+                continue;
+            }
+            let mut code = 0;
+            // SAFETY: the process handle is open and, after the wait, signaled.
+            if woke != WAIT_OBJECT_0 + handles.len() as u32 - 1
+                || unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut code) } == 0
+            {
+                eprintln!(
+                    "openresearch app: could not wait for the server {pid}: {}",
+                    std::io::Error::last_os_error()
+                );
+                break None;
+            }
+            eprintln!("openresearch app: the server {pid} exited: {code}");
+            let exit = Some((Some(code as i32), format!("exit code: {code}")));
+            if code != 0 {
+                break exit;
+            }
+            let successor = match named.take() {
+                Some(successor) => Ok(successor),
+                // A successor quick enough to have started already replaced the announcement with its descriptor.
+                None => match announced(&followed).and_then(open_successor).or_else(|| {
+                    open_successor(live_successor(runtime, data_dir.as_deref()?, &followed)?)
+                }) {
+                    Some(successor) => successor,
+                    None => break exit,
+                },
+            };
+            match successor {
+                Ok(successor) => {
+                    (pid, process) = successor;
+                    followed.push(pid);
+                }
+                Err(error) => {
+                    eprintln!("openresearch app: could not follow the restarted server: {error}");
+                    break None;
+                }
+            }
+        };
+        if let Some(changes) = changes {
+            // SAFETY: the notification handle opened above, closed once.
+            unsafe { FindCloseChangeNotification(changes) };
         }
-        // A successor quick enough to have started already replaced the announcement with its descriptor.
-        match runtime.block_on(ServerDescriptor::live(&data_dir)) {
-            Ok(server) => server.map(|server| server.pid).filter(|pid| *pid != exited),
+        status
+    }
+
+    /// The server that has taken over from the one that exited, if one has.
+    #[cfg(windows)]
+    fn live_successor(
+        runtime: &tokio::runtime::Handle,
+        data_dir: &std::path::Path,
+        followed: &[u32],
+    ) -> Option<u32> {
+        match runtime.block_on(crate::commands::remote_host::ServerDescriptor::live(
+            data_dir,
+        )) {
+            Ok(server) => server
+                .map(|server| server.pid)
+                .filter(|pid| !followed.contains(pid)),
             Err(error) => {
                 eprintln!("openresearch app: could not look for a restarted server: {error:#}");
                 None
@@ -1891,36 +2191,40 @@ mod imp {
         }
     }
 
-    /// Waits for the process `pid` to exit, then reads its exit code.
+    /// The successor `pid` and a handle to it, or `None` once no process has that pid.
     #[cfg(windows)]
-    fn wait_for_exit(pid: u32) -> std::io::Result<u32> {
-        use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    fn open_successor(
+        pid: u32,
+    ) -> Option<std::io::Result<(u32, std::os::windows::io::OwnedHandle)>> {
+        match open_process(pid) {
+            Ok(process) => Some(Ok((pid, process))),
+            // ERROR_INVALID_PARAMETER: no process has this pid.
+            Err(error) if error.raw_os_error() == Some(87) => None,
+            Err(error) => Some(Err(error)),
+        }
+    }
+
+    /// A handle to wait on the process `pid` and read its exit code.
+    #[cfg(windows)]
+    fn open_process(pid: u32) -> std::io::Result<std::os::windows::io::OwnedHandle> {
+        use std::os::windows::io::FromRawHandle as _;
         use windows_sys::Win32::System::Threading::{
-            GetExitCodeProcess, OpenProcess, WaitForSingleObject, INFINITE,
-            PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
         };
 
-        // SAFETY: plain syscalls on a handle opened here and closed on every path out.
-        unsafe {
-            let process = OpenProcess(
+        // SAFETY: a plain syscall; the handle it returns is owned from here on.
+        let process = unsafe {
+            OpenProcess(
                 PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
                 0,
                 pid,
-            );
-            if process.is_null() {
-                return Err(std::io::Error::last_os_error());
-            }
-            let mut code = 0;
-            let read = WaitForSingleObject(process, INFINITE) == WAIT_OBJECT_0
-                && GetExitCodeProcess(process, &mut code) != 0;
-            let error = std::io::Error::last_os_error();
-            CloseHandle(process);
-            if read {
-                Ok(code)
-            } else {
-                Err(error)
-            }
+            )
+        };
+        if process.is_null() {
+            return Err(std::io::Error::last_os_error());
         }
+        // SAFETY: a valid handle no one else owns.
+        Ok(unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(process) })
     }
 
     #[cfg(target_os = "macos")]
@@ -2018,7 +2322,8 @@ mod imp {
         webview: &WebView,
         control_flow: &mut ControlFlow,
     ) {
-        if !matches!(quit, Quit::No) {
+        // An alert is up already; a second can't show.
+        if !matches!(quit, Quit::No) || matches!(ask, Ask::Alert) {
             return;
         }
         if external_server {
@@ -2040,9 +2345,8 @@ mod imp {
             return;
         }
         if !page_ready {
-            *ask = Ask::No;
-            let answer = ask_natively(window, &pending);
-            answer_close(answer, quit, window, webview, control_flow);
+            *ask = Ask::Alert;
+            ask_natively(window, &pending);
             return;
         }
         let detail =
@@ -2099,7 +2403,8 @@ mod imp {
             .contains(NSWindowStyleMask::FullScreen)
     }
 
-    fn ask_natively(window: &Window, pending: &serde_json::Value) -> super::CloseAnswer {
+    /// Asks in an alert, answering with [`UserEvent::CloseAnswer`].
+    fn ask_natively(window: &Window, pending: &serde_json::Value) {
         let title = "Work is still running";
         // A newer server may list work this build cannot read; the page it serves still can.
         let pending = serde_json::from_value::<crate::store::PendingWork>(pending.clone());
@@ -2120,8 +2425,28 @@ mod imp {
         } else {
             "Quit"
         };
+        let answer = move |label: &str| match label {
+            label if label == quit => super::CloseAnswer::Quit,
+            label if Some(label) == background => super::CloseAnswer::Background,
+            _ => super::CloseAnswer::Cancel,
+        };
 
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        {
+            let buttons: Vec<&str> = background.into_iter().chain([quit, "Cancel"]).collect();
+            ask_in_sheet(
+                window,
+                title,
+                &description,
+                &buttons.clone(),
+                false,
+                move |chosen| {
+                    let label = buttons.get(chosen).copied().unwrap_or("Cancel");
+                    send_later(UserEvent::CloseAnswer(answer(label)));
+                },
+            );
+        }
+        #[cfg(windows)]
         let chosen = {
             let cancel = "Cancel".to_string();
             let buttons = match background {
@@ -2133,11 +2458,8 @@ mod imp {
             let dialog = rfd::MessageDialog::new()
                 .set_title(title)
                 .set_description(description)
-                .set_buttons(buttons);
-            #[cfg(windows)]
-            let dialog = dialog.set_parent(window);
-            #[cfg(target_os = "macos")]
-            let _ = window;
+                .set_buttons(buttons)
+                .set_parent(window);
             match dialog.show() {
                 rfd::MessageDialogResult::Custom(label) => label,
                 _ => "Cancel".into(),
@@ -2170,11 +2492,136 @@ mod imp {
             .to_string()
         };
 
-        match chosen.as_str() {
-            label if label == quit => super::CloseAnswer::Quit,
-            label if Some(label) == background => super::CloseAnswer::Background,
-            _ => super::CloseAnswer::Cancel,
+        #[cfg(not(target_os = "macos"))]
+        send_later(UserEvent::CloseAnswer(answer(&chosen)));
+    }
+
+    /// Asks, when no page can, whether to start the stopped server again or quit, answering
+    /// with [`UserEvent::StopAnswer`].
+    fn ask_after_stop(window: &Window, stop: &ServerStop) {
+        /// The end of the log the alert has room for; the server stopped where it ends.
+        const LINES: usize = 12;
+        const LINE_CHARS: usize = 300;
+
+        let title = "OpenResearch stopped";
+        let reason = stop
+            .reason
+            .as_deref()
+            .unwrap_or("Restart it to keep working.");
+        let lines: Vec<&str> = stop.log.lines().collect();
+        let shown = &lines[lines.len().saturating_sub(LINES)..];
+        let mut description = reason.to_string();
+        if !shown.is_empty() {
+            description.push_str("\n\n");
+            if shown.len() < lines.len() {
+                description.push_str("…\n");
+            }
+            for line in shown {
+                match line.char_indices().nth(LINE_CHARS) {
+                    Some((end, _)) => description.push_str(&format!("{}…\n", &line[..end])),
+                    None => description.push_str(&format!("{line}\n")),
+                }
+            }
         }
+        let description = description.trim_end();
+
+        #[cfg(target_os = "macos")]
+        ask_in_sheet(
+            window,
+            title,
+            description,
+            &["Restart", "Quit"],
+            true,
+            |chosen| {
+                send_later(UserEvent::StopAnswer(chosen == 0));
+            },
+        );
+        #[cfg(windows)]
+        let restart = {
+            let dialog = rfd::MessageDialog::new()
+                .set_level(rfd::MessageLevel::Error)
+                .set_title(title)
+                .set_description(description)
+                .set_buttons(rfd::MessageButtons::OkCancelCustom(
+                    "Restart".into(),
+                    "Quit".into(),
+                ));
+            let dialog = if window.is_visible() {
+                dialog.set_parent(window)
+            } else {
+                dialog
+            };
+            matches!(dialog.show(), rfd::MessageDialogResult::Custom(label) if label == "Restart")
+        };
+        #[cfg(target_os = "linux")]
+        let restart = {
+            use gtk::prelude::*;
+            use tao::platform::unix::WindowExtUnix;
+
+            let dialog = gtk::MessageDialog::builder()
+                .transient_for(window.gtk_window())
+                .modal(true)
+                .message_type(gtk::MessageType::Error)
+                .text(title)
+                .secondary_text(description)
+                .build();
+            dialog.add_button("Quit", gtk::ResponseType::Reject);
+            dialog.add_button("Restart", gtk::ResponseType::Accept);
+            dialog.set_default_response(gtk::ResponseType::Accept);
+            let response = dialog.run();
+            dialog.close();
+            response == gtk::ResponseType::Accept
+        };
+        #[cfg(not(target_os = "macos"))]
+        send_later(UserEvent::StopAnswer(restart));
+    }
+
+    /// An alert drawn in this process as a sheet on the window, calling `answered` with the index
+    /// of the button chosen; the first is the default, and `critical` marks it as a failure. It opens once tao's event handler returns:
+    /// the sheet's animation redraws the window, which needs that handler, and would deadlock.
+    #[cfg(target_os = "macos")]
+    fn ask_in_sheet(
+        window: &Window,
+        title: &str,
+        description: &str,
+        buttons: &[&str],
+        critical: bool,
+        answered: impl Fn(usize) + 'static,
+    ) {
+        use objc2::rc::Retained;
+        use objc2_app_kit::{NSAlertStyle, NSModalResponse, NSWindow};
+        use objc2_foundation::NSRunLoop;
+        use tao::platform::macos::WindowExtMacOS;
+
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let alert = NSAlert::new(mtm);
+        if critical {
+            alert.setAlertStyle(NSAlertStyle::Critical);
+        }
+        alert.setMessageText(&NSString::from_str(title));
+        alert.setInformativeText(&NSString::from_str(description));
+        for button in buttons {
+            alert.addButtonWithTitle(&NSString::from_str(button));
+        }
+        window.set_visible(true);
+        // SAFETY: tao's window is an NSWindow, retained here for as long as the sheet needs it.
+        let Some(parent) = (unsafe { Retained::retain(window.ns_window().cast::<NSWindow>()) })
+        else {
+            return;
+        };
+        // Holds the alert until the sheet ends.
+        let kept = alert.clone();
+        let handler = block2::RcBlock::new(move |response: NSModalResponse| {
+            let _ = &kept;
+            answered(usize::try_from(response - NSAlertFirstButtonReturn).unwrap_or(usize::MAX));
+        });
+        let open = block2::RcBlock::new(move || {
+            alert.beginSheetModalForWindow_completionHandler(&parent, Some(&handler));
+        });
+        // SAFETY: the block runs once, on the main thread, and owns everything it uses.
+        unsafe { NSRunLoop::mainRunLoop().performBlock(&open) };
     }
 
     fn begin_quit(
@@ -2607,6 +3054,36 @@ mod imp {
     #[cfg(test)]
     mod tests {
         use super::ZoomAction;
+
+        #[test]
+        fn a_reported_error_is_the_reason_and_leaves_the_log() {
+            let lines = |text: &str| text.lines().map(String::from).collect::<Vec<_>>();
+            let reported = super::ServerStop::read(
+                lines("orx up: starting\nAnother program is using port 4792. Quit it and try again.\n"),
+                Some((Some(1), "exit status: 1".into())),
+            );
+            assert_eq!(
+                reported.reason.as_deref(),
+                Some("Another program is using port 4792. Quit it and try again.")
+            );
+            assert_eq!(reported.log, "orx up: starting\nexit status: 1");
+
+            let killed = super::ServerStop::read(
+                lines("orx up: dashboard on http://127.0.0.1:4792"),
+                Some((None, "signal: 9 (SIGKILL)".into())),
+            );
+            assert_eq!(killed.reason, None);
+            assert_eq!(
+                killed.log,
+                "orx up: dashboard on http://127.0.0.1:4792\nsignal: 9 (SIGKILL)"
+            );
+
+            let unknown = super::ServerStop::read(lines("could not restart"), None);
+            assert_eq!(
+                (unknown.reason, unknown.log.as_str()),
+                (None, "could not restart")
+            );
+        }
 
         #[test]
         fn zoom_steps_clamp_and_reset() {

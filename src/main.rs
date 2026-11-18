@@ -1533,10 +1533,9 @@ fn show_error_dialog(message: &str) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
 
     // The app's console is hidden, and shared with the agents it runs, so it
-    // doesn't own it.
-    if !owns_its_console()
-        && !commands::app::launched_with_app_arg()
-        && !commands::app::serves_window()
+    // doesn't own it; the window's server leaves its errors to the window.
+    if commands::app::serves_window()
+        || (!owns_its_console() && !commands::app::launched_with_app_arg())
     {
         return;
     }
@@ -1555,8 +1554,7 @@ fn show_error_dialog(message: &str) {
 
 #[cfg(target_os = "macos")]
 fn show_error_dialog(message: &str) {
-    let app = std::env::args_os().len() == 1 || commands::app::serves_window();
-    if !commands::app::launched_as_app_bundle() || !app {
+    if !commands::app::launched_as_app_bundle() || std::env::args_os().len() != 1 {
         return;
     }
     let _ = crate::process::command("osascript")
@@ -1573,7 +1571,7 @@ fn show_error_dialog(message: &str) {
 /// whichever desktop's dialog tool is installed, as the folder picker does.
 #[cfg(all(desktop_app, target_os = "linux"))]
 fn show_error_dialog(message: &str) {
-    if !commands::app::launched_with_app_arg() && !commands::app::serves_window() {
+    if !commands::app::launched_with_app_arg() {
         return;
     }
     eprintln!("OpenResearch: {message}");

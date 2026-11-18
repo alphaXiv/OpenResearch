@@ -108,15 +108,22 @@ export function useRestartApp(status: UpdateStatus | null): RestartState {
           body: m.update_overlay_applying_body({ version: versionLabel(target) }),
         });
       }
+      // The window's notice that the server stopped takes the overlay over, and ends the wait.
+      let stopped = false;
+      const onStopped = () => {
+        stopped = true;
+      };
+      window.addEventListener("orx:server-stopped", onStopped);
+      const done = () => stopped || retired();
       try {
         await mutRestartApp.runAsHeadlessPromise(workspace, agents.length > 0, {});
-        if (retired()) return;
+        if (done()) return;
         const deadline = Date.now() + RESTART_TIMEOUT_MS;
         while (Date.now() < deadline) {
           await new Promise((resolve) => setTimeout(resolve, RESTART_POLL_MS));
-          if (retired()) return;
+          if (done()) return;
           const next = await queryClient.fetchQuery({ ...options, staleTime: 0 }).catch(() => null);
-          if (retired()) return;
+          if (done()) return;
           if (next && next.instance !== previous) {
             window.location.reload();
             return;
@@ -124,10 +131,13 @@ export function useRestartApp(status: UpdateStatus | null): RestartState {
         }
         throw new Error(m.update_banner_restart_timed_out());
       } catch (e) {
+        if (stopped) return;
         window.orxUpdateOverlay?.end();
         if (retired()) return;
         setError(e instanceof Error ? e.message : String(e));
         setRestarting(false);
+      } finally {
+        window.removeEventListener("orx:server-stopped", onStopped);
       }
     })();
   };
@@ -165,6 +175,13 @@ export function UpdateHandoff({ workspace }: { workspace: Workspace }) {
     }
   }, [status]);
 
+  // The window's notice that the server stopped takes the overlay over.
+  useEffect(() => {
+    const stopped = () => setUnchanged(null);
+    window.addEventListener("orx:server-stopped", stopped);
+    return () => window.removeEventListener("orx:server-stopped", stopped);
+  }, []);
+
   if (!unchanged) return null;
   const close = () => {
     window.orxUpdateOverlay?.end();
@@ -175,6 +192,85 @@ export function UpdateHandoff({ workspace }: { workspace: Workspace }) {
       <Button type="button" variant="primary" autoFocus onClick={close}>{m.update_overlay_close()}</Button>
     </EscapeScope>,
     unchanged,
+  );
+}
+
+const STARTING_POLL_MS = 500;
+
+/** Why the window's server stopped, as the window read it from the server (FROZEN.md). */
+interface ServerStop {
+  /** The server's own message for the user, when it reported its error. */
+  reason: string | null;
+  /** The end of its stderr, then how it exited. */
+  log: string;
+}
+
+/** The desktop window's notice that its server stopped with nothing to take over: the page
+ *  can't work without one, so it says why and offers to start it again or to quit. */
+export function ServerStopped({ workspace }: { workspace: Workspace }) {
+  const [stopped, setStopped] = useState<{ log: string; actions: HTMLElement; details: HTMLElement } | null>(null);
+  const attempt = useRef(0);
+
+  useEffect(() => {
+    const onStopped = (event: Event) => {
+      const overlay = window.orxUpdateOverlay;
+      if (!overlay) return;
+      // A window from before the reason came with the event sends none.
+      const stop = (event as CustomEvent<ServerStop | null>).detail;
+      attempt.current += 1;
+      overlay.show({ title: m.server_stopped_title(), body: stop?.reason || m.server_stopped_body(), busy: false });
+      const actions = overlay.actions();
+      const details = overlay.details();
+      if (!actions || !details) return;
+      setStopped({ log: stop?.log ?? "", actions, details });
+      window.ipc?.postMessage("server:asking");
+    };
+    window.addEventListener("orx:server-stopped", onStopped);
+    return () => window.removeEventListener("orx:server-stopped", onStopped);
+  }, []);
+
+  if (!stopped) return null;
+  const restart = () => {
+    const current = ++attempt.current;
+    setStopped(null);
+    window.orxUpdateOverlay?.show({ title: m.server_starting_title(), body: m.server_starting_body(), busy: true });
+    window.ipc?.postMessage("server:start");
+    void (async () => {
+      const options = { ...workspace.queries.getUpdateStatusQuery(), staleTime: 0, retry: false };
+      // A server that stops again says so, which starts another attempt.
+      while (attempt.current === current) {
+        await new Promise((resolve) => setTimeout(resolve, STARTING_POLL_MS));
+        if (await workspace.queryClient.fetchQuery(options).catch(() => null)) {
+          window.location.reload();
+          return;
+        }
+      }
+    })();
+  };
+  return (
+    <>
+      {stopped.log && createPortal(
+        <details
+          className="min-w-0 text-sm text-text"
+          // The end of the log is where the server stopped.
+          onToggle={(event) => {
+            const log = event.currentTarget.querySelector("pre");
+            if (log) log.scrollTop = log.scrollHeight;
+          }}
+        >
+          <summary className="cursor-pointer">{m.server_stopped_details()}</summary>
+          <pre tabIndex={0} dir="ltr" className="mt-2 mb-0 max-h-48 overflow-auto whitespace-pre-wrap wrap-anywhere rounded-md bg-surface px-2 py-1.5 font-mono text-xs text-subtext outline-none focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus">{stopped.log}</pre>
+        </details>,
+        stopped.details,
+      )}
+      {createPortal(
+        <EscapeScope onEscape={() => {}}>
+          <Button type="button" onClick={() => window.ipc?.postMessage("app:quit")}>{m.server_stopped_quit()}</Button>
+          <Button type="button" variant="primary" autoFocus onClick={restart}>{m.server_stopped_restart()}</Button>
+        </EscapeScope>,
+        stopped.actions,
+      )}
+    </>
   );
 }
 

@@ -31,19 +31,29 @@ struct Window {
 }
 
 impl Window {
-    /// Starts the server the way a window does, holding its stdin.
+    /// Starts the server the way a window does, holding its stdin, and waits for it to answer.
     async fn open() -> Self {
-        let root = std::env::temp_dir().join(format!("orx-app-window-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(root.join("config/openresearch")).unwrap();
-        fs::create_dir_all(root.join(".ssh")).unwrap();
-        fs::write(root.join(".ssh/config"), "").unwrap();
+        Self::open_from(Path::new(env!("CARGO_BIN_EXE_orx"))).await
+    }
+
+    async fn open_from(exe: &Path) -> Self {
         let port = TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
             .unwrap()
             .port();
+        let window = Self::start(exe, port);
+        window.state().await;
+        window
+    }
+
+    fn start(exe: &Path, port: u16) -> Self {
+        let root = std::env::temp_dir().join(format!("orx-app-window-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("config/openresearch")).unwrap();
+        fs::create_dir_all(root.join(".ssh")).unwrap();
+        fs::write(root.join(".ssh/config"), "").unwrap();
         let log = root.join("server.log");
-        let mut command = Command::new(env!("CARGO_BIN_EXE_orx"));
+        let mut command = Command::new(exe);
         home::isolate_home(&mut command, &root)
             .env_remove("ORX_LOCAL_SESSION")
             .env_remove("ORX_UP_PORT")
@@ -64,7 +74,7 @@ impl Window {
         let mut server = command.spawn().unwrap();
         let lease = server.stdin.take();
         let reader = server.stderr.take().map(|stderr| read_stderr(stderr, &log));
-        let window = Self {
+        Self {
             root,
             server,
             lease,
@@ -76,9 +86,7 @@ impl Window {
                 .timeout(Duration::from_secs(5))
                 .build()
                 .unwrap(),
-        };
-        window.state().await;
-        window
+        }
     }
 
     fn log(&self) -> String {
@@ -246,4 +254,56 @@ async fn a_quit_stops_the_server_rather_than_handing_off() {
         window.log()
     );
     assert!(!window.log().contains("the app window closed"));
+}
+
+#[tokio::test]
+async fn a_server_that_cannot_start_says_why_last_for_its_window_to_show() {
+    let taken = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = taken.local_addr().unwrap().port();
+    let mut window = Window::start(Path::new(env!("CARGO_BIN_EXE_orx")), port);
+    assert!(
+        window.exited_within(Duration::from_secs(60)),
+        "{}",
+        window.log()
+    );
+    assert_eq!(window.server.try_wait().unwrap().unwrap().code(), Some(1));
+    let log = window.log();
+    let last = log.lines().rev().find(|line| !line.trim().is_empty());
+    assert!(
+        last.is_some_and(|last| last.contains(&format!("port {port}"))),
+        "{log}"
+    );
+}
+
+#[tokio::test]
+async fn a_restart_whose_successor_cannot_start_says_why_last_for_its_window_to_show() {
+    let bin = std::env::temp_dir().join(format!("orx-app-window-bin-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&bin).unwrap();
+    let exe = bin.join("orx");
+    fs::hard_link(env!("CARGO_BIN_EXE_orx"), &exe)
+        .or_else(|_| fs::copy(env!("CARGO_BIN_EXE_orx"), &exe).map(drop))
+        .unwrap();
+    let mut window = Window::open_from(&exe).await;
+    fs::remove_dir_all(&bin).unwrap();
+
+    fs::write(config(&window.root).join("update-check-unknown.json"), json!({"checked_at":0,"latest":"0.2.99","installed_version":"0.2.99","installed_tag":"v0.2.99"}).to_string()).unwrap();
+    let response = window
+        .client
+        .post(format!("{}/api/update/restart", window.url))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success(), "{}", window.log());
+    assert!(
+        window.exited_within(Duration::from_secs(60)),
+        "{}",
+        window.log()
+    );
+    assert_eq!(window.server.try_wait().unwrap().unwrap().code(), Some(1));
+    let log = window.log();
+    let last = log.lines().rev().find(|line| !line.trim().is_empty());
+    assert!(
+        last.is_some_and(|last| last.contains("could not restart")),
+        "{log}"
+    );
 }

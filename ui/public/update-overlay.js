@@ -45,7 +45,8 @@
     var spinner = child(line, "span", "spinner size-3.5 shrink-0 animate-[spin_0.8s_linear_infinite] rounded-full border-2 border-border border-t-subtext");
     spinner.id = ID + "-spinner";
     spinner.style.animationDelay = -(Date.now() % SPIN_MS) + "ms";
-    child(line, "span", "").id = ID + "-body";
+    child(line, "span", "min-w-0 break-words").id = ID + "-body";
+    child(card, "div", "mt-4 empty:hidden").id = ID + "-details";
     child(card, "div", "mt-6 flex justify-end gap-2.5 empty:hidden").id = ID + "-actions";
 
     if (CAPTIONS) {
@@ -154,6 +155,10 @@
     /** The overlay's button row, for the page to render into. */
     actions: function () {
       return document.getElementById(ID + "-actions");
+    },
+    /** The space under the body, for the page to render into. */
+    details: function () {
+      return document.getElementById(ID + "-details");
     },
     /** Forgets the record and fades the overlay out. */
     end: function () {
