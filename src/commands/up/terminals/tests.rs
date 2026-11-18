@@ -216,6 +216,7 @@ async fn a_terminal_outlives_its_page_and_ends_with_its_tab() {
 }
 
 /// Raw output until it holds `needle`, answering nothing.
+#[cfg(unix)]
 async fn read_unanswered(socket: &mut Socket, needle: &[u8]) -> Vec<u8> {
     let mut output = Vec::new();
     let read = async {
