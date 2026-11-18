@@ -220,6 +220,8 @@ export interface UiState {
   runBanner?: RunBannerLevel;
   /** The model feed nudges the user dismissed, by id. Absent from a server too old to keep them. */
   seenNudges?: string[];
+  /** When this copy first opened its store, in ms; null for one older than the field, absent from a server too old to say. */
+  createdAt?: number | null;
 }
 
 /** What openresearch.sh features in the model picker, as `orx up` last fetched it. */

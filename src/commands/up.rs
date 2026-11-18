@@ -12126,6 +12126,7 @@ mod tests {
             run_banner: crate::store::RunBannerLevel::Strip,
             run_watching: true,
             seen_nudges: Vec::new(),
+            created_at: None,
             preferred_agent: Some(StoredAgentSelection {
                 profile: None,
                 harness: "codex".into(),
@@ -12169,6 +12170,7 @@ mod tests {
             run_banner: crate::store::RunBannerLevel::Strip,
             run_watching: true,
             seen_nudges: Vec::new(),
+            created_at: None,
         };
         let catalog = json!({"harnesses": [{"id":"claude-code", "agentReady":true,"defaultModel":"opus",
             "models":[{"id":"opus"}], "options":{"defaultPermissionMode":"plan", "reasoningLevels":[{"id":"default"}]}}]});
@@ -12228,6 +12230,7 @@ mod tests {
             run_banner: crate::store::RunBannerLevel::Strip,
             run_watching: true,
             seen_nudges: Vec::new(),
+            created_at: None,
         };
         let catalog = json!({"harnesses":[
             {"id":"codex", "agentReady":true, "models":[], "options":{}},
