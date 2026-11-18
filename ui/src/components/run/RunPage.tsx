@@ -56,7 +56,8 @@ export function RunPage({ run, name, chatSessionId, now }: { run: Run; name: str
   });
   const age = model.live && model.sentence.at !== null ? model.sentence.at : null;
   const blocks = data?.view.blocks.filter((block) => drawsAt(block, "page")) ?? [];
-  const empty = !data || blocks.length > 0 ? null
+  const canSayEmpty = !failed && data?.availability.state === "live";
+  const empty = !canSayEmpty || blocks.length > 0 ? null
     : !data.viewFrom.isDefault ? m.run_page_view_empty()
     : model.live ? m.run_page_no_signals()
     : m.run_page_no_signals_ended();
@@ -95,7 +96,7 @@ export function RunPage({ run, name, chatSessionId, now }: { run: Run; name: str
         </div>
       )}
       {data && <Rules rules={data.rules} outcome={run.outcome ?? null} />}
-      {data && <ViewSource monitor={data} projectId={run.projectId} live={model.live} />}
+      {data && <ViewSource monitor={data} projectId={run.projectId} live={model.live} canSayEmpty={canSayEmpty} />}
     </div>
   );
 }

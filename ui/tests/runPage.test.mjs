@@ -157,6 +157,17 @@ test("a view with nothing to draw says why: nothing found in the log yet, nothin
   assert.ok(words.includes(m.run_page_view_empty()) && !words.includes(m.run_page_no_signals()), words);
 });
 
+test("a checkpoint read error does not claim the log had no metrics", async () => {
+  const unreadable = readFileSync(new URL("../../tests/contracts/run-monitor-api.json", import.meta.url), "utf8");
+  const { monitor } = JSON.parse(unreadable).states.unreadable;
+  const data = { ...monitor, runId: "r2", asOf: now };
+  const { container } = await overview([run("r2", { monitor: summary(data) })], () => data);
+  const words = text(container);
+  assert.ok(words.includes(data.availability.reason), words);
+  assert.ok(!words.includes(m.run_page_no_signals()), words);
+  assert.ok(!words.includes(m.run_view_source_none()), words);
+});
+
 test("the page's clock does not redraw the blocks; new data does", async () => {
   const monitor = pipeline();
   const latest = run("r2", { monitor: summary(monitor) });

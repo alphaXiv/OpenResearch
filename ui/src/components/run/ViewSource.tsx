@@ -15,11 +15,14 @@ const SOURCE: Record<string, () => string> = {
 };
 
 /** How the run's view is built: the view itself, where its signals come from, and what an agent reads instead. */
-export function ViewSource({ monitor, projectId, live }: { monitor: RunMonitor; projectId: string; live: boolean }) {
+export function ViewSource({ monitor, projectId, live, canSayEmpty }: { monitor: RunMonitor; projectId: string; live: boolean; canSayEmpty: boolean }) {
   const { listExperimentsQuery } = useWorkspace().queries;
   const experiments = useQuery(listExperimentsQuery(projectId)).data;
   const { viewFrom, source } = monitor;
   const owner = experiments?.find((experiment) => experiment.id === viewFrom.experimentId)?.slug ?? viewFrom.experimentId;
+  const sourceText = source === null
+    ? canSayEmpty ? (live ? m.run_view_source_none() : m.run_page_no_signals_ended()) : null
+    : Object.hasOwn(SOURCE, source) ? SOURCE[source]() : null;
   return (
     <details className="group @container mt-3.5 text-sm">
       <summary className="inline-flex cursor-pointer list-none items-center gap-1 rounded-sm text-ink-subtext hover:text-text focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus [&::-webkit-details-marker]:hidden">
@@ -32,8 +35,7 @@ export function ViewSource({ monitor, projectId, live }: { monitor: RunMonitor; 
           {viewFrom.markup && <pre dir="ltr" className={PRE}>{viewFrom.markup}</pre>}
         </div>
         <div className="min-w-0">
-          {/* A source from a newer server goes unnamed. */}
-          {(source === null || Object.hasOwn(SOURCE, source)) && <p className="m-0 mb-1.5 text-xs text-ink-subtext">{source ? SOURCE[source]() : live ? m.run_view_source_none() : m.run_page_no_signals_ended()}</p>}
+          {sourceText && <p className="m-0 mb-1.5 text-xs text-ink-subtext">{sourceText}</p>}
           {source === "pattern" && monitor.pattern && <pre dir="ltr" className={PRE}>{monitor.pattern}</pre>}
           <p className="m-0 mb-1.5 mt-3 text-xs text-ink-subtext">{m.run_view_as_text()}</p>
           <pre dir="ltr" className={PRE}>{monitor.statusText}</pre>
