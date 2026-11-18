@@ -19,7 +19,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Verify exact PR product source
-        run: git diff --exit-code cb1343d24a3f9524e8931fb6a5f50a35939c9345 -- src crates Cargo.toml Cargo.lock build.rs
+        run: git diff --exit-code 34e1eb2985a59869ef731ac2dc2310eae4e61f56 -- src crates Cargo.toml Cargo.lock build.rs
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           artifact-ids: 14383180091
