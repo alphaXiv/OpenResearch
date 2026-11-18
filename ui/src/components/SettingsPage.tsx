@@ -3838,6 +3838,7 @@ const LOCALE_CHOICES: { id: Locale; label: string }[] = [
   { id: "pl", label: "Polski" },
   { id: "ru", label: "Русский" },
   { id: "tr", label: "Türkçe" },
+  { id: "vi", label: "Tiếng Việt" },
 ];
 
 function AppearanceTab() {
