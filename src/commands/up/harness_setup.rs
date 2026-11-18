@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use super::{bad_request, AppState};
 use crate::local::harness::managed;
 use crate::store::human_bytes;
-use crate::telemetry::harness::SetupAttempt;
+use crate::telemetry::harness::{InstallStep, SetupAttempt};
 
 mod sign_in;
 pub(super) use sign_in::SignInPage;
@@ -150,7 +150,7 @@ pub(super) async fn connect(
         return bad_request("Only OpenCode installation supports automatic setup").into_response();
     }
     ws.on_upgrade(move |mut socket| async move {
-        let attempt = SetupAttempt::new(
+        let mut attempt = SetupAttempt::new(
             &request.harness,
             request.action.label(),
             if request.trigger == Trigger::Automatic {
@@ -165,7 +165,7 @@ pub(super) async fn connect(
             &state,
             &mut socket,
             &request,
-            &attempt,
+            &mut attempt,
             &mut size,
             &mut follow_up,
         )
@@ -204,7 +204,7 @@ async fn run(
     state: &AppState,
     socket: &mut WebSocket,
     request: &SetupRequest,
-    attempt: &SetupAttempt,
+    attempt: &mut SetupAttempt,
     size: &mut PtySize,
     // Set once a command actually ran: the env its follow-up shell must share.
     follow_up: &mut FollowUp,
@@ -523,7 +523,7 @@ const MANAGED_ENV: [(&str, &str); 2] = [
 async fn managed_setup(
     socket: &mut WebSocket,
     request: &SetupRequest,
-    attempt: &SetupAttempt,
+    attempt: &mut SetupAttempt,
     size: &mut PtySize,
     follow_up: &mut FollowUp,
     opencode_host: &crate::local::opencode::AgentHost,
@@ -532,6 +532,7 @@ async fn managed_setup(
     let harness = request.harness.as_str();
     let user = managed::user_install(harness).await;
     let copy = managed::installed(harness);
+    attempt.install_step = Some(InstallStep::ReleaseLookup);
     let release = managed::latest(harness).await;
     if let (Some((_, version)), Ok(release)) = (&user, &release) {
         if *version >= release.version {
@@ -546,6 +547,7 @@ async fn managed_setup(
     ) {
         let (_, args) = update_command(harness).expect("the selected agent has an updater");
         let program = bin.to_string_lossy().into_owned();
+        attempt.install_step = Some(InstallStep::NativeUpdater);
         let (status, output) = run_in_terminal(
             socket,
             attempt,
@@ -578,6 +580,7 @@ async fn managed_setup(
         }
     }
     let host = (harness == "opencode").then_some(opencode_host);
+    attempt.install_step = Some(InstallStep::ManagedCopy);
     match install_with_progress(socket, harness, &release, host).await {
         Some(Ok(_)) => {
             attempt.record("command_completed", "command", None, Some(0), None);
