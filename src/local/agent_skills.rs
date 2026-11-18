@@ -570,6 +570,88 @@ r.flush()
             .unwrap();
         assert!(muted.status.success());
         assert!(muted.stdout.is_empty());
+        let other_launcher = command("python3")
+            .args([
+                "-c",
+                "import orx_run; orx_run.progress(start=3).step(4,x=1)",
+            ])
+            .current_dir(dir.path())
+            .env_remove("RANK")
+            .env_remove("SLURM_PROCID")
+            .env("OMPI_COMM_WORLD_RANK", "1")
+            .output()
+            .unwrap();
+        assert!(
+            !other_launcher.stdout.is_empty(),
+            "only rank=, RANK or SLURM_PROCID name a process's rank"
+        );
+    }
+
+    /// What the fold would drop, the helper still prints and says once on stderr, without raising
+    /// inside the training it runs in.
+    #[test]
+    fn python_warns_once_of_each_report_the_fold_drops() {
+        use crate::process::command;
+        if command("python3").arg("--version").output().is_err() {
+            crate::config::skip_without_tool("python3 is unavailable");
+            return;
+        }
+        let dir = crate::local::git::TemporaryDirectory::new("orx-python-dropped").unwrap();
+        let (_, resource) = find_resource("compute/assets/orx_run.py", SkillSet::Local).unwrap();
+        std::fs::write(dir.path().join("orx_run.py"), resource.content).unwrap();
+        let code = r#"import orx_run
+orx_run.plan(["setup", {"phase": "train", "of": 0}])
+orx_run.plan(["stage%d" % i for i in range(65)])
+run = orx_run.progress(phase="x" * 129, total=10, interval=0)
+for step in range(3):
+    run.step(step, loss=0.5, ok=True, hist=[1, 2], note="y" * 1025, **{"val/loss": 1.0})
+run.row("bad-table", task="a")
+run.step(3, odd="\udc80")
+"#;
+        let run = |rank: &str| {
+            command("python3")
+                .args(["-c", code])
+                .current_dir(dir.path())
+                .env("RANK", rank)
+                .env_remove("SLURM_PROCID")
+                .output()
+                .unwrap()
+        };
+
+        let output = run("0");
+
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let warnings = String::from_utf8(output.stderr).unwrap();
+        for dropped in [
+            "the whole plan for the total 0",
+            "the whole plan: it lists 65 stages",
+            "the stage name 'xxx",
+            "ok=True",
+            "hist, a list",
+            "note: its text is over 1024 bytes",
+            "'val/loss'",
+            "the table 'bad-table'",
+        ] {
+            assert_eq!(
+                warnings
+                    .lines()
+                    .filter(|line| line.contains(dropped))
+                    .count(),
+                1,
+                "{dropped:?} in {warnings}"
+            );
+        }
+        let mut folded = orx_signals::Snapshot::new("r1", "1-100", "g1");
+        folded.feed(&output.stdout, true, 1, false).unwrap();
+        assert_eq!(folded.latest["loss"], 0.5);
+        assert!(folded.plan.is_none(), "the fold drops both plans");
+        let other = run("1");
+        assert!(other.status.success());
+        assert!(other.stdout.is_empty() && other.stderr.is_empty());
     }
 
     #[test]
