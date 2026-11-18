@@ -2022,7 +2022,12 @@ async fn a_childs_digest_includes_warning_kinds_printed_by_its_parent() {
     let parent = classifier_run(&store, "parent", None, "done", "chat");
     epochs(&store, &parent, &HEALTHY);
     let warning = "WARNING: Flash Attention is unavailable; using fallback\n";
-    keep_log(&store, "parent", warning);
+    let secret = "AKIAABCDEFGHIJKLMNOP";
+    keep_log(
+        &store,
+        "parent",
+        &format!("{warning}WARNING: rejected {secret}\n"),
+    );
     let child = classifier_run(&store, "child", Some("parent"), "running", "chat");
     epochs(&store, &child, &HEALTHY);
     keep_log(&store, "child", warning);
@@ -2034,6 +2039,7 @@ async fn a_childs_digest_includes_warning_kinds_printed_by_its_parent() {
     let id = look(&store, "chat", "manual", &[("child", "r1")]);
     take(id).await.unwrap();
     let prompt = std::fs::read_to_string(calls_dir.join("prompt-1")).unwrap();
+    assert!(!prompt.to_lowercase().contains(&secret.to_lowercase()));
     let sent: Value = serde_json::from_str(prompt.strip_prefix(DIGEST_PREAMBLE).unwrap()).unwrap();
     assert_eq!(
         sent["parents"][0]["run"]["warningKinds"],
@@ -2042,6 +2048,11 @@ async fn a_childs_digest_includes_warning_kinds_printed_by_its_parent() {
 
     let id = look(&store, "chat", "manual", &[("parent", "r1")]);
     take(id).await.unwrap();
+    assert!(!store.watch_look_runs(id).unwrap()[0]
+        .cursor
+        .to_string()
+        .to_lowercase()
+        .contains(&secret.to_lowercase()));
     std::fs::remove_file(store.data_dir().join("run-logs/parent.log")).unwrap();
     let id = look(&store, "chat", "manual", &[("child", "r1")]);
     take(id).await.unwrap();

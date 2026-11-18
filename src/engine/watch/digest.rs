@@ -332,7 +332,9 @@ pub(super) fn family(line: &str) -> Option<String> {
         "skipp",
         "invalid",
     ];
-    if line.trim_start().starts_with("::orx::") || !alarming.iter().any(|word| lower.contains(word))
+    if line.trim_start().starts_with("::orx::")
+        || !alarming.iter().any(|word| lower.contains(word))
+        || crate::local::share::find_secret(line).is_some()
     {
         return None;
     }
