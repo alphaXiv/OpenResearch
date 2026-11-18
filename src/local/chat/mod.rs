@@ -10548,7 +10548,7 @@ pub fn set_chat_session_env(
         anyhow!("The agent could not be given this dashboard's data directory: {error:#}")
     })?;
     // A project's own variables override the synced ones; the user's shell still wins.
-    let project_vars = Store::open()
+    let project_vars = Store::open_read_only(data_dir.clone())
         .and_then(|store| match store.get_chat_session(session_id)? {
             Some(session) => store.project_env(&session.project_id),
             None => Ok(Vec::new()),
@@ -10778,6 +10778,7 @@ mod session_env_tests {
         let synced = crate::config::test_home().join(".openresearch/env");
         std::fs::create_dir_all(synced.parent().unwrap()).unwrap();
         std::fs::write(&synced, "export ORX_DATA_DIR='/elsewhere'\n").unwrap();
+        crate::store::Store::open().unwrap();
         let mut cmd = crate::process::tokio_command("agent");
         super::prepare_env(&mut cmd);
         super::set_chat_session_env(&mut cmd, "session", "claude", None).unwrap();
@@ -10792,6 +10793,7 @@ mod session_env_tests {
 
     #[test]
     fn each_harness_keeps_its_native_invocation_context() {
+        crate::store::Store::open().unwrap();
         for harness in [
             "claude-code",
             "codex",
@@ -10845,7 +10847,11 @@ mod session_env_tests {
 
         let mut cmd = crate::process::tokio_command("agent");
         super::prepare_env(&mut cmd);
+        let writer = store.begin_immediate().unwrap();
+        let started = std::time::Instant::now();
         super::set_chat_session_env(&mut cmd, "chat_env", "claude", None).unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        writer.rollback().unwrap();
         let env = |cmd: &tokio::process::Command, key: &str| {
             cmd.as_std()
                 .get_envs()
