@@ -2366,3 +2366,39 @@ async fn failed_provider_calls_keep_the_credentials_notice() {
     assert_eq!(facts["looks"][1]["withheld"], json!([]));
     assert_eq!(calls(&dir), 2);
 }
+
+#[test]
+fn a_ready_final_look_does_not_wait_for_a_newly_ended_sibling() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let store = Store::open().unwrap();
+    chat(&store, "sweep", "claude-code");
+    let now = crate::store::now_ms();
+    let mut ready = run(&store, "ready", "Ready", "sweep", LOG);
+    ready.status = "done".into();
+    ready.ended_at = Some(now - paced_ms(3600) + 1);
+    store.upsert_run(&ready).unwrap();
+    let mut recent = run(&store, "recent", "Recent", "sweep", LOG);
+    recent.status = "done".into();
+    recent.ended_at = Some(now);
+    store.upsert_run(&recent).unwrap();
+    let live = run(&store, "live", "Live", "sweep", LOG);
+    let owned = Owned {
+        chat: store.get_chat_session("sweep").unwrap().unwrap(),
+        runs: [&recent, &ready, &live]
+            .into_iter()
+            .map(|row| (Now::read(&store, row).unwrap(), Vec::new()))
+            .collect(),
+    };
+    let plans = due(&store, &State::default(), &owned, now).unwrap();
+    assert_eq!(plans.len(), 1);
+    assert_eq!(plans[0].kind, "terminal");
+    assert_eq!(
+        plans[0].runs,
+        [
+            ("ready".into(), "r1".into(), "subject"),
+            ("live".into(), "r2".into(), "rider")
+        ]
+    );
+}

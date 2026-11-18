@@ -1609,12 +1609,6 @@ fn due(store: &Store, state: &State, owned: &Owned, now: i64) -> Result<Vec<Plan
     let looks = store.chat_watch_looks(&owned.chat.id, earliest)?;
     let last_at = looks.iter().map(|look| look.created_at).max();
     let live: Vec<&(Now, Vec<String>)> = owned.runs.iter().filter(|(run, _)| run.live()).collect();
-    let ended: Vec<&Now> = owned
-        .runs
-        .iter()
-        .map(|(run, _)| run)
-        .filter(|run| !run.live())
-        .collect();
     let keyed = |runs: Vec<(String, &'static str)>| -> Vec<(String, String, &'static str)> {
         runs.into_iter()
             .enumerate()
@@ -1634,17 +1628,28 @@ fn due(store: &Store, state: &State, owned: &Owned, now: i64) -> Result<Vec<Plan
             .map(|(look, _)| look.done_at.unwrap_or(look.created_at))
             .max()
     };
-    // A run's last look waits for its siblings to end within the gate, and for its log; one
-    // that failed is taken again only after the least gap, past an outage's first minute.
     let gate = paced_ms(TERMINAL_GATE_S);
-    let waited = |run: &Now| {
+    let mut ended = Vec::new();
+    for (run, _) in owned.runs.iter().filter(|(run, _)| !run.live()) {
         let ended_at = run.run.ended_at.unwrap_or(run.run.updated_at);
-        let collected = !store.log_collection_pending(&run.run.id).unwrap_or(false)
-            || now - ended_at >= paced_ms(TERMINAL_WAIT_S);
+        let collected = now - ended_at >= paced_ms(TERMINAL_WAIT_S)
+            || !store.log_collection_pending(&run.run.id)?;
         let rested = failed_at(run).is_none_or(|at| now - at >= gaps(&run.settings).0);
-        collected && rested && (now - ended_at >= gate || live.is_empty())
-    };
-    if !ended.is_empty() && ended.iter().all(|run| waited(run)) {
+        if collected && rested {
+            ended.push((ended_at, run));
+        }
+    }
+    ended.sort_by_key(|(ended_at, _)| *ended_at);
+    if let Some(&(oldest, _)) = ended
+        .first()
+        .filter(|(at, _)| now - at >= gate || live.is_empty())
+    {
+        let ended: Vec<&Now> = ended
+            .into_iter()
+            .take_while(|(at, _)| live.is_empty() || *at <= (now - gate).max(oldest + gate))
+            .map(|(_, run)| run)
+            .take(RUNS_PER_LOOK)
+            .collect();
         let names: Vec<&str> = ended.iter().map(|run| run.label.as_str()).collect();
         let again = ended.iter().any(|run| failed_at(run).is_some());
         let runs = ended
