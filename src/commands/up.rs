@@ -670,6 +670,8 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
             post(prewarm_starter_prompts),
         )
         .route("/api/projects/activity", get(list_project_activity))
+        .route("/api/projects/scratch", post(create_scratch_project))
+        .route("/api/projects/{id}/promote", post(promote_project))
         .route(
             "/api/projects/{id}",
             get(get_project)
@@ -1746,6 +1748,7 @@ fn project_json_with_artifacts_dir(p: &local::model::LocalProject, artifacts_dir
         map.insert("filesDir".into(), dir);
         map.insert("path".into(), Value::String(p.repo_path.clone()));
         map.insert("githubEnabled".into(), Value::Bool(p.github_enabled()));
+        map.insert("scratch".into(), Value::Bool(p.is_scratch()));
         map.insert(
             "githubUrl".into(),
             p.github_url().map(Value::String).unwrap_or(Value::Null),
@@ -2028,6 +2031,86 @@ async fn get_project(Path(id): Path<String>) -> ApiResult {
         .get_local_project(&id)?
         .ok_or_else(|| not_found("project"))?;
     Ok(Json(json!({ "project": project_json(&project) })))
+}
+
+async fn create_scratch_project(State(state): State<AppState>) -> ApiResult {
+    reject_if_moving(&state)?;
+    let _admission = state
+        .project_lifecycle
+        .admit("__project_create__")
+        .ok_or_else(|| bad_request("project creation is unavailable"))?;
+    let creation_guard = state.project_creation_lock.clone().lock_owned().await;
+    let project = tokio::task::spawn_blocking(move || {
+        let _creation_guard = creation_guard;
+        local::projects::scratch_project(&Store::open()?)
+    })
+    .await
+    .map_err(|error| anyhow!("project task failed: {error}"))??;
+    Ok(Json(json!({ "project": project_json(&project) })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PromoteProjectReq {
+    name: String,
+    path: String,
+    /// The chat whose work the project's folder starts from.
+    session_id: Option<String>,
+}
+
+async fn promote_project(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<PromoteProjectReq>,
+) -> ApiResult {
+    reject_if_moving(&state)?;
+    let _promoting = state
+        .project_lifecycle
+        .begin_delete(&id)
+        .ok_or_else(|| bad_request("The project is busy with another change; try again."))?;
+    let (project, sessions) = {
+        let store = Store::open()?;
+        let project = store
+            .get_local_project(&id)?
+            .ok_or_else(|| not_found("project"))?;
+        let sessions = store
+            .list_chat_sessions_by_project(&id)?
+            .into_iter()
+            .map(|session| session.id)
+            .collect::<Vec<_>>();
+        (project, sessions)
+    };
+    let worktree = match req.session_id.as_deref() {
+        Some(session_id) if sessions.iter().any(|id| id == session_id) => Some(
+            local::git::existing_session_worktree_path(&project, session_id),
+        ),
+        Some(_) => return Err(bad_request("That chat is not in this project.")),
+        None => None,
+    };
+    let promotion = state
+        .chat
+        .while_idle(&sessions, || {
+            local::projects::promote_scratch_project(
+                &Store::open()?,
+                &project,
+                worktree.as_deref(),
+                &req.name,
+                &req.path,
+            )
+        })
+        .await
+        .map_err(bad_request)?;
+    // Resident agents restart on their next turn with the new project's playbook.
+    for session_id in &sessions {
+        state.chat.opencode.kill_session(session_id).await;
+        state.chat.codex.kill_session(session_id).await;
+        state.chat.claude.kill_session(session_id).await;
+        state.chat.acp.stop(session_id).await;
+    }
+    Ok(Json(json!({
+        "project": project_json(&promotion.project),
+        "leftOut": promotion.left_out,
+    })))
 }
 
 fn project_git_json(
@@ -9910,9 +9993,48 @@ async fn delete_chat_session(State(state): State<AppState>, Path(id): Path<Strin
     reject_if_moving(&state)?;
     // Detached so a canceled request cannot stop between the native purge and the row delete.
     let chat = state.chat.clone();
-    tokio::spawn(async move { chat.delete_session(&id).await })
-        .await
-        .map_err(|error| anyhow!("chat deletion task failed: {error}"))??;
+    let store = Store::open()?;
+    let scratch = store
+        .get_chat_session(&id)?
+        .map(|session| store.get_local_project(&session.project_id))
+        .transpose()?
+        .flatten()
+        .filter(|project| project.is_scratch());
+    drop(store);
+    tokio::spawn(async move {
+        chat.delete_session(&id).await?;
+        // A chat without a project owns its repository, which goes with its last chat.
+        let Some(project) = scratch else {
+            return Ok(());
+        };
+        if !Store::open()?
+            .list_chat_sessions_by_project(&project.id)?
+            .is_empty()
+        {
+            return Ok(());
+        }
+        // The chat is gone either way; a scratch project left behind is reused by the next one.
+        let query = DeleteProjectQuery {
+            delete_artifacts: true,
+        };
+        match delete_project_inner(state, project.id.clone(), query).await {
+            Ok(Json(deleted)) => {
+                if let Some(error) = deleted["artifactsError"].as_str() {
+                    eprintln!("orx up: {error}");
+                }
+                if let Err(error) = std::fs::remove_dir_all(&project.repo_path) {
+                    eprintln!("orx up: could not remove {}: {error}", project.repo_path);
+                }
+            }
+            Err(error) => eprintln!(
+                "orx up: kept the scratch project {} after its last chat: {}",
+                project.id, error.1
+            ),
+        }
+        Ok::<_, crate::error::Error>(())
+    })
+    .await
+    .map_err(|error| anyhow!("chat deletion task failed: {error}"))??;
     Ok(Json(json!({ "ok": true })))
 }
 

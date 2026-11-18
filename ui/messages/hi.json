@@ -2171,5 +2171,17 @@
   "settings_env_set_in_project": "इस प्रोजेक्ट में सेट",
   "settings_env_project_heading": "केवल {project} में",
   "settings_env_project_note": "ये केवल इस प्रोजेक्ट के एजेंटों और रन को मिलते हैं। ये ऊपर दिए गए इसी नाम के वेरिएबल की जगह लेते हैं।",
-  "settings_env_project_empty": "इस प्रोजेक्ट में अभी कोई वेरिएबल नहीं है। यहाँ जोड़ें, या कोई एजेंट आपसे माँग सकता है।"
+  "settings_env_project_empty": "इस प्रोजेक्ट में अभी कोई वेरिएबल नहीं है। यहाँ जोड़ें, या कोई एजेंट आपसे माँग सकता है।",
+  "no_project": "कोई प्रोजेक्ट नहीं",
+  "no_project_new_chat": "बिना प्रोजेक्ट के नई चैट",
+  "create_project_button": "प्रोजेक्ट बनाएँ",
+  "create_project_title": "प्रोजेक्ट बनाएँ",
+  "create_project_description": "इस चैट की फ़ाइलें आपके चुने फ़ोल्डर में चली जाती हैं, और चैट नए प्रोजेक्ट में जारी रहती है।",
+  "create_project_confirm": "प्रोजेक्ट बनाएँ",
+  "create_project_folder_has_files": "इस फ़ोल्डर में पहले से फ़ाइलें हैं। कोई नई जगह चुनें।",
+  "create_project_left_out": "ये फ़ाइलें कमिट करने के लिए बहुत बड़ी हैं, इसलिए केवल चैट की प्रति में रहती हैं: {files}",
+  "create_project_created": "बनाया गया",
+  "create_project_review": "समीक्षा करें…",
+  "activity_proposed_project": "प्रोजेक्ट {name} प्रस्तावित किया",
+  "chat_delete_scratch_session_confirm": "“{title}” हटाएँ?\n\nइस चैट का कोई प्रोजेक्ट नहीं है, इसलिए इसका वार्तालाप, साइड चैट और फ़ाइलें स्थायी रूप से हटा दी जाएँगी।"
 }

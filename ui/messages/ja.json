@@ -2171,5 +2171,17 @@
   "settings_env_set_in_project": "このプロジェクトで設定済み",
   "settings_env_project_heading": "{project} のみ",
   "settings_env_project_note": "このプロジェクトのエージェントと実行だけに渡されます。上にある同じ名前の変数より優先されます。",
-  "settings_env_project_empty": "このプロジェクトにはまだ変数がありません。ここで追加するか、エージェントからの依頼で設定できます。"
+  "settings_env_project_empty": "このプロジェクトにはまだ変数がありません。ここで追加するか、エージェントからの依頼で設定できます。",
+  "no_project": "プロジェクトなし",
+  "no_project_new_chat": "プロジェクトなしの新しいチャット",
+  "create_project_button": "プロジェクトを作成",
+  "create_project_title": "プロジェクトを作成",
+  "create_project_description": "このチャットのファイルは選んだフォルダーに移動し、チャットは新しいプロジェクトで続きます。",
+  "create_project_confirm": "プロジェクトを作成",
+  "create_project_folder_has_files": "このフォルダーには既にファイルがあります。別の場所を選んでください。",
+  "create_project_left_out": "コミットするには大きすぎるため、次のファイルはチャットのコピーにだけ残ります: {files}",
+  "create_project_created": "作成済み",
+  "create_project_review": "確認…",
+  "activity_proposed_project": "プロジェクト {name} を提案しました",
+  "chat_delete_scratch_session_confirm": "「{title}」を削除しますか？\n\nこのチャットにはプロジェクトがないため、会話履歴、サイドチャット、ファイルが完全に削除されます。"
 }

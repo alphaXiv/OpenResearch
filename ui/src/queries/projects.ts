@@ -136,6 +136,29 @@ export const mutCreateProject = mutations.define({
   refetchOnSuccess: false,
 });
 
+export const mutCreateScratchProject = mutations.define({
+  id: "projects/scratch",
+  mutate: (ws: Workspace) => ws.api.createScratchProject(),
+  optimistic({ args: [ws], onSuccess }) {
+    onSuccess((project) => showProject(ws, project));
+  },
+  describe: "start a chat without a project",
+  describeResult: null,
+  refetchOnSuccess: false,
+});
+
+export const mutPromoteProject = mutations.define({
+  id: "projects/promote",
+  mutate: (ws: Workspace, projectId: string, body: Parameters<Api["promoteProject"]>[1]) => ws.api.promoteProject(projectId, body),
+  optimistic({ args: [ws], onSuccess }) {
+    onSuccess(({ project }) => showProject(ws, project));
+  },
+  key: ({ args: [ws, projectId] }) => [ws.identity, projectId],
+  describe: "create the project",
+  describeResult: null,
+  refetchOnSuccess: false,
+});
+
 export const mutImportSharedProject = mutations.define({
   id: "projects/import",
   mutate: (ws: Workspace, path: string, source: api.SharedSource, onProgress: (progress: api.OperationProgress) => void) =>

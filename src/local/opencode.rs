@@ -176,6 +176,16 @@ fn plural(count: usize, singular: &str, plural: &str) -> String {
 }
 
 fn project_state_md(project: &LocalProject, state: &ProjectState) -> String {
+    if project.is_scratch() {
+        return "This chat has **no project** yet: OpenResearch keeps its repository in a \
+                temporary folder of its own, and deleting the chat deletes it. When the work \
+                is worth keeping, or the user asks to make it a project, run \
+                `orx project create --name \"<name>\"` (add `--path <folder>` for a folder \
+                other than `~/OpenResearch/<name>`). The user reviews the name and folder in \
+                the chat and creates it; the chat's work is then committed and moved there, \
+                and this chat continues in that project."
+            .to_string();
+    }
     let has_run_command = project
         .run_command
         .as_deref()
@@ -259,6 +269,14 @@ pub(super) fn playbook_md(project: &LocalProject, state: &ProjectState) -> Strin
         "- Compute: default target **{compute_backend}**{flavor_part} — \
          {compute_default_source}; load **`orx-compute`** and read `orx compute instructions show` before configuring or launching"
     );
+    let folder_line = if project.is_scratch() {
+        String::new()
+    } else {
+        format!(
+            "- Project folder: `{}`, the user's own checkout; you work in your worktree\n",
+            project.repo_path
+        )
+    };
     let project_state = project_state_md(project, state);
     let template = SYSTEM_PROMPT
         .split_once("-->\n\n")
@@ -267,6 +285,7 @@ pub(super) fn playbook_md(project: &LocalProject, state: &ProjectState) -> Strin
     template
         .replace("{name}", name)
         .replace("{id}", id)
+        .replace("{folder_line}", &folder_line)
         .replace("{publication_line}", publication_line)
         .replace("{paper_line}", &paper_line)
         .replace("{compute_bullet}", &compute_bullet)

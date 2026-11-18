@@ -23,6 +23,9 @@ export function useDebouncedValue(value: string, delay: number) {
   return debounced;
 }
 
+/** Where a new project's folder goes unless the user picks one. */
+export const defaultProjectPath = (name: string) => name.trim() ? `~/OpenResearch/${slugify(name, 48)}` : "";
+
 export function slugify(text: string, maxLength?: number): string {
   const slug = text
     .toLowerCase()
@@ -118,7 +121,7 @@ export function NewProjectForm({
     paper: { name: "", nameTouched: false, path: "", pathTouched: false },
   });
   const paperGithubRepo = mode === "paper" ? parseGithubRepository(paper?.repoUrl) : null;
-  const automaticBlankProjectPath = name.trim() ? `~/OpenResearch/${slugify(name, 48)}` : "";
+  const automaticBlankProjectPath = defaultProjectPath(name);
   const automaticPaperProjectPath = `~/OpenResearch/${slugify(name || paper?.title || paper?.paperId || "")}`;
   const projectPath = mode === "blank" && !pathTouched
     ? automaticBlankProjectPath

@@ -61,6 +61,8 @@ export interface Project {
   path: string;
   githubEnabled: boolean;
   githubUrl?: string | null;
+  /** A chat without a project yet: orx keeps its code until the user makes it a project. */
+  scratch?: boolean;
   /** Absolute path of the project's artifacts directory, non-canonical to
    *  match paths agents inline into chat. */
   artifactsDir: string;
@@ -2283,6 +2285,14 @@ export function createApi(
       (r) => r.paper,
     );
 
+  /** The project a new chat without a project starts in. */
+  const createScratchProject = () =>
+    post<{ project: Project }>("/api/projects/scratch", {}).then((r) => r.project);
+
+  /** Name a scratch project and move its code to `path`; `sessionId`'s work is committed first. */
+  const promoteProject = (projectId: string, body: { name: string; path: string; sessionId?: string }) =>
+    post<{ project: Project; leftOut: string[] }>(`/api/projects/${projectId}/promote`, body);
+
   const updateProject = (projectId: string, body: { runCommand?: string; name?: string }) =>
     patch<{ project: Project }>(`/api/projects/${projectId}`, body).then((r) => r.project);
 
@@ -3286,6 +3296,8 @@ export function createApi(
     repoAccess,
     resolvePaper,
     updateProject,
+    createScratchProject,
+    promoteProject,
     prewarmStarterPrompts,
     getProjectStarterPrompts,
     deleteProject,

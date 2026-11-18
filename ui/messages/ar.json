@@ -2171,5 +2171,17 @@
   "settings_env_set_in_project": "معيّن في هذا المشروع",
   "settings_env_project_heading": "في {project} فقط",
   "settings_env_project_note": "لا يحصل عليها إلا وكلاء هذا المشروع وتشغيلاته. وهي تحل محل المتغيّر الذي يحمل الاسم نفسه أعلاه.",
-  "settings_env_project_empty": "لا توجد متغيّرات لهذا المشروع بعد. أضف واحدًا هنا، أو قد يطلبه منك أحد الوكلاء."
+  "settings_env_project_empty": "لا توجد متغيّرات لهذا المشروع بعد. أضف واحدًا هنا، أو قد يطلبه منك أحد الوكلاء.",
+  "no_project": "بلا مشروع",
+  "no_project_new_chat": "محادثة جديدة بلا مشروع",
+  "create_project_button": "إنشاء مشروع",
+  "create_project_title": "إنشاء مشروع",
+  "create_project_description": "تنتقل ملفات هذه المحادثة إلى المجلد الذي تختاره، وتستمر المحادثة في المشروع الجديد.",
+  "create_project_confirm": "إنشاء المشروع",
+  "create_project_folder_has_files": "يحتوي هذا المجلد على ملفات بالفعل. اختر موقعًا جديدًا.",
+  "create_project_left_out": "هذه الملفات أكبر من أن تُحفظ في الالتزام، فتبقى في نسخة المحادثة فقط: {files}",
+  "create_project_created": "تم الإنشاء",
+  "create_project_review": "مراجعة…",
+  "activity_proposed_project": "اقترح المشروع {name}",
+  "chat_delete_scratch_session_confirm": "هل تريد حذف «{title}»؟\n\nلا مشروع لهذه المحادثة، لذا سيُحذف سجلها ومحادثاتها الجانبية وملفاتها نهائيًا."
 }

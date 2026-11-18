@@ -2171,5 +2171,17 @@
   "settings_env_set_in_project": "Bu projede ayarlı",
   "settings_env_project_heading": "Yalnızca {project}",
   "settings_env_project_note": "Bunları yalnızca bu projenin ajanları ve çalıştırmaları alır. Yukarıdaki aynı adlı değişkenin yerine geçerler.",
-  "settings_env_project_empty": "Bu projede henüz değişken yok. Buradan ekleyin ya da bir ajan sizden isteyebilir."
+  "settings_env_project_empty": "Bu projede henüz değişken yok. Buradan ekleyin ya da bir ajan sizden isteyebilir.",
+  "no_project": "Proje yok",
+  "no_project_new_chat": "Projesiz yeni sohbet",
+  "create_project_button": "Proje oluştur",
+  "create_project_title": "Proje oluştur",
+  "create_project_description": "Bu sohbetin dosyaları seçtiğiniz klasöre taşınır ve sohbet yeni projede devam eder.",
+  "create_project_confirm": "Proje oluştur",
+  "create_project_folder_has_files": "Bu klasörde zaten dosyalar var. Yeni bir konum seçin.",
+  "create_project_left_out": "Bu dosyalar commit için çok büyük, bu yüzden yalnızca sohbetin kopyasında kalır: {files}",
+  "create_project_created": "Oluşturuldu",
+  "create_project_review": "İncele…",
+  "activity_proposed_project": "{name} projesini önerdi",
+  "chat_delete_scratch_session_confirm": "“{title}” silinsin mi?\n\nBu sohbetin projesi yok, bu yüzden konuşma dökümü, yan sohbetleri ve dosyaları kalıcı olarak kaldırılacak."
 }

@@ -2171,5 +2171,17 @@
   "settings_env_set_in_project": "Ustawiono w tym projekcie",
   "settings_env_project_heading": "Tylko w {project}",
   "settings_env_project_note": "Dostają je tylko agenci i uruchomienia tego projektu. Zastępują zmienną o tej samej nazwie powyżej.",
-  "settings_env_project_empty": "Ten projekt nie ma jeszcze zmiennych. Dodaj je tutaj albo agent może o nie poprosić."
+  "settings_env_project_empty": "Ten projekt nie ma jeszcze zmiennych. Dodaj je tutaj albo agent może o nie poprosić.",
+  "no_project": "Bez projektu",
+  "no_project_new_chat": "Nowy czat bez projektu",
+  "create_project_button": "Utwórz projekt",
+  "create_project_title": "Utwórz projekt",
+  "create_project_description": "Pliki tego czatu zostaną przeniesione do wybranego folderu, a czat będzie kontynuowany w nowym projekcie.",
+  "create_project_confirm": "Utwórz projekt",
+  "create_project_folder_has_files": "Ten folder zawiera już pliki. Wybierz inną lokalizację.",
+  "create_project_left_out": "Te pliki są zbyt duże, by je zatwierdzić, więc zostają tylko w kopii czatu: {files}",
+  "create_project_created": "Utworzono",
+  "create_project_review": "Przejrzyj…",
+  "activity_proposed_project": "Zaproponowano projekt {name}",
+  "chat_delete_scratch_session_confirm": "Usunąć „{title}”?\n\nTen czat nie ma projektu, więc historia rozmowy, czaty poboczne i pliki zostaną trwale usunięte."
 }

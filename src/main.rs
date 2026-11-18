@@ -306,6 +306,18 @@ pub enum ProjectCommand {
         no_artifacts: bool,
     },
 
+    /// From a chat without a project: propose making it a project. The user
+    /// reviews the name and folder in the chat; creating it commits the chat's
+    /// work and moves its repository there.
+    Create {
+        /// The project's name.
+        #[arg(long)]
+        name: String,
+        /// Folder for its code; it must be new or empty (default: ~/OpenResearch/<name>).
+        #[arg(long)]
+        path: Option<String>,
+    },
+
     /// Delete a project's published openresearch.sh link and its file.
     Unpublish { project_id: String },
 

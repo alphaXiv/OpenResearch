@@ -2171,5 +2171,17 @@
   "settings_env_set_in_project": "Set in this project",
   "settings_env_project_heading": "Only in {project}",
   "settings_env_project_note": "Only this project's agents and runs get these. They replace a variable of the same name above.",
-  "settings_env_project_empty": "No variables for this project yet. Add one here, or an agent can ask you for one."
+  "settings_env_project_empty": "No variables for this project yet. Add one here, or an agent can ask you for one.",
+  "no_project": "No project",
+  "no_project_new_chat": "New chat without a project",
+  "create_project_button": "Create project",
+  "create_project_title": "Create a project",
+  "create_project_description": "This chat's files move to the folder you choose, and the chat continues in the new project.",
+  "create_project_confirm": "Create project",
+  "create_project_folder_has_files": "This folder already has files. Choose a new location.",
+  "create_project_left_out": "Too large to commit, so these files stay only in the chat's copy: {files}",
+  "create_project_created": "Created",
+  "create_project_review": "Review…",
+  "activity_proposed_project": "Proposed project {name}",
+  "chat_delete_scratch_session_confirm": "Delete “{title}”?\n\nThis chat has no project, so its transcript, side chats and files will be permanently removed."
 }

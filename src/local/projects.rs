@@ -227,6 +227,217 @@ pub fn create_project(
     Ok(project)
 }
 
+pub fn scratch_root() -> PathBuf {
+    crate::store::data_dir().join("scratch")
+}
+
+/// The project a new chat without a project starts in. A scratch project no
+/// chat uses yet is reused, so opening the draft again leaves no new folder.
+pub fn scratch_project(store: &Store) -> Result<LocalProject> {
+    for project in store.list_local_projects()? {
+        if project.is_scratch() && store.list_chat_sessions_by_project(&project.id)?.is_empty() {
+            return Ok(project);
+        }
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    let repo = scratch_root().join(&id);
+    crate::paths::create_dir_all(&repo)?;
+    git::initialize_own_repository(&repo)?;
+    let now = now_ms();
+    let project = LocalProject {
+        slug: unique_project_slug(store, &format!("scratch-{}", &id[..8]))?,
+        id,
+        name: "No project".to_string(),
+        github_owner: String::new(),
+        github_repo: String::new(),
+        github_sync_enabled: false,
+        baseline_branch: git::require_current_branch(&repo)?,
+        repo_path: repo.to_string_lossy().into_owned(),
+        run_command: None,
+        paper_id: None,
+        created_at: now,
+        updated_at: now,
+    };
+    store.create_local_project(&project)?;
+    Ok(project)
+}
+
+pub struct Promotion {
+    pub project: LocalProject,
+    /// Files too large to commit, still in the chat's worktree.
+    pub left_out: Vec<String>,
+}
+
+/// Turn a scratch project into a real one at `path`: commit the chat's work
+/// onto the baseline, move the repository there, and give it `name`. The
+/// caller keeps every chat of the project idle meanwhile.
+pub fn promote_scratch_project(
+    store: &Store,
+    project: &LocalProject,
+    worktree: Option<&Path>,
+    name: &str,
+    path: &str,
+) -> Result<Promotion> {
+    if !project.is_scratch() {
+        return Err(crate::error::anyhow!(
+            "This chat is already in {}, at {}.",
+            project.name,
+            project.repo_path
+        ));
+    }
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(crate::error::anyhow!("Give the project a name."));
+    }
+    let target = expand_path(path)?;
+    if target.starts_with(crate::store::data_dir()) {
+        return Err(crate::error::anyhow!(
+            "{} is inside OpenResearch's data folder; choose a folder of your own.",
+            target.display()
+        ));
+    }
+    if target.exists() && (!target.is_dir() || std::fs::read_dir(&target)?.next().is_some()) {
+        return Err(crate::error::anyhow!(
+            "{} already exists; choose a new folder for the project.",
+            target.display()
+        ));
+    }
+
+    let repo = PathBuf::from(&project.repo_path);
+    let worktree = worktree.filter(|dir| dir.join(".git").exists());
+    let left_out = match worktree {
+        Some(dir) => commit_chat_work(dir, name)?,
+        None => Vec::new(),
+    };
+    if let Some(dir) = worktree {
+        let head = git::git(Some(dir), &["rev-parse", "HEAD"])?;
+        git::git(Some(&repo), &["merge", "--ff-only", "--quiet", &head]).map_err(|error| {
+            crate::error::anyhow!(
+                "Could not bring the chat's work onto {}: {error}",
+                project.baseline_branch
+            )
+        })?;
+    }
+
+    move_repository(&repo, &target)?;
+    let moved = (|| -> Result<LocalProject> {
+        git::git(Some(&target), &["worktree", "repair"])?;
+        let mut promoted = project.clone();
+        promoted.name = name.to_string();
+        promoted.repo_path = crate::paths::canonicalize(&target)?
+            .to_string_lossy()
+            .into_owned();
+        store.update_local_project(&promoted)?;
+        Ok(promoted)
+    })();
+    let mut promoted = match moved {
+        Ok(promoted) => promoted,
+        Err(error) => {
+            let restored = move_repository(&target, &repo)
+                .and_then(|()| git::git(Some(&repo), &["worktree", "repair"]).map(drop));
+            return Err(match restored {
+                Ok(()) => crate::error::anyhow!(
+                    "Could not move the project to {}: {error}",
+                    target.display()
+                ),
+                Err(restore) => crate::error::anyhow!(
+                    "Could not move the project to {}: {error}. Moving it back also failed: {restore}",
+                    target.display()
+                ),
+            });
+        }
+    };
+
+    // The artifacts folder follows the name; a failed rename keeps the old one.
+    let slug = unique_project_slug(store, &slugify(name))?;
+    let artifacts = super::files::files_dir(project);
+    let renamed = super::files::files_root().join(&slug);
+    if !artifacts.exists() || std::fs::rename(&artifacts, &renamed).is_ok() {
+        let previous = std::mem::replace(&mut promoted.slug, slug);
+        if let Err(error) = store.update_local_project(&promoted) {
+            let _ = std::fs::rename(&renamed, &artifacts);
+            promoted.slug = previous;
+            eprintln!(
+                "orx: kept the artifacts folder of {}: {error}",
+                promoted.name
+            );
+        }
+    }
+    let promoted = store.get_local_project(&project.id)?.unwrap_or(promoted);
+    Ok(Promotion {
+        project: promoted,
+        left_out,
+    })
+}
+
+/// Commit what the chat left uncommitted, so the new project's folder holds it.
+fn commit_chat_work(worktree: &Path, name: &str) -> Result<Vec<String>> {
+    git::git(Some(worktree), &["add", "--all"])?;
+    let added = git::git(
+        Some(worktree),
+        &["diff", "--cached", "--name-only", "--diff-filter=A", "-z"],
+    )?;
+    let mut left_out = Vec::new();
+    for file in added.split('\0').filter(|file| !file.is_empty()) {
+        let size = std::fs::symlink_metadata(worktree.join(file)).map_or(0, |meta| meta.len());
+        if size >= git::INITIAL_SNAPSHOT_MAX_FILE_BYTES {
+            git::git(Some(worktree), &["reset", "--quiet", "--", file])?;
+            left_out.push(file.to_string());
+        }
+    }
+    if git::git(Some(worktree), &["diff", "--cached", "--name-only"])?.is_empty() {
+        return Ok(left_out);
+    }
+    let (user, email, _, _) = git::identity(worktree);
+    let mut args = vec!["-c", "commit.gpgSign=false"];
+    if user.is_none() || email.is_none() {
+        args.extend([
+            "-c",
+            "user.name=OpenResearch",
+            "-c",
+            "user.email=local@openresearch.sh",
+        ]);
+    }
+    let message = format!("Start {name}");
+    args.extend(["commit", "--no-verify", "--quiet", "-m", &message]);
+    git::git(Some(worktree), &args)?;
+    Ok(left_out)
+}
+
+fn move_repository(from: &Path, to: &Path) -> Result<()> {
+    if let Some(parent) = to.parent() {
+        crate::paths::create_dir_all(parent)?;
+    }
+    // An empty folder the user picked is replaced, which `rename` refuses on Windows.
+    if to.is_dir() {
+        std::fs::remove_dir(to)?;
+    }
+    match std::fs::rename(from, to) {
+        Ok(()) => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {}
+        Err(error) => {
+            return Err(crate::error::anyhow!(
+                "Could not move {} to {}: {error}",
+                from.display(),
+                to.display()
+            ))
+        }
+    }
+    let parent = to.parent().unwrap_or(to);
+    let temporary = parent.join(format!(".orx-copy-{}", uuid::Uuid::new_v4()));
+    if let Err(error) = super::storage::copy_verified(from, &temporary) {
+        let _ = std::fs::remove_dir_all(&temporary);
+        return Err(crate::error::anyhow!(
+            "Could not copy {} to {}: {error}",
+            from.display(),
+            to.display()
+        ));
+    }
+    std::fs::rename(&temporary, to)?;
+    std::fs::remove_dir_all(from)?;
+    Ok(())
+}
+
 #[derive(Default)]
 pub struct CreateProjectOptions {
     pub create_folder: bool,
@@ -1170,6 +1381,118 @@ mod tests {
             git_output(&project_path, &["ls-tree", "-r", "--name-only", "HEAD"]),
             ".gitignore\nREADME.md"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_new_chat_without_a_project_reuses_an_unused_scratch_project() {
+        let root = root();
+        let store = Store::open_at(root.join("data")).unwrap();
+
+        let first = scratch_project(&store).unwrap();
+        assert!(first.is_scratch());
+        assert_eq!(scratch_project(&store).unwrap().id, first.id);
+
+        let _ = std::fs::remove_dir_all(&first.repo_path);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn creating_a_project_moves_the_chat_work_to_the_chosen_folder() {
+        let root = root();
+        let store = Store::open_at(root.join("data")).unwrap();
+        let scratch = scratch_project(&store).unwrap();
+        let worktree = root.join("worktree");
+        run_git(
+            Path::new(&scratch.repo_path),
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                worktree.to_str().unwrap(),
+                "main",
+            ],
+        );
+        std::fs::write(worktree.join("fib.py"), "print(1)\n").unwrap();
+        sparse_file(
+            &worktree.join("weights.bin"),
+            git::INITIAL_SNAPSHOT_MAX_FILE_BYTES,
+        );
+        let artifacts = crate::local::files::files_dir(&scratch);
+        std::fs::create_dir_all(&artifacts).unwrap();
+        std::fs::write(artifacts.join("report.md"), "# report\n").unwrap();
+
+        let target = root.join("projects").join("fib");
+        let promotion = promote_scratch_project(
+            &store,
+            &scratch,
+            Some(&worktree),
+            "Fibonacci sandbox",
+            target.to_str().unwrap(),
+        )
+        .unwrap();
+
+        let project = promotion.project;
+        assert!(!project.is_scratch());
+        assert_eq!(project.id, scratch.id);
+        assert_eq!(project.name, "Fibonacci sandbox");
+        assert_eq!(project.slug, "fibonacci-sandbox");
+        assert_eq!(
+            Path::new(&project.repo_path),
+            crate::paths::canonicalize(&target).unwrap()
+        );
+        assert!(!Path::new(&scratch.repo_path).exists());
+        // The folder holds the chat's work, committed on the baseline.
+        assert_eq!(
+            std::fs::read_to_string(target.join("fib.py")).unwrap(),
+            "print(1)\n"
+        );
+        assert_eq!(
+            git_output(&target, &["log", "-1", "--format=%s"]),
+            "Start Fibonacci sandbox"
+        );
+        assert_eq!(promotion.left_out, vec!["weights.bin".to_string()]);
+        assert!(!target.join("weights.bin").exists());
+        // The chat keeps working in its worktree, now linked to the moved repository.
+        assert!(git_output(&worktree, &["status", "--porcelain"]).contains("weights.bin"));
+        assert_eq!(
+            git_output(&worktree, &["rev-parse", "HEAD"]),
+            git_output(&target, &["rev-parse", "HEAD"])
+        );
+        // Artifacts follow the new name.
+        assert!(crate::local::files::files_dir(&project)
+            .join("report.md")
+            .exists());
+
+        let again = promote_scratch_project(&store, &project, None, "Other", "/nowhere");
+        assert!(again.err().unwrap().to_string().contains("already in"));
+        let _ = std::fs::remove_dir_all(crate::local::files::files_dir(&project));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn creating_a_project_refuses_a_folder_with_files() {
+        let root = root();
+        let store = Store::open_at(root.join("data")).unwrap();
+        let scratch = scratch_project(&store).unwrap();
+        let occupied = root.join("occupied");
+        std::fs::create_dir_all(&occupied).unwrap();
+        std::fs::write(occupied.join("notes.txt"), "mine").unwrap();
+
+        let error =
+            promote_scratch_project(&store, &scratch, None, "Mine", occupied.to_str().unwrap())
+                .err()
+                .unwrap()
+                .to_string();
+
+        assert!(error.contains("choose a new folder"), "{error}");
+        assert!(Path::new(&scratch.repo_path).exists());
+        assert!(store
+            .get_local_project(&scratch.id)
+            .unwrap()
+            .unwrap()
+            .is_scratch());
+        let _ = std::fs::remove_dir_all(&scratch.repo_path);
         let _ = std::fs::remove_dir_all(root);
     }
 }

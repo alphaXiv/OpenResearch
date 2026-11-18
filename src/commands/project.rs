@@ -77,6 +77,7 @@ pub async fn run(args: crate::ProjectArgs) -> Result<()> {
             print_skipped(&manifest.skipped);
             Ok(())
         }
+        ProjectCommand::Create { name, path } => propose(&name, path.as_deref()),
         ProjectCommand::Unpublish { project_id } => {
             let store = crate::store::Store::open()?;
             let project = crate::local::resolve::resolve_project(&store, &project_id)?;
@@ -155,4 +156,53 @@ fn print_skipped(skipped: &[String]) {
             crate::store::human_bytes(share::MAX_FILE_BYTES)
         );
     }
+}
+
+/// Proposes a project for the calling chat; the user creates it from the card
+/// the dashboard draws for this command.
+fn propose(name: &str, path: Option<&str>) -> Result<()> {
+    let session_id = std::env::var(crate::local::chat::CHAT_SESSION_ENV)
+        .ok()
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| {
+            anyhow!("orx project create makes a chat without a project into one; run it from that chat.")
+        })?;
+    let store = crate::store::Store::open_for_reading()?;
+    let session = store
+        .get_chat_session(&session_id)?
+        .ok_or_else(|| anyhow!("Chat {session_id} was not found."))?;
+    let project = store
+        .get_local_project(&session.project_id)?
+        .ok_or_else(|| anyhow!("Project {} was not found.", session.project_id))?;
+    if !project.is_scratch() {
+        return Err(anyhow!(
+            "This chat is already in the project {} at {}; orx project create only works in a chat without a project.",
+            project.name,
+            project.repo_path
+        ));
+    }
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(anyhow!("Give the project a name with --name."));
+    }
+    let place = match path {
+        Some(path) => {
+            let target = expand_path(path)?;
+            if target.exists() && (!target.is_dir() || std::fs::read_dir(&target)?.next().is_some())
+            {
+                return Err(anyhow!(
+                    "{} already exists and is not an empty folder; pass another --path.",
+                    target.display()
+                ));
+            }
+            format!("at {}", target.display())
+        }
+        None => "in ~/OpenResearch".to_string(),
+    };
+    println!(
+        "Proposed the project \"{name}\" {place}. The user reviews the name and folder in this chat and creates it; \
+         then this chat's work is committed and moved there, and the chat continues in that project. \
+         Until then the chat has no project, so tell the user it is ready for their review."
+    );
+    Ok(())
 }

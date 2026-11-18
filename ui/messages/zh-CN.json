@@ -2171,5 +2171,17 @@
   "settings_env_set_in_project": "已在此项目中设置",
   "settings_env_project_heading": "仅限 {project}",
   "settings_env_project_note": "只有此项目的智能体和运行会获得这些变量。它们会替代上方的同名变量。",
-  "settings_env_project_empty": "此项目还没有变量。可以在这里添加，也可以由智能体向你索取。"
+  "settings_env_project_empty": "此项目还没有变量。可以在这里添加，也可以由智能体向你索取。",
+  "no_project": "无项目",
+  "no_project_new_chat": "不属于项目的新对话",
+  "create_project_button": "创建项目",
+  "create_project_title": "创建项目",
+  "create_project_description": "此对话的文件会移到你选择的文件夹，对话将在新项目中继续。",
+  "create_project_confirm": "创建项目",
+  "create_project_folder_has_files": "此文件夹已有文件。请选择新的位置。",
+  "create_project_left_out": "这些文件太大，无法提交，只保留在对话的副本中：{files}",
+  "create_project_created": "已创建",
+  "create_project_review": "查看…",
+  "activity_proposed_project": "建议创建项目 {name}",
+  "chat_delete_scratch_session_confirm": "删除“{title}”？\n\n此对话不属于任何项目，其聊天记录、侧边聊天和文件都将被永久删除。"
 }

@@ -2171,5 +2171,17 @@
   "settings_env_set_in_project": "در این پروژه تنظیم شده",
   "settings_env_project_heading": "فقط در {project}",
   "settings_env_project_note": "فقط عامل‌ها و اجراهای این پروژه این‌ها را می‌گیرند. جای متغیر هم‌نام بالا را می‌گیرند.",
-  "settings_env_project_empty": "این پروژه هنوز متغیری ندارد. یکی را اینجا اضافه کنید یا عاملی آن را از شما بخواهد."
+  "settings_env_project_empty": "این پروژه هنوز متغیری ندارد. یکی را اینجا اضافه کنید یا عاملی آن را از شما بخواهد.",
+  "no_project": "بدون پروژه",
+  "no_project_new_chat": "گفتگوی جدید بدون پروژه",
+  "create_project_button": "ساخت پروژه",
+  "create_project_title": "ساخت یک پروژه",
+  "create_project_description": "فایل‌های این گفتگو به پوشه‌ای که انتخاب می‌کنید منتقل می‌شوند و گفتگو در پروژهٔ جدید ادامه می‌یابد.",
+  "create_project_confirm": "ساخت پروژه",
+  "create_project_folder_has_files": "این پوشه از قبل فایل دارد. مکان دیگری انتخاب کنید.",
+  "create_project_left_out": "این فایل‌ها برای ثبت بیش از حد بزرگ‌اند و فقط در نسخهٔ گفتگو می‌مانند: {files}",
+  "create_project_created": "ساخته شد",
+  "create_project_review": "بازبینی…",
+  "activity_proposed_project": "پروژهٔ {name} را پیشنهاد داد",
+  "chat_delete_scratch_session_confirm": "«{title}» حذف شود؟\n\nاین گفتگو پروژه ندارد، پس متن گفتگو، گفتگوهای جانبی و فایل‌هایش برای همیشه حذف خواهند شد."
 }

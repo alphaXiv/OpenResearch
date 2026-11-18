@@ -2171,5 +2171,17 @@
   "settings_env_set_in_project": "Definida en este proyecto",
   "settings_env_project_heading": "Solo en {project}",
   "settings_env_project_note": "Solo los agentes y las ejecuciones de este proyecto las reciben. Sustituyen a la variable del mismo nombre de arriba.",
-  "settings_env_project_empty": "Este proyecto aún no tiene variables. Añade una aquí, o un agente puede pedírtela."
+  "settings_env_project_empty": "Este proyecto aún no tiene variables. Añade una aquí, o un agente puede pedírtela.",
+  "no_project": "Sin proyecto",
+  "no_project_new_chat": "Nuevo chat sin proyecto",
+  "create_project_button": "Crear proyecto",
+  "create_project_title": "Crear un proyecto",
+  "create_project_description": "Los archivos de este chat se mueven a la carpeta que elijas y el chat continúa en el nuevo proyecto.",
+  "create_project_confirm": "Crear proyecto",
+  "create_project_folder_has_files": "Esta carpeta ya tiene archivos. Elige otra ubicación.",
+  "create_project_left_out": "Estos archivos son demasiado grandes para confirmarlos y quedan solo en la copia del chat: {files}",
+  "create_project_created": "Creado",
+  "create_project_review": "Revisar…",
+  "activity_proposed_project": "Propuso el proyecto {name}",
+  "chat_delete_scratch_session_confirm": "¿Eliminar «{title}»?\n\nEste chat no tiene proyecto, así que su transcripción, sus chats secundarios y sus archivos se eliminarán permanentemente."
 }
