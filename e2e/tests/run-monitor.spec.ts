@@ -693,7 +693,8 @@ for (let step = 1; step <= ${total}; step++) {
     await page.clock.setFixedTime(Date.now() + 30_000)
     await page.setViewportSize({ width: 420, height: 860 })
     await expect(banner).toContainText('No progress for')
-    await expect(banner).toContainText('Depth … at 2e15 FLOPs')
+    // Whether the runs' names fit beside the count at 420 px depends on the platform's fonts.
+    await expect(banner).toContainText(/Depth (…|4, 6, 8) at 2e15 FLOPs/)
     for (const { title, label } of runs.slice(0, 3)) {
       const clipped = await named(title).evaluate((trigger, short) => {
         const label = Array.from(trigger.children).find((element) => element.textContent.replace(/[⁦-⁩]/g, '').trim() === `${short} ·`)
