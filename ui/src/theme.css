@@ -154,8 +154,14 @@
   zoom: calc(1 / var(--desktop-page-zoom, 1));
 }
 
+/* An emoji in a tile, sized to the tile (its container) since the glyph runs wider than its font size. */
+@utility text-tile-emoji {
+  font-size: 54cqi;
+}
+
+/* Both sides hold the sidebar toggle and New chat, so the title stays centred. */
 @utility grid-cols-titlebar-chat {
-  grid-template-columns: var(--spacing-titlebar-sidebar-controls) minmax(0, 1fr) var(--spacing-titlebar-sidebar-controls);
+  grid-template-columns: calc(var(--spacing-titlebar-sidebar-controls) + 2.25rem) minmax(0, 1fr) calc(var(--spacing-titlebar-sidebar-controls) + 2.25rem);
 }
 
 :root {

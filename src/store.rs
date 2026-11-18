@@ -2212,6 +2212,18 @@ impl Store {
         Ok(run)
     }
 
+    /// The newest run a chat launched, so its sidebar card can still say how it ended.
+    pub fn latest_chat_run(&self, session_id: &str) -> Result<Option<StoredRun>> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!("{SELECT_RUN} WHERE chat_session_id = ?1 ORDER BY created_at DESC, id DESC LIMIT 1"),
+                params![session_id],
+                row_to_run,
+            )
+            .optional()?)
+    }
+
     /// Newest first (creation time).
     pub fn list_runs(&self, limit: usize) -> Result<Vec<StoredRun>> {
         let mut stmt = self
@@ -4329,6 +4341,18 @@ impl Store {
             row_to_chat_session,
         )?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// How many chats the sidebar's archive filter holds, however far down its paging they run.
+    pub fn count_sidebar_chat_sessions(&self, archived: Option<bool>) -> Result<i64> {
+        Ok(self.conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM chat_sessions
+                 WHERE {TOP_LEVEL_CHATS} AND (?1 IS NULL OR archived = ?1)"
+            ),
+            params![archived],
+            |row| row.get(0),
+        )?)
     }
 
     /// Top-level chats with an experiment run in flight, wherever they fall in the sidebar's paging.
@@ -14608,6 +14632,31 @@ pub(crate) mod tests {
             store.list_sidebar_chat_sessions(None, None).unwrap()[0].id,
             "chat_064"
         );
+        assert_eq!(store.count_sidebar_chat_sessions(Some(false)).unwrap(), 60);
+        assert_eq!(store.count_sidebar_chat_sessions(Some(true)).unwrap(), 5);
+        assert_eq!(store.count_sidebar_chat_sessions(None).unwrap(), 65);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn latest_chat_run_is_the_newest_the_chat_launched() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-store-latest-run-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat"))
+            .unwrap();
+        for (id, at, chat) in [
+            ("old", 1, Some("chat")),
+            ("new", 2, Some("chat")),
+            ("other", 3, None),
+        ] {
+            let mut run = run_fixture(id, "done", chat);
+            run.created_at = at;
+            store.upsert_run(&run).unwrap();
+        }
+        assert_eq!(store.latest_chat_run("chat").unwrap().unwrap().id, "new");
+        assert!(store.latest_chat_run("missing").unwrap().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

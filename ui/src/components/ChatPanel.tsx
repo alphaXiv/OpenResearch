@@ -41,7 +41,7 @@ import { DelegateCard } from "./DelegateCard";
 import { EnvRequestCard } from "./EnvRequestCard";
 import { delegateAncestors, delegateModelLabel, delegateStatus, delegatesOf, type DelegateStatus } from "../delegates";
 import { taskLocation } from "../workspaceState";
-import { DONE_PREVIEW_HEIGHT, fitSidebarRows, sidebarGroup, sidebarRowHeight, type SidebarRow } from "../sidebarLayout";
+import { DONE_PREVIEW_HEIGHT, fitSidebarRows, sidebarGroup, sidebarRowHeight, type RailSection, type SidebarRow } from "../sidebarLayout";
 import { useVirtualizer, defaultRangeExtractor, elementScroll, measureElement as measureVirtualElement, type Range as VirtualRange } from "@tanstack/react-virtual";
 import { markLiveUpdate } from "../queries/live";
 import {
@@ -125,7 +125,6 @@ import {
   NotebookText,
   Paperclip,
   Pencil,
-  Plus,
   ScrollText,
   Search,
   SlidersHorizontal,
@@ -138,7 +137,6 @@ import {
 } from "lucide-react";
 
 import { BrandMark } from "./Wordmark";
-import { HarnessLogo, ModelMark } from "./HarnessLogo";
 import { chatStatus, chatStatusWorking, type ChatStatus } from "../chatStatus";
 import {
   type ChatSessionPatch,
@@ -168,6 +166,7 @@ import {
   type OrxSource,
   type Autonomy,
   type ChatSession,
+  type SidebarChatCursor,
   type CitedMessage,
   type ChatSearchHit,
   type Harness,
@@ -244,7 +243,9 @@ import { PlanStrip } from "./PlanStrip";
 import { useComposerFocus } from "./useComposerFocus";
 import { RunBanner } from "./run/RunBanner";
 import { BackgroundTaskBanner } from "./BackgroundTaskBanner";
-import { sessionRunMark } from "../runMonitor/model";
+import { cardSentence, runModel, sessionLeadRun, sessionRunMark } from "../runMonitor/model";
+import { Mark } from "./run/Mark";
+import { Sentence } from "./run/Sentence";
 import type { ShownRun } from "../runMonitor/types";
 import { SettingsHeader, harnessSetupPath, type SettingsTab } from "./SettingsPage";
 import { SkillMenu } from "./SkillMenu";
@@ -5267,8 +5268,12 @@ const Transcript = memo(function Transcript({
 
 type SessionFilter = "active" | "archived" | "all";
 
-const SIDEBAR_GROUPINGS = ["projects", "list", "inbox"] as const;
+const SIDEBAR_GROUPINGS = ["projects", "inbox"] as const;
 type SidebarGrouping = (typeof SIDEBAR_GROUPINGS)[number];
+
+const WORKING_PLACES = ["above", "below", "bottom"] as const;
+/** Where the one-list rail puts Working: before the inbox, right after it, or held at the rail's foot with Done. */
+type WorkingPlace = (typeof WORKING_PLACES)[number];
 
 /** Whether the rail's current filter shows a session in this archived state. */
 const matchesFilter = (filter: SessionFilter, archived: boolean) =>
@@ -5281,26 +5286,30 @@ const SESSION_FILTERS: { id: SessionFilter; label: () => string; railLabel: () =
   { id: "all", label: m.chat_panel_all, railLabel: m.chat_all_sessions },
 ];
 
-/** Filter control beside the "Recents" label: Active (default) / Archived / All. */
-function SessionFilterMenu({
+/** The rail's view options: grouping, then the project filter or where Working sits. */
+function SidebarViewMenu({
   value,
   onChange,
   grouping,
   onGroupingChange,
+  workingPlace,
+  onWorkingPlaceChange,
 }: {
   value: SessionFilter;
   onChange: (next: SessionFilter) => void;
   grouping: SidebarGrouping;
   onGroupingChange: (next: SidebarGrouping) => void;
+  workingPlace: WorkingPlace;
+  onWorkingPlaceChange: (next: WorkingPlace) => void;
 }) {
   const { open, setOpen, ref } = usePopover();
   return (
     <div className="rail-filter relative inline-flex" ref={ref}>
-      <Tooltip interactive content={m.chat_panel_filter_sessions()}>
+      <Tooltip interactive content={m.sidebar_customize_view()}>
         <IconButton size="small"
           className="rail-filter-btn text-subtext"
-          active={grouping !== "inbox" && value !== "active"}
-          aria-label={m.chat_panel_filter_sessions()}
+          active={grouping === "projects" && value !== "active"}
+          aria-label={m.sidebar_customize_view()}
           onClick={() => setOpen((v) => !v)}
         >
           <SlidersHorizontal size={16} className="text-subtext" />
@@ -5311,12 +5320,25 @@ function SessionFilterMenu({
           <div className={MENU_LABEL}>{m.sidebar_group_by()}</div>
           {SIDEBAR_GROUPINGS.map((mode) => (
             <MenuItem key={mode} onClick={() => { onGroupingChange(mode); setOpen(false); }}>
-              <span>{mode === "projects" ? m.projects_home_projects() : mode === "list" ? m.sidebar_one_list() : m.sidebar_inbox()}</span>
+              <span>{mode === "projects" ? m.projects_home_projects() : m.sidebar_one_list()}</span>
               {grouping === mode && <Check size={14} />}
             </MenuItem>
           ))}
-          {grouping !== "inbox" && <>
-            <div className={MENU_SEPARATOR} />
+          <div className={MENU_SEPARATOR} />
+          {grouping === "inbox" ? <>
+            <div className={MENU_LABEL}>{m.sidebar_working_section()}</div>
+            {WORKING_PLACES.map((place) => {
+              const item = (
+                <MenuItem key={place} onClick={() => { onWorkingPlaceChange(place); setOpen(false); }}>
+                  <span>{place === "above" ? m.sidebar_working_above() : place === "below" ? m.sidebar_working_below() : m.sidebar_working_bottom()}</span>
+                  {workingPlace === place && <Check size={14} />}
+                </MenuItem>
+              );
+              return place === "bottom"
+                ? <Tooltip key={place} interactive side="end" content={m.sidebar_working_bottom_hint()} className="flex w-full rounded-sm [&>*]:flex-1">{item}</Tooltip>
+                : item;
+            })}
+          </> : <>
             <div className={MENU_LABEL}>{m.sidebar_filter()}</div>
             {SESSION_FILTERS.map((f) => (
               <MenuItem
@@ -5411,11 +5433,13 @@ function SessionRow({
   busy,
   waiting,
   runs,
+  leadRun = null,
   variant,
   revealTitle,
   onOpen,
   onRename,
   onSetArchived,
+  onMarkBelowDone,
   onMoveToProject,
   onDelete,
   onProjectSettings,
@@ -5435,6 +5459,8 @@ function SessionRow({
   waiting: boolean;
   /** The chat's runs above its composer: live, flagged, or ended and not yet answered. */
   runs: readonly ShownRun[];
+  /** The run an inbox card gives its middle line to. */
+  leadRun?: ShownRun | null;
   /** `inbox`: title and agent, then project and what the chat is doing. `done`: one line, restored from its hover button. */
   variant: "list" | "inbox" | "done";
   /** Nonce set while this row's freshly auto-generated title should play its
@@ -5444,6 +5470,8 @@ function SessionRow({
   onOpen: () => void;
   onRename: (title: string) => void;
   onSetArchived: (archived: boolean) => void;
+  /** Marks done the inbox chats listed below this one; only an inbox row in the inbox offers it. */
+  onMarkBelowDone?: () => void;
   /** Makes the chat a project of its own; labelled for a chat without one. */
   onMoveToProject?: { label: string; run: () => void };
   onDelete: () => void;
@@ -5462,6 +5490,7 @@ function SessionRow({
   const open = menuAt !== null;
   const runMark = sessionRunMark(runs, session.id);
   const runFlag = runMark === "waiting" || runMark === "flagged";
+  const lead = inbox && leadRun && runModel({ item: leadRun, monitor: null, shown: false, agent: m.chat_the_agent(), now: Date.now(), nextRetryMs: null });
   const title = session.title?.trim() || m.chat_untitled();
   const attention = runMark === "waiting" ? m.chat_run_needs_attention() : runMark === "flagged" ? m.chat_run_flagged() : waiting ? m.chat_panel_waiting_for_your_input() : null;
   const sessionDescription = `${title} · ${harnessLabel(session.harness, session.harnessName)}${modelName ? ` · ${modelName}` : ""}${attention ? ` · ${attention}` : ""}`;
@@ -5615,7 +5644,7 @@ function SessionRow({
         if (!ref.current?.contains(event.relatedTarget) && !cardRef.current?.contains(event.relatedTarget)) dismissed.current = false;
         scheduleClose();
       }}
-      className={`session-row relative flex items-center gap-2 w-full ${inbox ? "inbox h-12.5" : variant === "done" ? "h-8" : "h-8.5"} text-start px-2.25 rounded-md text-sm text-text cursor-pointer select-none [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium [&_.session-dot:empty]:hidden [&_.session-dot]:w-4 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title[data-overflow]]:[mask-image:linear-gradient(to_right,black_calc(100%_-_16px),transparent)] [&_.session-title]:whitespace-nowrap [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:size-6 [&_.session-menu-btn]:-mx-1 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-visible_.session-menu-btn]:inline-flex [&_.session-menu-btn:focus-within]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&.card-open_.session-menu-btn]:inline-flex [&:hover_.session-dot]:hidden [&:focus-visible_.session-dot]:hidden [&:has(.session-menu-btn:focus-within)_.session-dot]:hidden [&.menu-open_.session-dot]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-accent-teal [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-accent-blue [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:absolute [&_.session-title-input]:inset-0 [&_.session-title-input]:size-full [&_.session-title-input]:py-0 [&_.session-title-input]:ps-0 [&_.session-title-input]:pe-[9px] [&_.session-title-input]:indent-[9px] [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-focus-border [&_.session-title-input]:rounded-md [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-dot]:hidden [&_.session-done-btn]:hidden [&:hover_.session-done-btn]:inline-flex [&:focus-visible_.session-done-btn]:inline-flex [&_.session-done-btn:focus-visible]:inline-flex [&_.session-done-btn:focus-within]:inline-flex [&:has(.session-done-btn:focus-within)_.session-logo]:hidden [&.card-open_.session-done-btn]:inline-flex [&:has(.session-done-btn):hover_.session-logo]:hidden [&:has(.session-done-btn):focus-visible_.session-logo]:hidden [&:has(.session-done-btn:focus-visible)_.session-logo]:hidden [&.card-open:has(.session-done-btn)_.session-logo]:hidden [&.editing_.session-done-btn]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""} ${anchor ? "card-open" : ""}  ${
+      className={`session-row relative flex items-center gap-2 w-full ${inbox ? `inbox ${lead ? "h-17.5" : "h-12.5"}` : variant === "done" ? "h-8" : "h-8.5"} text-start px-2.25 rounded-md text-sm text-text cursor-pointer select-none [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium [&_.session-dot:empty]:hidden [&_.session-dot]:w-4 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title[data-overflow]]:[mask-image:linear-gradient(to_right,black_calc(100%_-_16px),transparent)] [&_.session-title]:whitespace-nowrap [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:size-6 [&_.session-menu-btn]:-mx-1 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-visible_.session-menu-btn]:inline-flex [&_.session-menu-btn:focus-within]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&.card-open_.session-menu-btn]:inline-flex [&:hover_.session-dot]:hidden [&:focus-visible_.session-dot]:hidden [&:has(.session-menu-btn:focus-within)_.session-dot]:hidden [&.menu-open_.session-dot]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-accent-teal [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-accent-blue [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:absolute [&_.session-title-input]:inset-0 [&_.session-title-input]:size-full [&_.session-title-input]:py-0 [&_.session-title-input]:ps-0 [&_.session-title-input]:pe-[9px] [&_.session-title-input]:indent-[9px] [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-focus-border [&_.session-title-input]:rounded-md [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-dot]:hidden [&_.session-done-btn]:hidden [&:hover_.session-done-btn]:inline-flex [&:focus-visible_.session-done-btn]:inline-flex [&_.session-done-btn:focus-visible]:inline-flex [&_.session-done-btn:focus-within]:inline-flex [&:has(.session-done-btn:focus-within)_.session-logo]:hidden [&.card-open_.session-done-btn]:inline-flex [&:has(.session-done-btn):hover_.session-logo]:hidden [&:has(.session-done-btn):focus-visible_.session-logo]:hidden [&:has(.session-done-btn:focus-visible)_.session-logo]:hidden [&.card-open:has(.session-done-btn)_.session-logo]:hidden [&.editing_.session-done-btn]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""} ${anchor ? "card-open" : ""}  ${
         editing ? "editing" : ""
         }`}
       onContextMenu={(e) => {
@@ -5683,11 +5712,6 @@ function SessionRow({
               </span>
             )}
             {flagMark}
-            <span className="session-logo inline-flex w-4 shrink-0 items-center justify-center">
-              {session.model
-                ? <ModelMark model={{ id: session.model, displayName: modelName ?? undefined }} harness={session.harness} size={14} />
-                : <HarnessLogo harness={session.harness} logo={harnessLogo} size={14} />}
-            </span>
             {!session.archived && !editing && (
               <button
                 className="session-done-btn -my-1 -me-1 h-6 shrink-0 items-center gap-1 rounded-sm px-1.5 text-xs text-subtext hover:bg-panel hover:text-text"
@@ -5703,7 +5727,13 @@ function SessionRow({
               </button>
             )}
           </div>
-          <div className="flex items-center gap-2 text-xs text-subtext">
+          {lead && (
+            <div className={`flex h-4 min-w-0 items-center gap-1.5 text-xs ${lead.tone === "flag" ? "text-ink-amber" : "text-ink-subtext"}`}>
+              {lead.tone !== "flag" && <span className="flex w-4 shrink-0 justify-center"><Mark tone={lead.tone} live={lead.live} label={lead.status} /></span>}
+              <span dir="auto" className="truncate"><Sentence text={cardSentence(lead)} tone={lead.tone} /></span>
+            </div>
+          )}
+          <div className={`${lead ? "mt-0.5" : ""} flex items-center gap-2 text-xs text-subtext`}>
             <span className="flex min-w-0 flex-1 items-center gap-1.5">
               <ProjectIconTile project={project} size="sm" />
               {!project.scratch && <span className="truncate">{projectName}</span>}
@@ -5786,6 +5816,7 @@ function SessionRow({
           onClose={() => setMenuAt(null)}
           onRename={startEditing}
           onSetArchived={() => onSetArchived(!session.archived)}
+          onMarkBelowDone={onMarkBelowDone}
           onMoveToProject={onMoveToProject}
           onProjectSettings={project.scratch ? undefined : onProjectSettings}
           onDelete={onDelete}
@@ -5797,13 +5828,14 @@ function SessionRow({
 }
 
 /** A chat's actions, opened at a point: the cursor, or below the row's kebab. */
-function SessionMenu({ at, label, archiveLabel, onClose, onRename, onSetArchived, onMoveToProject, onProjectSettings, onDelete }: {
+function SessionMenu({ at, label, archiveLabel, onClose, onRename, onSetArchived, onMarkBelowDone, onMoveToProject, onProjectSettings, onDelete }: {
   at: { x: number; y: number };
   label: string;
   archiveLabel: string;
   onClose: () => void;
   onRename: () => void;
   onSetArchived: () => void;
+  onMarkBelowDone?: () => void;
   onMoveToProject?: { label: string; run: () => void };
   /** Absent for a chat without a project, which has no settings of its own. */
   onProjectSettings?: () => void;
@@ -5831,6 +5863,7 @@ function SessionMenu({ at, label, archiveLabel, onClose, onRename, onSetArchived
             >
               <Menu.Item nativeButton render={item} onClick={onRename}>{m.chat_panel_rename()}</Menu.Item>
               <Menu.Item nativeButton render={item} onClick={onSetArchived}>{archiveLabel}</Menu.Item>
+              {onMarkBelowDone && <Menu.Item nativeButton render={item} onClick={onMarkBelowDone}>{m.chat_inbox_mark_below_done()}</Menu.Item>}
               {onMoveToProject && <Menu.Item nativeButton render={item} onClick={onMoveToProject.run}>{onMoveToProject.label}</Menu.Item>}
               {onProjectSettings && <Menu.Item nativeButton render={item} onClick={onProjectSettings}>{m.sidebar_project_settings()}</Menu.Item>}
               <Menu.Separator className="my-1 border-t border-border" />
@@ -5853,11 +5886,14 @@ interface SidebarActions {
   openExperiment: (session: ChatSession, projectId: string, experimentId: string) => void;
   rename: (session: ChatSession, title: string) => void;
   setArchived: (session: ChatSession, archived: boolean, working: boolean) => void;
+  markBelowDone: (session: ChatSession) => void;
   moveToProject: (session: ChatSession, project: Project) => void;
   remove: (session: ChatSession) => void;
 }
 
 const RAIL_MOVE_MS = 380;
+/** Whether a rail layout holds chats yet, rather than only its loading or empty state. */
+const railSettled = (layout: Map<string, { row: SidebarRow }>) => [...layout.values()].some(({ row }) => "session" in row);
 const RAIL_FADE_MS = 180;
 /** Eases in gently, then settles on a long tail. */
 const RAIL_CURVE = [0.47, 0.44, 0, 1] as const;
@@ -5903,10 +5939,13 @@ const SidebarProjectCard = memo(function SidebarProjectCard({
 const SidebarSessionRow = memo(function SidebarSessionRow({
   actions,
   project,
+  markBelowDone,
   ...row
-}: Omit<React.ComponentProps<typeof SessionRow>, "onOpen" | "onOpenExperiment" | "onRename" | "onSetArchived" | "onMoveToProject" | "onDelete" | "onProjectSettings"> & {
+}: Omit<React.ComponentProps<typeof SessionRow>, "onOpen" | "onOpenExperiment" | "onRename" | "onSetArchived" | "onMarkBelowDone" | "onMoveToProject" | "onDelete" | "onProjectSettings"> & {
   actions: React.RefObject<SidebarActions>;
   project: Project;
+  /** Whether the row sits in the inbox section, whose menu can mark the chats below it done. */
+  markBelowDone: boolean;
 }) {
   useLocale();
   const { session } = row;
@@ -5919,6 +5958,7 @@ const SidebarSessionRow = memo(function SidebarSessionRow({
       onOpenExperiment={(projectId, experimentId) => actions.current.openExperiment(session, projectId, experimentId)}
       onRename={(title) => actions.current.rename(session, title)}
       onSetArchived={(archived) => actions.current.setArchived(session, archived, working)}
+      onMarkBelowDone={markBelowDone ? () => actions.current.markBelowDone(session) : undefined}
       onMoveToProject={session.pendingProject ? undefined : {
         label: project.scratch ? m.create_project_menu() : m.create_project_move_menu(),
         run: () => actions.current.moveToProject(session, project),
@@ -6098,6 +6138,7 @@ export function ChatPanel({
     listProjectActivityQuery,
     listChatSessionsQuery,
     listSidebarChatSessionsQuery,
+    readSidebarChatPage,
     listChatShownRunsQuery,
     getHarnessesQuery,
     getUiStateQuery,
@@ -6124,12 +6165,23 @@ export function ChatPanel({
 
   const navigate = useNavigate();
   const createProject = useCreateProject();
-  const { data: sidebarProjects = [] } = useQuery({ ...listProjectsQuery(), enabled: !embedded });
-  const latestProject = sidebarProjects.reduce<Project | undefined>((latest, project) => project.scratch || (latest && project.updatedAt <= latest.updatedAt) ? latest : project, undefined);
+  const { data: sidebarProjects = [], isSuccess: projectsLoaded } = useQuery({ ...listProjectsQuery(), enabled: !embedded });
   const { data: projectActivity = [] } = useQuery({ ...listProjectActivityQuery(), enabled: !embedded });
-  const [sidebarGrouping, setSidebarGrouping] = useState<SidebarGrouping>(() => {
-    try { return SIDEBAR_GROUPINGS.find((mode) => mode === localStorage.getItem("sidebar-grouping")) ?? "projects"; }
-    catch { return "projects"; }
+  // Null until chosen: the inbox for someone new, the project list they knew for someone who used orx before it.
+  const [storedGrouping] = useState<string | null>(() => {
+    try {
+      const stored = localStorage.getItem("sidebar-grouping");
+      // Someone already on the inbox needs no introduction to it.
+      if (stored && stored !== "projects" && !localStorage.getItem("sidebar-inbox-intro")) localStorage.setItem("sidebar-inbox-intro", "seen");
+      return stored;
+    } catch { return "inbox"; }
+  });
+  const [sidebarGrouping, setSidebarGrouping] = useState<SidebarGrouping>(() =>
+    storedGrouping === null ? "projects" : SIDEBAR_GROUPINGS.find((mode) => mode === storedGrouping) ?? "inbox");
+  const [groupingChosen, setGroupingChosen] = useState(storedGrouping !== null);
+  const [workingPlace, setWorkingPlace] = useState<WorkingPlace>(() => {
+    try { return WORKING_PLACES.find((place) => place === localStorage.getItem("sidebar-working-place")) ?? "above"; }
+    catch { return "above"; }
   });
   const [collapsedInbox, setCollapsedInbox] = useState<string[]>(() => {
     try {
@@ -6199,9 +6251,18 @@ export function ChatPanel({
     })),
   });
   const flatSessions = useInfiniteQuery({
-    ...listSidebarChatSessionsQuery(sidebarGrouping === "inbox" ? "active" : sessionFilter),
+    ...listSidebarChatSessionsQuery("active"),
     enabled: !embedded && sidebarGrouping !== "projects",
   });
+  useEffect(() => {
+    if (groupingChosen || !projectsLoaded) return;
+    // A project older than a day was made before this choice existed; onboarding's, and its demo seeded hours back, are newer.
+    const returning = sidebarProjects.some((project) => project.createdAt < Date.now() - 24 * 60 * 60 * 1000);
+    const grouping = returning ? "projects" : "inbox";
+    try { localStorage.setItem("sidebar-grouping", grouping); } catch {}
+    setSidebarGrouping(grouping);
+    setGroupingChosen(true);
+  }, [groupingChosen, projectsLoaded, sidebarProjects]);
   const doneExpanded = sidebarGrouping === "inbox" && !collapsedInbox.includes("done");
   // Done is a place to look something up, not a view to stay in: opening a chat or clicking away closes it.
   const closeDone = useCallback(() => setCollapsedInbox((collapsed) => {
@@ -6221,7 +6282,8 @@ export function ChatPanel({
   }, [doneExpanded, closeDone]);
   const doneSessions = useInfiniteQuery({
     ...listSidebarChatSessionsQuery("archived"),
-    enabled: !embedded && doneExpanded,
+    // Read while Done is folded too: hovering its header shows the count.
+    enabled: !embedded && sidebarGrouping === "inbox",
   });
   const sessionsOptions = useMemo(() => listChatSessionsQuery(projectId), [projectId]);
   const { data: sessions = EMPTY_SESSIONS, isSuccess: sessionsLoaded } = useQuery(sessionsOptions);
@@ -6355,6 +6417,14 @@ export function ChatPanel({
   const queuedPlanOverrideSeen = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const shownRuns = useQuery(listChatShownRunsQuery()).data?.runs ?? EMPTY_RUNS;
+  // A run that leaves the shown list ended and was answered; the sidebar's own record of each chat's last run catches up.
+  const shownRunIds = useRef(new Set<string>());
+  useEffect(() => {
+    const ids = new Set(shownRuns.map((item) => `${item.sessionId} ${item.run.id}`));
+    const left = [...shownRunIds.current].some((id) => !ids.has(id));
+    shownRunIds.current = ids;
+    if (left) void queryClient.invalidateQueries({ queryKey: listSidebarChatSessionsQuery("active").queryKey });
+  }, [shownRuns]);
   const runsBySession = useMemo(() => {
     const bySession = new Map<string, ShownRun[]>();
     for (const item of shownRuns) bySession.set(item.sessionId, [...bySession.get(item.sessionId) ?? [], item]);
@@ -8389,6 +8459,54 @@ export function ChatPanel({
     const error = queries.some((query) => query.error);
     if (!visible.length) sidebarRows.push({ kind: "status", project, pending, error, retry: () => { for (const query of queries) void query.refetch(); } });
   });
+  const atWork = ({ project, session }: { project: Project; session: ChatSession }) =>
+    chatStatusWorking(chatStatus(session, sessionBusy(project, session), sessionWaiting(session), runsBySession.get(session.id) ?? EMPTY_RUNS));
+  /** Every open chat not at work, read whole from the server in the inbox's order; throws when a page can't be read. */
+  const inboxChats = async () => {
+    const read: ChatSession[] = [];
+    let next: SidebarChatCursor | null = null;
+    do {
+      const page = await readSidebarChatPage("active", next, new AbortController().signal);
+      read.push(...page.sessions);
+      next = page.next;
+    } while (next);
+    const fetched = new Set(read.map((session) => session.id));
+    return listedChats(read, false).filter((chat) => fetched.has(chat.session.id) && !atWork(chat)).map(({ session }) => session);
+  };
+  const markBelowDone = async (session: ChatSession) => {
+    const chats = await inboxChats().catch((error: unknown) => {
+      showAlert(m.chat_inbox_mark_below_failed({ error: ltr(error instanceof Error ? error.message : String(error)) }), "error");
+      return null;
+    });
+    const at = chats?.findIndex((chat) => chat.id === session.id) ?? -1;
+    if (at >= 0) chats!.slice(at + 1).forEach((chat) => setArchived(chat, true, false));
+  };
+  const cleanupScanning = useRef(false);
+  // The first time the inbox shows, chats left alone for days can go straight to Done.
+  const offerInboxCleanup = async () => {
+    if (cleanupScanning.current) return;
+    try {
+      if (localStorage.getItem("sidebar-inbox-intro") === "seen") return;
+      // Pending until a scan succeeds, so a failed one is tried again on the next switch.
+      localStorage.setItem("sidebar-inbox-intro", "pending");
+    } catch { return; }
+    const cutoff = Date.now() - 3 * 24 * 60 * 60 * 1000;
+    // Best-effort: a scan that fails asks again on the next switch.
+    cleanupScanning.current = true;
+    const stale = (await inboxChats().catch(() => null).finally(() => { cleanupScanning.current = false; }))?.filter((chat) => chat.updatedAt < cutoff);
+    if (!stale) return;
+    try { localStorage.setItem("sidebar-inbox-intro", "seen"); } catch {}
+    if (!stale.length) return;
+    const count = fmtNumber(stale.length);
+    showConfirmDialog({
+      title: m.sidebar_inbox_intro_title(),
+      description: pluralMessage(stale.length, m.sidebar_inbox_intro_body_one, m.sidebar_inbox_intro_body_other)({ count }),
+      confirmLabel: m.sidebar_inbox_intro_confirm({ count }),
+      cancelLabel: m.sidebar_inbox_intro_keep(),
+      onCancel: "close",
+      onConfirm: () => stale.forEach((chat) => setArchived(chat, true, false)),
+    });
+  };
   const listedChats = (listed: readonly ChatSession[], archived: boolean | null) => {
     const byId = new Map(listed.map((session) => [session.id, session]));
     const selected = sessions.find((session) => session.id === activeId);
@@ -8405,28 +8523,40 @@ export function ChatPanel({
         retry: () => { void (query.isFetchNextPageError ? query.fetchNextPage() : query.refetch()); } });
     }
   };
-  // Rows past this index belong to Working and Done; paging the open chats only needs to keep up with the rows above it.
+  // Rows before this index hold at the rail's top while it is short; the rest, at least Done, hold at its foot.
   let inboxEnd = 0;
-  const flatListed = flatSessions.data?.pages.flatMap((page) => page.sessions) ?? EMPTY_SESSIONS;
-  if (sidebarGrouping === "list") {
-    listedChats(flatListed, null).forEach(({ project, session }) => sidebarRows.push({ kind: "chat", project, session }));
-    pushListStatus(flatSessions, !sidebarRows.length);
-  } else if (sidebarGrouping === "inbox") {
-    const open = listedChats(flatListed, false);
-    const working = open.filter(({ project, session }) =>
-      chatStatusWorking(chatStatus(session, sessionBusy(project, session), sessionWaiting(session), runsBySession.get(session.id) ?? EMPTY_RUNS)));
+  // Paging the open chats only needs to keep up with the rows above this index.
+  let openEnd = 0;
+  if (sidebarGrouping === "inbox") {
+    const open = listedChats(flatSessions.data?.pages.flatMap((page) => page.sessions) ?? EMPTY_SESSIONS, false);
+    const working = open.filter(atWork);
     // Newest first by creation, so streaming updates don't reshuffle what's running.
     working.sort((a, b) => b.session.createdAt - a.session.createdAt);
-    open.filter((chat) => !working.includes(chat)).forEach(({ project, session }) => sidebarRows.push({ kind: "inbox", project, session }));
-    pushListStatus(flatSessions, !open.length);
-    inboxEnd = sidebarRows.length;
+    const waiting = open.filter((chat) => !working.includes(chat));
 
-    const workingCollapsed = collapsedInbox.includes("working");
-    if (working.length) {
-      sidebarRows.push({ kind: "section", section: "working", collapsed: workingCollapsed, count: working.length });
-      if (!workingCollapsed) working.forEach(({ project, session }) => sidebarRows.push({ kind: "inbox", project, session }));
-    }
-    sidebarRows.push({ kind: "section", section: "done", collapsed: !doneExpanded, count: 0 });
+    const pushSection = (section: "inbox" | "working", chats: typeof open, count = chats.length) => {
+      const collapsed = collapsedInbox.includes(section);
+      sidebarRows.push({ kind: "section", section, collapsed, count });
+      if (!collapsed) chats.forEach(({ project, session }) => sidebarRows.push({ kind: "inbox", section, project, session, run: sessionLeadRun(runsBySession.get(session.id) ?? EMPTY_RUNS, session.id, session.lastRun) }));
+      return collapsed;
+    };
+    const pushWorking = () => { if (working.length) pushSection("working", working); };
+    const pushWaiting = () => {
+      // The loaded pages reach only as far as the rail has scrolled; the server counts the rest.
+      const openTotal = flatSessions.data?.pages[0]?.total;
+      const count = openTotal === undefined ? waiting.length : Math.max(waiting.length, openTotal - working.length);
+      if (!pushSection("inbox", waiting, count)) pushListStatus(flatSessions, !open.length);
+      openEnd = sidebarRows.length;
+    };
+
+    if (workingPlace === "above") pushWorking();
+    pushWaiting();
+    if (workingPlace === "below") pushWorking();
+    inboxEnd = sidebarRows.length;
+    if (workingPlace === "bottom") pushWorking();
+    const archived = doneSessions.data?.pages;
+    const doneCount = archived?.[0]?.total ?? archived?.flatMap((page) => page.sessions).length ?? 0;
+    sidebarRows.push({ kind: "section", section: "done", collapsed: !doneExpanded, count: doneCount });
     const doneStart = sidebarRows.length;
     if (doneExpanded) {
       const done = listedChats(doneSessions.data?.pages.flatMap((page) => page.sessions) ?? EMPTY_SESSIONS, true);
@@ -8494,7 +8624,8 @@ export function ChatPanel({
     railReturns.current.set(key, ghost.top);
     railFlight.current.set(key, now + RAIL_MOVE_MS);
   }
-  if (railSameList) {
+  // The first rows to load appear in place, so nothing they replace is left to fade out.
+  if (railSameList && railSettled(railCommitted.current!.layout)) {
     const viewTop = sidebarVirtualizer.scrollOffset ?? 0;
     for (const [key, was] of railCommitted.current?.layout ?? []) {
       const onScreen = was.top < viewTop + railHeight && was.top + sidebarRowHeight(was.row) > viewTop;
@@ -8508,7 +8639,7 @@ export function ChatPanel({
   const sidebarVirtualItems = sidebarVirtualizer.getVirtualItems();
 
   // A section just opened scrolls into view far enough to show its first rows.
-  const railReveal = useRef<"working" | "done" | null>(null);
+  const railReveal = useRef<RailSection | null>(null);
   // Where each row was last drawn at rest, from the top of the rail's viewport.
   const railRest = useRef(new Map<string, number>());
   useLayoutEffect(() => {
@@ -8545,8 +8676,7 @@ export function ChatPanel({
     const before = railRest.current;
     railRest.current = new Map(rows.map(({ key, at }) => [key, at]));
 
-    const settled = (layout: typeof railLayout) => [...layout.values()].some(({ row }) => "session" in row);
-    if (!previous || previous.grouping !== sidebarGrouping || previous.layout === railLayout || !settled(previous.layout)) return;
+    if (!previous || previous.grouping !== sidebarGrouping || previous.layout === railLayout || !railSettled(previous.layout)) return;
     const changed = previous.layout.size !== railLayout.size || [...railLayout].some(([key, { top }]) => previous.layout.get(key)?.top !== top);
     if (!changed) return;
     if (railReducedMotion) return;
@@ -8559,9 +8689,11 @@ export function ChatPanel({
       const returning = railReturns.current.get(key);
       const was = returning !== undefined ? returning - previous.scrollTop : before.get(key) ?? (known === undefined ? undefined : known - previous.scrollTop);
       if (was === undefined) {
-        el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: RAIL_FADE_MS, delay, easing: "ease-out", fill: "backwards" });
+        el.animate([{ opacity: 0 }, { opacity: 1 }], { id: "rail-arrive", duration: RAIL_FADE_MS, delay, easing: "ease-out", fill: "backwards" });
         continue;
       }
+      // A row still fading in lands where it now belongs rather than flying there.
+      if (el.getAnimations().some((animation) => animation.id === "rail-arrive")) continue;
       // Start from where the row is drawn now, so a move that interrupts another doesn't jump.
       moves.push({ el, key, at, offset: was + drawn - at, from: returning ?? known });
     }
@@ -8570,8 +8702,9 @@ export function ChatPanel({
     const heightOf = (key: string) => sidebarRowHeight(railLayout.get(key)!.row);
     const offsets = new Map(moves.map(({ key, offset }) => [key, offset]));
     for (const { el, key, at, offset, from } of moves) {
-      if (Math.abs(offset) < 0.5) continue;
+      // A move this one interrupts would otherwise keep sliding the row from where it was headed before.
       el.getAnimations().forEach((animation) => animation.cancel());
+      if (Math.abs(offset) < 0.5) continue;
       el.animate([{ transform: `translateY(${offset}px)` }, { transform: "none" }], move);
 
       // A row passing several others goes behind them: faint where it overlaps them, whole in the gap it lands in.
@@ -8628,15 +8761,15 @@ export function ChatPanel({
   });
   // The visible range, not the rendered rows: pinned headers are always rendered.
   const lastVisibleIndex = sidebarVirtualizer.range?.endIndex ?? -1;
-  const listEnd = sidebarGrouping === "inbox" ? inboxEnd : sidebarRows.length;
   useEffect(() => {
     if (!railOpen || embedded || sidebarGrouping === "projects") return;
     const page = (query: typeof flatSessions, end: number) => {
       if (lastVisibleIndex >= end - 6 && query.hasNextPage && !query.isFetching && !query.isError) void query.fetchNextPage();
     };
-    page(flatSessions, listEnd);
-    if (sidebarGrouping === "inbox" && doneExpanded) page(doneSessions, sidebarRows.length);
-  }, [sidebarGrouping, railOpen, embedded, lastVisibleIndex, listEnd, flatSessions, doneExpanded, doneSessions, sidebarRows.length]);
+    // A folded inbox never grows, so paging it would only read every page.
+    if (sidebarGrouping !== "inbox" || !collapsedInbox.includes("inbox")) page(flatSessions, openEnd);
+    if (doneExpanded) page(doneSessions, sidebarRows.length);
+  }, [sidebarGrouping, railOpen, embedded, lastVisibleIndex, openEnd, flatSessions, collapsedInbox, doneExpanded, doneSessions, sidebarRows.length]);
   const sidebarActions = useRef<SidebarActions>(null!);
   sidebarActions.current = {
     toggleProjectCollapsed: (project) => {
@@ -8682,16 +8815,17 @@ export function ChatPanel({
     },
     rename,
     setArchived,
+    markBelowDone: (session) => void markBelowDone(session),
     moveToProject: (s, project) => createProject(project, s),
     remove: (s) => void removeSession(s),
   };
   const openRuntimeDetails = useCallback(() => onSelectMainView("openresearch"), [onSelectMainView]);
   const openSettings = useCallback(() => onSelectMainView("settings"), [onSelectMainView]);
 
-  /** How far above the rail's foot a section header pins: Working sits on Done's header. */
-  const railStickyBottom = (section: "working" | "done") => {
-    const done = section === "working" ? sidebarRows.find((row) => row.kind === "section" && row.section === "done") : undefined;
-    return done ? sidebarRowHeight(done) : 0;
+  /** How far above the rail's foot a section header pins: on the headers of the sections after it. */
+  const railStickyBottom = (section: RailSection) => {
+    const start = sidebarRows.findIndex((row) => row.kind === "section" && row.section === section);
+    return sidebarRows.slice(start + 1).reduce((height, row) => height + (row.kind === "section" ? sidebarRowHeight(row) : 0), 0);
   };
   const railGap = inboxPinned ? sidebarVirtualizer.measurementsCache[inboxEnd]?.size ?? 0 : 0;
 
@@ -8785,8 +8919,10 @@ export function ChatPanel({
           onFocusCapture={() => setFocusedSidebarRow(sidebarRowKey(row))}>
           <button data-sidebar-keyboard-row aria-expanded={!row.collapsed} onClick={toggle}
             className="group/section flex h-full w-full items-end gap-1 rounded-md px-2.25 pb-1.5 text-start text-sm font-medium text-subtext hover:text-text">
-            <span>{row.section === "working" ? m.chat_inbox_working() : m.chat_inbox_done()}</span>
-            {row.section === "working" && row.collapsed && <span className="tabular-nums text-muted">{fmtNumber(row.count)}</span>}
+            <span>{row.section === "inbox" ? m.sidebar_inbox() : row.section === "working" ? m.chat_inbox_working() : m.chat_inbox_done()}</span>
+            {row.section === "done"
+              ? row.count > 0 && <span className={`tabular-nums text-muted ${row.collapsed ? "hidden group-hover/section:inline group-focus-visible/section:inline" : ""}`}>{fmtNumber(row.count)}</span>
+              : row.collapsed && <span className="tabular-nums text-muted">{fmtNumber(row.count)}</span>}
             <ChevronRight size={14} aria-hidden="true"
               className={`mb-px shrink-0 text-muted transition-transform duration-120 ease-standard motion-reduce:transition-none ${row.collapsed ? "" : "rotate-90"}`} />
             <span aria-hidden="true" className="mb-2.5 ms-1.5 h-px flex-1 bg-border-variant" />
@@ -8794,7 +8930,7 @@ export function ChatPanel({
         </div>
       );
     }
-    const sessionRow = (project: Project, s: ChatSession, variant: "list" | "inbox" | "done") => {
+    const sessionRow = (project: Project, s: ChatSession, variant: "list" | "inbox" | "done", leadRun: ShownRun | null, markBelowDone: boolean) => {
       const sessionHarness = sessionAcpHarness(s, selectionHarness(harnesses, s));
       const sessionModel = sessionHarness?.models.find((model) => model.id === s.model);
       return (
@@ -8812,6 +8948,8 @@ export function ChatPanel({
           busy={sessionBusy(project, s)}
           waiting={sessionWaiting(s)}
           runs={runsBySession.get(s.id) ?? EMPTY_RUNS}
+          leadRun={leadRun}
+          markBelowDone={markBelowDone}
           variant={variant}
           revealTitle={titleReveals.get(s.id)}
         />
@@ -8852,7 +8990,7 @@ export function ChatPanel({
           </div>
         ) : s ? (
           <div className={sidebarGrouping === "projects" ? "ms-5.5" : undefined}>
-            {sessionRow(project, s, row.kind === "inbox" ? "inbox" : row.kind === "done" ? "done" : "list")}
+            {sessionRow(project, s, row.kind === "inbox" ? "inbox" : row.kind === "done" ? "done" : "list", row.kind === "inbox" ? row.run : null, row.kind === "inbox" && row.section === "inbox")}
           </div>
         ) : row.kind === "more" ? (
           <Button variant="ghost" size="small" className="ms-5.5 font-normal text-subtext" aria-expanded={sidebarGroup(project) in chatLimits} onClick={() => {
@@ -8884,31 +9022,31 @@ export function ChatPanel({
         onPointerDown={onResizeRail}
       />}
       {railHeader}
-      <div className="rail-section-head flex items-center justify-between shrink-0 pt-3.5 pe-2 pb-0 ps-3.25">
-        <div className="rail-section-label p-0 text-sm font-medium text-subtext">
-          {sidebarGrouping === "projects" ? m.projects_home_projects() : sidebarGrouping === "list" ? m.chat_all_sessions() : m.sidebar_inbox()}
+      <div data-titlebar-drag className="rail-section-head @container flex items-center justify-between gap-2 shrink-0 pt-0 pe-2 pb-0.5 ps-3.25 select-none mac-titlebar:-mt-1">
+        <div className="rail-section-label min-w-0 truncate p-0 text-sm font-medium text-subtext">
+          {sidebarGrouping === "projects" ? m.projects_home_projects() : m.sidebar_chats()}
         </div>
-        <div className="rail-section-actions flex items-center gap-1">
-          {sidebarGrouping === "list" && <Tooltip interactive content={m.chat_panel_new_chat()} className="rounded-sm">
-            <IconButton size="small" className="text-subtext" aria-label={m.chat_panel_new_chat()} onClick={startNewTask}>
-              <Plus size={16} aria-hidden="true" />
-            </IconButton>
-          </Tooltip>}
-          {sidebarGrouping === "inbox" ? latestProject && <Tooltip interactive content={m.chat_panel_new_chat()} className="rounded-sm">
-            <IconButton size="small" className="text-subtext" aria-label={`${m.chat_panel_new_chat()} · ${latestProject.name}`} onClick={() => sidebarActions.current.newProjectChat(latestProject)}>
-              <SquarePen size={16} className="text-subtext" />
-            </IconButton>
-          </Tooltip> : onNewProject && <Tooltip interactive content={m.projects_home_new_project()} className="rounded-sm">
+        <div className="rail-section-actions flex shrink-0 items-center gap-1">
+          {sidebarGrouping === "projects" && onNewProject && <Tooltip interactive content={m.projects_home_new_project()} className="rounded-sm">
             <IconButton size="small" className="text-subtext" aria-label={m.projects_home_new_project()} onClick={onNewProject}>
               <FolderPlus size={16} className="text-subtext" />
             </IconButton>
           </Tooltip>}
-          <SessionFilterMenu value={sessionFilter} onChange={setSessionFilter} grouping={sidebarGrouping} onGroupingChange={(grouping) => {
+          <Button variant="ghost" size="small" className="px-2 font-normal text-subtext hover:text-text" aria-label={m.chat_panel_new_chat()} onClick={startNewTask}>
+            <SquarePen size={14} aria-hidden="true" />
+            {/* Beside the new project button, a rail at its narrowest has room for the icon only. */}
+            <span className={sidebarGrouping === "projects" ? "@max-[14.5rem]:hidden" : undefined}>{m.chat_panel_new_chat()}</span>
+          </Button>
+          <SidebarViewMenu value={sessionFilter} onChange={setSessionFilter} grouping={sidebarGrouping} onGroupingChange={(grouping) => {
             setSidebarGrouping(grouping);
+            if (grouping === "inbox") void offerInboxCleanup();
             try { localStorage.setItem("sidebar-grouping", grouping); } catch {}
             setSidebarExpandedAll(false);
             setChatLimits({});
             if (railBodyRef.current) railBodyRef.current.scrollTop = 0;
+          }} workingPlace={workingPlace} onWorkingPlaceChange={(place) => {
+            setWorkingPlace(place);
+            try { localStorage.setItem("sidebar-working-place", place); } catch {}
           }} />
         </div>
       </div>
@@ -9005,13 +9143,22 @@ export function ChatPanel({
   const railReopen = (!railOpen || mobileRail) && !embedded && (
     <SidebarToggle open={false} onClick={onShowRail} className="ms-2.5 max-md:ms-1 mac-titlebar:invisible mac-titlebar:ms-titlebar-inset" />
   );
+  // With the sidebar closed, New chat follows its toggle.
+  const railClosedControls = railReopen && (
+    <div className="flex items-center gap-1">
+      {railReopen}
+      <Tooltip interactive content={m.chat_panel_new_chat()} className="rounded-md">
+        <IconButton aria-label={m.chat_panel_new_chat()} onClick={startNewTask}><SquarePen size={16} /></IconButton>
+      </Tooltip>
+    </div>
+  );
 
   if (mainView !== "chat") {
     return (
       <>
         {displayedRail}
         <section inert={contentInert} className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0">
-          {mainView === "project" && (!railOpen || mobileRail) && <div className="mac-titlebar-spacer flex h-12 mac-titlebar:h-titlebar shrink-0 items-center">{railReopen}</div>}
+          {mainView === "project" && (!railOpen || mobileRail) && <div className="mac-titlebar-spacer flex h-12 mac-titlebar:h-titlebar shrink-0 items-center">{railClosedControls}</div>}
           {mainView !== "project" && <SettingsHeader active={mainView} onSelect={onSelectMainView} leading={railReopen} />}
           {/* Keyed per view so no tab inherits the chat thread's or another tab's scroll offset. */}
           <div key={mainView} className="settings-view-scroll flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges]">
@@ -9029,8 +9176,8 @@ export function ChatPanel({
       <section inert={contentInert} data-side-chat={embedded || undefined} className="chat-pane relative flex-1 min-w-0 flex flex-col bg-background min-h-0">
         {/* Header — session title on the left, end-pane view switchers on the
           right, fading into the chat below (sessions live in the rail). */}
-        <div className={railOpen && !mobileRail || embedded ? "contents" : "chat-heading-row grid shrink-0 grid-cols-[2.625rem_minmax(0,1fr)_2.625rem] mac-titlebar:grid-cols-titlebar-chat items-center"}>
-          {railReopen}
+        <div className={railOpen && !mobileRail || embedded ? "contents" : "chat-heading-row grid shrink-0 grid-cols-[4.875rem_minmax(0,1fr)_4.875rem] mac-titlebar:grid-cols-titlebar-chat items-center"}>
+          {railClosedControls}
           <div className={headerClass}>
           <div className="flex min-w-0 flex-1 items-center gap-2">
             {activeSession && <>

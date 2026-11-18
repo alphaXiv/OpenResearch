@@ -1850,6 +1850,8 @@ export interface ChatSession {
     errorKind: string | null;
     error: string | null;
   } | null;
+  /** The newest run the chat launched, in the sidebar's pages; absent from an older server. */
+  lastRun?: Run | null;
 }
 
 /** Fields `PATCH /api/chat/sessions/<id>` changes; each is optional. */
@@ -1905,7 +1907,8 @@ export interface ChatSearchPage {
   requiresLongerQuery: boolean;
 }
 export interface SidebarChatCursor { updatedAt: number; id: string }
-export interface SidebarChatPage { sessions: ChatSession[]; next: SidebarChatCursor | null }
+/** `total` counts every chat the filter holds, past the loaded pages; a server too old to send it omits it. */
+export interface SidebarChatPage { sessions: ChatSession[]; next: SidebarChatCursor | null; total?: number }
 
 /** Per-session (and per-turn) composer selections beyond the harness itself. */
 export interface TurnOptions {
