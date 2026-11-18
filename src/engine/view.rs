@@ -1622,7 +1622,7 @@ pub(crate) fn check(
             .as_ref()
             .map(|p| p.regexes())
             .unwrap_or_default();
-        report["lines"] = json!(tally.lines);
+        report["lines"] = json!(tally.entries);
         report["read"] =
             json!({"bytes": folded.cursor.offset, "complete": folded.coverage.complete});
         report["patterns"] = tally
@@ -1648,9 +1648,16 @@ pub(crate) fn check(
     if let Some(markup) = report["markup"].as_str().map(str::to_owned) {
         let compiled =
             compile(&markup).map_err(|problem| Refusal::Invalid(problem.text(&name, &fix)))?;
-        let pending = compiled
-            .check(&seen)
-            .map_err(|problem| Refusal::Invalid(problem.text(&name, &fix)))?;
+        let pending = compiled.check(&seen).map_err(|problem| {
+            let mut message = problem.text(&name, &fix);
+            if report["read"]["complete"] == false {
+                let byte = report["read"]["bytes"].as_u64().unwrap_or_default();
+                message.push_str(&format!(
+                    " Log coverage was incomplete through byte {byte}. The missing names may appear outside the checked bytes."
+                ));
+            }
+            Refusal::Invalid(message)
+        })?;
         if compiled.tree["blocks"]
             .as_array()
             .is_some_and(|blocks| blocks.iter().any(|block| block["media"].is_string()))

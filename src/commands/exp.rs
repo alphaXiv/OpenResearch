@@ -387,8 +387,16 @@ fn checked(report: &serde_json::Value) -> String {
             .join(", ")
     };
     let run = report["runId"].as_str().unwrap_or_default();
+    let status = report["status"].as_str().unwrap_or_default();
     let mut lines = Vec::new();
-    let read = report["lines"].as_u64();
+    let partial = report["read"]["complete"].as_bool() == Some(false);
+    if let (true, Some(bytes)) = (partial, report["read"]["bytes"].as_u64()) {
+        lines.push(format!(
+            "Log check reached byte {bytes} with incomplete coverage. Results cover only the bytes read."
+        ));
+    }
+    let scope = if partial { " in the checked log" } else { "" };
+    let entries = report["lines"].as_u64().unwrap_or_default();
     for (index, pattern) in report["patterns"]
         .as_array()
         .into_iter()
@@ -399,16 +407,16 @@ fn checked(report: &serde_json::Value) -> String {
         let matched = pattern["matched"].as_u64().unwrap_or_default();
         lines.push(match pattern["first"].as_object() {
             Some(first) => format!(
-                "Pattern {} ({regex}) matched {matched} line{}; first, line {}: {}",
+                "Pattern {} ({regex}) matched {matched} {}. First match at entry {}: {}",
                 index + 1,
-                if matched == 1 { "" } else { "s" },
+                if matched == 1 { "entry" } else { "entries" },
                 first["line"],
                 first["text"].as_str().unwrap_or_default()
             ),
             None => format!(
-                "Pattern {} ({regex}) matched nothing in the run's {} lines.",
+                "Pattern {} ({regex}) matched nothing in {entries} checked {}.",
                 index + 1,
-                read.unwrap_or_default()
+                if entries == 1 { "entry" } else { "entries" }
             ),
         });
     }
@@ -443,13 +451,12 @@ fn checked(report: &serde_json::Value) -> String {
         .map(|(table, columns)| format!("{table} ({})", names(columns)))
         .collect();
     lines.push(match (signals.is_empty(), tables.is_empty()) {
-        (true, true) => format!(
-            "Run {run} ({}) has reported no metrics or tables yet.",
-            report["status"].as_str().unwrap_or_default()
-        ),
+        (true, true) if partial => {
+            format!("Run {run} ({status}) had no metrics or tables in the checked log.")
+        }
+        (true, true) => format!("Run {run} ({status}) has reported no metrics or tables yet."),
         _ => format!(
-            "Run {run} ({}) reported: {}{}{}.",
-            report["status"].as_str().unwrap_or_default(),
+            "Run {run} ({status}) reported{scope}: {}{}{}.",
             if signals.is_empty() {
                 "no metrics"
             } else {
@@ -466,7 +473,6 @@ fn checked(report: &serde_json::Value) -> String {
         ));
         return lines.join("\n");
     }
-    let status = report["status"].as_str().unwrap_or_default();
     let active =
         !crate::engine::Phase::parse(status).is_some_and(crate::engine::Phase::is_terminal);
     for block in report["tree"]["blocks"].as_array().into_iter().flatten() {
@@ -484,6 +490,8 @@ fn checked(report: &serde_json::Value) -> String {
         } else {
             "The view draws only what the run reported.".to_owned()
         }
+    } else if partial {
+        format!("The view is valid. Missing from the checked log: {pending}.")
     } else {
         format!("The view is valid. Not reported yet, so not drawn yet: {pending}.")
     });

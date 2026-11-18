@@ -479,11 +479,6 @@ impl Snapshot {
                     self.finish_dropped(&mut pending);
                     framing = Framing::default();
                 }
-                if byte == b'\n' {
-                    if let Some(tally) = self.tally.as_mut() {
-                        tally.lines += 1;
-                    }
-                }
                 if byte == b'\n' || pending.is_empty() {
                     self.cursor.dropping = false;
                     self.cursor.frame_start = self.cursor.offset;
@@ -563,6 +558,9 @@ impl Snapshot {
     }
 
     fn finish_dropped(&mut self, pending: &mut Vec<u8>) {
+        if let Some(tally) = self.tally.as_mut() {
+            tally.entries += 1;
+        }
         if let Some(example) = self
             .diagnostics
             .examples
@@ -589,6 +587,9 @@ impl Snapshot {
         row_bytes: &mut usize,
         seconds_per_byte: Option<f64>,
     ) {
+        if let Some(tally) = self.tally.as_mut() {
+            tally.entries += 1;
+        }
         if std::str::from_utf8(bytes).is_err() && bytes.windows(7).any(|w| w == b"::orx::") {
             self.diagnose(
                 "invalid_record",
@@ -634,10 +635,12 @@ impl Snapshot {
         } else {
             let matched = self.patterns.as_ref().and_then(|p| p.record(text));
             if let Some((index, record)) = matched {
-                let line = self.tally.as_ref().map_or(0, |t| t.lines + 1);
-                if let Some(hit) = self.tally.as_mut().and_then(|t| t.hits.get_mut(index)) {
-                    hit.matched += 1;
-                    hit.first.get_or_insert_with(|| (line, text.to_owned()));
+                if let Some(tally) = self.tally.as_mut() {
+                    let entry = tally.entries;
+                    if let Some(hit) = tally.hits.get_mut(index) {
+                        hit.matched += 1;
+                        hit.first.get_or_insert_with(|| (entry, text.to_owned()));
+                    }
                 }
                 self.record(record, now, observed, "pattern", row_bytes, replay_elapsed);
             } else if self

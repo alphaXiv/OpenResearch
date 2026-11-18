@@ -247,14 +247,14 @@ fn lexeme(text: &str) -> Value {
 /// What each pattern matched in one fold, for `orx exp view check`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Tally {
-    /// Lines read so far.
-    pub lines: u64,
+    /// Nonempty log frames read so far, including carriage-return redraws.
+    pub entries: u64,
     pub hits: Vec<Hit>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Hit {
     pub matched: u64,
-    /// The first line it matched: its number from 1, and its text.
+    /// The first entry it matched: its number from 1, and its text.
     pub first: Option<(u64, String)>,
 }

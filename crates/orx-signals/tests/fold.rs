@@ -1010,7 +1010,7 @@ fn patterns_read_a_log_the_agent_cannot_change() {
     assert_eq!(s.row_columns["levels"].len(), 7);
 
     let tally = s.tally.as_ref().unwrap();
-    assert_eq!(tally.lines, 40);
+    assert_eq!(tally.entries, 40);
     let matched: Vec<u64> = tally.hits.iter().map(|h| h.matched).collect();
     assert_eq!(matched, [10, 1, 9, 10]);
     assert_eq!(
