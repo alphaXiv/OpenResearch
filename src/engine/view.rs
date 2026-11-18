@@ -85,6 +85,7 @@ enum Kind {
     Signal,
     Table,
     Column(String),
+    Outcome(String),
 }
 
 /// A name the view draws, to be checked against what runs report.
@@ -170,6 +171,10 @@ impl Compiled {
     /// its kind was reported (or, for a declared signal, until it is): it may arrive in a later
     /// stage. Returns the pending names, or the first name that cannot be right.
     pub(crate) fn check(&self, seen: &Seen) -> Result<Vec<String>, Problem> {
+        self.check_with_patterns(seen, &Seen::default())
+    }
+
+    fn check_with_patterns(&self, seen: &Seen, expected: &Seen) -> Result<Vec<String>, Problem> {
         let mut pending = Vec::new();
         for reference in &self.references {
             let problem = |message: String| Problem {
@@ -181,7 +186,7 @@ impl Compiled {
             let found = match &reference.kind {
                 Kind::Signal => seen.has_signal(name),
                 Kind::Table => seen.tables.contains_key(name),
-                Kind::Column(table) => seen
+                Kind::Column(table) | Kind::Outcome(table) => seen
                     .tables
                     .get(table)
                     .is_some_and(|columns| columns.contains(name)),
@@ -190,9 +195,20 @@ impl Compiled {
                 continue;
             }
             let reported = match &reference.kind {
-                Kind::Signal => !seen.signals.is_empty() && !self.declared.contains(name),
-                Kind::Table => !seen.tables.is_empty(),
-                Kind::Column(table) => seen.tables.contains_key(table),
+                Kind::Signal => {
+                    !seen.signals.is_empty()
+                        && !self.declared.contains(name)
+                        && !expected.has_signal(name)
+                }
+                Kind::Table => !seen.tables.is_empty() && !expected.tables.contains_key(name),
+                Kind::Column(table) => {
+                    seen.tables.contains_key(table)
+                        && !expected
+                            .tables
+                            .get(table)
+                            .is_some_and(|columns| columns.contains(name))
+                }
+                Kind::Outcome(_) => false,
             };
             if !reported {
                 if !pending.contains(name) {
@@ -203,7 +219,7 @@ impl Compiled {
             return Err(problem(match &reference.kind {
                 Kind::Signal => format!("no signal \"{name}\"; seen: {}", listed(&seen.signals)),
                 Kind::Table => format!("no table \"{name}\"; seen: {}", listed(seen.tables.keys())),
-                Kind::Column(table) => format!(
+                Kind::Column(table) | Kind::Outcome(table) => format!(
                     "table \"{table}\" has no column \"{name}\"; seen: {}",
                     listed(&seen.tables[table])
                 ),
@@ -570,7 +586,7 @@ impl Parser<'_> {
                 self.refer(
                     node,
                     format!("{path}.outcome"),
-                    Kind::Column(table.clone()),
+                    Kind::Outcome(table.clone()),
                     "outcome",
                 );
                 if kind == "bars" {
@@ -1482,6 +1498,17 @@ pub(crate) fn set(
         Some(run) => format!("Run `orx exp view check {run} {flag}`."),
         None => format!("Run `orx exp view set {id} {flag}`."),
     };
+    let config = match given {
+        Some(given) => {
+            let file = source.patterns.unwrap_or("PATH");
+            Some(patterns(
+                given,
+                source,
+                &check_fix(format!("--pattern {file}")),
+            )?)
+        }
+        None => None,
+    };
     let mut pending = Vec::new();
     let tree = if let Some(markup) = markup {
         let compiled = compile(markup).map_err(|problem| {
@@ -1491,22 +1518,27 @@ pub(crate) fn set(
             };
             Refusal::Invalid(problem.text(source.name(), &fix))
         })?;
-        pending = compiled.check(&seen).map_err(|problem| {
-            Refusal::Invalid(problem.text(
-                source.name(),
-                &format!("Run `orx exp view set {id} {}`.", source.flag()),
-            ))
-        })?;
+        let mut expected = Seen::default();
+        if let Some((_, Some(patterns))) = &config {
+            for (table, names) in patterns.named_outputs() {
+                let columns = match table {
+                    Some(table) => expected.tables.entry(table.to_owned()).or_default(),
+                    None => &mut expected.signals,
+                };
+                columns.extend(names.into_iter().map(str::to_owned));
+            }
+        }
+        pending = compiled
+            .check_with_patterns(&seen, &expected)
+            .map_err(|problem| {
+                Refusal::Invalid(problem.text(
+                    source.name(),
+                    &format!("Run `orx exp view set {id} {}`.", source.flag()),
+                ))
+            })?;
         Some(compiled.tree)
     } else {
         None
-    };
-    let config = match given {
-        Some(given) => {
-            let file = source.patterns.unwrap_or("PATH");
-            Some(patterns(given, source, &check_fix(format!("--pattern {file}")))?.0)
-        }
-        None => None,
     };
     let configured = match configured {
         Some(given) => {
@@ -1532,7 +1564,7 @@ pub(crate) fn set(
         if let Some(markup) = markup {
             settings.insert("view".into(), json!(markup));
         }
-        if let Some(config) = &config {
+        if let Some((config, _)) = &config {
             settings.insert("patterns".into(), json!(config.patterns));
         }
         match &configured.plan {
@@ -2684,11 +2716,7 @@ mod tests {
             .message
             .contains("no table \"items\""));
         seen.tables.insert("items".into(), vec!["score".into()]);
-        assert!(cells
-            .check(&seen)
-            .unwrap_err()
-            .message
-            .contains("no column \"outcome\""));
+        assert_eq!(cells.check(&seen).unwrap(), ["outcome"]);
         seen.tables.get_mut("items").unwrap().push("outcome".into());
         assert!(cells.check(&seen).unwrap().is_empty());
         assert!(bars

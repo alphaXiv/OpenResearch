@@ -6765,6 +6765,72 @@ mod tests {
     }
 
     #[test]
+    fn a_view_can_be_saved_with_a_pattern_for_an_unreported_table() {
+        use crate::engine::view::{etag, set, Source};
+
+        let f = Fixture::new("orx-view-with-new-pattern");
+        f.run("running", local());
+        f.collect(&folded(&[(
+            T0,
+            r#"::orx:: {"row":"training","m":{"loss":2}}"#.into(),
+        )]));
+        let pattern = json!([{"row": "validation", "regex": "^test (?P<accuracy>\\d+)$"}]);
+        let markup = r#"<view><table name="validation" columns="accuracy" /></view>"#;
+        let source = Source {
+            file: Some("view.xml"),
+            patterns: Some("pattern.json"),
+            config: None,
+        };
+        assert!(set(
+            &f.store,
+            "exp",
+            &etag(None),
+            Some(markup),
+            None,
+            None,
+            &source
+        )
+        .is_err());
+        let saved = set(
+            &f.store,
+            "exp",
+            &etag(None),
+            Some(markup),
+            Some(&pattern),
+            None,
+            &source,
+        )
+        .unwrap();
+        assert_eq!(saved["pending"], json!(["validation", "accuracy"]));
+        assert_eq!(saved["patterns"], pattern);
+    }
+
+    #[test]
+    fn checking_bars_waits_for_an_outcome_column_to_be_reported() {
+        use crate::engine::view::{check, Source};
+
+        let f = Fixture::new("orx-bars-without-outcomes");
+        let run = f.run("running", local());
+        f.collect(&folded(&[(
+            T0,
+            r#"::orx:: {"row":"items","m":{"category":"validation"}}"#.into(),
+        )]));
+        let report = check(
+            &f.store,
+            &run.id,
+            Some(r#"<view><bars from="items" by="category" /></view>"#),
+            None,
+            &Source {
+                file: Some("view.xml"),
+                patterns: None,
+                config: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(report["pending"], json!(["outcome"]));
+    }
+
+    #[test]
     fn saving_a_plan_refuses_each_mistake_in_its_own_words() {
         let f = Fixture::new("orx-monitor-plan-save");
         let invalid = |answer: Result<Value, crate::engine::view::Refusal>| match answer {

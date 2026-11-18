@@ -174,6 +174,29 @@ impl Patterns {
         self.list.iter().map(|c| c.pattern.regex.as_str()).collect()
     }
 
+    /// Statically named signals and columns a view can refer to before a pattern has matched.
+    pub fn named_outputs(&self) -> impl Iterator<Item = (Option<&str>, Vec<&str>)> {
+        self.list.iter().filter_map(|compiled| {
+            let row = compiled.pattern.row.as_deref();
+            if row.is_none()
+                && compiled
+                    .regex
+                    .capture_names()
+                    .flatten()
+                    .any(|name| name == "row")
+            {
+                return None;
+            }
+            let measures = compiled.regex.capture_names().flatten().filter(|name| {
+                !matches!(
+                    *name,
+                    "phase" | "unit" | "row" | "step" | "of" | "t" | "spend" | "name" | "value"
+                )
+            });
+            Some((row, measures.collect()))
+        })
+    }
+
     /// The record the first pattern matching `line` makes of it, and which pattern that is.
     pub(crate) fn record(&self, line: &str) -> Option<(usize, Map<String, Value>)> {
         self.list.iter().enumerate().find_map(|(index, compiled)| {
