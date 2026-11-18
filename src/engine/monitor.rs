@@ -631,11 +631,16 @@ fn first_point_stage(snapshot: &Snapshot, names: &[&str]) -> Option<Option<usize
 }
 
 /// Whether the parent's series `name` is of the same stage as the run's, so their steps can be
-/// compared: the fold restarts a series at each stage, so a finished parent holds its last.
+/// compared: the fold restarts a series at each stage, so a finished parent holds its last. A run
+/// that reports no steps is placed by elapsed seconds, which never match another run's steps.
 pub(super) fn same_stage(run: &Snapshot, parent: &Snapshot, name: &str) -> bool {
-    series_stage(run, name)
-        .zip(series_stage(parent, name))
-        .is_none_or(|(mine, theirs)| mine.0.is_empty() || theirs.0.is_empty() || mine == theirs)
+    let stepped = |snapshot: &Snapshot| snapshot.phases.iter().any(|p| p.done.is_some());
+    let same_axis = stepped(run) == stepped(parent);
+
+    same_axis
+        && series_stage(run, name)
+            .zip(series_stage(parent, name))
+            .is_none_or(|(mine, theirs)| mine.0.is_empty() || theirs.0.is_empty() || mine == theirs)
 }
 
 pub(super) fn parent_at(points: &[orx_signals::Point], x: f64) -> Option<f64> {
@@ -8180,6 +8185,54 @@ mod tests {
             stopped_by(&f, "r1"),
             None,
             "pretrain's 6.0 is never held against finetune's 1.2"
+        );
+    }
+
+    #[test]
+    fn a_parent_that_counted_seconds_stops_no_run_that_counts_steps() {
+        let f = Fixture::new("orx-rules-parent-units");
+        let timed = |lines: Vec<String>| -> Vec<(i64, String)> {
+            lines
+                .into_iter()
+                .enumerate()
+                .map(|(i, line)| (T0 + 1000 * i as i64, line))
+                .collect()
+        };
+        f.run_in("parent", "exp", "done", local());
+        f.collect(&Snapshot {
+            run_id: "parent".into(),
+            ..folded(&timed(
+                (0..=70)
+                    .map(|_| "::orx:: {\"m\":{\"loss\":0.5}}".to_string())
+                    .collect(),
+            ))
+        });
+        rules_at(&f, "parent", T0 + 71_000);
+        f.child("child", "exp");
+        ruled(
+            &f,
+            "r1",
+            "child",
+            local(),
+            json!([{"name": "diverging", "text": "Stop when the loss is 1 worse than the parent's.",
+                "does": "stop", "when": {"kind": "worseThanParent", "signal": "loss", "by": 1, "better": "lower", "reports": 3}}]),
+        );
+        let mut child = vec!["::orx:: {\"phase\":\"train\",\"step\":0,\"of\":100}".to_string()];
+        child.extend(
+            (10..=60)
+                .step_by(10)
+                .map(|step| format!("::orx:: {{\"step\":{step},\"m\":{{\"loss\":6.0}}}}")),
+        );
+        f.collect(&Snapshot {
+            run_id: "r1".into(),
+            ..folded(&timed(child))
+        });
+        f.confirmed("r1", T0 + 7_000);
+        rules_at(&f, "r1", T0 + 10_000);
+        assert_eq!(
+            stopped_by(&f, "r1"),
+            None,
+            "the child's step 10 is never held against the parent's tenth second"
         );
     }
 
