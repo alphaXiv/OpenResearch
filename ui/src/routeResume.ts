@@ -1,6 +1,6 @@
 import type { Workspace } from "./workspace";
 
-import { isDemoProjectId, type ChatSession } from "./api";
+import { DEMO_PROJECT_ID, isDemoProjectId, type ChatSession, type Project, type RuntimeInfo, type UiState } from "./api";
 import { defaultTaskWorkspace } from "./workspaceTabs";
 import { getTaskWorkspace, parseDestination, safeLocation, taskLocation } from "./workspaceState";
 
@@ -10,11 +10,17 @@ function validSessionLocation(location: string, sessions: ChatSession[]): boolea
     session.id === destination.sessionId && session.projectId === destination.projectId)));
 }
 
-export async function globalResumeLocation(workspace: Workspace): Promise<string> {
+export function needsOnboarding(state: UiState, projects: Project[]): boolean {
+  const demoOnly = projects.length === 1 && projects[0].id === DEMO_PROJECT_ID;
+  return !state.onboardingCompleted && (projects.length === 0 || demoOnly);
+}
+
+export async function globalResumeLocation(workspace: Workspace, kind: RuntimeInfo["kind"] = "local"): Promise<string> {
   const { queryClient: client } = workspace;
   const { getUiStateQuery, listProjectsQuery, listChatSessionsQuery } = workspace.queries;
   const { getRememberedGlobalWorkspace } = workspace.persistence;
   const [state, projects] = await Promise.all([client.fetchQuery(getUiStateQuery()), client.fetchQuery(listProjectsQuery())]);
+  if (kind === "local" && needsOnboarding(state, projects)) return "/projects";
   const location = safeLocation((getRememberedGlobalWorkspace() ?? state.workspace)?.lastLocation);
   const fallback = () => projects[0] ? projectResumeLocation(projects[0].id, workspace) : Promise.resolve("/projects");
   if (!location) return fallback();

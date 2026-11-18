@@ -1,3 +1,5 @@
+import { unlinkSync, writeFileSync } from 'node:fs'
+import path from 'node:path'
 import { FAKE_AGENT } from '../src/orx.ts'
 import { composer, expect, test } from '../src/test.ts'
 
@@ -20,7 +22,28 @@ test('a first run connects an agent, creates a project and streams its first rep
     await expect(page.getByText('E2E Agent', { exact: true })).toBeVisible()
     await page.getByRole('button', { name: 'Continue', exact: true }).click()
     await expect(page.getByRole('heading', { name: 'Bring your alphaXiv library' })).toBeVisible()
+  })
+
+  await test.step('reopening onboarding after a failed demo save lets the user finish it', async () => {
+    const signals = path.join(orx.root, 'home', '.local', 'share', 'openresearch', 'run-signals')
+    writeFileSync(signals, 'blocks the checkpoint directory', { flag: 'wx' })
+    try {
+      await page.getByRole('button', { name: 'Skip' }).click()
+      await expect(page.getByRole('alert').filter({ hasText: 'run-signals' })).toBeVisible()
+    } finally {
+      unlinkSync(signals)
+    }
+    await page.reload()
+    await page.getByRole('button', { name: 'Continue', exact: true }).click()
+    await expect(page.getByText('E2E Agent', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Continue', exact: true }).click()
     await page.getByRole('button', { name: 'Skip' }).click()
+    await expect(page.getByRole('dialog', { name: 'Welcome to OpenResearch' })).toBeVisible()
+    const response = await page.request.get(`${orx.url}/api/runs/demo_nanochat_run_v1/monitor`)
+    await expect(response).toBeOK()
+    const monitor = await response.json()
+    expect(monitor.viewFrom.isDefault).toBe(false)
+    expect(monitor.series.val_bpb.length).toBeGreaterThan(1)
   })
 
   await test.step('a new project opens on a new chat with that agent', async () => {

@@ -7,7 +7,7 @@ use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::error::{anyhow, Result};
+use crate::error::{anyhow, Context, Result};
 use crate::store::{now_ms, Store, StoredChatMessage, StoredChatSession, StoredRun};
 
 use super::chat::{WirePart, WireToolState};
@@ -391,6 +391,10 @@ fn seed_at(
     selection: DemoSelection,
 ) -> Result<DemoCompletion> {
     FOREGROUND_WANTED.store(true, std::sync::atomic::Ordering::Relaxed);
+    let probe_config = || {
+        serde_json::from_str(VOCAB_PROBE_CONFIG)
+            .map_err(|error| anyhow!("Could not read the bundled vocabulary probe plan: {error}"))
+    };
     if let Some(project) = store.get_local_project(PROJECT_ID)? {
         if !same_path(&project.repo_path, repo)
             || project.github_owner != OWNER
@@ -400,6 +404,9 @@ fn seed_at(
             return Err(anyhow!(
                 "The existing demo repository could not be located; its files have been preserved."
             ));
+        }
+        if !store.ui_state()?.onboarding_completed {
+            seed_monitor(store, data_root, &probe_config()?)?;
         }
         let stored = store.get_chat_session(SESSION_ID)?;
         return Ok(DemoCompletion {
@@ -523,8 +530,7 @@ fn seed_at(
             chat_session_id: None,
             archived: false,
         };
-    let vocab_probe_config: Value = serde_json::from_str(VOCAB_PROBE_CONFIG)
-        .map_err(|error| anyhow!("Could not read the bundled vocabulary probe plan: {error}"))?;
+    let vocab_probe_config = probe_config()?;
     let vocab_probe = LocalExperiment {
             id: VOCAB_PROBE_EXPERIMENT_ID.into(),
             project_id: PROJECT_ID.into(),
@@ -756,19 +762,11 @@ fn seed_at(
             literature_assistant,
         ],
     )?;
-    if newly_created {
-        draw_run(store, data_root, run_ended_at, &vocab_probe_config)?;
-    }
+    seed_monitor(store, data_root, &vocab_probe_config)?;
     validate_snapshot(store, repo, newly_created)
 }
 
-/// Seeds the recorded run's signals and the experiments' views and plan.
-fn draw_run(
-    store: &Store,
-    data_root: &Path,
-    ended_at: i64,
-    vocab_probe_config: &Value,
-) -> Result<()> {
+fn draw_run(checkpoint: &Path, ended_at: i64) -> Result<()> {
     // No host wrote the bundled log, so it has no file identity of its own.
     let mut snapshot = orx_signals::Snapshot::new(RUN_ID, "0-0", "demo");
     snapshot
@@ -812,14 +810,33 @@ fn draw_run(
         }
     }
 
-    let signals = data_root.join("run-signals");
-    std::fs::create_dir_all(&signals)?;
-    crate::engine::adapters::local::signals::publish(
-        &signals.join(format!("{RUN_ID}.json")),
-        &snapshot,
-    )?;
+    crate::engine::adapters::local::signals::publish(checkpoint, &snapshot)?;
+    Ok(())
+}
 
+fn seed_monitor(store: &Store, data_root: &Path, vocab_probe_config: &Value) -> Result<()> {
     use crate::engine::view::{self, Refusal, Source};
+
+    let signals = data_root.join("run-signals");
+    let checkpoint = signals.join(format!("{RUN_ID}.json"));
+    if crate::engine::adapters::local::signals::load(&checkpoint)?.is_none() {
+        store.with_run_artifacts_shared(|| {
+            let run = store
+                .get_run(RUN_ID)?
+                .context("The demo's recorded run is missing")?;
+            let ended_at = run
+                .ended_at
+                .context("The demo's recorded run has no finish time")?;
+            std::fs::create_dir_all(&signals).with_context(|| {
+                format!(
+                    "Could not create the demo checkpoint directory {}",
+                    signals.display()
+                )
+            })?;
+            draw_run(&checkpoint, ended_at)
+        })?;
+    }
+
     for (experiment, file, markup, config) in [
         (EXPERIMENT_ID, "baseline-view.xml", BASELINE_VIEW, None),
         (LR_PROBE_EXPERIMENT_ID, "probe-view.xml", PROBE_VIEW, None),
@@ -830,6 +847,9 @@ fn draw_run(
             Some(vocab_probe_config),
         ),
     ] {
+        if store.run_monitor_json(experiment)?.is_some() {
+            continue;
+        }
         let source = Source {
             file: Some(file),
             patterns: None,
@@ -2158,6 +2178,52 @@ mod tests {
                     .len(),
                 3
             );
+        }
+    }
+
+    #[test]
+    fn retry_onboarding_finishes_the_demo_checkpoint_and_views() {
+        let root = super::super::git::TemporaryDirectory::new("orx-demo-retry").unwrap();
+        let data = root.path().join("data");
+        let repo = root.path().join("cache/repos").join(OWNER).join(REPO);
+        prepare_origin(&demo_bare_path_in(&data));
+        let store = Store::open_at(data.clone()).unwrap();
+        let selection = DemoSelection {
+            profile: None,
+            harness: "codex".into(),
+            model: None,
+            permission_mode: None,
+            reasoning_level: None,
+        };
+
+        let signals = data.join("run-signals");
+        std::fs::write(&signals, "blocks checkpoint creation").unwrap();
+        assert!(seed_at(&store, &data, &repo, selection.clone()).is_err());
+        assert!(store.get_run(RUN_ID).unwrap().is_some());
+        std::fs::remove_file(&signals).unwrap();
+
+        let fault = format!(
+            "CREATE TRIGGER fail_demo_view BEFORE UPDATE OF run_monitor_json ON local_experiments
+             WHEN NEW.id = '{LR_PROBE_EXPERIMENT_ID}' BEGIN SELECT RAISE(ABORT, 'disk full'); END;"
+        );
+        store.conn_execute_for_tests(&fault);
+        assert!(seed_at(&store, &data, &repo, selection.clone()).is_err());
+        assert!(signals.join(format!("{RUN_ID}.json")).is_file());
+        let baseline = store.run_monitor_json(EXPERIMENT_ID).unwrap().unwrap();
+        assert!(store
+            .run_monitor_json(LR_PROBE_EXPERIMENT_ID)
+            .unwrap()
+            .is_none());
+        store.conn_execute_for_tests("DROP TRIGGER fail_demo_view");
+
+        let completion = seed_at(&store, &data, &repo, selection).unwrap();
+        assert_eq!(completion.project.id, PROJECT_ID);
+        assert_eq!(
+            store.run_monitor_json(EXPERIMENT_ID).unwrap().unwrap(),
+            baseline
+        );
+        for experiment in [LR_PROBE_EXPERIMENT_ID, VOCAB_PROBE_EXPERIMENT_ID] {
+            assert!(store.run_monitor_json(experiment).unwrap().is_some());
         }
     }
 
