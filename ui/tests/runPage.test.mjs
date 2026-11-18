@@ -301,15 +301,15 @@ test("run history opens the older SSH run's chart, stats and journal while the l
   assert.ok(!requests.some(({ request }) => request === "GET /api/runs/r1/log"));
 });
 
-test("a flagged run offers to ask the chat's agent by name, and the agent in general when no chat is known", async () => {
+test("a flagged run only names the agent when the launch chat is known", async () => {
   const flagged = fixture("flagged");
   const waiting = { ...flagged, runId: "r2", asOf: now, flags: [{ ...flagged.flags[0], state: "waiting", mode: "copilot" }] };
   const flaggedRun = () => run("r2", { monitor: summary(waiting, { tone: "flag", sentence: flagged.sentence, flag: { id: "f1", state: "waiting", mode: "copilot" } }) });
   const asks = (container) => [...container.querySelectorAll("button")].map(text);
 
-  const named = await overview([flaggedRun()], () => waiting, { chat: "s1", sessions: [{ ...session("s1"), harness: "claude-code" }] });
-  assert.ok(asks(named.container).includes(m.run_flag_ask({ agent: "Claude Code" })), asks(named.container).join(" | "));
-  await named.unmount();
+  const subscribed = await overview([flaggedRun()], () => waiting, { chat: "s1", sessions: [{ ...session("s1"), harness: "claude-code" }] });
+  assert.ok(asks(subscribed.container).includes(m.run_flag_ask_unnamed()), asks(subscribed.container).join(" | "));
+  await subscribed.unmount();
 
   const launched = await overview([{ ...flaggedRun(), chatSessionId: "s2" }], () => waiting, { chat: "s1", sessions: [{ ...session("s1"), harness: "codex" }, { ...session("s2"), harness: "claude-code" }] });
   assert.ok(asks(launched.container).includes(m.run_flag_ask({ agent: "Claude Code" })), "the run's own chat wins over the experiment's");

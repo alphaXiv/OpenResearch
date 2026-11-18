@@ -63,14 +63,15 @@ test("an estimate that needs more steps, or a stalled run, says so", () => {
   assert.equal(stalled.etaDetail, m.run_eta_stalled({ duration: fmtDuration(180_000) }));
 });
 
-test("a flag waiting on the user opens the choice; one the agent handles says it is looking", () => {
+test("a flag waiting on the user opens the choice while one the agent handles keeps its state", () => {
   const waiting = model(run({ monitor: summary({ tone: "flag", sentence: flagged.sentence, bindings: { loss: "NaN" }, flag: { id: "f1", state: "waiting", mode: "copilot" } }) }), { monitor: flagged });
   assert.equal(waiting.tone, "flag");
   assert.equal(waiting.text, "Loss is **NaN**.");
-  assert.ok(waiting.needsChoice && !waiting.looking);
+  assert.ok(waiting.needsChoice);
   assert.deepEqual(waiting.ticks.map((tick) => tick.flag), [false, true]);
   const looking = model(run({ monitor: summary({ tone: "flag", flag: { id: "f1", state: "agent_looking", mode: "agentic" } }) }));
-  assert.ok(looking.looking && !looking.needsChoice);
+  assert.equal(looking.flag.state, "agent_looking");
+  assert.ok(!looking.needsChoice);
 });
 
 test("an ended run leads with how it ended and offers Dismiss", () => {

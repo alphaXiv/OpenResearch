@@ -294,10 +294,13 @@ fn a_flag_falls_to_the_user_when_the_agent_it_woke_settles_nothing() {
     assert_eq!(state(), "raised");
     store.claim_run_notices_for_tests("chat", "t1", false);
     assert_eq!(state(), "waking");
-    store.claim_run_notices_for_tests("chat", "t1", true);
     store.put_chat_turn("chat", "t1", "running", 2);
+    assert_eq!(state(), "waking");
+    store
+        .update_chat_turn_progress("t1", "running", "accepted", 1, None)
+        .unwrap();
     assert_eq!(state(), "agent_looking");
-    store.conn_execute_for_tests("UPDATE chat_turns SET state = 'completed' WHERE id = 't1'");
+    assert!(store.complete_chat_turn("t1").unwrap());
     assert_eq!(state(), "waiting");
 
     let again = json!({"id": "f2", "fingerprint": "stall:train:300", "source": "tripwire"});

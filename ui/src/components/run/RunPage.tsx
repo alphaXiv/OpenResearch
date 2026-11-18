@@ -75,7 +75,7 @@ export function RunPage({ run, name, chatSessionId, now }: { run: Run; name: str
       )}
       {model.stale && !failed && <p className="m-0 mt-1.5 text-xs text-ink-subtext">{model.stale.why} · {model.stale.age}</p>}
       {model.note && <p className="m-0 mt-1.5 text-sm text-ink-subtext">{model.note}</p>}
-      {model.flag?.record && <Issue model={model} flag={model.flag.record} agent={agent} />}
+      {model.flag?.record && <Issue model={model} flag={model.flag.record} agent={run.chatSessionId ? agent : null} />}
       {failed && (
         <div className="mt-2 flex items-center gap-2 text-xs text-ink-subtext">
           {model.stale ? `${model.stale.why} · ${model.stale.age}` : m.run_monitor_load_failed()}

@@ -19,7 +19,7 @@ const summary = (extra = {}) => ({
   bindings: { loss: 2.31 }, signals: running.view.signals, estimate: null, flag: null, rev: 1, generation: "g1", asOf: now, ...extra,
 });
 const run = (id, extra = {}) => ({
-  id, experimentId: `e-${id}`, projectId: "p", status: "running", createdAt: now - 60_000, startedAt: now - 60_000, updatedAt: now,
+  id, experimentId: `e-${id}`, projectId: "p", chatSessionId: "s", status: "running", createdAt: now - 60_000, startedAt: now - 60_000, updatedAt: now,
   contact: null, cancelling: false, lostReason: null, host: null, backend: { kind: "local_job" }, monitor: summary(), ...extra,
 });
 const item = (value) => ({ sessionId: "s", run: value, experimentName: value.id, experimentSlug: `lr-${value.id}`, runNo: 1, runCount: 1 });
@@ -386,6 +386,35 @@ test("the expanded flag renders the full warning in one place", async () => {
 const plain = (text) => text.replace(/[⁦-⁩]/g, "");
 const named = (label) => [...document.querySelectorAll("button")].find((element) => plain(element.textContent) === plain(label)) ?? null;
 const waitingRun = () => run("r1", { monitor: summary({ tone: "flag", flag: { id: "f1", state: "waiting", mode: "copilot" } }) });
+
+test("a follower's flag does not name the current chat's agent as the Ask recipient", async () => {
+  backend({ monitors: { r1: flagged } });
+  await banner([{ ...waitingRun(), chatSessionId: "another-chat" }]);
+  await settle();
+  assert.ok(named(m.run_flag_ask_unnamed()));
+  assert.equal(named(m.run_flag_ask({ agent: "Claude" })), null);
+});
+
+test("a flag shows when its review is queued, waking the agent or being read, in the strip and line", async () => {
+  const states = [
+    ["raised", m.chat_queued(), m.chat_queued()],
+    ["asking", m.chat_queued(), m.chat_queued()],
+    ["waking", m.run_flag_waking({ agent: "Claude" }), m.chat_starting()],
+    ["agent_looking", m.run_flag_reading({ agent: "Claude" }), m.run_agent_looking({ agent: "Claude" })],
+  ];
+  for (const [state, stripStatus, lineStatus] of states) {
+    const monitor = { ...flagged, flags: [{ ...flagged.flags[0], state }] };
+    backend({ monitors: { r1: monitor } });
+    const view = await banner([waitingRun()]);
+    await settle();
+    assert.ok(plain(view.container.textContent).includes(stripStatus), state);
+    if (state !== "agent_looking") assert.ok(!plain(view.container.textContent).includes(m.run_flag_reading({ agent: "Claude" })), state);
+    await click(button(m.run_show_less()));
+    assert.ok(plain(view.container.textContent).includes(lineStatus), state);
+    if (state !== "agent_looking") assert.ok(!plain(view.container.textContent).includes(m.run_agent_looking({ agent: "Claude" })), state);
+    await view.unmount();
+  }
+});
 
 /** Today's server with run r1 flagged and waiting; each flag answer waits until the test gives it. */
 function heldFlag() {

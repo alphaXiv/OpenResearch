@@ -44,10 +44,16 @@ export interface RunLabel {
 }
 
 /** The collapsed run: one sentence, how it compares, the time left. The bar is its underline. A `label` puts it among several. */
-export function RunLine({ model, agent, label, onToggle, onOpenRunPage, expanded = false, expandable = true, children }: { expandable?: boolean; expanded?: boolean; children?: ReactNode; model: RunModel; agent: string; label?: RunLabel; onToggle: () => void; onOpenRunPage?: (run: Run, intent: TabOpenIntent) => void }) {
+export function RunLine({ model, agent, label, onToggle, onOpenRunPage, expanded = false, expandable = true, children }: { expandable?: boolean; expanded?: boolean; children?: ReactNode; model: RunModel; agent: string | null; label?: RunLabel; onToggle: () => void; onOpenRunPage?: (run: Run, intent: TabOpenIntent) => void }) {
   const { requestHostConnect } = useWorkspace().events;
   const host = model.connectHost;
-  const working = model.tone === "revising" ? m.run_agent_editing({ agent: autoDir(agent) }) : model.looking ? m.run_agent_looking({ agent: autoDir(agent) }) : null;
+  const state = expanded && model.flag?.record ? null : model.flag?.state;
+  const editing = model.tone === "revising";
+  const name = autoDir(agent ?? m.chat_the_agent());
+  const working = editing ? m.run_agent_editing({ agent: name })
+    : state === "agent_looking" ? m.run_agent_looking({ agent: name })
+    : state === "waking" ? m.chat_starting()
+    : state === "raised" || state === "asking" ? m.chat_queued() : null;
   const whyId = useId();
   const { stale } = model;
   // The time slot explains itself: why the view stopped, or what the time means.
@@ -60,7 +66,7 @@ export function RunLine({ model, agent, label, onToggle, onOpenRunPage, expanded
       <div className="flex min-h-9 min-w-0 items-center gap-x-2 py-1 ps-3 pe-1.5">
         <Mark tone={model.tone} live={model.live} label={model.status} />
         <RunStatus model={model} label={label ? text : undefined} descriptionId={time?.why ? whyId : undefined} onOpenRunPage={onOpenRunPage} expanded={expanded} />
-        {working && <span className="tool-running-shimmer shrink-0 whitespace-nowrap @max-[40rem]:hidden">{working}</span>}
+        {working && <span className={cn("shrink-0 whitespace-nowrap @max-[40rem]:hidden", editing || state === "agent_looking" ? "tool-running-shimmer" : "text-ink-subtext")}>{working}</span>}
         {!expanded && <Headline model={model} />}
         {host && <Button size="small" onClick={() => requestHostConnect(host)}>{m.settings_connect()}</Button>}
         {time && (time.why ? (

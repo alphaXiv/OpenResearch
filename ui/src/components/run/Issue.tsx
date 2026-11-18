@@ -16,7 +16,7 @@ import { Button } from "../ui";
 export function Issue({ model, flag, agent, onOpenRun }: {
   model: RunModel;
   flag: Flag;
-  /** The chat's agent by name; null when the page can't tell which chat it belongs to. */
+  /** The agent who receives Ask, if known. */
   agent: string | null;
   onOpenRun?: (runId: string, intent: TabOpenIntent, seek?: LogSeek) => void;
 }) {
@@ -29,9 +29,10 @@ export function Issue({ model, flag, agent, onOpenRun }: {
   const where = evidence && (evidence.from === null || evidence.to === null ? m.chat_run_logs()
     : evidence.from === evidence.to ? m.run_flag_log_lines_one({ from: ltr(fmtNumber(evidence.from)) })
     : m.run_flag_log_lines_other({ from: ltr(fmtNumber(evidence.from)), to: ltr(fmtNumber(evidence.to)) }));
-  const status = model.looking || state === "asking"
+  const status = state === "agent_looking"
     ? (evidence ? m.run_flag_reading({ agent: name }) : m.run_flag_reading_what({ agent: name }))
-    : state === "raised" || state === "waking" ? (model.live ? m.run_flag_waking : m.run_flag_waking_ended)({ agent: name }) : null;
+    : state === "waking" ? (model.live ? m.run_flag_waking : m.run_flag_waking_ended)({ agent: name })
+    : state === "asking" || state === "raised" ? m.chat_queued() : null;
 
   const locked = Boolean(choice?.sending);
   const pick = (value: FlagAnswer) => ({
@@ -71,7 +72,7 @@ export function Issue({ model, flag, agent, onOpenRun }: {
           {!locked && choice?.error && <p role="alert" className="m-0 w-full text-xs text-ink-red">{choice.error}</p>}
         </div>
       ) : status && (
-        <p className="m-0 mt-2 text-sm"><span className={state === "raised" || state === "waking" ? "text-ink-subtext" : "tool-running-shimmer"}>{status}</span></p>
+        <p className="m-0 mt-2 text-sm"><span className={state === "agent_looking" ? "tool-running-shimmer" : "text-ink-subtext"}>{status}</span></p>
       )}
     </div>
   );

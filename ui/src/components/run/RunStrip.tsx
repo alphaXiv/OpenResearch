@@ -43,7 +43,7 @@ export function RunStrip({ model, monitor, agent, label, open, onToggle, onOpenR
   model: RunModel;
   open: boolean;
   monitor: StripMonitor;
-  agent: string;
+  agent: string | null;
   label?: RunLabel;
   onToggle: () => void;
   onOpenRun?: OpenRun;

@@ -128,7 +128,8 @@ impl Store {
     /// The notices that woke, or will wake, chats with the run's flags.
     pub(crate) fn run_flag_notices(&self, run_id: &str) -> Result<Vec<FlagNotice>> {
         let mut stmt = self.conn.prepare(
-            "SELECT n.chat_session_id, n.dedupe, n.client_turn_id IS NOT NULL, n.delivered_at IS NOT NULL,
+            "SELECT n.chat_session_id, n.dedupe, n.client_turn_id IS NOT NULL,
+                    n.delivered_at IS NOT NULL OR t.delivery_state IS 'accepted',
                     n.retired_at IS NOT NULL, t.state
              FROM run_notices n
              LEFT JOIN chat_turns t ON t.session_id = n.chat_session_id AND t.client_turn_id = n.client_turn_id

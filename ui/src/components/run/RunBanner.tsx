@@ -110,7 +110,7 @@ export function RunBanner({ sessionId, agent, onOpenRun, onOpenRunPage }: {
       monitor: read && read.status !== "loading" ? read.data : null,
       monitorFailed: read?.status === "error",
       shown,
-      agent,
+      agent: item.run.chatSessionId === sessionId ? agent : m.chat_the_agent(),
       now,
       nextRetryMs: retryAt(item),
     });
@@ -178,7 +178,7 @@ export function RunBanner({ sessionId, agent, onOpenRun, onOpenRunPage }: {
         model={model}
         open={isOpen(model.run.id)}
         monitor={monitor}
-        agent={agent}
+        agent={model.run.chatSessionId === sessionId ? agent : null}
         label={label}
         onToggle={() => toggle(model.run.id)}
         onOpenRun={onOpenRun}

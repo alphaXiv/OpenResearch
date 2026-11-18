@@ -77,8 +77,6 @@ export interface RunModel {
   flagDetail: string | null;
   /** A Copilot flag waits on the user; the strip opens by itself. */
   needsChoice: boolean;
-  /** The chat's agent is reading a flag. */
-  looking: boolean;
   /** What only the strip says under the sentence: a rule's detail, or that the agent is revising. */
   note: string | null;
   /** Lost contact, a pending cancel and the like, worded by `runNoticeCopy`. */
@@ -277,7 +275,6 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   // A flag's words and evidence never change, so a lagging monitor still supplies them for the same flag.
   const flag = stated && { id: stated.id, state: stated.state, record: fetched?.flags.find((flag) => flag.id === stated.id) ?? null };
   const needsChoice = flag?.state === "waiting";
-  const looking = flag?.state === "waking" || flag?.state === "agent_looking" || flag?.state === "asking";
 
   const position = stagePosition(order, settingUp);
   const rawName = stagePhase?.name ?? "";
@@ -444,7 +441,6 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     flag,
     flagDetail: flag?.record?.detail ? autoDir(fillSentence(flag.record.detail, bindings, signals)) : null,
     needsChoice,
-    looking,
     note,
     notice,
     stale,
