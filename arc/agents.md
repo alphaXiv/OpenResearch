@@ -263,14 +263,14 @@ Where an agent offers a hook or plugin, it stamps each shell command with the is
 
 A turn is a row with a state and a **delivery state**: its prompt was never sent, rejected, accepted, or of unknown fate. A running turn holds a per-chat lease with a heartbeat, which keeps one turn per chat and exposes a turn whose process died ([storage](storage.md)).
 
-When a dashboard starts or a lease expires, every turn still marked running has no process behind it, and a turn that finds its own lease gone stops. A turn whose agent was kept and taken back resumes from its checkpoint instead ([restarts](restarts.md)): in the same message, without sending its prompt again, with the requests it held still answerable. Every other becomes a failed turn with a recovery action chosen by its delivery state, and its kept agent, if any, is stopped, so recovery starts on a fresh one:
+When a dashboard quits, starts, or finds a lease expired, every turn still marked running has no process behind it, and a turn that finds its own lease gone stops. A turn whose agent was kept and taken back resumes from its checkpoint instead ([restarts](restarts.md)): in the same message, without sending its prompt again, with the requests it held still answerable. Every other becomes a failed turn with a recovery action chosen by its delivery state, and its kept agent, if any, is stopped, so recovery starts on a fresh one:
 
 | Delivery state | Action | Effect |
 | --- | --- | --- |
 | not sent, rejected | retry | replays the prompt; the agent never saw it |
 | accepted, unknown | continue | asks the agent to carry on; replaying could repeat work |
 
-**Nothing is replayed without the user.** An adapter retries on its own only before the prompt is accepted, within a bounded budget. A continued turn resumes the native session; if that session is gone, the agent gets a bounded snapshot of orx's transcript with instructions not to repeat completed tool actions. An ACP agent's session is gone when the agent says so or no longer lists it.
+**Only a quit or a kept agent resumes on its own.** A dashboard that quits, for the user or an update, marks the turns it stops, and the next start recovers each one before its chat's queue runs. A crash or a lapsed lease may come from the turn itself, so those wait for the user. An adapter retries on its own only before the prompt is accepted, within a bounded budget. A continued turn resumes the native session; if that session is gone, the agent gets a bounded snapshot of orx's transcript with instructions not to repeat completed tool actions. An ACP agent's session is gone when the agent says so or no longer lists it.
 
 **An OpenCode turn resumes from its server.** The server is kept ([restarts](restarts.md)), so a resumed turn resubscribes to its events and reads its export and pending approvals and questions back over the server's API; the transcript is rebuilt from those, and a card still pending stays answerable.
 

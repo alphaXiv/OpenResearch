@@ -2809,10 +2809,12 @@ function TurnStatusRow({
     : reportedCause && Object.hasOwn(FAILURE_LABEL, reportedCause) ? reportedCause
     : isModelAccessLimitPart(part) ? "model_unavailable" : usageLimited ? "usage_limit" : temporaryApiError ? "network" : undefined;
   const agent = input && failure?.agent(input);
-  const label = cause ? FAILURE_LABEL[cause](agent && (agent.profile?.name ?? harnessDisplayName(agent))) : m.chat_turn_incomplete();
+  const errorMessage = cleanToolError(part.state?.error || "");
+  const errorHeadline = errorMessage.split("\n", 1)[0].trim();
+  const label = cause ? FAILURE_LABEL[cause](agent && (agent.profile?.name ?? harnessDisplayName(agent)))
+    : errorHeadline || m.chat_turn_incomplete();
   const Icon = cause === "network" ? WifiOff : cause === "overloaded" ? Hourglass : cause === "sign_in" ? LogIn : cause === "usage_limit" ? Gauge : TriangleAlert;
   const quiet = cause === "network" || cause === "overloaded";
-  const errorMessage = cleanToolError(part.state?.error || "");
   const fixLabel = cause && FIX_LABEL[cause];
   const fix = fixLabel && input && failure?.fix(cause, input);
   // While the agent is signed out, only signing in, here or in the composer, sends the turn again.
@@ -2929,7 +2931,7 @@ function ToolRow({
       ) : (
         <ToolActivityIcon activity={activity} className="text-muted" />
       )}
-      <span className={`${TOOL_LINE_CLASS_NAME} ${failed ? "text-accent-red" : quiet ? "text-muted" : "text-subtext"}`}>
+      <span className={`${TOOL_LINE_CLASS_NAME} ${failed ? "text-accent-red group-hover/detail:text-text" : quiet ? "text-muted" : "text-subtext"}`}>
         <ToolActivityLabel
           activity={activity}
           onOpenFile={onOpenFile}
@@ -2954,15 +2956,18 @@ function ToolRow({
 
   return (
     <div data-part-id={part.id} className="tool-row tool-row-error flex flex-col min-w-0">
-      <div className="flex items-start gap-2 w-fit max-w-full py-1 px-1 min-w-0 rounded-sm">
+      <div
+        className="group/detail flex items-start gap-2 w-fit max-w-full py-1 px-1 min-w-0 rounded-sm cursor-pointer hover:bg-surface"
+        onClick={toggleUnlessControl(() => { expansionState?.set(key, !detailOpen); setDetailOpen(!detailOpen); })}
+      >
         {line}
         <button
           type="button"
-          className="tool-row-detail-toggle inline-flex h-6 shrink-0 items-center justify-center p-0.5 rounded-sm cursor-pointer hover:bg-surface"
+          data-row-toggle
+          className="tool-row-detail-toggle inline-flex h-6 shrink-0 items-center justify-center p-0.5 rounded-sm cursor-pointer"
           aria-expanded={detailOpen}
           aria-controls={detailId}
           aria-label={detailOpen ? m.a11y_hide_error_details({ activity: activity.label }) : m.a11y_show_error_details({ activity: activity.label })}
-          onClick={() => { expansionState?.set(key, !detailOpen); setDetailOpen(!detailOpen); }}
         >
           <ChevronRight size={16} className={`text-accent-red transition-transform duration-120 ease-standard ${detailOpen ? "rotate-90" : ""}`} />
         </button>
@@ -2976,6 +2981,15 @@ function ToolRow({
       )}
     </div>
   );
+}
+
+/** Toggles the row on click, unless a nested link or button without `data-row-toggle` was hit. */
+function toggleUnlessControl(toggle: () => void) {
+  return (event: React.MouseEvent<HTMLElement>) => {
+    const control = (event.target as Element).closest("a, button, [role='button']");
+    if (control && !control.hasAttribute("data-row-toggle")) return;
+    toggle();
+  };
 }
 
 /** Consecutive calls render as one Codex-style activity group: a readable
@@ -3104,7 +3118,10 @@ function ToolGroup({
 
   return (
     <div className="tool-group my-3.5 mx-0">
-      <div className={`tool-group-summary flex items-start gap-2 w-fit max-w-full py-1 px-1 text-base leading-6 text-start ${quiet && !pendingActivity ? "text-muted" : "text-subtext"}`}>
+      <div
+        className={`tool-group-summary flex items-start gap-2 w-fit max-w-full py-1 px-1 text-base leading-6 text-start cursor-pointer ${quiet && !pendingActivity ? "text-muted" : "text-subtext"}`}
+        onClick={toggleUnlessControl(toggle)}
+      >
         <ToolActivityIcon activity={iconActivity} className={shimmering ? "tool-running-shimmer-icon" : "text-muted"} />
         {pendingActivity ? (
           <span
@@ -3125,7 +3142,7 @@ function ToolGroup({
           <button
             type="button"
             className="tool-group-label min-w-0 whitespace-normal break-words cursor-pointer text-start"
-            onClick={toggle}
+            data-row-toggle
             aria-expanded={open}
           >
             {summaryLabel}
@@ -3134,7 +3151,7 @@ function ToolGroup({
         <button
           type="button"
           className="tool-group-chevron-button inline-flex h-6 shrink-0 items-center justify-center p-px cursor-pointer rounded-sm"
-          onClick={toggle}
+          data-row-toggle
           aria-expanded={open}
           aria-label={open ? m.chat_collapse_tool_activity() : m.chat_expand_tool_activity()}
         >
@@ -3981,7 +3998,10 @@ export const Message = memo(function Message({
   }
   const responses = responseMessages ?? [message];
   const localErrors = responses.filter((turn) => turn.id.startsWith(`${LOCAL_PREFIX}senderr-`));
-  const responseTurns = responses.filter((turn) => !turn.id.startsWith(`${LOCAL_PREFIX}senderr-`)).map(splitResponseTurn);
+  const sent = responses.filter((turn) => !turn.id.startsWith(`${LOCAL_PREFIX}senderr-`));
+  const responseTurns = sent.map(splitResponseTurn);
+  let latestResponse = sent.length - 1;
+  while (latestResponse > 0 && !startsTurn(sent[latestResponse])) latestResponse--;
   const turns = responseTurns.map((turn) => turn.message);
   const response = splitResponseParts(turns, predictTextTail, replies);
   const predictingAnswer = predictTextTail && response.answerMessageId === message.id;
@@ -4007,7 +4027,7 @@ export const Message = memo(function Message({
         onOpenSubagent,
         predictTextTail,
       }} />}
-      {responseTurns.map(({ message: turn, turnStatus, usageLimit, temporaryApiError }) => turnStatus && (
+      {responseTurns.map(({ message: turn, turnStatus, usageLimit, temporaryApiError }, index) => turnStatus && (
         <TurnStatusRow
           key={turn.id}
           part={turnStatus}
@@ -4015,8 +4035,8 @@ export const Message = memo(function Message({
           temporaryApiError={temporaryApiError}
           busy={busy}
           recovering={recoveringTurnId === turnStatus.state?.input?.turnId}
-          onRecover={onRecover}
-          failure={failure}
+          onRecover={index === latestResponse ? onRecover : undefined}
+          failure={index === latestResponse ? failure : undefined}
         />
       ))}
       {localErrors.map((turn) => (
@@ -4230,6 +4250,17 @@ function AssistantTurn({ messages, response, options }: {
       </div>
     </>
   );
+}
+
+const TURN_MARKER_TOOLS = new Set(["provider_switch", "compacted"]);
+
+/** Whether `message` belongs to a turn that takes an earlier failed turn's place: shell
+ * exchanges, local send errors, agent switches, compactions and standalone approvals start none. */
+function startsTurn(message: ChatMessage) {
+  if (message.id.startsWith(LOCAL_PREFIX)) return false;
+  if (message.role === "user") return !shellExchangePart(message);
+  return !message.parts.every((part) => (part.tool && TURN_MARKER_TOOLS.has(part.tool))
+    || (part.type === "prompt" && part.prompt?.kind === "permission"));
 }
 
 function shellExchangePart(message: ChatMessage): ChatPart | null {
@@ -4856,6 +4887,9 @@ const Transcript = memo(function Transcript({
     },
     [messages, activePermissionId],
   );
+  // A later agent turn takes a failed turn's place; shell exchanges and local send errors start none.
+  let latestTurnRow = visibleMessages.length - 1;
+  while (latestTurnRow > 0 && !visibleMessages[latestTurnRow].some(startsTurn)) latestTurnRow--;
   // Each delegate sits under the turn that started it: the last row begun before it was.
   const delegatesByRow = useMemo(() => {
     const rows = new Map<number, DelegateRow[]>();
@@ -5135,6 +5169,7 @@ const Transcript = memo(function Transcript({
         // A session owns one turn slot, so one recovery disables every status
         // card until its durable admission resolves.
         const recoveryDisabled = busy || recoveringTurnId !== null;
+        const latest = item.index === latestTurnRow;
         return (
           <div
             key={rowId}
@@ -5193,8 +5228,8 @@ const Transcript = memo(function Transcript({
             onOpenSubagent={onOpenSubagent}
             busy={recoveryDisabled}
             recoveringTurnId={recoveringTurnId}
-            onRecover={onRecover}
-            failure={failure}
+            onRecover={latest ? onRecover : undefined}
+            failure={latest ? failure : undefined}
             skills={skills}
             predictTextTail={busy && m === activeMessage && m.role === "assistant"}
           />

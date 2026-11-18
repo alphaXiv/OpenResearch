@@ -23,40 +23,36 @@ async function midTurn(orx: Orx, page: Page, agent: Agent) {
   await expect(page.getByText('Profiling the loader.')).toBeVisible()
 }
 
-for (const [signal, how, quitting] of [['SIGTERM', 'quits', 'quitting']] as const) {
-  test(`when orx up ${how} mid-turn, the transcript survives and Continue resumes the turn`, async ({ page, agent, launchOrx }) => {
-    const orx = await launchOrx()
-    await midTurn(orx, page, agent)
+test('when orx up quits mid-turn, the next start resumes the turn on its own', async ({ page, agent, launchOrx }) => {
+  const orx = await launchOrx()
+  await midTurn(orx, page, agent)
 
-    await orx.restart(signal)
-    await page.reload()
-    await expect(page.getByText('The baseline trains in four minutes.')).toBeVisible()
-    await expect(page.getByText('Profiling the loader.')).toBeVisible()
-    await expect(page.getByText('This turn did not finish.')).toBeVisible(leaseExpiry)
-    await expect(page.getByText('Never sent.')).toBeHidden()
+  agent.script('Profile the data loader.', [{ say: 'The loader spends most of its time decoding JPEGs.' }])
+  await orx.restart('SIGTERM')
+  await page.reload()
+  await expect(page.getByText('The baseline trains in four minutes.')).toBeVisible()
+  await expect(page.getByText('Profiling the loader.')).toBeVisible()
+  await expect(page.getByText('The loader spends most of its time decoding JPEGs.')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Continue', exact: true })).toBeHidden()
+  await expect(page.getByText('Never sent.')).toBeHidden()
+})
 
-    agent.script('Profile the data loader.', [{ say: 'The loader spends most of its time decoding JPEGs.' }])
-    await page.getByRole('button', { name: 'Continue', exact: true }).click()
-    await expect(page.getByText('The loader spends most of its time decoding JPEGs.')).toBeVisible()
-    await expect(page.getByText('This turn did not finish.')).toBeHidden()
-  })
+test('a message queued behind a turn survives orx up quitting and runs once the turn ends', async ({ page, agent, launchOrx }) => {
+  const orx = await launchOrx()
+  await midTurn(orx, page, agent)
+  agent.script('Then try pinned memory.', [{ say: 'Pinned memory saves a second per epoch.' }])
+  await send(page, 'Then try pinned memory.')
+  await expect(page.getByText('Queued', { exact: true })).toBeVisible()
 
-  test(`a message queued behind a turn survives orx up ${quitting} and runs once the turn is given up`, async ({ page, agent, launchOrx }) => {
-    const orx = await launchOrx()
-    await midTurn(orx, page, agent)
-    agent.script('Then try pinned memory.', [{ say: 'Pinned memory saves a second per epoch.' }])
-    await send(page, 'Then try pinned memory.')
-    await expect(page.getByText('Queued', { exact: true })).toBeVisible()
-
-    await orx.restart(signal)
-    await page.reload()
-    await expect(page.getByText('Then try pinned memory.')).toBeVisible()
-    await expect(page.getByText('This turn did not finish.')).toBeVisible(leaseExpiry)
-    await expect(page.getByText('Pinned memory saves a second per epoch.')).toBeVisible()
-    await expect(page.getByText('This turn did not finish.')).toHaveCount(1)
-    await expect(page.getByText('Queued', { exact: true })).toBeHidden()
-  })
-}
+  agent.script('Profile the data loader.', [{ say: 'The loader spends most of its time decoding JPEGs.' }])
+  await orx.restart('SIGTERM')
+  await page.reload()
+  await expect(page.getByText('Then try pinned memory.')).toBeVisible()
+  await expect(page.getByText('The loader spends most of its time decoding JPEGs.')).toBeVisible()
+  await expect(page.getByText('Pinned memory saves a second per epoch.')).toBeVisible(leaseExpiry)
+  await expect(page.getByText('Queued', { exact: true })).toBeHidden()
+  await expect(page.getByRole('button', { name: 'Continue', exact: true })).toBeHidden()
+})
 
 test('a crashed ACP turn finishes the same reply without another prompt', async ({ page, agent, launchOrx }) => {
   const orx = await launchOrx()
@@ -68,7 +64,7 @@ test('a crashed ACP turn finishes the same reply without another prompt', async 
   await page.reload()
   agent.release('profiling')
   await expect(page.getByText('Profiling the loader. Never sent.', { exact: true })).toBeVisible()
-  await expect(page.getByText('This turn did not finish.')).toBeHidden()
+  await expect(page.getByText(/before this turn finished/)).toBeHidden()
   await expect(page.getByRole('button', { name: 'Stop', exact: true })).toBeHidden()
   await expect(page.locator(`[data-message-id="${messageId}"]`).getByText('Profiling the loader. Never sent.', { exact: true })).toBeVisible()
   await page.reload()
@@ -88,7 +84,7 @@ test('an ACP permission card survives a crash and answers its original request',
   await expect(page.getByRole('button', { name: 'Allow this action', exact: true })).toHaveCount(1)
   await page.getByRole('button', { name: 'Allow this action', exact: true }).click()
   await expect(page.getByText('Data inspection finished.', { exact: true })).toBeVisible()
-  await expect(page.getByText('This turn did not finish.')).toBeHidden()
+  await expect(page.getByText(/before this turn finished/)).toBeHidden()
 })
 
 test('an ACP command running during a crash completes on the adopted connection', async ({ page, agent, launchOrx }) => {
@@ -108,7 +104,7 @@ test('an ACP command running during a crash completes on the adopted connection'
   agent.release('command')
   await expect(page.getByText('Analysis finished.', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Stop', exact: true })).toBeHidden()
-  await expect(page.getByText('This turn did not finish.')).toBeHidden()
+  await expect(page.getByText(/before this turn finished/)).toBeHidden()
   expect(readFileSync(orx.agentLog, 'utf8')).toContain('COMMAND_FINISHED')
 })
 
@@ -120,7 +116,7 @@ test('a turn running when orx up hands off to its next build finishes the same r
   await page.reload()
   agent.release('profiling')
   await expect(page.getByText('Profiling the loader. Never sent.', { exact: true })).toBeVisible()
-  await expect(page.getByText('This turn did not finish.')).toBeHidden()
+  await expect(page.getByText(/before this turn finished/)).toBeHidden()
   await page.reload()
   await expect(page.getByText('Profiling the loader. Never sent.', { exact: true })).toHaveCount(1)
   await expect(page.getByText('The baseline trains in four minutes.')).toHaveCount(1)

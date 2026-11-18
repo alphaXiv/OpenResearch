@@ -3025,6 +3025,8 @@ pub struct ChatHost {
     durable_turns: std::sync::Mutex<HashMap<String, String>>,
     /// Set once `orx up` commits to exiting; no turn starts after, and queues wait for the next start.
     exiting: std::sync::atomic::AtomicBool,
+    /// Set while startup resumes the turns a quit stopped, whose slots no queue may take first.
+    resuming_quit_turns: std::sync::atomic::AtomicBool,
     deleting_sessions: Arc<std::sync::Mutex<HashSet<String>>>,
     /// Per-session serialization for `respond`. Answering a prompt reads the
     /// card, delivers the answer (a non-idempotent POST for inline harnesses),
@@ -4046,6 +4048,7 @@ impl ChatHost {
             turns: Mutex::new(HashMap::new()),
             durable_turns: std::sync::Mutex::new(HashMap::new()),
             exiting: std::sync::atomic::AtomicBool::new(false),
+            resuming_quit_turns: std::sync::atomic::AtomicBool::new(false),
             deleting_sessions: Arc::new(std::sync::Mutex::new(HashSet::new())),
             respond_locks: Mutex::new(HashMap::new()),
             msg_write: std::sync::Mutex::new(()),
@@ -4629,7 +4632,7 @@ impl ChatHost {
     }
 
     /// Stop every active turn for server shutdown without marking it cancelled,
-    /// so lease reconciliation on the next startup still offers Continue/Retry.
+    /// leaving it for the next start to resume.
     /// Stops run together so shutdown waits on the slowest agent, not the sum.
     pub async fn stop_for_shutdown(self: &Arc<Self>) {
         let sessions = self.busy_sessions().await;
@@ -4639,6 +4642,41 @@ impl ChatHost {
             }
         });
         futures::future::join_all(stops).await;
+    }
+
+    /// Resume each turn the last quit stopped, then run the queues waiting behind them.
+    pub async fn resume_quit_turns(self: &Arc<Self>) {
+        self.resuming_quit_turns
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let turns = match Store::open().and_then(|store| store.chat_turns_to_resume()) {
+            Ok(turns) => turns,
+            Err(error) => {
+                eprintln!("orx up: could not read the turns the last quit stopped: {error:#}");
+                Vec::new()
+            }
+        };
+        for turn in turns {
+            let Some(action) = turn.recovery_action.as_deref() else {
+                continue;
+            };
+            if let Err(error) = self
+                .recover_turn(
+                    &turn.session_id,
+                    &turn.id,
+                    action,
+                    RecoveryOverrides::default(),
+                )
+                .await
+            {
+                eprintln!(
+                    "orx up: could not resume turn {} of chat {}: {error:#}",
+                    turn.id, turn.session_id
+                );
+            }
+        }
+        self.resuming_quit_turns
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        self.resume_persisted_queues();
     }
 
     pub async fn is_busy(&self, session_id: &str) -> bool {
@@ -4925,6 +4963,12 @@ impl ChatHost {
     }
 
     pub fn resume_persisted_queues(self: &Arc<Self>) {
+        if self
+            .resuming_quit_turns
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return;
+        }
         let candidates = {
             let queued = self.queued.lock().unwrap();
             queued
@@ -7619,6 +7663,16 @@ impl ChatHost {
             };
             if let Some(active) = active {
                 let _ = active.handle.await;
+                if mode == StopMode::Shutdown {
+                    if let Err(error) = Store::open()
+                        .and_then(|store| store.fail_chat_turn_for_quit(&active.turn_id))
+                    {
+                        eprintln!(
+                            "orx up: the next start will not resume turn {}: {error:#}",
+                            active.turn_id
+                        );
+                    }
+                }
                 // A steer the aborted turn was still handing over runs next instead.
                 host.release_steers(&session_id);
                 let _ = Store::open().and_then(|store| {
@@ -10688,7 +10742,8 @@ enum StopMode {
     User,
     /// Cut short: the stored turn is left for lease reconciliation, which offers Continue.
     LeaseLost,
-    /// Cut short like `LeaseLost`, without waiting on the agent: shutdown kills it next.
+    /// Cut short by a quit, without waiting on the agent: shutdown kills it next and the
+    /// next start resumes the turn.
     Shutdown,
 }
 

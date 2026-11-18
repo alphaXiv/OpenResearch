@@ -676,6 +676,13 @@ pub(crate) const CHAT_TURN_LEASE_TTL: std::time::Duration = std::time::Duration:
 
 /// Delete turn leases not renewed within the TTL, except `held`, the claim tokens of this
 /// process's running turns: a stall or sleep leaves them stale but their turns alive.
+/// The recovery a turn cut short offers: replay a prompt the agent never saw, otherwise
+/// ask it to carry on, since replaying could repeat work.
+const RECOVERY_ACTION_SQL: &str =
+    "CASE WHEN delivery_state IN ('not_sent', 'rejected') THEN 'retry' ELSE 'continue' END";
+
+const QUIT_ERROR_KIND: &str = "server_quit";
+
 fn expire_turn_leases(conn: &Connection, held: &[String]) -> Result<()> {
     conn.execute(
         "DELETE FROM chat_turn_leases
@@ -1469,6 +1476,7 @@ impl Store {
             "ALTER TABLE chat_usage_samples ADD COLUMN cost_currency TEXT",
             "ALTER TABLE chat_usage_samples ADD COLUMN recorded_at INTEGER",
             "ALTER TABLE ui_state ADD COLUMN seen_nudges TEXT",
+            "ALTER TABLE ui_state ADD COLUMN created_at INTEGER",
         ] {
             let _ = schema.execute(ddl, []);
         }
@@ -1620,17 +1628,19 @@ impl Store {
             "INSERT OR IGNORE INTO ui_state (
                  id, onboarding_completed, tour_completed,
                  preferred_harness, preferred_model,
-                 preferred_service_tier, preferred_permission_mode, preferred_reasoning_level
+                 preferred_service_tier, preferred_permission_mode, preferred_reasoning_level,
+                 created_at
              )
              SELECT 1,
                     EXISTS(SELECT 1 FROM local_projects),
                     EXISTS(SELECT 1 FROM local_projects),
-                    harness, model, service_tier, permission_mode, reasoning_level
+                    harness, model, service_tier, permission_mode, reasoning_level,
+                    ?1
              FROM (SELECT 1) seed
              LEFT JOIN chat_sessions ON chat_sessions.id = (
                  SELECT id FROM chat_sessions ORDER BY updated_at DESC LIMIT 1
              )",
-            [],
+            [now_ms()],
         )?;
         // Preferred-agent state never carries Plan for command-activated
         // harnesses: new sessions start in Build/Default until `/plan` is used.
@@ -1735,7 +1745,7 @@ impl Store {
                     preferred_autonomy, nested_delegation, opencode_free_models, preferred_profile,
                     favorite_models, hidden_models, model_section_order,
                     collapsed_model_sections, model_sightings, hidden_agents, seen_nudges,
-                    opencode_review_model
+                    opencode_review_model, created_at
              FROM ui_state WHERE id = 1",
             [],
             |row| {
@@ -1782,6 +1792,7 @@ impl Store {
                         .get::<_, Option<String>>(16)?
                         .and_then(|json| serde_json::from_str(&json).ok()),
                     seen_nudges: list(18)?,
+                    created_at: row.get(20)?,
                 })
             },
         )?)
@@ -5085,6 +5096,41 @@ impl Store {
         Ok(())
     }
 
+    /// Fail an in-flight turn because this server is quitting, so the next start resumes it;
+    /// a turn a crash cuts short waits for the user instead.
+    pub fn fail_chat_turn_for_quit(&self, turn_id: &str) -> Result<()> {
+        self.conn.execute(
+            &format!(
+                "UPDATE chat_turns
+                 SET state = 'failed', error_kind = '{QUIT_ERROR_KIND}',
+                     error_message = 'OpenResearch quit before this turn finished.',
+                     recovery_action = {RECOVERY_ACTION_SQL},
+                     next_retry_at = NULL, updated_at = ?1
+                 WHERE state IN ('preparing', 'retrying', 'running')
+                   AND id = ?2"
+            ),
+            params![now_ms(), turn_id],
+        )?;
+        Ok(())
+    }
+
+    /// Turns a quit cut short that are still their chat's latest and unrecovered, oldest first.
+    pub fn chat_turns_to_resume(&self) -> Result<Vec<StoredChatTurn>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {CHAT_TURN_COLS} FROM chat_turns
+             WHERE state = 'failed' AND error_kind = '{QUIT_ERROR_KIND}'
+               AND recovery_action IS NOT NULL AND recovered_by_turn_id IS NULL
+               AND NOT EXISTS (
+                 SELECT 1 FROM chat_turns later
+                 WHERE later.session_id = chat_turns.session_id
+                   AND (later.created_at, later.rowid) > (chat_turns.created_at, chat_turns.rowid)
+               )
+             ORDER BY created_at ASC"
+        ))?;
+        let rows = stmt.query_map([], row_to_chat_turn)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     /// On server startup no in-flight task survives. Convert unfinished rows
     /// into explicit, user-recoverable terminal states without replaying them.
     pub fn reconcile_unfinished_chat_turns(&self) -> Result<Vec<StoredChatTurn>> {
@@ -5121,19 +5167,18 @@ impl Store {
             rows.collect::<std::result::Result<std::collections::HashSet<_>, _>>()?
         };
         transaction.execute(
-            "UPDATE chat_turns
-             SET state = 'failed', error_kind = 'server_restarted',
-                 error_message = 'ORX restarted before this turn finished',
-                 recovery_action = CASE
-                   WHEN delivery_state IN ('not_sent', 'rejected') THEN 'retry'
-                   ELSE 'continue'
-                 END,
-                 next_retry_at = NULL, updated_at = ?1
-             WHERE state IN ('preparing', 'retrying', 'running')
-               AND NOT EXISTS (
-                 SELECT 1 FROM chat_turn_leases
-                 WHERE chat_turn_leases.chat_session_id = chat_turns.session_id
-               )",
+            &format!(
+                "UPDATE chat_turns
+                 SET state = 'failed', error_kind = 'server_restarted',
+                     error_message = 'OpenResearch restarted before this turn finished.',
+                     recovery_action = {RECOVERY_ACTION_SQL},
+                     next_retry_at = NULL, updated_at = ?1
+                 WHERE state IN ('preparing', 'retrying', 'running')
+                   AND NOT EXISTS (
+                     SELECT 1 FROM chat_turn_leases
+                     WHERE chat_turn_leases.chat_session_id = chat_turns.session_id
+                   )"
+            ),
             params![now],
         )?;
         transaction.commit()?;
@@ -5507,6 +5552,8 @@ pub struct StoredUiState {
     pub model_sightings: Option<serde_json::Value>,
     /// The ids of model feed nudges the user dismissed.
     pub seen_nudges: Vec<String>,
+    /// When this copy first opened its store, in ms; empty for a store older than the field.
+    pub created_at: Option<i64>,
 }
 
 /// Normalized transcript entry; `parts_json` is the wire-format parts array
@@ -9889,6 +9936,8 @@ pub(crate) mod tests {
     fn ui_state_roundtrips_functional_preferences() {
         let dir = std::env::temp_dir().join(format!("orx-store-ui-state-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
+        let created_at = store.ui_state().unwrap().created_at;
+        assert!(created_at.is_some_and(|at| at > 0));
         assert_eq!(
             store.ui_state().unwrap(),
             StoredUiState {
@@ -9907,6 +9956,7 @@ pub(crate) mod tests {
                 collapsed_model_sections: Vec::new(),
                 model_sightings: None,
                 seen_nudges: Vec::new(),
+                created_at,
             }
         );
 
@@ -9967,8 +10017,24 @@ pub(crate) mod tests {
                 collapsed_model_sections: vec!["openai".into()],
                 model_sightings: Some(serde_json::json!({"seen": ["gpt-6"]})),
                 seen_nudges: vec!["2026-11-12-c081d9e1".into()],
+                created_at,
             }
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ui_state_from_before_created_at_reads_as_undated() {
+        let dir = std::env::temp_dir().join(format!("orx-store-ui-dated-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .conn
+            .execute("UPDATE ui_state SET created_at = NULL", [])
+            .unwrap();
+        drop(store);
+
+        let reopened = Store::open_at(dir.clone()).unwrap();
+        assert_eq!(reopened.ui_state().unwrap().created_at, None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -10366,6 +10432,40 @@ pub(crate) mod tests {
         assert!(!store.has_chat_submission("another", "ct_steer").unwrap());
         store.delete_queued_chat_message("q_queue-id").unwrap();
         assert!(!store.has_chat_submission("chat_1", "ct_queue-id").unwrap());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_quit_leaves_its_turns_to_resume_and_a_crash_leaves_them_to_the_user() {
+        let dir = std::env::temp_dir().join(format!("orx-store-quit-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        for id in ["quit", "crashed"] {
+            store
+                .create_chat_session(&chat_session_fixture(id))
+                .unwrap();
+            let mut turn = chat_turn_fixture(id, &format!("client-{id}"));
+            turn.session_id = id.into();
+            turn.state = "running".into();
+            turn.delivery_state = "accepted".into();
+            store.admit_chat_turn(None, &turn).unwrap();
+        }
+
+        store.fail_chat_turn_for_quit("quit").unwrap();
+        store.reconcile_unfinished_chat_turns().unwrap();
+
+        let resumable = store.chat_turns_to_resume().unwrap();
+        assert_eq!(resumable.len(), 1);
+        assert_eq!(resumable[0].id, "quit");
+        assert_eq!(resumable[0].recovery_action.as_deref(), Some("continue"));
+        let crashed = store.get_chat_turn("crashed", "crashed").unwrap().unwrap();
+        assert_eq!(crashed.state, "failed");
+        assert_eq!(crashed.recovery_action.as_deref(), Some("continue"));
+
+        let mut later = chat_turn_fixture("later", "client-later");
+        later.session_id = "quit".into();
+        later.created_at = resumable[0].created_at + 1;
+        store.admit_chat_turn(None, &later).unwrap();
+        assert!(store.chat_turns_to_resume().unwrap().is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }
 
