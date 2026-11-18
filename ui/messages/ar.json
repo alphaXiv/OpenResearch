@@ -597,6 +597,7 @@
   "chat_delete_session_confirm": "هل تريد حذف «{title}»؟\n\nسيُحذف سجلها وأي محادثات جانبية نهائيًا.",
   "chat_delete_session_failed": "تعذّر حذف «{title}»: {error}",
   "chat_untitled": "بدون عنوان",
+  "chat_parent_chats": "المحادثات الأصلية",
   "skills_delete_skill_label": "حذف المهارة {name}",
   "skills_delete_skill_confirm": "حذف مهارة «{name}»؟",
   "skills_edit_skill": "تعديل المهارة",

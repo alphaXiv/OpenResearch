@@ -598,6 +598,7 @@
   "chat_delete_session_confirm": "Xóa \"{title}\"?\n\nBản ghi hội thoại và mọi cuộc trò chuyện phụ của nó sẽ bị xóa vĩnh viễn.",
   "chat_delete_session_failed": "Không thể xóa \"{title}\": {error}",
   "chat_untitled": "Không có tiêu đề",
+  "chat_parent_chats": "Cuộc trò chuyện cha",
   "skills_delete_skill_label": "Xóa kỹ năng {name}",
   "skills_delete_skill_confirm": "Xóa kỹ năng \"{name}\"?",
   "skills_edit_skill": "Chỉnh sửa kỹ năng",

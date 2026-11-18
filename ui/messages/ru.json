@@ -598,6 +598,7 @@
   "chat_delete_session_confirm": "Удалить «{title}»?\n\nСтенограмма и все боковые чаты будут удалены безвозвратно.",
   "chat_delete_session_failed": "Не удалось удалить «{title}»: {error}",
   "chat_untitled": "Без названия",
+  "chat_parent_chats": "Родительские чаты",
   "skills_delete_skill_label": "Удалить навык {name}",
   "skills_delete_skill_confirm": "Удалить навык «{name}»?",
   "skills_edit_skill": "Редактировать навык",

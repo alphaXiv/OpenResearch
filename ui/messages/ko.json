@@ -598,6 +598,7 @@
   "chat_delete_session_confirm": "“{title}”을(를) 삭제할까요?\n\n대화 기록과 관련 사이드 채팅이 영구적으로 삭제됩니다.",
   "chat_delete_session_failed": "“{title}” 삭제 실패: {error}",
   "chat_untitled": "제목 없음",
+  "chat_parent_chats": "상위 채팅",
   "skills_delete_skill_label": "{name} 스킬 삭제",
   "skills_delete_skill_confirm": "“{name}” 스킬을 삭제할까요?",
   "skills_edit_skill": "스킬 편집",

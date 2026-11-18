@@ -598,6 +598,7 @@
   "chat_delete_session_confirm": "“{title}” silinsin mi?\n\nKonuşma dökümü ve tüm yan sohbetler kalıcı olarak kaldırılacak.",
   "chat_delete_session_failed": "“{title}” silinemedi: {error}",
   "chat_untitled": "Başlıksız",
+  "chat_parent_chats": "Üst sohbetler",
   "skills_delete_skill_label": "{name} skill'ini sil",
   "skills_delete_skill_confirm": "“{name}” skill'i silinsin mi?",
   "skills_edit_skill": "Skill'i düzenle",

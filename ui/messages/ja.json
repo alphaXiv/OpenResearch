@@ -598,6 +598,7 @@
   "chat_delete_session_confirm": "「{title}」を削除しますか？\n\n会話履歴と関連するサイドチャットが完全に削除されます。",
   "chat_delete_session_failed": "「{title}」の削除に失敗: {error}",
   "chat_untitled": "無題",
+  "chat_parent_chats": "親チャット",
   "skills_delete_skill_label": "スキル {name} を削除",
   "skills_delete_skill_confirm": "スキル「{name}」を削除しますか？",
   "skills_edit_skill": "スキルを編集",
