@@ -41,7 +41,7 @@ export function AcpAuth({ harness, remote = false, onReady, close, disabled = fa
   const [command, setCommand] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
   const environment = useQuery({ ...getEnvVarsQuery(), enabled: Boolean(harness.authEnvKey) });
-  const entry = environment.data?.find((entry) => entry.key === harness.authEnvKey);
+  const entry = environment.data?.vars.find((entry) => entry.key === harness.authEnvKey);
   const commands = remote ? [] : harness.logo === "zcode-acp-server" ? ["zcode login zai", "zcode login bigmodel"]
     : harness.logo === "kimi" ? ["kimi login"]
     : harness.logo === "mcode" ? ["mcode login --region global"]
@@ -62,7 +62,7 @@ export function AcpAuth({ harness, remote = false, onReady, close, disabled = fa
     setError(null);
     try {
       if (save && harness.authEnvKey) {
-        await mutSetEnvVar.runAsHeadlessPromise(workspace, harness.authEnvKey, value.trim(), {});
+        await mutSetEnvVar.runAsHeadlessPromise(workspace, { key: harness.authEnvKey, value: value.trim() }, {});
         setValue("");
       }
       const current = (await refreshHarnesses(true, true)).find((item) => item.id === harness.id);

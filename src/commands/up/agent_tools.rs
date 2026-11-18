@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use super::{harnesses_payload, reject_if_moving, ApiError, ApiResult, AppState, HarnessQuery};
 use crate::error::{anyhow, bail, Result};
 use crate::local::chat::{
-    delegation, news, OrxDisplay, OrxKind, OrxSource, PromptAnswer, TurnOverrides,
+    delegation, env_request, news, OrxDisplay, OrxKind, OrxSource, PromptAnswer, TurnOverrides,
     ORX_MESSAGE_PREFIX,
 };
 use crate::local::model_routes;
@@ -165,6 +165,32 @@ fn tools(harness: &str) -> Value {
                     "text": { "type": "string", "description": "A written answer, or a note beside the choices." },
                 },
                 "required": ["chatId", "promptId"],
+            },
+        },
+        {
+            "name": "request_env",
+            "description": format!("Ask the user to set environment variables, such as an API key or a setting your code reads. The user types the values on a card in this chat and chooses where to save them for your shell, your runs and later chats. The tool result omits secret values. Waits until the user answers, at most {} minutes. Use this instead of asking for a key in chat or reading one from a file.", longest / 60),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "reason": { "type": "string", "description": "Why you need them, in a sentence the user reads on the card." },
+                    "variables": {
+                        "type": "array",
+                        "maxItems": env_request::MAX_VARIABLES,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": { "type": "string", "description": "The variable's name, such as `WANDB_API_KEY`." },
+                                "description": { "type": "string", "description": "What it is and where the user finds it, such as \"From wandb.ai/authorize\". Saved with the variable." },
+                                "secret": { "type": "boolean", "description": "Default true. False for a setting that is not sensitive, such as a project name: the user sees it as typed and you are told its value." },
+                                "pattern": { "type": "string", "description": "Optional regex the value should match, such as `^[0-9a-f]{40}$`. A value that does not match only gets a warning." },
+                                "example": { "type": "string", "description": "Optional placeholder showing the value's form, never a real value." },
+                            },
+                            "required": ["name"],
+                        },
+                    },
+                },
+                "required": ["variables"],
             },
         },
         {
@@ -326,8 +352,13 @@ async fn call(
             let pending = delegation::pending_prompt(&store, &target.id)?
                 .filter(|pending| pending.id == prompt_id)
                 .ok_or_else(|| anyhow!("Chat `{}` has no open question `{prompt_id}`; call `status` for its current one.", target.id))?;
-            if pending.kind() != "question" {
-                bail!("Only the user can approve a step; `answer` answers questions.");
+            match pending.kind() {
+                "question" => {}
+                "env" => bail!(
+                    "Only the user can set the variables chat `{}` asks for.",
+                    target.id
+                ),
+                _ => bail!("Only the user can approve a step; `answer` answers questions."),
             }
             let choices: Vec<String> = args
                 .get("choices")
@@ -361,9 +392,28 @@ async fn call(
                     note,
                     annotations: Vec::new(),
                     from: Some(caller.id.clone()),
+                    env: Vec::new(),
                 })
                 .await?;
             Ok(format!("Answered chat `{}`; it continues.", target.id))
+        }
+        "request_env" => {
+            let variables = env_request::parse_variables(args)?;
+            if let Some(error) = variables
+                .iter()
+                .find_map(|var| super::env_key_error(&var.name))
+            {
+                bail!("{error}");
+            }
+            state
+                .chat
+                .request_env(
+                    &caller.id,
+                    optional_text(args, "reason").map(str::to_string),
+                    variables,
+                    std::time::Duration::from_secs(longest_wait(&caller.harness)),
+                )
+                .await
         }
         "cancel" => {
             let store = Store::open()?;

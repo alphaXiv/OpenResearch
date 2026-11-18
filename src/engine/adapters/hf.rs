@@ -23,17 +23,17 @@ impl Api for HfAccount {
             serde_json::from_value(intent.launch.options.clone()).map_err(api::rejected)?;
         let token = hf::resolve_token().map_err(api::rejected)?;
         spec.labels.insert("or_run".into(), intent.run.id.clone());
-        // Tokens travel as job secrets; the environment carries the run context and Trackio's
-        // space, never every saved variable.
+        let mut saved = crate::config::saved_run_env(&intent.run).map_err(api::rejected)?;
+        // The HF launcher only forwards saved Trackio settings.
         spec.secrets.insert("HF_TOKEN".into(), token.clone());
         for key in [trackio::SERVER_URL, trackio::WRITE_TOKEN] {
-            if let Some(value) = crate::config::synced_env_var(key) {
+            if let Some(value) = saved.remove(key) {
                 spec.secrets.insert(key.into(), value);
             }
         }
         spec.environment
-            .extend(crate::config::run_context_env(&intent.run.id));
-        if let Some(space) = crate::config::synced_env_var(trackio::SPACE_ID) {
+            .extend(crate::config::run_context_env(&intent.run, &saved));
+        if let Some(space) = saved.remove(trackio::SPACE_ID) {
             spec.environment.insert(trackio::SPACE_ID.into(), space);
         }
         let descriptor = crate::jobs::BackendDescriptor::parse(&intent.run.backend_json)

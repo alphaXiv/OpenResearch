@@ -8,7 +8,7 @@ export type DelegateStatus = "running" | "asking" | "approval" | "finished" | "f
  * about to, since its task is queued. What it waits on comes first.
  */
 export function delegateStatus(session: ChatSession, sessions: ChatSession[]): DelegateStatus {
-  if (session.delegate?.asking === "question") return "asking";
+  if (session.delegate?.asking === "question" || session.delegate?.asking === "env") return "asking";
   if (session.delegate?.asking) return "approval";
   if (session.busy || delegatesOf(sessions, session.id).some((child) => delegateStatus(child, sessions) === "running")) {
     return "running";

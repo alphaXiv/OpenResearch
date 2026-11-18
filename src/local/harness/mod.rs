@@ -1,6 +1,6 @@
 //! The harness compatibility layer: one `Harness` trait that every coding-agent
 //! integration (Claude Code, Codex, OpenCode, Cursor, Antigravity) implements, plus the
-//! single `registry()` that every consumer iterates.
+//! shared registry for dispatch and discovery.
 //!
 //! A harness can offer up to three capabilities, and no harness is required to
 //! offer all of them:
@@ -14,7 +14,7 @@
 //!   shim so the agent auto-discovers the CLI.
 //!
 //! Adding a harness is one new file with one `impl Harness` and one line
-//! in `registry()`; the dispatch, the ID list, the detection sweep, and the
+//! in the registry; the dispatch, the ID list, the detection sweep, and the
 //! skill installer all pick it up with no further edits.
 
 pub(crate) mod acp;
@@ -459,9 +459,12 @@ pub fn permission_id_for_mode(harness_id: &str, mode: PermissionMode) -> Option<
         .map(|choice| choice.id)
 }
 
-/// The one registry. Every consumer — chat dispatch, detection sweep, the
-/// create-session allowlist, and the skill installer — iterates this.
+/// Harness registration for dispatch, the session allowlist, and skills.
 pub fn registry() -> Vec<Box<dyn Harness>> {
+    registry_with_acp(crate::local::acp::registered_definitions())
+}
+
+fn registry_with_acp(definitions: Vec<crate::local::acp::Definition>) -> Vec<Box<dyn Harness>> {
     let mut harnesses: Vec<Box<dyn Harness>> = vec![
         Box::new(claude::ClaudeCode),
         Box::new(codex::Codex),
@@ -470,7 +473,7 @@ pub fn registry() -> Vec<Box<dyn Harness>> {
         Box::new(antigravity::Antigravity),
     ];
     harnesses.extend(
-        crate::local::acp::registered_definitions()
+        definitions
             .into_iter()
             .map(|definition| Box::new(acp::Acp(definition)) as Box<dyn Harness>),
     );
@@ -633,10 +636,7 @@ async fn detect_one(harness: &dyn Harness, snapshot: bool) -> Option<HarnessInfo
 }
 
 pub async fn detect_harness(id: &str) -> Option<HarnessInfo> {
-    let harness = registry()
-        .into_iter()
-        .find(|h| h.id() == id && h.supports_chat())?;
-    detect_one(harness.as_ref(), false).await
+    detect_one(chat_harness(id)?.as_ref(), false).await
 }
 
 /// The snapshot pass of [`detect_harness`] (see [`Harness::detect_snapshot`]).
@@ -644,22 +644,25 @@ pub async fn detect_harness_snapshot(id: &str) -> Option<HarnessInfo> {
     detect_one(chat_harness(id)?.as_ref(), true).await
 }
 
-/// Detect every chat-capable harness, in registry order. This is what the
-/// `orx up` dashboard renders in its harness picker.
+/// The dashboard's detected harness catalog, in registry order.
 pub async fn detect_harnesses() -> Vec<HarnessInfo> {
     detect_all(false).await
+}
+
+fn catalog_harnesses() -> impl Iterator<Item = Box<dyn Harness>> {
+    registry_with_acp(crate::local::acp::catalog_definitions())
+        .into_iter()
+        .filter(|h| h.supports_chat())
 }
 
 /// The full pass, yielding each harness as its own probes finish instead of
 /// in a batch. Callers that can commit entries individually unblock a ready
 /// agent on its own clock rather than the slowest sibling's — the onboarding
 /// gate is per-entry (`agentReady && !catalogPending`), so the catalog fill
-/// should not be. Items carry the harness's registry index so the caller can
-/// restore registry order for the final payload.
+/// should not be. Items carry their catalog index so the caller can restore
+/// the order for the final payload.
 pub fn detect_harnesses_each() -> impl futures::Stream<Item = (usize, HarnessInfo)> {
-    registry()
-        .into_iter()
-        .filter(|h| h.supports_chat())
+    catalog_harnesses()
         .enumerate()
         .map(|(i, h)| async move { detect_one(h.as_ref(), false).await.map(|info| (i, info)) })
         .collect::<futures::stream::FuturesUnordered<_>>()
@@ -675,10 +678,8 @@ pub async fn detect_harnesses_snapshot() -> Vec<HarnessInfo> {
 }
 
 async fn detect_all(snapshot: bool) -> Vec<HarnessInfo> {
-    let futures = registry()
-        .into_iter()
-        .filter(|h| h.supports_chat())
-        .map(|h| async move { detect_one(h.as_ref(), snapshot).await });
+    let futures =
+        catalog_harnesses().map(|h| async move { detect_one(h.as_ref(), snapshot).await });
     futures::future::join_all(futures)
         .await
         .into_iter()
