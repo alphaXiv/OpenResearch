@@ -87,12 +87,13 @@ fn report(plan: &[orx_signals::Stage], parent: Option<&orx_signals::Snapshot>) -
         });
         *occurrence += 1;
         let timing = (|| {
-            let prior = stage.prior.ok_or("no recorded parent duration")?;
+            let prior = stage.prior.ok_or_else(|| {
+                previous
+                    .and_then(|phase| estimate::prior_scale(&stage, phase).err())
+                    .unwrap_or("no recorded parent duration")
+            })?;
             let parent_unit = previous.and_then(|p| p.unit.as_deref());
             let unit = stage.unit.as_deref();
-            if !estimate::compatible_units(unit, parent_unit) && stage.of.is_some() {
-                return Err("the parent counted a different unit");
-            }
             let (ms, explanation) = match stage.of {
                 Some(of) => {
                     let each = prior

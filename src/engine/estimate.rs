@@ -768,15 +768,32 @@ pub(crate) enum TimedBy {
     Parent,
 }
 
-pub(crate) fn compatible_units(mine: Option<&str>, theirs: Option<&str>) -> bool {
-    mine.zip(theirs).is_none_or(|(mine, theirs)| mine == theirs)
+pub(crate) fn prior_scale(
+    stage: &Stage,
+    previous: &orx_signals::Phase,
+) -> Result<f64, &'static str> {
+    if stage
+        .unit
+        .as_deref()
+        .zip(previous.unit.as_deref())
+        .is_some_and(|(mine, theirs)| mine != theirs)
+    {
+        return Err("the parent counted a different unit");
+    }
+
+    match (stage.of, previous.of) {
+        (None, None) => Ok(1.0),
+        (Some(mine), Some(theirs)) if (mine <= 1.0) == (theirs <= 1.0) => Ok(mine / theirs),
+        (Some(_), Some(_)) => Err("one run counts a single item and the other counts several"),
+        _ => Err("only one run declares a total"),
+    }
 }
 
 /// Lays a run's phase occurrences over its plan, in order. An occurrence is the next planned stage
 /// of its name, and the planned stages it passed over were skipped; one the plan does not name is
 /// unplanned, and the plan grows by it there; with no plan, every occurrence is unplanned. A run
 /// that finished skipped the stages it never reached. A stage's prior is how long the first of
-/// `timed` that went through the stage of the same name and count took over it; each comes with
+/// `timed` that went through that occurrence with a comparable count took over it; each comes with
 /// whether that run finished.
 pub(crate) fn stages(
     plan: &[orx_signals::Stage],
@@ -821,57 +838,29 @@ pub(crate) fn stages(
     }
     shown.extend(plan[next..].iter().map(|s| planned(s, finished)));
 
-    let took: Vec<Vec<_>> = timed
-        .iter()
-        .map(|(run, done, _)| {
-            let last = run.phases.len().checked_sub(1);
-            run.phases
-                .iter()
-                .enumerate()
-                .map(|(index, phase)| {
-                    // The last stage of a run that finished ended with its log.
-                    let end = phase.ended_at.or(run
-                        .timing
-                        .last_log_at
-                        .filter(|_| *done && Some(index) == last));
-                    let took = phase
-                        .started_at
-                        .zip(end)
-                        .map(|(start, end)| (end - start) as f64);
-                    (
-                        phase.name.as_str(),
-                        took.filter(|ms| *ms > 0.0),
-                        phase.done,
-                        phase.of,
-                        phase.unit.as_deref(),
-                    )
-                })
-                .collect()
-        })
-        .collect();
     let mut counted: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for stage in &mut shown {
         let count = counted.entry(stage.name.clone()).or_default();
-        stage.prior = took.iter().zip(timed).find_map(|(took, (_, _, by))| {
-            took.iter()
-                .filter(|(name, ..)| *name == stage.name)
-                .nth(*count)
-                .and_then(|&(_, took, done, of, unit)| {
-                    let compatible = compatible_units(stage.unit.as_deref(), unit);
-                    let ms = took?;
-                    let scale = stage
-                        .of
-                        .zip(of)
-                        .filter(|(mine, theirs)| compatible && *mine > 0.0 && *theirs > 0.0)
-                        .map_or(1.0, |(mine, theirs)| mine / theirs);
-                    Some(Prior {
-                        ms: ms * scale,
-                        by: *by,
-                        per_unit_ms: done
-                            .filter(|done| compatible && *done > 0.0)
-                            .map(|done| ms / done),
-                    })
-                })
+        stage.prior = timed.iter().find_map(|(run, finished, by)| {
+            let (index, phase) = run
+                .phases
+                .iter()
+                .enumerate()
+                .filter(|(_, phase)| phase.name == stage.name)
+                .nth(*count)?;
+            let scale = prior_scale(stage, phase).ok()?;
+
+            // The last stage of a run that finished ended with its log.
+            let end = phase.ended_at.or(run
+                .timing
+                .last_log_at
+                .filter(|_| *finished && index + 1 == run.phases.len()))?;
+            let ms = (end - phase.started_at?) as f64;
+            (ms > 0.0).then(|| Prior {
+                ms: ms * scale,
+                by: *by,
+                per_unit_ms: phase.done.filter(|done| *done > 0.0).map(|done| ms / done),
+            })
         });
         *count += 1;
     }
@@ -1043,29 +1032,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn different_stage_units_keep_the_parent_duration() {
+    fn stage_priors_require_comparable_counts() {
         let mut parent = orx_signals::Snapshot::new("parent", "", "");
         parent
             .feed(
-                b"::orx:: {\"phase\":\"tokenizer\",\"step\":0,\"of\":32503,\"unit\":\"merges\"}\n",
+                b"::orx:: {\"phase\":\"eval\",\"step\":0,\"of\":22,\"unit\":\"tasks\"}\n",
                 false,
                 1000,
                 true,
             )
             .unwrap();
         parent
-            .feed(b"::orx:: {\"step\":32503}\n", false, 51000, true)
+            .feed(b"::orx:: {\"step\":22}\n", false, 51000, true)
             .unwrap();
         parent.feed(b"", true, 51000, true).unwrap();
-        let plan = orx_signals::plan(
-            &serde_json::json!([{ "phase": "tokenizer", "of": 2, "unit": "commands" }]),
-            false,
-        )
-        .unwrap();
-        let stages = stages(&plan, None, false, &[(&parent, true, TimedBy::Parent)]);
-        let prior = stages[0].prior.unwrap();
-        close(prior.ms, 50_000.0);
-        assert_eq!(prior.per_unit_ms, None);
+
+        for (of, unit, expected_ms) in [
+            (Some(11), Some("reports"), None),
+            (None, Some("tasks"), None),
+            (Some(1), Some("tasks"), None),
+            (Some(11), Some("tasks"), Some(25_000.0)),
+            (Some(11), None, Some(25_000.0)),
+        ] {
+            let plan = orx_signals::plan(
+                &serde_json::json!([{ "phase": "eval", "of": of, "unit": unit }]),
+                false,
+            )
+            .unwrap();
+            let stages = stages(&plan, None, false, &[(&parent, true, TimedBy::Parent)]);
+            assert_eq!(
+                stages[0].prior.map(|prior| prior.ms),
+                expected_ms,
+                "eval of {of:?} {unit:?}"
+            );
+        }
     }
 
     #[test]

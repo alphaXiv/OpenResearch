@@ -5868,11 +5868,6 @@ mod tests {
     #[test]
     fn a_plan_times_future_stages_and_weights_reported_progress() {
         let f = Fixture::new("orx-monitor-plan");
-        let stages = json!(PIPELINE
-            .iter()
-            .map(|name| json!({"phase": name}))
-            .collect::<Vec<_>>());
-        plan(&f, "exp", stages).unwrap();
         let pipeline = [
             ("install", 10, None),
             ("download", 30, Some(30)),
@@ -5880,6 +5875,11 @@ mod tests {
             ("eval", 30, Some(30)),
             ("sft", 70, None),
         ];
+        let stages = json!(pipeline
+            .iter()
+            .map(|(name, _, of)| json!({"phase": name, "of": of}))
+            .collect::<Vec<_>>());
+        plan(&f, "exp", stages).unwrap();
         let parent = staged(&f, "p1", "exp", "done", &pipeline, 200);
         monitor_at(&f, &parent, T0 + 700_000);
         f.child("child", "exp");
@@ -6410,16 +6410,16 @@ mod tests {
     #[test]
     fn a_stage_is_timed_by_the_experiments_own_last_run_before_its_parents() {
         let f = Fixture::new("orx-monitor-earlier-prior");
-        let stages = json!(["setup", "train", "eval"]
-            .iter()
-            .map(|name| json!({"phase": name}))
-            .collect::<Vec<_>>());
-        plan(&f, "exp", stages).unwrap();
         let parent = [
             ("setup", 4, Some(4)),
             ("train", 60, Some(60)),
             ("eval", 10, Some(10)),
         ];
+        let stages = json!(parent
+            .iter()
+            .map(|(name, _, of)| json!({"phase": name, "of": of}))
+            .collect::<Vec<_>>());
+        plan(&f, "exp", stages).unwrap();
         let parent = staged(&f, "p1", "exp", "done", &parent, 200);
         monitor_at(&f, &parent, T0 + 700_000);
         f.child("child", "exp");

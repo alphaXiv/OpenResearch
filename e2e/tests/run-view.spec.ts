@@ -354,7 +354,7 @@ process.stdout.write('::orx:: {"step":3,"m":{"loss":0.5}}\\n')
   await expect(page.getByText('Reporting smoke test finished.', { exact: true })).toBeVisible()
 })
 
-test('a timed floor names the untimed stage above the chat', async ({ page, project, agent, orx }) => {
+test('a timed floor names a stage whose parent counted different work', async ({ page, project, agent, orx }) => {
   test.slow()
   const dir = path.join(orx.root, `floor-${project.id}`)
   mkdirSync(dir)
@@ -362,6 +362,14 @@ test('a timed floor names the untimed stage above the chat', async ({ page, proj
   expect(spawnSync('mkfifo', [ready]).status).toBe(0)
   const gate = path.join(dir, 'finish')
   expect(spawnSync('mkfifo', [gate]).status).toBe(0)
+  const sweep = path.join(dir, 'sweep')
+  expect(spawnSync('mkfifo', [sweep]).status).toBe(0)
+  const baseline = path.join(dir, 'baseline.mjs')
+  writeFileSync(baseline, `import { readFileSync } from 'node:fs'
+console.log('::orx:: {"phase":"sweep","step":0,"of":22,"unit":"tasks"}')
+readFileSync(${JSON.stringify(sweep)})
+console.log('::orx:: {"step":22}')
+`)
   const script = path.join(dir, 'train.mjs')
   writeFileSync(script, `import { readFileSync } from 'node:fs'
 process.stdout.write('::orx:: {"plan":[{"phase":"prepare-model","of":1},{"phase":"training-a-very-long-stage-name","of":800},{"phase":"sweep"}]}\\n')
@@ -373,10 +381,28 @@ for (const step of [0, 10, 20, 30, 40, 50, 60, 70, 80, 93]) {
 }
 readFileSync(${JSON.stringify(gate)})
 `)
+  const banner = page.getByRole('region', { name: 'Runs in this chat' })
+  agent.script('Launch the parent sweep.', [
+    { run: [
+      'set -e',
+      `id=$(orx create-experiment ${project.id} --title Sweep --run-command '${process.execPath} ${baseline}' | sed -n 's/^ *id: *//p')`,
+      `echo "$id" > ${dir}/parent`,
+      'orx exp run "$id" --backend local',
+      'orx exp wake "$id"',
+    ].join('\n') },
+    { say: 'Parent sweep launched.' },
+  ])
+  agent.script('finished with status **done**', [{ say: 'Parent sweep finished.' }])
+  await project.open(page)
+  await send(page, 'Launch the parent sweep.')
+  await expect(banner).toContainText(/0[⁦-⁩]* of [⁦-⁩]*22/)
+  await writeFile(sweep, 'go\n')
+  await expect(page.getByText('Parent sweep finished.', { exact: true })).toBeVisible()
+
   agent.script('Launch timed floor.', [
     { run: [
       'set -e',
-      `id=$(orx create-experiment ${project.id} --title 'Timed floor' --run-command '${process.execPath} ${script}' | sed -n 's/^ *id: *//p')`,
+      `id=$(orx create-experiment ${project.id} --title 'Timed floor' --parent "$(cat ${dir}/parent)" --run-command '${process.execPath} ${script}' | sed -n 's/^ *id: *//p')`,
       'orx exp run "$id" --backend local',
       'orx exp wake "$id"',
     ].join('\n') },
@@ -384,12 +410,10 @@ readFileSync(${JSON.stringify(gate)})
   ])
   const hold = `floor-result-${project.id}`
   agent.script('finished with status **done**', [{ hold }, { say: 'Timed floor finished.' }])
-  await project.open(page)
   await send(page, 'Launch timed floor.')
-  const banner = page.getByRole('region', { name: 'Runs in this chat' })
   await expect(banner).toContainText(/Prepare-model.*started/)
   await expect(banner).not.toContainText('window_pattern')
-  const shots = path.resolve(import.meta.dirname, '../../.shots/q2')
+  const shots = path.resolve(import.meta.dirname, '../../.shots/r3')
   mkdirSync(shots, { recursive: true })
   await expect(page.locator('.right-pane')).toHaveCount(0)
   await page.getByText('Timed floor launched.', { exact: true }).click()
@@ -431,6 +455,21 @@ readFileSync(${JSON.stringify(gate)})
       await page.screenshot({ path: path.join(shots, `floor-card-${colorScheme}-${width}.png`) })
       await page.keyboard.press('Escape')
       await expect(card).not.toBeVisible()
+    }
+  }
+  await page.setViewportSize({ width: 1440, height: 1000 })
+  await banner.getByRole('button', { name: /Timed floor/ }).first().hover()
+  await page.getByRole('dialog').getByRole('link', { name: /Timed floor/ }).click()
+  const latest = page.locator('section', { has: page.getByRole('heading', { name: 'Latest run', exact: true }) })
+  const estimate = latest.getByText(/At least .* left.*sweep.*not timed/)
+  await expect(estimate).toBeVisible()
+  for (const width of [420, 1440]) {
+    await page.setViewportSize({ width, height: 1000 })
+    for (const colorScheme of ['light', 'dark'] as const) {
+      await page.emulateMedia({ colorScheme })
+      await expect(page.locator('html')).toHaveAttribute('data-theme', colorScheme)
+      await estimate.scrollIntoViewIfNeeded()
+      await page.screenshot({ path: path.join(shots, `floor-page-${colorScheme}-${width}.png`) })
     }
   }
   await writeFile(gate, 'go\n')

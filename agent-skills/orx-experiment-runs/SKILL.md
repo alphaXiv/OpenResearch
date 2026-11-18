@@ -61,6 +61,8 @@ When the user names a duration, run:
 orx exp run <expId> --estimate
 ```
 
+If the estimate falls below the user's requested window, add steps or data or
+run a short calibration before launching, and tell the user which you did.
 Resize the workload in the child's code or configuration and update its
 stage plan. Re-estimate until the total falls inside the user's range.
 If the estimate says "at least," report the floor and calibrate the untimed
