@@ -2574,9 +2574,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                       ) ?? null
                     }
                     onOpenView={(view, runId, intent) => {
-                      openFromRightTab(expTab, () =>
-                        openExperimentTab(tabExperiment.id, view, intent, runId),
-                      );
+                      if (view !== expTab.view) promoteRightTab(expTab);
+                      openExperimentTab(tabExperiment.id, view, intent, runId);
                     }}
                     onOpenCode={(view, intent) =>
                       openFromRightTab(expTab, () =>

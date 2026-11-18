@@ -72,6 +72,7 @@ export function DetailDrawer({
         project={project}
         runs={expRuns}
         selectedRunId={selectedRunId}
+        onOpenRun={(runId, intent) => onOpenView("overview", runId, intent)}
         onOpenLogs={(runId, intent) => onOpenView("terminal", runId, intent)}
         onOpenTrackio={(runId, intent) => onOpenView("trackio", runId, intent)}
         onOpenCode={(intent) => onOpenCode("files", intent)}

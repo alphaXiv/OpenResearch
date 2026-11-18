@@ -3,11 +3,11 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { act, createElement } from "react";
 import { ExperimentOverview } from "../src/components/ExperimentOverview.tsx";
-import { session } from "./chat.mjs";
+import { renderChat, session } from "./chat.mjs";
 import { m } from "../src/paraglide/messages.js";
 import { capitalized } from "../src/runMonitor/words.ts";
 import { createWorkspace } from "../src/workspace.tsx";
-import { render, serveApp, settle } from "./render.mjs";
+import { find, render, serveApp, settle } from "./render.mjs";
 
 const fixture = (name) => JSON.parse(readFileSync(new URL(`./fixtures/runMonitor/${name}.json`, import.meta.url), "utf8"));
 const now = Date.now();
@@ -50,7 +50,7 @@ async function overview(runs, monitor = () => pipeline(), { chat = null, session
     const body = await monitor(read[1]);
     return body instanceof Response ? body : Response.json(body);
   };
-  const props = (runs) => ({ experiment: shown, lineageNode: null, onOpenExperiment() {}, parentExperiment: null, project, runs, selectedRunId, onOpenLogs() {}, onOpenTrackio() {}, onOpenCode() {}, onOpenDiff() {} });
+  const props = (runs) => ({ experiment: shown, lineageNode: null, onOpenExperiment() {}, parentExperiment: null, project, runs, selectedRunId, onOpenRun() {}, onOpenLogs() {}, onOpenTrackio() {}, onOpenCode() {}, onOpenDiff() {} });
   const view = await render(createElement(ExperimentOverview, props(runs)), createWorkspace("test"));
   await settle();
   const update = async (next) => {
@@ -251,6 +251,35 @@ test("run history says what each run finished with or where it stopped", async (
   const rows = [...container.querySelectorAll(".experiment-run-history button")].map(text);
   assert.match(rows[1], /By you, at step 26 of 120\./);
   assert.match(rows[2], /Train loss 0\.41/);
+});
+
+test("run history opens the older SSH run's chart, stats and journal while the latest attempt is unreachable", async () => {
+  const older = { ...pipeline(), runId: "r1", estimate: null, watch: fixture("running").watch };
+  const latest = pipeline();
+  const ssh = { backend: { kind: "ssh_job" }, host: "lab-a40" };
+  const previous = run("r1", { ...ssh, status: "done", endedAt: now - 630_000, createdAt: now - 900_000, monitor: summary(older, { tone: "done" }) });
+  const unreachable = run("r2", { ...ssh, contact: { type: "unreachable", since: now - 60_000, cause: "timed out" }, monitor: summary(latest) });
+  const pane = encodeURIComponent(JSON.stringify({ kind: "experiment", experimentId: "e1", view: "overview" }));
+  const { container, requests } = await renderChat(`/projects/p/tasks/s?pane=${pane}`, { routes: {
+    "GET /api/projects": () => ({ projects: [project] }),
+    "GET /api/projects/p/experiments": () => ({ experiments: [experiment] }),
+    "GET /api/projects/p/runs": () => ({ runs: [unreachable, previous] }),
+    "GET /api/runs/r1/monitor": () => older,
+    "GET /api/runs/r2/monitor": () => latest,
+    "GET /api/compute/hosts": () => [],
+  } });
+  assert.ok(find("h2", m.experiment_latest_run()));
+  const row = () => find(".experiment-run-history button", "Run 1");
+  await act(async () => row().click());
+  await settle();
+  assert.ok([...container.querySelectorAll("h2")].some((heading) => text(heading) === "Run 1"));
+  assert.equal(row().getAttribute("aria-current"), "true");
+  assert.ok(container.querySelector('section[aria-label="Train loss"] svg[role="img"]'));
+  assert.ok(find("dt", "GLUE average"));
+  const journal = find(`ol[aria-label="${m.run_watch_journal()}"]`);
+  assert.match(text(journal), /falling steadily/);
+  assert.ok(requests.some(({ request }) => request === "GET /api/runs/r1/monitor"));
+  assert.ok(!requests.some(({ request }) => request === "GET /api/runs/r1/log"));
 });
 
 test("a flagged run offers to ask the chat's agent by name, and the agent in general when no chat is known", async () => {

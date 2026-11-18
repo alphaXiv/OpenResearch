@@ -2,6 +2,7 @@ import { useWorkspace } from "../workspace";
 import { m } from "../paraglide/messages.js";
 import { getLocale } from "../paraglide/runtime.js";
 import {
+  ArrowUpRight,
   CalendarDays,
   ChartLine,
   Clock3,
@@ -10,7 +11,7 @@ import {
   GitCompareArrows,
   Terminal,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   fmtDuration,
   timeAgo,
@@ -66,6 +67,7 @@ export function ExperimentOverview({
   project,
   runs,
   selectedRunId = null,
+  onOpenRun,
   onOpenLogs,
   onOpenTrackio,
   onOpenCode,
@@ -78,6 +80,7 @@ export function ExperimentOverview({
   project: Project;
   runs: Run[];
   selectedRunId?: string | null;
+  onOpenRun: (runId: string, intent: TabOpenIntent) => void;
   onOpenLogs: (runId: string, intent: TabOpenIntent) => void;
   onOpenTrackio: (runId: string, intent: TabOpenIntent) => void;
   onOpenCode: (intent: TabOpenIntent) => void;
@@ -96,8 +99,13 @@ export function ExperimentOverview({
   const result = run ? runResult(run) : null;
   const hasLiveRun = runs.some((run) => runActive(run.status));
   const [now, setNow] = useState(() => Date.now());
+  const overview = useRef<HTMLDivElement>(null);
   const trackio = useTrackioRuns(experiment.projectId, hasLiveRun).data;
   const hasTrackio = run !== null && trackioRunUrl(trackio, run.id) !== null;
+
+  useEffect(() => {
+    if (overview.current) overview.current.scrollTop = 0;
+  }, [selectedRunId]);
 
   useEffect(() => {
     if (!hasLiveRun) return;
@@ -107,7 +115,7 @@ export function ExperimentOverview({
   }, [hasLiveRun]);
 
   return (
-    <div className="experiment-overview absolute inset-0 overflow-y-auto bg-background [&_h1]:m-0 [&_h1]:text-text [&_h1]:text-xl [&_h1]:leading-tight">
+    <div ref={overview} className="experiment-overview absolute inset-0 overflow-y-auto bg-background [&_h1]:m-0 [&_h1]:text-text [&_h1]:text-xl [&_h1]:leading-tight">
       <div className="experiment-overview-inner w-full max-w-230 my-0 mx-auto pt-6.5 px-7 pb-10 [@media((max-width:_720px))]:pt-5 [@media((max-width:_720px))]:px-4.5 [@media((max-width:_720px))]:pb-8">
         <header className="experiment-overview-head flex items-start justify-between gap-6">
           <div className="experiment-overview-heading min-w-0">
@@ -196,7 +204,7 @@ export function ExperimentOverview({
               {run.command && (
                 <code className={EXPERIMENT_OVERVIEW_COMMAND_CLASS_NAME}>$ {run.command}</code>
               )}
-              <RunPage run={run} name={experiment.slug} chatSessionId={experiment.chatSessionId} now={now} />
+              <RunPage key={run.id} run={run} name={experiment.slug} chatSessionId={experiment.chatSessionId} now={now} />
               {attentionRun && !(run.monitor && attentionRun.id === run.id) && <RunContactNotice run={attentionRun} className="mt-4" />}
               {result && (
                 <div
@@ -213,26 +221,28 @@ export function ExperimentOverview({
           <section className={`${EXPERIMENT_OVERVIEW_SECTION_CLASS_NAME} @container`}>
             <h2>{m.experiment_overview_run_history()}</h2>
             <div className="experiment-run-history divide-y divide-border-variant [&_button]:w-full [&_button]:grid [&_button]:grid-cols-[minmax(56px,_0.5fr)_minmax(100px,_0.9fr)_minmax(0,_2.2fr)_minmax(64px,_0.6fr)_60px_16px] [&_button]:items-center [&_button]:gap-3.5 [&_button]:py-3 [&_button]:px-0.5 [&_button]:text-text [&_button]:text-start [&_button]:text-sm [&_button:hover]:bg-surface @max-lg:[&_button]:grid-cols-[48px_minmax(0,_1fr)_40px_16px] @max-lg:[&_button_>_:nth-child(3)]:hidden @max-lg:[&_button_>_:nth-child(4)]:hidden">
-              {runs.map((run, index) => (
+              {runs.map((attempt, index) => (
                 <button
-                  key={run.id}
+                  key={attempt.id}
+                  aria-current={attempt.id === run?.id ? true : undefined}
+                  className="focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:-outline-offset-2"
                   {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
-                    onOpenLogs(run.id, intent),
+                    onOpenRun(attempt.id, intent),
                   )}
                 >
                   <span className="experiment-run-number text-xs font-medium">{m.experiment_overview_run()} {runs.length - index}</span>
-                  <StatusBadge {...runDisplay(run)} className="min-w-0" />
-                  <span className="truncate text-ink-subtext">{historySentence(run, now)}</span>
-                  <span>{timeAgo(run.createdAt)}</span>
-                  <span>{runDuration(run, now)}</span>
-                  <Terminal size={14} />
+                  <StatusBadge {...runDisplay(attempt)} className="min-w-0" />
+                  <span className="truncate text-ink-subtext">{historySentence(attempt, now)}</span>
+                  <span>{timeAgo(attempt.createdAt)}</span>
+                  <span>{runDuration(attempt, now)}</span>
+                  <ArrowUpRight size={14} aria-hidden="true" />
                 </button>
               ))}
             </div>
           </section>
         )}
 
-        {run?.monitor && <WatchSection run={run} chatSessionId={experiment.chatSessionId} now={now} className={EXPERIMENT_OVERVIEW_SECTION_CLASS_NAME} />}
+        {run?.monitor && <WatchSection key={run.id} run={run} chatSessionId={experiment.chatSessionId} now={now} className={EXPERIMENT_OVERVIEW_SECTION_CLASS_NAME} />}
 
         {lineageNode && (
           <div className="mt-5.5 border-t border-border-variant pt-4.5">

@@ -33,7 +33,7 @@ function useChatAgent(run: Run, experimentChat: string | null | undefined): stri
 }
 
 /**
- * A run in full, in its experiment's Latest run: the sentence, the stages, the bar and its captions, then every block
+ * A run in full: the sentence, stages, bar and captions, then every block
  * of the view in the agent's order. Nothing against an older server, which keeps the run's status and log.
  */
 export function RunPage({ run, name, chatSessionId, now }: { run: Run; name: string; chatSessionId?: string | null; now: number }) {
@@ -101,7 +101,7 @@ export function RunPage({ run, name, chatSessionId, now }: { run: Run; name: str
 }
 
 /**
- * The experiment page's Watch section for its latest run, from the monitor its `RunPage` keeps current, once that has
+ * The experiment page's Watch section, from the monitor its `RunPage` keeps current, once that has
  * said how the run is watched.
  */
 export function WatchSection({ run, chatSessionId, now, className }: { run: Run; chatSessionId?: string | null; now: number; className: string }) {
