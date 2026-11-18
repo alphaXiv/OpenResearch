@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { act } from "react";
+import { autoDir } from "../src/i18n.ts";
 import { m } from "../src/paraglide/messages.js";
 import { find, navigate, renderApp, serveApp, settle, type } from "./render.mjs";
 
@@ -41,6 +42,25 @@ test("links saved by earlier versions open the section that replaced them", asyn
     assert.equal(selectedTab(), tab, path);
     assert.equal(heading(), m.settings_page_settings(), path);
   }
+});
+
+test("the Environment tab shows variables for the open project", async () => {
+  const project = { id: "p", name: "Training lab" };
+  const variable = { key: "ORX_TRAINING_RUN", maskedValue: "••••", inProcessEnv: false };
+  serveApp({
+    "GET /api/projects": () => ({ projects: [project] }),
+    "GET /api/settings/env": (_, url) => {
+      const projectId = new URL(url, location.origin).searchParams.get("projectId");
+      return { vars: [], projectVars: projectId === project.id ? [variable] : [] };
+    },
+  });
+  await renderApp("/projects/p/tasks/new");
+
+  await click(settingsButton());
+  await click(find('[role="tab"]', m.settings_page_environment()));
+
+  assert.ok(find("h2", m.settings_env_project_heading({ project: autoDir(project.name) })));
+  assert.ok(find("tr", variable.key)?.textContent.includes(variable.maskedValue));
 });
 
 test("the sidebar's chat list can start a chat in the most recently active project", async () => {

@@ -1428,10 +1428,13 @@ pub(super) async fn trackio_project_runs(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult {
-    let project = Store::open()?
-        .get_local_project(&id)?
-        .ok_or_else(|| not_found("project"))?;
-    let project = crate::local::trackio::project_for(&project.slug);
+    let project = {
+        let store = Store::open()?;
+        let project = store
+            .get_local_project(&id)?
+            .ok_or_else(|| not_found("project"))?;
+        crate::local::trackio::project_for(&store, project)?
+    };
     // A gateway error, not a 200 with no runs, so the dashboard keeps an open embed through a blip.
     let mut runs = crate::local::trackio::project_runs(&state.trackio, project)
         .await
@@ -1453,11 +1456,14 @@ pub(super) async fn trackio_run_metrics(
     State(state): State<AppState>,
     Path((id, run)): Path<(String, String)>,
 ) -> ApiResult {
-    let project = Store::open()?
-        .get_local_project(&id)?
-        .ok_or_else(|| not_found("project"))?;
-    let project = crate::local::trackio::project_for(&project.slug);
-    let metrics = crate::local::trackio::run_metrics(&state.trackio, project, run, &[], 48).await;
+    let project = {
+        let store = Store::open()?;
+        let project = store
+            .get_local_project(&id)?
+            .ok_or_else(|| not_found("project"))?;
+        crate::local::trackio::project_for(&store, project)?
+    };
+    let metrics = crate::local::trackio::run_metrics(&state.trackio, &project, run, &[], 48).await;
     Ok(Json(json!(metrics)))
 }
 

@@ -254,9 +254,9 @@ fn answer_text(
         text.push('\n');
     }
     if let Some(pending) = pending_prompt(store, id)? {
-        let tool = pending.prompt.tool.as_deref().unwrap_or("a step");
         text.push_str(&format!(
-            "\nIt waits for the user to approve {tool} in that chat."
+            "\nIt waits for the user to {} in that chat.",
+            pending.awaits()
         ));
     }
     let shown = OrxDisplay {

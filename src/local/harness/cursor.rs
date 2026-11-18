@@ -1612,6 +1612,7 @@ ActionRequiredError: Named models unavailable Free plans can only use Auto. Swit
                     resume_mode: None,
                     annotations: Vec::new(),
                     from: None,
+                    env: Vec::new(),
                 },
             )
             .await
@@ -1641,6 +1642,7 @@ ActionRequiredError: Named models unavailable Free plans can only use Auto. Swit
                     resume_mode: None,
                     annotations: Vec::new(),
                     from: None,
+                    env: Vec::new(),
                 },
             )
             .await

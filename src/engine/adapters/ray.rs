@@ -21,7 +21,7 @@ impl Api for RayAccount {
         let mut spec: ray::JobSubmission =
             serde_json::from_value(intent.launch.options.clone()).map_err(api::rejected)?;
         spec.submission_id = intent.run.id.clone();
-        spec.env.extend(crate::config::launch_env(&intent.run.id));
+        spec.env.extend(crate::config::launch_env(&intent.run).map_err(api::rejected)?);
         ray::run_job(&self.address, &spec)
             .await
             .map_err(api::launch_error)?;

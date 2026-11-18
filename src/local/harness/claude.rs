@@ -3843,6 +3843,7 @@ mod tests {
             note: note.map(str::to_string),
             annotations: Vec::new(),
             from: None,
+            env: Vec::new(),
         }
     }
 
