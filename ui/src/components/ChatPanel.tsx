@@ -31,6 +31,7 @@ import { ProjectInfoCard } from "./ProjectInfoCard";
 import { SessionHoverCard } from "./SessionHoverCard";
 import { AgentMessageCard } from "./AgentMessageCard";
 import { DelegateCard } from "./DelegateCard";
+import { EnvRequestCard } from "./EnvRequestCard";
 import { delegateStatus, delegatesOf, type DelegateStatus } from "../delegates";
 import { taskLocation } from "../workspaceState";
 import { fitSidebarRows, sidebarRowHeight, type SidebarRow } from "../sidebarLayout";
@@ -3268,6 +3269,8 @@ function PromptCard({
       setSubmitting(false);
     }
   };
+
+  if (p.kind === "env") return <EnvRequestCard part={part} done={done} respond={respond} />;
 
   // Resolved rendering, keyed off `resolved` alone (`done` also covers
   // read-only hosts, where an *unresolved* card must stay visible).
