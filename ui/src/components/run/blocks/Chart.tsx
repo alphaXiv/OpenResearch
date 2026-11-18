@@ -5,7 +5,7 @@ import { m } from "../../../paraglide/messages.js";
 import { getLocale } from "../../../paraglide/runtime.js";
 import { fmtMagnitude, fmtMeasure, fmtSignal } from "../../../runMonitor/format";
 import { versusOf } from "../../../runMonitor/model";
-import type { ChartBlock, Point, RunMonitor, SignalSpec } from "../../../runMonitor/types";
+import type { ChartBlock, Point, RunMonitor, SignalSpec, ViewBlock } from "../../../runMonitor/types";
 import { useBoxSize } from "../useBoxSize";
 import { chartOf, type ChartData, type Series } from "./series";
 
@@ -179,7 +179,7 @@ function Readout({ at, width, outside, onDismiss, children }: { at: number; widt
  * point an arrow key has reached. Over steps, each line ends in its latest value; from a table's rows, the axes name
  * their measures and anything left out of the picture is said under it.
  */
-export function Chart({ monitor, block, size, live, height = 160 }: { monitor: RunMonitor; block: ChartBlock; size: "strip" | "page"; live: boolean; height?: number }) {
+export function Chart({ monitor, block, size, live, height = 160 }: { monitor: RunMonitor; block: ChartBlock & Pick<ViewBlock, "phase">; size: "strip" | "page"; live: boolean; height?: number }) {
   const [ref, box] = useBoxSize<HTMLDivElement>();
   const [pointer, setPointer] = useState<{ at: number; keyboard: boolean } | null>(null);
   const dismiss = useCallback(() => setPointer(null), []);
@@ -244,7 +244,10 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
   const yCaption = [ySpec?.unit !== "%" ? ySpec?.unit : null, yLog ? m.run_chart_log() : null].filter(Boolean).join(", ");
   const number = new Intl.NumberFormat(getLocale(), { maximumFractionDigits: 4 });
   const compact = new Intl.NumberFormat(getLocale(), { notation: "compact", maximumFractionDigits: 1 });
-  const elapsed = !table && monitor.x.name === "elapsed";
+  const phase = block.phase === undefined ? monitor.phases[monitor.progress?.phase ?? monitor.stageOrder.index ?? -1]
+    : monitor.phases.find((phase) => phase.name === block.phase);
+  const elapsed = !table && (monitor.x.name === "elapsed" || (monitor.x.name === "step" && /^(s|sec|secs|second|seconds)$/i.test(phase?.unit ?? "")));
+  const coordinate = elapsed ? m.run_chart_elapsed() : monitor.x.name;
   /** A tick on a table's axis reads as its signal does, scaled and in percent, at the size of the tick. */
   const tick = (spec: SignalSpec | undefined, value: number) => Math.abs(value * (spec?.scale ?? 1)) >= 10_000
     ? compact.format(value * (spec?.scale ?? 1))
@@ -257,10 +260,11 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
   const yName = table && yNames.size === 1 ? [...yNames][0] : null;
   const ys = (visible === drawn ? drawn : [...drawn, ...visible]).map((point) => point[1]);
   const [xLo, xHi] = table && drawn.length > 0 ? extent(drawn.map((point) => point[0])) : [x0, x1];
-  const xRange = !page && !categories && drawn.length > 0 ? rangeLine(table ? lead && xName(lead) : monitor.x.name, xLo, xHi, xLabel, xLog) : "";
+  const xRange = !page && !categories && drawn.length > 0 ? rangeLine(table ? lead && xName(lead) : coordinate, xLo, xHi, xLabel, xLog) : "";
   const yRange = !page && drawn.length > 0 ? rangeLine(yName, Math.min(...ys), Math.max(...ys), yLabel, yLog) : "";
   /** A strip with room for its axes in a line under the plot, the two ranges at full length. */
-  const ranged = !page && boxHeight >= 44 && !blank && (xRange.length + yRange.length) * CHAR_WIDTH + 12 <= width;
+  const rangeWidth = (xRange + yRange).replace(/[\u2066-\u2069]/g, "").length * CHAR_WIDTH + 12;
+  const ranged = !page && boxHeight >= 44 && !blank && rangeWidth <= width;
   const margin = page ? { start: 38, end: categories ? 6 : 48, top: yCaption ? 22 : 8, bottom: 22 } : { start: 1, end: 5, top: 5, bottom: ranged ? 17 : 3 };
   const innerWidth = Math.max(1, width - margin.start - margin.end);
   const innerHeight = Math.max(1, boxHeight - margin.top - margin.bottom);
@@ -339,7 +343,7 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
   })();
   const readoutTitle = (anchor: { line: Series; point: Point }) => {
     if (categories) return categories[anchor.point[0]];
-    if (!table) return `${monitor.x.name} ${xLabel(anchor.point[0])}`;
+    if (!table) return `${autoDir(coordinate)} ${ltr(xLabel(anchor.point[0]))}`;
     return `${xName(anchor.line)} ${withUnit(signals[anchor.line.x], anchor.point[0])}`;
   };
   const readoutValue = (line: Series, point: Point, anchor: Point) => {
@@ -450,12 +454,12 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
     );
   }
 
-  const xCaption = table ? [xSpec?.unit ?? (lead ? xName(lead) : null), xLog ? m.run_chart_log() : null].filter(Boolean).join(", ") : xLog ? `${monitor.x.name}, ${m.run_chart_log()}` : monitor.x.name;
+  const xCaption = table ? [xSpec?.unit ?? (lead ? xName(lead) : null), xLog ? m.run_chart_log() : null].filter(Boolean).join(", ") : xLog ? `${coordinate}, ${m.run_chart_log()}` : coordinate;
   const dotted = (line: Series) => !line.ghost && line.points.length > 0 && line.points.length * DOT_SPACING <= innerWidth;
   const captionStart = margin.start + innerWidth + margin.end - 2 - xCaption.length * CHAR_WIDTH;
   /** Over steps the ticks are as they always were; elsewhere a tick whose label would run into another or the caption goes. */
   const spaced = (values: number[]) => {
-    if (!table && !xLog) return values;
+    if (!table && !xLog && !elapsed) return values;
     let reach = -Infinity;
     return values.filter((value) => {
       const half = (xLabel(value).length * CHAR_WIDTH) / 2;

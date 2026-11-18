@@ -2318,6 +2318,7 @@
   "run_view_source_none": "로그에서 아직 지표를 찾지 못했습니다",
   "run_view_as_text": "에이전트가 로그 대신 읽는 내용",
   "run_chart_against": "{x} 대비 {y}",
+  "run_chart_elapsed": "경과 시간",
   "run_chart_log": "로그",
   "run_chart_scrub": "차트. 왼쪽·오른쪽 화살표 키로 각 값을 읽습니다.",
   "run_chart_by_value": "{label} {value}",

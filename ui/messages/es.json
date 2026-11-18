@@ -2318,6 +2318,7 @@
   "run_view_source_none": "Aún no se encontraron métricas en el registro",
   "run_view_as_text": "Lo que lee un agente en lugar del registro",
   "run_chart_against": "{y} frente a {x}",
+  "run_chart_elapsed": "tiempo transcurrido",
   "run_chart_log": "log",
   "run_chart_scrub": "Gráfico. Las flechas izquierda y derecha leen cada valor.",
   "run_chart_by_value": "{label} {value}",

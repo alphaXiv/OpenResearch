@@ -2318,6 +2318,7 @@
   "run_view_source_none": "لم يُعثر على مقاييس في السجل بعد",
   "run_view_as_text": "ما يقرؤه الوكيل بدلًا من السجل",
   "run_chart_against": "{y} مقابل {x}",
+  "run_chart_elapsed": "الوقت المنقضي",
   "run_chart_log": "لوغاريتمي",
   "run_chart_scrub": "مخطط. مفتاحا السهم الأيسر والأيمن يقرآن كل قيمة.",
   "run_chart_by_value": "{label} {value}",

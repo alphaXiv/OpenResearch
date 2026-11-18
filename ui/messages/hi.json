@@ -2318,6 +2318,7 @@
   "run_view_source_none": "लॉग में अभी कोई मीट्रिक नहीं मिला",
   "run_view_as_text": "लॉग की जगह एजेंट क्या पढ़ता है",
   "run_chart_against": "{x} के सामने {y}",
+  "run_chart_elapsed": "बीता समय",
   "run_chart_log": "लॉग",
   "run_chart_scrub": "चार्ट। बाएँ और दाएँ तीर कुंजियाँ हर मान पढ़ती हैं।",
   "run_chart_by_value": "{label} {value}",

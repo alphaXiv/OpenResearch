@@ -2318,6 +2318,7 @@
   "run_view_source_none": "В журнале пока не найдено метрик",
   "run_view_as_text": "Что агент читает вместо журнала",
   "run_chart_against": "{y} в зависимости от {x}",
+  "run_chart_elapsed": "прошло",
   "run_chart_log": "лог.",
   "run_chart_scrub": "График. Стрелки влево и вправо читают каждое значение.",
   "run_chart_by_value": "{label} {value}",

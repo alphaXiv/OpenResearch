@@ -2318,6 +2318,7 @@
   "run_view_source_none": "ログにメトリクスがまだ見つかっていません",
   "run_view_as_text": "ログの代わりにエージェントが読む内容",
   "run_chart_against": "{x}に対する{y}",
+  "run_chart_elapsed": "経過時間",
   "run_chart_log": "対数",
   "run_chart_scrub": "グラフ。左右の矢印キーで各値を読み上げます。",
   "run_chart_by_value": "{label} {value}",

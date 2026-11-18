@@ -2318,6 +2318,7 @@
   "run_view_source_none": "W logu nie znaleziono jeszcze metryk",
   "run_view_as_text": "Co agent czyta zamiast logu",
   "run_chart_against": "{y} względem {x}",
+  "run_chart_elapsed": "upływ czasu",
   "run_chart_log": "log",
   "run_chart_scrub": "Wykres. Strzałki w lewo i w prawo odczytują kolejne wartości.",
   "run_chart_by_value": "{label} {value}",

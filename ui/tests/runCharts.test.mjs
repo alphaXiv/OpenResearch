@@ -122,6 +122,27 @@ test("a readout never gives a value beside a step it wasn't recorded at", async 
   assert.ok(parents.every((one) => !one.endsWith(` at ${step}`)), said);
 });
 
+test("elapsed chart axes and readouts say durations for elapsed points and timed stages", async (t) => {
+  t.after(() => { chartWidth = 800; });
+  chartWidth = 192;
+  const base = fixture("running");
+  const block = { chart: ["loss"] };
+  for (const x of [{ name: "elapsed", max: null }, { name: "step", max: 2400 }]) {
+    const phases = [{ ...base.phases[0], name: "train", unit: x.max ? "seconds" : null }];
+    const monitor = { ...base, x, phases, progress: { ...base.progress, phase: 0 }, series: { loss: [[0, 3.27], [43, 2.1], [300, 1.66]] } };
+    const strip = await draw(monitor, block, "strip");
+    assert.match(text(strip), new RegExp(`elapsed 0s → ${x.max ? "40m" : "5m"}`, "i"));
+    const pointer = await point(strip, 187 * 43 / (x.max ?? 300) + 1);
+    assert.match(text(pointer), /^elapsed 43s/i);
+    const box = chartOf(strip).parentElement;
+    await press("ArrowRight", box);
+    assert.match(text(box.querySelector('[role="status"]')), /^elapsed 5m:/i);
+
+    const page = await draw(monitor, block);
+    assert.ok(labels(page).some((label) => /^elapsed$/i.test(label)));
+  }
+});
+
 test("a readout uses reports under a smoothed line and a clipped parent", async () => {
   const base = fixture("finetune");
   const monitor = {

@@ -2318,6 +2318,7 @@
   "run_view_source_none": "هنوز معیاری در گزارش پیدا نشده است",
   "run_view_as_text": "آنچه یک عامل به جای گزارش می‌خواند",
   "run_chart_against": "{y} در برابر {x}",
+  "run_chart_elapsed": "زمان سپری‌شده",
   "run_chart_log": "لگاریتمی",
   "run_chart_scrub": "نمودار. کلیدهای جهت‌نمای چپ و راست هر مقدار را می‌خوانند.",
   "run_chart_by_value": "{label} {value}",

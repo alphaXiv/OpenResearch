@@ -2318,6 +2318,7 @@
   "run_view_source_none": "Günlükte henüz metrik bulunamadı",
   "run_view_as_text": "Bir ajanın günlük yerine okuduğu",
   "run_chart_against": "{x} karşısında {y}",
+  "run_chart_elapsed": "geçen süre",
   "run_chart_log": "log",
   "run_chart_scrub": "Grafik. Sol ve sağ ok tuşları her değeri okur.",
   "run_chart_by_value": "{label} {value}",
