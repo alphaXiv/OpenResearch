@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
-use crate::error::Result;
+use crate::error::{Context, Result};
 
 /// Base URL of the API. Defaults to prod (`https://api.openresearch.sh`), so a
 /// plain `orx login` just works. Override per-invocation with `--api-url` (handled
@@ -399,7 +399,10 @@ pub(crate) fn in_test_child(cleared: &[&str]) -> bool {
     let temp = std::env::temp_dir().join(format!("orx-test-child-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&temp).unwrap();
     let mut command = crate::process::command(std::env::current_exe().unwrap());
-    command.args(["--exact", test]).env(TEST_CHILD, test);
+    // Run exactly the selected test, including an explicitly selected release-only test.
+    command
+        .args(["--include-ignored", "--exact", test])
+        .env(TEST_CHILD, test);
     // The child's temp dir, home included, goes away with it.
     for var in ["TMPDIR", "TMP", "TEMP"] {
         command.env(var, &temp);
@@ -738,22 +741,47 @@ pub fn list_synced_env() -> Vec<(String, String)> {
 /// Names the run inside its job, e.g. as a metric tracker's run name.
 pub const RUN_ID_ENV: &str = "ORX_RUN_ID";
 
-/// A run's environment: the synced env file plus what the run knows about itself.
-pub fn run_env(run_id: &str) -> std::collections::HashMap<String, String> {
-    let mut env: std::collections::HashMap<String, String> =
-        list_synced_env().into_iter().collect();
-    env.extend(run_context_env(run_id));
+/// The synced env file with the project's own variables applied over it.
+pub fn saved_project_env(
+    store: &crate::store::Store,
+    project_id: &str,
+) -> Result<std::collections::HashMap<String, String>> {
+    Ok(merge_saved_env(store.project_env(project_id)?))
+}
+
+pub fn merge_saved_env(
+    project_vars: Vec<crate::store::ProjectEnvVar>,
+) -> std::collections::HashMap<String, String> {
+    let mut env: std::collections::HashMap<_, _> = list_synced_env().into_iter().collect();
+    env.extend(project_vars.into_iter().map(|var| (var.key, var.value)));
     env
 }
 
-/// What a launched job sees: [`run_env`] plus a configured Hugging Face token. Resolved at
+pub fn saved_run_env(
+    run: &crate::store::StoredRun,
+) -> Result<std::collections::HashMap<String, String>> {
+    crate::store::Store::open()
+        .and_then(|store| saved_project_env(&store, &run.project_id))
+        .with_context(|| {
+            format!(
+                "Couldn't read project {}'s environment for run {}.",
+                run.project_id, run.id
+            )
+        })
+}
+
+/// What a launched job sees: saved variables, run context and a configured Hugging Face token. Resolved at
 /// launch, so secrets never enter a stored launch intent.
-pub fn launch_env(run_id: &str) -> std::collections::HashMap<String, String> {
-    let mut env = run_env(run_id);
+pub fn launch_env(
+    run: &crate::store::StoredRun,
+) -> Result<std::collections::HashMap<String, String>> {
+    let mut env = saved_run_env(run)?;
+    let context = run_context_env(run, &env);
+    env.extend(context);
     if let Ok(token) = crate::jobs::huggingface::resolve_token() {
         env.entry("HF_TOKEN".to_string()).or_insert(token);
     }
-    env
+    Ok(env)
 }
 
 const EXPERIMENT_ENV: &str = "ORX_EXPERIMENT";
@@ -761,25 +789,33 @@ const EXPERIMENT_TITLE_ENV: &str = "ORX_EXPERIMENT_TITLE";
 const PARENT_EXPERIMENT_ENV: &str = "ORX_PARENT_EXPERIMENT";
 const COMMIT_ENV: &str = "ORX_COMMIT";
 
-/// The run's id, experiment, parent, commit and Trackio project, read from its reserved row.
-pub fn run_context_env(run_id: &str) -> Vec<(String, String)> {
-    let mut env = vec![(RUN_ID_ENV.to_string(), run_id.to_string())];
-    match stored_run_context(run_id) {
+/// The run's identity, experiment and Trackio project.
+pub fn run_context_env(
+    run: &crate::store::StoredRun,
+    saved: &std::collections::HashMap<String, String>,
+) -> Vec<(String, String)> {
+    use crate::local::trackio::PROJECT;
+
+    let mut env = vec![(RUN_ID_ENV.to_string(), run.id.clone())];
+    let trackio_project = saved.get(PROJECT);
+    env.extend(trackio_project.map(|project| (PROJECT.to_string(), project.clone())));
+    match stored_run_context(run, trackio_project.is_none()) {
         Ok(context) => env.extend(context),
         Err(error) => {
             eprintln!(
-                "warning: could not read run {run_id}'s experiment for its environment: {error}"
+                "warning: could not read run {}'s experiment for its environment: {error}",
+                run.id
             )
         }
     }
     env
 }
 
-fn stored_run_context(run_id: &str) -> Result<Vec<(String, String)>> {
+fn stored_run_context(
+    run: &crate::store::StoredRun,
+    needs_trackio_project: bool,
+) -> Result<Vec<(String, String)>> {
     let store = crate::store::Store::open()?;
-    let Some(run) = store.get_run(run_id)? else {
-        return Ok(Vec::new());
-    };
     let mut env = Vec::new();
     if let Some(experiment) = store.get_local_experiment(&run.experiment_id)? {
         let parent = match &experiment.parent_experiment_id {
@@ -794,14 +830,13 @@ fn stored_run_context(run_id: &str) -> Result<Vec<(String, String)>> {
         }
         env.push((EXPERIMENT_ENV.to_string(), experiment.slug));
     }
-    if let Some(commit) = run.commit_sha.filter(|sha| !sha.is_empty()) {
-        env.push((COMMIT_ENV.to_string(), commit));
+    if let Some(commit) = run.commit_sha.as_ref().filter(|sha| !sha.is_empty()) {
+        env.push((COMMIT_ENV.to_string(), commit.clone()));
     }
-    if let Some(project) = store.get_local_project(&run.project_id)? {
-        env.push((
-            crate::local::trackio::PROJECT.to_string(),
-            crate::local::trackio::project_for(&project.slug),
-        ));
+    if needs_trackio_project {
+        if let Some(project) = store.get_local_project(&run.project_id)? {
+            env.push((crate::local::trackio::PROJECT.to_string(), project.slug));
+        }
     }
     Ok(env)
 }

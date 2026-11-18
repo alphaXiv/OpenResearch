@@ -695,7 +695,24 @@ export interface EnvVar {
   maskedValue: string;
   /** Set only for non-secret keys, which are shown and edited in the clear. */
   value?: string | null;
+  description?: string | null;
   inProcessEnv: boolean;
+}
+
+export interface EnvSettings {
+  vars: EnvVar[];
+  /** The project's own variables, when one was asked for. */
+  projectVars?: EnvVar[];
+}
+
+export interface EnvVarChange {
+  key: string;
+  /** Omitted keeps the saved value. */
+  value?: string;
+  /** Omitted keeps the saved description; empty clears it. */
+  description?: string;
+  /** Saves it for this project instead of every project. */
+  projectId?: string;
 }
 
 /** Where `source` says the resolved data dir came from. `env` means the
@@ -1546,7 +1563,7 @@ export interface ChatQuestionOption {
 /** An interactive request the user acts on before the harness continues. */
 export interface ChatPrompt {
   nativeChoices?: { id: string; label: string; kind: string }[];
-  kind: "plan" | "permission" | "question";
+  kind: "plan" | "permission" | "question" | "env";
   resolved: boolean;
   plan?: string;
   /** plan: card synthesized from the turn's final text (no ExitPlanMode call). */
@@ -1570,6 +1587,29 @@ export interface ChatPrompt {
   /** Backend resume routing id. Presence marks a HELD mid-turn card (the
    * turn is blocked open waiting on this answer); absent on end-turn cards. */
   nativeId?: string;
+  /** env: the variables the agent asks the user to set. `question` holds its reason. */
+  variables?: EnvRequestVar[];
+}
+
+export type EnvScope = "global" | "project";
+
+export interface EnvRequestVar {
+  name: string;
+  description?: string;
+  /** A secret is typed masked and omitted from the tool result. */
+  secret: boolean;
+  /** A regex the value should match; a mismatch only warns. */
+  pattern?: string;
+  example?: string;
+  /** Answer echo: where the user saved it. Absent when left unset. */
+  savedTo?: EnvScope;
+}
+
+export interface EnvAnswer {
+  name: string;
+  value: string;
+  scope: EnvScope;
+  mismatched: boolean;
 }
 
 export interface ChatPart {
@@ -1749,7 +1789,7 @@ export interface ChatSession {
     state: string | null;
     answer: string | null;
     error: string | null;
-    asking: "question" | "permission" | "plan" | null;
+    asking: "question" | "permission" | "plan" | "env" | null;
   } | null;
   createdAt: number;
   updatedAt: number;
@@ -1860,6 +1900,8 @@ export interface PromptAnswer {
   answers?: string[];
   note?: string;
   annotations?: ChatTextAnnotation[];
+  /** Values saved from an env card. */
+  env?: EnvAnswer[];
 }
 
 // --- helpers shared across views --------------------------------------------
@@ -2585,16 +2627,16 @@ export function createApi(
   const saveVercelSetup = (setup: { token: string | null; teamId: string; projectId: string | null; newProject: string | null }) =>
     post<VercelSettings>("/api/settings/vercel", setup);
 
-  const getEnvVars = (signal?: AbortSignal) =>
-    get<{ vars: EnvVar[] }>("/api/settings/env", signal).then((r) => r.vars);
+  const envScope = (projectId?: string) => projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
 
-  const setEnvVar = (key: string, value: string) =>
-    post<{ vars: EnvVar[] }>("/api/settings/env", { key, value }).then((r) => r.vars);
+  const getEnvVars = (projectId?: string, signal?: AbortSignal) =>
+    get<EnvSettings>(`/api/settings/env${envScope(projectId)}`, signal);
 
-  const deleteEnvVar = (key: string) =>
-    writeResponse(`/api/settings/env/${encodeURIComponent(key)}`, { method: "DELETE" })
-      .then((r) => json<{ vars: EnvVar[] }>(r))
-      .then((r) => r.vars);
+  const setEnvVar = (change: EnvVarChange) => post<EnvSettings>("/api/settings/env", change);
+
+  const deleteEnvVar = (key: string, projectId?: string) =>
+    writeResponse(`/api/settings/env/${encodeURIComponent(key)}${envScope(projectId)}`, { method: "DELETE" })
+      .then((r) => json<EnvSettings>(r));
 
   const getDataDir = (signal?: AbortSignal) => get<DataDirSettings>("/api/settings/data-dir", signal);
 

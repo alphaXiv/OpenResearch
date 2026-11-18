@@ -10,9 +10,11 @@
 
 mod acp;
 mod costs;
+mod env;
 pub(crate) mod search;
 mod telemetry;
 pub(crate) use costs::{BilledRun, Per, Quote};
+pub(crate) use env::ProjectEnvVar;
 pub(crate) use telemetry::{Cost, InvocationIdentity, SampleCost, TokenUsage};
 
 use std::path::{Path, PathBuf};
@@ -1342,6 +1344,18 @@ impl Store {
                 launch_json TEXT NOT NULL,
                 configuration_json TEXT NOT NULL DEFAULT '[]'
             );
+            CREATE TABLE IF NOT EXISTS project_env_vars (
+                project_id  TEXT NOT NULL,
+                key         TEXT NOT NULL,
+                value       TEXT NOT NULL,
+                description TEXT,
+                created_at  INTEGER NOT NULL,
+                PRIMARY KEY (project_id, key)
+            );
+            CREATE TABLE IF NOT EXISTS env_var_descriptions (
+                key         TEXT PRIMARY KEY,
+                description TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS ui_state (
                 id                       INTEGER PRIMARY KEY CHECK (id = 1),
                 onboarding_completed     INTEGER NOT NULL DEFAULT 0,
@@ -1450,6 +1464,7 @@ impl Store {
             "CREATE INDEX IF NOT EXISTS idx_chat_messages_native_ids
              ON chat_messages(base_native_session_id, result_native_session_id, session_id);",
         )?;
+        schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_project_env_vars AFTER DELETE ON local_projects BEGIN DELETE FROM project_env_vars WHERE project_id = OLD.id; END;")?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_log_collection AFTER DELETE ON runs BEGIN DELETE FROM log_collections WHERE run_id = OLD.id; END;")?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_steer_receipts AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_steer_receipts WHERE session_id = OLD.id; END;")?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_invocation_identities AFTER DELETE ON chat_sessions BEGIN DELETE FROM native_invocation_identities WHERE session_id = OLD.id; END;")?;
@@ -6420,7 +6435,7 @@ fn real_path_under<'a>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -10807,7 +10822,24 @@ mod tests {
         assert!(store.get_chat_session("second").unwrap().is_none());
     }
 
-    fn chat_session_fixture(id: &str) -> StoredChatSession {
+    pub(crate) fn local_project_fixture(id: &str) -> LocalProject {
+        LocalProject {
+            id: id.into(),
+            name: id.into(),
+            slug: id.into(),
+            github_owner: String::new(),
+            github_repo: String::new(),
+            github_sync_enabled: false,
+            baseline_branch: "main".into(),
+            repo_path: std::env::temp_dir().join(id).to_string_lossy().into_owned(),
+            run_command: None,
+            paper_id: None,
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    pub(crate) fn chat_session_fixture(id: &str) -> StoredChatSession {
         StoredChatSession {
             profile_id: None,
             id: id.into(),
@@ -11383,7 +11415,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    fn run_fixture(id: &str, status: &str, chat_session_id: Option<&str>) -> StoredRun {
+    pub(crate) fn run_fixture(id: &str, status: &str, chat_session_id: Option<&str>) -> StoredRun {
         StoredRun {
             id: id.into(),
             experiment_id: "exp_1".into(),
