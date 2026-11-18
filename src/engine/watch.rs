@@ -2365,20 +2365,6 @@ async fn take(id: i64) -> Result<()> {
             total.cost_usd = None;
         }
     }
-    if usage.is_none() {
-        let store = Store::open()?;
-        return store.finish_watch_look(
-            id,
-            "error",
-            crate::store::now_ms(),
-            None,
-            failure.as_deref(),
-            None,
-            &unanswered(&rows, "error"),
-            &[],
-        );
-    }
-
     let now = crate::store::now_ms();
     let mut results = Vec::new();
     let mut flags = Vec::new();

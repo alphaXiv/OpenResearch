@@ -27,6 +27,9 @@ if [ "$n" = 1 ] && [ -p "$dir/ready" ]; then
     read -r resume < "$dir/resume"
 fi
 reply=$(cat "$dir/reply-$n")
+case "$reply" in
+    *"API Error:"*) printf '{{"type":"result","is_error":true,"result":%s}}' "$reply"; exit 1 ;;
+esac
 printf '{{"type":"result","is_error":false,"result":%s,"total_cost_usd":0.002,"usage":{{"input_tokens":3000,"output_tokens":60}}}}' "$reply"
 "#,
         dir.display()
@@ -2330,4 +2333,36 @@ async fn a_setup_sentence_expires_on_the_first_research_point() {
         run_facts(&store, &row).unwrap()["sentence"]["template"],
         "Loss tracks the parent."
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn failed_provider_calls_keep_the_credentials_notice() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let dir = crate::config::home_dir().unwrap().join("claude-calls");
+    fake_claude(&dir, &["API Error: 503 Service Unavailable"; 2]);
+    let store = Store::open().unwrap();
+    chat(&store, "chat", "claude-code");
+    let row = run(
+        &store,
+        "a",
+        "Depth 6",
+        "chat",
+        "warning: AKIAABCDEFGHIJKLMNOP\n",
+    );
+    for _ in 0..2 {
+        take(look(&store, "chat", "terminal", &[("a", "r1")]))
+            .await
+            .unwrap();
+    }
+    let facts = run_facts(&store, &row).unwrap();
+    let notice = facts["looks"][0]["withheld"][0]
+        .as_str()
+        .unwrap_or_default();
+    assert!(notice.contains("line 1 of the log"), "{facts}");
+    assert!(notice.contains("AWS access key"));
+    assert_eq!(facts["looks"][1]["withheld"], json!([]));
+    assert_eq!(calls(&dir), 2);
 }
