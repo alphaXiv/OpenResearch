@@ -1,6 +1,6 @@
 # Where state lives
 
-orx keeps a researcher's work on their own machine. Projects, experiments, runs, chats and transcripts pass through no service, so the copy on disk is the only one, and every orx process on the machine reads and writes it at once: the dashboard and its run engine, the desktop app, a terminal `orx`, an agent's `orx`, a supervisor an older orx left watching a job.
+orx keeps a researcher's work on their own machine. Projects, experiments, runs, chats and transcripts are kept nowhere else ([what leaves the machine](#what-leaves-the-machine) lists what is sent, and when), so the copy on disk is the only one, and every orx process on the machine reads and writes it at once: the dashboard and its run engine, the desktop app, a terminal `orx`, an agent's `orx`, a supervisor an older orx left watching a job.
 
 ## Three directories
 
@@ -141,6 +141,7 @@ Detection repeats on every start, so an interrupted rename or reference repair r
 - **Published projects.** Publishing, from the Share dialog or `orx project share --publish`, uploads exactly the file sharing would write, after the same scan, to openresearch.sh, which serves it to anyone with the link until the publisher deletes it. The upload names the local project ID, so publishing again replaces the file behind the same link.
 - **Updates.** Each surface checks GitHub releases on its own schedule ([desktop](desktop.md)).
 - **Prices.** Once a day `orx up` downloads models.dev's public model price list (`models.dev/api.json`) into the cache directory, keeping the last good copy when a fetch fails. When a run starts on a backend that bills, the engine reads its price: Hugging Face's public hardware list, the Modal workspace's rates through Modal's SDK with the user's token, or the box's own price from openresearch.sh. The requests carry no research data, and costs never go to telemetry.
+- **Run watching.** Run watching, on by default when a watching model is selected, sends a bounded digest of a chat's runs to that model's provider when something about them changes or a look is asked for: each run's label, experiment, state, progress, stages and estimate; its signal values with recent points and how each compares with the parent, the parent's name and kinds of warning, and pattern match counts; selected log lines, which can quote code or data; the brief the agent wrote, why the look started, the flags someone kept going after with their reasons; the watcher's own earlier sentences and notes; and the dashboard's language. It sends no full chat, repository or whole log. Turn it off in Settings. The model is the chat's own agent's cheap one (Claude Code's Haiku, Codex's GPT Luna), run as a one-shot with no tools, and every field of the request passes the credential scan sharing uses, as written and before it is clipped: a log line or field that matches is left out, the look goes on without it, and the journal tells the user once where it was ([experiments](experiments.md)).
 - **Plan usage.** For each Claude Code and Codex sign-in that may be on a subscription, `orx up` asks the user's own agent how much of the plan is left: Claude Code's `get_usage` and Codex's `account/rateLimits/read` reach Anthropic and OpenAI with the user's sign-in, when the dashboard asks (at most once a minute per account unless the user refreshes) and when a running chat's limits move ([agents](agents.md)). The answer stays in `orx up`'s memory.
 - **Cursor sign-in diagnostics.** When telemetry is enabled, an unsuccessful sign-in verification can report a fixed status-probe failure category to the first-party API. The probe's output and account details are never sent.
 - **Model feed.** Every `orx up`, a remote host's included, asks openresearch.sh for the model feed when it starts and every six hours: the models the picker features, its nudge, and the release days of models models.dev lists as new. The request carries no credentials, account, install ID or research data, and the answer is kept in the cache directory as served.
@@ -161,3 +162,42 @@ Detection repeats on every start, so an interrupted rename or reference repair r
   and cache; no user npm configuration or global prefix is used.
 - **Installers the user starts.** Git for Windows comes from GitHub (`src/local/portable_git.rs`).
 - **Integrations the user turns on.** Creating a project from a GitHub URL, which also asks GitHub's public API for its size; publishing to GitHub; syncing a paper with Overleaf, through its Git bridge or its live editor channel with the user's browser session cookie; Trackio metrics; and the agents' own model providers, which the agent talks to directly. Adding a custom endpoint also asks it, with its key, for its model list.
+
+## Signal checkpoints
+
+The owner-only file `run-signals/<run>.json` commits raw carry, cursor and
+aggregates together by syncing a temporary file, renaming it and syncing its
+directory. Its nonblocking per-run lock returns WouldBlock on contention.
+A failed publication leaves the previous committed cursor available for replay.
+
+Signal debt is independent of log debt and gates host cleanup until it
+settles. While the host has the run, its checkpoint is the answer. Once the
+host cannot be asked, the laptop continues that checkpoint over the log it
+kept where that reaches its cursor, and settles as incomplete only for
+reported signals the kept log lacks or that nothing kept. Another generation
+replaces a checkpoint with signals only when it covers at least the same
+bytes; until then it is kept in `<run>.replay`, which resumes across passes
+and restarts, and the held one stands, marked `rebuilding`, or `log_replaced`
+once the other ended short. A promoted rebuild carries a `log_replaced`
+diagnostic; a host gone mid-rebuild leaves it to go on over the kept log where
+that reaches as far. The staging file goes with the first publication of a
+checkpoint not rebuilding. `hostGone` keeps how the host went, which a
+settlement names over any earlier failure.
+A run that never reported a signal settles quietly.
+The owner-only `<run>.status.json` keeps the specific cause and the laptop's
+last successful collection time. The checkpoint's `updatedAt` is the host
+data time; status labels both. `clock` is `[host, laptop]`: the host's clock
+in the last answer a successful collection accepted and the laptop's time of
+receipt. It carries the checkpoint's host times onto the laptop's clock and
+moves at most once a minute while nothing changes; a run folded on the laptop
+has none.
+
+Sharing can include `signals/<run>.json` when logs are selected, after the
+credential scan. Import rewrites the local run ID when the file is present.
+Folded data leaves the machine only in that file and in run watching's digests ([above](#what-leaves-the-machine)).
+
+Component bounds keep current snapshots below the 16 MiB publication cap.
+The worst-case serialization test reserves the 2 MiB row budget and 2 MiB
+for cursor, retained timing, phases, diagnostics and bounded error metadata.
+New reducers and cell stores must preserve that guarantee or reduce
+deterministically before publication.

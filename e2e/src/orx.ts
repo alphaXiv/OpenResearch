@@ -25,8 +25,12 @@ function copyBuild(from: string, to: string) {
   return path.join(to, 'orx')
 }
 
-/** `ownBuild` runs from a copy no other server shares, for a test that replaces the executable. */
-export async function startOrx({ agent, outside, ownBuild }: { agent: Agent; outside: Outside; ownBuild?: boolean }) {
+/**
+ * `claude` replaces the sandbox's signed-out Claude Code with this script, `env` adds to the
+ * server's environment, and `ownBuild` runs from a copy no other server shares, for a test that
+ * replaces the executable.
+ */
+export async function startOrx({ agent, outside, claude, env: extra = {}, ownBuild }: { agent: Agent; outside: Outside; claude?: string; env?: Record<string, string>; ownBuild?: boolean }) {
   // Short and outside the checkout: orx keeps Unix sockets under its data directory.
   const root = realpathSync(mkdtempSync('/tmp/orx-e2e-'))
   const home = path.join(root, 'home')
@@ -41,6 +45,7 @@ export async function startOrx({ agent, outside, ownBuild }: { agent: Agent; out
     const auth = status ? `[ "$1" = auth ] && echo '${status}'\n` : ''
     writeFileSync(path.join(bin, name), `#!/bin/sh\n[ "$1" = --version ] && echo "${version}" && exit 0\n${auth}exit 1\n`, { mode: 0o755 })
   }
+  if (claude) writeFileSync(path.join(bin, 'claude'), claude, { mode: 0o755 })
   const log = path.join(root, 'orx.log')
   const env = {
     HOME: home,
@@ -60,6 +65,7 @@ export async function startOrx({ agent, outside, ownBuild }: { agent: Agent; out
     ORX_TEST_SPEEDUP: String(SPEEDUP),
     ORX_E2E_AGENT: agent.url,
     ORX_E2E_AGENT_LOG: path.join(root, 'agent.log'),
+    ...extra,
   }
 
   let binary = ownBuild ? copyBuild(ORX, path.join(root, 'builds', '0')) : ORX
@@ -139,10 +145,14 @@ export async function startOrx({ agent, outside, ownBuild }: { agent: Agent; out
       return { id: project.id, open: async (page) => void (await page.goto(`${url}/projects/${project.id}`)) }
     },
     stop,
-    /** Stops `orx up` and starts it again on the same port and data, from `next.binary` if given. */
-    async restart(signal: NodeJS.Signals = 'SIGTERM', next?: { binary: string }) {
+    /**
+     * Stops `orx up` and starts it again on the same port and data, from `binary` if given,
+     * doing `meanwhile` while it is down.
+     */
+    async restart(signal: NodeJS.Signals = 'SIGTERM', { binary: next, meanwhile }: { binary?: string; meanwhile?: () => Promise<void> } = {}) {
       await stop(signal)
-      if (next) binary = next.binary
+      if (next) binary = next
+      await meanwhile?.()
       await start()
     },
     /**

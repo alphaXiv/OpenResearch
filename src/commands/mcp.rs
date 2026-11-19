@@ -523,8 +523,11 @@ fn invocation_overwrite(input: &str) -> Option<Value> {
         model: payload.get("modelName")?.as_str()?.to_string(),
         provider: None,
     };
-    let command =
-        crate::commands::invocation_gate::with_invocation_context(command, &identity).ok()?;
+    identity.validate().ok()?;
+    let command = format!(
+        "export ORX_INVOCATION_CONTEXT={}; {command}",
+        crate::jobs::ssh::sh_quote(&serde_json::to_string(&identity).ok()?)
+    );
     Some(json!({ "CommandLine": command }))
 }
 

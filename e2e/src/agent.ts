@@ -2,7 +2,7 @@
 import { createServer, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 
-export type Step = { say: string } | { think: string } | { hold: string } | { run: string } | { exit: number }
+export type Step = { say: string } | { think: string } | { hold: string; onCancel?: 'exit' } | { run: string } | { exit: number }
   | { permission: string; kind?: string; grant?: 'allow_once' | 'allow_always' | 'none' }
   | { permissionAfterReply: string }
 

@@ -47,6 +47,7 @@ use crate::store::Store;
 pub(crate) use claude::{
     question_prompt, should_synthesize_plan, synthesize_resume, SKIPPED_QUESTION_MESSAGE,
 };
+pub(crate) use codex::codex_luna;
 pub(crate) use detect::{
     detect_spawn_output_timed, probe_timing_scope, spawn_retrying_busy, unique as unique_bins,
     ProbeTiming, ProbeTimingSink,
@@ -478,6 +479,21 @@ pub trait Harness: Send + Sync {
         true
     }
 
+    /// Whether [`Self::one_shot_without_tools`] can promise a child with no tools at all.
+    fn runs_without_tools(&self) -> bool {
+        false
+    }
+
+    /// [`Self::one_shot`] on a child that cannot run a command, read or write a file, search the
+    /// web or reach an MCP server, with what the CLI reports the request used. A reply from a
+    /// child that started a tool anyway is an error, never an answer.
+    async fn one_shot_without_tools(&self, _request: OneShot<'_>) -> Result<OneShotReply> {
+        Err(anyhow!(
+            "{} cannot run a request without tools",
+            self.name()
+        ))
+    }
+
     /// Decide how an answered prompt flows back, and (for inline harnesses)
     /// deliver it. See [`ResumeAction`] for the two shapes. This runs *before*
     /// `ChatHost::respond` marks the card resolved, so returning an `Err` (e.g.
@@ -725,6 +741,93 @@ pub struct OneShot<'a> {
     /// provider with no working key); Claude keeps its per-quality alias.
     pub model: Option<&'a str>,
     pub timeout: Duration,
+}
+
+/// What [`Harness::one_shot_without_tools`] answered.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OneShotReply {
+    pub text: String,
+    /// None when the CLI reported nothing.
+    pub usage: Option<OneShotUsage>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OneShotUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    /// None when the CLI does not price its requests.
+    pub cost_usd: Option<f64>,
+}
+
+pub(crate) fn sign_in_revision(harness: &str, profile: Option<&str>) -> Result<String> {
+    use crate::local::native_store::{claude_config_file, claude_home, codex_home, NativeStore};
+
+    use sha2::{Digest, Sha256};
+
+    let mut vars: Vec<&str> = match harness {
+        "claude-code" => claude::CLAUDE_CREDENTIAL_VARS.into(),
+        "codex" => vec!["OPENAI_API_KEY", "CODEX_API_KEY"],
+        _ => unreachable!("only Claude Code and Codex take looks"),
+    };
+    let custom_key;
+    let files = match (harness, profile) {
+        ("claude-code", None) => vec![
+            claude_home(NativeStore::Legacy).join(".credentials.json"),
+            claude_config_file(),
+        ],
+        ("claude-code", Some(id)) => {
+            let home = crate::local::agent_profiles::home(id, harness)?;
+            vec![home.join(".credentials.json"), home.join(".claude.json")]
+        }
+        ("codex", profile) => {
+            let home = profile
+                .map(|id| crate::local::agent_profiles::home(id, harness))
+                .transpose()?
+                .unwrap_or_else(|| codex_home(NativeStore::Legacy));
+            let config = home.join("config.toml");
+            custom_key = codex::provider_env_key(&config);
+            vars.extend(custom_key.as_deref());
+            vec![home.join("auth.json"), config]
+        }
+        _ => unreachable!("only Claude Code and Codex take looks"),
+    };
+    let mut times = Vec::new();
+    for file in files {
+        match std::fs::metadata(&file).and_then(|metadata| metadata.modified()) {
+            Ok(time) => times.push(Some(time)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => times.push(None),
+            Err(error) => return Err(anyhow!("Couldn't inspect {}: {error}", file.display())),
+        }
+    }
+    let configured: Vec<_> = vars.into_iter().map(detect::api_key).collect();
+    let revision = serde_json::to_vec(&(times, configured))?;
+    Ok(format!("{:x}", Sha256::digest(revision)))
+}
+
+#[derive(Debug)]
+pub(crate) struct OneShotAuthError;
+
+impl std::fmt::Display for OneShotAuthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Sign-in was refused")
+    }
+}
+
+impl std::error::Error for OneShotAuthError {}
+
+fn one_shot_request_error(detail: &str) -> Error {
+    let lower = detail.trim().to_ascii_lowercase();
+    if lower.starts_with("not logged in")
+        || lower.starts_with("invalid api key")
+        || lower.starts_with("api error: 401")
+        || lower.contains("unexpected status 401")
+        || lower.contains("refresh token was already used")
+    {
+        OneShotAuthError.into()
+    } else {
+        anyhow!("{detail}")
+    }
 }
 
 /// A failed one-shot child's message from the first of `outputs` it wrote to,

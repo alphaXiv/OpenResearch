@@ -1,0 +1,8 @@
+<signal name="val_loss_lr_0_001" label="Validation loss, LR 0.001" digits="3" better="lower" />
+<signal name="val_loss_lr_0_002" label="Validation loss, LR 0.002" digits="3" better="lower" />
+<signal name="train_loss_lr_0_001" label="Training loss, LR 0.001" digits="3" better="lower" />
+<signal name="train_loss_lr_0_002" label="Training loss, LR 0.002" digits="3" better="lower" />
+<view headline="val_loss_lr_0_002 val_loss_lr_0_001">
+  <chart y="val_loss_lr_0_001 val_loss_lr_0_002" title="Validation loss by learning rate" />
+  <chart y="train_loss_lr_0_001 train_loss_lr_0_002" title="Training loss by learning rate" />
+</view>

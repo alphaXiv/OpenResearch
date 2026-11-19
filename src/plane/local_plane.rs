@@ -6,7 +6,7 @@ use super::{CreateExperimentSpec, DescInput, ProjectEdit, Run, RunListing};
 use crate::commands::remote_host::RELAUNCH_WAIT;
 use crate::error::{anyhow, Context, Result};
 use crate::local::model::{LocalExperiment, LocalProject};
-use crate::store::Store;
+use crate::store::{is_db_locked, Store};
 use crate::ExpRunArgs;
 
 /// The local-store plane. `project`/`experiment` carry the row the resolver
@@ -133,10 +133,85 @@ impl LocalPlane {
 
     // --- experiment -------------------------------------------------------
 
-    pub async fn experiment_status(&self, scheduler: bool) -> Result<()> {
+    pub async fn experiment_status(
+        &self,
+        scheduler: bool,
+        run_id: Option<&str>,
+        json: bool,
+    ) -> Result<()> {
         let store = &self.store;
         let exp = self.experiment()?;
-        println!("{}  ({})  [local]", exp.display_name(), exp.agent_status);
+        let runs = store.list_runs_by_experiment(&exp.id)?;
+        let selected = match run_id {
+            Some(id) => Some(
+                runs.iter()
+                    .find(|run| run.id == id)
+                    .ok_or_else(|| anyhow!("Run {id} does not belong to experiment {}", exp.id))?,
+            ),
+            None => runs
+                .iter()
+                .find(|run| matches!(run.status.as_str(), "submitting" | "starting" | "running"))
+                .or_else(|| runs.first()),
+        };
+        let monitor = match selected {
+            Some(row) => Some(run_monitor(store, row).await?),
+            None => None,
+        };
+        if json {
+            use serde_json::{json, Value};
+
+            let monitor = monitor.as_ref().unwrap_or(&Value::Null);
+            if let Some(run) =
+                selected.filter(|_| monitor["availability"]["state"] == "unavailable")
+            {
+                let reason = monitor["availability"]["reason"]
+                    .as_str()
+                    .unwrap_or("The monitor is unavailable.");
+                return Err(anyhow!("Run {}: {reason}", run.id));
+            }
+            let progress = &monitor["progress"];
+            let stage =
+                monitor["phases"]
+                    .as_array()
+                    .and_then(|phases| match progress["phase"].as_u64() {
+                        Some(index) => phases.get(index as usize),
+                        None => phases.last(),
+                    });
+            let progress = progress.is_object().then(|| {
+                json!({
+                    "done": progress["done"],
+                    "of": stage.and_then(|stage| stage.get("of")),
+                    "unit": stage.and_then(|stage| stage.get("unit")),
+                    "whole": progress["whole"],
+                })
+            });
+            let estimate = &monitor["estimate"];
+            let estimate = estimate.is_object().then(|| json!({
+                "loMs": estimate["loMs"], "midMs": estimate["midMs"], "hiMs": estimate["hiMs"],
+                "at": estimate["at"], "pending": estimate["pending"], "floor": estimate["floor"],
+                "untimed": estimate["untimed"].as_array().map_or(&[][..], Vec::as_slice),
+            }));
+            let flags: Vec<_> = monitor["flags"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|flag| json!({"id": flag["id"], "state": flag["state"], "text": flag["text"]}))
+                .collect();
+            let status = json!({
+                "experimentId": exp.id,
+                "runId": selected.map(|run| &run.id),
+                "status": selected.map(|run| &run.status),
+                "stage": stage.and_then(|stage| stage["name"].as_str()).filter(|name| !name.is_empty()),
+                "progress": progress,
+                "latest": monitor["latest"].as_object().cloned().unwrap_or_default(),
+                "estimate": estimate,
+                "flags": flags,
+            });
+            println!("{}", serde_json::to_string_pretty(&status)?);
+            return Ok(());
+        }
+        // The run's own line below says its state; an experiment's `agent_status` is never set.
+        println!("{}  [local]", exp.display_name());
         println!("  id:       {}", exp.id);
         println!("  branch:   {}", exp.branch_name);
         if exp.archived {
@@ -162,22 +237,28 @@ impl LocalPlane {
             ),
         }
 
-        match store.latest_run_for_experiment(&exp.id)? {
+        match runs.first() {
             Some(r) => {
                 let state = store.engine_run_state(&r.id)?;
-                let run = Run::from_store(store, &r)?;
+                let run = Run::from_store(store, r)?;
                 let commit = run
                     .commit_sha
                     .as_deref()
                     .map(|s| s.chars().take(7).collect::<String>())
                     .unwrap_or_else(|| "—".to_string());
+                let state_prefix = if selected.is_some_and(|selected| selected.id == run.id) {
+                    String::new()
+                } else {
+                    format!("{}, ", run.display_status())
+                };
+                let ran = if run.never_started() {
+                    "never started".to_owned()
+                } else {
+                    format!("ran {}", crate::output::format_duration(run.duration_secs))
+                };
                 println!(
-                    "  last run: {} ({}, commit {}, ran {}, updated {})",
-                    run.id,
-                    run.display_status(),
-                    commit,
-                    crate::output::format_duration(run.duration_secs),
-                    run.updated_display
+                    "  last run: {} ({}commit {}, {ran}, updated {})",
+                    run.id, state_prefix, commit, run.updated_display
                 );
                 for detail in [run.waiting_detail(), run.contact_detail()]
                     .into_iter()
@@ -258,6 +339,9 @@ impl LocalPlane {
                 println!("  older live run {}: {error}", older.id);
             }
         }
+        if let Some(text) = monitor.as_ref().and_then(|m| m["statusText"].as_str()) {
+            println!("{text}");
+        }
         Ok(())
     }
 
@@ -313,10 +397,14 @@ impl LocalPlane {
         Ok(())
     }
 
-    pub async fn cancel(&self, run: Option<&str>) -> Result<()> {
+    pub async fn revise(&self, run: &str) -> Result<()> {
+        ApiClient::discover().await?.revise(&self.id, run).await
+    }
+
+    pub async fn cancel(&self, run: Option<&str>, reason: Option<&str>) -> Result<()> {
         ApiClient::discover()
             .await?
-            .cancel(Some(&self.id), run)
+            .cancel(Some(&self.id), run, reason)
             .await
     }
 
@@ -429,6 +517,42 @@ impl LocalPlane {
     }
 }
 
+/// The status line's progress: `[<percent>%  ][<phase> · ]step <done>[ of <of>]`. A run with
+/// several detected bars has no whole-run percentage.
+/// The run's monitor as `orx up` serves it, at the `rev` the page shows; read from the store
+/// and the run's signals when no server is running, which publishes nothing.
+async fn run_monitor(store: &Store, run: &crate::store::StoredRun) -> Result<serde_json::Value> {
+    use crate::commands::remote_host::{canonical_data_dir, ServerDescriptor};
+    let server = match ServerDescriptor::agent_session(
+        std::env::var("ORX_UP_PORT").ok(),
+        std::env::var("ORX_UP_AUTH_TOKEN").ok(),
+    )? {
+        Some(server) => Some(server),
+        None => ServerDescriptor::live(&canonical_data_dir()?).await?,
+    };
+    if let Some(server) = server {
+        let response = ApiClient::new(server)?
+            .request(reqwest::Method::GET, &format!("runs/{}/monitor", run.id))
+            .send()
+            .await;
+        match response {
+            Ok(response) if response.status().is_success() => return Ok(response.json().await?),
+            // An older server has no monitors to serve.
+            Ok(response) if response.status() == reqwest::StatusCode::NOT_FOUND => {}
+            Ok(response) => eprintln!(
+                "orx up could not serve run {}'s monitor ({}); reading it from disk.",
+                run.id,
+                response.status()
+            ),
+            Err(error) => eprintln!(
+                "orx up could not serve run {}'s monitor ({error}); reading it from disk.",
+                run.id
+            ),
+        }
+    }
+    crate::engine::monitor::offline(store, run, crate::store::now_ms())
+}
+
 fn experiment_wait_progress(run: Option<(&str, &str)>, last_status: &mut Option<String>) {
     match run {
         Some((id, status)) if last_status.as_deref() != Some(status) => {
@@ -472,16 +596,6 @@ fn warn_unreachable_trackio(store: &Store, project_id: &str, backend: &str) -> R
         _ => {}
     }
     Ok(())
-}
-
-/// True when `error` is a transient SQLite lock ("database is locked") —
-/// contention a wait command should outlast, not die on.
-pub(crate) fn is_db_locked(error: &crate::error::Error) -> bool {
-    matches!(
-        error.downcast_ref::<rusqlite::Error>(),
-        Some(rusqlite::Error::SqliteFailure(failure, _))
-            if failure.code == rusqlite::ErrorCode::DatabaseBusy
-    )
 }
 
 fn note_db_locked(notified: &mut bool) {
@@ -670,6 +784,7 @@ impl ApiClient {
 
     pub async fn launch(&self, mut args: ExpRunArgs) -> Result<()> {
         args.chat_session_id = args.launching_chat_session();
+        let in_chat = args.chat_session_id.is_some();
         args.agent_origin = crate::agent_origin();
         args.caller_config_dir = Some(crate::commands::up::absolute_config_dir());
         args.caller_python_overrides = crate::jobs::caller_python_overrides();
@@ -703,8 +818,47 @@ impl ApiClient {
         println!("\u{2713} Run {} submitted ({}).", run.id, run.status);
         println!(
             "{}",
-            crate::invocation::follow_up(&run.experiment_id, &run.id)
+            crate::invocation::follow_up(&run.experiment_id, &run.id, in_chat)
         );
+        Ok(())
+    }
+
+    pub async fn revise(&self, experiment: &str, run: &str) -> Result<()> {
+        let request = serde_json::json!({
+            "experimentId": experiment,
+            "chatSessionId": crate::local::chat::launching_chat_session(),
+        });
+        let path = format!("runs/{}/revise", urlencoding::encode(run));
+        self.json(reqwest::Method::POST, &path, Some(&request))
+            .await?;
+        println!(
+            "\u{2713} Run {run} shows as Revising until experiment {experiment}'s next run starts or this turn ends."
+        );
+        Ok(())
+    }
+
+    pub async fn flag(
+        &self,
+        run: &str,
+        flag: &str,
+        choice: &str,
+        reason: Option<&str>,
+    ) -> Result<()> {
+        let request = serde_json::json!({
+            "flagId": flag,
+            "choice": choice,
+            "reason": reason,
+            "chatSessionId": crate::local::chat::launching_chat_session(),
+            "requestId": uuid::Uuid::new_v4().to_string(),
+        });
+        let path = format!("runs/{}/flag", urlencoding::encode(run));
+        let accepted = self
+            .json(reqwest::Method::POST, &path, Some(&request))
+            .await?;
+        let state = accepted["flag"]["state"].as_str().ok_or_else(|| {
+            anyhow!("orx up did not return a state for flag {flag} on run {run}.")
+        })?;
+        println!("✓ Flag {flag} on run {run}: {state}.");
         Ok(())
     }
 
@@ -715,7 +869,12 @@ impl ApiClient {
         Ok(())
     }
 
-    pub async fn cancel(&self, experiment: Option<&str>, selected: Option<&str>) -> Result<()> {
+    pub async fn cancel(
+        &self,
+        experiment: Option<&str>,
+        selected: Option<&str>,
+        reason: Option<&str>,
+    ) -> Result<()> {
         let path = match (experiment, selected) {
             (_, Some(run)) => format!("runs/{}", urlencoding::encode(run)),
             (Some(experiment), None) => {
@@ -762,6 +921,7 @@ impl ApiClient {
         for id in in_flight {
             let request = serde_json::json!({
                 "chatSessionId": crate::local::chat::launching_chat_session(),
+                "reason": reason,
             });
             let run: Run = serde_json::from_value(
                 self.json(

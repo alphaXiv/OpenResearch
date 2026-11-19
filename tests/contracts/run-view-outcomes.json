@@ -1,0 +1,12 @@
+{
+  "markup": "<signal name=\"val_loss\" digits=\"2\" />\n<view>\n  <text>Loss is **{val_loss}**. Lower is better.</text>\n  <cells from=\"items\" />\n  <bars from=\"items\" by=\"category\" />\n</view>\n",
+  "tree": {
+    "signals": {"val_loss": {"label": "val_loss", "digits": 2}},
+    "headline": [],
+    "blocks": [
+      {"text": "Loss is **{val_loss}**. Lower is better."},
+      {"cells": "items"},
+      {"bars": "items", "by": "category"}
+    ]
+  }
+}

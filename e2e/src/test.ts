@@ -15,6 +15,7 @@ export const composer = (page: Page) => page.getByRole('textbox', { name: /^Mess
 
 /** Types a chat message and sends it with Enter, as a user does. */
 export async function send(page: Page, text: string) {
+  await composer(page).click()
   await composer(page).fill(text)
   await composer(page).press('Enter')
 }

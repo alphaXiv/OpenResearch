@@ -37,8 +37,8 @@ use super::options::{
     HarnessOptions, OptionChoice, PermissionMode, PlanActivation, REASONING_DEFAULT_ID,
 };
 use super::{
-    CompactCtx, CompactOutcome, Harness, OneShot, OneShotQuality, ResumeAction, TurnFailure,
-    TurnOutcome, TurnResult, Waited, ORX_MAX_ATTEMPTS,
+    CompactCtx, CompactOutcome, Harness, OneShot, OneShotQuality, OneShotReply, OneShotUsage,
+    ResumeAction, TurnFailure, TurnOutcome, TurnResult, Waited, ORX_MAX_ATTEMPTS,
 };
 use crate::error::{anyhow, Result};
 use crate::local::chat::{
@@ -1090,7 +1090,7 @@ pub(crate) const CLAUDE_ENTRYPOINT: &str = "openresearch";
 /// Either credential Claude Code accepts. `ANTHROPIC_AUTH_TOKEN` is the one a
 /// custom `ANTHROPIC_BASE_URL` gateway uses, so detecting only the api key
 /// reports those working setups as signed out.
-const CLAUDE_CREDENTIAL_VARS: [&str; 2] = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
+pub(super) const CLAUDE_CREDENTIAL_VARS: [&str; 2] = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
 
 fn has_api_credential() -> bool {
     CLAUDE_CREDENTIAL_VARS
@@ -1129,6 +1129,52 @@ fn billing_label(
 /// through from the catalog; a CLI too old to know them exits non-zero, and
 /// the error carries what it printed.
 async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
+    let out = claude_one_shot_output(bin, request, &[]).await?;
+    Ok(String::from_utf8_lossy(&out).into_owned())
+}
+
+/// A one-shot's reply and usage from `-p --output-format json`: one result object.
+async fn claude_one_shot_reply(bin: &Path, request: OneShot<'_>) -> Result<OneShotReply> {
+    let out = claude_one_shot_output(bin, request, &["--output-format", "json"]).await?;
+    claude_result_reply(&out)
+}
+
+fn claude_result_reply(out: &[u8]) -> Result<OneShotReply> {
+    let result: Value = serde_json::from_slice(out).map_err(|error| {
+        anyhow!(
+            "Claude Code answered something other than its JSON result ({error}): {}",
+            super::one_line(&String::from_utf8_lossy(out), 200)
+        )
+    })?;
+    let text = result["result"].as_str().unwrap_or_default().to_owned();
+    if result["error"] == "authentication_failed" {
+        return Err(super::OneShotAuthError.into());
+    }
+    if result["is_error"] == true {
+        return Err(super::one_shot_request_error(&super::one_line(&text, 300)));
+    }
+    let usage = &result["usage"];
+    let input = [
+        "input_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+    ]
+    .iter()
+    .filter_map(|key| usage[key].as_u64())
+    .sum();
+    let usage = usage.is_object().then(|| OneShotUsage {
+        input_tokens: input,
+        output_tokens: usage["output_tokens"].as_u64().unwrap_or_default(),
+        cost_usd: result["total_cost_usd"].as_f64(),
+    });
+    Ok(OneShotReply { text, usage })
+}
+
+async fn claude_one_shot_output(
+    bin: &Path,
+    request: OneShot<'_>,
+    extra: &[&str],
+) -> Result<Vec<u8>> {
     let model = match request.quality {
         OneShotQuality::Cheap => "haiku",
         OneShotQuality::Standard => "sonnet",
@@ -1150,6 +1196,13 @@ async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
         "--strict-mcp-config",
         "--tools",
         "",
+        // Only the home's own settings: a project's, found in any folder above the working
+        // directory (a `.claude` in the user's home among them), would bring its memory along.
+        "--setting-sources",
+        "user",
+        // Nor the user's hooks: a sound, a notification or a hook's output on every look.
+        "--settings",
+        r#"{"disableAllHooks":true}"#,
         // Replace the agent system prompt: the default hauls ~8.5k tokens of
         // Claude Code scaffolding into a request that ignores it (measured
         // 8.5k → 1.9k input for titles). Latency is unchanged — the ~3s is
@@ -1157,6 +1210,7 @@ async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
         "--system-prompt",
         request.system,
     ])
+    .args(extra)
     .stdin(Stdio::null())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())
@@ -1166,19 +1220,32 @@ async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
     .current_dir(std::env::temp_dir());
     prepare_env(&mut cmd);
     cmd.env("CLAUDE_CODE_ENTRYPOINT", CLAUDE_ENTRYPOINT);
-    if let Some(profile) = request.profile {
+    let (home, name) = if let Some(profile) = request.profile {
         crate::local::agent_profiles::home(profile, "claude-code")?;
-        cmd.envs(crate::local::agent_profiles::login_env(profile)?);
+        let env = crate::local::agent_profiles::login_env(profile)?;
+        let home = env
+            .iter()
+            .find(|(key, _)| *key == "CLAUDE_CONFIG_DIR")
+            .map(|(_, home)| PathBuf::from(home))
+            .ok_or_else(|| anyhow!("agent account {profile} has no Claude Code home"))?;
+        cmd.envs(env);
+        (home, profile)
     } else {
-        cmd.env(
-            "CLAUDE_CONFIG_DIR",
-            native_store::prepare_claude(NativeStore::Isolated)?,
-        );
         cmd.env(
             "CLAUDE_SECURESTORAGE_CONFIG_DIR",
             native_store::claude_secure_storage_config_dir(),
         );
-    }
+        (
+            native_store::prepare_claude(NativeStore::Isolated)?,
+            "claude",
+        )
+    };
+    // A one-shot brings its own context: the user's memory, skills and plugins would add
+    // thousands of tokens to every request.
+    cmd.env(
+        "CLAUDE_CONFIG_DIR",
+        native_store::prepare_claude_one_shot(&home, name)?,
+    );
     // Plain text only — an ANSI-colorizing CLI (or a synced FORCE_COLOR) would
     // otherwise write escape codes straight into the reply.
     cmd.env("NO_COLOR", "1");
@@ -1187,13 +1254,26 @@ async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
         .await
         .ok_or_else(|| anyhow!("timed out after {}s", request.timeout.as_secs()))??;
     if !out.status.success() {
+        // A JSON result says why in its own words.
+        let said = serde_json::from_slice::<Value>(&out.stdout).ok();
+        if said
+            .as_ref()
+            .is_some_and(|said| said["error"] == "authentication_failed")
+        {
+            return Err(super::OneShotAuthError.into());
+        }
+        if let Some(why) = said
+            .as_ref()
+            .and_then(|said| said["result"].as_str())
+            .filter(|why| !why.trim().is_empty())
+        {
+            return Err(super::one_shot_request_error(&super::one_line(why, 300)));
+        }
         // `-p` prints request failures (bad model, signed out) on stdout; stderr is diagnostics.
-        return Err(super::one_shot_exit_error(
-            out.status,
-            &[&out.stdout, &out.stderr],
-        ));
+        let error = super::one_shot_exit_error(out.status, &[&out.stdout, &out.stderr]);
+        return Err(super::one_shot_request_error(&error.to_string()));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    Ok(out.stdout)
 }
 
 /// Every `claude` install, in preference order.
@@ -1475,6 +1555,16 @@ impl Harness for ClaudeCode {
 
     fn one_shot_honours_model(&self) -> bool {
         false
+    }
+
+    /// `--tools ""` leaves the child no tool to call, and `--strict-mcp-config` no server.
+    fn runs_without_tools(&self) -> bool {
+        true
+    }
+
+    async fn one_shot_without_tools(&self, request: OneShot<'_>) -> Result<OneShotReply> {
+        let bin = find_claude().ok_or_else(|| anyhow!("{} is not installed", self.name()))?;
+        claude_one_shot_reply(&bin, request).await
     }
 
     fn options(&self) -> HarnessOptions {
@@ -1805,7 +1895,6 @@ const PLAN_SETTINGS_REL: &str = ".openresearch/agent/claude-plan-settings.json";
 /// and each config names its own chat. Same git-excluded agent dir.
 const MCP_CONFIG_DIR_REL: &str = ".openresearch/agent";
 
-// Attribution updates input without granting permission; plan decisions stay separate.
 pub(crate) fn write_settings(repo: &std::path::Path, plan: bool) -> Result<PathBuf> {
     let orx = crate::paths::spawnable_exe()
         .map_err(|e| anyhow!("cannot resolve orx binary path for native hooks: {e}"))?;
@@ -1816,9 +1905,7 @@ pub(crate) fn write_settings(repo: &std::path::Path, plan: bool) -> Result<PathB
             crate::jobs::ssh::sh_quote(&orx.to_string_lossy())
         ),
     }]);
-    let mut hooks = vec![
-        serde_json::json!({"matcher":"Bash","hooks":[{"type":"command","command":format!("{} invocation-gate", crate::jobs::ssh::sh_quote(&orx.to_string_lossy()))}]}),
-    ];
+    let mut hooks = Vec::new();
     if plan {
         hooks.push(serde_json::json!({"matcher":"Bash","hooks":hook}));
         hooks.push(serde_json::json!({"matcher":"ExitPlanMode","hooks":hook}));
@@ -2462,9 +2549,6 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
             _ => {}
         },
         Some("assistant") => {
-            if let Some(message) = event.get("message") {
-                ctx.record_native_invocations(message);
-            }
             if let Some(message) = event.get("message") {
                 record_message(ctx, message);
             }
@@ -3119,8 +3203,13 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
         prompt: (!resumed_alone).then(|| ctx.text.clone()),
         ..Default::default()
     });
-    if !resumed {
-        ctx.begin_native_usage_attempt(&format!("claude-{}:", ctx.attempt_count_for_usage()))?;
+    if let Some(execution) = ctx.usage_execution_id().filter(|_| !resumed) {
+        client.begin_usage_attempt(
+            &crate::store::Store::open()?,
+            execution,
+            &format!("claude-{}:", ctx.attempt_count_for_usage()),
+            ctx.native_session_id.as_deref(),
+        )?;
     }
     if !resumed && !resumed_alone {
         ctx.persist_delivery(DeliveryState::Unknown)?;

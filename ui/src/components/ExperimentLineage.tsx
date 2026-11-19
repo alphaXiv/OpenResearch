@@ -21,6 +21,9 @@ const STATUS_WORD: Record<HistoryStatus, () => string> = {
   lost: m.status_lost,
   running: m.status_running,
   stale: m.status_unconfirmed,
+  flagged: m.status_flagged,
+  auto_stopped: m.status_auto_stopped,
+  revising: m.status_revising,
   none: m.history_status_not_run,
 };
 const STATUS_TONE: Record<HistoryStatus, string> = {
@@ -30,6 +33,9 @@ const STATUS_TONE: Record<HistoryStatus, string> = {
   lost: "var(--muted)",
   running: "var(--accent-teal)",
   stale: "var(--accent-amber)",
+  flagged: "var(--mark-amber)",
+  auto_stopped: "var(--accent-orange)",
+  revising: "var(--accent-purple)",
   none: "var(--muted)",
 };
 // Only runtime theme variables: an @theme colour that no class uses is dropped from the build.
@@ -37,7 +43,7 @@ const INK = "var(--lineage)";
 const LINE_OPACITY = 0.48;
 const DOT_OPACITY = 1;
 
-/** Status as a shape, so colour is never the only signal: ● done, ◆ failed, ⊘ cancelled, ◐ running, ◌ stale, ○ not run. */
+/** Status as a shape, so colour is never the only signal: ● done, ◆ failed, ⊘ stopped, ◐ running, ◌ stale, ○ not run. */
 function StatusShape({ status, cx, cy, r, color, background = "var(--base)" }: {
   status: HistoryStatus;
   cx: number;
@@ -54,7 +60,7 @@ function StatusShape({ status, cx, cy, r, color, background = "var(--base)" }: {
     return <path d={`M${cx} ${cy - d}L${cx + d} ${cy}L${cx} ${cy + d}L${cx - d} ${cy}Z`} fill={color} />;
   }
   const ring = <circle cx={cx} cy={cy} r={inner} fill={background} stroke={color} strokeWidth={stroke} />;
-  if (status === "running")
+  if (status === "running" || status === "flagged")
     return (
       <g>
         {ring}
@@ -62,7 +68,7 @@ function StatusShape({ status, cx, cy, r, color, background = "var(--base)" }: {
       </g>
     );
   if (status === "stale") return <circle cx={cx} cy={cy} r={inner} fill={background} stroke={color} strokeWidth={stroke} strokeDasharray={`${stroke} ${stroke}`} />;
-  if (status === "cancelled" || status === "lost") {
+  if (status === "cancelled" || status === "lost" || status === "auto_stopped" || status === "revising") {
     const s = (r - stroke) * 0.7;
     return (
       <g>

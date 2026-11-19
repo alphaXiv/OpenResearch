@@ -15,6 +15,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{watch, Notify};
 
 use super::adapters::openresearch::LegacyTransport;
+use super::adapters::signals::{Host as SignalHost, Next as SignalNext};
 use super::adapters::{api, local::Local, openresearch, slurm::Slurm, ssh::Ssh};
 use super::clock::Clock;
 use super::handle::ApiAccount;
@@ -65,7 +66,7 @@ fn box_of(run: &StoredRun) -> Option<String> {
 
 /// What one adapter instance serves.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum Key {
+pub(super) enum Key {
     Ssh {
         host: String,
         root: String,
@@ -124,7 +125,7 @@ impl Key {
         Self::of_kind(&launch.kind, launch.target.clone(), root.into(), context)
     }
 
-    fn of_handle(handle: &Handle) -> Result<Self> {
+    pub(super) fn of_handle(handle: &Handle) -> Result<Self> {
         Ok(match handle {
             Handle::OpenResearch { descriptor } => Self::OpenResearch {
                 rental: descriptor.job_id.clone(),
@@ -166,6 +167,15 @@ impl Key {
             _ => Duration::from_secs(10),
         }
     }
+}
+
+/// A file the laptop kept is gone: reading again cannot bring it back.
+fn missing_file(error: &crate::error::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+    })
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -593,6 +603,8 @@ impl Runtime {
 
     /// One loop per adapter. A changed watch set interrupts a pending long poll.
     async fn observe(self: Arc<Self>, key: Key, mut runs: watch::Receiver<Vec<WatchedRun>>) {
+        let mut first_signal = 0;
+        let mut overrunning = false;
         loop {
             let watched = runs.borrow_and_update().clone();
             if watched.is_empty() {
@@ -635,6 +647,16 @@ impl Runtime {
             self.engine
                 .apply_observations(backend.as_ref(), &watched, observations)
                 .await;
+            let budget = crate::config::paced(EARLY_COLLECTION_BUDGET);
+            let overran = self
+                .collect_signals(backend.as_ref(), &watched, budget, &mut first_signal)
+                .await;
+            if overran && !overrunning {
+                eprintln!(
+                    "orx up: {key:?}: live signal collection needs more than {budget:?} a tick; runs it does not reach wait for the next"
+                );
+            }
+            overrunning = overran;
             if finished {
                 self.changed.notify_one();
             }
@@ -702,6 +724,59 @@ impl Runtime {
         }
     }
 
+    /// One turn of live collection, from `next` round the batch until `budget` runs out. A run
+    /// the budget did not finish keeps its availability and is first on the next tick; the
+    /// result says whether that happened.
+    async fn collect_signals(
+        &self,
+        backend: &dyn Backend,
+        watched: &[WatchedRun],
+        budget: Duration,
+        next: &mut usize,
+    ) -> bool {
+        let deadline = tokio::time::Instant::now() + budget;
+        let first = *next % watched.len();
+        for (turn, run) in watched
+            .iter()
+            .cycle()
+            .skip(first)
+            .take(watched.len())
+            .enumerate()
+        {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let collect = super::adapters::signals::collect(
+                &self.data_dir,
+                backend,
+                run,
+                false,
+                self.engine.clock.wall_ms(),
+                || self.store()?.run_patterns(&run.id),
+            );
+            let collected = if remaining.is_zero() {
+                None
+            } else {
+                tokio::time::timeout(remaining, collect).await.ok()
+            };
+            let Some(collected) = collected else {
+                // Past the first turn, so a run slower than the whole budget cannot hold the rest.
+                *next = first + turn.max(1);
+                return true;
+            };
+            if let Err(error) = collected {
+                if let Err(error) = super::adapters::signals::availability(
+                    &self.data_dir,
+                    &run.id,
+                    "stale",
+                    Some(&format!("{error:#}")),
+                ) {
+                    eprintln!("orx up: run {} signal availability: {error:#}", run.id);
+                }
+            }
+        }
+        *next = first + 1;
+        false
+    }
+
     /// Starts keeping the log of every run about to become terminal, so later reads need no
     /// host. What the early budget leaves is finished by [`Self::collect_pending`].
     async fn collect_logs(
@@ -711,12 +786,12 @@ impl Runtime {
         observations: &[(String, Observation)],
     ) {
         for run in watched {
-            if !observations
+            let Some((_, exit)) = observations
                 .iter()
-                .any(|(id, observation)| *id == run.id && observation.ends_run())
-            {
+                .find(|(id, observation)| *id == run.id && observation.ends_run())
+            else {
                 continue;
-            }
+            };
             let terminal = self
                 .store()
                 .and_then(|store| store.get_run(&run.id))
@@ -727,13 +802,33 @@ impl Runtime {
             if terminal {
                 continue;
             }
-            if let Err(error) = self.collect(backend, run, COLLECTION_BUDGET).await {
+            let local_exit = matches!(Key::of_handle(&run.handle), Ok(Key::Local))
+                && matches!(
+                    exit,
+                    Observation::Exited { .. }
+                        | Observation::Cancelled { .. }
+                        | Observation::CancelReceipt { remaining: 0, .. }
+                        | Observation::Failed {
+                            finished_at: Some(_),
+                            ..
+                        }
+                );
+            let collected = async {
+                if self.collect(backend, run, COLLECTION_BUDGET).await?
+                    && local_exit
+                    && self.engine.read_notify(backend, &run.id, true).await?
+                {
+                    self.store()?.finish_log_collection(&run.id)?;
+                }
+                Ok::<_, crate::error::Error>(())
+            };
+            if let Err(error) = collected.await {
                 eprintln!("orx up: run {}: log collection: {error:#}", run.id);
             }
         }
     }
 
-    /// Retries, across restarts, the logs of finished runs that could not be kept in time.
+    /// Retries finished runs' collection debts across restarts.
     /// A starting engine retries them all at once.
     async fn collect_pending(self: Arc<Self>) {
         if let Err(error) = self
@@ -742,15 +837,30 @@ impl Runtime {
         {
             eprintln!("orx up: log collection: {error:#}");
         }
+        if let Err(error) = self
+            .store()
+            .and_then(|store| store.retry_signal_collections_now(None))
+        {
+            eprintln!("orx up: signal collection: {error:#}");
+        }
         loop {
-            match self.store().and_then(|store| store.due_log_collections(10)) {
+            let due = self.store().and_then(|store| {
+                let mut due = store.due_log_collections(10)?;
+                due.extend(store.pending_signal_collections(true, 10)?);
+                due.sort();
+                due.dedup();
+                Ok(due)
+            });
+            match due {
                 Ok(due) => {
                     let full = due.len() == 10;
-                    for run_id in &due {
-                        if let Err(error) = self.collect_finished(run_id).await {
-                            eprintln!("orx up: run {run_id}: log collection: {error:#}");
+                    let runtime = self.as_ref();
+                    futures::future::join_all(due.iter().map(|run_id| async move {
+                        if let Err(error) = runtime.collect_finished(run_id).await {
+                            eprintln!("orx up: run {run_id}: final collection: {error:#}");
                         }
-                    }
+                    }))
+                    .await;
                     if full
                         && self
                             .store()
@@ -760,7 +870,7 @@ impl Runtime {
                         continue;
                     }
                 }
-                Err(error) => eprintln!("orx up: log collection: {error:#}"),
+                Err(error) => eprintln!("orx up: final collection: {error:#}"),
             }
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(30)) => {}
@@ -773,10 +883,21 @@ impl Runtime {
         let Some(run) = self.store()?.get_run(run_id)? else {
             return Ok(());
         };
+        let refold = self.store()?.signal_refold_ready(run_id)?;
         let collected = async {
             let Some(handle) = handle_of(&run) else {
-                return self.store()?.finish_log_collection(run_id);
+                let store = self.store()?;
+                store.finish_signal_collection(run_id)?;
+                store.finish_log_collection(run_id)?;
+                if store.signal_refold_ready(run_id)? {
+                    store.finish_signal_refold(run_id, &store.run_patterns(run_id)?)?;
+                }
+                return Ok(());
             };
+            let data_as_of = run.ended_at.unwrap_or(self.engine.clock.wall_ms());
+            if refold {
+                return self.refold_signals(&run, handle).await;
+            }
             let run = WatchedRun { id: run.id, handle };
             let backend = self.backend_for(&Key::of_handle(&run.handle)?)?;
             if !self.store()?.log_output_collected(run_id)? {
@@ -795,26 +916,58 @@ impl Runtime {
                 }
                 self.store()?.checkpoint_log_collection(run_id)?;
             }
-            backend.finish(&run).await?;
-            {
-                let store = self.store()?;
-                let tx = store.begin_immediate()?;
-                store.finish_log_collection(run_id)?;
-                store.queue_finished_remote_cleanup(run_id)?;
-                tx.commit()?;
+            let signals_pending = self.store()?.signal_collection_pending(run_id)?;
+            if self.store()?.log_collection_pending(run_id)? {
+                if signals_pending {
+                    let budget = crate::config::paced(EARLY_COLLECTION_BUDGET);
+                    let attempt = self.drive_signals(backend.as_ref(), &run, false, &SignalHost::Has, data_as_of, tokio::time::Instant::now() + budget);
+                    let recorded = match tokio::time::timeout(budget, attempt).await {
+                        Ok(Ok(_)) => Ok(()),
+                        Ok(Err(error)) => match error.downcast_ref::<super::adapters::signals::HostGone>() {
+                            Some(gone) => super::adapters::signals::host_gone(&self.data_dir, run_id, &gone.0),
+                            None => super::adapters::signals::delayed(&self.data_dir, run_id, &format!("{error:#}")),
+                        },
+                        Err(_) => super::adapters::signals::delayed(&self.data_dir, run_id, "Final signal collection did not reach the end of the log within its time bound"),
+                    };
+                    if let Err(error) = recorded {
+                        eprintln!("orx up: run {run_id} signals: {error:#}");
+                    }
+                }
+                backend.finish(&run).await?;
+                {
+                    let store = self.store()?;
+                    let tx = store.begin_immediate()?;
+                    store.finish_log_collection(run_id)?;
+                    store.queue_finished_remote_cleanup(run_id)?;
+                    tx.commit()?;
+                }
+                backend.unwatch(&run).await;
             }
-            backend.unwatch(&run).await;
+            if signals_pending {
+                if let Err(error) = self.settle_signals(backend.as_ref(), &run, data_as_of).await {
+                    if let Err(error) = self.defer_signals(&run, &format!("{error:#}")) {
+                        eprintln!("orx up: run {run_id} signals: {error:#}");
+                    }
+                }
+            }
             Ok(())
         }
         .await;
         if let Err(error) = &collected {
             let error = format!("{error:#}");
-            if self.store()?.defer_log_collection(run_id, &error)? {
+            if !refold
+                && self.store()?.log_collection_pending(run_id)?
+                && self.store()?.defer_log_collection(run_id, &error)?
+            {
                 let body = format!(
                     "[orx] Run `{run_id}`'s output collection could not finish ({error}). orx keeps retrying hourly, and at once when its host reconnects."
                 );
                 self.engine.attention(run_id, "log-collection", &body)?;
             }
+        }
+        if !refold && self.store()?.signal_refold_ready(run_id)? {
+            self.store()?.retry_signal_collections_now(Some(run_id))?;
+            self.collect_now.notify_one();
         }
         self.engine
             .bus
@@ -824,9 +977,308 @@ impl Runtime {
         collected
     }
 
+    async fn refold_signals(&self, row: &StoredRun, handle: Handle) -> Result<()> {
+        use super::adapters::signals::{availability, collect_kept, REFOLD_FAILED};
+
+        let as_of = row.ended_at.unwrap_or(row.updated_at);
+        let started = self
+            .store()?
+            .engine_run_state(&row.id)?
+            .and_then(|state| state.started_at)
+            .unwrap_or(row.created_at);
+        let duration = u64::try_from(as_of.saturating_sub(started))
+            .ok()
+            .map(Duration::from_millis);
+        let run = WatchedRun {
+            id: row.id.clone(),
+            handle,
+        };
+        let desired = || self.store()?.run_patterns(&run.id);
+        let config = desired()?;
+        let pass = async {
+            if crate::commands::up::api_v2::kept_log(&self.data_dir, &run.id)?
+                .iter()
+                .all(|range| range.len == 0)
+            {
+                return Ok(None);
+            }
+            collect_kept(
+                &self.data_dir,
+                &run,
+                self.engine.clock.wall_ms(),
+                as_of,
+                tokio::time::Instant::now() + crate::config::paced(Duration::from_secs(2)),
+                duration,
+                desired,
+            )
+            .await
+            .map(Some)
+        };
+        let reason = match pass.await {
+            Ok(Some(true)) => None,
+            Ok(Some(false)) => {
+                self.store()?.retry_signal_collections_now(Some(&run.id))?;
+                self.collect_now.notify_one();
+                return Ok(());
+            }
+            Ok(None) => Some("This run has no saved log to read again with the new patterns.".into()),
+            Err(error) if missing_file(&error) => Some(format!(
+                "This run's saved log is missing and couldn't be read again with the new patterns. {error:#}"
+            )),
+            Err(error) => {
+                let notify = {
+                    let store = self.store()?;
+                    let tx = store.begin_immediate()?;
+                    if store.run_patterns(&run.id)? != config {
+                        return Ok(());
+                    }
+                    let notify = store.defer_signal_collection(&run.id)?;
+                    tx.commit()?;
+                    notify
+                };
+                let reason = format!(
+                    "Couldn't read the saved log again with the new patterns. {error:#}"
+                );
+                availability(&self.data_dir, &run.id, REFOLD_FAILED, Some(&reason))?;
+                if notify {
+                    self.engine.attention(
+                        &run.id,
+                        "signal-refold",
+                        &format!("[orx] Run `{}`. {reason} OpenResearch is retrying hourly.", run.id),
+                    )?;
+                }
+                return Ok(());
+            }
+        };
+        if let Some(reason) = reason {
+            availability(&self.data_dir, &run.id, REFOLD_FAILED, Some(&reason))?;
+        }
+        self.store()?.finish_signal_refold(&run.id, &config)?;
+        self.collect_now.notify_one();
+        Ok(())
+    }
+
+    /// Runs the end-of-run decision for a run's signals until it asks for something other than
+    /// reading: the release, a retry or a settlement. Every read must advance the checkpoint.
+    /// A kept fold reads until `deadline`, then answers `FoldKept` to be continued.
+    async fn drive_signals(
+        &self,
+        backend: &dyn Backend,
+        run: &WatchedRun,
+        released: bool,
+        host: &SignalHost,
+        data_as_of: i64,
+        deadline: tokio::time::Instant,
+    ) -> Result<SignalNext> {
+        let mut contended = 0;
+        loop {
+            let held = self.held_signals(&run.id);
+            let kept = crate::commands::up::api_v2::kept_log(&self.data_dir, &run.id)?;
+            let now = self.engine.clock.wall_ms();
+            let next = super::adapters::signals::decide(
+                released,
+                host,
+                held.as_ref().map(Option::as_ref).map_err(String::as_str),
+                &kept,
+            );
+            let before = self.signal_progress(&run.id);
+            let desired = || self.store()?.run_patterns(&run.id);
+            let read = match next {
+                SignalNext::AskHost => {
+                    super::adapters::signals::collect(
+                        &self.data_dir,
+                        backend,
+                        run,
+                        true,
+                        now,
+                        desired,
+                    )
+                    .await
+                }
+                SignalNext::FoldKept => {
+                    let pass = super::adapters::signals::collect_kept(
+                        &self.data_dir,
+                        run,
+                        now,
+                        data_as_of,
+                        deadline,
+                        None,
+                        desired,
+                    );
+                    match pass.await {
+                        Ok(false) => return Ok(SignalNext::FoldKept),
+                        Err(error) if missing_file(&error) => {
+                            let cause =
+                                format!("Part of the run's saved log is missing: {error:#}");
+                            return Ok(SignalNext::Settle(Some(cause)));
+                        }
+                        read => read,
+                    }
+                }
+                next => return Ok(next),
+            };
+            if let Err(error) = read {
+                let busy = error.chain().any(|cause| {
+                    cause
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|io| io.kind() == std::io::ErrorKind::WouldBlock)
+                });
+                if !busy {
+                    return Err(error);
+                }
+                // Live collection may hold the checkpoint for a moment; a holder that stays is another process.
+                contended += 1;
+                if contended == 5 {
+                    bail!(
+                        "Another orx process is reading run {}'s signal checkpoint",
+                        run.id
+                    );
+                }
+                tokio::time::sleep(crate::config::paced(Duration::from_millis(200))).await;
+                continue;
+            }
+            if self.signal_progress(&run.id) == before {
+                bail!("Reading run {}'s signals made no progress", run.id);
+            }
+        }
+    }
+
+    /// After the release: settles the run's signal debt, or leaves it open to retry.
+    async fn settle_signals(
+        &self,
+        backend: &dyn Backend,
+        run: &WatchedRun,
+        data_as_of: i64,
+    ) -> Result<()> {
+        let before = self.signal_progress(&run.id);
+        let host = if matches!(
+            Key::of_handle(&run.handle),
+            Ok(Key::OpenResearch { .. } | Key::Api { .. })
+        ) {
+            SignalHost::Gone(format!("The machine that ran {} was released", run.id))
+        } else {
+            let budget = crate::config::paced(EARLY_COLLECTION_BUDGET);
+            match tokio::time::timeout(budget, Self::log_info(backend, run)).await {
+                Ok(Ok(Some(_))) => SignalHost::Has,
+                Ok(Ok(None)) => {
+                    SignalHost::Gone(format!("The host no longer has run {}'s log", run.id))
+                }
+                Ok(Err(error)) => SignalHost::Unreachable(format!("{error:#}")),
+                Err(_) => SignalHost::Unreachable("The host did not answer in time".into()),
+            }
+        };
+        let budget = crate::config::paced(EARLY_COLLECTION_BUDGET);
+        let deadline = tokio::time::Instant::now() + budget / 2;
+        let driven = self.drive_signals(backend, run, true, &host, data_as_of, deadline);
+        let next = match tokio::time::timeout(budget, driven).await {
+            Ok(next) => next?,
+            Err(_) if self.signal_progress(&run.id) != before => SignalNext::AskHost,
+            Err(_) => bail!("Reading run {}'s signals made no progress in time", run.id),
+        };
+        match next {
+            // A pass that made progress is due again at once, after the other runs' turns.
+            SignalNext::AskHost | SignalNext::FoldKept => {
+                self.store()?.retry_signal_collections_now(Some(&run.id))?;
+                self.collect_now.notify_one();
+            }
+            SignalNext::Settle(None) => {
+                super::adapters::signals::availability(&self.data_dir, &run.id, "cached", None)?;
+                self.store()?.finish_signal_collection(&run.id)?;
+            }
+            SignalNext::Settle(Some(cause)) => {
+                let cause = cause.trim_end_matches(['.', ' ']);
+                super::adapters::signals::settle_incomplete(&self.data_dir, &run.id, cause)?;
+                let kept = if self.held_signals(&run.id).is_ok_and(|s| s.is_some()) {
+                    "The signals read before then are kept."
+                } else {
+                    "No signals were kept."
+                };
+                self.engine.attention(
+                    &run.id,
+                    "signal-collection-incomplete",
+                    &format!(
+                        "[orx] Run `{}`'s signal collection could not finish: {cause}. {kept} Read any saved output with `orx logs {}`.",
+                        run.id, run.id
+                    ),
+                )?;
+                self.store()?.finish_signal_collection(&run.id)?;
+            }
+            SignalNext::Retry(cause) => bail!("{cause}"),
+            SignalNext::Release => {
+                unreachable!("the release precedes settling")
+            }
+        }
+        Ok(())
+    }
+
+    /// Keeps the signal debt open; like the log debt, its seventh failure tells the chat once.
+    fn defer_signals(&self, run: &WatchedRun, cause: &str) -> Result<()> {
+        if self.store()?.defer_signal_collection(&run.id)? {
+            let host = match Key::of_handle(&run.handle) {
+                Ok(Key::Ssh { host, .. } | Key::Slurm { host, .. }) => host,
+                Ok(Key::Local) => "this computer".into(),
+                Ok(Key::Api { provider, .. }) => provider,
+                Ok(Key::OpenResearch { .. }) => "its OpenResearch box".into(),
+                Err(_) => "its host".into(),
+            };
+            self.engine.attention(
+                &run.id,
+                "signal-collection",
+                &format!(
+                    "[orx] Run `{}`'s signals could not be read from {host} ({cause}). orx keeps retrying hourly, and at once when its host reconnects.",
+                    run.id
+                ),
+            )?;
+        }
+        super::adapters::signals::availability(&self.data_dir, &run.id, "stale", Some(cause))
+    }
+
+    fn signals_path(&self, run: &str) -> PathBuf {
+        self.data_dir
+            .join("run-signals")
+            .join(format!("{run}.json"))
+    }
+
+    /// The run's signal checkpoint, or why it cannot be read: one set aside as corrupt counts.
+    fn held_signals(&self, run: &str) -> Result<Option<orx_signals::Snapshot>, String> {
+        let path = self.signals_path(run);
+        let held = super::adapters::local::signals::load(&path)
+            .map_err(|error| format!("Run {run}'s signal checkpoint cannot be read: {error}"))?;
+        if held.is_some() {
+            return Ok(held);
+        }
+        let prefix = format!("{run}.corrupt-");
+        let retained = std::fs::read_dir(path.parent().unwrap())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .find(|entry| entry.file_name().to_string_lossy().starts_with(&prefix));
+        match retained {
+            Some(entry) => Err(format!(
+                "Run {run}'s signal checkpoint could not be read; it is kept at {}",
+                entry.path().display()
+            )),
+            None => Ok(None),
+        }
+    }
+
+    fn signal_progress(&self, run: &str) -> [Option<(String, u64)>; 2] {
+        let path = self.signals_path(run);
+        [path.with_extension("replay"), path].map(|path| {
+            super::adapters::local::signals::load(&path)
+                .ok()
+                .flatten()
+                .map(|s| (s.generation, s.rev))
+        })
+    }
+
     fn host_returned(&self, alias: &str, root: &str) -> Result<()> {
         let store = self.store()?;
-        for run_id in store.pending_log_collections()? {
+        let mut pending = store.pending_log_collections()?;
+        pending.extend(store.pending_signal_collections(false, usize::MAX / 2)?);
+        pending.sort();
+        pending.dedup();
+        for run_id in pending {
             let on_host = store
                 .get_run(&run_id)?
                 .is_some_and(|run| match box_of(&run) {
@@ -840,6 +1292,7 @@ impl Runtime {
                 });
             if on_host {
                 store.retry_log_collections_now(Some(&run_id))?;
+                store.retry_signal_collections_now(Some(&run_id))?;
                 self.collect_now.notify_one();
             }
         }
@@ -1081,6 +1534,7 @@ impl Commands for Runtime {
                 commit_sha: Some(&submission.source.revision),
                 chat_session_id: chat_session.as_deref(),
                 spec_digest: &digest,
+                monitor_config: submission.monitor_config.as_deref(),
                 launch: &submission.launch,
             })?;
             drop(admission);
@@ -1115,7 +1569,12 @@ impl Commands for Runtime {
 
     /// Accepts a cancel for a run the engine owns, or records it for the 0.2.x supervisor
     /// that does.
-    async fn cancel(&self, run: &StoredRun, reason: &str) -> Result<()> {
+    async fn cancel(
+        &self,
+        run: &StoredRun,
+        reason: &str,
+        stop: Option<&crate::store::StopContext>,
+    ) -> Result<()> {
         if !is_engine_row(run)
             && !self.engine.holds(&run.id)
             && !crate::local::is_terminal(&run.status)
@@ -1129,12 +1588,14 @@ impl Commands for Runtime {
         match self.key(run).and_then(|key| self.backend_for(&key)) {
             Ok(backend) => {
                 self.engine
-                    .cancel(backend.as_ref(), &run.id, reason)
+                    .stop(backend.as_ref(), &run.id, reason, stop)
                     .await?;
             }
             // The tick shows the run unreconciled with this error; delivery waits for an adapter.
             Err(_) => {
-                self.engine.accept_cancel(&run.id, reason)?;
+                self.engine.accept_stop(&run.id, |store| {
+                    store.accept_run_stop(&run.id, Some(reason), stop)
+                })?;
             }
         }
         self.changed.notify_one();
@@ -1277,6 +1738,10 @@ impl Commands for Runtime {
             Key::Ssh { .. } | Key::Slurm { .. } => Box::new(self.ssh(&key)?.follow_logs(run)),
             _ => Box::new(()),
         })
+    }
+
+    fn collect_signals_now(&self) {
+        self.collect_now.notify_one();
     }
 }
 
@@ -1453,6 +1918,7 @@ mod tests {
     }
 
     use crate::engine::fake::{FakeBackend, HostFile};
+    use std::sync::atomic::Ordering;
 
     /// A host log that counts the bytes collection pages from it and, when `grows`, grows
     /// before answering each page.
@@ -1463,7 +1929,16 @@ mod tests {
         grows: std::sync::atomic::AtomicBool,
         destroyed: std::sync::atomic::AtomicBool,
         fail_finish: std::sync::atomic::AtomicBool,
+        fail_signals: std::sync::atomic::AtomicBool,
+        hang_signals: std::sync::atomic::AtomicBool,
+        signal_started: tokio::sync::Notify,
+        signal_calls: std::sync::atomic::AtomicUsize,
+        signal_runs: Mutex<Vec<String>>,
+        hang_run: Option<String>,
+        signal_delay: Option<Duration>,
         stall_after: Option<u64>,
+        gone: std::sync::atomic::AtomicBool,
+        unreachable: std::sync::atomic::AtomicBool,
     }
 
     #[async_trait]
@@ -1478,11 +1953,15 @@ mod tests {
         async fn recover(&self, _: &super::super::RunIntent) -> super::super::Recovery {
             unreachable!()
         }
-        async fn observe(&self, _: &[WatchedRun], _: Duration) -> Vec<(String, Observation)> {
-            unreachable!()
+        async fn observe(
+            &self,
+            runs: &[WatchedRun],
+            budget: Duration,
+        ) -> Vec<(String, Observation)> {
+            self.log.observe(runs, budget).await
         }
-        async fn cancel(&self, _: &WatchedRun) -> super::super::CancelOutcome {
-            unreachable!()
+        async fn cancel(&self, run: &WatchedRun) -> super::super::CancelOutcome {
+            self.log.cancel(run).await
         }
         async fn finish(&self, _: &WatchedRun) -> Result<()> {
             use std::sync::atomic::Ordering;
@@ -1492,6 +1971,29 @@ mod tests {
             }
             Ok(())
         }
+        async fn signals(
+            &self,
+            run: &WatchedRun,
+            _: bool,
+            _: Option<&orx_signals::Snapshot>,
+        ) -> Result<Option<(orx_signals::Snapshot, Option<(i64, i64)>)>> {
+            lock(&self.signal_runs).push(run.id.clone());
+            self.signal_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.signal_started.notify_one();
+            if let Some(delay) = self.signal_delay {
+                tokio::time::sleep(delay).await;
+            }
+            if self.hang_signals.load(std::sync::atomic::Ordering::SeqCst)
+                && self.hang_run.as_ref().is_none_or(|id| id == &run.id)
+            {
+                std::future::pending::<()>().await;
+            }
+            if self.fail_signals.load(std::sync::atomic::Ordering::SeqCst) {
+                bail!("rental signal disk is full");
+            }
+            Ok(None)
+        }
         async fn read_log(
             &self,
             run: &WatchedRun,
@@ -1500,8 +2002,11 @@ mod tests {
             ident: Option<&FileIdent>,
         ) -> Result<LogPage> {
             use std::sync::atomic::Ordering;
-            if self.destroyed.load(Ordering::SeqCst) {
-                bail!("sandbox was destroyed");
+            if self.gone.load(Ordering::SeqCst) {
+                return Ok(LogPage::Reset { info: None });
+            }
+            if self.unreachable.load(Ordering::SeqCst) {
+                bail!("connection refused");
             }
             let probe = range.start == u64::MAX - 1;
             if !probe
@@ -1628,6 +2133,7 @@ mod tests {
                 commit_sha: None,
                 chat_session_id: None,
                 spec_digest: "digest",
+                monitor_config: None,
                 launch: &LaunchSpec {
                     kind: "hf_job".into(),
                     target: Some("lab".into()),
@@ -1884,6 +2390,7 @@ mod tests {
         backend.0.feed.lock().unwrap().push_back((
             "finished".into(),
             Observation::Exited {
+                started_at: None,
                 finished_at: None,
                 code: Some(0),
                 signal: None,
@@ -1909,6 +2416,7 @@ mod tests {
                     commit_sha: None,
                     chat_session_id: None,
                     spec_digest: "digest",
+                    monitor_config: None,
                     launch: &LaunchSpec {
                         kind: "openresearch_job".into(),
                         target: Some("org".into()),
@@ -2328,6 +2836,7 @@ mod tests {
                 commit_sha: None,
                 chat_session_id: None,
                 spec_digest: "digest",
+                monitor_config: None,
                 launch: &LaunchSpec {
                     kind: "local_job".into(),
                     target: None,
@@ -2356,6 +2865,7 @@ mod tests {
             .observe(
                 "run",
                 Observation::Exited {
+                    started_at: None,
                     finished_at: None,
                     code: Some(0),
                     signal: None,
@@ -2469,13 +2979,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_local_exit_keeps_its_log_and_final_notify_before_the_terminal_phase() {
+        local_exit_collection(false).await;
+    }
+
+    #[tokio::test]
     async fn early_collection_and_failed_final_notify_do_not_finish_output_debt() {
+        local_exit_collection(true).await;
+    }
+
+    async fn local_exit_collection(fail_notify: bool) {
         let dir = std::env::temp_dir().join(format!("orx-final-notify-{}", uuid::Uuid::new_v4()));
         let runtime = collector(&dir);
         let local = dir.join("local-runs/run");
         std::fs::create_dir_all(&local).unwrap();
         std::fs::write(local.join("log"), "finished\n").unwrap();
-        std::fs::create_dir(local.join("notify")).unwrap();
+        if fail_notify {
+            std::fs::create_dir(local.join("notify")).unwrap();
+        } else {
+            std::fs::write(local.join("notify"), "final evaluation\n").unwrap();
+        }
         let metadata = crate::jobs::BackendDescriptor::parse(r#"{"kind":"local_job"}"#).unwrap();
         runtime
             .engine
@@ -2489,6 +3012,7 @@ mod tests {
                 commit_sha: None,
                 chat_session_id: Some("chat"),
                 spec_digest: "spec",
+                monitor_config: None,
                 launch: &LaunchSpec {
                     kind: "local_job".into(),
                     target: None,
@@ -2516,39 +3040,50 @@ mod tests {
             handle,
         };
         let backend = Local::new(dir.clone());
+        let observations = vec![(
+            "run".into(),
+            Observation::Exited {
+                started_at: None,
+                finished_at: None,
+                code: Some(0),
+                signal: None,
+            },
+        )];
+        let watched = [watched];
         runtime
-            .collect(&backend, &watched, COLLECTION_BUDGET)
-            .await
-            .unwrap();
-        assert!(store.log_collection("run").unwrap().is_none());
+            .collect_logs(&backend, &watched, &observations)
+            .await;
         runtime
             .engine
-            .observe(
-                "run",
-                Observation::Exited {
-                    finished_at: None,
-                    code: Some(0),
-                    signal: None,
-                },
-            )
-            .unwrap();
-        assert!(store.log_collection_pending("run").unwrap());
-        assert!(runtime.collect_finished("run").await.is_err());
-        assert!(store.log_collection_pending("run").unwrap());
-        drop(runtime);
-        let runtime = collector(&dir);
-        assert_eq!(store.pending_log_collections().unwrap(), ["run"]);
-        std::fs::remove_dir(local.join("notify")).unwrap();
-        std::fs::write(local.join("notify"), "final evaluation\n").unwrap();
-        runtime.collect_finished("run").await.unwrap();
+            .apply_observations(&backend, &watched, observations)
+            .await;
+        assert_eq!(store.get_run("run").unwrap().unwrap().status, "done");
+        assert!(store.signal_collection_pending("run").unwrap());
+        assert_eq!(
+            std::fs::read(dir.join("run-logs/run.log")).unwrap(),
+            b"finished\n"
+        );
+        let runtime = if fail_notify {
+            assert!(runtime.collect_finished("run").await.is_err());
+            assert!(store.log_collection_pending("run").unwrap());
+            drop(runtime);
+            let runtime = collector(&dir);
+            assert_eq!(store.pending_log_collections().unwrap(), ["run"]);
+            std::fs::remove_dir(local.join("notify")).unwrap();
+            std::fs::write(local.join("notify"), "final evaluation\n").unwrap();
+            runtime.collect_finished("run").await.unwrap();
+            runtime
+        } else {
+            runtime
+        };
         assert!(!store.log_collection_pending("run").unwrap());
         let notices = store.run_notice_batch("chat").unwrap();
         assert!(notices
             .iter()
             .any(|notice| notice.kind == crate::store::NOTIFY
                 && notice.body.ends_with("final evaluation\n")));
-        drop(runtime);
         drop(store);
+        drop(runtime);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -2614,6 +3149,7 @@ mod tests {
                 commit_sha: None,
                 chat_session_id: None,
                 spec_digest: "digest",
+                monitor_config: None,
                 launch: &LaunchSpec {
                     kind: "retired_job".into(),
                     target: None,
@@ -2637,7 +3173,7 @@ mod tests {
         assert_eq!(notices[0].kind, crate::store::ATTENTION);
         // Nothing launched, so the cancel needs no adapter.
         let run = store.get_run("run").unwrap().unwrap();
-        runtime.cancel(&run, "user").await.unwrap();
+        runtime.cancel(&run, "user", None).await.unwrap();
         assert_eq!(store.get_run("run").unwrap().unwrap().status, "cancelled");
         drop(runtime);
         drop(store);
@@ -2671,6 +3207,7 @@ mod tests {
             .unwrap();
         store.subscribe_run("run", "chat", 1).unwrap();
         store.queue_log_collection("run").unwrap();
+        store.queue_signal_collection("run").unwrap();
         let engine = Arc::new(Engine::new(store, clock.clone()));
         let runtime = Runtime::new(engine, clock, dir.clone(), None);
         let attention = || {
@@ -2703,6 +3240,22 @@ mod tests {
             assert_eq!(failed, attempt >= 7, "attempt {attempt}");
             assert!(error.unwrap().contains("vanished_job"));
             assert_eq!(attention(), usize::from(attempt >= 7), "attempt {attempt}");
+            assert!(runtime
+                .store()
+                .unwrap()
+                .signal_collection_pending("run")
+                .unwrap());
+            assert!(runtime
+                .store()
+                .unwrap()
+                .pending_signal_collections(true, 10)
+                .unwrap()
+                .is_empty());
+            assert!(
+                super::super::adapters::signals::read_availability(&dir, "run")
+                    .unwrap()
+                    .is_none()
+            );
         }
 
         // Reconnecting a host retries its runs' collections at once.
@@ -2739,6 +3292,54 @@ mod tests {
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }
+    #[tokio::test(start_paused = true)]
+    async fn an_ended_rentals_signal_read_does_not_delay_another_release() {
+        let directory = crate::local::git::TemporaryDirectory::new("orx-rental-finish").unwrap();
+        let runtime = collector(directory.path());
+        let mut backends = Vec::new();
+        for id in ["a-slow", "b-fast"] {
+            let descriptor = crate::jobs::BackendDescriptor::parse(
+                &json!({"kind":"openresearch_job","namespace":"org","jobId":id}).to_string(),
+            )
+            .unwrap();
+            let handle = Handle::OpenResearch {
+                descriptor: Box::new(descriptor),
+            };
+            let mut run = crate::store::tests::run_fixture(id, "done", None);
+            run.backend_json = json!({"kind":"engine","handle":handle}).to_string();
+            let store = runtime.store().unwrap();
+            store.upsert_run(&run).unwrap();
+            store.queue_log_collection(id).unwrap();
+            store.checkpoint_log_collection(id).unwrap();
+            store.queue_signal_collection(id).unwrap();
+
+            let backend = Arc::new(Host::default());
+            backend.hang_signals.store(id == "a-slow", Ordering::SeqCst);
+            lock(&runtime.backends).insert(Key::of_handle(&handle).unwrap(), backend.clone());
+            backends.push(backend);
+        }
+
+        let mut events = runtime.engine.bus.subscribe();
+        let task = tokio::spawn(runtime.clone().collect_pending());
+        let first = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let super::super::bus::RunEvent::LogCollection { run_id } =
+                    events.recv().await.unwrap()
+                {
+                    break run_id;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        task.abort();
+        let _ = task.await;
+
+        assert_eq!(first, "b-fast");
+        assert!(backends[1].destroyed.load(Ordering::SeqCst));
+        assert!(!backends[0].destroyed.load(Ordering::SeqCst));
+    }
+
     #[tokio::test(start_paused = true)]
     async fn rental_live_at_eight_minutes_wakes_collection_after_seven_minute_failure() {
         let dir =
@@ -3034,5 +3635,1540 @@ mod tests {
         drop(runtime);
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[tokio::test]
+    async fn live_signal_rotation_gives_a_later_run_its_turn() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-signal-fairness").unwrap();
+        let runtime = collector(dir.path());
+        let backend = Host {
+            hang_run: Some("slow".into()),
+            ..Default::default()
+        };
+        backend
+            .hang_signals
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let runs: Vec<_> = ["slow", "fast"]
+            .iter()
+            .map(|id| WatchedRun {
+                id: (*id).into(),
+                handle: local_run().handle,
+            })
+            .collect();
+        let mut next = 0;
+        for _ in 0..2 {
+            runtime
+                .collect_signals(
+                    &backend,
+                    &runs,
+                    crate::config::paced(Duration::from_secs(3)),
+                    &mut next,
+                )
+                .await;
+        }
+        assert!(lock(&backend.signal_runs).iter().any(|id| id == "fast"));
+    }
+
+    /// A tick whose budget reaches only some of a backend's runs says nothing about the rest:
+    /// each keeps its last availability and has its turn within a bounded number of ticks.
+    #[tokio::test(start_paused = true)]
+    async fn a_spent_tick_budget_leaves_every_run_live_and_reaches_each_in_turn() {
+        use std::sync::atomic::Ordering;
+        let dir = crate::local::git::TemporaryDirectory::new("orx-signal-turns").unwrap();
+        let clock = Arc::new(TestClock::new());
+        let engine = Arc::new(Engine::new(
+            Store::open_at(dir.path().to_owned()).unwrap(),
+            clock.clone(),
+        ));
+        let runtime = Runtime::new(engine, clock.clone(), dir.path().to_owned(), None);
+        let mut backend = Host::default();
+        backend.log.log.lock().unwrap().bytes =
+            b"::orx:: {\"step\":1,\"m\":{\"score\":42}}\n".to_vec();
+        let runs: Vec<_> = (0..5)
+            .map(|i| WatchedRun {
+                id: format!("r{i}"),
+                handle: local_run().handle,
+            })
+            .collect();
+        let budget = Duration::from_secs(3);
+        let mut next = 0;
+        assert!(
+            !runtime
+                .collect_signals(&backend, &runs, budget, &mut next)
+                .await
+        );
+
+        // Two 1.2 s collections fit in each 3 s tick; the third is cut off.
+        backend.signal_delay = Some(Duration::from_millis(1200));
+        let mut reached = std::collections::BTreeMap::new();
+        for tick in 0..3 {
+            clock.advance(Duration::from_secs(61));
+            let now = clock.wall_ms();
+            let calls = backend.signal_calls.load(Ordering::SeqCst);
+            assert!(
+                runtime
+                    .collect_signals(&backend, &runs, budget, &mut next)
+                    .await
+            );
+            assert_eq!(backend.signal_calls.load(Ordering::SeqCst) - calls, 3);
+            for run in &runs {
+                let status =
+                    super::super::adapters::signals::read_availability(dir.path(), &run.id)
+                        .unwrap()
+                        .unwrap();
+                assert_eq!(status["state"], "cached", "{} at tick {tick}", run.id);
+                assert_eq!(status["reason"], serde_json::Value::Null);
+                if status["lastCollectedAt"] == now {
+                    reached.entry(run.id.clone()).or_insert(tick);
+                }
+            }
+        }
+        assert_eq!(
+            reached.into_iter().collect::<Vec<_>>(),
+            [
+                ("r0".into(), 2),
+                ("r1".into(), 0),
+                ("r2".into(), 0),
+                ("r3".into(), 1),
+                ("r4".into(), 1),
+            ]
+        );
+    }
+
+    fn ended_signal_run(dir: &Path) -> Arc<Runtime> {
+        let runtime = launched_signal_run(dir);
+        runtime
+            .engine
+            .observe(
+                "run",
+                Observation::Exited {
+                    started_at: None,
+                    finished_at: None,
+                    code: Some(0),
+                    signal: None,
+                },
+            )
+            .unwrap();
+        runtime
+    }
+
+    fn launched_signal_run(dir: &Path) -> Arc<Runtime> {
+        let runtime = collector(dir);
+        let metadata = crate::jobs::BackendDescriptor::parse(r#"{"kind":"local_job"}"#).unwrap();
+        runtime
+            .engine
+            .insert(SubmittingRun {
+                id: "run",
+                experiment_id: "exp",
+                project_id: "project",
+                metadata: &metadata,
+                command: "true",
+                created_at: 1,
+                commit_sha: None,
+                chat_session_id: Some("chat"),
+                spec_digest: "digest",
+                monitor_config: None,
+                launch: &LaunchSpec {
+                    kind: "local_job".into(),
+                    target: None,
+                    options: json!({}),
+                },
+            })
+            .unwrap();
+        {
+            let store = runtime.store().unwrap();
+            store
+                .set_submission_fence(
+                    "run",
+                    1,
+                    &crate::store::SubmissionFence {
+                        taken_at: 1,
+                        submitter: None,
+                    },
+                )
+                .unwrap();
+            store
+                .record_run_handle("run", 1, &local_run().handle)
+                .unwrap();
+        }
+        runtime
+    }
+
+    #[tokio::test]
+    async fn drifted_monitor_tables_fail_without_blocking_another_writer() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-monitor-drift").unwrap();
+        let runtime = ended_signal_run(dir.path());
+        let mut store = Store::open_at(dir.path().to_path_buf()).unwrap();
+        store.put_chat_session("chat", "claude-code", None);
+        store.set_run_watching(true).unwrap();
+        let run = store.get_run("run").unwrap().unwrap();
+        let other = rusqlite::Connection::open(dir.path().join("orx.db")).unwrap();
+        other.busy_timeout(Duration::ZERO).unwrap();
+        other.execute_batch(
+            "ALTER TABLE signal_collections DROP COLUMN refold;
+             DROP TABLE watch_looks;
+             CREATE TABLE watch_looks (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT, chat_session_id TEXT NOT NULL,
+                 kind TEXT NOT NULL, state TEXT NOT NULL, reason TEXT NOT NULL, created_at INTEGER NOT NULL,
+                 model TEXT NOT NULL, done_at INTEGER, summary_template TEXT, summary_text TEXT, usage_json TEXT, error TEXT
+             );
+             DROP TABLE run_dismissals;
+             CREATE TABLE run_dismissals (
+                 chat_session_id TEXT NOT NULL, run_id TEXT NOT NULL, dismissed_at INTEGER NOT NULL,
+                 PRIMARY KEY (chat_session_id, run_id)
+             );",
+        ).unwrap();
+        let another_writer_proceeds = || {
+            other
+                .execute("UPDATE ui_state SET run_watching = 1 WHERE id = 1", [])
+                .unwrap();
+        };
+
+        assert!(super::super::monitor::advance(&store, &run, crate::store::now_ms()).is_err());
+        another_writer_proceeds();
+        let Err(super::super::watch::LookNow::Failed(error)) =
+            super::super::watch::look_now(&store, &run)
+        else {
+            panic!("expected a watcher admission error");
+        };
+        assert!(format!("{error:#}").contains("watch_looks.model"));
+        another_writer_proceeds();
+
+        assert_eq!(store.due_log_collections(10).unwrap(), ["run"]);
+        let error = runtime.collect_finished("run").await.unwrap_err();
+        assert!(format!("{error:#}").contains("no such column: refold"));
+        another_writer_proceeds();
+        assert_eq!(store.due_log_collections(10).unwrap(), ["run"]);
+
+        let error = store.dismiss_chat_run("chat", "run").err().unwrap();
+        assert!(format!("{error:#}").contains("run_dismissals.dismissed_at"));
+        another_writer_proceeds();
+    }
+
+    #[tokio::test]
+    async fn final_signal_batches_reach_the_end_of_long_logs() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-final-batches").unwrap();
+        let runtime = ended_signal_run(dir.path());
+        let backend = Arc::new(Host::default());
+        let mut bytes = vec![b'\n'; 6 * 1024 * 1024];
+        bytes.extend_from_slice(b"::orx:: {\"step\":9999,\"m\":{\"score\":42}}\n");
+        let len = bytes.len();
+        backend.log.log.lock().unwrap().bytes = bytes;
+        lock(&runtime.backends).insert(Key::Local, backend.clone());
+        for _ in 0..20 {
+            runtime.collect_finished("run").await.unwrap();
+            if !runtime
+                .store()
+                .unwrap()
+                .signal_collection_pending("run")
+                .unwrap()
+            {
+                break;
+            }
+        }
+        let snapshot =
+            super::super::adapters::local::signals::load(&dir.path().join("run-signals/run.json"))
+                .unwrap()
+                .unwrap();
+        assert_eq!(snapshot.cursor.offset, len as u64);
+        assert_eq!(snapshot.latest["score"], 42);
+        assert_eq!(snapshot.extra["terminal"], true);
+        assert!(snapshot.coverage.complete);
+        assert!(backend.destroyed.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!runtime
+            .store()
+            .unwrap()
+            .signal_collection_pending("run")
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn final_signal_collection_can_advance_a_staged_rebuild() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-final-rebuild").unwrap();
+        let runtime = ended_signal_run(dir.path());
+        let backend = Arc::new(Host::default());
+        let mut log = b"::orx:: {\"m\":{\"score\":1}}\n".to_vec();
+        log.resize(2 * 1024 * 1024, b'\n');
+        let mut held = orx_signals::Snapshot::new("run", "1-1", "old");
+        held.feed(&log, false, 1, true).unwrap();
+        let path = runtime.signals_path("run");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        super::super::adapters::local::signals::publish(&path, &held).unwrap();
+
+        let mut replacement = b"::orx:: {\"m\":{\"score\":2}}\n".to_vec();
+        replacement.resize(3 * 1024 * 1024, b'\n');
+        let len = replacement.len() as u64;
+        *backend.log.log.lock().unwrap() = HostFile {
+            bytes: replacement,
+            ino: 2,
+        };
+        lock(&runtime.backends).insert(Key::Local, backend);
+        {
+            let store = runtime.store().unwrap();
+            store.checkpoint_log_collection("run").unwrap();
+            store.finish_log_collection("run").unwrap();
+        }
+        for _ in 0..8 {
+            runtime.collect_finished("run").await.unwrap();
+            if settled(&runtime) {
+                break;
+            }
+            assert_eq!(
+                runtime
+                    .store()
+                    .unwrap()
+                    .pending_signal_collections(true, 10)
+                    .unwrap(),
+                ["run"]
+            );
+        }
+
+        let snapshot = runtime.held_signals("run").unwrap().unwrap();
+        assert_eq!(snapshot.cursor.offset, len);
+        assert_eq!(snapshot.latest["score"], 2);
+        assert!(settled(&runtime));
+    }
+
+    #[tokio::test]
+    async fn saving_patterns_preserves_a_live_local_run_during_replay() {
+        use crate::engine::adapters::{local::Local, signals};
+        use crate::engine::view::{etag, set, Source};
+
+        let dir = crate::local::git::TemporaryDirectory::new("orx-live-pattern-replay").unwrap();
+        let root = dir.path().join("local-runs");
+        let job = root.join("run");
+        std::fs::create_dir_all(&job).unwrap();
+        let mut log = vec![b'\n'; 5 * 1024 * 1024];
+        log.extend_from_slice(b"::orx:: {\"step\":42,\"m\":{\"loss\":2}}\nscore 3\n");
+        std::fs::write(job.join("log"), log).unwrap();
+        let run = WatchedRun {
+            id: "run".into(),
+            handle: Handle::Local {
+                dir: job.to_string_lossy().into_owned(),
+            },
+        };
+        let backend = Local::new(root);
+        let runtime = launched_signal_run(dir.path());
+        let store = Store::open_at(dir.path().to_path_buf()).unwrap();
+        store
+            .create_local_experiment(&crate::local::model::LocalExperiment {
+                id: "exp".into(),
+                project_id: "project".into(),
+                parent_experiment_id: None,
+                slug: "exp".into(),
+                branch_name: "orx/exp".into(),
+                title: None,
+                description: None,
+                run_command: "train".into(),
+                agent_status: "idle".into(),
+                created_at: 1,
+                updated_at: 1,
+                chat_session_id: None,
+                archived: false,
+            })
+            .unwrap();
+        let collect = || {
+            signals::collect(dir.path(), &backend, &run, false, 10, || {
+                store.run_patterns("run")
+            })
+        };
+        collect().await.unwrap();
+        collect().await.unwrap();
+        let held = runtime.held_signals("run").unwrap().unwrap();
+        assert_eq!(held.latest["loss"], 2);
+        set(
+            &store,
+            "exp",
+            &etag(None),
+            None,
+            Some(&json!([{"regex": "^score (?P<score>\\d+)$"}])),
+            None,
+            &Source {
+                file: None,
+                patterns: Some("pattern.json"),
+                config: None,
+            },
+        )
+        .unwrap();
+
+        collect().await.unwrap();
+        let replaying = runtime.held_signals("run").unwrap().unwrap();
+        assert_eq!(replaying.generation, held.generation);
+        assert_eq!(replaying.progress().unwrap().done, Some(42.0));
+        assert!(replaying
+            .coverage
+            .reasons
+            .iter()
+            .any(|reason| reason == "rebuilding"));
+        for _ in 0..8 {
+            collect().await.unwrap();
+            if runtime.held_signals("run").unwrap().unwrap().generation != held.generation {
+                break;
+            }
+        }
+        let updated = runtime.held_signals("run").unwrap().unwrap();
+        assert_ne!(updated.generation, held.generation);
+        assert_eq!(updated.latest["score"].as_f64(), Some(3.0));
+    }
+
+    #[tokio::test]
+    async fn a_failed_pattern_replay_reports_why_the_old_metrics_are_still_shown() {
+        use crate::engine::view::{etag, set, Source};
+
+        let log = b"::orx:: {\"step\":1,\"m\":{\"loss\":2}}\nscore 1\n::orx:: {\"step\":2,\"m\":{\"loss\":1}}\n";
+        for (failure, expected) in [
+            ("missing", "no saved log"),
+            ("short", "covers less"),
+            ("unreadable", "saved log"),
+        ] {
+            let dir = crate::local::git::TemporaryDirectory::new("orx-refold-failure").unwrap();
+            let runtime = gone_host(dir.path());
+            keep(dir.path(), &[(0, log, true)]);
+            runtime.collect_finished("run").await.unwrap();
+            assert!(settled(&runtime));
+            let store = Store::open_at(dir.path().to_path_buf()).unwrap();
+            store
+                .create_local_experiment(&crate::local::model::LocalExperiment {
+                    id: "exp".into(),
+                    project_id: "project".into(),
+                    parent_experiment_id: None,
+                    slug: "exp".into(),
+                    branch_name: "orx/exp".into(),
+                    title: None,
+                    description: None,
+                    run_command: "train".into(),
+                    agent_status: "idle".into(),
+                    created_at: 1,
+                    updated_at: 1,
+                    chat_session_id: None,
+                    archived: false,
+                })
+                .unwrap();
+            match failure {
+                "missing" => {
+                    super::super::adapters::signals::settle_incomplete(
+                        dir.path(),
+                        "run",
+                        "The host lost the end of the log",
+                    )
+                    .unwrap();
+                    keep(dir.path(), &[]);
+                }
+                "short" => keep(dir.path(), &[(0, &log[..40], true)]),
+                _ => std::fs::write(
+                    dir.path().join("run-logs/run.log.part.json"),
+                    "invalid JSON",
+                )
+                .unwrap(),
+            }
+            set(
+                &store,
+                "exp",
+                &etag(None),
+                None,
+                Some(&json!([{"regex": "^score (?P<score>\\d+)$"}])),
+                None,
+                &Source {
+                    file: None,
+                    patterns: Some("pattern.json"),
+                    config: None,
+                },
+            )
+            .unwrap();
+
+            runtime.collect_finished("run").await.unwrap();
+            let run = store.get_run("run").unwrap().unwrap();
+            let (_, view) = super::super::monitor::monitor(&store, &run).unwrap();
+            assert_eq!(view["latest"]["loss"], 1);
+            assert!(
+                view["availability"]["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.contains(expected)),
+                "{failure}: {}",
+                view["availability"]
+            );
+            assert_eq!(settled(&runtime), failure != "unreadable");
+            if failure == "unreadable" {
+                for _ in 0..7 {
+                    store.retry_signal_collections_now(Some("run")).unwrap();
+                    runtime.collect_finished("run").await.unwrap();
+                }
+                let notices = signal_notices(&runtime, "signal-refold");
+                assert_eq!(notices.len(), 1);
+                assert!(notices[0].contains("saved log"));
+                std::fs::remove_file(dir.path().join("run-logs/run.log.part.json")).unwrap();
+                store.retry_signal_collections_now(Some("run")).unwrap();
+                runtime.collect_finished("run").await.unwrap();
+                let (_, view) = super::super::monitor::monitor(&store, &run).unwrap();
+                assert_eq!(view["latest"]["score"].as_f64(), Some(1.0));
+                assert_eq!(view["availability"]["reason"], serde_json::Value::Null);
+                assert!(settled(&runtime));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn saving_patterns_reopens_collection_for_an_ended_run_across_restart() {
+        use crate::engine::view::{etag, set, Source};
+
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        std::env::set_var("ORX_TEST_SPEEDUP", "1000000");
+        let dir = crate::local::git::TemporaryDirectory::new("orx-pattern-restart").unwrap();
+        let runtime = gone_host(dir.path());
+        let mut log = b"::orx:: {\"m\":{\"existing\":1}}\n".to_vec();
+        log.resize(768 * 1024, b'\n');
+        for score in 35..=42 {
+            log.extend_from_slice(format!("METRIC score {score}\n").as_bytes());
+        }
+        keep(dir.path(), &[(0, &log, true)]);
+        for _ in 0..8 {
+            if settled(&runtime) {
+                break;
+            }
+            runtime.collect_finished("run").await.unwrap();
+        }
+        assert!(settled(&runtime));
+        let save = |store: &Store, patterns: &serde_json::Value| {
+            let raw = store.run_monitor_json("exp").unwrap();
+            set(
+                store,
+                "exp",
+                &etag(raw.as_deref()),
+                None,
+                Some(patterns),
+                None,
+                &Source {
+                    file: None,
+                    patterns: None,
+                    config: None,
+                },
+            )
+            .unwrap();
+        };
+        {
+            let store = runtime.store().unwrap();
+            store
+                .create_local_experiment(&crate::local::model::LocalExperiment {
+                    id: "exp".into(),
+                    project_id: "project".into(),
+                    parent_experiment_id: None,
+                    slug: "exp".into(),
+                    branch_name: "orx/exp".into(),
+                    title: None,
+                    description: None,
+                    run_command: "train".into(),
+                    agent_status: "idle".into(),
+                    created_at: 1,
+                    updated_at: 1,
+                    chat_session_id: None,
+                    archived: false,
+                })
+                .unwrap();
+            save(
+                &store,
+                &json!([{"regex": "^METRIC (?P<name>\\w+) (?P<value>\\d+)$"}]),
+            );
+        }
+        assert_eq!(
+            runtime
+                .store()
+                .unwrap()
+                .pending_signal_collections(true, 10)
+                .unwrap(),
+            ["run"]
+        );
+        runtime.collect_finished("run").await.unwrap();
+        let stage = runtime.signals_path("run").with_extension("replay");
+        let load_stage = || {
+            super::super::adapters::local::signals::load(&stage)
+                .unwrap()
+                .unwrap()
+        };
+        let before = load_stage();
+        assert!(before.cursor.offset < log.len() as u64);
+        drop(runtime);
+
+        let runtime = collector(dir.path());
+        runtime.collect_finished("run").await.unwrap();
+        let after = load_stage();
+        assert_eq!(after.generation, before.generation);
+        assert!(after.cursor.offset > before.cursor.offset);
+        for _ in 0..8 {
+            if settled(&runtime) {
+                break;
+            }
+            runtime.collect_finished("run").await.unwrap();
+        }
+        let snapshot = runtime.held_signals("run").unwrap().unwrap();
+        assert_eq!(snapshot.latest["score"].as_f64(), Some(42.0));
+        assert!(settled(&runtime));
+        let (_, monitor) = {
+            let store = runtime.store().unwrap();
+            let run = store.get_run("run").unwrap().unwrap();
+            super::super::monitor::monitor(&store, &run).unwrap()
+        };
+        assert_eq!(monitor["x"]["name"], "elapsed");
+        let points = monitor["series"]["score"].as_array().unwrap();
+        assert_eq!(points.len(), 8);
+        for (point, value) in points.iter().zip(35..=42) {
+            assert_eq!(point[1].as_f64(), Some(f64::from(value)));
+        }
+        assert!(points
+            .windows(2)
+            .all(|pair| { pair[0][0].as_f64().unwrap() < pair[1][0].as_f64().unwrap() }));
+
+        {
+            let store = runtime.store().unwrap();
+            let superseded = store.run_patterns("run").unwrap();
+            save(&store, &json!([]));
+            store.finish_signal_refold("run", &superseded).unwrap();
+        }
+        assert!(!settled(&runtime));
+        for _ in 0..8 {
+            if settled(&runtime) {
+                break;
+            }
+            runtime.collect_finished("run").await.unwrap();
+        }
+        let snapshot = runtime.held_signals("run").unwrap().unwrap();
+        assert!(!snapshot.latest.contains_key("score"));
+        assert_eq!(snapshot.latest["existing"], 1);
+        assert!(settled(&runtime));
+    }
+
+    /// A cancel that cannot reach the host leaves the run unfinished and owes nothing; once the
+    /// stop lands (survivors, then a receipt that they stopped) or the job is proven gone, the last signals
+    /// are read once, after the run is settled, and never again.
+    #[tokio::test]
+    async fn a_stuck_cancel_that_releases_collects_the_last_signals_once() {
+        use crate::engine::CancelOutcome;
+        use std::sync::atomic::Ordering;
+        for lost in [false, true] {
+            let dir = crate::local::git::TemporaryDirectory::new("orx-stuck-cancel").unwrap();
+            let runtime = launched_signal_run(dir.path());
+            runtime
+                .engine
+                .observe(
+                    "run",
+                    Observation::Running {
+                        started_at: Some(2),
+                    },
+                )
+                .unwrap();
+            let backend = Arc::new(Host::default());
+            backend.log.log.lock().unwrap().bytes =
+                b"::orx:: {\"step\":1,\"m\":{\"score\":42}}\n".to_vec();
+            backend
+                .log
+                .cancels
+                .lock()
+                .unwrap()
+                .push_back(CancelOutcome::Undelivered {
+                    detail: "connection refused".into(),
+                });
+            lock(&runtime.backends).insert(Key::Local, backend.clone());
+            let pending = || {
+                runtime
+                    .store()
+                    .unwrap()
+                    .signal_collection_pending("run")
+                    .unwrap()
+            };
+
+            let run = runtime.store().unwrap().get_run("run").unwrap().unwrap();
+            runtime.cancel(&run, "user", None).await.unwrap();
+            assert_eq!(
+                runtime.engine.cancel_error("run").as_deref(),
+                Some("connection refused")
+            );
+            assert_eq!(
+                runtime
+                    .store()
+                    .unwrap()
+                    .get_run("run")
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                "running"
+            );
+            assert!(!pending(), "an unfinished run owes no final signals");
+
+            if lost {
+                runtime
+                    .engine
+                    .observe(
+                        "run",
+                        Observation::Lost {
+                            reason: "The host no longer has this job".into(),
+                        },
+                    )
+                    .unwrap();
+            } else {
+                backend
+                    .log
+                    .cancels
+                    .lock()
+                    .unwrap()
+                    .push_back(CancelOutcome::Survivors { count: 1 });
+                runtime
+                    .engine
+                    .apply_observations(backend.as_ref(), &[local_run()], Vec::new())
+                    .await;
+                assert!(matches!(
+                    runtime.engine.load("run").unwrap().1.contact,
+                    crate::store::Contact::Stopping { .. }
+                ));
+                runtime.collect_finished("run").await.unwrap();
+                assert!(pending(), "signals wait for the survivors to stop");
+                assert!(!backend.destroyed.load(Ordering::SeqCst));
+                runtime
+                    .engine
+                    .observe(
+                        "run",
+                        Observation::CancelReceipt {
+                            finished_at: None,
+                            code: None,
+                            remaining: 0,
+                            note: None,
+                        },
+                    )
+                    .unwrap();
+                assert_eq!(
+                    runtime.engine.load("run").unwrap().1.contact,
+                    crate::store::Contact::Live
+                );
+            }
+            assert_eq!(
+                runtime
+                    .store()
+                    .unwrap()
+                    .get_run("run")
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                "cancelled"
+            );
+            assert_eq!(runtime.engine.cancel_error("run"), None);
+            assert!(pending());
+
+            for _ in 0..5 {
+                runtime.collect_finished("run").await.unwrap();
+                if !pending() {
+                    break;
+                }
+            }
+            assert!(!pending());
+            let path = dir.path().join("run-signals/run.json");
+            let snapshot = super::super::adapters::local::signals::load(&path)
+                .unwrap()
+                .unwrap();
+            assert_eq!(snapshot.latest["score"], 42);
+            assert_eq!(snapshot.extra["terminal"], true);
+            assert!(backend.destroyed.swap(false, Ordering::SeqCst));
+            let calls = backend.signal_calls.load(Ordering::SeqCst);
+
+            runtime.collect_finished("run").await.unwrap();
+            let again = super::super::adapters::local::signals::load(&path)
+                .unwrap()
+                .unwrap();
+            assert_eq!(again.rev, snapshot.rev);
+            assert_eq!(backend.signal_calls.load(Ordering::SeqCst), calls);
+            assert!(!backend.destroyed.load(Ordering::SeqCst));
+        }
+    }
+
+    fn keep(dir: &Path, ranges: &[(u64, &[u8], bool)]) {
+        let logs = dir.join("run-logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let ranges = ranges
+            .iter()
+            .enumerate()
+            .map(|(index, &(offset, bytes, eof))| {
+                let file = logs.join(format!("run.{index}.log"));
+                std::fs::write(&file, bytes).unwrap();
+                KeptRange {
+                    file,
+                    offset,
+                    len: bytes.len() as u64,
+                    ident: FileIdent { dev: 1, ino: 1 },
+                    eof,
+                }
+            })
+            .collect();
+        crate::commands::up::api_v2::keep_ranges(dir, "run", ranges).unwrap();
+    }
+
+    fn signal_notices(runtime: &Runtime, dedupe: &str) -> Vec<String> {
+        runtime
+            .store()
+            .unwrap()
+            .run_notice_batch("chat")
+            .unwrap()
+            .into_iter()
+            .filter(|n| n.dedupe == dedupe)
+            .map(|n| n.body)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn lost_host_folds_kept_ranges_and_keeps_the_cause_in_one_notice() {
+        for preserved in [true, false] {
+            let dir = crate::local::git::TemporaryDirectory::new("orx-kept-gap").unwrap();
+            let runtime = ended_signal_run(dir.path());
+            let backend = Arc::new(Host::default());
+            backend.gone.store(true, Ordering::SeqCst);
+            runtime
+                .store()
+                .unwrap()
+                .checkpoint_log_collection("run")
+                .unwrap();
+            let mut head = b"::orx:: {\"step\":1}\n".to_vec();
+            head.resize(256, b'\n');
+            keep(
+                dir.path(),
+                &[
+                    (0, &head, false),
+                    (1024, b"::orx:: {\"step\":9,\"m\":{\"score\":42}}\n", true),
+                ],
+            );
+            let deleted = "The rental was deleted before final signal collection";
+            if preserved {
+                let mut held = orx_signals::Snapshot::new("run", "1-1", "g1");
+                held.feed(&head[..19], false, 5000, true).unwrap();
+                let path = dir.path().join("run-signals/run.json");
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                super::super::adapters::local::signals::publish(&path, &held).unwrap();
+                super::super::adapters::signals::delayed(dir.path(), "run", "connection refused")
+                    .unwrap();
+                super::super::adapters::signals::host_gone(dir.path(), "run", deleted).unwrap();
+            }
+            let cause = if preserved {
+                deleted
+            } else {
+                "The saved log is missing part of the run's output"
+            };
+            lock(&runtime.backends).insert(Key::Local, backend);
+            runtime.collect_finished("run").await.unwrap();
+
+            let (snapshot, status) = super::super::adapters::signals::cached(dir.path(), "run");
+            let snapshot = snapshot.unwrap();
+            assert_eq!(snapshot.latest["score"], 42);
+            assert_eq!(snapshot.coverage.ranges.len(), 2);
+            assert_eq!(
+                snapshot.coverage.reasons,
+                ["collection_incomplete", "missing_middle"]
+            );
+            assert_eq!(snapshot.extra["collectionError"], cause);
+            assert_eq!(status["state"], "incomplete");
+            assert_eq!(status["reason"], cause);
+            if preserved {
+                assert_eq!(snapshot.generation, "g1");
+                assert_eq!(snapshot.phases[0].started_at, Some(5000));
+            }
+            assert!(!runtime
+                .store()
+                .unwrap()
+                .signal_collection_pending("run")
+                .unwrap());
+            let notices = signal_notices(&runtime, "signal-collection-incomplete");
+            assert_eq!(notices.len(), 1);
+            assert_eq!(notices[0].matches(cause).count(), 1);
+            assert!(notices[0].contains("signals read before then are kept"));
+            runtime.collect_finished("run").await.unwrap();
+            assert_eq!(
+                signal_notices(&runtime, "signal-collection-incomplete").len(),
+                1
+            );
+        }
+    }
+
+    /// The host's checkpoint, with the arrival times it observed, outlives a whole kept log.
+    #[tokio::test]
+    async fn a_whole_kept_log_never_replaces_the_host_checkpoint() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-host-answer").unwrap();
+        let runtime = ended_signal_run(dir.path());
+        let backend = Arc::new(Host::default());
+        let run = local_run();
+        let live = |now| {
+            super::super::adapters::signals::collect(
+                dir.path(),
+                backend.as_ref(),
+                &run,
+                false,
+                now,
+                || runtime.store()?.run_patterns(&run.id),
+            )
+        };
+        live(4000).await.unwrap();
+        backend.log.log.lock().unwrap().bytes =
+            b"::orx:: {\"phase\":\"train\",\"step\":1,\"of\":4,\"m\":{\"loss\":2}}\n::orx:: {\"step\":2,\"m\":{\"loss\":1}}\n".to_vec();
+        live(5000).await.unwrap();
+        let path = dir.path().join("run-signals/run.json");
+        let live = super::super::adapters::local::signals::load(&path)
+            .unwrap()
+            .unwrap();
+        assert_eq!(live.timing.progress_points.len(), 2);
+        lock(&runtime.backends).insert(Key::Local, backend);
+
+        runtime.collect_finished("run").await.unwrap();
+        assert_eq!(kept_ranges(dir.path()).len(), 1);
+        let settled = super::super::adapters::local::signals::load(&path)
+            .unwrap()
+            .unwrap();
+        assert_eq!(settled.generation, live.generation);
+        assert_eq!(settled.phases[0].started_at, Some(5000));
+        assert_eq!(settled.timing.progress_points, live.timing.progress_points);
+        assert_eq!(settled.series["loss"].len(), 2);
+        assert!(settled.coverage.complete);
+        assert!(!runtime
+            .store()
+            .unwrap()
+            .signal_collection_pending("run")
+            .unwrap());
+    }
+
+    /// Folding a kept log is local work resumed from its own cursor after `orx up` restarts.
+    #[tokio::test]
+    async fn the_kept_fold_resumes_from_the_host_checkpoint_across_restarts() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-kept-restart").unwrap();
+        let runtime = ended_signal_run(dir.path());
+        let mut log = b"::orx:: {\"phase\":\"train\",\"step\":1,\"of\":3}\n".to_vec();
+        let first = log.len();
+        log.extend(std::iter::repeat_n(b'\n', 3 * 1024 * 1024));
+        log.extend_from_slice(b"::orx:: {\"step\":3,\"m\":{\"score\":42}}\n");
+        keep(dir.path(), &[(0, &log, true)]);
+        let mut held = orx_signals::Snapshot::new("run", "1-1", "g1");
+        held.feed(&log[..first], false, 5000, true).unwrap();
+        let path = dir.path().join("run-signals/run.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        super::super::adapters::local::signals::publish(&path, &held).unwrap();
+        {
+            let store = runtime.store().unwrap();
+            store.checkpoint_log_collection("run").unwrap();
+            store.finish_log_collection("run").unwrap();
+        }
+        assert!(!super::super::adapters::signals::collect_kept(
+            dir.path(),
+            &local_run(),
+            6000,
+            6000,
+            tokio::time::Instant::now(),
+            None,
+            || Ok(orx_signals::Config::default()),
+        )
+        .await
+        .unwrap());
+        let partial = super::super::adapters::local::signals::load(&path)
+            .unwrap()
+            .unwrap();
+        assert!(partial.cursor.offset > first as u64);
+        assert!(partial.cursor.offset < log.len() as u64);
+        drop(runtime);
+
+        let runtime = collector(dir.path());
+        let backend = Arc::new(Host::default());
+        backend.gone.store(true, Ordering::SeqCst);
+        lock(&runtime.backends).insert(Key::Local, backend);
+        runtime.collect_finished("run").await.unwrap();
+        let settled = super::super::adapters::local::signals::load(&path)
+            .unwrap()
+            .unwrap();
+        assert_eq!(settled.generation, "g1");
+        assert_eq!(settled.phases[0].started_at, Some(5000));
+        assert_eq!(settled.cursor.offset, log.len() as u64);
+        assert_eq!(settled.latest["score"], 42);
+        assert!(settled.coverage.complete);
+        assert!(!runtime
+            .store()
+            .unwrap()
+            .signal_collection_pending("run")
+            .unwrap());
+        assert!(signal_notices(&runtime, "signal-collection-incomplete").is_empty());
+    }
+
+    /// While the host keeps the run its checkpoint is the answer: failures retry like the log
+    /// debt and tell the chat once, and a whole kept log is never used instead.
+    #[tokio::test]
+    async fn a_host_that_keeps_the_run_is_asked_again_until_it_answers() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-host-retry").unwrap();
+        let runtime = ended_signal_run(dir.path());
+        let backend = Arc::new(Host::default());
+        backend.log.log.lock().unwrap().bytes =
+            b"::orx:: {\"step\":3,\"m\":{\"score\":7}}\n".to_vec();
+        backend.fail_signals.store(true, Ordering::SeqCst);
+        lock(&runtime.backends).insert(Key::Local, backend.clone());
+        runtime.collect_finished("run").await.unwrap();
+        assert!(backend.destroyed.load(Ordering::SeqCst));
+        keep(
+            dir.path(),
+            &[(0, b"::orx:: {\"m\":{\"score\":999}}\n", true)],
+        );
+        for _ in 1..8 {
+            runtime.collect_finished("run").await.unwrap();
+        }
+        assert!(runtime
+            .store()
+            .unwrap()
+            .signal_collection_pending("run")
+            .unwrap());
+        let (snapshot, status) = super::super::adapters::signals::cached(dir.path(), "run");
+        assert!(snapshot.is_none());
+        assert_eq!(status["reason"], "rental signal disk is full");
+        let notices = signal_notices(&runtime, "signal-collection");
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].contains("this computer"));
+        assert!(notices[0].contains("rental signal disk is full"));
+
+        backend.fail_signals.store(false, Ordering::SeqCst);
+        runtime.collect_finished("run").await.unwrap();
+        let (snapshot, status) = super::super::adapters::signals::cached(dir.path(), "run");
+        assert_eq!(snapshot.unwrap().latest["score"], 7);
+        assert_eq!(status["state"], "cached");
+        assert!(!runtime
+            .store()
+            .unwrap()
+            .signal_collection_pending("run")
+            .unwrap());
+        assert_eq!(signal_notices(&runtime, "signal-collection").len(), 1);
+        assert!(signal_notices(&runtime, "signal-collection-incomplete").is_empty());
+    }
+
+    /// A checkpoint another process keeps locked is retried briefly, then named as the cause.
+    #[tokio::test]
+    async fn a_held_checkpoint_lock_is_named_not_reported_as_an_io_error() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-held-lock").unwrap();
+        let runtime = ended_signal_run(dir.path());
+        let backend = Arc::new(Host::default());
+        backend.log.log.lock().unwrap().bytes = b"::orx:: {\"step\":1}\n".to_vec();
+        runtime
+            .store()
+            .unwrap()
+            .checkpoint_log_collection("run")
+            .unwrap();
+        std::fs::create_dir_all(dir.path().join("run-signals")).unwrap();
+        let file = std::fs::File::create(dir.path().join("run-signals/run.lock")).unwrap();
+        let mut other = fd_lock::RwLock::new(file);
+        let held = other.write().unwrap();
+        lock(&runtime.backends).insert(Key::Local, backend);
+        runtime.collect_finished("run").await.unwrap();
+        let (_, status) = super::super::adapters::signals::cached(dir.path(), "run");
+        assert_eq!(
+            status["reason"],
+            "Another orx process is reading run run's signal checkpoint"
+        );
+        drop(held);
+        runtime.collect_finished("run").await.unwrap();
+        assert!(!runtime
+            .store()
+            .unwrap()
+            .signal_collection_pending("run")
+            .unwrap());
+    }
+
+    /// A host that cannot be reached keeps the debt open. Once it no longer has the run, a
+    /// run that reported nothing settles quietly; one whose signals were lost says so once,
+    /// naming that the host no longer has the log over the earlier failure to reach it.
+    #[tokio::test]
+    async fn nothing_to_read_settles_once_and_only_loud_when_signals_existed() {
+        for reported in [false, true] {
+            let dir = crate::local::git::TemporaryDirectory::new("orx-nothing-kept").unwrap();
+            let runtime = ended_signal_run(dir.path());
+            let backend = Arc::new(Host::default());
+            backend.unreachable.store(true, Ordering::SeqCst);
+            runtime
+                .store()
+                .unwrap()
+                .checkpoint_log_collection("run")
+                .unwrap();
+            if reported {
+                let mut held = orx_signals::Snapshot::new("run", "1-1", "g1");
+                held.feed(b"::orx:: {\"step\":1}\n", false, 5000, true)
+                    .unwrap();
+                let path = dir.path().join("run-signals/run.json");
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                super::super::adapters::local::signals::publish(&path, &held).unwrap();
+            }
+            lock(&runtime.backends).insert(Key::Local, backend.clone());
+            runtime.collect_finished("run").await.unwrap();
+            assert!(runtime
+                .store()
+                .unwrap()
+                .signal_collection_pending("run")
+                .unwrap());
+            let (_, status) = super::super::adapters::signals::cached(dir.path(), "run");
+            assert_eq!(status["reason"], "connection refused");
+
+            backend.unreachable.store(false, Ordering::SeqCst);
+            backend.gone.store(true, Ordering::SeqCst);
+            drop(runtime);
+            let runtime = collector(dir.path());
+            lock(&runtime.backends).insert(Key::Local, backend);
+            runtime.collect_finished("run").await.unwrap();
+            runtime.collect_finished("run").await.unwrap();
+            assert!(!runtime
+                .store()
+                .unwrap()
+                .signal_collection_pending("run")
+                .unwrap());
+            let (_, status) = super::super::adapters::signals::cached(dir.path(), "run");
+            let notices = signal_notices(&runtime, "signal-collection-incomplete");
+            if reported {
+                let gone = "The host no longer has run run's log";
+                assert_eq!(status["state"], "incomplete");
+                assert_eq!(status["reason"], gone, "the most specific cause wins");
+                assert_eq!(notices.len(), 1);
+                assert!(notices[0].contains(gone));
+            } else {
+                assert_eq!(status["state"], "empty");
+                assert!(notices.is_empty());
+            }
+        }
+    }
+
+    fn gone_host(dir: &Path) -> Arc<Runtime> {
+        let runtime = ended_signal_run(dir);
+        let backend = Arc::new(Host::default());
+        backend.gone.store(true, Ordering::SeqCst);
+        lock(&runtime.backends).insert(Key::Local, backend);
+        let store = runtime.store().unwrap();
+        store.checkpoint_log_collection("run").unwrap();
+        store.finish_log_collection("run").unwrap();
+        drop(store);
+        runtime
+    }
+
+    fn settled(runtime: &Runtime) -> bool {
+        !runtime
+            .store()
+            .unwrap()
+            .signal_collection_pending("run")
+            .unwrap()
+    }
+
+    /// A kept log that does not reach the host's checkpoint (a short prefix, or the empty log
+    /// kept for a rental deleted with nothing saved) never replaces it: the checkpoint settles as
+    /// it is, incomplete, with how the host went.
+    #[tokio::test]
+    async fn a_kept_log_that_knows_less_never_replaces_the_host_checkpoint() {
+        let log = b"::orx:: {\"phase\":\"train\",\"step\":1,\"of\":4,\"t\":1}\n::orx:: {\"step\":2,\"t\":2}\n::orx:: {\"step\":3,\"t\":3}\n";
+        for prefix in [true, false] {
+            let dir = crate::local::git::TemporaryDirectory::new("orx-kept-less").unwrap();
+            let runtime = gone_host(dir.path());
+            let mut held = orx_signals::Snapshot::new("run", "1-1", "g1");
+            held.feed(log, false, 5000, true).unwrap();
+            let path = dir.path().join("run-signals/run.json");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            super::super::adapters::local::signals::publish(&path, &held).unwrap();
+            if prefix {
+                keep(dir.path(), &[(0, &log[..57], true)]);
+            } else {
+                let file = dir.path().join("run-logs/run.log");
+                std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                std::fs::write(&file, b"").unwrap();
+                let ident = FileIdent { dev: 0, ino: 0 };
+                let range = KeptRange {
+                    file,
+                    offset: 0,
+                    len: 0,
+                    ident,
+                    eof: true,
+                };
+                crate::commands::up::api_v2::keep_ranges(dir.path(), "run", vec![range]).unwrap();
+            }
+            runtime.collect_finished("run").await.unwrap();
+
+            let (snapshot, status) = super::super::adapters::signals::cached(dir.path(), "run");
+            let snapshot = snapshot.unwrap();
+            assert_eq!(snapshot.generation, "g1");
+            assert_eq!(snapshot.phases[0].started_at, Some(5000));
+            assert_eq!(snapshot.timing.progress_points, held.timing.progress_points);
+            assert_eq!(status["state"], "incomplete");
+            assert_eq!(status["reason"], "The host no longer has run run's log");
+            assert!(settled(&runtime));
+            assert_eq!(
+                signal_notices(&runtime, "signal-collection-incomplete").len(),
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_corrupt_live_checkpoint_stays_unavailable_until_rebuilt() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-live-unreadable").unwrap();
+        let runtime = launched_signal_run(dir.path());
+        let now = runtime.engine.clock.wall_ms();
+        runtime
+            .engine
+            .observe(
+                "run",
+                Observation::Running {
+                    started_at: Some(now - 2_000),
+                },
+            )
+            .unwrap();
+        let job = dir.path().join("local-runs/run");
+        std::fs::create_dir_all(&job).unwrap();
+        let log = job.join("log");
+        std::fs::write(&log, b"::orx:: {\"step\":10}\n").unwrap();
+        let watched = [WatchedRun {
+            id: "run".into(),
+            handle: Handle::Local {
+                dir: job.to_str().unwrap().into(),
+            },
+        }];
+        let backend = runtime.backend_for(&Key::Local).unwrap();
+        let collect = || async {
+            assert!(
+                !runtime
+                    .collect_signals(backend.as_ref(), &watched, Duration::from_secs(5), &mut 0)
+                    .await
+            );
+        };
+        let projection = || {
+            let store = runtime.store().unwrap();
+            let run = store.get_run("run").unwrap().unwrap();
+            super::super::monitor::advance(&store, &run, now).unwrap()
+        };
+
+        collect().await;
+        let first = projection().monitor();
+        assert_eq!(first["progress"]["done"].as_f64(), Some(10.0));
+        let path = runtime.signals_path("run");
+        std::fs::write(&path, b"{broken").unwrap();
+        std::fs::remove_file(&log).unwrap();
+
+        collect().await;
+        let pending = projection();
+        let unreadable = pending.monitor();
+        assert_eq!(unreadable["availability"]["state"], "unavailable");
+        assert!(unreadable["availability"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("run.json")));
+        assert!(unreadable["progress"].is_null());
+        assert!(unreadable["statusText"]
+            .as_str()
+            .is_some_and(|text| text.contains("run.json") && !text.contains("step 10")));
+        assert_eq!(
+            pending.summary()["unavailable"],
+            unreadable["availability"]["reason"]
+        );
+
+        std::fs::create_dir(&log).unwrap();
+        collect().await;
+        assert_eq!(
+            projection().monitor()["availability"],
+            unreadable["availability"]
+        );
+        let retained: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .starts_with("run.corrupt-")
+            })
+            .collect();
+        assert_eq!(retained.len(), 1);
+        assert_eq!(std::fs::read(&retained[0]).unwrap(), b"{broken");
+
+        std::fs::remove_dir(&log).unwrap();
+        std::fs::write(&log, b"::orx:: {\"step\":11}\n").unwrap();
+        collect().await;
+        let rebuilt = projection().monitor();
+        assert_eq!(rebuilt["availability"]["state"], "live");
+        assert!(rebuilt["availability"]["reason"].is_null());
+        assert_eq!(rebuilt["progress"]["done"].as_f64(), Some(11.0));
+        assert_ne!(rebuilt["generation"], first["generation"]);
+    }
+
+    /// A checkpoint that cannot be read, in place or set aside as corrupt, is unknown: the run
+    /// settles incomplete naming it, and says so.
+    #[tokio::test]
+    async fn an_unreadable_checkpoint_is_unknown_never_absent() {
+        for set_aside in [false, true] {
+            let dir = crate::local::git::TemporaryDirectory::new("orx-unreadable").unwrap();
+            let runtime = gone_host(dir.path());
+            let signals = dir.path().join("run-signals");
+            std::fs::create_dir_all(&signals).unwrap();
+            let name = if set_aside {
+                "run.corrupt-1.json"
+            } else {
+                "run.json"
+            };
+            std::fs::write(signals.join(name), b"{broken").unwrap();
+            runtime.collect_finished("run").await.unwrap();
+
+            let status = super::super::adapters::signals::read_availability(dir.path(), "run")
+                .unwrap()
+                .unwrap();
+            assert_eq!(status["state"], "incomplete");
+            assert!(
+                status["reason"].as_str().unwrap().contains(name),
+                "{status}"
+            );
+            assert!(settled(&runtime));
+            let notices = signal_notices(&runtime, "signal-collection-incomplete");
+            assert_eq!(notices.len(), 1);
+            assert!(notices[0].contains(name));
+        }
+    }
+
+    /// A kept file that is gone settles the run incomplete, naming it, instead of retrying.
+    #[tokio::test]
+    async fn a_missing_kept_file_settles_naming_it() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-kept-missing").unwrap();
+        let runtime = gone_host(dir.path());
+        keep(dir.path(), &[(0, b"::orx:: {\"step\":1}\n", true)]);
+        std::fs::remove_file(dir.path().join("run-logs/run.0.log")).unwrap();
+        runtime.collect_finished("run").await.unwrap();
+
+        let (_, status) = super::super::adapters::signals::cached(dir.path(), "run");
+        assert_eq!(status["state"], "incomplete");
+        assert!(
+            status["reason"].as_str().unwrap().contains("run.0.log"),
+            "{status}"
+        );
+        assert!(settled(&runtime));
+        assert!(signal_notices(&runtime, "signal-collection").is_empty());
+    }
+
+    /// A kept fold reads to its deadline and stops; a pass that made progress is due again at
+    /// once, so a long fold neither holds up other runs nor backs off.
+    #[tokio::test]
+    async fn a_long_kept_fold_yields_and_is_due_again_at_once() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        std::env::set_var("ORX_TEST_SPEEDUP", "1000000");
+        let dir = crate::local::git::TemporaryDirectory::new("orx-kept-yields").unwrap();
+        let runtime = gone_host(dir.path());
+        let mut log = b"::orx:: {\"phase\":\"train\",\"step\":1,\"of\":3}\n".to_vec();
+        log.extend(std::iter::repeat_n(b'\n', 4 * 1024 * 1024));
+        log.extend_from_slice(b"::orx:: {\"step\":3,\"m\":{\"score\":42}}\n");
+        keep(dir.path(), &[(0, &log, true)]);
+        {
+            let store = runtime.store().unwrap();
+            store.defer_signal_collection("run").unwrap();
+            assert!(store
+                .pending_signal_collections(true, 10)
+                .unwrap()
+                .is_empty());
+        }
+
+        runtime.collect_finished("run").await.unwrap();
+        let path = dir.path().join("run-signals/run.json");
+        let partial = super::super::adapters::local::signals::load(&path)
+            .unwrap()
+            .unwrap();
+        assert!(partial.cursor.offset < log.len() as u64);
+        let due = runtime
+            .store()
+            .unwrap()
+            .pending_signal_collections(true, 10)
+            .unwrap();
+        assert_eq!(due, ["run"]);
+
+        for _ in 0..40 {
+            if settled(&runtime) {
+                break;
+            }
+            runtime.collect_finished("run").await.unwrap();
+        }
+        let whole = super::super::adapters::local::signals::load(&path)
+            .unwrap()
+            .unwrap();
+        assert_eq!(whole.latest["score"], 42);
+        assert!(whole.coverage.complete);
+        assert!(settled(&runtime));
+        assert!(signal_notices(&runtime, "signal-collection").is_empty());
+    }
+
+    #[tokio::test]
+    async fn signal_metadata_failure_cannot_hold_log_debt_open() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-status-error").unwrap();
+        let runtime = ended_signal_run(dir.path());
+        let backend = Arc::new(Host::default());
+        backend
+            .gone
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        backend
+            .fail_signals
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        runtime
+            .store()
+            .unwrap()
+            .checkpoint_log_collection("run")
+            .unwrap();
+        std::fs::create_dir_all(dir.path().join("run-signals/run.status.json")).unwrap();
+        lock(&runtime.backends).insert(Key::Local, backend.clone());
+        runtime.collect_finished("run").await.unwrap();
+        assert!(backend.destroyed.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!runtime
+            .store()
+            .unwrap()
+            .log_collection_pending("run")
+            .unwrap());
+        assert!(runtime
+            .store()
+            .unwrap()
+            .signal_collection_pending("run")
+            .unwrap());
+        assert!(!runtime
+            .store()
+            .unwrap()
+            .run_notice_batch("chat")
+            .unwrap()
+            .iter()
+            .any(|n| n.dedupe == "log-collection"));
+    }
+
+    #[tokio::test]
+    async fn final_signal_timeout_releases_and_preserves_readable_debt() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-final-timeout").unwrap();
+        let runtime = ended_signal_run(dir.path());
+        let backend = Arc::new(Host::default());
+        backend
+            .hang_signals
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        runtime
+            .store()
+            .unwrap()
+            .checkpoint_log_collection("run")
+            .unwrap();
+        lock(&runtime.backends).insert(Key::Local, backend.clone());
+        tokio::time::timeout(
+            crate::config::paced(Duration::from_secs(20)),
+            runtime.collect_finished("run"),
+        )
+        .await
+        .expect("final signals exceeded their bound")
+        .unwrap();
+        assert!(backend.destroyed.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(runtime
+            .store()
+            .unwrap()
+            .signal_collection_pending("run")
+            .unwrap());
+        assert!(!runtime
+            .store()
+            .unwrap()
+            .log_collection_pending("run")
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn pending_signals_cannot_delay_observed_lifecycle() {
+        use std::sync::atomic::Ordering;
+        let dir = std::env::temp_dir().join(format!("orx-finalize-{}", uuid::Uuid::new_v4()));
+        let runtime = collector(&dir);
+        let metadata = crate::jobs::BackendDescriptor::parse(r#"{"kind":"local_job"}"#).unwrap();
+        runtime
+            .engine
+            .insert(SubmittingRun {
+                id: "run",
+                experiment_id: "exp",
+                project_id: "project",
+                metadata: &metadata,
+                command: "true",
+                created_at: 1,
+                commit_sha: None,
+                chat_session_id: None,
+                spec_digest: "digest",
+                monitor_config: None,
+                launch: &LaunchSpec {
+                    kind: "local_job".into(),
+                    target: None,
+                    options: json!({}),
+                },
+            })
+            .unwrap();
+        {
+            let store = runtime.store().unwrap();
+            store
+                .set_submission_fence(
+                    "run",
+                    1,
+                    &crate::store::SubmissionFence {
+                        taken_at: 1,
+                        submitter: None,
+                    },
+                )
+                .unwrap();
+            store
+                .record_run_handle("run", 1, &local_run().handle)
+                .unwrap();
+        }
+
+        let backend = Arc::new(Host::default());
+        backend.hang_signals.store(true, Ordering::SeqCst);
+        backend.log.feed.lock().unwrap().push_back((
+            "run".into(),
+            Observation::Exited {
+                started_at: None,
+                finished_at: None,
+                code: Some(0),
+                signal: None,
+            },
+        ));
+        lock(&runtime.backends).insert(Key::Local, backend.clone());
+        let (sender, receiver) = watch::channel(vec![local_run()]);
+        let task = tokio::spawn(runtime.clone().observe(Key::Local, receiver));
+        tokio::time::timeout(Duration::from_secs(5), backend.signal_started.notified())
+            .await
+            .unwrap();
+        assert_eq!(
+            runtime
+                .store()
+                .unwrap()
+                .get_run("run")
+                .unwrap()
+                .unwrap()
+                .status,
+            "done"
+        );
+        task.abort();
+        let _ = task.await;
+        drop(sender);
+        drop(runtime);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[tokio::test]
+    async fn live_signal_budget_is_shared_by_the_whole_batch() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-signal-budget").unwrap();
+        let runtime = collector(dir.path());
+        let backend = Host::default();
+        backend
+            .hang_signals
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let runs: Vec<_> = (0..3)
+            .map(|i| WatchedRun {
+                id: format!("r{i}"),
+                handle: local_run().handle,
+            })
+            .collect();
+        assert!(
+            runtime
+                .collect_signals(
+                    &backend,
+                    &runs,
+                    crate::config::paced(Duration::from_millis(20)),
+                    &mut 0,
+                )
+                .await
+        );
+        assert!(
+            backend
+                .signal_calls
+                .load(std::sync::atomic::Ordering::SeqCst)
+                <= 1
+        );
+        for run in runs {
+            let status =
+                super::super::adapters::signals::read_availability(dir.path(), &run.id).unwrap();
+            assert_eq!(status, None, "a spent budget says nothing about {}", run.id);
+        }
     }
 }

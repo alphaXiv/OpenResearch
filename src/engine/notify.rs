@@ -34,11 +34,20 @@ impl Engine {
     /// Turns the bytes past the run's notify cursor into one notice per subscribed chat, then
     /// advances the cursor in the same transaction.
     pub async fn deliver_notify(&self, backend: &dyn Backend, run_id: &str) -> Result<bool> {
+        self.read_notify(backend, run_id, false).await
+    }
+
+    pub(super) async fn read_notify(
+        &self,
+        backend: &dyn Backend,
+        run_id: &str,
+        exit_observed: bool,
+    ) -> Result<bool> {
         let Some(_gate) = self.try_gate(run_id) else {
             return Ok(false);
         };
         let (run, state) = self.load(run_id)?;
-        let terminal = phase_of(&run)?.is_terminal();
+        let terminal = exit_observed || phase_of(&run)?.is_terminal();
         if !terminal && (!self.notify_window_open(run_id)? || !self.own(run_id)?) {
             return Ok(false);
         }

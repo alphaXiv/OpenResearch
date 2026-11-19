@@ -23,10 +23,20 @@ pub enum RunEvent {
     Notices {
         chats: Vec<String>,
     },
+    /// The run's flags changed outside its monitor: a turn carrying one was accepted, or orx
+    /// followed one up.
+    FlagReview {
+        run_id: String,
+    },
     Grew {
         run_id: String,
         file: super::LogFile,
         len: u64,
+    },
+    /// A run's monitor published a new `rev`: the `run.monitor` event as the page reads it.
+    Monitor {
+        run_id: String,
+        event: std::sync::Arc<serde_json::Value>,
     },
 }
 
