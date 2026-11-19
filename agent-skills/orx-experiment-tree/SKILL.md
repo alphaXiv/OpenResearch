@@ -167,7 +167,9 @@ intended flow — do **not** edit a frozen node or rewrite the run command:
    or live agent session is needed.
 7. **Reconcile on every wake.** A run result, a delegate's answer, a flag, a
    model switch or a resumed chat all start the same way: read
-   `orx project view <projectId>` and `orx runs <projectId>`, and check each
+   `orx project view <projectId>` and `orx runs <projectId>` (`orx exp status
+   <expId>` shows a node's parent when the view can't tell siblings from planned
+   descendants), and check each
    delegate named in the chat with the MCP `status` tool (`orx-agent-delegation`
    says when to relaunch one). Account for every run still going, every delegate
    still working and every planned child, including runs that finished while you
@@ -182,8 +184,9 @@ intended flow — do **not** edit a frozen node or rewrite the run command:
    completion is a decision point with four moves:
    - **Repair** — the run answered nothing: fix this node's branch and
      re-launch the same node (above).
-   - **Refill** — result is mediocre or inconclusive: launch the next planned child to
-     keep the round moving (step 5).
+   - **Refill** — a sibling of this round is still planned and not yet launched,
+     whatever this result was: launch it (step 5) and choose the winner once the
+     round's results are in. Nothing else will wake the chat to start it.
    - **Promote** — result is a clear win: once it is confirmed (step 4), this
      node becomes the **parent for the next round**; while a sibling still runs,
      plan the next round under it and end your turn. The next batch of children

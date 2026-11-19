@@ -453,10 +453,10 @@ impl Instrumentation {
              needs the missing report for a decision. Otherwise change nothing and leave it out of your reply. \
              Inspect `orx exp view show {run}`, `orx exp view check {run}` and `orx logs {run}`. \
              Repair the view, plan or patterns on this run with `orx exp view set {experiment}`. \
-             If the missing report requires a code change, weigh the work already done before relaunching. \
+             If this run needs a code change, restart only when the fix is worth the progress lost. \
              {relaunch} To restart, cancel an active run with \
              `orx exp cancel --run {run} --reason 'Fixing run reports'`, then fix and commit the code before the next launch. \
-             For an ended run, make any needed code fix when implementing its planned child. \
+             If only a planned child needs the report, or the run has ended, make the fix when implementing that child. \
              This check sends at most one notice per run."
         );
         let queued = store.insert_run_notice(

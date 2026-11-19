@@ -32,8 +32,9 @@ A model in `models` is available, not approved. A delegate gets this
 project's checkout, so delegate only to a model provider the user already uses
 in this project's chats or approved for it. A route billed per use, such as an
 API key or a metered provider, is spend even when this chat runs on it: it
-needs a budget that covers it or the user's go; a route marked `(free)` adds
-no charge. Name the route you checked in `delegate`'s `route`. Delegation is
+needs a budget that covers it, with what runs and delegates in flight already
+committed counted against it, or the user's go; skip optional delegation whose
+cost you cannot bound. A route marked `(free)` adds no charge. Name the route you checked in `delegate`'s `route`. Delegation is
 encouraged, never required: when no permitted route exists, do the in-scope
 work yourself, and never end a turn just to ask for a delegate.
 

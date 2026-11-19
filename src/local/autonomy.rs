@@ -63,10 +63,11 @@ impl Autonomy {
                 class or per-use paid model route the user has not approved, or paid compute with \
                 no budget set), before sending project code, data or results to a destination or \
                 model provider the user has not approved, and before work outside the direction. \
-                Before each paid launch or repair, count what runs in flight have already \
-                committed, bound the next run to what remains of the budget, and ask if you cannot \
-                establish that bound, such as when the backend reports no price. Delegate each \
-                step's parallel parts on a route `orx-agent-delegation` permits; when none is \
+                Before each paid launch, repair or metered delegate, count what runs and \
+                delegates in flight have already committed, bound the next one to what remains of \
+                the budget, and ask if you cannot establish that bound, such as when the backend \
+                reports no price; skip optional delegation whose cost you cannot bound. Delegate \
+                each step's parallel parts on a route `orx-agent-delegation` permits; when none is \
                 permitted, do the in-scope work yourself and never end a turn just to ask for a \
                 delegate. An open-ended direction is not done because one idea worked: where a \
                 skill says to stop after repeated failed or regressed runs, back up to an earlier \
