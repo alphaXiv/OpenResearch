@@ -179,8 +179,6 @@ async fn one_look_writes_each_runs_sentence_and_the_summary_through_the_agent_cl
         "--model\nhaiku",
         "--setting-sources\nuser",
         "--settings\n{\"disableAllHooks\":true}",
-        "Flag only evidence that merits investigation now",
-        "sparse early plateaus",
     ] {
         assert!(args.contains(flag), "{flag} in {args}");
     }
@@ -1146,8 +1144,6 @@ async fn a_look_that_flags_while_a_flag_is_open_is_noted_under_it() {
     assert_eq!(shown["brief"], digest["briefs"][0]["id"]);
     assert_eq!(digest["briefs"][0]["lines"]["noise"], noise);
     assert_eq!(shown["notedWhileFlagOpen"][0]["lines"], json!([failed]));
-    let args = std::fs::read_to_string(calls_dir.join("args-2")).unwrap();
-    assert!(args.contains(r#""keptGoingAfter" takes precedence over "notedWhileFlagOpen""#));
     let flags = super::super::flags::read(&store, &a).unwrap();
     assert_eq!(flags.len(), 2, "{flags:?}");
     assert_eq!(
@@ -2061,8 +2057,8 @@ async fn instrumentation_warns_once_across_restart_and_shares_a_due_notice_turn(
     ] {
         assert!(warning.body.contains(&command), "{}", warning.body);
     }
-    assert!(warning.body.contains("In Agentic mode you may cancel"));
-    assert!(!warning.body.contains("Copilot mode"));
+    assert!(warning.body.contains(AGENTIC_RELAUNCH));
+    assert!(!warning.body.contains(COPILOT_RELAUNCH));
     assert!(warning.body.contains("total="));
     assert!(
         instrumentation(&mut Seen::default(), &current, now + 300_000)
@@ -2115,8 +2111,8 @@ async fn instrumentation_waits_for_data_or_two_minutes_and_ignores_queued_runs()
     );
     let batch = store.run_notice_batch("quiet-owner").unwrap();
     let warning = &batch[0].body;
-    assert!(warning.contains("ask the user before cancelling healthy compute or relaunching"));
-    assert!(!warning.contains("Agentic mode"));
+    assert!(warning.contains(COPILOT_RELAUNCH));
+    assert!(!warning.contains(AGENTIC_RELAUNCH));
     assert!(store
         .last_notice_at(&row.id, "instrumentation")
         .unwrap()

@@ -420,6 +420,9 @@ struct Seen {
 }
 
 const INSTRUMENTATION: &str = "instrumentation";
+const AGENTIC_RELAUNCH: &str = "In Agentic mode you may cancel and relaunch on your own.";
+const COPILOT_RELAUNCH: &str =
+    "In Copilot mode, ask the user before cancelling healthy compute or relaunching.";
 
 struct Instrumentation {
     chat: String,
@@ -436,10 +439,8 @@ impl Instrumentation {
             return Ok(None);
         };
         let relaunch = match Autonomy::from_stored(chat.autonomy.as_deref()) {
-            Autonomy::Agentic => "In Agentic mode you may cancel and relaunch on your own.",
-            Autonomy::Copilot => {
-                "In Copilot mode, ask the user before cancelling healthy compute or relaunching."
-            }
+            Autonomy::Agentic => AGENTIC_RELAUNCH,
+            Autonomy::Copilot => COPILOT_RELAUNCH,
         };
         let problems = self
             .problems
