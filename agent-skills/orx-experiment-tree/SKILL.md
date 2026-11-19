@@ -107,7 +107,7 @@ intended flow — do **not** edit a frozen node or rewrite the run command:
    decision (which LR? which schedule? which init?), each a concrete change you can
    make and measure against the others in this round. Don't mix decisions from
    different rounds into one batch — that's what produces the flat fan.
-3. **Create the round as a bush, or confirm the one planned in step 6, and pick
+3. **Create the round as a bush, or use the one planned in step 6, and pick
    its parent deliberately.** All of this round's options are **siblings under
    one parent** — the title is the idea, the
    description is the concrete change you'll make on that node's branch. The user
@@ -131,17 +131,18 @@ intended flow — do **not** edit a frozen node or rewrite the run command:
    ```
    The child inherits its parent's run command automatically — you don't set it,
    and you never give siblings different commands or env vars (cardinal rule 2).
-4. **Implement each child's change on its Git branch** just before launching
-   it — `orx create-experiment` prints the child's branch (`orx/<slug>`); in
-   your worktree:
+4. **Implement each child's change on its Git branch** once its parent's run
+   has answered, never before — `orx create-experiment` prints the child's
+   branch (`orx/<slug>`); in your worktree:
    ```sh
-   git checkout -B orx/<child-slug> <parent-branch>   # child has no commits or runs yet
+   git checkout -B orx/<child-slug> <parent-branch>   # first commit only
    #   …edit only the files that idea touches…
    git commit -am "cosine LR + warmup"
    ```
-   `-B` starts the branch from its parent's current code, which a repair or an
-   `orx exp move` may have changed since the child was planned. Use plain
-   `git checkout orx/<child-slug>` once the child has commits.
+   An answered parent is frozen, so its branch head is the commit its run
+   measured: check it against that run's COMMIT in `orx runs <projectId>`.
+   `-B` starts the child there even when it was planned under another node and
+   moved. Use plain `git checkout orx/<child-slug>` once the child has commits.
    **Leave the run command alone.** Before launching, ensure the committed code
    prints its effective configuration, final metrics, and a compact summary to
    stdout. Long runs should also print periodic searchable metrics.
@@ -149,21 +150,21 @@ intended flow — do **not** edit a frozen node or rewrite the run command:
    (or omit `--backend` when a default target is set — see `orx-compute`). Remote
    backends can run siblings in parallel; `--backend local` shares this machine's
    CPU, RAM, and GPU.
-6. **Plan the next round before this one lands, then end your turn.** Create
-   the next decision's options as unrun children, title and description only:
-   under the running node when one run answers this step, or under the sibling
-   you expect to win when several compete. These planned children are the queue;
-   the user sees them in the tree, so never keep a plan in chat or a file. Run
-   results and delegates' answers arrive as messages in this chat once it is
-   idle; no waiting process or live agent session is needed.
+6. **Plan ahead when the next decision is clear, then end your turn.** Create
+   its options as unrun children, title and description only, under the running
+   node or the sibling you expect to win, and leave their branches alone until
+   that parent answers (step 4). Planned children are the queue the user sees in
+   the tree; never keep a plan in chat or a file. Run results and delegates'
+   answers arrive as messages in this chat once it is idle; no waiting process
+   or live agent session is needed.
 7. **Reconcile on every wake.** A run result, a delegate's answer, a flag, a
    model switch or a resumed chat all start the same way: read
    `orx project view <projectId>` and `orx runs <projectId>`, and check each
-   delegate named in the chat with the MCP `status` tool. Account for every run
-   still going, every delegate still working and every planned child, including
-   runs that finished while you analyzed another. Relaunch a delegate whose chat
-   ended without its answer. When every run is terminal and no planned child of
-   this round remains, the round is complete.
+   delegate named in the chat with the MCP `status` tool (`orx-agent-delegation`
+   says when to relaunch one). Account for every run still going, every delegate
+   still working and every planned child, including runs that finished while you
+   analyzed another. A run the user stopped stays stopped. When every run is
+   terminal and no planned child of this round remains, the round is complete.
 8. **Analyze each finish as it lands, then iterate.** When a result message
    arrives, read its results from the file reported by `orx logs <runId>`
    (see `orx-logs`) and, when it logged to Trackio, its curves with
@@ -188,10 +189,9 @@ intended flow — do **not** edit a frozen node or rewrite the run command:
    stay untouched throughout — promotion moves the *focal parent* down the tree, it
    never rewrites a node that already measured something.
 
-After ~3 consecutive failed or regressed runs on a branch, reconsider it: back up
-to an earlier winner or change the decision being tested. Stop when the goal is
-met or the agreed budget is spent, and write up the tree as a descriptively named
-project artifact — see the `orx-reports` skill for naming and folder guidance.
+Stop when the goal is met, the agreed budget is spent, or after ~3 consecutive
+failed or regressed runs, and write up the tree as a descriptively named project
+artifact — see the `orx-reports` skill for naming and folder guidance.
 Findings live in such artifacts and node notes, never only in chat.
 
 ## Experiment description / notes — `orx exp desc`

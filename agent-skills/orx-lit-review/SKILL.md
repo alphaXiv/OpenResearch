@@ -6,10 +6,11 @@ description: "Explain and compare scientific or technical concepts using origina
 # Literature retrieval
 
 Use this skill for scientific explanations and comparisons, even without a named
-paper. Scale it to the step: a check before a small change takes one search; a
-new method, a surprising result or a related-work request takes the full loop.
+paper. Before an experiment, scale it to the step: a bug fix or a setting
+already tested needs no search; a new method, dataset or surprising result
+takes the loop below.
 
-A delegate on a cheap model (`orx-agent-delegation`) may run the discovery
+A delegate (`orx-agent-delegation`, on a route it allows) may run the discovery
 searches below while you work, returning ranked candidate IDs with the snippets
 that matched. Its summary is a lead, not evidence: read the papers that carry
 your claims yourself, write the synthesis, quotes and citations yourself, and
@@ -120,8 +121,9 @@ orx discover pubmed "<query>" --published-after 2020-01-01 --prioritize recency
 ### Set up the retrieval query
 
 1. If using keyword retrieval, build focused terms using only wording from the
-   user or prior tool results. Never guess an acronym expansion. General-purpose
-   padding reduces result quality.
+   user or prior tool results, and only public topic terms: never unpublished
+   results, project code, data or file contents. Never guess an acronym
+   expansion. General-purpose padding reduces result quality.
 2. For semantic or scholarly-graph retrieval, build one short faithful question
    in the user's terms rather than a padded reformulation.
 3. Estimate retrieval difficulty from 1–10. This controls a budget of complete

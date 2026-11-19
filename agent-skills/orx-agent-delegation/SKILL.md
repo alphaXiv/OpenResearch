@@ -1,6 +1,6 @@
 ---
 name: orx-agent-delegation
-description: "Delegate tasks to other models and chats with the orx MCP server's `delegate`, `wait`, `subscribe` and `answer` tools. Covers what to delegate (scouts, parallel prep, independent checks), standalone briefs, worktrees, compute authorization, nesting and questions. Use before delegating or opening another chat, and when a step has parts that could run in parallel."
+description: "Delegate tasks to other models and chats with the orx MCP server's `delegate`, `wait`, `subscribe` and `answer` tools. Covers what to delegate (scouts, parallel prep, independent checks), which routes and data need the user's go, standalone briefs, worktrees, compute authorization, nesting and questions. Use before delegating or opening another chat, or when a step has parallel parts."
 ---
 
 # Delegate to another chat
@@ -13,20 +13,28 @@ without the answer, and end your turn otherwise; never poll `status` in a loop.
 
 ## What to delegate
 
-Keep delegates on a step's parallel parts at every autonomy level, and more of
-them in Full auto-research, so the main line never waits on work another chat
-could do:
+When a step has parts another chat could do while you work, delegate them and
+keep the main line here:
 
-- **Scouts** on a cheap, fast model from `models`: candidate papers
-  (`orx-lit-review` says what to return), a dataset's format, a library's API.
+- **Scouts** on a fast model: candidate papers (`orx-lit-review` says what to
+  return), a dataset's format, a library's API.
 - **Prep**: data loading, an eval harness, a figure script, in its own files or
   `worktree: "own"`.
-- **Independent checks** of a claim a decision rests on, by a model from a
-  different provider than yours. Give it the claim, the runs and the files, not
-  your conclusion, and name the checking model when you report the claim.
+- **Independent checks** of a claim a decision rests on, by another provider's
+  model once the user approved it for project content (below). Give it the
+  claim, the runs and the files, not your conclusion, and name the checking
+  model when you report the claim.
 
 Keep the decision, the synthesis and what you tell the user in this chat. Tell
 the user what a delegate's result changes, not that it finished.
+
+A model in `models` is available, not approved. Delegate without asking only
+on a route that adds no per-use charge: one marked `(free)`, the route this
+chat runs on, or one the user approved; ask before any other, such as an API
+key or a pay-per-call provider. A model from another provider may receive
+public topic terms; ask before sending it project code, data, unpublished
+results, or the user's messages and attachments, unless the user approved that
+provider for them.
 
 A delegate starts with nothing but its task. Write a standalone brief: the
 project, experiment or commit, constraints, permitted compute, expected output,
@@ -50,8 +58,11 @@ ref (`msg_3fa9c1d2`) in the task instead of retyping it.
   direction the user approved decides it; otherwise ask the user for that
   specific decision. Approvals are the user's.
 - **After a model switch or cut-off.** Check each delegate named in the chat
-  with `status` before starting new work, and relaunch one whose chat ended
-  without its answer.
+  with `status` before starting new work. Before relaunching one whose chat
+  ended without its answer, `read` what it already did (commits, runs, files)
+  and why it ended. Relaunch one a cut-off or restart ended, with a brief that
+  accounts for that work; one that failed, only once you know why; never one
+  the user stopped.
 - **Effort.** Pass `effort` from `models` only when the task needs more or less
   reasoning than the route's default.
 - **Retries.** Give `delegate` and `send` a `clientRequestId` when you may

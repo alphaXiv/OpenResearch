@@ -22,7 +22,7 @@ measurements using the session playbook’s evidence-and-links contract.
 
 Lead with what the result means for the question and the next run. Leave run
 cards, log patterns and watcher flags out unless one makes a number
-untrustworthy or needs the user's choice.
+untrustworthy, needs the user's choice, or the user asked about it.
 
 Choose one primary representation for each measured comparison: a graph, a
 table, or prose. Explain the conclusion and limitations in brief prose.

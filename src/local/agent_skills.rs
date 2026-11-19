@@ -198,7 +198,7 @@ const S_GIT: AgentSkill = AgentSkill {
 };
 const S_AGENT_DELEGATION: AgentSkill = AgentSkill {
     name: "orx-agent-delegation",
-    description: "Delegate tasks to other models and chats with the orx MCP server's `delegate`, `wait`, `subscribe` and `answer` tools. Covers what to delegate (scouts, parallel prep, independent checks), standalone briefs, worktrees, compute authorization, nesting and questions. Use before delegating or opening another chat, and when a step has parts that could run in parallel.",
+    description: "Delegate tasks to other models and chats with the orx MCP server's `delegate`, `wait`, `subscribe` and `answer` tools. Covers what to delegate (scouts, parallel prep, independent checks), which routes and data need the user's go, standalone briefs, worktrees, compute authorization, nesting and questions. Use before delegating or opening another chat, or when a step has parallel parts.",
     content: AGENT_DELEGATION,
     resources: &[],
 };

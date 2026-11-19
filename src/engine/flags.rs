@@ -49,7 +49,7 @@ fn home(store: &Store, run: &StoredRun) -> Result<Option<StoredChatSession>> {
 }
 
 fn autonomous(chat: &StoredChatSession) -> bool {
-    !chat.archived && Autonomy::from_stored(chat.autonomy.as_deref()).is_autonomous()
+    !chat.archived && Autonomy::from_stored(chat.autonomy.as_deref()) != Autonomy::Copilot
 }
 
 fn settles(event: &FlagEvent) -> bool {
@@ -83,6 +83,7 @@ fn carried(notice: &FlagNotice, asked: bool) -> &'static str {
 const REMIND: &str = "remind";
 const AFTER_RESULT: &str = "result";
 const PRIVATE_REVIEW: &str = "Review the result privately. Tell the user only what changes a finding, the next run or a decision they need to make.";
+const UNSOUND: &str = "If a bug or a failure means the result does not stand, repair the experiment and run it again. A result that is only disappointing is an answer: its node is frozen, so branch a child instead.";
 
 fn own(notice: &FlagNotice, flag: &str) -> bool {
     notice.flag_id == flag
@@ -518,10 +519,7 @@ fn review_steps(run: &StoredRun, flag: &Value, asked: bool) -> String {
         } else {
             PRIVATE_REVIEW
         };
-        format!(
-            "Run {id} has ended ({}). {report} If it does not stand, fix experiment {exp} and run it again.",
-            run.status
-        )
+        format!("Run {id} has ended ({}). {report} {UNSOUND}", run.status)
     } else {
         format!("To stop a confirmed failure, use `{settle} --stop --reason '…'`.")
     };

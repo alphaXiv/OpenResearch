@@ -249,11 +249,12 @@ lines carry no `step` shows no progress.
 
 OpenResearch also checks reporting as the run starts and sends at most one
 warning about missing patterns, headline or chart data, or stage totals.
-When this notice arrives, inspect `orx exp view show RUN`,
-`orx exp view check RUN` and `orx logs RUN` before acting. When the same wake
-brings a result, interpret it and decide the next run first. A warning matters
-only for a run still going or a planned child that inherits its view. Card
-repairs are housekeeping: make them without reporting them.
+The check never stops the run. When the same wake brings a result, interpret it
+and decide the next run first. A warning matters only when a run still going,
+or a planned child that inherits its view, needs the missing report for a
+decision. Then inspect `orx exp view show RUN`, `orx exp view check RUN` and
+`orx logs RUN` before acting. Card repairs are housekeeping: make them without
+reporting them unless the user asked.
 
 After every launch, before replying to the user:
 
@@ -474,7 +475,7 @@ does. `--ask` leaves the choice to the user, who sees Stop run, Keep going and
 Ask in the chat. In a Collaborative chat the flag waits for the user, and you
 hear of it only when they ask you. The reason shows on the run's card, so tell
 the user about a flag in chat only when it changes a finding or the next run,
-or when you `--ask`.
+when you `--ask`, or when they asked about it.
 
 For recurring model flags, read `orx exp view get EXP --json`. Write the revised
 `brief` object to a JSON file as above, preserving its other labels. Use `noise`
