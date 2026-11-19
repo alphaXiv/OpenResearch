@@ -1478,7 +1478,6 @@ fn is_initial_chat_message(transcript_text: Option<&str>, has_messages: bool) ->
 
 fn with_turn_context(
     goal: Option<&str>,
-    autonomy: Option<&str>,
     demo_evidence_context: Option<&str>,
     shell_context: Option<&str>,
     text: String,
@@ -1491,9 +1490,6 @@ fn with_turn_context(
     });
     if let Some(goal) = goal.as_deref() {
         contexts.push(goal);
-    }
-    if let Some(autonomy) = autonomy {
-        contexts.push(autonomy);
     }
     if let Some(context) = demo_evidence_context {
         contexts.push(context);
@@ -2748,7 +2744,7 @@ mod shell_command_tests {
         assert!(context.contains("status=\"exit 1\">\ncat missing\n</command>"));
         assert!(context.contains("<stderr>\nboom\n</stderr>"));
         assert!(context.find("ls\n</command>").unwrap() < context.find("cat missing").unwrap());
-        let turn = with_turn_context(None, None, None, Some(&context), "why?".into());
+        let turn = with_turn_context(None, None, Some(&context), "why?".into());
         assert!(turn.starts_with("<user-shell-commands>"));
         assert!(turn.ends_with("<current-user-message>\nwhy?\n</current-user-message>"));
         assert!(shell_context(&[]).is_none());
@@ -2759,10 +2755,10 @@ mod shell_command_tests {
 #[cfg(test)]
 mod initial_message_tests {
     use super::{
-        contextualize_messages, is_initial_chat_message, with_selected_chat_context,
-        with_turn_context, AnnotatedText, TextAnnotation,
+        contextualize_messages, is_initial_chat_message, strip_legacy_autonomy,
+        with_selected_chat_context, with_turn_context, AnnotatedText, TextAnnotation,
+        CONTINUE_PROMPT, LEGACY_COPILOT_CONTEXT,
     };
-    use crate::local::autonomy::Autonomy;
     use serde_json::{json, Value};
 
     #[test]
@@ -2774,42 +2770,41 @@ mod initial_message_tests {
 
     #[test]
     fn the_goal_rides_every_turn() {
-        let seeded = with_turn_context(Some("ship the sweep"), None, None, None, "continue".into());
+        let seeded = with_turn_context(Some("ship the sweep"), None, None, "continue".into());
         assert!(seeded.contains("ship the sweep"));
         assert!(seeded.contains("<current-user-message>\ncontinue"));
         assert_eq!(
-            with_turn_context(None, None, None, None, "continue".into()),
+            with_turn_context(None, None, None, "continue".into()),
             "continue"
         );
     }
 
     #[test]
-    fn autonomy_rides_every_turn_after_the_goal() {
-        let turn = with_turn_context(
-            Some("ship the sweep"),
-            Autonomy::Copilot.turn_context(),
-            None,
-            None,
-            "continue".into(),
+    fn legacy_recovery_removes_saved_autonomy_and_preserves_quoted_instructions() {
+        let message = format!(
+            "<current-user-message>\nQuote this:\n{LEGACY_COPILOT_CONTEXT}</current-user-message>"
         );
-        let goal = turn.find("<orx-goal>").unwrap();
-        let autonomy = turn.find("<orx-autonomy level=\"copilot\">").unwrap();
-        assert!(goal < autonomy);
-        assert!(turn.ends_with("<current-user-message>\ncontinue\n</current-user-message>"));
+        let goal = "<orx-goal>\nResearch optimizers.\n</orx-goal>\n\n";
+        let mut text =
+            format!("{CONTINUE_PROMPT}{goal}{LEGACY_COPILOT_CONTEXT}{message}\n</orx-recovery>");
+        strip_legacy_autonomy(&mut text);
+        assert_eq!(
+            text,
+            format!("{CONTINUE_PROMPT}{goal}{message}\n</orx-recovery>")
+        );
     }
 
     #[test]
     fn demo_evidence_context_is_injected_without_rewrapping_the_user_message() {
-        let first = with_turn_context(None, None, Some("demo evidence"), None, "first".into());
-        let follow_up =
-            with_turn_context(None, None, Some("demo evidence"), None, "follow up".into());
+        let first = with_turn_context(None, Some("demo evidence"), None, "first".into());
+        let follow_up = with_turn_context(None, Some("demo evidence"), None, "follow up".into());
         assert!(first.contains("demo evidence"));
         assert!(first.contains("<current-user-message>\nfirst"));
         assert!(follow_up.contains("demo evidence"));
         assert!(follow_up.contains("<current-user-message>\nfollow up"));
         assert_eq!(first.matches("<current-user-message>").count(), 1);
         assert_eq!(
-            with_turn_context(None, None, None, None, "ordinary".into()),
+            with_turn_context(None, None, None, "ordinary".into()),
             "ordinary"
         );
     }
@@ -6050,12 +6045,9 @@ impl ChatHost {
                     rebase_prepared_attachment_paths(&turn.prepared_input)
                 } else {
                     format!(
-                    "<orx-recovery>\nA previous turn ended after the request may have been accepted. \
-                     Inspect the current repository and transcript state before acting. Do not \
-                     repeat completed tool actions. Continue the unfinished request safely.\n\n\
-                     Original request:\n{}\n</orx-recovery>",
-                    rebase_prepared_attachment_paths(&turn.prepared_input)
-                )
+                        "{CONTINUE_PROMPT}{}\n</orx-recovery>",
+                        rebase_prepared_attachment_paths(&turn.prepared_input)
+                    )
                 };
                 let submission = self
                     .send_message_showing(
@@ -6929,7 +6921,7 @@ impl ChatHost {
                         .any(|m| m.text.trim_start().starts_with('/'))
             })
             .map(|message| delegation::message_ref(&message.id));
-        let mut turn_text = prepared_input.unwrap_or_else(|| {
+        let mut prepared_input = prepared_input.unwrap_or_else(|| {
             let mut expanded = contextualize_messages(messages, |text| {
                 if orx.is_empty() {
                     let text = expand_slash_skills(
@@ -6948,7 +6940,6 @@ impl ChatHost {
             }
             with_turn_context(
                 session.goal.as_deref(),
-                Autonomy::from_stored(session.autonomy.as_deref()).turn_context(),
                 super::demo::turn_context(&project.id),
                 shell_context.as_deref(),
                 expanded,
@@ -6962,7 +6953,7 @@ impl ChatHost {
                 .iter()
                 .map(|att| format!("- {} — {}\n", att.display_name, att.path.display()))
                 .collect();
-            turn_text.push_str(&format!(
+            prepared_input.push_str(&format!(
                 "\n\n<attached-files>\nThe user attached {} file(s) to this message, saved on disk at:\n{list}\
                  Open each with your file-reading tool (Read) before responding — it can read PDFs and images.\n</attached-files>",
                 saved_images.len()
@@ -7004,7 +6995,7 @@ impl ChatHost {
             assistant_message_id: assistant_message_id.clone(),
             client_turn_id,
             request_hash,
-            prepared_input: turn_text.clone(),
+            prepared_input,
             flag_input,
             settings_json: serde_json::to_string(&TurnOverrides {
                 model: session.model.clone(),
@@ -8926,6 +8917,39 @@ pub struct TurnCtx {
     pub continuation: bool,
 }
 
+const CONTINUE_PROMPT: &str =
+    "<orx-recovery>\nA previous turn ended after the request may have been accepted. \
+    Inspect the current repository and transcript state before acting. Do not \
+    repeat completed tool actions. Continue the unfinished request safely.\n\n\
+    Original request:\n";
+
+// Older builds saved this exact block inside the prepared input.
+const LEGACY_COPILOT_CONTEXT: &str = "<orx-autonomy level=\"copilot\">\n\
+    You are the user's research copilot; they make the decisions. Before acting, \
+    explain what you plan to do and why, then wait for their approval. Ask before \
+    every `orx exp run` and before changing direction. When results arrive, explain \
+    what they show and propose next steps instead of taking them. On a failed run, \
+    explain the likely cause and ask how to proceed. This overrides any skill \
+    guidance to continue on your own.\n\
+    </orx-autonomy>\n\n";
+
+fn strip_legacy_autonomy(text: &mut String) {
+    let mut original = text.as_str();
+    while let Some(request) = original.strip_prefix(CONTINUE_PROMPT) {
+        original = request;
+    }
+    if original.starts_with("<orx-goal>\n") {
+        let Some((_, context)) = original.split_once("\n</orx-goal>\n\n") else {
+            return;
+        };
+        original = context;
+    }
+    if original.starts_with(LEGACY_COPILOT_CONTEXT) {
+        let start = text.len() - original.len();
+        text.replace_range(start..start + LEGACY_COPILOT_CONTEXT.len(), "");
+    }
+}
+
 fn turn_ctx_from_stored(
     host: Arc<ChatHost>,
     store: &Store,
@@ -8940,6 +8964,12 @@ fn turn_ctx_from_stored(
             text.push_str("\n\n");
         }
         text.push_str(flags);
+    }
+    if !text.is_empty() {
+        strip_legacy_autonomy(&mut text);
+        if let Some(autonomy) = Autonomy::from_stored(session.autonomy.as_deref()).turn_context() {
+            text = format!("{autonomy}\n\n{text}");
+        }
     }
     let position = handoff::position_for(store, session)?;
     // A pending fork branches at the branch's resume point, which turns after
@@ -10045,6 +10075,13 @@ fn effective_bootstrap_context(
     ))
 }
 
+fn child_autonomy(parent: &StoredChatSession) -> Option<String> {
+    match parent.autonomy.as_deref() {
+        Some(id) if id == Autonomy::AutoResearch.id() => Some(Autonomy::Agentic.id().into()),
+        _ => parent.autonomy.clone(),
+    }
+}
+
 fn side_chat_session(
     parent: &StoredChatSession,
     messages: &[StoredChatMessage],
@@ -10083,7 +10120,7 @@ fn side_chat_session(
         context_usage_json: None,
         bootstrap_context,
         goal: None,
-        autonomy: parent.autonomy.clone(),
+        autonomy: child_autonomy(parent),
         active_leaf_id: None,
         side_parent_session_id: Some(parent.id.clone()),
         side_parent_leaf_id: leaf.cloned(),
@@ -15579,7 +15616,11 @@ done
             };
             let last_prompt = || {
                 let prompts = std::fs::read_to_string(&prompts).unwrap();
-                prompts.lines().last().unwrap().to_string()
+                let prompt: Value = serde_json::from_str(prompts.lines().last().unwrap()).unwrap();
+                prompt["message"]["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
             };
             let fork = |native: &str, at: &str| (Some(native.into()), Some(at.into()), true);
             let plain = |native: &str| (Some(native.to_string()), None, false);
@@ -15704,6 +15745,7 @@ done
             store
                 .set_chat_session_native_fork("chat", Some("s8"), Some("gone"))
                 .unwrap();
+            chat.set_autonomy("chat", Autonomy::AutoResearch).await.unwrap();
             send("six").await;
             finished(&chat, &mut events).await;
             assert_eq!(resumed(&spawns()[8]), fork("s8", "gone"));
@@ -15711,12 +15753,19 @@ done
             assert_eq!(failed.state, "failed");
             assert_eq!(failed.recovery_action.as_deref(), Some("retry"));
             assert_eq!(session().native_session_id, None);
+            chat.set_autonomy("chat", Autonomy::Copilot).await.unwrap();
             chat.recover_turn("chat", &failed.id, "retry", RecoveryOverrides::default())
                 .await
                 .unwrap();
             assert_eq!(finished(&chat, &mut events).await, "s10");
             assert_eq!(resumed(&spawns()[9]), fresh);
             assert!(last_prompt().contains("seven"), "{}", last_prompt());
+            assert!(last_prompt().contains("<orx-autonomy level=\"copilot\">"));
+            assert!(!last_prompt().contains("<orx-autonomy level=\"autoresearch\">"));
+            let retried = store.latest_chat_turn("chat").unwrap().unwrap();
+            assert_eq!(retried.id, failed.id);
+            assert_eq!(retried.request_hash, failed.request_hash);
+            assert_eq!(retried.prepared_input, failed.prepared_input);
 
             // Coming back from another agent branches where Claude last ended.
             let agent = |harness: &str| crate::store::StoredAgentSelection {
@@ -16226,7 +16275,8 @@ for line in sys.stdin:
         text = '\n'.join(b.get('text', '') for b in request['params']['prompt'])
         with open(sys.argv[1], 'a') as log:
             log.write(json.dumps(text) + '\n')
-        result = {'stopReason':'end_turn'}
+        stopped = 'Cut this turn short.' in text and '<orx-recovery>' not in text
+        result = {'stopReason':'cancelled' if stopped else 'end_turn'}
     print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':result}), flush=True)
 "#
             .into(),
@@ -16443,6 +16493,91 @@ for line in sys.stdin:
             .unwrap()
             .is_none());
         assert_eq!(flag(&store, &run)["state"], "waiting");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn continuing_a_failed_turn_uses_the_chats_current_autonomy() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let store = Store::open().unwrap();
+        quiet_agent_chat(&store, Some(Autonomy::AutoResearch.id()));
+        let host = notice_host();
+        let mut events = host.subscribe();
+        let wait_for_idle = async |events: &mut broadcast::Receiver<(&'static str, Value)>| {
+            tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    let (topic, value) = events.recv().await.unwrap();
+                    if topic == "chat.busy"
+                        && value["sessionId"] == "owner"
+                        && value["busy"] == false
+                    {
+                        break;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+        };
+        let request = host
+            .send_message(
+                "owner",
+                "Cut this turn short.".into(),
+                TurnOverrides::default(),
+                Vec::new(),
+                Vec::new(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        wait_for_idle(&mut events).await;
+        let failed = store
+            .get_chat_turn("owner", &request.turn_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(failed.state, "failed");
+        assert_eq!(failed.recovery_action.as_deref(), Some("continue"));
+        assert!(prompts()[0].contains("<orx-autonomy level=\"autoresearch\">"));
+        assert!(!failed.prepared_input.contains("<orx-autonomy"));
+
+        host.set_autonomy("owner", Autonomy::Copilot).await.unwrap();
+        let continued = host
+            .recover_turn(
+                "owner",
+                &failed.id,
+                "continue",
+                RecoveryOverrides::default(),
+            )
+            .await
+            .unwrap();
+        wait_for_idle(&mut events).await;
+        let delivered = prompts();
+        assert_eq!(delivered.len(), 2);
+        assert!(delivered[1].contains("<orx-autonomy level=\"copilot\">"));
+        assert!(!delivered[1].contains("<orx-autonomy level=\"autoresearch\">"));
+        assert!(delivered[1].contains("Cut this turn short."));
+        assert_eq!(
+            store
+                .get_chat_turn("owner", &continued.turn_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            "completed"
+        );
+
+        host.set_autonomy("owner", Autonomy::Agentic).await.unwrap();
+        let repeated = host
+            .recover_turn(
+                "owner",
+                &failed.id,
+                "continue",
+                RecoveryOverrides::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(repeated.turn_id, continued.turn_id);
+        assert!(repeated.existing);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -17055,6 +17190,38 @@ mod transcript_tree_tests {
     fn a_side_chat_of_an_empty_chat_has_no_seed_context() {
         let side = side_chat_session(&parent_session("claude-code"), &[]);
         assert_eq!(side.bootstrap_context, None);
+    }
+
+    #[test]
+    fn delegates_and_side_chats_start_at_default_for_a_full_auto_research_parent() {
+        let mut parent = parent_session("codex");
+        let route = crate::local::model_routes::Route {
+            profile: None,
+            name: parent.harness.clone(),
+            harness: parent.harness.clone(),
+            model: "model-x".into(),
+            free: false,
+            efforts: Vec::new(),
+        };
+        for (level, expected) in [
+            (Autonomy::AutoResearch, Autonomy::Agentic),
+            (Autonomy::Copilot, Autonomy::Copilot),
+            (Autonomy::Agentic, Autonomy::Agentic),
+        ] {
+            parent.autonomy = Some(level.id().into());
+            let side = side_chat_session(&parent, &[]);
+            let delegate = delegation::delegate_session(
+                "delegate".into(),
+                &parent,
+                &route,
+                None,
+                None,
+                None,
+                false,
+            );
+            assert_eq!(side.autonomy.as_deref(), Some(expected.id()));
+            assert_eq!(delegate.autonomy.as_deref(), Some(expected.id()));
+        }
     }
 
     #[test]

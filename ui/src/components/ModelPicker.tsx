@@ -978,7 +978,7 @@ export function ModelPicker({
                 >
                   {permissionChoices.length > 0 && (
                     <Menu.Group>
-                      <Menu.GroupLabel className={cn(MENU_LABEL, "text-subtext")}>{m.model_picker_permissions()}</Menu.GroupLabel>
+                      <Menu.GroupLabel className={MENU_LABEL}>{m.model_picker_permissions()}</Menu.GroupLabel>
                       <Menu.RadioGroup
                         value={effectivePermissionId}
                         onValueChange={(id) => {
@@ -994,7 +994,7 @@ export function ModelPicker({
                   {permissionChoices.length > 0 && onSelectAutonomy && <Menu.Separator className={MENU_SEPARATOR} />}
                   {onSelectAutonomy && (
                     <Menu.Group>
-                      <Menu.GroupLabel className={cn(MENU_LABEL, "text-subtext")}>{m.model_picker_autonomy()}</Menu.GroupLabel>
+                      <Menu.GroupLabel className={MENU_LABEL}>{m.model_picker_autonomy()}</Menu.GroupLabel>
                       <Menu.RadioGroup
                         value={autonomy ?? DEFAULT_AUTONOMY}
                         onValueChange={(id) => {

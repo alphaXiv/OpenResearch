@@ -7281,7 +7281,6 @@ impl Store {
         now: i64,
     ) -> Result<Option<i64>> {
         let tx = self.begin_immediate()?;
-        Self::retire_stale_instrumentation(&tx, Some(chat), now)?;
         let table = NoticeOutbox::for_turn(client_turn_id).table();
         let prior: Option<(i64, Option<i64>)> = tx
             .query_row(
@@ -7321,6 +7320,7 @@ impl Store {
              WHERE chat_session_id = ?1 AND client_turn_id = ?2 AND delivered_at IS NULL AND retired_at IS NULL"),
             params![chat, client_turn_id, failures + 1, first, next, reason, retired],
         )?;
+        Self::retire_stale_instrumentation(&tx, Some(chat), now)?;
         tx.commit()?;
         Ok(Some(failures + 1))
     }
@@ -9851,6 +9851,56 @@ pub(crate) mod tests {
             drop(other_writer);
             std::fs::remove_dir_all(dir).unwrap();
         }
+    }
+
+    #[test]
+    fn retiring_stale_instrumentation_keeps_the_surviving_batch_in_backoff() {
+        let dir = crate::config::test_home().join(format!("orx-notices-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let run = run_fixture("ending", "running", Some("owner"));
+        store.upsert_run(&run).unwrap();
+        store
+            .upsert_run(&run_fixture("live", "running", Some("owner")))
+            .unwrap();
+        store
+            .insert_run_notice(
+                &run.id,
+                "owner",
+                INSTRUMENTATION,
+                INSTRUMENTATION,
+                "Check the run.",
+                1,
+            )
+            .unwrap();
+        store
+            .insert_run_notice("live", "owner", NOTIFY, "live", "Keep this notice.", 1)
+            .unwrap();
+        let frozen = store.run_notice_batch_at("owner", 2).unwrap();
+        assert_eq!(frozen.len(), 2);
+
+        store
+            .update_status(&run.id, RunStatus::Done, None, None)
+            .unwrap();
+        assert_eq!(store.get_run(&run.id).unwrap().unwrap().ended_at, None);
+        let recorded = store
+            .record_run_notice_failure(
+                "owner",
+                &frozen[0].client_turn_id,
+                "Temporary failure",
+                false,
+                3,
+            )
+            .unwrap();
+        assert_eq!(recorded, Some(1));
+        assert!(store.run_notice_batch_at("owner", 4).unwrap().is_empty());
+
+        let retry = store.run_notice_batch_at("owner", 60_003).unwrap();
+        assert_eq!(retry.len(), 1);
+        assert_eq!(retry[0].body, "Keep this notice.");
+        assert_ne!(retry[0].client_turn_id, frozen[0].client_turn_id);
+        assert_eq!(store.run_notice_error(&run.id).unwrap(), None);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

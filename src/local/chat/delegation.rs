@@ -8,8 +8,8 @@ use sha2::{Digest as _, Sha256};
 use std::sync::OnceLock;
 
 use super::{
-    attachments_dir, stored_to_wire, MessagePhase, OrxKind, OrxSource, WirePart, WirePrompt,
-    ORX_MESSAGE_PREFIX,
+    attachments_dir, child_autonomy, stored_to_wire, MessagePhase, OrxKind, OrxSource, WirePart,
+    WirePrompt, ORX_MESSAGE_PREFIX,
 };
 use crate::error::{anyhow, Result};
 use crate::local::harness::{self, PermissionMode};
@@ -211,7 +211,7 @@ pub fn delegate_session(
         context_usage_json: None,
         bootstrap_context: None,
         goal: None,
-        autonomy: parent.autonomy.clone(),
+        autonomy: child_autonomy(parent),
         active_leaf_id: None,
         side_parent_session_id: (!own_worktree).then(|| parent.id.clone()),
         side_parent_leaf_id: None,
