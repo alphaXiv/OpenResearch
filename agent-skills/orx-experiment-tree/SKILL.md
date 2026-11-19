@@ -158,7 +158,8 @@ intended flow — do **not** edit a frozen node or rewrite the run command:
    what runs in flight have already committed, bound the next run to what
    remains, and ask the user if you cannot establish that bound, such as when the
    backend reports no price.
-6. **Plan ahead when the next decision is clear, then end your turn.** Create
+6. **Plan ahead when the next decision is clear, then end your turn with
+   a `running` `yield`.** Create
    its options as unrun children, title and description only, under the running
    node or the sibling you expect to win, and leave their branches alone until
    that parent is confirmed (step 4). Planned children are the queue the user
@@ -189,10 +190,10 @@ intended flow — do **not** edit a frozen node or rewrite the run command:
      round's results are in. Nothing else will wake the chat to start it.
    - **Promote** — result is a clear win: once it is confirmed (step 4), this
      node becomes the **parent for the next round**; while a sibling still runs,
-     plan the next round under it and end your turn. The next batch of children
-     branch off *it*, not the baseline, so the win carries forward and the next
-     ideas stack on top of it. If you planned that round under another sibling,
-     `orx exp move` its unrun children onto the winner. This is
+     plan the next round under it and end your turn with a `running`
+     `yield`. The next batch of children branch off *it*, not the baseline, so
+     the win carries forward and the next ideas stack on top of it. If you planned
+     that round under another sibling, `orx exp move` its unrun children onto the winner. This is
      the move that makes the tree grow deeper; skipping it is what produces a flat,
      sweep-only tree.
    - **Stop** — goal met, or the branch is exhausted.

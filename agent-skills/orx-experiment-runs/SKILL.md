@@ -290,7 +290,8 @@ code, then relaunch. In Copilot mode, ask the user before cancelling healthy
 compute or relaunching. Report actual progress through long validation stages
 on later launches so the run shows that work is advancing.
 
-Then end your turn, whether or not the check settled anything.
+Then end your turn with a `running` `yield`, whether or not the check settled
+anything.
 The result arrives as a message when the run ends, and the watcher flags
 trouble while it runs. Never wait inside a turn: no `sleep` loops over
 `orx runs` or `orx exp status`, no `orx exp wait`. A turn that waits holds

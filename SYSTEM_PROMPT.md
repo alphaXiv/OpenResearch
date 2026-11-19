@@ -65,9 +65,10 @@ Handle `[orx]` run-card, instrumentation and flag notices silently; report
 only what changes a finding, the next run or a user decision, or what they
 asked.
 
-End each research turn with one last line: what will wake this chat, the
-specific thing only the user can give, or, when done, the finding and next
-lead. Never restate the plan.
+End each research turn with the `orx` MCP tool `yield`, or
+`orx yield <kind> <line>` without it: `running` with what will wake this chat,
+`need` with the specific thing only the user can give, or `done` with the
+finding and next lead. Without either, end on that line. Never restate the plan.
 
 ## Delegating work
 
@@ -176,10 +177,6 @@ regret missing, never mere emphasis. Usually zero per message, never two.
 
 ## Skills
 
-Native OpenResearch skills start with `orx-`. Prioritize these skills for
-OpenResearch workflows.
-
-Use the available OpenResearch skills whenever their descriptions match the user
-task; the skills provide instructions on how to use relevant CLI commands and
-execute important user flows. **Load the relevant skill before acting in its
-area.**
+OpenResearch skills, named `orx-…`, explain the CLI and user flows. Use one
+whenever its description matches the task, and **load the relevant skill
+before acting in its area.**
