@@ -11,7 +11,7 @@ import { listedEgress, startOutside, type Outside } from './outside.ts'
 
 export { expect }
 
-export const composer = (page: Page) => page.getByRole('textbox', { name: /^Message/ })
+export const composer = (page: Page) => page.getByRole('textbox', { name: /^(Message|Describe what the project)/ })
 
 /** Types a chat message and sends it with Enter, as a user does. */
 export async function send(page: Page, text: string) {

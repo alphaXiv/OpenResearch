@@ -4,7 +4,7 @@ import path from 'node:path'
 
 const commit = 'git -c user.name=E2E -c user.email=e2e@example.com commit -qm'
 
-test('a chat without a project becomes the project its agent proposes', async ({ page, project, agent, orx }, info) => {
+test('a new project becomes the project its agent proposes', async ({ page, project, agent, orx }, info) => {
   const folder = path.join(orx.root, 'kept', 'tokenizer-probes')
   agent.script('Jot down some ideas.', [
     { run: `printf 'ideas\\n' > notes.md && printf 'draft\\n' > draft.md && git add notes.md && ${commit} 'Add notes'` },
@@ -16,16 +16,18 @@ test('a chat without a project becomes the project its agent proposes', async ({
   ])
   await project.open(page)
 
-  await test.step('the composer starts a chat with no project', async () => {
+  await test.step('the composer starts a new project that asks for a description', async () => {
     await page.getByRole('button', { name: /^e2e-/, expanded: false }).click()
-    await page.getByRole('menuitem', { name: 'No project' }).click()
-    await expect(page.getByRole('button', { name: 'No project', expanded: false })).toBeVisible()
+    await page.getByRole('menuitem', { name: 'New project' }).click()
+    await expect(page.getByRole('textbox', { name: 'Project name (optional)' })).toBeVisible()
     // The new draft focuses its composer once it is ready for a message.
     await expect(composer(page)).toBeFocused()
+    await expect(composer(page)).toHaveAccessibleName('Describe what the project should be')
     await send(page, 'Jot down some ideas.')
     await expect(page.getByText('Wrote notes.md.', { exact: true })).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Create project' })).toBeVisible()
-    await expect(page.getByRole('complementary').getByRole('img', { name: 'No project' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Choose folder' })).toBeVisible()
+    // A project nobody named is just its chat in the sidebar, with no project row to add a second chat to.
+    await expect(page.getByRole('complementary').getByRole('button', { name: /^Jot down some ideas\./ })).toBeVisible()
   })
 
   await test.step("the agent's proposal moves the chat's work into the new project", async () => {
@@ -44,6 +46,41 @@ test('a chat without a project becomes the project its agent proposes', async ({
     expect(readFileSync(path.join(folder, 'notes.md'), 'utf8')).toBe('ideas\n')
     expect(existsSync(path.join(folder, 'draft.md'))).toBe(false)
   })
+})
+
+test('naming a new project makes it a project of its own, which outlives its last chat', async ({ page, project, agent }) => {
+  agent.script('Compare tokenizers on a small corpus.', [{ say: 'Comparing tokenizers.' }])
+  await project.open(page)
+  await page.getByRole('button', { name: /^e2e-/, expanded: false }).click()
+  await page.getByRole('menuitem', { name: 'New project' }).click()
+  await expect(composer(page)).toBeFocused()
+
+  const name = page.getByRole('textbox', { name: 'Project name (optional)' })
+  await name.fill('Tokenizer probes')
+  await name.press('Enter')
+  await send(page, 'Compare tokenizers on a small corpus.')
+  await expect(page.getByText('Comparing tokenizers.', { exact: true })).toBeVisible()
+  const sidebar = page.getByRole('complementary')
+  await expect(sidebar.getByRole('button', { name: 'Tokenizer probes', exact: true })).toBeVisible()
+
+  await sidebar.getByRole('button', { name: /^Compare tokenizers on a small corpus\./ }).click({ button: 'right' })
+  await page.getByRole('menuitem', { name: 'Delete' }).click()
+  await page.getByRole('dialog').getByRole('button', { name: 'Delete' }).click()
+  await expect(sidebar.getByRole('button', { name: /^Compare tokenizers on a small corpus\./ })).toBeHidden()
+  await expect(sidebar.getByRole('button', { name: 'Tokenizer probes', exact: true })).toBeVisible()
+})
+
+test('a new project offers a paper, a folder or an .orx file to start from', async ({ page, project }) => {
+  await project.open(page)
+  await page.getByRole('button', { name: /^e2e-/, expanded: false }).click()
+  await page.getByRole('menuitem', { name: 'New project' }).click()
+
+  await page.getByRole('button', { name: 'Import', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'Import' })
+  await expect(dialog.getByRole('button', { name: 'Existing folder' })).toBeVisible()
+  await expect(dialog.getByRole('button', { name: 'From a paper' })).toBeVisible()
+  await expect(dialog.getByRole('button', { name: 'Open .orx file' })).toBeVisible()
+  await expect(dialog.getByRole('button', { name: 'Blank project' })).toBeHidden()
 })
 
 test('a chat in a project moves into a new one once its turn ends', async ({ page, project, agent, orx }) => {

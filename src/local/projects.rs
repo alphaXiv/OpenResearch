@@ -232,11 +232,16 @@ pub fn scratch_root() -> PathBuf {
     crate::store::data_dir().join("scratch")
 }
 
-/// The project a new chat without a project starts in. A scratch project no
-/// chat uses yet is reused, so opening the draft again leaves no new folder.
+/// What a scratch project is called until the user names it; older versions show it as a project of this name.
+pub const UNNAMED_SCRATCH: &str = "No project";
+
+/// The project a new chat without a project starts in. An unnamed scratch
+/// project no chat uses yet is reused, so opening the draft again leaves no new folder.
 pub fn scratch_project(store: &Store) -> Result<LocalProject> {
     for project in store.list_local_projects()? {
-        if project.is_scratch() && store.list_chat_sessions_by_project(&project.id)?.is_empty() {
+        if project.is_unnamed_scratch()
+            && store.list_chat_sessions_by_project(&project.id)?.is_empty()
+        {
             return Ok(project);
         }
     }
@@ -248,7 +253,7 @@ pub fn scratch_project(store: &Store) -> Result<LocalProject> {
     let project = LocalProject {
         slug: unique_project_slug(store, &format!("scratch-{}", &id[..8]))?,
         id,
-        name: "No project".to_string(),
+        name: UNNAMED_SCRATCH.to_string(),
         github_owner: String::new(),
         github_repo: String::new(),
         github_sync_enabled: false,
@@ -1537,6 +1542,27 @@ mod tests {
         assert_eq!(scratch_project(&store).unwrap().id, first.id);
 
         let _ = std::fs::remove_dir_all(&first.repo_path);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn naming_a_scratch_project_keeps_it_from_the_next_new_chat() {
+        let root = root();
+        let store = Store::open_at(root.join("data")).unwrap();
+
+        let mut named = scratch_project(&store).unwrap();
+        assert!(named.is_unnamed_scratch());
+        named.name = "Tokenizer probes".to_string();
+        store.update_local_project(&named).unwrap();
+
+        let next = scratch_project(&store).unwrap();
+        assert_ne!(next.id, named.id);
+        assert!(next.is_unnamed_scratch());
+        let kept = store.get_local_project(&named.id).unwrap().unwrap();
+        assert!(kept.is_scratch() && !kept.is_unnamed_scratch());
+
+        let _ = std::fs::remove_dir_all(&named.repo_path);
+        let _ = std::fs::remove_dir_all(&next.repo_path);
         let _ = std::fs::remove_dir_all(root);
     }
 
