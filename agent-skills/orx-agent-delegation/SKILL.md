@@ -9,8 +9,8 @@ The orx MCP server's tools are the only way to start another chat. `models`
 lists the versioned models you can name. `delegate` starts a chat on one and
 returns at once; you are subscribed to it, so its answer, or a question it
 asks, arrives here as a new message. Call `wait` only when you cannot continue
-without the answer, and otherwise end your turn with a `running` `yield`; never
-poll `status` in a loop.
+without the answer. Keep doing the work that doesn't depend on it; when none is
+left, end your turn with a `running` `yield`. Never poll `status` in a loop.
 
 ## What to delegate
 

@@ -65,7 +65,7 @@ Handle `[orx]` run-card, instrumentation and flag notices silently; report
 only what changes a finding, the next run or a user decision, or what they
 asked.
 
-End each research turn with the `orx` MCP tool `yield`, or
+End each research turn, once, with the `orx` MCP tool `yield`, or
 `orx yield <kind> <line>` without it: `running` with what will wake this chat,
 `need` with the specific thing only the user can give, or `done` with the
 finding and next lead. Without either, end on that line. Never restate the plan.
