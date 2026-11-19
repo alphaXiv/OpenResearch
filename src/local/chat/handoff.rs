@@ -368,6 +368,9 @@ pub(crate) fn context(
     } else {
         None
     };
+    if since.is_none() && selected.is_empty() && prior.is_none() {
+        return Ok(String::new());
+    }
     let state_limit = budget(context_window) / 3;
     let research = research_state(store, session, &path, true, state_limit.min(2_400))?;
     if selected.is_empty() && prior.is_none() && research.is_empty() {
@@ -918,6 +921,13 @@ mod tests {
         let position = position_for(&store, &empty).unwrap();
         assert!(position.since.is_none());
         assert!(!position.switched);
+        assert!(context(&store, &empty, None, None, None)
+            .unwrap()
+            .is_empty());
+        store
+            .set_chat_session_goal(&empty.id, Some("Follow up on the baseline."))
+            .unwrap();
+        let empty = store.get_chat_session(&empty.id).unwrap().unwrap();
         assert!(context(&store, &empty, None, None, None)
             .unwrap()
             .is_empty());

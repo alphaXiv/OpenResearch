@@ -86,7 +86,7 @@ fn tools(harness: &str) -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "kind": { "type": "string", "enum": ["running", "need", "done"], "description": "Use running for followed runs or live delegates, need for user input, or done for completed work." },
+                    "kind": { "type": "string", "enum": ["running", "need", "done"], "description": "Use running for runs, delegates or background tasks that will wake this chat, need for user input, or done for completed work." },
                     "text": { "type": "string", "maxLength": 500 },
                 },
                 "required": ["kind", "text"],
@@ -247,7 +247,10 @@ async fn call(
         "set_goal" => {
             let goal = match args.get("goal") {
                 Some(Value::Null) => None,
-                Some(Value::String(text)) => Some(text.trim()).filter(|text| !text.is_empty()),
+                Some(Value::String(text)) if !text.trim().is_empty() => Some(text.trim()),
+                Some(Value::String(_)) => {
+                    bail!("Enter a goal. To clear it, pass null to set_goal or run orx goal clear.")
+                }
                 _ => bail!("Provide goal as text or null to clear it."),
             };
             state.chat.set_agent_goal(&caller.id, goal).await?;

@@ -13541,9 +13541,14 @@ mod tests {
             .await
             .unwrap();
         let listed: Value = serde_json::from_slice(&body).unwrap();
-        for (name, args) in [
-            ("yield", json!({ "kind": "need", "text": "Need input" })),
-            ("set_goal", json!({ "goal": null })),
+        for (name, args, error) in [
+            (
+                "yield",
+                json!({ "kind": "need", "text": "Need input" }),
+                "active turn",
+            ),
+            ("set_goal", json!({ "goal": null }), "active turn"),
+            ("set_goal", json!({ "goal": "  " }), "orx goal clear"),
         ] {
             assert!(listed["tools"]
                 .as_array()
@@ -13570,7 +13575,7 @@ mod tests {
             assert!(receipt["content"][0]["text"]
                 .as_str()
                 .unwrap()
-                .contains("active turn"));
+                .contains(error));
         }
     }
 

@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{anyhow, Context, Result};
 use crate::local::autonomy::Autonomy;
+use crate::local::claude::BackgroundTasks;
 use crate::local::harness::TurnOutcome;
 use crate::local::model::{LocalExperiment, LocalProject};
 use crate::workspace_state::{GlobalWorkspaceState, WorkspaceState};
@@ -4442,6 +4443,10 @@ impl Store {
     }
 
     pub fn chat_session_awaiting_input(&self, session_id: &str, busy: bool) -> Result<bool> {
+        self.chat_session_has_prompt(session_id, Some(busy))
+    }
+
+    fn chat_session_has_prompt(&self, session_id: &str, busy: Option<bool>) -> Result<bool> {
         Ok(self.conn.query_row(
             "WITH RECURSIVE active(id, parent_id, parts_json) AS (
                 SELECT m.id, m.parent_id, m.parts_json FROM chat_messages m
@@ -4455,10 +4460,10 @@ impl Store {
                 SELECT 1 FROM active a, json_each(a.parts_json) p
                 WHERE json_extract(p.value, '$.type') = 'prompt'
                   AND COALESCE(json_extract(p.value, '$.prompt.resolved'), 0) = 0
-                  AND CASE WHEN json_extract(p.value, '$.prompt.nativeId') IS NOT NULL
+                  AND (?2 IS NULL OR CASE WHEN json_extract(p.value, '$.prompt.nativeId') IS NOT NULL
                     THEN ?2
                     ELSE json_extract(p.value, '$.prompt.kind') = 'question'
-                  END
+                  END)
              )",
             params![session_id, busy],
             |row| row.get(0),
@@ -5706,37 +5711,51 @@ impl Store {
         Ok(())
     }
 
-    pub(crate) fn has_followed_work(&self, chat: &str) -> Result<bool> {
-        let mut runs = self.conn.prepare(
-            "SELECT status FROM runs WHERE chat_session_id = ?1
-             UNION SELECT r.status FROM run_subscriptions s JOIN runs r ON r.id = s.run_id
-             WHERE s.chat_session_id = ?1",
-        )?;
-        let mut rows = runs.query([chat])?;
-        while let Some(row) = rows.next()? {
-            let status: String = row.get(0)?;
-            if !is_terminal_status(&status) {
-                return Ok(true);
-            }
-        }
-
-        Ok(self.conn.query_row(
-            "WITH RECURSIVE delegates(id) AS (
+    pub(crate) fn has_wake_work(&self, chat: &str, background: &BackgroundTasks) -> Result<bool> {
+        let background_ids = serde_json::to_string(&background.keys().collect::<Vec<_>>())?;
+        let mut work = self.conn.prepare(
+            "WITH RECURSIVE followed(id) AS (
                 SELECT ?1
                 UNION
-                SELECT d.session_id FROM delegates
-                JOIN chat_delegates d ON d.parent_session_id = delegates.id
-                JOIN chat_subscriptions s ON s.subscriber_session_id = delegates.id
+                SELECT d.session_id FROM followed
+                JOIN chat_delegates d ON d.parent_session_id = followed.id
+                JOIN chat_subscriptions s ON s.subscriber_session_id = followed.id
                     AND s.target_session_id = d.session_id AND s.paused = 0
                 JOIN chat_sessions c ON c.id = d.session_id AND c.archived = 0
              )
-             SELECT EXISTS (
-                SELECT 1 FROM delegates JOIN chat_turn_leases l ON l.chat_session_id = delegates.id
-                WHERE delegates.id != ?1 AND l.heartbeat_at >= ?2
-             )",
-            params![chat, expired_before(CHAT_TURN_LEASE_TTL)],
-            |row| row.get(0),
-        )?)
+             SELECT NULL FROM followed f
+             WHERE f.id IN (SELECT value FROM json_each(?3))
+                OR (f.id != ?1 AND EXISTS (SELECT 1 FROM chat_turn_leases l
+                    WHERE l.chat_session_id = f.id AND l.heartbeat_at >= ?2))
+                OR (f.id != ?1 AND EXISTS (SELECT 1 FROM chat_queued_messages q
+                    WHERE q.session_id = f.id))
+                OR EXISTS (SELECT 1 FROM pending_chat_run_outbox n
+                    WHERE n.chat_session_id = f.id
+                      AND (n.is_flag OR NOT EXISTS (SELECT 1 FROM chat_turns accepted
+                        WHERE accepted.session_id = f.id
+                          AND accepted.client_turn_id = n.client_turn_id
+                          AND accepted.delivery_state = 'accepted')))
+             UNION ALL
+             SELECT r.status FROM followed f JOIN runs r ON r.chat_session_id = f.id
+             UNION ALL
+             SELECT r.status FROM followed f JOIN run_subscriptions s ON s.chat_session_id = f.id
+             JOIN runs r ON r.id = s.run_id",
+        )?;
+        let mut rows = work.query(params![
+            chat,
+            expired_before(CHAT_TURN_LEASE_TTL),
+            background_ids
+        ])?;
+        while let Some(row) = rows.next()? {
+            let status: Option<String> = row.get(0)?;
+            if status
+                .as_deref()
+                .is_none_or(|status| !is_terminal_status(status))
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     pub(crate) fn write_chat_turn_yield(&self, id: &str, closing: &TurnYield) -> Result<()> {
@@ -5765,6 +5784,19 @@ impl Store {
         Ok(yields)
     }
 
+    pub(crate) fn chat_message_yield(&self, message_id: &str) -> Result<Option<TurnYield>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT yield_json FROM chat_turns
+             WHERE assistant_message_id = ?1 AND state = 'completed' AND yield_json IS NOT NULL",
+                [message_id],
+                |row| read_turn_yield(row, 0),
+            )
+            .optional()?
+            .flatten())
+    }
+
     pub(crate) fn chat_session_yield_kind(&self, session_id: &str) -> Result<Option<YieldKind>> {
         let kind: Option<String> = self
             .conn
@@ -5785,6 +5817,7 @@ impl Store {
         chat: &str,
         source: &str,
         frontier: &str,
+        background: &BackgroundTasks,
     ) -> Result<bool> {
         let current: bool = self.conn.query_row(
             "SELECT EXISTS (
@@ -5800,19 +5833,13 @@ impl Store {
                   AND NOT EXISTS (SELECT 1 FROM chat_turns newer WHERE newer.session_id = c.id
                                   AND (newer.created_at, newer.rowid) > (head.created_at, head.rowid))
                   AND NOT EXISTS (SELECT 1 FROM chat_queued_messages q WHERE q.session_id = c.id)
-                  AND NOT EXISTS (SELECT 1 FROM run_notices n WHERE n.chat_session_id = c.id
-                                  AND n.delivered_at IS NULL AND n.retired_at IS NULL
-                                  AND NOT EXISTS (SELECT 1 FROM chat_turns accepted
-                                    WHERE accepted.session_id = c.id
-                                      AND accepted.client_turn_id = n.client_turn_id
-                                      AND accepted.delivery_state = 'accepted'))
              )",
             params![chat, source, frontier, STOP_CHECK_PREFIX],
             |row| row.get(0),
         )?;
         Ok(current
-            && !self.chat_session_awaiting_input(chat, true)?
-            && !self.has_followed_work(chat)?)
+            && !self.chat_session_has_prompt(chat, None)?
+            && !self.has_wake_work(chat, background)?)
     }
 
     pub(crate) fn pending_stop_checks(&self) -> Result<Vec<(String, String, i64)>> {
@@ -5864,15 +5891,16 @@ impl Store {
 
     #[cfg(test)]
     pub fn complete_chat_turn(&self, id: &str) -> Result<bool> {
-        self.finish_chat_turn(id, TurnOutcome::Completed, false)
+        self.finish_chat_turn(id, TurnOutcome::Completed, None)
     }
 
     pub(crate) fn finish_chat_turn(
         &self,
         id: &str,
         outcome: TurnOutcome,
-        stop_check: bool,
+        stop_check: Option<&BackgroundTasks>,
     ) -> Result<bool> {
+        let stop_check = stop_check.filter(|_| outcome == TurnOutcome::Completed);
         let tx = self
             .conn
             .is_autocommit()
@@ -5889,19 +5917,25 @@ impl Store {
         )?;
         if changed > 0 {
             self.confirm_flag_wake_delivery(id, now)?;
-            if stop_check && outcome == TurnOutcome::Completed {
+        }
+        if let Some(background) = stop_check.filter(|_| changed > 0) {
+            let stage = || -> Result<()> {
                 let session_id: String = self.conn.query_row(
                     "SELECT session_id FROM chat_turns WHERE id = ?1",
                     [id],
                     |row| row.get(0),
                 )?;
-                if self.stop_check_current(&session_id, id, id)? {
+                if self.stop_check_current(&session_id, id, id, background)? {
                     self.conn.execute(
                         "INSERT OR IGNORE INTO chat_turn_wakes (source_turn_id, kind, next_delivery_at)
                          VALUES (?1, 'stop-check', ?2)",
                         params![id, now],
                     )?;
                 }
+                Ok(())
+            };
+            if let Err(error) = stage() {
+                eprintln!("orx up: could not stage stop check for turn {id}: {error:#}");
             }
         }
         if let Some(tx) = tx {
@@ -10776,49 +10810,70 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn legacy_turn_rows_read_without_yield_and_legacy_updates_keep_it() {
+    fn old_turn_rows_migrate_and_old_writes_keep_yields_and_wakes() {
         let root =
             crate::config::test_home().join(format!("yield-legacy-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("orx.db");
+        let old = Connection::open(&path).unwrap();
+        old.execute_batch(include_str!(
+            "../tests/contracts/store-pre-autoresearch-turns.sql"
+        ))
+        .unwrap();
+
         let store = Store::open_at(root.clone()).unwrap();
         store.put_chat_session("old-chat", "codex", None);
         store
-            .conn
-            .execute_batch(
-                "ALTER TABLE chat_turns DROP COLUMN yield_json;
-             INSERT INTO chat_turns (
-                id, session_id, assistant_message_id, client_turn_id, request_hash,
-                prepared_input, settings_json, state, delivery_state, created_at, updated_at
-             ) VALUES ('old-turn', 'old-chat', 'old-answer', 'old-client', 'hash',
-                       'question', '{}', 'running', 'accepted', 1, 1);",
-            )
+            .set_chat_session_autonomy("old-chat", crate::local::autonomy::Autonomy::AutoResearch)
             .unwrap();
-        drop(store);
-
-        let store = Store::open_at(root).unwrap();
-        let read = || {
+        store
+            .set_chat_session_active_leaf("old-chat", Some("old-source-answer"))
+            .unwrap();
+        assert_eq!(
             store
                 .get_chat_turn("old-chat", "old-turn")
                 .unwrap()
                 .unwrap()
-        };
-        assert_eq!(read().turn_yield, None);
+                .turn_yield,
+            None
+        );
+        assert!(store.pending_stop_checks().unwrap().is_empty());
         let closing = TurnYield {
             kind: YieldKind::Done,
             text: "Budget spent.".into(),
         };
         store.write_chat_turn_yield("old-turn", &closing).unwrap();
-        store
-            .conn
-            .execute(
-                "UPDATE chat_turns SET state = 'completed', updated_at = 2 WHERE id = 'old-turn'",
-                [],
+        store.complete_chat_turn("old-turn").unwrap();
+        assert!(store
+            .finish_chat_turn(
+                "old-source",
+                TurnOutcome::Completed,
+                Some(&Default::default())
             )
+            .unwrap());
+        let pending = store.pending_stop_checks().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].1, "old-source");
+        drop(store);
+
+        for id in ["old-turn", "old-source"] {
+            assert_eq!(
+                old.execute(
+                    include_str!("../tests/contracts/store-pre-autoresearch-turn-settings.sql"),
+                    params![id, r#"{"model":"legacy-model"}"#, 3],
+                )
+                .unwrap(),
+                1
+            );
+        }
+        let store = Store::open_at(root).unwrap();
+        let row = store
+            .get_chat_turn("old-chat", "old-turn")
+            .unwrap()
             .unwrap();
-        assert_eq!(read().turn_yield, Some(closing.clone()));
-        assert_eq!(
-            store.completed_chat_yields("old-chat").unwrap()["old-answer"],
-            closing
-        );
+        assert_eq!(row.turn_yield, Some(closing));
+        assert_eq!(row.settings_json, r#"{"model":"legacy-model"}"#);
+        assert_eq!(store.pending_stop_checks().unwrap(), pending);
     }
 
     fn project_with_run_artifacts(store: &Store, project: &str, run: &str, digest: &str) {

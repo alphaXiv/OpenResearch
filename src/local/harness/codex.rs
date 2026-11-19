@@ -4010,7 +4010,7 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<TurnOutcome> {
                     &mut open_requests,
                 )
                 .await;
-                return Ok(TurnOutcome::Stopped);
+                return Ok(TurnOutcome::Completed);
             }
             Waited::Event(Err(_)) => {
                 client.interrupt_active_turn().await;
@@ -5097,17 +5097,7 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<TurnOutcome> {
 
         match kind {
             "turn.completed" | "task_complete" => completed = true,
-            "turn.failed" | "turn_aborted" => {
-                completed = false;
-                if kind == "turn.failed" {
-                    let detail = msg["message"]
-                        .as_str()
-                        .or_else(|| msg["error"]["message"].as_str())
-                        .unwrap_or("Codex reported a failed turn");
-                    ctx.mark_terminal_failure("codex_terminal", detail.to_string());
-                    ctx.push_error(detail.to_string());
-                }
-            }
+            "turn_aborted" => completed = false,
             "agent_message_delta" => {
                 let delta = msg.get("delta").and_then(Value::as_str).unwrap_or("");
                 let id = open_text.get_or_insert_with(|| next_id("text")).clone();
@@ -5180,7 +5170,7 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<TurnOutcome> {
                     }
                 }
             }
-            "error" | "stream_error" => {
+            "error" | "stream_error" | "turn.failed" => {
                 completed = false;
                 let detail = msg
                     .get("message")

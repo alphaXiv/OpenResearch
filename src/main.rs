@@ -187,7 +187,8 @@ enum Command {
     Yield {
         #[arg(value_enum)]
         kind: store::YieldKind,
-        line: String,
+        #[arg(required = true, trailing_var_arg = true)]
+        line: Vec<String>,
     },
 
     /// Set or clear the current agent chat's research goal.
@@ -1415,9 +1416,10 @@ async fn run_cli() {
         return;
     }
     let chat_tool = match &command {
-        Command::Yield { kind, line } => {
-            Some(("yield", serde_json::json!({ "kind": kind, "text": line })))
-        }
+        Command::Yield { kind, line } => Some((
+            "yield",
+            serde_json::json!({ "kind": kind, "text": line.join(" ") }),
+        )),
         Command::Goal(GoalCommand::Set { goal }) => {
             Some(("set_goal", serde_json::json!({ "goal": goal })))
         }
@@ -1818,6 +1820,22 @@ mod cli_tests {
             dry_run: true,
             force: false,
         })));
+    }
+
+    #[test]
+    fn yield_accepts_quoted_and_unquoted_lines() {
+        for args in [
+            vec!["orx", "yield", "need", "Share the corpus."],
+            vec!["orx", "yield", "need", "Share", "the", "corpus."],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            let Command::Yield { kind, line } = cli.command.unwrap() else {
+                panic!("expected yield");
+            };
+            assert_eq!(kind, store::YieldKind::Need);
+            assert_eq!(line.join(" "), "Share the corpus.");
+        }
+        assert!(Cli::try_parse_from(["orx", "yield", "need"]).is_err());
     }
 
     #[test]
