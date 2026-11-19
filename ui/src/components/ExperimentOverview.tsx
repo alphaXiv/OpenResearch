@@ -11,6 +11,7 @@ import {
   GitCompareArrows,
   Terminal,
 } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef } from "react";
 import {
   timeAgo,
@@ -24,7 +25,7 @@ import { noticeRun, runActive, runDisplay, runDuration, runNeverStarted, runResu
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { BackendBadge } from "./BackendLogos";
 import { BranchPill } from "./BranchPill";
-import { Md } from "./Md";
+import { ChatImageScope, Md } from "./Md";
 import { RunContactNotice } from "./RunContactNotice";
 import { useRunClock } from "./RunTiming";
 import { RunDetails } from "./run/Details";
@@ -83,7 +84,7 @@ export function ExperimentOverview({
   onOpenCode: (intent: TabOpenIntent) => void;
   onOpenDiff: (intent: TabOpenIntent) => void;
 }) {
-  const { useTrackioRuns } = useWorkspace().queries;
+  const { useTrackioRuns, listChatSessionsQuery } = useWorkspace().queries;
   const { trackioRunUrl } = useWorkspace().api;
 
   const run = selectedRunId ? runs.find((run) => run.id === selectedRunId) ?? null : runs[0] ?? null;
@@ -98,6 +99,10 @@ export function ExperimentOverview({
   const now = useRunClock(hasLiveRun);
   const overview = useRef<HTMLDivElement>(null);
   const trackio = useTrackioRuns(experiment.projectId, hasLiveRun).data;
+  const sessions = useQuery(listChatSessionsQuery(experiment.projectId)).data;
+  // The experiment outlives its chat; the file route 404s a deleted session.
+  const chatDeleted = sessions?.every((session) => session.id !== experiment.chatSessionId);
+  const chatSessionId = chatDeleted ? null : experiment.chatSessionId;
   const hasTrackio = run !== null && trackioRunUrl(trackio, run.id) !== null;
 
   useEffect(() => {
@@ -105,6 +110,7 @@ export function ExperimentOverview({
   }, [selectedRunId]);
 
   return (
+    <ChatImageScope projectId={experiment.projectId} sessionId={chatSessionId}>
     <div ref={overview} className="experiment-overview absolute inset-0 overflow-y-auto bg-background [&_h1]:m-0 [&_h1]:text-text [&_h1]:text-xl [&_h1]:leading-tight">
       <div className="experiment-overview-inner w-full max-w-230 my-0 mx-auto pt-6.5 px-7 pb-10 [@media((max-width:_720px))]:pt-5 [@media((max-width:_720px))]:px-4.5 [@media((max-width:_720px))]:pb-8">
         <header className="experiment-overview-head flex items-start justify-between gap-6">
@@ -269,5 +275,6 @@ export function ExperimentOverview({
         {run?.monitor && <RunDetails key={`details:${run.id}`} run={run} className="mt-5.5 border-t border-t-border-variant pt-4.5" />}
       </div>
     </div>
+    </ChatImageScope>
   );
 }

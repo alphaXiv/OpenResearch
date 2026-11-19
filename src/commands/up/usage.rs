@@ -46,10 +46,11 @@ async fn report(
                 })
             })
             .transpose()?;
+        let week = local::spend::seven_days(&store, now, plans.as_deref())?;
         Ok(UsageReport {
             plans,
             chat,
-            ..local::spend::seven_days(&store, now)?
+            ..week
         })
     })
     .await
