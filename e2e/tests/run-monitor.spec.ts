@@ -1345,6 +1345,8 @@ for (let step = 1; step <= 5000 && !existsSync(${JSON.stringify(stop)}); step++)
 }`)
   const create = (title: string, command: string) => `orx create-experiment ${project.id} --title '${title}' --run-command '${command}' | sed -n 's/^ *id: *//p'`
   const launch = (title: string, command: string) => `orx exp run "$(${create(title, command)})" --backend local`
+  /** `commands` at once, failing if any fails: each launch mostly waits on orx, which a slow runner stretches. */
+  const together = (commands: string[]) => ['pids=', ...commands.map((command) => `(${command}) & pids="$pids $!"`), 'for pid in $pids; do wait "$pid"; done']
   type Row = { experiment: { title: string }; currentRun: { id: string; status: string; monitor?: { flag?: { state: string } | null } | null } | null }
   /** Until some chat lists `count` experiments that `ready` accepts; ended runs stay shown until their notice is answered. */
   const settled = (count: number, ready: (rows: Row[]) => boolean) => expect.poll(async () => {
@@ -1390,13 +1392,13 @@ for (let step = 1; step <= 5000 && !existsSync(${JSON.stringify(stop)}); step++)
   await autonomy('copilot')
   try {
     await project.open(page)
-    await turn('Try four ideas.', [
+    await turn('Try four ideas.', together([
       launch('Baseline', quick),
       launch('Smaller batch', broken),
       launch('Wider layers', live('wider', null)),
       launch('Higher learning rate', live('higher', 'RuntimeError: CUDA error: device-side assert triggered')),
       create('Dropout ablation', 'true'),
-    ], 5, (rows) => status(rows, 'Baseline')?.status === 'done' && status(rows, 'Smaller batch')?.status === 'failed'
+    ]), 5, (rows) => status(rows, 'Baseline')?.status === 'done' && status(rows, 'Smaller batch')?.status === 'failed'
       && status(rows, 'Wider layers')?.status === 'running' && status(rows, 'Higher learning rate')?.monitor?.flag?.state === 'waiting')
 
     await test.step('the card leads with the flag waiting on the user, then the live run, then how each finished one ended', async () => {
@@ -1432,36 +1434,32 @@ for (let step = 1; step <= 5000 && !existsSync(${JSON.stringify(stop)}); step++)
       await expect(card).toHaveCount(0)
     })
 
-    await test.step('a chat whose experiments all finished reads each result', async () => {
-      await page.keyboard.press('ControlOrMeta+n')
-      await expect(page.getByRole('feed', { name: 'Messages' })).toHaveCount(0)
-      await turn('Try two baselines.', ['Linear baseline', 'Learning rate 0.10'].map((title) => launch(title, quick)), 2,
-        (rows) => rows.every((row) => row.currentRun?.status === 'done'))
-      await shots('Try two baselines', 'hover-finished')
-      await expect(card.locator('[data-experiment-row]')).toHaveCount(2)
-    })
-
-    await test.step('a long result wraps inside the card and keeps its value and its comparison', async () => {
+    await test.step('a chat whose experiments all finished reads each result, a long one wrapped inside the card', async () => {
       const long = ticking('long', `
 const scale = Number(process.argv[2])
 process.stdout.write('::orx:: {"step":0,"of":4,"unit":"steps","t":0}\\n')
 for (let step = 1; step <= 4; step++) { await tick(); process.stdout.write('::orx:: {"step":' + step + ',"t":' + step + ',"m":{"bpb":' + (scale / step).toFixed(4) + '}}\\n') }`)
-      const parent = path.join(orx.root, `hover-parent-${project.id}`)
       const view = path.join(orx.root, `hover-view-${project.id}.xml`)
       writeFileSync(view, '<signal name="bpb" label="Validation bits per byte on held-out shards" digits="3" better="lower"/><view headline="bpb"><chart y="bpb"/></view>')
       await page.keyboard.press('ControlOrMeta+n')
       await expect(page.getByRole('feed', { name: 'Messages' })).toHaveCount(0)
-      await turn('Run the long baseline.', [`id=$(${create('Long baseline', `${long} 0.9`)})`, `echo "$id" > ${parent}`, `orx exp view set "$id" --file ${view}`, 'orx exp run "$id" --backend local'], 1,
-        (rows) => rows.every((row) => row.currentRun?.status === 'done'))
-      await turn('Try a smaller learning rate on it.', [
-        `id=$(orx create-experiment ${project.id} --parent "$(cat ${parent})" --title 'Smaller learning rate' --run-command '${long} 0.7' | sed -n 's/^ *id: *//p')`,
+      // The child's comparison is against its parent's result, so the parent ends first.
+      await turn('Run the long baseline, then a smaller learning rate on it.', [
+        `parent=$(${create('Long baseline', `${long} 0.9`)})`,
+        `orx exp view set "$parent" --file ${view}`,
+        'orx exp run "$parent" --backend local',
+        'orx exp wait "$parent"',
+        `id=$(orx create-experiment ${project.id} --parent "$parent" --title 'Smaller learning rate' --run-command '${long} 0.7' | sed -n 's/^ *id: *//p')`,
         `orx exp view set "$id" --file ${view}`,
         'orx exp run "$id" --backend local',
       ], 2, (rows) => rows.every((row) => row.currentRun?.status === 'done'))
+      await shots('Run the long baseline', 'hover-finished')
+      await expect(card.locator('[data-experiment-row]')).toHaveCount(2)
       for (const width of [1440, 420]) {
         await page.setViewportSize({ width, height: 900 })
         if (width === 420) await page.getByRole('button', { name: 'Show sidebar' }).click()
         await hover('Run the long baseline')
+        await expect(card.locator('[data-experiment-row]', { hasText: 'Long baseline' })).toContainText('Done in')
         const row = card.locator('[data-experiment-row]', { hasText: 'Smaller learning rate' })
         await expect(row).toContainText('Validation bits per byte on held-out shards')
         await expect(row).toContainText(said('0.175'))
@@ -1477,9 +1475,9 @@ for (let step = 1; step <= 4; step++) { await tick(); process.stdout.write('::or
     await test.step('a chat with many experiments scrolls them under its header', async () => {
       await page.keyboard.press('ControlOrMeta+n')
       await expect(page.getByRole('feed', { name: 'Messages' })).toHaveCount(0)
-      await turn('Try twelve seeds.', Array.from({ length: 12 }, (_, index) => launch(`Seed ${index + 1}`, quick)), 12,
+      await turn('Try seven seeds.', together(Array.from({ length: 7 }, (_, index) => launch(`Seed ${index + 1}`, quick))), 7,
         (rows) => rows.every((row) => row.currentRun?.status === 'done'))
-      await shots('Try twelve seeds', 'hover-many')
+      await shots('Try seven seeds', 'hover-many')
       const scroller = card.locator('ul').locator('..')
       expect(await scroller.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true)
     })
