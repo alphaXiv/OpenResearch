@@ -50,7 +50,9 @@ export function RunFigure({ id, children }: { id: string; children: ReactNode })
         </div>
       ) : run && data && block && drawsAt(block, "page") && hasData(block, data) ? (
         <div className="mt-2 min-w-0 rounded-md border border-border p-4">
-          {data.availability.state !== "live" && <p className="m-0 mb-2 text-xs text-ink-subtext">{data.availability.reason ?? m.run_monitor_load_failed()} · {timeAgo(data.asOf)}</p>}
+          {data.availability.state !== "live" && data.availability.reason && (
+            <p className="m-0 mb-2 text-xs text-ink-subtext">{data.availability.reason} · {timeAgo(data.asOf)}</p>
+          )}
           <Block monitor={data} block={block} size="page" tone={runTone(run, data)} live={runActive(run.status) && data.availability.state === "live"} />
         </div>
       ) : null}
