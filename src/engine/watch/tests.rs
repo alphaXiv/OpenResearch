@@ -257,15 +257,16 @@ async fn one_look_writes_each_runs_sentence_and_the_summary_through_the_agent_cl
         (evidence["byteFrom"].as_u64(), evidence["byteTo"].as_u64()),
         (Some(26), Some(69))
     );
-    let notices = store.run_notices_for_tests("b");
+    let notices = store.run_notice_batch("chat").unwrap();
     assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].run_id, "b", "the run that said ok wakes no one");
     let at = super::super::monitor::clock_text(flag["at"].as_i64().unwrap());
     let (flag_id, ident) = (
         flag["id"].as_str().unwrap(),
         evidence["ident"].as_str().unwrap(),
     );
     assert_eq!(
-        notices[0].2,
+        notices[0].body,
         format!(
             "[orx] Run b (experiment exp-b) was flagged for review.\n\
              Watcher sentence at {at}: Prints depth 4 though its title says 8.\n\
@@ -279,10 +280,6 @@ async fn one_look_writes_each_runs_sentence_and_the_summary_through_the_agent_cl
              To settle this flag without stopping: orx exp flag b --flag {flag_id} --keep --reason '…'\n\
              To leave the choice to the user: orx exp flag b --flag {flag_id} --ask --reason '…'"
         )
-    );
-    assert!(
-        store.run_notices_for_tests("a").is_empty(),
-        "a run that said ok wakes no one"
     );
 }
 
@@ -304,15 +301,16 @@ fn a_flag_follows_the_turn_that_carries_it() {
     assert_eq!(raise(body.clone()), crate::store::Raise::Raised);
     let state = || super::super::flags::read(&store, &row).unwrap()[0]["state"].clone();
     assert_eq!(state(), "raised");
-    store.claim_run_notices_for_tests("chat", "t1", false);
+    let batch = store.run_notice_batch("chat").unwrap();
+    let turn = &batch[0].client_turn_id;
     assert_eq!(state(), "waking");
-    store.put_chat_turn("chat", "t1", "running", 2);
+    store.put_chat_turn("chat", turn, "running", 2);
     assert_eq!(state(), "waking");
     store
-        .update_chat_turn_progress("t1", "running", "accepted", 1, None)
+        .update_chat_turn_progress(turn, "running", "accepted", 1, None)
         .unwrap();
     assert_eq!(state(), "agent_looking");
-    assert!(store.complete_chat_turn("t1").unwrap());
+    assert!(store.complete_chat_turn(turn).unwrap());
     assert_eq!(state(), "waking");
 
     let again = json!({"id": "f2", "fingerprint": "stall:train:300", "source": "tripwire"});
@@ -396,8 +394,8 @@ async fn an_error_is_flagged_on_a_run_no_model_watches() {
         "{}",
         flags[0]
     );
-    assert!(store.run_notices_for_tests("a")[0]
-        .2
+    assert!(store.run_notice_batch("chat").unwrap()[0]
+        .body
         .contains("OpenResearch checked this itself, with no model"));
     assert!(
         store.watch_look_runs(1).unwrap().is_empty(),

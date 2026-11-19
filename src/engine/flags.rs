@@ -11,7 +11,7 @@ use super::Phase;
 use crate::error::Result;
 use crate::local::autonomy::Autonomy;
 use crate::store::{
-    FlagEvent, FlagNotice, NewFlag, Store, StoredChatSession, StoredRun, WATCH_FLAG,
+    flag_ask_dedupe, FlagEvent, FlagNotice, NewFlag, Store, StoredChatSession, StoredRun,
 };
 
 /// What a wake from the watcher says once, whatever it holds.
@@ -49,7 +49,7 @@ fn home(store: &Store, run: &StoredRun) -> Result<Option<StoredChatSession>> {
 }
 
 fn agentic(chat: &StoredChatSession) -> bool {
-    Autonomy::from_stored(chat.autonomy.as_deref()) == Autonomy::Agentic
+    !chat.archived && Autonomy::from_stored(chat.autonomy.as_deref()) == Autonomy::Agentic
 }
 
 fn settles(event: &FlagEvent) -> bool {
@@ -81,20 +81,19 @@ fn carried(notice: &FlagNotice, asked: bool) -> &'static str {
 }
 
 const REMIND: &str = "remind";
+const AFTER_RESULT: &str = "result";
 
 fn own(notice: &FlagNotice, flag: &str) -> bool {
-    let first = format!("{WATCH_FLAG}:{flag}");
-    notice.dedupe == first
-        || notice.dedupe.strip_prefix(&first).is_some_and(|suffix| {
-            suffix.strip_prefix(':') == Some(REMIND) || suffix.starts_with(":resume:")
-        })
+    notice.flag_id == flag
+        && (matches!(notice.dedupe.as_str(), "initial" | REMIND | AFTER_RESULT)
+            || notice.dedupe.starts_with("resume:"))
 }
 
 fn needs_redelivery(notice: &FlagNotice) -> bool {
     match notice.turn.as_deref() {
         Some("preparing" | "retrying" | "running" | "completed") => false,
         Some("interrupted") => true,
-        _ => notice.retired || notice.delivered || notice.dedupe.contains(":resume:"),
+        _ => notice.retired || notice.delivered || notice.dedupe.starts_with("resume:"),
     }
 }
 
@@ -130,11 +129,11 @@ pub(crate) fn read(store: &Store, run: &StoredRun) -> Result<Vec<Value>> {
         home.as_ref()
             .is_some_and(|chat| chat.id == notice.chat_session_id)
     };
-    let notice = |dedupe: &str| {
+    let notice = |id: &str, dedupe: &str| {
         notices
             .iter()
             .filter(at_home)
-            .find(|notice| notice.dedupe == dedupe)
+            .find(|notice| notice.flag_id == id && notice.dedupe == dedupe)
     };
     let mut flags = Vec::new();
     for event in events.iter().filter(|event| event.kind == "flag") {
@@ -153,42 +152,41 @@ pub(crate) fn read(store: &Store, run: &StoredRun) -> Result<Vec<Value>> {
             (Some(_), _) => "stopped",
             (None, _) if stopped.is_some() => "stopped",
             (None, Some(ask)) if ask.body["by"] == "agent" => "waiting",
-            (None, Some(ask)) => {
-                let request = ask.body["requestId"].as_str().unwrap_or("ask");
-                notice(&format!("{WATCH_FLAG}:{id}:{request}"))
-                    .map_or("asking", |notice| carried(notice, true))
-            }
+            (None, Some(ask)) => notice(id, &flag_ask_dedupe(ask.body["requestId"].as_str()))
+                .map_or("asking", |notice| carried(notice, true)),
             (None, None) => {
                 let last = notices
                     .iter()
                     .filter(at_home)
                     .rfind(|notice| own(notice, id));
                 match last {
+                    Some(last) if live && last.retired && !last.claimed => "waiting",
                     Some(last) if autonomous && needs_redelivery(last) => "raised",
-                    Some(last) if autonomous && last.turn.as_deref() == Some("completed") => {
-                        let reminder = format!("{WATCH_FLAG}:{id}:{REMIND}");
+                    Some(last)
+                        if autonomous
+                            && last.delivered
+                            && last.turn.as_deref() == Some("completed") =>
+                    {
                         if run.chat_session_id.as_deref() == Some(last.chat_session_id.as_str())
-                            || notice(&reminder).is_none()
+                            || notice(id, REMIND).is_none()
                         {
                             "waking"
                         } else {
                             "waiting"
                         }
                     }
-                    Some(last) if autonomous && last.retired => {
-                        if last.delivered {
-                            "agent_looking"
-                        } else {
-                            "waking"
-                        }
-                    }
+                    Some(last) if autonomous && last.retired && last.delivered => "agent_looking",
                     Some(last) => carried(last, false),
-                    None if autonomous && live => "raised",
                     None => "waiting",
                 }
             }
         };
         let mut flag = event.body.clone();
+        if state == "waiting" {
+            if let Some(ask) = routed {
+                flag["handback"] = json!(ask.seq);
+            }
+        }
         flag["detail"] = flag["template"].clone();
         if let Some(look) = flag["lookId"].as_str() {
             flag["group"] = json!(format!("look:{look}"));
@@ -232,9 +230,10 @@ pub(crate) fn carry_cut_flags(
     if !agentic(chat) {
         return Ok(Vec::new());
     }
+    store.retire_unconfirmed_flag_attachments(Some(&chat.id), now)?;
 
     let mut bodies = Vec::new();
-    for run_id in store.flag_follow_up_runs(Some(&chat.id))? {
+    for run_id in store.flag_follow_up_runs(Some((&chat.id, client_turn_id)))? {
         let Some(run) = store.get_run(&run_id)? else {
             continue;
         };
@@ -244,12 +243,18 @@ pub(crate) fn carry_cut_flags(
             let latest = notices
                 .iter()
                 .rfind(|notice| notice.chat_session_id == chat.id && own(notice, id));
-            if latest.is_some_and(needs_redelivery) {
-                let reminder = format!("{WATCH_FLAG}:{id}:{REMIND}");
-                let body = if notices
-                    .iter()
-                    .any(|notice| notice.chat_session_id == chat.id && notice.dedupe == reminder)
-                {
+            if latest.is_some_and(|notice| {
+                needs_redelivery(notice)
+                    || (notice.dedupe.starts_with("resume:")
+                        && notice.retired
+                        && !notice.delivered
+                        && notice.turn.as_deref() == Some("completed"))
+            }) {
+                let body = if notices.iter().any(|notice| {
+                    notice.chat_session_id == chat.id
+                        && notice.flag_id == id
+                        && notice.dedupe == REMIND
+                }) {
                     remind(&run, id, &chat.id)
                 } else {
                     wake(&run, flag, false)
@@ -281,29 +286,54 @@ pub(crate) fn follow_up_flags(store: &Store, now: i64) -> Result<()> {
         let events = store.run_flag_events(&run_id)?;
         let notices = store.run_flag_notices(&run_id)?;
         let mut changed = false;
-        for (id, _) in unrouted(&events) {
+        for (id, flag) in unrouted(&events) {
             let chats: BTreeSet<&str> = notices
                 .iter()
                 .filter(|notice| own(notice, id))
                 .map(|notice| notice.chat_session_id.as_str())
                 .collect();
-            let dedupe = format!("{WATCH_FLAG}:{id}:{REMIND}");
             for chat in chats {
-                let latest = notices
+                let Some(latest) = notices
                     .iter()
-                    .rfind(|notice| notice.chat_session_id == chat && own(notice, id));
-                if !latest.is_some_and(|last| last.turn.as_deref() == Some("completed"))
-                    || !store
-                        .get_chat_session(chat)?
-                        .is_some_and(|chat| agentic(&chat))
+                    .rfind(|notice| notice.chat_session_id == chat && own(notice, id))
+                else {
+                    continue;
+                };
+                if !store
+                    .get_chat_session(chat)?
+                    .is_some_and(|chat| agentic(&chat))
                 {
                     continue;
                 }
 
-                if notices
-                    .iter()
-                    .any(|notice| notice.chat_session_id == chat && notice.dedupe == dedupe)
+                let reminded = notices.iter().any(|notice| {
+                    notice.chat_session_id == chat
+                        && notice.flag_id == id
+                        && notice.dedupe == REMIND
+                });
+                if latest.retired
+                    && !latest.claimed
+                    && Phase::parse(&run.status).is_some_and(Phase::is_terminal)
                 {
+                    let ended = run.ended_at.unwrap_or(run.updated_at);
+                    let body = if reminded {
+                        remind(&run, id, chat)
+                    } else {
+                        wake(&run, flag, false)
+                    };
+                    changed |= store.queue_flag_follow_up(
+                        &run_id,
+                        latest,
+                        AFTER_RESULT,
+                        &body,
+                        now.max(ended.saturating_add(1)),
+                    )?;
+                    continue;
+                }
+                if !latest.delivered || latest.turn.as_deref() != Some("completed") {
+                    continue;
+                }
+                if reminded {
                     if run.chat_session_id.as_deref() != Some(chat) {
                         continue;
                     }
@@ -319,8 +349,13 @@ pub(crate) fn follow_up_flags(store: &Store, now: i64) -> Result<()> {
                         == crate::store::Chosen::Recorded;
                     break;
                 }
-                changed |=
-                    store.remind_flag(&run_id, chat, id, &dedupe, &remind(&run, id, chat), now)?;
+                changed |= store.queue_flag_follow_up(
+                    &run_id,
+                    latest,
+                    REMIND,
+                    &remind(&run, id, chat),
+                    now,
+                )?;
             }
         }
         if changed {
@@ -564,6 +599,26 @@ mod tests {
     use super::*;
     use crate::local::git::TemporaryDirectory;
     use crate::store::{tests::run_fixture, Raise};
+
+    #[test]
+    fn a_live_flag_offers_a_choice_after_switching_back_to_independent() {
+        let dir = TemporaryDirectory::new("orx-flag-autonomy").unwrap();
+        let store = Store::open_at(dir.path().to_path_buf()).unwrap();
+        store.put_chat_session("owner", "claude-code", None);
+        let run = run_fixture("run", "running", Some("owner"));
+        store.upsert_run(&run).unwrap();
+        let flag = new_flag(&store, &run, json!({"id": "f1", "at": 1}), true).unwrap();
+        store.raise_flags(&[flag], 1).unwrap();
+        assert_eq!(read(&store, &run).unwrap()[0]["state"], "raised");
+        store
+            .set_chat_session_autonomy("owner", Autonomy::Copilot)
+            .unwrap();
+        assert!(store.run_notice_batch_at("owner", 2).unwrap().is_empty());
+        store
+            .set_chat_session_autonomy("owner", Autonomy::Agentic)
+            .unwrap();
+        assert_eq!(read(&store, &run).unwrap()[0]["state"], "waiting");
+    }
 
     #[test]
     fn a_subscribers_unsettled_reviews_leave_the_flag_open() {

@@ -48,7 +48,7 @@ export function Issue({ model, flag, agent, onOpenRun }: {
       } else {
         void chooseFlag(workspace, model.run, flag.id, value, () => {
           if (button.isConnected) button.focus();
-        });
+        }, model.flag?.handback);
       }
     },
   });

@@ -1176,7 +1176,11 @@ test('an Independent flag gets one reminder then closes when both reviews leave 
   await expect(banner.getByRole('button', { name: 'Keep going', exact: true })).toBeVisible()
   await expect(banner.getByRole('button', { name: 'Stop run', exact: true })).toBeVisible()
   await capture('reading')
-  await page.getByLabel('Stop', { exact: true }).click()
+  const [interrupted] = await Promise.all([
+    page.waitForResponse((response) => response.url().endsWith('/interrupt') && response.request().method() === 'POST'),
+    page.getByLabel('Stop', { exact: true }).click(),
+  ])
+  expect(interrupted.ok()).toBe(true)
   await expect(banner.locator('[data-run-frame]').getByRole('status')).toHaveText('Queued')
   await expect(banner.getByRole('button', { name: /^Ask / })).toHaveCount(0)
   await capture('queued')
@@ -1262,6 +1266,7 @@ gate('finish')`)
 
     await test.step('Ask can queue behind a turn and can wake the agent again after a lost reply and handback', async () => {
       const busy = `busy-${project.id}`
+      const handback = `handback-${project.id}`
       const waking = `waking-${project.id}`
       const asked = `asked-${project.id}`
       const stopped = `stopped-${project.id}`
@@ -1269,6 +1274,7 @@ gate('finish')`)
       agent.script('The user asked you to look at a flag', [
         { run: settle(experimentId, runId, 'ask', 'This choice needs the user.') },
         { say: 'The flag is back with you.' },
+        { hold: handback },
       ])
       agent.script('The user asked you to look at a flag', [
         { hold: waking },
@@ -1291,11 +1297,26 @@ gate('finish')`)
       await expect(banner.getByText('Queued', { exact: true })).toBeVisible()
       agent.release(busy)
       await expect(page.getByText('The flag is back with you.', { exact: true })).toBeVisible()
+      await agent.reached(handback)
       await expect(banner.getByRole('button', { name: /^Ask / })).toBeEnabled()
-      await banner.getByRole('button', { name: /^Ask / }).click()
-      await agent.reached(waking)
-      await expect(banner.getByRole('button', { name: /^Ask / })).toHaveCount(0)
+
       const row = banner.getByRole('group', { name: 'Copiloted', exact: true })
+      const flagPath = `/api/runs/${runId}/flag`
+      await page.route(`**${flagPath}`, async (route) => {
+        const saved = await route.fetch()
+        expect(saved.ok()).toBe(true)
+        expect((await saved.json()).flag.state).toBe('asking')
+        agent.release(handback)
+        await agent.reached(waking)
+        await expect(row).toContainText('Waking')
+        await route.fulfill({ response: saved })
+      }, { times: 1 })
+      const [reply] = await Promise.all([
+        page.waitForResponse((response) => response.url().endsWith(flagPath) && response.request().method() === 'POST'),
+        banner.getByRole('button', { name: /^Ask / }).click(),
+      ])
+      await reply.finished()
+      await expect(banner.getByRole('button', { name: /^Ask / })).toHaveCount(0)
       await expect(row.getByRole('button', { name: 'Show less', exact: true })).toBeVisible()
       await expect(row).toContainText('Waking')
       agent.release(waking)

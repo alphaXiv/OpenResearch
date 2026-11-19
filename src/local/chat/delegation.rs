@@ -921,6 +921,7 @@ mod tests {
             client_turn_id: "ct_1".into(),
             request_hash: "hash".into(),
             prepared_input: "task".into(),
+            flag_input: None,
             settings_json: "{}".into(),
             state: "preparing".into(),
             delivery_state: "not_sent".into(),

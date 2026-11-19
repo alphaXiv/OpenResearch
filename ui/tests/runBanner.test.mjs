@@ -546,14 +546,14 @@ test("a flag shows when its review is queued, waking the agent or being read, in
 });
 
 /** Today's server with run r1 flagged and waiting; each flag answer waits until the test gives it. */
-function heldFlag() {
+function heldFlag(monitor = () => flagged) {
   const choices = [];
   const answers = [];
   serve((path, init) => {
     const request = `${init.method ?? "GET"} ${path}`;
     if (request === "GET /api/settings/ui-state") return { onboardingCompleted: true };
     if (request === "GET /api/compute/hosts") return [];
-    if (request === "GET /api/runs/r1/monitor") return flagged;
+    if (request === "GET /api/runs/r1/monitor") return monitor();
     if (request === "POST /api/runs/r1/flag") {
       choices.push(JSON.parse(init.body));
       return new Promise((resolve) => answers.push(resolve));
@@ -563,6 +563,8 @@ function heldFlag() {
   const lose = () => act(async () => answers.shift()(Promise.reject(new TypeError("Failed to fetch"))));
   return { choices, answer, lose };
 }
+
+const askReply = (flag, rev) => ({ flag, run: run("r1", { monitor: summary({ tone: "flag", rev, flag }) }) });
 
 test("Ask retries reuse the request id and a new Ask after handback gets a new id", async () => {
   const { choices, answer } = heldFlag();
@@ -579,36 +581,67 @@ test("Ask retries reuse the request id and a new Ask after handback gets a new i
   assert.equal(choices.length, 2);
   assert.equal(choices[1].requestId, choices[0].requestId);
   assert.equal(choices[1].choice, "ask");
-  await answer({ flag: { ...flagged.flags[0], state: "asking" }, run: waitingRun() });
+  const queued = { ...flagged.flags[0], state: "asking" };
+  await answer(askReply(queued, flagged.rev + 1));
   await settle();
   assert.equal(named(m.run_flag_ask({ agent: "Claude" })), null);
   const { queryKey } = workspace.queries.getRunMonitorQuery("r1");
-  await act(async () => workspace.queryClient.setQueryData(queryKey, { ...flagged, rev: flagged.rev + 1 }));
+  await act(async () => workspace.queryClient.setQueryData(queryKey, { ...flagged, rev: flagged.rev + 2 }));
   await settle();
   await click(named(m.run_flag_ask({ agent: "Claude" })));
   assert.equal(choices.length, 3);
   assert.notEqual(choices[2].requestId, choices[1].requestId, "a new Ask after the handback wakes the agent again");
-  await answer({ flag: { ...flagged.flags[0], state: "asking" }, run: waitingRun() });
+  await answer(askReply(queued, flagged.rev + 3));
   await settle();
 });
 
-test("a lost Ask reply does not replay the request after the agent hands back the flag", async () => {
+for (const by of ["agent", "user"]) test(`a lost Ask reply gets a new request id when the ${by}'s Ask returns to waiting`, async () => {
   const { choices, answer, lose } = heldFlag();
   const workspace = createWorkspace("test");
   const { queryKey } = workspace.queries.getRunMonitorQuery("r1");
-  await banner([waitingRun()], { workspace });
+  const view = await banner([waitingRun()], { workspace });
   await settle();
   await click(named(m.run_flag_ask({ agent: "Claude" })));
 
-  // The server accepted Ask and the agent handed it back before the next monitor update.
-  const handedBack = { ...flagged.flags[0], choice: { by: "agent", c: "ask", at: now } };
-  await act(async () => workspace.setScopedQueryData(queryKey, { ...flagged, rev: flagged.rev + 2, flags: [handedBack] }));
+  const handedBack = { ...flagged.flags[0], handback: 11, choice: { by, c: "ask", at: now } };
+  await view.update([run("r1", { monitor: summary({ tone: "flag", flag: handedBack, rev: flagged.rev + 2 }) })]);
   await lose();
   await settle();
+  assert.equal(workspace.queryClient.getQueryData(queryKey).rev, flagged.rev, "the full monitor still lags");
   await click(named(m.run_flag_ask({ agent: "Claude" })));
-  await answer({ flag: { ...handedBack, state: "asking" }, run: waitingRun() });
+  await answer(askReply({ ...handedBack, state: "asking" }, flagged.rev + 3));
   assert.equal(choices.length, 2);
   assert.notEqual(choices[0].requestId, choices[1].requestId);
+});
+
+test("a late Ask reply keeps the newer waking status", async () => {
+  let monitor = flagged;
+  const { answer } = heldFlag(() => monitor);
+  const workspace = createWorkspace("test");
+  const { container } = await banner([waitingRun()], { workspace });
+  await render(createElement(QueryEvents), workspace);
+  await settle();
+  await click(named(m.run_flag_ask({ agent: "Claude" })));
+
+  const queued = { ...flagged.flags[0], state: "asking", choice: { by: "user", c: "ask", at: now } };
+  const waking = { ...queued, state: "waking" };
+  const wakingSummary = summary({ tone: "flag", generation: "g2", rev: flagged.rev + 2, flag: waking });
+  monitor = { ...flagged, generation: wakingSummary.generation, rev: wakingSummary.rev, asOf: wakingSummary.asOf, flags: [waking] };
+  await act(async () => {
+    streams.at(-1).dispatchEvent(new MessageEvent("run.updated", { data: JSON.stringify({ run: run("r1", { monitor: wakingSummary }) }) }));
+  });
+  const { queryKey } = workspace.queries.getRunMonitorQuery("r1");
+  await act(async () => workspace.queryClient.refetchQueries({ queryKey, exact: true }));
+  await settle();
+  const status = () => container.querySelector('[data-run-frame] [role="status"]')?.textContent ?? "";
+  const beforeReply = status();
+
+  await answer(askReply(queued, flagged.rev + 1));
+  await settle();
+  assert.match(beforeReply, /Waking/);
+  assert.match(status(), /Waking/);
+  const shown = workspace.queries.listChatShownRunsQuery();
+  assert.equal(workspace.queryClient.getQueryData(shown.queryKey).runs[0].run.monitor.rev, wakingSummary.rev);
 });
 
 test("a refused Keep going stays where it was, says why and keeps focus", async () => {
@@ -725,7 +758,7 @@ test("a run whose view was rebuilt reads its monitor again, and shows none of th
   const requests = backend();
   const view = await banner([run("r1")]);
   await settle();
-  await view.update([run("r1", { monitor: summary({ generation: "g2", rev: 1, asOf: running.asOf + 1000, bindings: { loss: 1.5 }, headline: { name: "loss", label: "Loss", value: 1.5 } }) })]);
+  await view.update([run("r1", { monitor: summary({ generation: "g2", rev: running.rev + 1, asOf: running.asOf + 1000, bindings: { loss: 1.5 }, headline: { name: "loss", label: "Loss", value: 1.5 } }) })]);
   await settle();
   assert.equal(requests.filter((r) => r.request === "GET /api/runs/r1/monitor").length, 2);
   const text = plain(view.container.textContent);
