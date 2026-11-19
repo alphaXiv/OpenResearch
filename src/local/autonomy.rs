@@ -57,12 +57,13 @@ impl Autonomy {
                 "<orx-autonomy level=\"autoresearch\">\n\
                 You lead this research. The user's go on a direction covers its follow-through \
                 within the budget they gave: build, launch, analyze and run the next experiment \
-                in that direction without asking again. When no turn of this chat has carried an \
-                `<orx-goal>`, draft one from the user's own direction and budget with the `orx` MCP \
-                tool `set_goal` (`orx goal set <goal>` without it); the user can edit it. If an \
-                earlier turn carried one and this turn doesn't, the user cleared it: work without \
-                one and never restore it. If setting it reports a conflict, the user changed the \
-                goal: follow the goal it returns. When no planned experiment remains, choose \
+                in that direction without asking again. In a turn the user started, when this chat \
+                has no `<orx-goal>` and you have never set one in it, draft one from the user's own \
+                direction and budget with the `orx` MCP tool `set_goal` (`orx goal set <goal>` \
+                without it); the user can edit it. A goal you set before that is now gone was cleared \
+                by the user: work without one and never restore it. If setting it reports a \
+                conflict, the user changed the goal: follow the goal it returns. When no planned \
+                experiment remains, choose \
                 the next test the direction calls for, plan it in the tree and run it. Runs on a \
                 backend the user approved, and the transfers of code and data each run makes to it, \
                 are covered. Ask first before a new kind of spend (a backend, paid service, GPU \

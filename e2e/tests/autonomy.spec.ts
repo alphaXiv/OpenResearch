@@ -24,7 +24,7 @@ test('the autonomy picker saves Full auto-research and applies it to the chat', 
   const fullAutoTrigger = page.getByRole('button', { name: /Autonomy: Full auto-research$/ })
   await expect(fullAutoTrigger).toBeVisible()
   agent.script('<orx-autonomy level="autoresearch">', [{ say: 'Ready to follow the approved research direction.' }])
-  agent.script('[orx] Continue the approved research', [{ say: 'The approved direction has no step left.' }])
+  agent.script('[orx] If an approved next step remains', [{ say: 'The approved direction has no step left.' }])
   await send(page, 'Investigate the experiment results.')
   await expect(page.getByText('Ready to follow the approved research direction.', { exact: true })).toBeVisible()
   // A Full auto-research turn that ends with nothing running and no yield gets exactly one stop check.
