@@ -2501,7 +2501,7 @@
   "chat_turn_close_running": "Sonuç bekliyor",
   "chat_turn_close_need": "Seni bekliyor",
   "chat_turn_close_done": "Bitti",
-  "announcement_turn_close": "{status}: {text}",
+  "chat_turn_close_with_status": "{status}: {text}",
   "chat_status_working_for": "Çalışıyor {duration}",
   "chat_status_working": "Çalışıyor",
   "chat_status_running": "Koşuyor {duration}",

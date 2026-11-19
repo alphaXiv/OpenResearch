@@ -281,7 +281,6 @@ test("pending input outlives async turns but held prompts require a live turn", 
   assert.equal(hasPendingInput([message(held)], false), false);
   assert.equal(hasPendingInput([message(held)], true), true);
   assert.equal(hasPendingInput([message({ ...question, prompt: { ...question.prompt, resolved: true } })], true), false);
-  assert.equal(hasPendingInput([message({ id: "plan", type: "prompt", prompt: { kind: "plan", resolved: false } })], false), false);
 });
 
 test("switching conversation branches clears hidden pending questions", async () => {

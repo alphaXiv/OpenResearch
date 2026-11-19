@@ -2501,7 +2501,7 @@
   "chat_turn_close_running": "नतीजों का इंतज़ार",
   "chat_turn_close_need": "आपकी ज़रूरत",
   "chat_turn_close_done": "पूरा",
-  "announcement_turn_close": "{status}: {text}",
+  "chat_turn_close_with_status": "{status}: {text}",
   "chat_status_working_for": "काम जारी {duration}",
   "chat_status_working": "काम जारी",
   "chat_status_running": "चल रहा {duration}",

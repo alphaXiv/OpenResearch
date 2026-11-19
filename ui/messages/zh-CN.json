@@ -2501,7 +2501,7 @@
   "chat_turn_close_running": "等待结果",
   "chat_turn_close_need": "待你处理",
   "chat_turn_close_done": "已完成",
-  "announcement_turn_close": "{status}：{text}",
+  "chat_turn_close_with_status": "{status}：{text}",
   "chat_status_working_for": "工作中 {duration}",
   "chat_status_working": "工作中",
   "chat_status_running": "运行中 {duration}",

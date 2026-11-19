@@ -2501,7 +2501,7 @@
   "chat_turn_close_running": "Esperando resultados",
   "chat_turn_close_need": "Te necesita",
   "chat_turn_close_done": "Listo",
-  "announcement_turn_close": "{status}: {text}",
+  "chat_turn_close_with_status": "{status}: {text}",
   "chat_status_working_for": "Trabajando {duration}",
   "chat_status_working": "Trabajando",
   "chat_status_running": "Ejecutando {duration}",

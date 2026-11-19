@@ -2501,7 +2501,7 @@
   "chat_turn_close_running": "Czeka na wyniki",
   "chat_turn_close_need": "Czeka na Ciebie",
   "chat_turn_close_done": "Gotowe",
-  "announcement_turn_close": "{status}: {text}",
+  "chat_turn_close_with_status": "{status}: {text}",
   "chat_status_working_for": "Pracuje {duration}",
   "chat_status_working": "Pracuje",
   "chat_status_running": "Działa {duration}",

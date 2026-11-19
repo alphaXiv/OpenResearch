@@ -2501,7 +2501,7 @@
   "chat_turn_close_running": "در انتظار نتایج",
   "chat_turn_close_need": "منتظر شما",
   "chat_turn_close_done": "انجام شد",
-  "announcement_turn_close": "{status}: {text}",
+  "chat_turn_close_with_status": "{status}: {text}",
   "chat_status_working_for": "در حال کار {duration}",
   "chat_status_working": "در حال کار",
   "chat_status_running": "در حال اجرا {duration}",

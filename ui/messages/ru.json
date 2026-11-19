@@ -2501,7 +2501,7 @@
   "chat_turn_close_running": "Ждёт результатов",
   "chat_turn_close_need": "Ждёт вас",
   "chat_turn_close_done": "Готово",
-  "announcement_turn_close": "{status}: {text}",
+  "chat_turn_close_with_status": "{status}: {text}",
   "chat_status_working_for": "Работает {duration}",
   "chat_status_working": "Работает",
   "chat_status_running": "Идёт {duration}",

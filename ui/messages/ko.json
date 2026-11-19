@@ -2501,7 +2501,7 @@
   "chat_turn_close_running": "결과 대기 중",
   "chat_turn_close_need": "확인 필요",
   "chat_turn_close_done": "완료",
-  "announcement_turn_close": "{status}: {text}",
+  "chat_turn_close_with_status": "{status}: {text}",
   "chat_status_working_for": "작업 중 {duration}",
   "chat_status_working": "작업 중",
   "chat_status_running": "실행 중 {duration}",

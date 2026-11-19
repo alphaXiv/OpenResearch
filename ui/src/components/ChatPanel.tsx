@@ -70,7 +70,7 @@ import { useAgentSignIn } from "./HarnessSetupDialog";
 
 import { RemoteConnectionStrip, useRemoteConnection } from "../RemoteRuntime";
 
-import { LOCAL_ERROR_PART_ID, LOCAL_PREFIX, SHELL_TOOL, optimisticUserMessage } from "../queries/chatState";
+import { LOCAL_ERROR_PART_ID, LOCAL_PREFIX, optimisticUserMessage } from "../queries/chatState";
 import { CancelledError, useInfiniteQuery, useQueries, useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 
@@ -189,7 +189,8 @@ import {
   parentUpdateText,
   splitResponseParts,
   isUsageLimitPart,
-  isYieldCall,
+  yieldCallClose,
+  hideClosedYieldCalls,
   isModelAccessLimitPart,
   unreadAfterBusyChange,
   isTurnStatusPart,
@@ -198,6 +199,8 @@ import {
   questionReplies,
   type QuestionReplies,
   hasPendingInput,
+  pendingPlanPart,
+  shellExchangePart,
   partsTailToolId,
   streamTailIsText,
   streamTailTool,
@@ -1665,6 +1668,12 @@ function computeToolActivity(part: ChatPart): ToolActivity {
   const filePath = inputString(normalizedInput, "filePath", "file_path", "notebookPath", "notebook_path", "path");
   const description = inputString(normalizedInput, "description");
   if (part.state?.title === "subagent") return { kind: "agent", label: description ?? m.activity_ran_subagent() };
+  // Shown only when the turn ended without the close this call asked for.
+  const close = yieldCallClose(part);
+  if (close?.text) {
+    const status = close.kind ? TURN_CLOSE_KINDS[close.kind]?.label() : undefined;
+    return { kind: "command", label: status ? m.chat_turn_close_with_status({ status, text: close.text }) : close.text };
+  }
   const alphaxivTool = [tool, part.state?.title]
     .map((name) => name?.match(ALPHAXIV_TOOL)?.[1])
     .find((name) => name != null);
@@ -4296,11 +4305,6 @@ function startsTurn(message: ChatMessage) {
     || (part.type === "prompt" && part.prompt?.kind === "permission"));
 }
 
-function shellExchangePart(message: ChatMessage): ChatPart | null {
-  const part = message.parts.length === 1 ? message.parts[0] : undefined;
-  return message.role === "user" && part?.type === "tool" && part.tool === SHELL_TOOL ? part : null;
-}
-
 /** A composer `!` command and what it printed: the user's own shell run, shown
  * where it happened on the branch. */
 function ShellExchangeCard({ part }: { part: ChatPart }) {
@@ -4702,7 +4706,7 @@ function latestToolStates(messages: ChatMessage[]): { messageId: string; states:
   const visit = (parts: ChatPart[], parent: string) => {
     for (const part of parts) {
       const path = `${parent}/${part.id}`;
-      if (part.type === "tool" && part.state?.status && !isYieldCall(part)) {
+      if (part.type === "tool" && part.state?.status && !yieldCallClose(part)) {
         states.set(path, { status: part.state.status, part });
       }
       if (part.children?.length) visit(part.children, path);
@@ -4800,7 +4804,7 @@ function useTranscriptAnnouncement(messages: ChatMessage[]): TranscriptAnnouncem
     if (turnYield && close !== previousClose) {
       const status = TURN_CLOSE_KINDS[turnYield.kind]?.label();
       setAnnouncement((current) => ({
-        text: status ? m.announcement_turn_close({ status, text: turnYield.text }) : turnYield.text,
+        text: status ? m.chat_turn_close_with_status({ status, text: turnYield.text }) : turnYield.text,
         sequence: current.sequence + 1,
       }));
       return;
@@ -7404,7 +7408,7 @@ export function ChatPanel({
   const allMessages = activeId ? (state.messagesBySession[activeId] ?? NO_MESSAGES) : NO_MESSAGES;
   const activeLeafId = activeId ? (state.activeLeafBySession[activeId] ?? null) : null;
   activeLeafRef.current = activeLeafId;
-  const messages = useMemo(() => activePath(allMessages, activeLeafId), [allMessages, activeLeafId]);
+  const messages = useMemo(() => hideClosedYieldCalls(activePath(allMessages, activeLeafId)), [allMessages, activeLeafId]);
   const previousBusySessions = useRef({ projectId, ids: state.busySessions });
   useEffect(() => {
     const previous = previousBusySessions.current;
@@ -7480,21 +7484,9 @@ export function ChatPanel({
   // Nonce while the open session's title is mid-reveal; undefined = static.
   const activeTitleReveal = activeSession ? titleReveals.get(activeSession.id) : undefined;
 
-  // Shell exchanges don't start a new agent turn or resolve its pending plan.
   const pendingPlan = useMemo(() => {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].role === "user" && !shellExchangePart(messages[i])) break;
-      for (const part of messages[i].parts) {
-        if (part.type === "prompt" && part.prompt?.kind === "plan" && !part.prompt.resolved) {
-          return {
-            promptId: part.id,
-            plan: part.prompt.plan ?? "",
-            synthesized: !!part.prompt.synthesized,
-          };
-        }
-      }
-    }
-    return null;
+    const part = pendingPlanPart(messages);
+    return part && { promptId: part.id, plan: part.prompt?.plan ?? "", synthesized: !!part.prompt?.synthesized };
   }, [messages]);
 
   const knownCommand = (name: string) => {
@@ -10099,7 +10091,7 @@ export function ChatPanel({
                     aria-haspopup="dialog"
                     onClick={() => showCustomDialog({
                       component: GoalDialog,
-                      props: { sessionId: openSession.id, projectId: openSession.projectId, initialGoal: sessionGoal },
+                      props: { sessionId: openSession.id, projectId: openSession.projectId, initialGoal: sessionGoal, focusComposer: () => composerRef.current?.focus() },
                       onConfirm: async (goal) => { await patchSession(openSession, { goal }); },
                       onCancel: "close",
                     })}

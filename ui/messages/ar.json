@@ -2501,7 +2501,7 @@
   "chat_turn_close_running": "بانتظار النتائج",
   "chat_turn_close_need": "بانتظارك",
   "chat_turn_close_done": "تم",
-  "announcement_turn_close": "{status}: {text}",
+  "chat_turn_close_with_status": "{status}: {text}",
   "chat_status_working_for": "يعمل {duration}",
   "chat_status_working": "يعمل",
   "chat_status_running": "قيد التشغيل {duration}",

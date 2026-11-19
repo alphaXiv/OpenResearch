@@ -2501,7 +2501,7 @@
   "chat_turn_close_running": "Đang chờ kết quả",
   "chat_turn_close_need": "Cần bạn",
   "chat_turn_close_done": "Xong",
-  "announcement_turn_close": "{status}: {text}",
+  "chat_turn_close_with_status": "{status}: {text}",
   "chat_status_working_for": "Đang làm việc {duration}",
   "chat_status_working": "Đang làm việc",
   "chat_status_running": "Đang chạy {duration}",
