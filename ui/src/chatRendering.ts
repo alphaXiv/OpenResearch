@@ -1,4 +1,5 @@
 import type { ChatMessage, ChatPart, ChatSession } from "./api";
+import { orxArgvFromTokens, shellWords, shellWrapperBody, unwrapShellBody } from "./orxCommand.ts";
 import { LOCAL_ERROR_PART_ID } from "./queries/chatState.ts";
 
 export function isParentUpdate(part: ChatPart): boolean {
@@ -117,8 +118,33 @@ export function questionReplies(messages: ChatMessage[]): QuestionReplies {
   return { textById, questionById, prompts };
 }
 
+/** orx's `yield` tool as Claude Code (`mcp__orx__yield`), Codex (`orx:yield`), OpenCode (`orx_yield`) and ACP titles name it. */
+const YIELD_TOOL = /^(?:tool: )?(?:mcp__)?orx(?:__|[:/_])yield$/i;
+
+/** A call that closed the turn: orx's `yield` tool, or a command that is only `orx yield`. */
+export function isYieldCall(part: ChatPart): boolean {
+  if (part.type !== "tool") return false;
+  if ([part.tool, part.state?.title].some((name) => name && YIELD_TOOL.test(name))) return true;
+  const input = part.state?.input ?? {};
+  const argv = Array.isArray(input.commandArgv) && input.commandArgv.every((word) => typeof word === "string")
+    ? input.commandArgv as string[] : null;
+  const command = argv ? shellWrapperBody(argv) ?? argv : input.command ?? input.cmd;
+  if (typeof command !== "string" && !Array.isArray(command)) return false;
+  if (!/\byield\b/.test(typeof command === "string" ? command : command.join(" "))) return false;
+  try {
+    const words = typeof command === "string"
+      ? shellWords(unwrapShellBody(command.trim().replace(/^\/bin\/(?:ba|z)?sh\s+-lc\s+/, "")), false, true)
+      : command;
+    return orxArgvFromTokens(words)?.[0] === "yield";
+  } catch {
+    return false;
+  }
+}
+
 /** Whether a part paints anything in the transcript. */
 export function partIsVisible(part: ChatPart, activePermissionId?: string | null): boolean {
+  // The turn's closing line stands for a yield call; one that failed stays visible.
+  if (isYieldCall(part)) return part.state?.status === "error";
   // The persisted marker still delimits stopped turns for history consumers.
   if (part.type === "tool" && part.tool?.toLowerCase() === "interrupted") return false;
   if (part.type === "prompt") {
@@ -235,6 +261,7 @@ export function groupResponseMessages(messages: ChatMessage[], previousGroups: C
       || previous?.[0].parts.some((part) => part.tool === "provider_switch");
     if (message.role === "assistant" && previous?.[0].role === "assistant" && !providerChanged
       && message.parts[0]?.id !== LOCAL_ERROR_PART_ID
+      && !previous[previous.length - 1].turnYield
       && finalAnswerIndex(previous[previous.length - 1].parts, false) < 0) {
       previous.push(message);
     } else {
@@ -321,9 +348,9 @@ function textPartsText(parts: ChatPart[]): string {
     .join("\n\n");
 }
 
-/** The answer an assistant turn gave, without its commentary or tool work. */
+/** The answer an assistant turn gave and its closing line, without its commentary or tool work. */
 export function responseText(message: ChatMessage): string {
-  return textPartsText(splitTurnParts(message.parts, false).answer);
+  return [textPartsText(splitTurnParts(message.parts, false).answer), message.turnYield?.text].filter(Boolean).join("\n\n");
 }
 
 export function lastResponseText(messages: ChatMessage[]): string {
@@ -342,7 +369,7 @@ export function transcriptMarkdown(
   labels: { user: string; assistant: string },
 ): string | null {
   const sections = messages.flatMap((message) => {
-    const text = textPartsText(message.parts);
+    const text = [textPartsText(message.parts), message.turnYield?.text].filter(Boolean).join("\n\n");
     if (!text) return [];
     return [`## ${message.role === "user" ? labels.user : labels.assistant}\n\n${text}`];
   });

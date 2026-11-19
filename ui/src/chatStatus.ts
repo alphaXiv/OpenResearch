@@ -13,6 +13,10 @@ export type ChatStatus =
   | { kind: "failed"; error: string | null }
   | { kind: "done"; since: number };
 
+/** An open question or approval, or an idle chat whose agent ended its turn on something only the user can give. */
+export const chatNeedsYou = (session: ChatSession, busy: boolean, prompted: boolean) =>
+  prompted || (!busy && session.yieldKind === "need");
+
 /** Whether a status belongs in the inbox's Working section; a chat waiting on the user stays in the inbox. */
 export const chatStatusWorking = (status: ChatStatus) =>
   status.kind === "queued" || status.kind === "running" || status.kind === "working" || status.kind === "background";

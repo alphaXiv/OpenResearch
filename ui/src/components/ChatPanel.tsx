@@ -41,6 +41,7 @@ import { DelegateCard } from "./DelegateCard";
 import { EnvRequestCard } from "./EnvRequestCard";
 import { delegateAncestors, delegateModelLabel, delegateStatus, delegatesOf, type DelegateStatus } from "../delegates";
 import { taskLocation } from "../workspaceState";
+import { GoalDialog } from "./GoalDialog";
 import { DONE_PREVIEW_HEIGHT, fitSidebarRows, sidebarGroup, sidebarRowHeight, type RailSection, type SidebarRow } from "../sidebarLayout";
 import { useVirtualizer, defaultRangeExtractor, elementScroll, measureElement as measureVirtualElement, type Range as VirtualRange } from "@tanstack/react-virtual";
 import { markLiveUpdate } from "../queries/live";
@@ -137,7 +138,7 @@ import {
 } from "lucide-react";
 
 import { BrandMark } from "./Wordmark";
-import { chatStatus, chatStatusWorking, type ChatStatus } from "../chatStatus";
+import { chatNeedsYou, chatStatus, chatStatusWorking, type ChatStatus } from "../chatStatus";
 import {
   type ChatSessionPatch,
   DEMO_FIGURE_SESSION_ID,
@@ -159,6 +160,7 @@ import {
   type ChatImageAttachment,
   type ArtifactEntry,
   type ChatMessage,
+  type TurnYield,
   type AlphaXivFolder,
   type ChatPart,
   type ChatToolState,
@@ -187,6 +189,7 @@ import {
   parentUpdateText,
   splitResponseParts,
   isUsageLimitPart,
+  isYieldCall,
   isModelAccessLimitPart,
   unreadAfterBusyChange,
   isTurnStatusPart,
@@ -3647,7 +3650,7 @@ function PromptCard({
  * a bridge permission card rides its own message, so resolving it leaves the
  * message empty and it must drop out of the transcript entirely. */
 function messageHasVisibleContent(m: ChatMessage, activePermissionId?: string | null): boolean {
-  if (m.role === "user") return true;
+  if (m.role === "user" || m.turnYield) return true;
   return m.parts.some((part) => partIsVisible(part, activePermissionId));
 }
 
@@ -4010,7 +4013,9 @@ export const Message = memo(function Message({
   const turns = responseTurns.map((turn) => turn.message);
   const response = splitResponseParts(turns, predictTextTail, replies);
   const predictingAnswer = predictTextTail && response.answerMessageId === message.id;
-  const copyText = predictingAnswer && !message.completedAt ? "" : responseText({ ...message, parts: response.answer });
+  // A yield closes its group, so only the last message can carry one; a failed turn shows its recovery instead.
+  const close = responseTurns.at(-1)?.turnStatus ? undefined : sent.at(-1)?.turnYield;
+  const copyText = predictingAnswer && !message.completedAt ? "" : responseText({ ...message, parts: response.answer, turnYield: close });
   const answerRef = messageRef(response.answerMessageId ?? message.id);
   return (
     <div className="msg-assistant group/turn text-base leading-relaxed text-text min-w-0">
@@ -4032,6 +4037,7 @@ export const Message = memo(function Message({
         onOpenSubagent,
         predictTextTail,
       }} />}
+      {close && <TurnClose close={close} />}
       {responseTurns.map(({ message: turn, turnStatus, usageLimit, temporaryApiError }, index) => turnStatus && (
         <TurnStatusRow
           key={turn.id}
@@ -4076,6 +4082,28 @@ export const Message = memo(function Message({
     </div>
   );
 });
+
+/** How each reason a turn ended is drawn and named; a kind from a newer host has no entry. */
+const TURN_CLOSE_KINDS: Partial<Record<string, { Icon: typeof Hourglass; tone: string; label: () => string }>> = {
+  running: { Icon: Hourglass, tone: "text-accent-blue", label: m.chat_turn_close_running },
+  need: { Icon: HelpCircle, tone: "text-accent-purple", label: m.chat_turn_close_need },
+  done: { Icon: CircleCheck, tone: "text-accent-green", label: m.chat_turn_close_done },
+};
+
+/** The line an agent ended its turn with: why it stopped and what restarts the work. */
+function TurnClose({ close }: { close: TurnYield }) {
+  const kind = TURN_CLOSE_KINDS[close.kind];
+  return (
+    <p className="mt-3 mb-0 flex gap-2 text-sm leading-5 text-subtext" data-turn-close={close.kind}>
+      {kind && (
+        <span role="img" aria-label={kind.label()} className={`inline-flex h-5 shrink-0 items-center ${kind.tone}`}>
+          <kind.Icon size={14} aria-hidden="true" />
+        </span>
+      )}
+      <span className="min-w-0 whitespace-pre-wrap break-words">{close.text}</span>
+    </p>
+  );
+}
 
 interface ReceiptItem {
   icon: React.ReactNode;
@@ -4674,7 +4702,7 @@ function latestToolStates(messages: ChatMessage[]): { messageId: string; states:
   const visit = (parts: ChatPart[], parent: string) => {
     for (const part of parts) {
       const path = `${parent}/${part.id}`;
-      if (part.type === "tool" && part.state?.status) {
+      if (part.type === "tool" && part.state?.status && !isYieldCall(part)) {
         states.set(path, { status: part.state.status, part });
       }
       if (part.children?.length) visit(part.children, path);
@@ -4721,13 +4749,19 @@ function useTranscriptAnnouncement(messages: ChatMessage[]): TranscriptAnnouncem
     messageId: string;
     states: Map<string, AnnouncedToolState>;
     permissionPath: string | null;
+    close: string;
   } | null>(null);
   useEffect(() => {
     const transcript = messages[0]?.id ?? "";
     const { messageId, states } = latestToolStates(messages);
     const pendingPermission = firstPendingPermission(messages);
+    let lastAssistant: ChatMessage | undefined;
+    for (let index = messages.length - 1; index >= 0 && !lastAssistant; index--) {
+      if (messages[index].role === "assistant") lastAssistant = messages[index];
+    }
+    const close = lastAssistant?.turnYield ? `${lastAssistant.id}\n${lastAssistant.turnYield.text}` : "";
     if (!previous.current || previous.current.transcript !== transcript) {
-      previous.current = { transcript, messageId, states, permissionPath: pendingPermission?.path ?? null };
+      previous.current = { transcript, messageId, states, permissionPath: pendingPermission?.path ?? null, close };
       setAnnouncement((current) => ({
         text: pendingPermission ? m.announcement_approval_required({ label: autoDir(pendingPermission.label) }) : "",
         sequence: current.sequence + 1,
@@ -4736,8 +4770,9 @@ function useTranscriptAnnouncement(messages: ChatMessage[]): TranscriptAnnouncem
     }
     const previousStates = previous.current.messageId === messageId ? previous.current.states : new Map<string, AnnouncedToolState>();
     const previousPermissionPath = previous.current.permissionPath;
+    const previousClose = previous.current.close;
     const changes = [...states].filter(([path, state]) => previousStates.get(path)?.status !== state.status);
-    previous.current = { transcript, messageId, states, permissionPath: pendingPermission?.path ?? null };
+    previous.current = { transcript, messageId, states, permissionPath: pendingPermission?.path ?? null, close };
     if (pendingPermission && pendingPermission.path !== previousPermissionPath) {
       setAnnouncement((current) => ({
         text: m.announcement_approval_required({ label: autoDir(pendingPermission.label) }),
@@ -4757,6 +4792,15 @@ function useTranscriptAnnouncement(messages: ChatMessage[]): TranscriptAnnouncem
     if (turnStatus?.id === "turn-retry") {
       setAnnouncement((current) => ({
         text: m.announcement_cli_retrying(),
+        sequence: current.sequence + 1,
+      }));
+      return;
+    }
+    const turnYield = lastAssistant?.turnYield;
+    if (turnYield && close !== previousClose) {
+      const status = TURN_CLOSE_KINDS[turnYield.kind]?.label();
+      setAnnouncement((current) => ({
+        text: status ? m.announcement_turn_close({ status, text: turnYield.text }) : turnYield.text,
         sequence: current.sequence + 1,
       }));
       return;
@@ -8518,9 +8562,9 @@ export function ChatPanel({
   useHotkey(appHotkeys["chat.find"], openFind, { enabled: mainView === "chat" && !contentInert && (embedded ? searchRegion === "right" : searchRegion !== "right"), requireReset: true, ignoreInputs: false, capture: true, conflictBehavior: "allow" });
   useHotkey("Mod+Shift+Enter", newTask, { enabled: !embedded, requireReset: true, conflictBehavior: "allow" });
 
-  const sessionWaiting = (session: ChatSession) => session.id === activeId && historyQuery.data
-    ? hasPendingInput(messages, busy) : session.awaitingInput === true;
   const sessionBusy = (project: Project, session: ChatSession) => project.id === projectId ? state.busySessions.has(session.id) : session.busy;
+  const sessionWaiting = (project: Project, session: ChatSession) => chatNeedsYou(session, sessionBusy(project, session),
+    session.id === activeId && historyQuery.data ? hasPendingInput(messages, busy) : session.awaitingInput === true);
   const sidebarRows: SidebarRow[] = [];
   if (sidebarGrouping === "projects") shownProjects.forEach((project) => {
     const group = sidebarGroup(project);
@@ -8536,7 +8580,7 @@ export function ChatPanel({
     if (selected && !visible.some((session) => session.id === activeId)) visible = [...visible.slice(0, chatLimit - 1), selected];
     const collapsed = collapsedProjects.includes(group);
     const rowProject = (session: ChatSession) => projectOf.get(session.projectId) ?? project;
-    sidebarRows.push({ kind: "project", project, collapsed, busy: collapsed && matching.some((session) => sessionBusy(rowProject(session), session) && !sessionWaiting(session)) });
+    sidebarRows.push({ kind: "project", project, collapsed, busy: collapsed && matching.some((session) => sessionBusy(rowProject(session), session) && !sessionWaiting(rowProject(session), session)) });
     if (collapsed) return;
     visible.forEach((session) => sidebarRows.push({ kind: "chat", project: rowProject(session), session }));
     if (matching.length > 6 || (project.scratch && scratchProjects.length > 6)) sidebarRows.push({ kind: "more", project });
@@ -8545,7 +8589,7 @@ export function ChatPanel({
     if (!visible.length) sidebarRows.push({ kind: "status", project, pending, error, retry: () => { for (const query of queries) void query.refetch(); } });
   });
   const atWork = ({ project, session }: { project: Project; session: ChatSession }) =>
-    chatStatusWorking(chatStatus(session, sessionBusy(project, session), sessionWaiting(session), runsBySession.get(session.id) ?? EMPTY_RUNS));
+    chatStatusWorking(chatStatus(session, sessionBusy(project, session), sessionWaiting(project, session), runsBySession.get(session.id) ?? EMPTY_RUNS));
   /** Every open chat not at work, read whole from the server in the inbox's order; throws when a page can't be read. */
   const inboxChats = async () => {
     const read: ChatSession[] = [];
@@ -9036,7 +9080,7 @@ export function ChatPanel({
           active={s.id === activeId && mainView === "chat"}
           unread={unreadSessionIds.has(s.id)}
           busy={sessionBusy(project, s)}
-          waiting={sessionWaiting(s)}
+          waiting={sessionWaiting(project, s)}
           runs={runsBySession.get(s.id) ?? EMPTY_RUNS}
           leadRun={leadRun}
           markBelowDone={markBelowDone}
@@ -10025,24 +10069,42 @@ export function ChatPanel({
                   </IconButton>
                 </Tooltip>
               )}
-              {(sessionGoal || goalArmed) && (
-                <Tooltip interactive content={goalArmed ? m.goal_command_description() : m.chat_panel_clear_goal({ goal: autoDir(sessionGoal) })}>
+              {goalArmed ? (
+                <Tooltip interactive content={m.goal_command_description()}>
                   <Button
                     type="button"
                     size="small"
                     variant="purple"
                     active
                     className="group max-w-60"
-                    aria-label={goalArmed ? m.chat_panel_goal() : m.chat_panel_clear_goal({ goal: autoDir(sessionGoal) })}
-                    onClick={() => {
-                      setGoalScope(null);
-                      if (sessionGoal) void setGoal("clear");
-                    }}
+                    aria-label={m.chat_panel_goal()}
+                    onClick={() => setGoalScope(null)}
                   >
                     <span className="relative size-4" aria-hidden="true">
                       <Goal className="absolute inset-0 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0" size={16} strokeWidth={1.5} />
                       <X className="absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" size={16} strokeWidth={1.5} />
                     </span>
+                    <span className="truncate">{m.chat_panel_goal()}</span>
+                  </Button>
+                </Tooltip>
+              ) : sessionGoal && openSession && (
+                <Tooltip interactive content={m.chat_panel_edit_goal({ goal: autoDir(sessionGoal) })}>
+                  <Button
+                    type="button"
+                    size="small"
+                    variant="purple"
+                    active
+                    className="max-w-60"
+                    aria-label={m.chat_panel_edit_goal({ goal: autoDir(sessionGoal) })}
+                    aria-haspopup="dialog"
+                    onClick={() => showCustomDialog({
+                      component: GoalDialog,
+                      props: { sessionId: openSession.id, projectId: openSession.projectId, initialGoal: sessionGoal },
+                      onConfirm: async (goal) => { await patchSession(openSession, { goal }); },
+                      onCancel: "close",
+                    })}
+                  >
+                    <Goal size={16} strokeWidth={1.5} aria-hidden="true" />
                     <span className="truncate">{m.chat_panel_goal()}</span>
                   </Button>
                 </Tooltip>
