@@ -20,9 +20,9 @@
 <p>Нужен ли вам помощник или инструмент для автономных исследований, OpenResearch ускорит вашу работу. Запускайте исследовательских агентов, которые изучают литературу, выдвигают гипотезы, ставят эксперименты и готовят исследовательские материалы.</p>
 
 <p>
-<a href="https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch.dmg"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/download-macos-dark.svg"><img src=".github/readme-assets/download-macos.svg" alt="Скачать OpenResearch для macOS" width="220" height="44" /></picture></a>
-<a href="https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch-Setup.exe"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/download-windows-dark.svg"><img src=".github/readme-assets/download-windows.svg" alt="Скачать OpenResearch для Windows (бета)" width="220" height="44" /></picture></a>
-<a href="https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch-x86_64.AppImage"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/download-linux-dark.svg"><img src=".github/readme-assets/download-linux.svg" alt="Скачать OpenResearch для Linux" width="220" height="44" /></picture></a>
+<a href="https://openresearch.sh/dl/macos?src=github"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/download-macos-dark.svg"><img src=".github/readme-assets/download-macos.svg" alt="Скачать OpenResearch для macOS" width="220" height="44" /></picture></a>
+<a href="https://openresearch.sh/dl/windows?src=github"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/download-windows-dark.svg"><img src=".github/readme-assets/download-windows.svg" alt="Скачать OpenResearch для Windows (бета)" width="220" height="44" /></picture></a>
+<a href="https://openresearch.sh/dl/linux_x64?src=github"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/download-linux-dark.svg"><img src=".github/readme-assets/download-linux.svg" alt="Скачать OpenResearch для Linux" width="220" height="44" /></picture></a>
 </p>
 
 <p>
@@ -41,9 +41,9 @@
 
 **Мы рекомендуем настольное приложение OpenResearch.** Скачайте его для своей платформы:
 
-- [macOS](https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch.dmg)
-- [Windows (бета)](https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch-Setup.exe)
-- Linux: [x86_64](https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch-x86_64.AppImage) · [ARM64](https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch-aarch64.AppImage)
+- [macOS](https://openresearch.sh/dl/macos?src=github)
+- [Windows (бета)](https://openresearch.sh/dl/windows?src=github)
+- Linux: [x86_64](https://openresearch.sh/dl/linux_x64?src=github) · [ARM64](https://openresearch.sh/dl/linux_arm64?src=github)
 
 <details>
 <summary>Предпочитаете отдельный CLI? Установка в macOS или Linux</summary>
