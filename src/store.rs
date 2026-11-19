@@ -934,12 +934,22 @@ fn runs_past_newest(runs: &'static str) -> String {
     )
 }
 
+fn remote_collections_settled(run_id: &'static str) -> String {
+    format!(
+        "NOT EXISTS (SELECT 1 FROM log_collections WHERE run_id = {run_id} AND done = 0)
+        AND NOT EXISTS (SELECT 1 FROM signal_collections WHERE run_id = {run_id} AND done = 0)"
+    )
+}
+
 fn remote_cleanup_eligibility() -> String {
-    format!("NOT EXISTS (SELECT 1 FROM runs WHERE id = run_id AND
+    let settled = remote_collections_settled("remote_cleanups.run_id");
+    format!(
+        "NOT EXISTS (SELECT 1 FROM runs WHERE id = run_id AND
           (contact IS NOT NULL OR status IN ('submitting','starting','running')))
-        AND NOT EXISTS (SELECT 1 FROM log_collections WHERE run_id = remote_cleanups.run_id AND done = 0)
-        AND NOT EXISTS (SELECT 1 FROM signal_collections WHERE run_id = remote_cleanups.run_id AND done = 0)
-        AND (deleted = 1 OR run_id IN (SELECT id FROM ({})))", runs_past_newest(REMOTE_RUNS))
+        AND {settled}
+        AND (deleted = 1 OR run_id IN (SELECT id FROM ({})))",
+        runs_past_newest(REMOTE_RUNS)
+    )
 }
 
 /// Queues the SSH/Slurm runs whose `column` equals `value`; deletion wins over a pending finish.
@@ -1675,6 +1685,27 @@ impl Store {
              CREATE INDEX IF NOT EXISTS idx_run_monitor_flags ON run_monitor_events(run_id) WHERE kind = 'flag';"
         ))?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_signal_collection AFTER DELETE ON runs BEGIN DELETE FROM signal_collections WHERE run_id = OLD.id; END;")?;
+        let enqueue_settled = remote_collections_settled("NEW.run_id");
+        let queued_settled = remote_collections_settled("remote_cleanups.run_id");
+        // Released writers queue the log before publishing the terminal phase.
+        schema.execute_batch(&format!(
+            "CREATE TRIGGER IF NOT EXISTS queue_remote_signal_collection
+             AFTER INSERT ON log_collections WHEN NEW.done = 0 BEGIN
+                 INSERT INTO signal_collections (run_id)
+                 SELECT id FROM runs WHERE id = NEW.run_id AND {REMOTE_RUNS}
+                 ON CONFLICT(run_id) DO NOTHING;
+             END;
+             CREATE TRIGGER IF NOT EXISTS protect_remote_cleanup
+             BEFORE INSERT ON remote_cleanups
+             WHEN NEW.deleted = 0 AND NOT ({enqueue_settled}) BEGIN
+                 SELECT RAISE(IGNORE);
+             END;
+             INSERT INTO signal_collections (run_id)
+             SELECT runs.id FROM log_collections JOIN runs ON runs.id = log_collections.run_id
+             WHERE log_collections.done = 0 AND {REMOTE_RUNS}
+             ON CONFLICT(run_id) DO NOTHING;
+             DELETE FROM remote_cleanups WHERE deleted = 0 AND NOT ({queued_settled});"
+        ))?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_run_monitor_state AFTER DELETE ON runs BEGIN DELETE FROM run_monitor_state WHERE run_id = OLD.id; END;")?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_run_monitor_events AFTER DELETE ON runs BEGIN DELETE FROM run_monitor_events WHERE run_id = OLD.id; END;")?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_run_watch_counts AFTER DELETE ON runs BEGIN DELETE FROM watch_counts WHERE run_id = OLD.id; END;")?;
@@ -3713,7 +3744,7 @@ impl Store {
             ],
             |r| r.get(0),
         )?;
-        Ok(attempts == LOG_COLLECTION_FAILED_AFTER)
+        Ok(attempts >= LOG_COLLECTION_FAILED_AFTER)
     }
 
     /// A terminal run owes final log and notify collection.
@@ -3818,7 +3849,7 @@ impl Store {
         Ok(attempts == LOG_COLLECTION_FAILED_AFTER)
     }
 
-    /// Queues a finished run's remote dir for removal; non-SSH/Slurm runs are ignored.
+    /// Queues retirement if both collections have settled. Call in the settlement transaction.
     pub(crate) fn queue_finished_remote_cleanup(&self, run_id: &str) -> Result<()> {
         queue_remote_cleanups(&self.conn, "id", run_id, false)
     }
@@ -10660,6 +10691,7 @@ pub(crate) mod tests {
             .conn
             .execute("UPDATE runs SET status = 'done'", [])
             .unwrap();
+        store.queue_signal_collection("r5").unwrap();
         store.delete_local_project("p").unwrap();
         assert!(store.watch_counts("local").unwrap().is_empty());
         // Deletion marks every SSH/Slurm run, including the newest and one waiting to retry.
@@ -10920,6 +10952,8 @@ pub(crate) mod tests {
         store.queue_log_collection(run).unwrap();
         assert!(!store.remote_cleanup_eligible(run, false).unwrap());
         store.finish_log_collection(run).unwrap();
+        assert!(!store.remote_cleanup_eligible(run, false).unwrap());
+        store.finish_signal_collection(run).unwrap();
         assert!(store.remote_cleanup_eligible(run, false).unwrap());
         store
             .conn
