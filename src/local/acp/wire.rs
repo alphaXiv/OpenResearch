@@ -82,11 +82,7 @@ pub(super) fn connect(
     owner: Value,
     io: Arc<super::host::SessionIo>,
     resume_at: Option<u64>,
-) -> Result<(
-    Arc<Wire>,
-    tokio::io::DuplexStream,
-    tokio::sync::oneshot::Receiver<()>,
-)> {
+) -> Result<(Arc<Wire>, tokio::io::DuplexStream)> {
     let keeper = kept.handle();
     let mut lines = kept.take_stdout().expect("keeper stdout").lines();
     if let Some(offset) = resume_at {
@@ -214,7 +210,6 @@ pub(super) fn connect(
         }
     });
     let incoming = wire.clone();
-    let (ended, receiver) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         let result: Result<()> = async {
             let mut injected = None;
@@ -336,9 +331,10 @@ pub(super) fn connect(
                 incoming.keeper.id()
             );
         }
-        let _ = ended.send(());
+        // The input task still holds the bridge's other half, so only this ends the connection.
+        let _ = writer.shutdown().await;
     });
-    Ok((wire, library, receiver))
+    Ok((wire, library))
 }
 
 /// The agent's next JSON-RPC message and the offset after it. The SDK answers every line that
@@ -396,7 +392,7 @@ mod tests {
         })
         .await
         .unwrap();
-        let (wire, transport, _) = connect(
+        let (wire, transport) = connect(
             kept,
             owner,
             Arc::new(super::super::host::SessionIo::default()),
@@ -436,7 +432,7 @@ mod tests {
             .unwrap();
         assert_eq!(offset, limit);
         keeper.detach();
-        let (wire, transport, _) = connect(
+        let (wire, transport) = connect(
             crate::keep::attach(keeper.id()).await.unwrap(),
             owner,
             Arc::new(super::super::host::SessionIo::default()),
@@ -458,6 +454,31 @@ mod tests {
         let message: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(message["method"], "done");
         wire.keeper.stop(std::time::Duration::from_secs(2)).await;
+    }
+
+    #[tokio::test]
+    async fn the_connection_ends_when_the_agent_does() {
+        let (wire, transport) = peer(
+            "import json;print(json.dumps({'jsonrpc':'2.0','method':'bye','params':{}}))",
+            json!({}),
+        )
+        .await;
+        let (reader, _writer) = tokio::io::split(transport);
+        let mut lines = tokio::io::BufReader::new(reader).lines();
+        let bound = std::time::Duration::from_secs(5);
+        let line = tokio::time::timeout(bound, lines.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&line).unwrap()["method"],
+            "bye"
+        );
+        // Each message is handled before the next read, here the end, is taken.
+        wire.processed();
+        let end = tokio::time::timeout(bound, lines.next_line()).await;
+        assert_eq!(end.unwrap().unwrap(), None);
     }
 
     #[tokio::test]

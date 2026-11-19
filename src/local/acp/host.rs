@@ -998,7 +998,7 @@ async fn connect(
         *io.replay.lock().unwrap() = Some(Vec::new());
     }
     *io.native_id.lock().unwrap() = saved_native_id;
-    let (wire, transport, ended) = super::wire::connect(kept, owner, io.clone(), resume_at)?;
+    let (wire, transport) = super::wire::connect(kept, owner, io.clone(), resume_at)?;
     let (reader, writer) = tokio::io::split(transport);
     let transport = ByteStreams::new(writer.compat_write(), reader.compat());
     let mut delegated = super::delegated::Delegated::new(cwd);
@@ -1203,7 +1203,6 @@ async fn connect(
                     Stop::Failure(message) => (false, Some(anyhow!(message))),
                 }
             }
-            _ = ended => (false, Some(anyhow!("closed its connection"))),
             result = &mut run => {
                 let error = match result {
                     Ok(()) => anyhow!("closed its connection"),
@@ -1860,7 +1859,7 @@ mod tests {
         let io = Arc::new(SessionIo::default());
         let (sender, mut events) = mpsc::unbounded_channel();
         *io.events.lock().unwrap() = Some(sender);
-        let (wire, transport, _) = super::super::wire::connect(kept, owner, io, None).unwrap();
+        let (wire, transport) = super::super::wire::connect(kept, owner, io, None).unwrap();
         wire.durable
             .store(true, std::sync::atomic::Ordering::SeqCst);
         let (reader, mut writer) = tokio::io::split(transport);
