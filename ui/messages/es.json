@@ -2090,6 +2090,7 @@
   "icon_emoji_flags": "Banderas",
   "chat_run_needs_attention": "Una ejecución necesita tu atención",
   "chat_run_flagged": "Se marcó una ejecución",
+  "chat_hover_waiting_for_choice": "Esperando tu decisión",
   "run_banner_label": "Ejecuciones de este chat",
   "run_stop": "Detener la ejecución",
   "run_stop_title": "¿Detener {name}?",

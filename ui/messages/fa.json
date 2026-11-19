@@ -2090,6 +2090,7 @@
   "icon_emoji_flags": "پرچم‌ها",
   "chat_run_needs_attention": "یک اجرا به توجه شما نیاز دارد",
   "chat_run_flagged": "یک اجرا علامت‌گذاری شد",
+  "chat_hover_waiting_for_choice": "در انتظار انتخاب شما",
   "run_banner_label": "اجراهای این گفتگو",
   "run_stop": "توقف اجرا",
   "run_stop_title": "{name} متوقف شود؟",

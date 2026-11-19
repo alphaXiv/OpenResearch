@@ -100,7 +100,7 @@ export interface SessionExperiment {
   experiment: Experiment;
   projectName: string;
   /** Its newest live run, else its newest run: a forced relaunch can leave an older run live. Null until it has been run. */
-  currentRun: (Pick<Run, "status" | "createdAt" | "endedAt" | "contact" | "cancelling" | "cancelUnconfirmed" | "host" | "lostReason"> & { cancelRequested: boolean }) | null;
+  currentRun: Run | null;
 }
 
 export type RunStatus = "submitting" | "starting" | "running" | "done" | "failed" | "cancelled" | "lost";

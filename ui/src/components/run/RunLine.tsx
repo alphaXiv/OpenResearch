@@ -20,7 +20,7 @@ export const runFrame = (model: RunModel) => cn(
 );
 
 /** The run's one number once it has one, unless the sentence already says it; then only how it compares. */
-function Headline({ model }: { model: RunModel }) {
+export function Headline({ model }: { model: RunModel }) {
   const headline = model.headline;
   if (!headline?.known || (model.tone !== "starting" && model.tone !== "running" && model.tone !== "done")) return null;
   const { delta } = headline;

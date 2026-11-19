@@ -2090,6 +2090,7 @@
   "icon_emoji_flags": "Bayraklar",
   "chat_run_needs_attention": "Bir çalıştırma dikkatinizi bekliyor",
   "chat_run_flagged": "Bir çalıştırma işaretlendi",
+  "chat_hover_waiting_for_choice": "Seçiminizi bekliyor",
   "run_banner_label": "Bu sohbetteki çalıştırmalar",
   "run_stop": "Çalıştırmayı durdur",
   "run_stop_title": "{name} durdurulsun mu?",

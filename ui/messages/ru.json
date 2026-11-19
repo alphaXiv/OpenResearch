@@ -2090,6 +2090,7 @@
   "icon_emoji_flags": "Флаги",
   "chat_run_needs_attention": "Запуск требует внимания",
   "chat_run_flagged": "Запуск помечен",
+  "chat_hover_waiting_for_choice": "Ждёт вашего решения",
   "run_banner_label": "Запуски в этом чате",
   "run_stop": "Остановить запуск",
   "run_stop_title": "Остановить {name}?",

@@ -2090,6 +2090,7 @@
   "icon_emoji_flags": "Flags",
   "chat_run_needs_attention": "A run needs your attention",
   "chat_run_flagged": "A run was flagged",
+  "chat_hover_waiting_for_choice": "Waiting for your choice",
   "run_banner_label": "Runs in this chat",
   "run_stop": "Stop the run",
   "run_stop_title": "Stop {name}?",

@@ -2090,6 +2090,7 @@
   "icon_emoji_flags": "깃발",
   "chat_run_needs_attention": "확인이 필요한 실행이 있습니다",
   "chat_run_flagged": "실행에 플래그가 지정되었습니다",
+  "chat_hover_waiting_for_choice": "선택을 기다리는 중",
   "run_banner_label": "이 채팅의 실행",
   "run_stop": "실행 중지",
   "run_stop_title": "{name} 실행을 중지할까요?",

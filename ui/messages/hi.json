@@ -2090,6 +2090,7 @@
   "icon_emoji_flags": "झंडे",
   "chat_run_needs_attention": "एक रन पर आपका ध्यान चाहिए",
   "chat_run_flagged": "एक रन फ़्लैग किया गया",
+  "chat_hover_waiting_for_choice": "आपके चुनाव की प्रतीक्षा है",
   "run_banner_label": "इस चैट के रन",
   "run_stop": "रन रोकें",
   "run_stop_title": "{name} रोकें?",
