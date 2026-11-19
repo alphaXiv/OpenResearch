@@ -1285,6 +1285,7 @@ impl Store {
                        client_turn_id, next_delivery_at, 1
                 FROM flag_wakes w WHERE delivered_at IS NULL AND retired_at IS NULL
                   AND w.dedupe NOT GLOB 'resume:*'
+                  AND (w.client_turn_id IS NULL OR w.client_turn_id GLOB 'flag-wake:*')
                   AND (EXISTS (
                       SELECT 1 FROM chat_turns t WHERE t.session_id = w.chat_session_id
                         AND t.client_turn_id = w.client_turn_id

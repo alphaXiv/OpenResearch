@@ -476,7 +476,8 @@ user asks. Initial wakes, reminders and Ask are stored in `flag_wakes`. Servers 
 result goes before a fresh wake about the same run. A wake says the watcher saw only a digest and
 none of the chat, cites the lines and how to settle it. A chat past 70% of its
 context is compacted in the wake's reserved turn slot. Admission checks that the
-wake still applies and freezes the payload that will be sent.
+wake still applies and freezes the payload that will be sent. Marking a chat Done
+withdraws queued Asks and leaves their flags available for a choice.
 When its run ends before admission, the flag is rewritten for delivery after the
 result. A queued Ask keeps its request identity through that rewrite. A flag
 raised on an ended run still wakes, to be weighed against the result.
@@ -484,8 +485,8 @@ raised on an ended run still wakes, to be weighed against the result.
 What became of a flag is read back, never stored: its choices in the run's
 journal and the notice and turn that carried it give its state. An Agentic flag
 is raised, then waking, then the agent is looking. A cut or retired review can go
-with a later chat turn. The flag portion of a turn's saved prompt is loaded by
-flag-aware recovery, and flag-aware delivery records its own receipt.
+with a later chat turn. Flag-aware recovery loads the saved flag text and tracks
+it on the recovery turn, which records its own delivery receipt.
 If a carrying turn completes without confirming flag delivery, orx records the
 error and leaves the flag available for the user's choice or a later turn.
 A completed review without a choice wakes the agent

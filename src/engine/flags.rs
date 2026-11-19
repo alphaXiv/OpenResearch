@@ -93,7 +93,7 @@ fn needs_redelivery(notice: &FlagNotice) -> bool {
     match notice.turn.as_deref() {
         Some("preparing" | "retrying" | "running" | "completed") => false,
         Some("interrupted") => true,
-        _ => notice.retired || notice.delivered || notice.dedupe.starts_with("resume:"),
+        _ => notice.retired || notice.delivered || notice.attached,
     }
 }
 
@@ -245,7 +245,7 @@ pub(crate) fn carry_cut_flags(
                 .rfind(|notice| notice.chat_session_id == chat.id && own(notice, id));
             if latest.is_some_and(|notice| {
                 needs_redelivery(notice)
-                    || (notice.dedupe.starts_with("resume:")
+                    || (notice.attached
                         && notice.retired
                         && !notice.delivered
                         && notice.turn.as_deref() == Some("completed"))

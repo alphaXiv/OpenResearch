@@ -52,6 +52,7 @@ pub(crate) struct FlagNotice {
     pub chat_session_id: String,
     pub dedupe: String,
     pub claimed: bool,
+    pub attached: bool,
     pub delivered: bool,
     pub retired: bool,
     /// The state of the turn that carries it, once there is one.
@@ -106,7 +107,7 @@ impl Store {
                AND NOT EXISTS (
                    SELECT 1 FROM runs r JOIN chat_sessions s ON s.id = w.chat_session_id
                    WHERE r.id = w.run_id AND r.cancel_requested = 0 AND r.cancel_accepted_at IS NULL
-                     AND r.status NOT IN ('cancelled', 'stopping')
+                     AND r.status NOT IN ('cancelled', 'stopping') AND s.archived = 0
                      AND NOT EXISTS (SELECT 1 FROM run_notices n WHERE n.run_id = r.id
                                      AND n.chat_session_id = s.id AND n.dedupe = 'chat-done')
                      AND CASE WHEN w.dedupe GLOB 'ask:*' THEN (
@@ -116,7 +117,7 @@ impl Store {
                          FROM run_monitor_events e WHERE e.run_id = r.id AND e.kind = 'choice'
                            AND json_extract(e.body_json, '$.flagId') = w.flag_id
                          ORDER BY e.seq DESC LIMIT 1
-                     ) ELSE s.autonomy IS NOT 'copilot' AND s.archived = 0
+                     ) ELSE s.autonomy IS NOT 'copilot'
                          AND (r.status NOT IN ('done', 'failed', 'lost')
                               OR COALESCE(r.ended_at, r.updated_at) < w.created_at)
                          AND NOT EXISTS (SELECT 1 FROM run_monitor_events e
@@ -215,7 +216,8 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT n.chat_session_id, n.dedupe, n.client_turn_id IS NOT NULL,
                     n.delivered_at IS NOT NULL,
-                    n.retired_at IS NOT NULL, t.state, n.id, n.flag_id
+                    n.retired_at IS NOT NULL, t.state, n.id, n.flag_id,
+                    n.dedupe GLOB 'resume:*' OR COALESCE(n.client_turn_id NOT GLOB 'flag-wake:*', 0)
              FROM flag_wakes n
              LEFT JOIN chat_turns t ON t.session_id = n.chat_session_id AND t.client_turn_id = n.client_turn_id
              WHERE n.run_id = ?1 ORDER BY n.id",
@@ -225,6 +227,7 @@ impl Store {
                 chat_session_id: row.get(0)?,
                 dedupe: row.get(1)?,
                 claimed: row.get(2)?,
+                attached: row.get(8)?,
                 delivered: row.get(3)?,
                 retired: row.get(4)?,
                 turn: row.get(5)?,
@@ -257,6 +260,23 @@ impl Store {
         Ok(())
     }
 
+    /// A recovered prompt keeps the same wakes, with delivery confirmed by its new turn.
+    pub(crate) fn reattach_flag_wakes(
+        tx: &rusqlite::Transaction<'_>,
+        chat: &str,
+        previous: &str,
+        recovery: &str,
+    ) -> Result<()> {
+        tx.execute(
+            "UPDATE flag_wakes SET client_turn_id = ?3, delivered_at = NULL, retired_at = NULL,
+                    delivery_failures = 0, first_failure_at = NULL, next_delivery_at = NULL,
+                    delivery_error = NULL
+             WHERE chat_session_id = ?1 AND client_turn_id = ?2",
+            params![chat, previous, recovery],
+        )?;
+        Ok(())
+    }
+
     /// Released Retry can complete the carrying turn with only its base prompt.
     pub(crate) fn retire_unconfirmed_flag_attachments(
         &self,
@@ -265,7 +285,8 @@ impl Store {
     ) -> Result<BTreeSet<String>> {
         let mut stmt = self.conn.prepare(
             "UPDATE flag_wakes AS w SET retired_at = ?2, delivery_error = ?3
-             WHERE w.dedupe GLOB 'resume:*' AND w.delivered_at IS NULL AND w.retired_at IS NULL
+             WHERE (w.dedupe GLOB 'resume:*' OR w.client_turn_id NOT GLOB 'flag-wake:*')
+               AND w.delivered_at IS NULL AND w.retired_at IS NULL
                AND (?1 IS NULL OR w.chat_session_id = ?1)
                AND EXISTS (
                    SELECT 1 FROM chat_turns t
@@ -293,8 +314,7 @@ impl Store {
                             AND r.status IN ('done', 'failed', 'lost')
                             AND COALESCE(r.ended_at, r.updated_at) >= n.created_at)))
                     OR (n.chat_session_id = ?1 AND (n.retired_at IS NOT NULL
-                        OR t.state = 'interrupted' OR (t.state = 'failed'
-                            AND n.delivered_at IS NOT NULL))
+                        OR t.state IN ('interrupted', 'failed'))
                         AND NOT EXISTS (SELECT 1 FROM run_notices result
                             WHERE result.chat_session_id = ?1 AND (result.dedupe = 'chat-done' AND result.run_id = n.run_id
                                 OR result.client_turn_id = ?2
@@ -394,7 +414,8 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT DISTINCT w.run_id FROM flag_wakes w
              WHERE w.retired_at IS NULL AND (
-                 (w.delivered_at IS NULL AND w.dedupe NOT GLOB 'resume:*')
+                 (w.delivered_at IS NULL AND w.dedupe NOT GLOB 'resume:*'
+                     AND (w.client_turn_id IS NULL OR w.client_turn_id GLOB 'flag-wake:*'))
                  OR EXISTS (
                      SELECT 1 FROM chat_turns t
                      WHERE t.session_id = w.chat_session_id AND t.client_turn_id = w.client_turn_id

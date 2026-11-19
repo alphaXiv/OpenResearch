@@ -3455,7 +3455,10 @@ enum TurnAdmission {
     RejectIfBusy,
     Preclaimed(TurnGuard),
     FlagWake(TurnGuard),
-    Recovery(Option<String>),
+    Recovery {
+        previous_client_turn_id: String,
+        flag_input: Option<String>,
+    },
 }
 
 /// Replayed files are already on disk, so a fork never re-decodes or duplicates
@@ -6064,7 +6067,10 @@ impl ChatHost {
                             },
                             overrides: settings,
                             images: TurnAttachments::Uploaded(Vec::new()),
-                            admission: TurnAdmission::Recovery(turn.flag_input.clone()),
+                            admission: TurnAdmission::Recovery {
+                                previous_client_turn_id: turn.client_turn_id,
+                                flag_input: turn.flag_input,
+                            },
                             client_turn_id: Some(format!("recover_{turn_id}")),
                             request_hash: None,
                             continuation: false,
@@ -6406,9 +6412,12 @@ impl ChatHost {
             None => turn_request_hash(&messages, &transcript, &overrides, &images)?,
         };
         let flag_wake = matches!(&admission, TurnAdmission::FlagWake(_));
-        let flag_input = match &admission {
-            TurnAdmission::Recovery(input) => input.clone(),
-            _ => None,
+        let (previous_flag_turn, flag_input) = match &admission {
+            TurnAdmission::Recovery {
+                previous_client_turn_id,
+                flag_input: Some(input),
+            } => (Some(previous_client_turn_id.clone()), Some(input.clone())),
+            _ => (None, None),
         };
         let client_turn_id = requested_client_turn_id
             .filter(|id| !id.trim().is_empty())
@@ -6477,7 +6486,7 @@ impl ChatHost {
         // same session. `_guard` releases the reservation on any early error.
         let (mut guard, mut pending_client_turn) = match admission {
             TurnAdmission::Preclaimed(guard) | TurnAdmission::FlagWake(guard) => (guard, None),
-            TurnAdmission::RejectIfBusy | TurnAdmission::Recovery(_) => {
+            TurnAdmission::RejectIfBusy | TurnAdmission::Recovery { .. } => {
                 match TurnGuard::claim(self, session_id, Some(&mut overrides)).await {
                     Some(guard) => (guard, None),
                     None => return Err(anyhow!("session is busy — interrupt it first")),
@@ -7062,6 +7071,14 @@ impl ChatHost {
                 ctx.continuation = continuation;
                 let admitted = Store::append_chat_turn(&tx, stored_user.as_ref(), &turn)?;
                 if matches!(admitted, ChatTurnAdmission::Inserted) {
+                    if let Some(previous) = previous_flag_turn {
+                        Store::reattach_flag_wakes(
+                            &tx,
+                            session_id,
+                            &previous,
+                            &turn.client_turn_id,
+                        )?;
+                    }
                     tx.commit()?;
                 }
                 Some((ctx, admitted))
@@ -16117,6 +16134,51 @@ for line in sys.stdin:
         crate::engine::flags::read(store, run).unwrap().remove(0)
     }
 
+    fn ask_about_flag(store: &Store, run: &StoredRun) {
+        let ask = crate::store::FlagChoice {
+            run_id: run.id.clone(),
+            body: json!({"flagId": "f1", "c": "ask", "by": "user", "requestId": "first"}),
+            wakes: vec![(
+                "owner".into(),
+                crate::engine::flags::wake(run, &flag(store, run), true),
+            )],
+        };
+        store.record_flag_choices(&[ask], None, 2).unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn marking_done_withdraws_an_ask_about_a_live_run() {
+        if crate::config::in_test_child(&[]) {
+            marking_done_withdraws_ask(false).await;
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn marking_done_withdraws_an_ask_about_an_ended_run() {
+        if crate::config::in_test_child(&[]) {
+            marking_done_withdraws_ask(true).await;
+        }
+    }
+
+    async fn marking_done_withdraws_ask(ended: bool) {
+        let store = Store::open().unwrap();
+        let mut run = quiet_agent_chat(&store, Some("copilot"));
+        if ended {
+            run.status = "done".into();
+            run.ended_at = Some(1);
+            store.upsert_run(&run).unwrap();
+        }
+        ask_about_flag(&store, &run);
+        assert_eq!(flag(&store, &run)["state"], "asking");
+
+        store.set_chat_session_archived("owner", true).unwrap();
+        settle_all(&notice_host()).await;
+
+        assert!(prompts().is_empty());
+        assert!(store.get_chat_session("owner").unwrap().unwrap().archived);
+        assert_eq!(flag(&store, &run)["state"], "waiting");
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn marking_done_before_flag_admission_preserves_done_and_withdraws_the_wake() {
         if !crate::config::in_test_child(&[]) {
@@ -16166,6 +16228,130 @@ for line in sys.stdin:
             (&json!("agent"), &json!(true))
         );
         assert!(crate::engine::flags::status_line(&flag).contains("the agent left it unsettled"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_continued_independent_flag_review_gets_its_reminder() {
+        if crate::config::in_test_child(&[]) {
+            recover_flag_review("continue", false, false).await;
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_continued_copilot_ask_tracks_the_new_review_turn() {
+        if crate::config::in_test_child(&[]) {
+            recover_flag_review("continue", true, false).await;
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn retrying_a_flag_review_keeps_its_original_turn() {
+        if crate::config::in_test_child(&[]) {
+            recover_flag_review("retry", false, false).await;
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn retrying_a_flag_review_after_switching_agents_tracks_the_new_turn() {
+        if crate::config::in_test_child(&[]) {
+            recover_flag_review("retry", false, true).await;
+        }
+    }
+
+    async fn recover_flag_review(action: &str, copilot: bool, switched: bool) {
+        let store = Store::open().unwrap();
+        let run = quiet_agent_chat(&store, copilot.then_some("copilot"));
+        if copilot {
+            ask_about_flag(&store, &run);
+        }
+        let batch = store.run_notice_batch("owner").unwrap();
+        let notice = &batch[0];
+        let client_turn = &notice.client_turn_id;
+        store.put_chat_turn("owner", client_turn, "running", 2);
+        let tx = store.begin().unwrap();
+        tx.execute(
+            "UPDATE chat_turns SET flag_input = ?2 WHERE id = ?1",
+            rusqlite::params![client_turn, notice.body],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        if switched {
+            store
+                .upsert_chat_message(&StoredChatMessage {
+                    id: client_turn.clone(),
+                    session_id: "owner".into(),
+                    role: "assistant".into(),
+                    parts_json: "[]".into(),
+                    created_at: 2,
+                    completed_at: Some(2),
+                    parent_id: None,
+                    base_native_session_id: None,
+                    result_native_session_id: None,
+                    result_native_message_id: None,
+                    native_harness: Some("claude-code".into()),
+                })
+                .unwrap();
+        }
+        let delivery = if action == "continue" {
+            store
+                .update_chat_turn_progress(client_turn, "running", "accepted", 1, None)
+                .unwrap();
+            "accepted"
+        } else {
+            "not_sent"
+        };
+        store
+            .fail_chat_turn(
+                client_turn,
+                delivery,
+                "fixture",
+                "The review was cut short",
+                Some(action),
+            )
+            .unwrap();
+
+        let host = notice_host();
+        let reply = host
+            .recover_turn("owner", client_turn, action, RecoveryOverrides::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            reply.turn_id == *client_turn,
+            action == "retry" && !switched
+        );
+        if reply.turn_id != *client_turn {
+            assert!(store
+                .flag_notice_runs_for_turn(client_turn)
+                .unwrap()
+                .is_empty());
+            assert!(store.pending_run_notice_sessions().unwrap().is_empty());
+        }
+        settle_all(&host).await;
+
+        let sent = prompts();
+        assert_eq!(sent.len(), if copilot { 1 } else { 2 }, "{sent:#?}");
+        assert_eq!(sent[0].matches(notice.body.as_str()).count(), 1);
+        let continued = store
+            .get_chat_turn("owner", &reply.turn_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(continued.state, "completed");
+        assert_eq!(continued.flag_input.as_deref(), Some(notice.body.as_str()));
+        assert_eq!(
+            store.flag_notice_runs_for_turn(&reply.turn_id).unwrap(),
+            [run.id.as_str()]
+        );
+        if copilot {
+            assert_eq!(flag(&store, &run)["state"], "waiting");
+            assert!(flag(&store, &run)["handback"].is_number());
+            assert_eq!(
+                store.run_flag_notices(&run.id).unwrap()[0].dedupe,
+                "ask:first"
+            );
+        } else {
+            assert!(sent[1].contains("Your last turn ended without settling flag f1"));
+            assert_eq!(flag(&store, &run)["state"], "kept");
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
