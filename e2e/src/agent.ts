@@ -14,6 +14,7 @@ export async function startAgentScripts() {
   const scripts: { match: string; steps: Step[] }[] = []
   const holds = new Map<string, Hold>()
   const unclaimed: string[] = []
+  const starts: string[] = []
   const hold = (name: string) => {
     let entry = holds.get(name)
     if (!entry) holds.set(name, (entry = { reached: Promise.withResolvers() }))
@@ -31,6 +32,10 @@ export async function startAgentScripts() {
       response.setHeader('content-type', 'application/json').end(JSON.stringify(steps))
       return
     }
+    if (request.url === '/session') {
+      response.setHeader('content-type', 'application/json').end(JSON.stringify({ hold: starts.shift() }))
+      return
+    }
     const name = decodeURIComponent(request.url!.slice('/hold/'.length))
     const entry = hold(name)
     entry.response = response
@@ -43,6 +48,10 @@ export async function startAgentScripts() {
     /** The next prompt containing `match` plays `steps`, once. */
     script(match: string, steps: Step[]) {
       scripts.push({ match, steps })
+    },
+    /** The next chat session the agent starts stops at `name` before orx can send it a prompt. */
+    holdStart(name: string) {
+      starts.push(name)
     },
     /** Resolves once a turn stops at `{ hold: name }`. */
     reached(name: string) {
@@ -59,9 +68,11 @@ export async function startAgentScripts() {
       const problems = [
         ...scripts.map(({ match }) => `No prompt used the script for ${JSON.stringify(match)}`),
         ...unclaimed.map((text) => `No script matched the prompt ${JSON.stringify(text.slice(-200))}`),
+        ...starts.map((name) => `No session started to stop at ${JSON.stringify(name)}`),
       ]
       scripts.length = 0
       unclaimed.length = 0
+      starts.length = 0
       for (const entry of holds.values()) entry.response?.end()
       holds.clear()
       return problems

@@ -54,6 +54,23 @@ test('a message queued behind a turn survives orx up quitting and runs once the 
   await expect(page.getByRole('button', { name: 'Continue', exact: true })).toBeHidden()
 })
 
+test('a turn a crash kept from reaching the agent is sent on its own at the next start', async ({ page, agent, launchOrx }) => {
+  const orx = await launchOrx()
+  await orx.onboard()
+  const project = await orx.createProject('restart')
+  agent.holdStart('starting')
+  agent.script('Profile the data loader.', [{ say: 'The loader spends most of its time decoding JPEGs.' }])
+  await project.open(page)
+  await send(page, 'Profile the data loader.')
+  await agent.reached('starting')
+
+  await orx.restart('SIGKILL')
+  await page.reload()
+  await expect(page.getByText('The loader spends most of its time decoding JPEGs.')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeHidden()
+  await expect(page.getByText(/before this turn finished/)).toBeHidden()
+})
+
 test('a crashed ACP turn finishes the same reply without another prompt', async ({ page, agent, launchOrx }) => {
   const orx = await launchOrx()
   await midTurn(orx, page, agent)

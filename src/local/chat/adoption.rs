@@ -127,7 +127,8 @@ pub async fn adopt_kept_work(chat: &Arc<ChatHost>, reachable: bool) -> Result<()
     )
     .await;
 
-    resume_turns(chat, true).await
+    // Startup reads what resumes on its own back from the store (`ChatHost::resume_quit_turns`).
+    resume_turns(chat, true).await.map(drop)
 }
 
 async fn adopt(
@@ -310,7 +311,11 @@ fn resumed_turn(
 /// Resumes each turn adoption made resumable once no other process holds its lease, then fails
 /// the unfinished turns no one holds, as a server has always recovered them: at `startup` all
 /// of them, later those whose lease expired. A resumed turn holds its lease, so it is spared.
-pub(super) async fn resume_turns(chat: &Arc<ChatHost>, startup: bool) -> Result<()> {
+/// Returns the failed turns that resume on their own.
+pub(super) async fn resume_turns(
+    chat: &Arc<ChatHost>,
+    startup: bool,
+) -> Result<Vec<StoredChatTurn>> {
     let store = Store::open()?;
     let pending: Vec<(String, Resumable)> = chat
         .resumable
@@ -348,6 +353,11 @@ pub(super) async fn resume_turns(chat: &Arc<ChatHost>, startup: bool) -> Result<
     } else {
         store.reconcile_expired_unfinished_chat_turns(&chat.held_turn_leases())?
     };
+    let on_their_own = unfinished
+        .iter()
+        .filter(|turn| turn.error_kind.as_deref() == Some(crate::store::QUIT_ERROR_KIND))
+        .cloned()
+        .collect();
     for (session_id, message) in materialize_unfinished_turns(&store, unfinished)? {
         chat.emit("chat.message", message_json(&message, &session_id));
     }
@@ -371,7 +381,7 @@ pub(super) async fn resume_turns(chat: &Arc<ChatHost>, startup: bool) -> Result<
             }
         }
     }
-    Ok(())
+    Ok(on_their_own)
 }
 
 /// The turn `resume` names, if it is still the chat's running turn and its checkpoint is still

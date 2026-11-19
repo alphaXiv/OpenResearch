@@ -736,7 +736,14 @@ pub(crate) const CHAT_TURN_LEASE_TTL: std::time::Duration = std::time::Duration:
 const RECOVERY_ACTION_SQL: &str =
     "CASE WHEN delivery_state IN ('not_sent', 'rejected') THEN 'retry' ELSE 'continue' END";
 
-const QUIT_ERROR_KIND: &str = "server_quit";
+/// A turn cut short that resumes on its own at the next start, or at once past startup.
+pub(crate) const QUIT_ERROR_KIND: &str = "server_quit";
+
+/// A crash or a lapsed lease may come from the turn itself, so a turn it cuts short resumes on
+/// its own only if the agent never saw its prompt, and only once: a setup that crashes orx
+/// retries a message once, not at every start.
+const RESTART_RETRY_SQL: &str =
+    "delivery_state IN ('not_sent', 'rejected') AND restart_retried = 0";
 
 fn expire_turn_leases(conn: &Connection, held: &[String]) -> Result<()> {
     conn.execute(
@@ -1648,6 +1655,7 @@ impl Store {
             "ALTER TABLE chat_usage_samples ADD COLUMN recorded_at INTEGER",
             "ALTER TABLE ui_state ADD COLUMN seen_nudges TEXT",
             "ALTER TABLE ui_state ADD COLUMN created_at INTEGER",
+            "ALTER TABLE chat_turns ADD COLUMN restart_retried INTEGER NOT NULL DEFAULT 0",
         ] {
             if let Err(error) = schema.execute(ddl, []) {
                 if !matches!(
@@ -5682,8 +5690,7 @@ impl Store {
         Ok(())
     }
 
-    /// Fail an in-flight turn because this server is quitting, so the next start resumes it;
-    /// a turn a crash cuts short waits for the user instead.
+    /// Fail an in-flight turn because this server is quitting, so the next start resumes it.
     pub fn fail_chat_turn_for_quit(&self, turn_id: &str) -> Result<()> {
         self.conn.execute(
             &format!(
@@ -5700,7 +5707,8 @@ impl Store {
         Ok(())
     }
 
-    /// Turns a quit cut short that are still their chat's latest and unrecovered, oldest first.
+    /// Turns that resume on their own ([`QUIT_ERROR_KIND`]) and are still their chat's latest
+    /// and unrecovered, oldest first.
     pub fn chat_turns_to_resume(&self) -> Result<Vec<StoredChatTurn>> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {CHAT_TURN_COLS} FROM chat_turns
@@ -5755,7 +5763,10 @@ impl Store {
         transaction.execute(
             &format!(
                 "UPDATE chat_turns
-                 SET state = 'failed', error_kind = 'server_restarted',
+                 SET state = 'failed',
+                     error_kind = CASE WHEN {RESTART_RETRY_SQL}
+                         THEN 'server_quit' ELSE 'server_restarted' END,
+                     restart_retried = restart_retried OR ({RESTART_RETRY_SQL}),
                      error_message = 'OpenResearch restarted before this turn finished.',
                      recovery_action = {RECOVERY_ACTION_SQL},
                      next_retry_at = NULL, updated_at = ?1
@@ -13489,36 +13500,120 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_quit_leaves_its_turns_to_resume_and_a_crash_leaves_them_to_the_user() {
+    fn a_quit_and_a_crashed_unsent_prompt_resume_and_other_crashed_turns_wait() {
         let dir = std::env::temp_dir().join(format!("orx-store-quit-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
-        for id in ["quit", "crashed"] {
+        let running = |id: &str, delivery: &str| {
             store
                 .create_chat_session(&chat_session_fixture(id))
                 .unwrap();
             let mut turn = chat_turn_fixture(id, &format!("client-{id}"));
             turn.session_id = id.into();
             turn.state = "running".into();
-            turn.delivery_state = "accepted".into();
+            turn.delivery_state = delivery.into();
             store.admit_chat_turn(None, &turn).unwrap();
-        }
+        };
+        running("quit", "accepted");
+        running("crashed", "accepted");
+        running("unsent", "not_sent");
+        running("rejected", "rejected");
 
         store.fail_chat_turn_for_quit("quit").unwrap();
         store.reconcile_unfinished_chat_turns().unwrap();
 
         let resumable = store.chat_turns_to_resume().unwrap();
-        assert_eq!(resumable.len(), 1);
-        assert_eq!(resumable[0].id, "quit");
-        assert_eq!(resumable[0].recovery_action.as_deref(), Some("continue"));
+        let mut resumed: Vec<_> = resumable
+            .iter()
+            .map(|turn| (turn.id.as_str(), turn.recovery_action.as_deref()))
+            .collect();
+        resumed.sort();
+        assert_eq!(
+            resumed,
+            [
+                ("quit", Some("continue")),
+                ("rejected", Some("retry")),
+                ("unsent", Some("retry")),
+            ]
+        );
         let crashed = store.get_chat_turn("crashed", "crashed").unwrap().unwrap();
         assert_eq!(crashed.state, "failed");
         assert_eq!(crashed.recovery_action.as_deref(), Some("continue"));
 
         let mut later = chat_turn_fixture("later", "client-later");
         later.session_id = "quit".into();
-        later.created_at = resumable[0].created_at + 1;
+        later.created_at = 3;
         store.admit_chat_turn(None, &later).unwrap();
-        assert!(store.chat_turns_to_resume().unwrap().is_empty());
+        assert!(store
+            .chat_turns_to_resume()
+            .unwrap()
+            .iter()
+            .all(|turn| turn.id != "quit"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_unsent_prompt_whose_retry_crashes_again_waits_for_the_user() {
+        let dir = std::env::temp_dir().join(format!("orx-store-recrash-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat_1"))
+            .unwrap();
+        let mut turn = chat_turn_fixture("unsent", "client-unsent");
+        turn.state = "running".into();
+        store.admit_chat_turn(None, &turn).unwrap();
+        let resumable = |store: &Store| -> Vec<String> {
+            let turns = store.chat_turns_to_resume().unwrap();
+            turns.into_iter().map(|turn| turn.id).collect()
+        };
+
+        store.reconcile_unfinished_chat_turns().unwrap();
+        assert_eq!(resumable(&store), ["unsent"]);
+
+        assert!(store.reset_chat_turn_for_retry("unsent", 3).unwrap());
+        store.reconcile_unfinished_chat_turns().unwrap();
+        assert!(resumable(&store).is_empty());
+        let waiting = store.get_chat_turn("chat_1", "unsent").unwrap().unwrap();
+        assert_eq!(waiting.state, "failed");
+        assert_eq!(waiting.recovery_action.as_deref(), Some("retry"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_lapsed_lease_resumes_only_an_unsent_prompt() {
+        let dir = std::env::temp_dir().join(format!("orx-store-lapsed-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        for (id, delivery) in [("unsent", "not_sent"), ("unknown", "unknown")] {
+            store
+                .create_chat_session(&chat_session_fixture(id))
+                .unwrap();
+            let mut turn = chat_turn_fixture(id, &format!("client-{id}"));
+            turn.session_id = id.into();
+            turn.state = "running".into();
+            turn.delivery_state = delivery.into();
+            store.admit_chat_turn(None, &turn).unwrap();
+            assert!(store.claim_chat_turn(id, id, &[]).unwrap());
+        }
+        store
+            .conn
+            .execute(
+                "UPDATE chat_turn_leases SET heartbeat_at = ?1",
+                params![expired_before(CHAT_TURN_LEASE_TTL) - 1],
+            )
+            .unwrap();
+
+        let mut lapsed = store.reconcile_expired_unfinished_chat_turns(&[]).unwrap();
+        lapsed.sort_by(|a, b| a.id.cmp(&b.id));
+        let kinds: Vec<_> = lapsed
+            .iter()
+            .map(|turn| (turn.id.as_str(), turn.error_kind.as_deref()))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                ("unknown", Some("server_restarted")),
+                ("unsent", Some(QUIT_ERROR_KIND)),
+            ]
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

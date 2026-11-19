@@ -4733,17 +4733,25 @@ impl ChatHost {
         futures::future::join_all(stops).await;
     }
 
-    /// Resume each turn the last quit stopped, then run the queues waiting behind them.
+    /// Resume each turn the last server left to resume on its own, then run the queues waiting
+    /// behind them.
     pub async fn resume_quit_turns(self: &Arc<Self>) {
         self.resuming_quit_turns
             .store(true, std::sync::atomic::Ordering::SeqCst);
         let turns = match Store::open().and_then(|store| store.chat_turns_to_resume()) {
             Ok(turns) => turns,
             Err(error) => {
-                eprintln!("orx up: could not read the turns the last quit stopped: {error:#}");
+                eprintln!("orx up: could not read the turns the last server stopped: {error:#}");
                 Vec::new()
             }
         };
+        self.resume_turns_on_their_own(turns).await;
+        self.resuming_quit_turns
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        self.resume_persisted_queues();
+    }
+
+    async fn resume_turns_on_their_own(self: &Arc<Self>, turns: Vec<StoredChatTurn>) {
         for turn in turns {
             let Some(action) = turn.recovery_action.as_deref() else {
                 continue;
@@ -4763,9 +4771,6 @@ impl ChatHost {
                 );
             }
         }
-        self.resuming_quit_turns
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-        self.resume_persisted_queues();
     }
 
     pub async fn is_busy(&self, session_id: &str) -> bool {
@@ -5134,7 +5139,8 @@ impl ChatHost {
         if crate::keep::handing_off() {
             return Ok(());
         }
-        adoption::resume_turns(self, false).await?;
+        let turns = adoption::resume_turns(self, false).await?;
+        self.resume_turns_on_their_own(turns).await;
         self.resume_persisted_queues();
         Ok(())
     }
