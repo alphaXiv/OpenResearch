@@ -1015,6 +1015,8 @@ async fn only_an_unfinished_local_run_keeps_this_machine_awake() {
     fs::write(nearby.join("release"), "").unwrap();
     fs::write(faraway.join("release"), "").unwrap();
     assert_eq!(f.terminal(&local, "nearby").await.status, "done");
+    let receipt = orx_host::wrapper::receipt(&nearby).unwrap().unwrap();
+    assert!(receipt.processes.is_empty(), "{:?}", receipt.processes);
     assert_eq!(f.terminal(f.ssh.as_ref(), "faraway").await.status, "done");
     until(|| sleep_locks(&nearby, &inhibitors).is_empty()).await;
 }
