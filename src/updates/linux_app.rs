@@ -19,7 +19,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use super::Outcome;
-use crate::error::{anyhow, Result};
+use crate::error::{anyhow, Context, Result};
 
 /// Release asset describing the published AppImages. Written by
 /// `.github/workflows/release-linux-app.yml` after both are attached.
@@ -259,8 +259,6 @@ fn stage(
     version: &Version,
     tag: &str,
 ) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
     // Beside the target, so the final move is a same-filesystem rename. A killed
     // update leaves its full-size scratch copy, so clear older ones first.
     super::macos_app::sweep_leftovers(parent, appimage);
@@ -270,10 +268,8 @@ fn stage(
     let written = (|| {
         std::fs::create_dir_all(&scratch)
             .map_err(|e| anyhow!("Could not create {}: {}", scratch.display(), e))?;
-        std::fs::write(&payload, bytes)
-            .map_err(|e| anyhow!("Could not write {}: {}", payload.display(), e))?;
-        std::fs::set_permissions(&payload, std::fs::Permissions::from_mode(0o755))
-            .map_err(|e| anyhow!("Could not make {} executable: {}", payload.display(), e))?;
+        crate::process::write_executable(&payload, 0o755, |file| file.write_all(bytes))
+            .with_context(|| format!("Could not stage {}", payload.display()))?;
         super::write_staged_release(&scratch, version, tag)?;
 
         let _ = std::fs::remove_dir_all(staged);

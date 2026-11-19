@@ -59,6 +59,46 @@ pub fn tokio_command(program: impl AsRef<OsStr>) -> tokio::process::Command {
     command(program).into()
 }
 
+/// A child opens the executable so parallel forks of orx cannot inherit its writer.
+#[cfg(unix)]
+pub(crate) fn write_executable(
+    path: &Path,
+    mode: u32,
+    write: impl FnOnce(&mut dyn std::io::Write) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    use std::fs::{self, Permissions};
+    use std::io;
+    use std::net::Shutdown;
+    use std::os::fd::OwnedFd;
+    use std::os::unix::{fs::PermissionsExt, net::UnixStream};
+    use std::process::Stdio;
+
+    let (mut input, reader) = UnixStream::pair()?;
+    let writer = command("/bin/sh")
+        .args(["-c", "umask 077; set -C; exec cat > \"$1\"", "orx-write"])
+        .arg(path)
+        .env("PATH", "/usr/bin:/bin:/run/current-system/sw/bin")
+        .stdin(Stdio::from(OwnedFd::from(reader)))
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let written = write(&mut input);
+    // Half-close also sends EOF when a sibling fork inherited the socket.
+    let closed = input.shutdown(Shutdown::Write);
+    let output = writer.wait_with_output()?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr);
+        return Err(io::Error::other(format!(
+            "Could not write {} ({}): {}",
+            path.display(),
+            output.status,
+            detail.trim()
+        )));
+    }
+    written?;
+    closed?;
+    fs::set_permissions(path, Permissions::from_mode(mode))
+}
+
 /// How long an agent CLI gets, at each step of ending it, to exit on its own.
 const AGENT_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 
@@ -213,6 +253,46 @@ fn resolve(program: &OsStr) -> OsString {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn executable_is_runnable_while_a_sibling_fork_is_still_alive() {
+        use std::io;
+        use std::net::Shutdown;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let dir = crate::local::git::TemporaryDirectory::new("orx-executable").unwrap();
+        let path = dir.path().join("probe");
+        let (release, gate) = UnixStream::pair().unwrap();
+        let gate_fd = gate.as_raw_fd();
+        let mut sibling = -1;
+        let installed = write_executable(&path, 0o700, |writer| {
+            // The child parks before exec, which is when CLOEXEC would close inherited writers.
+            sibling = unsafe { libc::fork() };
+            if sibling == 0 {
+                let mut byte = 0_u8;
+                unsafe {
+                    libc::read(gate_fd, (&mut byte as *mut u8).cast(), 1);
+                    libc::_exit(0);
+                }
+            }
+            if sibling == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            writer.write_all(b"#!/bin/sh\nexit 0\n")
+        });
+        let status = installed.and_then(|()| command(&path).status());
+
+        release.shutdown(Shutdown::Write).unwrap();
+        if sibling > 0 {
+            assert_eq!(
+                unsafe { libc::waitpid(sibling, std::ptr::null_mut(), 0) },
+                sibling
+            );
+        }
+        assert!(status.unwrap().success());
+    }
 
     #[test]
     fn bounded_wait_keeps_exit_codes_and_reaps_a_stalled_child() {
