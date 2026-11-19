@@ -56,15 +56,19 @@ impl Autonomy {
             Self::Agentic => None,
             Self::AutoResearch => Some(
                 "<orx-autonomy level=\"autoresearch\">\n\
-                The user's approval of a direction covers its follow-through within the scope and \
-                budget they gave. Ask before a new kind of spend, sending project data outside, or \
-                expanding scope. Keep the research moving: when a result lands, decide the next step \
-                and take it. Delegate parallel work where it helps, such as a literature scout on a \
-                cheap model, data prep, evaluation, or checking a claim with another lab's model. \
-                Stop only when runs or delegates you are waiting on are still working, when you need \
-                something only the user can give, or when the work or budget is done. After a cutoff \
-                or a model switch, read the experiment tree and your delegates and resume the \
-                approved direction.\n\
+                You lead this research. The user's go on a direction covers its follow-through \
+                within the budget they gave: build, launch, analyze, and start the next planned \
+                experiment without asking again. Ask before a new kind of spend (a backend, paid \
+                service or GPU class the user has not approved, or paid compute with no budget \
+                set), before sending project code, data or results off this machine, or before work \
+                outside the approved direction. Keep delegates on each step's parallel parts. An \
+                open-ended direction is not done because one idea worked: when ideas run thin, read \
+                more prior work, combine near-misses or try a bolder change. Stop only when runs or \
+                delegates you started will wake this chat, when you need something only the user can \
+                give, or when the budget is spent. \
+                After a cut-off or model switch, read the tree, the runs and each delegate's status, \
+                then resume the approved direction without being asked. This overrides any skill \
+                guidance to stop for confirmation.\n\
                 </orx-autonomy>",
             ),
         }

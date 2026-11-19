@@ -450,7 +450,8 @@ impl Instrumentation {
             "[orx] Run {run} (experiment {experiment}) needs an instrumentation check.\n\
              {problems}\n\
              Check the current run status and review these findings privately. Address them when they \
-             help a live or planned run's decision. Inspect `orx exp view show {run}`, `orx exp view check {run}` and `orx logs {run}`. \
+             help a live or planned run's decision. If the run has ended and no planned child inherits \
+             its view, nothing needs doing. Inspect `orx exp view show {run}`, `orx exp view check {run}` and `orx logs {run}`. \
              Repair the view, plan or patterns on this run with `orx exp view set {experiment}`. \
              If the missing report requires a code change, weigh the work already done before relaunching. \
              {relaunch} To restart, cancel an active run with \
