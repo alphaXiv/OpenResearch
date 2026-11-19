@@ -156,7 +156,7 @@ impl Harness for Acp {
 
     async fn run_turn(&self, ctx: &mut TurnCtx) -> TurnResult {
         match run_turn(ctx, &self.0).await {
-            Ok(()) => Ok(TurnOutcome::Completed),
+            Ok(outcome) => Ok(outcome),
             Err(error) => {
                 ctx.host.acp.stop(&ctx.session_id).await;
                 Err(TurnFailure::adapter(error, ctx.delivery_state()))
@@ -333,7 +333,7 @@ pub(crate) fn orx_mcp_servers(
     Ok(servers)
 }
 
-async fn run_turn(ctx: &mut TurnCtx, definition: &Definition) -> Result<()> {
+async fn run_turn(ctx: &mut TurnCtx, definition: &Definition) -> Result<TurnOutcome> {
     let apply_model = ctx.native_session_id.is_none() || {
         let store = Store::open()?;
         let session = store
@@ -383,8 +383,8 @@ async fn run_turn(ctx: &mut TurnCtx, definition: &Definition) -> Result<()> {
                 .await;
         }
     }
-    prompt_session(ctx, &session).await?;
-    Ok(())
+    let result = prompt_session(ctx, &session).await?;
+    Ok(prompt_outcome(&result))
 }
 
 /// The chat's agent with its native session open, and the prompt to send it.
@@ -595,6 +595,14 @@ pub(crate) async fn prompt_session(ctx: &mut TurnCtx, session: &OpenSession) -> 
     };
     ctx.flush()?;
     Ok(result)
+}
+
+pub(super) fn prompt_outcome(result: &Value) -> TurnOutcome {
+    if result["stopReason"] == "end_turn" {
+        TurnOutcome::Completed
+    } else {
+        TurnOutcome::Stopped
+    }
 }
 
 fn approve_permissions(ctx: &mut TurnCtx, client: &Client) -> Result<Vec<String>> {
@@ -942,6 +950,56 @@ fn tool_output(tool: &Value, terminals: &HashMap<String, String>) -> Option<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn only_end_turn_completes_an_acp_prompt() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let agent = Acp(Definition {
+            id: format!("acp:{}", uuid::Uuid::new_v4()),
+            name: "Peer".into(),
+            executable: crate::local::acp::fake_agent_interpreter("python3"),
+            arguments: vec![concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/local/harness/fixtures/acp-peer.py"
+            )
+            .into()],
+            unknown: Default::default(),
+        });
+        crate::local::acp::save(agent.0.clone(), true).unwrap();
+        let repo = std::env::temp_dir().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        crate::local::git::initialize_own_repository(&repo).unwrap();
+
+        let store = Store::open().unwrap();
+        for (input, expected) in [
+            ("echo", Some(TurnOutcome::Completed)),
+            ("refuse", Some(TurnOutcome::Stopped)),
+            ("token-limit", Some(TurnOutcome::Stopped)),
+            ("request-limit", Some(TurnOutcome::Stopped)),
+            ("missing-stop", Some(TurnOutcome::Stopped)),
+            ("unknown-stop", Some(TurnOutcome::Stopped)),
+            ("cancel", None),
+            ("error", None),
+            ("crash", None),
+        ] {
+            let mut ctx = TurnCtx::test_stub();
+            ctx.harness = agent.0.id.clone();
+            ctx.session_id = input.into();
+            ctx.project.repo_path = repo.to_string_lossy().into_owned();
+            ctx.text = format!("ACP_TEST:{input}");
+            store.put_chat_session(&ctx.session_id, &ctx.harness, Some("autoresearch"));
+
+            let result = agent.run_turn(&mut ctx).await;
+            assert_eq!(
+                result.as_ref().ok().copied(),
+                expected,
+                "{input}: {result:?}"
+            );
+            ctx.host.acp.stop(&ctx.session_id).await;
+        }
+    }
 
     #[test]
     fn codex_acp_counts_each_prompt_with_inclusive_input() {

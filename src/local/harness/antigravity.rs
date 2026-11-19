@@ -153,7 +153,7 @@ impl Harness for Antigravity {
 
     async fn run_turn(&self, ctx: &mut TurnCtx) -> TurnResult {
         match run_turn(ctx).await {
-            Ok(()) => Ok(TurnOutcome::Completed),
+            Ok(outcome) => Ok(outcome),
             Err(error) => {
                 ctx.host.acp.stop(&ctx.session_id).await;
                 Err(TurnFailure::adapter(error, ctx.delivery_state()))
@@ -435,7 +435,7 @@ async fn prepare(
     Ok((definition, repo))
 }
 
-async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
+async fn run_turn(ctx: &mut TurnCtx) -> Result<TurnOutcome> {
     let log = log_path(&ctx.session_id);
     if ctx.host.acp.connected(&ctx.session_id).await.is_err() {
         // No process writes it: each one starts its own.
@@ -451,7 +451,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
         })
 }
 
-async fn turn(ctx: &mut TurnCtx, log: &Path, logged: u64) -> Result<()> {
+async fn turn(ctx: &mut TurnCtx, log: &Path, logged: u64) -> Result<TurnOutcome> {
     let (definition, repo) = prepare(
         &ctx.project,
         &ctx.session_id,
@@ -490,16 +490,16 @@ async fn turn(ctx: &mut TurnCtx, log: &Path, logged: u64) -> Result<()> {
         let sample = format!("antigravity-acp-{}", ctx.attempt_count_for_usage());
         ctx.record_native_usage(&sample, model.as_deref(), None, usage, None);
     }
+    let stop_error = take_stop_error(&ctx.session_id, &native_id);
     if take_notices(ctx) {
-        let cause = take_stop_error(&ctx.session_id, &native_id)
-            .or_else(|| logged_network_failure(log, logged));
+        let cause = stop_error.or_else(|| logged_network_failure(log, logged));
         let message = match cause {
             Some(cause) => format!("Antigravity stopped with an error: {cause}"),
             None => format!("Antigravity stopped with an error; see {}", log.display()),
         };
         ctx.mark_terminal_failure("antigravity_terminal", message);
         ctx.flush()?;
-        return Ok(());
+        return Ok(TurnOutcome::Stopped);
     }
     if ctx.plan_mode {
         if let Some(card) = plan_card(&ctx.assistant.parts, &ctx.assistant.id) {
@@ -507,7 +507,12 @@ async fn turn(ctx: &mut TurnCtx, log: &Path, logged: u64) -> Result<()> {
             ctx.flush()?;
         }
     }
-    Ok(())
+    // A Stop with an error may have kept the same ACP prompt open for background work.
+    Ok(if stop_error.is_some() {
+        TurnOutcome::Stopped
+    } else {
+        super::acp::prompt_outcome(&result)
+    })
 }
 
 /// Removes the lines agy prints as notices from the answer; true when its give-up line ended the turn.
@@ -1070,10 +1075,10 @@ mod tests {
         ctx.plan_mode = true;
         ctx.text = "List the runs".into();
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        runtime
-            .block_on(Antigravity.run_turn(&mut ctx))
-            .map_err(|failure| failure.message)
-            .unwrap();
+        assert_eq!(
+            runtime.block_on(Antigravity.run_turn(&mut ctx)).unwrap(),
+            TurnOutcome::Completed
+        );
 
         let texts: Vec<_> = ctx
             .assistant
@@ -1129,8 +1134,6 @@ mod tests {
             runtime.block_on(Antigravity.compact(&compact)).unwrap(),
             CompactOutcome::Native
         );
-        runtime.block_on(ctx.host.acp.stop(&ctx.session_id));
-
         let received: Vec<Value> = std::fs::read_to_string(record)
             .unwrap()
             .lines()
@@ -1152,6 +1155,26 @@ mod tests {
             .map(|entry| entry["params"]["prompt"][0]["text"].clone())
             .collect();
         assert_eq!(prompts.last(), Some(&json!("/compact")));
+
+        for (frame, expected) in [
+            (json!({"stopReason": "refusal"}), Some(TurnOutcome::Stopped)),
+            (
+                json!({"stopError": "RESOURCE_EXHAUSTED: quota"}),
+                Some(TurnOutcome::Stopped),
+            ),
+            (text(ERROR_MARKER), Some(TurnOutcome::Stopped)),
+            (json!({"stopReason": "cancelled"}), None),
+        ] {
+            std::fs::write(&replay, frame.to_string()).unwrap();
+            ctx.assistant.parts.clear();
+            let result = runtime.block_on(Antigravity.run_turn(&mut ctx));
+            assert_eq!(
+                result.as_ref().ok().copied(),
+                expected,
+                "{frame}: {result:?}"
+            );
+        }
+        runtime.block_on(ctx.host.acp.stop(&ctx.session_id));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

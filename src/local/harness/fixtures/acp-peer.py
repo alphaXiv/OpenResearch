@@ -183,11 +183,20 @@ for line in sys.stdin:
     elif method == "session/set_mode" and mode == "replay":
         reply(request, {})
     elif method == "session/prompt" and mode == "replay":
+        result = dict(stopReason="end_turn")
         if params["prompt"][0]["text"] != "/compact":
             with open(value, encoding="utf-8") as frames:
                 for line in frames:
-                    update(json.loads(line))
-        reply(request, dict(stopReason="end_turn"))
+                    frame = json.loads(line)
+                    if "stopReason" in frame:
+                        result = frame
+                    elif "stopError" in frame:
+                        log = sys.argv[sys.argv.index("--log-file") + 1]
+                        with open(os.path.splitext(log)[0] + ".error.json", "w", encoding="utf-8") as saved:
+                            json.dump(dict(conversationId=session, error=frame["stopError"]), saved)
+                    else:
+                        update(frame)
+        reply(request, result)
     elif method == "session/prompt":
         if pending:
             update(dict(sessionUpdate="agent_message_chunk", content=dict(type="text", text=pending)))
@@ -299,7 +308,14 @@ with socket.create_connection(('127.0.0.1', int(sys.argv[1]))) as gate:
             assert len(response["result"]["output"].encode()) <= 100
             reverse("terminal/release", dict(terminalId=terminal))
             assert "error" in reverse("terminal/output", dict(terminalId=terminal))
-        reply(request, dict(stopReason="refusal" if text == "refuse" else "end_turn"))
+        stop_reason = {
+            "refuse": "refusal",
+            "token-limit": "max_tokens",
+            "request-limit": "max_turn_requests",
+            "cancel": "cancelled",
+            "unknown-stop": "unknown",
+        }.get(text, "end_turn")
+        reply(request, {} if text == "missing-stop" else dict(stopReason=stop_reason))
     elif method == "session/list":
         if params.get("cursor") is None:
             reply(request, dict(sessions=[dict(sessionId="first-page", cwd="/")], nextCursor="page-2"))

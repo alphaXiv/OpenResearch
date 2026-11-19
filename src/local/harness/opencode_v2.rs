@@ -79,7 +79,7 @@ pub(super) async fn run_turn(
     store: NativeStore,
     binary: crate::local::opencode::ResolvedBinary,
     database: PathBuf,
-) -> Result<()> {
+) -> Result<TurnOutcome> {
     ensure_runtime(ctx, store, binary, database).await?;
     let endpoint = ctx
         .host
@@ -136,8 +136,17 @@ pub(super) async fn run_turn(
     if let Some(model) = model {
         post(&endpoint, &format!("{path}/model"), &json!({"model":model})).await?;
     }
-    let mut events = subscribe(&endpoint).await?;
-    let before = get(&endpoint, &endpoint.v2_export_path(&native_id)).await?;
+    prompt_session(ctx, &endpoint, &native_id, &path).await
+}
+
+async fn prompt_session(
+    ctx: &mut TurnCtx,
+    endpoint: &AgentEndpoint,
+    native_id: &str,
+    path: &str,
+) -> Result<TurnOutcome> {
+    let mut events = subscribe(endpoint).await?;
+    let before = get(endpoint, &endpoint.v2_export_path(native_id)).await?;
     let previous: HashSet<String> = messages(&before)?
         .iter()
         .filter_map(|m| m["id"].as_str().map(str::to_owned))
@@ -146,7 +155,7 @@ pub(super) async fn run_turn(
     ctx.persist_delivery(DeliveryState::Unknown)?;
     // A transport failure can follow durable admission. Never replay this POST.
     let admission = post(
-        &endpoint,
+        endpoint,
         &format!("{path}/prompt"),
         &json!({"id":prompt_id,"text":ctx.text}),
     )
@@ -155,9 +164,9 @@ pub(super) async fn run_turn(
         ctx.persist_delivery(DeliveryState::Accepted)?;
     }
     let mut turn = Turn {
-        endpoint: &endpoint,
-        native_id: &native_id,
-        path: &path,
+        endpoint,
+        native_id,
+        path,
         prompt_id: &prompt_id,
         delivered: false,
         previous: &previous,
@@ -171,6 +180,7 @@ pub(super) async fn run_turn(
     let mut ended = admission.is_err() && turn.idle().await?;
     let mut failure = None;
     let mut stopped = false;
+    let mut terminal_success = false;
     let mut stale = false;
     while !ended {
         let event = tokio::select! {
@@ -190,7 +200,7 @@ pub(super) async fn run_turn(
             }
         };
         let Some(Ok(event)) = event else {
-            events = subscribe(&endpoint).await.map_err(|error| {
+            events = subscribe(endpoint).await.map_err(|error| {
                 anyhow!("OpenCode stopped streaming this chat's events: {error}")
             })?;
             let (projection, _) = turn.reconcile(ctx).await?;
@@ -200,7 +210,7 @@ pub(super) async fn run_turn(
         };
         let kind = event["type"].as_str().unwrap_or_default();
         let data = &event["data"];
-        match fold(&mut turn.steps, &native_id, &event) {
+        match fold(&mut turn.steps, native_id, &event) {
             Some(Folded::Text { part, delta }) => ctx.append_part_text(&part, delta),
             Some(Folded::Step(index)) => {
                 for (part, _) in projected_parts(&turn.steps[index]) {
@@ -208,12 +218,13 @@ pub(super) async fn run_turn(
                 }
             }
             None if kind == "session.inbox.delivered"
+                && data["sessionID"].as_str() == Some(native_id)
                 && data["inboxID"].as_str() == Some(prompt_id.as_str()) =>
             {
                 turn.delivered = true;
                 stale = true;
             }
-            None if data["sessionID"].as_str() == Some(native_id.as_str())
+            None if data["sessionID"].as_str() == Some(native_id)
                 && matches!(
                     kind,
                     "session.execution.succeeded"
@@ -225,6 +236,9 @@ pub(super) async fn run_turn(
                 if ended {
                     failure = data.get("error").map(error_text);
                     stopped = kind == "session.execution.interrupted";
+                    terminal_success = kind == "session.execution.succeeded"
+                        && turn.delivered
+                        && failure.is_none();
                 }
             }
             // A failed step is only terminal once no retry follows, which the next event says.
@@ -249,22 +263,38 @@ pub(super) async fn run_turn(
             tokio::time::sleep(crate::config::paced(Duration::from_millis(100))).await;
         }
         let (projection, answered) = turn.reconcile(ctx).await?;
-        let delivered = messages(&projection)?
+        let history = messages(&projection)?;
+        let prompt = history
             .iter()
-            .any(|m| m["id"].as_str() == Some(&prompt_id));
+            .position(|m| m["id"].as_str() == Some(&prompt_id));
         let outcome = projection
             .pointer("/data/info/outcome")
             .and_then(Value::as_str);
         // Declining a permission or question interrupts the execution without an export outcome.
-        if delivered
-            && answered
-            && (stopped || matches!(outcome, Some("succeeded" | "interrupted")))
-        {
+        if let Some(prompt) = prompt.filter(|_| {
+            answered && (stopped || matches!(outcome, Some("succeeded" | "interrupted")))
+        }) {
             ctx.persist_delivery(DeliveryState::Accepted)?;
             ctx.mark_final_text_tail();
-            return Ok(());
+            let final_step = history[prompt + 1..]
+                .split(|message| matches!(message["type"].as_str(), Some("user" | "idle")))
+                .next()
+                .and_then(|execution| execution.iter().rfind(|step| step["type"] == "assistant"));
+            let completed = terminal_success
+                && outcome == Some("succeeded")
+                && final_step.is_some_and(|step| {
+                    step["finish"] == "stop"
+                        && !step["time"]["completed"].is_null()
+                        && step["error"].is_null()
+                        && step["retry"].is_null()
+                });
+            return Ok(if completed {
+                TurnOutcome::Completed
+            } else {
+                TurnOutcome::Stopped
+            });
         }
-        if let (true, Some(message)) = (delivered, &failure) {
+        if let (Some(_), Some(message)) = (prompt, &failure) {
             // Failures before a step (e.g. an unavailable model) leave no assistant message.
             ctx.mark_native_retry_exhausted();
             ctx.mark_terminal_failure("opencode_terminal", message);
@@ -2004,6 +2034,124 @@ mod tests {
                 .and_then(Value::as_str),
             Some("ses_child")
         );
+    }
+
+    #[tokio::test]
+    async fn only_the_current_prompts_ordinary_execution_completes() {
+        use axum::{body::Body, http::StatusCode, routing, Json, Router};
+        use futures::stream;
+        use std::convert::Infallible;
+
+        for (case, expected) in [
+            ("success", Some(TurnOutcome::Completed)),
+            ("interrupted", Some(TurnOutcome::Stopped)),
+            ("token-limit", Some(TurnOutcome::Stopped)),
+            ("refusal", Some(TurnOutcome::Stopped)),
+            ("earlier-success", Some(TurnOutcome::Stopped)),
+            ("malformed-eof", Some(TurnOutcome::Stopped)),
+            ("provider-error", None),
+        ] {
+            let mut export: Value =
+                serde_json::from_str(include_str!("fixtures/opencode-turn-export.json")).unwrap();
+            let native_id = export["data"]["info"]["id"].as_str().unwrap().to_owned();
+            let captured_prompt = export["data"]["messages"][0]["id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let mut events = include_str!("fixtures/opencode-turn-events.sse").to_owned();
+            match case {
+                "interrupted" => {
+                    events = events.replace("execution.succeeded", "execution.interrupted");
+                    export["data"]["info"]["outcome"] = Value::Null;
+                    export["data"]["messages"][2]["error"] =
+                        json!({"type": "aborted", "message": "Step interrupted"});
+                }
+                "token-limit" => export["data"]["messages"][2]["finish"] = json!("length"),
+                "refusal" => export["data"]["messages"][2]["finish"] = json!("content-filter"),
+                "malformed-eof" => {
+                    let (before, _) = events.rsplit_once("data: ").unwrap();
+                    events = format!("{before}data: {{\"type\":\n");
+                }
+                "provider-error" => {
+                    export["data"]["messages"][2]["error"] =
+                        json!({"type": "provider.error", "message": "Quota exceeded"});
+                }
+                _ => {}
+            }
+            let (admission, prompt) = tokio::sync::watch::channel::<Option<String>>(None);
+            let stream_prompt = prompt.clone();
+            let app = Router::new()
+                .route(
+                    "/api/event",
+                    routing::get(move || {
+                        let mut prompt = stream_prompt.clone();
+                        let events = events.clone();
+                        let captured_prompt = captured_prompt.clone();
+                        async move {
+                            let connected = stream::iter([Ok::<_, Infallible>(
+                                "data: {\"type\":\"server.connected\"}\n\n".to_owned(),
+                            )]);
+                            let replay = stream::once(async move {
+                                let id = prompt.wait_for(Option::is_some).await.unwrap();
+                                let events = if case == "earlier-success" {
+                                    events
+                                } else {
+                                    events.replace(&captured_prompt, id.as_deref().unwrap())
+                                };
+                                Ok(events)
+                            });
+                            (
+                                [("content-type", "text/event-stream")],
+                                Body::from_stream(connected.chain(replay)),
+                            )
+                        }
+                    }),
+                )
+                .route(
+                    "/api/experimental/session/{id}/export",
+                    routing::get(move || {
+                        let mut export = export.clone();
+                        let id = prompt.borrow().clone();
+                        async move {
+                            if let Some(id) = id {
+                                export["data"]["messages"][0]["id"] = json!(id);
+                            } else {
+                                export["data"]["messages"] = json!([]);
+                                export["data"]["info"]["outcome"] = Value::Null;
+                            }
+                            Json(export)
+                        }
+                    }),
+                )
+                .route(
+                    "/api/session/{id}/prompt",
+                    routing::post(move |Json(body): Json<Value>| {
+                        admission
+                            .send(Some(body["id"].as_str().unwrap().to_owned()))
+                            .unwrap();
+                        async { StatusCode::NO_CONTENT }
+                    }),
+                )
+                .route(
+                    "/api/session/{id}/{resource}",
+                    routing::get(|| async { Json(json!({"data": []})) }),
+                )
+                .route(
+                    "/api/session/active",
+                    routing::get(|| async { Json(json!({"data": {}})) }),
+                );
+            let (endpoint, server) = catalog_server(app, false).await;
+            let mut ctx = TurnCtx::test_stub();
+            ctx.harness = "opencode".into();
+            let path = format!("/api/session/{native_id}");
+            let result = prompt_session(&mut ctx, &endpoint, &native_id, &path).await;
+            server.abort();
+            assert_eq!(
+                result.as_ref().ok().copied(),
+                expected,
+                "{case}: {result:?}"
+            );
+        }
     }
 
     #[tokio::test]
