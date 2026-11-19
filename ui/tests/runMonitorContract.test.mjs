@@ -374,7 +374,7 @@ test("a table's columns come in the order the run printed them, and the headline
 
 test("declared stages keep their names next to capitalized counts", () => {
   for (const full of [true, false]) {
-    assert.equal(bare(model("named", full).sentence.text), "Setup · train Step **2,280** of **4,200**", `full: ${full}`);
+    assert.equal(bare(model("named", full).sentence.text), "train · Step **2,280** of **4,200**", `full: ${full}`);
     assert.equal(bare(model("measures", full).sentence.text), "round · Round **14** of **24**", `full: ${full}`);
   }
 });

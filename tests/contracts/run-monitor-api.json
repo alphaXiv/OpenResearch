@@ -2894,7 +2894,7 @@
         "stageOrder": {
           "index": 1,
           "count": 3,
-          "first": 1
+          "first": 0
         },
         "progress": {
           "phase": 1,
@@ -2999,7 +2999,7 @@
         "stageOrder": {
           "index": 1,
           "count": 3,
-          "first": 1
+          "first": 0
         },
         "stage": {
           "name": "train",
@@ -3047,7 +3047,7 @@
         "rev": 1
       },
       "expect": {
-        "stage": "train · step 5 of 10",
+        "stage": "train (3/4) · step 5 of 10",
         "duration": "5s"
       }
     },
@@ -3096,7 +3096,7 @@
         "stageOrder": {
           "index": 0,
           "count": null,
-          "first": null
+          "first": 0
         },
         "progress": {
           "phase": 0,
@@ -3153,11 +3153,7 @@
         "sentence": null,
         "flagId": null,
         "flags": [],
-        "setup": {
-          "line": null,
-          "stage": "train",
-          "startsAt": null
-        },
+        "setup": null,
         "disagrees": null,
         "revising": false,
         "brief": [],
@@ -3173,7 +3169,7 @@
         "stageOrder": {
           "index": 0,
           "count": null,
-          "first": null
+          "first": 0
         },
         "stage": {
           "name": "train",
@@ -3196,11 +3192,7 @@
         },
         "limitEndsAt": null,
         "flag": null,
-        "setup": {
-          "line": null,
-          "stage": "train",
-          "startsAt": null
-        },
+        "setup": null,
         "generation": "g1",
         "asOf": 1794444301000,
         "rev": 1

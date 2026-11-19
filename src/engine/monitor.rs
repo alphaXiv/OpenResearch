@@ -614,20 +614,29 @@ pub(super) fn series_stage(run: &Snapshot, name: &str) -> Option<(String, usize)
     Some((stage.clone(), before))
 }
 
-/// The first displayed point's phase index; an inner None means it preceded every phase.
-fn first_point_stage(snapshot: &Snapshot, names: &[&str]) -> Option<Option<usize>> {
-    let first = names
+/// The first counted stage or displayed point. An inner None means work preceded the retained stages.
+fn first_work_stage(snapshot: &Snapshot, names: &[&str], planned: bool) -> Option<Option<usize>> {
+    let point = names
         .iter()
         .filter_map(|name| snapshot.first_series_stages.get(*name).copied())
-        .min()?;
-    match first {
-        None => Some(None),
-        Some(occurrence) => snapshot
+        .min();
+    let count = snapshot.first_omitted_counted_stage.or_else(|| {
+        snapshot
+            .phases
+            .iter()
+            .find(|phase| {
+                phase.done.is_some()
+                    && (!phase.name.is_empty() || !planned && phase.source == "detected")
+            })
+            .map(|phase| phase.occurrence)
+    });
+    let first = point.into_iter().chain(count.map(Some)).min()?;
+    Some(first.and_then(|occurrence| {
+        snapshot
             .phases
             .iter()
             .position(|phase| phase.occurrence == occurrence)
-            .map(Some),
-    }
+    }))
 }
 
 /// Whether the parent's series `name` is of the same stage as the run's, so their steps can be
@@ -1235,19 +1244,12 @@ fn evaluate(
                 .filter_map(Value::as_str),
         )
         .collect();
-    let has_point = snapshot.is_some_and(|s| {
-        displayed
-            .iter()
-            .any(|name| s.series.get(*name).is_some_and(|points| !points.is_empty()))
+    let first_work = snapshot.and_then(|snapshot| first_work_stage(snapshot, &displayed, planned));
+    let first_observed = first_work.and_then(|phase| match phase {
+        None => Some(0),
+        Some(phase) => stages.iter().position(|stage| stage.phase == Some(phase)),
     });
-    let first_detected = snapshot.filter(|_| !planned).and_then(|snapshot| {
-        let phase = snapshot
-            .phases
-            .iter()
-            .position(|phase| phase.source == "detected" && phase.done.is_some())?;
-        stages.iter().position(|stage| stage.phase == Some(phase))
-    });
-    let has_work = has_point || first_detected.is_some();
+    let has_work = first_work.is_some();
     let matching_stage = |prior: &Snapshot, index: usize| {
         let name = &prior.phases[index].name;
         let occurrence = prior.phases[..index]
@@ -1263,7 +1265,7 @@ fn evaluate(
     };
     let guess = if life.live() {
         let historical = timed.iter().find_map(|(prior, _, _)| {
-            let Some(first) = first_point_stage(prior, &displayed)? else {
+            let Some(first) = first_work_stage(prior, &displayed, planned)? else {
                 return Some(0);
             };
             matching_stage(prior, first)
@@ -1335,7 +1337,7 @@ fn evaluate(
         } else {
             // Without a plan, only the earlier run knows which stages lie ahead.
             timed.iter().find_map(|(prior, _, _)| {
-                let first = first_point_stage(prior, &displayed)?.unwrap_or(0);
+                let first = first_work_stage(prior, &displayed, planned)?.unwrap_or(0);
                 let from = if let Some(current) = current {
                     let index = (0..prior.phases.len())
                         .find(|index| matching_stage(prior, *index) == Some(current))?;
@@ -1365,16 +1367,7 @@ fn evaluate(
         json!({ "line": line, "stage": stage, "startsAt": starts_at })
     });
 
-    let first_data = snapshot
-        .and_then(|snapshot| first_point_stage(snapshot, &displayed))
-        .and_then(|phase| match phase {
-            None => Some(0),
-            Some(phase) => stages.iter().position(|stage| stage.phase == Some(phase)),
-        })
-        .into_iter()
-        .chain(first_detected)
-        .min()
-        .or(guess);
+    let first_data = first_observed.or(guess);
     let stage_order = json!({
         "index": current,
         "count": planned.then_some(stages.len()),
@@ -1439,9 +1432,9 @@ fn evaluate(
         },
         "whole": whole,
         "stageOrder": stage_order,
-        "stage": snapshot.and_then(|snapshot| snapshot.phases.last()).map(|phase| {
-            let of = phase.of.or(current.and_then(|index| stages[index].of));
-            json!({"name": phase.name, "done": phase.done, "of": of, "unit": phase.unit})
+        "stage": current.map(|index| {
+            let stage = &stages[index];
+            json!({"name": stage.name, "done": progressed.and_then(|phase| phase.done), "of": stage.of, "unit": stage.unit})
         }),
         "headline": headline,
         "logError": life.log_error,
@@ -1493,6 +1486,11 @@ fn evaluate(
             view_problem: view_problem.as_deref().or(plan_problem.as_deref()),
             disagrees: disagrees.as_ref(),
             stages: planned.then(|| (&phases[..], current)),
+            stage: &summary["stage"],
+            stage_position: current
+                .zip(first_observed)
+                .filter(|(index, first)| planned && life.live() && index >= first)
+                .map(|(index, first)| (index - first + 2, phases.len() - first + 1)),
             pace: pace.as_ref(),
             setup: setup.as_ref(),
             bindings: &summary["bindings"],
@@ -2751,6 +2749,8 @@ struct StatusFacts<'a> {
     setup: Option<&'a Value>,
     /// A plan's stages as the monitor lists them, and the one the run is in.
     stages: Option<(&'a [Value], Option<usize>)>,
+    stage: &'a Value,
+    stage_position: Option<(usize, usize)>,
     /// How much slower than the run that timed it the stage is going, when it is.
     pace: Option<&'a Value>,
     /// What the run's sentence reads now.
@@ -2764,13 +2764,25 @@ fn status_text(life: &Lifecycle, fold: &Fold, watch: &Value, facts: &StatusFacts
     if let Some(whole) = facts.whole.filter(|_| life.started()) {
         first.push_str(&format!("  {:.0}%", (whole * 100.0).clamp(0.0, 100.0)));
     }
-    // A stage that printed no total has the one its plan gives.
-    let planned_of = facts
-        .stages
-        .and_then(|(stages, current)| stages.get(current?)?["of"].as_f64());
-    if let Some(words) = snapshot.and_then(|s| progress_words(s, planned_of)) {
-        first.push_str("  ");
-        first.push_str(&words);
+    if let Some(name) = facts.stage["name"].as_str() {
+        let unit = facts.stage["unit"].as_str().unwrap_or_default();
+        let count = facts.stage["done"]
+            .as_f64()
+            .map(|done| count_words(done, facts.stage["of"].as_f64(), unit));
+        let stage = match facts.stage_position {
+            Some((position, total)) if !name.is_empty() => {
+                format!("{name} ({position}/{total})")
+            }
+            _ if count.is_some() && counted(name) != counted(unit) => name.to_owned(),
+            _ if count.is_none() && life.live() && facts.setup.is_none() => name.to_owned(),
+            _ => String::new(),
+        };
+        match (stage.is_empty(), count) {
+            (false, Some(count)) => first.push_str(&format!("  {stage} · {count}")),
+            (false, None) => first.push_str(&format!("  {stage}")),
+            (true, Some(count)) => first.push_str(&format!("  {count}")),
+            (true, None) => {}
+        }
     }
     first.push_str(&format!("  [run {}]", life.run.id));
     lines.push(first);
@@ -3280,29 +3292,19 @@ fn compact(value: f64) -> String {
     format!("{sign}{text}{suffix}")
 }
 
-/// Where the run stands in its stage, in the page's words: "train · step 1,140 of 5,000",
-/// "35 of 90 batches". With no unit the word is "step".
-pub(crate) fn progress_words(snapshot: &Snapshot, planned_of: Option<f64>) -> Option<String> {
-    let phase = snapshot.progress()?;
-    let done = number(phase.done?);
-    let unit = phase.unit.as_deref().unwrap_or_default();
+fn count_words(done: f64, of: Option<f64>, unit: &str) -> String {
+    let done = number(done);
     let word = match unit {
         "" | "step" | "steps" => Some("step"),
         "round" | "rounds" => Some("round"),
         _ => None,
     };
-    let at = match (phase.of.or(planned_of).map(number), word) {
+    match (of.map(number), word) {
         (Some(of), Some(word)) => format!("{word} {done} of {of}"),
         (Some(of), None) => format!("{done} of {of} {unit}"),
         (None, _) if unit.is_empty() => format!("step {done}"),
         (None, _) => format!("{done} {unit}"),
-    };
-    // A stage named like what it counts is said once: "round 14 of 24".
-    Some(match phase.name.as_str() {
-        "" => at,
-        name if counted(name) == counted(unit) => at,
-        name => format!("{name} · {at}"),
-    })
+    }
 }
 
 /// What a stage counts in, singular and lower case: "rounds" and "Round" are both "round", and no
@@ -4382,7 +4384,7 @@ mod tests {
                 &["::orx:: {\"phase\":\"download\",\"step\":0,\"of\":9}"],
                 "running"
             ),
-            json!({"line": null, "stage": "download", "startsAt": null})
+            Value::Null
         );
         assert_eq!(
             setting_up("progress", &["Epoch 1/10", "Epoch 2/10"], "running"),
@@ -6215,11 +6217,11 @@ mod tests {
             run_id: "c1".into(),
             ..folded(&reports)
         });
-        let (setup, _) = monitor_at(&f, &child, T0 + 1_100);
-        assert_eq!(setup["setup"]["startsAt"], T0 + 15_000);
-        assert_eq!(setup["estimate"]["midMs"], 134_000);
+        let (downloading, _) = monitor_at(&f, &child, T0 + 1_100);
+        assert_eq!(downloading["setup"], Value::Null);
+        assert_eq!(downloading["estimate"]["midMs"], 134_000);
         assert_eq!(
-            setup["phases"]
+            downloading["phases"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -6288,17 +6290,17 @@ mod tests {
             ],
             "the last stage ends with the log"
         );
-        assert_eq!(monitor["setup"]["startsAt"], T0 + 40_000);
+        assert_eq!(monitor["setup"]["startsAt"], T0 + 10_000);
         assert_eq!(
             monitor["stageOrder"],
-            json!({"index": 0, "count": 5, "first": 2})
+            json!({"index": 0, "count": 5, "first": 1})
         );
         let child_with_points = staged(&f, "c2", "child", "running", &pipeline, 45);
         let (training, _) = monitor_at(&f, &child_with_points, T0 + 45_500);
         assert_eq!(training["setup"], Value::Null);
         assert_eq!(
             training["stageOrder"],
-            json!({"index": 2, "count": 5, "first": 2})
+            json!({"index": 2, "count": 5, "first": 1})
         );
 
         assert_eq!(monitor["progress"]["whole"], Value::Null);
@@ -6520,7 +6522,7 @@ mod tests {
         assert_eq!(monitor["estimate"]["untimed"], json!(["eval", "sft"]));
         let text = monitor["statusText"].as_str().unwrap();
         assert!(
-            text.starts_with("baseline  running  train \u{b7} step 59 of 60"),
+            text.starts_with("baseline  running  train (3/5) \u{b7} step 59 of 60"),
             "{text}"
         );
         mentions(
@@ -6562,13 +6564,10 @@ mod tests {
         let snapshot = Snapshot {
             run_id: "p1".into(),
             ..folded(&[
-                (
-                    T0,
-                    "::orx:: {\"phase\":\"setup\",\"step\":0,\"of\":4,\"t\":0}".into(),
-                ),
+                (T0, "::orx:: {\"phase\":\"setup\",\"of\":4,\"t\":0}".into()),
                 (
                     T0 + 4_000,
-                    "::orx:: {\"phase\":\"train\",\"step\":0,\"of\":10,\"t\":4}".into(),
+                    "::orx:: {\"phase\":\"train\",\"of\":10,\"t\":4}".into(),
                 ),
                 (
                     T0 + 5_000,
@@ -6591,7 +6590,11 @@ mod tests {
         monitor_at(&f, &parent, T0 + 700_000);
         f.child("child", "exp");
         plan(&f, "child", json!([{"phase": "setup", "of": 4}, {"phase": "train", "of": 10}, {"phase": "sft", "of": 10}])).unwrap();
-        let child = staged(&f, "c1", "child", "running", &[("setup", 4, Some(4))], 1);
+        let child = f.run_in("c1", "child", "running", local());
+        f.collect(&Snapshot {
+            run_id: child.id.clone(),
+            ..folded(&reports(&[r#"{"phase":"setup","of":4}"#]))
+        });
         let (monitor, _) = monitor_at(&f, &child, T0 + 1_500);
         assert_eq!(monitor["setup"]["startsAt"], T0 + 4_000);
         assert_eq!(
@@ -6626,10 +6629,8 @@ mod tests {
             run_id: "p1".into(),
             ..folded(&reports(&[
                 r#"{"phase":"install"}"#,
-                r#"{"phase":"download","step":0,"of":3}"#,
-                r#"{"step":3}"#,
-                r#"{"phase":"eval","step":0,"of":2}"#,
-                r#"{"step":2,"m":{"wer":0.05}}"#,
+                r#"{"phase":"download"}"#,
+                r#"{"phase":"eval","m":{"wer":0.05}}"#,
             ]))
         });
         monitor_at(f, &parent, T0 + 700_000);
@@ -6661,13 +6662,10 @@ mod tests {
         json!({"order": monitor["stageOrder"], "setup": monitor["setup"].is_object(), "startsAt": monitor["setup"]["startsAt"]})
     }
 
-    const LABEL: [&str; 6] = [
+    const LABEL: [&str; 3] = [
         r#"{"phase":"install"}"#,
-        r#"{"phase":"download","step":0,"of":3}"#,
-        r#"{"step":3}"#,
-        r#"{"phase":"label","step":0,"of":5}"#,
-        r#"{"step":2}"#,
-        r#"{"step":3}"#,
+        r#"{"phase":"download"}"#,
+        r#"{"phase":"label"}"#,
     ];
 
     #[test]
@@ -6688,15 +6686,15 @@ mod tests {
         let labelling = order_after(&f, "c1", &LABEL);
         assert_eq!(
             labelling,
-            json!({"order": {"index": 2, "count": 5, "first": 3}, "setup": true, "startsAt": T0 + 6_500}),
-            "train starts when label ends at its own pace"
+            json!({"order": {"index": 2, "count": 5, "first": 3}, "setup": true, "startsAt": null}),
+            "label is still untimed"
         );
         let mut training = LABEL.to_vec();
-        training.push(r#"{"phase":"train","step":0,"of":272}"#);
+        training.push(r#"{"phase":"train","of":272}"#);
         let waiting = order_after(&f, "c2", &training);
         assert_eq!(
             waiting,
-            json!({"order": {"index": 3, "count": 5, "first": 3}, "setup": true, "startsAt": T0 + 6_000}),
+            json!({"order": {"index": 3, "count": 5, "first": 3}, "setup": true, "startsAt": T0 + 3_000}),
             "train began and has yet to report a point"
         );
 
@@ -6709,8 +6707,8 @@ mod tests {
 
         let mut missed = LABEL.to_vec();
         missed.extend([
-            r#"{"phase":"train","step":0,"of":272}"#,
-            r#"{"phase":"eval","step":0,"of":2}"#,
+            r#"{"phase":"train","of":272}"#,
+            r#"{"phase":"eval","of":2}"#,
         ]);
         assert_eq!(
             order_after(&f, "c4", &missed)["order"],
@@ -6725,12 +6723,12 @@ mod tests {
         labelled_child(&f, r#"<stats of="dev_loss" phase="train"/>"#);
 
         let mut training = LABEL.to_vec();
-        training.push(r#"{"phase":"train","step":0,"of":272}"#);
+        training.push(r#"{"phase":"train","of":272}"#);
         let waiting = order_after(&f, "c1", &training);
         assert_eq!(waiting["order"], json!({"index":3,"count":5,"first":3}));
         assert_eq!(waiting["setup"], true);
 
-        training.push(r#"{"step":16,"m":{"dev_loss":0.3}}"#);
+        training.push(r#"{"m":{"dev_loss":0.3}}"#);
         let reported = order_after(&f, "c2", &training);
         assert_eq!(reported["order"], waiting["order"]);
         assert_eq!(reported["setup"], false);
@@ -6759,16 +6757,120 @@ mod tests {
 
         let mut evaluating = LABEL.to_vec();
         evaluating.extend([
-            r#"{"phase":"train","step":0,"of":272}"#,
-            r#"{"step":272}"#,
-            r#"{"phase":"eval","step":0,"of":2}"#,
-            r#"{"step":1,"m":{"wer":0.04}}"#,
+            r#"{"phase":"train","of":272}"#,
+            r#"{"phase":"eval","of":2,"m":{"wer":0.04}}"#,
         ]);
         assert_eq!(
             order_after(&f, "c2", &evaluating),
             json!({"order": {"index": 4, "count": 5, "first": 4}, "setup": false, "startsAt": null}),
             "the first point came where the parent's did"
         );
+    }
+
+    #[test]
+    fn a_count_makes_a_named_stage_work_before_it_has_any_points() {
+        let f = Fixture::new("orx-monitor-count-first");
+        plan(
+            &f,
+            "exp",
+            json!([{"phase": "train", "of": 20, "unit": "steps"}]),
+        )
+        .unwrap();
+        let run = f.run("running", local());
+        f.collect(&folded(&reports(&[
+            r#"{"phase":"train","step":0}"#,
+            r#"{"step":2}"#,
+        ])));
+
+        let (body, _) = monitor_at(&f, &run, T0 + 1_000);
+        let summary = current(&f.store, &run).unwrap().unwrap().summary().clone();
+        assert!(body["latest"].as_object().unwrap().is_empty());
+        assert_eq!(body["setup"], Value::Null);
+        assert_eq!(summary["setup"], body["setup"]);
+        assert_eq!(
+            body["stageOrder"],
+            json!({"index": 0, "count": 1, "first": 0})
+        );
+        assert_eq!(summary["stageOrder"], body["stageOrder"]);
+        assert_eq!(summary["stage"]["done"], 2.0);
+        assert_eq!(summary["stage"]["unit"], "steps");
+        assert_eq!(summary["whole"], 0.1);
+        assert_eq!(summary["estimate"]["midMs"], 9_000);
+        mentions(
+            body["statusText"].as_str().unwrap().lines().next().unwrap(),
+            &["train (2/2)", "step 2 of 20"],
+        );
+        mentions(status_line(&body, "eta"), &["9s left"]);
+    }
+
+    #[test]
+    fn setup_stays_ended_when_the_first_counted_stage_leaves_the_checkpoint() {
+        let f = Fixture::new("orx-monitor-omitted-count");
+        let run = f.run("running", local());
+        f.collect(&folded(&reports(&[r#"{"phase":"train","step":1}"#])));
+        let (before, _) = monitor_at(&f, &run, T0);
+        assert_eq!(before["setup"], Value::Null);
+
+        let [path, _] = signal_paths(f.dir.path(), &run.id);
+        let mut snapshot = super::super::adapters::local::signals::load(&path)
+            .unwrap()
+            .unwrap();
+        let later: Vec<_> = (1..=65)
+            .map(|n| (T0 + n * 1000, format!(r#"::orx:: {{"phase":"eval-{n}"}}"#)))
+            .collect();
+        fold(&mut snapshot, &later);
+        f.collect(&snapshot);
+        f.collected(T0 + 65_000);
+
+        let (body, _) = monitor_at(&f, &run, T0 + 65_000);
+        assert_eq!(body["setup"], Value::Null);
+        assert_eq!(body["stageOrder"]["first"], 0);
+        let summary = current(&f.store, &run).unwrap().unwrap();
+        assert_eq!(summary.summary()["setup"], Value::Null);
+    }
+
+    #[test]
+    fn the_first_observed_stage_stays_first_when_the_other_report_arrives() {
+        let f = Fixture::new("orx-monitor-first-observed");
+        f.child("child", "exp");
+        plan(
+            &f,
+            "child",
+            json!([{"phase": "install"}, {"phase": "train"}, {"phase": "eval"}]),
+        )
+        .unwrap();
+        for (id, first, next) in [
+            (
+                "count-first",
+                r#"{"phase":"train","step":1,"of":20}"#,
+                r#"{"phase":"eval","m":{"loss":0.5}}"#,
+            ),
+            (
+                "point-first",
+                r#"{"phase":"train","m":{"loss":0.5}}"#,
+                r#"{"phase":"eval","step":1,"of":20}"#,
+            ),
+            (
+                "unplanned",
+                r#"{"phase":"tokenize","step":1,"of":20}"#,
+                r#"{"phase":"train","m":{"loss":0.5}}"#,
+            ),
+        ] {
+            let before = order_after(
+                &f,
+                &format!("{id}-first"),
+                &[r#"{"phase":"install"}"#, first],
+            );
+            assert_eq!(
+                before,
+                json!({"order": {"index": 1, "count": if id == "unplanned" { 4 } else { 3 }, "first": 1}, "setup": false, "startsAt": null}),
+                "{id}"
+            );
+            let after = order_after(&f, id, &[r#"{"phase":"install"}"#, first, next]);
+            assert_eq!(after["order"]["first"], before["order"]["first"], "{id}");
+            assert_eq!(after["order"]["index"], 2, "{id}");
+            assert_eq!(after["setup"], false, "{id}");
+        }
     }
 
     #[test]
@@ -7047,7 +7149,10 @@ mod tests {
         f.collect(&folded(&lines));
         let (monitor, _) = monitor_at(&f, &run, T0 + 5_500);
         let text = monitor["statusText"].as_str().unwrap();
-        assert!(text.contains("  eval \u{b7} step 4 of 10  "), "{text}");
+        assert!(
+            text.contains("  eval (3/3) \u{b7} step 4 of 10  "),
+            "{text}"
+        );
         let summary = current(&f.store, &run).unwrap().unwrap().summary().clone();
         assert_eq!(summary["stage"]["of"], 10.0);
     }
@@ -9439,7 +9544,7 @@ mod tests {
                 json!({
                     "duration": "5s",
                     "cli": ["5s of train left", "earlier run", "timed", "eval"],
-                    "stage": "train · step 5 of 10",
+                    "stage": "train (3/4) · step 5 of 10",
                 }),
             ),
             state(
