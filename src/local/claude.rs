@@ -1598,7 +1598,9 @@ impl ClaudeHost {
         spec: SpawnSpec,
         tx: mpsc::UnboundedSender<TurnEvent>,
     ) -> Result<TurnRoute> {
-        let invocation_model = match spec.config.model.as_deref() {
+        let selected = spec.config.model.as_deref();
+        // `None` while the catalog has not resolved the selection, as right after a start.
+        let resolved = match selected {
             Some(selected) => {
                 let catalog = spec.chat.harnesses.lock().await;
                 let entry = catalog.as_ref().and_then(|(_, payload)| {
@@ -1608,7 +1610,7 @@ impl ClaudeHost {
                         spec.config.profile.as_deref(),
                     )
                 });
-                let model = entry
+                entry
                     .and_then(|entry| entry["models"].as_array())
                     .and_then(|models| {
                         models
@@ -1616,10 +1618,17 @@ impl ClaudeHost {
                             .find(|model| model["id"].as_str() == Some(selected))
                     })
                     .and_then(|model| model["resolvedModel"].as_str())
-                    .unwrap_or(selected);
-                Some(model.to_owned())
+                    .map(str::to_owned)
             }
             None => None,
+        };
+        let invocation_model = resolved.clone().or_else(|| selected.map(str::to_owned));
+        // A child started on the bare selection, or before the catalog resolved it, runs what
+        // the selection still names; only a different resolution needs another child.
+        let runs_selection = |live: &ClaudeClient| match (&live.invocation_model, &resolved) {
+            (running, _) if running.as_deref() == selected => true,
+            (_, None) => true,
+            (running, Some(resolved)) => running.as_ref() == Some(resolved),
         };
         let session = spec.session_id.clone();
         let session_lock = {
@@ -1690,7 +1699,7 @@ impl ClaudeHost {
             } else if !profile && !live.matches_auth(&auth) {
                 self.inner.lock().await.remove(&session);
                 stop_client(live, "authentication-changed").await;
-            } else if live.config() == spec.config && live.invocation_model == invocation_model {
+            } else if live.config() == spec.config && runs_selection(&live) {
                 let latest = self.auth_snapshot();
                 if profile
                     || (latest.state == HarnessAuthState::Ready && live.matches_auth(&latest))
@@ -3224,8 +3233,18 @@ done
             fork_at: None,
             config,
         };
+        // The first server knows what the alias resolves to; a successor's catalog starts empty.
+        *spec.chat.harnesses.lock().await = Some((
+            Instant::now(),
+            json!({"harnesses": [{"id": "claude-code", "profile": {"id": null},
+                "models": [{"id": "sonnet", "resolvedModel": "claude-sonnet-5-5"}]}]}),
+        ));
         let (tx, mut rx) = mpsc::unbounded_channel();
         let route = host.acquire_turn(spec.clone(), tx).await.unwrap();
+        assert_eq!(
+            route.client().invocation_model.as_deref(),
+            Some("claude-sonnet-5-5")
+        );
         run_to_result(&route, &mut rx).await;
         let client = route.client().clone();
         let kept = keep::entries()
