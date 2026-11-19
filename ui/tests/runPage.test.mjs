@@ -277,6 +277,16 @@ test("a view that stopped updating says why and since when, and the countdown st
   assert.doesNotMatch(text(container), /\d+m left/);
 });
 
+test("a finished run's page shows its blocks during quiet final collection", async () => {
+  const availability = { state: "stale", reason: null };
+  const monitor = { ...pipeline(), availability };
+  const finished = run("r2", { status: "done", endedAt: now, monitor: summary(monitor, { tone: "done", availability }) });
+  const { container } = await overview([finished], () => monitor);
+  assert.deepEqual([...container.querySelectorAll("section h3")].map(text), ["Eval", "Train loss"]);
+  assert.ok(!text(container).includes(m.run_monitor_load_failed()));
+  assert.ok(!find("button", m.app_retry()));
+});
+
 test("a run that can't be reached says so once, where its sentence goes", async () => {
   const monitor = pipeline();
   const contact = { type: "unreachable", since: now - 60_000, cause: "ssh: connect timed out" };
