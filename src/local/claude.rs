@@ -1672,6 +1672,9 @@ impl ClaudeHost {
         if !profile && auth.state == HarnessAuthState::Unknown && !auth.runtime_rejected {
             auth = self.resolve_unknown().await;
         }
+        // A sign-in the check could not read is no sign-out: a running child keeps serving, and
+        // reports a rejected credential itself. Only starting one needs a verified sign-in.
+        let unverified = !profile && auth.state == HarnessAuthState::Unknown;
         match if profile {
             HarnessAuthState::Ready
         } else {
@@ -1700,12 +1703,7 @@ impl ClaudeHost {
                     anyhow!("Claude Code 2.1.211 or newer is required"),
                 ));
             }
-            HarnessAuthState::Unknown => {
-                return Err(SetupFailure::tag("claude_setup_auth_check", anyhow!(
-                    "Claude Code authentication could not be verified — run `claude auth status`, then re-check the agent"
-                )));
-            }
-            HarnessAuthState::Ready => {}
+            HarnessAuthState::Unknown | HarnessAuthState::Ready => {}
         }
         let live = self.inner.lock().await.get(&session).cloned();
         if let Some(live) = live {
@@ -1717,12 +1715,17 @@ impl ClaudeHost {
             {
                 self.inner.lock().await.remove(&session);
                 stop_client(live, reason.as_str()).await;
-            } else if !profile && !live.matches_auth(&auth) {
+            } else if !profile && !unverified && !live.matches_auth(&auth) {
                 self.inner.lock().await.remove(&session);
                 stop_client(live, "authentication-changed").await;
             } else if live.config() == spec.config && runs_selection(&live) {
                 let latest = self.auth_snapshot();
+                // Unbound is a child a previous server kept, never checked against this one's.
+                let unverified_match = unverified
+                    && latest.state == HarnessAuthState::Unknown
+                    && [UNBOUND, latest.generation].contains(&live.auth_generation());
                 if profile
+                    || unverified_match
                     || (latest.state == HarnessAuthState::Ready && live.matches_auth(&latest))
                 {
                     return Ok(live.register_turn(tx, self.reaper_notify.clone()));
@@ -1733,6 +1736,11 @@ impl ClaudeHost {
                 self.inner.lock().await.remove(&session);
                 stop_client(live, "configuration-changed").await;
             }
+        }
+        if unverified {
+            return Err(SetupFailure::tag("claude_setup_auth_check", anyhow!(
+                "Claude Code authentication could not be verified — run `claude auth status`, then re-check the agent"
+            )));
         }
         auth = self.auth_snapshot();
         if !profile && auth.state != HarnessAuthState::Ready {
@@ -3367,6 +3375,57 @@ done
 
         host.shutdown().await;
         assert!(adopted.keeper.try_wait().is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_kept_claude_serves_on_while_its_sign_in_cannot_be_checked() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        // No `claude` to ask, so the check cannot say. The rest of PATH stays: orx-host
+        // resolves through the cargo toolchain on it.
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let without_claude =
+            std::env::split_paths(&path).filter(|dir| !dir.join("claude").exists());
+        std::env::set_var("PATH", std::env::join_paths(without_claude).unwrap());
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let session = format!("adopt-{}", uuid::Uuid::new_v4());
+            let (spec, previous) = kept_fake_claude(&session).await;
+
+            let host = Arc::new(ClaudeHost::new());
+            let chat = chat_with(&host);
+            let adopted = adopt_in(&chat, &previous, None).await.unwrap();
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let route = host
+                .acquire_turn(
+                    SpawnSpec {
+                        chat: chat.clone(),
+                        ..spec.clone()
+                    },
+                    tx,
+                )
+                .await
+                .unwrap();
+            assert_eq!(host.auth_snapshot().state, HarnessAuthState::Unknown);
+            assert!(Arc::ptr_eq(route.client(), &adopted));
+            run_to_result(&route, &mut rx).await;
+            drop(route);
+
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let fresh = SpawnSpec {
+                chat,
+                session_id: format!("fresh-{}", uuid::Uuid::new_v4()),
+                ..spec
+            };
+            let refused = host.acquire_turn(fresh, tx).await.err().unwrap();
+            assert!(
+                refused.to_string().contains("could not be verified"),
+                "{refused:#}"
+            );
+            assert!(adopted.keeper.try_wait().is_none());
+            host.shutdown().await;
+        });
     }
 
     #[cfg(unix)]
