@@ -45,6 +45,9 @@ pub(crate) struct BilledRun {
 /// One usage sample as spend reads it.
 pub(crate) struct SpentSample {
     pub harness: String,
+    /// The chat's agent profile when it still runs this agent; None for the user's own sign-in,
+    /// an agent the chat switched away from, or a chat that is gone.
+    pub profile: Option<String>,
     /// `YYYY-MM-DD` in local time.
     pub day: String,
     pub usage: TokenUsage,
@@ -123,15 +126,25 @@ impl Store {
     /// turn's.
     pub(crate) fn spent_samples(&self, from: i64, to: i64) -> Result<Vec<SpentSample>> {
         let mut statement = self.conn.prepare(
-            "SELECT harness, date(recorded_at / 1000, 'unixepoch', 'localtime'),
-                    usage_json, cost_micros, cost_currency
-             FROM chat_usage_samples WHERE recorded_at >= ?1 AND recorded_at < ?2
+            "SELECT s.harness, date(s.recorded_at / 1000, 'unixepoch', 'localtime'),
+                    s.usage_json, s.cost_micros, s.cost_currency,
+                    CASE WHEN c.harness = s.harness THEN c.profile_id END
+             FROM chat_usage_samples s
+             LEFT JOIN chat_usage_executions u ON u.execution_id = s.execution_id
+             LEFT JOIN chat_turns t ON t.id = u.turn_id
+             -- A late Codex turn, `codex-late:<chat>:<thread>:<turn>`, has no chat_turns row.
+             LEFT JOIN chat_sessions c ON c.id = COALESCE(t.session_id, CASE
+                 WHEN u.turn_id LIKE 'codex-late:%'
+                 THEN substr(u.turn_id, 12, instr(substr(u.turn_id, 12), ':') - 1) END)
+             WHERE s.recorded_at >= ?1 AND s.recorded_at < ?2
              UNION ALL
              SELECT s.harness, date(t.created_at / 1000, 'unixepoch', 'localtime'),
-                    s.usage_json, s.cost_micros, s.cost_currency
+                    s.usage_json, s.cost_micros, s.cost_currency,
+                    CASE WHEN c.harness = s.harness THEN c.profile_id END
              FROM chat_usage_samples s
              JOIN chat_usage_executions u ON u.execution_id = s.execution_id
              JOIN chat_turns t ON t.id = u.turn_id
+             LEFT JOIN chat_sessions c ON c.id = t.session_id
              WHERE s.recorded_at IS NULL AND t.created_at >= ?1 AND t.created_at < ?2",
         )?;
         let rows = statement.query_map(params![from, to], |row| {
@@ -141,13 +154,15 @@ impl Store {
                 row.get::<_, String>(2)?,
                 row.get::<_, Option<i64>>(3)?,
                 row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
             ))
         })?;
         let mut samples = Vec::new();
         for row in rows {
-            let (harness, day, usage, micros, currency) = row?;
+            let (harness, day, usage, micros, currency, profile) = row?;
             samples.push(SpentSample {
                 harness,
+                profile,
                 day,
                 usage: serde_json::from_str(&usage)?,
                 cost: micros.zip(currency).map(|(micros, currency)| Cost {
