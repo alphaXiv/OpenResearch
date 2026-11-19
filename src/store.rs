@@ -32,7 +32,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{anyhow, Context, Result};
 use crate::local::autonomy::Autonomy;
-use crate::local::claude::BackgroundTasks;
 use crate::local::harness::TurnOutcome;
 use crate::local::model::{LocalExperiment, LocalProject};
 use crate::workspace_state::{GlobalWorkspaceState, WorkspaceState};
@@ -4448,21 +4447,25 @@ impl Store {
 
     fn chat_session_has_prompt(&self, session_id: &str, busy: Option<bool>) -> Result<bool> {
         Ok(self.conn.query_row(
-            "WITH RECURSIVE active(id, parent_id, parts_json) AS (
-                SELECT m.id, m.parent_id, m.parts_json FROM chat_messages m
+            "WITH RECURSIVE active(id, parent_id, parts_json, role, recent) AS (
+                SELECT m.id, m.parent_id, m.parts_json, m.role, m.role != 'user' FROM chat_messages m
                 JOIN chat_sessions s ON s.active_leaf_id = m.id AND s.id = m.session_id
                 WHERE s.id = ?1
                 UNION ALL
-                SELECT m.id, m.parent_id, m.parts_json FROM chat_messages m
+                SELECT m.id, m.parent_id, m.parts_json, m.role, a.recent AND m.role != 'user'
+                FROM chat_messages m
                 JOIN active a ON a.parent_id = m.id WHERE m.session_id = ?1
+                  AND (?2 IS NOT NULL OR a.recent)
              )
              SELECT EXISTS (
                 SELECT 1 FROM active a, json_each(a.parts_json) p
                 WHERE json_extract(p.value, '$.type') = 'prompt'
                   AND COALESCE(json_extract(p.value, '$.prompt.resolved'), 0) = 0
-                  AND (?2 IS NULL OR CASE WHEN json_extract(p.value, '$.prompt.nativeId') IS NOT NULL
-                    THEN ?2
+                  AND (CASE
+                    WHEN ?2 IS NULL THEN a.recent
+                    WHEN json_extract(p.value, '$.prompt.nativeId') IS NOT NULL THEN ?2
                     ELSE json_extract(p.value, '$.prompt.kind') = 'question'
+                      OR (a.recent AND json_extract(p.value, '$.prompt.kind') = 'plan')
                   END)
              )",
             params![session_id, busy],
@@ -5711,8 +5714,12 @@ impl Store {
         Ok(())
     }
 
-    pub(crate) fn has_wake_work(&self, chat: &str, background: &BackgroundTasks) -> Result<bool> {
-        let background_ids = serde_json::to_string(&background.keys().collect::<Vec<_>>())?;
+    pub(crate) fn has_wake_work(
+        &self,
+        chat: &str,
+        background: &std::collections::HashSet<String>,
+    ) -> Result<bool> {
+        let background_ids = serde_json::to_string(background)?;
         let mut work = self.conn.prepare(
             "WITH RECURSIVE followed(id) AS (
                 SELECT ?1
@@ -5755,7 +5762,7 @@ impl Store {
                 return Ok(true);
             }
         }
-        Ok(false)
+        Ok(!crate::local::chat::news::chat_news(self, Some(chat))?.is_empty())
     }
 
     pub(crate) fn write_chat_turn_yield(&self, id: &str, closing: &TurnYield) -> Result<()> {
@@ -5817,7 +5824,7 @@ impl Store {
         chat: &str,
         source: &str,
         frontier: &str,
-        background: &BackgroundTasks,
+        background: &std::collections::HashSet<String>,
     ) -> Result<bool> {
         let current: bool = self.conn.query_row(
             "SELECT EXISTS (
@@ -5898,7 +5905,7 @@ impl Store {
         &self,
         id: &str,
         outcome: TurnOutcome,
-        stop_check: Option<&BackgroundTasks>,
+        stop_check: Option<&std::collections::HashSet<String>>,
     ) -> Result<bool> {
         let stop_check = stop_check.filter(|_| outcome == TurnOutcome::Completed);
         let tx = self
@@ -15238,6 +15245,27 @@ pub(crate) mod tests {
         assert!(!store
             .chat_session_awaiting_input("chat_pending", true)
             .unwrap());
+        for (resolved, awaiting) in [(false, true), (true, false)] {
+            let mut message = store.get_chat_message("question").unwrap().unwrap();
+            message.parts_json = serde_json::json!([{
+                "type": "prompt",
+                "prompt": {"kind": "plan", "resolved": resolved},
+            }])
+            .to_string();
+            store.upsert_chat_message(&message).unwrap();
+            assert_eq!(
+                store
+                    .chat_session_awaiting_input("chat_pending", false)
+                    .unwrap(),
+                awaiting
+            );
+            let session = store.get_chat_session("chat_pending").unwrap().unwrap();
+            assert_eq!(
+                crate::local::chat::session_json_with(Some(&store), &session, false)
+                    ["awaitingInput"],
+                awaiting
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -9698,7 +9698,6 @@ fn sidebar_session_json(
     let mut value = local::chat::session_json_with(Some(store), session, busy);
     value["background"] = background.cloned().unwrap_or(Value::Null);
     local::chat::project_model(&mut value, session, catalog);
-    value["awaitingInput"] = json!(store.chat_session_awaiting_input(&session.id, busy)?);
     value["lastTurn"] = json!(store.latest_chat_turn(&session.id)?.map(|turn| json!({
         "state": turn.state,
         "startedAt": turn.created_at,

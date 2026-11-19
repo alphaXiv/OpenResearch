@@ -561,7 +561,7 @@ fn attach_target_event(
     ids.into_iter().collect()
 }
 
-fn reconcile_target_file(session_id: &str, message_id: &str) -> Option<WireMessage> {
+fn reconcile_target_file(store: &Store, session_id: &str, message_id: &str) -> Option<WireMessage> {
     let path = target_event_path(session_id, message_id);
     let mut contents = String::new();
     if let Ok(file) = std::fs::File::open(&path) {
@@ -569,9 +569,6 @@ fn reconcile_target_file(session_id: &str, message_id: &str) -> Option<WireMessa
             .take(TOOL_TARGET_SCAN_BYTES as u64)
             .read_to_string(&mut contents);
     }
-    let Ok(store) = Store::open() else {
-        return None;
-    };
     let Ok(messages) = store.list_chat_messages(session_id) else {
         return None;
     };
@@ -1408,6 +1405,13 @@ pub fn session_json_with(store: Option<&Store>, s: &StoredChatSession, busy: boo
         "createdAt": s.created_at,
         "updatedAt": s.updated_at,
         "busy": busy,
+        "awaitingInput": store.and_then(|store| match store.chat_session_awaiting_input(&s.id, busy) {
+            Ok(awaiting) => Some(awaiting),
+            Err(error) => {
+                eprintln!("orx up: could not read pending input for {}: {error:#}", s.id);
+                None
+            }
+        }),
         "contextUsage": context_usage,
         "activeLeafId": s.active_leaf_id,
         "sideParentSessionId": s.side_parent_session_id,
@@ -1438,19 +1442,10 @@ pub(crate) fn project_model(value: &mut Value, session: &StoredChatSession, cata
     ));
 }
 
-fn message_json(m: &WireMessage, session_id: &str) -> Value {
-    message_json_with(m, session_id, None)
-}
-
-fn message_json_with(m: &WireMessage, session_id: &str, store: Option<&Store>) -> Value {
+fn message_json(m: &WireMessage, session_id: &str, store: &Store) -> Value {
     let mut message = json!(m);
     if m.role == "assistant" && m.turn_yield.is_none() {
-        let closing = match store {
-            Some(store) => store.chat_message_yield(&m.id),
-            None => Store::open_read_only(crate::store::data_dir())
-                .and_then(|store| store.chat_message_yield(&m.id)),
-        };
-        match closing {
+        match store.chat_message_yield(&m.id) {
             Ok(Some(closing)) => message["turnYield"] = json!(closing),
             Ok(None) => {}
             Err(error) => eprintln!(
@@ -2176,7 +2171,7 @@ impl ChatHost {
         self.acp.stop(session_id).await;
         self.emit(
             "chat.message",
-            message_json(&stored_to_wire(&marker), session_id),
+            message_json(&stored_to_wire(&marker), session_id, &store),
         );
         let session = store
             .get_chat_session(session_id)?
@@ -2511,7 +2506,7 @@ impl ChatHost {
         } else {
             message.parent_id = store.upsert_chat_message_on_branch(&stored)?;
         }
-        self.emit("chat.message", message_json(&message, session_id));
+        self.emit("chat.message", message_json(&message, session_id, store));
         Ok(message)
     }
 
@@ -2640,7 +2635,7 @@ impl ChatHost {
             native_harness: None,
         })?;
         store.touch_chat_session(session_id)?;
-        self.emit("chat.message", message_json(&message, session_id));
+        self.emit("chat.message", message_json(&message, session_id, &store));
         self.emit_session(store.get_chat_session(session_id)?).await;
         Ok(message)
     }
@@ -2963,14 +2958,18 @@ impl Drop for PendingGuard {
         if saving {
             return;
         }
+        let Ok(store) = Store::open() else {
+            return;
+        };
         if let Ok(Some(msg)) = mark_prompt_resolved(
+            &store,
             &self.host.msg_write,
             &self.session_id,
             &self.prompt_id,
             None,
         ) {
             self.host
-                .emit("chat.message", message_json(&msg, &self.session_id));
+                .emit("chat.message", message_json(&msg, &self.session_id, &store));
         }
     }
 }
@@ -4318,7 +4317,8 @@ impl ChatHost {
             completed_at: None,
             parent_id: None,
         };
-        msg.parent_id = Store::open()?.upsert_chat_message_on_branch(&StoredChatMessage {
+        let store = Store::open()?;
+        msg.parent_id = store.upsert_chat_message_on_branch(&StoredChatMessage {
             id: msg.id.clone(),
             session_id: session_id.to_string(),
             role: "assistant".into(),
@@ -4347,9 +4347,8 @@ impl ChatHost {
                 prompt_id,
             },
         };
-        self.emit("chat.message", message_json(&msg, session_id));
-        self.emit_session(Store::open()?.get_chat_session(session_id)?)
-            .await;
+        self.emit("chat.message", message_json(&msg, session_id, &store));
+        self.emit_session(store.get_chat_session(session_id)?).await;
         Ok(held)
     }
 
@@ -4481,6 +4480,14 @@ impl ChatHost {
 
     pub async fn busy_sessions(&self) -> Vec<String> {
         self.turns.lock().await.keys().cloned().collect()
+    }
+
+    async fn background_chat_ids(&self) -> HashSet<String> {
+        let (claude, codex) = tokio::join!(
+            self.claude.background_tasks(),
+            self.codex.background_tasks()
+        );
+        claude.into_keys().chain(codex.into_keys()).collect()
     }
 
     /// What will pick each idle chat back up: its agent's background tasks and
@@ -4942,7 +4949,7 @@ impl ChatHost {
         let store = Store::open()?;
         let turns = store.reconcile_expired_unfinished_chat_turns(&self.held_turn_leases())?;
         for (session_id, message) in materialize_unfinished_turns(&store, turns)? {
-            self.emit("chat.message", message_json(&message, &session_id));
+            self.emit("chat.message", message_json(&message, &session_id, &store));
         }
         self.resume_persisted_queues();
         Ok(())
@@ -5958,9 +5965,9 @@ impl ChatHost {
                     *reserved = Some(turn_id.to_string());
                 }
                 let background = if stop_source.is_some() {
-                    self.claude.background_tasks().await
+                    self.background_chat_ids().await
                 } else {
-                    HashMap::new()
+                    HashSet::new()
                 };
                 {
                     let tx = store.begin_immediate()?;
@@ -5972,8 +5979,6 @@ impl ChatHost {
                                 turn_id,
                                 &background,
                             )?
-                            || delegation::pending_prompt(&store, session_id)?.is_some()
-                            || !news::chat_news(&store, Some(session_id))?.is_empty()
                         {
                             store.settle_stop_check(source, false)?;
                             tx.commit()?;
@@ -6035,7 +6040,7 @@ impl ChatHost {
                     session.plan_reset_pending = reset_pending;
                 }
                 session.reasoning_level = settings.reasoning_level.clone();
-                self.emit("chat.message", message_json(&assistant, session_id));
+                self.emit("chat.message", message_json(&assistant, session_id, &store));
                 self.emit_busy(session_id, true, Self::delegator(&store, session_id));
                 crate::telemetry::capture(
                     "chat_recovery_action",
@@ -6147,7 +6152,10 @@ impl ChatHost {
                         &recovered_by,
                         &updated,
                     )? {
-                        self.emit("chat.message", message_json(&failed_assistant, session_id));
+                        self.emit(
+                            "chat.message",
+                            message_json(&failed_assistant, session_id, &store),
+                        );
                     }
                 } else if !store.mark_chat_turn_recovered(turn_id, &recovered_by)? {
                     return Ok(SendMessageResult {
@@ -7073,9 +7081,9 @@ impl ChatHost {
         };
         let delegator = Self::delegator(&store, session_id);
         let background = if stop_source.is_some() {
-            self.claude.background_tasks().await
+            self.background_chat_ids().await
         } else {
-            HashMap::new()
+            HashSet::new()
         };
         let mut turns = self.turns.lock().await;
         let Some(TurnState::Reserved { turn_id: reserved }) = turns.get_mut(session_id) else {
@@ -7095,10 +7103,7 @@ impl ChatHost {
                 if !store.stop_check_pending(source)? {
                     break 'admission None;
                 }
-                if !store.stop_check_current(session_id, source, source, &background)?
-                    || delegation::pending_prompt(&store, session_id)?.is_some()
-                    || !news::chat_news(&store, Some(session_id))?.is_empty()
-                {
+                if !store.stop_check_current(session_id, source, source, &background)? {
                     store.settle_stop_check(source, false)?;
                     tx.commit()?;
                     break 'admission None;
@@ -7189,7 +7194,7 @@ impl ChatHost {
             crate::telemetry::capture_chat_session_started(&session.harness);
         }
         if let Some(user_msg) = user_msg.as_ref() {
-            self.emit("chat.message", message_json(user_msg, &session.id));
+            self.emit("chat.message", message_json(user_msg, &session.id, &store));
         }
         let _ = store.touch_chat_session(&session.id);
         let session = store
@@ -7340,9 +7345,9 @@ impl ChatHost {
             } else {
                 let host = ctx.host.clone();
                 let background = if outcome == TurnOutcome::Completed {
-                    host.claude.background_tasks().await
+                    host.background_chat_ids().await
                 } else {
-                    HashMap::new()
+                    HashSet::new()
                 };
                 let turns = host.turns.lock().await;
                 let session_id = ctx.session_id.clone();
@@ -7695,7 +7700,7 @@ impl ChatHost {
                         result_native_message_id: None,
                         native_harness: None,
                     });
-                    self.emit("chat.message", message_json(&assistant, session_id));
+                    self.emit("chat.message", message_json(&assistant, session_id, &store));
                 }
             }
             active.handle.abort();
@@ -7744,25 +7749,27 @@ impl ChatHost {
                 }
                 // A steer the aborted turn was still handing over runs next instead.
                 host.release_steers(&session_id);
-                let _ = Store::open().and_then(|store| {
-                    store.finalize_turn_usage(
+                if let Ok(store) = Store::open() {
+                    let _ = store.finalize_turn_usage(
                         &active.turn_id,
                         if cancel { "cancelled" } else { "failed" },
-                    )
-                });
+                    );
+                    let mut message =
+                        reconcile_target_file(&store, &session_id, &active.message_id);
+                    if let Some(items) = interrupted_items.as_deref() {
+                        message = crate::local::harness::codex::reconcile_interrupted_items(
+                            &store,
+                            &session_id,
+                            &active.message_id,
+                            items,
+                        )
+                        .or(message);
+                    }
+                    if let Some(message) = message {
+                        host.emit("chat.message", message_json(&message, &session_id, &store));
+                    }
+                }
                 crate::telemetry::retry_outbox();
-                let mut message = reconcile_target_file(&session_id, &active.message_id);
-                if let Some(items) = interrupted_items.as_deref() {
-                    message = crate::local::harness::codex::reconcile_interrupted_items(
-                        &session_id,
-                        &active.message_id,
-                        items,
-                    )
-                    .or(message);
-                }
-                if let Some(message) = message {
-                    host.emit("chat.message", message_json(&message, &session_id));
-                }
                 let _ = std::fs::remove_file(target_event_path(&session_id, &active.message_id));
                 remove_target_pointer_if_matches(&session_id, &active.message_id);
             }
@@ -7845,27 +7852,26 @@ impl ChatHost {
         // Broadcasting one that did not persist is not harmless though — with no
         // parent a live client reads it as a new branch root and blanks the
         // transcript down to the marker.
-        let persisted = match (Store::open(), serde_json::to_string(&msg.parts)) {
-            (Ok(store), Ok(json)) => store
-                .upsert_chat_message_on_branch(&StoredChatMessage {
-                    id: msg.id.clone(),
-                    session_id: session_id.to_string(),
-                    role: "assistant".into(),
-                    parts_json: json,
-                    created_at: msg.created_at,
-                    completed_at: msg.completed_at,
-                    parent_id: None,
-                    base_native_session_id: None,
-                    result_native_session_id: None,
-                    result_native_message_id: None,
-                    native_harness: None,
-                })
-                .ok(),
-            _ => None,
+        let mut persisted = || {
+            let store = Store::open()?;
+            msg.parent_id = store.upsert_chat_message_on_branch(&StoredChatMessage {
+                id: msg.id.clone(),
+                session_id: session_id.to_string(),
+                role: "assistant".into(),
+                parts_json: serde_json::to_string(&msg.parts)?,
+                created_at: msg.created_at,
+                completed_at: msg.completed_at,
+                parent_id: None,
+                base_native_session_id: None,
+                result_native_session_id: None,
+                result_native_message_id: None,
+                native_harness: None,
+            })?;
+            self.emit("chat.message", message_json(&msg, session_id, &store));
+            Ok::<_, crate::error::Error>(())
         };
-        if let Some(parent) = persisted {
-            msg.parent_id = parent;
-            self.emit("chat.message", message_json(&msg, session_id));
+        if let Err(error) = persisted() {
+            eprintln!("orx up: could not record interruption for {session_id}: {error:#}");
         }
     }
 
@@ -8023,7 +8029,7 @@ impl ChatHost {
                 .await?;
                 let mut prompt_echo = req;
                 prompt_echo.annotations.clear();
-                self.resolve_prompt_card(&prompt_echo);
+                self.resolve_prompt_card(&prompt_echo, true);
                 Ok(())
             }
             ResumeAction::Handled { plan_mode } => {
@@ -8032,7 +8038,7 @@ impl ChatHost {
                 if let Some(plan_mode) = plan_mode {
                     self.set_plan_mode(&req.session_id, plan_mode).await?;
                 }
-                self.resolve_prompt_card(&req);
+                self.resolve_prompt_card(&req, true);
                 // A held reply reads as the user's own; say which chat gave it,
                 // where that can join the running turn rather than start one.
                 if prompt.native_id.is_some()
@@ -8056,13 +8062,7 @@ impl ChatHost {
             ResumeAction::Nothing => {
                 // Card closed with no resume (e.g. a denied Claude permission);
                 // broadcast idle so `busy` clears in the UI.
-                self.resolve_prompt_card(&req);
-                if let Ok(Some(session)) = Store::open()?.get_chat_session(&req.session_id) {
-                    self.emit(
-                        "chat.session",
-                        json!({ "session": session_json(&session, false) }),
-                    );
-                }
+                self.resolve_prompt_card(&req, false);
                 Ok(())
             }
         }
@@ -8073,8 +8073,13 @@ impl ChatHost {
     /// [`PendingGuard`] never ran). Collapses the card so it stops rendering
     /// actionable and swallowing every answer. Best-effort by design.
     pub fn resolve_zombie_prompt(&self, session_id: &str, prompt_id: &str) {
-        if let Ok(Some(msg)) = mark_prompt_resolved(&self.msg_write, session_id, prompt_id, None) {
-            self.emit("chat.message", message_json(&msg, session_id));
+        let Ok(store) = Store::open() else {
+            return;
+        };
+        if let Ok(Some(msg)) =
+            mark_prompt_resolved(&store, &self.msg_write, session_id, prompt_id, None)
+        {
+            self.emit("chat.message", message_json(&msg, session_id, &store));
         }
     }
 
@@ -8085,24 +8090,30 @@ impl ChatHost {
     /// has already been delivered, so a (store-only) failure is logged rather
     /// than surfaced — an Err from `respond` would make the UI's catch clear
     /// `busy` on a turn that is actually still streaming.
-    fn resolve_prompt_card(&self, req: &PromptAnswer) {
-        let resolved =
-            mark_prompt_resolved(&self.msg_write, &req.session_id, &req.prompt_id, Some(req))
-                .and_then(|m| m.ok_or_else(|| anyhow!("prompt not found")));
-        match resolved {
-            Ok(msg) => self.emit("chat.message", message_json(&msg, &req.session_id)),
-            Err(e) => eprintln!("orx up: answered prompt not marked resolved: {e}"),
+    fn resolve_prompt_card(&self, req: &PromptAnswer, busy: bool) {
+        let resolved = || {
+            let store = Store::open()?;
+            let msg = mark_prompt_resolved(
+                &store,
+                &self.msg_write,
+                &req.session_id,
+                &req.prompt_id,
+                Some(req),
+            )?
+            .ok_or_else(|| anyhow!("prompt not found"))?;
+            self.emit("chat.message", message_json(&msg, &req.session_id, &store));
+            if let Some(session) = store.get_chat_session(&req.session_id)? {
+                self.emit(
+                    "chat.session",
+                    json!({ "session": session_json_with(Some(&store), &session, busy) }),
+                );
+            }
+            Ok::<_, crate::error::Error>(())
+        };
+        if let Err(error) = resolved() {
+            eprintln!("orx up: answered prompt not marked resolved: {error}");
         }
         let _ = self.prompt_answered.send(req.session_id.clone());
-        // A delegate's card stops showing the question; the answered turn goes on.
-        if let Ok(Some(session)) =
-            Store::open().and_then(|store| store.get_chat_session(&req.session_id))
-        {
-            self.emit(
-                "chat.session",
-                json!({ "session": session_json(&session, true) }),
-            );
-        }
     }
 
     pub(crate) async fn session_json(&self, session: &StoredChatSession, busy: bool) -> Value {
@@ -8194,9 +8205,9 @@ impl ChatHost {
         closing.text = line.to_string();
 
         let background = if closing.kind == YieldKind::Running {
-            self.claude.background_tasks().await
+            self.background_chat_ids().await
         } else {
-            HashMap::new()
+            HashSet::new()
         };
         let mut turns = self.turns.lock().await;
         let (active, token) = self.agent_turn_binding(&mut turns, session_id)?;
@@ -8227,13 +8238,14 @@ impl ChatHost {
             let session = store
                 .get_chat_session(session_id)?
                 .ok_or_else(|| anyhow!("This chat was deleted."))?;
+            if session.goal.as_deref() == goal {
+                return Ok(());
+            }
             if &session.goal != delivered {
                 let current = serde_json::to_string(&session.goal)?;
                 return Err(anyhow!("The goal changed since this turn started. Current goal: {current}. Reconcile it before setting a goal in a new turn."));
             }
-            if session.goal.as_deref() != goal {
-                store.set_chat_session_goal(session_id, goal)?;
-            }
+            store.set_chat_session_goal(session_id, goal)?;
             tx.commit()?;
             active.expected_goal = Some(goal.map(str::to_string));
         }
@@ -8731,13 +8743,13 @@ fn stamp_resolved(prompt: &mut WirePrompt, answer: Option<&PromptAnswer>) {
 /// still-running turn's `flush` reconcile-and-persist of the same message (see
 /// `TurnCtx::flush`) — otherwise the flush could clobber this resolve.
 fn mark_prompt_resolved(
+    store: &Store,
     msg_write: &std::sync::Mutex<()>,
     session_id: &str,
     prompt_id: &str,
     answer: Option<&PromptAnswer>,
 ) -> Result<Option<WireMessage>> {
     let _guard = msg_write.lock().unwrap();
-    let store = Store::open()?;
     for msg in store.list_chat_messages(session_id)?.iter().rev() {
         if msg.role != "assistant" {
             continue;
@@ -8787,12 +8799,12 @@ fn mark_prompt_resolved(
 /// Same `msg_write` contract as `mark_prompt_resolved`. Returns the updated
 /// messages so the caller can broadcast them.
 fn resolve_stale_prompts(
+    store: &Store,
     msg_write: &std::sync::Mutex<()>,
     session_id: &str,
     native_only: bool,
 ) -> Result<Vec<WireMessage>> {
     let _guard = msg_write.lock().unwrap();
-    let store = Store::open()?;
     let mut updated = Vec::new();
     for msg in store.list_chat_messages(session_id)? {
         if msg.role != "assistant" {
@@ -8836,8 +8848,9 @@ fn resolve_stale_prompts_in_parts(parts: &mut [WirePart], native_only: bool) -> 
 impl ChatHost {
     /// [`resolve_stale_prompts`] + broadcast, for harness turn-entry use.
     pub fn resolve_stale_prompts(&self, session_id: &str, native_only: bool) -> Result<()> {
-        for msg in resolve_stale_prompts(&self.msg_write, session_id, native_only)? {
-            self.emit("chat.message", message_json(&msg, session_id));
+        let store = Store::open()?;
+        for msg in resolve_stale_prompts(&store, &self.msg_write, session_id, native_only)? {
+            self.emit("chat.message", message_json(&msg, session_id, &store));
         }
         Ok(())
     }
@@ -9621,7 +9634,7 @@ impl TurnCtx {
                     });
                     self.host.emit(
                         "chat.message",
-                        message_json(&self.assistant, &self.session_id),
+                        message_json(&self.assistant, &self.session_id, &store),
                     );
                 }
             } else {
@@ -10120,7 +10133,7 @@ impl TurnCtx {
                     })?;
                 self.host.emit(
                     "chat.message",
-                    message_json_with(&wire_assistant, &self.session_id, Some(&store)),
+                    message_json(&wire_assistant, &self.session_id, &store),
                 );
             }
         }
@@ -10881,7 +10894,7 @@ async fn process_run_notices(
 
             let result = chat.send_message_showing(&session_id, SendTurnRequest {
                 messages: vec![AnnotatedText {
-                    text: "[orx] Continue the approved research, or use yield to say why you stopped and what will restart the work.".into(),
+                    text: "[orx] If an approved next step remains, take it now. Otherwise use yield to say why you stopped and what will restart the work.".into(),
                     annotations: Vec::new(),
                 }],
                 prepared_input: None,
@@ -10914,7 +10927,7 @@ async fn process_run_notices(
                             ));
                             row.parts_json = serde_json::to_string(&message.parts)?;
                             store.upsert_chat_message(&row)?;
-                            chat.emit("chat.message", message_json(&message, &session_id));
+                            chat.emit("chat.message", message_json(&message, &session_id, &store));
                         }
                     }
                 }
@@ -12582,7 +12595,14 @@ mod bridge_tests {
         assert_eq!(events.try_recv().unwrap().0, "chat.message");
         let mut answer = answer(&["A"], true, None);
         answer.from = Some("chat_parent".into());
-        mark_prompt_resolved(&ctx.host.msg_write, &ctx.session_id, "card", Some(&answer)).unwrap();
+        mark_prompt_resolved(
+            &Store::open().unwrap(),
+            &ctx.host.msg_write,
+            &ctx.session_id,
+            "card",
+            Some(&answer),
+        )
+        .unwrap();
         ctx.flush().unwrap();
         assert!(events.try_recv().is_err());
         assert!(ctx.asking.is_none());
@@ -15561,7 +15581,7 @@ for line in sys.stdin:
                 !chat.stop_background("parent", "gone").await.unwrap(),
                 "a task that already finished is reported as not running"
             );
-            let background = claude.background_tasks().await;
+            let background = claude.background_tasks().await.into_keys().collect();
             assert!(store.has_wake_work("nested", &background).unwrap());
             assert!(store.has_wake_work("parent", &background).unwrap());
             assert!(!store.has_wake_work("unrelated", &background).unwrap());
@@ -15594,7 +15614,10 @@ for line in sys.stdin:
             .await;
             assert!(chat.waiting_on().await.unwrap().is_empty());
             assert!(!store
-                .has_wake_work("parent", &claude.background_tasks().await)
+                .has_wake_work(
+                    "parent",
+                    &claude.background_tasks().await.into_keys().collect()
+                )
                 .unwrap());
             claude.shutdown().await;
         });
@@ -16725,6 +16748,8 @@ for line in sys.stdin:
             ("interrupted", "autoresearch", TurnOutcome::Completed),
             ("archived", "autoresearch", TurnOutcome::Completed),
             ("plan", "autoresearch", TurnOutcome::Completed),
+            ("past-plan", "autoresearch", TurnOutcome::Completed),
+            ("owed-news", "autoresearch", TurnOutcome::Completed),
             ("bad-parts", "autoresearch", TurnOutcome::Completed),
         ] {
             fixture.id = id.into();
@@ -16736,6 +16761,46 @@ for line in sys.stdin:
                 rusqlite::params![id, serde_json::to_string(&agent.launch).unwrap()],
             ).unwrap();
             tx.commit().unwrap();
+            if id == "past-plan" {
+                for (message_id, role, parts_json) in [
+                    (
+                        "old-plan",
+                        "assistant",
+                        r#"[{"type":"prompt","prompt":{"kind":"plan"}}]"#,
+                    ),
+                    ("new-user", "user", "[]"),
+                ] {
+                    store
+                        .upsert_chat_message_on_branch(&StoredChatMessage {
+                            id: message_id.into(),
+                            session_id: id.into(),
+                            role: role.into(),
+                            parts_json: parts_json.into(),
+                            created_at: now_ms(),
+                            completed_at: Some(now_ms()),
+                            parent_id: None,
+                            base_native_session_id: None,
+                            result_native_session_id: None,
+                            result_native_message_id: None,
+                            native_harness: None,
+                        })
+                        .unwrap();
+                }
+            }
+            if id == "owed-news" {
+                session(&store, "finished-delegate");
+                store
+                    .record_chat_delegate("finished-delegate", id, false)
+                    .unwrap();
+                store.subscribe_chat(id, "finished-delegate", None).unwrap();
+                store.put_chat_turn(
+                    "finished-delegate",
+                    "delegated-answer",
+                    "completed",
+                    now_ms(),
+                );
+                assert_eq!(news::chat_news(&store, Some(id)).unwrap().len(), 1);
+            }
             let source = format!("source-{id}");
             store.put_chat_turn(id, &source, "running", now_ms());
             store
@@ -16769,20 +16834,25 @@ for line in sys.stdin:
             }
             assert_eq!(
                 store
-                    .finish_chat_turn(&source, outcome, Some(&HashMap::new()))
+                    .finish_chat_turn(&source, outcome, Some(&HashSet::new()))
                     .unwrap(),
                 id != "interrupted"
             );
         }
 
         let due = store.pending_stop_checks().unwrap();
-        assert_eq!(due.len(), 1);
-        assert_eq!(due[0].1, "source-archived");
+        assert_eq!(
+            due.iter()
+                .map(|(_, source, _)| source.as_str())
+                .collect::<HashSet<_>>(),
+            HashSet::from(["source-archived", "source-past-plan"])
+        );
         assert_eq!(
             store.latest_chat_turn("bad-parts").unwrap().unwrap().state,
             "completed"
         );
         store.set_chat_session_archived("archived", true).unwrap();
+        store.set_chat_session_archived("past-plan", true).unwrap();
         drop(store);
 
         let restarted = notice_host();
@@ -16974,6 +17044,16 @@ for line in sys.stdin:
         )
         .await
         .unwrap();
+        run.status = "done".into();
+        store.upsert_run(&run).unwrap();
+        store.put_chat_turn("delegate", "delegated-answer", "completed", now_ms());
+        assert_eq!(news::chat_news(&store, Some("owner")).unwrap().len(), 1);
+        host.record_yield(
+            "owner",
+            yield_line(YieldKind::Running, "Waiting for the delegate's answer"),
+        )
+        .await
+        .unwrap();
         store.pause_chat_subscription("owner", "delegate").unwrap();
         assert!(host
             .record_yield(
@@ -17000,7 +17080,7 @@ for line in sys.stdin:
             .await
             .unwrap();
         let conflict = host
-            .set_agent_goal("owner", None)
+            .set_agent_goal("owner", Some("Different direction"))
             .await
             .unwrap_err()
             .to_string();
@@ -17014,6 +17094,10 @@ for line in sys.stdin:
                 .as_deref(),
             Some("Updated by the user")
         );
+        host.set_agent_goal("owner", Some("Updated by the user"))
+            .await
+            .unwrap();
+        assert!(host.set_agent_goal("owner", None).await.is_err());
         host.set_goal("owner", Some("Refined by the agent"))
             .await
             .unwrap();
@@ -17042,7 +17126,7 @@ for line in sys.stdin:
         ));
         ctx.save(true).unwrap();
         assert!(store
-            .finish_chat_turn("answer", TurnOutcome::Completed, Some(&HashMap::new()))
+            .finish_chat_turn("answer", TurnOutcome::Completed, Some(&HashSet::new()))
             .unwrap());
         assert_eq!(
             list_messages("owner").unwrap()[0].turn_yield,

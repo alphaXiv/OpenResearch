@@ -2687,11 +2687,11 @@ async fn reconcile_turn_items(
 }
 
 pub(crate) fn reconcile_interrupted_items(
+    store: &Store,
     session_id: &str,
     message_id: &str,
     items: &[Value],
 ) -> Option<WireMessage> {
-    let store = Store::open().ok()?;
     let stored = store
         .list_chat_messages(session_id)
         .ok()?
@@ -3091,7 +3091,7 @@ fn item_to_part(item: &Value, completed: bool, prior: &[WirePart]) -> Option<Wir
 /// Thread ids of the sub-agents a `collabAgentToolCall` / `subAgentActivity`
 /// item references. Spawn/send/etc. carry the target(s) in `receiverThreadIds`;
 /// `subAgentActivity` carries the single `agentThreadId`.
-fn subagent_thread_ids(item: &Value) -> Vec<String> {
+pub(crate) fn subagent_thread_ids(item: &Value) -> Vec<String> {
     if let Some(arr) = item.get("receiverThreadIds").and_then(Value::as_array) {
         return arr
             .iter()
@@ -3429,7 +3429,7 @@ fn register_sub_thread(
 
 /// Whether a collab item DRIVES its referenced threads (starts or re-drives an
 /// agent), as opposed to passively referencing them.
-fn item_arms_thread(item: &Value) -> bool {
+pub(crate) fn item_arms_thread(item: &Value) -> bool {
     match item.get("type").and_then(Value::as_str) {
         Some("collabAgentToolCall") => matches!(
             item.get("tool").and_then(Value::as_str),
