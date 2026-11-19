@@ -1025,13 +1025,14 @@ pub(crate) fn compile(markup: &str) -> Result<Compiled, Problem> {
     })
 }
 
+fn escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+}
+
 /// The markup that draws `tree`, for a view orx derived rather than one an agent wrote.
 pub(crate) fn markup(tree: &Value) -> String {
-    let escape = |text: &str| {
-        text.replace('&', "&amp;")
-            .replace('"', "&quot;")
-            .replace('<', "&lt;")
-    };
     let names = |value: &Value| {
         value
             .as_array()
@@ -1359,6 +1360,90 @@ pub(crate) enum Refusal {
     Invalid(String),
     Changed(String),
     Failed(String),
+}
+
+#[derive(serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub(crate) enum ChartEdit {
+    X { log: bool },
+    Y { log: bool },
+    Smooth { signal: String, weight: Option<f64> },
+}
+
+/// Patch just the selected attribute so an agent's formatting and comments survive.
+pub(crate) fn edit_chart(markup: &str, block: usize, edit: ChartEdit) -> Result<String, Refusal> {
+    let unreadable = || {
+        Refusal::Invalid("This chart's view couldn't be read. Reopen the run and try again.".into())
+    };
+    let wrapped = format!("{WRAPPER}{markup}</orx>");
+    let document = roxmltree::Document::parse(&wrapped).map_err(|_| unreadable())?;
+    let root = document.root_element();
+    let view = root
+        .children()
+        .find(|node| node.has_tag_name("view"))
+        .ok_or_else(unreadable)?;
+    let chart = view
+        .children()
+        .filter(|node| node.is_element())
+        .nth(block)
+        .filter(|node| node.has_tag_name("chart"))
+        .ok_or_else(|| {
+            Refusal::Invalid("This chart is unavailable. Reopen the run and try again.".into())
+        })?;
+    let (node, attr, value) = match edit {
+        ChartEdit::X { log } => (chart, "x-scale", log.then(|| "log".to_owned())),
+        ChartEdit::Y { log } => (chart, "y-scale", log.then(|| "log".to_owned())),
+        ChartEdit::Smooth { signal, weight } => {
+            if chart.attribute("from").is_some()
+                || !matches!(chart.attribute("mark"), None | Some("line"))
+                || !chart
+                    .attribute("y")
+                    .is_some_and(|names| names.split_whitespace().any(|name| name == signal))
+            {
+                return Err(Refusal::Invalid(
+                    "Smoothing is available for lines drawn from run signals.".into(),
+                ));
+            }
+            let declaration = root.children().find(|node| {
+                node.has_tag_name("signal")
+                    && node
+                        .attribute("name")
+                        .is_some_and(|name| name.trim() == signal)
+            });
+            let Some(node) = declaration else {
+                let mut markup = markup.to_owned();
+                if let Some(weight) = weight {
+                    markup.insert_str(
+                        view.range().start - WRAPPER.len(),
+                        &format!(
+                            "<signal name=\"{}\" smooth=\"{weight}\" />\n",
+                            escape(&signal)
+                        ),
+                    );
+                }
+                return Ok(markup);
+            };
+            (node, "smooth", weight.map(|weight| weight.to_string()))
+        }
+    };
+    let mut markup = markup.to_owned();
+    let at = node.range().start + 1 + node.tag_name().name().len() - WRAPPER.len();
+    if let Some(attribute) = node.attributes().find(|attribute| attribute.name() == attr) {
+        let range = attribute.range();
+        let start = range.start - WRAPPER.len();
+        let end = range.end - WRAPPER.len();
+        if let Some(value) = value {
+            markup.replace_range(start..end, &format!("{attr}=\"{value}\""));
+        } else {
+            let before = markup[at..start]
+                .trim_end_matches([' ', '\t', '\r', '\n'])
+                .len();
+            markup.replace_range(at + before..end, "");
+        }
+    } else if let Some(value) = value {
+        markup.insert_str(at, &format!(" {attr}=\"{value}\""));
+    }
+    Ok(markup)
 }
 
 impl From<crate::error::Error> for Refusal {

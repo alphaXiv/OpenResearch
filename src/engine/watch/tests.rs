@@ -1050,16 +1050,23 @@ async fn a_look_that_flags_while_a_flag_is_open_is_noted_under_it() {
         return;
     }
     let calls_dir = crate::config::home_dir().unwrap().join("claude-calls");
-    fake_claude(
-        &calls_dir,
-        &[
-            r#"{"runs": {"r1": {"status": "flag", "line": "Checkpoint write failed at step **450**.", "evidence": [{"from": 26, "to": 69}]}}}"#,
-            r#"{"runs": {"r1": {"status": "flag", "line": "Checkpoint write still failing at step **450**.", "evidence": [{"from": 26, "to": 69}]}}}"#,
-        ],
-    );
+    let skipped = "Warning: skipped samples during warm-up.";
+    let failed = "Error: checkpoint write failed: disk full.";
+    let from = skipped.len() + 1;
+    let to = from + failed.len();
+    let reply = json!({"runs": {"r1": {"status": "flag", "line": "Checkpoint write failed.",
+        "evidence": [{"from": from, "to": to}]}}})
+    .to_string();
+    fake_claude(&calls_dir, &[&reply, &reply]);
     let store = Store::open().unwrap();
     store.put_chat_session("chat", "claude-code", Some("agentic"));
-    let a = run(&store, "a", "Depth 6", "chat", LOG);
+    let a = run(
+        &store,
+        "a",
+        "Training",
+        "chat",
+        &format!("{skipped}\n{failed}\n"),
+    );
     let open = json!({"id": "f1", "source": "tripwire", "fingerprint": "error:x", "at": 5, "template": "t",
         "detail": "t", "text": "Skipped samples.", "evidence": null, "whole": 0.2});
     store
@@ -1080,35 +1087,48 @@ async fn a_look_that_flags_while_a_flag_is_open_is_noted_under_it() {
     );
     let flags = super::super::flags::read(&store, &a).unwrap();
     assert_eq!(flags.len(), 1, "{flags:?}");
-    assert_eq!(
-        flags[0]["noted"][0]["text"],
-        "Checkpoint write failed at step **450**."
-    );
+    assert_eq!(flags[0]["noted"][0]["text"], "Checkpoint write failed.");
     assert_eq!(flags[0]["noted"][0]["lookId"], id.to_string());
     let facts = run_facts(&store, &a).unwrap();
     assert_eq!(facts["looks"][0]["notedUnder"], 5);
     assert_eq!(facts["looks"][0]["said"], "new");
-    let notices = store.run_notices_for_tests("a");
+    let notices = store.run_notice_batch("chat").unwrap();
     assert!(
         notices.iter().any(|notice| notice
-            .2
+            .body
             .contains("was flagged again while its earlier flag is still open")
-            && notice.2.contains("Checkpoint write failed at step 450.")),
+            && notice.body.contains("Checkpoint write failed.")),
         "the Agentic chat's agent hears of it before it settles the open flag: {notices:?}"
     );
 
-    // Kept going after the open flag: the next look weighs what was noted, and flags it again.
+    // A Keep and a live config edit both reach the next look.
+    let reason = "Skipped samples were expected this early.";
     store
         .record_flag_choices(
             &[crate::store::FlagChoice {
                 run_id: "a".into(),
-                body: json!({"flagId": "f1", "c": "keep", "by": "agent"}),
+                body: json!({"flagId": "f1", "c": "keep", "by": "agent", "reason": reason}),
                 wakes: Vec::new(),
             }],
             None,
             crate::store::now_ms(),
         )
         .unwrap();
+    let noise = "Warm-up can skip samples while the data loads.";
+    super::super::view::set(
+        &store,
+        &a.experiment_id,
+        &super::super::view::etag(None),
+        None,
+        None,
+        Some(&json!({"brief": {"noise": noise}})),
+        &super::super::view::Source {
+            file: None,
+            patterns: None,
+            config: None,
+        },
+    )
+    .unwrap();
     let now = Now::read(&store, &a).unwrap();
     assert_eq!(now.noted.len(), 1);
     assert!(changes(&mut Seen::default(), &now, 0)
@@ -1116,9 +1136,14 @@ async fn a_look_that_flags_while_a_flag_is_open_is_noted_under_it() {
         .any(|reason| reason.contains("finding noted")));
     let again = look(&store, "chat", "change", &[("a", "r1")]);
     take(again).await.unwrap();
-    assert!(std::fs::read_to_string(calls_dir.join("prompt-2"))
-        .unwrap()
-        .contains("notedWhileFlagOpen"));
+    let request = std::fs::read_to_string(calls_dir.join("prompt-2")).unwrap();
+    let digest: Value =
+        serde_json::from_str(request.strip_prefix(DIGEST_PREAMBLE).unwrap()).unwrap();
+    let shown = &digest["runs"][0];
+    assert_eq!(shown["keptGoingAfter"][0]["why"], reason);
+    assert_eq!(shown["brief"], digest["briefs"][0]["id"]);
+    assert_eq!(digest["briefs"][0]["lines"]["noise"], noise);
+    assert_eq!(shown["notedWhileFlagOpen"][0]["lines"], json!([failed]));
     let flags = super::super::flags::read(&store, &a).unwrap();
     assert_eq!(flags.len(), 2, "{flags:?}");
     assert_eq!(
@@ -1127,7 +1152,7 @@ async fn a_look_that_flags_while_a_flag_is_open_is_noted_under_it() {
     );
     assert_eq!(
         flags[1]["evidence"]["lines"],
-        json!(["WARNING --depth 8 overrides DEPTH; using 4"]),
+        json!([failed]),
         "it cites the line the noted flag did"
     );
     assert!(
@@ -2023,9 +2048,17 @@ async fn instrumentation_warns_once_across_restart_and_shares_a_due_notice_turn(
         .iter()
         .find(|notice| notice.kind == "instrumentation")
         .unwrap();
-    assert!(warning
-        .body
-        .contains(&format!("orx exp view show {}", row.id)));
+    for command in [
+        format!("orx exp view show {}", row.id),
+        format!("orx exp view check {}", row.id),
+        format!("orx logs {}", row.id),
+        format!("orx exp view set {}", row.experiment_id),
+        format!("orx exp cancel --run {}", row.id),
+    ] {
+        assert!(warning.body.contains(&command), "{}", warning.body);
+    }
+    assert!(warning.body.contains(AGENTIC_RELAUNCH));
+    assert!(!warning.body.contains(COPILOT_RELAUNCH));
     assert!(warning.body.contains("total="));
     assert!(
         instrumentation(&mut Seen::default(), &current, now + 300_000)
@@ -2060,13 +2093,26 @@ async fn instrumentation_waits_for_data_or_two_minutes_and_ignores_queued_runs()
             .unwrap()
             .is_none()
     );
-    assert_eq!(
-        instrumentation(&mut seen, &current, row.created_at + 120_000)
+    let at = row.created_at + 120_000;
+    let notice =
+        super::instrumentation(&Mutex::new(Store::open().unwrap()), &mut seen, &current, at)
             .await
+            .unwrap()
+            .unwrap();
+    store
+        .set_chat_session_autonomy("quiet-owner", Autonomy::Copilot)
+        .unwrap();
+    assert_eq!(
+        notice
+            .queue(&store, &row.id, &row.experiment_id, at)
             .unwrap()
             .as_deref(),
         Some("quiet-owner")
     );
+    let batch = store.run_notice_batch("quiet-owner").unwrap();
+    let warning = &batch[0].body;
+    assert!(warning.contains(COPILOT_RELAUNCH));
+    assert!(!warning.contains(AGENTIC_RELAUNCH));
     assert!(store
         .last_notice_at(&row.id, "instrumentation")
         .unwrap()
@@ -2319,27 +2365,6 @@ async fn a_setup_look_defaults_to_no_sentence_and_can_clear_a_previous_one() {
     assert_eq!(calls(&calls_dir), 3);
 }
 
-#[test]
-fn setup_ends_on_the_first_headlined_or_charted_point() {
-    let mut body = json!({
-        "phases": [{"name": ""}],
-        "view": {"headline": ["accuracy"], "blocks": [
-            {"chart": ["loss"], "phase": "train"}, {"stats": ["tok_per_sec"]}
-        ]},
-        "series": {"tok_per_sec": [[1, 1000]]}
-    });
-    assert!(in_setup(&body));
-    body["series"]["loss"] = json!([[1, 2.0]]);
-    assert!(!in_setup(&body));
-    body["series"]["loss"] = json!([]);
-    body["series"]["accuracy"] = json!([[1, 0.8]]);
-    assert!(!in_setup(&body));
-    body["series"]["accuracy"] = json!([]);
-    body["view"]["blocks"] = json!([{ "series": [{"y": "loss"}], "phase": "train" }]);
-    body["series"]["loss"] = json!([[1, 2.0]]);
-    assert!(!in_setup(&body));
-}
-
 #[cfg(unix)]
 #[tokio::test]
 async fn stopped_runs_keep_final_sentences_without_flags_or_wakes() {
@@ -2497,7 +2522,7 @@ async fn an_overlong_sentence_gets_one_retry_with_the_exact_error() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn a_setup_sentence_expires_on_the_first_research_point() {
+async fn a_setup_sentence_expires_on_the_first_stage_count() {
     if !crate::config::in_test_child(&[]) {
         return;
     }
@@ -2510,7 +2535,7 @@ async fn a_setup_sentence_expires_on_the_first_research_point() {
         &[
             r#"{"runs":{"r1":{"status":"ok","line":"Waiting for data."}}}"#,
             r#"{"runs":{"r1":{"same":true}}}"#,
-            r#"{"runs":{"r1":{"status":"ok","line":"Loss tracks the parent."}}}"#,
+            r#"{"runs":{"r1":{"status":"ok","line":"The data is on disk."}}}"#,
         ],
     );
     let id = look(&store, "chat", "manual", &[("setup", "r1")]);
@@ -2523,7 +2548,18 @@ async fn a_setup_sentence_expires_on_the_first_research_point() {
         monitor.summary()["sentence"]["template"],
         "Waiting for data."
     );
-    epochs(&store, &row, &[(2.1, 0.5)]);
+    let log = concat!(r#"::orx:: {"phase":"train","step":1,"of":20}"#, "\n");
+    keep_log(&store, &row.id, log);
+    let at = crate::store::now_ms() + 1_000;
+    let mut snapshot = orx_signals::Snapshot::new(&row.id, "1-7", "g1");
+    snapshot.feed(log.as_bytes(), true, at, true).unwrap();
+    let path = store
+        .data_dir()
+        .join("run-signals")
+        .join(format!("{}.json", row.id));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    crate::engine::adapters::signals::publish(&path, &snapshot).unwrap();
+    super::super::monitor::advance(&store, &row, at).unwrap();
     let monitor = super::super::monitor::current(&store, &row)
         .unwrap()
         .unwrap();
@@ -2548,9 +2584,12 @@ async fn a_setup_sentence_expires_on_the_first_research_point() {
         3,
         "same cannot revive the expired setup sentence"
     );
+    let prompt = std::fs::read_to_string(calls_dir.join("prompt-2")).unwrap();
+    let sent: Value = serde_json::from_str(prompt.strip_prefix(DIGEST_PREAMBLE).unwrap()).unwrap();
+    assert_eq!(sent["runs"][0]["setup"], false);
     assert_eq!(
         run_facts(&store, &row).unwrap()["sentence"]["template"],
-        "Loss tracks the parent."
+        "The data is on disk."
     );
 }
 

@@ -165,6 +165,9 @@ pub struct Snapshot {
     pub row_order: Vec<String>,
     pub row_columns: BTreeMap<String, Vec<String>>,
     pub phases: Vec<Phase>,
+    /// The first named stage with a count that has aged out of `phases`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_omitted_counted_stage: Option<usize>,
     pub timing: Timing,
     pub detectors: Detectors,
     pub diagnostics: Diagnostics,
@@ -321,6 +324,7 @@ impl Snapshot {
             row_order: Vec::new(),
             row_columns: BTreeMap::new(),
             phases: Vec::new(),
+            first_omitted_counted_stage: None,
             timing: Timing::default(),
             detectors: Detectors::default(),
             diagnostics: Diagnostics::default(),
@@ -1219,6 +1223,10 @@ impl Snapshot {
             .map_or(0, |p| p.occurrence.saturating_add(1));
         if self.phases.len() == 64 {
             let removed = self.phases.remove(0);
+            if removed.done.is_some() && !removed.name.is_empty() {
+                self.first_omitted_counted_stage
+                    .get_or_insert(removed.occurrence);
+            }
             self.timing
                 .progress_points
                 .retain(|(phase, _, _)| *phase != removed.occurrence);

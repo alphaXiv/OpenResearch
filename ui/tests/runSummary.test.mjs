@@ -141,15 +141,15 @@ test("who needs attention comes first, before any leader", () => {
   assert.match(said([model("a", summary()), byRule]).text, /^g · Auto-stopped:/);
 });
 
-test("otherwise the summary counts the runs in each state and, in the same sentence, when the next should finish", () => {
+test("otherwise the summary counts each state and provides a separate estimate for the next finish", () => {
   const eta = (mid, floor = false) => summary({ estimate: { loMs: mid - 60_000, midMs: mid, hiMs: mid + 60_000, at: now, pending: false, floor } });
   const models = [model("a", eta(29 * 60_000)), model("b", eta(40 * 60_000)), model("c", summary({ tone: "starting" }), { status: "starting" }), model("d", summary({ tone: "done" }), { status: "done", endedAt: now })];
   const { text, firstDone } = said(models);
   assert.equal(text, [
-    m.run_summary_starting({ count: "**1**" }), m.run_summary_running({ count: "**2**" }), m.run_summary_done({ count: "**1**" }), m.run_summary_next_done({ duration: "**29m**" }),
-  ].map(bare).join(" · "), "once one is done, the soonest of the rest is the next");
-  assert.equal(firstDone, null, "said once, in the sentence");
-  assert.match(said([model("a", eta(29 * 60_000, true)), model("b", eta(40 * 60_000))]).text, /at least.*29m/);
+    m.run_summary_starting({ count: "**1**" }), m.run_summary_running({ count: "**2**" }), m.run_summary_done({ count: "**1**" }),
+  ].map(bare).join(" · "));
+  assert.equal(firstDone, bare(m.run_summary_next_done({ duration: "**29m**" })), "once one is done, the soonest of the rest is the next");
+  assert.equal(said([model("a", eta(29 * 60_000, true)), model("b", eta(40 * 60_000))]).firstDone, bare(m.run_summary_first_floor({ duration: "**29m**" })));
 });
 
 test("the watcher's summary stands for the runs its look covered, with names and numbers bound to each run", () => {
@@ -166,9 +166,9 @@ test("the watcher's summary stands for the runs its look covered, with names and
 
 test("a summary's subsecond time left stays positive", () => {
   const line = model("one", summary({ estimate: { loMs: 500, midMs: 500, hiMs: 500, at: now, pending: false, floor: false } }));
-  const { text } = said([line]);
+  const { firstDone } = said([line]);
   const expected = m.run_summary_first_done({ duration: `**${m.duration_seconds({ value: "1" })}**` });
-  assert.ok(text.includes(bare(expected)), text);
+  assert.equal(firstDone, bare(expected));
 });
 
 test("a stage counting work during setup takes precedence over the watcher's starting summary", () => {

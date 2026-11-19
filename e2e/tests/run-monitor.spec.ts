@@ -128,6 +128,125 @@ const steps = async (page: Page, orx: Orx, runId: string) => {
   return { monitor, x: (monitor.series.loss ?? []).map(([x]: [number]) => x) as number[] }
 }
 
+test('run chart settings save, redraw and follow the run into chat', async ({ page, project, agent, orx }) => {
+  test.slow()
+  const run = payload(orx, `chart-settings-${project.id}`, ['finish'], `
+const loss = [1, 0.9, 0.6, 0.8, 0.3, 0.2, 0.26, 0.13, 0.17, 0.09, 0.05, 0.08]
+for (const [i, value] of loss.entries()) console.log('::orx:: ' + JSON.stringify({ step: i + 1, of: 16, m: { loss: value } }))
+gate('finish')`)
+  const view = path.join(orx.root, `chart-view-${project.id}.xml`)
+  writeFileSync(view, '<signal name="loss" label="Training loss" smooth="0.25"/>\n<view headline="loss"><chart y="loss"/></view>')
+  await page.request.post(`${orx.url}/api/settings/ui-state`, { headers: { origin: orx.url }, data: { runBanner: 'strip' } })
+  agent.script('Start training.', [
+    { run: [
+      'set -e',
+      `id=$(orx create-experiment ${project.id} --title Training --run-command '${run.command}' | sed -n 's/^ *id: *//p')`,
+      `orx exp view set "$id" --file ${view}`,
+      'orx exp run "$id" --backend local',
+      'orx exp wake "$id"',
+    ].join('\n') },
+    { say: 'Training started.' },
+  ])
+  agent.script('finished with status **done**', [{ say: 'Training finished.' }])
+  await project.open(page)
+  await send(page, 'Start training.')
+  const banner = page.getByRole('region', { name: 'Runs in this chat' })
+  const strip = banner.getByRole('group', { name: /Training loss/ })
+  const menu = page.getByRole('menu', { name: 'Chart settings' })
+  const choice = (axis: string, name: string) => menu.getByRole('group', { name: axis }).getByRole('menuitemradio', { name, exact: true })
+  const open = async (chart: Locator) => {
+    await chart.click({ button: 'right' })
+    await expect(menu).toBeVisible()
+  }
+  const capture = async (name: string, chart: Locator, withMenu = false) => {
+    const dir = process.env.ORX_E2E_SHOTS
+    if (!dir) return
+    mkdirSync(dir, { recursive: true })
+    for (const width of [1440, 420]) {
+      await page.setViewportSize({ width, height: 900 })
+      await chart.scrollIntoViewIfNeeded()
+      const plot = await chart.boundingBox()
+      if (withMenu) await open(chart)
+      else await chart.blur()
+      const popup = withMenu ? await menu.boundingBox() : null
+      if (!plot || (withMenu && !popup)) throw new Error('The chart or menu is hidden in the capture')
+      const y = Math.max(0, Math.floor(Math.min(plot.y - 36, popup ? popup.y - 8 : Infinity)))
+      for (const scheme of ['light', 'dark'] as const) {
+        await page.emulateMedia({ colorScheme: scheme })
+        await expect(page.locator('html')).toHaveAttribute('data-theme', scheme)
+        await expect.poll(() => page.evaluate(() => document.getAnimations().filter((a) => a instanceof CSSTransition).length)).toBe(0)
+        if (withMenu) expect(await contrast(menu)).toEqual([])
+        await page.screenshot({ path: path.join(dir, `${name}-${width}-${scheme}.png`), clip: { x: 0, y, width, height: 900 - y } })
+      }
+      await page.emulateMedia({ colorScheme: 'light' })
+      if (withMenu) await page.keyboard.press('Escape')
+    }
+    await page.setViewportSize({ width: 1440, height: 900 })
+  }
+  await expect(strip.getByRole('img')).toBeVisible()
+  await capture('composer-menu', strip, true)
+  if (process.platform === 'darwin') {
+    await strip.click({ modifiers: ['Control'] })
+    await expect(menu).toBeVisible()
+    await page.keyboard.press('Escape')
+  }
+
+  await openRunPage(page, banner, /Training/)
+  const chart = latestRun(page).getByRole('group', { name: /Training loss/ })
+  const image = chart.getByRole('img')
+  const raw = image.locator('path[opacity="0.3"]')
+  await expect(raw).toHaveCount(1)
+  await capture('run-menu', chart, true)
+  await capture('before-log', chart)
+
+  await chart.press('Shift+F10')
+  await expect(menu).toBeVisible()
+  await expect(choice('Y axis', 'Linear')).toHaveAttribute('aria-checked', 'true')
+  await page.keyboard.press('Home')
+  await expect(choice('Y axis', 'Linear')).toBeFocused()
+  await page.keyboard.press('ArrowDown')
+  await expect(choice('Y axis', 'Logarithmic')).toBeFocused()
+  await page.keyboard.press('Enter')
+  await expect(menu).toBeHidden()
+  await expect(chart).toBeFocused()
+  await expect(image.getByText('log', { exact: true })).toBeVisible()
+  await expect(strip.getByText(/\blog\b/)).toBeVisible()
+  await capture('after-log', chart)
+  await capture('before-smoothing-off', chart)
+
+  await chart.press('ContextMenu')
+  await expect(choice('Smoothing', 'Medium')).toHaveAttribute('aria-checked', 'true')
+  await choice('Smoothing', 'Off').click()
+  await expect(menu).toBeHidden()
+  await expect(raw).toHaveCount(0)
+  await expect(strip.getByRole('img').locator('path[opacity="0.3"]')).toHaveCount(0)
+  await capture('after-smoothing-off', chart)
+
+  await page.route('**/api/runs/*/view/chart', (route) => route.fulfill({
+    status: 409,
+    json: { error: "The experiment's view changed. Choose the chart setting again." },
+  }), { times: 1 })
+  await open(chart)
+  await choice('Y axis', 'Linear').click()
+  await expect(menu.getByRole('alert')).toContainText('The experiment\'s view changed.')
+  await expect(choice('Y axis', 'Logarithmic')).toHaveAttribute('aria-checked', 'true')
+  await page.keyboard.press('Escape')
+  await expect(chart).toBeFocused()
+  await expect(image.getByText('log', { exact: true })).toBeVisible()
+
+  const shown = (await (await page.request.get(`${orx.url}/api/chat/shown-runs`)).json()).find((item: { run: { projectId: string } }) => item.run.projectId === project.id)
+  const { monitor } = await steps(page, orx, shown.run.id)
+  expect(monitor.viewFrom.markup).toContain('y-scale="log"')
+  expect(monitor.viewFrom.markup).not.toContain('smooth=')
+  await page.reload()
+  await open(strip)
+  await expect(choice('Y axis', 'Logarithmic')).toHaveAttribute('aria-checked', 'true')
+  await expect(choice('Smoothing', 'Off')).toHaveAttribute('aria-checked', 'true')
+  await page.keyboard.press('Escape')
+  await run.open('finish')
+  await expect(page.getByText('Training finished.', { exact: true })).toBeVisible()
+})
+
 test('Stop asks before cancelling a running experiment', async ({ page, project, agent, orx }) => {
   const run = payload(orx, 'stop-run', ['finish'], "gate('finish')")
   agent.script('Stopped by: the user.', [{ say: 'The run was stopped.' }])
@@ -305,6 +424,56 @@ for (let step = 1; step <= total; step++) {
     agent.release(hold)
     await expect(page.getByText('Training finished.', { exact: true })).toBeVisible()
   })
+})
+
+test('a named counter ends setup before the run charts anything', async ({ page, project, agent, orx }) => {
+  const run = payload(orx, `counts-${project.id}`, ['count', 'finish'], `
+console.log('::orx:: {"plan":[{"phase":"train","of":20}]}')
+console.log('::orx:: {"phase":"train"}')
+gate('count')
+console.log('::orx:: {"step":0,"t":0}')
+console.log('::orx:: {"step":2,"t":10}')
+gate('finish')
+console.log('::orx:: {"step":20,"t":100}')
+`)
+  const hold = `counts-result-${project.id}`
+  agent.script('finished with status **done**', [{ hold }, { say: 'Counting finished.' }])
+  const banner = await launch(page, agent, project, 'Counting', run.command)
+  const { id } = (await (await page.request.get(`${orx.url}/api/chat/shown-runs`)).json())[0].run
+  try {
+    const status = banner.getByRole('button', { name: /Counting/ })
+    await expect(status).toContainText('Setup')
+    await run.open('count')
+
+    const stage = /train[⁦-⁩]* \([⁦-⁩]*2\/2[⁦-⁩]*\)/
+    const count = said('Step 2 of 20')
+    await expect(status).toContainText(stage)
+    await expect(status).toContainText(count)
+    await expect(banner).toContainText('left')
+    await status.hover()
+    const card = page.getByRole('dialog')
+    const current = card.locator('[aria-current="step"]')
+    await expect(current).toContainText('train')
+    await expect(current).toContainText(count)
+    await expect(card).toContainText(/Whole run: .*left/)
+    await page.keyboard.press('Escape')
+    await expect(card).toHaveCount(0)
+    await openRunPage(page, banner, /Counting/)
+    const latest = latestRun(page)
+    await expect(latest).toContainText(stage)
+    await expect(latest).toContainText(count)
+    await expect(latest).toContainText('left')
+
+    await run.open('finish')
+    await agent.reached(hold)
+    await expect(latest).toContainText('Done in')
+    agent.release(hold)
+  } finally {
+    const { run: current } = await (await page.request.get(`${orx.url}/api/runs/${id}`)).json()
+    if (current.status === 'running') {
+      await page.request.post(`${orx.url}/api/runs/${id}/cancel`, { headers: { origin: orx.url } })
+    }
+  }
 })
 
 test('a run with one progress bar and no declared lines shows its bar from the log', async ({ page, project, agent, orx }) => {
@@ -649,13 +818,12 @@ test('several runs share one summary over an open card each, whose rows name wha
   const orx = await launchOrx()
   await orx.onboard()
   const project = await orx.createProject('sweep')
-  /** A run that reports a falling val bpb to `total` steps, held at step 20 until the test opens its gate. */
+  /** A falling val bpb every two simulated seconds, held at step 20 while its estimate counts down. */
   const sweep = (name: string, total: number, floor: number) => payload(orx, name, ['mid'], `
-const started = performance.now()
 process.stdout.write('::orx:: {"step":0,"of":${total},"unit":"steps","t":0}\\n')
 for (let step = 1; step <= ${total}; step++) {
   await tick()
-  process.stdout.write('::orx:: ' + JSON.stringify({ step, t: (performance.now() - started) / 1000, m: { val_bpb: ${floor} + 1 / step } }) + '\\n')
+  process.stdout.write('::orx:: ' + JSON.stringify({ step, t: step * 2, m: { val_bpb: ${floor} + 1 / step } }) + '\\n')
   if (step === 20) gate('mid')
 }`)
   const runs = [
@@ -670,6 +838,7 @@ for (let step = 1; step <= ${total}; step++) {
     'orx exp wake "$id"',
   ])
   agent.script('Run the depth sweep.', [{ run: ['set -e', ...start(0, 3)].join('\n') }, { say: 'Launched the sweep.' }])
+  await page.setViewportSize({ width: 1440, height: 1100 })
   await project.open(page)
   await send(page, 'Run the depth sweep.')
   await expect(page.getByText('Launched the sweep.', { exact: true })).toBeVisible({ timeout: 90_000 })
@@ -690,11 +859,45 @@ for (let step = 1; step <= ${total}; step++) {
     }
     await themes(page, banner, info, 'summary-rows')
 
-    await page.clock.setFixedTime(Date.now() + 30_000)
+    const shown = await (await page.request.get(`${orx.url}/api/chat/shown-runs`)).json()
+    const finishes = await Promise.all(shown.map(async ({ run }: { run: { id: string } }) => {
+      const monitor = await (await page.request.get(`${orx.url}/api/runs/${run.id}/monitor`)).json()
+      const { at, midMs, hiMs } = monitor.estimate
+      expect(midMs).toBeGreaterThan(0)
+      return { mid: at + midMs, high: at + (hiMs ?? midMs) }
+    }))
+    const firstFinish = Math.min(...finishes.map(({ mid }) => mid))
+    const estimate = banner.locator('[data-part="estimate"]')
+    await page.clock.setFixedTime(firstFinish - 10_500)
+    await expect(estimate).toContainText(said('10s'))
+    for (const width of [1440, 420, 320]) {
+      await page.setViewportSize({ width, height: 860 })
+      for (const name of ['shared', 'sentence', 'estimate']) {
+        const part = banner.locator(`[data-part="${name}"]`)
+        await expect(part).toBeVisible()
+        const overflow = await part.evaluate((element) => {
+          const range = document.createRange()
+          range.selectNodeContents(element)
+          const bounds = element.getBoundingClientRect()
+          return Math.max(0, ...Array.from(range.getClientRects(), (rect) => Math.max(bounds.left - rect.left, rect.right - bounds.right)))
+        })
+        expect(overflow, `${name} at ${width} px`).toBeLessThanOrEqual(1)
+      }
+      const status = await banner.locator('[data-part="sentence"]').boundingBox()
+      const time = await estimate.boundingBox()
+      if (width === 1440) expect(time!.y).toBe(status!.y)
+      else expect(time!.y).toBeGreaterThan(status!.y)
+    }
+
     await page.setViewportSize({ width: 420, height: 860 })
+    const summaryText = estimate.locator('..')
+    const beforeTick = await summaryText.boundingBox()
+    await page.clock.setFixedTime(firstFinish - 9_500)
+    await expect(estimate).toContainText(said('9s'))
+    expect(await summaryText.boundingBox()).toEqual(beforeTick)
+
+    await page.clock.setFixedTime(Math.min(...finishes.map(({ high }) => high)) + 1000)
     await expect(banner).toContainText('No progress for')
-    // Whether the runs' names fit beside the count at 420 px depends on the platform's fonts.
-    await expect(banner).toContainText(/Depth (…|4, 6, 8) at 2e15 FLOPs/)
     for (const { title, label } of runs.slice(0, 3)) {
       const clipped = await named(title).evaluate((trigger, short) => {
         const label = Array.from(trigger.children).find((element) => element.textContent.replace(/[⁦-⁩]/g, '').trim() === `${short} ·`)

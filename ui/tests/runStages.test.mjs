@@ -27,20 +27,28 @@ test("C shows the folded stage position, its count, then the fresh watcher sente
   assert.equal(stale.sentence.watcher, undefined);
 });
 
-test("Setup folds its prep phases and retains the current download count", () => {
+test("Setup folds the prep phases up to the first counted stage", () => {
   const data = monitor();
   data.stageOrder.index = 1;
   data.phases = data.phases.map((phase, index) => index === 1 ? { ...phase, endedAt: null } : index > 1 ? { ...phase, startedAt: null, endedAt: null } : phase);
-  data.progress = { ...data.progress, phase: 1, done: 4 };
+  data.progress = { ...data.progress, phase: 1, done: null };
   data.setup = { stage: "Download", line: null, startsAt: now + 120_000 };
   data.sentence = null;
   const row = model(data);
-  assert.equal(plain(row.sentence.text), "Setup (1/5) · Download 4 of 9 shards");
+  assert.equal(plain(row.sentence.text), "Setup (1/5) · Download started");
   const stages = foldedStages(data, row);
   assert.deepEqual(stages.phases.map((phase) => phase.name), ["Setup", "Train", "Eval", "SFT", "Probe"]);
   assert.deepEqual(stages.names, ["Install", "Download", "Tokenizer"]);
   assert.equal(stages.current, 0);
   assert.equal(stages.phases[0].priorMs, 60_000);
+
+  data.setup = null;
+  data.stageOrder.first = 1;
+  data.progress.done = 4;
+  const counting = model(data);
+  assert.equal(plain(counting.sentence.text), "Download (2/7) · 4 of 9 shards");
+  assert.deepEqual(foldedStages(data, counting).names, ["Install"]);
+  assert.equal(foldedStages(data, counting).current, 1);
 });
 
 test("an unknown first-data stage or an undeclared plan claims no stage total", () => {

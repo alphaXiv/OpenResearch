@@ -1,4 +1,4 @@
-import type { Run, RunContact, RunStatus } from "./api";
+import { fmtDuration, type Run, type RunContact, type RunStatus } from "./api";
 import type { RunMonitor } from "./runMonitor/types";
 
 export type RunDisplayStatus =
@@ -61,6 +61,13 @@ export function runNeverStarted(run: Pick<Run, "status" | "startedAt" | "exitCod
   return summary?.stage == null && summary?.headline?.value == null && !summary?.logError && !summary?.setup?.line
     && !Object.values(summary?.bindings ?? {}).some((value) => value != null)
     && monitor?.progress == null && !monitor?.logError && !Object.values(monitor?.latest ?? {}).some((value) => value != null);
+}
+
+export function runDuration(run: Run, now: number): string {
+  if (runNeverStarted(run)) return "—";
+  const start = run.startedAt ?? run.createdAt;
+  const end = run.endedAt ?? (runActive(run.status) ? now : run.updatedAt);
+  return fmtDuration(end - start);
 }
 
 function runCancelling(run: RunState): boolean {

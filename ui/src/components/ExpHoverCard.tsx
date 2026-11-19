@@ -22,14 +22,13 @@ import { createPortal } from "react-dom";
 import { FolderTree, GitBranch, Terminal } from "lucide-react";
 import {
   backendKind,
-  fmtDuration,
   fmtNumber,
-  timeAgo,
   type Experiment,
   type Run,
 } from "../api";
 import { BackendBadge } from "./BackendLogos";
 import { RunDiffStat } from "./RunDiffStat";
+import { RunTiming } from "./RunTiming";
 import { noticeRun, runActive, runDisplay, runNotice, runResult } from "../runDisplay";
 import { StatusBadge } from "./StatusBadge";
 import { useMeasure, usePopoverPosition } from "./tourGeometry";
@@ -167,9 +166,6 @@ export function ExpHoverCard({
     else if (r.status === "cancelled") counts.cancelled += 1;
     else if (runActive(r.status)) counts.live += 1;
   }
-  const duration = latestRun
-    ? fmtDuration((latestRun.endedAt ?? Date.now()) - latestRun.createdAt)
-    : null;
   // Local runs leave resultMarkdown empty on success (the agent freezes its
   // findings into the experiment description instead); on failure it holds a
   // short error worth surfacing — but never in both slots at once.
@@ -260,8 +256,7 @@ export function ExpHoverCard({
           ])}
         </span>
         {latestRun && backendKind(latestRun.backend) && <BackendBadge backend={latestRun.backend} />}
-        {duration && <span>{duration}</span>}
-        {latestRun && <span>{timeAgo(latestRun.createdAt)}</span>}
+        {latestRun && <RunTiming run={latestRun} />}
       </div>
       <div className="hc-git">
         <div className="hc-git-row">

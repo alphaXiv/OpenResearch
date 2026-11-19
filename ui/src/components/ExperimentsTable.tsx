@@ -3,9 +3,10 @@ import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { FlaskConical, CircleStop, FolderTree, Terminal } from "lucide-react";
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
-import { fmtNumber, timeAgo, type Experiment, type Run } from "../api";
+import { fmtNumber, type Experiment, type Run } from "../api";
 import { runActive, runDisplay, runStoppable } from "../runDisplay";
 import { StatusBadge } from "./StatusBadge";
+import { RunTiming } from "./RunTiming";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { IconButton, Tooltip } from "./ui";
 import { confirmStop } from "./run/confirmStop";
@@ -108,7 +109,7 @@ export function ExperimentsTable({
             <div
               key={experiment.id}
               style={{ paddingLeft: showLineage ? railWidth + 12 : 20 }}
-              className="experiment-table-group grid min-h-11 grid-cols-[minmax(0,_1fr)_9.5rem_4rem_4rem_auto] [grid-template-areas:'name_status_attempts_latest_actions'] items-center gap-x-3 gap-y-1 py-2 pe-3 border-b border-b-divider-subtle bg-background cursor-pointer [&:hover]:bg-surface [&:last-child]:border-b-0 [@container(max-width:640px)]:grid-cols-[minmax(0,_1fr)_auto] [@container(max-width:640px)]:[grid-template-areas:'name_actions'_'meta_meta'] [@container(max-width:640px)]:gap-x-3"
+              className="experiment-table-group grid min-h-11 grid-cols-[minmax(0,_1fr)_9.5rem_4rem_11.5rem_7.75rem] [grid-template-areas:'name_status_attempts_latest_actions'] items-center gap-x-3 gap-y-1 py-2 pe-3 border-b border-b-divider-subtle bg-background cursor-pointer [&:hover]:bg-surface [&:last-child]:border-b-0 @max-3xl:grid-cols-[minmax(0,_1fr)_auto] @max-3xl:[grid-template-areas:'name_actions'_'meta_meta']"
               role="listitem"
               onClick={() => onOpen(experiment, "preview")}
               onDoubleClick={() => onOpen(experiment, "keepOpen")}
@@ -132,15 +133,15 @@ export function ExperimentsTable({
                 {experiment.archived && <span className="text-muted text-xs">{m.tree_archived()}</span>}
               </div>
               {/* Columns when wide; one full-width line under the title when narrow, clear of the actions. */}
-              <div className="experiment-table-meta contents [@container(max-width:640px)]:flex [@container(max-width:640px)]:[grid-area:meta] [@container(max-width:640px)]:min-w-0 [@container(max-width:640px)]:items-center [@container(max-width:640px)]:gap-x-3">
+              <div className="experiment-table-meta contents @max-3xl:flex @max-3xl:[grid-area:meta] @max-3xl:min-w-0 @max-3xl:items-center @max-3xl:gap-x-3">
                 <div className="experiment-table-status [grid-area:status] min-w-0">
                   <StatusBadge {...display} className="max-w-full" />
                 </div>
                 <div className="experiment-run-summary [grid-area:attempts] flex items-center gap-2 whitespace-nowrap text-sm text-subtext">
                   <span>{experimentRuns.length === 1 ? m.experiments_one_run() : m.experiments_run_count({ count: fmtNumber(experimentRuns.length) })}</span>
                 </div>
-                <div className="experiment-table-latest [grid-area:latest] min-w-0 truncate text-xs tabular-nums text-subtext">
-                  {latestRun ? timeAgo(latestRun.createdAt) : "–"}
+                <div className="experiment-table-latest [grid-area:latest] min-w-0 text-xs text-subtext">
+                  {latestRun ? <RunTiming run={latestRun} className="grid grid-cols-[minmax(max-content,_6rem)_minmax(0,_1fr)] @max-lg:grid-cols-1" /> : "–"}
                 </div>
               </div>
               <div

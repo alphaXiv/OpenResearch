@@ -8,7 +8,7 @@ import type { GlobalWorkspace, ProjectWorkspace } from "./workspaceState";
 import { m } from "./paraglide/messages.js";
 import { getLocale } from "./paraglide/runtime.js";
 import { fmtNumber } from "./i18n";
-import type { ChatShownRun, Flag, RunMonitor, RunMonitorSummary, RunOutcome } from "./runMonitor/types";
+import type { ChartEdit, ChatShownRun, Flag, RunMonitor, RunMonitorSummary, RunOutcome } from "./runMonitor/types";
 
 export { fmtNumber } from "./i18n";
 
@@ -1701,6 +1701,7 @@ export interface UsageReport {
   plans: PlanUsage[] | null;
   /** The last seven days in the machine's local time, oldest first, as `YYYY-MM-DD`; today last. */
   days: string[];
+  /** Spend of accounts not on one of `plans`; empty while `plans` is null. */
   agents: AgentSpend[];
   compute: BackendSpend[];
   /** The chat `?chat=` asked about. */
@@ -1839,7 +1840,12 @@ export interface ChatSession {
   activeLeafId: string | null;
   contextUsage?: ContextUsage;
   /** Tasks the agent left running after its turn, which it resumes to report; in the session lists. */
-  background?: { count: number; since: number } | null;
+  background?: {
+    count: number;
+    since: number;
+    /** Each task, or each delegate chat (`chat`) at work; absent from an older orx up. */
+    tasks?: { id: string; name: string; chat?: boolean }[];
+  } | null;
   /** The chat's most recent turn, in the session lists. */
   lastTurn?: {
     state: string;
@@ -3300,6 +3306,12 @@ export function createApi(
   const interruptChat = (sessionId: string) =>
     post<{ ok: boolean }>(`/api/chat/sessions/${sessionId}/interrupt`);
 
+  const stopAndArchiveChat = (sessionId: string) =>
+    post<ChatSession>(`/api/chat/sessions/${sessionId}/stop-and-archive`);
+
+  const stopBackgroundTask = (sessionId: string, taskId: string) =>
+    post<{ ok: boolean }>(`/api/chat/sessions/${sessionId}/background/${encodeURIComponent(taskId)}/stop`);
+
   const respondChat = (sessionId: string, answer: PromptAnswer) =>
     post<{ ok: boolean }>(`/api/chat/sessions/${sessionId}/respond`, answer);
   const getLocalModels = (signal?: AbortSignal) => get<LocalModelConnection[]>("/api/local-models", signal);
@@ -3345,6 +3357,21 @@ export function createApi(
 
   const getRunMonitor = (runId: string, signal?: AbortSignal) =>
     get<RunMonitor>(`/api/runs/${encodeURIComponent(runId)}/monitor`, signal);
+
+  const editRunChart = ({ runId, viewFrom }: Pick<RunMonitor, "runId" | "viewFrom">, block: number, edit: ChartEdit) => {
+    const scope = workspaceScope();
+    return patch<unknown>(`/api/runs/${encodeURIComponent(runId)}/view/chart`, {
+      markup: viewFrom.markup, isDefault: viewFrom.isDefault, block, edit,
+    }).finally(() => {
+      if (!isCurrentScope(scope)) return;
+      const { queryClient } = client;
+      for (const [queryKey, data] of queryClient.getQueriesData<RunMonitor>({ queryKey: [...scope, "getRunMonitor"] })) {
+        if (data?.viewFrom.experimentId === viewFrom.experimentId) {
+          void queryClient.invalidateQueries({ queryKey, exact: true });
+        }
+      }
+    });
+  };
 
   const chooseRunFlag = (runId: string, choice: { flagId: string; choice: "stop" | "keep" | "ask"; requestId: string }) =>
     post<{ flag: Flag; run: Run }>(`/api/runs/${encodeURIComponent(runId)}/flag`, choice);
@@ -3569,6 +3596,8 @@ export function createApi(
     forkChatTurn,
     selectChatBranch,
     interruptChat,
+    stopAndArchiveChat,
+    stopBackgroundTask,
     respondChat,
     getLocalModels,
     discoverLocalModels,
@@ -3592,6 +3621,7 @@ export function createApi(
     listChatActiveRuns,
     listChatShownRuns,
     getRunMonitor,
+    editRunChart,
     dismissShownRun,
     lookNow,
     chooseRunFlag,
