@@ -1698,6 +1698,7 @@ export interface UsageReport {
   plans: PlanUsage[] | null;
   /** The last seven days in the machine's local time, oldest first, as `YYYY-MM-DD`; today last. */
   days: string[];
+  /** Spend of accounts not on one of `plans`; empty while `plans` is null. */
   agents: AgentSpend[];
   compute: BackendSpend[];
   /** The chat `?chat=` asked about. */

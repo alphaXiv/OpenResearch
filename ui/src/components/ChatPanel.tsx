@@ -6430,6 +6430,7 @@ export function ChatPanel({
   const stickToBottom = useRef(true);
   const programmaticScroll = useRef<number | null>(null);
   const lastTranscriptTop = useRef(0);
+  const lastTranscriptSize = useRef("");
   const [transcriptAtBottom, setTranscriptAtBottom] = useState(true);
   const composerRef = useRef<ComposerEditorHandle>(null);
   useEffect(() => {
@@ -7499,10 +7500,14 @@ export function ChatPanel({
     // Wheels, keys, focus moves and screen readers scroll unannounced; only the virtualizer's own scrolls are recorded.
     const programmatic = programmaticScroll.current !== null && Math.abs(el.scrollTop - programmaticScroll.current) <= 1;
     const movedUp = el.scrollTop < lastTranscriptTop.current;
+    // Chromium can reset the offset while the pane resizes; that is no user scroll, and the resize re-pins.
+    const size = `${el.clientWidth}x${el.clientHeight}`;
+    const resized = lastTranscriptSize.current !== "" && size !== lastTranscriptSize.current;
     programmaticScroll.current = null;
     lastTranscriptTop.current = el.scrollTop;
+    lastTranscriptSize.current = size;
     // Trackpads scroll a pixel at a time, so any upward scroll lets go before the next resize re-pins it.
-    if (!programmatic) stickToBottom.current = distance <= 1 || (atBottom && !movedUp);
+    if (!programmatic && !resized) stickToBottom.current = distance <= 1 || (atBottom && !movedUp);
     setTranscriptAtBottom(atBottom);
   }, []);
   const pinTranscriptToBottom = useCallback(() => {
@@ -9248,7 +9253,6 @@ export function ChatPanel({
                   onLeaveFeed={leaveTranscriptFeed}
                 />
                 </ChatLinksContext>
-              </ChatImageScope>
               {busy && awaitingInput && (
                 <div className="flex items-center gap-2 text-subtext text-sm pt-0.5 px-0 pb-2 italic">{m.chat_panel_waiting_for_your_input()}</div>
               )}
@@ -9277,6 +9281,7 @@ export function ChatPanel({
                   <span role="status" className="tool-running-shimmer -mt-3 ms-auto px-1 text-xs">{m.chat_steering()}</span>
                 </div>
               )}
+              </ChatImageScope>
             </div>
             </div>
           </div>
