@@ -319,7 +319,6 @@ console.log('::orx:: {"step":20,"t":100}')
 `)
   const hold = `counts-result-${project.id}`
   agent.script('finished with status **done**', [{ hold }, { say: 'Counting finished.' }])
-  await page.request.post(`${orx.url}/api/settings/ui-state`, { headers: { origin: orx.url }, data: { runBanner: 'line' } })
   const banner = await launch(page, agent, project, 'Counting', run.command)
   const { id } = (await (await page.request.get(`${orx.url}/api/chat/shown-runs`)).json())[0].run
   try {

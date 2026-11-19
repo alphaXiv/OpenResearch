@@ -180,8 +180,10 @@ the run is done is unknown, though each bar still shows its step of total.
 
 The same bounded fold runs beside native host logs and over API spools on the
 workspace machine. Its checkpoint commits unfinished frame bytes, byte cursor,
-latest values and bounded history together. A restart resumes that checkpoint;
-a replaced or shortened log starts a new generation. A spool cut back to where
+latest values and bounded history together. It remembers the occurrence of the
+first counted named stage when that stage leaves the retained phase list, so
+Setup stays ended. A restart resumes that checkpoint. A replaced or shortened
+log starts a new generation. A spool cut back to where
 its provider continues is the exception: its checkpoint stands while the bytes
 past that point are fetched again, which resume it if they return the same and
 are another log if not. Collection retains corrupt checkpoints and logs where

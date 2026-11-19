@@ -620,15 +620,17 @@ fn first_work_stage(snapshot: &Snapshot, names: &[&str], planned: bool) -> Optio
         .iter()
         .filter_map(|name| snapshot.first_series_stages.get(*name).copied())
         .min();
-    let count = snapshot
-        .phases
-        .iter()
-        .find(|phase| {
-            phase.done.is_some()
-                && (!phase.name.is_empty() || !planned && phase.source == "detected")
-        })
-        .map(|phase| Some(phase.occurrence));
-    let first = point.into_iter().chain(count).min()?;
+    let count = snapshot.first_omitted_counted_stage.or_else(|| {
+        snapshot
+            .phases
+            .iter()
+            .find(|phase| {
+                phase.done.is_some()
+                    && (!phase.name.is_empty() || !planned && phase.source == "detected")
+            })
+            .map(|phase| phase.occurrence)
+    });
+    let first = point.into_iter().chain(count.map(Some)).min()?;
     Some(first.and_then(|occurrence| {
         snapshot
             .phases
@@ -6799,6 +6801,32 @@ mod tests {
             &["train (2/2)", "step 2 of 20"],
         );
         mentions(status_line(&body, "eta"), &["9s left"]);
+    }
+
+    #[test]
+    fn setup_stays_ended_when_the_first_counted_stage_leaves_the_checkpoint() {
+        let f = Fixture::new("orx-monitor-omitted-count");
+        let run = f.run("running", local());
+        f.collect(&folded(&reports(&[r#"{"phase":"train","step":1}"#])));
+        let (before, _) = monitor_at(&f, &run, T0);
+        assert_eq!(before["setup"], Value::Null);
+
+        let [path, _] = signal_paths(f.dir.path(), &run.id);
+        let mut snapshot = super::super::adapters::local::signals::load(&path)
+            .unwrap()
+            .unwrap();
+        let later: Vec<_> = (1..=65)
+            .map(|n| (T0 + n * 1000, format!(r#"::orx:: {{"phase":"eval-{n}"}}"#)))
+            .collect();
+        fold(&mut snapshot, &later);
+        f.collect(&snapshot);
+        f.collected(T0 + 65_000);
+
+        let (body, _) = monitor_at(&f, &run, T0 + 65_000);
+        assert_eq!(body["setup"], Value::Null);
+        assert_eq!(body["stageOrder"]["first"], 0);
+        let summary = current(&f.store, &run).unwrap().unwrap();
+        assert_eq!(summary.summary()["setup"], Value::Null);
     }
 
     #[test]
