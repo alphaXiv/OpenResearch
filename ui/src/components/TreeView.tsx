@@ -24,7 +24,6 @@ import { GitHubMark } from "./BackendLogos";
 import {
   githubBranchUrl,
   fmtNumber,
-  timeAgo,
   type Experiment,
   type Project,
   type Run,
@@ -32,6 +31,7 @@ import {
 import type { ExperimentView } from "./DetailDrawer";
 import type { CodeView } from "./CodeTab";
 import { ExpHoverCard, dismissTreeHoverCards, useHoverIntent } from "./ExpHoverCard";
+import { RunTiming } from "./RunTiming";
 import { ArchiveMenu, type ArchiveActions } from "./ArchiveMenu";
 import { MenuItem } from "./ui";
 import { statusLabel, StatusBadge } from "./StatusBadge";
@@ -291,7 +291,7 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
             <span>{m.tree_view_no_runs()}</span>
           )}
           <span className="flex-1" />
-          {latestRun && <span>{timeAgo(latestRun.createdAt)}</span>}
+          {latestRun && <RunTiming run={latestRun} />}
         </div>
       </div>
       {/* Direct view shortcuts — code always, logs once there's a run, charts once it logs to Trackio. */}
@@ -613,7 +613,7 @@ export function TreeView({
   return (
     <ReactFlow
       data-keyboard-list
-      className="[&_.react-flow\_\_node.react-flow\_\_node-exp.selectable]:cursor-default [&_.react-flow\_\_node.react-flow\_\_node-archived.selectable]:cursor-pointer [&_.react-flow\_\_node.react-flow\_\_node-elided.selectable]:cursor-pointer [&_.react-flow\_\_handle]:opacity-0 [&_.react-flow\_\_handle]:pointer-events-none [&_.react-flow\_\_attribution]:hidden!"
+      className="@container [&_.react-flow\_\_node.react-flow\_\_node-exp.selectable]:cursor-default [&_.react-flow\_\_node.react-flow\_\_node-archived.selectable]:cursor-pointer [&_.react-flow\_\_node.react-flow\_\_node-elided.selectable]:cursor-pointer [&_.react-flow\_\_handle]:opacity-0 [&_.react-flow\_\_handle]:pointer-events-none [&_.react-flow\_\_attribution]:hidden!"
       // Saved viewports initialize on mount; a new scope needs its own canvas.
       key={agentSessionId ?? "project"}
       nodes={nodes}
