@@ -246,7 +246,8 @@ lines carry no `step` shows no progress.
 
 OpenResearch also checks reporting as the run starts and sends at most one
 warning about missing patterns, headline or chart data, or stage totals.
-Inspect the run before acting on it; the check never stops the run.
+When this notice arrives, inspect `orx exp view show RUN`,
+`orx exp view check RUN` and `orx logs RUN` before acting.
 
 After every launch, before replying to the user:
 
@@ -276,8 +277,11 @@ seconds. If it has seen nothing yet, check once more on your next turn after
 setup; never wait inside a turn for data.
 
 Repair the view, plan or patterns with `view set`: they apply to the run in
-flight. A report missing from the code means cancelling, fixing and
-relaunching, which is cheap now and costly an hour in.
+flight. If the missing report requires a code change, weigh the work already
+done before relaunching. In Agentic mode you may cancel, fix and commit the
+code, then relaunch. In Copilot mode, ask the user before cancelling healthy
+compute or relaunching. Report actual progress through long validation stages
+on later launches so the run shows that work is advancing.
 
 Then end your turn, whether or not the check settled anything.
 The result arrives as a message when the run ends, and the watcher flags
@@ -448,7 +452,8 @@ progress, a new kind of error) saying a run may be going
 wrong. It never stops the run. In Agentic mode it wakes you with the lines it
 saw and where they are: it saw a digest and none of the chat, so read the run
 yourself (`orx exp status <expId> --run <runId>`, `orx logs <runId>`) and
-confirm before acting. Then settle it, with a reason the user reads:
+confirm before acting. If you own the choice, settle it before ending your
+turn, with a reason the user reads:
 
 ```sh
 orx exp flag <runId> --flag <flagId> --keep --reason 'The spike is the eval, as the brief says.'
@@ -456,12 +461,24 @@ orx exp flag <runId> --flag <flagId> --stop --reason 'Loss is NaN since step 410
 orx exp flag <runId> --flag <flagId> --ask --reason 'It may be fine; the user knows the dataset.'
 ```
 
-`--keep` lets it run, and the watcher's next looks read what you kept and why,
-so a warning you judged harmless is not raised again on that run; add it to the brief's
-`noise` for the experiment's next runs. `--stop` stops it as `orx exp cancel`
+`--keep` settles this flag. Later looks read what you kept and why. Say what you
+verified and what evidence would change your mind. A later look can raise a new flag.
+`--stop` stops it as `orx exp cancel`
 does. `--ask` leaves the choice to the user, who sees Stop run, Keep going and
 Ask in the chat. In Copilot mode the flag waits for the user, and you hear of it
 only when they ask you.
+
+For recurring model flags, read `orx exp view get EXP --json`. Write the revised
+`brief` object to a JSON file as above, preserving its other labels. Use `noise`
+for expected behavior and `worth_a_flag` for evidence that needs investigation.
+To space out change-triggered looks, increase `watch.minGapS` and keep the
+desired `watch.maxGapS`. Save with `orx exp view set EXP --config PATH`. The
+changes apply to the next look built for this run.
+
+For a built-in stall during healthy validation, have the code report a
+validation phase and advancing steps on the next launch. For a flag from a
+rule, find the named rule in the experiment's config and revise it there.
+Rule edits apply to later launches.
 
 ## Worked examples
 

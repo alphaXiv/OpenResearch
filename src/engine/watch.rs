@@ -14,6 +14,7 @@ use serde_json::{json, Map, Value};
 
 use super::{lock, ByteRange, LogPage, Phase};
 use crate::error::{anyhow, Result};
+use crate::local::autonomy::Autonomy;
 use crate::local::harness::{
     sign_in_revision, OneShot, OneShotAuthError, OneShotQuality, OneShotUsage,
 };
@@ -419,11 +420,14 @@ struct Seen {
 }
 
 const INSTRUMENTATION: &str = "instrumentation";
+const AGENTIC_RELAUNCH: &str = "In Agentic mode you may cancel and relaunch on your own.";
+const COPILOT_RELAUNCH: &str =
+    "In Copilot mode, ask the user before cancelling healthy compute or relaunching.";
 
 struct Instrumentation {
     chat: String,
     settings: Option<String>,
-    body: String,
+    problems: String,
 }
 
 impl Instrumentation {
@@ -431,12 +435,32 @@ impl Instrumentation {
         if store.run_monitor_json(experiment)? != self.settings {
             return Ok(None);
         }
+        let Some(chat) = store.get_chat_session(&self.chat)? else {
+            return Ok(None);
+        };
+        let relaunch = match Autonomy::from_stored(chat.autonomy.as_deref()) {
+            Autonomy::Agentic => AGENTIC_RELAUNCH,
+            Autonomy::Copilot => COPILOT_RELAUNCH,
+        };
+        let problems = self
+            .problems
+            .replace("view set EXP ", &format!("view set {experiment} "));
+        let body = format!(
+            "[orx] Run {run} (experiment {experiment}) needs an instrumentation check.\n\
+             {problems}\n\
+             Inspect `orx exp view show {run}`, `orx exp view check {run}` and `orx logs {run}`. \
+             Repair the view, plan or patterns on this run with `orx exp view set {experiment}`. \
+             If the missing report requires a code change, weigh the work already done before relaunching. \
+             {relaunch} To restart, cancel an active run with \
+             `orx exp cancel --run {run} --reason 'Fixing run reports'`, then fix and commit the code before the next launch. \
+             This check sends at most one notice per run."
+        );
         let queued = store.insert_run_notice(
             run,
             &self.chat,
             INSTRUMENTATION,
             INSTRUMENTATION,
-            &self.body,
+            &body,
             now,
         )?;
         Ok(queued.then_some(self.chat))
@@ -594,22 +618,10 @@ async fn instrumentation(
         }
         return Ok(None);
     }
-    let (id, experiment) = (&run.run.id, &run.run.experiment_id);
-    let problems = problems
-        .join("\n")
-        .replace("view set EXP ", &format!("view set {experiment} "));
-    let body = format!(
-        "[orx] Run {id} (experiment {experiment}) needs an instrumentation check.\n\
-         {problems}\n\
-         Inspect `orx exp view show {id}` and `orx logs {id}` before changing anything. \
-         View and pattern changes apply now. If a code report is missing, cancel a still-running run with \
-         `orx exp cancel --run {id} --reason 'Fixing run reports'`, fix and commit the code, then relaunch. \
-         This automatic check never stops the run and sends at most one warning for it."
-    );
     Ok(Some(Instrumentation {
         chat,
         settings: raw,
-        body,
+        problems: problems.join("\n"),
     }))
 }
 
@@ -2798,7 +2810,7 @@ async fn take(id: i64) -> Result<()> {
 }
 
 /// What the run's flags someone chose to keep going after said, and why, newest last: a look
-/// reads them so it does not raise the same thing again on this run.
+/// reads them when deciding whether a new finding merits a flag.
 fn kept_after(store: &Store, run: &str) -> Result<Vec<Value>> {
     const KEPT: usize = 5;
     let events = store.run_flag_events(run)?;
