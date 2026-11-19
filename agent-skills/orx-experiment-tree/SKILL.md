@@ -185,23 +185,19 @@ intended flow — do **not** edit a frozen node or rewrite the run command:
    completion is a decision point with four moves:
    - **Repair** — the run answered nothing: fix this node's branch and
      re-launch the same node (above).
-   - **Refill** — a sibling of this round is still planned and not yet launched,
-     whatever this result was: launch it (step 5) and choose the winner once the
-     round's results are in. Nothing else will wake the chat to start it.
-   - **Promote** — result is a clear win: once it is confirmed (step 4), this
-     node becomes the **parent for the next round**; while a sibling still runs,
-     plan the next round under it and end your turn with a `running`
-     `yield`. The next batch of children branch off *it*, not the baseline, so
-     the win carries forward and the next ideas stack on top of it. If you planned
-     that round under another sibling, `orx exp move` its unrun children onto the winner. This is
-     the move that makes the tree grow deeper; skipping it is what produces a flat,
-     sweep-only tree.
+   - **Refill** — a planned sibling still tests a live hypothesis: launch it
+     (step 5) and choose the winner once the round's results are in. Nothing else will wake the chat to start it.
+   - **Promote** — a clear win (`orx-results`), once confirmed (step 4), becomes
+     the **parent for the next round**. While a sibling still runs, plan the next
+     round under the likely winner and end your turn with a `running` `yield`.
+     If another sibling wins, `orx exp move` the next round's unrun children
+     onto it so the next batch builds on the confirmed gain.
    - **Stop** — goal met, or the branch is exhausted.
 
-   After each move, update the planned children: add what the result suggests and
-   archive (`orx exp archive <expId> --only`) those it made pointless. Frozen nodes
-   stay untouched throughout — promotion moves the *focal parent* down the tree, it
-   never rewrites a node that already measured something.
+   After each move, add plans the result suggests and drop superseded plans with
+   `orx exp archive <expId> --only`. Frozen nodes stay untouched throughout —
+   promotion moves the *focal parent* down the tree, it never rewrites a node
+   that already measured something.
 
 Stop when the goal is met, the agreed budget is spent, or after ~3 consecutive
 failed or regressed runs, and write up the tree as a descriptively named project
