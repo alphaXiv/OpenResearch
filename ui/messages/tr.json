@@ -2159,7 +2159,7 @@
   "run_brief_from_parent": "Üst çalıştırmadan",
   "run_brief_decided": "Daha önce karar verilen",
   "settings_run_watching": "Çalıştırmaları izle",
-  "settings_run_watching_sends": "Bir şey değiştiğinde küçük bir model her çalıştırmanın kısa bir özetini okur ve mesaj alanının üstündeki cümleyi yazar. Özet, çalıştırma günlüğünden satırlarla birlikte ajanınızın sağlayıcısına gider. Sohbetinizin tamamı ve deponuz asla gönderilmez.",
+  "settings_run_watching_sends": "Bir şey değiştiğinde küçük bir model her çalıştırmanın kısa bir özetini okur ve mesaj alanının üstündeki cümleyi yazar. Özet, çalıştırma günlüğünden satırlarla birlikte ajanınızın sağlayıcısına gider. Sohbetinizin tamamı ve deponuz asla gönderilmez. İzleme kapalıyken OpenResearch sorunları işaretlemeye devam eder ve Bağımsız modda ilgili günlük satırlarını sohbet ajanınızın sağlayıcısına gönderebilir.",
   "run_eta_left": "{duration} kaldı",
   "run_eta_silent_for": "{duration} süredir ilerleme yok",
   "run_eta_almost_done": "Neredeyse bitti",
