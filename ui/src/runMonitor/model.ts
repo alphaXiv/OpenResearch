@@ -528,6 +528,25 @@ export function sessionRunMark(runs: readonly ShownRun[], sessionId: string): Se
   return own.some((item) => runActive(item.run.status)) ? "running" : null;
 }
 
+/**
+ * The monitored run a chat's inbox card gives a line to: the one with an unsettled flag, else the newest still going,
+ * else the newest shown, else `last`, the newest the chat launched, which stays after its result is answered.
+ */
+export function sessionLeadRun(runs: readonly ShownRun[], sessionId: string, last: Run | null | undefined): ShownRun | null {
+  const monitored = runs.filter((item) => item.run.monitor).sort((a, b) => b.run.createdAt - a.run.createdAt);
+  return monitored.find((item) => item.run.monitor!.flag) ?? monitored.find((item) => runActive(item.run.status)) ?? monitored[0]
+    // A live run is always among the shown ones; one listed live here is a stale read of a run that has since ended.
+    ?? (last?.monitor && !runActive(last.status) ? { sessionId, run: last, experimentName: null } : null);
+}
+
+/** What an inbox card says of its run: the watcher's words, else the stage's count without the stage, else how it ended. */
+export function cardSentence(model: RunModel): string {
+  const { sentence, headline } = model;
+  if (sentence.watcher) return sentence.watcher;
+  if (sentence.key === "end:done") return headline?.known ? `${headline.label} **${headline.value}**` : model.status;
+  return sentence.stage?.count || sentence.text || model.status;
+}
+
 /** What a row of run history says beside its status: what the run finished with, or where it stood, in its own words. */
 export function historySentence(run: Run, now: number): string {
   const model = runModel({ item: { sessionId: "", run, experimentName: null }, monitor: null, shown: false, agent: m.chat_the_agent(), now, nextRetryMs: null });

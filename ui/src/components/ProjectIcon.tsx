@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { MessageCircleDashed, Search } from "lucide-react";
 import type { AgentIconColor, Project, ProjectIcon } from "../api";
@@ -26,7 +26,21 @@ function defaultIcon(project: Project): ProjectIcon {
   return { brand: true, color: INITIALS_COLORS[hash % INITIALS_COLORS.length] };
 }
 
-const initialsMark = (name: string): Logo => (size) => <span className="font-bold leading-none" style={{ fontSize: Math.round(size * 0.8) }}>{projectInitials(name)}</span>;
+const initialsMark = (name: string): Logo => (size) => <Initials text={projectInitials(name)} size={size} />;
+
+/** Initials at the tile's type size, shrunk to keep a margin when wide letters ("MW") would crowd it. */
+function Initials({ text, size }: { text: string; size: number }) {
+  const ref = useRef<HTMLSpanElement>(null);
+  const [scale, setScale] = useState(1);
+  useLayoutEffect(() => {
+    const span = ref.current;
+    const room = span?.parentElement?.clientWidth;
+    if (!span?.offsetWidth || !room) return;
+    const natural = span.offsetWidth * size * 0.8 / parseFloat(span.style.fontSize);
+    setScale(Math.min(1, room * 0.8 / natural));
+  }, [text, size]);
+  return <span ref={ref} className="whitespace-nowrap font-bold leading-none" style={{ fontSize: size * 0.8 * scale }}>{text}</span>;
+}
 
 export function ProjectIconTile({ project, icon = project.icon, size = "xs" }: {
   project: Project;
@@ -38,7 +52,7 @@ export function ProjectIconTile({ project, icon = project.icon, size = "xs" }: {
   // A chat without a project has nothing to name; its tile says so on hover.
   if (project.scratch) return (
     <Tooltip content={m.no_project()} className={`inline-flex shrink-0 items-center justify-center text-muted ${TILE_SIZES[size].box}`}>
-      <MessageCircleDashed size={TILE_SIZES[size].mark + 2} role="img" aria-label={m.no_project()} />
+      <MessageCircleDashed size={TILE_SIZES[size].mark + 2} aria-hidden="true" />
     </Tooltip>
   );
   return (

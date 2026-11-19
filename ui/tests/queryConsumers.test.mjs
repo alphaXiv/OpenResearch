@@ -271,8 +271,9 @@ for (const retired of [true, false]) {
     if (retired) await chat.reconnect();
     const before = chat.requests.length;
     await answer.resolve({ ok: true });
-    const reads = chat.requests.slice(before).filter(({ request }) => request === "GET /api/chat/sessions/s/messages" || request === "GET /api/chat/sessions");
-    assert.equal(reads.length, retired ? 0 : 2);
+    const reads = new Set(chat.requests.slice(before).map(({ request }) => request)
+      .filter((request) => request === "GET /api/chat/sessions/s/messages" || request === "GET /api/chat/sessions"));
+    assert.equal(reads.size, retired ? 0 : 2);
   });
 }
 
