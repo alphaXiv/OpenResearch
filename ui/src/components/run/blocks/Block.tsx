@@ -69,7 +69,7 @@ export function drawsAt(block: ViewBlock, size: BlockSize): boolean {
 
 function Body({ monitor, block, size, tone, live, title }: BlockProps & { title: string }) {
   if ("chart" in block) {
-    return <Chart monitor={monitor} block={block} size={size} live={live} height={block.chart.length > 1 || block.from !== undefined ? 200 : 160} />;
+    return <Chart monitor={monitor} block={block} title={title} size={size} live={live} height={block.chart.length > 1 || block.from !== undefined ? 200 : 160} />;
   }
   if ("table" in block) return <Table monitor={monitor} block={block} size={size} live={live} title={title} />;
   if ("bars" in block) return <Bars monitor={monitor} block={block} size={size} live={live} />;

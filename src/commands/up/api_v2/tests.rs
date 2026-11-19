@@ -3359,6 +3359,112 @@ async fn an_unreadable_view_can_be_replaced_conditionally() {
     assert_eq!(stored["futureField"], 19);
 }
 
+#[tokio::test]
+async fn a_chart_edit_preserves_the_agents_view_and_refuses_a_stale_copy() {
+    let f = Fixture::new().await;
+    f.insert("run", "exp", "project", "running");
+    f.insert("sibling", "exp", "project", "done");
+    let path = "experiments/exp/view";
+    let client = crate::net::loopback_client().build().unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}/api/runs/run/view/chart",
+        f.descriptor.port
+    );
+    let mut snapshot = orx_signals::Snapshot::new("run", "1-1", "g1");
+    snapshot
+        .feed(
+            b"::orx:: {\"step\":1,\"m\":{\"loss\":1}}\n",
+            false,
+            crate::store::now_ms(),
+            true,
+        )
+        .unwrap();
+    let signals = f.api.data_dir.join("run-signals");
+    std::fs::create_dir_all(&signals).unwrap();
+    crate::engine::adapters::local::signals::publish(&signals.join("run.json"), &snapshot).unwrap();
+    let monitor = f
+        .client
+        .json(reqwest::Method::GET, "runs/run/monitor", None)
+        .await
+        .unwrap();
+    assert_eq!(monitor["viewFrom"]["isDefault"], true);
+    let saved_default: Value = client
+        .patch(&url)
+        .json(&json!({
+            "markup": monitor["viewFrom"]["markup"], "isDefault": true, "block": 0,
+            "edit": {"kind": "x", "log": true}
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(saved_default["tree"]["blocks"][0]["xScale"], "log");
+    assert_eq!(saved_default["isDefault"], false);
+
+    let edit = |markup: &str, edit: Value| {
+        client.patch(&url).json(&json!({
+            "markup": markup, "isDefault": false, "block": 1, "edit": edit,
+        }))
+    };
+
+    let original =
+        "<signal name='loss' smooth='0.2'/><view><stats of='loss'/><chart y='loss'/></view>";
+    let annotated = original.replace("<chart", "<!-- An agent's note --><chart");
+    for markup in [original, &annotated] {
+        let current = f
+            .client
+            .json(reqwest::Method::GET, path, None)
+            .await
+            .unwrap();
+        let response = f
+            .client
+            .request(reqwest::Method::PUT, path)
+            .header(reqwest::header::IF_MATCH, current["etag"].as_str().unwrap())
+            .json(&json!({"markup": markup}))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success(), "{response:?}");
+    }
+    let y_log = json!({"kind": "y", "log": true});
+    let refused = edit(original, y_log.clone()).send().await.unwrap();
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+    let saved: Value = edit(&annotated, y_log)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let expected = annotated.replace("<chart", "<chart y-scale=\"log\"");
+    assert_eq!(saved["markup"], expected);
+    let smoothed = edit(
+        &expected,
+        json!({"kind": "smooth", "signal": "loss", "weight": null}),
+    )
+    .send()
+    .await
+    .unwrap();
+    assert!(smoothed.status().is_success(), "{smoothed:?}");
+    let sibling = f
+        .client
+        .json(reqwest::Method::GET, "runs/sibling/monitor", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        sibling["viewFrom"]["markup"],
+        expected.replace(" smooth='0.2'", "")
+    );
+    assert_eq!(sibling["view"]["blocks"][1]["yScale"], "log");
+    assert!(sibling["view"]["signals"]["loss"]["smooth"].is_null());
+}
+
 /// A flag's choice: the user keeps it going or stops the run, the agent hands it to the user, a
 /// repeated request answers as the first did, a settled flag or a stop of an ended run is refused
 /// in the words `orx exp flag` prints.

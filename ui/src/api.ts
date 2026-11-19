@@ -8,7 +8,7 @@ import type { GlobalWorkspace, ProjectWorkspace } from "./workspaceState";
 import { m } from "./paraglide/messages.js";
 import { getLocale } from "./paraglide/runtime.js";
 import { fmtNumber } from "./i18n";
-import type { ChatShownRun, Flag, RunMonitor, RunMonitorSummary, RunOutcome } from "./runMonitor/types";
+import type { ChartEdit, ChatShownRun, Flag, RunMonitor, RunMonitorSummary, RunOutcome } from "./runMonitor/types";
 
 export { fmtNumber } from "./i18n";
 
@@ -3340,6 +3340,21 @@ export function createApi(
   const getRunMonitor = (runId: string, signal?: AbortSignal) =>
     get<RunMonitor>(`/api/runs/${encodeURIComponent(runId)}/monitor`, signal);
 
+  const editRunChart = ({ runId, viewFrom }: Pick<RunMonitor, "runId" | "viewFrom">, block: number, edit: ChartEdit) => {
+    const scope = workspaceScope();
+    return patch<unknown>(`/api/runs/${encodeURIComponent(runId)}/view/chart`, {
+      markup: viewFrom.markup, isDefault: viewFrom.isDefault, block, edit,
+    }).finally(() => {
+      if (!isCurrentScope(scope)) return;
+      const { queryClient } = client;
+      for (const [queryKey, data] of queryClient.getQueriesData<RunMonitor>({ queryKey: [...scope, "getRunMonitor"] })) {
+        if (data?.viewFrom.experimentId === viewFrom.experimentId) {
+          void queryClient.invalidateQueries({ queryKey, exact: true });
+        }
+      }
+    });
+  };
+
   const chooseRunFlag = (runId: string, choice: { flagId: string; choice: "stop" | "keep" | "ask"; requestId: string }) =>
     post<{ flag: Flag; run: Run }>(`/api/runs/${encodeURIComponent(runId)}/flag`, choice);
 
@@ -3585,6 +3600,7 @@ export function createApi(
     listChatActiveRuns,
     listChatShownRuns,
     getRunMonitor,
+    editRunChart,
     dismissShownRun,
     lookNow,
     chooseRunFlag,

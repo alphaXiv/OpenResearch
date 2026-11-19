@@ -11,7 +11,7 @@ use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -274,6 +274,7 @@ fn dashboard_routes(api: Arc<Api>) -> Router {
     Router::new()
         .route("/api/runs/{id}/log", get(log))
         .route("/api/runs/{id}/monitor", get(monitor))
+        .route("/api/runs/{id}/view/chart", patch(edit_chart))
         .route("/api/runs/{id}/media", get(run_image))
         .route("/api/runs/{id}/look", post(look_now))
         .route("/api/runs/{id}/flag", post(dashboard_choose_flag))
@@ -1427,7 +1428,7 @@ async fn view_etag(State(api): State<Arc<Api>>, Path(id): Path<String>) -> Respo
     .await
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 struct ViewBody {
     markup: Option<String>,
     /// The file the markup came from, named in errors.
@@ -1450,7 +1451,6 @@ async fn set_view(
     headers: axum::http::HeaderMap,
     Json(body): Json<ViewBody>,
 ) -> Response {
-    use crate::engine::view::Refusal;
     let Some(expected) = headers
         .get(axum::http::header::IF_MATCH)
         .and_then(|value| value.to_str().ok())
@@ -1462,41 +1462,106 @@ async fn set_view(
         )
             .into_response();
     };
-    let answer = tokio::task::spawn_blocking(move || {
-        let store = api.store();
-        let source = crate::engine::view::Source {
-            file: body.file.as_deref(),
-            patterns: body.pattern_file.as_deref(),
-            config: body.config_file.as_deref(),
-        };
-        let saved = crate::engine::view::set(
-            &store,
-            &id,
-            &expected,
-            body.markup.as_deref(),
-            body.patterns.as_ref(),
-            body.config.as_ref(),
-            &source,
-        )?;
-        if body.patterns.is_some() {
-            api.commands.collect_signals_now();
-        }
-        match store.list_runs_by_experiment(&id) {
-            Ok(runs) => {
-                let now = crate::store::now_ms();
-                for run in runs {
-                    if let Err(error) = crate::engine::monitor::advance(&store, &run, now) {
-                        eprintln!("orx up: run {} after its view changed: {error:#}", run.id);
-                    }
+    blocking_view(move || save_view(&api, &id, &expected, body)).await
+}
+
+fn save_view(
+    api: &Api,
+    id: &str,
+    expected: &str,
+    body: ViewBody,
+) -> std::result::Result<Value, crate::engine::view::Refusal> {
+    let store = api.store();
+    let source = crate::engine::view::Source {
+        file: body.file.as_deref(),
+        patterns: body.pattern_file.as_deref(),
+        config: body.config_file.as_deref(),
+    };
+    let saved = crate::engine::view::set(
+        &store,
+        id,
+        expected,
+        body.markup.as_deref(),
+        body.patterns.as_ref(),
+        body.config.as_ref(),
+        &source,
+    )?;
+    if body.patterns.is_some() {
+        api.commands.collect_signals_now();
+    }
+    match store.list_runs_by_experiment(id) {
+        Ok(runs) => {
+            let now = crate::store::now_ms();
+            for run in runs {
+                if let Err(error) = crate::engine::monitor::advance(&store, &run, now) {
+                    eprintln!("orx up: run {} after its view changed: {error:#}", run.id);
                 }
             }
-            Err(error) => eprintln!("orx up: experiment {id} after its view changed: {error:#}"),
         }
-        Ok(saved)
+        Err(error) => eprintln!("orx up: experiment {id} after its view changed: {error:#}"),
+    }
+    Ok(saved)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChartEditBody {
+    markup: String,
+    is_default: bool,
+    block: usize,
+    edit: crate::engine::view::ChartEdit,
+}
+
+async fn edit_chart(
+    State(api): State<Arc<Api>>,
+    Path(id): Path<String>,
+    Json(body): Json<ChartEditBody>,
+) -> Response {
+    use crate::engine::{monitor, view};
+    use view::Refusal;
+
+    blocking_view(move || {
+        let changed = || {
+            Refusal::Changed(
+                "The experiment's view changed. Choose the chart setting again.".into(),
+            )
+        };
+        let (experiment, expected) = {
+            let store = api.store();
+            let run = store
+                .get_run(&id)?
+                .ok_or_else(|| Refusal::Missing(format!("Run {id} not found.")))?;
+            let raw = store.run_monitor_json(&run.experiment_id)?;
+            let matches = match view::stored(&run.experiment_id, raw.as_deref())? {
+                Some(markup) => !body.is_default && markup == body.markup,
+                None if body.is_default => {
+                    let (_, monitor) = monitor::monitor(&store, &run)?;
+                    monitor["viewFrom"]["isDefault"] == true
+                        && monitor["viewFrom"]["markup"] == body.markup
+                }
+                None => false,
+            };
+            if !matches {
+                return Err(changed());
+            }
+            (run.experiment_id, view::etag(raw.as_deref()))
+        };
+        let markup = view::edit_chart(&body.markup, body.block, body.edit)?;
+        save_view(
+            &api,
+            &experiment,
+            &expected,
+            ViewBody {
+                markup: Some(markup),
+                ..ViewBody::default()
+            },
+        )
+        .map_err(|error| match error {
+            Refusal::Changed(_) => changed(),
+            other => other,
+        })
     })
     .await
-    .unwrap_or_else(|cause| Err(Refusal::Failed(cause.to_string())));
-    view_answer(answer)
 }
 
 #[derive(Default, Deserialize)]

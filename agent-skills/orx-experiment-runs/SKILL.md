@@ -162,6 +162,9 @@ orx exp view set <expId> --file view.xml
 | `media` | `glob="samples/*.png"`, `last="6"` (1–6, default 6) |
 
 A chart over signals uses reported steps when available and elapsed time otherwise.
+Users can change `x-scale`, `y-scale` and `smooth` from a chart's menu, so read
+the current view with `orx exp view get` and keep those choices when you run
+`orx exp view set`.
 Every block also takes `phase` (shown only during that stage) and `title`.
 Declare a `signal` for every measure the view names and every column the user
 should read by a label. One chart answers one question: measures on different
