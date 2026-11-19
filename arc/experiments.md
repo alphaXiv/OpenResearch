@@ -133,6 +133,7 @@ SSH and Slurm run directories enter the automatic cleanup queue in the transacti
 - **Exactly once.** A batch's membership and turn ID are fixed before sending, so a resend after a crash is recognised as the same turn. The terminal notice adds the current signal collection status when its turn is first admitted. When collection settles incomplete, a chat gets the cause and the saved-output guidance in the result turn if possible, or in a follow-up if its accepted result lacked the cause.
 - **Never blocking.** Transient failures retry within a bounded window; a permanent one (the chat deleted) retires the batch, and its error shows on the run.
 - **The payload can speak.** New bytes in `$ORX_NOTIFY_FILE` become rate-limited notices (`src/engine/notify.rs`); hosted providers have no such file. Notice text is data for the agent, never instructions.
+- **Instrumentation rides with other work.** Progress card advice travels with the chat's next prompted turn at any autonomy level. A run ending before admission withdraws its advice.
 
 Full auto-research stages a stop check when an agent completes an ordinary turn with no yield, work that can wake the chat, or unresolved prompt. Before admitting the hidden follow-up, the same notice dispatcher checks that the source turn still heads the active branch. User input, flag reminders, and owed run or delegate news take precedence. The follow-up itself cannot stage another stop check.
 

@@ -7125,6 +7125,18 @@ impl ChatHost {
                         flags.iter().map(String::as_str),
                     ));
                 }
+                if !continuation {
+                    for body in Store::carry_instrumentation(
+                        &tx,
+                        &turn.session_id,
+                        &turn.client_turn_id,
+                        turn.created_at,
+                    )? {
+                        turn.prepared_input.push_str("\n\n");
+                        turn.prepared_input.push_str(&body);
+                    }
+                }
+
                 let mut ctx = turn_ctx_from_stored(
                     self.clone(),
                     &store,
@@ -17873,6 +17885,77 @@ for line in sys.stdin:
         assert!(delivered[0].contains("Check it again."));
         assert!(delivered[0].contains("was flagged for review"));
         assert_eq!(flag(&store, &run)["state"], "kept");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn instrumentation_waits_for_another_prompt_and_expires_when_its_run_ends() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let store = Store::open().unwrap();
+        quiet_agent_chat(&store, Some("copilot"));
+        let host = notice_host();
+        let mut running = run("running");
+        running.chat_session_id = None;
+        let queue = |run: &StoredRun, body| {
+            store.upsert_run(run).unwrap();
+            store
+                .insert_run_notice(
+                    &run.id,
+                    "owner",
+                    crate::store::INSTRUMENTATION,
+                    crate::store::INSTRUMENTATION,
+                    body,
+                    1,
+                )
+                .unwrap();
+        };
+        queue(&running, "Instrument the first run.");
+        settle_all(&host).await;
+        assert!(prompts().is_empty());
+        assert!(store.latest_chat_turn("owner").unwrap().is_none());
+        assert!(!store.has_wake_work("owner", &HashMap::new()).unwrap());
+
+        host.send_message(
+            "owner",
+            "Inspect my work.".into(),
+            TurnOverrides::default(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        settle_all(&host).await;
+        let received = prompts();
+        assert_eq!(received.len(), 1, "{received:#?}");
+        assert!(received[0].contains("Inspect my work."));
+        assert!(received[0].contains("Instrument the first run."));
+
+        running.id = "second-run".into();
+        queue(&running, "Instrument the second run.");
+        running.id = "ending-run".into();
+        queue(&running, "Instrument the ended run.");
+        running.status = "done".into();
+        store.upsert_run(&running).unwrap();
+        store
+            .insert_run_notice(
+                &running.id,
+                "owner",
+                crate::store::TERMINAL,
+                "terminal",
+                "The ending run finished.",
+                2,
+            )
+            .unwrap();
+        settle_all(&host).await;
+        let received = prompts();
+        assert_eq!(received.len(), 2, "{received:#?}");
+        assert!(received[1].contains("The ending run finished."));
+        assert!(received[1].contains("Instrument the second run."));
+        assert!(!received[1].contains("Instrument the first run."));
+        assert!(!received[1].contains("Instrument the ended run."));
     }
 
     #[tokio::test(flavor = "current_thread")]

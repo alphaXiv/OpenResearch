@@ -2445,7 +2445,7 @@ impl Store {
                     r.launch_spec IS NOT NULL
                         AND json_extract(r.backend_json, '$.handle.type') IS NOT 'Legacy',
                     (EXISTS(SELECT 1 FROM run_notices n WHERE n.run_id = r.id
-                           AND n.delivered_at IS NULL AND n.retired_at IS NULL)
+                           AND n.delivered_at IS NULL AND n.retired_at IS NULL AND n.kind != ?1)
                      OR EXISTS(SELECT 1 FROM flag_wakes w WHERE w.run_id = r.id
                                AND w.delivered_at IS NULL AND w.retired_at IS NULL))
              FROM runs r
@@ -2453,7 +2453,7 @@ impl Store {
              LEFT JOIN local_projects p ON p.id = r.project_id
              ORDER BY r.created_at",
         )?;
-        let mut rows = statement.query([])?;
+        let mut rows = statement.query([INSTRUMENTATION])?;
         let mut runs = Vec::new();
         while let Some(row) = rows.next()? {
             let status: String = row.get(0)?;
@@ -5755,6 +5755,7 @@ impl Store {
                     WHERE q.session_id = f.id))
                 OR EXISTS (SELECT 1 FROM pending_chat_run_outbox n
                     WHERE n.chat_session_id = f.id
+                      AND n.kind IS NOT ?4
                       AND (n.is_flag OR NOT EXISTS (SELECT 1 FROM chat_turns accepted
                         WHERE accepted.session_id = f.id
                           AND accepted.client_turn_id = n.client_turn_id
@@ -5768,7 +5769,8 @@ impl Store {
         let mut rows = work.query(params![
             chat,
             expired_before(CHAT_TURN_LEASE_TTL),
-            background_ids
+            background_ids,
+            INSTRUMENTATION
         ])?;
         while let Some(row) = rows.next()? {
             let status: Option<String> = row.get(0)?;
@@ -7586,9 +7588,10 @@ impl Store {
     pub fn pending_run_notice_sessions(&self) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
             "SELECT DISTINCT chat_session_id FROM pending_chat_run_outbox
-             WHERE next_delivery_at IS NULL OR next_delivery_at <= ?1 ORDER BY chat_session_id",
+             WHERE kind IS NOT ?2 AND (next_delivery_at IS NULL OR next_delivery_at <= ?1)
+             ORDER BY chat_session_id",
         )?;
-        let rows = stmt.query_map([now_ms()], |row| row.get(0))?;
+        let rows = stmt.query_map(params![now_ms(), INSTRUMENTATION], |row| row.get(0))?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
@@ -7690,6 +7693,31 @@ impl Store {
         self.run_notice_batch_at(chat_session_id, now_ms())
     }
 
+    // The admitting transaction hands the notice to the durable prompt and its recovery path.
+    pub(crate) fn carry_instrumentation(
+        tx: &rusqlite::Transaction<'_>,
+        chat: &str,
+        client_turn_id: &str,
+        now: i64,
+    ) -> Result<Vec<String>> {
+        Self::retire_stale_instrumentation(tx, Some(chat), now)?;
+        let mut stmt = tx.prepare(
+            "UPDATE run_notices SET client_turn_id = ?2, delivered_at = ?3, next_delivery_at = NULL
+             WHERE chat_session_id = ?1 AND kind = ?4
+               AND delivered_at IS NULL AND retired_at IS NULL
+               AND (client_turn_id IS NULL OR (client_turn_id != ?2 AND NOT EXISTS (
+                   SELECT 1 FROM chat_turns t WHERE t.session_id = run_notices.chat_session_id
+                     AND t.client_turn_id = run_notices.client_turn_id)))
+             RETURNING id, body",
+        )?;
+        let rows = stmt.query_map(params![chat, client_turn_id, now, INSTRUMENTATION], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut notices = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        notices.sort_by_key(|(id, _)| *id);
+        Ok(notices.into_iter().map(|(_, body)| body).collect())
+    }
+
     pub(crate) fn run_notice_batch_is_current(
         tx: &rusqlite::Transaction<'_>,
         turn: &StoredChatTurn,
@@ -7751,10 +7779,11 @@ impl Store {
                                 PARTITION BY is_flag ORDER BY client_turn_id IS NULL, id
                             ) AS oldest
                      FROM pending_chat_run_outbox
-                     WHERE chat_session_id = ?1 AND (next_delivery_at IS NULL OR next_delivery_at <= ?2)
+                     WHERE chat_session_id = ?1 AND kind IS NOT ?3
+                       AND (next_delivery_at IS NULL OR next_delivery_at <= ?2)
                  ) WHERE oldest = 1
                  ORDER BY client_turn_id IS NULL, created_at, id, is_flag LIMIT 1",
-                params![chat_session_id, now],
+                params![chat_session_id, now, INSTRUMENTATION],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
@@ -7777,10 +7806,10 @@ impl Store {
                     &format!(
                         "UPDATE {table} SET client_turn_id = ?2 WHERE id IN (
                          SELECT id FROM pending_chat_run_outbox WHERE chat_session_id = ?1
-                           AND is_flag = ?3 AND client_turn_id IS NULL
+                           AND is_flag = ?3 AND kind IS NOT ?4 AND client_turn_id IS NULL
                      )"
                     ),
-                    params![chat_session_id, id, is_flag],
+                    params![chat_session_id, id, is_flag, INSTRUMENTATION],
                 )?;
                 id
             }
@@ -10100,7 +10129,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn instrumentation_is_rechecked_until_the_notice_turn_is_admitted() {
+    fn instrumentation_frozen_by_an_older_dashboard_is_rechecked_until_admission() {
         for admitted in [false, true] {
             let dir =
                 crate::config::test_home().join(format!("orx-notices-{}", uuid::Uuid::new_v4()));
@@ -10122,8 +10151,17 @@ pub(crate) mod tests {
                     )
                     .unwrap();
             }
+            assert!(store.pending_run_notice_sessions().unwrap().is_empty());
+            assert!(store.run_notice_batch_at("chat_1", 1).unwrap().is_empty());
+            store
+                .insert_run_notice("live", "chat_1", NOTIFY, "live", "Run news.", 1)
+                .unwrap();
+            store.conn.execute(
+                "UPDATE run_notices SET client_turn_id = 'run-notice:legacy' WHERE chat_session_id = 'chat_1'",
+                [],
+            ).unwrap();
             let frozen = store.run_notice_batch_at("chat_1", 1).unwrap();
-            assert_eq!(frozen.len(), 2);
+            assert_eq!(frozen.len(), 3);
             let mut turn = chat_turn_fixture("notice", &frozen[0].client_turn_id);
             turn.user_message_id = None;
             if admitted {
@@ -10153,8 +10191,8 @@ pub(crate) mod tests {
                     Some(turn)
                 );
             } else {
-                assert_eq!(after.len(), 1);
-                assert_eq!(after[0].run_id, "live");
+                assert_eq!(after.len(), 2);
+                assert!(after.iter().all(|notice| notice.run_id == "live"));
                 assert_ne!(after[0].client_turn_id, turn.client_turn_id);
                 let tx = reopened.begin_immediate().unwrap();
                 assert!(!Store::run_notice_batch_is_current(&tx, &turn).unwrap());
@@ -10174,7 +10212,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn retiring_stale_instrumentation_keeps_the_surviving_batch_in_backoff() {
+    fn retiring_stale_instrumentation_keeps_the_older_batch_in_backoff() {
         let dir = crate::config::test_home().join(format!("orx-notices-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
         let run = run_fixture("ending", "running", Some("owner"));
@@ -10195,6 +10233,10 @@ pub(crate) mod tests {
         store
             .insert_run_notice("live", "owner", NOTIFY, "live", "Keep this notice.", 1)
             .unwrap();
+        store.conn.execute(
+            "UPDATE run_notices SET client_turn_id = 'run-notice:legacy' WHERE chat_session_id = 'owner'",
+            [],
+        ).unwrap();
         let frozen = store.run_notice_batch_at("owner", 2).unwrap();
         assert_eq!(frozen.len(), 2);
 

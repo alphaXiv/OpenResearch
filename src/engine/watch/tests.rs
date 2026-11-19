@@ -1989,7 +1989,7 @@ async fn live_monitoring_leaves_time_for_another_store_writer() {
 }
 
 #[tokio::test]
-async fn instrumentation_warns_once_across_restart_and_shares_a_due_notice_turn() {
+async fn instrumentation_warns_once_across_restart_and_rides_a_due_notice_turn() {
     if !crate::config::in_test_child(&[]) {
         return;
     }
@@ -2033,12 +2033,16 @@ async fn instrumentation_warns_once_across_restart_and_shares_a_due_notice_turn(
         Some("instrument-owner")
     );
     let batch = store.run_notice_batch("instrument-owner").unwrap();
-    assert_eq!(batch.len(), 2);
-    assert_eq!(batch[0].client_turn_id, batch[1].client_turn_id);
-    let warning = batch
-        .iter()
-        .find(|notice| notice.kind == "instrumentation")
-        .unwrap();
+    assert_eq!(batch.len(), 1);
+    assert_eq!(batch[0].body, "A notice already due.");
+    let warnings = {
+        let tx = store.begin_immediate().unwrap();
+        Store::carry_instrumentation(&tx, "instrument-owner", &batch[0].client_turn_id, now)
+            .unwrap()
+    };
+    let [warning] = warnings.as_slice() else {
+        panic!("Expected one instrumentation warning, got {warnings:?}");
+    };
     for command in [
         format!("orx exp view show {}", row.id),
         format!("orx exp view check {}", row.id),
@@ -2046,11 +2050,11 @@ async fn instrumentation_warns_once_across_restart_and_shares_a_due_notice_turn(
         format!("orx exp view set {}", row.experiment_id),
         format!("orx exp cancel --run {}", row.id),
     ] {
-        assert!(warning.body.contains(&command), "{}", warning.body);
+        assert!(warning.contains(&command), "{warning}");
     }
-    assert!(warning.body.contains(AGENTIC_RELAUNCH));
-    assert!(!warning.body.contains(COPILOT_RELAUNCH));
-    assert!(warning.body.contains("total="));
+    assert!(warning.contains(AGENTIC_RELAUNCH));
+    assert!(!warning.contains(COPILOT_RELAUNCH));
+    assert!(warning.contains("total="));
     assert!(
         instrumentation(&mut Seen::default(), &current, now + 300_000)
             .await
@@ -2100,8 +2104,12 @@ async fn instrumentation_waits_for_data_or_two_minutes_and_ignores_queued_runs()
             .as_deref(),
         Some("quiet-owner")
     );
-    let batch = store.run_notice_batch("quiet-owner").unwrap();
-    let warning = &batch[0].body;
+    assert!(store.run_notice_batch("quiet-owner").unwrap().is_empty());
+    let tx = store.begin_immediate().unwrap();
+    let warnings = Store::carry_instrumentation(&tx, "quiet-owner", "user-turn", at).unwrap();
+    let [warning] = warnings.as_slice() else {
+        panic!("Expected one instrumentation warning, got {warnings:?}");
+    };
     assert!(warning.contains(COPILOT_RELAUNCH));
     assert!(!warning.contains(AGENTIC_RELAUNCH));
     assert!(store
@@ -2176,13 +2184,13 @@ async fn instrumentation_rechecks_a_deferred_pattern_when_its_stage_matures_or_r
                 .as_deref(),
             Some(id)
         );
-        let notice = store.run_notice_batch(id).unwrap();
+        assert!(store.run_notice_batch(id).unwrap().is_empty());
+        let tx = store.begin_immediate().unwrap();
+        let warnings = Store::carry_instrumentation(&tx, id, "user-turn", later).unwrap();
         if ended {
-            assert!(notice.is_empty());
+            assert!(warnings.is_empty());
         } else {
-            assert!(notice
-                .iter()
-                .any(|notice| notice.run_id == id && notice.body.contains("Pattern 1")));
+            assert!(warnings.iter().any(|warning| warning.contains("Pattern 1")));
         }
     }
 }

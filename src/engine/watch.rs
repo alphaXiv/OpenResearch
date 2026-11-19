@@ -907,14 +907,13 @@ async fn pass(state: &mut State) -> Result<()> {
         start.push(chat_id);
     }
     if !updates.is_empty() || !plans.is_empty() {
-        let mut notified = Vec::new();
         let tx = store.begin_immediate()?;
         for (run, experiment, counts, warning) in updates {
             for (before, lines, offset, ident) in counts {
                 store.advance_watch_count(&run, &before, lines, offset, &ident)?;
             }
             if let Some(warning) = warning {
-                notified.extend(warning.queue(&store, &run, &experiment, now)?);
+                warning.queue(&store, &run, &experiment, now)?;
             }
         }
         for (chat, due) in plans {
@@ -932,7 +931,6 @@ async fn pass(state: &mut State) -> Result<()> {
             }
         }
         tx.commit()?;
-        crate::commands::up::api_v2::notices_queued(notified);
     }
     // A look asked for by hand, or left prepared by a restart, in a chat this pass found no run of.
     start.extend(waiting);
