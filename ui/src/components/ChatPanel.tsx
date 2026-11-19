@@ -242,7 +242,7 @@ import { FileScopeContext } from "./FileReference";
 import { FigureReveal, PaperShelf, pluralMessage, ReportCard, RunCard, SourceStrip, type ShelfPaper } from "./ResearchCards";
 import { discoveredPapers, linkedPapers, paperKey, type CitedPaper, type PaperMeta } from "../researchActivity";
 import { LitSourcesList } from "./LitSourcesPicker";
-import { ChatImageScope, Md } from "./Md";
+import { ChatImageScope, Md, mentionsAsText } from "./Md";
 import { ChatLinksContext, type ChatLinks } from "./ChatLinks";
 import { CITED_ID, messageRef } from "../agentMessages";
 import { PlanStrip } from "./PlanStrip";
@@ -1672,7 +1672,8 @@ function computeToolActivity(part: ChatPart): ToolActivity {
   const close = yieldCallClose(part);
   if (close?.text) {
     const status = close.kind ? TURN_CLOSE_KINDS[close.kind]?.label() : undefined;
-    return { kind: "command", label: status ? m.chat_turn_close_with_status({ status, text: close.text }) : close.text };
+    const text = mentionsAsText(close.text);
+    return { kind: "command", label: status ? m.chat_turn_close_with_status({ status, text }) : text };
   }
   const alphaxivTool = [tool, part.state?.title]
     .map((name) => name?.match(ALPHAXIV_TOOL)?.[1])
@@ -4046,7 +4047,7 @@ export const Message = memo(function Message({
         onOpenSubagent,
         predictTextTail,
       }} />}
-      {close && <TurnClose close={close} />}
+      {close && <TurnClose close={close} onOpenFile={onOpenFile} onOpenRun={onOpenRun} />}
       {responseTurns.map(({ message: turn, turnStatus, usageLimit, temporaryApiError }, index) => turnStatus && (
         <TurnStatusRow
           key={turn.id}
@@ -4100,17 +4101,17 @@ const TURN_CLOSE_KINDS: Partial<Record<string, { Icon: typeof Hourglass; tone: s
 };
 
 /** The line an agent ended its turn with: why it stopped and what restarts the work. */
-function TurnClose({ close }: { close: TurnYield }) {
+function TurnClose({ close, onOpenFile, onOpenRun }: { close: TurnYield; onOpenFile?: OpenTranscriptFile; onOpenRun?: OpenTranscriptTarget }) {
   const kind = TURN_CLOSE_KINDS[close.kind];
   return (
-    <p className="mt-3 mb-0 flex gap-2 text-sm leading-5 text-subtext" data-turn-close={close.kind}>
+    <div className="mt-3 flex gap-2 text-sm leading-5 text-subtext [&_.md]:leading-5 [&_.md]:text-subtext" data-turn-close={close.kind}>
       {kind && (
         <span role="img" aria-label={kind.label()} className={`inline-flex h-5 shrink-0 items-center ${kind.tone}`}>
           <kind.Icon size={14} aria-hidden="true" />
         </span>
       )}
-      <span className="min-w-0 whitespace-pre-wrap break-words">{close.text}</span>
-    </p>
+      <div className="min-w-0 flex-1"><Md text={close.text} onOpenFile={onOpenFile} onOpenRun={onOpenRun} /></div>
+    </div>
   );
 }
 
@@ -4803,8 +4804,9 @@ function useTranscriptAnnouncement(messages: ChatMessage[]): TranscriptAnnouncem
     const turnYield = lastAssistant?.turnYield;
     if (turnYield && close !== previousClose) {
       const status = TURN_CLOSE_KINDS[turnYield.kind]?.label();
+      const text = mentionsAsText(turnYield.text);
       setAnnouncement((current) => ({
-        text: status ? m.chat_turn_close_with_status({ status, text: turnYield.text }) : turnYield.text,
+        text: status ? m.chat_turn_close_with_status({ status, text }) : text,
         sequence: current.sequence + 1,
       }));
       return;

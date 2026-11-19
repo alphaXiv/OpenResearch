@@ -90,6 +90,28 @@ test("a turn ends with its closing line after the answer, labelled by why it sto
   assert.equal(document.querySelectorAll("[data-turn-close]").length, 1);
 });
 
+test("a run cited in a closing line shows as the run's chip everywhere the line is read, never as its tag", async () => {
+  const RUN = "ac7c54f8-23e2-4ff7-a52c-2b740dc788b3";
+  const cited = { kind: "running", text: `The baseline reached 2.237 bpc. <run id="${RUN}" /> The MLP <run id="r2" label="1.80 bpc"/> wakes the next comparison.` };
+  const spoken = "The baseline reached 2.237 bpc. The MLP 1.80 bpc wakes the next comparison.";
+  const running = { ...assistantMessage("a", [{ id: "a-text", type: "text", text: "Comparing now.", phase: "final_answer" }]), completedAt: null };
+  await renderChat("/projects/p/tasks/s", { transcripts: { s: [userMessage("u", "Compare."), running] } });
+  await emit("chat.message", { sessionId: "s", message: { ...running, completedAt: 3, turnYield: cited } });
+
+  const chips = close().querySelectorAll(".run-chip");
+  assert.equal(chips.length, 2);
+  assert.equal(chips[0].textContent, m.tree_view_logs());
+  assert.equal(chips[1].textContent, "1.80 bpc");
+  assert.ok(chips[0].title.includes(RUN));
+  assert.equal(close().textContent.includes("<run"), false);
+  assert.equal(announced(), m.chat_turn_close_with_status({ status: m.chat_turn_close_running(), text: spoken }));
+
+  const call = tool("mcp__orx__yield", { arguments: cited });
+  await emit("chat.message", { sessionId: "s", message: { ...assistantMessage("a", [call]) } });
+  assert.equal(document.querySelector(`[data-part-id="${call.id}"]`).textContent,
+    m.chat_turn_close_with_status({ status: m.chat_turn_close_running(), text: spoken }));
+});
+
 test("a reply that is only a yield stays visible, and its call shows no second copy", async () => {
   const yieldOnly = { ...assistantMessage("a", [tool("mcp__orx__yield", { arguments: { kind: "running", text: "Waiting on two runs." } })]), turnYield: { kind: "running", text: "Waiting on two runs." } };
   await renderChat("/projects/p/tasks/s", { transcripts: { s: [userMessage("u", "Start the sweep."), yieldOnly] } });
