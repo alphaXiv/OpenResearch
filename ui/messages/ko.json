@@ -2159,7 +2159,7 @@
   "run_brief_from_parent": "부모 실행에서",
   "run_brief_decided": "앞서 정한 것",
   "settings_run_watching": "실행 지켜보기",
-  "settings_run_watching_sends": "무언가 바뀌면 작은 모델이 각 실행의 짧은 요약을 읽고 입력창 위의 문장을 씁니다. 요약은 실행 로그의 일부 줄과 함께 에이전트의 제공자에게 갑니다. 채팅 전체와 저장소는 보내지 않습니다.",
+  "settings_run_watching_sends": "무언가 바뀌면 작은 모델이 각 실행의 짧은 요약을 읽고 입력창 위의 문장을 씁니다. 요약은 실행 로그의 일부 줄과 함께 에이전트의 제공자에게 갑니다. 채팅 전체와 저장소는 보내지 않습니다. 지켜보기를 꺼도 OpenResearch는 문제를 표시하며, 독립 실행 모드에서는 관련 로그 줄을 채팅 에이전트의 제공자에게 보낼 수 있습니다.",
   "run_eta_left": "{duration} 남음",
   "run_eta_silent_for": "{duration} 동안 진행 없음",
   "run_eta_almost_done": "거의 완료",

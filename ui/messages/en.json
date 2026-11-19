@@ -2159,7 +2159,7 @@
   "run_brief_from_parent": "From the parent run",
   "run_brief_decided": "Decided earlier",
   "settings_run_watching": "Watch runs",
-  "settings_run_watching_sends": "A small model reads a short digest of each run when something changes and writes the sentence above the composer. The digest, including lines from the run's log, goes to your agent's provider. Your full chat and repository are never sent.",
+  "settings_run_watching_sends": "A small model reads a short digest of each run when something changes and writes the sentence above the composer. The digest, including lines from the run's log, goes to your agent's provider. Your full chat and repository are never sent. With watching off, OpenResearch still flags problems and can send the relevant log lines to your chat agent's provider in Independent mode.",
   "run_eta_left": "{duration} left",
   "run_eta_silent_for": "No progress for {duration}",
   "run_eta_almost_done": "Almost done",
