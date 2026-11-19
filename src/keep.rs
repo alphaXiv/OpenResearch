@@ -426,8 +426,10 @@ async fn keeper_program() -> Result<PathBuf> {
                 *RESOLVED.lock().unwrap() = Some((root, host.clone()));
                 return Ok(host);
             }
-            // A test binary given `keep DIR` runs tests instead of keeping anything.
+            // A test binary given `keep DIR` runs every test matching "keep", which keep children
+            // of their own the same way, so a test never falls back to its own binary.
             Ok(Err(error)) if cfg!(test) => return Err(error),
+            Err(error) if cfg!(test) => return Err(anyhow!("could not resolve orx-host: {error}")),
             Ok(Err(error)) => {
                 eprintln!("orx up: keeping children with this binary; no orx-host: {error:#}")
             }
