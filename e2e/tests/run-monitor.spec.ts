@@ -1441,6 +1441,39 @@ for (let step = 1; step <= 5000 && !existsSync(${JSON.stringify(stop)}); step++)
       await expect(card.locator('[data-experiment-row]')).toHaveCount(2)
     })
 
+    await test.step('a long result wraps inside the card and keeps its value and its comparison', async () => {
+      const long = ticking('long', `
+const scale = Number(process.argv[2])
+process.stdout.write('::orx:: {"step":0,"of":4,"unit":"steps","t":0}\\n')
+for (let step = 1; step <= 4; step++) { await tick(); process.stdout.write('::orx:: {"step":' + step + ',"t":' + step + ',"m":{"bpb":' + (scale / step).toFixed(4) + '}}\\n') }`)
+      const parent = path.join(orx.root, `hover-parent-${project.id}`)
+      const view = path.join(orx.root, `hover-view-${project.id}.xml`)
+      writeFileSync(view, '<signal name="bpb" label="Validation bits per byte on held-out shards" digits="3" better="lower"/><view headline="bpb"><chart y="bpb"/></view>')
+      await page.keyboard.press('ControlOrMeta+n')
+      await expect(page.getByRole('feed', { name: 'Messages' })).toHaveCount(0)
+      await turn('Run the long baseline.', [`id=$(${create('Long baseline', `${long} 0.9`)})`, `echo "$id" > ${parent}`, `orx exp view set "$id" --file ${view}`, 'orx exp run "$id" --backend local'], 1,
+        (rows) => rows.every((row) => row.currentRun?.status === 'done'))
+      await turn('Try a smaller learning rate on it.', [
+        `id=$(orx create-experiment ${project.id} --parent "$(cat ${parent})" --title 'Smaller learning rate' --run-command '${long} 0.7' | sed -n 's/^ *id: *//p')`,
+        `orx exp view set "$id" --file ${view}`,
+        'orx exp run "$id" --backend local',
+      ], 2, (rows) => rows.every((row) => row.currentRun?.status === 'done'))
+      for (const width of [1440, 420]) {
+        await page.setViewportSize({ width, height: 900 })
+        if (width === 420) await page.getByRole('button', { name: 'Show sidebar' }).click()
+        await hover('Run the long baseline')
+        const row = card.locator('[data-experiment-row]', { hasText: 'Smaller learning rate' })
+        await expect(row).toContainText('Validation bits per byte on held-out shards')
+        await expect(row).toContainText(said('0.175'))
+        await expect(row).toContainText('better than parent')
+        const scroller = card.locator('ul').locator('..')
+        expect(await scroller.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
+        expect(await row.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
+        await keep(page, card, `hover-long-${width}`)
+      }
+      await page.setViewportSize({ width: 1440, height: 900 })
+    })
+
     await test.step('a chat with many experiments scrolls them under its header', async () => {
       await page.keyboard.press('ControlOrMeta+n')
       await expect(page.getByRole('feed', { name: 'Messages' })).toHaveCount(0)

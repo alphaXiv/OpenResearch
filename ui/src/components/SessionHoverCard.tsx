@@ -75,7 +75,7 @@ function ExperimentRow({ row, model, sessionProjectId, tabbable, onFocus, onOpen
               )
               : <span className="break-words"><Lead model={model} /><Sentence text={model.sentence.text} tone={model.tone} /></span>}
           </span>
-          {model && <span className="mt-0.5 flex text-xs empty:hidden"><Headline model={model} /></span>}
+          {model && <span className="mt-0.5 block text-xs empty:hidden"><Headline model={model} wrap /></span>}
           {watcher && <span className="mt-0.5 block break-words text-xs"><Sentence text={watcher} tone={model.tone} /></span>}
           {model?.needsChoice && <span className="mt-0.5 block text-xs font-medium text-ink-amber">{m.chat_hover_waiting_for_choice()}</span>}
           {(experiment.archived || elsewhere) && (
