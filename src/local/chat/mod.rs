@@ -1476,37 +1476,6 @@ fn is_initial_chat_message(transcript_text: Option<&str>, has_messages: bool) ->
     transcript_text.is_none() && !has_messages
 }
 
-fn with_turn_context(
-    goal: Option<&str>,
-    demo_evidence_context: Option<&str>,
-    shell_context: Option<&str>,
-    text: String,
-) -> String {
-    let mut contexts = Vec::new();
-    // The goal rides every turn: the agent has to be told it again each time,
-    // and it outlives compaction and a lost native session.
-    let goal = goal.map(|goal| {
-        format!("<orx-goal>\nKeep working toward this goal until it is met, across every turn:\n\n{goal}\n</orx-goal>")
-    });
-    if let Some(goal) = goal.as_deref() {
-        contexts.push(goal);
-    }
-    if let Some(context) = demo_evidence_context {
-        contexts.push(context);
-    }
-    if let Some(context) = shell_context {
-        contexts.push(context);
-    }
-    if contexts.is_empty() {
-        text
-    } else {
-        format!(
-            "{}\n\n<current-user-message>\n{text}\n</current-user-message>",
-            contexts.join("\n\n")
-        )
-    }
-}
-
 fn with_selected_chat_context(text: String, annotations: &[TextAnnotation]) -> String {
     let selections = annotations
         .iter()
@@ -2647,8 +2616,8 @@ impl ChatHost {
 #[cfg(test)]
 mod shell_command_tests {
     use super::{
-        pending_shell_exchanges, shell_context, shell_exchange, with_turn_context, WireMessage,
-        WirePart, USER_SHELL_TOOL,
+        pending_shell_exchanges, shell_context, shell_exchange, WireMessage, WirePart,
+        USER_SHELL_TOOL,
     };
     use crate::store::{Store, StoredChatMessage};
     use serde_json::json;
@@ -2744,9 +2713,8 @@ mod shell_command_tests {
         assert!(context.contains("status=\"exit 1\">\ncat missing\n</command>"));
         assert!(context.contains("<stderr>\nboom\n</stderr>"));
         assert!(context.find("ls\n</command>").unwrap() < context.find("cat missing").unwrap());
-        let turn = with_turn_context(None, None, Some(&context), "why?".into());
-        assert!(turn.starts_with("<user-shell-commands>"));
-        assert!(turn.ends_with("<current-user-message>\nwhy?\n</current-user-message>"));
+        assert!(context.starts_with("<user-shell-commands>"));
+        assert!(context.ends_with("</user-shell-commands>"));
         assert!(shell_context(&[]).is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -2755,9 +2723,9 @@ mod shell_command_tests {
 #[cfg(test)]
 mod initial_message_tests {
     use super::{
-        contextualize_messages, is_initial_chat_message, strip_legacy_autonomy,
-        with_selected_chat_context, with_turn_context, AnnotatedText, TextAnnotation,
-        CONTINUE_PROMPT, LEGACY_COPILOT_CONTEXT,
+        contextualize_messages, is_initial_chat_message, strip_legacy_turn_context,
+        with_selected_chat_context, AnnotatedText, TextAnnotation, CONTINUE_PROMPT, GOAL_END,
+        GOAL_START, LEGACY_COPILOT_CONTEXT,
     };
     use serde_json::{json, Value};
 
@@ -2769,44 +2737,29 @@ mod initial_message_tests {
     }
 
     #[test]
-    fn the_goal_rides_every_turn() {
-        let seeded = with_turn_context(Some("ship the sweep"), None, None, "continue".into());
-        assert!(seeded.contains("ship the sweep"));
-        assert!(seeded.contains("<current-user-message>\ncontinue"));
-        assert_eq!(
-            with_turn_context(None, None, None, "continue".into()),
-            "continue"
-        );
-    }
-
-    #[test]
-    fn legacy_recovery_removes_saved_autonomy_and_preserves_quoted_instructions() {
+    fn legacy_recovery_removes_saved_instructions_after_bootstrap_and_preserves_quotes() {
+        let goal = format!("{GOAL_START}Research optimizers.{GOAL_END}");
         let message = format!(
-            "<current-user-message>\nQuote this:\n{LEGACY_COPILOT_CONTEXT}</current-user-message>"
+            "<current-user-message>\nQuote this:\n{goal}{LEGACY_COPILOT_CONTEXT}</current-user-message>"
         );
-        let goal = "<orx-goal>\nResearch optimizers.\n</orx-goal>\n\n";
-        let mut text =
-            format!("{CONTINUE_PROMPT}{goal}{LEGACY_COPILOT_CONTEXT}{message}\n</orx-recovery>");
-        strip_legacy_autonomy(&mut text);
-        assert_eq!(
-            text,
-            format!("{CONTINUE_PROMPT}{goal}{message}\n</orx-recovery>")
-        );
-    }
-
-    #[test]
-    fn demo_evidence_context_is_injected_without_rewrapping_the_user_message() {
-        let first = with_turn_context(None, Some("demo evidence"), None, "first".into());
-        let follow_up = with_turn_context(None, Some("demo evidence"), None, "follow up".into());
-        assert!(first.contains("demo evidence"));
-        assert!(first.contains("<current-user-message>\nfirst"));
-        assert!(follow_up.contains("demo evidence"));
-        assert!(follow_up.contains("<current-user-message>\nfollow up"));
-        assert_eq!(first.matches("<current-user-message>").count(), 1);
-        assert_eq!(
-            with_turn_context(None, None, None, "ordinary".into()),
-            "ordinary"
-        );
+        for (bootstrap, saved_bootstrap) in [
+            ("", None),
+            (
+                "<orx-side-chat-context>\nParent snapshot\n</orx-side-chat-context>\n\n",
+                None,
+            ),
+            (
+                "<orx-compacted-context>\nOld summary\n</orx-compacted-context>\n\n",
+                Some("New summary"),
+            ),
+            ("Earlier conversation\n\n", Some("Earlier conversation")),
+        ] {
+            let prefix = format!("{CONTINUE_PROMPT}{CONTINUE_PROMPT}{bootstrap}");
+            let suffix = format!("{message}\n</orx-recovery>\n</orx-recovery>");
+            let mut text = format!("{prefix}{goal}{LEGACY_COPILOT_CONTEXT}{suffix}");
+            strip_legacy_turn_context(&mut text, saved_bootstrap);
+            assert_eq!(text, format!("{prefix}{suffix}"));
+        }
     }
 
     #[test]
@@ -6938,12 +6891,15 @@ impl ChatHost {
             if let Some(message_ref) = message_ref {
                 expanded = format!("{message_ref}\n{expanded}");
             }
-            with_turn_context(
-                session.goal.as_deref(),
+            [
                 super::demo::turn_context(&project.id),
                 shell_context.as_deref(),
-                expanded,
-            )
+                Some(expanded.as_str()),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("\n\n")
         });
         // Harnesses take plain text; attachments ride as on-disk paths every
         // CLI can open with its own file-reading tool (Read handles PDFs and
@@ -8923,6 +8879,10 @@ const CONTINUE_PROMPT: &str =
     repeat completed tool actions. Continue the unfinished request safely.\n\n\
     Original request:\n";
 
+const GOAL_START: &str =
+    "<orx-goal>\nKeep working toward this goal until it is met, across every turn:\n\n";
+const GOAL_END: &str = "\n</orx-goal>\n\n";
+
 // Older builds saved this exact block inside the prepared input.
 const LEGACY_COPILOT_CONTEXT: &str = "<orx-autonomy level=\"copilot\">\n\
     You are the user's research copilot; they make the decisions. Before acting, \
@@ -8933,21 +8893,40 @@ const LEGACY_COPILOT_CONTEXT: &str = "<orx-autonomy level=\"copilot\">\n\
     guidance to continue on your own.\n\
     </orx-autonomy>\n\n";
 
-fn strip_legacy_autonomy(text: &mut String) {
+fn strip_legacy_turn_context(text: &mut String, bootstrap: Option<&str>) {
     let mut original = text.as_str();
     while let Some(request) = original.strip_prefix(CONTINUE_PROMPT) {
         original = request;
     }
-    if original.starts_with("<orx-goal>\n") {
-        let Some((_, context)) = original.split_once("\n</orx-goal>\n\n") else {
-            return;
-        };
+
+    // Older turns put a bootstrap snapshot before the goal and autonomy blocks.
+    if let Some(after_bootstrap) =
+        bootstrap.and_then(|saved| original.strip_prefix(saved)?.strip_prefix("\n\n"))
+    {
+        original = after_bootstrap;
+    } else {
+        for tag in ["orx-side-chat-context", "orx-compacted-context"] {
+            if let Some((_, after_bootstrap)) = original
+                .strip_prefix(&format!("<{tag}>\n"))
+                .and_then(|body| body.split_once(&format!("\n</{tag}>\n\n")))
+            {
+                original = after_bootstrap;
+                break;
+            }
+        }
+    }
+
+    let start = text.len() - original.len();
+    if let Some((_, context)) = original
+        .strip_prefix(GOAL_START)
+        .and_then(|goal| goal.split_once(GOAL_END))
+    {
         original = context;
     }
-    if original.starts_with(LEGACY_COPILOT_CONTEXT) {
-        let start = text.len() - original.len();
-        text.replace_range(start..start + LEGACY_COPILOT_CONTEXT.len(), "");
-    }
+    let original = original
+        .strip_prefix(LEGACY_COPILOT_CONTEXT)
+        .unwrap_or(original);
+    text.replace_range(start..text.len() - original.len(), "");
 }
 
 fn turn_ctx_from_stored(
@@ -8966,9 +8945,12 @@ fn turn_ctx_from_stored(
         text.push_str(flags);
     }
     if !text.is_empty() {
-        strip_legacy_autonomy(&mut text);
+        strip_legacy_turn_context(&mut text, session.bootstrap_context.as_deref());
         if let Some(autonomy) = Autonomy::from_stored(session.autonomy.as_deref()).turn_context() {
             text = format!("{autonomy}\n\n{text}");
+        }
+        if let Some(goal) = &session.goal {
+            text = format!("{GOAL_START}{goal}{GOAL_END}{text}");
         }
     }
     let position = handoff::position_for(store, session)?;
@@ -15746,6 +15728,7 @@ done
                 .set_chat_session_native_fork("chat", Some("s8"), Some("gone"))
                 .unwrap();
             chat.set_autonomy("chat", Autonomy::AutoResearch).await.unwrap();
+            chat.set_goal("chat", Some("Old retry goal")).await.unwrap();
             send("six").await;
             finished(&chat, &mut events).await;
             assert_eq!(resumed(&spawns()[8]), fork("s8", "gone"));
@@ -15754,6 +15737,7 @@ done
             assert_eq!(failed.recovery_action.as_deref(), Some("retry"));
             assert_eq!(session().native_session_id, None);
             chat.set_autonomy("chat", Autonomy::Copilot).await.unwrap();
+            chat.set_goal("chat", None).await.unwrap();
             chat.recover_turn("chat", &failed.id, "retry", RecoveryOverrides::default())
                 .await
                 .unwrap();
@@ -15762,6 +15746,8 @@ done
             assert!(last_prompt().contains("seven"), "{}", last_prompt());
             assert!(last_prompt().contains("<orx-autonomy level=\"copilot\">"));
             assert!(!last_prompt().contains("<orx-autonomy level=\"autoresearch\">"));
+            assert!(!last_prompt().contains("<orx-goal>"));
+            assert!(!last_prompt().contains("Old retry goal"));
             let retried = store.latest_chat_turn("chat").unwrap().unwrap();
             assert_eq!(retried.id, failed.id);
             assert_eq!(retried.request_hash, failed.request_hash);
@@ -16496,13 +16482,16 @@ for line in sys.stdin:
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn continuing_a_failed_turn_uses_the_chats_current_autonomy() {
+    async fn continuing_a_failed_turn_uses_the_chats_current_goal_and_autonomy() {
         if !crate::config::in_test_child(&[]) {
             return;
         }
         let store = Store::open().unwrap();
         quiet_agent_chat(&store, Some(Autonomy::AutoResearch.id()));
         let host = notice_host();
+        host.set_goal("owner", Some("Spend at most ten dollars"))
+            .await
+            .unwrap();
         let mut events = host.subscribe();
         let wait_for_idle = async |events: &mut broadcast::Receiver<(&'static str, Value)>| {
             tokio::time::timeout(Duration::from_secs(15), async {
@@ -16538,10 +16527,17 @@ for line in sys.stdin:
             .unwrap();
         assert_eq!(failed.state, "failed");
         assert_eq!(failed.recovery_action.as_deref(), Some("continue"));
-        assert!(prompts()[0].contains("<orx-autonomy level=\"autoresearch\">"));
+        let delivered = prompts();
+        assert!(delivered[0].contains("<orx-autonomy level=\"autoresearch\">"));
+        assert!(delivered[0].contains(&format!("{GOAL_START}Spend at most ten dollars{GOAL_END}")));
+        assert!(!delivered[0].contains("<current-user-message>"));
         assert!(!failed.prepared_input.contains("<orx-autonomy"));
+        assert!(!failed.prepared_input.contains("<orx-goal>"));
 
         host.set_autonomy("owner", Autonomy::Copilot).await.unwrap();
+        host.set_goal("owner", Some("Spend at most two dollars"))
+            .await
+            .unwrap();
         let continued = host
             .recover_turn(
                 "owner",
@@ -16556,6 +16552,11 @@ for line in sys.stdin:
         assert_eq!(delivered.len(), 2);
         assert!(delivered[1].contains("<orx-autonomy level=\"copilot\">"));
         assert!(!delivered[1].contains("<orx-autonomy level=\"autoresearch\">"));
+        assert!(!delivered[1].contains("<current-user-message>"));
+        let (goal_context, recovery) = delivered[1].split_once(CONTINUE_PROMPT).unwrap();
+        assert!(goal_context.contains(&format!("{GOAL_START}Spend at most two dollars{GOAL_END}")));
+        assert!(!recovery.contains("<orx-goal>"));
+        assert!(!delivered[1].contains("Spend at most ten dollars"));
         assert!(delivered[1].contains("Cut this turn short."));
         assert_eq!(
             store
@@ -16567,6 +16568,7 @@ for line in sys.stdin:
         );
 
         host.set_autonomy("owner", Autonomy::Agentic).await.unwrap();
+        host.set_goal("owner", None).await.unwrap();
         let repeated = host
             .recover_turn(
                 "owner",
@@ -16578,6 +16580,7 @@ for line in sys.stdin:
             .unwrap();
         assert_eq!(repeated.turn_id, continued.turn_id);
         assert!(repeated.existing);
+        assert_eq!(prompts().len(), 2);
     }
 
     #[tokio::test(flavor = "current_thread")]
