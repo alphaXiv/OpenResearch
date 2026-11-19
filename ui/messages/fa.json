@@ -592,6 +592,7 @@
   "chat_delete_session_confirm": "«{title}» حذف شود؟\n\nمتن گفتگو و تمام گفتگوهای جانبی آن برای همیشه حذف خواهند شد.",
   "chat_delete_session_failed": "حذف «{title}» ناموفق بود: {error}",
   "chat_untitled": "بدون عنوان",
+  "chat_parent_chats": "گفتگوهای والد",
   "skills_delete_skill_label": "حذف مهارت {name}",
   "skills_delete_skill_confirm": "مهارت «{name}» حذف شود؟",
   "skills_edit_skill": "ویرایش مهارت",

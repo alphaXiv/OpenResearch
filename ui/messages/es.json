@@ -596,6 +596,7 @@
   "chat_delete_session_confirm": "¿Eliminar «{title}»?\n\nSu transcripción y sus chats secundarios se eliminarán permanentemente.",
   "chat_delete_session_failed": "No se pudo eliminar “{title}”: {error}",
   "chat_untitled": "Sin título",
+  "chat_parent_chats": "Chats principales",
   "skills_delete_skill_label": "Eliminar la skill {name}",
   "skills_delete_skill_confirm": "¿Eliminar la skill “{name}”?",
   "skills_edit_skill": "Editar skill",

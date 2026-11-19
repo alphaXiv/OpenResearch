@@ -39,7 +39,7 @@ import { SessionHoverCard } from "./SessionHoverCard";
 import { AgentMessageCard } from "./AgentMessageCard";
 import { DelegateCard } from "./DelegateCard";
 import { EnvRequestCard } from "./EnvRequestCard";
-import { delegateStatus, delegatesOf, type DelegateStatus } from "../delegates";
+import { delegateAncestors, delegateModelLabel, delegateStatus, delegatesOf, type DelegateStatus } from "../delegates";
 import { taskLocation } from "../workspaceState";
 import { DONE_PREVIEW_HEIGHT, fitSidebarRows, sidebarGroup, sidebarRowHeight, type SidebarRow } from "../sidebarLayout";
 import { useVirtualizer, defaultRangeExtractor, elementScroll, measureElement as measureVirtualElement, type Range as VirtualRange } from "@tanstack/react-virtual";
@@ -7271,6 +7271,7 @@ export function ChatPanel({
     part.type === "prompt" && part.prompt?.kind === "question" && !part.prompt.resolved && (!part.prompt.nativeId || busy),
   )), [messages, busy]);
   const activeSession = openSession;
+  const ancestors = embedded || !onOpenDelegate ? [] : delegateAncestors(sessions, activeSession);
   // Once the user writes in a delegate, whether it still reports to its parent is theirs to decide.
   const steeringDelegate = Boolean(activeSession?.delegate?.notifies) && (draft.trim() !== ""
     || messages.some((message) => message.parts.some((part) =>
@@ -9014,6 +9015,27 @@ export function ChatPanel({
           <div className={headerClass}>
           <div className="flex min-w-0 flex-1 items-center gap-2">
             {activeSession && <>
+              {ancestors.length > 0 && (
+                <nav aria-label={m.chat_parent_chats()} className="-me-1 flex min-w-0 shrink items-center gap-1">
+                  {ancestors.map((ancestor) => {
+                    const label = ancestor.title?.trim() || (ancestor.delegate ? delegateModelLabel(ancestor, modelName) : m.chat_untitled());
+                    return (
+                      <Fragment key={ancestor.id}>
+                        <button
+                          type="button"
+                          dir="auto"
+                          className="min-w-8 max-w-48 cursor-pointer truncate rounded-sm text-base text-subtext transition-colors duration-120 ease-standard hover:text-text focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:outline-offset-2"
+                          title={label}
+                          onClick={() => onOpenDelegate?.(ancestor.id)}
+                        >
+                          {label}
+                        </button>
+                        <ChevronRight size={14} className="shrink-0 text-muted rtl:rotate-180" aria-hidden="true" />
+                      </Fragment>
+                    );
+                  })}
+                </nav>
+              )}
               {activeSession.title?.trim() ? (
                 <PaperTitle variant="header" className="flex-initial" title={activeSession.title.trim()}>
                   <TitleReveal
