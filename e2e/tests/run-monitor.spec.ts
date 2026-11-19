@@ -649,13 +649,12 @@ test('several runs share one summary over an open card each, whose rows name wha
   const orx = await launchOrx()
   await orx.onboard()
   const project = await orx.createProject('sweep')
-  /** A run that reports a falling val bpb to `total` steps, held at step 20 until the test opens its gate. */
+  /** A falling val bpb every two simulated seconds, held at step 20 while its estimate counts down. */
   const sweep = (name: string, total: number, floor: number) => payload(orx, name, ['mid'], `
-const started = performance.now()
 process.stdout.write('::orx:: {"step":0,"of":${total},"unit":"steps","t":0}\\n')
 for (let step = 1; step <= ${total}; step++) {
   await tick()
-  process.stdout.write('::orx:: ' + JSON.stringify({ step, t: (performance.now() - started) / 1000, m: { val_bpb: ${floor} + 1 / step } }) + '\\n')
+  process.stdout.write('::orx:: ' + JSON.stringify({ step, t: step * 2, m: { val_bpb: ${floor} + 1 / step } }) + '\\n')
   if (step === 20) gate('mid')
 }`)
   const runs = [
@@ -670,6 +669,7 @@ for (let step = 1; step <= ${total}; step++) {
     'orx exp wake "$id"',
   ])
   agent.script('Run the depth sweep.', [{ run: ['set -e', ...start(0, 3)].join('\n') }, { say: 'Launched the sweep.' }])
+  await page.setViewportSize({ width: 1440, height: 1100 })
   await project.open(page)
   await send(page, 'Run the depth sweep.')
   await expect(page.getByText('Launched the sweep.', { exact: true })).toBeVisible({ timeout: 90_000 })
@@ -690,11 +690,45 @@ for (let step = 1; step <= ${total}; step++) {
     }
     await themes(page, banner, info, 'summary-rows')
 
-    await page.clock.setFixedTime(Date.now() + 30_000)
+    const shown = await (await page.request.get(`${orx.url}/api/chat/shown-runs`)).json()
+    const finishes = await Promise.all(shown.map(async ({ run }: { run: { id: string } }) => {
+      const monitor = await (await page.request.get(`${orx.url}/api/runs/${run.id}/monitor`)).json()
+      const { at, midMs, hiMs } = monitor.estimate
+      expect(midMs).toBeGreaterThan(0)
+      return { mid: at + midMs, high: at + (hiMs ?? midMs) }
+    }))
+    const firstFinish = Math.min(...finishes.map(({ mid }) => mid))
+    const estimate = banner.locator('[data-part="estimate"]')
+    await page.clock.setFixedTime(firstFinish - 10_500)
+    await expect(estimate).toContainText(said('10s'))
+    for (const width of [1440, 420, 320]) {
+      await page.setViewportSize({ width, height: 860 })
+      for (const name of ['shared', 'sentence', 'estimate']) {
+        const part = banner.locator(`[data-part="${name}"]`)
+        await expect(part).toBeVisible()
+        const overflow = await part.evaluate((element) => {
+          const range = document.createRange()
+          range.selectNodeContents(element)
+          const bounds = element.getBoundingClientRect()
+          return Math.max(0, ...Array.from(range.getClientRects(), (rect) => Math.max(bounds.left - rect.left, rect.right - bounds.right)))
+        })
+        expect(overflow, `${name} at ${width} px`).toBeLessThanOrEqual(1)
+      }
+      const status = await banner.locator('[data-part="sentence"]').boundingBox()
+      const time = await estimate.boundingBox()
+      if (width === 1440) expect(time!.y).toBe(status!.y)
+      else expect(time!.y).toBeGreaterThan(status!.y)
+    }
+
     await page.setViewportSize({ width: 420, height: 860 })
+    const summaryText = estimate.locator('..')
+    const beforeTick = await summaryText.boundingBox()
+    await page.clock.setFixedTime(firstFinish - 9_500)
+    await expect(estimate).toContainText(said('9s'))
+    expect(await summaryText.boundingBox()).toEqual(beforeTick)
+
+    await page.clock.setFixedTime(Math.min(...finishes.map(({ high }) => high)) + 1000)
     await expect(banner).toContainText('No progress for')
-    // Whether the runs' names fit beside the count at 420 px depends on the platform's fonts.
-    await expect(banner).toContainText(/Depth (…|4, 6, 8) at 2e15 FLOPs/)
     for (const { title, label } of runs.slice(0, 3)) {
       const clipped = await named(title).evaluate((trigger, short) => {
         const label = Array.from(trigger.children).find((element) => element.textContent.replace(/[⁦-⁩]/g, '').trim() === `${short} ·`)
