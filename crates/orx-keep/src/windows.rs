@@ -9,8 +9,8 @@ use windows_sys::Win32::Foundation::{
     CloseHandle, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT,
 };
 use windows_sys::Win32::System::Console::{
-    GenerateConsoleCtrlEvent, GetStdHandle, CTRL_BREAK_EVENT, STD_ERROR_HANDLE, STD_INPUT_HANDLE,
-    STD_OUTPUT_HANDLE,
+    GenerateConsoleCtrlEvent, GetStdHandle, SetConsoleCtrlHandler, CTRL_BREAK_EVENT,
+    STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
 };
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicProcessIdList,
@@ -167,6 +167,10 @@ pub fn spawn(spec: &Spec) -> io::Result<Spawned> {
             if let Some(cwd) = &spec.cwd {
                 command.cwd(cwd);
             }
+            // A keeper starts in a console group of its own, which ignores Ctrl+C and passes that
+            // on to what it starts; a terminal's shell must hear the Ctrl+C its user types.
+            // SAFETY: a plain Win32 call on this process's own console state.
+            unsafe { SetConsoleCtrlHandler(None, 0) };
             let mut child = pair
                 .slave
                 .spawn_command(command)
