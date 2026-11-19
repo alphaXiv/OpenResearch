@@ -5852,7 +5852,7 @@ interface SidebarActions {
   openSession: (session: ChatSession, project: Project) => void;
   openExperiment: (session: ChatSession, projectId: string, experimentId: string) => void;
   rename: (session: ChatSession, title: string) => void;
-  setArchived: (session: ChatSession, archived: boolean) => void;
+  setArchived: (session: ChatSession, archived: boolean, working: boolean) => void;
   moveToProject: (session: ChatSession, project: Project) => void;
   remove: (session: ChatSession) => void;
 }
@@ -5910,6 +5910,7 @@ const SidebarSessionRow = memo(function SidebarSessionRow({
 }) {
   useLocale();
   const { session } = row;
+  const working = row.variant !== "list" && chatStatusWorking(chatStatus(session, row.busy, row.waiting, row.runs));
   return (
     <SessionRow
       {...row}
@@ -5917,7 +5918,7 @@ const SidebarSessionRow = memo(function SidebarSessionRow({
       onOpen={() => actions.current.openSession(session, project)}
       onOpenExperiment={(projectId, experimentId) => actions.current.openExperiment(session, projectId, experimentId)}
       onRename={(title) => actions.current.rename(session, title)}
-      onSetArchived={(archived) => actions.current.setArchived(session, archived)}
+      onSetArchived={(archived) => actions.current.setArchived(session, archived, working)}
       onMoveToProject={session.pendingProject ? undefined : {
         label: project.scratch ? m.create_project_menu() : m.create_project_move_menu(),
         run: () => actions.current.moveToProject(session, project),
@@ -8252,8 +8253,21 @@ export function ChatPanel({
     seenTitles.current.delete(sessionId);
   }
 
-  function setArchived(session: ChatSession, archived: boolean) {
-    mutPatchChatSession.run(workspace, session, { archived });
+  function setArchived(session: ChatSession, archived: boolean, working: boolean) {
+    if (!archived || !working) {
+      mutPatchChatSession.run(workspace, session, { archived });
+      return;
+    }
+    showConfirmDialog({
+      title: m.chat_inbox_stop_done_title(),
+      description: m.chat_inbox_stop_done_description(),
+      confirmLabel: m.chat_inbox_stop_done_confirm(),
+      destructive: true,
+      onCancel: "close",
+      onConfirm: async () => {
+        await mutPatchChatSession.runAsHeadlessPromise(workspace, session, "stop-and-archive", {});
+      },
+    });
   }
 
   function stopNotifyingParent(session: ChatSession) {
@@ -9319,7 +9333,7 @@ export function ChatPanel({
               onOpenRunPage={onOpenRunPage}
             />
           )}
-          {!busy && <BackgroundTaskBanner background={activeSession?.background} />}
+          {!busy && activeId && <BackgroundTaskBanner sessionId={activeId} background={activeSession?.background} />}
           {/* Inside the composer so the composer's popovers (mode/model pickers,
             z 50 within this stacking context) layer above the strip — as a
             sibling, the composer's own z-index: 4 capped them below it. */}
