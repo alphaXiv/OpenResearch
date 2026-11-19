@@ -2101,6 +2101,7 @@
   "icon_emoji_flags": "旗帜",
   "chat_run_needs_attention": "有运行需要你关注",
   "chat_run_flagged": "有运行被标记",
+  "chat_hover_waiting_for_choice": "等待你的选择",
   "run_banner_label": "此对话中的运行",
   "run_stop": "停止运行",
   "run_stop_title": "停止 {name}？",

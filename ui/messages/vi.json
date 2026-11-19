@@ -2101,6 +2101,7 @@
   "icon_emoji_flags": "Cờ",
   "chat_run_needs_attention": "Một lượt chạy cần bạn chú ý",
   "chat_run_flagged": "Một lượt chạy đã bị gắn cờ",
+  "chat_hover_waiting_for_choice": "Đang chờ bạn chọn",
   "run_banner_label": "Các lượt chạy trong cuộc trò chuyện này",
   "run_stop": "Dừng lượt chạy",
   "run_stop_title": "Dừng {name}?",

@@ -19,19 +19,23 @@ export const runFrame = (model: RunModel) => cn(
   model.needsChoice ? "border-accent-amber/45 bg-accent-amber-subtle" : "border-border bg-surface",
 );
 
-/** The run's one number once it has one, unless the sentence already says it; then only how it compares. */
-function Headline({ model }: { model: RunModel }) {
+/**
+ * The run's one number once it has one, unless the sentence already says it; then only how it compares. `wrap` lets it
+ * break across lines where there is no container to hide it from, keeping the value and the comparison each whole.
+ */
+export function Headline({ model, wrap = false }: { model: RunModel; wrap?: boolean }) {
   const headline = model.headline;
   if (!headline?.known || (model.tone !== "starting" && model.tone !== "running" && model.tone !== "done")) return null;
   const { delta } = headline;
+  const frame = wrap ? "min-w-0 wrap-break-word text-ink-subtext" : "shrink-0 whitespace-nowrap text-ink-subtext @max-[40rem]:hidden";
   if (headline.inSentence) {
     if (!delta || delta.flat || headline.vsInSentence) return null;
-    return <span className="shrink-0 whitespace-nowrap text-ink-subtext @max-[40rem]:hidden"><Delta delta={delta} said /> {m.run_than_parent()}</span>;
+    return <span className={frame}><span className="whitespace-nowrap"><Delta delta={delta} said /> {m.run_than_parent()}</span></span>;
   }
   return (
-    <span className="shrink-0 whitespace-nowrap text-ink-subtext @max-[40rem]:hidden">
-      {autoDir(headline.label)} <span className="font-medium tabular-nums text-text">{headline.value}</span>
-      {delta && <> <Delta delta={delta} said />{!delta.flat && <> {m.run_than_parent()}</>}</>}
+    <span className={frame}>
+      {autoDir(headline.label)} <span className="whitespace-nowrap font-medium tabular-nums text-text">{headline.value}</span>
+      {delta && <> <span className="whitespace-nowrap"><Delta delta={delta} said />{!delta.flat && <> {m.run_than_parent()}</>}</span></>}
     </span>
   );
 }

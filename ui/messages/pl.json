@@ -2101,6 +2101,7 @@
   "icon_emoji_flags": "Flagi",
   "chat_run_needs_attention": "Uruchomienie wymaga uwagi",
   "chat_run_flagged": "Uruchomienie oznaczono",
+  "chat_hover_waiting_for_choice": "Czeka na Twój wybór",
   "run_banner_label": "Uruchomienia w tym czacie",
   "run_stop": "Zatrzymaj uruchomienie",
   "run_stop_title": "Zatrzymać {name}?",

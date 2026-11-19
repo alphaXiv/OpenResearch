@@ -2101,6 +2101,7 @@
   "icon_emoji_flags": "الأعلام",
   "chat_run_needs_attention": "هناك تشغيل يحتاج إلى انتباهك",
   "chat_run_flagged": "تم وضع علامة على تشغيل",
+  "chat_hover_waiting_for_choice": "بانتظار اختيارك",
   "run_banner_label": "عمليات التشغيل في هذه المحادثة",
   "run_stop": "إيقاف التشغيل",
   "run_stop_title": "إيقاف {name}؟",

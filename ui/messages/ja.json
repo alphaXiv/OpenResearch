@@ -2101,6 +2101,7 @@
   "icon_emoji_flags": "旗",
   "chat_run_needs_attention": "実行に確認が必要です",
   "chat_run_flagged": "実行にフラグが付きました",
+  "chat_hover_waiting_for_choice": "あなたの選択待ち",
   "run_banner_label": "このチャットの実行",
   "run_stop": "実行を停止",
   "run_stop_title": "{name} を停止しますか？",

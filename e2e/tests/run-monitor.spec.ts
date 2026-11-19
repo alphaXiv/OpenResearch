@@ -1318,3 +1318,176 @@ gate('finish')`)
     await autonomy('agentic')
   }
 })
+
+test("a chat's hover card says how each experiment is going and how the finished ones ended", async ({ page, project, agent, orx }, info) => {
+  test.slow()
+  const autonomy = (value: string) => page.request.post(`${orx.url}/api/settings/ui-state`, { headers: { origin: orx.url }, data: { preferredAutonomy: value } })
+  const stop = path.join(orx.root, `hover-stop-${project.id}`)
+  const ticking = (name: string, body: string) => payload(orx, `${name}-${project.id}`, [], `import { existsSync } from 'node:fs'\n${body}`).command
+  const quick = ticking('baseline', `
+process.stdout.write('::orx:: {"step":0,"of":8,"unit":"steps","t":0}\\n')
+for (let step = 1; step <= 8; step++) { await tick(); process.stdout.write('::orx:: {"step":' + step + ',"t":' + step + ',"m":{"val_loss":' + (0.5 / step).toFixed(4) + '}}\\n') }`)
+  const broken = ticking('broken', `
+process.stdout.write('::orx:: {"step":0,"of":100,"unit":"steps","t":0}\\n')
+for (let step = 1; step <= 4; step++) { await tick(); process.stdout.write('::orx:: {"step":' + step + ',"t":' + step + '}\\n') }
+process.exit(3)`)
+  // Live runs tick until the test writes the stop file.
+  const live = (name: string, err: string | null) => ticking(name, `
+const started = performance.now()
+process.stdout.write('::orx:: {"plan":[{"phase":"prepare","of":3,"unit":"steps"},{"phase":"train","of":5000,"unit":"steps"}]}\\n')
+process.stdout.write('::orx:: {"phase":"prepare","step":0,"of":3,"unit":"steps","t":0}\\n')
+for (let step = 1; step <= 3; step++) { await tick(); process.stdout.write('::orx:: {"step":' + step + '}\\n') }
+process.stdout.write('::orx:: {"phase":"train","step":0,"of":5000,"unit":"steps","t":0}\\n')
+for (let step = 1; step <= 5000 && !existsSync(${JSON.stringify(stop)}); step++) {
+  await tick()
+  if (step === 6 && ${JSON.stringify(err)}) console.error(${JSON.stringify(err)})
+  process.stdout.write('::orx:: {"step":' + step + ',"t":' + ((performance.now() - started) / 1000) + ',"m":{"val_loss":' + (1 / Math.sqrt(step)).toFixed(4) + '}}\\n')
+}`)
+  const create = (title: string, command: string) => `orx create-experiment ${project.id} --title '${title}' --run-command '${command}' | sed -n 's/^ *id: *//p'`
+  const launch = (title: string, command: string) => `orx exp run "$(${create(title, command)})" --backend local`
+  /** `commands` at once, failing if any fails: each launch mostly waits on orx, which a slow runner stretches. */
+  const together = (commands: string[]) => ['pids=', ...commands.map((command) => `(${command}) & pids="$pids $!"`), 'for pid in $pids; do wait "$pid"; done']
+  type Row = { experiment: { title: string }; currentRun: { id: string; status: string; monitor?: { flag?: { state: string } | null } | null } | null }
+  /** Until some chat lists `count` experiments that `ready` accepts; ended runs stay shown until their notice is answered. */
+  const settled = (count: number, ready: (rows: Row[]) => boolean) => expect.poll(async () => {
+    const shown: { sessionId: string }[] = await (await page.request.get(`${orx.url}/api/chat/shown-runs`)).json()
+    for (const id of new Set(shown.map((item) => item.sessionId))) {
+      const { experiments } = await (await page.request.get(`${orx.url}/api/chat/sessions/${id}/experiments`)).json()
+      if (experiments.length === count && ready(experiments)) return true
+    }
+    return false
+  }, { timeout: 60_000 }).toBe(true)
+  /** A turn that runs `commands` and holds until its runs reach `count` and `ready`, so their results come back as one turn. */
+  const turn = async (prompt: string, commands: string[], count: number, ready: (rows: Row[]) => boolean) => {
+    const hold = `${prompt}-${project.id}`
+    agent.script(prompt, [{ run: ['set -e', ...commands].join('\n') }, { hold }, { say: `${prompt} Done.` }])
+    agent.script('finished with status', [{ say: `Read what came of: ${prompt}` }])
+    await send(page, prompt)
+    await agent.reached(hold)
+    await settled(count, ready)
+    agent.release(hold)
+    await expect(page.getByText(`Read what came of: ${prompt}`, { exact: true })).toBeVisible({ timeout: 60_000 })
+  }
+  const card = page.locator('[data-session-hover-card]')
+  const chat = (prompt: string) => page.locator('[data-sidebar-keyboard-row]').filter({ hasText: prompt })
+  const hover = async (prompt: string) => {
+    await page.mouse.move(0, 0)
+    await expect(card).toHaveCount(0)
+    await chat(prompt).hover()
+    await expect(card).toBeVisible()
+  }
+  const shots = async (prompt: string, name: string) => {
+    for (const width of [1440, 420]) {
+      await page.setViewportSize({ width, height: 900 })
+      if (width === 420) await page.getByRole('button', { name: 'Show sidebar' }).click()
+      await hover(prompt)
+      await keep(page, page, `${name}-${width}`)
+    }
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await hover(prompt)
+    await themes(page, card, info, name)
+  }
+  const status = (rows: Row[], title: string) => rows.find((row) => row.experiment.title === title)?.currentRun
+
+  await autonomy('copilot')
+  try {
+    await project.open(page)
+    await turn('Try four ideas.', together([
+      launch('Baseline', quick),
+      launch('Smaller batch', broken),
+      launch('Wider layers', live('wider', null)),
+      launch('Higher learning rate', live('higher', 'RuntimeError: CUDA error: device-side assert triggered')),
+      create('Dropout ablation', 'true'),
+    ]), 5, (rows) => status(rows, 'Baseline')?.status === 'done' && status(rows, 'Smaller batch')?.status === 'failed'
+      && status(rows, 'Wider layers')?.status === 'running' && status(rows, 'Higher learning rate')?.monitor?.flag?.state === 'waiting')
+
+    await test.step('the card leads with the flag waiting on the user, then the live run, then how each finished one ended', async () => {
+      await shots('Try four ideas', 'hover-mixed')
+      const rows = card.locator('[data-experiment-row]')
+      await expect(rows).toHaveCount(5)
+      await expect(rows.nth(0)).toContainText('Higher learning rate')
+      await expect(rows.nth(0)).toContainText('Waiting for your choice')
+      await expect(rows.nth(0).getByRole('img', { name: 'Flagged' })).toBeVisible()
+      await expect(rows.nth(1)).toContainText('Wider layers')
+      await expect(rows.nth(1)).toContainText(said('of 5,000'))
+      await expect(rows.nth(1)).toContainText('val_loss')
+      const row = (title: string) => card.locator('[data-experiment-row]', { hasText: title })
+      await expect(row('Baseline')).toContainText('Done in')
+      await expect(row('Baseline')).toContainText('val_loss')
+      await expect(row('Smaller batch')).toContainText('Failed')
+      await expect(row('Dropout ablation')).toContainText('Not run yet')
+    })
+
+    await test.step('focus moves between rows and Escape goes back to the chat', async () => {
+      await page.mouse.move(0, 0)
+      await expect(card).toHaveCount(0)
+      await chat('Try four ideas').focus()
+      await expect(card).toBeVisible()
+      await page.keyboard.press('Tab')
+      await expect(card).toBeFocused()
+      await page.keyboard.press('Tab')
+      await expect(card.locator('[data-experiment-row]').nth(0)).toBeFocused()
+      await page.keyboard.press('ArrowDown')
+      await expect(card.locator('[data-experiment-row]').nth(1)).toBeFocused()
+      await page.keyboard.press('Escape')
+      await expect(chat('Try four ideas')).toBeFocused()
+      await expect(card).toHaveCount(0)
+    })
+
+    await test.step('a chat whose experiments all finished reads each result, a long one wrapped inside the card', async () => {
+      const long = ticking('long', `
+const scale = Number(process.argv[2])
+process.stdout.write('::orx:: {"step":0,"of":4,"unit":"steps","t":0}\\n')
+for (let step = 1; step <= 4; step++) { await tick(); process.stdout.write('::orx:: {"step":' + step + ',"t":' + step + ',"m":{"bpb":' + (scale / step).toFixed(4) + '}}\\n') }`)
+      const view = path.join(orx.root, `hover-view-${project.id}.xml`)
+      writeFileSync(view, '<signal name="bpb" label="Validation bits per byte on held-out shards" digits="3" better="lower"/><view headline="bpb"><chart y="bpb"/></view>')
+      await page.keyboard.press('ControlOrMeta+n')
+      await expect(page.getByRole('feed', { name: 'Messages' })).toHaveCount(0)
+      // The child's comparison is against its parent's result, so the parent ends first.
+      await turn('Run the long baseline, then a smaller learning rate on it.', [
+        `parent=$(${create('Long baseline', `${long} 0.9`)})`,
+        `orx exp view set "$parent" --file ${view}`,
+        'orx exp run "$parent" --backend local',
+        'orx exp wait "$parent"',
+        `id=$(orx create-experiment ${project.id} --parent "$parent" --title 'Smaller learning rate' --run-command '${long} 0.7' | sed -n 's/^ *id: *//p')`,
+        `orx exp view set "$id" --file ${view}`,
+        'orx exp run "$id" --backend local',
+      ], 2, (rows) => rows.every((row) => row.currentRun?.status === 'done'))
+      await shots('Run the long baseline', 'hover-finished')
+      await expect(card.locator('[data-experiment-row]')).toHaveCount(2)
+      for (const width of [1440, 420]) {
+        await page.setViewportSize({ width, height: 900 })
+        if (width === 420) await page.getByRole('button', { name: 'Show sidebar' }).click()
+        await hover('Run the long baseline')
+        await expect(card.locator('[data-experiment-row]', { hasText: 'Long baseline' })).toContainText('Done in')
+        const row = card.locator('[data-experiment-row]', { hasText: 'Smaller learning rate' })
+        await expect(row).toContainText('Validation bits per byte on held-out shards')
+        await expect(row).toContainText(said('0.175'))
+        await expect(row).toContainText('better than parent')
+        const scroller = card.locator('ul').locator('..')
+        expect(await scroller.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
+        expect(await row.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
+        await keep(page, card, `hover-long-${width}`)
+      }
+      await page.setViewportSize({ width: 1440, height: 900 })
+    })
+
+    await test.step('a chat with many experiments scrolls them under its header', async () => {
+      await page.keyboard.press('ControlOrMeta+n')
+      await expect(page.getByRole('feed', { name: 'Messages' })).toHaveCount(0)
+      await turn('Try seven seeds.', together(Array.from({ length: 7 }, (_, index) => launch(`Seed ${index + 1}`, quick))), 7,
+        (rows) => rows.every((row) => row.currentRun?.status === 'done'))
+      await shots('Try seven seeds', 'hover-many')
+      const scroller = card.locator('ul').locator('..')
+      expect(await scroller.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true)
+    })
+
+    await test.step('the live runs end and their results come back', async () => {
+      await chat('Try four ideas').click()
+      await turn('Stop the rest.', [`touch ${stop}`], 5, (rows) => rows.every((row) => !row.currentRun || ['done', 'failed'].includes(row.currentRun.status)))
+    })
+  } finally {
+    writeFileSync(stop, '')
+    await autonomy('agentic')
+  }
+})

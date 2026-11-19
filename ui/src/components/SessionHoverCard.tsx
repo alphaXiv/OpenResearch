@@ -1,49 +1,46 @@
 import { useWorkspace } from "../workspace";
 import { useQuery } from "@tanstack/react-query";
-import { FlaskConical, Folder, TriangleAlert } from "lucide-react";
-import { useCallback, useId, useState } from "react";
+import { Folder } from "lucide-react";
+import { useCallback, useEffect, useId, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { m } from "../paraglide/messages.js";
-import { fmtNumber, ltr } from "../i18n";
-import { fmtDuration, timeAgo } from "../api";
+import { autoDir, fmtNumber, ltr } from "../i18n";
+import { timeAgo } from "../api";
 import type { ChatSession, SessionExperiment } from "../api";
-import { runDisplay, type RunDisplayStatus } from "../runDisplay";
+import { runModel, type RunModel } from "../runMonitor/model";
 import { harnessLabel } from "./ModelPicker";
 import { HarnessLogo } from "./HarnessLogo";
-import { statusLabel, statusStyle } from "./StatusBadge";
+import { Lead } from "./run/Lead";
+import { Mark } from "./run/Mark";
+import { Headline } from "./run/RunLine";
+import { Sentence } from "./run/Sentence";
 import { useMeasure, usePopoverPosition } from "./tourGeometry";
 import { Badge } from "./ui";
+import { cn } from "./ui/cn";
 
-const CARD_WIDTH = 320;
+const CARD_WIDTH = 400;
 const GAP = 8;
 
-const ICON_TONES: Partial<Record<RunDisplayStatus, string>> = {
-  submitting: "text-mark-green",
-  starting: "text-mark-green",
-  running: "text-mark-green",
-  flagged: "text-mark-amber",
-  flagged_ended: "text-mark-amber",
-  cancelling: "text-mark-amber",
-  cancellation_pending: "text-mark-amber",
-  failed: "text-accent-red",
-  auto_stopped: "text-accent-orange",
-  revising: "text-accent-purple",
-};
+/** Waiting on the user first, then live, then ended in the server's order of newest activity, then never run. */
+const rank = (model: RunModel | null) => !model ? 3 : model.needsChoice ? 0 : model.live ? 1 : 2;
 
-function ExperimentRow({ row, sessionProjectId, tabbable, onFocus, onOpen }: {
+/** An experiment as its current run stands, in the run line's words: how far, how long, its number, and a flag's warning. */
+function ExperimentRow({ row, model, sessionProjectId, tabbable, onFocus, onOpen }: {
   row: SessionExperiment;
+  model: RunModel | null;
   sessionProjectId: string;
   tabbable: boolean;
   onFocus: () => void;
   onOpen: () => void;
 }) {
-  const { experiment, currentRun, projectName } = row;
-  const display = currentRun ? runDisplay(currentRun) : null;
-  const status = display?.status ?? null;
-  const tone = status ? ICON_TONES[status] ?? "text-subtext" : "text-muted";
-  const live = status !== null && statusStyle(status).live;
-  const elapsed = currentRun && (live ? fmtDuration(Date.now() - currentRun.createdAt) : timeAgo(currentRun.endedAt ?? currentRun.createdAt));
+  const { experiment, projectName } = row;
+  const stage = model?.sentence.stage;
+  const watcher = stage && model.sentence.watcher;
+  const time = !model ? null
+    : model.live ? model.stale?.age ?? model.eta
+    : timeAgo(model.run.endedAt ?? model.run.updatedAt);
+  const elsewhere = experiment.projectId !== sessionProjectId;
 
   return (
     <li>
@@ -51,28 +48,47 @@ function ExperimentRow({ row, sessionProjectId, tabbable, onFocus, onOpen }: {
         type="button"
         data-experiment-row=""
         tabIndex={tabbable ? 0 : -1}
-        className="flex w-full items-start gap-2 rounded-md px-1.5 py-1.5 text-start hover:bg-surface focus-visible:-outline-offset-2 focus-visible:outline-2 focus-visible:outline-focus-border"
+        className={cn(
+          "flex w-full items-start gap-2 rounded-md px-1.5 py-1.5 text-start focus-visible:-outline-offset-2 focus-visible:outline-2 focus-visible:outline-focus-border",
+          model?.needsChoice ? "bg-accent-amber-subtle" : "hover:bg-surface",
+        )}
         onFocus={onFocus}
         onClick={onOpen}
       >
-        {status === "flagged" || status === "flagged_ended" ? <TriangleAlert size={14} className={`mt-[3px] shrink-0 ${tone}`} aria-hidden="true" /> : <FlaskConical
-          size={14}
-          className={`mt-[3px] shrink-0 ${tone} ${live ? "motion-safe:animate-[or-experiment-pulse_3s_ease-in-out_infinite]" : ""}`}
-          aria-hidden="true"
-        />}
+        <span className="flex h-5 w-3.5 shrink-0 items-center justify-center">
+          {model ? <Mark tone={model.tone} live={model.live} label={model.status} />
+            : <span aria-hidden="true" className="inline-block size-[7px] rounded-full border border-subtext" />}
+        </span>
         <span className="min-w-0 flex-1">
-          <span className="block break-words">{experiment.title?.trim() || experiment.slug}</span>
-          <span className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-xs text-subtext">
-            {status ? <span className="text-text">{statusLabel(status, display?.stopping)}</span> : <span>{m.experiments_not_run_yet()}</span>}
-            {elapsed && <span className="tabular-nums">{elapsed}</span>}
-            {experiment.archived && <span>{m.tree_archived()}</span>}
-            {experiment.projectId !== sessionProjectId && (
-              <span className="ms-auto flex min-w-0 items-center gap-1">
-                <Folder size={12} className="shrink-0" aria-hidden="true" />
-                <span className="truncate">{projectName}</span>
-              </span>
-            )}
+          <span className="flex items-start gap-3">
+            <span className="min-w-0 flex-1 break-words">{autoDir(experiment.title?.trim() || experiment.slug)}</span>
+            {time && <span className="shrink-0 whitespace-nowrap text-xs leading-5 tabular-nums text-ink-subtext">{time}</span>}
           </span>
+          <span className="mt-0.5 block text-xs text-ink-subtext">
+            {!model ? m.experiments_not_run_yet()
+              : stage ? (
+                <span className="flex min-w-0 whitespace-nowrap">
+                  <Lead model={model} />
+                  {stage.name && <span className="min-w-0 shrink truncate"><Sentence text={stage.name} tone={model.tone} /></span>}
+                  {stage.count && <span className={cn("shrink-0", stage.name && "ms-1")}><Sentence text={stage.count} tone={model.tone} /></span>}
+                </span>
+              )
+              : <span className="break-words"><Lead model={model} /><Sentence text={model.sentence.text} tone={model.tone} /></span>}
+          </span>
+          {model && <span className="mt-0.5 block text-xs empty:hidden"><Headline model={model} wrap /></span>}
+          {watcher && <span className="mt-0.5 block break-words text-xs"><Sentence text={watcher} tone={model.tone} /></span>}
+          {model?.needsChoice && <span className="mt-0.5 block text-xs font-medium text-ink-amber">{m.chat_hover_waiting_for_choice()}</span>}
+          {(experiment.archived || elsewhere) && (
+            <span className="mt-0.5 flex items-center gap-x-1.5 text-xs text-ink-subtext">
+              {experiment.archived && <span>{m.tree_archived()}</span>}
+              {elsewhere && (
+                <span className="flex min-w-0 items-center gap-1">
+                  <Folder size={12} className="shrink-0" aria-hidden="true" />
+                  <span className="truncate">{autoDir(projectName)}</span>
+                </span>
+              )}
+            </span>
+          )}
         </span>
       </button>
     </li>
@@ -100,6 +116,24 @@ export function SessionHoverCard({ session, modelName, projectName, harnessLogo,
   const headingId = useId();
   const { data, isPending, error } = useQuery(getSessionExperimentsQuery(session.id));
   const [focusedId, setFocusedId] = useState<string>();
+  const [now, setNow] = useState(Date.now);
+  const rows = (data ?? []).map((row) => ({
+    row,
+    model: row.currentRun && runModel({
+      item: { sessionId: session.id, run: row.currentRun, experimentName: row.experiment.title?.trim() || row.experiment.slug },
+      monitor: null,
+      shown: false,
+      agent: m.chat_the_agent(),
+      now,
+      nextRetryMs: null,
+    }),
+  })).sort((a, b) => rank(a.model) - rank(b.model));
+  const live = rows.some(({ model }) => model?.live);
+  useEffect(() => {
+    if (!live) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [live]);
   const setCard = useCallback((element: HTMLDivElement | null) => {
     cardRef.current = element;
     const dispose = measure.ref(element);
@@ -126,7 +160,7 @@ export function SessionHoverCard({ session, modelName, projectName, harnessLogo,
     }
   }
   const title = session.title?.trim() || m.chat_untitled();
-  const tabbableId = data?.some(({ experiment }) => experiment.id === focusedId) ? focusedId : data?.[0]?.experiment.id;
+  const tabbableId = rows.some(({ row }) => row.experiment.id === focusedId) ? focusedId : rows[0]?.row.experiment.id;
 
   return createPortal(
     <div
@@ -136,7 +170,7 @@ export function SessionHoverCard({ session, modelName, projectName, harnessLogo,
       role="group"
       aria-label={title}
       tabIndex={-1}
-      className="fixed z-60 flex max-h-[min(24rem,calc(100vh-16px))] flex-col rounded-lg border border-border bg-background p-4 text-sm text-text shadow-menu focus-visible:outline-2 focus-visible:outline-focus-border"
+      className="fixed z-60 flex max-h-[min(32rem,calc(100vh-16px))] flex-col rounded-lg border border-border bg-background p-4 text-sm text-text shadow-menu focus-visible:outline-2 focus-visible:outline-focus-border"
       style={{ width, left: x, top: y, visibility: measure.offsetHeight === 0 ? "hidden" : undefined }}
       onMouseEnter={onEnter}
       onMouseLeave={onLeave}
@@ -186,10 +220,11 @@ export function SessionHoverCard({ session, modelName, projectName, harnessLogo,
             : error ? <div className="px-1.5 text-subtext">{m.common_failed_to_load({ error: ltr(error.message) })}</div>
               : data && data.length > 0 ? (
                   <ul role="list" aria-labelledby={headingId} className="m-0 list-none p-0">
-                    {data.map((row) => (
+                    {rows.map(({ row, model }) => (
                       <ExperimentRow
                         key={row.experiment.id}
                         row={row}
+                        model={model}
                         sessionProjectId={session.projectId}
                         tabbable={row.experiment.id === tabbableId}
                         onFocus={() => setFocusedId(row.experiment.id)}

@@ -14,7 +14,7 @@ import { runDisplay } from "../src/runDisplay.ts";
 import { createWorkspace } from "../src/workspace.tsx";
 import { render, serve, settle } from "./render.mjs";
 
-const run = (extra = {}) => ({ id: "run", experimentId: "exp", status: "cancelled", cancelling: false, cancelUnconfirmed: null, contact: null, host: "gpu-box", resultMarkdown: null, backend: null, createdAt: 1, ...extra });
+const run = (extra = {}) => ({ id: "run", experimentId: "exp", status: "cancelled", cancelling: false, cancelUnconfirmed: null, contact: null, host: "gpu-box", resultMarkdown: null, backend: null, createdAt: 1, updatedAt: 1, ...extra });
 const experiment = { id: "exp", title: "SSH sandwich", slug: "ssh-sandwich", createdAt: 1, parentExperimentId: null };
 const plain = (text) => text.replace(/[⁦-⁩]/g, "");
 const ignore = () => {};
@@ -57,15 +57,16 @@ const states = [
   [run({ status: "submitting", cancelling: true }), m.status_cancellation_pending(), true],
   [run({ status: "submitting", cancelling: true, contact: { type: "unreconciled", since: 1, detail: "No handle" } }), m.status_cancellation_pending(), true],
   [run({ status: "running", cancelling: true, contact: { type: "unreconciled", since: 1, detail: "Stop pending" } }), m.status_cancellation_pending(), true],
-  [run(), m.status_cancelled(), false],
+  [run(), m.status_cancelled(), false, m.run_lead_stopped()],
   [run({ contact: { type: "stopping", since: 1, count: 2 } }), survivors, true],
   [run({ cancelUnconfirmed: [], resultMarkdown: "Container processes couldn't be checked." }), m.status_cancelled_unconfirmed(), true],
 ];
 
 test("each cancellation state agrees across the badge, notice, lineage and session hover card", async () => {
-  for (const [value, label, hasNotice] of states) {
+  // The hover card words a run as the chat's run line does, which says a plain stop as "Stopped".
+  for (const [value, label, hasNotice, hoverLabel = label] of states) {
     const shown = await surfaces(value);
-    for (const surface of ["badge", "lineage", "hover"]) assert.ok(shown[surface].includes(label), `${surface}: ${shown[surface]}`);
+    for (const [surface, expected] of [["badge", label], ["lineage", label], ["hover", hoverLabel]]) assert.ok(shown[surface].includes(expected), `${surface}: ${shown[surface]}`);
     assert.equal(shown.noticeStatus, hasNotice, label);
     if (hasNotice) assert.ok(shown.notice.includes(label), shown.notice);
     assert.equal(shown.notice.includes(m.run_stop_now()), value.contact?.type === "stopping");
