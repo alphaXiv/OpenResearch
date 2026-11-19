@@ -32,6 +32,18 @@ export function delegatesOf(sessions: ChatSession[], parentId: string): ChatSess
     .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
 }
 
+/** The chats that delegated to `session`, root first, up to the first one not in `sessions`. */
+export function delegateAncestors(sessions: ChatSession[], session: ChatSession | undefined): ChatSession[] {
+  const ancestors: ChatSession[] = [];
+  for (let parentId = session?.delegate?.parentId; parentId;) {
+    const parent = sessions.find((row) => row.id === parentId);
+    if (!parent) break;
+    ancestors.unshift(parent);
+    parentId = parent.delegate?.parentId;
+  }
+  return ancestors;
+}
+
 /** Every delegate below `rootId`, each followed by its own, with its level under the root. */
 export function delegateLineage(sessions: ChatSession[], rootId: string): { session: ChatSession; level: number }[] {
   const rows: { session: ChatSession; level: number }[] = [];

@@ -1,3 +1,4 @@
+import type { LogSeek } from "../logWindow";
 import { useMachines } from "../machineSelection";
 import { downloadFile } from "../download";
 import { flushSync } from "react-dom";
@@ -38,7 +39,7 @@ import { SessionHoverCard } from "./SessionHoverCard";
 import { AgentMessageCard } from "./AgentMessageCard";
 import { DelegateCard } from "./DelegateCard";
 import { EnvRequestCard } from "./EnvRequestCard";
-import { delegateStatus, delegatesOf, type DelegateStatus } from "../delegates";
+import { delegateAncestors, delegateModelLabel, delegateStatus, delegatesOf, type DelegateStatus } from "../delegates";
 import { taskLocation } from "../workspaceState";
 import { DONE_PREVIEW_HEIGHT, fitSidebarRows, sidebarGroup, sidebarRowHeight, type SidebarRow } from "../sidebarLayout";
 import { useVirtualizer, defaultRangeExtractor, elementScroll, measureElement as measureVirtualElement, type Range as VirtualRange } from "@tanstack/react-virtual";
@@ -167,7 +168,6 @@ import {
   type OrxSource,
   type Autonomy,
   type ChatSession,
-  type ChatActiveRun,
   type CitedMessage,
   type ChatSearchHit,
   type Harness,
@@ -175,6 +175,7 @@ import {
   type Project,
   type PromptAnswer,
   type RuntimeInfo,
+  type Run,
   type NativeChat,
   type SkillInfo,
   type StarterPrompt,
@@ -241,7 +242,10 @@ import { ChatLinksContext, type ChatLinks } from "./ChatLinks";
 import { CITED_ID, messageRef } from "../agentMessages";
 import { PlanStrip } from "./PlanStrip";
 import { useComposerFocus } from "./useComposerFocus";
-import { BackgroundTaskBanner, ExperimentRunBanner } from "./ExperimentRunBanner";
+import { RunBanner } from "./run/RunBanner";
+import { BackgroundTaskBanner } from "./BackgroundTaskBanner";
+import { sessionRunMark } from "../runMonitor/model";
+import type { ShownRun } from "../runMonitor/types";
 import { SettingsHeader, harnessSetupPath, type SettingsTab } from "./SettingsPage";
 import { SkillMenu } from "./SkillMenu";
 import { MentionMenu, type MentionMatch } from "./MentionMenu";
@@ -925,7 +929,7 @@ const PROMPT_ACTIONS_CLASS_NAME = "prompt-actions flex flex-wrap gap-2";
 
 const NO_MESSAGES: ChatMessage[] = [];
 const EMPTY_SESSIONS: ChatSession[] = [];
-const EMPTY_RUNS: ChatActiveRun[] = [];
+const EMPTY_RUNS: ShownRun[] = [];
 type DelegateRow = { session: ChatSession; status: DelegateStatus };
 const EMPTY_DELEGATES: DelegateRow[] = [];
 const EMPTY_RECOVERY_OVERRIDES = {};
@@ -5182,7 +5186,7 @@ const Transcript = memo(function Transcript({
             data-message-id={rowId}
             data-search-target={isTarget || undefined}
             ref={virtualizer.measureElement}
-            className={`absolute left-0 w-full pb-4 isolate outline-none before:-z-10 before:pointer-events-none before:absolute before:-inset-x-2 before:-top-2 before:bottom-2 before:rounded-lg before:bg-highlight before:transition-opacity before:duration-700 motion-reduce:before:transition-none after:pointer-events-none after:absolute after:-inset-x-2 after:-top-2 after:bottom-2 after:rounded-lg focus-visible:after:outline-2 focus-visible:after:outline-focus ${rowId === markedRowId ? "before:opacity-60" : "before:opacity-0"}`}
+            className={`absolute left-0 w-full isolate outline-none before:-z-10 before:pointer-events-none before:absolute before:-inset-x-2 before:-top-2 before:bottom-2 before:rounded-lg before:bg-highlight before:transition-opacity before:duration-700 motion-reduce:before:transition-none after:pointer-events-none after:absolute after:-inset-x-2 after:-top-2 after:bottom-2 after:rounded-lg focus-visible:after:outline-2 focus-visible:after:outline-focus ${rowId === markedRowId ? "before:opacity-60" : "before:opacity-0"}`}
             onClickCapture={(event) => {
               if (!(event.target instanceof Element) || !event.target.closest("[data-work-toggle]")) return;
               stickToBottom.current = false;
@@ -5195,6 +5199,8 @@ const Transcript = memo(function Transcript({
               if (!event.currentTarget.contains(event.relatedTarget)) setFocusedRow((current) => current === rowId ? null : current);
             }}
           >
+          {/* Bleeds to the pane edges: WebKit anchors a press beside an absolutely positioned row at the feed's first character. */}
+          <div className="-mx-[100vw] px-[100vw] pb-4">
           {/* NVDA leaves article names unspoken by default, so a hidden heading names the author. A reply nests under its prompt. */}
           {group[0].role === "user"
             ? <h5 id={headingId} className="sr-only select-none">{userLabel}</h5>
@@ -5248,6 +5254,7 @@ const Transcript = memo(function Transcript({
               ))}
             </div>
           )}
+          </div>
           </div>
         );
       })}
@@ -5426,8 +5433,8 @@ function SessionRow({
   busy: boolean;
   /** An actionable question or held approval needs the user's attention. */
   waiting: boolean;
-  /** The chat's experiment runs in flight. */
-  runs: readonly ChatActiveRun[];
+  /** The chat's runs above its composer: live, flagged, or ended and not yet answered. */
+  runs: readonly ShownRun[];
   /** `inbox`: title and agent, then project and what the chat is doing. `done`: one line, restored from its hover button. */
   variant: "list" | "inbox" | "done";
   /** Nonce set while this row's freshly auto-generated title should play its
@@ -5453,13 +5460,16 @@ function SessionRow({
   /** Where the row's menu opens: the cursor for a right-click, the kebab for a click. */
   const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null);
   const open = menuAt !== null;
-  const experimentRunning = runs.length > 0;
+  const runMark = sessionRunMark(runs, session.id);
+  const runFlag = runMark === "waiting" || runMark === "flagged";
   const title = session.title?.trim() || m.chat_untitled();
-  const sessionDescription = `${title} · ${harnessLabel(session.harness, session.harnessName)}${modelName ? ` · ${modelName}` : ""}`;
+  const attention = runMark === "waiting" ? m.chat_run_needs_attention() : runMark === "flagged" ? m.chat_run_flagged() : waiting ? m.chat_panel_waiting_for_your_input() : null;
+  const sessionDescription = `${title} · ${harnessLabel(session.harness, session.harnessName)}${modelName ? ` · ${modelName}` : ""}${attention ? ` · ${attention}` : ""}`;
   const [editing, setEditing] = useState(false);
   // Seeded by startEditing() before the input mounts; "" is just a placeholder.
   const [draft, setDraft] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const titleRef = useRef<HTMLSpanElement>(null);
   const cardRef = useRef<HTMLDivElement>(null);
   const cardId = useId();
   const [anchor, setAnchor] = useState<DOMRect | null>(null);
@@ -5467,6 +5477,18 @@ function SessionRow({
   const closeTimer = useRef<number | undefined>(undefined);
   const pointerInside = useRef(false);
   const dismissed = useRef(false);
+
+  useLayoutEffect(() => {
+    const element = titleRef.current;
+    if (!element) return;
+
+    const measure = () => element.toggleAttribute("data-overflow", element.scrollWidth > element.clientWidth);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    if (element.firstElementChild) observer.observe(element.firstElementChild);
+    return () => observer.disconnect();
+  }, [title, editing, variant]);
 
   function closeCard() {
     window.clearTimeout(openTimer.current);
@@ -5528,6 +5550,12 @@ function SessionRow({
     }
   }, [editing]);
 
+  const flagMark = runFlag && !editing && (
+    <Tooltip content={runMark === "waiting" ? m.chat_run_needs_attention() : m.chat_run_flagged()} className="shrink-0 text-ink-amber">
+      <TriangleAlert size={14} aria-hidden="true" />
+    </Tooltip>
+  );
+
   const titleInput = (
     <input
       ref={inputRef}
@@ -5587,7 +5615,7 @@ function SessionRow({
         if (!ref.current?.contains(event.relatedTarget) && !cardRef.current?.contains(event.relatedTarget)) dismissed.current = false;
         scheduleClose();
       }}
-      className={`session-row relative flex items-center gap-2 w-full ${inbox ? "inbox h-12.5" : variant === "done" ? "h-8" : "h-8.5"} text-start px-2.25 rounded-md text-sm text-text cursor-pointer select-none [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium [&_.session-dot:empty]:hidden [&_.session-dot]:w-4 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title]:[mask-image:linear-gradient(to_right,black_calc(100%_-_16px),transparent)] [&_.session-title]:whitespace-nowrap [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:size-6 [&_.session-menu-btn]:-mx-1 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-visible_.session-menu-btn]:inline-flex [&_.session-menu-btn:focus-within]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&.card-open_.session-menu-btn]:inline-flex [&:hover_.session-dot]:hidden [&:focus-visible_.session-dot]:hidden [&:has(.session-menu-btn:focus-within)_.session-dot]:hidden [&.menu-open_.session-dot]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-accent-teal [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-accent-blue [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:absolute [&_.session-title-input]:inset-0 [&_.session-title-input]:size-full [&_.session-title-input]:py-0 [&_.session-title-input]:ps-0 [&_.session-title-input]:pe-[9px] [&_.session-title-input]:indent-[9px] [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-focus-border [&_.session-title-input]:rounded-md [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-dot]:hidden [&_.session-done-btn]:hidden [&:hover_.session-done-btn]:inline-flex [&:focus-visible_.session-done-btn]:inline-flex [&_.session-done-btn:focus-visible]:inline-flex [&_.session-done-btn:focus-within]:inline-flex [&:has(.session-done-btn:focus-within)_.session-logo]:hidden [&.card-open_.session-done-btn]:inline-flex [&:has(.session-done-btn):hover_.session-logo]:hidden [&:has(.session-done-btn):focus-visible_.session-logo]:hidden [&:has(.session-done-btn:focus-visible)_.session-logo]:hidden [&.card-open:has(.session-done-btn)_.session-logo]:hidden [&.editing_.session-done-btn]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""} ${anchor ? "card-open" : ""}  ${
+      className={`session-row relative flex items-center gap-2 w-full ${inbox ? "inbox h-12.5" : variant === "done" ? "h-8" : "h-8.5"} text-start px-2.25 rounded-md text-sm text-text cursor-pointer select-none [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium [&_.session-dot:empty]:hidden [&_.session-dot]:w-4 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title[data-overflow]]:[mask-image:linear-gradient(to_right,black_calc(100%_-_16px),transparent)] [&_.session-title]:whitespace-nowrap [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:size-6 [&_.session-menu-btn]:-mx-1 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-visible_.session-menu-btn]:inline-flex [&_.session-menu-btn:focus-within]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&.card-open_.session-menu-btn]:inline-flex [&:hover_.session-dot]:hidden [&:focus-visible_.session-dot]:hidden [&:has(.session-menu-btn:focus-within)_.session-dot]:hidden [&.menu-open_.session-dot]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-accent-teal [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-accent-blue [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:absolute [&_.session-title-input]:inset-0 [&_.session-title-input]:size-full [&_.session-title-input]:py-0 [&_.session-title-input]:ps-0 [&_.session-title-input]:pe-[9px] [&_.session-title-input]:indent-[9px] [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-focus-border [&_.session-title-input]:rounded-md [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-dot]:hidden [&_.session-done-btn]:hidden [&:hover_.session-done-btn]:inline-flex [&:focus-visible_.session-done-btn]:inline-flex [&_.session-done-btn:focus-visible]:inline-flex [&_.session-done-btn:focus-within]:inline-flex [&:has(.session-done-btn:focus-within)_.session-logo]:hidden [&.card-open_.session-done-btn]:inline-flex [&:has(.session-done-btn):hover_.session-logo]:hidden [&:has(.session-done-btn):focus-visible_.session-logo]:hidden [&:has(.session-done-btn:focus-visible)_.session-logo]:hidden [&.card-open:has(.session-done-btn)_.session-logo]:hidden [&.editing_.session-done-btn]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""} ${anchor ? "card-open" : ""}  ${
         editing ? "editing" : ""
         }`}
       onContextMenu={(e) => {
@@ -5625,10 +5653,11 @@ function SessionRow({
       {variant === "done" ? <>
         <ProjectIconTile project={project} size="sm" />
         {editing ? titleInput : (
-          <span className={`session-title ${unread ? "text-title-unread" : "text-title-read"}`} onDoubleClick={startEditing}>
-            <TitleReveal key={revealTitle ?? "static"} title={title} animate={revealTitle !== undefined} />
+          <span ref={titleRef} className={`session-title ${runFlag ? "text-ink-amber" : unread ? "text-title-unread" : "text-title-read"}`} onDoubleClick={startEditing}>
+            <span className="inline-block"><TitleReveal key={revealTitle ?? "static"} title={title} animate={revealTitle !== undefined} /></span>
           </span>
         )}
+        {flagMark}
         {!editing && <span className="session-logo shrink-0 text-xs tabular-nums text-muted">{timeAgo(session.updatedAt)}</span>}
         {!editing && (
           <Tooltip content={m.chat_inbox_restore()} className="session-done-btn -my-1 -me-1 shrink-0">
@@ -5649,10 +5678,11 @@ function SessionRow({
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
           <div className="flex items-center gap-2">
             {editing ? titleInput : (
-              <span className={`session-title ${unread || waiting ? "text-title-unread" : "text-title-read"}`} onDoubleClick={startEditing}>
-                <TitleReveal key={revealTitle ?? "static"} title={title} animate={revealTitle !== undefined} />
+              <span ref={titleRef} className={`session-title ${runFlag ? "text-ink-amber" : unread || waiting ? "text-title-unread" : "text-title-read"}`} onDoubleClick={startEditing}>
+                <span className="inline-block"><TitleReveal key={revealTitle ?? "static"} title={title} animate={revealTitle !== undefined} /></span>
               </span>
             )}
+            {flagMark}
             <span className="session-logo inline-flex w-4 shrink-0 items-center justify-center">
               {session.model
                 ? <ModelMark model={{ id: session.model, displayName: modelName ?? undefined }} harness={session.harness} size={14} />
@@ -5682,21 +5712,24 @@ function SessionRow({
           </div>
         </div>
       ) : (
-        <span className="session-title" onDoubleClick={startEditing}>
-          <TitleReveal
-            key={revealTitle ?? "static"}
-            title={title}
-            animate={revealTitle !== undefined}
-          />
+        <span ref={titleRef} className={`session-title ${attention ? "text-ink-amber" : ""}`} onDoubleClick={startEditing}>
+          <span className="inline-block">
+            <TitleReveal
+              key={revealTitle ?? "static"}
+              title={title}
+              animate={revealTitle !== undefined}
+            />
+          </span>
         </span>
       )}
-      {plain && experimentRunning && !editing && (
+      {plain && runMark === "running" && !editing && (
         <Tooltip content={m.chat_experiment_running()} className="shrink-0 text-accent-green">
           <FlaskConical size={14} className="motion-safe:animate-[or-experiment-pulse_3s_ease-in-out_infinite]" aria-label={m.chat_experiment_running()} />
         </Tooltip>
       )}
+      {plain && flagMark}
       {plain && waiting && !editing && (
-        <Tooltip content={m.chat_panel_waiting_for_your_input()} className="shrink-0 text-accent-amber">
+        <Tooltip content={m.chat_panel_waiting_for_your_input()} className="shrink-0 text-ink-amber">
           <HelpCircle size={14} aria-hidden="true" />
         </Tooltip>
       )}
@@ -5935,6 +5968,7 @@ export function ChatPanel({
   onSelectMainView,
   onOpenFile,
   onOpenRun,
+  onOpenRunPage,
   runExperimentName,
   chatInfo,
   onOpenMessage,
@@ -5995,9 +6029,10 @@ export function ChatPanel({
     ref: string | undefined,
     intent: TabOpenIntent,
   ) => void;
-  /** Open a run's logs in the right pane (agent-emitted `<run>` evidence chips).
+  /** Open a run's logs in the right pane (agent-emitted `<run>` evidence chips), at `seek` when given.
    * Run ids are globally unique, so no session context is needed. */
-  onOpenRun?: OpenTranscriptTarget;
+  onOpenRun?: (runId: string, intent: TabOpenIntent, seek?: LogSeek) => void;
+  onOpenRunPage?: (run: Run, intent: TabOpenIntent) => void;
   /** Resolve a run to the experiment name shown on tool activity links. */
   runExperimentName?: (runId: string) => string;
   /** A chat in this project, or undefined for one elsewhere. */
@@ -6062,7 +6097,7 @@ export function ChatPanel({
     listProjectActivityQuery,
     listChatSessionsQuery,
     listSidebarChatSessionsQuery,
-    listChatActiveRunsQuery,
+    listChatShownRunsQuery,
     getHarnessesQuery,
     getUiStateQuery,
     getSkillsQuery,
@@ -6318,12 +6353,12 @@ export function ChatPanel({
   const planModeOverrideRef = useRef<boolean | null>(null);
   const queuedPlanOverrideSeen = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const { data: activeRuns = EMPTY_RUNS } = useQuery(listChatActiveRunsQuery());
+  const shownRuns = useQuery(listChatShownRunsQuery()).data?.runs ?? EMPTY_RUNS;
   const runsBySession = useMemo(() => {
-    const bySession = new Map<string, ChatActiveRun[]>();
-    for (const item of activeRuns) bySession.set(item.sessionId, [...bySession.get(item.sessionId) ?? [], item]);
+    const bySession = new Map<string, ShownRun[]>();
+    for (const item of shownRuns) bySession.set(item.sessionId, [...bySession.get(item.sessionId) ?? [], item]);
     return bySession;
-  }, [activeRuns]);
+  }, [shownRuns]);
   const [state, dispatch, historyQuery] = useChatState(projectId, mainView === "chat" ? activeId : null);
   const { data: harnesses = EMPTY_HARNESSES } = useQuery(getHarnessesQuery());
   const modelName = useModelName();
@@ -7159,7 +7194,7 @@ export function ChatPanel({
   useEffect(() => onChatEvent((event) => {
     if (event.type === "reconnected") void syncSessionList(true);
     if (event.type === "runsChanged") {
-      void queryClient.invalidateQueries({ queryKey: listChatActiveRunsQuery().queryKey });
+      void queryClient.invalidateQueries({ queryKey: listChatShownRunsQuery().queryKey });
     }
   }), [syncSessionList]);
 
@@ -7236,6 +7271,7 @@ export function ChatPanel({
     part.type === "prompt" && part.prompt?.kind === "question" && !part.prompt.resolved && (!part.prompt.nativeId || busy),
   )), [messages, busy]);
   const activeSession = openSession;
+  const ancestors = embedded || !onOpenDelegate ? [] : delegateAncestors(sessions, activeSession);
   // Once the user writes in a delegate, whether it still reports to its parent is theirs to decide.
   const steeringDelegate = Boolean(activeSession?.delegate?.notifies) && (draft.trim() !== ""
     || messages.some((message) => message.parts.some((part) =>
@@ -8979,6 +9015,27 @@ export function ChatPanel({
           <div className={headerClass}>
           <div className="flex min-w-0 flex-1 items-center gap-2">
             {activeSession && <>
+              {ancestors.length > 0 && (
+                <nav aria-label={m.chat_parent_chats()} className="-me-1 flex min-w-0 shrink items-center gap-1">
+                  {ancestors.map((ancestor) => {
+                    const label = ancestor.title?.trim() || (ancestor.delegate ? delegateModelLabel(ancestor, modelName) : m.chat_untitled());
+                    return (
+                      <Fragment key={ancestor.id}>
+                        <button
+                          type="button"
+                          dir="auto"
+                          className="min-w-8 max-w-48 cursor-pointer truncate rounded-sm text-base text-subtext transition-colors duration-120 ease-standard hover:text-text focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:outline-offset-2"
+                          title={label}
+                          onClick={() => onOpenDelegate?.(ancestor.id)}
+                        >
+                          {label}
+                        </button>
+                        <ChevronRight size={14} className="shrink-0 text-muted rtl:rotate-180" aria-hidden="true" />
+                      </Fragment>
+                    );
+                  })}
+                </nav>
+              )}
               {activeSession.title?.trim() ? (
                 <PaperTitle variant="header" className="flex-initial" title={activeSession.title.trim()}>
                   <TitleReveal
@@ -9133,8 +9190,8 @@ export function ChatPanel({
               transcriptSelection.dismiss();
             }}
           >
-            {/* Clips the launch rise at the composer, since a transform still extends the scroll range. */}
-            <div className="min-h-full overflow-y-clip">
+            {/* Clips the rows' bleed, and the launch rise at the composer, since a transform still extends the scroll range. */}
+            <div className="min-h-full overflow-hidden supports-[overflow:clip]:overflow-clip">
             <div className="chat-thread-inner max-w-readable my-0 mx-auto pt-4 px-4 pb-8 flex flex-col gap-4" ref={threadInnerRef}>
               <ChatImageScope projectId={projectId} sessionId={activeId}>
                 <ChatLinksContext value={chatLinks}>
@@ -9248,12 +9305,15 @@ export function ChatPanel({
               </IconButton>
             </Tooltip>
           )}
-          <ExperimentRunBanner
-            key={activeId}
-            runs={activeRuns.filter((item) => item.sessionId === activeId)}
-            onOpenRun={onOpenRun}
-            onOpenExperiment={onOpenExperiment}
-          />
+          {activeId && (
+            <RunBanner
+              key={activeId}
+              sessionId={activeId}
+              agent={assistantLabel}
+              onOpenRun={onOpenRun}
+              onOpenRunPage={onOpenRunPage}
+            />
+          )}
           {!busy && <BackgroundTaskBanner background={activeSession?.background} />}
           {/* Inside the composer so the composer's popovers (mode/model pickers,
             z 50 within this stacking context) layer above the strip — as a

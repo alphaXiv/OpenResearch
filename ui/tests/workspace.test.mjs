@@ -262,29 +262,32 @@ async function projectPage({ experiments = [], runs = () => [] } = {}) {
 
 const logs = (runId, text = "log") => ({ runId, dataBase64: btoa(text), offset: 0 });
 const runningRun = (id, projectId = "p") => ({ id, projectId, experimentId: "exp", status: "running", createdAt: 1, updatedAt: 2 });
-const runLogsPane = (runId) => ({ kind: "experiment", experimentId: "exp", view: "terminal", runId });
 
-test("a newly running experiment opens its logs only on its first output", async () => {
+test("a newly running experiment leaves the chat pane unchanged", async () => {
   const app = await projectPage({ runs: () => [runningRun("historical")] });
   await app.emit("run.updated", { run: runningRun("new") });
   assert.equal(app.pane(), null);
   await app.emit("run.log", logs("new", ""));
   assert.equal(app.pane(), null);
   await app.emit("run.log", logs("new"));
-  assert.deepEqual(app.pane(), runLogsPane("new"));
+  assert.equal(app.pane(), null);
 
-  await app.closePanel();
+  const files = { kind: "home", view: "files" };
+  await navigate(workspace.taskLocation("p", null, files));
+  await app.emit("run.updated", { run: runningRun("files-run") });
+  await app.emit("run.log", logs("files-run"));
   await app.emit("run.log", logs("new", "more"));
   await app.emit("run.updated", { run: runningRun("historical") });
   await app.emit("run.log", logs("historical"));
   await app.emit("run.log", logs("unknown"));
   await app.emit("run.updated", { run: runningRun("other-project", "other") });
   await app.emit("run.log", logs("other-project"));
-  assert.equal(app.pane(), null);
+  assert.deepEqual(app.pane(), files);
 
+  await app.closePanel();
   await app.emit("run.log", logs("early-log"));
   await app.emit("run.updated", { run: runningRun("early-log") });
-  assert.deepEqual(app.pane(), runLogsPane("early-log"));
+  assert.equal(app.pane(), null);
 });
 
 test("a run baseline resolving after the project page unmounts cannot navigate", async () => {

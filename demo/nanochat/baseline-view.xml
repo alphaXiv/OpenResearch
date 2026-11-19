@@ -1,0 +1,13 @@
+<signal name="val_bpb" label="Val bpb" digits="3" better="lower" />
+<signal name="loss" label="Train loss" digits="3" smooth="0.3" better="lower" />
+<signal name="tok_per_sec" label="Tokens/s" as="compact" better="higher" />
+<signal name="sft_val_bpb" label="SFT val bpb" digits="4" better="lower" />
+<signal name="sft_loss" label="SFT loss" digits="3" smooth="0.3" better="lower" />
+
+<view headline="sft_val_bpb val_bpb">
+  <chart y="val_bpb" ghost="parent" phase="train" title="Validation bits per byte" />
+  <chart y="loss" phase="train" />
+  <stats of="val_bpb loss tok_per_sec" phase="train" />
+  <chart y="sft_val_bpb" ghost="parent" phase="sft" title="SFT validation bits per byte" />
+  <chart y="sft_loss" phase="sft" />
+</view>

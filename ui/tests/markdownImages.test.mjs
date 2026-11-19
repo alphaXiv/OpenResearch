@@ -58,7 +58,7 @@ async function experimentImages(sessions) {
 }
 
 test("experiment descriptions and run results load project images from the experiment's chat", async () => {
-  const sources = await experimentImages([{ id: "s", projectId: "p" }]);
+  const sources = await experimentImages([{ id: "s", projectId: "p", harness: "claude" }]);
   assert.equal(sources.plot.pathname, "/api/projects/p/files/file");
   assert.equal(sources.plot.searchParams.get("path"), "example.svg");
   assert.equal(sources.loss.pathname, "/api/projects/p/file/raw");

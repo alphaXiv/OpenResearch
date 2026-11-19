@@ -29,6 +29,17 @@ globalThis.EventSource = class extends EventTarget {
   close() { this.readyState = 2; }
 };
 
+// happy-dom does not deliver intersection entries. Run cards are in view unless a test clips them.
+globalThis.IntersectionObserver = class extends IntersectionObserver {
+  constructor(callback, options) {
+    super(callback, options);
+    this.callback = callback;
+  }
+  observe(target) {
+    if (target.hasAttribute("data-run")) this.callback([{ target, isIntersecting: true }]);
+  }
+};
+
 afterEach(async () => {
   for (const unmount of mounted) await unmount();
   for (const client of clients) client.clear();

@@ -91,9 +91,10 @@ function ConfirmDialogContent({
   cancelLabel: string;
 }) {
   const confirmRef = useRef<HTMLButtonElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
 
   return (
-    <DialogContent initialFocus={confirmRef}>
+    <DialogContent initialFocus={destructive && cancelable ? cancelRef : confirmRef}>
       <DialogHeader>
         <DialogTitle>{title}</DialogTitle>
         <DialogDescription>{description}</DialogDescription>
@@ -101,7 +102,7 @@ function ConfirmDialogContent({
       {errorMessage != null && <DialogError>{errorMessage}</DialogError>}
       <DialogFooter>
         {cancelable && (
-          <Button onClick={cancel} disabled={isDisabled}>
+          <Button ref={cancelRef} onClick={cancel} disabled={isDisabled}>
             {cancelLabel}
           </Button>
         )}

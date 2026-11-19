@@ -1,0 +1,4 @@
+{
+  "defaults": {"runBanner": "strip"},
+  "saved": {"runBanner": "line"}
+}

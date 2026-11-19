@@ -213,9 +213,17 @@ pub fn fmt_ago(ms: i64) -> String {
     }
 }
 
-/// Run duration in seconds (open-ended runs measure up to now).
-pub fn run_duration_secs(run: &StoredRun) -> i64 {
-    (run.ended_at.unwrap_or_else(now_ms) - run.created_at) / 1000
+/// When the backend never reported a start, the launch is the only timestamp available.
+pub fn run_duration_ms(run: &StoredRun, started_at: Option<i64>) -> i64 {
+    let end = run.ended_at.unwrap_or_else(|| {
+        if crate::engine::Phase::parse(&run.status).is_some_and(crate::engine::Phase::is_terminal) {
+            run.updated_at
+        } else {
+            now_ms()
+        }
+    });
+    end.saturating_sub(started_at.unwrap_or(run.created_at))
+        .max(0)
 }
 
 #[cfg(test)]

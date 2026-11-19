@@ -1,5 +1,6 @@
 import type { ChatActiveRun, ChatSession } from "./api";
 import { isUsageLimitError } from "./chatRendering";
+import { runActive } from "./runDisplay";
 
 /** What a chat is doing, as the inbox sidebar shows it. `since` is when the state began. */
 export type ChatStatus =
@@ -16,16 +17,17 @@ export type ChatStatus =
 export const chatStatusWorking = (status: ChatStatus) =>
   status.kind === "queued" || status.kind === "running" || status.kind === "working" || status.kind === "background";
 
-/** A running experiment outranks the agent's own work: it is what the chat waits on. */
+/** A running experiment outranks the agent's own work: it is what the chat waits on. Ended `runs` count for nothing. */
 export function chatStatus(session: ChatSession, busy: boolean, waiting: boolean, runs: readonly ChatActiveRun[]): ChatStatus {
   if (waiting) return { kind: "input" };
 
-  const running = runs.filter((item) => item.run.status === "running");
+  const live = runs.filter((item) => runActive(item.run.status));
+  const running = live.filter((item) => item.run.status === "running");
   if (running.length) {
     const since = Math.min(...running.map((item) => item.run.startedAt ?? item.run.createdAt));
     return { kind: "running", since, runs: running.length };
   }
-  if (runs.length) return { kind: "queued", since: Math.min(...runs.map((item) => item.run.createdAt)), runs: runs.length };
+  if (live.length) return { kind: "queued", since: Math.min(...live.map((item) => item.run.createdAt)), runs: live.length };
 
   const turn = session.lastTurn;
   const turnLive = turn && (turn.state === "preparing" || turn.state === "retrying" || turn.state === "running");

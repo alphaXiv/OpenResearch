@@ -23,9 +23,8 @@
 //!
 //! Control requests ride the same stdin stream
 //! (`{"type":"control_request","request_id":…,"request":{"subtype":…}}`) and are
-//! answered by a `control_response`; `set_model` is the only one we use — native
-//! `interrupt` gave no response and is treated as unreliable, so v1 interrupts
-//! by killing the child (`ChatHost::interrupt`'s `claude-code` branch).
+//! answered by a `control_response`. Interrupts kill the child because native
+//! `interrupt` gave no response.
 //!
 //! Non-goals (separate tasks): MCP config isolation (`--strict-mcp-config`);
 //! codex/opencode paths; the UI rendering fix.
@@ -51,7 +50,7 @@ use crate::local::harness::claude::{
 use crate::local::harness::{HarnessAuthState, PermissionMode, SetupFailure};
 use crate::local::native_store::NativeStore;
 
-/// Ceiling on a control request's response wait. Control requests (`set_model`)
+/// Ceiling on a control request's response wait. Control requests
 /// are quick; a wedged child must never hold the respawn path for long.
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 const TERMINATION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -222,8 +221,7 @@ impl TurnSlot {
 
 /// What the resident child was spawned with. Any field that can only be applied
 /// at launch (permission mode, effort, the `orx mcp` bridge) forces a respawn
-/// when it changes; `model` is the exception — it retunes live via `set_model`,
-/// so it is updated in place on a successful control request.
+/// when it changes, including the model carried in the child's environment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpawnConfig {
     pub permission_mode: Option<PermissionMode>,
@@ -341,9 +339,12 @@ pub struct ClaudeClient {
     /// The session's in-flight turn, if any (one per session-child). The
     /// registration guard drops synchronously on task abort, hence sync mutex.
     turn: std::sync::Mutex<TurnSlot>,
-    /// What this child was spawned with — the reuse/respawn decision reads it,
-    /// and a successful `set_model` updates its `model` in place.
+    /// What this child was spawned with, used by the reuse/respawn decision.
     config: std::sync::Mutex<SpawnConfig>,
+    /// The inherited model stays fixed even when the catalog resolves its alias differently.
+    invocation_model: Option<String>,
+    /// Compaction can serve a turn before this process records any usage.
+    usage_started: AtomicBool,
     auth_generation: u64,
     started_at: Instant,
     terminated: AtomicBool,
@@ -364,6 +365,24 @@ impl ClaudeClient {
     /// The config this child is currently running under.
     pub fn config(&self) -> SpawnConfig {
         self.config.lock().unwrap().clone()
+    }
+
+    pub(crate) fn begin_usage_attempt(
+        &self,
+        store: &crate::store::Store,
+        execution: &str,
+        prefix: &str,
+        native_scope: Option<&str>,
+    ) -> Result<()> {
+        let native_scope = if self.usage_started.load(Ordering::Relaxed) {
+            native_scope
+        } else {
+            None
+        };
+
+        store.begin_native_usage_attempt(execution, prefix, "claude-code", native_scope)?;
+        self.usage_started.store(true, Ordering::Relaxed);
+        Ok(())
     }
 
     pub fn auth_generation(&self) -> u64 {
@@ -507,21 +526,6 @@ impl ClaudeClient {
                 timeout.as_secs()
             )
         })?
-    }
-
-    /// Retune the resident child's model in place via `set_model`. On success,
-    /// record the new model in `config` so the reuse decision stays truthful.
-    async fn set_model(&self, model: &str) -> Result<()> {
-        match self
-            .control_request(json!({ "subtype": "set_model", "model": model }))
-            .await?
-        {
-            Ok(_) => {
-                self.config.lock().unwrap().model = Some(model.to_string());
-                Ok(())
-            }
-            Err(msg) => Err(anyhow!("claude set_model failed: {msg}")),
-        }
     }
 
     async fn write_line(&self, msg: &Value) -> Result<()> {
@@ -682,10 +686,7 @@ async fn read_loop(client: Arc<ClaudeClient>, stdout: tokio::process::ChildStdou
                         }
                     }
                 }
-                // Route to the live turn. With none listening, a segment the
-                // child starts itself is held for a turn to record; any other
-                // line (an aborted turn's tail) is dropped once its tool
-                // identities are recorded.
+                // A segment the child starts itself is held for a turn to record.
                 let mut turn = client.turn.lock().unwrap();
                 if turn.track_background(&value, Instant::now()) {
                     if let Some(chat) = client.chat.upgrade() {
@@ -704,19 +705,6 @@ async fn read_loop(client: Arc<ClaudeClient>, stdout: tokio::process::ChildStdou
                     if let Some(chat) = client.chat.upgrade() {
                         let session_id = client.session_id.clone();
                         tokio::spawn(async move { chat.record_continuation(&session_id).await });
-                    }
-                } else if value.get("type").and_then(Value::as_str) == Some("assistant") {
-                    drop(turn);
-                    if let Some(message) = value.get("message").cloned() {
-                        let session_id = client.session_id.clone();
-                        // Off the reader so a busy store never stalls Claude's stdout.
-                        tokio::task::spawn_blocking(move || {
-                            crate::local::chat::record_native_invocations(
-                                "claude-code",
-                                &session_id,
-                                &message,
-                            )
-                        });
                     }
                 }
             }
@@ -842,7 +830,11 @@ fn release_steers(client: &ClaudeClient) {
 /// wiring: `--input-format stream-json` and, on recovery/respawn,
 /// `--resume <native_id>`. No handshake — the first turn's `system`/`init` line
 /// is the health signal.
-async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<ClaudeClient>> {
+async fn spawn_client(
+    spec: &SpawnSpec,
+    auth_generation: u64,
+    invocation_model: Option<String>,
+) -> Result<Arc<ClaudeClient>> {
     let bin = spec.config.bin.clone().ok_or_else(|| {
         SetupFailure::tag(
             "claude_setup_binary",
@@ -978,6 +970,15 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
         "claude-code",
         spec.chat.up_port(),
     )?;
+    if let Some(model) = &invocation_model {
+        let identity = crate::store::InvocationIdentity {
+            harness: "claude-code".into(),
+            model: model.clone(),
+            provider: None,
+        };
+        identity.validate()?;
+        cmd.env("ORX_INVOCATION_CONTEXT", serde_json::to_string(&identity)?);
+    }
     // Own process group: a terminal SIGINT reaches orx up alone, which then
     // tears the resident child down deliberately (kill_session / shutdown). A
     // shared group would let Ctrl-C kill a persistent child mid-turn.
@@ -1015,6 +1016,8 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
         pending: std::sync::Mutex::new(HashMap::new()),
         turn: std::sync::Mutex::new(TurnSlot::new(started_at)),
         config: std::sync::Mutex::new(config),
+        invocation_model,
+        usage_started: AtomicBool::new(false),
         auth_generation,
         started_at,
         terminated: AtomicBool::new(false),
@@ -1022,44 +1025,6 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
     });
     tokio::spawn(read_loop(client.clone(), stdout));
     Ok(client)
-}
-
-/// How a live child reconciles with the turn's wanted config.
-///
-/// * `Reuse` — identical spawn config → hand back the running child (zero cost).
-/// * `SetModel` — only the model changed, to a concrete value → retune in place.
-/// * `Respawn` — mode/effort/bridge changed, or the model was cleared (a launch
-///   flag can't be unset live) → kill and respawn with `--resume`.
-#[derive(Debug, PartialEq, Eq)]
-pub enum ChildAction {
-    Reuse,
-    SetModel(String),
-    Respawn,
-}
-
-/// Pure reuse/respawn decision (unit-tested). `current` is the running child's
-/// config, `wanted` the turn's.
-pub fn child_action(current: &SpawnConfig, wanted: &SpawnConfig) -> ChildAction {
-    // Any launch-only axis differing forces a respawn.
-    if current.permission_mode != wanted.permission_mode
-        || current.effort != wanted.effort
-        || current.bridge_active != wanted.bridge_active
-        || current.alphaxiv_signed_in != wanted.alphaxiv_signed_in
-        || current.native_store != wanted.native_store
-        || current.profile != wanted.profile
-        || current.bin != wanted.bin
-    {
-        return ChildAction::Respawn;
-    }
-    if current.model == wanted.model {
-        return ChildAction::Reuse;
-    }
-    // Model differs. A change TO a concrete model retunes live; clearing the
-    // model (Some → None) can't be expressed as a flag toggle, so respawn.
-    match &wanted.model {
-        Some(model) => ChildAction::SetModel(model.clone()),
-        None => ChildAction::Respawn,
-    }
 }
 
 /// The `orx up` Claude host: one resident `claude` child per chat session, keyed
@@ -1413,6 +1378,29 @@ impl ClaudeHost {
         spec: SpawnSpec,
         tx: mpsc::UnboundedSender<TurnEvent>,
     ) -> Result<TurnRoute> {
+        let invocation_model = match spec.config.model.as_deref() {
+            Some(selected) => {
+                let catalog = spec.chat.harnesses.lock().await;
+                let entry = catalog.as_ref().and_then(|(_, payload)| {
+                    crate::local::harness::catalog_entry(
+                        payload,
+                        "claude-code",
+                        spec.config.profile.as_deref(),
+                    )
+                });
+                let model = entry
+                    .and_then(|entry| entry["models"].as_array())
+                    .and_then(|models| {
+                        models
+                            .iter()
+                            .find(|model| model["id"].as_str() == Some(selected))
+                    })
+                    .and_then(|model| model["resolvedModel"].as_str())
+                    .unwrap_or(selected);
+                Some(model.to_owned())
+            }
+            None => None,
+        };
         let session = spec.session_id.clone();
         let session_lock = {
             let mut locks = self.spawn_locks.lock().await;
@@ -1484,42 +1472,19 @@ impl ClaudeHost {
             } else if !profile && live.auth_generation() != auth.generation {
                 self.inner.lock().await.remove(&session);
                 stop_client(live, "authentication-changed").await;
-            } else {
-                match child_action(&live.config(), &spec.config) {
-                    ChildAction::Reuse => {
-                        let latest = self.auth_snapshot();
-                        if profile
-                            || (latest.state == HarnessAuthState::Ready
-                                && live.auth_generation() == latest.generation)
-                        {
-                            return Ok(live.register_turn(tx, self.reaper_notify.clone()));
-                        }
-                        self.inner.lock().await.remove(&session);
-                        stop_client(live, "authentication-changed").await;
-                    }
-                    ChildAction::SetModel(model) => match live.set_model(&model).await {
-                        Ok(()) => {
-                            let latest = self.auth_snapshot();
-                            if profile
-                                || (latest.state == HarnessAuthState::Ready
-                                    && live.auth_generation() == latest.generation)
-                            {
-                                return Ok(live.register_turn(tx, self.reaper_notify.clone()));
-                            }
-                            self.inner.lock().await.remove(&session);
-                            stop_client(live, "authentication-changed").await;
-                        }
-                        Err(e) => {
-                            eprintln!("orx up: claude set_model failed, respawning: {e}");
-                            self.inner.lock().await.remove(&session);
-                            stop_client(live, "set-model-failed").await;
-                        }
-                    },
-                    ChildAction::Respawn => {
-                        self.inner.lock().await.remove(&session);
-                        stop_client(live, "configuration-changed").await;
-                    }
+            } else if live.config() == spec.config && live.invocation_model == invocation_model {
+                let latest = self.auth_snapshot();
+                if profile
+                    || (latest.state == HarnessAuthState::Ready
+                        && live.auth_generation() == latest.generation)
+                {
+                    return Ok(live.register_turn(tx, self.reaper_notify.clone()));
                 }
+                self.inner.lock().await.remove(&session);
+                stop_client(live, "authentication-changed").await;
+            } else {
+                self.inner.lock().await.remove(&session);
+                stop_client(live, "configuration-changed").await;
             }
         }
         auth = self.auth_snapshot();
@@ -1535,7 +1500,7 @@ impl ClaudeHost {
             .insert(session.clone(), spawn_epoch);
         let host = self.clone();
         let client = tokio::spawn(async move {
-            let client = spawn_client(&spec, auth.generation).await?;
+            let client = spawn_client(&spec, auth.generation, invocation_model).await?;
             {
                 let mut guard = host.inner.lock().await;
                 let latest = host.auth_snapshot();
@@ -1778,6 +1743,8 @@ pub(crate) mod tests {
             pending: std::sync::Mutex::new(HashMap::new()),
             turn: std::sync::Mutex::new(TurnSlot::new(idle_since)),
             config: std::sync::Mutex::new(cfg(None, None, None, false)),
+            invocation_model: None,
+            usage_started: AtomicBool::new(false),
             auth_generation: 0,
             started_at,
             terminated: AtomicBool::new(false),
@@ -1950,25 +1917,87 @@ pub(crate) mod tests {
         }
     }
 
-    #[test]
-    fn changing_profile_always_respawns_the_child() {
-        let current = cfg(None, None, Some("sonnet"), false);
-        let mut wanted = current.clone();
-        wanted.profile = Some("claude-012345abcd".into());
-        assert_eq!(child_action(&current, &wanted), ChildAction::Respawn);
-        let mut second = wanted.clone();
-        second.profile = Some("claude-abcdefghij".into());
-        assert_eq!(child_action(&wanted, &second), ChildAction::Respawn);
-    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bash_inherits_the_selected_model_without_an_input_hook() {
+        use std::os::unix::fs::PermissionsExt;
 
-    #[test]
-    fn a_newly_selected_claude_respawns_the_child() {
-        let mut current = cfg(None, None, Some("sonnet"), false);
-        current.bin = Some(PathBuf::from("/user/claude"));
-        let mut wanted = current.clone();
-        assert_eq!(child_action(&current, &wanted), ChildAction::Reuse);
-        wanted.bin = Some(PathBuf::from("/managed/claude"));
-        assert_eq!(child_action(&current, &wanted), ChildAction::Respawn);
+        let repo = crate::store::data_dir().join(format!("invocation-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&repo).unwrap();
+        let bin = repo.join("claude");
+        std::fs::write(
+            &bin,
+            r#"#!/bin/sh
+while IFS= read -r input; do
+    printf '{"type":"system","identity":%s}\n' "$ORX_INVOCATION_CONTEXT"
+done
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let host = Arc::new(ClaudeHost::new());
+        host.auth.write().unwrap().state = HarnessAuthState::Ready;
+        let chat = Arc::new(crate::local::chat::ChatHost::new(
+            Arc::new(crate::local::opencode::AgentHost::new(None)),
+            Arc::new(crate::local::codex::CodexHost::new()),
+            host.clone(),
+        ));
+        for (selected, resolved) in [
+            ("haiku", Some("claude-haiku-5-5")),
+            ("sonnet[1m]", Some("claude-sonnet-5-5")),
+            ("sonnet[1m]", Some("claude-sonnet-5-5")),
+            ("sonnet[1m]", Some("claude-sonnet-6-0")),
+            ("custom-model", None),
+        ] {
+            *chat.harnesses.lock().await = Some((
+                Instant::now(),
+                json!({"harnesses":[{
+                    "id":"claude-code", "models":[{"id":selected,"resolvedModel":resolved}]
+                }]}),
+            ));
+            let mut config = cfg(Some(PermissionMode::Auto), None, Some(selected), false);
+            config.bin = Some(bin.clone());
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let route = host
+                .acquire_turn(
+                    SpawnSpec {
+                        chat: chat.clone(),
+                        session_id: "invocation-test".into(),
+                        repo: repo.clone(),
+                        playbook: repo.join("playbook"),
+                        resume: None,
+                        fork_at: None,
+                        config,
+                    },
+                    tx,
+                )
+                .await
+                .unwrap();
+            route.client().send_user_message("Run orx").await.unwrap();
+            let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let TurnEvent::Line(event) = event else {
+                panic!("Claude exited before replying")
+            };
+            let identity: crate::store::InvocationIdentity =
+                serde_json::from_value(event["identity"].clone()).unwrap();
+            assert_eq!(identity.harness, "claude-code");
+            assert_eq!(identity.model, resolved.unwrap_or(selected));
+            assert_eq!(route.client().config().model.as_deref(), Some(selected));
+            let settings: Value = serde_json::from_slice(
+                &std::fs::read(write_settings(&repo, false).unwrap()).unwrap(),
+            )
+            .unwrap();
+            assert!(settings["hooks"]["PreToolUse"]
+                .as_array()
+                .unwrap()
+                .is_empty());
+            drop(route);
+        }
+        host.shutdown().await;
+        std::fs::remove_dir_all(repo).unwrap();
     }
 
     #[cfg(unix)]
@@ -2151,136 +2180,6 @@ pub(crate) mod tests {
             ),
             None
         );
-    }
-
-    #[test]
-    fn child_action_matrix() {
-        // Identical config → reuse.
-        assert_eq!(
-            child_action(
-                &cfg(
-                    Some(PermissionMode::Auto),
-                    Some("high"),
-                    Some("opus"),
-                    false
-                ),
-                &cfg(
-                    Some(PermissionMode::Auto),
-                    Some("high"),
-                    Some("opus"),
-                    false
-                ),
-            ),
-            ChildAction::Reuse
-        );
-        let mut legacy = cfg(None, None, None, false);
-        legacy.native_store = NativeStore::Legacy;
-        assert_eq!(
-            child_action(&cfg(None, None, None, false), &legacy),
-            ChildAction::Respawn
-        );
-        // Model-only change to a concrete value → set_model.
-        assert_eq!(
-            child_action(
-                &cfg(
-                    Some(PermissionMode::Auto),
-                    Some("high"),
-                    Some("opus"),
-                    false
-                ),
-                &cfg(
-                    Some(PermissionMode::Auto),
-                    Some("high"),
-                    Some("sonnet"),
-                    false
-                ),
-            ),
-            ChildAction::SetModel("sonnet".into())
-        );
-        // Clearing the model (Some → None) can't be a live flag toggle → respawn.
-        assert_eq!(
-            child_action(
-                &cfg(
-                    Some(PermissionMode::Auto),
-                    Some("high"),
-                    Some("opus"),
-                    false
-                ),
-                &cfg(Some(PermissionMode::Auto), Some("high"), None, false),
-            ),
-            ChildAction::Respawn
-        );
-        // Setting a model from None is a concrete target → set_model.
-        assert_eq!(
-            child_action(
-                &cfg(Some(PermissionMode::Auto), Some("high"), None, false),
-                &cfg(
-                    Some(PermissionMode::Auto),
-                    Some("high"),
-                    Some("opus"),
-                    false
-                ),
-            ),
-            ChildAction::SetModel("opus".into())
-        );
-        // Permission-mode change → respawn (launch-only).
-        assert_eq!(
-            child_action(
-                &cfg(
-                    Some(PermissionMode::Auto),
-                    Some("high"),
-                    Some("opus"),
-                    false
-                ),
-                &cfg(
-                    Some(PermissionMode::Plan),
-                    Some("high"),
-                    Some("opus"),
-                    false
-                ),
-            ),
-            ChildAction::Respawn
-        );
-        // Effort change → respawn (launch-only).
-        assert_eq!(
-            child_action(
-                &cfg(
-                    Some(PermissionMode::Auto),
-                    Some("high"),
-                    Some("opus"),
-                    false
-                ),
-                &cfg(Some(PermissionMode::Auto), Some("max"), Some("opus"), false),
-            ),
-            ChildAction::Respawn
-        );
-        // Bridge toggling on (a plan turn that got the bridge where the child
-        // didn't have it) → respawn.
-        assert_eq!(
-            child_action(
-                &cfg(Some(PermissionMode::Plan), None, Some("opus"), false),
-                &cfg(Some(PermissionMode::Plan), None, Some("opus"), true),
-            ),
-            ChildAction::Respawn
-        );
-        // Mode-and-model both differing still respawns (launch axis wins over
-        // the model-only set_model shortcut).
-        assert_eq!(
-            child_action(
-                &cfg(Some(PermissionMode::Auto), None, Some("opus"), false),
-                &cfg(Some(PermissionMode::Plan), None, Some("sonnet"), false),
-            ),
-            ChildAction::Respawn
-        );
-    }
-
-    #[test]
-    fn alphaxiv_sign_in_changes_respawn_the_resident_child() {
-        let signed_out = cfg(Some(PermissionMode::Ask), None, None, true);
-        let mut signed_in = signed_out.clone();
-        signed_in.alphaxiv_signed_in = true;
-        assert_eq!(child_action(&signed_out, &signed_in), ChildAction::Respawn);
-        assert_eq!(child_action(&signed_in, &signed_out), ChildAction::Respawn);
     }
 
     #[test]
