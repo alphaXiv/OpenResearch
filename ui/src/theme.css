@@ -70,7 +70,7 @@
   --color-ink-orange: color-mix(in srgb, var(--accent-orange) 80%, var(--text));
   --color-ink-red: color-mix(in srgb, var(--accent-red) 70%, var(--text));
   --color-ink-green: color-mix(in srgb, var(--accent-green) 60%, var(--text));
-  --color-ink-purple: color-mix(in srgb, var(--accent-purple) 80%, var(--text));
+  --color-ink-purple: color-mix(in srgb, var(--accent-purple) 75%, var(--text));
   /* Secondary words over a run's strip and line, which sit on the surface: 4.5:1 in both themes. */
   --color-ink-subtext: color-mix(in srgb, var(--subtext) 85%, var(--text));
   --color-mark-teal: var(--mark-teal);

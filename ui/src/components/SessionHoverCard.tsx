@@ -1,6 +1,6 @@
 import { useWorkspace } from "../workspace";
 import { useQuery } from "@tanstack/react-query";
-import { FlaskConical, Folder, RefreshCw, TriangleAlert } from "lucide-react";
+import { FlaskConical, Folder, HelpCircle, RefreshCw, TriangleAlert } from "lucide-react";
 import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 
@@ -160,8 +160,9 @@ function ExperimentRow({ row, peek, sessionProjectId, tabbable, onFocus, onOpen 
   );
 }
 
-export function SessionHoverCard({ session, runs, motion, modelName, harnessLogo, anchor, cardId, cardRef, container, onOpenExperiment, onReturnToRow, onContinue }: {
+export function SessionHoverCard({ session, need, runs, motion, modelName, harnessLogo, anchor, cardId, cardRef, container, onOpenExperiment, onReturnToRow, onContinue }: {
   session: ChatSession;
+  need: string | null;
   /** The chat's runs its composer shows, each drawn under its experiment. */
   runs: readonly ShownRun[];
   motion: "enter" | "warm" | "leave";
@@ -295,6 +296,12 @@ export function SessionHoverCard({ session, runs, motion, modelName, harnessLogo
       }}
     >
       <div className="shrink-0 font-semibold break-words">{title}</div>
+      {need && (
+        <div className="mt-2 flex shrink-0 gap-1.5 text-subtext">
+          <HelpCircle size={14} className="mt-[3px] shrink-0 text-accent-purple" aria-hidden="true" />
+          <span className="min-w-0 wrap-anywhere" dir="auto">{need}</span>
+        </div>
+      )}
       {experiments && <div className="mt-3 flex min-h-0 flex-col border-t border-border pt-2">
         {(!data || data.length > 0) && (
           <div className="mb-1 flex shrink-0 items-center gap-1.5 text-xs font-medium text-subtext">

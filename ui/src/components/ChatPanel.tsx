@@ -5500,7 +5500,7 @@ function SessionRow({
   busy,
   waiting,
   runs,
-  leadRun = null,
+  inboxDetail,
   variant,
   revealTitle,
   onOpen,
@@ -5526,8 +5526,7 @@ function SessionRow({
   waiting: boolean;
   /** The chat's runs above its composer: live, flagged, or ended and not yet answered. */
   runs: readonly ShownRun[];
-  /** The run an inbox card gives its middle line to. */
-  leadRun?: ShownRun | null;
+  inboxDetail: Extract<SidebarRow, { kind: "inbox" }>["detail"];
   /** `inbox`: title and agent, then project and what the chat is doing. `done`: one line, restored from its hover button. */
   variant: "list" | "inbox" | "done";
   /** Nonce set while this row's freshly auto-generated title should play its
@@ -5558,10 +5557,12 @@ function SessionRow({
   const open = menuAt !== null;
   const runMark = sessionRunMark(runs, session.id);
   const runFlag = runMark === "waiting" || runMark === "flagged";
-  const lead = inbox && leadRun && runModel({ item: leadRun, monitor: null, shown: false, agent: m.chat_the_agent(), now: Date.now(), nextRetryMs: null });
+  const needsInput = inboxDetail === "need";
+  const lead = inboxDetail && !needsInput && runModel({ item: inboxDetail, monitor: null, shown: false, agent: m.chat_the_agent(), now: Date.now(), nextRetryMs: null });
   const title = session.title?.trim() || m.chat_untitled();
   const attention = runMark === "waiting" ? m.chat_run_needs_attention() : runMark === "flagged" ? m.chat_run_flagged() : waiting ? m.chat_panel_waiting_for_your_input() : null;
-  const sessionDescription = `${title} · ${harnessLabel(session.harness, session.harnessName)}${modelName ? ` · ${modelName}` : ""}${attention ? ` · ${attention}` : ""}`;
+  const need = needsInput && session.yieldText ? mentionsAsText(session.yieldText) : null;
+  const sessionDescription = `${title} · ${harnessLabel(session.harness, session.harnessName)}${modelName ? ` · ${modelName}` : ""}${attention ? ` · ${attention}` : ""}${need ? ` · ${need}` : ""}`;
   const [editing, setEditing] = useState(false);
   // Seeded by startEditing() before the input mounts; "" is just a placeholder.
   const [draft, setDraft] = useState("");
@@ -5779,7 +5780,7 @@ function SessionRow({
         if (!ref.current?.contains(event.relatedTarget) && !cardRef.current?.contains(event.relatedTarget)) dismissed.current = false;
         scheduleClose();
       }}
-      className={`session-row relative flex items-center gap-2 w-full ${inbox ? `inbox ${lead ? "h-17.5" : "h-12.5"}` : variant === "done" ? "h-8" : "h-8.5"} text-start px-2.25 rounded-md text-sm text-text cursor-pointer select-none [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium [&_.session-dot:empty]:hidden [&_.session-dot]:w-4 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title[data-overflow]]:[mask-image:linear-gradient(to_right,black_calc(100%_-_16px),transparent)] [&_.session-title]:whitespace-nowrap [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:size-6 [&_.session-menu-btn]:-mx-1 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-visible_.session-menu-btn]:inline-flex [&_.session-menu-btn:focus-within]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&.card-open_.session-menu-btn]:inline-flex [&:hover_.session-dot]:hidden [&:focus-visible_.session-dot]:hidden [&:has(.session-menu-btn:focus-within)_.session-dot]:hidden [&.menu-open_.session-dot]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-accent-teal [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-accent-blue [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:absolute [&_.session-title-input]:inset-0 [&_.session-title-input]:size-full [&_.session-title-input]:py-0 [&_.session-title-input]:ps-0 [&_.session-title-input]:pe-[9px] [&_.session-title-input]:indent-[9px] [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-focus-border [&_.session-title-input]:rounded-md [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-dot]:hidden [&_.session-done-btn]:hidden [&:hover_.session-done-btn]:inline-flex [&:focus-visible_.session-done-btn]:inline-flex [&_.session-done-btn:focus-visible]:inline-flex [&_.session-done-btn:focus-within]:inline-flex [&:has(.session-done-btn:focus-within)_.session-logo]:hidden [&.card-open_.session-done-btn]:inline-flex [&:has(.session-done-btn):hover_.session-logo]:hidden [&:has(.session-done-btn):focus-visible_.session-logo]:hidden [&:has(.session-done-btn:focus-visible)_.session-logo]:hidden [&.card-open:has(.session-done-btn)_.session-logo]:hidden [&.editing_.session-done-btn]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""} ${cardShown ? "card-open" : ""}  ${
+      className={`session-row relative flex items-center gap-2 w-full ${inbox ? `inbox ${inboxDetail ? "h-17.5" : "h-12.5"}` : variant === "done" ? "h-8" : "h-8.5"} text-start px-2.25 rounded-md text-sm text-text cursor-pointer select-none [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium [&_.session-dot:empty]:hidden [&_.session-dot]:w-4 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title[data-overflow]]:[mask-image:linear-gradient(to_right,black_calc(100%_-_16px),transparent)] [&_.session-title]:whitespace-nowrap [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:size-6 [&_.session-menu-btn]:-mx-1 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-visible_.session-menu-btn]:inline-flex [&_.session-menu-btn:focus-within]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&.card-open_.session-menu-btn]:inline-flex [&:hover_.session-dot]:hidden [&:focus-visible_.session-dot]:hidden [&:has(.session-menu-btn:focus-within)_.session-dot]:hidden [&.menu-open_.session-dot]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-accent-teal [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-accent-blue [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:absolute [&_.session-title-input]:inset-0 [&_.session-title-input]:size-full [&_.session-title-input]:py-0 [&_.session-title-input]:ps-0 [&_.session-title-input]:pe-[9px] [&_.session-title-input]:indent-[9px] [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-focus-border [&_.session-title-input]:rounded-md [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-dot]:hidden [&_.session-done-btn]:hidden [&:hover_.session-done-btn]:inline-flex [&:focus-visible_.session-done-btn]:inline-flex [&_.session-done-btn:focus-visible]:inline-flex [&_.session-done-btn:focus-within]:inline-flex [&:has(.session-done-btn:focus-within)_.session-logo]:hidden [&.card-open_.session-done-btn]:inline-flex [&:has(.session-done-btn):hover_.session-logo]:hidden [&:has(.session-done-btn):focus-visible_.session-logo]:hidden [&:has(.session-done-btn:focus-visible)_.session-logo]:hidden [&.card-open:has(.session-done-btn)_.session-logo]:hidden [&.editing_.session-done-btn]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""} ${cardShown ? "card-open" : ""}  ${
         editing ? "editing" : ""
         }`}
       onContextMenu={(e) => {
@@ -5862,18 +5863,23 @@ function SessionRow({
               </button>
             )}
           </div>
-          {lead && (
+          {needsInput ? (
+            <div className="flex h-4 min-w-0 items-center gap-1.5 text-xs text-ink-purple">
+              <span className="flex w-4 shrink-0 justify-center"><HelpCircle size={12} aria-hidden="true" /></span>
+              <span dir="auto" className="truncate">{need || m.chat_turn_close_need()}</span>
+            </div>
+          ) : lead && (
             <div className={`flex h-4 min-w-0 items-center gap-1.5 text-xs ${lead.tone === "flag" ? "text-ink-amber" : "text-ink-subtext"}`}>
               {lead.tone !== "flag" && <span className="flex w-4 shrink-0 justify-center"><Mark tone={lead.tone} live={lead.live} label={lead.status} /></span>}
               <span dir="auto" className="truncate"><Sentence text={cardSentence(lead)} tone={lead.tone} /></span>
             </div>
           )}
-          <div className={`${lead ? "mt-0.5" : ""} flex items-center gap-2 text-xs text-subtext`}>
+          <div className={`${inboxDetail ? "mt-0.5" : ""} flex items-center gap-2 text-xs text-subtext`}>
             <span className="flex min-w-0 flex-1 items-center gap-1.5">
               <ProjectIconTile project={project} size="sm" />
               {!project.scratch && <span className="truncate">{projectName}</span>}
             </span>
-            <InboxStatus status={chatStatus(session, busy, waiting, runs)} unread={unread} />
+            {!needsInput && <InboxStatus status={chatStatus(session, busy, waiting, runs)} unread={unread} />}
           </div>
         </div>
       ) : (
@@ -5924,6 +5930,7 @@ function SessionRow({
           session={session}
           runs={runs}
           motion={cardMotion}
+          need={need}
           modelName={modelName}
           harnessLogo={harnessLogo}
           anchor={anchor}
@@ -8664,7 +8671,12 @@ export function ChatPanel({
     const pushSection = (section: "inbox" | "working", chats: typeof open, count = chats.length) => {
       const collapsed = collapsedInbox.includes(section);
       sidebarRows.push({ kind: "section", section, collapsed, count });
-      if (!collapsed) chats.forEach(({ project, session }) => sidebarRows.push({ kind: "inbox", section, project, session, run: sessionLeadRun(runsBySession.get(session.id) ?? EMPTY_RUNS, session.id, session.lastRun) }));
+      if (!collapsed) chats.forEach(({ project, session }) => {
+        const detail = chatNeedsYou(session, sessionBusy(project, session), false)
+          ? "need"
+          : sessionLeadRun(runsBySession.get(session.id) ?? EMPTY_RUNS, session.id, session.lastRun);
+        sidebarRows.push({ kind: "inbox", section, project, session, detail });
+      });
       return collapsed;
     };
     const pushWorking = () => { if (working.length) pushSection("working", working); };
@@ -9058,7 +9070,7 @@ export function ChatPanel({
         </div>
       );
     }
-    const sessionRow = (project: Project, s: ChatSession, variant: "list" | "inbox" | "done", leadRun: ShownRun | null, markBelowDone: boolean) => {
+    const sessionRow = (project: Project, s: ChatSession, variant: "list" | "inbox" | "done", inboxDetail: React.ComponentProps<typeof SessionRow>["inboxDetail"], markBelowDone: boolean) => {
       const sessionHarness = sessionAcpHarness(s, selectionHarness(harnesses, s));
       const sessionModel = sessionHarness?.models.find((model) => model.id === s.model);
       return (
@@ -9076,7 +9088,7 @@ export function ChatPanel({
           busy={sessionBusy(project, s)}
           waiting={sessionWaiting(project, s)}
           runs={runsBySession.get(s.id) ?? EMPTY_RUNS}
-          leadRun={leadRun}
+          inboxDetail={inboxDetail}
           markBelowDone={markBelowDone}
           variant={variant}
           revealTitle={titleReveals.get(s.id)}
@@ -9118,7 +9130,7 @@ export function ChatPanel({
           </div>
         ) : s ? (
           <div className={sidebarGrouping === "projects" ? "ms-5.5" : undefined}>
-            {sessionRow(project, s, row.kind === "inbox" ? "inbox" : row.kind === "done" ? "done" : "list", row.kind === "inbox" ? row.run : null, row.kind === "inbox" && row.section === "inbox")}
+            {sessionRow(project, s, row.kind === "inbox" ? "inbox" : row.kind === "done" ? "done" : "list", row.kind === "inbox" ? row.detail : null, row.kind === "inbox" && row.section === "inbox")}
           </div>
         ) : row.kind === "more" ? (
           <Button variant="ghost" size="small" className="ms-5.5 font-normal text-subtext" aria-expanded={sidebarGroup(project) in chatLimits} onClick={() => {

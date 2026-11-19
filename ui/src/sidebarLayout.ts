@@ -7,8 +7,7 @@ export type SidebarRow =
   | { kind: "project"; project: Project; collapsed: boolean; busy: boolean }
   | { kind: "chat"; project: Project; session: ChatSession }
   | { kind: "section"; section: RailSection; collapsed: boolean; count: number }
-  /** `run` is the experiment the card gives a line to. */
-  | { kind: "inbox"; section: "inbox" | "working"; project: Project; session: ChatSession; run: ShownRun | null }
+  | { kind: "inbox"; section: "inbox" | "working"; project: Project; session: ChatSession; detail: ShownRun | "need" | null }
   | { kind: "done"; project: Project; session: ChatSession }
   | { kind: "spacer"; height: number }
   | { kind: "more"; project: Project }
@@ -21,7 +20,7 @@ export const sidebarGroup = (project: Project) => project.scratch ? "scratch" : 
 export const DONE_PREVIEW_HEIGHT = 32 * 5.5;
 
 export const sidebarRowHeight = (row: SidebarRow) =>
-  row.kind === "spacer" ? row.height : row.kind === "project" ? 36 : row.kind === "inbox" ? (row.run ? 70 : 50)
+  row.kind === "spacer" ? row.height : row.kind === "project" ? 36 : row.kind === "inbox" ? (row.detail ? 70 : 50)
     : row.kind === "section" || row.kind === "done" ? 32 : 34;
 
 export function fitSidebarRows(rows: SidebarRow[], height: number, activeId: string | null): SidebarRow[] {

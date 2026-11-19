@@ -194,6 +194,46 @@ test("chats waiting on the user stay in Inbox while active turns go in Working",
   }
 });
 
+test("an inbox card gives its middle line to a closing need until a new turn starts", async () => {
+  const text = `Two runs were starved by host load <run id="r1" />, so tell me when the machine is free.`;
+  const words = "Two runs were starved by host load, so tell me when the machine is free.";
+  const lastRun = {
+    id: "r1", experimentId: "e1", projectId: "p", status: "done", createdAt: 1, updatedAt: 1,
+    endedAt: 1, contact: null, cancelling: false, lostReason: null, host: null, backend: null,
+    monitor: { tone: "done", whole: 1, headline: { name: "loss", label: "Loss", value: 2.31 }, sentence: null, bindings: {}, signals: {}, estimate: null, flag: null, rev: 1, generation: "g", asOf: 1 },
+  };
+  const sessions = [session("need", { yieldKind: "need", yieldText: text, lastRun, updatedAt: 2 }), session("old", { yieldKind: "need", updatedAt: 1 })];
+  localStorage.setItem("sidebar-grouping", "inbox");
+  try {
+    await renderChat("/projects/p/tasks/old", {
+      sessions,
+      routes: { "GET /api/chat/sessions": (_, url) => ({ sessions: url.includes("archived=true") ? [] : sessions }) },
+    });
+    const row = (title) => [...document.querySelectorAll(".session-row")].find((element) => !element.closest("[data-rail-ghost]") && element.textContent.includes(title));
+    const line = (title) => row(title).textContent;
+    assert.ok(line("Chat need").includes(words), "the need, its run tag as words");
+    assert.ok(line("Chat need").includes("Project"), "the project stays on the bottom line");
+    assert.doesNotMatch(line("Chat need"), /Loss/);
+    assert.equal(row("Chat need").closest("[data-index]").style.height, "70px");
+    assert.ok(row("Chat need").getAttribute("aria-label").includes(words));
+    assert.ok(line("Chat old").includes(m.chat_turn_close_need()), "an older host can send the kind alone");
+
+    await act(async () => row("Chat need").focus());
+    await settle();
+    assert.ok(document.querySelector('[data-session-hover-card="need"]').textContent.includes(words), "the hover card reads it in full");
+
+    sessions[0] = { ...sessions[0], busy: true, yieldKind: null, yieldText: null };
+    await emit("chat.session", { session: sessions[0] });
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 150)));
+    await settle();
+    assert.ok(line("Chat need").includes("Project"));
+    assert.ok(!line("Chat need").includes(words));
+    assert.match(line("Chat need"), /Loss/);
+  } finally {
+    localStorage.removeItem("sidebar-grouping");
+  }
+});
+
 for (const [answer, approve] of [[m.plan_strip_accept_plan, true], [m.plan_strip_reject, false]]) {
   test(`a plan in the open chat shows an input status until the user ${approve ? "accepts" : "rejects"} it`, async () => {
     const current = { ...assistantMessage("a", [{ id: "a-plan", type: "prompt", prompt: { kind: "plan", plan: "Compare on the held-out set.", resolved: false, synthesized: true } }]), parentId: "u" };

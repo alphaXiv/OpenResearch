@@ -1825,6 +1825,8 @@ export interface ChatSession {
   goal?: string | null;
   /** How the current turn on the active branch ended; null when a newer turn has not ended, absent from older hosts. */
   yieldKind?: YieldKind | null;
+  /** The line that turn ended with, beside `yieldKind`; absent from older hosts. */
+  yieldText?: string | null;
   autonomy: Autonomy;
   reasoningLevel: string | null;
   /** Hidden from the default Recents list, but fully intact and resumable. */
