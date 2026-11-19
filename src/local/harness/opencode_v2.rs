@@ -1406,10 +1406,15 @@ async fn discover_models_within(
             post(endpoint, "/api/plugin/await-activation", &json!({})).await?;
         }
         loop {
-            if !endpoint.legacy_v2_api && !endpoint.plugins_active(deadline).await? {
-                plugins_pending = true;
-                tokio::time::sleep(retry).await;
-                continue;
+            if !endpoint.legacy_v2_api {
+                // A plugin check the deadline cuts off counts as pending; an answer leaves what the
+                // catalogs last said.
+                let catalogs_pending = std::mem::replace(&mut plugins_pending, true);
+                if !endpoint.plugins_active(deadline).await? {
+                    tokio::time::sleep(retry).await;
+                    continue;
+                }
+                plugins_pending = catalogs_pending;
             }
             let models = catalog_get(endpoint, "/api/model").await?;
             plugins_pending = models.is_none();
