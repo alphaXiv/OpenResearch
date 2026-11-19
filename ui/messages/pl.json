@@ -596,6 +596,7 @@
   "chat_delete_session_confirm": "Usunąć „{title}”?\n\nHistoria rozmowy i wszystkie czaty poboczne zostaną trwale usunięte.",
   "chat_delete_session_failed": "Nie udało się usunąć „{title}”: {error}",
   "chat_untitled": "Bez tytułu",
+  "chat_parent_chats": "Czaty nadrzędne",
   "skills_delete_skill_label": "Usuń umiejętność {name}",
   "skills_delete_skill_confirm": "Usunąć umiejętność „{name}”?",
   "skills_edit_skill": "Edytuj umiejętność",

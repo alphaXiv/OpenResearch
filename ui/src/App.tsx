@@ -1250,9 +1250,14 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   // A delegate with its own worktree is a chat of its own, not a side chat.
   const openDelegate = useCallback((sessionId: string) => {
     const session = sessionsQuery.data?.find((row) => row.id === sessionId);
-    if (session && !session.sideParentSessionId) onActiveSessionChange(sessionId);
-    else focusSideTab(sessionId);
-  }, [sessionsQuery.data, onActiveSessionChange, focusSideTab]);
+    const sideParentId = session?.sideParentSessionId;
+    if (session && !sideParentId) onActiveSessionChange(sessionId);
+    else if (sideParentId && sideParentId !== activeSessionId) {
+      setSideComposerFocusNonce((nonce) => nonce + 1);
+      setPanelWidth((width) => Math.max(width, sideChatPanelWidth()));
+      void router.navigate({ href: taskLocation(projectId, sideParentId, { kind: "side", sessionId }) });
+    } else focusSideTab(sessionId);
+  }, [sessionsQuery.data, onActiveSessionChange, focusSideTab, projectId, activeSessionId, router]);
 
   const [requestedFocus, setRequestedFocus] = useState<FocusedMessage | null>(null);
   const focusedMessage = destination?.projectId === projectId ? requestedFocus : null;

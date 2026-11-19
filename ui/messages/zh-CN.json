@@ -592,6 +592,7 @@
   "chat_delete_session_confirm": "删除“{title}”？\n\n其聊天记录及所有侧边聊天都将被永久删除。",
   "chat_delete_session_failed": "删除“{title}”失败：{error}",
   "chat_untitled": "未命名",
+  "chat_parent_chats": "父级聊天",
   "skills_delete_skill_label": "删除技能 {name}",
   "skills_delete_skill_confirm": "删除技能“{name}”？",
   "skills_edit_skill": "编辑技能",
