@@ -29,12 +29,12 @@ use tokio::sync::{broadcast, mpsc, watch, Mutex};
 
 use crate::error::{anyhow, Result};
 use crate::local::autonomy::Autonomy;
-use crate::local::harness::ResumeAction;
+use crate::local::harness::{ResumeAction, TurnOutcome};
 use crate::local::model::LocalProject;
 use crate::local::opencode::AgentHost;
 use crate::store::{
     now_ms, ChatTurnAdmission, Store, StoredChatMessage, StoredChatSession, StoredChatTurn,
-    StoredQueuedChatMessage,
+    StoredQueuedChatMessage, TurnYield, YieldKind, STOP_CHECK_PREFIX,
 };
 
 /// Min interval between mid-turn persist+broadcast flushes (streaming parts
@@ -1198,6 +1198,8 @@ pub struct ContextUsage {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WireMessage {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_yield: Option<TurnYield>,
     pub id: String,
     pub role: String,
     pub parts: Vec<WirePart>,
@@ -1411,6 +1413,13 @@ pub fn session_json_with(store: Option<&Store>, s: &StoredChatSession, busy: boo
         "sideParentSessionId": s.side_parent_session_id,
         "delegate": delegate,
         "goal": s.goal,
+        "yieldKind": store.and_then(|store| match store.chat_session_yield_kind(&s.id) {
+            Ok(kind) => kind,
+            Err(error) => {
+                eprintln!("orx up: could not read yield for {}: {error:#}", s.id);
+                None
+            }
+        }),
         "autonomy": Autonomy::from_stored(s.autonomy.as_deref()).id(),
     })
 }
@@ -1435,6 +1444,7 @@ fn message_json(m: &WireMessage, session_id: &str) -> Value {
 
 pub(crate) fn stored_to_wire(m: &StoredChatMessage) -> WireMessage {
     let mut message = WireMessage {
+        turn_yield: None,
         id: m.id.clone(),
         role: m.role.clone(),
         parts: serde_json::from_str(&m.parts_json).unwrap_or_default(),
@@ -2213,6 +2223,7 @@ impl ChatHost {
         turns.insert(
             session_id.to_string(),
             TurnState::Active(ActiveTurn {
+                goal_at_delivery: None,
                 handle,
                 message_id: marker.id.clone(),
                 // No `chat_turns` row backs a compaction, so the id only has to
@@ -2446,6 +2457,7 @@ impl ChatHost {
         let mut message = match previous {
             Some(previous) => previous.clone(),
             None => WireMessage {
+                turn_yield: None,
                 id: format!("msg_{}", uuid::Uuid::new_v4()),
                 role: "assistant".into(),
                 parts: Vec::new(),
@@ -2586,6 +2598,7 @@ impl ChatHost {
             store.set_chat_session_archived(session_id, false)?;
         }
         let mut message = WireMessage {
+            turn_yield: None,
             id: format!("msg_{}", uuid::Uuid::new_v4()),
             role: "user".into(),
             parts: vec![part],
@@ -2633,6 +2646,7 @@ mod shell_command_tests {
         state.input = Some(json!({ "command": command, "cwd": "/work", "exitCode": code }));
         state.output = Some(format!("out of {command}"));
         WireMessage {
+            turn_yield: None,
             id: id.into(),
             role: "user".into(),
             parts: vec![part],
@@ -2644,6 +2658,7 @@ mod shell_command_tests {
 
     fn text_message(id: &str, parent: Option<&str>, role: &str) -> WireMessage {
         WireMessage {
+            turn_yield: None,
             id: id.into(),
             role: role.into(),
             parts: vec![WirePart::text("p0", "hi")],
@@ -2725,7 +2740,7 @@ mod initial_message_tests {
     use super::{
         contextualize_messages, is_initial_chat_message, strip_legacy_turn_context,
         with_selected_chat_context, AnnotatedText, TextAnnotation, CONTINUE_PROMPT, GOAL_END,
-        GOAL_START, LEGACY_COPILOT_CONTEXT,
+        LEGACY_COPILOT_CONTEXT, LEGACY_GOAL_START,
     };
     use serde_json::{json, Value};
 
@@ -2738,7 +2753,7 @@ mod initial_message_tests {
 
     #[test]
     fn legacy_recovery_removes_saved_instructions_after_bootstrap_and_preserves_quotes() {
-        let goal = format!("{GOAL_START}Research optimizers.{GOAL_END}");
+        let goal = format!("{LEGACY_GOAL_START}Research optimizers.{GOAL_END}");
         let message = format!(
             "<current-user-message>\nQuote this:\n{goal}{LEGACY_COPILOT_CONTEXT}</current-user-message>"
         );
@@ -3179,6 +3194,7 @@ impl Drop for QueueDispatchGuard {
 }
 
 struct ActiveTurn {
+    goal_at_delivery: Option<Option<String>>,
     handle: tokio::task::JoinHandle<()>,
     message_id: String,
     turn_id: String,
@@ -3406,6 +3422,7 @@ enum TurnAdmission {
     RejectIfBusy,
     Preclaimed(TurnGuard),
     RunNotice(TurnGuard),
+    StopCheck(TurnGuard, String),
     FlagWake(TurnGuard),
     Recovery {
         previous_client_turn_id: String,
@@ -4273,6 +4290,7 @@ impl ChatHost {
         // in-flight message's parts (a foreign part appended there would be
         // clobbered by the turn's next flush).
         let mut msg = WireMessage {
+            turn_yield: None,
             id: format!("msg_{prompt_id}"),
             role: "assistant".into(),
             parts: vec![WirePart::prompt(prompt_id.clone(), prompt)],
@@ -5757,6 +5775,18 @@ impl ChatHost {
         action: &str,
         explicit_overrides: RecoveryOverrides,
     ) -> Result<SendMessageResult> {
+        self.recover_turn_inner(session_id, turn_id, action, explicit_overrides, None)
+            .await
+    }
+
+    async fn recover_turn_inner(
+        self: &Arc<Self>,
+        session_id: &str,
+        turn_id: &str,
+        action: &str,
+        explicit_overrides: RecoveryOverrides,
+        stop_source: Option<&str>,
+    ) -> Result<SendMessageResult> {
         let recovery_lock = self
             .recovery_locks
             .lock()
@@ -5827,6 +5857,12 @@ impl ChatHost {
                 .as_ref()
                 .and_then(|message| message.native_harness.as_deref())
                 .is_some_and(|harness| harness != session.harness);
+        if let Some(source) = stop_source.filter(|_| agent_switched) {
+            store.settle_stop_check(source, false)?;
+            return Err(anyhow!(
+                "The agent changed before the automatic follow-up could be retried."
+            ));
+        }
         let mut settings: TurnOverrides = if agent_switched {
             TurnOverrides {
                 model: session.model.clone(),
@@ -5868,6 +5904,7 @@ impl ChatHost {
                     .as_ref()
                     .map(stored_to_wire)
                     .unwrap_or(WireMessage {
+                        turn_yield: None,
                         id: turn.assistant_message_id.clone(),
                         role: "assistant".into(),
                         parts: Vec::new(),
@@ -5886,7 +5923,13 @@ impl ChatHost {
                                 .is_some_and(|state| state.status == "error"))
                 });
                 let assistant_parts = serde_json::to_string(&assistant.parts)?;
-                let Some(guard) = TurnGuard::claim(self, session_id, None).await else {
+                let guard = if stop_source.is_some() {
+                    TurnGuard::claim_idle(self, session_id, TurnState::Reserved { turn_id: None })
+                        .await
+                } else {
+                    TurnGuard::claim(self, session_id, None).await
+                };
+                let Some(guard) = guard else {
                     return Err(anyhow!("session is busy — interrupt it first"));
                 };
                 if let Some(TurnState::Reserved { turn_id: reserved }) =
@@ -5894,8 +5937,23 @@ impl ChatHost {
                 {
                     *reserved = Some(turn_id.to_string());
                 }
-                if !store.reset_chat_turn_for_retry(turn_id, assistant.created_at)? {
-                    return Err(anyhow!("this recovery action is no longer available"));
+                {
+                    let tx = store.begin_immediate()?;
+                    if let Some(source) = stop_source {
+                        if !store.stop_check_pending(source)?
+                            || !store.stop_check_current(session_id, source, turn_id)?
+                            || !news::chat_news(&store, Some(session_id))?.is_empty()
+                        {
+                            store.settle_stop_check(source, false)?;
+                            tx.commit()?;
+                            return Err(anyhow!("The automatic follow-up is no longer current."));
+                        }
+                    }
+                    if !Store::reset_chat_turn_for_retry_locked(&tx, turn_id, assistant.created_at)?
+                    {
+                        return Err(anyhow!("this recovery action is no longer available"));
+                    }
+                    tx.commit()?;
                 }
                 let plan_state = settings.plan_mode.map(|plan_mode| {
                     let reset_pending = !plan_mode
@@ -6332,7 +6390,7 @@ impl ChatHost {
                 overrides: TurnOverrides::default(),
                 images: TurnAttachments::Uploaded(Vec::new()),
                 admission: TurnAdmission::Preclaimed(guard),
-                client_turn_id: None,
+                client_turn_id: Some(format!("chat-news:{}", uuid::Uuid::new_v4())),
                 request_hash: None,
                 continuation: false,
             },
@@ -6438,10 +6496,15 @@ impl ChatHost {
         // send racing a /respond resume) can't both spawn a turn against the
         // same session. `_guard` releases the reservation on any early error.
         let run_notice = matches!(&admission, TurnAdmission::RunNotice(_));
+        let mut stop_source = None;
         let (mut guard, mut pending_client_turn) = match admission {
             TurnAdmission::Preclaimed(guard)
             | TurnAdmission::RunNotice(guard)
             | TurnAdmission::FlagWake(guard) => (guard, None),
+            TurnAdmission::StopCheck(guard, source) => {
+                stop_source = Some(source);
+                (guard, None)
+            }
             TurnAdmission::RejectIfBusy | TurnAdmission::Recovery { .. } => {
                 match TurnGuard::claim(self, session_id, Some(&mut overrides)).await {
                     Some(guard) => (guard, None),
@@ -6790,7 +6853,7 @@ impl ChatHost {
         }
         // Activity unarchives (Claude-desktop behavior): a session being talked
         // to shouldn't stay hidden from the default Recents view.
-        if session.archived && !flag_wake {
+        if session.archived && !flag_wake && stop_source.is_none() {
             store.set_chat_session_archived(&session.id, false)?;
             session.archived = false;
         }
@@ -6843,6 +6906,7 @@ impl ChatHost {
             None
         } else {
             Some(WireMessage {
+                turn_yield: None,
                 id: format!("msg_{}", uuid::Uuid::new_v4()),
                 role: "user".into(),
                 parts,
@@ -6972,6 +7036,7 @@ impl ChatHost {
             error_message: None,
             recovery_action: None,
             recovered_by_turn_id: None,
+            turn_yield: None,
             created_at,
             updated_at: created_at,
         };
@@ -6989,6 +7054,19 @@ impl ChatHost {
             if run_notice && !Store::run_notice_batch_is_current(&tx, &turn)? {
                 tx.commit()?;
                 break 'admission None;
+            }
+            if let Some(source) = &stop_source {
+                if !store.stop_check_pending(source)? {
+                    break 'admission None;
+                }
+                if !store.stop_check_current(session_id, source, source)?
+                    || delegation::pending_prompt(&store, session_id)?.is_some()
+                    || !news::chat_news(&store, Some(session_id))?.is_empty()
+                {
+                    store.settle_stop_check(source, false)?;
+                    tx.commit()?;
+                    break 'admission None;
+                }
             }
             let mut flags = if flag_wake {
                 store.admit_flag_wakes(session_id, &turn.client_turn_id, now_ms())?
@@ -7021,6 +7099,7 @@ impl ChatHost {
                     project,
                     &turn,
                     WireMessage {
+                        turn_yield: None,
                         id: assistant_message_id,
                         role: "assistant".into(),
                         parts: Vec::new(),
@@ -7141,6 +7220,8 @@ impl ChatHost {
             &ctx.turn_id,
             &ctx.harness,
         )?;
+        let goal_at_delivery =
+            (!ctx.text.is_empty() && !ctx.continuation).then(|| ctx.delivered_goal.take());
         let task = tokio::spawn(async move {
             ctx.attempt_count = 1;
             let _ = Store::open().and_then(|store| {
@@ -7176,6 +7257,7 @@ impl ChatHost {
             };
             drop(steer_route);
             drop(ctx.steering.take());
+            let outcome = result.as_ref().copied().unwrap_or(TurnOutcome::Stopped);
             let failure = match result {
                 Err(error) => {
                     ctx.delivery_state = error.delivery;
@@ -7185,10 +7267,10 @@ impl ChatHost {
                             .unwrap_or_else(|| (error.kind.to_string(), error.message)),
                     )
                 }
-                Ok(crate::local::harness::TurnOutcome::Completed) => ctx.terminal_error.take(),
+                Ok(_) => ctx.terminal_error.take(),
             };
             let usage_outcome = if failure.is_some() { "failed" } else { "done" };
-            let _terminal_won = if let Some((kind, message)) = failure {
+            let terminal_won = if let Some((kind, message)) = failure {
                 let action = ctx.delivery_state.recovery_action();
                 let retry_owner = ctx
                     .retry_owner
@@ -7219,13 +7301,46 @@ impl ChatHost {
                     }
                 }
                 changed
-            } else if let Ok(store) = Store::open() {
-                ctx.clear_retry_status();
-                store.complete_chat_turn(&ctx.turn_id).unwrap_or(false)
             } else {
-                false
+                let host = ctx.host.clone();
+                let turns = host.turns.lock().await;
+                let session_id = ctx.session_id.clone();
+                let turn_id = ctx.turn_id.clone();
+                let mut complete = || {
+                    let store = Store::open()?;
+                    let stop_check = outcome == TurnOutcome::Completed
+                        && matches!(ctx.harness.as_str(), "claude-code" | "codex")
+                        && store
+                            .get_chat_session(&ctx.session_id)?
+                            .is_some_and(|session| {
+                                session.autonomy.as_deref() == Some("autoresearch")
+                            });
+                    let recorded = store
+                        .get_chat_turn(&ctx.session_id, &ctx.turn_id)?
+                        .and_then(|turn| turn.turn_yield);
+                    ctx.clear_retry_status();
+                    let anchor =
+                        stop_check || (outcome == TurnOutcome::Completed && recorded.is_some());
+                    if anchor {
+                        ctx.save(true)?;
+                    }
+                    let won = store.finish_chat_turn(&ctx.turn_id, outcome, stop_check)?;
+                    if won && outcome == TurnOutcome::Completed {
+                        ctx.assistant.turn_yield = recorded;
+                    }
+                    Ok::<_, crate::error::Error>(won)
+                };
+                if matches!(turns.get(&session_id), Some(TurnState::Active(active)) if active.turn_id == turn_id)
+                {
+                    complete().unwrap_or_else(|error| {
+                        eprintln!("orx up: could not complete turn {}: {error:#}", ctx.turn_id);
+                        false
+                    })
+                } else {
+                    false
+                }
             };
-            if _terminal_won {
+            if terminal_won {
                 let _ = Store::open()
                     .and_then(|store| store.finalize_turn_usage(&ctx.turn_id, usage_outcome));
             }
@@ -7250,6 +7365,7 @@ impl ChatHost {
         turns.insert(
             sid.clone(),
             TurnState::Active(ActiveTurn {
+                goal_at_delivery,
                 handle: task,
                 message_id,
                 turn_id: active_turn_id,
@@ -7493,6 +7609,12 @@ impl ChatHost {
             if let Ok(store) = Store::open() {
                 if cancel {
                     let _ = store.interrupt_chat_turn(&active.turn_id);
+                    if let Err(error) = store.settle_stop_check(&active.turn_id, false) {
+                        eprintln!(
+                            "orx up: could not retire stop check for {}: {error:#}",
+                            active.turn_id
+                        );
+                    }
                 }
                 if let Ok(Some(stored)) = store.get_chat_message(&active.message_id) {
                     let mut assistant = stored_to_wire(&stored);
@@ -7644,6 +7766,7 @@ impl ChatHost {
     /// from a silent one.
     fn record_interruption(&self, session_id: &str) {
         let mut msg = WireMessage {
+            turn_yield: None,
             id: format!("msg_{}", uuid::Uuid::new_v4()),
             role: "assistant".into(),
             parts: vec![WirePart::tool(
@@ -7991,6 +8114,79 @@ impl ChatHost {
         }
         self.emit_session(Some(session.clone())).await;
         Ok(session)
+    }
+
+    pub(crate) async fn record_yield(
+        &self,
+        session_id: &str,
+        mut closing: TurnYield,
+    ) -> Result<()> {
+        let line = closing.text.trim();
+        anyhow::ensure!(
+            !line.is_empty()
+                && line.chars().count() <= 500
+                && !line
+                    .chars()
+                    .any(|ch| ch.is_control() || matches!(ch, '\u{2028}' | '\u{2029}')),
+            "Provide one plain line of up to 500 characters for yield."
+        );
+        closing.text = line.to_string();
+
+        let turns = self.turns.lock().await;
+        let (active, token) = self.agent_turn_binding(&turns, session_id)?;
+        let store = Store::open()?;
+        let tx = store.begin_immediate()?;
+        store.require_live_chat_turn(&active.turn_id, &token)?;
+        if closing.kind == YieldKind::Running && !store.has_followed_work(session_id)? {
+            return Err(anyhow!(
+                "No followed run or live delegate can wake this chat. Use need for user input or done when the work is complete."
+            ));
+        }
+        store.write_chat_turn_yield(&active.turn_id, &closing)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(crate) async fn set_agent_goal(&self, session_id: &str, goal: Option<&str>) -> Result<()> {
+        let store = Store::open()?;
+        {
+            let turns = self.turns.lock().await;
+            let (active, token) = self.agent_turn_binding(&turns, session_id)?;
+            let tx = store.begin_immediate()?;
+            store.require_live_chat_turn(&active.turn_id, &token)?;
+            let delivered = active
+                .goal_at_delivery
+                .as_ref()
+                .ok_or_else(|| anyhow!("Change the goal from a turn that received a prompt."))?;
+            let session = store
+                .get_chat_session(session_id)?
+                .ok_or_else(|| anyhow!("This chat was deleted."))?;
+            if session.goal.as_deref() != goal {
+                if &session.goal != delivered {
+                    let current = serde_json::to_string(&session.goal)?;
+                    return Err(anyhow!("The goal changed since this turn started. Current goal: {current}. Reconcile it before setting a goal in a new turn."));
+                }
+                store.set_chat_session_goal(session_id, goal)?;
+            }
+            tx.commit()?;
+        }
+        self.emit_session(store.get_chat_session(session_id)?).await;
+        Ok(())
+    }
+
+    fn agent_turn_binding<'a>(
+        &self,
+        turns: &'a HashMap<String, TurnState>,
+        session_id: &str,
+    ) -> Result<(&'a ActiveTurn, String)> {
+        if let Some(TurnState::Active(active)) = turns.get(session_id) {
+            if let Some(token) = self.durable_turns.lock().unwrap().get(session_id) {
+                return Ok((active, token.clone()));
+            }
+        }
+        Err(anyhow!(
+            "This tool needs an active turn in your OpenResearch chat."
+        ))
     }
 
     /// Set (or, with `None`, clear) the goal every turn is reminded of.
@@ -8495,6 +8691,7 @@ fn mark_prompt_resolved(
                 ..msg.clone()
             })?;
             return Ok(Some(WireMessage {
+                turn_yield: None,
                 id: msg.id.clone(),
                 role: msg.role.clone(),
                 parts,
@@ -8542,6 +8739,7 @@ fn resolve_stale_prompts(
                 ..msg.clone()
             })?;
             updated.push(WireMessage {
+                turn_yield: None,
                 id: msg.id,
                 role: msg.role,
                 parts,
@@ -8814,6 +9012,7 @@ pub struct TurnCtx {
     /// is re-sent when that changes.
     asking: Option<String>,
     durable: bool,
+    delivered_goal: Option<String>,
     usage_execution_id: String,
     pub(crate) native_message_models: HashMap<String, crate::store::InvocationIdentity>,
     pub(crate) native_usage_scopes: HashSet<String>,
@@ -8880,6 +9079,8 @@ const CONTINUE_PROMPT: &str =
     Original request:\n";
 
 const GOAL_START: &str =
+    "<orx-goal>\nUse this as the chat's current research direction and budget. Follow the user's latest instructions and the autonomy setting.\n\n";
+const LEGACY_GOAL_START: &str =
     "<orx-goal>\nKeep working toward this goal until it is met, across every turn:\n\n";
 const GOAL_END: &str = "\n</orx-goal>\n\n";
 
@@ -8918,7 +9119,7 @@ fn strip_legacy_turn_context(text: &mut String, bootstrap: Option<&str>) {
 
     let start = text.len() - original.len();
     if let Some((_, context)) = original
-        .strip_prefix(GOAL_START)
+        .strip_prefix(LEGACY_GOAL_START)
         .and_then(|goal| goal.split_once(GOAL_END))
     {
         original = context;
@@ -8956,6 +9157,7 @@ fn turn_ctx_from_stored(
     let position = handoff::position_for(store, session)?;
     // A pending fork branches at the branch's resume point, which turns after
     // it, such as an interrupted one, never reached.
+    let mut has_handoff = false;
     if position.switched || position.since.is_none() || session.native_fork_at.is_some() {
         // A retry records no user message: it re-sends the branch's leaf.
         let prompt = turn
@@ -8970,7 +9172,24 @@ fn turn_ctx_from_stored(
             position.context_window,
         )?;
         if !context.is_empty() {
+            has_handoff = true;
             text = format!("{context}\n\n{text}");
+        }
+    }
+
+    if !has_handoff
+        && !text.is_empty()
+        && ["run-notice:", "chat-news:", STOP_CHECK_PREFIX]
+            .iter()
+            .any(|prefix| turn.client_turn_id.starts_with(prefix))
+    {
+        let messages = store.list_chat_messages(&session.id)?;
+        let path = active_path(&messages, session.active_leaf_id.as_deref());
+        let state = handoff::research_state(store, session, &path, false, 2_400)?;
+        if !state.is_empty() {
+            text.push_str(&format!(
+                "\n\n<orx-research-state>\n{state}</orx-research-state>"
+            ));
         }
     }
 
@@ -8979,6 +9198,7 @@ fn turn_ctx_from_stored(
         host,
         turn_id: turn.id.clone(),
         durable: true,
+        delivered_goal: session.goal.clone(),
         usage_execution_id: uuid::Uuid::new_v4().to_string(),
         native_message_models: HashMap::new(),
         native_usage_scopes: HashSet::new(),
@@ -9387,6 +9607,7 @@ impl TurnCtx {
             )),
             turn_id: "test-turn".into(),
             durable: false,
+            delivered_goal: None,
             usage_execution_id: "test-execution".into(),
             native_message_models: HashMap::new(),
             native_usage_scopes: HashSet::new(),
@@ -9430,6 +9651,7 @@ impl TurnCtx {
             },
             text: String::new(),
             assistant: WireMessage {
+                turn_yield: None,
                 id: "test-msg".into(),
                 role: "assistant".into(),
                 parts: Vec::new(),
@@ -9760,7 +9982,7 @@ impl TurnCtx {
     }
 
     pub fn flush(&mut self) -> Result<()> {
-        self.save()?;
+        self.save(false)?;
         let host = self.host.clone();
         let session_id = self.session_id.clone();
         self.read_steers
@@ -9768,7 +9990,7 @@ impl TurnCtx {
         Ok(())
     }
 
-    fn save(&mut self) -> Result<()> {
+    fn save(&mut self, ensure_anchor: bool) -> Result<()> {
         self.last_flush = Instant::now();
         self.deferred_flush = false;
         if self
@@ -9777,7 +9999,8 @@ impl TurnCtx {
         {
             self.mark_delivery(self.delivery_state);
         }
-        if self.assistant.parts.is_empty() {
+        if self.assistant.parts.is_empty() && self.assistant.turn_yield.is_none() && !ensure_anchor
+        {
             return Ok(());
         }
         self.apply_target_events();
@@ -10159,10 +10382,15 @@ pub enum ForkKind {
 /// Transcript replay for the UI.
 pub fn list_messages(session_id: &str) -> Result<Vec<WireMessage>> {
     let store = Store::open()?;
-    Ok(store
-        .list_chat_messages(session_id)?
+    let messages = store.list_chat_messages(session_id)?;
+    let mut yields = store.completed_chat_yields(session_id)?;
+    Ok(messages
         .iter()
-        .map(stored_to_wire)
+        .map(|row| {
+            let mut message = stored_to_wire(row);
+            message.turn_yield = yields.remove(&message.id);
+            message
+        })
         .collect())
 }
 
@@ -10190,6 +10418,7 @@ fn materialize_unfinished_turns(
             .as_ref()
             .map(stored_to_wire)
             .unwrap_or(WireMessage {
+                turn_yield: None,
                 id: turn.assistant_message_id.clone(),
                 role: "assistant".into(),
                 parts: Vec::new(),
@@ -10423,9 +10652,15 @@ async fn process_run_notices(
     for run in store.retire_unconfirmed_flag_attachments(None, now_ms())? {
         crate::commands::up::api_v2::flag_changed(run);
     }
-    if let Err(error) = crate::engine::flags::follow_up_flags(&store, now_ms()) {
-        eprintln!("orx up: run notices: following up flags: {error:#}");
-    }
+    // Candidates chosen here have already completed by the time flags are checked.
+    let stop_checks = store.pending_stop_checks();
+    let flags_checked = match crate::engine::flags::follow_up_flags(&store, now_ms()) {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("orx up: run notices: following up flags: {error:#}");
+            false
+        }
+    };
     for session_id in store.pending_run_notice_sessions()? {
         if data_dir_move_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
             return Ok(held);
@@ -10519,6 +10754,103 @@ async fn process_run_notices(
                     );
                 }
                 held.push(session_id);
+            }
+        }
+    }
+    if flags_checked {
+        for (session_id, source, next_delivery_at) in stop_checks? {
+            if data_dir_move_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
+                return Ok(held);
+            }
+            let client_turn_id = format!("{STOP_CHECK_PREFIX}{source}");
+            if let Some(turn) = store.get_chat_turn_by_client_id(&session_id, &client_turn_id)? {
+                match (turn.state.as_str(), turn.delivery_state.as_str()) {
+                    (_, "accepted") => store.settle_stop_check(&source, true)?,
+                    ("preparing" | "retrying" | "running", _) => held.push(session_id),
+                    ("failed", "not_sent" | "rejected")
+                        if turn.recovery_action.as_deref() == Some("retry")
+                            && turn.recovered_by_turn_id.is_none()
+                            && crate::local::harness::failure_cause(
+                                turn.error_kind.as_deref().unwrap_or(""),
+                                turn.error_message.as_deref().unwrap_or(""),
+                            ) != Some(crate::local::harness::FailureCause::SignIn) =>
+                    {
+                        // A failure schedules its next attempt once, even across a restart.
+                        if next_delivery_at <= turn.updated_at {
+                            store.retry_stop_check(&source, turn.updated_at)?;
+                        } else if let Err(error) = chat
+                            .recover_turn_inner(
+                                &session_id,
+                                &turn.id,
+                                "retry",
+                                RecoveryOverrides::default(),
+                                Some(&source),
+                            )
+                            .await
+                        {
+                            if !chat.is_busy(&session_id).await {
+                                eprintln!(
+                                    "orx up: could not retry stop check for {source}: {error:#}"
+                                );
+                                store.retry_stop_check(&source, now_ms())?;
+                            }
+                        }
+                    }
+                    _ => store.settle_stop_check(&source, false)?,
+                }
+                continue;
+            }
+            let Some(mut guard) =
+                TurnGuard::claim_idle(chat, &session_id, TurnState::Reserved { turn_id: None })
+                    .await
+            else {
+                held.push(session_id);
+                continue;
+            };
+            if data_dir_move_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
+                guard.release().await;
+                return Ok(held);
+            }
+
+            let result = chat.send_message_showing(&session_id, SendTurnRequest {
+                messages: vec![AnnotatedText {
+                    text: "[orx] Continue the approved research, or use yield to say why you stopped and what will restart the work.".into(),
+                    annotations: Vec::new(),
+                }],
+                prepared_input: None,
+                replace_settings: false,
+                transcript: TranscriptDisplay {
+                    text: Some(String::new()),
+                    annotations: None,
+                    orx: Vec::new(),
+                    record_user_message: false,
+                },
+                overrides: TurnOverrides::default(),
+                images: TurnAttachments::Uploaded(Vec::new()),
+                admission: TurnAdmission::StopCheck(guard, source.clone()),
+                client_turn_id: Some(client_turn_id),
+                request_hash: None,
+                continuation: false,
+            }).await;
+            if let Err(error) = result {
+                eprintln!("orx up: stop check for {source}: {error:#}");
+                if store.retry_stop_check(&source, now_ms())? {
+                    let _guard = chat.msg_write.lock().unwrap();
+                    if let Some(turn) = store.get_chat_turn(&session_id, &source)? {
+                        if let Some(mut row) = store.get_chat_message(&turn.assistant_message_id)? {
+                            let mut message = stored_to_wire(&row);
+                            message.parts.push(WirePart::tool(
+                                "stop-check-error",
+                                "error",
+                                "error",
+                                Some("OpenResearch could not send the automatic follow-up. Send a message to continue the research.".into()),
+                            ));
+                            row.parts_json = serde_json::to_string(&message.parts)?;
+                            store.upsert_chat_message(&row)?;
+                            chat.emit("chat.message", message_json(&message, &session_id));
+                        }
+                    }
+                }
             }
         }
     }
@@ -13094,6 +13426,7 @@ mod bridge_tests {
                             error_message: None,
                             recovery_action: Some("retry".into()),
                             recovered_by_turn_id: None,
+                            turn_yield: None,
                             created_at: 1,
                             updated_at: 1,
                         };
@@ -13288,6 +13621,7 @@ mod bridge_tests {
                             error_message: None,
                             recovery_action: None,
                             recovered_by_turn_id: None,
+                            turn_yield: None,
                             created_at: 1,
                             updated_at: 1,
                         };
@@ -14862,6 +15196,7 @@ for line in sys.stdin:
                 error_message: None,
                 recovery_action: None,
                 recovered_by_turn_id: None,
+                turn_yield: None,
                 created_at: now_ms(),
                 updated_at: now_ms(),
             };
@@ -15275,6 +15610,7 @@ for line in sys.stdin:
             chat.turns.lock().await.insert(
                 "resumes".into(),
                 TurnState::Active(ActiveTurn {
+                    goal_at_delivery: None,
                     handle,
                     message_id: "finishing".into(),
                     turn_id: "finishing".into(),
@@ -15845,12 +16181,14 @@ done
                     error_message: None,
                     recovery_action: None,
                     recovered_by_turn_id: None,
+                    turn_yield: None,
                     created_at: now_ms(),
                     updated_at: now_ms(),
                 };
                 store.admit_chat_turn(None, &turn).unwrap();
                 let state = if running {
                     TurnState::Active(ActiveTurn {
+                        goal_at_delivery: None,
                         handle: tokio::spawn(std::future::pending()),
                         message_id: turn.assistant_message_id.clone(),
                         turn_id: turn.id.clone(),
@@ -15908,6 +16246,7 @@ done
                 error_message: None,
                 recovery_action: None,
                 recovered_by_turn_id: None,
+                turn_yield: None,
                 created_at: now_ms(),
                 updated_at: now_ms(),
             };
@@ -15934,6 +16273,7 @@ done
             host.turns.lock().await.insert(
                 session_id.into(),
                 TurnState::Active(ActiveTurn {
+                    goal_at_delivery: None,
                     handle: tokio::spawn(std::future::pending()),
                     message_id: turn.assistant_message_id.clone(),
                     turn_id: turn.id.clone(),
@@ -16035,6 +16375,7 @@ done
                 host.turns.lock().await.insert(
                     "chat".into(),
                     TurnState::Active(ActiveTurn {
+                        goal_at_delivery: None,
                         handle: tokio::spawn(std::future::pending()),
                         message_id: "answer".into(),
                         turn_id: "turn".into(),
@@ -16284,6 +16625,216 @@ for line in sys.stdin:
         )
         .unwrap();
         tx.commit().unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stop_checks_survive_reopen_and_admit_one_hidden_follow_up() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let store = Store::open().unwrap();
+        quiet_agent_chat(&store, Some("autoresearch"));
+        let mut fixture = store.get_chat_session("owner").unwrap().unwrap();
+        let agent = store.acp_session_state("owner").unwrap().unwrap();
+
+        for (id, mode, outcome) in [
+            ("default", "agentic", TurnOutcome::Completed),
+            ("collaborative", "copilot", TurnOutcome::Completed),
+            ("stopped", "autoresearch", TurnOutcome::Stopped),
+            ("interrupted", "autoresearch", TurnOutcome::Completed),
+            ("auto", "autoresearch", TurnOutcome::Completed),
+            ("archived", "autoresearch", TurnOutcome::Completed),
+        ] {
+            fixture.id = id.into();
+            fixture.autonomy = Some(mode.into());
+            store.create_chat_session(&fixture).unwrap();
+            let tx = store.begin().unwrap();
+            tx.execute(
+                "INSERT OR REPLACE INTO acp_sessions (session_id, launch_json, configuration_json) VALUES (?1, ?2, '[]')",
+                rusqlite::params![id, serde_json::to_string(&agent.launch).unwrap()],
+            ).unwrap();
+            tx.commit().unwrap();
+            let source = format!("source-{id}");
+            store.put_chat_turn(id, &source, "running", now_ms());
+            store
+                .upsert_chat_message_on_branch(&StoredChatMessage {
+                    id: source.clone(),
+                    session_id: id.into(),
+                    role: "assistant".into(),
+                    parts_json: "[]".into(),
+                    created_at: now_ms(),
+                    completed_at: Some(now_ms()),
+                    parent_id: None,
+                    base_native_session_id: None,
+                    result_native_session_id: None,
+                    result_native_message_id: None,
+                    native_harness: Some(fixture.harness.clone()),
+                })
+                .unwrap();
+            if id == "interrupted" {
+                store.interrupt_chat_turn(&source).unwrap();
+            }
+            assert_eq!(
+                store.finish_chat_turn(&source, outcome, true).unwrap(),
+                id != "interrupted"
+            );
+        }
+
+        let due = store.pending_stop_checks().unwrap();
+        assert_eq!(due.len(), 2);
+        assert!(due
+            .iter()
+            .any(|(chat, source, _)| chat == "auto" && source == "source-auto"));
+        store.set_chat_session_archived("archived", true).unwrap();
+        drop(store);
+
+        let restarted = notice_host();
+        let moving = std::sync::atomic::AtomicBool::new(false);
+        settle_run_notices(&restarted, &moving).await.unwrap();
+        settle_run_notices(&restarted, &moving).await.unwrap();
+        let store = Store::open().unwrap();
+        let wake = store.latest_chat_turn("auto").unwrap().unwrap();
+        assert_eq!(wake.client_turn_id, "stop-check:source-auto");
+        assert_eq!(wake.user_message_id, None);
+        assert_eq!(wake.delivery_state, "accepted");
+        assert_eq!(
+            prompts()
+                .iter()
+                .filter(|prompt| prompt.contains("use yield to say why you stopped"))
+                .count(),
+            1
+        );
+        assert!(store.pending_stop_checks().unwrap().is_empty());
+        assert!(
+            store
+                .get_chat_session("archived")
+                .unwrap()
+                .unwrap()
+                .archived
+        );
+        assert_eq!(
+            store.latest_chat_turn("archived").unwrap().unwrap().id,
+            "source-archived"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_goal_uses_the_delivered_goal_and_yield_needs_a_wake() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let store = Store::open().unwrap();
+        let host = notice_host();
+        session(&store, "owner");
+        let guard = TurnGuard::claim(&host, "owner", None).await.unwrap();
+        store.put_chat_turn("owner", "answer", "running", now_ms());
+        store
+            .set_chat_session_goal("owner", Some("Original budget"))
+            .unwrap();
+        host.turns.lock().await.insert(
+            "owner".into(),
+            TurnState::Active(ActiveTurn {
+                goal_at_delivery: Some(Some("Original budget".into())),
+                turn_id: "answer".into(),
+                message_id: "answer".into(),
+                handle: tokio::spawn(std::future::pending()),
+            }),
+        );
+        guard.defuse();
+
+        let yield_line = |kind, text: &str| TurnYield {
+            kind,
+            text: text.into(),
+        };
+        assert!(host
+            .record_yield(
+                "owner",
+                yield_line(YieldKind::Running, "Waiting for output")
+            )
+            .await
+            .is_err());
+        let run = run("running");
+        store.upsert_run(&run).unwrap();
+        host.record_yield(
+            "owner",
+            yield_line(YieldKind::Running, "Waiting for output"),
+        )
+        .await
+        .unwrap();
+        host.record_yield("owner", yield_line(YieldKind::Need, "Need the test corpus"))
+            .await
+            .unwrap();
+        assert!(host
+            .record_yield("owner", yield_line(YieldKind::Done, "Two\nlines"))
+            .await
+            .is_err());
+
+        host.set_goal("owner", Some("Updated by the user"))
+            .await
+            .unwrap();
+        let conflict = host
+            .set_agent_goal("owner", None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(conflict.contains("Updated by the user"));
+        assert_eq!(
+            store
+                .get_chat_session("owner")
+                .unwrap()
+                .unwrap()
+                .goal
+                .as_deref(),
+            Some("Updated by the user")
+        );
+        host.set_goal("owner", Some("Original budget"))
+            .await
+            .unwrap();
+        host.set_agent_goal("owner", Some("Draft from the agent"))
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .get_chat_session("owner")
+                .unwrap()
+                .unwrap()
+                .goal
+                .as_deref(),
+            Some("Draft from the agent")
+        );
+
+        let mut ctx = TurnCtx::test_stub();
+        ctx.durable = true;
+        ctx.session_id = "owner".into();
+        ctx.turn_id = "answer".into();
+        ctx.assistant.id = "answer".into();
+        ctx.save(true).unwrap();
+        assert!(store
+            .finish_chat_turn("answer", TurnOutcome::Completed, true)
+            .unwrap());
+        assert_eq!(
+            list_messages("owner").unwrap()[0].turn_yield,
+            Some(yield_line(YieldKind::Need, "Need the test corpus"))
+        );
+        assert_eq!(
+            store.chat_session_yield_kind("owner").unwrap(),
+            Some(YieldKind::Need)
+        );
+        assert!(host
+            .record_yield("owner", yield_line(YieldKind::Done, "Late"))
+            .await
+            .is_err());
+        store.put_chat_turn("owner", "next", "running", now_ms() + 1);
+        assert_eq!(store.chat_session_yield_kind("owner").unwrap(), None);
+        assert_eq!(
+            list_messages("owner").unwrap()[0]
+                .turn_yield
+                .as_ref()
+                .unwrap()
+                .kind,
+            YieldKind::Need
+        );
+        host.interrupt("owner").await.unwrap();
     }
 
     /// Delivers what the outbox has until the chat goes quiet.
@@ -17594,6 +18145,7 @@ pub(crate) mod steering_tests {
         host.turns.lock().await.insert(
             "owner".into(),
             TurnState::Active(ActiveTurn {
+                goal_at_delivery: None,
                 handle: tokio::spawn(std::future::pending()),
                 message_id: "answer".into(),
                 turn_id: "turn".into(),

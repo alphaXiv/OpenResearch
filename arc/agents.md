@@ -242,6 +242,8 @@ OpenCode runs local inference over connections to OpenAI-compatible servers (`sr
 - **Full auto-research** (`autoresearch`) treats approval of a direction as approval to follow through within its scope and budget. The agent is instructed to act on results, delegate when useful, and resume the approved direction after a cutoff or model switch.
 - Side chats and delegates inherit Collaborative or Default. A Full auto-research chat starts its side chats and delegates at Default.
 
+An agent can write the current goal with `set_goal` or `orx goal set` and clear it with `orx goal clear`. The server checks the chat's live turn and compares the saved goal with the goal delivered to it. The user's edit wins a conflict. The same turn can record why it is stopping with `yield` or `orx yield`. A `running` yield needs a followed run or a delegate that will report back. A completed turn exposes its last valid yield. Agent switches and automatic wakes give the receiving agent this chat's unrun plans and last successful yield on the active branch.
+
 ## Permissions
 
 Each agent keeps its own permission modes, and orx exposes those the harness advertises. A tool call needing approval becomes a prompt part:

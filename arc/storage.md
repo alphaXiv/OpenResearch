@@ -36,6 +36,8 @@ Retiring a table is the one removal: the open folds any rows still needed into t
 
 **`min_reader_version` is the only fence.** Every open reads it from `store_metadata` before applying anything and refuses a floor it does not support. A breaking host-disk change raises it (`crates/orx-host-proto/FROZEN.md`). It cannot stop a running or shipped 0.2.x writer, so database changes stay additive while those may exist.
 
+A turn's optional yield lives in `chat_turns.yield_json`. The transcript and sidebar derive it from completed turns. `chat_turn_wakes` records automatic follow-up candidates keyed by their source turn, with delivery bookkeeping that survives a restart.
+
 Chat search is a contentless full-text index in this same database, kept by triggers on the message table so writes from older binaries keep it current; every writer runs those triggers, so they must never fail on stored JSON. Text, tool inputs, tool errors, shell output the user ran and subagent reports are indexed. Other tool output and reasoning deliberately are not. Membership in a session, project or branch comes from source rows at query time. History is indexed in bounded background batches behind a committed cursor, and completion is recorded once (`src/store/search.sql`, `src/store/search.rs`).
 
 **Spend is recorded where it happens.** Each usage sample keeps the cost its agent reported, or, for an agent that reports only tokens, its price on the model price list when the list has that exact model; a sample neither prices stays unpriced, never zero. A run on a backend that bills keeps the price it was quoted at launch ([experiments](experiments.md#the-price-of-a-run)). Different currencies are kept apart, never converted.

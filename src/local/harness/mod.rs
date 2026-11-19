@@ -118,6 +118,7 @@ pub(crate) fn orx_retry_delay(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TurnOutcome {
     Completed,
+    Stopped,
 }
 
 /// Attach a fixed diagnostic to a setup error without replacing its local detail.

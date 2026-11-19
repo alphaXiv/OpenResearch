@@ -931,6 +931,7 @@ mod tests {
             error_message: None,
             recovery_action: None,
             recovered_by_turn_id: None,
+            turn_yield: None,
             created_at: 1,
             updated_at: 1,
         };

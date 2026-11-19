@@ -183,6 +183,17 @@ enum Command {
     #[command(name = "mcp", alias = "mcp-gate", hide = true)]
     Mcp,
 
+    /// Record why this agent turn is ending.
+    Yield {
+        #[arg(value_enum)]
+        kind: store::YieldKind,
+        line: String,
+    },
+
+    /// Set or clear the current agent chat's research goal.
+    #[command(subcommand)]
+    Goal(GoalCommand),
+
     #[command(name = "alphaxiv-mcp", hide = true)]
     AlphaxivMcp,
 
@@ -1403,6 +1414,25 @@ async fn run_cli() {
         }
         return;
     }
+    let chat_tool = match &command {
+        Command::Yield { kind, line } => {
+            Some(("yield", serde_json::json!({ "kind": kind, "text": line })))
+        }
+        Command::Goal(GoalCommand::Set { goal }) => {
+            Some(("set_goal", serde_json::json!({ "goal": goal })))
+        }
+        Command::Goal(GoalCommand::Clear) => {
+            Some(("set_goal", serde_json::json!({ "goal": null })))
+        }
+        _ => None,
+    };
+    if let Some((tool, args)) = chat_tool {
+        if let Err(error) = commands::mcp::call_agent_tool(tool, args).await {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if let Command::RemoteHost(args) = &command {
         if let Err(err) = commands::remote_host::run(args.clone()).await {
             eprintln!("orx remote-host: {err}");
@@ -1583,6 +1613,14 @@ fn install_panic_reporter() {
     }));
 }
 
+#[derive(clap::Subcommand, Debug)]
+enum GoalCommand {
+    /// Set the current chat's research direction and budget.
+    Set { goal: String },
+    /// Clear the current chat's research goal.
+    Clear,
+}
+
 /// Servers, protocol children and per-call hooks outlive a closed stdout; every other
 /// command ends with it, as `orx runs | head` expects.
 fn ends_with_its_stdout(command: &Command) -> bool {
@@ -1648,6 +1686,8 @@ fn command_name(command: &Command) -> &'static str {
         Command::PlanGate => "plan-gate",
         Command::InvocationGate => "invocation-gate",
         Command::Mcp => "mcp",
+        Command::Yield { .. } => "yield",
+        Command::Goal(_) => "goal",
         Command::AlphaxivMcp => "alphaxiv-mcp",
         Command::AntigravityGate => "antigravity-gate",
         Command::PublishBranch(_) => "publish-branch",
@@ -1714,6 +1754,7 @@ async fn dispatch(command: Command) -> error::Result<()> {
         Command::PlanGate => commands::plan_gate::run().await,
         Command::InvocationGate => unreachable!("handled before dispatch"),
         Command::Mcp => commands::mcp::run().await,
+        Command::Yield { .. } | Command::Goal(_) => unreachable!("handled before dispatch"),
         Command::AntigravityGate => commands::mcp::run_antigravity().await,
         #[cfg(all(desktop_app, target_os = "linux"))]
         Command::CheckMedia => unreachable!("handled before dispatch"),

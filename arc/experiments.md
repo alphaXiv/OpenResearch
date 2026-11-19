@@ -134,6 +134,8 @@ SSH and Slurm run directories enter the automatic cleanup queue in the transacti
 - **Never blocking.** Transient failures retry within a bounded window; a permanent one (the chat deleted) retires the batch, and its error shows on the run.
 - **The payload can speak.** New bytes in `$ORX_NOTIFY_FILE` become rate-limited notices (`src/engine/notify.rs`); hosted providers have no such file. Notice text is data for the agent, never instructions.
 
+Full auto-research stages a stop check when Claude Code or Codex completes an ordinary turn with no yield, followed work or unresolved input. Before admitting the hidden follow-up, the same notice dispatcher checks that the source turn still heads the active branch. User input, flag reminders, and owed run or delegate news take precedence. The follow-up itself cannot stage another stop check.
+
 Agents are taught to end their turn after launching: a blocking wait would die with the agent process, and a queued message survives it.
 
 ### Runs from 0.2.x

@@ -277,6 +277,72 @@ pub(crate) fn position_for(store: &Store, session: &StoredChatSession) -> Result
     ))
 }
 
+pub(super) fn research_state(
+    store: &Store,
+    session: &StoredChatSession,
+    path: &[&StoredChatMessage],
+    include_goal: bool,
+    limit: usize,
+) -> Result<String> {
+    let mut state = String::new();
+    if include_goal {
+        if let Some(goal) = &session.goal {
+            let _ = writeln!(state, "Goal: {}", shorten(goal, limit / 4));
+        }
+    }
+    let yields = store.completed_chat_yields(&session.id)?;
+    if let Some(closing) = path
+        .iter()
+        .rev()
+        .find_map(|message| yields.get(&message.id))
+    {
+        let kind = match closing.kind {
+            crate::store::YieldKind::Running => "running",
+            crate::store::YieldKind::Need => "need",
+            crate::store::YieldKind::Done => "done",
+        };
+        let _ = writeln!(
+            state,
+            "Last yield ({kind}): {}",
+            shorten(&closing.text, limit / 3)
+        );
+    }
+    let mut plans = store
+        .list_experiments_by_chat_session(&session.id)?
+        .into_iter()
+        .filter(|entry| {
+            entry.current_run.is_none()
+                && !entry.experiment.archived
+                && entry.experiment.project_id == session.project_id
+                && entry.experiment.chat_session_id.as_deref() == Some(&session.id)
+        })
+        .peekable();
+    if plans.peek().is_some() {
+        state.push_str("Planned experiments (not run yet):\n");
+        let more = "See the experiment tree for more.\n";
+        for (index, entry) in plans.enumerate() {
+            let experiment = entry.experiment;
+            let title = experiment
+                .display_name()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let parent = experiment.parent_experiment_id.as_deref().unwrap_or("none");
+            let line = format!(
+                "- {}: {} (parent {parent})\n",
+                experiment.id,
+                shorten(&title, 180)
+            );
+            if index >= 12 || state.len() + line.len() + more.len() > limit {
+                state.push_str(more);
+                break;
+            }
+            state.push_str(&line);
+        }
+    }
+    Ok(state)
+}
+
 pub(crate) fn context(
     store: &Store,
     session: &StoredChatSession,
@@ -302,10 +368,12 @@ pub(crate) fn context(
     } else {
         None
     };
-    if selected.is_empty() && prior.is_none() {
+    let state_limit = budget(context_window) / 3;
+    let research = research_state(store, session, &path, true, state_limit.min(2_400))?;
+    if selected.is_empty() && prior.is_none() && research.is_empty() {
         return Ok(String::new());
     }
-    let mut state = format!("Chat: `{}`\n", session.id);
+    let mut state = format!("Chat: `{}`\n{research}", session.id);
     if let Some(project) = store.get_local_project(&session.project_id)? {
         let cwd = crate::local::git::existing_session_worktree_path(&project, &session.id);
         let _ = writeln!(state, "Worktree: {}", cwd.display());
@@ -363,13 +431,10 @@ pub(crate) fn context(
             );
         }
     }
-    if let Some(goal) = &session.goal {
-        let _ = writeln!(state, "Goal: {goal}");
-    }
     if let Some(prior) = prior {
         let _ = writeln!(state, "Earlier saved context:\n{prior}");
     }
-    let state = shorten(&state, budget(context_window) / 3);
+    let state = shorten(&state, state_limit);
     let cli_read = r#"printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read","arguments":{"ref":"msg_…"}}}' | orx mcp"#;
     let header = format!(
         "<orx-handoff>\n\
@@ -377,7 +442,8 @@ pub(crate) fn context(
          Earlier assistant replies name the agent that wrote them; an agent switch \
          changes who is answering, not the conversation. Use the messages below to \
          answer the current user message after this block. Prior tool actions \
-         already happened. Read history only for details missing below: \
+         already happened. Inspect the experiment tree and delegates before continuing the research. \
+         Read history only for details missing below: \
          `read {{\"ref\":\"msg_…\"}}` returns that message and its tools; \
          `read {{\"before\":\"msg_…\"}}` returns older messages, excluding that message.\n\
          If no orx MCP tool is exposed, run `{cli_read}` in this chat's shell, \
@@ -469,6 +535,98 @@ mod tests {
         message.parts_json = serde_json::to_string(&[part]).unwrap();
         message.native_harness = Some(from.into());
         message
+    }
+
+    #[test]
+    fn an_empty_handoff_delta_still_has_owned_unrun_plans_and_the_branch_yield() {
+        let root =
+            crate::config::test_home().join(format!("handoff-plans-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(root.clone()).unwrap();
+        let mut chat = session();
+        chat.goal = Some("Try one more baseline".into());
+        chat.active_leaf_id = Some("msg_active".into());
+        store.create_chat_session(&chat).unwrap();
+        store
+            .create_local_project(&crate::local::model::LocalProject {
+                id: chat.project_id.clone(),
+                name: "Plans".into(),
+                slug: "plans".into(),
+                github_owner: String::new(),
+                github_repo: String::new(),
+                github_sync_enabled: false,
+                baseline_branch: "main".into(),
+                repo_path: root.join("repo").to_string_lossy().into_owned(),
+                run_command: None,
+                paper_id: None,
+                icon: None,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .unwrap();
+        for (id, owner, archived) in [
+            ("ours", chat.id.as_str(), false),
+            ("already-ran", chat.id.as_str(), false),
+            ("archived", chat.id.as_str(), true),
+            ("theirs", "other-chat", false),
+        ] {
+            store
+                .create_local_experiment(&crate::local::model::LocalExperiment {
+                    id: id.into(),
+                    project_id: chat.project_id.clone(),
+                    parent_experiment_id: Some("baseline".into()),
+                    slug: id.into(),
+                    branch_name: format!("orx/{id}"),
+                    title: Some(format!("Plan for {id}")),
+                    description: None,
+                    run_command: String::new(),
+                    agent_status: "idle".into(),
+                    created_at: 1,
+                    updated_at: 1,
+                    chat_session_id: Some(owner.into()),
+                    archived,
+                })
+                .unwrap();
+        }
+        let mut failed = crate::store::tests::run_fixture("attempt", "failed", Some(&chat.id));
+        failed.project_id = chat.project_id.clone();
+        failed.experiment_id = "already-ran".into();
+        store.upsert_run(&failed).unwrap();
+
+        for (id, line) in [
+            ("active", "Active branch yield"),
+            ("sibling", "Other branch yield"),
+        ] {
+            let row = message(id, "assistant", "");
+            store.upsert_chat_message(&row).unwrap();
+            store.put_chat_turn(&chat.id, &row.id, "running", 1);
+            store
+                .write_chat_turn_yield(
+                    &row.id,
+                    &crate::store::TurnYield {
+                        kind: crate::store::YieldKind::Need,
+                        text: line.into(),
+                    },
+                )
+                .unwrap();
+            store.complete_chat_turn(&row.id).unwrap();
+        }
+        let handoff = context(&store, &chat, None, Some("msg_active"), None).unwrap();
+        for value in [
+            "Try one more baseline",
+            "Plan for ours",
+            "parent baseline",
+            "Active branch yield",
+        ] {
+            assert!(handoff.contains(value), "{handoff}");
+        }
+        for value in [
+            "already-ran",
+            "Plan for archived",
+            "Plan for theirs",
+            "Other branch yield",
+        ] {
+            assert!(!handoff.contains(value), "{handoff}");
+        }
     }
 
     #[test]
