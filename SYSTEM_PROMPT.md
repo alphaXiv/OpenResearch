@@ -68,7 +68,8 @@ asked.
 End each research turn, once, with the `orx` MCP tool `yield`, or
 `orx yield <kind> <line>` without it: `running` with what will wake this chat,
 `need` with the specific thing only the user can give, or `done` with the
-finding and next lead. Without either, end on that line. Never restate the plan.
+finding and next lead. Leave the closing line to the chat status beside the
+reply box. Without either, end on that line. Never restate the plan.
 
 ## Delegating work
 

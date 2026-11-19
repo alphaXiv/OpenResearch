@@ -27,6 +27,13 @@ test('the autonomy picker saves Full auto-research and applies it to the chat', 
   agent.script('[orx] If an approved next step remains', [{ say: 'The approved direction has no step left.' }])
   await send(page, 'Investigate the experiment results.')
   await expect(page.getByText('Ready to follow the approved research direction.', { exact: true })).toBeVisible()
+  const sessionId = new URL(page.url()).pathname.split('/').at(-1)!
+  const playbook = await page.request.get(`/api/projects/${project.id}/file`, {
+    params: { sessionId, path: '.openresearch/agent/autoresearch-local.md' },
+  })
+  expect(playbook.ok()).toBe(true)
+  const { content } = await playbook.json()
+  expect(content).toMatch(/Leave the closing line to the chat status beside the\s+reply box\./)
   // A Full auto-research turn that ends with nothing running and no yield gets exactly one stop check.
   await expect(page.getByText('The approved direction has no step left.', { exact: true })).toHaveCount(1)
 

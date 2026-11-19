@@ -175,9 +175,9 @@ function PermissionIcon({ id }: { id: string | null | undefined }) {
   return <Icon size={14} aria-hidden="true" className={cn("shrink-0", permission?.tone ?? "text-subtext")} />;
 }
 
-function DescribedRadioItem({ choice, icon, isDefault }: { choice: OptionChoice; icon?: ReactNode; isDefault?: boolean }) {
+function DescribedRadioItem({ choice, icon, isDefault, className }: { choice: OptionChoice; icon?: ReactNode; isDefault?: boolean; className?: string }) {
   return (
-    <Menu.RadioItem value={choice.id} closeOnClick label={choice.label} className={cn(SETTINGS_ROW, "items-start")}>
+    <Menu.RadioItem value={choice.id} closeOnClick label={choice.label} className={cn(SETTINGS_ROW, "items-start", className)}>
       <span className="flex min-w-0 items-start gap-2">
         {icon && <span className="flex h-5 items-center">{icon}</span>}
         <span className="flex min-w-0 flex-col items-start gap-0.5">
@@ -590,10 +590,10 @@ export function ModelPicker({
       icon: <Workflow size={14} aria-hidden="true" className="shrink-0 text-accent-purple" />,
     },
   ];
-  const autonomyLabel = autonomyChoices.find((choice) => choice.id === autonomy)?.label;
+  const selectedAutonomy = autonomyChoices.find((choice) => choice.id === autonomy);
   const permissionSummary = [
     permissionLabel && `${m.model_picker_permissions()}: ${permissionLabel}`,
-    autonomyLabel && `${m.model_picker_autonomy()}: ${autonomyLabel}`,
+    selectedAutonomy && `${m.model_picker_autonomy()}: ${selectedAutonomy.label}`,
   ].filter(Boolean).join(" · ") || m.model_picker_permissions();
   const moveFocus = (event: React.KeyboardEvent<HTMLDivElement>) => {
     if (event.nativeEvent.isComposing || event.keyCode === 229) return;
@@ -966,6 +966,7 @@ export function ModelPicker({
             <Tooltip interactive content={permissionSummary} className="rounded-md">
               <Menu.Trigger disabled={disabled} className={PILL} aria-label={permissionSummary}>
                 <PermissionIcon id={effectivePermissionId} />
+                {selectedAutonomy?.id === "autoresearch" && selectedAutonomy.icon}
                 <ChevronDown size={14} className="shrink-0 text-muted" />
               </Menu.Trigger>
             </Tooltip>
@@ -1003,7 +1004,7 @@ export function ModelPicker({
                         }}
                       >
                         {autonomyChoices.map((choice) => (
-                          <DescribedRadioItem key={choice.id} choice={choice} icon={choice.icon} />
+                          <DescribedRadioItem key={choice.id} choice={choice} icon={choice.icon} className={choice.id === "autoresearch" ? "text-ink-purple" : undefined} />
                         ))}
                       </Menu.RadioGroup>
                     </Menu.Group>

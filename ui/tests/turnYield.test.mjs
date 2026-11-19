@@ -12,6 +12,7 @@ const NEED = { kind: "need", text: "Share the held-out corpus before I compare a
 const tool = (name, input = {}, status = "completed") => ({ id: `${name}-${status}`, type: "tool", tool: name, state: { status, input } });
 const answer = (id, text, turnYield, extra = {}) => ({ ...assistantMessage(id, [{ id: `${id}-text`, type: "text", text, phase: "final_answer" }]), turnYield, ...extra });
 const close = () => document.querySelector("[data-turn-close]");
+const question = () => document.querySelector('.composer [role="group"][aria-labelledby]');
 
 test("the yield call hides behind the closing line it produced, under every agent's name and as a lone command", () => {
   const visible = (part, fields = { turnYield: NEED }) => hideClosedYieldCalls([{ ...assistantMessage("a", [part]), ...fields }])[0].parts.length === 1;
@@ -69,12 +70,13 @@ test("a turn that ended without its close keeps the yield call in the activity, 
   const stopped = assistantMessage("a", [{ id: "a-text", type: "text", text: "Reached 3.21% WER.", phase: "final_answer" }, call]);
   await renderChat("/projects/p/tasks/s", { transcripts: { s: [userMessage("u", "Compare."), stopped] } });
   assert.equal(close(), null);
+  assert.equal(question(), null);
   const row = document.querySelector(`[data-part-id="${call.id}"]`);
   assert.ok(row, "the call is in the activity");
   assert.equal(row.textContent, m.chat_turn_close_with_status({ status: m.chat_turn_close_need(), text: NEED.text }));
 });
 
-test("the composer shows why the current turn stopped using the matching session summary", async () => {
+test("the composer asks the closing question from the matching session summary", async () => {
   const previous = { kind: "running", text: "Waiting on the first comparison." };
   await renderChat("/projects/p/tasks/s", {
     sessions: [session("s", { activeLeafId: "a", yieldKind: NEED.kind, yieldText: NEED.text })],
@@ -86,10 +88,10 @@ test("the composer shows why the current turn stopped using the matching session
       ],
     },
   });
-  const line = close();
-  assert.ok(line.closest(".composer [role=status]"));
-  assert.ok(line.textContent.includes(m.chat_turn_close_need()));
-  assert.ok(line.textContent.includes(NEED.text));
+  const prompt = question();
+  assert.ok(prompt.textContent.includes(m.chat_question()));
+  assert.equal(document.getElementById(prompt.getAttribute("aria-labelledby")).textContent, NEED.text);
+  assert.ok(document.querySelector(`.composer [role="textbox"][aria-label="${m.chat_question_your_answer()}"]`));
   const feed = document.querySelector('[role="feed"]');
   assert.ok(feed.textContent.includes("3.21% WER"));
   assert.ok(!feed.textContent.includes(NEED.text));
@@ -136,6 +138,7 @@ test("a failed turn shows its recovery, never a closing line", async () => {
   };
   await renderChat("/projects/p/tasks/s", { transcripts: { s: [userMessage("u", "Compare."), failed] } });
   assert.equal(close(), null);
+  assert.equal(question(), null);
 });
 
 test("the closing line updates a persistent live region and clears as soon as the next turn starts", async () => {
@@ -154,6 +157,7 @@ test("the closing line updates a persistent live region and clears as soon as th
 
   await emit("chat.session", { session: session("s", { activeLeafId: "a", busy: true, yieldKind: NEED.kind, yieldText: NEED.text }) });
   assert.equal(status.textContent, "");
+  assert.equal(question(), null);
 });
 
 test("chats waiting on the user stay in Inbox while active turns go in Working", async () => {

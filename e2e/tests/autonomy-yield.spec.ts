@@ -40,27 +40,28 @@ test("the composer shows why the agent stopped until a reply starts a new turn",
 
   const closes: Yield[] = [
     { kind: 'running', text: 'Two seeds of the larger adapter are still training; their results restart the comparison.' },
-    { kind: 'need', text: 'Share the 40 recordings Wispr was scored on, so both models are compared on the same audio.' },
     { kind: 'done', text: 'The comparison is finished within the four GPU-hour budget.' },
+    { kind: 'need', text: 'Share the 40 recordings Wispr was scored on, so both models are compared on the same audio.' },
   ]
-  const labels = { running: 'Waiting on results', need: 'Needs you', done: 'Done' }
+  const labels = { running: 'Waiting on results', done: 'Done' }
   for (const close of closes) {
     await test.step(`a ${close.kind} close`, async () => {
       await closeLatestTurn(page, sessionId, close)
       await page.reload()
-      const line = page.locator('.composer').getByRole('status').filter({ hasText: close.text })
-      await expect(line.getByText(close.text)).toBeVisible()
-      await expect(line.getByText(labels[close.kind], { exact: true })).toBeVisible()
-      await expect(page.getByRole('feed').getByText(close.text)).toHaveCount(0)
-
+      const status = page.locator('.composer').getByRole('status').filter({ hasText: close.text })
       const row = page.locator('.session-row', { hasText: 'Compare the fine-tune' })
       if (close.kind === 'need') {
+        await expect(page.getByRole('group', { name: close.text })).toBeVisible()
+        await expect(status).toHaveText(close.text)
         await expect(page.getByRole('button', { name: 'Inbox', exact: true })).toHaveAttribute('aria-expanded', 'true')
         await expect(row).toHaveAccessibleName(/Waiting for your input/)
         await expect(row.getByText(close.text)).toBeVisible()
       } else {
+        await expect(status.getByText(close.text)).toBeVisible()
+        await expect(status.getByText(labels[close.kind], { exact: true })).toBeVisible()
         await expect(row).not.toHaveAccessibleName(/Waiting for your input/)
       }
+      await expect(page.getByRole('feed').getByText(close.text)).toHaveCount(0)
       for (const colorScheme of ['light', 'dark'] as const) {
         await page.emulateMedia({ colorScheme })
         await expect(page.locator('html')).toHaveAttribute('data-theme', colorScheme)
@@ -70,18 +71,29 @@ test("the composer shows why the agent stopped until a reply starts a new turn",
     })
   }
 
-  await test.step('a narrow window wraps the line', async () => {
+  const question = page.getByRole('group', { name: closes[2].text })
+  await test.step('a narrow window wraps the question', async () => {
     await page.setViewportSize({ width: 720, height: 640 })
-    await expect(page.locator('[data-turn-close]')).toBeVisible()
-    await page.screenshot({ path: info.outputPath('close-done-narrow.png'), animations: 'disabled' })
+    await expect(question).toBeInViewport({ ratio: 1 })
+    await page.screenshot({ path: info.outputPath('close-need-narrow.png'), animations: 'disabled' })
   })
 
-  await test.step('a reply clears the closing line', async () => {
+  await test.step('answering by keyboard clears the question as the next turn starts', async () => {
     await page.unrouteAll({ behavior: 'wait' })
-    agent.script('Continue with the next trial.', [{ say: 'The next trial is ready for review.' }])
-    await send(page, 'Continue with the next trial.')
-    await expect(page.locator('[data-turn-close]')).toBeHidden()
+    agent.script('The recordings are in the project.', [{ hold: 'answer' }, { say: 'The next trial is ready for review.' }])
+    const reply = page.getByRole('textbox', { name: 'Your answer' })
+    await question.getByText(closes[2].text).click()
+    await page.keyboard.press('Tab')
+    await expect(page.getByRole('separator', { name: 'Resize message box' })).toBeFocused()
+    await page.keyboard.press('Tab')
+    await expect(reply).toBeFocused()
+    await reply.fill('The recordings are in the project.')
+    await reply.press('Enter')
+    await agent.reached('answer')
+    await expect(question).toBeHidden()
+    agent.release('answer')
     await expect(page.getByText('The next trial is ready for review.')).toBeVisible()
+    await expect(question).toBeHidden()
   })
 })
 

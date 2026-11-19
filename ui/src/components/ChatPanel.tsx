@@ -1671,7 +1671,7 @@ function computeToolActivity(part: ChatPart): ToolActivity {
   // Shown only when the turn ended without the close this call asked for.
   const close = yieldCallClose(part);
   if (close?.text) {
-    const status = close.kind ? TURN_CLOSE_KINDS[close.kind]?.label() : undefined;
+    const status = close.kind === "need" ? m.chat_turn_close_need() : close.kind ? TURN_CLOSE_KINDS[close.kind]?.label() : undefined;
     const text = mentionsAsText(close.text);
     return { kind: "command", label: status ? m.chat_turn_close_with_status({ status, text }) : text };
   }
@@ -4095,17 +4095,17 @@ export const Message = memo(function Message({
 /** How each reason a turn ended is drawn and named; a kind from a newer host has no entry. */
 const TURN_CLOSE_KINDS: Partial<Record<string, { Icon: typeof Hourglass; tone: string; label: () => string }>> = {
   running: { Icon: Hourglass, tone: "text-accent-blue", label: m.chat_turn_close_running },
-  need: { Icon: HelpCircle, tone: "text-accent-purple", label: m.chat_turn_close_need },
   done: { Icon: CircleCheck, tone: "text-accent-green", label: m.chat_turn_close_done },
 };
 
 /** The line an agent ended its turn with: why it stopped and what restarts the work. */
-function TurnClose({ close, onOpenFile, onOpenRun }: { close: TurnYield; onOpenFile?: OpenTranscriptFile; onOpenRun?: OpenTranscriptTarget }) {
+function TurnClose({ close, fullAuto, onOpenFile, onOpenRun }: { close: TurnYield; fullAuto: boolean; onOpenFile?: OpenTranscriptFile; onOpenRun?: OpenTranscriptTarget }) {
   const kind = TURN_CLOSE_KINDS[close.kind];
+  const tone = fullAuto && close.kind === "running" ? "text-accent-purple" : kind?.tone;
   return (
     <div className="mb-2.5 flex items-start gap-2 rounded-lg border border-border bg-surface px-3 py-2 text-sm leading-5 text-text" data-turn-close={close.kind}>
       {kind && (
-        <span className={`inline-flex h-5 shrink-0 items-center ${kind.tone}`}>
+        <span className={`inline-flex h-5 shrink-0 items-center ${tone}`}>
           <kind.Icon size={14} aria-hidden="true" />
         </span>
       )}
@@ -7472,6 +7472,7 @@ export function ChatPanel({
     part.type === "prompt" && part.prompt?.kind === "question" && !part.prompt.resolved && (!part.prompt.nativeId || busy),
   )), [messages, busy]);
   const activeSession = openSession;
+  const autonomy = activeSession?.autonomy ?? sideDraftAutonomy ?? preferredAutonomy;
   const tail = messages.at(-1);
   let currentClose: TurnYield | undefined;
   if (!busy && tail?.role === "assistant" && !tail.parts.some(isTurnStatusPart)) {
@@ -8377,6 +8378,8 @@ export function ChatPanel({
 
   const questions = useQuestions(activeId, pendingQuestions, respond);
   const asking = questions.part !== null;
+  const visibleClose = pendingPlan || asking ? undefined : currentClose;
+  const closingQuestion = visibleClose?.kind === "need" && tail ? { id: tail.id, text: visibleClose.text } : null;
   const showQuestion = questions.show;
   const searchedPartId = focusedMessage?.sessionId === activeId ? focusedMessage.partId : undefined;
   useEffect(() => {
@@ -9592,7 +9595,7 @@ export function ChatPanel({
 
         {/* Docked while a plan awaits a decision, so the approval controls never
           scroll away. Actions mirror the (now compact) inline card's wire. */}
-        <div inert={contentLoading || Boolean(contentError) || historyLoading} className={`composer flex flex-col px-3 pb-3 ${questions.part ? "min-h-0" : "shrink-0"} relative z-4 bg-background w-full max-w-readable my-0 mx-auto`}>
+        <div inert={contentLoading || Boolean(contentError) || historyLoading} className={`composer flex flex-col px-3 pb-3 ${asking || closingQuestion ? "min-h-0" : "shrink-0"} relative z-4 bg-background w-full max-w-readable my-0 mx-auto`}>
           {threadMounted && (
             <Tooltip interactive content={m.chat_scroll_to_bottom()} className={`absolute bottom-full left-1/2 z-5 mb-6 -translate-x-1/2 transition-opacity duration-150 ease-standard ${transcriptAtBottom ? "pointer-events-none opacity-0" : "opacity-100"}`}>
               <IconButton
@@ -9747,9 +9750,10 @@ export function ChatPanel({
           )}
           <RemoteConnectionStrip />
           <div role="status">
-            {currentClose && !pendingPlan && !asking && (
+            {closingQuestion && <span className="sr-only">{mentionsAsText(closingQuestion.text)}</span>}
+            {visibleClose && !closingQuestion && (
               <ChatImageScope projectId={projectId} sessionId={activeId}>
-                <TurnClose close={currentClose} onOpenFile={openFileInSession} onOpenRun={onOpenRun} />
+                <TurnClose close={visibleClose} fullAuto={autonomy === "autoresearch"} onOpenFile={openFileInSession} onOpenRun={onOpenRun} />
               </ChatImageScope>
             )}
           </div>
@@ -9836,7 +9840,7 @@ export function ChatPanel({
                   {settingsError}
                 </div>
               )}
-              {questions.part && (
+              {questions.part ? (
                 <QuestionDock
                   key={questions.part.id}
                   part={questions.part}
@@ -9849,9 +9853,19 @@ export function ChatPanel({
                   searchTarget={focusedMessage?.partId === questions.part.id}
                   onPick={questions.pick}
                 />
+              ) : closingQuestion && (
+                <ChatImageScope projectId={projectId} sessionId={activeId}>
+                  <QuestionDock
+                    key={closingQuestion.id}
+                    reply={{
+                      id: closingQuestion.id,
+                      text: <Md text={closingQuestion.text} onOpenFile={openFileInSession} onOpenRun={onOpenRun} />,
+                    }}
+                  />
+                </ChatImageScope>
               )}
               {/* The answer lines up with the question's text above it. */}
-              <div className={`composer-input flex min-w-0 items-end ${asking ? "relative [--composer-pad-x:1rem]" : ""}`}>
+              <div className={`composer-input flex min-w-0 items-end ${asking || closingQuestion ? "relative [--composer-pad-x:1rem]" : ""}`}>
                 <ComposerEditor
                   ref={composerRef}
                   value={questions.part ? questions.answer.note : draft}
@@ -9863,6 +9877,8 @@ export function ChatPanel({
                         : questions.part?.prompt?.options?.length
                           ? m.chat_question_custom_response()
                           : m.chat_question_your_answer()
+                      : closingQuestion && !bashMode
+                      ? m.chat_question_your_answer()
                       : steering && activeHarness
                       ? m.chat_steer_placeholder({ harness: ltr(activeHarness.name), shortcut: ltr(queueChord) })
                       : composerSelection
@@ -10172,7 +10188,7 @@ export function ChatPanel({
                   reasoningChoices={activeHarness?.agentReady ? reasoning.choices : []}
                   defaultReasoningId={reasoning.defaultId}
                   onSelectReasoning={setReasoningLevel}
-                  autonomy={openSession?.autonomy ?? sideDraftAutonomy ?? preferredAutonomy}
+                  autonomy={autonomy}
                   onSelectAutonomy={setAutonomy}
                   disabled={switchingAgent}
                   lockHarness={busy || switchingAgent || (!openSession && !!sideParentSessionId)}
