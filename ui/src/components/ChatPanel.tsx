@@ -5887,6 +5887,7 @@ interface SidebarActions {
   rename: (session: ChatSession, title: string) => void;
   setArchived: (session: ChatSession, archived: boolean, working: boolean) => void;
   markBelowDone: (session: ChatSession) => void;
+  markIdleDone: () => Promise<void>;
   moveToProject: (session: ChatSession, project: Project) => void;
   remove: (session: ChatSession) => void;
 }
@@ -8481,6 +8482,10 @@ export function ChatPanel({
     const at = chats?.findIndex((chat) => chat.id === session.id) ?? -1;
     if (at >= 0) chats!.slice(at + 1).forEach((chat) => setArchived(chat, true, false));
   };
+  const idleChats = async () => {
+    const cutoff = Date.now() - 3 * 24 * 60 * 60 * 1000;
+    return (await inboxChats()).filter((chat) => chat.updatedAt < cutoff);
+  };
   const cleanupScanning = useRef(false);
   // The first time the inbox shows, chats left alone for days can go straight to Done.
   const offerInboxCleanup = async () => {
@@ -8490,10 +8495,9 @@ export function ChatPanel({
       // Pending until a scan succeeds, so a failed one is tried again on the next switch.
       localStorage.setItem("sidebar-inbox-intro", "pending");
     } catch { return; }
-    const cutoff = Date.now() - 3 * 24 * 60 * 60 * 1000;
     // Best-effort: a scan that fails asks again on the next switch.
     cleanupScanning.current = true;
-    const stale = (await inboxChats().catch(() => null).finally(() => { cleanupScanning.current = false; }))?.filter((chat) => chat.updatedAt < cutoff);
+    const stale = await idleChats().catch(() => null).finally(() => { cleanupScanning.current = false; });
     if (!stale) return;
     try { localStorage.setItem("sidebar-inbox-intro", "seen"); } catch {}
     if (!stale.length) return;
@@ -8504,7 +8508,8 @@ export function ChatPanel({
       confirmLabel: m.sidebar_inbox_intro_confirm({ count }),
       cancelLabel: m.sidebar_inbox_intro_keep(),
       onCancel: "close",
-      onConfirm: () => stale.forEach((chat) => setArchived(chat, true, false)),
+      // Read again from the newest render: a chat that resumed while the dialog was open stays put.
+      onConfirm: () => sidebarActions.current.markIdleDone(),
     });
   };
   const listedChats = (listed: readonly ChatSession[], archived: boolean | null) => {
@@ -8816,6 +8821,7 @@ export function ChatPanel({
     rename,
     setArchived,
     markBelowDone: (session) => void markBelowDone(session),
+    markIdleDone: async () => (await idleChats()).forEach((chat) => setArchived(chat, true, false)),
     moveToProject: (s, project) => createProject(project, s),
     remove: (s) => void removeSession(s),
   };
