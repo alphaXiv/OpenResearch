@@ -307,21 +307,11 @@ pub(super) fn research_state(
             shorten(&closing.text, limit / 3)
         );
     }
-    let mut plans = store
-        .list_experiments_by_chat_session(&session.id)?
-        .into_iter()
-        .filter(|entry| {
-            entry.current_run.is_none()
-                && !entry.experiment.archived
-                && entry.experiment.project_id == session.project_id
-                && entry.experiment.chat_session_id.as_deref() == Some(&session.id)
-        })
-        .peekable();
-    if plans.peek().is_some() {
+    let plans = store.chat_planned_experiments(&session.id)?;
+    if !plans.is_empty() {
         state.push_str("Planned experiments (not run yet):\n");
         let more = "See the experiment tree for more.\n";
-        for (index, entry) in plans.enumerate() {
-            let experiment = entry.experiment;
+        for (index, experiment) in plans.into_iter().enumerate() {
             let title = experiment
                 .display_name()
                 .split_whitespace()

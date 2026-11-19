@@ -5965,12 +5965,9 @@ impl ChatHost {
                     let tx = store.begin_immediate()?;
                     if let Some(source) = stop_source {
                         if !store.stop_check_pending(source)?
-                            || !store.stop_check_current(
-                                session_id,
-                                source,
-                                turn_id,
-                                &background,
-                            )?
+                            || store
+                                .stop_check_plans(session_id, source, turn_id, &background)?
+                                .is_none()
                         {
                             store.settle_stop_check(source, false)?;
                             tx.commit()?;
@@ -7095,11 +7092,38 @@ impl ChatHost {
                 if !store.stop_check_pending(source)? {
                     break 'admission None;
                 }
-                if !store.stop_check_current(session_id, source, source, &background)? {
+                let Some(plans) =
+                    store.stop_check_plans(session_id, source, source, &background)?
+                else {
                     store.settle_stop_check(source, false)?;
                     tx.commit()?;
                     break 'admission None;
+                };
+                let prompt = if plans.is_empty() {
+                    "[orx] If an approved next step remains, take it now. Otherwise use yield to say why you stopped and what will restart the work.".into()
+                } else {
+                    let remaining = if plans.len() == 1 {
+                        "1 planned experiment remains".into()
+                    } else {
+                        format!("{} planned experiments remain", plans.len())
+                    };
+                    let names = plans
+                        .iter()
+                        .map(|experiment| {
+                            experiment
+                                .display_name()
+                                .split_whitespace()
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("[orx] You said done, but {remaining}: {names}. Run them, drop the ones that no longer matter, or say why they no longer matter.")
+                };
+                if !turn.prepared_input.is_empty() {
+                    turn.prepared_input.push_str("\n\n");
                 }
+                turn.prepared_input.push_str(&prompt);
             }
             let mut flags = if flag_wake {
                 store.admit_flag_wakes(session_id, &turn.client_turn_id, now_ms())?
@@ -10900,26 +10924,28 @@ async fn process_run_notices(
                 return Ok(held);
             }
 
-            let result = chat.send_message_showing(&session_id, SendTurnRequest {
-                messages: vec![AnnotatedText {
-                    text: "[orx] If an approved next step remains, take it now. Otherwise use yield to say why you stopped and what will restart the work.".into(),
-                    annotations: Vec::new(),
-                }],
-                prepared_input: None,
-                replace_settings: false,
-                transcript: TranscriptDisplay {
-                    text: Some(String::new()),
-                    annotations: None,
-                    orx: Vec::new(),
-                    record_user_message: false,
-                },
-                overrides: TurnOverrides::default(),
-                images: TurnAttachments::Uploaded(Vec::new()),
-                admission: TurnAdmission::StopCheck(guard, source.clone()),
-                client_turn_id: Some(client_turn_id),
-                request_hash: None,
-                continuation: false,
-            }).await;
+            let result = chat
+                .send_message_showing(
+                    &session_id,
+                    SendTurnRequest {
+                        messages: Vec::new(),
+                        prepared_input: None,
+                        replace_settings: false,
+                        transcript: TranscriptDisplay {
+                            text: Some(String::new()),
+                            annotations: None,
+                            orx: Vec::new(),
+                            record_user_message: false,
+                        },
+                        overrides: TurnOverrides::default(),
+                        images: TurnAttachments::Uploaded(Vec::new()),
+                        admission: TurnAdmission::StopCheck(guard, source.clone()),
+                        client_turn_id: Some(client_turn_id),
+                        request_hash: None,
+                        continuation: false,
+                    },
+                )
+                .await;
             if let Err(error) = result {
                 eprintln!("orx up: stop check for {source}: {error:#}");
                 if store.retry_stop_check(&source, now_ms())? {
@@ -17003,6 +17029,125 @@ for line in sys.stdin:
                 .count(),
             1
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn done_checks_only_current_unrun_plans_in_full_auto_research() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let store = Store::open().unwrap();
+        quiet_agent_chat(&store, Some("autoresearch"));
+        session(&store, "other");
+        for (id, title, chat, archived) in [
+            ("a", "Warmup sweep", "owner", false),
+            ("b", "Batch size control", "owner", false),
+            ("c", "Abandoned variant", "owner", true),
+            ("d", "Cancelled launch", "owner", false),
+            ("e", "Another chat's plan", "other", false),
+        ] {
+            store
+                .create_local_experiment(&crate::local::model::LocalExperiment {
+                    id: id.into(),
+                    project_id: "p1".into(),
+                    parent_experiment_id: None,
+                    slug: id.into(),
+                    branch_name: format!("exp/{id}"),
+                    title: Some(title.into()),
+                    description: None,
+                    run_command: String::new(),
+                    agent_status: "idle".into(),
+                    created_at: 1,
+                    updated_at: 1,
+                    chat_session_id: Some(chat.into()),
+                    archived,
+                })
+                .unwrap();
+        }
+        let mut cancelled = run("cancelled");
+        cancelled.experiment_id = "d".into();
+        store.upsert_run(&cancelled).unwrap();
+        store
+            .insert_run_notice(
+                &cancelled.id,
+                "owner",
+                crate::store::INSTRUMENTATION,
+                crate::store::INSTRUMENTATION,
+                "Watch the cancelled run.",
+                1,
+            )
+            .unwrap();
+
+        let complete = |id: &str, autonomy, kind| {
+            store.set_chat_session_autonomy("owner", autonomy).unwrap();
+            store.put_chat_turn("owner", id, "running", now_ms());
+            store
+                .upsert_chat_message_on_branch(&StoredChatMessage {
+                    id: id.into(),
+                    session_id: "owner".into(),
+                    role: "assistant".into(),
+                    parts_json: "[]".into(),
+                    created_at: now_ms(),
+                    completed_at: Some(now_ms()),
+                    parent_id: None,
+                    base_native_session_id: None,
+                    result_native_session_id: None,
+                    result_native_message_id: None,
+                    native_harness: None,
+                })
+                .unwrap();
+            store
+                .write_chat_turn_yield(
+                    id,
+                    &TurnYield {
+                        kind,
+                        text: "Stopped here.".into(),
+                    },
+                )
+                .unwrap();
+            assert!(store
+                .finish_chat_turn(id, TurnOutcome::Completed, Some(&HashMap::new()))
+                .unwrap());
+            store.stop_check_pending(id).unwrap()
+        };
+        assert!(!complete("default", Autonomy::Agentic, YieldKind::Done));
+        assert!(!complete(
+            "collaborative",
+            Autonomy::Copilot,
+            YieldKind::Done
+        ));
+        assert!(!complete(
+            "needs-input",
+            Autonomy::AutoResearch,
+            YieldKind::Need
+        ));
+        assert!(complete("source", Autonomy::AutoResearch, YieldKind::Done));
+
+        let host = notice_host();
+        settle_all(&host).await;
+        let received = prompts();
+        assert_eq!(received.len(), 1, "{received:#?}");
+        assert!(received[0].contains("2 planned experiments remain"));
+        assert!(received[0].contains("Warmup sweep, Batch size control"));
+        assert!(!received[0].contains("Watch the cancelled run."));
+        assert!(store.pending_stop_checks().unwrap().is_empty());
+        let wake = store.latest_chat_turn("owner").unwrap().unwrap();
+        assert_eq!(wake.client_turn_id, "stop-check:source");
+        assert_eq!(wake.user_message_id, None);
+
+        assert!(complete(
+            "superseded",
+            Autonomy::AutoResearch,
+            YieldKind::Done
+        ));
+        Store::open()
+            .unwrap()
+            .set_experiments_archived(&["a".into(), "b".into()], true)
+            .unwrap();
+        settle_all(&host).await;
+        assert_eq!(prompts(), received);
+        assert!(store.pending_stop_checks().unwrap().is_empty());
+        assert!(!complete("done", Autonomy::AutoResearch, YieldKind::Done));
     }
 
     #[tokio::test(flavor = "current_thread")]

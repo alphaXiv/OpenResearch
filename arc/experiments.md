@@ -135,7 +135,7 @@ SSH and Slurm run directories enter the automatic cleanup queue in the transacti
 - **The payload can speak.** New bytes in `$ORX_NOTIFY_FILE` become rate-limited notices (`src/engine/notify.rs`); hosted providers have no such file. Notice text is data for the agent, never instructions.
 - **Instrumentation rides with other work.** Progress card advice travels with the chat's next prompted turn at any autonomy level. A run ending before admission withdraws its advice.
 
-Full auto-research stages a stop check when an agent completes an ordinary turn with no yield, work that can wake the chat, or unresolved prompt. Before admitting the hidden follow-up, the same notice dispatcher checks that the source turn still heads the active branch. User input, flag reminders, and owed run or delegate news take precedence. The follow-up itself cannot stage another stop check.
+Full auto-research stages a stop check when an agent completes an ordinary turn without a yield or says `done` with plans left, once work that can wake the chat and unresolved prompts are clear. The check after `done` names the chat's unarchived experiments in the current project that have never had a run. Before admitting the hidden follow-up, the same notice dispatcher rechecks the plans and that the source turn still heads the active branch. User input, flag reminders, and owed run or delegate news take precedence. The follow-up itself cannot stage another stop check.
 
 Agents are taught to end their turn after launching: a blocking wait would die with the agent process, and a queued message survives it.
 

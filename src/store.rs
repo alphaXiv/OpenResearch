@@ -4288,6 +4288,18 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    pub(crate) fn chat_planned_experiments(&self, chat: &str) -> Result<Vec<LocalExperiment>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {EXPERIMENT_COLS} FROM local_experiments e
+             WHERE e.chat_session_id = ?1 AND e.archived = 0
+               AND e.project_id = (SELECT project_id FROM chat_sessions WHERE id = ?1)
+               AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.experiment_id = e.id)
+             ORDER BY e.created_at DESC, e.id"
+        ))?;
+        let rows = stmt.query_map([chat], LocalExperiment::from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn list_experiments_by_chat_session(
         &self,
         session_id: &str,
@@ -5838,34 +5850,45 @@ impl Store {
             .transpose()?)
     }
 
-    pub(crate) fn stop_check_current(
+    /// An eligible stop check has no names for a missing yield and at least one plan for `done`.
+    pub(crate) fn stop_check_plans(
         &self,
         chat: &str,
         source: &str,
         frontier: &str,
         background: &BackgroundTasks,
-    ) -> Result<bool> {
-        let current: bool = self.conn.query_row(
-            "SELECT EXISTS (
-                SELECT 1 FROM chat_turns t JOIN chat_sessions c ON c.id = t.session_id
+    ) -> Result<Option<Vec<LocalExperiment>>> {
+        let closing = self.conn.query_row(
+            "SELECT t.yield_json FROM chat_turns t JOIN chat_sessions c ON c.id = t.session_id
                 JOIN chat_turns head ON head.id = ?3 AND head.session_id = c.id
                 WHERE t.id = ?2 AND c.id = ?1 AND c.archived = 0 AND c.autonomy = 'autoresearch'
                   AND c.active_leaf_id = head.assistant_message_id AND t.state = 'completed'
-                  AND t.yield_json IS NULL AND t.client_turn_id NOT LIKE (?4 || '%')
+                  AND t.client_turn_id NOT LIKE (?4 || '%')
                   AND NOT EXISTS (SELECT 1 FROM chat_turns origin
                                   WHERE origin.id = substr(t.client_turn_id, length('recover_') + 1)
                                     AND substr(t.client_turn_id, 1, length('recover_')) = 'recover_'
                                     AND origin.session_id = c.id AND origin.client_turn_id LIKE (?4 || '%'))
                   AND NOT EXISTS (SELECT 1 FROM chat_turns newer WHERE newer.session_id = c.id
                                   AND (newer.created_at, newer.rowid) > (head.created_at, head.rowid))
-                  AND NOT EXISTS (SELECT 1 FROM chat_queued_messages q WHERE q.session_id = c.id)
-             )",
+                  AND NOT EXISTS (SELECT 1 FROM chat_queued_messages q WHERE q.session_id = c.id)",
             params![chat, source, frontier, STOP_CHECK_PREFIX],
-            |row| row.get(0),
-        )?;
-        Ok(current
-            && !self.chat_session_has_prompt(chat, None)?
-            && !self.has_wake_work(chat, background)?)
+            |row| read_turn_yield(row, 0),
+        ).optional()?;
+        let plans = match closing {
+            Some(None) => Vec::new(),
+            Some(Some(closing)) if closing.kind == YieldKind::Done => {
+                let plans = self.chat_planned_experiments(chat)?;
+                if plans.is_empty() {
+                    return Ok(None);
+                }
+                plans
+            }
+            _ => return Ok(None),
+        };
+        if self.chat_session_has_prompt(chat, None)? || self.has_wake_work(chat, background)? {
+            return Ok(None);
+        }
+        Ok(Some(plans))
     }
 
     pub(crate) fn pending_stop_checks(&self) -> Result<Vec<(String, String, i64)>> {
@@ -5951,7 +5974,10 @@ impl Store {
                     [id],
                     |row| row.get(0),
                 )?;
-                if self.stop_check_current(&session_id, id, id, background)? {
+                if self
+                    .stop_check_plans(&session_id, id, id, background)?
+                    .is_some()
+                {
                     self.conn.execute(
                         "INSERT OR IGNORE INTO chat_turn_wakes (source_turn_id, kind, next_delivery_at)
                          VALUES (?1, 'stop-check', ?2)",
