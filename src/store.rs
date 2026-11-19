@@ -1685,27 +1685,35 @@ impl Store {
              CREATE INDEX IF NOT EXISTS idx_run_monitor_flags ON run_monitor_events(run_id) WHERE kind = 'flag';"
         ))?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_signal_collection AFTER DELETE ON runs BEGIN DELETE FROM signal_collections WHERE run_id = OLD.id; END;")?;
-        let enqueue_settled = remote_collections_settled("NEW.run_id");
-        let queued_settled = remote_collections_settled("remote_cleanups.run_id");
-        // Released writers queue the log before publishing the terminal phase.
-        schema.execute_batch(&format!(
-            "CREATE TRIGGER IF NOT EXISTS queue_remote_signal_collection
-             AFTER INSERT ON log_collections WHEN NEW.done = 0 BEGIN
+        let cleanup_guard_installed: bool = schema.query_row(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_schema
+                            WHERE type = 'trigger' AND name = 'protect_remote_cleanup')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !cleanup_guard_installed {
+            let enqueue_settled = remote_collections_settled("NEW.run_id");
+            let queued_settled = remote_collections_settled("remote_cleanups.run_id");
+            // Released writers queue the log before publishing the terminal phase.
+            schema.execute_batch(&format!(
+                "CREATE TRIGGER IF NOT EXISTS queue_remote_signal_collection
+                 AFTER INSERT ON log_collections WHEN NEW.done = 0 BEGIN
+                     INSERT INTO signal_collections (run_id)
+                     SELECT id FROM runs WHERE id = NEW.run_id AND {REMOTE_RUNS}
+                     ON CONFLICT(run_id) DO NOTHING;
+                 END;
+                 CREATE TRIGGER protect_remote_cleanup
+                 BEFORE INSERT ON remote_cleanups
+                 WHEN NEW.deleted = 0 AND NOT ({enqueue_settled}) BEGIN
+                     SELECT RAISE(IGNORE);
+                 END;
                  INSERT INTO signal_collections (run_id)
-                 SELECT id FROM runs WHERE id = NEW.run_id AND {REMOTE_RUNS}
+                 SELECT runs.id FROM log_collections JOIN runs ON runs.id = log_collections.run_id
+                 WHERE log_collections.done = 0 AND {REMOTE_RUNS}
                  ON CONFLICT(run_id) DO NOTHING;
-             END;
-             CREATE TRIGGER IF NOT EXISTS protect_remote_cleanup
-             BEFORE INSERT ON remote_cleanups
-             WHEN NEW.deleted = 0 AND NOT ({enqueue_settled}) BEGIN
-                 SELECT RAISE(IGNORE);
-             END;
-             INSERT INTO signal_collections (run_id)
-             SELECT runs.id FROM log_collections JOIN runs ON runs.id = log_collections.run_id
-             WHERE log_collections.done = 0 AND {REMOTE_RUNS}
-             ON CONFLICT(run_id) DO NOTHING;
-             DELETE FROM remote_cleanups WHERE deleted = 0 AND NOT ({queued_settled});"
-        ))?;
+                 DELETE FROM remote_cleanups WHERE deleted = 0 AND NOT ({queued_settled});"
+            ))?;
+        }
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_run_monitor_state AFTER DELETE ON runs BEGIN DELETE FROM run_monitor_state WHERE run_id = OLD.id; END;")?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_run_monitor_events AFTER DELETE ON runs BEGIN DELETE FROM run_monitor_events WHERE run_id = OLD.id; END;")?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_run_watch_counts AFTER DELETE ON runs BEGIN DELETE FROM watch_counts WHERE run_id = OLD.id; END;")?;
@@ -10630,6 +10638,40 @@ pub(crate) mod tests {
         assert!(store.get_local_project("p").unwrap().is_some());
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn opening_repairs_remote_cleanup_only_when_installing_the_guard() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-cleanup-repair").unwrap();
+        let store = Store::open_at(dir.path().to_path_buf()).unwrap();
+        store
+            .conn
+            .execute_batch(
+                "DROP TRIGGER protect_remote_cleanup;
+                 DROP TRIGGER queue_remote_signal_collection;",
+            )
+            .unwrap();
+        let mut run = run_fixture("remote", "done", None);
+        run.backend_json = r#"{"kind":"ssh_job"}"#.into();
+        store.upsert_run(&run).unwrap();
+        store.queue_log_collection(&run.id).unwrap();
+        assert!(!store.signal_collection_pending(&run.id).unwrap());
+        drop(store);
+
+        let store = Store::open_at(dir.path().to_path_buf()).unwrap();
+        assert!(store.signal_collection_pending(&run.id).unwrap());
+        store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER reject_repeated_repair BEFORE INSERT ON signal_collections BEGIN
+                SELECT RAISE(ABORT, 'remote signal repair already ran');
+             END;",
+            )
+            .unwrap();
+        drop(store);
+
+        let store = Store::open_at(dir.path().to_path_buf()).unwrap();
+        assert!(store.signal_collection_pending(&run.id).unwrap());
     }
 
     #[test]

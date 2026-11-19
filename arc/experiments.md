@@ -213,7 +213,8 @@ log the laptop kept, and whether the host can still be asked. Before release
 the host gets one time-bounded request to fold to the end of its log; the
 release then happens once, whatever that did. While the host still has the
 run, its checkpoint is the answer and failures retry with the log debt's
-backoff, telling the chat once on the seventh. Once it cannot be asked
+backoff. The seventh failure queues a chat notice. Later failures retry a
+missed notice, and the chat receives it once. When the host cannot be asked
 (released, deleted or cleaned up), the laptop continues the host's checkpoint
 over the bytes it kept, a pass at a time to a deadline so other runs keep their
 turn, resumed across restarts, then settles: complete, or incomplete with one
