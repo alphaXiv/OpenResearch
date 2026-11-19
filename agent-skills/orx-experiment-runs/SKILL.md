@@ -162,7 +162,8 @@ orx exp view set <expId> --file view.xml
 | `media` | `glob="samples/*.png"`, `last="6"` (1–6, default 6) |
 
 A chart over signals uses reported steps when available and elapsed time otherwise.
-Every block also takes `phase` (shown only during that stage) and `title`.
+Every block also takes `phase` and `title`. The strip only picks a phased chart
+during its stage. The run page and embedded figures can show blocks from any stage.
 Declare a `signal` for every measure the view names and every column the user
 should read by a label. One chart answers one question: measures on different
 scales get a chart each. A chart draws at most 8 series and a stats block
@@ -286,9 +287,10 @@ back the user's next message (such as "chart it differently" while it runs)
 and every other run's result, and outlives a short run anyway.
 
 When reporting a result about a number shown in the run's first view block,
-cite `<run id="RUN_ID" figure/>` in the message. It shows the run's own block
-beneath its chip and stays live while the run runs. Use `label="…"` to name
-the cited result. Reuse that figure instead of plotting the same data again.
+cite `<run id="RUN_ID" figure/>` in the message. It shows the first block of
+the run's current view, with live data beneath the chip. Editing or reordering
+the view can change or remove figures in earlier messages. Use `label="…"` to
+name the cited result. Reuse that figure instead of plotting the same data again.
 A run with no view or no data yet shows only its chip.
 
 For scripts, `orx exp status EXP --run RUN --json` returns `experimentId`,
