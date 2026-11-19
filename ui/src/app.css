@@ -572,6 +572,12 @@
   input, textarea, select { font-size: 16px; }
 }
 
+/* Lines in the sidebar tint what is under them, so they match over the window material and off it. */
+.session-rail {
+  --border: var(--material-border);
+  --border-variant: var(--material-border-variant);
+}
+
 /* The desktop app's window material shows through the sidebar. */
 .window-material:has(.app-body > .session-rail),
 .window-material:has(.app-body > .session-rail) body {

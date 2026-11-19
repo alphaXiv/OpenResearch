@@ -12,9 +12,8 @@ import {
   Terminal,
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import {
-  fmtDuration,
   timeAgo,
   type Experiment,
   type Project,
@@ -22,12 +21,13 @@ import {
 } from "../api";
 import { autoDir, fmtNumber, ltr } from "../i18n";
 import { capitalized } from "../runMonitor/words";
-import { noticeRun, runActive, runDisplay, runNeverStarted, runResult } from "../runDisplay";
+import { noticeRun, runActive, runDisplay, runDuration, runNeverStarted, runResult } from "../runDisplay";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { BackendBadge } from "./BackendLogos";
 import { BranchPill } from "./BranchPill";
 import { ChatImageScope, Md } from "./Md";
 import { RunContactNotice } from "./RunContactNotice";
+import { useRunClock } from "./RunTiming";
 import { RunDetails } from "./run/Details";
 import { RunPage, WatchSection } from "./run/RunPage";
 import { historySentence } from "../runMonitor/model";
@@ -55,11 +55,6 @@ function fmtDate(ms: number): string {
     hour: "numeric",
     minute: "2-digit",
   });
-}
-
-function runDuration(run: Run, now: number): string {
-  if (runNeverStarted(run)) return "—";
-  return fmtDuration((run.endedAt ?? (runActive(run.status) ? now : run.updatedAt)) - (run.startedAt ?? run.createdAt));
 }
 
 export function ExperimentOverview({
@@ -101,7 +96,7 @@ export function ExperimentOverview({
   const attentionRun = selectedRunId ? run : noticeRun(runs);
   const result = run && run.status !== "failed" ? runResult(run) : null;
   const hasLiveRun = runs.some((run) => runActive(run.status));
-  const [now, setNow] = useState(() => Date.now());
+  const now = useRunClock(hasLiveRun);
   const overview = useRef<HTMLDivElement>(null);
   const trackio = useTrackioRuns(experiment.projectId, hasLiveRun).data;
   const sessions = useQuery(listChatSessionsQuery(experiment.projectId)).data;
@@ -113,13 +108,6 @@ export function ExperimentOverview({
   useEffect(() => {
     if (overview.current) overview.current.scrollTop = 0;
   }, [selectedRunId]);
-
-  useEffect(() => {
-    if (!hasLiveRun) return;
-    setNow(Date.now());
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, [hasLiveRun]);
 
   return (
     <ChatImageScope projectId={experiment.projectId} sessionId={chatSessionId}>

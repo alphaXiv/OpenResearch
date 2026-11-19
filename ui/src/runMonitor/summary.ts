@@ -138,11 +138,10 @@ function watcherSummary(models: RunModel[], labels: string[], watch: ChatWatch |
 }
 
 /**
- * The one line that stands for several runs, worded by orx from their views: who needs attention first; else, when the
+ * The summary for several runs, worded by orx from their views: who needs attention first; else, when the
  * runs of exactly one label group share a headline that says which way is better, who leads them; else how many are in
  * each state and when the first should finish. Runs only lead where they differ by what their labels say, as a sweep
- * does. The watcher's summary, when there is one, says the last two. `firstDone` is when the soonest live run should
- * finish, for the line to say beside a sentence that doesn't.
+ * does. The watcher's summary, when there is one, says the last two. `firstDone` is the estimate for the soonest run.
  */
 export function summarize(models: RunModel[], { labels, groups }: { labels: string[]; groups: (number | null)[] }, watch?: ChatWatch | null, now = Date.now(), rowsOpen = false): { parts: SummaryPart[]; firstDone: string | null } {
   const name = (model: RunModel) => autoDir(labels[models.indexOf(model)]);
@@ -185,14 +184,14 @@ export function summarize(models: RunModel[], { labels, groups }: { labels: stri
   const soonest = floor && timed.length !== live.length ? undefined : timed.sort((a, b) => a - b)[0];
   // Once one has ended, the soonest of the rest is the next done, not the first.
   const after = models.some((model) => !model.live);
-  const firstDone = (duration: string) => (floor ? after ? m.run_summary_next_floor : m.run_summary_first_floor : after ? m.run_summary_next_done : m.run_summary_first_done)({ duration });
-  if (parts) return { parts, firstDone: soonest !== undefined ? firstDone(remainingText(soonest)) : null };
+  const finish = floor
+    ? after ? m.run_summary_next_floor : m.run_summary_first_floor
+    : after ? m.run_summary_next_done : m.run_summary_first_done;
+  const firstDone = soonest === undefined ? null : finish({ duration: `**${remainingText(soonest)}**` });
 
-  // The common case: the counts, then when the first finishes, all one sentence.
-  const counts = PROGRESS.flatMap(({ tone, words }) => {
+  const summary = parts ?? PROGRESS.flatMap(({ tone, words }) => {
     const count = models.filter((model) => model.tone === tone).length;
     return count > 0 ? [{ tone, text: words(`**${ltr(fmtNumber(count))}**`) }] : [];
   });
-  const first = soonest !== undefined ? firstDone(`**${remainingText(soonest)}**`) : null;
-  return { parts: first ? [...counts, { tone: "running", text: first }] : counts, firstDone: null };
+  return { parts: summary, firstDone };
 }

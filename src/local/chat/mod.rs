@@ -15,7 +15,7 @@ pub mod news;
 pub mod project_move;
 pub(crate) mod subagent;
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -3955,7 +3955,7 @@ impl TurnGuard {
         self.armed = false;
     }
 
-    async fn release(&mut self) {
+    pub(crate) async fn release(&mut self) {
         if !self.armed {
             return;
         }
@@ -4476,7 +4476,7 @@ impl ChatHost {
     }
 
     /// What will pick each idle chat back up: its agent's background tasks and
-    /// its delegates still working or waiting themselves, as `{count, since}`
+    /// its delegates still working or waiting themselves, as `{count, since, tasks}`
     /// by chat id.
     pub async fn waiting_on(&self) -> Result<HashMap<String, Value>> {
         let background = self.claude.background_tasks().await;
@@ -4497,7 +4497,7 @@ impl ChatHost {
         }
 
         // A delegate at work keeps its delegator waiting, up the chain, since the earliest start below it.
-        let mut delegates: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut delegates: HashMap<String, BTreeSet<String>> = HashMap::new();
         let mut queue: Vec<String> = active.keys().cloned().collect();
         while let Some(id) = queue.pop() {
             let Some(parent) = store.delegation(&id)?.parent else {
@@ -4519,14 +4519,46 @@ impl ChatHost {
         }
 
         let waiting: HashSet<&String> = background.keys().chain(delegates.keys()).collect();
-        Ok(waiting
+        waiting
             .into_iter()
             .map(|id| {
-                let count = background.get(id).map_or(0, |(count, _)| *count)
-                    + delegates.get(id).map_or(0, HashSet::len);
-                (id.clone(), json!({ "count": count, "since": active[id] }))
+                let own = background
+                    .get(id)
+                    .map(|(tasks, _)| tasks.as_slice())
+                    .unwrap_or_default();
+                let mut tasks: Vec<Value> = own
+                    .iter()
+                    .map(|(task, description)| json!({ "id": task, "name": description }))
+                    .collect();
+                for delegate in delegates.get(id).into_iter().flatten() {
+                    let title = store
+                        .get_chat_session(delegate)?
+                        .and_then(|chat| chat.title);
+                    tasks.push(
+                        json!({ "id": delegate, "name": title.unwrap_or_default(), "chat": true }),
+                    );
+                }
+                let entry = json!({ "count": tasks.len(), "since": active[id], "tasks": tasks });
+                Ok((id.clone(), entry))
             })
-            .collect())
+            .collect()
+    }
+
+    /// Stop one thing `chat_id` waits on: a delegate chat and the chats it
+    /// delegated to, or one of its agent's background tasks. `Ok(false)` when
+    /// neither is running.
+    pub async fn stop_background(self: &Arc<Self>, chat_id: &str, task_id: &str) -> Result<bool> {
+        let store = Store::open()?;
+        if store.delegation(task_id)?.parent.as_deref() != Some(chat_id) {
+            return self.claude.stop_task(chat_id, task_id).await;
+        }
+        let interrupted = self.interrupt(task_id).await?;
+        if interrupted {
+            news::mark_told(&store, chat_id, task_id)?;
+        }
+        let stopped = interrupted || self.claude.interrupt_background(task_id).await;
+        let below = self.stop_delegates(task_id).await?;
+        Ok(stopped || !below.is_empty())
     }
 
     pub fn queued_count(&self) -> usize {
@@ -7559,8 +7591,11 @@ impl ChatHost {
         let mut parents = vec![id.to_string()];
         while let Some(parent) = parents.pop() {
             for child in store.chat_delegates_of(&parent)? {
-                if self.interrupt(&child).await? {
+                let interrupted = self.interrupt(&child).await?;
+                if interrupted {
                     news::mark_told(&store, &parent, &child)?;
+                }
+                if interrupted || self.claude.interrupt_background(&child).await {
                     stopped.push(child.clone());
                 }
                 parents.push(child);
@@ -7908,18 +7943,6 @@ impl ChatHost {
             json!({ "session": self.session_json(&session, busy).await }),
         );
         Some(session)
-    }
-
-    /// Archive/unarchive a session and broadcast the updated row so every open
-    /// dashboard's Recents list re-filters. Returns None for an unknown id.
-    pub async fn set_archived(
-        &self,
-        session_id: &str,
-        archived: bool,
-    ) -> Result<Option<StoredChatSession>> {
-        let store = Store::open()?;
-        store.set_chat_session_archived(session_id, archived)?;
-        Ok(self.emit_session(store.get_chat_session(session_id)?).await)
     }
 
     /// Branch a side chat off `parent`, seeded with a snapshot of the parent's
@@ -14835,7 +14858,10 @@ for line in sys.stdin:
 
             emit(
                 &client,
-                &[json!({"type": "system", "subtype": "task_started", "task_id": "shell"})],
+                &[
+                    json!({"type": "system", "subtype": "task_started", "task_id": "shell",
+                    "description": "Tail the training log"}),
+                ],
             )
             .await;
             let waiting = chat.waiting_on().await.unwrap();
@@ -14843,6 +14869,16 @@ for line in sys.stdin:
             ids.sort();
             assert_eq!(ids, ["delegate", "nested", "parent"]);
             assert_eq!(waiting["parent"]["count"], 1);
+            assert_eq!(
+                waiting["nested"]["tasks"],
+                json!([{"id": "shell", "name": "Tail the training log"}])
+            );
+            assert_eq!(waiting["parent"]["tasks"][0]["id"], "delegate");
+            assert_eq!(waiting["parent"]["tasks"][0]["chat"], true);
+            assert!(
+                !chat.stop_background("parent", "gone").await.unwrap(),
+                "a task that already finished is reported as not running"
+            );
 
             // A delegate with work of its own and a delegate at work below it counts once,
             // since the earliest of them began.

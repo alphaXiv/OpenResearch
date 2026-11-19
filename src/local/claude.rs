@@ -29,7 +29,7 @@
 //! Non-goals (separate tasks): MCP config isolation (`--strict-mcp-config`);
 //! codex/opencode paths; the UI rendering fix.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
@@ -86,10 +86,10 @@ struct TurnSlot {
     /// A turn has ended on this child, so a segment it starts with no turn
     /// listening is its own continuation rather than startup output.
     served: bool,
-    /// Background tasks the child reported started and not yet finished. It
-    /// resumes on its own when one finishes, so it must outlive them, even one
-    /// that never ends.
-    background: HashSet<String>,
+    /// Background tasks the child reported started and not yet finished, with
+    /// their descriptions, by task id. It resumes on its own when one finishes,
+    /// so it must outlive them, even one that never ends.
+    background: BTreeMap<String, String>,
     /// When `background` last went from empty to not, in epoch milliseconds.
     background_since: Option<i64>,
     /// A segment the child began on its own after a turn ended, held until a
@@ -109,7 +109,7 @@ impl TurnSlot {
             sender: None,
             idle_since: now,
             served: false,
-            background: HashSet::new(),
+            background: BTreeMap::new(),
             background_since: None,
             unclaimed: None,
             recording: false,
@@ -169,43 +169,73 @@ impl TurnSlot {
         true
     }
 
-    /// Follows the child's background tasks; returns whether how many there are changed.
+    /// Follows the child's background tasks; returns whether they changed.
     fn track_background(&mut self, event: &Value, now: Instant) -> bool {
         if event.get("type").and_then(Value::as_str) != Some("system") {
             return false;
         }
-        let before = self.background.len();
-        let task_id = || {
-            event
-                .get("task_id")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        };
-        match event.get("subtype").and_then(Value::as_str) {
-            Some("task_started") => self.background.extend(task_id()),
-            Some("task_notification") => {
-                if let Some(id) = task_id() {
-                    self.background.remove(&id);
+        let was_empty = self.background.is_empty();
+        let text =
+            |value: &Value, key: &str| value.get(key).and_then(Value::as_str).map(str::to_string);
+        let task_id = text(event, "task_id");
+        let changed = match event.get("subtype").and_then(Value::as_str) {
+            Some("task_started") => {
+                let Some(id) = task_id else { return false };
+                let description = text(event, "description").unwrap_or_default();
+                if self.background.get(&id) == Some(&description) {
+                    return false;
                 }
+                self.background.insert(id, description);
+                true
+            }
+            Some("task_updated") => {
+                let description = event
+                    .get("patch")
+                    .and_then(|patch| text(patch, "description"));
+                let (Some(id), Some(description)) = (task_id, description) else {
+                    return false;
+                };
+                let Some(known) = self.background.get_mut(&id) else {
+                    return false;
+                };
+                if *known == description {
+                    return false;
+                }
+                *known = description;
+                true
+            }
+            Some("task_notification") => {
                 self.task_finished_at = Some(now);
+                task_id.is_some_and(|id| self.background.remove(&id).is_some())
             }
             Some("background_tasks_changed") => {
-                if let Some(tasks) = event.get("tasks").and_then(Value::as_array) {
-                    self.background = tasks
-                        .iter()
-                        .filter_map(|task| task.get("task_id").and_then(Value::as_str))
-                        .map(str::to_string)
-                        .collect();
+                let Some(tasks) = event.get("tasks").and_then(Value::as_array) else {
+                    return false;
+                };
+                let updated = tasks
+                    .iter()
+                    .filter_map(|task| {
+                        let id = text(task, "task_id")?;
+                        let description = text(task, "description")
+                            .or_else(|| self.background.get(&id).cloned())
+                            .unwrap_or_default();
+                        Some((id, description))
+                    })
+                    .collect();
+                if self.background == updated {
+                    return false;
                 }
+                self.background = updated;
+                true
             }
-            _ => {}
-        }
+            _ => return false,
+        };
         if self.background.is_empty() {
             self.background_since = None;
-        } else if before == 0 {
+        } else if was_empty {
             self.background_since = Some(crate::store::now_ms());
         }
-        self.background.len() != before
+        changed
     }
 
     /// Whether a line no turn is listening for starts a segment the child
@@ -1533,9 +1563,9 @@ impl ClaudeHost {
         Ok(client.register_turn(tx, self.reaper_notify.clone()))
     }
 
-    /// How many background tasks each live child has unfinished, and since
-    /// when the first of them has run, by session id.
-    pub async fn background_tasks(&self) -> HashMap<String, (usize, i64)> {
+    /// Each live child's unfinished background tasks as `(task id, description)`,
+    /// and since when the first of them has run, by session id.
+    pub async fn background_tasks(&self) -> HashMap<String, (Vec<(String, String)>, i64)> {
         let live: Vec<_> = self.inner.lock().await.values().cloned().collect();
         live.iter()
             .filter(|client| !client.terminated.load(Ordering::Acquire))
@@ -1544,9 +1574,31 @@ impl ClaudeHost {
                 let since = turn
                     .background_since
                     .filter(|_| !turn.background.is_empty())?;
-                Some((client.session_id.clone(), (turn.background.len(), since)))
+                let tasks = turn
+                    .background
+                    .iter()
+                    .map(|(id, description)| (id.clone(), description.clone()))
+                    .collect();
+                Some((client.session_id.clone(), (tasks, since)))
             })
             .collect()
+    }
+
+    /// Stop one of the session's background tasks with Claude Code's `stop_task`.
+    /// `Ok(false)` when the session has no such task running.
+    pub async fn stop_task(&self, session_id: &str, task_id: &str) -> Result<bool> {
+        let Some(client) = self
+            .live(session_id)
+            .await
+            .filter(|client| client.turn.lock().unwrap().background.contains_key(task_id))
+        else {
+            return Ok(false);
+        };
+        client
+            .control_request(json!({ "subtype": "stop_task", "task_id": task_id }))
+            .await?
+            .map_err(|msg| anyhow!("Claude Code could not stop the task: {msg}"))?;
+        Ok(true)
     }
 
     /// Whether the session's child holds a segment it started on its own that
@@ -1601,6 +1653,17 @@ impl ClaudeHost {
     pub async fn interrupt_session(&self, session_id: &str) {
         self.kill_session_for(session_id, "session-interrupted", true)
             .await;
+    }
+
+    pub async fn interrupt_background(&self, session_id: &str) -> bool {
+        let Some(client) = self.live(session_id).await else {
+            return false;
+        };
+        if client.turn.lock().unwrap().background.is_empty() {
+            return false;
+        }
+        self.interrupt_session(session_id).await;
+        true
     }
 
     /// Stops the session's child so its next turn resumes whatever the store
@@ -1847,6 +1910,13 @@ pub(crate) mod tests {
             printf '%s\n' "$line"
             case "$line" in *'"type":"user"'*)
                 printf '%s\n' '{"type":"assistant","message":{"id":"reply","content":[{"type":"text","text":"REPLY"}]}}' '{"type":"result","subtype":"success"}' ;;
+            *'"subtype":"stop_task"'*)
+                request=${line#*'"request_id":"'}
+                request=${request%%'"'*}
+                task=${line#*'"task_id":"'}
+                task=${task%%'"'*}
+                printf '{"type":"system","subtype":"task_notification","task_id":"%s","status":"stopped"}\n' "$task"
+                printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s"}}\n' "$request" ;;
             esac
         done"#;
         let client = chat_test_client(session_id, now, now, shell, chat);
@@ -2332,22 +2402,45 @@ done
     #[tokio::test]
     async fn background_tasks_are_listed_from_the_first_start_until_the_last_finishes() {
         let (host, client) = echo_worker("listed").await;
-        let started =
-            |id: &str| json!({"type": "system", "subtype": "task_started", "task_id": id});
+        let started = |id: &str, description: &str| json!({"type": "system", "subtype": "task_started", "task_id": id, "description": description});
         let finished =
             |id: &str| json!({"type": "system", "subtype": "task_notification", "task_id": id});
         assert!(host.background_tasks().await.is_empty());
 
-        emit(&client, &[started("a")]).await;
-        let (_, since) = host.background_tasks().await["listed"];
-        emit(&client, &[started("b"), finished("a")]).await;
+        emit(&client, &[started("a", "Train the baseline")]).await;
+        let (_, since) = host.background_tasks().await.remove("listed").unwrap();
+        emit(&client, &[started("b", "Watch the run"), finished("a")]).await;
         assert_eq!(
-            host.background_tasks().await["listed"],
-            (1, since),
+            host.background_tasks().await.remove("listed"),
+            Some((vec![("b".into(), "Watch the run".into())], since)),
             "a task still runs since the first began"
         );
 
-        emit(&client, &[finished("b")]).await;
+        emit(
+            &client,
+            &[
+                json!({"type": "system", "subtype": "task_updated", "task_id": "b",
+                    "patch": {"description": "Watch run 2"}}),
+                json!({"type": "system", "subtype": "background_tasks_changed",
+                    "tasks": [{"task_id": "b"}, {"task_id": "c", "description": "Sweep"}]}),
+            ],
+        )
+        .await;
+        assert_eq!(
+            host.background_tasks().await.remove("listed").unwrap().0,
+            [
+                ("b".into(), "Watch run 2".into()),
+                ("c".into(), "Sweep".into())
+            ],
+            "the level keeps a description the edge gave"
+        );
+
+        assert!(host.stop_task("listed", "b").await.unwrap());
+        assert_eq!(
+            host.background_tasks().await.remove("listed"),
+            Some((vec![("c".into(), "Sweep".into())], since))
+        );
+        emit(&client, &[finished("c")]).await;
         assert!(host.background_tasks().await.is_empty());
         host.shutdown().await;
     }
