@@ -309,6 +309,7 @@ pub(crate) struct TerminalEvidence {
 }
 
 pub const TERMINAL: &str = "terminal";
+pub(crate) const INSTRUMENTATION: &str = "instrumentation";
 pub const ATTENTION: &str = "attention";
 pub(crate) const INCOMPLETE_SIGNAL_NOTICE: &str = "signal-collection-incomplete";
 pub(crate) const SIGNAL_AVAILABILITY_PREFIX: &str = "\n\nSignal availability: ";
@@ -7280,6 +7281,7 @@ impl Store {
         now: i64,
     ) -> Result<Option<i64>> {
         let tx = self.begin_immediate()?;
+        Self::retire_stale_instrumentation(&tx, Some(chat), now)?;
         let table = NoticeOutbox::for_turn(client_turn_id).table();
         let prior: Option<(i64, Option<i64>)> = tx
             .query_row(
@@ -7323,7 +7325,7 @@ impl Store {
         Ok(Some(failures + 1))
     }
 
-    /// Why the run's latest retired notice batch never reached its chat.
+    /// The run's latest notice delivery failure that ended retries.
     pub(crate) fn run_notice_error(&self, run_id: &str) -> Result<Option<String>> {
         Ok(self
             .conn
@@ -7340,10 +7342,18 @@ impl Store {
             .optional()?)
     }
 
-    pub fn expire_run_notice_batches(&self, now: i64) -> Result<()> {
+    pub fn retire_run_notice_batches(&self, now: i64) -> Result<()> {
+        let tx = self.begin_immediate()?;
+        Self::retire_run_notice_batches_locked(&tx, now)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn retire_run_notice_batches_locked(tx: &rusqlite::Transaction<'_>, now: i64) -> Result<()> {
+        Self::retire_stale_instrumentation(tx, None, now)?;
         for outbox in [NoticeOutbox::Run, NoticeOutbox::Flag] {
             let table = outbox.table();
-            self.conn.execute(
+            tx.execute(
                 &format!(
                     "UPDATE {table} SET retired_at = ?1, next_delivery_at = NULL,
              delivery_error = 'Retry window expired after 24 hours: ' || delivery_error
@@ -7360,9 +7370,58 @@ impl Store {
         self.run_notice_batch_at(chat_session_id, now_ms())
     }
 
+    pub(crate) fn run_notice_batch_is_current(
+        tx: &rusqlite::Transaction<'_>,
+        turn: &StoredChatTurn,
+    ) -> Result<bool> {
+        Self::retire_stale_instrumentation(tx, Some(&turn.session_id), turn.created_at)?;
+        Ok(tx.query_row(
+            "SELECT NOT EXISTS (SELECT 1 FROM run_notices
+             WHERE chat_session_id = ?1 AND client_turn_id = ?2 AND kind = ?3
+               AND retired_at IS NOT NULL AND delivery_error IS NULL)",
+            params![turn.session_id, turn.client_turn_id, INSTRUMENTATION],
+            |row| row.get(0),
+        )?)
+    }
+
+    fn retire_stale_instrumentation(
+        tx: &rusqlite::Transaction<'_>,
+        chat: Option<&str>,
+        now: i64,
+    ) -> Result<()> {
+        let old_batches = {
+            let mut stmt = tx.prepare(
+                "UPDATE run_notices SET retired_at = ?2, next_delivery_at = NULL, delivery_error = NULL
+                 WHERE (?1 IS NULL OR chat_session_id = ?1) AND kind = ?3
+                   AND delivered_at IS NULL AND retired_at IS NULL
+                   AND EXISTS (SELECT 1 FROM runs WHERE id = run_notices.run_id
+                               AND status IN ('done', 'failed', 'cancelled', 'lost'))
+                   AND NOT EXISTS (SELECT 1 FROM chat_turns WHERE session_id = run_notices.chat_session_id
+                                   AND client_turn_id = run_notices.client_turn_id)
+                 RETURNING chat_session_id, client_turn_id",
+            )?;
+            let ids = stmt.query_map(params![chat, now, INSTRUMENTATION], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })?;
+            ids.collect::<rusqlite::Result<std::collections::BTreeSet<_>>>()?
+        };
+        for (chat, old) in old_batches {
+            let Some(old) = old else { continue };
+            // Retired rows keep the old id so an in-flight preparation can detect the change.
+            let replacement = format!("run-notice:{}", uuid::Uuid::new_v4());
+            tx.execute(
+                "UPDATE run_notices SET client_turn_id = ?3
+                 WHERE chat_session_id = ?1 AND client_turn_id = ?2
+                   AND delivered_at IS NULL AND retired_at IS NULL",
+                params![chat, old, replacement],
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn run_notice_batch_at(&self, chat_session_id: &str, now: i64) -> Result<Vec<RunNotice>> {
         let tx = self.begin_immediate()?;
-        self.expire_run_notice_batches(now)?;
+        Self::retire_run_notice_batches_locked(&tx, now)?;
         self.retire_unadmitted_flag_wakes(now)?;
         let next: Option<(bool, Option<String>)> = tx
             .query_row(
@@ -9718,6 +9777,80 @@ pub(crate) mod tests {
             .unwrap());
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn instrumentation_is_rechecked_until_the_notice_turn_is_admitted() {
+        for admitted in [false, true] {
+            let dir =
+                crate::config::test_home().join(format!("orx-notices-{}", uuid::Uuid::new_v4()));
+            let store = Store::open_at(dir.clone()).unwrap();
+            store
+                .create_chat_session(&chat_session_fixture("chat_1"))
+                .unwrap();
+            let mut ending = run_fixture("ending", "running", Some("chat_1"));
+            for run in [&ending, &run_fixture("live", "running", Some("chat_1"))] {
+                store.upsert_run(run).unwrap();
+                store
+                    .insert_run_notice(
+                        &run.id,
+                        "chat_1",
+                        INSTRUMENTATION,
+                        INSTRUMENTATION,
+                        "Check the run's instrumentation.",
+                        1,
+                    )
+                    .unwrap();
+            }
+            let frozen = store.run_notice_batch_at("chat_1", 1).unwrap();
+            assert_eq!(frozen.len(), 2);
+            let mut turn = chat_turn_fixture("notice", &frozen[0].client_turn_id);
+            turn.user_message_id = None;
+            if admitted {
+                store.admit_chat_turn(None, &turn).unwrap();
+            }
+
+            let other_writer = Store::open_at(dir.clone()).unwrap();
+            ending.status = "done".into();
+            ending.ended_at = Some(2);
+            other_writer.upsert_run(&ending).unwrap();
+            let tx = store.begin_immediate().unwrap();
+            assert_eq!(
+                Store::run_notice_batch_is_current(&tx, &turn).unwrap(),
+                admitted
+            );
+            tx.commit().unwrap();
+            drop(store);
+
+            let reopened = Store::open_at(dir.clone()).unwrap();
+            let after = reopened.run_notice_batch_at("chat_1", 3).unwrap();
+            if admitted {
+                assert_eq!(after, frozen);
+                assert_eq!(
+                    reopened
+                        .get_chat_turn_by_client_id("chat_1", &turn.client_turn_id)
+                        .unwrap(),
+                    Some(turn)
+                );
+            } else {
+                assert_eq!(after.len(), 1);
+                assert_eq!(after[0].run_id, "live");
+                assert_ne!(after[0].client_turn_id, turn.client_turn_id);
+                let tx = reopened.begin_immediate().unwrap();
+                assert!(!Store::run_notice_batch_is_current(&tx, &turn).unwrap());
+                turn.client_turn_id.clone_from(&after[0].client_turn_id);
+                assert!(Store::run_notice_batch_is_current(&tx, &turn).unwrap());
+                assert_eq!(
+                    Store::append_chat_turn(&tx, None, &turn).unwrap(),
+                    ChatTurnAdmission::Inserted
+                );
+                tx.commit().unwrap();
+                assert_eq!(reopened.run_notice_error(&ending.id).unwrap(), None);
+            }
+            drop(reopened);
+            drop(other_writer);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
     }
 
     #[test]

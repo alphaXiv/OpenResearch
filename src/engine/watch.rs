@@ -20,6 +20,7 @@ use crate::local::harness::{
 };
 use crate::store::{
     LookResult, Store, StoredChatSession, StoredRun, WatchCount, WatchLook, WatchLookRun,
+    INSTRUMENTATION,
 };
 
 /// Ceilings on silence after a stage starts, in seconds: a look at least this often while the run
@@ -419,10 +420,10 @@ struct Seen {
     patterns_checked: Option<(String, String, Vec<bool>)>,
 }
 
-const INSTRUMENTATION: &str = "instrumentation";
-const AGENTIC_RELAUNCH: &str = "In Agentic mode you may cancel and relaunch on your own.";
+const AGENTIC_RELAUNCH: &str =
+    "In Default or Full auto-research mode you may cancel and relaunch on your own.";
 const COPILOT_RELAUNCH: &str =
-    "In Copilot mode, ask the user before cancelling healthy compute or relaunching.";
+    "In Collaborative mode, ask the user before cancelling healthy compute or relaunching.";
 
 struct Instrumentation {
     chat: String,
@@ -439,7 +440,7 @@ impl Instrumentation {
             return Ok(None);
         };
         let relaunch = match Autonomy::from_stored(chat.autonomy.as_deref()) {
-            Autonomy::Agentic => AGENTIC_RELAUNCH,
+            Autonomy::Agentic | Autonomy::AutoResearch => AGENTIC_RELAUNCH,
             Autonomy::Copilot => COPILOT_RELAUNCH,
         };
         let problems = self
@@ -448,7 +449,8 @@ impl Instrumentation {
         let body = format!(
             "[orx] Run {run} (experiment {experiment}) needs an instrumentation check.\n\
              {problems}\n\
-             Inspect `orx exp view show {run}`, `orx exp view check {run}` and `orx logs {run}`. \
+             Check the current run status and review these findings privately. Address them when they \
+             help a live or planned run's decision. Inspect `orx exp view show {run}`, `orx exp view check {run}` and `orx logs {run}`. \
              Repair the view, plan or patterns on this run with `orx exp view set {experiment}`. \
              If the missing report requires a code change, weigh the work already done before relaunching. \
              {relaunch} To restart, cancel an active run with \

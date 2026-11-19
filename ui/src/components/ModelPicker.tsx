@@ -175,7 +175,7 @@ function PermissionIcon({ id }: { id: string | null | undefined }) {
   return <Icon size={14} aria-hidden="true" className={cn("shrink-0", permission?.tone ?? "text-subtext")} />;
 }
 
-function DescribedRadioItem({ choice, icon, isDefault }: { choice: OptionChoice; icon?: ReactNode; isDefault: boolean }) {
+function DescribedRadioItem({ choice, icon, isDefault }: { choice: OptionChoice; icon?: ReactNode; isDefault?: boolean }) {
   return (
     <Menu.RadioItem value={choice.id} closeOnClick label={choice.label} className={cn(SETTINGS_ROW, "items-start")}>
       <span className="flex min-w-0 items-start gap-2">
@@ -183,9 +183,9 @@ function DescribedRadioItem({ choice, icon, isDefault }: { choice: OptionChoice;
         <span className="flex min-w-0 flex-col items-start gap-0.5">
           <span>
             {choice.label}
-            {isDefault && <span className="text-muted"> {m.model_picker_default()}</span>}
+            {isDefault && <span className="text-ink-subtext"> {m.model_picker_default()}</span>}
           </span>
-          {choice.description && <span className="text-sm leading-snug text-muted">{choice.description}</span>}
+          {choice.description && <span className="text-sm leading-snug text-ink-subtext">{choice.description}</span>}
         </span>
       </span>
       <Menu.RadioItemIndicator className="flex h-5 shrink-0 items-center">
@@ -583,6 +583,12 @@ export function ModelPicker({
       description: m.model_picker_autonomy_copilot_description(),
       icon: <Handshake size={14} aria-hidden="true" className="shrink-0 text-accent-green" />,
     },
+    {
+      id: "autoresearch",
+      label: m.model_picker_autonomy_autoresearch(),
+      description: m.model_picker_autonomy_autoresearch_description(),
+      icon: <Workflow size={14} aria-hidden="true" className="shrink-0 text-accent-purple" />,
+    },
   ];
   const autonomyLabel = autonomyChoices.find((choice) => choice.id === autonomy)?.label;
   const permissionSummary = [
@@ -972,7 +978,7 @@ export function ModelPicker({
                 >
                   {permissionChoices.length > 0 && (
                     <Menu.Group>
-                      <Menu.GroupLabel className={MENU_LABEL}>{m.model_picker_permissions()}</Menu.GroupLabel>
+                      <Menu.GroupLabel className={cn(MENU_LABEL, "text-subtext")}>{m.model_picker_permissions()}</Menu.GroupLabel>
                       <Menu.RadioGroup
                         value={effectivePermissionId}
                         onValueChange={(id) => {
@@ -988,7 +994,7 @@ export function ModelPicker({
                   {permissionChoices.length > 0 && onSelectAutonomy && <Menu.Separator className={MENU_SEPARATOR} />}
                   {onSelectAutonomy && (
                     <Menu.Group>
-                      <Menu.GroupLabel className={MENU_LABEL}>{m.model_picker_autonomy()}</Menu.GroupLabel>
+                      <Menu.GroupLabel className={cn(MENU_LABEL, "text-subtext")}>{m.model_picker_autonomy()}</Menu.GroupLabel>
                       <Menu.RadioGroup
                         value={autonomy ?? DEFAULT_AUTONOMY}
                         onValueChange={(id) => {
@@ -997,7 +1003,7 @@ export function ModelPicker({
                         }}
                       >
                         {autonomyChoices.map((choice) => (
-                          <DescribedRadioItem key={choice.id} choice={choice} icon={choice.icon} isDefault={choice.id === DEFAULT_AUTONOMY} />
+                          <DescribedRadioItem key={choice.id} choice={choice} icon={choice.icon} />
                         ))}
                       </Menu.RadioGroup>
                     </Menu.Group>

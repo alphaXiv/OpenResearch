@@ -2177,9 +2177,13 @@ async fn instrumentation_rechecks_a_deferred_pattern_when_its_stage_matures_or_r
             Some(id)
         );
         let notice = store.run_notice_batch(id).unwrap();
-        assert!(notice
-            .iter()
-            .any(|notice| notice.run_id == id && notice.body.contains("Pattern 1")));
+        if ended {
+            assert!(notice.is_empty());
+        } else {
+            assert!(notice
+                .iter()
+                .any(|notice| notice.run_id == id && notice.body.contains("Pattern 1")));
+        }
     }
 }
 

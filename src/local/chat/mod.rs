@@ -3457,6 +3457,7 @@ enum TurnAdmission {
     QueueIfBusy,
     RejectIfBusy,
     Preclaimed(TurnGuard),
+    RunNotice(TurnGuard),
     FlagWake(TurnGuard),
     Recovery {
         previous_client_turn_id: String,
@@ -6491,8 +6492,11 @@ impl ChatHost {
         // reservation happen under one lock so two concurrent sends (or a
         // send racing a /respond resume) can't both spawn a turn against the
         // same session. `_guard` releases the reservation on any early error.
+        let run_notice = matches!(&admission, TurnAdmission::RunNotice(_));
         let (mut guard, mut pending_client_turn) = match admission {
-            TurnAdmission::Preclaimed(guard) | TurnAdmission::FlagWake(guard) => (guard, None),
+            TurnAdmission::Preclaimed(guard)
+            | TurnAdmission::RunNotice(guard)
+            | TurnAdmission::FlagWake(guard) => (guard, None),
             TurnAdmission::RejectIfBusy | TurnAdmission::Recovery { .. } => {
                 match TurnGuard::claim(self, session_id, Some(&mut overrides)).await {
                     Some(guard) => (guard, None),
@@ -7033,8 +7037,12 @@ impl ChatHost {
         };
         *reserved = Some(turn_id.clone());
 
-        let submission = {
+        let prepared = 'admission: {
             let tx = store.begin_immediate()?;
+            if run_notice && !Store::run_notice_batch_is_current(&tx, &turn)? {
+                tx.commit()?;
+                break 'admission None;
+            }
             let mut flags = if flag_wake {
                 store.admit_flag_wakes(session_id, &turn.client_turn_id, now_ms())?
             } else {
@@ -7091,7 +7099,7 @@ impl ChatHost {
                 Some((ctx, admitted))
             }
         };
-        let Some((ctx, admitted)) = submission else {
+        let Some((ctx, admitted)) = prepared else {
             drop(turns);
             guard.release().await;
             return Ok(TurnSubmission::NotStarted);
@@ -10327,7 +10335,7 @@ fn run_notice_request(
         admission: if flag_wake {
             TurnAdmission::FlagWake(guard)
         } else {
-            TurnAdmission::Preclaimed(guard)
+            TurnAdmission::RunNotice(guard)
         },
         client_turn_id: Some(notices[0].client_turn_id.clone()),
         request_hash: None,
@@ -10391,7 +10399,7 @@ async fn process_run_notices(
     if data_dir_move_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
         return Ok(held);
     }
-    store.expire_run_notice_batches(now_ms())?;
+    store.retire_run_notice_batches(now_ms())?;
     store.retire_unadmitted_flag_wakes(now_ms())?;
     for run in store.retire_unconfirmed_flag_attachments(None, now_ms())? {
         crate::commands::up::api_v2::flag_changed(run);
@@ -10413,7 +10421,7 @@ async fn process_run_notices(
             guard.release().await;
             return Ok(held);
         }
-        let notices = store.run_notice_batch(&session_id)?;
+        let mut notices = store.run_notice_batch(&session_id)?;
         if notices.is_empty() {
             // A covered result can empty the first batch while a later batch still waits.
             held.push(session_id);
@@ -10427,6 +10435,11 @@ async fn process_run_notices(
                 .is_none()
         {
             chat.compact_before_wake(&session_id).await;
+            notices = store.run_notice_batch(&session_id)?;
+            if notices.is_empty() {
+                guard.release().await;
+                continue;
+            }
         }
         match send_run_notice_batch(chat, &session_id, &notices, guard).await {
             Ok(submission @ (TurnSubmission::Started(_) | TurnSubmission::Existing(_))) => {
@@ -10468,26 +10481,25 @@ async fn process_run_notices(
                     }
                 }
             }
-            Ok(TurnSubmission::NotStarted) if flagged => held.push(session_id),
+            Ok(TurnSubmission::NotStarted) => held.push(session_id),
             Ok(_) => {}
             Err(err) => {
                 let permanent = is_client_turn_conflict(&err)
                     || err.downcast_ref::<PermanentRunNoticeError>().is_some();
-                if let Some(failures) = store.record_run_notice_failure(
+                let failures = store.record_run_notice_failure(
                     &session_id,
                     &notices[0].client_turn_id,
                     &err.to_string(),
                     permanent,
                     now_ms(),
-                )? {
-                    if failures == 1 {
-                        eprintln!(
-                            "orx up: run notices: batch {}: {err}",
-                            notices[0].client_turn_id
-                        );
-                    }
-                    held.push(session_id);
+                )?;
+                if failures == Some(1) {
+                    eprintln!(
+                        "orx up: run notices: batch {}: {err}",
+                        notices[0].client_turn_id
+                    );
                 }
+                held.push(session_id);
             }
         }
     }
@@ -16806,12 +16818,22 @@ for line in sys.stdin:
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn a_flag_whose_run_ended_first_goes_to_the_independent_agent_after_its_result() {
+    async fn an_ended_runs_flag_and_result_wake_full_auto_research_without_housekeeping() {
         if !crate::config::in_test_child(&[]) {
             return;
         }
         let store = Store::open().unwrap();
-        let mut run = quiet_agent_chat(&store, None);
+        let mut run = quiet_agent_chat(&store, Some(Autonomy::AutoResearch.id()));
+        store
+            .insert_run_notice(
+                &run.id,
+                "owner",
+                crate::store::INSTRUMENTATION,
+                crate::store::INSTRUMENTATION,
+                "Check the run's instrumentation.",
+                1,
+            )
+            .unwrap();
         run.status = "done".into();
         run.ended_at = Some(2);
         run.exit_code = Some(0);
@@ -16842,7 +16864,13 @@ for line in sys.stdin:
             "{}",
             prompts[1]
         );
+        assert!(prompts
+            .iter()
+            .all(|prompt| !prompt.contains("Check the run's instrumentation.")));
+        assert!(prompts[0].contains("<orx-autonomy level=\"autoresearch\">"));
         assert!(prompts[1].contains("has ended (done)"));
+        assert!(prompts[1].contains("Review the result privately"));
+        assert!(!prompts[1].contains("--stop"), "{}", prompts[1]);
         assert!(prompts[2].contains("ended without settling flag f1"));
         assert!(!prompts[2].contains("--stop"), "{}", prompts[2]);
         assert_eq!(flag(&store, &run)["state"], "kept");

@@ -249,7 +249,7 @@ export interface ModelNudge {
 export type RunBannerLevel = "line" | "strip";
 
 /** How much of the research the agent owns before checking in. */
-export type Autonomy = "copilot" | "agentic";
+export type Autonomy = "copilot" | "agentic" | "autoresearch";
 export const DEFAULT_AUTONOMY: Autonomy = "agentic";
 
 export interface ProjectPathStatus {
