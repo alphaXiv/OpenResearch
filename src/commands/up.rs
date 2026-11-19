@@ -1086,6 +1086,14 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
         .route("/api/chat/sessions/{id}/branch", post(select_chat_branch))
         .route("/api/chat/sessions/{id}/interrupt", post(interrupt_chat))
         .route(
+            "/api/chat/sessions/{id}/stop-and-archive",
+            post(stop_and_archive_chat),
+        )
+        .route(
+            "/api/chat/sessions/{id}/background/{task}/stop",
+            post(stop_background_task),
+        )
+        .route(
             "/api/chat/sessions/{id}/queue/{itemId}",
             axum::routing::delete(cancel_queued_chat).post(retry_queued_chat),
         )
@@ -10528,10 +10536,12 @@ async fn update_chat_session(
             .await?
             .ok_or_else(|| not_found("chat session"))?
     } else if let Some(archived) = req.archived {
+        let store = Store::open()?;
+        store.set_chat_session_archived(&id, archived)?;
         state
             .chat
-            .set_archived(&id, archived)
-            .await?
+            .emit_session(store.get_chat_session(&id)?)
+            .await
             .ok_or_else(|| not_found("chat session"))?
     } else if let Some(plan_mode) = req.plan_mode {
         state
@@ -11026,6 +11036,74 @@ async fn chat_attachment(
 
 async fn interrupt_chat(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
     state.chat.interrupt_by_user(&id).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn stop_and_archive_chat(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    reject_if_moving(&state)?;
+    let chat = state.chat;
+    // A disconnected client must not leave the chat between stopping and archiving.
+    tokio::spawn(async move {
+        let store = Store::open()?;
+        store
+            .get_chat_session(&id)?
+            .ok_or_else(|| not_found("chat session"))?;
+        if !chat.queued_items(&id).is_empty() {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "This chat has queued messages. Remove them, then mark it done.".into(),
+            ));
+        }
+        chat.interrupt(&id).await?;
+        let mut guard = local::chat::TurnGuard::claim(&chat, &id, None)
+            .await
+            .ok_or_else(|| {
+                ApiError(
+                    StatusCode::CONFLICT,
+                    "The chat took on another turn. Try marking it done again.".into(),
+                )
+            })?;
+        chat.claude.interrupt_session(&id).await;
+        chat.stop_delegates(&id).await?;
+
+        let reason = format!("Cancel requested by marking chat {id} done in the dashboard.");
+        for (session, run) in store.chat_active_runs()? {
+            if session == id && run.chat_session_id.as_deref() == Some(id.as_str()) {
+                api_v2::cancel_run(
+                    &run,
+                    &reason,
+                    Some(&crate::store::StopContext::by(crate::store::StopBy::User)),
+                )
+                .await
+                .map_err(|error| anyhow!("Could not stop experiment run {}: {error}", run.id))?;
+                store.dismiss_run_notices(&run.id, &id, now_ms())?;
+            }
+        }
+        store.set_chat_session_archived(&id, true)?;
+        guard.release().await;
+        let session = chat
+            .emit_session(store.get_chat_session(&id)?)
+            .await
+            .ok_or_else(|| not_found("chat session"))?;
+        Ok(Json(
+            chat.session_json(&session, chat.is_busy(&id).await).await,
+        ))
+    })
+    .await
+    .map_err(|error| anyhow!("Could not finish marking the chat done: {error}"))?
+}
+
+async fn stop_background_task(
+    State(state): State<AppState>,
+    Path((id, task)): Path<(String, String)>,
+) -> ApiResult {
+    reject_if_moving(&state)?;
+    if !state.chat.stop_background(&id, &task).await? {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            "That background task has already finished.".into(),
+        ));
+    }
     Ok(Json(json!({ "ok": true })))
 }
 

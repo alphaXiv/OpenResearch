@@ -218,17 +218,20 @@ function inChatTurn<T>(id: string, ws: Workspace, sessionId: string, write: () =
 /** Joins the workspace's chat writes, so a turn sent after a setting starts with it. */
 export const mutPatchChatSession = mutations.define({
   id: "chat/session",
-  mutate: (ws: Workspace, session: Pick<ChatSession, "id" | "projectId">, changes: ChatSessionPatch) =>
-    inChatTurn("chat/session", ws, session.id, () => ws.api.patchChatSession(session.id, changes)),
+  mutate: (ws: Workspace, session: Pick<ChatSession, "id" | "projectId">, changes: ChatSessionPatch | "stop-and-archive") =>
+    inChatTurn("chat/session", ws, session.id, () =>
+      changes === "stop-and-archive" ? ws.api.stopAndArchiveChat(session.id) : ws.api.patchChatSession(session.id, changes)),
   optimistic({ helpers, args: [ws, session, changes], onSuccess, onRestore }) {
     holdChatTurn("chat/session", ws, session.id, onRestore);
-    const { agent: _agent, notifyParent, ...fields } = changes;
-    const shown: Partial<ChatSession> = notifyParent === false ? { ...fields, delegate: null } : fields;
     const options = ws.queries.listChatSessionsQuery(session.projectId);
-    helpers(ws.queryClient).arrayUpdate(options, {
-      filter: (row) => row.id === session.id,
-      update: (row) => ({ ...row, ...shown }),
-    });
+    if (changes !== "stop-and-archive") {
+      const { agent: _agent, notifyParent, ...fields } = changes;
+      const shown: Partial<ChatSession> = notifyParent === false ? { ...fields, delegate: null } : fields;
+      helpers(ws.queryClient).arrayUpdate(options, {
+        filter: (row) => row.id === session.id,
+        update: (row) => ({ ...row, ...shown }),
+      });
+    }
     onSuccess((saved) => {
       markLiveUpdate(ws.queryClient, options.queryKey, saved.id);
       ws.setScopedQueryData(options.queryKey, (rows) => rows?.map((row) => row.id === saved.id ? saved : row));
@@ -351,6 +354,15 @@ export const mutInterruptChat = mutations.define({
   optimistic: () => {},
   key: ({ args: [ws, sessionId] }) => [ws.identity, sessionId],
   describe: "stop the turn",
+  describeResult: null,
+});
+
+export const mutStopBackgroundTask = mutations.define({
+  id: "chat/background/stop",
+  mutate: (ws: Workspace, sessionId: string, taskId: string) => ws.api.stopBackgroundTask(sessionId, taskId),
+  optimistic: () => {},
+  key: ({ args: [ws, sessionId, taskId] }) => [ws.identity, sessionId, taskId],
+  describe: "stop the background task",
   describeResult: null,
 });
 

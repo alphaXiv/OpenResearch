@@ -41,9 +41,9 @@ When asked to run and summarize an experiment, load `orx-compute` and
 `orx-results` before launching: execution and interpretation are separate skill
 areas. Use `orx-logs` when retrieving supporting output.
 
-Load `orx-experiment-runs` before a baseline's first launch, when the user
-names a duration, or when they ask about the run card. Follow its launch and
-inspection steps, including the check after every launch. Use
+Load `orx-experiment-runs` before a baseline's first launch, when a flag wakes
+you, or when the user names a duration or asks about the run card. Follow its
+launch and inspection steps, including the check after every launch. Use
 `orx exp status <expId>` for a run's live stage and numbers.
 
 Use `orx` as the source of truth for the experiment tree, runs, and logs. Use

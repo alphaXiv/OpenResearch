@@ -691,6 +691,17 @@ test("a monitor that can't be refreshed keeps its chart and says so once, how ol
   assert.ok(container.querySelector('[role="progressbar"]'), "the bar stays below the chart");
 });
 
+test("a finished run's strip shows its result during quiet final collection", async () => {
+  const availability = { state: "stale", reason: null };
+  backend({ monitors: { r1: { ...running, availability } } });
+  const { container } = await banner([run("r1", { status: "done", endedAt: now, monitor: summary({ tone: "done", availability }) })]);
+  await settle();
+  assert.ok(button(m.run_show_less()), "the strip is open");
+  assert.ok(container.textContent.includes("2.31"));
+  assert.ok(!container.textContent.includes(m.run_monitor_load_failed()));
+  assert.ok(!named(m.app_retry()));
+});
+
 test("a closed line uses its summary until opening reads the monitor, and Retry restores the countdown", async () => {
   const monitors = { r1: Response.json({ error: "The monitor is down." }, { status: 500 }) };
   const requests = backend({ uiState: { onboardingCompleted: true, runBanner: "line" }, monitors });

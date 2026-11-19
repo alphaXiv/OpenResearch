@@ -9,10 +9,10 @@ import { find, render, serveApp, settle } from "./render.mjs";
 
 const fixture = JSON.parse(readFileSync(new URL("./fixtures/runMonitor/running.json", import.meta.url), "utf8"));
 
-async function message({ monitor = fixture, visible = true, figure = "figure", projectId = "p", failure, id = "r1" } = {}) {
+async function message({ monitor = fixture, visible = true, figure = "figure", projectId = "p", failure, id = "r1", status = "running" } = {}) {
   const calls = [];
   let refused = !!failure;
-  const run = { id: "r1", projectId, experimentId: "e1", status: "running", contact: null, monitor: { rev: monitor.rev, generation: monitor.generation } };
+  const run = { id: "r1", projectId, experimentId: "e1", status, contact: null, monitor: { rev: monitor.rev, generation: monitor.generation } };
   serveApp({
     [`GET /api/projects/${projectId}/runs`]: () => failure === "runs" && refused ? Response.json({ error: "Could not read runs" }, { status: 500 }) : ({ runs: visible ? [run] : [] }),
     "GET /api/runs/r1/monitor": () => { calls.push("monitor"); return failure === "monitor" && refused ? Response.json({ error: "Could not read monitor" }, { status: 500 }) : monitor; },
@@ -36,6 +36,20 @@ test("a figure citation draws the page chart and keeps the chip's open gesture",
   await act(() => chip.click());
   assert.equal(opened[0][0], "r1");
   assert.ok(!container.querySelector("p div"), "block content does not nest in a paragraph");
+});
+
+test("a finished run's figure keeps drawing while final collection waits, and shows a reason when one arrives", async () => {
+  const monitor = { ...fixture, availability: { state: "stale", reason: null } };
+  const { container, workspace } = await message({ monitor, status: "done" });
+  assert.ok(container.querySelector('svg[role="img"][aria-label*="Loss"]'));
+  assert.ok(!container.textContent.includes(m.run_monitor_load_failed()));
+  assert.ok(!find("button", m.app_retry()));
+
+  const reason = "The final log is still being read.";
+  const next = { ...monitor, rev: monitor.rev + 1, availability: { ...monitor.availability, reason } };
+  await act(async () => workspace.queryClient.setQueryData(workspace.queries.getRunMonitorQuery("r1").queryKey, next));
+  await settle();
+  assert.ok(container.textContent.includes(reason));
 });
 
 test("a table citation tells the reader its most recent reports come first", async () => {
