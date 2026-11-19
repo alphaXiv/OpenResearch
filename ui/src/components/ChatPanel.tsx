@@ -5186,7 +5186,7 @@ const Transcript = memo(function Transcript({
             data-message-id={rowId}
             data-search-target={isTarget || undefined}
             ref={virtualizer.measureElement}
-            className={`absolute left-0 w-full pb-4 isolate outline-none before:-z-10 before:pointer-events-none before:absolute before:-inset-x-2 before:-top-2 before:bottom-2 before:rounded-lg before:bg-highlight before:transition-opacity before:duration-700 motion-reduce:before:transition-none after:pointer-events-none after:absolute after:-inset-x-2 after:-top-2 after:bottom-2 after:rounded-lg focus-visible:after:outline-2 focus-visible:after:outline-focus ${rowId === markedRowId ? "before:opacity-60" : "before:opacity-0"}`}
+            className={`absolute left-0 w-full isolate outline-none before:-z-10 before:pointer-events-none before:absolute before:-inset-x-2 before:-top-2 before:bottom-2 before:rounded-lg before:bg-highlight before:transition-opacity before:duration-700 motion-reduce:before:transition-none after:pointer-events-none after:absolute after:-inset-x-2 after:-top-2 after:bottom-2 after:rounded-lg focus-visible:after:outline-2 focus-visible:after:outline-focus ${rowId === markedRowId ? "before:opacity-60" : "before:opacity-0"}`}
             onClickCapture={(event) => {
               if (!(event.target instanceof Element) || !event.target.closest("[data-work-toggle]")) return;
               stickToBottom.current = false;
@@ -5199,6 +5199,8 @@ const Transcript = memo(function Transcript({
               if (!event.currentTarget.contains(event.relatedTarget)) setFocusedRow((current) => current === rowId ? null : current);
             }}
           >
+          {/* Bleeds to the pane edges: WebKit anchors a press beside an absolutely positioned row at the feed's first character. */}
+          <div className="-mx-[100vw] px-[100vw] pb-4">
           {/* NVDA leaves article names unspoken by default, so a hidden heading names the author. A reply nests under its prompt. */}
           {group[0].role === "user"
             ? <h5 id={headingId} className="sr-only select-none">{userLabel}</h5>
@@ -5252,6 +5254,7 @@ const Transcript = memo(function Transcript({
               ))}
             </div>
           )}
+          </div>
           </div>
         );
       })}
@@ -9165,8 +9168,8 @@ export function ChatPanel({
               transcriptSelection.dismiss();
             }}
           >
-            {/* Clips the launch rise at the composer, since a transform still extends the scroll range. */}
-            <div className="min-h-full overflow-y-clip">
+            {/* Clips the rows' bleed, and the launch rise at the composer, since a transform still extends the scroll range. */}
+            <div className="min-h-full overflow-hidden supports-[overflow:clip]:overflow-clip">
             <div className="chat-thread-inner max-w-readable my-0 mx-auto pt-4 px-4 pb-8 flex flex-col gap-4" ref={threadInnerRef}>
               <ChatImageScope projectId={projectId} sessionId={activeId}>
                 <ChatLinksContext value={chatLinks}>
