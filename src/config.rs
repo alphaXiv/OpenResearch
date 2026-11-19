@@ -255,9 +255,10 @@ pub(crate) const REDIRECT_VARS: [&str; 12] = [
 /// The credentials, endpoints and models agents and backends read, and the
 /// markers of an agent's shell; a test child sees only those its test sets.
 #[cfg(test)]
-pub(crate) const PROVIDER_VARS: [&str; 40] = [
+pub(crate) const PROVIDER_VARS: [&str; 41] = [
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_MODEL",
     "CLAUDE_CODE_PROMPT_CACHE_TTL",
