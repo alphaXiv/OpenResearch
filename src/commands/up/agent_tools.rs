@@ -94,7 +94,7 @@ fn tools(harness: &str) -> Value {
         },
         {
             "name": "set_goal",
-            "description": "Set this chat's research direction and budget. Use null to clear it.",
+            "description": "Set this chat's research direction and budget while replying to the user's own message. Use null to clear it.",
             "inputSchema": { "type": "object", "properties": { "goal": { "type": ["string", "null"] } }, "required": ["goal"] },
         },
         {

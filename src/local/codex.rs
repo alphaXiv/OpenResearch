@@ -13,7 +13,7 @@
 //! are plain UUIDs persisted as rollout files under the selected `CODEX_HOME`,
 //! so `thread/resume {threadId}` survives an `orx up` restart.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -229,7 +229,7 @@ pub struct CodexClient {
     /// The executable this child runs; once detection picks another, the next turn respawns it.
     bin: PathBuf,
     session_id: String,
-    live_subagents: std::sync::Mutex<HashMap<String, i64>>,
+    live_subagents: std::sync::Mutex<HashSet<String>>,
     /// Each native (thread, turn)'s model, outliving any one orx turn: sub-agents do.
     turn_models: std::sync::Mutex<HashMap<(String, String), String>>,
     /// Last time this child was handed out, reported thread work, or ended a
@@ -497,10 +497,10 @@ impl CodexClient {
                     return;
                 };
                 let mut live = self.live_subagents.lock().unwrap();
-                if thread == parent || live.contains_key(thread) {
+                if thread == parent || live.contains(thread) {
                     for id in subagent_thread_ids(&params["item"]) {
                         if id != parent {
-                            live.entry(id).or_insert_with(crate::store::now_ms);
+                            live.insert(id);
                         }
                     }
                 }
@@ -867,7 +867,7 @@ fn spawn_client(
         alphaxiv_signed_in: crate::alphaxiv::signed_in(),
         bin,
         session_id: session_id.to_string(),
-        live_subagents: std::sync::Mutex::new(HashMap::new()),
+        live_subagents: std::sync::Mutex::new(HashSet::new()),
         turn_models: std::sync::Mutex::new(HashMap::new()),
         last_active: std::sync::Mutex::new(Instant::now()),
     });
@@ -935,20 +935,6 @@ impl CodexHost {
 
     pub fn set_up_port(&self, port: u16) {
         let _ = self.up_port.set(port);
-    }
-
-    pub(crate) async fn background_tasks(&self) -> HashMap<String, (usize, i64)> {
-        self.inner
-            .lock()
-            .await
-            .iter()
-            .filter(|(_, client)| !client.terminated.load(Ordering::Acquire))
-            .filter_map(|(id, client)| {
-                let live = client.live_subagents.lock().unwrap();
-                let since = *live.values().min()?;
-                Some((id.clone(), (live.len(), since)))
-            })
-            .collect()
     }
 
     /// Spawn (or reuse) this session's app-server child. Idempotent while the
@@ -1491,7 +1477,7 @@ pub(crate) mod tests {
             alphaxiv_signed_in: false,
             bin: PathBuf::new(),
             session_id: String::new(),
-            live_subagents: std::sync::Mutex::new(HashMap::new()),
+            live_subagents: std::sync::Mutex::new(HashSet::new()),
             turn_models: std::sync::Mutex::new(HashMap::new()),
             last_active: std::sync::Mutex::new(Instant::now()),
         })
@@ -1561,7 +1547,7 @@ pub(crate) mod tests {
             alphaxiv_signed_in: false,
             bin: PathBuf::new(),
             session_id: String::new(),
-            live_subagents: std::sync::Mutex::new(HashMap::new()),
+            live_subagents: std::sync::Mutex::new(HashSet::new()),
             turn_models: std::sync::Mutex::new(HashMap::new()),
             last_active: std::sync::Mutex::new(last_active),
         });
@@ -1577,9 +1563,7 @@ pub(crate) mod tests {
     }
 
     #[cfg(unix)]
-    #[tokio::test]
-    async fn subagent_work_survives_the_parent_turn_route() {
-        let host = CodexHost::new();
+    pub(crate) async fn subagent_test_client(host: &CodexHost, chat: &str) -> Arc<CodexClient> {
         let client = rpc_test_client(
             r#"
             read -r request
@@ -1592,19 +1576,22 @@ pub(crate) mod tests {
             read -r request
             "#,
         );
-        host.inner
-            .lock()
-            .await
-            .insert("chat".into(), client.clone());
+        host.inner.lock().await.insert(chat.into(), client.clone());
         client.set_resumed_thread("parent");
         let (tx, _rx) = mpsc::unbounded_channel();
-        let route = client.register_turn(tx);
+        let _route = client.register_turn(tx);
         client.request("fixture/parent", json!({})).await.unwrap();
+        client
+    }
 
-        drop(route);
-        assert_eq!(host.background_tasks().await["chat"].0, 1);
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn subagent_work_survives_the_parent_turn_route() {
+        let host = CodexHost::new();
+        let client = subagent_test_client(&host, "chat").await;
+        assert!(client.idle_since().is_none());
         client.request("fixture/child", json!({})).await.unwrap();
-        assert!(host.background_tasks().await.is_empty());
+        assert!(client.idle_since().is_some());
         host.kill_session("chat").await;
     }
 
@@ -1979,7 +1966,7 @@ pub(crate) mod tests {
             alphaxiv_signed_in: false,
             bin: PathBuf::new(),
             session_id: String::new(),
-            live_subagents: std::sync::Mutex::new(HashMap::new()),
+            live_subagents: std::sync::Mutex::new(HashSet::new()),
             turn_models: std::sync::Mutex::new(HashMap::new()),
             last_active: std::sync::Mutex::new(Instant::now()),
         });

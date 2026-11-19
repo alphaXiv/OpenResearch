@@ -1523,7 +1523,7 @@ fn with_selected_chat_context(text: String, annotations: &[TextAnnotation]) -> S
 
 /// Tool name on the user-side transcript part recording a composer `!` command.
 /// Harness user messages never carry tool parts, so this alone marks one.
-const USER_SHELL_TOOL: &str = "bash";
+pub(crate) const USER_SHELL_TOOL: &str = "bash";
 
 /// The synthetic tool part that marks a compaction in the transcript.
 const COMPACTED_TOOL: &str = "compacted";
@@ -4482,14 +4482,6 @@ impl ChatHost {
         self.turns.lock().await.keys().cloned().collect()
     }
 
-    async fn background_chat_ids(&self) -> HashSet<String> {
-        let (claude, codex) = tokio::join!(
-            self.claude.background_tasks(),
-            self.codex.background_tasks()
-        );
-        claude.into_keys().chain(codex.into_keys()).collect()
-    }
-
     /// What will pick each idle chat back up: its agent's background tasks and
     /// its delegates still working or waiting themselves, as `{count, since, tasks}`
     /// by chat id.
@@ -5965,9 +5957,9 @@ impl ChatHost {
                     *reserved = Some(turn_id.to_string());
                 }
                 let background = if stop_source.is_some() {
-                    self.background_chat_ids().await
+                    self.claude.background_tasks().await
                 } else {
-                    HashSet::new()
+                    HashMap::new()
                 };
                 {
                     let tx = store.begin_immediate()?;
@@ -7081,9 +7073,9 @@ impl ChatHost {
         };
         let delegator = Self::delegator(&store, session_id);
         let background = if stop_source.is_some() {
-            self.background_chat_ids().await
+            self.claude.background_tasks().await
         } else {
-            HashSet::new()
+            HashMap::new()
         };
         let mut turns = self.turns.lock().await;
         let Some(TurnState::Reserved { turn_id: reserved }) = turns.get_mut(session_id) else {
@@ -7345,9 +7337,9 @@ impl ChatHost {
             } else {
                 let host = ctx.host.clone();
                 let background = if outcome == TurnOutcome::Completed {
-                    host.background_chat_ids().await
+                    host.claude.background_tasks().await
                 } else {
-                    HashSet::new()
+                    HashMap::new()
                 };
                 let turns = host.turns.lock().await;
                 let session_id = ctx.session_id.clone();
@@ -8205,9 +8197,9 @@ impl ChatHost {
         closing.text = line.to_string();
 
         let background = if closing.kind == YieldKind::Running {
-            self.background_chat_ids().await
+            self.claude.background_tasks().await
         } else {
-            HashSet::new()
+            HashMap::new()
         };
         let mut turns = self.turns.lock().await;
         let (active, token) = self.agent_turn_binding(&mut turns, session_id)?;
@@ -8231,6 +8223,10 @@ impl ChatHost {
             let (active, token) = self.agent_turn_binding(&mut turns, session_id)?;
             let tx = store.begin_immediate()?;
             store.require_live_chat_turn(&active.turn_id, &token)?;
+            anyhow::ensure!(
+                store.chat_turn_has_user_prompt(&active.turn_id)?,
+                "The goal is the user's to set on this turn."
+            );
             let delivered = active
                 .expected_goal
                 .as_ref()
@@ -15581,7 +15577,7 @@ for line in sys.stdin:
                 !chat.stop_background("parent", "gone").await.unwrap(),
                 "a task that already finished is reported as not running"
             );
-            let background = claude.background_tasks().await.into_keys().collect();
+            let background = claude.background_tasks().await;
             assert!(store.has_wake_work("nested", &background).unwrap());
             assert!(store.has_wake_work("parent", &background).unwrap());
             assert!(!store.has_wake_work("unrelated", &background).unwrap());
@@ -15614,10 +15610,7 @@ for line in sys.stdin:
             .await;
             assert!(chat.waiting_on().await.unwrap().is_empty());
             assert!(!store
-                .has_wake_work(
-                    "parent",
-                    &claude.background_tasks().await.into_keys().collect()
-                )
+                .has_wake_work("parent", &claude.background_tasks().await)
                 .unwrap());
             claude.shutdown().await;
         });
@@ -16654,6 +16647,23 @@ done
         run
     }
 
+    async fn wait_for_stop_prompt(events: &mut broadcast::Receiver<(&'static str, Value)>) {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let (topic, value) = events.recv().await.unwrap();
+                if topic == "chat.message"
+                    && value["message"]["parts"].as_array().is_some_and(|parts| {
+                        parts.iter().any(|part| part["text"] == "Waiting for Stop.")
+                    })
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+    }
+
     fn quiet_agent_chat(store: &Store, autonomy: Option<&str>) {
         let repo = crate::store::data_dir().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
@@ -16834,7 +16844,7 @@ for line in sys.stdin:
             }
             assert_eq!(
                 store
-                    .finish_chat_turn(&source, outcome, Some(&HashSet::new()))
+                    .finish_chat_turn(&source, outcome, Some(&HashMap::new()))
                     .unwrap(),
                 id != "interrupted"
             );
@@ -16898,20 +16908,7 @@ for line in sys.stdin:
             )
         };
         let stopped = send("Wait for Stop.").await.unwrap();
-        tokio::time::timeout(Duration::from_secs(15), async {
-            loop {
-                let (topic, value) = events.recv().await.unwrap();
-                if topic == "chat.message"
-                    && value["message"]["parts"].as_array().is_some_and(|parts| {
-                        parts.iter().any(|part| part["text"] == "Waiting for Stop.")
-                    })
-                {
-                    break;
-                }
-            }
-        })
-        .await
-        .unwrap();
+        wait_for_stop_prompt(&mut events).await;
         host.interrupt_by_user("owner").await.unwrap();
         assert_eq!(
             store
@@ -16971,6 +16968,7 @@ for line in sys.stdin:
             format!("stop-check:{}", source.turn_id)
         );
         assert_eq!(wake.user_message_id, None);
+        assert!(!store.chat_turn_has_user_prompt(&wake.id).unwrap());
         assert_eq!(wake.delivery_state, "accepted");
         assert!(store.stop_check_pending(&source.turn_id).unwrap());
         host.acp.stop("owner").await;
@@ -16996,7 +16994,7 @@ for line in sys.stdin:
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn agent_goal_uses_the_delivered_goal_and_yield_needs_a_wake() {
+    async fn running_yield_needs_work_that_will_wake_the_chat() {
         if !crate::config::in_test_child(&[]) {
             return;
         }
@@ -17005,13 +17003,10 @@ for line in sys.stdin:
         session(&store, "owner");
         let guard = TurnGuard::claim(&host, "owner", None).await.unwrap();
         store.put_chat_turn("owner", "answer", "running", now_ms());
-        store
-            .set_chat_session_goal("owner", Some("Original budget"))
-            .unwrap();
         host.turns.lock().await.insert(
             "owner".into(),
             TurnState::Active(ActiveTurn {
-                expected_goal: Some(Some("Original budget".into())),
+                expected_goal: None,
                 turn_id: "answer".into(),
                 message_id: "answer".into(),
                 handle: tokio::spawn(std::future::pending()),
@@ -17030,6 +17025,18 @@ for line in sys.stdin:
             )
             .await
             .is_err());
+        #[cfg(unix)]
+        {
+            crate::local::codex::tests::subagent_test_client(&host.codex, "owner").await;
+            assert!(host
+                .record_yield(
+                    "owner",
+                    yield_line(YieldKind::Running, "Waiting for the Codex subagent")
+                )
+                .await
+                .is_err());
+            host.codex.kill_session("owner").await;
+        }
         session(&store, "delegate");
         store
             .record_chat_delegate("delegate", "owner", false)
@@ -17070,48 +17077,6 @@ for line in sys.stdin:
             .await
             .is_err());
 
-        host.set_agent_goal("owner", Some("Draft from the agent"))
-            .await
-            .unwrap();
-        host.set_agent_goal("owner", Some("Refined by the agent"))
-            .await
-            .unwrap();
-        host.set_goal("owner", Some("Updated by the user"))
-            .await
-            .unwrap();
-        let conflict = host
-            .set_agent_goal("owner", Some("Different direction"))
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(conflict.contains("Updated by the user"));
-        assert_eq!(
-            store
-                .get_chat_session("owner")
-                .unwrap()
-                .unwrap()
-                .goal
-                .as_deref(),
-            Some("Updated by the user")
-        );
-        host.set_agent_goal("owner", Some("Updated by the user"))
-            .await
-            .unwrap();
-        assert!(host.set_agent_goal("owner", None).await.is_err());
-        host.set_goal("owner", Some("Refined by the agent"))
-            .await
-            .unwrap();
-        host.set_agent_goal("owner", None).await.unwrap();
-        assert_eq!(
-            store
-                .get_chat_session("owner")
-                .unwrap()
-                .unwrap()
-                .goal
-                .as_deref(),
-            None
-        );
-
         let mut ctx = TurnCtx::test_stub();
         ctx.durable = true;
         ctx.session_id = "owner".into();
@@ -17126,7 +17091,7 @@ for line in sys.stdin:
         ));
         ctx.save(true).unwrap();
         assert!(store
-            .finish_chat_turn("answer", TurnOutcome::Completed, Some(&HashSet::new()))
+            .finish_chat_turn("answer", TurnOutcome::Completed, Some(&HashMap::new()))
             .unwrap());
         assert_eq!(
             list_messages("owner").unwrap()[0].turn_yield,
@@ -17160,6 +17125,85 @@ for line in sys.stdin:
             YieldKind::Need
         );
         host.interrupt("owner").await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_goal_writes_require_a_user_prompt_and_the_delivered_goal() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let store = Store::open().unwrap();
+        quiet_agent_chat(&store, None);
+        let host = notice_host();
+        host.set_goal("owner", Some("Original budget"))
+            .await
+            .unwrap();
+
+        let delegate_update = OrxDisplay {
+            text: "Wait for Stop.".into(),
+            source: OrxSource {
+                kind: OrxKind::Message,
+                from: Some("delegate".into()),
+                status: None,
+            },
+        };
+        for from in [None, Some(delegate_update)] {
+            let from_user = from.is_none();
+            let mut events = host.subscribe();
+            host.send_message(
+                "owner",
+                "Wait for Stop.".into(),
+                TurnOverrides::default(),
+                Vec::new(),
+                Vec::new(),
+                None,
+                from,
+            )
+            .await
+            .unwrap();
+            wait_for_stop_prompt(&mut events).await;
+
+            let write = host
+                .set_agent_goal("owner", Some("Draft from the agent"))
+                .await;
+            if from_user {
+                write.unwrap();
+                host.set_agent_goal("owner", Some("Refined by the agent"))
+                    .await
+                    .unwrap();
+                host.set_goal("owner", Some("Updated by the user"))
+                    .await
+                    .unwrap();
+                let conflict = host
+                    .set_agent_goal("owner", Some("Different direction"))
+                    .await
+                    .unwrap_err()
+                    .to_string();
+                assert!(conflict.contains("Updated by the user"));
+                assert_eq!(
+                    store
+                        .get_chat_session("owner")
+                        .unwrap()
+                        .unwrap()
+                        .goal
+                        .as_deref(),
+                    Some("Updated by the user")
+                );
+                host.set_agent_goal("owner", Some("Updated by the user"))
+                    .await
+                    .unwrap();
+                assert!(host.set_agent_goal("owner", None).await.is_err());
+                host.set_goal("owner", Some("Refined by the agent"))
+                    .await
+                    .unwrap();
+                host.set_agent_goal("owner", None).await.unwrap();
+            } else {
+                assert!(write.unwrap_err().to_string().contains("the user's to set"));
+            }
+            assert_eq!(store.get_chat_session("owner").unwrap().unwrap().goal, None);
+            host.interrupt_by_user("owner").await.unwrap();
+        }
+        host.acp.stop("owner").await;
     }
 
     /// Delivers what the outbox has until the chat goes quiet.

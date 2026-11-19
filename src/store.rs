@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{anyhow, Context, Result};
 use crate::local::autonomy::Autonomy;
+use crate::local::claude::BackgroundTasks;
 use crate::local::harness::TurnOutcome;
 use crate::local::model::{LocalExperiment, LocalProject};
 use crate::workspace_state::{GlobalWorkspaceState, WorkspaceState};
@@ -4447,15 +4448,21 @@ impl Store {
 
     fn chat_session_has_prompt(&self, session_id: &str, busy: Option<bool>) -> Result<bool> {
         Ok(self.conn.query_row(
-            "WITH RECURSIVE active(id, parent_id, parts_json, role, recent) AS (
-                SELECT m.id, m.parent_id, m.parts_json, m.role, m.role != 'user' FROM chat_messages m
+            "WITH RECURSIVE messages AS NOT MATERIALIZED (
+                SELECT id, parent_id, session_id, parts_json, CASE WHEN role != 'user' THEN 1
+                    ELSE COALESCE(json_array_length(parts_json) = 1
+                        AND json_extract(parts_json, '$[0].type') = 'tool'
+                        AND json_extract(parts_json, '$[0].tool') = ?3, 0)
+                    END AS continues_reply
+                FROM chat_messages WHERE session_id = ?1
+             ), active(id, parent_id, parts_json, recent) AS (
+                SELECT m.id, m.parent_id, m.parts_json, m.continues_reply FROM messages m
                 JOIN chat_sessions s ON s.active_leaf_id = m.id AND s.id = m.session_id
                 WHERE s.id = ?1
                 UNION ALL
-                SELECT m.id, m.parent_id, m.parts_json, m.role, a.recent AND m.role != 'user'
-                FROM chat_messages m
-                JOIN active a ON a.parent_id = m.id WHERE m.session_id = ?1
-                  AND (?2 IS NOT NULL OR a.recent)
+                SELECT m.id, m.parent_id, m.parts_json, a.recent AND m.continues_reply
+                FROM messages m
+                JOIN active a ON a.parent_id = m.id WHERE ?2 IS NOT NULL OR a.recent
              )
              SELECT EXISTS (
                 SELECT 1 FROM active a, json_each(a.parts_json) p
@@ -4468,7 +4475,7 @@ impl Store {
                       OR (a.recent AND json_extract(p.value, '$.prompt.kind') = 'plan')
                   END)
              )",
-            params![session_id, busy],
+            params![session_id, busy, crate::local::chat::USER_SHELL_TOOL],
             |row| row.get(0),
         )?)
     }
@@ -5714,12 +5721,22 @@ impl Store {
         Ok(())
     }
 
-    pub(crate) fn has_wake_work(
-        &self,
-        chat: &str,
-        background: &std::collections::HashSet<String>,
-    ) -> Result<bool> {
-        let background_ids = serde_json::to_string(background)?;
+    pub(crate) fn chat_turn_has_user_prompt(&self, id: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (
+                SELECT 1 FROM chat_turns t JOIN chat_messages m
+                    ON m.id = t.user_message_id AND m.session_id = t.session_id
+                WHERE t.id = ?1 AND m.role = 'user'
+                  AND NOT EXISTS (SELECT 1 FROM json_each(m.parts_json) p
+                    WHERE json_extract(p.value, '$.orx') IS NOT NULL)
+             )",
+            [id],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub(crate) fn has_wake_work(&self, chat: &str, background: &BackgroundTasks) -> Result<bool> {
+        let background_ids = serde_json::to_string(&background.keys().collect::<Vec<_>>())?;
         let mut work = self.conn.prepare(
             "WITH RECURSIVE followed(id) AS (
                 SELECT ?1
@@ -5824,7 +5841,7 @@ impl Store {
         chat: &str,
         source: &str,
         frontier: &str,
-        background: &std::collections::HashSet<String>,
+        background: &BackgroundTasks,
     ) -> Result<bool> {
         let current: bool = self.conn.query_row(
             "SELECT EXISTS (
@@ -5905,7 +5922,7 @@ impl Store {
         &self,
         id: &str,
         outcome: TurnOutcome,
-        stop_check: Option<&std::collections::HashSet<String>>,
+        stop_check: Option<&BackgroundTasks>,
     ) -> Result<bool> {
         let stop_check = stop_check.filter(|_| outcome == TurnOutcome::Completed);
         let tx = self
@@ -15259,6 +15276,36 @@ pub(crate) mod tests {
                     .unwrap(),
                 awaiting
             );
+            let session = store.get_chat_session("chat_pending").unwrap().unwrap();
+            assert_eq!(
+                crate::local::chat::session_json_with(Some(&store), &session, false)
+                    ["awaitingInput"],
+                awaiting
+            );
+        }
+        let mut plan = store.get_chat_message("question").unwrap().unwrap();
+        plan.parts_json = r#"[{"type":"prompt","prompt":{"kind":"plan"}}]"#.into();
+        store.upsert_chat_message(&plan).unwrap();
+        for (id, parts, awaiting) in [
+            (
+                "shell",
+                serde_json::json!([{"type":"tool","tool":crate::local::chat::USER_SHELL_TOOL}]),
+                true,
+            ),
+            (
+                "reply",
+                serde_json::json!([{"type":"text","text":"Let's try another direction."}]),
+                false,
+            ),
+        ] {
+            store
+                .upsert_chat_message_on_branch(&StoredChatMessage {
+                    id: id.into(),
+                    role: "user".into(),
+                    parts_json: parts.to_string(),
+                    ..plan.clone()
+                })
+                .unwrap();
             let session = store.get_chat_session("chat_pending").unwrap().unwrap();
             assert_eq!(
                 crate::local::chat::session_json_with(Some(&store), &session, false)
