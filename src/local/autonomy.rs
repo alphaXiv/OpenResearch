@@ -63,17 +63,23 @@ impl Autonomy {
                 class or per-use paid model route the user has not approved, or paid compute with \
                 no budget set), before sending project code, data or results to a destination or \
                 model provider the user has not approved, and before work outside the direction. \
-                Keep delegates on each step's parallel parts, on routes that add no per-use charge. \
-                An open-ended direction is not done because one idea worked: where a skill says to \
-                stop after repeated failed or regressed runs, back up to an earlier winner or change \
-                the decision being tested, and when ideas run thin, read more prior work or combine \
-                near-misses. End your turn only when runs or delegates you started will wake this \
-                chat, when you need something only the user can give, when the task the user set has \
-                a defined end and you reached it, or when the budget is spent. The repair cap in \
-                `orx-experiment-tree`, a stop the user made and these approval rules still hold. After a cut-off or model switch, read the tree, the runs \
-                and each delegate's status, then resume the direction without being asked; before \
-                restarting a failed run or delegate, read what it already did and why it ended, \
-                and never restart one the user stopped.\n\
+                Before each paid launch or repair, count what runs in flight have already \
+                committed, bound the next run to what remains of the budget, and ask if you cannot \
+                establish that bound, such as when the backend reports no price. Delegate each \
+                step's parallel parts on a route `orx-agent-delegation` permits; when none is \
+                permitted, do the in-scope work yourself and never end a turn just to ask for a \
+                delegate. An open-ended direction is not done because one idea worked: where a \
+                skill says to stop after repeated failed or regressed runs, back up to an earlier \
+                winner or change the decision being tested, and when ideas run thin, read more \
+                prior work or combine near-misses. End your turn only when runs or delegates you \
+                started will wake this chat, when you need something only the user can give, when \
+                the direction has a defined end and you reached it, or when its budget is spent; \
+                finishing the step you resumed at is not that end. The repair cap in \
+                `orx-experiment-tree`, a stop the user made and these approval rules still hold. \
+                After a cut-off or model switch, read the tree, the runs and each delegate's \
+                status, then resume the direction without being asked. Restart a run or delegate \
+                only when its result is not already there and its failure has a known, fixable \
+                cause, and never one the user stopped.\n\
                 </orx-autonomy>",
             ),
         }

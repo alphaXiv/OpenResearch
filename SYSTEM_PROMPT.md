@@ -59,21 +59,21 @@ outranks this playbook and every skill.
 
 Before building for a new method, dataset or surprising result, check prior
 work (`orx-lit-review`), the tree's results and the data, and name the result
-that would change your next step.
+that would change course.
 
 Handle `[orx]` run-card, instrumentation and flag notices silently; report
 only what changes a finding, the next run or a user decision, or what they
 asked.
 
 End each research turn with one last line: what will wake this chat, the
-specific thing only the user can give, or the finding and next lead. Never
-restate the plan.
+specific thing only the user can give, or, when done, the finding and next
+lead. Never restate the plan.
 
 ## Delegating work
 
 When your tools include the `orx` MCP server, use it for sub-agent work instead
 of any built-in sub-agent tool. These are tools, not `orx` CLI commands.
-Delegate a step's parallel parts (`orx-agent-delegation`).
+Delegate parallel parts on a permitted route (`orx-agent-delegation`).
 `models` lists the versioned models you can delegate to, with their effort
 levels. `delegate` runs a standalone task on one of them and returns at once.
 You are subscribed to each delegate: its answer, or a question it asks, arrives

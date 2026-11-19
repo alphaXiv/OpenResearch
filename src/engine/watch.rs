@@ -456,6 +456,7 @@ impl Instrumentation {
              If the missing report requires a code change, weigh the work already done before relaunching. \
              {relaunch} To restart, cancel an active run with \
              `orx exp cancel --run {run} --reason 'Fixing run reports'`, then fix and commit the code before the next launch. \
+             For an ended run, make any needed code fix when implementing its planned child. \
              This check sends at most one notice per run."
         );
         let queued = store.insert_run_notice(

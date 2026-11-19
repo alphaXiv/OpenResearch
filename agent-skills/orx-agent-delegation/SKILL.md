@@ -21,20 +21,21 @@ keep the main line here:
 - **Prep**: data loading, an eval harness, a figure script, in its own files or
   `worktree: "own"`.
 - **Independent checks** of a claim a decision rests on, by another provider's
-  model once the user approved it for project content (below). Give it the
+  model once the user approved that provider (below). Give it the
   claim, the runs and the files, not your conclusion, and name the checking
   model when you report the claim.
 
 Keep the decision, the synthesis and what you tell the user in this chat. Tell
 the user what a delegate's result changes, not that it finished.
 
-A model in `models` is available, not approved. Delegate without asking only
-on a route that adds no per-use charge: one marked `(free)`, the route this
-chat runs on, or one the user approved; ask before any other, such as an API
-key or a pay-per-call provider. A model from another provider may receive
-public topic terms; ask before sending it project code, data, unpublished
-results, or the user's messages and attachments, unless the user approved that
-provider for them.
+A model in `models` is available, not approved. A delegate gets this
+project's checkout, so delegate only to a model provider the user already uses
+in this project's chats or approved for it. A route billed per use, such as an
+API key or a metered provider, is spend even when this chat runs on it: it
+needs a budget that covers it or the user's go; a route marked `(free)` adds
+no charge. Name the route you checked in `delegate`'s `route`. Delegation is
+encouraged, never required: when no permitted route exists, do the in-scope
+work yourself, and never end a turn just to ask for a delegate.
 
 A delegate starts with nothing but its task. Write a standalone brief: the
 project, experiment or commit, constraints, permitted compute, expected output,
@@ -60,8 +61,9 @@ ref (`msg_3fa9c1d2`) in the task instead of retyping it.
 - **After a model switch or cut-off.** Check each delegate named in the chat
   with `status` before starting new work. Before relaunching one whose chat
   ended without its answer, `read` what it already did (commits, runs, files)
-  and why it ended. Relaunch one a cut-off or restart ended, with a brief that
-  accounts for that work; one that failed, only once you know why; never one
+  and why it ended. Relaunch only work still needed, whose result or artifact
+  is not already there, and whose failure has a known, fixable cause, such as
+  a cut-off or restart; brief it with the work already done. Never relaunch one
   the user stopped.
 - **Effort.** Pass `effort` from `models` only when the task needs more or less
   reasoning than the route's default.

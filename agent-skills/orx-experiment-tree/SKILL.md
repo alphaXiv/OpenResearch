@@ -131,31 +131,39 @@ intended flow — do **not** edit a frozen node or rewrite the run command:
    ```
    The child inherits its parent's run command automatically — you don't set it,
    and you never give siblings different commands or env vars (cardinal rule 2).
-4. **Implement each child's change on its Git branch** once its parent's run
-   has answered, never before — `orx create-experiment` prints the child's
-   branch (`orx/<slug>`); in your worktree:
+4. **Implement each child's change on its Git branch** only once its parent
+   is confirmed: the baseline once it answered, any other node once it beat its
+   siblings and none is still running or waiting to run. `orx create-experiment`
+   prints the child's branch (`orx/<slug>`); in your worktree:
    ```sh
    git checkout -B orx/<child-slug> <parent-branch>   # first commit only
    #   …edit only the files that idea touches…
    git commit -am "cosine LR + warmup"
    ```
    An answered parent is frozen, so its branch head is the commit its run
-   measured: check it against that run's COMMIT in `orx runs <projectId>`.
-   `-B` starts the child there even when it was planned under another node and
-   moved. Use plain `git checkout orx/<child-slug>` once the child has commits.
+   measured. `-B` starts the child there even when it was planned under another
+   node and moved. Use plain `git checkout orx/<child-slug>` once the child has
+   commits. Before a child's first launch, check that it descends from its
+   confirmed parent's measured commit, the COMMIT `orx runs <projectId>` shows
+   for the parent's run, even when you committed the child earlier:
+   `git merge-base --is-ancestor <commit> orx/<child-slug>`. If not, rebase the
+   child's commits onto that commit or reapply its change from it.
    **Leave the run command alone.** Before launching, ensure the committed code
    prints its effective configuration, final metrics, and a compact summary to
    stdout. Long runs should also print periodic searchable metrics.
 5. **Launch the round's ready children**: `orx exp run <childId> --backend <b>`
    (or omit `--backend` when a default target is set — see `orx-compute`). Remote
    backends can run siblings in parallel; `--backend local` shares this machine's
-   CPU, RAM, and GPU.
+   CPU, RAM, and GPU. Under a budget, before each paid launch or repair, count
+   what runs in flight have already committed, bound the next run to what
+   remains, and ask the user if you cannot establish that bound, such as when the
+   backend reports no price.
 6. **Plan ahead when the next decision is clear, then end your turn.** Create
    its options as unrun children, title and description only, under the running
    node or the sibling you expect to win, and leave their branches alone until
-   that parent answers (step 4). Planned children are the queue the user sees in
-   the tree; never keep a plan in chat or a file. Run results and delegates'
-   answers arrive as messages in this chat once it is idle; no waiting process
+   that parent is confirmed (step 4). Planned children are the queue the user
+   sees in the tree; never keep a plan in chat or a file. Run results and
+   delegates' answers arrive as messages in this chat once it is idle; no waiting process
    or live agent session is needed.
 7. **Reconcile on every wake.** A run result, a delegate's answer, a flag, a
    model switch or a resumed chat all start the same way: read
@@ -176,10 +184,12 @@ intended flow — do **not** edit a frozen node or rewrite the run command:
      re-launch the same node (above).
    - **Refill** — result is mediocre or inconclusive: launch the next planned child to
      keep the round moving (step 5).
-   - **Promote** — result is a clear win: this node becomes the **parent for the next
-     round**. The next batch of children branch off *it*, not the baseline, so the win
-     carries forward and the next ideas stack on top of it. If you planned that round
-     under another sibling, `orx exp move` its unrun children onto the winner. This is
+   - **Promote** — result is a clear win: once it is confirmed (step 4), this
+     node becomes the **parent for the next round**; while a sibling still runs,
+     plan the next round under it and end your turn. The next batch of children
+     branch off *it*, not the baseline, so the win carries forward and the next
+     ideas stack on top of it. If you planned that round under another sibling,
+     `orx exp move` its unrun children onto the winner. This is
      the move that makes the tree grow deeper; skipping it is what produces a flat,
      sweep-only tree.
    - **Stop** — goal met, or the branch is exhausted.
