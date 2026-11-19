@@ -4579,7 +4579,7 @@ impl Store {
                  JOIN runs r ON r.id = s.run_id
                  WHERE r.status IN ('submitting', 'starting', 'running')
                ) OR id IN (SELECT value FROM json_each(?2))
-                 OR (archived = 0 AND {CURRENT_YIELD_KIND} = 'need'))
+                 OR (archived = 0 AND json_extract({CURRENT_YIELD}, '$.kind') = 'need'))
              ORDER BY updated_at DESC, id DESC"
         ))?;
         let live = serde_json::to_string(live)?;
@@ -5835,19 +5835,16 @@ impl Store {
             .flatten())
     }
 
-    pub(crate) fn chat_session_yield_kind(&self, session_id: &str) -> Result<Option<YieldKind>> {
-        let kind: Option<String> = self
+    pub(crate) fn chat_session_yield(&self, session_id: &str) -> Result<Option<TurnYield>> {
+        Ok(self
             .conn
             .query_row(
-                &format!("SELECT {CURRENT_YIELD_KIND} FROM chat_sessions WHERE id = ?1"),
+                &format!("SELECT {CURRENT_YIELD} FROM chat_sessions WHERE id = ?1"),
                 [session_id],
-                |row| row.get(0),
+                |row| read_turn_yield(row, 0),
             )
             .optional()?
-            .flatten();
-        Ok(kind
-            .map(|kind| serde_json::from_value(serde_json::Value::String(kind)))
-            .transpose()?)
+            .flatten())
     }
 
     /// An eligible stop check has no names for a missing yield and at least one plan for `done`.
@@ -6810,7 +6807,7 @@ fn read_turn_yield(row: &rusqlite::Row<'_>, column: usize) -> rusqlite::Result<O
         .transpose()
 }
 
-const CURRENT_YIELD_KIND: &str = "(SELECT json_extract(t.yield_json, '$.kind')
+const CURRENT_YIELD: &str = "(SELECT t.yield_json
      FROM chat_turns t WHERE t.session_id = chat_sessions.id
        AND t.assistant_message_id = chat_sessions.active_leaf_id AND t.state = 'completed'
        AND NOT EXISTS (SELECT 1 FROM chat_turns active WHERE active.session_id = t.session_id

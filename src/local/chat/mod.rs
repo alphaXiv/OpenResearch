@@ -1379,7 +1379,14 @@ pub fn session_json_with(store: Option<&Store>, s: &StoredChatSession, busy: boo
     let pending_project = store
         .and_then(|store| store.chat_project_move(&s.id).ok().flatten())
         .map(|(name, path)| json!({ "name": name, "path": path }));
-    json!({
+    let closing = store.and_then(|store| match store.chat_session_yield(&s.id) {
+        Ok(closing) => closing,
+        Err(error) => {
+            eprintln!("orx up: could not read yield for {}: {error:#}", s.id);
+            None
+        }
+    });
+    let mut summary = json!({
         "id": s.id,
         "projectId": s.project_id,
         "pendingProject": pending_project,
@@ -1417,15 +1424,13 @@ pub fn session_json_with(store: Option<&Store>, s: &StoredChatSession, busy: boo
         "sideParentSessionId": s.side_parent_session_id,
         "delegate": delegate,
         "goal": s.goal,
-        "yieldKind": store.and_then(|store| match store.chat_session_yield_kind(&s.id) {
-            Ok(kind) => kind,
-            Err(error) => {
-                eprintln!("orx up: could not read yield for {}: {error:#}", s.id);
-                None
-            }
-        }),
+        "yieldKind": closing.as_ref().map(|closing| closing.kind),
         "autonomy": Autonomy::from_stored(s.autonomy.as_deref()).id(),
-    })
+    });
+    if let Some(closing) = closing {
+        summary["yieldText"] = Value::String(closing.text);
+    }
+    summary
 }
 
 pub(crate) fn project_model(value: &mut Value, session: &StoredChatSession, catalog: &Value) {
@@ -17158,6 +17163,11 @@ for line in sys.stdin:
         let store = Store::open().unwrap();
         let host = notice_host();
         session(&store, "owner");
+        let summary = || {
+            let session = store.get_chat_session("owner").unwrap().unwrap();
+            session_json_with(Some(&store), &session, false)
+        };
+        assert!(summary().get("yieldText").is_none());
         let guard = TurnGuard::claim(&host, "owner", None).await.unwrap();
         store.put_chat_turn("owner", "answer", "running", now_ms());
         host.turns.lock().await.insert(
@@ -17254,10 +17264,9 @@ for line in sys.stdin:
             list_messages("owner").unwrap()[0].turn_yield,
             Some(yield_line(YieldKind::Need, "Need the test corpus"))
         );
-        assert_eq!(
-            store.chat_session_yield_kind("owner").unwrap(),
-            Some(YieldKind::Need)
-        );
+        let closed = summary();
+        assert_eq!(closed["yieldKind"], "need");
+        assert_eq!(closed["yieldText"], "Need the test corpus");
         let mut events = host.subscribe();
         host.resolve_zombie_prompt("owner", "question");
         let (event, payload) = events.try_recv().unwrap();
@@ -17272,7 +17281,9 @@ for line in sys.stdin:
             .await
             .is_err());
         store.put_chat_turn("owner", "next", "running", now_ms() + 1);
-        assert_eq!(store.chat_session_yield_kind("owner").unwrap(), None);
+        let active = summary();
+        assert_eq!(active["yieldKind"], Value::Null);
+        assert!(active.get("yieldText").is_none());
         assert_eq!(
             list_messages("owner").unwrap()[0]
                 .turn_yield
