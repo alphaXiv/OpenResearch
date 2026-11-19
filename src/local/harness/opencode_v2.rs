@@ -141,11 +141,6 @@ pub(super) async fn run_turn(
         post(&endpoint, &format!("{path}/model"), &json!({"model":model})).await?;
     }
     let events = subscribe(&endpoint).await?;
-    let before = get(&endpoint, &endpoint.v2_export_path(&native_id)).await?;
-    let previous: HashSet<String> = messages(&before)?
-        .iter()
-        .filter_map(|m| m["id"].as_str().map(str::to_owned))
-        .collect();
     let checkpoint = Checkpoint {
         prompt_id: format!("msg_{}", uuid::Uuid::new_v4().simple()),
     };
@@ -167,7 +162,6 @@ pub(super) async fn run_turn(
         native_id: &native_id,
         path: &path,
         delivered: false,
-        previous: &previous,
         steps: Vec::new(),
         recorded: HashSet::new(),
         surfaced: HashSet::new(),
@@ -210,13 +204,6 @@ pub(super) async fn resume_turn(ctx: &mut TurnCtx, resume: Resume) -> Result<()>
     let path = format!("/api/session/{native_id}");
     // Subscribed before reading back, so nothing between the two is missed.
     let events = subscribe(&endpoint).await?;
-    let projection = get(&endpoint, &endpoint.v2_export_path(&native_id)).await?;
-    let previous: HashSet<String> = messages(&projection)?
-        .iter()
-        .filter_map(|m| m["id"].as_str())
-        .take_while(|id| *id != checkpoint.prompt_id)
-        .map(str::to_owned)
-        .collect();
     let surfaced = ctx
         .assistant
         .parts
@@ -230,7 +217,6 @@ pub(super) async fn resume_turn(ctx: &mut TurnCtx, resume: Resume) -> Result<()>
         native_id: &native_id,
         path: &path,
         delivered: false,
-        previous: &previous,
         steps: Vec::new(),
         recorded: HashSet::new(),
         surfaced,
@@ -380,7 +366,6 @@ struct Turn<'a> {
     path: &'a str,
     /// Whether the event stream has said OpenCode took the prompt out of its inbox to run it.
     delivered: bool,
-    previous: &'a HashSet<String>,
     steps: Vec<Value>,
     recorded: HashSet<String>,
     surfaced: HashSet<String>,
@@ -512,15 +497,24 @@ impl Turn<'_> {
     /// Merges the export and the steps it does not hold yet, then surfaces pending requests.
     async fn reconcile(&mut self, ctx: &mut TurnCtx) -> Result<(Value, bool)> {
         let projection = get(self.endpoint, &self.endpoint.v2_export_path(self.native_id)).await?;
-        let mut current = messages(&projection)?.clone();
+        let exported = messages(&projection)?;
         self.steps.retain(|step| {
-            !current.iter().any(|message| {
+            !exported.iter().any(|message| {
                 message["id"] == step["id"]
                     && message
                         .pointer("/time/completed")
                         .is_some_and(|time| !time.is_null())
             })
         });
+        // The export orders steps by when they started but holds each only once it settles, so a
+        // step OpenCode finalizes late, like one a stopped server left running, lands before this
+        // prompt: only what follows the prompt is this turn's.
+        let mut current: Vec<Value> = exported
+            .iter()
+            .skip_while(|message| message["id"].as_str() != Some(&self.checkpoint.prompt_id))
+            .skip(1)
+            .cloned()
+            .collect();
         for step in &self.steps {
             match current
                 .iter_mut()
@@ -535,7 +529,6 @@ impl Turn<'_> {
             self.endpoint,
             self.native_id,
             &current,
-            self.previous,
             &mut self.recorded,
         )
         .await?;
@@ -595,15 +588,12 @@ async fn merge_projection(
     endpoint: &AgentEndpoint,
     native_id: &str,
     messages: &[Value],
-    previous: &HashSet<String>,
     recorded: &mut HashSet<String>,
 ) -> Result<bool> {
     let mut answered = false;
     let mut latest_usage = None;
     let mut latest_retry = None;
-    for message in messages.iter().filter(|m| {
-        m["id"].as_str().is_some_and(|id| !previous.contains(id)) && m["type"] == "assistant"
-    }) {
+    for message in messages.iter().filter(|m| m["type"] == "assistant") {
         if message.get("retry").is_none_or(Value::is_null)
             && message
                 .pointer("/time/completed")
@@ -2452,6 +2442,111 @@ mod restart_tests {
             assert_eq!(checkpoint.keep_id, keeper.id());
             let state: Value = serde_json::from_str(&checkpoint.state_json).unwrap();
             assert_eq!(state["harness"]["promptId"], "msg_prompt");
+        });
+    }
+
+    #[test]
+    fn a_step_finalized_late_stays_with_the_turn_it_started_in() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let earlier = json!({"id":"msg_earlier","type":"assistant","time":{"completed":1},
+                "content":[{"type":"text","text":"an earlier answer"}]});
+            let prompt = json!({"id":"msg_prompt","type":"user"});
+            let export = Arc::new(Mutex::new(json!({"data":{"info":{"outcome":"succeeded"},
+                "messages":[earlier.clone(), prompt.clone()]}})));
+            let running = Arc::new(Mutex::new(true));
+            let read = Arc::new(tokio::sync::Notify::new());
+            let (send, events) = tokio::sync::mpsc::unbounded_channel::<String>();
+            let events = Arc::new(Mutex::new(Some(events)));
+            let empty = || async { Json(json!({"data":[]})) };
+            let app = Router::new()
+                .route(
+                    "/api/event",
+                    get(move || {
+                        let rx = events.lock().unwrap().take().expect("one subscription");
+                        let connected = r#"{"type":"server.connected"}"#.to_owned();
+                        let stream = futures::stream::once(async move { connected })
+                            .chain(futures::stream::unfold(rx, |mut rx| async move {
+                                Some((rx.recv().await?, rx))
+                            }))
+                            .map(|line| Ok::<_, std::io::Error>(format!("data: {line}\n\n")));
+                        async move { axum::body::Body::from_stream(stream) }
+                    }),
+                )
+                .route(
+                    "/api/experimental/session/native/export",
+                    get({
+                        let export = export.clone();
+                        let read = read.clone();
+                        move || {
+                            let body = export.lock().unwrap().clone();
+                            read.notify_one();
+                            async move { Json(body) }
+                        }
+                    }),
+                )
+                .route("/api/session/native/inbox", get(empty))
+                .route("/api/session/native/permission", get(empty))
+                .route("/api/session/native/form", get(empty))
+                .route(
+                    "/api/session/active",
+                    get({
+                        let running = running.clone();
+                        move || {
+                            let running = *running.lock().unwrap();
+                            async move {
+                                Json(if running {
+                                    json!({"data":{"native":{}}})
+                                } else {
+                                    json!({"data":{}})
+                                })
+                            }
+                        }
+                    }),
+                );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let root = crate::local::git::TemporaryDirectory::new("orx-opencode-late").unwrap();
+            let mut ctx = TurnCtx::test_stub();
+            ctx.host
+                .opencode
+                .serve_for_test(&ctx.session_id, port, root.path())
+                .await;
+            let (_, keeper) = ctx.host.opencode.server_for(&ctx.session_id).await.unwrap();
+            ctx.native_session_id = Some("native".into());
+            ctx.resume = Some(Resume {
+                keep_id: keeper.id().into(),
+                offset: keeper.start(),
+                state: json!({"promptId": "msg_prompt"}),
+            });
+
+            // A step of an earlier turn, settled only once this prompt ran, keeps its place.
+            let late = json!({"id":"msg_late","type":"assistant",
+                "time":{"completed":3},"error":{"type":"aborted","message":"Step interrupted"},
+                "content":[{"type":"reasoning","text":"run the command"},
+                    {"type":"tool","id":"call_shell","name":"shell","state":{"status":"error",
+                        "input":{"command":"sleep 60"},
+                        "error":{"message":"Tool execution interrupted: shell"}}}]});
+            let reply = json!({"id":"msg_reply","type":"assistant","time":{"completed":4},
+                "content":[{"type":"text","text":"the answer"}]});
+            let driver = async {
+                read.notified().await;
+                export.lock().unwrap()["data"]["messages"] = json!([earlier, late, prompt, reply]);
+                *running.lock().unwrap() = false;
+                send.send(
+                    json!({"type":"session.execution.succeeded","data":{"sessionID":"native"}})
+                        .to_string(),
+                )
+                .unwrap();
+            };
+            let (result, ()) = tokio::join!(super::super::run_turn(&mut ctx), driver);
+            result.unwrap();
+
+            let ids: Vec<&str> = ctx.assistant.parts.iter().map(|p| p.id.as_str()).collect();
+            assert_eq!(ids, ["msg_reply:0"]);
         });
     }
 
