@@ -14,7 +14,7 @@ const waitFor = async (done) => {
 /** Runs public/update-overlay.js as index.html does on each page load. */
 const loadPage = () => import(`../public/update-overlay.js?load=${++loads}`);
 const overlay = () => document.querySelector('[role="alertdialog"]');
-const record = { from: "1.0.0", to: "2.0.0", title: "Updating OpenResearch", body: "Restarting into v2.0.0…" };
+const record = { from: "1.0.0", to: "2.0.0", title: "Updating OpenResearch", body: "Applying an update takes 5–10 seconds." };
 const status = (build) => ({ build, instance: `server-${build}`, restartRequired: false, current: build });
 
 beforeEach(() => {

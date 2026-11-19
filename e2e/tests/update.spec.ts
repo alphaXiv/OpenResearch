@@ -75,7 +75,7 @@ test('a page restarting into an update keeps its overlay through the reload', as
   // unchanged. Written before the page loads, since the server samples it only every ten seconds after.
   writeFileSync(path.join(orx.config, 'update-check-unknown.json'), JSON.stringify({ checked_at: 0, latest: '999.0.0', installed_version: '999.0.0', installed_tag: 'v999.0.0' }))
   await project.open(page)
-  const restart = page.getByRole('button', { name: 'Restart now' })
+  const restart = page.getByRole('button', { name: 'Apply', exact: true })
   await expect(restart).toBeVisible()
   const server = orx.pid()
 
@@ -87,7 +87,7 @@ test('a page restarting into an update keeps its overlay through the reload', as
   await expect(updating).toBeVisible()
   await reloaded
   await expect(updating).toBeVisible()
-  await expect(updating).toContainText(/Restarting into \W*v999\.0\.0/)
+  await expect(updating).toContainText('Applying an update takes')
   expect(orx.pid(), 'the window keeps the same server process, restarted in place').toBe(server)
 
   await page.unroute('**/assets/*.js')

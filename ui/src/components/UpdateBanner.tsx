@@ -105,7 +105,7 @@ export function useRestartApp(status: UpdateStatus | null): RestartState {
           from: status.build,
           to: target,
           title: m.update_overlay_applying_title(),
-          body: m.update_overlay_applying_body({ version: versionLabel(target) }),
+          body: m.update_overlay_applying_body(),
         });
       }
       // The window's notice that the server stopped takes the overlay over, and ends the wait.
