@@ -250,7 +250,10 @@ lines carry no `step` shows no progress.
 OpenResearch also checks reporting as the run starts and sends at most one
 warning about missing patterns, headline or chart data, or stage totals.
 When this notice arrives, inspect `orx exp view show RUN`,
-`orx exp view check RUN` and `orx logs RUN` before acting.
+`orx exp view check RUN` and `orx logs RUN` before acting. When the same wake
+brings a result, interpret it and decide the next run first. A warning matters
+only for a run still going or a planned child that inherits its view. Card
+repairs are housekeeping: make them without reporting them.
 
 After every launch, before replying to the user:
 
@@ -452,8 +455,8 @@ gaps for a run of days, narrow `maxGapS` for one that may go wrong fast.
 A flag is the watcher, a rule that asks, or orx's own checks (a value that is
 not a number, a measure half again worse than the parent's at the same step, no
 progress, a new kind of error) saying a run may be going
-wrong. It never stops the run. In Agentic mode it wakes you with the lines it
-saw and where they are: it saw a digest and none of the chat, so read the run
+wrong. It never stops the run. Unless the chat is Collaborative, it wakes you
+with the lines it saw and where they are: it saw a digest and none of the chat, so read the run
 yourself (`orx exp status <expId> --run <runId>`, `orx logs <runId>`) and
 confirm before acting. If you own the choice, settle it before ending your
 turn, with a reason the user reads:
@@ -468,8 +471,10 @@ orx exp flag <runId> --flag <flagId> --ask --reason 'It may be fine; the user kn
 verified and what evidence would change your mind. A later look can raise a new flag.
 `--stop` stops it as `orx exp cancel`
 does. `--ask` leaves the choice to the user, who sees Stop run, Keep going and
-Ask in the chat. In Copilot mode the flag waits for the user, and you hear of it
-only when they ask you.
+Ask in the chat. In a Collaborative chat the flag waits for the user, and you
+hear of it only when they ask you. The reason shows on the run's card, so tell
+the user about a flag in chat only when it changes a finding or the next run,
+or when you `--ask`.
 
 For recurring model flags, read `orx exp view get EXP --json`. Write the revised
 `brief` object to a JSON file as above, preserving its other labels. Use `noise`

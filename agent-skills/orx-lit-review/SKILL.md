@@ -6,7 +6,14 @@ description: "Explain and compare scientific or technical concepts using origina
 # Literature retrieval
 
 Use this skill for scientific explanations and comparisons, even without a named
-paper. Never delegate retrieval to a sub-agent.
+paper. Scale it to the step: a check before a small change takes one search; a
+new method, a surprising result or a related-work request takes the full loop.
+
+A delegate on a cheap model (`orx-agent-delegation`) may run the discovery
+searches below while you work, returning ranked candidate IDs with the snippets
+that matched. Its summary is a lead, not evidence: read the papers that carry
+your claims yourself, write the synthesis, quotes and citations yourself, and
+keep library tools in this chat.
 
 Use enabled literature connectors appropriate to the topic. General web search
 is a fallback only when relevant connectors provide no useful evidence. Do not
@@ -108,7 +115,7 @@ orx discover pubmed "<query>" --published-after 2020-01-01 --prioritize recency
   foundational work. Use `popular` only when the user asks about votes,
   popularity, or community standing.
 
-## Main-agent retrieval loop
+## Retrieval loop
 
 ### Set up the retrieval query
 
