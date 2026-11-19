@@ -82,7 +82,7 @@ import {
   paperToken,
 } from "../fileMentions";
 import { m } from "../paraglide/messages.js";
-import { formatForDisplay, matchesKeyboardEvent, useHotkey } from "@tanstack/react-hotkeys";
+import { matchesKeyboardEvent, useHotkey } from "@tanstack/react-hotkeys";
 import { appHotkeys } from "../hotkeys";
 import { copyToClipboard } from "../clipboard";
 import { readClipboardImage } from "../clipboardImage";
@@ -5741,7 +5741,8 @@ function SessionRow({
             <InboxStatus status={chatStatus(session, busy, waiting, runs)} unread={unread} />
           </div>
         </div>
-      ) : (
+      ) : <>
+        {project.unnamed && <ProjectIconTile project={project} size="sm" />}
         <span ref={titleRef} className={`session-title ${attention ? "text-ink-amber" : ""}`} onDoubleClick={startEditing}>
           <span className="inline-block">
             <TitleReveal
@@ -5751,7 +5752,7 @@ function SessionRow({
             />
           </span>
         </span>
-      )}
+      </>}
       {plain && runMark === "running" && !editing && (
         <Tooltip content={m.chat_experiment_running()} className="shrink-0 text-accent-green">
           <FlaskConical size={14} className="motion-safe:animate-[or-experiment-pulse_3s_ease-in-out_infinite]" aria-label={m.chat_experiment_running()} />
@@ -7012,7 +7013,7 @@ export function ChatPanel({
         if (embedded) {
           const parent = openSession?.sideParentSessionId ?? sideParentSessionId;
           if (parent) onOpenSideChat?.(parent, "");
-        } else startNewTask();
+        } else startChatIn(projectId);
         return false;
       case "resume":
         showCustomDialog({
@@ -7524,7 +7525,11 @@ export function ChatPanel({
   const historyError = !historyQuery.data ? historyQuery.error : null;
   // A chat without a project has no project to suggest a start from.
   const starterVisible = mainView === "chat" && !embedded && !threadMounted && !contentLoading && !contentError && !historyLoading && !historyError && !currentProject?.scratch;
-  const draftProject = !embedded && !activeId && !launching && currentProject?.scratch && (sessionsLoaded ? sessions.length === 0 : currentProject.unnamed) ? currentProject : undefined;
+  // A new project stays one after the user names it, until they open another; any other empty project is an ordinary one.
+  const newProjectId = useRef<string | undefined>(undefined);
+  if (currentProject?.unnamed) newProjectId.current = currentProject.id;
+  else if (newProjectId.current !== currentProject?.id) newProjectId.current = undefined;
+  const draftProject = !embedded && !activeId && !launching && currentProject?.scratch && newProjectId.current === currentProject.id && (sessionsLoaded ? sessions.length === 0 : currentProject.unnamed) ? currentProject : undefined;
   const starterQuery = useQuery({
     ...getProjectStarterPromptsQuery(projectId, starterHarness ?? "claude-code", starterModel, getLocale(), composerSelection?.profile ?? null),
     enabled: starterVisible && starterHarness !== null,
@@ -8373,7 +8378,6 @@ export function ChatPanel({
     });
   }
 
-  const queueChord = formatForDisplay("Mod+Enter");
   const startProjectTask = useCallback(() => {
     setSessionFilter("active");
     requestNewChatFocus(projectId);
@@ -8390,20 +8394,24 @@ export function ChatPanel({
       showAlert(error instanceof Error ? error.message : String(error), "error");
     }
   }, [onActiveSessionChange]);
+  /** A new chat in `target`; an unnamed project holds one chat, so it gets a new project instead. */
+  const startChatIn = useCallback((target: string) => {
+    if (sidebarProjects.find((project) => project.id === target)?.unnamed) return void startScratchChat();
+    setSessionFilter("active");
+    requestNewChatFocus(target);
+    onActiveSessionChange(null, { projectId: target });
+  }, [onActiveSessionChange, sidebarProjects, startScratchChat]);
+  /** The sidebar's New chat goes where work happened last. */
   const startNewTask = useCallback(async () => {
     try {
       const activity = await queryClient.fetchQuery({ ...listProjectActivityQuery(), staleTime: 0 });
       const latest = activity.reduce<(typeof activity)[number] | undefined>((current, item) =>
         !current || item.lastActivityAt > current.lastActivityAt ? item : current, undefined);
-      const targetProject = latest?.projectId ?? projectId;
-      if (sidebarProjects.find((project) => project.id === targetProject)?.unnamed) return void startScratchChat();
-      setSessionFilter("active");
-      requestNewChatFocus(targetProject);
-      onActiveSessionChange(null, { projectId: targetProject });
+      startChatIn(latest?.projectId ?? projectId);
     } catch (error) {
       showAlert(error instanceof Error ? error.message : String(error), "error");
     }
-  }, [projectId, onActiveSessionChange, sidebarProjects, startScratchChat]);
+  }, [projectId, startChatIn]);
 
   const openSpawnedSession = useCallback(
     async (sessionId: string) => {
@@ -8424,7 +8432,7 @@ export function ChatPanel({
 
   const newTask = () => {
     if (commandRegion() === "right" && document.querySelector(".right-pane [data-side-chat]")) return;
-    startNewTask();
+    startChatIn(projectId);
   };
   useHotkey(appHotkeys["task.new"], newTask, { enabled: !embedded, requireReset: true, conflictBehavior: "allow" });
   useHotkey(appHotkeys["chat.find"], openFind, { enabled: mainView === "chat" && !contentInert && (embedded ? searchRegion === "right" : searchRegion !== "right"), requireReset: true, ignoreInputs: false, capture: true, conflictBehavior: "allow" });
@@ -9244,7 +9252,7 @@ export function ChatPanel({
             <p>{historyError.message}</p>
             <Button onClick={() => void historyQuery.refetch()}>{m.app_retry()}</Button>
           </div>
-        ) : (contentLoading || historyLoading) && !launching ? (
+        ) : (historyLoading || (contentLoading && activeId)) && !launching ? (
           <div className="chat-loading flex-1 min-h-0 overflow-hidden [scrollbar-gutter:stable_both-edges]" role="status" aria-label={m.chat_panel_loading_conversation()} aria-busy="true">
             <div aria-hidden="true" className="mx-auto flex h-full w-full max-w-readable flex-col gap-6 px-4 pb-8 pt-4 motion-safe:animate-pulse">
               <div className="ms-auto h-14 w-3/5 shrink-0 rounded-lg bg-panel" />
@@ -9600,8 +9608,11 @@ export function ChatPanel({
               draftProject={draftProject}
               onNewProject={() => void startScratchChat()}
               onImport={() => onImportProject(draft)}
+              onOpenSettings={(project) => sidebarActions.current.openProjectSettings(project)}
               onSelect={(id) => {
-                if (id !== projectId) void navigate({ to: "/projects/$projectId/tasks/new", params: { projectId: id } });
+                if (id === projectId) return;
+                requestNewChatFocus(id);
+                void navigate({ to: "/projects/$projectId/tasks/new", params: { projectId: id } });
               }}
             />
           )}
@@ -9716,17 +9727,15 @@ export function ChatPanel({
                         : questions.part?.prompt?.options?.length
                           ? m.chat_question_custom_response()
                           : m.chat_question_your_answer()
-                      : steering && activeHarness
-                      ? m.chat_steer_placeholder({ harness: ltr(activeHarness.name), shortcut: ltr(queueChord) })
-                      : composerSelection
-                        ? activeHarness?.agentReady
-                          ? draftProject
-                            ? m.chat_new_project_placeholder()
-                            : m.chat_message_harness({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
-                          : composerSignIn
-                            ? m.add_agent_sign_in_title({ name: autoDir(agentName ?? activeHarness?.name ?? "") })
-                            : m.chat_harness_unavailable({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
-                        : m.chat_ask_agent_placeholder()
+                      : composerSelection && !activeHarness?.agentReady
+                        ? composerSignIn
+                          ? m.add_agent_sign_in_title({ name: autoDir(agentName ?? activeHarness?.name ?? "") })
+                          : m.chat_harness_unavailable({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
+                        : draftProject
+                          ? m.chat_new_project_placeholder()
+                          : activeId
+                            ? m.chat_followup_placeholder()
+                            : m.chat_new_chat_placeholder()
                   }
                   plain={bashMode && !asking}
                   readOnly={questions.busy}

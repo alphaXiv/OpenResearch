@@ -1,8 +1,19 @@
+import type { Page } from '@playwright/test'
 import { composer, expect, send, test } from '../src/test.ts'
 import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 
 const commit = 'git -c user.name=E2E -c user.email=e2e@example.com commit -qm'
+
+async function projectsOf(page: Page, orx: { url: string }) {
+  const { projects } = await (await page.request.get(`${orx.url}/api/projects`)).json()
+  return projects as { id: string; name: string }[]
+}
+
+/** The name of a test's project, which the picker's trigger shows beside its icon. */
+async function nameOf(page: Page, orx: { url: string }, project: { id: string }) {
+  return (await projectsOf(page, orx)).find((candidate) => candidate.id === project.id)!.name
+}
 
 test('a new project becomes the project its agent proposes', async ({ page, project, agent, orx }, info) => {
   const folder = path.join(orx.root, 'kept', 'tokenizer-probes')
@@ -14,20 +25,24 @@ test('a new project becomes the project its agent proposes', async ({ page, proj
     { run: `orx project create --name 'Tokenizer probes' --path '${folder}'` },
     { say: 'Proposed the project.' },
   ])
+  await page.addInitScript(() => localStorage.setItem('sidebar-grouping', 'projects'))
   await project.open(page)
 
   await test.step('the composer starts a new project that asks for a description', async () => {
     await page.getByRole('button', { name: /^e2e-/, expanded: false }).click()
-    await page.getByRole('menuitem', { name: 'New project' }).click()
+    await page.getByRole('dialog', { name: 'Projects' }).getByRole('button', { name: 'New project' }).click()
     await expect(page.getByRole('textbox', { name: 'Project name (optional)' })).toBeVisible()
     // The new draft focuses its composer once it is ready for a message.
     await expect(composer(page)).toBeFocused()
-    await expect(composer(page)).toHaveAccessibleName('Describe what the project should be')
+    await expect(composer(page)).toHaveAccessibleName(/^Describe your project goal/)
     await send(page, 'Jot down some ideas.')
     await expect(page.getByText('Wrote notes.md.', { exact: true })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Choose folder' })).toBeVisible()
     // A project nobody named is just its chat in the sidebar, with no project row to add a second chat to.
-    await expect(page.getByRole('complementary').getByRole('button', { name: /^Jot down some ideas\./ })).toBeVisible()
+    // The chat still gets an icon, the empty chat bubble.
+    const chat = page.getByRole('complementary').getByRole('button', { name: /^Jot down some ideas\./ })
+    await expect(chat).toBeVisible()
+    await expect(chat.getByRole('img', { name: 'New project' })).toBeVisible()
   })
 
   await test.step("the agent's proposal moves the chat's work into the new project", async () => {
@@ -48,32 +63,35 @@ test('a new project becomes the project its agent proposes', async ({ page, proj
   })
 })
 
-test('naming a new project makes it a project of its own, which outlives its last chat', async ({ page, project, agent }) => {
+test('naming a new project makes it a project of its own, which outlives its last chat', async ({ page, project, agent, orx }) => {
   agent.script('Compare tokenizers on a small corpus.', [{ say: 'Comparing tokenizers.' }])
   await project.open(page)
   await page.getByRole('button', { name: /^e2e-/, expanded: false }).click()
-  await page.getByRole('menuitem', { name: 'New project' }).click()
+  await page.getByRole('dialog', { name: 'Projects' }).getByRole('button', { name: 'New project' }).click()
   await expect(composer(page)).toBeFocused()
 
   const name = page.getByRole('textbox', { name: 'Project name (optional)' })
   await name.fill('Tokenizer probes')
   await name.press('Enter')
+  // The name is a field of its own; the switcher keeps saying this is a new project.
+  await expect(page.getByRole('button', { name: 'New project', expanded: false })).toBeVisible()
   await send(page, 'Compare tokenizers on a small corpus.')
   await expect(page.getByText('Comparing tokenizers.', { exact: true })).toBeVisible()
-  const sidebar = page.getByRole('complementary')
-  await expect(sidebar.getByRole('button', { name: 'Tokenizer probes', exact: true })).toBeVisible()
+  const chat = page.getByRole('complementary').getByRole('button', { name: /^Compare tokenizers on a small corpus\./ })
+  // A chat of an unnamed project reads as just its title; a named one says which project it is in.
+  await expect(chat).toContainText('Tokenizer probes')
 
-  await sidebar.getByRole('button', { name: /^Compare tokenizers on a small corpus\./ }).click({ button: 'right' })
+  await chat.click({ button: 'right' })
   await page.getByRole('menuitem', { name: 'Delete' }).click()
   await page.getByRole('dialog').getByRole('button', { name: 'Delete' }).click()
-  await expect(sidebar.getByRole('button', { name: /^Compare tokenizers on a small corpus\./ })).toBeHidden()
-  await expect(sidebar.getByRole('button', { name: 'Tokenizer probes', exact: true })).toBeVisible()
+  await expect(chat).toBeHidden()
+  expect((await projectsOf(page, orx)).map((candidate) => candidate.name)).toContain('Tokenizer probes')
 })
 
 test('a new project offers a paper, a folder or an .orx file to start from', async ({ page, project }) => {
   await project.open(page)
   await page.getByRole('button', { name: /^e2e-/, expanded: false }).click()
-  await page.getByRole('menuitem', { name: 'New project' }).click()
+  await page.getByRole('dialog', { name: 'Projects' }).getByRole('button', { name: 'New project' }).click()
 
   await page.getByRole('button', { name: 'Import', exact: true }).click()
   const dialog = page.getByRole('dialog', { name: 'Import' })
@@ -81,6 +99,68 @@ test('a new project offers a paper, a folder or an .orx file to start from', asy
   await expect(dialog.getByRole('button', { name: 'From a paper' })).toBeVisible()
   await expect(dialog.getByRole('button', { name: 'Open .orx file' })).toBeVisible()
   await expect(dialog.getByRole('button', { name: 'Blank project' })).toBeHidden()
+})
+
+test('a project picked from the picker is an ordinary project, even one nobody has chatted in', async ({ page, project, orx }) => {
+  await project.open(page)
+  const own = await nameOf(page, orx, project)
+  const picker = page.getByRole('dialog', { name: 'Projects' })
+  await page.getByRole('button', { name: own, exact: true, expanded: false }).click()
+  await picker.getByRole('button', { name: 'New project' }).click()
+  // A project that opens takes the composer's focus, which would close a picker opened before it lands.
+  await expect(composer(page)).toBeFocused()
+  const name = page.getByRole('textbox', { name: 'Project name (optional)' })
+  await name.fill('Picker rename check')
+  await name.press('Enter')
+  // The project being named stays a new project in its row.
+  await expect(name).toBeVisible()
+
+  await page.getByRole('button', { name: 'New project', expanded: false }).click()
+  await picker.getByRole('button', { name: own, exact: true }).click()
+  await expect(composer(page)).toBeFocused()
+  await page.getByRole('button', { name: own, exact: true, expanded: false }).click()
+  await picker.getByRole('button', { name: /^Picker rename check/ }).click()
+  await expect(page.getByRole('button', { name: /^Picker rename check/, expanded: false })).toBeVisible()
+  await expect(name).toBeHidden()
+  await expect(page.getByRole('button', { name: 'Import', exact: true })).toBeHidden()
+})
+
+test('the project picker searches by name and opens a project\'s settings', async ({ page, project, orx }) => {
+  await project.open(page)
+  const own = await nameOf(page, orx, project)
+  await page.getByRole('button', { name: own, exact: true, expanded: false }).click()
+  const picker = page.getByRole('dialog', { name: 'Projects' })
+  const search = picker.getByRole('textbox', { name: 'Search projects…' })
+  await search.fill('no such project')
+  await expect(picker.getByText('No projects match your search.')).toBeVisible()
+  await search.fill(own)
+  await expect(picker.getByRole('button', { name: own, exact: true })).toBeVisible()
+  await picker.getByRole('button', { name: `Project settings · ${own}` }).click()
+  await expect(page).toHaveURL(new RegExp(`/projects/${project.id}/settings/project`))
+})
+
+test('switching projects keeps the new chat in place while the project loads', async ({ page, project, orx }) => {
+  const other = await orx.createProject('other-project')
+  await project.open(page)
+  await expect(page.getByRole('heading', { name: 'What should we research?' })).toBeVisible()
+  let release!: () => void
+  let asked!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  const requested = new Promise<void>((resolve) => { asked = resolve })
+  await page.route(`**/api/projects/${other.id}/ui-state`, async (route) => {
+    if (route.request().method() !== 'GET') return route.fallback()
+    asked()
+    await held
+    await route.continue()
+  })
+
+  await page.getByRole('button', { name: /^e2e-/, expanded: false }).click()
+  await page.getByRole('dialog', { name: 'Projects' }).getByRole('button', { name: /^other-project/ }).click()
+  await expect(page.getByRole('button', { name: /^other-project/, expanded: false })).toBeVisible()
+  await requested
+  await expect(page.getByRole('heading', { name: 'What should we research?' })).toBeVisible()
+  await expect(page.getByRole('status', { name: 'Loading conversation…' })).toBeHidden()
+  release()
 })
 
 test('a chat in a project moves into a new one once its turn ends', async ({ page, project, agent, orx }) => {
@@ -94,6 +174,7 @@ test('a chat in a project moves into a new one once its turn ends', async ({ pag
   await project.open(page)
   await send(page, 'Write a probe and keep working.')
   await agent.reached('working')
+  await expect(composer(page)).toHaveAccessibleName(/^Ask a follow-up/)
 
   await page.getByRole('complementary').getByRole('button', { name: /^Write a probe and keep working\./ }).click({ button: 'right' })
   await page.getByRole('menuitem', { name: 'Move to a new project…' }).click()

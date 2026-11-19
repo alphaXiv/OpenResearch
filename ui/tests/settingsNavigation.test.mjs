@@ -3,7 +3,7 @@ import test from "node:test";
 import { act } from "react";
 import { autoDir } from "../src/i18n.ts";
 import { m } from "../src/paraglide/messages.js";
-import { find, navigate, renderApp, serveApp, settle, type } from "./render.mjs";
+import { find, navigate, press, renderApp, serveApp, settle, type } from "./render.mjs";
 
 const click = async (element) => {
   await act(async () => element.click());
@@ -78,6 +78,18 @@ test("the sidebar starts a chat in the most recently active project, grouped eit
     assert.equal(location.pathname, "/projects/recent/tasks/new", grouping);
   }
   localStorage.removeItem("sidebar-grouping");
+});
+
+test("the new chat shortcut stays in the project you are on, though another was active since", async () => {
+  serveApp({
+    "GET /api/projects": () => ({ projects: [{ id: "p", name: "Project" }, { id: "recent", name: "Recent project" }] }),
+    "GET /api/projects/activity": () => ({ activity: [{ projectId: "recent", lastActivityAt: 2 }] }),
+  });
+  await renderApp("/projects/p/settings/settings");
+
+  await press("n", document.body, { ctrlKey: true });
+  await settle();
+  assert.equal(location.pathname, "/projects/p/tasks/new");
 });
 
 test("a project's settings page renames it and has no global settings tabs", async () => {
