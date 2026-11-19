@@ -1,4 +1,4 @@
-import { useCallback, useLayoutEffect, useRef, useState, type FocusEvent, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
+import { useCallback, useLayoutEffect, useRef, useState, type FocusEvent, type KeyboardEvent, type MouseEvent, type ReactElement, type ReactNode } from "react";
 import { fmtDuration } from "../../../api";
 import { autoDir, ltr } from "../../../i18n";
 import { m } from "../../../paraglide/messages.js";
@@ -8,6 +8,7 @@ import { versusOf } from "../../../runMonitor/model";
 import type { ChartBlock, Point, RunMonitor, SignalSpec, ViewBlock } from "../../../runMonitor/types";
 import { useBoxSize } from "../useBoxSize";
 import { chartOf, type ChartData, type Series } from "./series";
+import { ChartMenu } from "./ChartMenu";
 import { midSentence } from "./Stats";
 
 /** Path segments for one line; a missing value (NaN on the wire) breaks it. */
@@ -183,7 +184,7 @@ function Readout({ at, width, outside, onDismiss, children }: { at: number; widt
  * point an arrow key has reached. Over steps, each line ends in its latest value; from a table's rows, the axes name
  * their measures and anything left out of the picture is said under it.
  */
-export function Chart({ monitor, block, size, live, height = 160 }: { monitor: RunMonitor; block: ChartBlock & Pick<ViewBlock, "phase">; size: "strip" | "page"; live: boolean; height?: number }) {
+export function Chart({ monitor, block, title, size, live, height = 160 }: { monitor: RunMonitor; block: ChartBlock & Pick<ViewBlock, "phase">; title: string; size: "strip" | "page"; live: boolean; height?: number }) {
   const [ref, box] = useBoxSize<HTMLDivElement>();
   const [pointer, setPointer] = useState<{ at: number; y: number | null; keyboard: boolean } | null>(null);
   const dismiss = useCallback(() => setPointer(null), []);
@@ -392,7 +393,7 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
   const interact = {
     tabIndex: 0,
     role: "group",
-    "aria-label": m.run_chart_scrub(),
+    "aria-label": `${autoDir(title)}. ${m.run_chart_scrub()}`,
     onMouseMove: (event: MouseEvent<HTMLDivElement>) => {
       const box = event.currentTarget.getBoundingClientRect();
       const position = event.clientX - box.left;
@@ -452,10 +453,13 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
     </Readout>
   );
   const status = <span role="status" className="sr-only">{pointer?.keyboard && spoken ? spoken : ""}</span>;
+  const withMenu = (trigger: ReactElement) => (
+    <ChartMenu monitor={monitor} block={block} limits={data.log} anchor={ref} onOpen={dismiss} trigger={trigger} />
+  );
 
   if (!page) {
-    return (
-      <div ref={ref} dir="ltr" className="group relative h-full min-h-6 w-full outline-none" {...interact}>
+    return withMenu(
+      <div dir="ltr" className="group relative h-full min-h-6 w-full outline-none" {...interact}>
         {width > 0 && focusRing}
         {drawn.length > 0 && (
           <svg width={width} height={boxHeight} role="img" aria-label={label} className="absolute inset-0 overflow-visible">
@@ -490,7 +494,7 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
         {width > 0 && blank && <span className="text-xs text-ink-subtext">{empty}</span>}
         {readoutView}
         {status}
-      </div>
+      </div>,
     );
   }
 
@@ -525,8 +529,8 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
     return [end];
   });
 
-  const chart = (
-    <div ref={ref} dir="ltr" className="group relative w-full outline-none" style={{ height: boxHeight }} {...interact}>
+  const chart = withMenu(
+    <div dir="ltr" className="group relative w-full outline-none" style={{ height: boxHeight }} {...interact}>
       {width > 0 && focusRing}
       <svg width={width} height={boxHeight} role="img" aria-label={blank ? empty : label} className="block overflow-visible text-xs">
           {drawn.length > 0 && yTicks.map((value) => (
@@ -573,7 +577,7 @@ export function Chart({ monitor, block, size, live, height = 160 }: { monitor: R
       </svg>
       {readoutView}
       {status}
-    </div>
+    </div>,
   );
   if (shownNotes.length === 0) return chart;
   return (

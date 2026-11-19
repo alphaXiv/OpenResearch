@@ -27,7 +27,10 @@ export interface ChartData {
   notes: string[];
   /** How many rows the table a chart draws from has; null when it draws signals over steps. */
   rows: number | null;
+  log: { x: LogLimit | "categorical"; y: LogLimit };
 }
+
+type LogLimit = "non-positive" | "no-points" | null;
 
 type Row = Record<string, SignalValue>;
 /** A line before its cells are read; `by` is the value of the `by` column its rows share. */
@@ -123,6 +126,9 @@ export function chartOf(monitor: RunMonitor, block: ChartBlock): ChartData {
   const counts = block.from !== undefined;
   let leftOut = 0;
   let offScale = 0;
+  let hasPoint = false;
+  let positiveX = true;
+  let positiveY = true;
   const series = lines.map(({ pairs, ...line }): Series => {
     const own = !line.ghost;
     const points: Point[] = [];
@@ -133,6 +139,11 @@ export function chartOf(monitor: RunMonitor, block: ChartBlock): ChartData {
       if (x === null) {
         if (counts && own && !broken.has(line.x)) leftOut++;
         continue;
+      }
+      if (y !== null) {
+        hasPoint = true;
+        positiveX &&= x > 0;
+        positiveY &&= y > 0;
       }
       if (!categories && block.xScale === "log" && x <= 0) {
         if (own) offScale++;
@@ -150,7 +161,8 @@ export function chartOf(monitor: RunMonitor, block: ChartBlock): ChartData {
   });
   if (leftOut > 0) notes.push(plural(leftOut, m.run_chart_left_out_one, m.run_chart_left_out_other));
   if (offScale > 0) notes.push(plural(offScale, m.run_chart_off_log_one, m.run_chart_off_log_other));
-  return { series, categories: categories?.words ?? null, notes, rows: count };
+  const limit = (positive: boolean): LogLimit => !hasPoint ? "no-points" : positive ? null : "non-positive";
+  return { series, categories: categories?.words ?? null, notes, rows: count, log: { x: bars ? "categorical" : limit(positiveX), y: limit(positiveY) } };
 }
 
 /** A chart block's lines, including each comparison its view asks for. */

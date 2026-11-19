@@ -64,6 +64,10 @@ export interface ChartSeries {
 export type Signals = Record<string, SignalSpec>;
 
 /** Signals over steps, or columns of a table. */
+export type ChartEdit =
+  | { kind: "x" | "y"; log: boolean }
+  | { kind: "smooth"; signal: string; weight: number | null };
+
 export interface ChartBlock {
   /** Signals over `x`, or columns of `from`; empty when `series` names the lines. */
   chart: string[];

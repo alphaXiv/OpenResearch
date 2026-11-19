@@ -5,17 +5,23 @@ import { act, createElement } from "react";
 import { ChatImageScope, Md } from "../src/components/Md.tsx";
 import { m } from "../src/paraglide/messages.js";
 import { createWorkspace } from "../src/workspace.tsx";
-import { find, render, serveApp, settle } from "./render.mjs";
+import { find, press, render, serveApp, settle } from "./render.mjs";
 
 const fixture = JSON.parse(readFileSync(new URL("./fixtures/runMonitor/running.json", import.meta.url), "utf8"));
 
-async function message({ monitor = fixture, visible = true, figure = "figure", projectId = "p", failure, id = "r1", status = "running" } = {}) {
+async function message({ monitor = fixture, visible = true, figure = "figure", projectId = "p", failure, id = "r1", status = "running", edit } = {}) {
   const calls = [];
   let refused = !!failure;
   const run = { id: "r1", projectId, experimentId: "e1", status, contact: null, monitor: { rev: monitor.rev, generation: monitor.generation } };
   serveApp({
     [`GET /api/projects/${projectId}/runs`]: () => failure === "runs" && refused ? Response.json({ error: "Could not read runs" }, { status: 500 }) : ({ runs: visible ? [run] : [] }),
     "GET /api/runs/r1/monitor": () => { calls.push("monitor"); return failure === "monitor" && refused ? Response.json({ error: "Could not read monitor" }, { status: 500 }) : monitor; },
+    ...(edit && { "PATCH /api/runs/r1/view/chart": (init) => {
+      const next = edit(JSON.parse(init.body), monitor);
+      if (next instanceof Response) return next;
+      monitor = next;
+      return {};
+    } }),
   });
   const workspace = createWorkspace("test");
   const opened = [];
@@ -36,6 +42,65 @@ test("a figure citation draws the page chart and keeps the chip's open gesture",
   await act(() => chip.click());
   assert.equal(opened[0][0], "r1");
   assert.ok(!container.querySelector("p div"), "block content does not nest in a paragraph");
+});
+
+test("the chart menu opens with mouse or keyboard and redraws after a saved axis change", async () => {
+  const markup = '<view><chart y="loss"/></view>';
+  const monitor = { ...fixture, viewFrom: { ...fixture.viewFrom, markup, isDefault: false } };
+  const { container } = await message({ monitor, edit: (body, current) => {
+    assert.deepEqual(body, { markup, isDefault: false, block: 0, edit: { kind: "y", log: true } });
+    return { ...current, rev: current.rev + 1, view: { ...current.view, blocks: [{ ...current.view.blocks[0], yScale: "log" }] } };
+  } });
+  const trigger = container.querySelector('[aria-haspopup="menu"]');
+  await act(() => trigger.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2 })));
+  assert.ok(find('[role="menu"]'));
+  await press("Escape");
+  await settle();
+  assert.equal(find('[role="menu"]'), null);
+  await act(() => trigger.focus());
+  await press("F10", trigger, { shiftKey: true });
+  const y = find('[role="menu"] [role="group"]', m.run_chart_y_axis());
+  const log = y.querySelectorAll('[role="menuitemradio"]')[1];
+  assert.equal(log.getAttribute("aria-checked"), "false");
+  await act(() => log.click());
+  await settle();
+  assert.match(container.querySelector('svg[role="img"]').textContent, /log/);
+  await press("ContextMenu", trigger);
+  assert.equal(find('[role="menu"] [role="group"]', m.run_chart_y_axis()).querySelectorAll('[role="menuitemradio"]')[1].getAttribute("aria-checked"), "true");
+});
+
+test("a refused chart edit keeps the prior scale and explains the failure", async () => {
+  const reason = "The experiment's view changed. Choose the chart setting again.";
+  const { container } = await message({
+    edit: () => Response.json({ error: reason }, { status: 409 }),
+  });
+  const trigger = container.querySelector('[aria-haspopup="menu"]');
+  await press("ContextMenu", trigger);
+  const y = find('[role="menu"] [role="group"]', m.run_chart_y_axis());
+  const [linear, log] = y.querySelectorAll('[role="menuitemradio"]');
+  await act(() => log.click());
+  await settle();
+  assert.equal(linear.getAttribute("aria-checked"), "true");
+  assert.ok(find('[role="alert"]', reason));
+  assert.doesNotMatch(container.querySelector('svg[role="img"]').textContent, /log/);
+});
+
+test("a plotted zero disables log on its axis and a table chart disables smoothing", async () => {
+  const block = { chart: ["loss"], from: "training", x: "step" };
+  const { container } = await message({
+    monitor: {
+      ...fixture,
+      view: { ...fixture.view, blocks: [block] },
+      rows: { training: [{ step: 0, loss: 2.33 }, { step: 1, loss: 2.31 }] },
+    },
+  });
+  const trigger = container.querySelector('[aria-haspopup="menu"]');
+  await press("ContextMenu", trigger);
+  const x = find('[role="menu"] [role="group"]', m.run_chart_x_axis());
+  const log = x.querySelectorAll('[role="menuitemradio"]')[1];
+  assert.equal(log.getAttribute("aria-disabled"), "true");
+  assert.match(x.textContent, /above zero/);
+  assert.equal(find('[role="menuitem"]', m.run_chart_smoothing()).getAttribute("aria-disabled"), "true");
 });
 
 test("a finished run's figure keeps drawing while final collection waits, and shows a reason when one arrives", async () => {

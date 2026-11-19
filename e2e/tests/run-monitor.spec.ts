@@ -128,6 +128,125 @@ const steps = async (page: Page, orx: Orx, runId: string) => {
   return { monitor, x: (monitor.series.loss ?? []).map(([x]: [number]) => x) as number[] }
 }
 
+test('run chart settings save, redraw and follow the run into chat', async ({ page, project, agent, orx }) => {
+  test.slow()
+  const run = payload(orx, `chart-settings-${project.id}`, ['finish'], `
+const loss = [1, 0.9, 0.6, 0.8, 0.3, 0.2, 0.26, 0.13, 0.17, 0.09, 0.05, 0.08]
+for (const [i, value] of loss.entries()) console.log('::orx:: ' + JSON.stringify({ step: i + 1, of: 16, m: { loss: value } }))
+gate('finish')`)
+  const view = path.join(orx.root, `chart-view-${project.id}.xml`)
+  writeFileSync(view, '<signal name="loss" label="Training loss" smooth="0.25"/>\n<view headline="loss"><chart y="loss"/></view>')
+  await page.request.post(`${orx.url}/api/settings/ui-state`, { headers: { origin: orx.url }, data: { runBanner: 'strip' } })
+  agent.script('Start training.', [
+    { run: [
+      'set -e',
+      `id=$(orx create-experiment ${project.id} --title Training --run-command '${run.command}' | sed -n 's/^ *id: *//p')`,
+      `orx exp view set "$id" --file ${view}`,
+      'orx exp run "$id" --backend local',
+      'orx exp wake "$id"',
+    ].join('\n') },
+    { say: 'Training started.' },
+  ])
+  agent.script('finished with status **done**', [{ say: 'Training finished.' }])
+  await project.open(page)
+  await send(page, 'Start training.')
+  const banner = page.getByRole('region', { name: 'Runs in this chat' })
+  const strip = banner.getByRole('group', { name: /Training loss/ })
+  const menu = page.getByRole('menu', { name: 'Chart settings' })
+  const choice = (axis: string, name: string) => menu.getByRole('group', { name: axis }).getByRole('menuitemradio', { name, exact: true })
+  const open = async (chart: Locator) => {
+    await chart.click({ button: 'right' })
+    await expect(menu).toBeVisible()
+  }
+  const capture = async (name: string, chart: Locator, withMenu = false) => {
+    const dir = process.env.ORX_E2E_SHOTS
+    if (!dir) return
+    mkdirSync(dir, { recursive: true })
+    for (const width of [1440, 420]) {
+      await page.setViewportSize({ width, height: 900 })
+      await chart.scrollIntoViewIfNeeded()
+      const plot = await chart.boundingBox()
+      if (withMenu) await open(chart)
+      else await chart.blur()
+      const popup = withMenu ? await menu.boundingBox() : null
+      if (!plot || (withMenu && !popup)) throw new Error('The chart or menu is hidden in the capture')
+      const y = Math.max(0, Math.floor(Math.min(plot.y - 36, popup ? popup.y - 8 : Infinity)))
+      for (const scheme of ['light', 'dark'] as const) {
+        await page.emulateMedia({ colorScheme: scheme })
+        await expect(page.locator('html')).toHaveAttribute('data-theme', scheme)
+        await expect.poll(() => page.evaluate(() => document.getAnimations().filter((a) => a instanceof CSSTransition).length)).toBe(0)
+        if (withMenu) expect(await contrast(menu)).toEqual([])
+        await page.screenshot({ path: path.join(dir, `${name}-${width}-${scheme}.png`), clip: { x: 0, y, width, height: 900 - y } })
+      }
+      await page.emulateMedia({ colorScheme: 'light' })
+      if (withMenu) await page.keyboard.press('Escape')
+    }
+    await page.setViewportSize({ width: 1440, height: 900 })
+  }
+  await expect(strip.getByRole('img')).toBeVisible()
+  await capture('composer-menu', strip, true)
+  if (process.platform === 'darwin') {
+    await strip.click({ modifiers: ['Control'] })
+    await expect(menu).toBeVisible()
+    await page.keyboard.press('Escape')
+  }
+
+  await openRunPage(page, banner, /Training/)
+  const chart = latestRun(page).getByRole('group', { name: /Training loss/ })
+  const image = chart.getByRole('img')
+  const raw = image.locator('path[opacity="0.3"]')
+  await expect(raw).toHaveCount(1)
+  await capture('run-menu', chart, true)
+  await capture('before-log', chart)
+
+  await chart.press('Shift+F10')
+  await expect(menu).toBeVisible()
+  await expect(choice('Y axis', 'Linear')).toHaveAttribute('aria-checked', 'true')
+  await page.keyboard.press('Home')
+  await expect(choice('Y axis', 'Linear')).toBeFocused()
+  await page.keyboard.press('ArrowDown')
+  await expect(choice('Y axis', 'Logarithmic')).toBeFocused()
+  await page.keyboard.press('Enter')
+  await expect(menu).toBeHidden()
+  await expect(chart).toBeFocused()
+  await expect(image.getByText('log', { exact: true })).toBeVisible()
+  await expect(strip.getByText(/\blog\b/)).toBeVisible()
+  await capture('after-log', chart)
+  await capture('before-smoothing-off', chart)
+
+  await chart.press('ContextMenu')
+  await expect(choice('Smoothing', 'Medium')).toHaveAttribute('aria-checked', 'true')
+  await choice('Smoothing', 'Off').click()
+  await expect(menu).toBeHidden()
+  await expect(raw).toHaveCount(0)
+  await expect(strip.getByRole('img').locator('path[opacity="0.3"]')).toHaveCount(0)
+  await capture('after-smoothing-off', chart)
+
+  await page.route('**/api/runs/*/view/chart', (route) => route.fulfill({
+    status: 409,
+    json: { error: "The experiment's view changed. Choose the chart setting again." },
+  }), { times: 1 })
+  await open(chart)
+  await choice('Y axis', 'Linear').click()
+  await expect(menu.getByRole('alert')).toContainText('The experiment\'s view changed.')
+  await expect(choice('Y axis', 'Logarithmic')).toHaveAttribute('aria-checked', 'true')
+  await page.keyboard.press('Escape')
+  await expect(chart).toBeFocused()
+  await expect(image.getByText('log', { exact: true })).toBeVisible()
+
+  const shown = (await (await page.request.get(`${orx.url}/api/chat/shown-runs`)).json()).find((item: { run: { projectId: string } }) => item.run.projectId === project.id)
+  const { monitor } = await steps(page, orx, shown.run.id)
+  expect(monitor.viewFrom.markup).toContain('y-scale="log"')
+  expect(monitor.viewFrom.markup).not.toContain('smooth=')
+  await page.reload()
+  await open(strip)
+  await expect(choice('Y axis', 'Logarithmic')).toHaveAttribute('aria-checked', 'true')
+  await expect(choice('Smoothing', 'Off')).toHaveAttribute('aria-checked', 'true')
+  await page.keyboard.press('Escape')
+  await run.open('finish')
+  await expect(page.getByText('Training finished.', { exact: true })).toBeVisible()
+})
+
 test('Stop asks before cancelling a running experiment', async ({ page, project, agent, orx }) => {
   const run = payload(orx, 'stop-run', ['finish'], "gate('finish')")
   agent.script('Stopped by: the user.', [{ say: 'The run was stopped.' }])

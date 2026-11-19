@@ -273,6 +273,7 @@ stage, but once runs report, a name they never did is refused with the names
 they did. A view changes what is shown, never what runs: saving one draws the
 experiment's runs again, and an open page starts over from it. A saved view
 this orx cannot read draws the default and `orx exp status` says why.
+The chart menu saves scale and smoothing edits in the experiment's view.
 
 A log an agent cannot change is read with patterns saved beside the view
 (`orx exp view set --pattern`): each line the first matching regex fits
