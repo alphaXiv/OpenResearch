@@ -19,12 +19,16 @@ async function closeLatestTurn(page: Page, sessionId: string, turnYield: Yield) 
   await page.route('**/api/chat/sessions?*', async (route) => {
     const response = await route.fetch()
     const body = await response.json()
-    for (const session of body.sessions ?? []) if (session.id === sessionId) session.yieldKind = turnYield.kind
+    for (const session of body.sessions ?? []) {
+      if (session.id !== sessionId) continue
+      session.yieldKind = turnYield.kind
+      session.yieldText = turnYield.text
+    }
     await route.fulfill({ response, json: body })
   })
 }
 
-test("a turn's closing line says why the agent stopped, and a need keeps the chat in Inbox", async ({ page, project, agent }, info) => {
+test("the composer shows why the agent stopped until a reply starts a new turn", async ({ page, project, agent }, info) => {
   await page.addInitScript(() => localStorage.setItem('sidebar-grouping', 'inbox'))
   await page.emulateMedia({ reducedMotion: 'reduce' })
   agent.script('Compare the fine-tune with Wispr.', [{ say: 'The fine-tune reaches 3.21% WER on the held-out set, against 2.40% for Wispr.' }])
@@ -44,15 +48,16 @@ test("a turn's closing line says why the agent stopped, and a need keeps the cha
     await test.step(`a ${close.kind} close`, async () => {
       await closeLatestTurn(page, sessionId, close)
       await page.reload()
-      const line = page.locator('[data-turn-close]')
-      await expect(line).toHaveText(close.text)
-      await expect(line.getByRole('img', { name: labels[close.kind] })).toBeVisible()
-      await expect(page.getByText(close.text)).toHaveCount(1)
+      const line = page.locator('.composer').getByRole('status').filter({ hasText: close.text })
+      await expect(line.getByText(close.text)).toBeVisible()
+      await expect(line.getByText(labels[close.kind], { exact: true })).toBeVisible()
+      await expect(page.getByRole('feed').getByText(close.text)).toHaveCount(0)
 
       const row = page.locator('.session-row', { hasText: 'Compare the fine-tune' })
       if (close.kind === 'need') {
         await expect(page.getByRole('button', { name: 'Inbox', exact: true })).toHaveAttribute('aria-expanded', 'true')
         await expect(row).toHaveAccessibleName(/Waiting for your input/)
+        await expect(row.getByText(close.text)).toBeVisible()
       } else {
         await expect(row).not.toHaveAccessibleName(/Waiting for your input/)
       }
@@ -69,6 +74,14 @@ test("a turn's closing line says why the agent stopped, and a need keeps the cha
     await page.setViewportSize({ width: 720, height: 640 })
     await expect(page.locator('[data-turn-close]')).toBeVisible()
     await page.screenshot({ path: info.outputPath('close-done-narrow.png'), animations: 'disabled' })
+  })
+
+  await test.step('a reply clears the closing line', async () => {
+    await page.unrouteAll({ behavior: 'wait' })
+    agent.script('Continue with the next trial.', [{ say: 'The next trial is ready for review.' }])
+    await send(page, 'Continue with the next trial.')
+    await expect(page.locator('[data-turn-close]')).toBeHidden()
+    await expect(page.getByText('The next trial is ready for review.')).toBeVisible()
   })
 })
 

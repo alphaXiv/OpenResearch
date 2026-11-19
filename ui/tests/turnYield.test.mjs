@@ -12,9 +12,6 @@ const NEED = { kind: "need", text: "Share the held-out corpus before I compare a
 const tool = (name, input = {}, status = "completed") => ({ id: `${name}-${status}`, type: "tool", tool: name, state: { status, input } });
 const answer = (id, text, turnYield, extra = {}) => ({ ...assistantMessage(id, [{ id: `${id}-text`, type: "text", text, phase: "final_answer" }]), turnYield, ...extra });
 const close = () => document.querySelector("[data-turn-close]");
-/** The transcript's live region, which sits just before its feed. */
-const liveRegion = () => document.querySelector('[role="feed"]').previousElementSibling;
-const announced = () => liveRegion().textContent;
 
 test("the yield call hides behind the closing line it produced, under every agent's name and as a lone command", () => {
   const visible = (part, fields = { turnYield: NEED }) => hideClosedYieldCalls([{ ...assistantMessage("a", [part]), ...fields }])[0].parts.length === 1;
@@ -77,23 +74,32 @@ test("a turn that ended without its close keeps the yield call in the activity, 
   assert.equal(row.textContent, m.chat_turn_close_with_status({ status: m.chat_turn_close_need(), text: NEED.text }));
 });
 
-test("a turn ends with its closing line after the answer, labelled by why it stopped", async () => {
+test("the composer shows why the current turn stopped using the matching session summary", async () => {
+  const previous = { kind: "running", text: "Waiting on the first comparison." };
   await renderChat("/projects/p/tasks/s", {
-    transcripts: { s: [userMessage("u", "Compare the fine-tune with the baseline."), answer("a", "The fine-tune reaches 3.21% WER.", NEED)] },
+    sessions: [session("s", { activeLeafId: "a", yieldKind: NEED.kind, yieldText: NEED.text })],
+    transcripts: {
+      s: [
+        userMessage("u", "Compare the fine-tune with the baseline."),
+        answer("first", "The comparison has started.", previous, { parentId: "u" }),
+        answer("a", "The fine-tune reaches 3.21% WER.", undefined, { parentId: "first" }),
+      ],
+    },
   });
   const line = close();
-  assert.ok(line, "a closing line");
-  assert.equal(line.textContent, NEED.text);
-  assert.equal(line.querySelector('[role="img"]').getAttribute("aria-label"), m.chat_turn_close_need());
-  const reply = find(".msg-assistant .md", "3.21% WER");
-  assert.ok(reply.compareDocumentPosition(line) & Node.DOCUMENT_POSITION_FOLLOWING, "after the answer");
-  assert.equal(document.querySelectorAll("[data-turn-close]").length, 1);
+  assert.ok(line.closest(".composer [role=status]"));
+  assert.ok(line.textContent.includes(m.chat_turn_close_need()));
+  assert.ok(line.textContent.includes(NEED.text));
+  const feed = document.querySelector('[role="feed"]');
+  assert.ok(feed.textContent.includes("3.21% WER"));
+  assert.ok(!feed.textContent.includes(NEED.text));
+  assert.ok(!document.body.textContent.includes(previous.text));
 });
 
 test("a run cited in a closing line shows as the run's chip everywhere the line is read, never as its tag", async () => {
   const RUN = "ac7c54f8-23e2-4ff7-a52c-2b740dc788b3";
   const cited = { kind: "running", text: `The baseline reached 2.237 bpc. <run id="${RUN}" /> The MLP <run id="r2" label="1.80 bpc"/> wakes the next comparison.` };
-  const spoken = "The baseline reached 2.237 bpc. The MLP 1.80 bpc wakes the next comparison.";
+  const words = "The baseline reached 2.237 bpc. The MLP 1.80 bpc wakes the next comparison.";
   const running = { ...assistantMessage("a", [{ id: "a-text", type: "text", text: "Comparing now.", phase: "final_answer" }]), completedAt: null };
   await renderChat("/projects/p/tasks/s", { transcripts: { s: [userMessage("u", "Compare."), running] } });
   await emit("chat.message", { sessionId: "s", message: { ...running, completedAt: 3, turnYield: cited } });
@@ -104,20 +110,20 @@ test("a run cited in a closing line shows as the run's chip everywhere the line 
   assert.equal(chips[1].textContent, "1.80 bpc");
   assert.ok(chips[0].title.includes(RUN));
   assert.equal(close().textContent.includes("<run"), false);
-  assert.equal(announced(), m.chat_turn_close_with_status({ status: m.chat_turn_close_running(), text: spoken }));
+  assert.ok(close().closest('[role="status"]'));
 
   const call = tool("mcp__orx__yield", { arguments: cited });
   await emit("chat.message", { sessionId: "s", message: { ...assistantMessage("a", [call]) } });
   assert.equal(document.querySelector(`[data-part-id="${call.id}"]`).textContent,
-    m.chat_turn_close_with_status({ status: m.chat_turn_close_running(), text: spoken }));
+    m.chat_turn_close_with_status({ status: m.chat_turn_close_running(), text: words }));
 });
 
 test("a reply that is only a yield stays visible, and its call shows no second copy", async () => {
   const yieldOnly = { ...assistantMessage("a", [tool("mcp__orx__yield", { arguments: { kind: "running", text: "Waiting on two runs." } })]), turnYield: { kind: "running", text: "Waiting on two runs." } };
   await renderChat("/projects/p/tasks/s", { transcripts: { s: [userMessage("u", "Start the sweep."), yieldOnly] } });
-  assert.equal(close()?.textContent, "Waiting on two runs.");
+  assert.ok(close()?.textContent.includes("Waiting on two runs."));
   assert.equal(document.body.textContent.split("Waiting on two runs.").length, 2, "shown once");
-  assert.equal(close().querySelector('[role="img"]').getAttribute("aria-label"), m.chat_turn_close_running());
+  assert.ok(close().textContent.includes(m.chat_turn_close_running()));
 });
 
 test("a failed turn shows its recovery, never a closing line", async () => {
@@ -132,18 +138,22 @@ test("a failed turn shows its recovery, never a closing line", async () => {
   assert.equal(close(), null);
 });
 
-test("a closing line that arrives with the finished turn is announced once", async () => {
+test("the closing line updates a persistent live region and clears as soon as the next turn starts", async () => {
   const running = { ...assistantMessage("a", [{ id: "a-text", type: "text", text: "Comparing now.", phase: "final_answer" }]), completedAt: null };
   await renderChat("/projects/p/tasks/s", { transcripts: { s: [userMessage("u", "Compare."), running] } });
+  const status = document.querySelector('.composer [role="status"]');
+  assert.ok(status);
   assert.equal(close(), null);
 
   await emit("chat.message", { sessionId: "s", message: { ...running, completedAt: 3, turnYield: NEED } });
-  assert.equal(close()?.textContent, NEED.text);
-  assert.equal(announced(), m.chat_turn_close_with_status({ status: m.chat_turn_close_need(), text: NEED.text }));
+  assert.ok(status.textContent.includes(NEED.text));
 
-  const spoken = liveRegion().firstElementChild;
+  const spoken = status.firstElementChild;
   await emit("chat.message", { sessionId: "s", message: { ...running, completedAt: 3, turnYield: NEED, parts: [...running.parts] } });
-  assert.equal(liveRegion().firstElementChild, spoken, "not announced again");
+  assert.equal(status.firstElementChild, spoken);
+
+  await emit("chat.session", { session: session("s", { activeLeafId: "a", busy: true, yieldKind: NEED.kind, yieldText: NEED.text }) });
+  assert.equal(status.textContent, "");
 });
 
 test("chats waiting on the user stay in Inbox while active turns go in Working", async () => {

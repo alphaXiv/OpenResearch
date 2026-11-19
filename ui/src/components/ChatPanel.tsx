@@ -3660,7 +3660,7 @@ function PromptCard({
  * a bridge permission card rides its own message, so resolving it leaves the
  * message empty and it must drop out of the transcript entirely. */
 function messageHasVisibleContent(m: ChatMessage, activePermissionId?: string | null): boolean {
-  if (m.role === "user" || m.turnYield) return true;
+  if (m.role === "user") return true;
   return m.parts.some((part) => partIsVisible(part, activePermissionId));
 }
 
@@ -4047,7 +4047,6 @@ export const Message = memo(function Message({
         onOpenSubagent,
         predictTextTail,
       }} />}
-      {close && <TurnClose close={close} onOpenFile={onOpenFile} onOpenRun={onOpenRun} />}
       {responseTurns.map(({ message: turn, turnStatus, usageLimit, temporaryApiError }, index) => turnStatus && (
         <TurnStatusRow
           key={turn.id}
@@ -4104,13 +4103,18 @@ const TURN_CLOSE_KINDS: Partial<Record<string, { Icon: typeof Hourglass; tone: s
 function TurnClose({ close, onOpenFile, onOpenRun }: { close: TurnYield; onOpenFile?: OpenTranscriptFile; onOpenRun?: OpenTranscriptTarget }) {
   const kind = TURN_CLOSE_KINDS[close.kind];
   return (
-    <div className="mt-3 flex gap-2 text-sm leading-5 text-subtext [&_.md]:leading-5 [&_.md]:text-subtext" data-turn-close={close.kind}>
+    <div className="mb-2.5 flex items-start gap-2 rounded-lg border border-border bg-surface px-3 py-2 text-sm leading-5 text-text" data-turn-close={close.kind}>
       {kind && (
-        <span role="img" aria-label={kind.label()} className={`inline-flex h-5 shrink-0 items-center ${kind.tone}`}>
+        <span className={`inline-flex h-5 shrink-0 items-center ${kind.tone}`}>
           <kind.Icon size={14} aria-hidden="true" />
         </span>
       )}
-      <div className="min-w-0 flex-1"><Md text={close.text} onOpenFile={onOpenFile} onOpenRun={onOpenRun} /></div>
+      <div className="min-w-0 flex-1">
+        {kind && <div className="font-medium">{kind.label()}</div>}
+        <div dir="auto" className="wrap-anywhere text-subtext [&_.md]:leading-5 [&_.md]:text-subtext">
+          <Md text={close.text} onOpenFile={onOpenFile} onOpenRun={onOpenRun} />
+        </div>
+      </div>
     </div>
   );
 }
@@ -4754,19 +4758,13 @@ function useTranscriptAnnouncement(messages: ChatMessage[]): TranscriptAnnouncem
     messageId: string;
     states: Map<string, AnnouncedToolState>;
     permissionPath: string | null;
-    close: string;
   } | null>(null);
   useEffect(() => {
     const transcript = messages[0]?.id ?? "";
     const { messageId, states } = latestToolStates(messages);
     const pendingPermission = firstPendingPermission(messages);
-    let lastAssistant: ChatMessage | undefined;
-    for (let index = messages.length - 1; index >= 0 && !lastAssistant; index--) {
-      if (messages[index].role === "assistant") lastAssistant = messages[index];
-    }
-    const close = lastAssistant?.turnYield ? `${lastAssistant.id}\n${lastAssistant.turnYield.text}` : "";
     if (!previous.current || previous.current.transcript !== transcript) {
-      previous.current = { transcript, messageId, states, permissionPath: pendingPermission?.path ?? null, close };
+      previous.current = { transcript, messageId, states, permissionPath: pendingPermission?.path ?? null };
       setAnnouncement((current) => ({
         text: pendingPermission ? m.announcement_approval_required({ label: autoDir(pendingPermission.label) }) : "",
         sequence: current.sequence + 1,
@@ -4775,9 +4773,8 @@ function useTranscriptAnnouncement(messages: ChatMessage[]): TranscriptAnnouncem
     }
     const previousStates = previous.current.messageId === messageId ? previous.current.states : new Map<string, AnnouncedToolState>();
     const previousPermissionPath = previous.current.permissionPath;
-    const previousClose = previous.current.close;
     const changes = [...states].filter(([path, state]) => previousStates.get(path)?.status !== state.status);
-    previous.current = { transcript, messageId, states, permissionPath: pendingPermission?.path ?? null, close };
+    previous.current = { transcript, messageId, states, permissionPath: pendingPermission?.path ?? null };
     if (pendingPermission && pendingPermission.path !== previousPermissionPath) {
       setAnnouncement((current) => ({
         text: m.announcement_approval_required({ label: autoDir(pendingPermission.label) }),
@@ -4797,16 +4794,6 @@ function useTranscriptAnnouncement(messages: ChatMessage[]): TranscriptAnnouncem
     if (turnStatus?.id === "turn-retry") {
       setAnnouncement((current) => ({
         text: m.announcement_cli_retrying(),
-        sequence: current.sequence + 1,
-      }));
-      return;
-    }
-    const turnYield = lastAssistant?.turnYield;
-    if (turnYield && close !== previousClose) {
-      const status = TURN_CLOSE_KINDS[turnYield.kind]?.label();
-      const text = mentionsAsText(turnYield.text);
-      setAnnouncement((current) => ({
-        text: status ? m.chat_turn_close_with_status({ status, text }) : text,
         sequence: current.sequence + 1,
       }));
       return;
@@ -7485,6 +7472,17 @@ export function ChatPanel({
     part.type === "prompt" && part.prompt?.kind === "question" && !part.prompt.resolved && (!part.prompt.nativeId || busy),
   )), [messages, busy]);
   const activeSession = openSession;
+  const tail = messages.at(-1);
+  let currentClose: TurnYield | undefined;
+  if (!busy && tail?.role === "assistant" && !tail.parts.some(isTurnStatusPart)) {
+    const summary = activeSession?.activeLeafId === tail.id ? activeSession : undefined;
+    if (summary?.yieldKind && summary.yieldText) {
+      currentClose = { kind: summary.yieldKind, text: summary.yieldText };
+    } else if (summary?.yieldKind !== null) {
+      currentClose = tail.turnYield;
+    }
+  }
+
   const ancestors = embedded || !onOpenDelegate ? [] : delegateAncestors(sessions, activeSession);
   // Once the user writes in a delegate, whether it still reports to its parent is theirs to decide.
   const steeringDelegate = Boolean(activeSession?.delegate?.notifies) && (draft.trim() !== ""
@@ -9748,6 +9746,13 @@ export function ChatPanel({
             />
           )}
           <RemoteConnectionStrip />
+          <div role="status">
+            {currentClose && !pendingPlan && !asking && (
+              <ChatImageScope projectId={projectId} sessionId={activeId}>
+                <TurnClose close={currentClose} onOpenFile={openFileInSession} onOpenRun={onOpenRun} />
+              </ChatImageScope>
+            )}
+          </div>
           <div inert={connection !== null} className={`composer-frame flex flex-col min-h-0 rounded-xl bg-surface${connection ? " opacity-60" : ""}`} data-onboarding="composer">
             <div className={`composer-box relative flex flex-col min-h-0 rounded-xl border ${bashMode && !asking ? "border-accent-amber" : "border-border"} bg-background shadow-control-subtle`}>
               {unconfirmedSend !== null && (
