@@ -5907,7 +5907,7 @@ const SidebarSessionRow = memo(function SidebarSessionRow({
 }) {
   useLocale();
   const { session } = row;
-  const working = row.variant !== "list" && (row.busy || Boolean(session.background) || row.runs.some(({ run }) => run.chatSessionId === session.id));
+  const working = row.variant !== "list" && chatStatusWorking(chatStatus(session, row.busy, row.waiting, row.runs));
   return (
     <SessionRow
       {...row}
@@ -9303,7 +9303,7 @@ export function ChatPanel({
               onOpenRunPage={onOpenRunPage}
             />
           )}
-          {!busy && activeId && <BackgroundTaskBanner key={activeId} sessionId={activeId} background={activeSession?.background} />}
+          {!busy && activeId && <BackgroundTaskBanner sessionId={activeId} background={activeSession?.background} />}
           {/* Inside the composer so the composer's popovers (mode/model pickers,
             z 50 within this stacking context) layer above the strip — as a
             sibling, the composer's own z-index: 4 capped them below it. */}
