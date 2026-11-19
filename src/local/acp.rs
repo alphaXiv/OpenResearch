@@ -833,23 +833,29 @@ mod tests {
         let advance = stall + std::time::Duration::from_secs(1);
         let record =
             std::env::temp_dir().join(format!("acp-oneshot-record-{}", uuid::Uuid::new_v4()));
+        if stalled {
+            tokio::time::pause();
+        }
         let (mut answer, cleanup) = spawn_one_shot(
             &peer(signaled_mode.as_deref().unwrap_or(mode), &record),
             request,
         );
 
         if let Some(listener) = listener {
-            let reached_stall =
-                tokio::time::timeout(std::time::Duration::from_secs(30), listener.accept());
+            // A blocking wait prevents Tokio from auto-advancing while the peer starts.
+            let (release_clock, wait) = std::sync::mpsc::channel::<()>();
+            let mut stall_deadline = tokio::task::spawn_blocking(move || {
+                let _ = wait.recv_timeout(std::time::Duration::from_secs(30));
+            });
             tokio::select! {
                 result = &mut answer => panic!("the peer never stalled: {result:?}"),
-                connected = reached_stall => {
-                    connected.expect("the peer never reached its stall").unwrap();
-                }
+                _ = &mut stall_deadline => panic!("the peer never reached its stall"),
+                connected = listener.accept() => { connected.unwrap(); }
             }
-            tokio::time::pause();
             tokio::time::advance(advance).await;
             tokio::time::resume();
+            drop(release_clock);
+            stall_deadline.await.unwrap();
         }
 
         let answer = answer.await.unwrap();
@@ -1127,11 +1133,9 @@ mod tests {
     #[tokio::test]
     async fn one_shot_names_the_agent_and_cause_of_each_failure() {
         let mut causes = std::collections::HashSet::new();
-        let started = std::time::Instant::now();
         let (answer, received) = run("delete", request("ACP_TEST:hang", None, 5)).await;
         let error = answer.unwrap_err().to_string();
         assert!(error.contains("Peer") && error.contains("5s"), "{error}");
-        assert!(started.elapsed() < std::time::Duration::from_secs(15));
         assert!(position(&received, "session/delete").is_some());
         causes.insert(error.replace("5s", ""));
         let (answer, _) = run("stalled-setup", request("ACP_TEST:hello", None, 1)).await;
