@@ -16070,6 +16070,7 @@ done
             "-c".into(),
             r#"
 import json, sys
+sys.stdin.reconfigure(encoding="utf-8")
 for line in sys.stdin:
     request = json.loads(line)
     method = request['method']
