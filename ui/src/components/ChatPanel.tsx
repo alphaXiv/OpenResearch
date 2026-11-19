@@ -6429,6 +6429,7 @@ export function ChatPanel({
   const stickToBottom = useRef(true);
   const programmaticScroll = useRef<number | null>(null);
   const lastTranscriptTop = useRef(0);
+  const lastTranscriptSize = useRef("");
   const [transcriptAtBottom, setTranscriptAtBottom] = useState(true);
   const composerRef = useRef<ComposerEditorHandle>(null);
   useEffect(() => {
@@ -7498,10 +7499,14 @@ export function ChatPanel({
     // Wheels, keys, focus moves and screen readers scroll unannounced; only the virtualizer's own scrolls are recorded.
     const programmatic = programmaticScroll.current !== null && Math.abs(el.scrollTop - programmaticScroll.current) <= 1;
     const movedUp = el.scrollTop < lastTranscriptTop.current;
+    // Chromium can reset the offset while the pane resizes; that is no user scroll, and the resize re-pins.
+    const size = `${el.clientWidth}x${el.clientHeight}`;
+    const resized = lastTranscriptSize.current !== "" && size !== lastTranscriptSize.current;
     programmaticScroll.current = null;
     lastTranscriptTop.current = el.scrollTop;
+    lastTranscriptSize.current = size;
     // Trackpads scroll a pixel at a time, so any upward scroll lets go before the next resize re-pins it.
-    if (!programmatic) stickToBottom.current = distance <= 1 || (atBottom && !movedUp);
+    if (!programmatic && !resized) stickToBottom.current = distance <= 1 || (atBottom && !movedUp);
     setTranscriptAtBottom(atBottom);
   }, []);
   const pinTranscriptToBottom = useCallback(() => {

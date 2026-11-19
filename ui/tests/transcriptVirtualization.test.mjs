@@ -214,6 +214,22 @@ test("viewport and footer resizing preserve the bottom pin without moving a read
   assert.equal(atBottom(), false);
 });
 
+test("a scroll the browser makes while the pane resizes keeps the bottom pin", async () => {
+  await renderHistory();
+  const viewport = thread();
+  let width = 1_440;
+  Object.defineProperty(viewport, "clientWidth", { configurable: true, get: () => width });
+  Object.defineProperty(viewport, "clientHeight", { configurable: true, get: () => 800 });
+  await scrollTo(16_000 - 800);
+  assert.equal(atBottom(), true);
+  width = 420;
+  await scrollTo(0);
+  await resize(viewport);
+  assert.ok(viewport.scrollTop > 0, "a narrowed window keeps the transcript at its end");
+  await scrollTo(viewport.scrollTop);
+  assert.equal(atBottom(), true);
+});
+
 test("opening a different conversation pins it to the bottom", async () => {
   const { chat } = await renderHistory();
   await scrollTo(0);
