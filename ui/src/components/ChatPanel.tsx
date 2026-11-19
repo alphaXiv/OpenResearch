@@ -6429,6 +6429,7 @@ export function ChatPanel({
   const stickToBottom = useRef(true);
   const programmaticScroll = useRef<number | null>(null);
   const lastTranscriptTop = useRef(0);
+  const transcriptViewport = useRef<{ width: number; height: number } | null>(null);
   const [transcriptAtBottom, setTranscriptAtBottom] = useState(true);
   const composerRef = useRef<ComposerEditorHandle>(null);
   useEffect(() => {
@@ -7498,10 +7499,13 @@ export function ChatPanel({
     // Wheels, keys, focus moves and screen readers scroll unannounced; only the virtualizer's own scrolls are recorded.
     const programmatic = programmaticScroll.current !== null && Math.abs(el.scrollTop - programmaticScroll.current) <= 1;
     const movedUp = el.scrollTop < lastTranscriptTop.current;
+    const viewport = transcriptViewport.current;
+    // Reflow can clamp scrollTop before the resize observer restores the bottom pin.
+    const resized = viewport !== null && (el.clientWidth !== viewport.width || el.clientHeight !== viewport.height);
     programmaticScroll.current = null;
     lastTranscriptTop.current = el.scrollTop;
     // Trackpads scroll a pixel at a time, so any upward scroll lets go before the next resize re-pins it.
-    if (!programmatic) stickToBottom.current = distance <= 1 || (atBottom && !movedUp);
+    if (!programmatic && !resized) stickToBottom.current = distance <= 1 || (atBottom && !movedUp);
     setTranscriptAtBottom(atBottom);
   }, []);
   const pinTranscriptToBottom = useCallback(() => {
@@ -7518,13 +7522,17 @@ export function ChatPanel({
     if (!el || !inner) return;
     // Virtual rows anchor their own growth; viewport and footer changes need the same pin.
     const observer = new ResizeObserver(() => {
+      transcriptViewport.current = { width: el.clientWidth, height: el.clientHeight };
       if (stickToBottom.current) scrollToEndRef.current?.();
       // Disclosure animation must not re-pin while its first frames remain near the bottom.
       else setTranscriptAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 60);
     });
     observer.observe(el);
     observer.observe(inner);
-    return () => observer.disconnect();
+    return () => {
+      observer.disconnect();
+      transcriptViewport.current = null;
+    };
   }, [threadMounted]);
 
   const scrollToTranscriptBottom = useCallback((event: ReactMouseEvent<HTMLButtonElement>) => {
