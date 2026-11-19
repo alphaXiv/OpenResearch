@@ -2319,27 +2319,6 @@ async fn a_setup_look_defaults_to_no_sentence_and_can_clear_a_previous_one() {
     assert_eq!(calls(&calls_dir), 3);
 }
 
-#[test]
-fn setup_ends_on_the_first_headlined_or_charted_point() {
-    let mut body = json!({
-        "phases": [{"name": ""}],
-        "view": {"headline": ["accuracy"], "blocks": [
-            {"chart": ["loss"], "phase": "train"}, {"stats": ["tok_per_sec"]}
-        ]},
-        "series": {"tok_per_sec": [[1, 1000]]}
-    });
-    assert!(in_setup(&body));
-    body["series"]["loss"] = json!([[1, 2.0]]);
-    assert!(!in_setup(&body));
-    body["series"]["loss"] = json!([]);
-    body["series"]["accuracy"] = json!([[1, 0.8]]);
-    assert!(!in_setup(&body));
-    body["series"]["accuracy"] = json!([]);
-    body["view"]["blocks"] = json!([{ "series": [{"y": "loss"}], "phase": "train" }]);
-    body["series"]["loss"] = json!([[1, 2.0]]);
-    assert!(!in_setup(&body));
-}
-
 #[cfg(unix)]
 #[tokio::test]
 async fn stopped_runs_keep_final_sentences_without_flags_or_wakes() {
@@ -2497,7 +2476,7 @@ async fn an_overlong_sentence_gets_one_retry_with_the_exact_error() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn a_setup_sentence_expires_on_the_first_research_point() {
+async fn a_setup_sentence_expires_on_the_first_stage_count() {
     if !crate::config::in_test_child(&[]) {
         return;
     }
@@ -2510,7 +2489,7 @@ async fn a_setup_sentence_expires_on_the_first_research_point() {
         &[
             r#"{"runs":{"r1":{"status":"ok","line":"Waiting for data."}}}"#,
             r#"{"runs":{"r1":{"same":true}}}"#,
-            r#"{"runs":{"r1":{"status":"ok","line":"Loss tracks the parent."}}}"#,
+            r#"{"runs":{"r1":{"status":"ok","line":"The data is on disk."}}}"#,
         ],
     );
     let id = look(&store, "chat", "manual", &[("setup", "r1")]);
@@ -2523,7 +2502,18 @@ async fn a_setup_sentence_expires_on_the_first_research_point() {
         monitor.summary()["sentence"]["template"],
         "Waiting for data."
     );
-    epochs(&store, &row, &[(2.1, 0.5)]);
+    let log = concat!(r#"::orx:: {"phase":"train","step":1,"of":20}"#, "\n");
+    keep_log(&store, &row.id, log);
+    let at = crate::store::now_ms() + 1_000;
+    let mut snapshot = orx_signals::Snapshot::new(&row.id, "1-7", "g1");
+    snapshot.feed(log.as_bytes(), true, at, true).unwrap();
+    let path = store
+        .data_dir()
+        .join("run-signals")
+        .join(format!("{}.json", row.id));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    crate::engine::adapters::signals::publish(&path, &snapshot).unwrap();
+    super::super::monitor::advance(&store, &row, at).unwrap();
     let monitor = super::super::monitor::current(&store, &row)
         .unwrap()
         .unwrap();
@@ -2548,9 +2538,12 @@ async fn a_setup_sentence_expires_on_the_first_research_point() {
         3,
         "same cannot revive the expired setup sentence"
     );
+    let prompt = std::fs::read_to_string(calls_dir.join("prompt-2")).unwrap();
+    let sent: Value = serde_json::from_str(prompt.strip_prefix(DIGEST_PREAMBLE).unwrap()).unwrap();
+    assert_eq!(sent["runs"][0]["setup"], false);
     assert_eq!(
         run_facts(&store, &row).unwrap()["sentence"]["template"],
-        "Loss tracks the parent."
+        "The data is on disk."
     );
 }
 

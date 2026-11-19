@@ -98,10 +98,10 @@ Each sentence follows "Train (2/5) · Step 120 of 5,000." above its chart. Never
 Use one sentence, at most {LINE} rendered characters excluding **; shorten labels/clauses.
 Read the brief first. Lead with "reportOn". Other stats matter for severe trouble outside the brief's noise.
 Expected eval dips aren't slowdowns.
-"setup":true: before the first chart/headline point; name known stages in the summary. Default to {"status":"ok","line":null}
+When "setup" is true, name known stages in the summary. Default to {"status":"ok","line":null}
 or omission, clearing old text. Speak only for facts differing from the parent or affecting
 data, results or wait; flag threats to validity/comparison. No progress, reassurance or shared warnings.
-After setup, lead with the headline/chart value. Moving numbers use {signal} or
+After setup, lead with any headline/chart value. Moving numbers use {signal} or
 {count:"regex"} (log matches since launch).
 Use a count label with no noun after the count: HTTP 429 count: **{count:"HTTP 429"}**.
 Tokens bind "signals", never "alsoLogged". Rising/falling needs two "points"; an ended run

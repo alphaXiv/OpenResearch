@@ -1413,34 +1413,7 @@ fn series(body: &Value, name: &str) -> Vec<(f64, f64)> {
 }
 
 fn in_setup(body: &Value) -> bool {
-    if body["stageOrder"]["count"].is_null()
-        && body["stageOrder"]["first"].is_u64()
-        && body["progress"]["done"].is_number()
-        && body["setup"].is_null()
-    {
-        return false;
-    }
-    body["view"]["headline"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .chain(
-            body["view"]["blocks"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .flat_map(|block| {
-                    block["chart"].as_array().into_iter().flatten().chain(
-                        block["series"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .filter_map(|series| series.get("y")),
-                    )
-                }),
-        )
-        .filter_map(Value::as_str)
-        .all(|name| body["series"][name].as_array().is_none_or(Vec::is_empty))
+    body["setup"].is_object()
 }
 
 /// The run's question leads; an open flag keeps its sentence's evidence in view.

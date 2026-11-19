@@ -307,6 +307,57 @@ for (let step = 1; step <= total; step++) {
   })
 })
 
+test('a named counter ends setup before the run charts anything', async ({ page, project, agent, orx }) => {
+  const run = payload(orx, `counts-${project.id}`, ['count', 'finish'], `
+console.log('::orx:: {"plan":[{"phase":"train","of":20}]}')
+console.log('::orx:: {"phase":"train"}')
+gate('count')
+console.log('::orx:: {"step":0,"t":0}')
+console.log('::orx:: {"step":2,"t":10}')
+gate('finish')
+console.log('::orx:: {"step":20,"t":100}')
+`)
+  const hold = `counts-result-${project.id}`
+  agent.script('finished with status **done**', [{ hold }, { say: 'Counting finished.' }])
+  await page.request.post(`${orx.url}/api/settings/ui-state`, { headers: { origin: orx.url }, data: { runBanner: 'line' } })
+  const banner = await launch(page, agent, project, 'Counting', run.command)
+  const { id } = (await (await page.request.get(`${orx.url}/api/chat/shown-runs`)).json())[0].run
+  try {
+    const status = banner.getByRole('button', { name: /Counting/ })
+    await expect(status).toContainText('Setup')
+    await run.open('count')
+
+    const stage = /train[⁦-⁩]* \([⁦-⁩]*2\/2[⁦-⁩]*\)/
+    const count = said('Step 2 of 20')
+    await expect(status).toContainText(stage)
+    await expect(status).toContainText(count)
+    await expect(banner).toContainText('left')
+    await status.hover()
+    const card = page.getByRole('dialog')
+    const current = card.locator('[aria-current="step"]')
+    await expect(current).toContainText('train')
+    await expect(current).toContainText(count)
+    await expect(card).toContainText(/Whole run: .*left/)
+    await page.keyboard.press('Escape')
+    await expect(card).toHaveCount(0)
+    await openRunPage(page, banner, /Counting/)
+    const latest = latestRun(page)
+    await expect(latest).toContainText(stage)
+    await expect(latest).toContainText(count)
+    await expect(latest).toContainText('left')
+
+    await run.open('finish')
+    await agent.reached(hold)
+    await expect(latest).toContainText('Done in')
+    agent.release(hold)
+  } finally {
+    const { run: current } = await (await page.request.get(`${orx.url}/api/runs/${id}`)).json()
+    if (current.status === 'running') {
+      await page.request.post(`${orx.url}/api/runs/${id}/cancel`, { headers: { origin: orx.url } })
+    }
+  }
+})
+
 test('a run with one progress bar and no declared lines shows its bar from the log', async ({ page, project, agent, orx }) => {
   // Two theme passes and the run itself outlast the default budget on a busy machine.
   test.slow()
