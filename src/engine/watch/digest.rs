@@ -99,7 +99,7 @@ Use one sentence, at most {LINE} rendered characters excluding **; shorten label
 Read the brief first. Lead with "reportOn". Use other stats for actionable trouble.
 Use "ok" for brief-defined noise, expected fast improvement or eval dips, sparse early plateaus,
 and uncertainty about a sibling's notes.
-"setup":true: before the first chart/headline point; name known stages in the summary. Default to {"status":"ok","line":null}
+When "setup" is true, name known stages in the summary. Default to {"status":"ok","line":null}
 or omission, clearing old text. Speak only for facts differing from the parent or affecting
 data, results or wait; flag threats to validity/comparison. No progress, reassurance or shared warnings.
 After setup, moving numbers use {signal} or {count:"regex"} (log matches since launch).

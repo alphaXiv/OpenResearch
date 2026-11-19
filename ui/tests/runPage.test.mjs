@@ -144,20 +144,19 @@ test("a starting run draws none of its view's blocks", async () => {
   assert.equal(container.querySelector("dl"), null);
 });
 
-test("a timed counter shows its floor during setup before the first metric", async () => {
+test("a named stage shows its count and floor before the first metric", async () => {
   const estimate = { loMs: 330_000, midMs: 630_000, hiMs: 900_000, at: now, floor: true, pending: false, pastLimitMs: null };
-  const setup = { stage: null, line: null, startsAt: null };
   const monitor = {
-    ...pipeline(), source: "detected", setup, estimate, latest: {}, headline: null,
-    phases: [{ name: "", of: 10, unit: "chunks", priorMs: null, startedAt: now - 600_000, endedAt: null }],
-    stageOrder: { index: 0, count: null, first: null },
+    ...pipeline(), source: "declared", setup: null, estimate, latest: {}, headline: null,
+    phases: [{ name: "download", of: 10, unit: "chunks", priorMs: null, startedAt: now - 600_000, endedAt: null }],
+    stageOrder: { index: 0, count: null, first: 0 },
     progress: { phase: 0, done: 9, segments: [{ weight: 1, fill: 0.9 }], whole: 0.9, lastAt: now, stallMs: 0 },
     viewFrom: { ...pipeline().viewFrom, isDefault: true },
     view: { ...pipeline().view, headline: [], blocks: [] },
   };
-  const { container } = await overview([run("r2", { monitor: summary(monitor, { setup, estimate }) })], () => monitor);
+  const { container } = await overview([run("r2", { monitor: summary(monitor, { setup: null, estimate }) })], () => monitor);
   const page = container.querySelector('[role="group"]');
-  assert.match(text(page), /9 of 10 chunks/);
+  assert.match(text(page), /download · 9 of 10 chunks/);
   assert.match(text(page), /At least 10m left/);
   assert.match(text(page), /Timed from progress in the log\. More work may follow\./);
   assert.ok(text(page).includes(m.run_page_no_signals()));

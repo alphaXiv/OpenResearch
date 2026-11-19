@@ -6,7 +6,7 @@ import { expect, send, test } from '../src/test.ts'
 const plain = (text: string) => text.replace(/[⁦-⁩]/g, '').replace(/\s+/g, ' ')
 const report = 'const say = (record) => console.log("::orx:: " + JSON.stringify(record))'
 
-test('the child view keeps training outside Setup before its first point', async ({ page, project, agent, orx }) => {
+test('a child run keeps its first counted stage when training starts charting', async ({ page, project, agent, orx }) => {
   test.slow()
   const dir = path.join(orx.root, 'stages')
   await mkdir(dir)
@@ -33,8 +33,8 @@ import { readFileSync } from 'node:fs'
 ${report}
 const gate = (name) => readFileSync(new URL(name, import.meta.url))
 say({ plan: [{ phase: 'install', of: 1 }, { phase: 'download', of: 3, unit: 'files' }, { phase: 'label', of: 5086, unit: 'clips' }, { phase: 'train', of: 272, unit: 'steps' }, { phase: 'eval', of: 2, unit: 'clips' }] })
-say({ phase: 'install', step: 1, of: 1 })
-say({ phase: 'download', step: 3, of: 3, unit: 'files' })
+say({ phase: 'install' })
+say({ phase: 'download' })
 say({ phase: 'label', step: 4351, of: 5086, unit: 'clips' })
 gate('label')
 say({ phase: 'train', step: 3, of: 272, unit: 'steps' })
@@ -80,19 +80,20 @@ say({ phase: 'eval', step: 2, of: 2, unit: 'clips', m: { wer: 0.0355 } })
     await page.mouse.move(5, 5)
     await expect(card).toBeHidden()
     await status.hover()
-    await expect(stages).toHaveCount(3)
-    await expect(stages.nth(0)).not.toContainText('train')
-    await expect(stages.nth(1)).toContainText('train')
-    await expect(stages.nth(2)).toContainText('eval')
+    await expect(stages).toHaveCount(4)
+    await expect(stages.nth(0)).toContainText('Setup')
+    await expect(stages.nth(1)).toContainText('label')
+    await expect(stages.nth(2)).toContainText('train')
+    await expect(stages.nth(3)).toContainText('eval')
     await expect(card.locator('[aria-current="step"]')).toContainText(active)
   }
   const release = (gate: string) => writeFile(path.join(dir, gate), 'go\n')
   try {
-    await check(/Setup \(1\/3\).*4,351/, 'Setup')
+    await check(/label \(2\/4\).*4,351/, 'label')
     await release('label')
-    await check(/Setup \(1\/3\).*3 of 272/, 'Setup')
+    await check(/train \(3\/4\).*3 of 272/, 'train')
     await release('train')
-    await check(/train \(2\/3\).*16 of 272/, 'train')
+    await check(/train \(3\/4\).*16 of 272/, 'train')
     await release('point')
     await expect(page.getByText('Labelled run finished.', { exact: true })).toBeVisible({ timeout: 60_000 })
   } finally {
