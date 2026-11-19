@@ -255,6 +255,38 @@ fn experiment_checkout_hint_matches_the_invoking_shell_and_stops_when_cd_fails()
 }
 
 #[test]
+fn options_for_the_other_compute_type_are_rejected() {
+    let sandbox = Sandbox::new();
+    let cases: [&[&str]; 6] = [
+        &[
+            "instance", "create", "org", "--cpu", "cpu5c", "--disk", "500",
+        ],
+        &[
+            "instance", "create", "org", "--cpu", "cpu5c", "--count", "2",
+        ],
+        &[
+            "instance",
+            "create",
+            "org",
+            "--cpu",
+            "cpu5c",
+            "--provider",
+            "runpod",
+        ],
+        &[
+            "instance", "create", "org", "--gpu", "H100_SXM", "--vcpus", "32",
+        ],
+        &["compute", "catalog", "--cpu", "--gpu", "H100"],
+        &["compute", "--cpu", "--provider", "runpod"],
+    ];
+
+    for args in cases {
+        let output = sandbox.run(args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+    }
+}
+
+#[test]
 fn standalone_settings_defaults_and_instruction_conflicts() {
     let sandbox = Sandbox::new();
     let saved = sandbox.json(&[
