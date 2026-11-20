@@ -64,15 +64,6 @@ async fn delete(creds: &crate::config::Credentials, args: InstanceDeleteArgs) ->
 
 /// `orx instance create <orgId> …` — provision a standalone GPU or CPU instance.
 async fn create(creds: &crate::config::Credentials, args: InstanceCreateArgs) -> Result<()> {
-    // Resolve the target: exactly one of --gpu or --cpu.
-    if args.gpu.is_some() && args.cpu.is_some() {
-        return Err(anyhow!("Pass exactly one of --gpu or --cpu."));
-    }
-    if args.provider.is_some() && args.gpu.is_none() {
-        return Err(anyhow!(
-            "--provider only applies with --gpu (it selects among new GPU offers)."
-        ));
-    }
     let target = if let Some(gpu) = &args.gpu {
         SandboxTarget::New {
             gpu: gpu.to_ascii_uppercase(),
