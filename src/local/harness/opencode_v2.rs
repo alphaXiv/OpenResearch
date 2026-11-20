@@ -147,6 +147,9 @@ async fn prompt_session(
 ) -> Result<TurnOutcome> {
     let mut events = subscribe(endpoint).await?;
     let before = get(endpoint, &endpoint.v2_export_path(native_id)).await?;
+    let idle_before_prompt = before
+        .pointer("/data/info/time/idle")
+        .and_then(Value::as_i64);
     let previous: HashSet<String> = messages(&before)?
         .iter()
         .filter_map(|m| m["id"].as_str().map(str::to_owned))
@@ -181,6 +184,7 @@ async fn prompt_session(
     let mut failure = None;
     let mut stopped = false;
     let mut terminal_success = false;
+    let mut idle_after_reconnect = false;
     let mut stale = false;
     while !ended {
         let event = tokio::select! {
@@ -206,6 +210,7 @@ async fn prompt_session(
             let (projection, _) = turn.reconcile(ctx).await?;
             turn.delivered |= turn.holds_prompt(&projection)?;
             ended = turn.idle().await?;
+            idle_after_reconnect = ended;
             continue;
         };
         let kind = event["type"].as_str().unwrap_or_default();
@@ -280,13 +285,23 @@ async fn prompt_session(
                 .split(|message| matches!(message["type"].as_str(), Some("user" | "idle")))
                 .next()
                 .and_then(|execution| execution.iter().rfind(|step| step["type"] == "assistant"));
-            let completed = terminal_success
-                && outcome == Some("succeeded")
+            let idle = projection
+                .pointer("/data/info/time/idle")
+                .and_then(Value::as_i64);
+            let completed = outcome == Some("succeeded")
                 && final_step.is_some_and(|step| {
+                    // The session outcome can still belong to an earlier execution.
+                    let completed_at = &step["time"]["completed"];
+                    let recovered_success = idle_after_reconnect
+                        && idle > idle_before_prompt
+                        && idle
+                            .zip(completed_at.as_i64())
+                            .is_some_and(|(idle, completed)| idle >= completed);
                     step["finish"] == "stop"
-                        && !step["time"]["completed"].is_null()
+                        && !completed_at.is_null()
                         && step["error"].is_null()
                         && step["retry"].is_null()
+                        && (terminal_success || recovered_success)
                 });
             return Ok(if completed {
                 TurnOutcome::Completed
@@ -2044,11 +2059,12 @@ mod tests {
 
         for (case, expected) in [
             ("success", Some(TurnOutcome::Completed)),
+            ("dropped-stream", Some(TurnOutcome::Completed)),
             ("interrupted", Some(TurnOutcome::Stopped)),
             ("token-limit", Some(TurnOutcome::Stopped)),
             ("refusal", Some(TurnOutcome::Stopped)),
             ("earlier-success", Some(TurnOutcome::Stopped)),
-            ("malformed-eof", Some(TurnOutcome::Stopped)),
+            ("malformed-eof", Some(TurnOutcome::Completed)),
             ("provider-error", None),
         ] {
             let mut export: Value =
@@ -2068,6 +2084,18 @@ mod tests {
                 }
                 "token-limit" => export["data"]["messages"][2]["finish"] = json!("length"),
                 "refusal" => export["data"]["messages"][2]["finish"] = json!("content-filter"),
+                "earlier-success" => {
+                    let prompt_at = export["data"]["messages"][0]["time"]["created"]
+                        .as_i64()
+                        .unwrap();
+                    let idle = prompt_at - 1;
+                    export["data"]["info"]["time"]["idle"] = json!(idle);
+                    let (_, terminal) = events.rsplit_once("data: ").unwrap();
+                    let mut terminal: Value = serde_json::from_str(terminal).unwrap();
+                    terminal["created"] = json!(idle);
+                    events = format!("data: {terminal}\n\n");
+                }
+                "dropped-stream" => events.truncate(events.rfind("data: ").unwrap()),
                 "malformed-eof" => {
                     let (before, _) = events.rsplit_once("data: ").unwrap();
                     events = format!("{before}data: {{\"type\":\n");
@@ -2093,12 +2121,7 @@ mod tests {
                             )]);
                             let replay = stream::once(async move {
                                 let id = prompt.wait_for(Option::is_some).await.unwrap();
-                                let events = if case == "earlier-success" {
-                                    events
-                                } else {
-                                    events.replace(&captured_prompt, id.as_deref().unwrap())
-                                };
-                                Ok(events)
+                                Ok(events.replace(&captured_prompt, id.as_deref().unwrap()))
                             });
                             (
                                 [("content-type", "text/event-stream")],
@@ -2118,6 +2141,7 @@ mod tests {
                             } else {
                                 export["data"]["messages"] = json!([]);
                                 export["data"]["info"]["outcome"] = Value::Null;
+                                export["data"]["info"]["time"]["idle"] = Value::Null;
                             }
                             Json(export)
                         }
