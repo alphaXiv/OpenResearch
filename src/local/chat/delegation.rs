@@ -137,11 +137,14 @@ pub fn delegate_permission(parent: &StoredChatSession, harness_id: &str) -> Resu
             ))
         };
     }
+    let bypass_unconfirmed = harness_id == "claude-code"
+        && harness::claude::full_access() == harness::claude::FullAccess::NeedsRootConsent;
     choices
         .iter()
         .filter_map(|choice| {
             PermissionMode::from_id(&choice.id)
                 .filter(|mode| *mode != PermissionMode::Plan)
+                .filter(|mode| !(bypass_unconfirmed && *mode == PermissionMode::Bypass))
                 .map(|mode| (mode_rank(mode), choice.id.clone()))
         })
         .filter(|(rank, _)| *rank <= ceiling)

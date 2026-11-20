@@ -14,26 +14,15 @@ test("an agent's orx project create proposes its name and folder", () => {
   assert.equal(projectProposal(orxArgv("orx project view p1")), null);
 });
 
-test("a chat without a project reads as No project", () => {
-  assert.equal(projectLabel({ name: "No project", scratch: true }), m.no_project());
+test("a project nobody named reads as a new project", () => {
+  assert.equal(projectLabel({ name: "No project", scratch: true, unnamed: true }), m.projects_home_new_project());
+  assert.equal(projectLabel({ name: "Tokenizer probes", scratch: true, unnamed: false }), "Tokenizer probes");
   assert.equal(projectLabel({ name: "Sweep", scratch: false }), "Sweep");
 });
 
-test("chats without a project share one sidebar group", () => {
-  const newest = { id: "a", scratch: true };
-  const older = { id: "b", scratch: true };
-  const other = { id: "c" };
-  const rows = [
-    { kind: "project", project: other, collapsed: false, busy: false },
-    { kind: "chat", project: other, session: { id: "one" } },
-    { kind: "chat", project: other, session: { id: "two" } },
-    { kind: "project", project: newest, collapsed: false, busy: false },
-    { kind: "chat", project: newest, session: { id: "three" } },
-    { kind: "chat", project: older, session: { id: "selected" } },
-  ];
-  // Selecting a chat from another scratch project still keeps the shared heading above it.
-  const fitted = fitSidebarRows(rows, 140, "selected");
-  assert.deepEqual(fitted.slice(-2), [rows[3], rows[5]]);
+test("a selected chat of an unnamed project stays in view without a project row", () => {
+  const rows = ["one", "two", "selected"].map((id) => ({ kind: "chat", project: { id: `p-${id}`, unnamed: true }, session: { id } }));
+  assert.deepEqual(fitSidebarRows(rows, 68, "selected"), [rows[0], rows[2]]);
 });
 
 test("creating the proposed project moves the chat into it", async () => {

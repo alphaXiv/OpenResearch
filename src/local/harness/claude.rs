@@ -1722,6 +1722,7 @@ impl Harness for ClaudeCode {
                 // bridge request is denied into the dying child, harmlessly.
                 ("plan", true) => {
                     let (text, mode) = synthesize_resume("plan", answer);
+                    check_full_access(mode)?;
                     Ok(ResumeAction::SendMessage {
                         text,
                         mode,
@@ -1758,6 +1759,16 @@ impl Harness for ClaudeCode {
             return Ok(ResumeAction::Nothing);
         }
         let (text, mode) = synthesize_resume(&prompt.kind, answer);
+        let session_mode = || -> Result<Option<PermissionMode>> {
+            let session = crate::store::Store::open()?.get_chat_session(&ctx.session_id)?;
+            Ok(session
+                .and_then(|session| session.permission_mode)
+                .and_then(|id| PermissionMode::from_id(&id)))
+        };
+        check_full_access(match mode {
+            Some(mode) => Some(mode),
+            None => session_mode()?,
+        })?;
         // Reject an empty resume (e.g. a question answered with no selection and
         // no note) so `respond` leaves the card actionable.
         if text.trim().is_empty() {
@@ -1921,6 +1932,64 @@ pub(crate) fn claude_permission_mode(mode: Option<PermissionMode>) -> &'static s
         PermissionMode::Auto => "auto",
         PermissionMode::Bypass => "bypassPermissions",
     }
+}
+
+/// Whether Claude may run with full access on this machine. Claude Code refuses
+/// its skip-permissions flags as root unless `IS_SANDBOX=1` declares the machine
+/// disposable, so as root that needs the user's confirmation first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FullAccess {
+    Allowed,
+    NeedsRootConsent,
+    RootConsented,
+}
+
+pub(crate) fn full_access() -> FullAccess {
+    if !runs_as_root() {
+        FullAccess::Allowed
+    } else if crate::telemetry::claude_root_full_access() {
+        FullAccess::RootConsented
+    } else {
+        FullAccess::NeedsRootConsent
+    }
+}
+
+/// Bypass permissions was asked for as root before the user confirmed it.
+#[derive(Debug)]
+pub(crate) struct RootBypassUnconfirmed;
+
+impl std::fmt::Display for RootBypassUnconfirmed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "Bypass permissions needs your confirmation on this machine because OpenResearch \
+             runs as root. Choose Bypass permissions in the permissions menu to confirm, or pick \
+             another mode.",
+        )
+    }
+}
+
+impl std::error::Error for RootBypassUnconfirmed {}
+
+/// Refuses `mode` when it is bypass and Claude may not bypass permissions here yet.
+pub(crate) fn check_full_access(mode: Option<PermissionMode>) -> Result<()> {
+    if mode == Some(PermissionMode::Bypass) && full_access() == FullAccess::NeedsRootConsent {
+        return Err(RootBypassUnconfirmed.into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) static TEST_RUNS_AS_ROOT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn runs_as_root() -> bool {
+    #[cfg(test)]
+    return TEST_RUNS_AS_ROOT.load(std::sync::atomic::Ordering::Relaxed);
+    // SAFETY: getuid has no failure mode. Claude checks the real uid too.
+    #[cfg(all(unix, not(test)))]
+    return unsafe { libc::getuid() } == 0;
+    #[cfg(all(not(unix), not(test)))]
+    false
 }
 
 pub(crate) fn uses_permission_bridge(mode: Option<PermissionMode>) -> bool {
@@ -3148,7 +3217,8 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
             Err(error) => {
                 ctx.host.claude.kill_session(&ctx.session_id).await;
                 let signed_out = error.downcast_ref::<super::SignedOut>().is_some();
-                let retry = (!signed_out)
+                let refused = error.downcast_ref::<RootBypassUnconfirmed>().is_some();
+                let retry = (!signed_out && !refused)
                     .then(|| ctx.schedule_orx_retry(None))
                     .flatten();
                 let Some((retry_number, delay)) = retry else {
@@ -4262,6 +4332,59 @@ mod tests {
         assert!(uses_permission_bridge(Some(PermissionMode::Auto)));
         assert!(uses_permission_bridge(None));
         assert!(uses_permission_bridge(Some(PermissionMode::Bypass)));
+    }
+
+    #[tokio::test]
+    async fn as_root_an_answer_resuming_in_bypass_is_refused_until_confirmed() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        TEST_RUNS_AS_ROOT.store(true, std::sync::atomic::Ordering::Relaxed);
+        let ctx = ResumeCtx {
+            host: TurnCtx::test_stub().host.clone(),
+            session_id: "s".into(),
+            native_session_id: None,
+        };
+        let permission = WirePrompt {
+            kind: "permission".into(),
+            ..Default::default()
+        };
+        let plan = WirePrompt {
+            kind: "plan".into(),
+            ..Default::default()
+        };
+        let resume = |prompt, mode| {
+            let answer = answer(true, mode, &[], None);
+            let ctx = &ctx;
+            async move { ClaudeCode.resume_from_prompt(ctx, prompt, &answer).await }
+        };
+
+        for (prompt, mode) in [(&permission, None), (&plan, Some("bypassPermissions"))] {
+            let refused = resume(prompt, mode).await.err().unwrap();
+            assert!(refused.downcast_ref::<RootBypassUnconfirmed>().is_some());
+        }
+        assert!(resume(&plan, None).await.is_ok());
+
+        let mut session = crate::store::tests::chat_session_fixture("s");
+        session.permission_mode = Some("bypassPermissions".into());
+        crate::store::Store::open()
+            .unwrap()
+            .create_chat_session(&session)
+            .unwrap();
+        let question = WirePrompt {
+            kind: "question".into(),
+            ..Default::default()
+        };
+        let answered = answer(true, None, &["Yes"], None);
+        let refused = ClaudeCode
+            .resume_from_prompt(&ctx, &question, &answered)
+            .await
+            .err()
+            .unwrap();
+        assert!(refused.downcast_ref::<RootBypassUnconfirmed>().is_some());
+
+        crate::telemetry::set_claude_root_full_access(true).unwrap();
+        assert!(resume(&permission, None).await.is_ok());
     }
 
     #[test]
