@@ -2332,6 +2332,7 @@
   "run_block_this": "khối này",
   "run_page_no_signals": "Chưa tìm thấy số liệu nào trong nhật ký. Số liệu sẽ hiện ở đây khi lượt chạy in ra.",
   "run_page_no_signals_ended": "Không tìm thấy số liệu nào trong nhật ký của lượt chạy này.",
+  "run_page_collection_incomplete": "OpenResearch không thể đọc hết số liệu của lượt chạy này. Các số liệu đã đọc vẫn được giữ lại.",
   "run_page_view_empty": "Chế độ xem được đặt cho thí nghiệm này không hiển thị gì",
   "run_view_how": "Cách dựng chế độ xem này",
   "run_view_default": "Dựng từ tín hiệu đầu tiên mà lượt chạy báo cáo. Agent chưa đặt chế độ xem.",

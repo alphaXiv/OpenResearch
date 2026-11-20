@@ -2332,6 +2332,7 @@
   "run_block_this": "bu blok",
   "run_page_no_signals": "Günlükte henüz metrik bulunamadı. Çalıştırma bir metrik yazdırdığında burada görünür.",
   "run_page_no_signals_ended": "Bu çalıştırmanın günlüğünde metrik bulunamadı.",
+  "run_page_collection_incomplete": "OpenResearch bu çalıştırmanın metriklerini okumayı tamamlayamadı. Daha önce okunan metrikler saklandı.",
   "run_page_view_empty": "Bu deney için ayarlanan görünüm hiçbir şey göstermiyor",
   "run_view_how": "Bu görünüm nasıl oluşturuldu",
   "run_view_default": "Çalıştırmanın bildirdiği ilk sinyalden oluşturuldu. Ajan bir görünüm ayarlamadı.",
