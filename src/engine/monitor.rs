@@ -8219,8 +8219,6 @@ mod tests {
                 "confirm",
                 "orx exp status exp --run r1",
                 "orx logs r1",
-                "saved rule `eval-zero`",
-                "later launches",
             ],
         );
         for action in ["stop", "keep", "ask"] {

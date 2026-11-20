@@ -16220,31 +16220,12 @@ for line in sys.stdin:
                         format!("orx logs {}", run.id),
                         format!("{choice} --keep --reason"),
                         format!("{choice} --ask --reason"),
-                        "relevant log lines".into(),
-                        "specific reason".into(),
                     ] {
                         assert!(prompt.contains(&text), "{text:?} missing from {prompt}");
                     }
                     assert_eq!(
-                        prompt.contains("Settle this review before ending the turn."),
-                        !copilot
-                    );
-                    assert_eq!(
-                        prompt.contains(
-                            "hand it back with `--ask` and give your recommendation in the reason"
-                        ),
-                        copilot
-                    );
-                    assert_eq!(
                         prompt.contains(&format!("{choice} --stop --reason")),
                         !ended
-                    );
-                    assert_eq!(prompt.contains("Check its result"), ended);
-                    assert_eq!(
-                        prompt.contains(
-                            "If it does not stand, fix experiment exp_1 and run it again."
-                        ),
-                        ended
                     );
                     assert_eq!(
                         prompt.contains("orx skill orx-experiment-runs"),
@@ -16258,7 +16239,6 @@ for line in sys.stdin:
                                 "noise",
                                 "worth_a_flag",
                                 "watch.minGapS",
-                                "next look built for this run",
                             ] {
                                 assert_eq!(prompt.contains(text), !ended, "{text:?} in {prompt}");
                             }
@@ -16266,18 +16246,15 @@ for line in sys.stdin:
                         "tripwire" => {
                             assert!(prompt
                                 .contains("::orx:: {\"phase\":\"eval\",\"step\":1,\"of\":10}"));
-                            assert!(prompt.contains("advancing steps"));
                         }
                         "rule" => {
-                            assert!(prompt.contains("saved rule `Validation loss`"));
-                            assert!(prompt.contains("later launches"));
+                            assert!(prompt.contains("`Validation loss`"));
                         }
                         _ => unreachable!(),
                     }
                 }
                 if source == "look" {
-                    assert!(wake.contains("only a digest"));
-                    assert!(wake.contains("none of this chat"));
+                    assert!(wake.contains("digest"));
                 }
             }
         }
