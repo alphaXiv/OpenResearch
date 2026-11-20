@@ -102,13 +102,9 @@ body {
   color: var(--color-ink-subtext);
 }
 
-.gallery-finding, .gallery-action {
+.gallery-action {
   margin-block: 0 8px;
   font-size: .8125rem;
-}
-
-.gallery-finding {
-  color: var(--color-ink-orange);
 }
 
 .gallery-specimen-heading button[aria-pressed="true"] {

@@ -61,6 +61,7 @@ export function RunStatus({ model, label, descriptionId, onOpenRunPage, expanded
   const footerNames = untimed.length ? new RegExp(`(${untimed.map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`, "g") : null;
   const stage = model.sentence.stage;
   const wrapWarning = expanded && model.tone === "flag";
+  const wrapSentence = wrapWarning || model.notice !== null;
   const sentence = wrapWarning && !stage && model.sentence.watcher
     ? model.flagDetail ?? model.sentence.text
     : model.sentence.text;
@@ -96,7 +97,7 @@ export function RunStatus({ model, label, descriptionId, onOpenRunPage, expanded
             {stage.name && <span className="min-w-0 shrink truncate"><Sentence text={stage.name} tone={model.tone} /></span>}
             {stage.count && <span className={cn("shrink-0", stage.name && "ms-1")}><Sentence text={stage.count} tone={model.tone} /></span>}
             {model.sentence.watcher && <span className="min-w-0 flex-1 basis-0 truncate"><Sentence text={m.run_stage_with_look({ stage: "", sentence: autoDir(model.sentence.watcher) })} tone={model.tone} /></span>}
-          </> : <span className={cn("min-w-0", wrapWarning ? "wrap-anywhere whitespace-normal" : "truncate")}><Sentence text={sentence} tone={model.tone} /></span>}
+          </> : <span className={cn("min-w-0", wrapSentence ? "wrap-anywhere whitespace-normal" : "truncate")}><Sentence text={sentence} tone={model.tone} /></span>}
         </Popover.Trigger>
         <Popover.Portal container={portalContainer}>
           <Popover.Positioner side="top" align="start" anchor={() => trigger.current?.closest<HTMLElement>("[data-run-frame]") ?? trigger.current} sideOffset={6} collisionPadding={12} className="z-50">

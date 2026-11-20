@@ -157,7 +157,7 @@ export function summarize(models: RunModel[], { labels, groups }: { labels: stri
   const countedSetup = models.find((model) => model.settingUp && model.sentence.stage?.count);
   const watched = urgent || countedSetup ? null : watcherSummary(models, labels, watch, now);
   const attention = !urgent ? null
-    : rowsOpen && urgent.tone === "flag" && urgent.sentence.watcher
+    : rowsOpen && (urgent.notice || urgent.tone === "flag" && urgent.sentence.watcher)
       ? { tone: urgent.tone, who: m.run_status_for({ status: autoDir(urgent.status), name: name(urgent) }), text: "" }
     : why ? { tone: urgent.tone, who: m.run_summary_attention({ name: name(urgent), state: urgent.status }), text: why }
     : { tone: urgent.tone, who: m.run_summary_attention_ended({ name: name(urgent), ended: urgent.eta }), text: "" };

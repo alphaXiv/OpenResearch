@@ -188,6 +188,7 @@ export function statedFlag(run: Run, fetched: RunMonitor | null): RunMonitorSumm
 export function runTone(run: Run, monitor: RunMonitor | null = null): Tone {
   const live = runActive(run.status);
   if (run.status === "lost" || (live && run.contact !== null && run.contact.type !== "stopping")) return "lost";
+  if (runNotice(run)?.kind === "monitoring") return "lost";
   if (monitor) {
     if (!live && monitor.revising && run.status === "cancelled") return "revising";
     // A flag no one settled outlasts the run, and colours one that finished.
@@ -307,9 +308,9 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
   let speaking: string | null = null;
   let sentence: RunModel["sentence"];
   if (notice) {
-    const { lead } = runNoticeCopy(notice, null, runApiProvider(run), bold);
+    const { lead } = runNoticeCopy(notice, nextRetryMs, runApiProvider(run), bold);
     const seen = progressText && live ? ` ${m.run_progress_last_seen({ progress: autoDir(progressText) })}.` : "";
-    sentence = { text: lead + seen, key: `notice:${notice.kind}`, at: null };
+    sentence = { text: lead + seen, key: `notice:${notice.kind}:${lead}`, at: null };
   } else if (display.waiting) {
     const text = `${statusLabel(display.status)} · ${autoDir(display.waiting)}`;
     sentence = { text, key: `pre:waiting:${display.waiting}`, at: null };
@@ -362,7 +363,6 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     : "";
   if (neverStarted) eta = m.run_not_started();
   else if (!live) eta = ended;
-  else if (notice?.kind === "unreachable") eta = nextRetryMs === null ? "" : m.run_notice_retry_at({ time: clockText(nextRetryMs) });
   else if (notice || degraded) eta = "";
   else if (pre) {
     etaElapsed = !monitor;

@@ -62,7 +62,7 @@ export function RunStrip({ model, monitor, agent, label, open, onToggle, onOpenR
   const data = monitor && monitor.status !== "loading" ? monitor.data : null;
   const chart = useMemo(() => liveChart(model, data), [data, model.live]);
   const flag = model.flag?.record;
-  const notice = model.notice && model.notice.kind !== "cancelling";
+  const notice = model.notice && model.notice.kind !== "cancelling" && model.notice.kind !== "monitoring";
   const hero = !flag && (chart || model.headline?.known);
   const content = Boolean(hero || flag || model.note || notice || model.stale && !model.live || monitor?.status === "error");
   const mayHaveContent = monitor?.status === "loading"
@@ -73,7 +73,7 @@ export function RunStrip({ model, monitor, agent, label, open, onToggle, onOpenR
   return (
     <RunLine model={model} agent={agent} label={label} onToggle={onToggle} onOpenRunPage={onOpenRunPage} expanded={expanded} expandable={content || mayHaveContent}>
       {expanded && content && <div className="px-3 pb-3">
-        {notice && <RunContactNotice run={model.run} className="mt-1.5" />}
+        {notice && <RunContactNotice run={model.run} inStrip className="mt-1.5" />}
         {stale && monitor?.status !== "error" && <p className="m-0 mt-1.5 text-xs text-ink-subtext">{stale}</p>}
         {model.note && <p className={cn("m-0 text-xs text-ink-subtext", !notice && !model.stale ? "-mt-0.5" : "mt-1.5")}>{model.note}</p>}
         {flag && !model.sentence.watcher && model.flagDetail && <p className="m-0 mt-1.5 text-sm"><Sentence text={model.flagDetail} tone={model.tone} /></p>}
