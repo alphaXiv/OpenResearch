@@ -43,7 +43,11 @@ pub async fn run(args: crate::DiscoverArgs) -> Result<()> {
         }
         crate::DiscoverCommand::Pubmed(args) => {
             ensure_source_enabled(LitSource::Pubmed, &disabled)?;
-            discover_pubmed(&args.query, pubmed_options(&args)).await?
+            let (hits, feedback) = discover_pubmed(&args.query, pubmed_options(&args)).await?;
+            for line in feedback {
+                eprintln!("{line}");
+            }
+            hits
         }
     };
 
