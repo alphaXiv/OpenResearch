@@ -3681,6 +3681,10 @@ async fn ensure_codex_pre_accept(
                     ctx.mark_setup_failure("codex_setup", &error);
                     return Err(error);
                 };
+                eprintln!(
+                    "orx up: Codex setup for turn {} failed, retrying: {error:#}",
+                    ctx.turn_id
+                );
                 ctx.show_retry_status(
                     "orx",
                     "Restarting Codex app-server",
@@ -4751,6 +4755,10 @@ async fn codex_resume_thread(
                     ctx.mark_terminal_failure("codex_resume", error.to_string());
                     return Err(error);
                 };
+                eprintln!(
+                    "orx up: resuming the Codex thread for turn {} failed, retrying: {error:#}",
+                    ctx.turn_id
+                );
                 ctx.show_retry_status(
                     "orx",
                     "Reconnecting to Codex",

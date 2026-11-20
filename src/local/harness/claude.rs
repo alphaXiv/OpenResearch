@@ -3207,6 +3207,8 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
             (route, rx, None)
         }
         None => loop {
+            // Outside the retry budget: the check's own timeout bounds it.
+            ctx.host.claude.settle_auth(&spec).await;
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
             let acquire = ctx.host.claude.acquire_turn(spec.clone(), tx);
             let result = match ctx.orx_retry_remaining() {
@@ -3235,6 +3237,10 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
                         ctx.mark_setup_failure(kind, &error);
                         return Err(error);
                     };
+                    eprintln!(
+                        "orx up: Claude Code setup for turn {} failed, retrying: {error:#}",
+                        ctx.turn_id
+                    );
                     ctx.show_retry_status(
                         "orx",
                         "Restarting Claude Code",

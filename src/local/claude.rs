@@ -1594,15 +1594,25 @@ impl ClaudeHost {
         auth.state
     }
 
-    async fn resolve_unknown(&self) -> AuthSnapshot {
-        let _recovering = self.auth_recovery_lock.lock().await;
-        let current = self.auth_snapshot();
-        if current.state != HarnessAuthState::Unknown || current.runtime_rejected {
-            return current;
+    /// Waits for a verdict on the shared sign-in when none is known yet, which a turn needs
+    /// before [`Self::acquire_turn`] can start a child; a profile has its own sign-in.
+    pub async fn settle_auth(&self, spec: &SpawnSpec) {
+        if spec.config.profile.is_some() {
+            return;
         }
-        let probe = crate::local::harness::claude::current_auth_state().await;
-        self.observe_auth_probe(&probe);
-        self.auth_snapshot()
+        let _recovering = self.auth_recovery_lock.lock().await;
+        for _ in 0..3 {
+            let current = self.auth_snapshot();
+            if current.state != HarnessAuthState::Unknown || current.runtime_rejected {
+                return;
+            }
+            let probe = crate::local::harness::claude::current_auth_state().await;
+            self.observe_auth_probe(&probe);
+            // A check reserved while this one ran discards its answer: still pending, not failed.
+            if self.auth_snapshot().sequence == probe.sequence {
+                return;
+            }
+        }
     }
 
     /// Acquire this session's resident child for one turn, reconciled to
@@ -1614,6 +1624,8 @@ impl ClaudeHost {
     /// the reader task keeps the child alive — an unregistered client would be
     /// unreachable by every kill path and leak the process for the rest of `orx
     /// up`'s life. Detached, the bring-up always runs to completion.
+    ///
+    /// A sign-in [`Self::settle_auth`] has not settled starts no child.
     pub async fn acquire_turn(
         self: &Arc<Self>,
         spec: SpawnSpec,
@@ -1669,9 +1681,6 @@ impl ClaudeHost {
                 .map_err(|e| SetupFailure::tag("claude_setup_profile", e))?;
         }
         let mut auth = self.auth_snapshot();
-        if !profile && auth.state == HarnessAuthState::Unknown && !auth.runtime_rejected {
-            auth = self.resolve_unknown().await;
-        }
         // A sign-in the check could not read is no sign-out: a running child keeps serving, and
         // reports a rejected credential itself. Only starting one needs a verified sign-in.
         let unverified = !profile && auth.state == HarnessAuthState::Unknown;
@@ -1997,6 +2006,7 @@ impl ClaudeHost {
         let session_id = spec.session_id.clone();
         let (tx, rx) = mpsc::unbounded_channel();
         let result = tokio::time::timeout(timeout, async {
+            self.settle_auth(&spec).await;
             let route = self.acquire_turn(spec, tx).await?;
             route.client().compact(rx, timeout).await
         })
@@ -3396,6 +3406,7 @@ done
             let host = Arc::new(ClaudeHost::new());
             let chat = chat_with(&host);
             let adopted = adopt_in(&chat, &previous, None).await.unwrap();
+            host.settle_auth(&spec).await;
             let (tx, mut rx) = mpsc::unbounded_channel();
             let route = host
                 .acquire_turn(
@@ -3424,6 +3435,77 @@ done
                 "{refused:#}"
             );
             assert!(adopted.keeper.try_wait().is_none());
+            host.shutdown().await;
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_check_reserved_while_a_turn_waits_on_sign_in_is_no_failure() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let dir = crate::config::test_root().join(format!("claude-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let gate = dir.join("gate");
+        assert!(crate::process::command("mkfifo")
+            .arg(&gate)
+            .status()
+            .unwrap()
+            .success());
+        // The first `auth status` answers only once the test has reserved a newer check.
+        let bin = dir.join("claude");
+        orx_test_support::write_executable(
+            &bin,
+            format!(
+                r#"#!/bin/sh
+case "$1" in
+--version) echo '2.1.300 (Claude Code)' ;;
+auth)
+    if [ ! -e '{gated}' ]; then : > '{gated}'; cat '{gate}' > /dev/null; fi
+    echo '{{"loggedIn":true,"authMethod":"api_key"}}' ;;
+*) while IFS= read -r line; do printf '%s\n' "$line"; done ;;
+esac
+"#,
+                gated = dir.join("gated").display(),
+                gate = gate.display(),
+            ),
+            0o755,
+        )
+        .unwrap();
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let path = std::iter::once(dir.clone()).chain(std::env::split_paths(&path));
+        std::env::set_var("PATH", std::env::join_paths(path).unwrap());
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let host = Arc::new(ClaudeHost::new());
+            let mut config = cfg(None, None, None, false);
+            config.bin = Some(bin);
+            let spec = SpawnSpec {
+                chat: chat_with(&host),
+                session_id: format!("settle-{}", uuid::Uuid::new_v4()),
+                repo: dir.clone(),
+                playbook: dir.join("playbook.md"),
+                resume: None,
+                fork_at: None,
+                config,
+            };
+            // As the dashboard's first catalog fill does at startup.
+            let reserving = tokio::task::spawn_blocking({
+                let host = host.clone();
+                move || {
+                    let held = std::fs::OpenOptions::new().write(true).open(gate).unwrap();
+                    host.reserve_auth_check();
+                    drop(held);
+                }
+            });
+
+            host.settle_auth(&spec).await;
+            reserving.await.unwrap();
+
+            assert_eq!(host.auth_snapshot().state, HarnessAuthState::Ready);
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let route = host.acquire_turn(spec, tx).await.unwrap();
+            drop(route);
             host.shutdown().await;
         });
     }
