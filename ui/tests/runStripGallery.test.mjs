@@ -5,6 +5,11 @@ import { galleryFetch, groups } from "../gallery/backend.ts";
 import { Gallery } from "../gallery/Gallery.tsx";
 import { render, settle } from "./render.mjs";
 
+// A chart sizes itself to its box, which happy-dom never lays out.
+for (const size of ["clientHeight", "clientWidth", "offsetHeight", "offsetWidth"]) {
+  Object.defineProperty(HTMLElement.prototype, size, { configurable: true, get: () => 800 });
+}
+
 test("every run gallery specimen renders the composer output", async (t) => {
   const errors = t.mock.method(console, "error");
   globalThis.fetch = galleryFetch;
@@ -20,6 +25,9 @@ test("every run gallery specimen renders the composer output", async (t) => {
     const sentence = banner.querySelector('[data-part="sentence"], button[aria-haspopup="dialog"][aria-expanded]')
       ?? [...banner.querySelectorAll('[role="status"]')].find((status) => status.textContent.trim());
     assert.ok(sentence?.textContent.trim(), entry.label);
+    for (const chart of banner.querySelectorAll('svg[role="img"]')) {
+      assert.ok(chart.querySelector("path, circle, rect"), `${entry.label}: chart draws no marks`);
+    }
     if (entry.pin === "stage") {
       const card = specimen.querySelector('[role="dialog"]');
       assert.ok(card?.textContent.trim(), entry.label);
