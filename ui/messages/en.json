@@ -2332,6 +2332,7 @@
   "run_block_this": "this block",
   "run_page_no_signals": "No metrics found in the log yet. They show here once the run prints one.",
   "run_page_no_signals_ended": "No metrics were found in this run's log.",
+  "run_page_collection_incomplete": "OpenResearch couldn't finish reading this run's metrics. Any metrics already read are kept.",
   "run_page_view_empty": "The view set for this experiment shows nothing",
   "run_view_how": "How this view is built",
   "run_view_default": "Drawn from the first signal the run reported. The agent hasn't set a view.",

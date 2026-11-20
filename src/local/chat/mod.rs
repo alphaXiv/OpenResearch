@@ -10323,7 +10323,12 @@ fn run_notice_request(
         .iter()
         .map(|notice| {
             let mut body = std::borrow::Cow::Borrowed(notice.body.as_str());
-            if notice.kind == crate::store::TERMINAL {
+            if notice.kind == crate::store::TERMINAL
+                && !notices.iter().any(|other| {
+                    other.run_id == notice.run_id
+                        && other.dedupe == crate::store::INCOMPLETE_SIGNAL_NOTICE
+                })
+            {
                 let availability =
                     crate::engine::monitor::terminal_signal_note(store, &notice.run_id)
                         .unwrap_or_else(|error| {
@@ -10332,8 +10337,9 @@ fn run_notice_request(
                             ))
                         });
                 if let Some(reason) = availability {
-                    body.to_mut()
-                        .push_str(&format!("\n\nSignal availability: {reason}"));
+                    let body = body.to_mut();
+                    body.push_str(crate::store::SIGNAL_AVAILABILITY_PREFIX);
+                    body.push_str(&reason);
                 }
             }
             body
@@ -10392,6 +10398,8 @@ async fn process_run_notices(
         }
         let notices = store.run_notice_batch(&session_id)?;
         if notices.is_empty() {
+            // A covered result can empty the first batch while a later batch still waits.
+            held.push(session_id);
             guard.release().await;
             continue;
         }
@@ -13881,6 +13889,46 @@ mod run_wakeup_tests {
         assert!(text()
             .await
             .contains("Signal availability: The host no longer has this log"));
+        assert!(text().await.contains("orx logs run_x"));
+
+        session(&store, "subscriber");
+        store
+            .insert_run_notice(
+                "run_x",
+                "subscriber",
+                crate::store::TERMINAL,
+                "terminal",
+                &body,
+                1,
+            )
+            .unwrap();
+        let incomplete = crate::store::RunNotice::signal_collection_failed(
+            "run_x",
+            "The host no longer has this log",
+            true,
+        );
+        store
+            .insert_run_notice(
+                "run_x",
+                "subscriber",
+                crate::store::ATTENTION,
+                crate::store::INCOMPLETE_SIGNAL_NOTICE,
+                &incomplete,
+                2,
+            )
+            .unwrap();
+        let batch = store.run_notice_batch("subscriber").unwrap();
+        let host = notice_host();
+        let guard =
+            TurnGuard::claim_idle(&host, "subscriber", TurnState::Reserved { turn_id: None })
+                .await
+                .unwrap();
+        let request = run_notice_request(&store, &batch, guard).unwrap();
+        let prompt = &request.messages[0].text;
+        assert!(prompt.contains("finished with status **done**"));
+        assert_eq!(prompt.matches("The host no longer has this log").count(), 1);
+        assert!(prompt.contains("orx logs run_x"));
+        drop(request);
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }

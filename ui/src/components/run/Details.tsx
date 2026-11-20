@@ -47,7 +47,7 @@ export function RunDetails({ run, className }: { run: Run; className?: string })
             </dl>
           </div>
         )}
-        <ViewSource monitor={monitor} projectId={run.projectId} live={runActive(run.status)} canSayEmpty={!isError && monitor.availability.state === "live"} heading={HEADING} />
+        <ViewSource monitor={monitor} projectId={run.projectId} live={runActive(run.status)} canSayEmpty={!isError && monitor.availability.state === "live" && !monitor.availability.collectionIncomplete} heading={HEADING} />
       </div>
     </details>
   );

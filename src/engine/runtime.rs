@@ -27,7 +27,9 @@ use super::{
 use crate::commands::up::api_v2::{Commands, KeptRange};
 use crate::error::{anyhow, bail, Result};
 use crate::jobs::ssh::SshTarget;
-use crate::store::{LaunchSpec, Store, StoredRun, SubmittingRun};
+use crate::store::{
+    LaunchSpec, RunNotice, Store, StoredRun, SubmittingRun, INCOMPLETE_SIGNAL_NOTICE,
+};
 use orx_host_proto::LogInfo;
 
 const DEFAULT_ROOT: &str = "~/.orx/engine";
@@ -1191,18 +1193,17 @@ impl Runtime {
         if let Some(cause) = cause {
             let cause = cause.trim_end_matches(['.', ' ']);
             super::adapters::signals::settle_incomplete(&self.data_dir, &run.id, cause)?;
-            let kept = if self.held_signals(&run.id).is_ok_and(|s| s.is_some()) {
-                "The signals read before then are kept."
-            } else {
-                "No signals were kept."
-            };
+            let status = super::adapters::signals::read_availability(&self.data_dir, &run.id)?;
+            let cause = status
+                .as_ref()
+                .filter(|value| value["state"] == "incomplete")
+                .and_then(|value| value["reason"].as_str())
+                .unwrap_or(cause);
+            let kept = self.held_signals(&run.id).is_ok_and(|s| s.is_some());
             self.engine.attention(
                 &run.id,
-                "signal-collection-incomplete",
-                &format!(
-                    "[orx] Run `{}`'s signal collection could not finish: {cause}. {kept} Read any saved output with `orx logs {}`.",
-                    run.id, run.id
-                ),
+                INCOMPLETE_SIGNAL_NOTICE,
+                &RunNotice::signal_collection_failed(&run.id, cause, kept),
             )?;
         } else {
             super::adapters::signals::availability(&self.data_dir, &run.id, "cached", None)?;
@@ -4786,6 +4787,104 @@ mod tests {
                 1
             );
         }
+    }
+
+    #[tokio::test]
+    async fn collection_failure_wakes_each_chat_only_if_its_result_did_not_include_it() {
+        use super::super::{adapters::signals, monitor};
+
+        let dir = crate::local::git::TemporaryDirectory::new("orx-rental-notices").unwrap();
+        let handle = Handle::OpenResearch {
+            descriptor: Box::new(
+                crate::jobs::BackendDescriptor::parse(
+                    r#"{"kind":"openresearch_job","namespace":"org","jobId":"deleted"}"#,
+                )
+                .unwrap(),
+            ),
+        };
+        let watched = WatchedRun {
+            id: "run".into(),
+            handle: handle.clone(),
+        };
+        let runtime = remote_runs(dir.path(), &handle);
+        let backend = Arc::new(Host::default());
+        backend.gone.store(true, Ordering::SeqCst);
+        let cause = "The rental was deleted before final signal collection finished";
+        {
+            let store = runtime.store().unwrap();
+            store.subscribe_run("run", "early", 1).unwrap();
+            let mut snapshot = orx_signals::Snapshot::new("run", "1-1", "g1");
+            snapshot
+                .feed(b"::orx:: {\"step\":20,\"of\":21}\n", false, 5000, true)
+                .unwrap();
+            let path = runtime.signals_path("run");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            super::super::adapters::local::signals::publish(&path, &snapshot).unwrap();
+        }
+        runtime
+            .engine
+            .observe(
+                "run",
+                Observation::Gone {
+                    reason: "The rental was released before its final outcome was collected."
+                        .into(),
+                },
+            )
+            .unwrap();
+        {
+            let store = runtime.store().unwrap();
+            store.checkpoint_log_collection("run").unwrap();
+            store.finish_log_collection("run").unwrap();
+            for chat in ["early", "chat"] {
+                if chat == "chat" {
+                    signals::host_gone(dir.path(), "run", cause).unwrap();
+                }
+                let batch = store.run_notice_batch(chat).unwrap();
+                assert_eq!(batch.len(), 1);
+                let terminal = &batch[0];
+                let note = monitor::terminal_signal_note(&store, "run")
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(note.contains(cause), chat == "chat");
+                let prefix = crate::store::SIGNAL_AVAILABILITY_PREFIX;
+                let prompt = format!(
+                    "{}\nA chat reference expanded from the log.{prefix}{note}",
+                    terminal.body
+                );
+                assert_eq!(prompt.matches(cause).count(), usize::from(chat == "chat"));
+                let tx = store.begin().unwrap();
+                tx.execute(
+                    "INSERT INTO chat_turns (id, session_id, assistant_message_id, client_turn_id,
+                     request_hash, prepared_input, settings_json, state, delivery_state, created_at, updated_at)
+                     VALUES (?1, ?1, ?2, ?3, 'hash', ?4, '{}', 'completed', 'accepted', 1, 1)",
+                    rusqlite::params![chat, format!("{chat}-assistant"), terminal.client_turn_id, prompt],
+                )
+                .unwrap();
+                tx.commit().unwrap();
+                store
+                    .mark_run_notice_batch_delivered(chat, &terminal.client_turn_id, 1)
+                    .unwrap();
+            }
+        }
+
+        drop(runtime);
+        let runtime = collector(dir.path());
+        runtime
+            .settle_signals(backend.as_ref(), &watched, 1)
+            .await
+            .unwrap();
+        let store = runtime.store().unwrap();
+        let run = store.get_run("run").unwrap().unwrap();
+        let (_, page) = monitor::monitor(&store, &run).unwrap();
+        assert_eq!(page["availability"]["collectionIncomplete"], true);
+        assert_eq!(page["progress"]["done"], 20.0);
+        assert!(store.run_notice_batch("chat").unwrap().is_empty());
+        let late = store.run_notice_batch("early").unwrap();
+        assert_eq!(late.len(), 1);
+        assert_eq!(late[0].dedupe, INCOMPLETE_SIGNAL_NOTICE);
+        assert!(late[0].body.contains(cause));
+        assert!(late[0].body.contains("signals read before then are kept"));
+        assert!(late[0].body.contains("orx logs run"));
     }
 
     /// The host's checkpoint, with the arrival times it observed, outlives a whole kept log.
