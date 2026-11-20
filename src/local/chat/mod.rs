@@ -33,8 +33,8 @@ use crate::local::harness::{ResumeAction, TurnOutcome};
 use crate::local::model::LocalProject;
 use crate::local::opencode::AgentHost;
 use crate::store::{
-    now_ms, ChatTurnAdmission, Store, StoredChatMessage, StoredChatSession, StoredChatTurn,
-    StoredQueuedChatMessage, TurnYield, YieldKind, STOP_CHECK_PREFIX,
+    now_ms, ChatTurnAdmission, StopCheck, Store, StoredChatMessage, StoredChatSession,
+    StoredChatTurn, StoredQueuedChatMessage, TurnYield, YieldKind, STOP_CHECK_PREFIX,
 };
 
 /// Min interval between mid-turn persist+broadcast flushes (streaming parts
@@ -5971,7 +5971,7 @@ impl ChatHost {
                     if let Some(source) = stop_source {
                         if !store.stop_check_pending(source)?
                             || store
-                                .stop_check_plans(session_id, source, turn_id, &background)?
+                                .current_stop_check(session_id, source, turn_id, &background)?
                                 .is_none()
                         {
                             store.settle_stop_check(source, false)?;
@@ -7097,33 +7097,39 @@ impl ChatHost {
                 if !store.stop_check_pending(source)? {
                     break 'admission None;
                 }
-                let Some(plans) =
-                    store.stop_check_plans(session_id, source, source, &background)?
+                let Some(check) =
+                    store.current_stop_check(session_id, source, source, &background)?
                 else {
                     store.settle_stop_check(source, false)?;
                     tx.commit()?;
                     break 'admission None;
                 };
-                let prompt = if plans.is_empty() {
-                    "[orx] If an approved next step remains, take it now. Otherwise use yield to say why you stopped and what will restart the work.".into()
-                } else {
-                    let remaining = if plans.len() == 1 {
-                        "1 planned experiment remains".into()
-                    } else {
-                        format!("{} planned experiments remain", plans.len())
-                    };
-                    let names = plans
-                        .iter()
-                        .map(|experiment| {
-                            experiment
-                                .display_name()
-                                .split_whitespace()
+                let prompt = match check {
+                    StopCheck::MissingYield => "[orx] If an approved next step remains, take it now. Otherwise use yield to say why you stopped and what will restart the work.".into(),
+                    StopCheck::Done => {
+                        let plans = store.chat_planned_experiments(session_id)?;
+                        if plans.is_empty() {
+                            "[orx] You said done. Is this direction exhausted? If recent gains were within run-to-run noise or too small to matter, try a different approach within the approved scope and budget. If no worthwhile step remains within those limits, yield done again and say why.".into()
+                        } else {
+                            let remaining = if plans.len() == 1 {
+                                "1 planned experiment remains".into()
+                            } else {
+                                format!("{} planned experiments remain", plans.len())
+                            };
+                            let names = plans
+                                .iter()
+                                .map(|experiment| {
+                                    experiment
+                                        .display_name()
+                                        .split_whitespace()
+                                        .collect::<Vec<_>>()
+                                        .join(" ")
+                                })
                                 .collect::<Vec<_>>()
-                                .join(" ")
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    format!("[orx] You said done, but {remaining}: {names}. Run them, drop the ones that no longer matter, or say why they no longer matter.")
+                                .join(", ");
+                            format!("[orx] You said done, but {remaining}: {names}. Run them, drop the ones that no longer matter, or say why they no longer matter.")
+                        }
+                    }
                 };
                 if !turn.prepared_input.is_empty() {
                     turn.prepared_input.push_str("\n\n");
@@ -16952,16 +16958,28 @@ for line in sys.stdin:
         };
         let stopped = send("Wait for Stop.").await.unwrap();
         wait_for_stop_prompt(&mut events).await;
+        host.record_yield(
+            "owner",
+            TurnYield {
+                kind: YieldKind::Done,
+                text: "Budget spent.".into(),
+            },
+        )
+        .await
+        .unwrap();
         host.interrupt_by_user("owner").await.unwrap();
+        let stopped = store
+            .get_chat_turn("owner", &stopped.turn_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stopped.state, "interrupted");
         assert_eq!(
             store
-                .get_chat_turn("owner", &stopped.turn_id)
-                .unwrap()
-                .unwrap()
-                .state,
-            "interrupted"
+                .chat_message_yield(&stopped.assistant_message_id)
+                .unwrap(),
+            None
         );
-        assert!(!store.stop_check_pending(&stopped.turn_id).unwrap());
+        assert!(!store.stop_check_pending(&stopped.id).unwrap());
 
         session(&store, "delegate");
         store
@@ -17036,12 +17054,43 @@ for line in sys.stdin:
         );
     }
 
+    fn complete_yield(store: &Store, id: &str, kind: YieldKind) {
+        store.put_chat_turn("owner", id, "running", now_ms());
+        store
+            .upsert_chat_message_on_branch(&StoredChatMessage {
+                id: id.into(),
+                session_id: "owner".into(),
+                role: "assistant".into(),
+                parts_json: "[]".into(),
+                created_at: now_ms(),
+                completed_at: Some(now_ms()),
+                parent_id: None,
+                base_native_session_id: None,
+                result_native_session_id: None,
+                result_native_message_id: None,
+                native_harness: None,
+            })
+            .unwrap();
+        store
+            .write_chat_turn_yield(
+                id,
+                &TurnYield {
+                    kind,
+                    text: "Stopped here.".into(),
+                },
+            )
+            .unwrap();
+        assert!(store
+            .finish_chat_turn(id, TurnOutcome::Completed, Some(&HashMap::new()))
+            .unwrap());
+    }
+
     #[tokio::test(flavor = "current_thread")]
-    async fn done_checks_only_current_unrun_plans_in_full_auto_research() {
+    async fn done_check_names_only_current_unrun_plans() {
         if !crate::config::in_test_child(&[]) {
             return;
         }
-        let store = Store::open().unwrap();
+        let mut store = Store::open().unwrap();
         quiet_agent_chat(&store, Some("autoresearch"));
         session(&store, "other");
         for (id, title, chat, archived) in [
@@ -17083,50 +17132,8 @@ for line in sys.stdin:
             )
             .unwrap();
 
-        let complete = |id: &str, autonomy, kind| {
-            store.set_chat_session_autonomy("owner", autonomy).unwrap();
-            store.put_chat_turn("owner", id, "running", now_ms());
-            store
-                .upsert_chat_message_on_branch(&StoredChatMessage {
-                    id: id.into(),
-                    session_id: "owner".into(),
-                    role: "assistant".into(),
-                    parts_json: "[]".into(),
-                    created_at: now_ms(),
-                    completed_at: Some(now_ms()),
-                    parent_id: None,
-                    base_native_session_id: None,
-                    result_native_session_id: None,
-                    result_native_message_id: None,
-                    native_harness: None,
-                })
-                .unwrap();
-            store
-                .write_chat_turn_yield(
-                    id,
-                    &TurnYield {
-                        kind,
-                        text: "Stopped here.".into(),
-                    },
-                )
-                .unwrap();
-            assert!(store
-                .finish_chat_turn(id, TurnOutcome::Completed, Some(&HashMap::new()))
-                .unwrap());
-            store.stop_check_pending(id).unwrap()
-        };
-        assert!(!complete("default", Autonomy::Agentic, YieldKind::Done));
-        assert!(!complete(
-            "collaborative",
-            Autonomy::Copilot,
-            YieldKind::Done
-        ));
-        assert!(!complete(
-            "needs-input",
-            Autonomy::AutoResearch,
-            YieldKind::Need
-        ));
-        assert!(complete("source", Autonomy::AutoResearch, YieldKind::Done));
+        complete_yield(&store, "source", YieldKind::Done);
+        assert!(store.stop_check_pending("source").unwrap());
 
         let host = notice_host();
         settle_all(&host).await;
@@ -17140,19 +17147,79 @@ for line in sys.stdin:
         assert_eq!(wake.client_turn_id, "stop-check:source");
         assert_eq!(wake.user_message_id, None);
 
-        assert!(complete(
-            "superseded",
-            Autonomy::AutoResearch,
-            YieldKind::Done
-        ));
-        Store::open()
-            .unwrap()
+        complete_yield(&store, "plans-archived", YieldKind::Done);
+        assert!(store.stop_check_pending("plans-archived").unwrap());
+        store
             .set_experiments_archived(&["a".into(), "b".into()], true)
             .unwrap();
         settle_all(&host).await;
-        assert_eq!(prompts(), received);
+        let received = prompts();
+        assert_eq!(received.len(), 2, "{received:#?}");
+        assert!(received[1].contains("run-to-run noise"));
+        assert!(!received[1].contains("planned experiments remain"));
         assert!(store.pending_stop_checks().unwrap().is_empty());
-        assert!(!complete("done", Autonomy::AutoResearch, YieldKind::Done));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn done_without_plans_gets_one_stop_check_after_restart() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let store = Store::open().unwrap();
+        quiet_agent_chat(&store, Some("autoresearch"));
+        complete_yield(&store, "source", YieldKind::Done);
+        assert!(store.stop_check_pending("source").unwrap());
+        drop(store);
+
+        let host = notice_host();
+        settle_all(&host).await;
+        let received = prompts();
+        assert_eq!(received.len(), 1, "{received:#?}");
+        assert!(received[0].contains("run-to-run noise"));
+        assert!(received[0].contains("yield done again"));
+        let store = Store::open().unwrap();
+        let wake = store.latest_chat_turn("owner").unwrap().unwrap();
+        assert_eq!(wake.client_turn_id, "stop-check:source");
+        assert_eq!(wake.user_message_id, None);
+        assert!(store.pending_stop_checks().unwrap().is_empty());
+    }
+
+    #[test]
+    fn done_in_a_stop_check_completes_without_staging_another() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let store = Store::open().unwrap();
+        session(&store, "owner");
+        store
+            .set_chat_session_autonomy("owner", Autonomy::AutoResearch)
+            .unwrap();
+        complete_yield(&store, "source", YieldKind::Done);
+        assert!(store.stop_check_pending("source").unwrap());
+
+        complete_yield(&store, "stop-check:source", YieldKind::Done);
+        let turn = store.latest_chat_turn("owner").unwrap().unwrap();
+        assert_eq!(turn.state, "completed");
+        assert_eq!(turn.turn_yield.unwrap().kind, YieldKind::Done);
+        assert!(!store.stop_check_pending(&turn.id).unwrap());
+    }
+
+    #[test]
+    fn default_and_collaborative_done_and_full_auto_research_need_skip_stop_checks() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let store = Store::open().unwrap();
+        session(&store, "owner");
+        for (mode, kind) in [
+            (Autonomy::Agentic, YieldKind::Done),
+            (Autonomy::Copilot, YieldKind::Done),
+            (Autonomy::AutoResearch, YieldKind::Need),
+        ] {
+            store.set_chat_session_autonomy("owner", mode).unwrap();
+            complete_yield(&store, mode.id(), kind);
+            assert!(!store.stop_check_pending(mode.id()).unwrap(), "{mode:?}");
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

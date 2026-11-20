@@ -311,6 +311,12 @@ pub(crate) struct TerminalEvidence {
 }
 
 pub(crate) const STOP_CHECK_PREFIX: &str = "stop-check:";
+
+pub(crate) enum StopCheck {
+    MissingYield,
+    Done,
+}
+
 pub const TERMINAL: &str = "terminal";
 pub(crate) const INSTRUMENTATION: &str = "instrumentation";
 pub const ATTENTION: &str = "attention";
@@ -5847,14 +5853,13 @@ impl Store {
             .flatten())
     }
 
-    /// An eligible stop check has no names for a missing yield and at least one plan for `done`.
-    pub(crate) fn stop_check_plans(
+    pub(crate) fn current_stop_check(
         &self,
         chat: &str,
         source: &str,
         frontier: &str,
         background: &BackgroundTasks,
-    ) -> Result<Option<Vec<LocalExperiment>>> {
+    ) -> Result<Option<StopCheck>> {
         let closing = self.conn.query_row(
             "SELECT t.yield_json FROM chat_turns t JOIN chat_sessions c ON c.id = t.session_id
                 JOIN chat_turns head ON head.id = ?3 AND head.session_id = c.id
@@ -5871,21 +5876,15 @@ impl Store {
             params![chat, source, frontier, STOP_CHECK_PREFIX],
             |row| read_turn_yield(row, 0),
         ).optional()?;
-        let plans = match closing {
-            Some(None) => Vec::new(),
-            Some(Some(closing)) if closing.kind == YieldKind::Done => {
-                let plans = self.chat_planned_experiments(chat)?;
-                if plans.is_empty() {
-                    return Ok(None);
-                }
-                plans
-            }
+        let check = match closing {
+            Some(None) => StopCheck::MissingYield,
+            Some(Some(closing)) if closing.kind == YieldKind::Done => StopCheck::Done,
             _ => return Ok(None),
         };
         if self.chat_session_has_prompt(chat, None)? || self.has_wake_work(chat, background)? {
             return Ok(None);
         }
-        Ok(Some(plans))
+        Ok(Some(check))
     }
 
     pub(crate) fn pending_stop_checks(&self) -> Result<Vec<(String, String, i64)>> {
@@ -5972,7 +5971,7 @@ impl Store {
                     |row| row.get(0),
                 )?;
                 if self
-                    .stop_check_plans(&session_id, id, id, background)?
+                    .current_stop_check(&session_id, id, id, background)?
                     .is_some()
                 {
                     self.conn.execute(
