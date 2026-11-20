@@ -1523,9 +1523,11 @@ impl From<PaperHit> for LitHit {
     }
 }
 
-/// `https://openalex.org/W123` (or any `.../W123`) → `W123`.
+/// `https://openalex.org/W123` (or any `.../W123`, with an optional trailing
+/// slash, query or fragment) → `W123`.
 fn strip_openalex_prefix(id: &str) -> &str {
-    id.rsplit('/').next().unwrap_or(id)
+    let id = id.split(['?', '#']).next().unwrap_or(id);
+    id.trim_end_matches('/').rsplit('/').next().unwrap_or(id)
 }
 
 /// `https://doi.org/10.1101/x` / `doi:10.1101/x` → `10.1101/x`.
@@ -2864,6 +2866,13 @@ mod tests {
             openalex_selector("https://openalex.org/W2919115771"),
             "W2919115771"
         );
+        for url in [
+            "https://openalex.org/W2919115771/",
+            "https://openalex.org/W2919115771?foo=bar",
+            "https://openalex.org/W2919115771/#abstract",
+        ] {
+            assert_eq!(openalex_selector(url), "W2919115771", "{url}");
+        }
     }
 
     /// An OpenAlex `/works` row (id + doi as URLs, citations, inverted-index
