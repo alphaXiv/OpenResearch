@@ -1,22 +1,38 @@
 import { useWorkspace } from "../workspace";
 import { useQuery } from "@tanstack/react-query";
 import { FlaskConical, Folder, TriangleAlert } from "lucide-react";
-import { useCallback, useId, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { m } from "../paraglide/messages.js";
-import { fmtNumber, ltr } from "../i18n";
+import { autoDir, fmtNumber, ltr } from "../i18n";
 import { fmtDuration, timeAgo } from "../api";
 import type { ChatSession, SessionExperiment } from "../api";
-import { runDisplay, type RunDisplayStatus } from "../runDisplay";
+import { hostForRun } from "../engineHosts";
+import { runActive, runDisplay, type RunDisplayStatus } from "../runDisplay";
+import { runModel, type RunModel } from "../runMonitor/model";
+import { shortLabels, summarize } from "../runMonitor/summary";
+import type { ShownRun } from "../runMonitor/types";
+import { Block } from "./run/blocks/Block";
+import { Lead } from "./run/Lead";
+import { Mark } from "./run/Mark";
+import { Rail } from "./run/Rail";
+import { Delta } from "./run/Delta";
+import { seriesOf } from "./run/blocks/series";
+import { liveChart, type StripMonitor } from "./run/RunStrip";
+import { SummarySentence } from "./run/RunSummary";
+import { Sentence } from "./run/Sentence";
+import { useRunMonitors } from "./run/useRunMonitor";
 import { harnessLabel } from "./ModelPicker";
 import { HarnessLogo } from "./HarnessLogo";
 import { statusLabel, statusStyle } from "./StatusBadge";
 import { useMeasure, usePopoverPosition } from "./tourGeometry";
 import { Badge } from "./ui";
+import { cn } from "./ui/cn";
 
-const CARD_WIDTH = 320;
+const CARD_WIDTH = 360;
 const GAP = 8;
+export const CARD_FADE_MS = 120;
 
 const ICON_TONES: Partial<Record<RunDisplayStatus, string>> = {
   submitting: "text-mark-green",
@@ -31,8 +47,60 @@ const ICON_TONES: Partial<Record<RunDisplayStatus, string>> = {
   revising: "text-accent-purple",
 };
 
-function ExperimentRow({ row, sessionProjectId, tabbable, onFocus, onOpen }: {
+/**
+ * A run the chat's composer shows, as its strip draws it: where it stands, its number, its live chart and its bar.
+ * Among several, under a summary that says when the first is done, it keeps to its count, its number and its bar.
+ */
+function RunPeek({ model, monitor, alone }: { model: RunModel; monitor: StripMonitor; alone: boolean }) {
+  const data = monitor && monitor.status !== "loading" ? monitor.data : null;
+  const chart = useMemo(() => alone ? liveChart(model, data) : undefined, [alone, data, model.live]);
+  const drawn = useMemo(() => data && chart ? seriesOf(data, chart).filter((line) => !line.ghost).map((line) => autoDir(line.label)).join(" · ") : "", [data, chart]);
+  const { stage } = model.sentence;
+  // The stage's words leave the headline out, so it gets a line of its own unless the run's sentence already says it.
+  const headline = model.headline?.known && (stage || !model.headline.inSentence) ? model.headline : null;
+  const number = headline && <>
+    {autoDir(headline.label)} <span className="font-medium tabular-nums text-text">{headline.value}</span>
+    {headline.delta && <> <Delta delta={headline.delta} said={alone} />{alone && !headline.delta.flat && <> {m.run_than_parent()}</>}</>}
+  </>;
+
+  if (!alone) {
+    return (
+      <div className="-mt-0.5 ps-[30px] pe-1.5 pb-2 text-xs">
+        <div className="truncate">
+          <Lead model={model} />
+          <Sentence text={stage?.count || model.sentence.text} tone={model.tone} />
+          {number && <span className="text-ink-subtext"> · {number}</span>}
+        </div>
+        {model.live && <div className="relative mt-1.5 h-[3px] overflow-hidden rounded-full"><Rail model={model} kind="edge" /></div>}
+      </div>
+    );
+  }
+
+  return (
+    <div className="-mt-0.5 ps-[30px] pe-1.5 pb-2 text-xs">
+      <div className="flex min-w-0 items-center gap-2">
+        <span className="flex min-w-0 flex-1 items-center whitespace-nowrap">
+          <Lead model={model} />
+          {stage ? <>
+            <span className="min-w-0 shrink truncate"><Sentence text={stage.name} tone={model.tone} /></span>
+            <span className="ms-1 shrink-0"><Sentence text={stage.count} tone={model.tone} /></span>
+          </> : <span className="min-w-0 truncate"><Sentence text={model.sentence.text} tone={model.tone} /></span>}
+        </span>
+        {model.eta && <span className="shrink-0 tabular-nums text-ink-subtext">{model.eta}</span>}
+      </div>
+      {number && <div className="mt-0.5 truncate text-ink-subtext">{number}</div>}
+      {data && chart && <div className="mt-2">
+        {drawn !== autoDir(headline?.label ?? "") && <div className="truncate text-ink-subtext">{drawn}</div>}
+        <div className="h-14"><Block monitor={data} block={chart} size="strip" tone={model.tone} live={model.live} /></div>
+      </div>}
+      {model.live && <div className="relative mt-1.5 h-[3px] overflow-hidden rounded-full"><Rail model={model} kind="edge" /></div>}
+    </div>
+  );
+}
+
+function ExperimentRow({ row, peek, sessionProjectId, tabbable, onFocus, onOpen }: {
   row: SessionExperiment;
+  peek: React.ReactNode;
   sessionProjectId: string;
   tabbable: boolean;
   onFocus: () => void;
@@ -43,7 +111,8 @@ function ExperimentRow({ row, sessionProjectId, tabbable, onFocus, onOpen }: {
   const status = display?.status ?? null;
   const tone = status ? ICON_TONES[status] ?? "text-subtext" : "text-muted";
   const live = status !== null && statusStyle(status).live;
-  const elapsed = currentRun && (live ? fmtDuration(Date.now() - currentRun.createdAt) : timeAgo(currentRun.endedAt ?? currentRun.createdAt));
+  const elapsed = !peek && currentRun && (live ? fmtDuration(Date.now() - currentRun.createdAt) : timeAgo(currentRun.endedAt ?? currentRun.createdAt));
+  const elsewhere = experiment.projectId !== sessionProjectId;
 
   return (
     <li>
@@ -62,44 +131,74 @@ function ExperimentRow({ row, sessionProjectId, tabbable, onFocus, onOpen }: {
         />}
         <span className="min-w-0 flex-1">
           <span className="block break-words">{experiment.title?.trim() || experiment.slug}</span>
-          <span className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-xs text-subtext">
-            {status ? <span className="text-text">{statusLabel(status, display?.stopping)}</span> : <span>{m.experiments_not_run_yet()}</span>}
+          {(!peek || experiment.archived || elsewhere) && <span className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-xs text-subtext">
+            {!peek && (status ? <span className="text-text">{statusLabel(status, display?.stopping)}</span> : <span>{m.experiments_not_run_yet()}</span>)}
             {elapsed && <span className="tabular-nums">{elapsed}</span>}
             {experiment.archived && <span>{m.tree_archived()}</span>}
-            {experiment.projectId !== sessionProjectId && (
+            {elsewhere && (
               <span className="ms-auto flex min-w-0 items-center gap-1">
                 <Folder size={12} className="shrink-0" aria-hidden="true" />
                 <span className="truncate">{projectName}</span>
               </span>
             )}
-          </span>
+          </span>}
         </span>
       </button>
+      {peek}
     </li>
   );
 }
 
-export function SessionHoverCard({ session, modelName, projectName, harnessLogo, anchor, cardId, cardRef, container, onEnter, onLeave, onOpenExperiment, onReturnToRow, onContinue }: {
+export function SessionHoverCard({ session, runs, motion, modelName, harnessLogo, anchor, cardId, cardRef, container, onOpenExperiment, onReturnToRow, onContinue }: {
   session: ChatSession;
+  /** The chat's runs its composer shows, each drawn under its experiment. */
+  runs: readonly ShownRun[];
+  motion: "enter" | "warm" | "leave";
   modelName: string | null;
-  projectName?: string;
   harnessLogo?: string;
   anchor: DOMRect;
   cardId: string;
   cardRef: React.RefObject<HTMLDivElement | null>;
   container: Element;
-  onEnter: () => void;
-  onLeave: () => void;
   onOpenExperiment: (projectId: string, experimentId: string) => void;
   onReturnToRow: () => void;
   onContinue: () => void;
 }) {
-  const { getSessionExperimentsQuery } = useWorkspace().queries;
+  const { getSessionExperimentsQuery, useEngineHosts } = useWorkspace().queries;
+  const hosts = useEngineHosts();
 
   const measure = useMeasure();
   const headingId = useId();
   const { data, isPending, error } = useQuery(getSessionExperimentsQuery(session.id));
   const [focusedId, setFocusedId] = useState<string>();
+  const [now, setNow] = useState(Date.now);
+  // An experiment shows its newest run, as its row in the composer's list reads it.
+  const latest = useMemo(() => runs.filter((item) => !runs.some((other) =>
+    other.run.experimentId === item.run.experimentId && other.run.createdAt > item.run.createdAt)), [runs]);
+  const latestRuns = useMemo(() => latest.map((item) => item.run), [latest]);
+  const monitors = useRunMonitors(latestRuns, () => true);
+  const live = latest.some((item) => runActive(item.run.status));
+  const models = latest.map((item, index) => {
+    const monitor = monitors[index];
+    const host = hostForRun(hosts, item.run);
+    return runModel({
+      item,
+      monitor: monitor && monitor.status !== "loading" ? monitor.data : null,
+      monitorFailed: monitor?.status === "error",
+      shown: true,
+      agent: harnessLabel(session.harness, session.harnessName),
+      now,
+      nextRetryMs: host?.status === "backoff" ? host.nextRetryMs : null,
+    });
+  });
+  // Several runs read as the composer's summary does: one sentence over them all, and no chart for each.
+  const titles = latest.map((item) => item.experimentName ?? item.experimentSlug ?? item.run.experimentId);
+  const summary = latest.length > 1 ? summarize(models, shortLabels(titles), latest[0].watch, now) : null;
+  useEffect(() => {
+    if (!live) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [live]);
   const setCard = useCallback((element: HTMLDivElement | null) => {
     cardRef.current = element;
     const dispose = measure.ref(element);
@@ -126,6 +225,9 @@ export function SessionHoverCard({ session, modelName, projectName, harnessLogo,
     }
   }
   const title = session.title?.trim() || m.chat_untitled();
+  /** Where the card slides from and back to: a few pixels toward its row. */
+  const offset = { right: "-4px 0", left: "4px 0", above: "0 4px", below: "0 -4px" }[side];
+  const experiments = isPending || error || (data && data.length > 0);
   const tabbableId = data?.some(({ experiment }) => experiment.id === focusedId) ? focusedId : data?.[0]?.experiment.id;
 
   return createPortal(
@@ -136,10 +238,21 @@ export function SessionHoverCard({ session, modelName, projectName, harnessLogo,
       role="group"
       aria-label={title}
       tabIndex={-1}
-      className="fixed z-60 flex max-h-[min(24rem,calc(100vh-16px))] flex-col rounded-lg border border-border bg-background p-4 text-sm text-text shadow-menu focus-visible:outline-2 focus-visible:outline-focus-border"
-      style={{ width, left: x, top: y, visibility: measure.offsetHeight === 0 ? "hidden" : undefined }}
-      onMouseEnter={onEnter}
-      onMouseLeave={onLeave}
+      inert={motion === "leave"}
+      className={cn(
+        "fixed z-60 flex max-h-[min(28rem,calc(100vh-16px))] flex-col rounded-lg border border-border bg-background p-4 text-sm text-text shadow-menu focus-visible:outline-2 focus-visible:outline-focus-border",
+        "transition-[opacity,translate] ease-out",
+        motion === "leave" ? "pointer-events-none opacity-0 motion-safe:[translate:var(--card-from)]" : "duration-150",
+        motion === "enter" && "starting:opacity-0 motion-safe:starting:[translate:var(--card-from)]",
+      )}
+      style={{
+        width,
+        left: x,
+        top: y,
+        visibility: measure.offsetHeight === 0 ? "hidden" : undefined,
+        transitionDuration: motion === "leave" ? `${CARD_FADE_MS}ms` : undefined,
+        "--card-from": offset,
+      } as React.CSSProperties}
       onClick={(event) => event.stopPropagation()}
       onKeyDown={(event) => {
         const rows = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>("[data-experiment-row]"));
@@ -164,21 +277,22 @@ export function SessionHoverCard({ session, modelName, projectName, harnessLogo,
       }}
     >
       <div className="shrink-0 font-semibold break-words">{title}</div>
-      {projectName && (
-        <div className="mt-2 flex shrink-0 items-center gap-1.5 text-subtext">
-          <Folder size={14} className="shrink-0" aria-hidden="true" />
-          <span className="min-w-0 break-words">{projectName}</span>
-        </div>
-      )}
-      <div className="mt-2 flex shrink-0 items-center gap-1.5 text-subtext">
-        <HarnessLogo harness={session.harness} logo={harnessLogo} size={14} />
-        <span className="min-w-0 break-words">{harnessLabel(session.harness, session.harnessName)}{modelName ? ` · ${modelName}` : ""}</span>
-      </div>
-      {(isPending || error || (data && data.length > 0)) && <div className="mt-3 flex min-h-0 flex-col border-t border-border pt-2">
+      {experiments && <div className="mt-3 flex min-h-0 flex-col border-t border-border pt-2">
         {(!data || data.length > 0) && (
           <div className="mb-1 flex shrink-0 items-center gap-1.5 text-xs font-medium text-subtext">
             <span id={headingId}>{m.app_experiments()}</span>
             {!!data && <Badge size="small" className="tabular-nums">{fmtNumber(data.length)}</Badge>}
+          </div>
+        )}
+        {summary && (
+          <div className="mb-1.5 flex shrink-0 items-start gap-2 text-xs">
+            <span className="flex h-4 shrink-0 items-center gap-1">
+              {models.map((model) => <Mark key={model.run.id} tone={model.tone} live={model.live} label={model.status} />)}
+            </span>
+            <span className="min-w-0">
+              <SummarySentence parts={summary.parts} />
+              {summary.firstDone && <span className="text-ink-subtext"> · <Sentence text={autoDir(summary.firstDone)} tone="running" /></span>}
+            </span>
           </div>
         )}
         <div className="-mx-1.5 min-h-0 overflow-y-auto overscroll-contain">
@@ -186,20 +300,26 @@ export function SessionHoverCard({ session, modelName, projectName, harnessLogo,
             : error ? <div className="px-1.5 text-subtext">{m.common_failed_to_load({ error: ltr(error.message) })}</div>
               : data && data.length > 0 ? (
                   <ul role="list" aria-labelledby={headingId} className="m-0 list-none p-0">
-                    {data.map((row) => (
-                      <ExperimentRow
+                    {data.map((row) => {
+                      const index = latest.findIndex((item) => item.run.experimentId === row.experiment.id);
+                      return <ExperimentRow
                         key={row.experiment.id}
                         row={row}
+                        peek={index >= 0 && <RunPeek model={models[index]} monitor={monitors[index]} alone={!summary} />}
                         sessionProjectId={session.projectId}
                         tabbable={row.experiment.id === tabbableId}
                         onFocus={() => setFocusedId(row.experiment.id)}
                         onOpen={() => onOpenExperiment(row.experiment.projectId, row.experiment.id)}
-                      />
-                    ))}
+                      />;
+                    })}
                   </ul>
                 ) : null}
         </div>
       </div>}
+      <div className={cn("flex shrink-0 items-center gap-1.5 text-xs text-muted", experiments ? "mt-3" : "mt-1.5")}>
+        <HarnessLogo harness={session.harness} logo={harnessLogo} size={12} />
+        <span className="min-w-0 break-words">{harnessLabel(session.harness, session.harnessName)}{modelName ? ` · ${modelName}` : ""}</span>
+      </div>
     </div>,
     container,
   );

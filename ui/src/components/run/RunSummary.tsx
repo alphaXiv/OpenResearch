@@ -14,6 +14,17 @@ import { Rail } from "./Rail";
 import { Sentence } from "./Sentence";
 import { useBoxSize } from "./useBoxSize";
 
+/** What several runs are doing together, each part in its own tone. */
+export function SummarySentence({ parts }: { parts: SummaryPart[] }) {
+  return parts.map((part, index) => (
+    <Fragment key={index}>
+      {index > 0 && " · "}
+      {part.who && <span className={cn("font-medium", TONE_INK[part.tone])}>{part.who} </span>}
+      <Sentence text={autoDir(part.text)} tone={part.tone} />
+    </Fragment>
+  ));
+}
+
 /** Several runs together, with every bar stacked below when folded. */
 export function RunSummary({ models, context, parts, firstDone, open, onToggle }: {
   models: RunModel[];
@@ -58,15 +69,7 @@ export function RunSummary({ models, context, parts, firstDone, open, onToggle }
               aria-expanded={open}
               onClick={onToggle}
             >
-              <span data-part="sentence" className="block">
-                {parts.map((part, index) => (
-                  <Fragment key={index}>
-                    {index > 0 && " · "}
-                    {part.who && <span className={cn("font-medium", TONE_INK[part.tone])}>{part.who} </span>}
-                    <Sentence text={autoDir(part.text)} tone={part.tone} />
-                  </Fragment>
-                ))}
-              </span>
+              <span data-part="sentence" className="block"><SummarySentence parts={parts} /></span>
             </button>
           </div>
           {firstDone && (
