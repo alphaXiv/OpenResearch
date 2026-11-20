@@ -293,6 +293,22 @@ test("repeated categories keep each row's bar and read every value in the group"
   }
 });
 
+test("grouped bars put each parent level over its own group's bar", async () => {
+  const base = fixture("evalbars");
+  const split = (rows) => rows.flatMap((row) => [{ ...row, model: "a" }, { ...row, model: "b", accuracy: row.accuracy / 2 }]);
+  const monitor = {
+    ...base,
+    rows: { categories: split(base.rows.categories) },
+    parent: { ...base.parent, rows: { categories: split(base.parent.rows.categories) } },
+  };
+  const block = { chart: ["accuracy"], from: "categories", x: "category", by: "model", mark: "bars", ghost: "parent" };
+  const chart = chartOf(await draw(monitor, block, "page"));
+  const bars = [...chart.querySelectorAll("rect")].map((bar) => Number(bar.getAttribute("x")) + Number(bar.getAttribute("width")) / 2);
+  const levels = [...chart.querySelectorAll('line[stroke-dasharray="3 2"]')].map((level) => (Number(level.getAttribute("x1")) + Number(level.getAttribute("x2"))) / 2);
+  assert.equal(levels.length, bars.length, "every bar has its parent's level");
+  assert.deepEqual(levels.map(Math.round).sort((a, b) => a - b), bars.map(Math.round).sort((a, b) => a - b));
+});
+
 test("a chart of a table with no rows says so, with a yet only while the run is going, over the parent's when there is one", async () => {
   const monitor = { ...fixture("frontier"), rows: {} };
   const block = monitor.view.blocks[0];

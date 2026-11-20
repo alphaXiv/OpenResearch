@@ -315,7 +315,7 @@ export function Chart({ monitor, block, title, size, live, height = 160 }: { mon
   }));
   /** Each category gives a series its own band, divided among its reported rows. */
   const bars = (strip: boolean) => [...owned, ...series.filter((line) => line.ghost)].map((line) => {
-    const index = line.ghost ? owned.findIndex((one) => one.x === line.x && one.y === line.y) : owned.indexOf(line);
+    const index = line.ghost ? owned.findIndex((one) => `parent ${one.name}` === line.name) : owned.indexOf(line);
     return (
       <g key={line.name}>
         {[...(barsBySeries.get(line) ?? [])].flatMap(([at, values]) => {
