@@ -4577,19 +4577,26 @@ impl Store {
     ) -> Result<Vec<StoredChatSession>> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {CHAT_SESSION_COLS} FROM chat_sessions
-             WHERE {TOP_LEVEL_CHATS} AND (?1 IS NULL OR archived = ?1)
+             WHERE {TOP_LEVEL_CHATS} AND (:archived IS NULL OR archived = :archived)
                AND (id IN (
                  SELECT chat_session_id FROM runs
                  WHERE status IN ('submitting', 'starting', 'running')
                  UNION SELECT s.chat_session_id FROM run_subscriptions s
                  JOIN runs r ON r.id = s.run_id
                  WHERE r.status IN ('submitting', 'starting', 'running')
-               ) OR id IN (SELECT value FROM json_each(?2))
+               ) OR id IN (SELECT value FROM json_each(:live))
                  OR (archived = 0 AND json_extract({CURRENT_YIELD}, '$.kind') = 'need'))
              ORDER BY updated_at DESC, id DESC"
         ))?;
         let live = serde_json::to_string(live)?;
-        let rows = stmt.query_map(params![archived, live], row_to_chat_session)?;
+        let rows = stmt.query_map(
+            rusqlite::named_params! {
+                ":archived": archived,
+                ":live": live,
+                ":shell_tool": crate::local::chat::USER_SHELL_TOOL,
+            },
+            row_to_chat_session,
+        )?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
@@ -5845,8 +5852,11 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                &format!("SELECT {CURRENT_YIELD} FROM chat_sessions WHERE id = ?1"),
-                [session_id],
+                &format!("SELECT {CURRENT_YIELD} FROM chat_sessions WHERE id = :session"),
+                rusqlite::named_params! {
+                    ":session": session_id,
+                    ":shell_tool": crate::local::chat::USER_SHELL_TOOL,
+                },
                 |row| read_turn_yield(row, 0),
             )
             .optional()?
@@ -5858,7 +5868,6 @@ impl Store {
         chat: &str,
         source: &str,
         frontier: &str,
-        background: &BackgroundTasks,
     ) -> Result<Option<StopCheck>> {
         let closing = self.conn.query_row(
             "SELECT t.yield_json FROM chat_turns t JOIN chat_sessions c ON c.id = t.session_id
@@ -5881,7 +5890,7 @@ impl Store {
             Some(Some(closing)) if closing.kind == YieldKind::Done => StopCheck::Done,
             _ => return Ok(None),
         };
-        if self.chat_session_has_prompt(chat, None)? || self.has_wake_work(chat, background)? {
+        if self.chat_session_has_prompt(chat, None)? {
             return Ok(None);
         }
         Ok(Some(check))
@@ -5970,10 +5979,14 @@ impl Store {
                     [id],
                     |row| row.get(0),
                 )?;
-                if self
-                    .current_stop_check(&session_id, id, id, background)?
-                    .is_some()
-                {
+                let stage = match self.current_stop_check(&session_id, id, id)? {
+                    Some(StopCheck::Done) => true,
+                    Some(StopCheck::MissingYield) => {
+                        !self.has_wake_work(&session_id, background)?
+                    }
+                    None => false,
+                };
+                if stage {
                     self.conn.execute(
                         "INSERT OR IGNORE INTO chat_turn_wakes (source_turn_id, kind, next_delivery_at)
                          VALUES (?1, 'stop-check', ?2)",
@@ -6806,9 +6819,18 @@ fn read_turn_yield(row: &rusqlite::Row<'_>, column: usize) -> rusqlite::Result<O
         .transpose()
 }
 
-const CURRENT_YIELD: &str = "(SELECT t.yield_json
-     FROM chat_turns t WHERE t.session_id = chat_sessions.id
-       AND t.assistant_message_id = chat_sessions.active_leaf_id AND t.state = 'completed'
+const CURRENT_YIELD: &str = "(WITH RECURSIVE leaf(id) AS (
+       SELECT chat_sessions.active_leaf_id
+       UNION ALL
+       SELECT m.parent_id FROM leaf
+       JOIN chat_messages m ON m.id = leaf.id AND m.session_id = chat_sessions.id
+       WHERE m.role = 'user' AND json_array_length(m.parts_json) = 1
+         AND json_extract(m.parts_json, '$[0].type') = 'tool'
+         AND json_extract(m.parts_json, '$[0].tool') = :shell_tool
+     )
+     SELECT t.yield_json FROM leaf
+     JOIN chat_turns t ON t.assistant_message_id = leaf.id
+     WHERE t.session_id = chat_sessions.id AND t.state = 'completed'
        AND NOT EXISTS (SELECT 1 FROM chat_turns active WHERE active.session_id = t.session_id
                        AND active.state IN ('preparing', 'running', 'retrying')
                        AND (active.created_at, active.rowid) > (t.created_at, t.rowid)))";
@@ -16177,6 +16199,163 @@ pub(crate) mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stop_check_does_not_echo_its_sources_news_back_to_the_subscriber() {
+        let store =
+            Store::open_at(crate::config::test_home().join(uuid::Uuid::new_v4().to_string()))
+                .unwrap();
+        for id in ["chat_1", "peer"] {
+            store
+                .create_chat_session(&chat_session_fixture(id))
+                .unwrap();
+        }
+        store.subscribe_chat("peer", "chat_1", None).unwrap();
+        let from_peer = StoredChatMessage {
+            id: "msg_source".into(),
+            session_id: "chat_1".into(),
+            role: "user".into(),
+            parts_json:
+                serde_json::json!([{"id": "p0", "type": "text", "orx": {"kind": "answer", "from": "peer"}}])
+                    .to_string(),
+            created_at: 2,
+            completed_at: None,
+            parent_id: None,
+            base_native_session_id: None,
+            result_native_session_id: None,
+            result_native_message_id: None,
+            native_harness: None,
+        };
+        let source = chat_turn_fixture("source", "chat-news:peer");
+        store.admit_chat_turn(Some(&from_peer), &source).unwrap();
+        store.complete_chat_turn(&source.id).unwrap();
+        assert!(crate::local::chat::news::chat_news(&store, Some("peer"))
+            .unwrap()
+            .is_empty());
+
+        for (id, client_id, echo) in [
+            ("wake", "stop-check:source", true),
+            ("recovered", "recover_wake", true),
+            ("unrelated", "stop-check:missing", false),
+        ] {
+            let mut wake = chat_turn_fixture(id, client_id);
+            wake.user_message_id = None;
+            wake.created_at = now_ms();
+            store.admit_chat_turn(None, &wake).unwrap();
+            store.complete_chat_turn(&wake.id).unwrap();
+            let news = crate::local::chat::news::chat_news(&store, Some("peer")).unwrap();
+            assert_eq!(news.is_empty(), echo, "{client_id}");
+        }
+    }
+
+    #[test]
+    fn a_completed_delegate_yield_reaches_its_subscriber_without_prose() {
+        use crate::local::chat::{delegation, news};
+        let store =
+            Store::open_at(crate::config::test_home().join(uuid::Uuid::new_v4().to_string()))
+                .unwrap();
+        let child = chat_session_fixture("chat_1");
+        for session in [&child, &chat_session_fixture("parent")] {
+            store.create_chat_session(session).unwrap();
+        }
+        store
+            .record_chat_delegate(&child.id, "parent", false)
+            .unwrap();
+        store.subscribe_chat("parent", &child.id, None).unwrap();
+        let turn = chat_turn_fixture("source", "task");
+        store.admit_chat_turn(None, &turn).unwrap();
+        let question = "Which dataset should I use?";
+        store
+            .write_chat_turn_yield(
+                &turn.id,
+                &TurnYield {
+                    kind: YieldKind::Need,
+                    text: question.into(),
+                },
+            )
+            .unwrap();
+        store.complete_chat_turn(&turn.id).unwrap();
+
+        let items = news::chat_news(&store, Some("parent")).unwrap();
+        let pieces = news::messages(&store, &items).unwrap();
+        let [(prompt, display)] = pieces.as_slice() else {
+            panic!("expected one delegate answer")
+        };
+        assert!(prompt.contains(question), "{prompt}");
+        assert!(display.text.contains(question));
+        let status = delegation::status(&store, &child, false, "parent").unwrap();
+        assert!(status.contains(question), "{status}");
+    }
+
+    #[test]
+    fn shell_exchanges_leave_the_last_need_in_the_inbox() {
+        let store =
+            Store::open_at(crate::config::test_home().join(uuid::Uuid::new_v4().to_string()))
+                .unwrap();
+        let session = chat_session_fixture("chat_1");
+        store.create_chat_session(&session).unwrap();
+        let mut turn = chat_turn_fixture("source", "task");
+        turn.user_message_id = None;
+        store.admit_chat_turn(None, &turn).unwrap();
+        let closing = TurnYield {
+            kind: YieldKind::Need,
+            text: "Which dataset?".into(),
+        };
+        store.write_chat_turn_yield(&turn.id, &closing).unwrap();
+        store.complete_chat_turn(&turn.id).unwrap();
+
+        for (id, role, parts) in [
+            (
+                turn.assistant_message_id.as_str(),
+                "assistant",
+                serde_json::json!([]),
+            ),
+            (
+                "shell-1",
+                "user",
+                serde_json::json!([{"type": "tool", "tool": crate::local::chat::USER_SHELL_TOOL}]),
+            ),
+            (
+                "shell-2",
+                "user",
+                serde_json::json!([{"type": "tool", "tool": crate::local::chat::USER_SHELL_TOOL}]),
+            ),
+        ] {
+            store
+                .upsert_chat_message_on_branch(&StoredChatMessage {
+                    id: id.into(),
+                    session_id: session.id.clone(),
+                    role: role.into(),
+                    parts_json: parts.to_string(),
+                    created_at: now_ms(),
+                    completed_at: Some(now_ms()),
+                    parent_id: None,
+                    base_native_session_id: None,
+                    result_native_session_id: None,
+                    result_native_message_id: None,
+                    native_harness: None,
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            store.chat_session_yield(&session.id).unwrap(),
+            Some(closing)
+        );
+        assert_eq!(
+            store
+                .sidebar_chat_sessions_at_work(None, &[])
+                .unwrap()
+                .len(),
+            1
+        );
+
+        store.put_chat_turn(&session.id, "reply", "running", now_ms());
+        assert_eq!(store.chat_session_yield(&session.id).unwrap(), None);
+        assert!(store
+            .sidebar_chat_sessions_at_work(None, &[])
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

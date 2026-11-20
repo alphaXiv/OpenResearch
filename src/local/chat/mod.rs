@@ -5969,14 +5969,22 @@ impl ChatHost {
                 {
                     let tx = store.begin_immediate()?;
                     if let Some(source) = stop_source {
-                        if !store.stop_check_pending(source)?
-                            || store
-                                .current_stop_check(session_id, source, turn_id, &background)?
-                                .is_none()
-                        {
+                        let check = store.current_stop_check(session_id, source, turn_id)?;
+                        if !store.stop_check_pending(source)? || check.is_none() {
                             store.settle_stop_check(source, false)?;
                             tx.commit()?;
                             return Err(anyhow!("The automatic follow-up is no longer current."));
+                        }
+                        if store.has_wake_work(session_id, &background)? {
+                            if matches!(check, Some(StopCheck::MissingYield)) {
+                                store.settle_stop_check(source, false)?;
+                            }
+                            tx.commit()?;
+                            return Ok(SendMessageResult {
+                                turn_id: turn_id.to_string(),
+                                queued: false,
+                                existing: true,
+                            });
                         }
                     }
                     if !Store::reset_chat_turn_for_retry_locked(&tx, turn_id, assistant.created_at)?
@@ -6441,7 +6449,7 @@ impl ChatHost {
     ) -> Result<TurnSubmission> {
         let SendTurnRequest {
             messages,
-            prepared_input,
+            mut prepared_input,
             replace_settings,
             transcript,
             mut overrides,
@@ -6971,6 +6979,9 @@ impl ChatHost {
                         .any(|m| m.text.trim_start().starts_with('/'))
             })
             .map(|message| delegation::message_ref(&message.id));
+        if let Some(replay) = &mut prepared_input {
+            strip_legacy_turn_context(replay, session.bootstrap_context.as_deref());
+        }
         let mut prepared_input = prepared_input.unwrap_or_else(|| {
             let mut expanded = contextualize_messages(messages, |text| {
                 if orx.is_empty() {
@@ -7097,40 +7108,19 @@ impl ChatHost {
                 if !store.stop_check_pending(source)? {
                     break 'admission None;
                 }
-                let Some(check) =
-                    store.current_stop_check(session_id, source, source, &background)?
-                else {
+                let Some(check) = store.current_stop_check(session_id, source, source)? else {
                     store.settle_stop_check(source, false)?;
                     tx.commit()?;
                     break 'admission None;
                 };
-                let prompt = match check {
-                    StopCheck::MissingYield => "[orx] If an approved next step remains, take it now. Otherwise use yield to say why you stopped and what will restart the work.".into(),
-                    StopCheck::Done => {
-                        let plans = store.chat_planned_experiments(session_id)?;
-                        if plans.is_empty() {
-                            "[orx] You said done. Is this direction exhausted? If recent gains were within run-to-run noise or too small to matter, try a different approach within the approved scope and budget. If no worthwhile step remains within those limits, yield done again and say why.".into()
-                        } else {
-                            let remaining = if plans.len() == 1 {
-                                "1 planned experiment remains".into()
-                            } else {
-                                format!("{} planned experiments remain", plans.len())
-                            };
-                            let names = plans
-                                .iter()
-                                .map(|experiment| {
-                                    experiment
-                                        .display_name()
-                                        .split_whitespace()
-                                        .collect::<Vec<_>>()
-                                        .join(" ")
-                                })
-                                .collect::<Vec<_>>()
-                                .join(", ");
-                            format!("[orx] You said done, but {remaining}: {names}. Run them, drop the ones that no longer matter, or say why they no longer matter.")
-                        }
+                if store.has_wake_work(session_id, &background)? {
+                    if matches!(check, StopCheck::MissingYield) {
+                        store.settle_stop_check(source, false)?;
                     }
-                };
+                    tx.commit()?;
+                    break 'admission None;
+                }
+                let prompt = stop_check_prompt(&store, session_id, check)?;
                 if !turn.prepared_input.is_empty() {
                     turn.prepared_input.push_str("\n\n");
                 }
@@ -7172,6 +7162,53 @@ impl ChatHost {
                     }
                 }
 
+                let mut carried_check = None;
+                if run_notice
+                    || flag_wake
+                    || turn.client_turn_id.starts_with("chat-news:") && !orx.is_empty()
+                {
+                    if let Some(latest) = store.latest_chat_turn(session_id)? {
+                        let source = latest
+                            .client_turn_id
+                            .strip_prefix(STOP_CHECK_PREFIX)
+                            .filter(|_| {
+                                latest.state == "failed"
+                                    && matches!(
+                                        latest.delivery_state.as_str(),
+                                        "not_sent" | "rejected"
+                                    )
+                            })
+                            .unwrap_or(&latest.id);
+                        if store.stop_check_pending(source)?
+                            && matches!(
+                                store.current_stop_check(session_id, source, &latest.id)?,
+                                Some(StopCheck::Done)
+                            )
+                        {
+                            if !turn.prepared_input.is_empty() {
+                                turn.prepared_input.push_str("\n\n");
+                            }
+                            turn.prepared_input.push_str(&stop_check_prompt(
+                                &store,
+                                session_id,
+                                StopCheck::Done,
+                            )?);
+                            carried_check = Some(source.to_string());
+                        }
+                    }
+                }
+
+                if !turn.prepared_input.is_empty() {
+                    // Older servers replay this payload directly after a rollback.
+                    if Autonomy::from_stored(session.autonomy.as_deref()) == Autonomy::Copilot {
+                        turn.prepared_input.insert_str(0, LEGACY_COPILOT_CONTEXT);
+                    }
+                    if let Some(goal) = &session.goal {
+                        turn.prepared_input
+                            .insert_str(0, &format!("{LEGACY_GOAL_START}{goal}{GOAL_END}"));
+                    }
+                }
+
                 let mut ctx = turn_ctx_from_stored(
                     self.clone(),
                     &store,
@@ -7199,6 +7236,10 @@ impl ChatHost {
                             &previous,
                             &turn.client_turn_id,
                         )?;
+                    }
+                    if let Some(source) = carried_check {
+                        // The admitted turn now owns delivery through its saved prompt.
+                        store.settle_stop_check(&source, false)?;
                     }
                     tx.commit()?;
                 }
@@ -10758,6 +10799,36 @@ fn run_notice_request(
             .join("\n\n");
     }
     Ok(request)
+}
+
+fn stop_check_prompt(store: &Store, session_id: &str, check: StopCheck) -> Result<String> {
+    Ok(match check {
+        StopCheck::MissingYield => "[orx] If an approved next step remains, take it now. Otherwise use yield to say why you stopped and what will restart the work.".into(),
+        StopCheck::Done => {
+            let plans = store.chat_planned_experiments(session_id)?;
+            if plans.is_empty() {
+                "[orx] You said done. Is this direction exhausted? If recent gains were within run-to-run noise or too small to matter, try a different approach within the approved scope and budget. If no worthwhile step remains within those limits, yield done again and say why.".into()
+            } else {
+                let remaining = if plans.len() == 1 {
+                    "1 planned experiment remains".into()
+                } else {
+                    format!("{} planned experiments remain", plans.len())
+                };
+                let names = plans
+                    .iter()
+                    .map(|experiment| {
+                        experiment
+                            .display_name()
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("[orx] You said done, but {remaining}: {names}. Run them, drop the ones that no longer matter, or say why they no longer matter.")
+            }
+        }
+    })
 }
 
 /// Returns the chats whose turn slot was taken; whoever holds it reports `chat.busy` false on release.
@@ -17086,7 +17157,7 @@ for line in sys.stdin:
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn done_check_names_only_current_unrun_plans() {
+    async fn run_result_carries_done_check_with_only_current_unrun_plans() {
         if !crate::config::in_test_child(&[]) {
             return;
         }
@@ -17118,7 +17189,7 @@ for line in sys.stdin:
                 })
                 .unwrap();
         }
-        let mut cancelled = run("cancelled");
+        let mut cancelled = run("running");
         cancelled.experiment_id = "d".into();
         store.upsert_run(&cancelled).unwrap();
         store
@@ -17137,14 +17208,36 @@ for line in sys.stdin:
 
         let host = notice_host();
         settle_all(&host).await;
+        assert!(prompts().is_empty());
+        assert!(store.stop_check_pending("source").unwrap());
+
+        store.set_run_status(&cancelled.id, "cancelled");
+        store
+            .insert_run_notice(
+                &cancelled.id,
+                "owner",
+                crate::store::TERMINAL,
+                crate::store::TERMINAL,
+                "[orx] The run was cancelled.",
+                now_ms(),
+            )
+            .unwrap();
+        let notice = store.run_notice_batch("owner").unwrap().remove(0);
+        settle_all(&host).await;
         let received = prompts();
-        assert_eq!(received.len(), 1, "{received:#?}");
-        assert!(received[0].contains("2 planned experiments remain"));
+        assert_eq!(received.len(), 2, "{received:#?}");
+        assert!(received[1].contains("use yield to say why you stopped"));
+        assert!(!received[1].contains("You said done"));
+        assert!(received[0].contains("The run was cancelled."));
+        assert!(received[0].contains("You said done, but 2 planned experiments remain"));
         assert!(received[0].contains("Warmup sweep, Batch size control"));
         assert!(!received[0].contains("Watch the cancelled run."));
         assert!(store.pending_stop_checks().unwrap().is_empty());
-        let wake = store.latest_chat_turn("owner").unwrap().unwrap();
-        assert_eq!(wake.client_turn_id, "stop-check:source");
+        let wake = store
+            .get_chat_turn_by_client_id("owner", &notice.client_turn_id)
+            .unwrap()
+            .unwrap();
+        assert!(wake.client_turn_id.starts_with("run-notice:"));
         assert_eq!(wake.user_message_id, None);
 
         complete_yield(&store, "plans-archived", YieldKind::Done);
@@ -17154,10 +17247,40 @@ for line in sys.stdin:
             .unwrap();
         settle_all(&host).await;
         let received = prompts();
-        assert_eq!(received.len(), 2, "{received:#?}");
-        assert!(received[1].contains("run-to-run noise"));
-        assert!(!received[1].contains("planned experiments remain"));
+        assert_eq!(received.len(), 3, "{received:#?}");
+        assert!(received[2].contains("run-to-run noise"));
+        assert!(!received[2].contains("planned experiments remain"));
         assert!(store.pending_stop_checks().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn done_check_survives_a_paused_delegate_subscription_and_restart() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let store = Store::open().unwrap();
+        quiet_agent_chat(&store, Some("autoresearch"));
+        session(&store, "delegate");
+        store
+            .record_chat_delegate("delegate", "owner", false)
+            .unwrap();
+        store.subscribe_chat("owner", "delegate", None).unwrap();
+        store.put_chat_turn("delegate", "delegated-answer", "completed", now_ms());
+        assert_eq!(news::chat_news(&store, Some("owner")).unwrap().len(), 1);
+
+        complete_yield(&store, "source", YieldKind::Done);
+        assert!(store.stop_check_pending("source").unwrap());
+        let host = notice_host();
+        settle_all(&host).await;
+        assert!(prompts().is_empty());
+        store.pause_chat_subscription("owner", "delegate").unwrap();
+        drop(host);
+        drop(store);
+
+        let restarted = notice_host();
+        settle_all(&restarted).await;
+        assert_eq!(prompts().len(), 1);
+        assert!(prompts()[0].contains("You said done."));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -17687,7 +17810,9 @@ for line in sys.stdin:
         assert!(delivered[0].contains(&format!("{GOAL_START}Spend at most ten dollars{GOAL_END}")));
         assert!(!delivered[0].contains("<current-user-message>"));
         assert!(!failed.prepared_input.contains("<orx-autonomy"));
-        assert!(!failed.prepared_input.contains("<orx-goal>"));
+        assert!(failed.prepared_input.contains(&format!(
+            "{LEGACY_GOAL_START}Spend at most ten dollars{GOAL_END}"
+        )));
 
         host.set_autonomy("owner", Autonomy::Copilot).await.unwrap();
         host.set_goal("owner", Some("Spend at most two dollars"))
@@ -17721,6 +17846,16 @@ for line in sys.stdin:
                 .state,
             "completed"
         );
+
+        let replay = store
+            .get_chat_turn("owner", &continued.turn_id)
+            .unwrap()
+            .unwrap();
+        assert!(replay.prepared_input.contains(LEGACY_COPILOT_CONTEXT));
+        assert!(replay.prepared_input.contains(&format!(
+            "{LEGACY_GOAL_START}Spend at most two dollars{GOAL_END}"
+        )));
+        assert!(!replay.prepared_input.contains("Spend at most ten dollars"));
 
         host.set_autonomy("owner", Autonomy::Agentic).await.unwrap();
         host.set_goal("owner", None).await.unwrap();

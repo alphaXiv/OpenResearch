@@ -7500,7 +7500,9 @@ export function ChatPanel({
   const activeSession = openSession;
   const autonomy = activeSession?.autonomy ?? sideDraftAutonomy ?? preferredAutonomy;
   const fullAuto = autonomy === "autoresearch";
-  const tail = messages.at(-1);
+  let tailIndex = messages.length - 1;
+  while (tailIndex >= 0 && shellExchangePart(messages[tailIndex])) tailIndex--;
+  const tail = messages[tailIndex];
   const lastReport = useMemo(() => {
     if (!fullAuto) return;
     for (let i = messages.length - 1; i >= 0; i--) {

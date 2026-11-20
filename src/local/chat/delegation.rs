@@ -251,10 +251,19 @@ pub fn message_text(message: &StoredChatMessage) -> String {
 
 /// The text a turn ended with.
 pub fn answer(store: &Store, assistant_message_id: &str) -> Result<String> {
-    Ok(store
+    let mut answer = store
         .get_chat_message(assistant_message_id)?
         .map(|message| message_text(&message))
-        .unwrap_or_default())
+        .unwrap_or_default();
+    if let Some(closing) = store.chat_message_yield(assistant_message_id)? {
+        if !answer.lines().any(|line| line.trim() == closing.text) {
+            if !answer.is_empty() {
+                answer.push_str("\n\n");
+            }
+            answer.push_str(&closing.text);
+        }
+    }
+    Ok(answer)
 }
 
 /// How many hex digits of a message's random id its ref carries.
