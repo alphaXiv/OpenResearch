@@ -12,7 +12,9 @@ pub async fn run(args: crate::ProjectArgs) -> Result<()> {
     match args.command {
         ProjectCommand::View { project_id, all } => {
             let store = crate::store::Store::open_for_reading()?;
-            resolve_project(store, &project_id)?.view_project(all).await
+            resolve_project(store, project_id.as_deref())?
+                .view_project(all)
+                .await
         }
         ProjectCommand::Edit {
             project_id,
@@ -20,7 +22,7 @@ pub async fn run(args: crate::ProjectArgs) -> Result<()> {
             run_command,
         } => {
             let store = crate::store::Store::open()?;
-            resolve_project(store, &project_id)?
+            resolve_project(store, project_id.as_deref())?
                 .edit_project(ProjectEdit { name, run_command })
                 .await
         }
@@ -34,7 +36,8 @@ pub async fn run(args: crate::ProjectArgs) -> Result<()> {
             no_artifacts,
         } => {
             let store = crate::store::Store::open()?;
-            let project = crate::local::resolve::resolve_project(&store, &project_id)?;
+            let project =
+                crate::local::resolve::resolve_project_or_current(&store, project_id.as_deref())?;
             let options = ShareOptions {
                 chats: if no_chats {
                     ChatSelection::None
@@ -80,7 +83,8 @@ pub async fn run(args: crate::ProjectArgs) -> Result<()> {
         ProjectCommand::Create { name, path } => propose(&name, path.as_deref()),
         ProjectCommand::Unpublish { project_id } => {
             let store = crate::store::Store::open()?;
-            let project = crate::local::resolve::resolve_project(&store, &project_id)?;
+            let project =
+                crate::local::resolve::resolve_project_or_current(&store, project_id.as_deref())?;
             let creds = signed_in().await?;
             let link = client::find_published_project(&creds, &project.id)
                 .await?

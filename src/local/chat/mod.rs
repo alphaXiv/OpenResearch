@@ -8025,6 +8025,7 @@ impl ChatHost {
             )?;
         }
         store.create_chat_session(&session)?;
+        store.set_chat_lit_sources(&session.id, store.chat_lit_sources(&parent.id)?.as_deref())?;
         transaction.commit()?;
         // Checked after the insert: a parent delete that began earlier has
         // already listed its side chats and would miss this one.

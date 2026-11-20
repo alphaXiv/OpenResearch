@@ -1689,10 +1689,12 @@ impl Store {
             "ALTER TABLE chat_sessions ADD COLUMN context_usage_json TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN bootstrap_context TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN title_source TEXT",
+            "ALTER TABLE chat_sessions ADD COLUMN lit_sources_json TEXT",
             "ALTER TABLE local_projects ADD COLUMN paper_id TEXT",
             "ALTER TABLE local_projects ADD COLUMN github_sync_enabled INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE local_projects ADD COLUMN workspace_state_json TEXT",
             "ALTER TABLE local_projects ADD COLUMN icon_json TEXT",
+            "ALTER TABLE local_projects ADD COLUMN settings_json TEXT",
             "ALTER TABLE local_experiments ADD COLUMN chat_session_id TEXT",
             "ALTER TABLE local_experiments ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE local_experiments ADD COLUMN run_monitor_json TEXT",
@@ -2205,6 +2207,72 @@ impl Store {
             "UPDATE local_projects SET workspace_state_json = ?2 WHERE id = ?1",
             params![id, serde_json::to_string(workspace)?],
         )? > 0)
+    }
+
+    /// The literature sources a chat turned off for itself; `None` follows its project.
+    pub fn chat_lit_sources(&self, id: &str) -> Result<Option<Vec<String>>> {
+        let json: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT lit_sources_json FROM chat_sessions WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        json.map(|json| {
+            serde_json::from_str(&json).with_context(|| {
+                format!("The literature sources saved for chat {id} are unreadable.")
+            })
+        })
+        .transpose()
+    }
+
+    /// Whether the chat exists to take the choice.
+    pub fn set_chat_lit_sources(&self, id: &str, disabled: Option<&[String]>) -> Result<bool> {
+        let json = disabled.map(serde_json::to_string).transpose()?;
+        Ok(self.conn.execute(
+            "UPDATE chat_sessions SET lit_sources_json = ?2 WHERE id = ?1",
+            params![id, json],
+        )? > 0)
+    }
+
+    /// The project's overrides of machine settings; an unknown project reads as none.
+    pub fn project_settings(&self, id: &str) -> Result<ProjectSettings> {
+        let json: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT settings_json FROM local_projects WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        json.map_or(Ok(ProjectSettings::default()), |json| {
+            serde_json::from_str(&json)
+                .with_context(|| format!("The settings saved for project {id} are unreadable."))
+        })
+    }
+
+    /// Edits the project's overrides in one write transaction, so concurrent edits of
+    /// different settings keep each other's changes.
+    pub fn update_project_settings(
+        &self,
+        id: &str,
+        edit: impl FnOnce(&mut ProjectSettings),
+    ) -> Result<ProjectSettings> {
+        let tx = self.begin_immediate()?;
+        if self.get_local_project(id)?.is_none() {
+            return Err(anyhow!("Project {id} is not registered in the orx store."));
+        }
+        let mut settings = self.project_settings(id)?;
+        edit(&mut settings);
+        self.conn.execute(
+            "UPDATE local_projects SET settings_json = ?2 WHERE id = ?1",
+            params![id, serde_json::to_string(&settings)?],
+        )?;
+        tx.commit()?;
+        Ok(settings)
     }
 
     pub fn set_tour_completed(&self, completed: bool) -> Result<()> {
@@ -6254,6 +6322,56 @@ pub struct StoredAgentSelection {
     pub service_tier: Option<String>,
     pub permission_mode: Option<String>,
     pub reasoning_level: Option<String>,
+}
+
+/// Settings a project sets for itself; each absent one follows the machine's.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compute: Option<ComputeDefault>,
+    /// The agent new chats in the project start with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<StoredAgentSelection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disabled_lit_sources: Option<Vec<String>>,
+    /// The autonomy id new chats start with; an id this orx doesn't know is ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autonomy: Option<String>,
+    #[serde(default, skip_serializing_if = "SlurmDefaults::is_empty")]
+    pub slurm: SlurmDefaults,
+    /// The Kubernetes namespace runs go to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub k8s_namespace: Option<String>,
+    /// Fields from a newer orx, kept across this version's saves.
+    #[serde(flatten)]
+    unknown: serde_json::Map<String, serde_json::Value>,
+}
+
+/// `#SBATCH` defaults a project sets over the machine's Slurm settings; each absent one follows them.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SlurmDefaults {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qos: Option<String>,
+}
+
+impl SlurmDefaults {
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputeDefault {
+    pub backend: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flavor: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -11943,6 +12061,72 @@ pub(crate) mod tests {
         let tests = store.list_ssh_host_tests().unwrap();
         assert_eq!(tests.len(), 1);
         assert_eq!(tests[0].host, "legacy-connect");
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn project_settings_follow_the_machine_until_set_and_survive_older_writers() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-project-settings-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let mut project = LocalProject {
+            id: "p".into(),
+            name: "P".into(),
+            slug: "p".into(),
+            github_owner: String::new(),
+            github_repo: String::new(),
+            github_sync_enabled: false,
+            baseline_branch: "main".into(),
+            repo_path: dir.join("p").to_string_lossy().into_owned(),
+            run_command: None,
+            paper_id: None,
+            icon: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        store.create_local_project(&project).unwrap();
+        assert_eq!(
+            store.project_settings("p").unwrap(),
+            ProjectSettings::default()
+        );
+
+        store
+            .update_project_settings("p", |settings| {
+                settings.compute = Some(ComputeDefault {
+                    backend: "slurm".into(),
+                    flavor: Some("h100:1".into()),
+                });
+                settings.disabled_lit_sources = Some(vec!["pubmed".into()]);
+            })
+            .unwrap();
+        // A newer orx's field, and a rename by an orx that predates settings.
+        store
+            .conn
+            .execute(
+                "UPDATE local_projects SET settings_json = json_set(settings_json, '$.future', 7) WHERE id = 'p'",
+                [],
+            )
+            .unwrap();
+        project.name = "Renamed".into();
+        store.update_local_project(&project).unwrap();
+        let saved = store
+            .update_project_settings("p", |settings| settings.compute = None)
+            .unwrap();
+        assert_eq!(saved.compute, None);
+        assert_eq!(saved.disabled_lit_sources, Some(vec!["pubmed".to_string()]));
+        assert_eq!(serde_json::to_value(&saved).unwrap()["future"], 7);
+
+        assert!(store.update_project_settings("missing", |_| {}).is_err());
+        store
+            .conn
+            .execute(
+                "UPDATE local_projects SET settings_json = '{' WHERE id = 'p'",
+                [],
+            )
+            .unwrap();
+        assert!(store.project_settings("p").is_err());
 
         drop(store);
         let _ = std::fs::remove_dir_all(dir);

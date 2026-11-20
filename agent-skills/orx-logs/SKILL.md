@@ -19,7 +19,7 @@ rg -n 'metric|summary' <log-path>   # search the file for relevant evidence
   the complete result.
 - Use native file tools on the printed path to search or read the portions you
   need. Cite the lines supporting each claim.
-- `<runId>` comes from `orx runs <projectId>`.
+- `<runId>` comes from `orx runs`.
 
 For a run's current stage, progress and measures, `orx exp status <expId>` is
 quicker than the log; read the log to confirm them or when they look wrong.

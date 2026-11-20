@@ -600,3 +600,105 @@ fn custom_instructions_survive_reinstall_and_harness_switches_across_projects() 
         saved
     );
 }
+
+#[test]
+fn the_default_target_belongs_to_the_project_the_command_runs_in() {
+    let sandbox = Sandbox::new();
+    let repo = sandbox.0.join("research");
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    sandbox.json(&["projects", "--json"]);
+    let db = rusqlite::Connection::open(sandbox.0.join("data/orx.db")).unwrap();
+    db.execute(
+        "INSERT INTO local_projects (id, name, slug, github_owner, github_repo, github_sync_enabled, baseline_branch, repo_path, created_at, updated_at) VALUES ('project', 'Research', 'research', '', '', 0, 'main', ?1, 0, 0)",
+        [repo.to_str().unwrap()],
+    )
+    .unwrap();
+    let json_in = |dir: &std::path::Path, args: &[&str]| -> Value {
+        let output = sandbox
+            .command()
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+    let inside = repo.join("src");
+    let outside = sandbox.0.clone();
+
+    let set = json_in(
+        &inside,
+        &[
+            "compute", "default", "set", "slurm", "--flavor", "h100:1", "--json",
+        ],
+    );
+    assert_eq!(set["project"]["name"], "Research");
+    assert_eq!(
+        set["projectDefault"],
+        serde_json::json!({"backend": "slurm", "flavor": "h100:1"})
+    );
+    assert_eq!(set["configuredDefaultBackend"], Value::Null);
+    assert_eq!(
+        json_in(&outside, &["compute", "status", "--json"])["configuredDefaultBackend"],
+        Value::Null
+    );
+
+    let machine = json_in(
+        &inside,
+        &[
+            "compute",
+            "default",
+            "set",
+            "modal",
+            "--flavor",
+            "A10G",
+            "--machine",
+            "--json",
+        ],
+    );
+    assert_eq!(machine["configuredDefaultBackend"], "modal");
+    let status = json_in(&inside, &["compute", "status", "--json"]);
+    assert_eq!(status["projectDefault"]["backend"], "slurm");
+    assert_eq!(status["configuredDefaultBackend"], "modal");
+
+    let cleared = json_in(&inside, &["compute", "default", "clear", "--json"]);
+    assert_eq!(cleared["projectDefault"], Value::Null);
+    assert_eq!(cleared["configuredDefaultBackend"], "modal");
+
+    let runs = sandbox
+        .command()
+        .current_dir(&inside)
+        .args(["runs"])
+        .output()
+        .unwrap();
+    assert!(
+        runs.status.success(),
+        "{}",
+        String::from_utf8_lossy(&runs.stderr)
+    );
+    // A cloud box's chat id is not in this store; the folder still names the project.
+    let foreign = sandbox
+        .command()
+        .current_dir(&inside)
+        .env("ORX_CHAT_SESSION_ID", "ses_cloud_box")
+        .args(["runs"])
+        .output()
+        .unwrap();
+    assert!(
+        foreign.status.success(),
+        "{}",
+        String::from_utf8_lossy(&foreign.stderr)
+    );
+    let runs = sandbox
+        .command()
+        .current_dir(&outside)
+        .args(["runs"])
+        .output()
+        .unwrap();
+    assert!(!runs.status.success());
+    assert!(String::from_utf8_lossy(&runs.stderr).contains("orx projects"));
+}

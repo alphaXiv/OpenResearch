@@ -23,7 +23,12 @@ pub async fn run(mut args: crate::CreateExperimentArgs) -> Result<()> {
     };
 
     let store = Store::open()?;
-    let plane = resolve_project(store, &args.project_id)?;
+    let plane = resolve_project(store, args.project_id.as_deref())?;
+    let surface = if plane.project()?.id == crate::local::demo::PROJECT_ID {
+        "demo"
+    } else {
+        "project"
+    };
     plane
         .create_experiment(CreateExperimentSpec {
             title,
@@ -34,11 +39,6 @@ pub async fn run(mut args: crate::CreateExperimentArgs) -> Result<()> {
         })
         .await?;
     crate::telemetry::capture_experiment_started("create", true, None);
-    let surface = if args.project_id == crate::local::demo::PROJECT_ID {
-        "demo"
-    } else {
-        "project"
-    };
     crate::telemetry::capture_first_action(surface, "create_experiment");
     Ok(())
 }

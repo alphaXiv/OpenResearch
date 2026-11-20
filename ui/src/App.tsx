@@ -270,6 +270,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     listProjectsQuery,
     getUiStateQuery,
     listExperimentsQuery,
+    getProjectSettingsQuery,
     listRunsQuery,
     getArtifactsQuery,
     getChatMessagesQuery,
@@ -365,6 +366,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const startupError = failedStartupItems.length
     ? m.app_startup_load_failed({ items: new Intl.ListFormat(locale).format(failedStartupItems) })
     : null;
+  const projectSettings = useQuery(getProjectSettingsQuery(projectId)).data;
+  const projectAgent = projectSettings?.agent;
   const experimentsQuery = useQuery(listExperimentsQuery(projectId));
   const experiments = experimentsQuery.data ?? [];
   const experimentDataReady = !experimentsQuery.isPending;
@@ -2018,9 +2021,9 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             runtime={runtime}
             activeSessionId={activeSessionId}
             onActiveSessionChange={(...args) => { setMobileRailOpen(false); onActiveSessionChange(...args); }}
-            preferredAgent={uiState.preferredAgent}
+            preferredAgent={projectAgent ?? uiState.preferredAgent}
             onPreferredAgentChange={persistPreferredAgent}
-            preferredAutonomy={uiState.preferredAutonomy ?? DEFAULT_AUTONOMY}
+            preferredAutonomy={projectSettings?.autonomy ?? uiState.preferredAutonomy ?? DEFAULT_AUTONOMY}
             onPreferredAutonomyChange={persistPreferredAutonomy}
           >
             {mainView !== "chat" ? (

@@ -32,7 +32,7 @@ expands on the why; these are the non-negotiables.
    behavior through environment variables or env-prefixed commands
    (`LR=3e-4 python …`). The *only* thing that may differ between nodes is the
    **committed code/config** on the node's git branch. Set the local project's
-   command once with `orx project edit <projectId> --run-command '<cmd>'`.
+   command once with `orx project edit --run-command '<cmd>'`.
 3. **Vary code, not knobs-in-the-command.** Encode hyperparameters in the
    code/config files and branch a child per variant — never sweep them by editing
    the run command or passing env vars. Every node runs the *same* command over
@@ -60,9 +60,10 @@ orx logout         # remove the stored token
 
 ## Command quick-reference
 
-Project-scoped commands take a **project id**; experiment-scoped commands take an
-**experiment id**; run-scoped commands take a **run id**. Don't mix them — get
-ids from `orx projects`, `orx project view`, and `orx runs` respectively. Each
+Project-scoped commands act on the chat's project when you leave out
+`[projectId]`; experiment-scoped commands take an **experiment id**; run-scoped
+commands take a **run id**. Don't mix them — get ids from `orx projects`,
+`orx project view`, and `orx runs` respectively. Each
 group below has a module (`orx skill <name>`) with the full flags and rules.
 
 ### Auth
@@ -76,8 +77,8 @@ group below has a module (`orx skill <name>`) with the full flags and rules.
 |---|---|
 | `orx projects [--json]` | List projects in the local `orx` store. |
 | `orx orgs [--json]` | List organization ids available for OpenResearch compute (login required). |
-| `orx project view <projectId>` | Show a local project's details and experiment tree. **Experiment ids come from here.** |
-| `orx runs <projectId> [--experiment <id>]` | List runs as a table, newest first. **Run ids come from here.** |
+| `orx project view [projectId]` | Show a local project's details and experiment tree. **Experiment ids come from here.** |
+| `orx runs [projectId] [--experiment <id>]` | List runs as a table, newest first. **Run ids come from here.** |
 
 ### Run evidence (run-scoped) — module `orx-logs`
 | Command | What it does |
@@ -88,13 +89,13 @@ group below has a module (`orx skill <name>`) with the full flags and rules.
 | Command | What it does |
 |---|---|
 | `orx up` | Open the local dashboard to import or create a local project. |
-| `orx project edit <localProjectId> [--name "<n>"] [--run-command "<cmd>"]` | Edit a local project's name or fixed run command. |
-| `orx project share <localProjectId> [--out <file> \| --publish] [--chat <chatId>... \| --no-chats] [--no-logs] [--no-artifacts]` | Only when the user asks: save the project's code, experiment tree, finished runs, logs, artifacts and chats as a `.orx` file to send to a collaborator. `--chat` narrows it to the named chats. `--publish` (only when the user asks for a link) uploads it to openresearch.sh and prints a link anyone can open; publishing again updates the same link. |
-| `orx project unpublish <localProjectId>` | Delete the project's published link and its file. |
+| `orx project edit [projectId] [--name "<n>"] [--run-command "<cmd>"]` | Edit a local project's name or fixed run command. |
+| `orx project share [projectId] [--out <file> \| --publish] [--chat <chatId>... \| --no-chats] [--no-logs] [--no-artifacts]` | Only when the user asks: save the project's code, experiment tree, finished runs, logs, artifacts and chats as a `.orx` file to send to a collaborator. `--chat` narrows it to the named chats. `--publish` (only when the user asks for a link) uploads it to openresearch.sh and prints a link anyone can open; publishing again updates the same link. |
+| `orx project unpublish [projectId]` | Delete the project's published link and its file. |
 | `orx project import <file.orx \| link> [--path <dir>]` | Open a shared `.orx` file or an `openresearch.sh/p/...` link as a new local project with its tree, runs and chosen chats. |
-| `orx create-experiment <localProjectId> --title "<t>" [...]` | Add a local experiment node; prints its Git branch. |
-| `orx compute status` / `show <backend>` / `test <backend>` | Inspect machine-wide compute configuration and readiness. |
-| `orx compute configure <backend> --help` / `default set <backend>` / `connect <backend>` | Configure compute or authenticate; load `orx-compute`. |
+| `orx create-experiment [projectId] --title "<t>" [...]` | Add a local experiment node; prints its Git branch. |
+| `orx compute status` / `show <backend>` / `test <backend>` | Inspect compute configuration, this project's default target, and readiness. |
+| `orx compute configure <backend> --help` / `default set <backend> [--machine]` / `connect <backend>` | Configure compute or authenticate; load `orx-compute`. |
 | `orx compute instructions show --json` | Read the machine-wide custom recipe and its revision before configuring or launching. |
 | `orx compute [--gpu <id>] [--count <n>] [--provider <name>]` / `orx compute --cpu` | List the GPU/CPU compute catalog. |
 | `orx instance create <orgId> (--gpu <id> … \| --cpu <flavor> …)` | Spin up a standalone instance in an org; see `orx-instances`. |
@@ -157,9 +158,9 @@ Orienting in a project (read-only discovery):
 
 ```sh
 orx projects                     # find the project id
-orx project view <projectId>     # see the tree, pick an experiment id
+orx project view     # see the tree, pick an experiment id
 orx skill experiment-tree        # the model + the auto-research loop
-orx runs <projectId>             # find a run id
+orx runs             # find a run id
 orx logs <runId>                 # locate its log, then inspect the file
 ```
 

@@ -323,13 +323,13 @@ pub struct CreateExperimentSpec {
     pub run_command: Option<String>,
 }
 
-pub(crate) fn resolve_project(store: Store, project_id: &str) -> Result<LocalPlane> {
-    let project = crate::local::resolve::resolve_project(&store, project_id)?;
+pub(crate) fn resolve_project(store: Store, project_id: Option<&str>) -> Result<LocalPlane> {
+    let project = crate::local::resolve::resolve_project_or_current(&store, project_id)?;
     Ok(LocalPlane {
         store,
+        id: project.id.clone(),
         project: Some(project),
         experiment: None,
-        id: project_id.to_string(),
     })
 }
 

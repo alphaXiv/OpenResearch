@@ -55,6 +55,7 @@ pub(crate) mod compute_settings;
 mod harness_setup;
 pub(crate) mod model_feed;
 mod network;
+mod project_settings;
 mod search;
 mod usage;
 use compute_settings::*;
@@ -689,6 +690,11 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
                 .patch(update_project)
                 .delete(delete_project),
         )
+        .route(
+            "/api/projects/{id}/settings",
+            get(project_settings::project_settings)
+                .patch(project_settings::update_project_settings),
+        )
         .route("/api/projects/{id}/open", post(open_project))
         .route("/api/projects/{id}/git", get(project_git_status))
         .route(
@@ -1040,6 +1046,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
         .route(
             "/api/chat/sessions",
             get(list_chat_sessions).post(create_chat_session),
+        )
+        .route(
+            "/api/chat/sessions/{id}/lit-sources",
+            get(project_settings::chat_lit_sources).put(project_settings::set_chat_lit_sources),
         )
         .route(
             "/api/chat/sessions/{id}",
@@ -3290,9 +3300,6 @@ struct CreateRunReq {
 
 impl CreateRunReq {
     fn into_run_args(self) -> crate::ExpRunArgs {
-        let mut backend = self.backend;
-        let mut flavor = self.flavor;
-        local::apply_compute_default(&mut backend, &mut flavor);
         crate::ExpRunArgs {
             estimate: false,
             invocation_context: self.invocation_context,
@@ -3300,8 +3307,8 @@ impl CreateRunReq {
             exp_id: self.experiment_id,
             disk: self.disk,
             provider: self.provider,
-            backend: Some(backend.unwrap_or_else(|| "local".to_string())),
-            flavor,
+            backend: self.backend,
+            flavor: self.flavor,
             org: self.org,
             host: self.host,
             container: self.container,
@@ -7090,6 +7097,39 @@ struct StoredAgentSelectionReq {
     reasoning_level: Option<String>,
 }
 
+/// An agent choice checked against the agents orx knows; its model is already resolved.
+fn stored_agent_selection(selection: StoredAgentSelectionReq) -> Result<StoredAgentSelection> {
+    if !local::harness::is_chat_harness(&selection.harness) {
+        return Err(anyhow!("unknown agent: {}", selection.harness));
+    }
+    let nonempty = |value: Option<String>| value.filter(|item| !item.trim().is_empty());
+    let permission_mode = nonempty(selection.permission_mode);
+    let service_tier = nonempty(selection.service_tier);
+    if permission_mode
+        .as_deref()
+        .is_some_and(|mode| local::harness::permission_mode_for(&selection.harness, mode).is_none())
+    {
+        return Err(anyhow!("invalid permission mode for the selected agent"));
+    }
+    if service_tier
+        .as_deref()
+        .is_some_and(|tier| local::harness::service_tier_for(&selection.harness, tier).is_none())
+    {
+        return Err(anyhow!("invalid speed for the selected agent"));
+    }
+    if let Some(id) = &selection.profile {
+        local::agent_profiles::home(id, &selection.harness)?;
+    }
+    Ok(StoredAgentSelection {
+        profile: selection.profile,
+        harness: selection.harness.clone(),
+        model: nonempty(selection.model),
+        service_tier,
+        permission_mode: preferred_permission_mode(&selection.harness, permission_mode),
+        reasoning_level: nonempty(selection.reasoning_level),
+    })
+}
+
 async fn set_ui_state(
     State(state): State<AppState>,
     Json(mut req): Json<SetUiStateReq>,
@@ -7200,35 +7240,7 @@ async fn set_ui_state(
         let store = Store::open()?;
         let selection = req
             .preferred_agent
-            .map(|selection| {
-                if !local::harness::is_chat_harness(&selection.harness) {
-                    return Err(anyhow!("unknown agent: {}", selection.harness));
-                }
-                let nonempty = |value: Option<String>| value.filter(|item| !item.trim().is_empty());
-                let permission_mode = nonempty(selection.permission_mode);
-                let service_tier = nonempty(selection.service_tier);
-                if permission_mode.as_deref().is_some_and(|mode| {
-                    local::harness::permission_mode_for(&selection.harness, mode).is_none()
-                }) {
-                    return Err(anyhow!("invalid permission mode for the selected agent"));
-                }
-                if service_tier.as_deref().is_some_and(|tier| {
-                    local::harness::service_tier_for(&selection.harness, tier).is_none()
-                }) {
-                    return Err(anyhow!("invalid speed for the selected agent"));
-                }
-                if let Some(id) = &selection.profile {
-                    local::agent_profiles::home(id, &selection.harness)?;
-                }
-                Ok(StoredAgentSelection {
-                    profile: selection.profile,
-                    harness: selection.harness.clone(),
-                    model: nonempty(selection.model),
-                    service_tier,
-                    permission_mode: preferred_permission_mode(&selection.harness, permission_mode),
-                    reasoning_level: nonempty(selection.reasoning_level),
-                })
-            })
+            .map(stored_agent_selection)
             .transpose()?;
         if let Some(completed) = req.tour_completed {
             store.set_tour_completed(completed)?;
@@ -9943,6 +9955,9 @@ struct CreateChatSessionReq {
     plan_mode: bool,
     reasoning_level: Option<String>,
     autonomy: Option<Autonomy>,
+    /// Sources a draft turned off before its first message.
+    #[serde(default)]
+    disabled_lit_sources: Option<Vec<String>>,
 }
 
 async fn selected_chat_model(
@@ -10052,6 +10067,7 @@ fn new_chat_settings(
         plan_mode: false,
         reasoning_level,
         autonomy: Some(preferences.preferred_autonomy.unwrap_or(Autonomy::Agentic)),
+        disabled_lit_sources: None,
     })
 }
 
@@ -10130,8 +10146,25 @@ async fn create_chat_session(
         }
     }
     if req.harness.is_none() {
-        let preferences = store.ui_state()?;
-        req = new_chat_settings(req.project_id, preferences, &catalog).map_err(bad_request)?;
+        let mut preferences = store.ui_state()?;
+        let project = store.project_settings(&req.project_id)?;
+        if let Some(autonomy) = project.autonomy.as_deref().and_then(Autonomy::from_id) {
+            preferences.preferred_autonomy = Some(autonomy);
+        }
+        let pinned = project.agent;
+        let from_project = pinned.is_some();
+        if pinned.is_some() {
+            preferences.preferred_agent = pinned;
+        }
+        let disabled_lit_sources = req.disabled_lit_sources.take();
+        req = new_chat_settings(req.project_id, preferences, &catalog).map_err(|error| {
+            if from_project {
+                bad_request("This project's agent for new chats is unavailable. Check its installation and sign-in, or choose another agent in Project settings.")
+            } else {
+                bad_request(error)
+            }
+        })?;
+        req.disabled_lit_sources = disabled_lit_sources;
     }
     let harness = req
         .harness
@@ -10169,6 +10202,11 @@ async fn create_chat_session(
         req.model.as_deref(),
     )
     .map_err(bad_request)?;
+    let disabled_lit_sources = req
+        .disabled_lit_sources
+        .map(project_settings::lit_sources)
+        .transpose()
+        .map_err(bad_request)?;
     let session = StoredChatSession {
         profile_id: req.profile,
         id: format!("chat_{}", uuid::Uuid::new_v4()),
@@ -10196,6 +10234,9 @@ async fn create_chat_session(
         updated_at: now_ms(),
     };
     store.create_chat_session(&session)?;
+    if let Some(disabled) = &disabled_lit_sources {
+        store.set_chat_lit_sources(&session.id, Some(disabled))?;
+    }
     state.chat.emit_session(Some(session.clone())).await;
     Ok(Json(
         json!({ "session": state.chat.session_json(&session, false).await }),
