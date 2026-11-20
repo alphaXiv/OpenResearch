@@ -4124,7 +4124,13 @@ function TurnClose({ close, historical, fullAuto, at, onOpenFile, onOpenRun }: {
   const label = historical ? m.chat_turn_last_update() : kind?.label();
   const tone = fullAuto ? "text-accent-purple" : kind?.tone;
   return (
-    <div className="mb-2.5 flex items-start gap-2 rounded-lg border border-border bg-surface px-3 py-2 text-sm leading-5 text-text" data-turn-close={close.kind}>
+    <div
+      role="group"
+      aria-label={label}
+      tabIndex={0}
+      className="mb-2.5 flex min-h-0 max-h-[min(8rem,20vh)] items-start gap-2 overflow-y-auto rounded-lg border border-border bg-surface px-3 py-2 text-sm leading-5 text-text focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:-outline-offset-2"
+      data-turn-close={close.kind}
+    >
       {Icon && (
         <span className={`inline-flex h-5 shrink-0 items-center ${tone}`}>
           <Icon size={14} aria-hidden="true" />
@@ -8414,9 +8420,9 @@ export function ChatPanel({
   const questions = useQuestions(activeId, pendingQuestions, respond);
   const asking = questions.part !== null;
   const visibleClose = pendingPlan || asking ? undefined : currentClose;
-  const report = visibleClose ?? lastReport?.turnYield;
-  const reportAt = fullAuto ? (visibleClose ? tail?.completedAt : lastReport?.completedAt) : undefined;
   const closingQuestion = visibleClose?.kind === "need" && tail ? { id: tail.id, text: visibleClose.text } : null;
+  const report = closingQuestion ? undefined : visibleClose ?? lastReport?.turnYield;
+  const reportAt = fullAuto ? (visibleClose ? tail?.completedAt : lastReport?.completedAt) : undefined;
   const showQuestion = questions.show;
   const searchedPartId = focusedMessage?.sessionId === activeId ? focusedMessage.partId : undefined;
   useEffect(() => {
@@ -9524,7 +9530,7 @@ export function ChatPanel({
           </div>
         ) : (
           <div
-            className="chat-thread flex-1 min-h-0 overflow-y-auto [overflow-anchor:none] [scrollbar-gutter:stable_both-edges]"
+            className={`chat-thread flex-1 ${report ? "min-h-6" : "min-h-0"} overflow-y-auto [overflow-anchor:none] [scrollbar-gutter:stable_both-edges]`}
             ref={threadRef}
             tabIndex={0}
             role="region"
@@ -9632,7 +9638,7 @@ export function ChatPanel({
 
         {/* Docked while a plan awaits a decision, so the approval controls never
           scroll away. Actions mirror the (now compact) inline card's wire. */}
-        <div inert={contentLoading || Boolean(contentError) || historyLoading} className={`composer flex flex-col px-3 pb-3 ${asking || closingQuestion ? "min-h-0" : "shrink-0"} relative z-4 bg-background w-full max-w-readable my-0 mx-auto`}>
+        <div inert={contentLoading || Boolean(contentError) || historyLoading} className={`composer flex flex-col px-3 pb-3 ${asking || closingQuestion || report ? "min-h-0" : "shrink-0"} relative z-4 bg-background w-full max-w-readable my-0 mx-auto`}>
           {threadMounted && (
             <Tooltip interactive content={m.chat_scroll_to_bottom()} className={`absolute bottom-full left-1/2 z-5 mb-6 -translate-x-1/2 transition-opacity duration-150 ease-standard ${transcriptAtBottom ? "pointer-events-none opacity-0" : "opacity-100"}`}>
               <IconButton
@@ -9787,9 +9793,9 @@ export function ChatPanel({
             />
           )}
           <RemoteConnectionStrip />
-          <div role="status" aria-atomic={false}>
+          <div role="status" aria-atomic={false} className={report ? "flex min-h-0 flex-col overflow-hidden" : undefined}>
             {closingQuestion && <span className="sr-only">{mentionsAsText(closingQuestion.text)}</span>}
-            {report && !closingQuestion && (
+            {report && (
               <ChatImageScope projectId={projectId} sessionId={activeId}>
                 <TurnClose
                   close={report}
@@ -9802,7 +9808,7 @@ export function ChatPanel({
               </ChatImageScope>
             )}
           </div>
-          <div inert={connection !== null} className={`composer-frame flex flex-col min-h-0 rounded-xl bg-surface${connection ? " opacity-60" : ""}`} data-onboarding="composer">
+          <div inert={connection !== null} className={`composer-frame flex flex-col min-h-0 rounded-xl bg-surface${report && !asking ? " shrink-0" : ""}${connection ? " opacity-60" : ""}`} data-onboarding="composer">
             <div className={`composer-box relative flex flex-col min-h-0 rounded-xl border ${bashMode && !asking ? "border-accent-amber" : "border-border"} bg-background shadow-control-subtle`}>
               {unconfirmedSend !== null && (
                 <div id={unconfirmedSendId} role="alert" className="flex items-start gap-2 pt-2 px-3 text-sm text-text">

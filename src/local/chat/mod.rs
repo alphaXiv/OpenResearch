@@ -1531,7 +1531,7 @@ fn with_selected_chat_context(text: String, annotations: &[TextAnnotation]) -> S
 pub(crate) const USER_SHELL_TOOL: &str = "bash";
 
 /// The synthetic tool part that marks a compaction in the transcript.
-const COMPACTED_TOOL: &str = "compacted";
+pub(crate) const COMPACTED_TOOL: &str = "compacted";
 
 /// A cancelled compaction's row would otherwise sit at `running` forever, where
 /// it reads as one that succeeded.
@@ -7198,7 +7198,7 @@ impl ChatHost {
                     }
                 }
 
-                if !turn.prepared_input.is_empty() {
+                if !turn.prepared_input.is_empty() || turn.flag_input.is_some() {
                     // Older servers replay this payload directly after a rollback.
                     if Autonomy::from_stored(session.autonomy.as_deref()) == Autonomy::Copilot {
                         turn.prepared_input.insert_str(0, LEGACY_COPILOT_CONTEXT);
@@ -7238,8 +7238,7 @@ impl ChatHost {
                         )?;
                     }
                     if let Some(source) = carried_check {
-                        // The admitted turn now owns delivery through its saved prompt.
-                        store.settle_stop_check(&source, false)?;
+                        store.transfer_stop_check(&source, &turn.id)?;
                     }
                     tx.commit()?;
                 }
@@ -9303,6 +9302,7 @@ fn turn_ctx_from_stored(
     assistant: WireMessage,
 ) -> Result<TurnCtx> {
     let mut text = rebase_prepared_attachment_paths(&turn.prepared_input);
+    strip_legacy_turn_context(&mut text, session.bootstrap_context.as_deref());
     if let Some(flags) = &turn.flag_input {
         if !text.is_empty() {
             text.push_str("\n\n");
@@ -9310,7 +9310,6 @@ fn turn_ctx_from_stored(
         text.push_str(flags);
     }
     if !text.is_empty() {
-        strip_legacy_turn_context(&mut text, session.bootstrap_context.as_deref());
         if let Some(autonomy) = Autonomy::from_stored(session.autonomy.as_deref()).turn_context() {
             text = format!("{autonomy}\n\n{text}");
         }
@@ -17225,9 +17224,7 @@ for line in sys.stdin:
         let notice = store.run_notice_batch("owner").unwrap().remove(0);
         settle_all(&host).await;
         let received = prompts();
-        assert_eq!(received.len(), 2, "{received:#?}");
-        assert!(received[1].contains("use yield to say why you stopped"));
-        assert!(!received[1].contains("You said done"));
+        assert_eq!(received.len(), 1, "{received:#?}");
         assert!(received[0].contains("The run was cancelled."));
         assert!(received[0].contains("You said done, but 2 planned experiments remain"));
         assert!(received[0].contains("Warmup sweep, Batch size control"));
@@ -17247,10 +17244,48 @@ for line in sys.stdin:
             .unwrap();
         settle_all(&host).await;
         let received = prompts();
-        assert_eq!(received.len(), 3, "{received:#?}");
-        assert!(received[2].contains("run-to-run noise"));
-        assert!(!received[2].contains("planned experiments remain"));
+        assert_eq!(received.len(), 2, "{received:#?}");
+        assert!(received[1].contains("run-to-run noise"));
+        assert!(!received[1].contains("planned experiments remain"));
         assert!(store.pending_stop_checks().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shell_and_compaction_leave_a_done_check_for_the_run_result() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let store = Store::open().unwrap();
+        quiet_agent_chat(&store, Some("autoresearch"));
+        let run = run("running");
+        store.upsert_run(&run).unwrap();
+        complete_yield(&store, "source", YieldKind::Done);
+        let host = notice_host();
+        host.run_shell_command("owner", "pwd".into(), crate::store::data_dir())
+            .await
+            .unwrap();
+        host.publish_compaction_marker(&store, "owner", None, "completed", None)
+            .unwrap();
+        settle_all(&host).await;
+        assert!(prompts().is_empty());
+        assert!(store.stop_check_pending("source").unwrap());
+
+        store.set_run_status(&run.id, "done");
+        store
+            .insert_run_notice(
+                &run.id,
+                "owner",
+                crate::store::TERMINAL,
+                crate::store::TERMINAL,
+                "[orx] The run finished.",
+                now_ms(),
+            )
+            .unwrap();
+        settle_all(&host).await;
+
+        let received = prompts();
+        assert!(received[0].contains("The run finished."), "{received:#?}");
+        assert!(received[0].contains("You said done."), "{received:#?}");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -17600,6 +17635,30 @@ for line in sys.stdin:
         if crate::config::in_test_child(&[]) {
             check_flag_wake_advice(true).await;
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn flag_only_wake_saves_goal_and_approval_rules_for_rollback() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let store = Store::open().unwrap();
+        let run = flagged_agent_chat(&store, Some("copilot"));
+        let goal = "Spend at most four GPU hours.";
+        store.set_chat_session_goal("owner", Some(goal)).unwrap();
+        ask_about_flag(&store, &run);
+        let notice = store.run_notice_batch("owner").unwrap().remove(0);
+        settle_all(&notice_host()).await;
+
+        let wake = store
+            .get_chat_turn_by_client_id("owner", &notice.client_turn_id)
+            .unwrap()
+            .unwrap();
+        assert!(wake.flag_input.as_deref().unwrap().contains("flag"));
+        let saved = format!("{LEGACY_GOAL_START}{goal}{GOAL_END}{LEGACY_COPILOT_CONTEXT}");
+        assert!(wake.prepared_input.starts_with(&saved), "{wake:#?}");
+        let received = prompts();
+        assert_eq!(received[0].matches(goal).count(), 1, "{received:#?}");
     }
 
     async fn check_flag_wake_advice(copilot: bool) {

@@ -4585,8 +4585,9 @@ impl Store {
                  JOIN runs r ON r.id = s.run_id
                  WHERE r.status IN ('submitting', 'starting', 'running')
                ) OR id IN (SELECT value FROM json_each(:live))
-                 OR (archived = 0 AND json_extract({CURRENT_YIELD}, '$.kind') = 'need'))
-             ORDER BY updated_at DESC, id DESC"
+                 OR (archived = 0 AND json_extract({current_yield}, '$.kind') = 'need'))
+             ORDER BY updated_at DESC, id DESC",
+            current_yield = current_yield_sql(),
         ))?;
         let live = serde_json::to_string(live)?;
         let rows = stmt.query_map(
@@ -5852,7 +5853,10 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                &format!("SELECT {CURRENT_YIELD} FROM chat_sessions WHERE id = :session"),
+                &format!(
+                    "SELECT {} FROM chat_sessions WHERE id = :session",
+                    current_yield_sql(),
+                ),
                 rusqlite::named_params! {
                     ":session": session_id,
                     ":shell_tool": crate::local::chat::USER_SHELL_TOOL,
@@ -5870,19 +5874,50 @@ impl Store {
         frontier: &str,
     ) -> Result<Option<StopCheck>> {
         let closing = self.conn.query_row(
-            "SELECT t.yield_json FROM chat_turns t JOIN chat_sessions c ON c.id = t.session_id
-                JOIN chat_turns head ON head.id = ?3 AND head.session_id = c.id
-                WHERE t.id = ?2 AND c.id = ?1 AND c.archived = 0 AND c.autonomy = 'autoresearch'
-                  AND c.active_leaf_id = head.assistant_message_id AND t.state = 'completed'
-                  AND t.client_turn_id NOT LIKE (?4 || '%')
-                  AND NOT EXISTS (SELECT 1 FROM chat_turns origin
-                                  WHERE origin.id = substr(t.client_turn_id, length('recover_') + 1)
-                                    AND substr(t.client_turn_id, 1, length('recover_')) = 'recover_'
-                                    AND origin.session_id = c.id AND origin.client_turn_id LIKE (?4 || '%'))
-                  AND NOT EXISTS (SELECT 1 FROM chat_turns newer WHERE newer.session_id = c.id
+            &format!("SELECT t.yield_json FROM chat_turns t
+                JOIN chat_sessions ON chat_sessions.id = t.session_id
+                JOIN chat_turns head ON head.id = :frontier AND head.session_id = t.session_id
+                WHERE t.id = :source AND t.session_id = :chat
+                  AND chat_sessions.archived = 0 AND chat_sessions.autonomy = 'autoresearch'
+                  AND t.state = 'completed'
+                  AND head.assistant_message_id IN (
+                    WITH RECURSIVE leaf(id) AS (
+                      SELECT chat_sessions.active_leaf_id
+                      UNION ALL
+                      SELECT m.parent_id FROM leaf
+                      JOIN chat_messages m ON m.id = leaf.id AND m.session_id = t.session_id
+                      WHERE {SHELL_EXCHANGE_ROW}
+                        OR (m.role = 'assistant' AND json_array_length(m.parts_json) = 1
+                          AND json_extract(m.parts_json, '$[0].type') = 'tool'
+                          AND json_extract(m.parts_json, '$[0].id') = :compacted_tool
+                          AND json_extract(m.parts_json, '$[0].tool') = :compacted_tool)
+                    )
+                    SELECT id FROM leaf
+                  )
+                  AND NOT EXISTS (
+                    WITH RECURSIVE request(id, client_turn_id) AS (
+                      SELECT t.id, t.client_turn_id
+                      UNION ALL
+                      SELECT origin.id, origin.client_turn_id FROM request
+                      JOIN chat_turns origin ON origin.session_id = t.session_id
+                        AND origin.id = substr(request.client_turn_id, length('recover_') + 1)
+                      WHERE substr(request.client_turn_id, 1, length('recover_')) = 'recover_'
+                    )
+                    SELECT 1 FROM request
+                    LEFT JOIN chat_turn_wakes w ON w.source_turn_id = request.id
+                    WHERE request.client_turn_id LIKE (:prefix || '%') OR w.retired_at IS NOT NULL
+                  )
+                  AND NOT EXISTS (SELECT 1 FROM chat_turns newer WHERE newer.session_id = t.session_id
                                   AND (newer.created_at, newer.rowid) > (head.created_at, head.rowid))
-                  AND NOT EXISTS (SELECT 1 FROM chat_queued_messages q WHERE q.session_id = c.id)",
-            params![chat, source, frontier, STOP_CHECK_PREFIX],
+                  AND NOT EXISTS (SELECT 1 FROM chat_queued_messages q WHERE q.session_id = t.session_id)"),
+            rusqlite::named_params! {
+                ":chat": chat,
+                ":source": source,
+                ":frontier": frontier,
+                ":prefix": STOP_CHECK_PREFIX,
+                ":shell_tool": crate::local::chat::USER_SHELL_TOOL,
+                ":compacted_tool": crate::local::chat::COMPACTED_TOOL,
+            },
             |row| read_turn_yield(row, 0),
         ).optional()?;
         let check = match closing {
@@ -5925,6 +5960,16 @@ impl Store {
                  retired_at = CASE WHEN ?2 THEN NULL ELSE ?3 END
              WHERE source_turn_id = ?1 AND delivered_at IS NULL AND retired_at IS NULL",
             params![source, delivered, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// The carrier's saved prompt now owns delivery, so its follow-up is already accounted for.
+    pub(crate) fn transfer_stop_check(&self, source: &str, carrier: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE chat_turn_wakes SET source_turn_id = ?2, retired_at = ?3
+             WHERE source_turn_id = ?1 AND delivered_at IS NULL AND retired_at IS NULL",
+            params![source, carrier, now_ms()],
         )?;
         Ok(())
     }
@@ -6819,21 +6864,27 @@ fn read_turn_yield(row: &rusqlite::Row<'_>, column: usize) -> rusqlite::Result<O
         .transpose()
 }
 
-const CURRENT_YIELD: &str = "(WITH RECURSIVE leaf(id) AS (
+const SHELL_EXCHANGE_ROW: &str = "(m.role = 'user' AND json_array_length(m.parts_json) = 1
+    AND json_extract(m.parts_json, '$[0].type') = 'tool'
+    AND json_extract(m.parts_json, '$[0].tool') = :shell_tool)";
+
+fn current_yield_sql() -> String {
+    format!(
+        "(WITH RECURSIVE leaf(id) AS (
        SELECT chat_sessions.active_leaf_id
        UNION ALL
        SELECT m.parent_id FROM leaf
        JOIN chat_messages m ON m.id = leaf.id AND m.session_id = chat_sessions.id
-       WHERE m.role = 'user' AND json_array_length(m.parts_json) = 1
-         AND json_extract(m.parts_json, '$[0].type') = 'tool'
-         AND json_extract(m.parts_json, '$[0].tool') = :shell_tool
+       WHERE {SHELL_EXCHANGE_ROW}
      )
      SELECT t.yield_json FROM leaf
      JOIN chat_turns t ON t.assistant_message_id = leaf.id
      WHERE t.session_id = chat_sessions.id AND t.state = 'completed'
        AND NOT EXISTS (SELECT 1 FROM chat_turns active WHERE active.session_id = t.session_id
                        AND active.state IN ('preparing', 'running', 'retrying')
-                       AND (active.created_at, active.rowid) > (t.created_at, t.rowid)))";
+                       AND (active.created_at, active.rowid) > (t.created_at, t.rowid)))"
+    )
+}
 
 /// The chats the user started or kept: neither a side chat nor a delegate.
 const TOP_LEVEL_CHATS: &str = "side_parent_session_id IS NULL
