@@ -22,6 +22,15 @@ type OpenRun = (runId: string, intent: TabOpenIntent, seek?: LogSeek) => void;
 
 export type StripMonitor = { status: "loading" } | { status: "error"; retry: () => void; data: RunMonitor | null } | { status: "ready"; data: RunMonitor } | null;
 
+/** The chart a live run is drawn by: the view's first in the current stage with a line of its own to draw. */
+export function liveChart(model: RunModel, data: RunMonitor | null): ChartBlock | undefined {
+  if (!model.live || !data) return undefined;
+  const phase = data.progress ? data.phases[data.progress.phase]?.name : undefined;
+  return data.view.blocks.find((block): block is ChartBlock => "chart" in block
+    && (!block.phase || block.phase === phase)
+    && seriesOf(data, block).some((line) => !line.ghost && line.points.filter(([, y]) => y !== null).length >= 2));
+}
+
 function Hero({ model, monitor, block }: { model: RunModel; monitor: RunMonitor | null; block?: ChartBlock }) {
   const series = useMemo(() => monitor && block ? seriesOf(monitor, block) : [], [monitor, block]);
   const drawn = series.filter((line) => !line.ghost).map((line) => line.label);
@@ -51,13 +60,7 @@ export function RunStrip({ model, monitor, agent, label, open, onToggle, onOpenR
   onOpenRunPage?: (run: Run, intent: TabOpenIntent) => void;
 }) {
   const data = monitor && monitor.status !== "loading" ? monitor.data : null;
-  const chart = useMemo(() => {
-    if (!model.live || !data) return undefined;
-    const phase = data.progress ? data.phases[data.progress.phase]?.name : undefined;
-    return data.view.blocks.find((block): block is ChartBlock => "chart" in block
-      && (!block.phase || block.phase === phase)
-      && seriesOf(data, block).some((line) => !line.ghost && line.points.filter(([, y]) => y !== null).length >= 2));
-  }, [data, model.live]);
+  const chart = useMemo(() => liveChart(model, data), [data, model.live]);
   const flag = model.flag?.record;
   const notice = model.notice && model.notice.kind !== "cancelling";
   const hero = !flag && (chart || model.headline?.known);
