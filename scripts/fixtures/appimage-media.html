@@ -11,10 +11,16 @@ try {
   audio.close();
   const video = document.getElementById('video');
   video.addEventListener('error', () => report({pass: false, error: video.error?.message ?? 'video decode failed'}));
-  video.addEventListener('loadeddata', () => {
+  video.addEventListener('loadeddata', async () => {
     const context = document.getElementById('canvas').getContext('2d');
-    context.drawImage(video, 0, 0);
-    const pixel = [...context.getImageData(80, 45, 1, 1).data];
+    let pixel;
+    // A loaded frame is not always paintable yet; a loaded runner draws a transparent canvas first.
+    for (let attempt = 0; attempt < 100; attempt++) {
+      context.drawImage(video, 0, 0);
+      pixel = [...context.getImageData(80, 45, 1, 1).data];
+      if (pixel[3] > 0) break;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
     report({pass: sampleRate > 0 && video.videoWidth === 160 && video.videoHeight === 90 && pixel[1] > 100 && pixel[0] < 20,
       sampleRate, videoWidth: video.videoWidth, videoHeight: video.videoHeight, pixel});
   }, {once: true});
