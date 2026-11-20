@@ -37,6 +37,7 @@ async function laptop(path, routes = {}, remote = () => server) {
     "GET /api/remote/sessions": () => ({ sessions: [remote()] }),
     "GET /api/settings/ssh": () => ({ hosts: [{ host: "research" }, { host: "lab" }], defaultHost: null }),
     "GET /api/remote/hosts": () => ({ hosts: [{ host: "research" }] }),
+    "POST /api/remote/sessions": () => remote(),
     ...routes,
   });
   const backend = globalThis.fetch;
@@ -53,28 +54,77 @@ async function laptop(path, routes = {}, remote = () => server) {
   return requests;
 }
 
-test("selecting a machine after Disconnect reconnects its existing SSH session", async () => {
-  let remote = server;
-  const requests = await laptop("/projects/p/tasks/new", {
-    "POST /_orx/disconnect": () => {
-      remote = { ...remote, status: "disconnected", canStartNewHost: false };
-      return remote;
+for (const error of [null, "Connection to research closed."]) {
+  test(`Disconnect keeps the machine listed, and selecting it connects again${error ? " after a lost connection" : ""}`, async () => {
+    let remote = server;
+    const connects = [];
+    await laptop("/projects/p/tasks/new", {
+      "POST /_orx/disconnect": () => {
+        remote = { ...remote, status: "disconnected", error, canStartNewHost: false };
+        return remote;
+      },
+      "POST /api/remote/sessions": (init) => {
+        connects.push(JSON.parse(init.body).host);
+        remote = server;
+        return remote;
+      },
+    }, () => remote);
+    await click(switcher());
+    await click(menuItem("research"));
+    assert.equal(visibleMachine(), "server");
+    await click(switcher());
+    await click(menuItem(m.remote_disconnect()));
+    assert.equal(visibleMachine(), "local");
+
+    await click(switcher());
+    assert.match(menuItem("research").textContent, new RegExp(m.remote_machine_disconnected()));
+    await click(menuItem("research"));
+    assert.equal(visibleMachine(), "server");
+    assert.deepEqual(connects, ["research", "research"]);
+  });
+}
+
+test("a saved machine with no session is listed and connects when selected", async () => {
+  let sessions = [];
+  await laptop("/projects/p/tasks/new", {
+    "GET /api/remote/sessions": () => ({ sessions }),
+    "POST /api/remote/sessions": () => {
+      sessions = [server];
+      return server;
     },
-    "POST /api/remote/sessions/server/reconnect": () => {
-      remote = server;
-      return remote;
+  });
+  await click(switcher());
+  assert.match(menuItem("research").textContent, new RegExp(m.remote_machine_disconnected()));
+  await click(menuItem("research"));
+  assert.equal(visibleMachine(), "server");
+});
+
+test("Forget this machine drops it from the list and returns to the laptop", async () => {
+  let hosts = [{ host: "research" }];
+  let sessions = [server];
+  const forgotten = [];
+  await laptop("/projects/p/tasks/new", {
+    "GET /api/remote/sessions": () => ({ sessions }),
+    "GET /api/remote/hosts": () => ({ hosts }),
+    "DELETE /api/remote/hosts/research": () => {
+      forgotten.push("research");
+      hosts = [];
+      sessions = [];
+      return { ok: true };
     },
-  }, () => remote);
+  }, () => server);
   await click(switcher());
   await click(menuItem("research"));
   assert.equal(visibleMachine(), "server");
+
   await click(switcher());
-  await click(menuItem(m.remote_disconnect()));
+  await click(menuItem(m.remote_forget_machine()));
+  assert.deepEqual(forgotten, []);
+  await click(find('[role="alertdialog"] button, [role="dialog"] button', m.remote_forget()));
+  assert.deepEqual(forgotten, ["research"]);
   assert.equal(visibleMachine(), "local");
   await click(switcher());
-  await click(menuItem("research"));
-  assert.equal(visibleMachine(), "server");
-  assert.equal(requests.filter((request) => request === "POST /api/remote/sessions/server/reconnect").length, 1);
+  assert.equal(menuItem("research"), null);
 });
 
 test("a disconnected workspace without startup data offers Reconnect", async (t) => {
@@ -127,7 +177,11 @@ for (const [place, path] of [["home", "/projects"], ["sidebar", "/projects/p/tas
 
 for (const [status, shown] of [["connected", null], ["reconnecting", m.remote_machine_connecting()], ["disconnected", m.remote_machine_disconnected()]]) {
   test(`the sidebar names the machine it shows, ${status}`, async () => {
-    await laptop("/projects/p/tasks/new", { "GET /api/remote/sessions": () => ({ sessions: [{ ...server, status }] }) });
+    const listed = { ...server, status };
+    await laptop("/projects/p/tasks/new", {
+      "GET /api/remote/sessions": () => ({ sessions: [listed] }),
+      "POST /api/remote/sessions": () => listed,
+    });
     assert.match(switcher().textContent, new RegExp(m.projects_local()));
     assert.equal(switcher().getAttribute("aria-label"), m.remote_machine_switcher({ machine: m.projects_local() }));
 
@@ -195,26 +249,58 @@ test("a pasted ssh command is saved, then connected by the alias the server chos
   assert.equal(visibleMachine(), "server");
 });
 
-test("a saved remote is removed unless a session is open on it", async () => {
+test("a Forget the server refuses keeps the machine open and says why", async () => {
+  let refuse;
+  await laptop("/projects/p/tasks/new", {
+    "DELETE /api/remote/hosts/research": () => new Promise((resolve) => {
+      refuse = () => resolve(Response.json({ error: "Could not update the saved hosts file." }, { status: 500 }));
+    }),
+  });
+  await click(switcher());
+  await click(menuItem("research"));
+  await click(switcher());
+  await click(menuItem(m.remote_forget_machine()));
+  await click(find('[role="dialog"] button', m.remote_forget()));
+  assert.equal(visibleMachine(), "server");
+  await act(async () => refuse());
+  await settle();
+  assert.equal(visibleMachine(), "server");
+  assert.equal(document.querySelector('[role="dialog"] [role="alert"]')?.textContent, "Could not update the saved hosts file.");
+});
+
+test("a machine that fails to connect leaves focus on the switcher", async () => {
+  await laptop("/projects/p/tasks/new", {
+    "POST /api/remote/sessions": () => Response.json({ error: "Add this host in Connect to remote first." }, { status: 400 }),
+  });
+  await click(switcher());
+  await click(menuItem("research"));
+  assert.equal(visibleMachine(), "local");
+  assert.ok(document.activeElement === switcher());
+});
+
+test("a saved remote is forgotten from Connect to remote, with or without a session", async () => {
   const removed = [];
   let hosts = [{ host: "research" }, { host: "lab", user: "me", hostname: "lab.example.edu", port: "2222" }];
   await laptop("/projects", {
     "GET /api/remote/sessions": () => ({ sessions: [server] }),
     "GET /api/remote/hosts": () => ({ hosts }),
-    "DELETE /api/remote/hosts/lab": () => {
-      removed.push("lab");
-      hosts = hosts.filter((host) => host.host !== "lab");
+    ...Object.fromEntries(["lab", "research"].map((host) => [`DELETE /api/remote/hosts/${host}`, () => {
+      removed.push(host);
+      hosts = hosts.filter((entry) => entry.host !== host);
       return { ok: true };
-    },
+    }])),
   });
   await click(switcher());
   await click(menuItem(m.remote_dialog_title()));
   assert.ok(find('[role="dialog"] li', "me@lab.example.edu:2222"));
-  const removeButton = (host) => document.querySelector(`[role="dialog"] button[aria-label="${m.remote_remove_host({ host: autoDir(host) })}"]`);
-  assert.equal(removeButton("research"), null);
-  await click(removeButton("lab"));
-  assert.deepEqual(removed, ["lab"]);
+  const forgetButton = (host) => document.querySelector(`[role="dialog"] button[aria-label="${m.remote_forget_host({ host: autoDir(host) })}"]`);
+  for (const host of ["lab", "research"]) {
+    await click(forgetButton(host));
+    await click(find('[role="alertdialog"] button, [role="dialog"] button', m.remote_forget()));
+  }
+  assert.deepEqual(removed, ["lab", "research"]);
   assert.equal(find('[role="dialog"] li', "lab"), null);
+  assert.equal(find('[role="dialog"] li', "research"), null);
 });
 
 for (const kind of ["local", "ssh"]) {

@@ -65,7 +65,7 @@ async function mountRoot(element) {
 
 /** Mounts `element` on a local page showing `workspace` and its dialogs; every mount ends with its test. */
 export async function render(element, workspace = createWorkspace("test")) {
-  const machines = { owner: workspace, activeId: "local", sessions: [], canSwitch: false, selectLocal() {}, selectRemote() {} };
+  const machines = { owner: workspace, activeId: "local", sessions: [], hosts: [], canSwitch: false, selectLocal() {}, async connect() {} };
   const wrap = (next) => createElement(MachineSelectionContext, { value: machines }, createElement(WorkspaceContext, { value: workspace },
     createElement(QueryClientProvider, { client: workspace.queryClient }, next, createElement(workspace.dialogs.DialogManager))));
   const { container, show, unmount } = await mountRoot(wrap(element));
