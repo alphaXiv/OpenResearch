@@ -2193,6 +2193,18 @@ mod imp {
             .collect()
     }
 
+    /// A shortcut this window cannot parse leaves its item without one.
+    #[cfg(target_os = "macos")]
+    fn shortcut(id: &str, hotkey: &str) -> Option<Accelerator> {
+        match hotkey.replace("Mod", "CmdOrCtrl").parse() {
+            Ok(accelerator) => Some(accelerator),
+            Err(error) => {
+                eprintln!("openresearch app: showing {id} without its shortcut {hotkey}: {error}");
+                None
+            }
+        }
+    }
+
     #[cfg(target_os = "macos")]
     fn build_menu(spec: &[PageMenu]) -> anyhow::Result<Menu> {
         let menu = Menu::new();
@@ -2209,13 +2221,7 @@ mod imp {
                         let accelerator = hotkey
                             .as_ref()
                             .and_then(serde_json::Value::as_str)
-                            .and_then(|hotkey| match hotkey.replace("Mod", "CmdOrCtrl").parse::<Accelerator>() {
-                                Ok(accelerator) => Some(accelerator),
-                                Err(error) => {
-                                    eprintln!("openresearch app: showing {id} without its shortcut {hotkey}: {error}");
-                                    None
-                                }
-                            });
+                            .and_then(|hotkey| shortcut(id, hotkey));
                         if let Some(checked) = checked {
                             submenu.append(&CheckMenuItem::with_id(
                                 id,
@@ -2505,6 +2511,13 @@ mod imp {
                     super::PageMenuEntry::Native { name },
                 ] if id == "chat.new" && name == "copy"
             ));
+        }
+
+        #[cfg(target_os = "macos")]
+        #[test]
+        fn a_shortcut_the_window_cannot_parse_is_left_off() {
+            assert!(super::shortcut("chat.new", "Mod+N").is_some());
+            assert!(super::shortcut("chat.find", "Mod+Nonsense").is_none());
         }
 
         #[test]
