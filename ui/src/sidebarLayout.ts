@@ -14,8 +14,9 @@ export type SidebarRow =
   | { kind: "more"; project: Project }
   | { kind: "status"; project: Project; pending: boolean; error: boolean; retry: () => void; empty?: string };
 
-/** Chats without a project share one group, whichever scratch project holds each. */
-export const sidebarGroup = (project: Project) => project.scratch ? "scratch" : project.id;
+/** Chats of unnamed projects share one group, whichever project holds each. */
+export const UNNAMED_GROUP = "unnamed";
+export const sidebarGroup = (project: Project) => project.unnamed ? UNNAMED_GROUP : project.id;
 
 /** How much of Done opening it shows at the rail's foot: five rows and half a sixth, the rest below the fold. */
 export const DONE_PREVIEW_HEIGHT = 32 * 5.5;

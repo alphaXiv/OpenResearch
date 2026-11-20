@@ -32,7 +32,7 @@ import { chatSearchRanges } from "../chatSearch";
 import { ComposerProjectPicker } from "./ComposerProjectPicker";
 import { LibraryPicker } from "./LibraryPicker";
 import { ProjectInfoCard } from "./ProjectInfoCard";
-import { NoProjectGroupHeader, PendingProjectMove, ProjectProposalCard, projectLabel, projectProposal, useCreateProject, type ProjectProposal } from "./NoProject";
+import { PendingProjectMove, ProjectProposalCard, projectLabel, projectProposal, useCreateProject, type ProjectProposal } from "./NoProject";
 import { mutCreateScratchProject } from "../queries/projects";
 import { ProjectIconTile } from "./ProjectIcon";
 import { CARD_FADE_MS, SessionHoverCard } from "./SessionHoverCard";
@@ -41,7 +41,7 @@ import { DelegateCard } from "./DelegateCard";
 import { EnvRequestCard } from "./EnvRequestCard";
 import { delegateAncestors, delegateModelLabel, delegateStatus, delegatesOf, type DelegateStatus } from "../delegates";
 import { taskLocation } from "../workspaceState";
-import { DONE_PREVIEW_HEIGHT, fitSidebarRows, sidebarGroup, sidebarRowHeight, type RailSection, type SidebarRow } from "../sidebarLayout";
+import { DONE_PREVIEW_HEIGHT, UNNAMED_GROUP, fitSidebarRows, sidebarGroup, sidebarRowHeight, type RailSection, type SidebarRow } from "../sidebarLayout";
 import { useVirtualizer, defaultRangeExtractor, elementScroll, measureElement as measureVirtualElement, type Range as VirtualRange } from "@tanstack/react-virtual";
 import { markLiveUpdate } from "../queries/live";
 import {
@@ -82,7 +82,7 @@ import {
   paperToken,
 } from "../fileMentions";
 import { m } from "../paraglide/messages.js";
-import { formatForDisplay, matchesKeyboardEvent, useHotkey } from "@tanstack/react-hotkeys";
+import { matchesKeyboardEvent, useHotkey } from "@tanstack/react-hotkeys";
 import { appHotkeys } from "../hotkeys";
 import { copyToClipboard } from "../clipboard";
 import { readClipboardImage } from "../clipboardImage";
@@ -5821,12 +5821,13 @@ function SessionRow({
           <div className={`${lead ? "mt-0.5" : ""} flex items-center gap-2 text-xs text-subtext`}>
             <span className="flex min-w-0 flex-1 items-center gap-1.5">
               <ProjectIconTile project={project} size="sm" />
-              {!project.scratch && <span className="truncate">{projectName}</span>}
+              {!project.unnamed && <span className="truncate">{projectName}</span>}
             </span>
             <InboxStatus status={chatStatus(session, busy, waiting, runs)} unread={unread} />
           </div>
         </div>
-      ) : (
+      ) : <>
+        {project.unnamed && <ProjectIconTile project={project} size="sm" />}
         <span ref={titleRef} className={`session-title ${attention ? "text-ink-amber" : ""}`} onDoubleClick={startEditing}>
           <span className="inline-block align-top">
             <TitleReveal
@@ -5836,7 +5837,7 @@ function SessionRow({
             />
           </span>
         </span>
-      )}
+      </>}
       {plain && runMark === "running" && !editing && (
         <Tooltip content={m.chat_experiment_running()} className="shrink-0 text-accent-green">
           <FlaskConical size={14} className="motion-safe:animate-[or-experiment-pulse_3s_ease-in-out_infinite]" aria-label={m.chat_experiment_running()} />
@@ -5902,7 +5903,7 @@ function SessionRow({
           onSetArchived={() => onSetArchived(!session.archived)}
           onMarkBelowDone={onMarkBelowDone}
           onMoveToProject={onMoveToProject}
-          onProjectSettings={project.scratch ? undefined : onProjectSettings}
+          onProjectSettings={project.unnamed ? undefined : onProjectSettings}
           onDelete={onDelete}
         />
       )}
@@ -6089,7 +6090,7 @@ export function ChatPanel({
   onCloseMobileRail,
   contentInert = false,
   onShowRail,
-  onNewProject,
+  onImportProject,
   mainView,
   onSelectMainView,
   onOpenFile,
@@ -6138,7 +6139,8 @@ export function ChatPanel({
   contentInert?: boolean;
   /** Reopen the rail (from the chat header's sidebar icon). */
   onShowRail: () => void;
-  onNewProject?: () => void;
+  /** Opens the form to start the project from a paper, a folder or an .orx file, keeping the unsent `draft`. */
+  onImportProject?: (draft: string) => void;
   /** Run a harness setup command (`path` is its setup route) in the right panel's terminal tab. */
   onRunSetup?: (command: string, path: string) => void;
   /** Settings sections replace chat; Artifacts remains a right-panel tool. */
@@ -6309,26 +6311,20 @@ export function ChatPanel({
   const recentActivity = new Map(projectActivity.map((activity) => [activity.projectId, activity.lastActivityAt]));
   const byRecency = (a: Project, b: Project) => Math.max(recentActivity.get(b.id) ?? 0, b.updatedAt) - Math.max(recentActivity.get(a.id) ?? 0, a.updatedAt);
   const currentProject = sidebarProjects.find((project) => project.id === projectId);
-  // Each chat without a project has a scratch project of its own; the newest one stands for the group.
+  // A project nobody named holds one chat, so it lists as a plain chat above the projects, newest first.
   const chatCounts = new Map(projectActivity.map((activity) => [activity.projectId, activity.totalAgents]));
-  const scratchProjects = sidebarProjects.filter((project) => project.scratch && (project.id === projectId || chatCounts.get(project.id))).sort(byRecency);
-  const scratchGroup = currentProject?.scratch ? currentProject : scratchProjects[0];
-  // Chats without a project stay on top, so opening one never reshuffles the projects below.
-  const sortedProjects = [
-    ...(scratchGroup ? [scratchGroup] : []),
-    ...sidebarProjects.filter((project) => !project.scratch)
-      .sort((a, b) => Number(pinnedProjects.includes(b.id)) - Number(pinnedProjects.includes(a.id)) || byRecency(a, b)),
-  ];
+  const unnamedProjects = sidebarProjects.filter((project) => project.unnamed && (project.id === projectId || chatCounts.get(project.id))).sort(byRecency);
+  const sortedProjects = sidebarProjects.filter((project) => !project.unnamed)
+    .sort((a, b) => Number(pinnedProjects.includes(b.id)) - Number(pinnedProjects.includes(a.id)) || byRecency(a, b));
   const candidateLimit = sidebarGrouping !== "projects" || sidebarExpanded ? sortedProjects.length : Math.max(1, Math.ceil(railHeight / 36));
   let shownProjects = sortedProjects.slice(0, candidateLimit);
-  const shownCurrent = currentProject?.scratch ? scratchGroup : currentProject;
-  if (shownCurrent && !shownProjects.includes(shownCurrent)) {
-    shownProjects = [...shownProjects.slice(0, candidateLimit - 1), shownCurrent];
+  if (currentProject && !currentProject.unnamed && !shownProjects.includes(currentProject)) {
+    shownProjects = [...shownProjects.slice(0, candidateLimit - 1), currentProject];
   }
-  const scratchLimit = chatLimits.scratch ?? 6;
-  const queriedScratch = scratchProjects.slice(0, scratchLimit);
-  if (currentProject?.scratch && !queriedScratch.includes(currentProject)) queriedScratch.push(currentProject);
-  const queriedProjects = sidebarGrouping === "projects" ? shownProjects.flatMap((project) => project.scratch ? queriedScratch : [project]) : [];
+  const unnamedLimit = chatLimits[UNNAMED_GROUP] ?? 6;
+  const shownUnnamed = unnamedProjects.slice(0, unnamedLimit);
+  if (currentProject?.unnamed && !shownUnnamed.includes(currentProject)) shownUnnamed.push(currentProject);
+  const queriedProjects = sidebarGrouping === "projects" ? [...shownUnnamed, ...shownProjects] : [];
   const projectSessionsQueries = useQueries({
     queries: queriedProjects.map((project) => ({
       ...listChatSessionsQuery(project.id),
@@ -7101,7 +7097,7 @@ export function ChatPanel({
         if (embedded) {
           const parent = openSession?.sideParentSessionId ?? sideParentSessionId;
           if (parent) onOpenSideChat?.(parent, "");
-        } else startNewTask();
+        } else startChatIn(projectId);
         return false;
       case "resume":
         showCustomDialog({
@@ -7613,6 +7609,11 @@ export function ChatPanel({
   const historyError = !historyQuery.data ? historyQuery.error : null;
   // A chat without a project has no project to suggest a start from.
   const starterVisible = mainView === "chat" && !embedded && !threadMounted && !contentLoading && !contentError && !historyLoading && !historyError && !currentProject?.scratch;
+  // A new project stays one after the user names it, until it has a chat or they open another; any other empty project is an ordinary one.
+  const newProjectId = useRef<string | undefined>(undefined);
+  if (currentProject?.unnamed) newProjectId.current = currentProject.id;
+  else if (activeId || newProjectId.current !== currentProject?.id) newProjectId.current = undefined;
+  const draftProject = !embedded && !activeId && !launching && currentProject?.scratch && newProjectId.current === currentProject.id && (sessionsLoaded ? sessions.length === 0 : currentProject.unnamed) ? currentProject : undefined;
   const starterQuery = useQuery({
     ...getProjectStarterPromptsQuery(projectId, starterHarness ?? "claude-code", starterModel, getLocale(), composerSelection?.profile ?? null),
     enabled: starterVisible && starterHarness !== null,
@@ -8435,13 +8436,13 @@ export function ChatPanel({
 
   function removeSession(session: ChatSession) {
     const title = session.title?.trim() || m.chat_untitled();
-    const scratch = sidebarProjects.find((project) => project.id === session.projectId)?.scratch;
+    const unnamed = sidebarProjects.find((project) => project.id === session.projectId)?.unnamed;
     const siblings = queryClient.getQueryData(listChatSessionsQuery(session.projectId).queryKey)?.filter((row) => row.id !== session.id && !row.sideParentSessionId);
-    // The last chat without a project takes its scratch project with it.
-    const lastOfScratch = scratch && !siblings?.length;
+    // The last chat of an unnamed project takes the project with it.
+    const lastOfUnnamed = unnamed && !siblings?.length;
     showConfirmDialog({
       title: m.chat_panel_delete(),
-      description: lastOfScratch
+      description: lastOfUnnamed
         ? m.chat_delete_scratch_session_confirm({ title: autoDir(title) })
         : m.chat_delete_session_confirm({ title: autoDir(title) }),
       confirmLabel: m.chat_panel_delete(),
@@ -8449,10 +8450,10 @@ export function ChatPanel({
       onCancel: "close",
       onConfirm: () => {
         const active = session.id === activeId;
-        if (active && !lastOfScratch) onActiveSessionChangeRef.current(null, { replace: true });
+        if (active && !lastOfUnnamed) onActiveSessionChangeRef.current(null, { replace: true });
         mutDeleteChatSession.runWithOptions(workspace, session, { onSuccessData: () => {
           forgetSession(session.id);
-          if (!lastOfScratch) return;
+          if (!lastOfUnnamed) return;
           setScopedQueryData(listProjectsQuery().queryKey, (rows) => rows?.filter((row) => row.id !== session.projectId));
           removeCachedProject(session.projectId);
           if (active) void navigate({ to: "/projects", replace: true });
@@ -8461,7 +8462,6 @@ export function ChatPanel({
     });
   }
 
-  const queueChord = formatForDisplay("Mod+Enter");
   const startProjectTask = useCallback(() => {
     setSessionFilter("active");
     requestNewChatFocus(projectId);
@@ -8478,20 +8478,24 @@ export function ChatPanel({
       showAlert(error instanceof Error ? error.message : String(error), "error");
     }
   }, [onActiveSessionChange]);
+  /** A new chat in `target`; an unnamed project holds one chat, so it gets a new project instead. */
+  const startChatIn = useCallback((target: string) => {
+    if (sidebarProjects.find((project) => project.id === target)?.unnamed) return void startScratchChat();
+    setSessionFilter("active");
+    requestNewChatFocus(target);
+    onActiveSessionChange(null, { projectId: target });
+  }, [onActiveSessionChange, sidebarProjects, startScratchChat]);
+  /** The sidebar's New chat goes where work happened last. */
   const startNewTask = useCallback(async () => {
     try {
       const activity = await queryClient.fetchQuery({ ...listProjectActivityQuery(), staleTime: 0 });
       const latest = activity.reduce<(typeof activity)[number] | undefined>((current, item) =>
         !current || item.lastActivityAt > current.lastActivityAt ? item : current, undefined);
-      const targetProject = latest?.projectId ?? projectId;
-      if (sidebarProjects.find((project) => project.id === targetProject)?.scratch) return void startScratchChat();
-      setSessionFilter("active");
-      requestNewChatFocus(targetProject);
-      onActiveSessionChange(null, { projectId: targetProject });
+      startChatIn(latest?.projectId ?? projectId);
     } catch (error) {
       showAlert(error instanceof Error ? error.message : String(error), "error");
     }
-  }, [projectId, onActiveSessionChange, sidebarProjects, startScratchChat]);
+  }, [projectId, startChatIn]);
 
   const openSpawnedSession = useCallback(
     async (sessionId: string) => {
@@ -8512,7 +8516,7 @@ export function ChatPanel({
 
   const newTask = () => {
     if (commandRegion() === "right" && document.querySelector(".right-pane [data-side-chat]")) return;
-    startNewTask();
+    startChatIn(projectId);
   };
   useHotkey(appHotkeys["task.new"], newTask, { enabled: !embedded, requireReset: true, conflictBehavior: "allow" });
   useHotkey(appHotkeys["chat.find"], openFind, { enabled: mainView === "chat" && !contentInert && (embedded ? searchRegion === "right" : searchRegion !== "right"), requireReset: true, ignoreInputs: false, capture: true, conflictBehavior: "allow" });
@@ -8522,12 +8526,23 @@ export function ChatPanel({
     ? hasPendingInput(messages, busy) : session.awaitingInput === true;
   const sessionBusy = (project: Project, session: ChatSession) => project.id === projectId ? state.busySessions.has(session.id) : session.busy;
   const sidebarRows: SidebarRow[] = [];
+  const projectSessions = (project: Project) => project.id === projectId ? sessions : projectSessionsQueries[queriedProjects.indexOf(project)].data ?? EMPTY_SESSIONS;
+  if (sidebarGrouping === "projects") {
+    shownUnnamed
+      .flatMap((project) => projectSessions(project).map((session) => ({ project, session })))
+      .filter(({ session }) => !session.sideParentSessionId && !session.delegate && (matchesFilter(sessionFilter, session.archived) || session.id === activeId))
+      .sort((a, b) => b.session.updatedAt - a.session.updatedAt)
+      .forEach(({ project, session }) => sidebarRows.push({ kind: "chat", project, session }));
+    if (unnamedProjects.length > 6) sidebarRows.push({ kind: "more", project: unnamedProjects[0] });
+    shownUnnamed.forEach((project) => {
+      const query = projectSessionsQueries[queriedProjects.indexOf(project)];
+      if (query.error && !projectSessions(project).length) sidebarRows.push({ kind: "status", project, pending: false, error: true, retry: () => void query.refetch() });
+    });
+  }
   if (sidebarGrouping === "projects") shownProjects.forEach((project) => {
     const group = sidebarGroup(project);
-    const members = project.scratch ? queriedScratch : [project];
-    const queries = members.map((member) => projectSessionsQueries[queriedProjects.indexOf(member)]);
-    const projectOf = new Map(members.map((member) => [member.id, member]));
-    const matching = members.flatMap((member, index) => member.id === projectId ? sessions : queries[index].data ?? EMPTY_SESSIONS)
+    const query = projectSessionsQueries[queriedProjects.indexOf(project)];
+    const matching = projectSessions(project)
       .filter((session) => !session.sideParentSessionId && !session.delegate && (matchesFilter(sessionFilter, session.archived) || session.id === activeId))
       .sort((a, b) => b.updatedAt - a.updatedAt);
     const chatLimit = chatLimits[group] ?? 6;
@@ -8535,14 +8550,11 @@ export function ChatPanel({
     const selected = matching.find((session) => session.id === activeId);
     if (selected && !visible.some((session) => session.id === activeId)) visible = [...visible.slice(0, chatLimit - 1), selected];
     const collapsed = collapsedProjects.includes(group);
-    const rowProject = (session: ChatSession) => projectOf.get(session.projectId) ?? project;
-    sidebarRows.push({ kind: "project", project, collapsed, busy: collapsed && matching.some((session) => sessionBusy(rowProject(session), session) && !sessionWaiting(session)) });
+    sidebarRows.push({ kind: "project", project, collapsed, busy: collapsed && matching.some((session) => sessionBusy(project, session) && !sessionWaiting(session)) });
     if (collapsed) return;
-    visible.forEach((session) => sidebarRows.push({ kind: "chat", project: rowProject(session), session }));
-    if (matching.length > 6 || (project.scratch && scratchProjects.length > 6)) sidebarRows.push({ kind: "more", project });
-    const pending = queries.some((query) => query.isPending);
-    const error = queries.some((query) => query.error);
-    if (!visible.length) sidebarRows.push({ kind: "status", project, pending, error, retry: () => { for (const query of queries) void query.refetch(); } });
+    visible.forEach((session) => sidebarRows.push({ kind: "chat", project, session }));
+    if (matching.length > 6) sidebarRows.push({ kind: "more", project });
+    if (!visible.length) sidebarRows.push({ kind: "status", project, pending: query.isPending, error: Boolean(query.error), retry: () => void query.refetch() });
   });
   const atWork = ({ project, session }: { project: Project; session: ChatSession }) =>
     chatStatusWorking(chatStatus(session, sessionBusy(project, session), sessionWaiting(session), runsBySession.get(session.id) ?? EMPTY_RUNS));
@@ -8875,7 +8887,7 @@ export function ChatPanel({
     projectRemoved: (project) => { if (project.id === projectId) void navigate({ to: "/projects" }); },
     openProjectSettings: (project) => void navigate({ href: `/projects/${encodeURIComponent(project.id)}/settings/project` }),
     newProjectChat: (project) => {
-      if (project.scratch) void startScratchChat();
+      if (project.unnamed) void startScratchChat();
       else if (project.id === projectId) startProjectTask();
       else void navigate({ to: "/projects/$projectId/tasks/new", params: { projectId: project.id } });
     },
@@ -9058,16 +9070,7 @@ export function ChatPanel({
         className="relative"
         style={{ height: sidebarRowHeight(row) }}
       >
-        {row.kind === "project" && project.scratch ? (
-          <div className="group h-9 flex items-end gap-1 rounded-md px-2.25 text-text">
-            <NoProjectGroupHeader
-              collapsed={row.collapsed}
-              busy={row.busy}
-              onToggleCollapsed={() => sidebarActions.current.toggleProjectCollapsed(project)}
-              onNewChat={() => sidebarActions.current.newProjectChat(project)}
-            />
-          </div>
-        ) : row.kind === "project" ? (
+        {row.kind === "project" ? (
           <div className="group h-9 flex items-end gap-1 rounded-md px-2.25 text-text">
             <SidebarProjectCard
               actions={sidebarActions}
@@ -9079,7 +9082,7 @@ export function ChatPanel({
             />
           </div>
         ) : s ? (
-          <div className={sidebarGrouping === "projects" ? "ms-5.5" : undefined}>
+          <div className={sidebarGrouping === "projects" && !project.unnamed ? "ms-5.5" : undefined}>
             {sessionRow(project, s, row.kind === "inbox" ? "inbox" : row.kind === "done" ? "done" : "list", row.kind === "inbox" ? row.run : null, row.kind === "inbox" && row.section === "inbox")}
           </div>
         ) : row.kind === "more" ? (
@@ -9117,8 +9120,8 @@ export function ChatPanel({
           {sidebarGrouping === "projects" ? m.projects_home_projects() : m.sidebar_chats()}
         </div>
         <div className="rail-section-actions flex shrink-0 items-center gap-1">
-          {sidebarGrouping === "projects" && onNewProject && <Tooltip interactive content={m.projects_home_new_project()} className="rounded-sm">
-            <IconButton size="small" className="text-subtext" aria-label={m.projects_home_new_project()} onClick={onNewProject}>
+          {sidebarGrouping === "projects" && <Tooltip interactive content={m.projects_home_new_project()} className="rounded-sm">
+            <IconButton size="small" className="text-subtext" aria-label={m.projects_home_new_project()} onClick={() => void startScratchChat()}>
               <FolderPlus size={16} className="text-subtext" />
             </IconButton>
           </Tooltip>}
@@ -9337,7 +9340,7 @@ export function ChatPanel({
             <p>{historyError.message}</p>
             <Button onClick={() => void historyQuery.refetch()}>{m.app_retry()}</Button>
           </div>
-        ) : (contentLoading || historyLoading) && !launching ? (
+        ) : (historyLoading || (contentLoading && activeId)) && !launching ? (
           <div className="chat-loading flex-1 min-h-0 overflow-hidden [scrollbar-gutter:stable_both-edges]" role="status" aria-label={m.chat_panel_loading_conversation()} aria-busy="true">
             <div aria-hidden="true" className="mx-auto flex h-full w-full max-w-readable flex-col gap-6 px-4 pb-8 pt-4 motion-safe:animate-pulse">
               <div className="ms-auto h-14 w-3/5 shrink-0 rounded-lg bg-panel" />
@@ -9684,15 +9687,18 @@ export function ChatPanel({
               </Tooltip>
             </div>
           )}
-          {!embedded && !activeId && !launching && onNewProject && (
+          {!embedded && !activeId && !launching && onImportProject && (
             <ComposerProjectPicker
               projects={sidebarProjects}
               activity={projectActivity}
               projectId={projectId}
               projectName={projectName}
-              onNewProject={onNewProject}
-              onNoProject={() => void startScratchChat()}
+              draftProject={draftProject}
+              onNewProject={() => void startScratchChat()}
+              onImport={() => onImportProject(draft)}
+              onOpenSettings={(project) => sidebarActions.current.openProjectSettings(project)}
               onSelect={(id) => {
+                requestNewChatFocus(id);
                 if (id !== projectId) void navigate({ to: "/projects/$projectId/tasks/new", params: { projectId: id } });
               }}
             />
@@ -9808,15 +9814,15 @@ export function ChatPanel({
                         : questions.part?.prompt?.options?.length
                           ? m.chat_question_custom_response()
                           : m.chat_question_your_answer()
-                      : steering && activeHarness
-                      ? m.chat_steer_placeholder({ harness: ltr(activeHarness.name), shortcut: ltr(queueChord) })
-                      : composerSelection
-                        ? activeHarness?.agentReady
-                          ? m.chat_message_harness({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
-                          : composerSignIn
-                            ? m.add_agent_sign_in_title({ name: autoDir(agentName ?? activeHarness?.name ?? "") })
-                            : m.chat_harness_unavailable({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
-                        : m.chat_ask_agent_placeholder()
+                      : composerSelection && !activeHarness?.agentReady
+                        ? composerSignIn
+                          ? m.add_agent_sign_in_title({ name: autoDir(agentName ?? activeHarness?.name ?? "") })
+                          : m.chat_harness_unavailable({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
+                        : draftProject
+                          ? m.chat_new_project_placeholder()
+                          : activeId
+                            ? m.chat_followup_placeholder()
+                            : m.chat_new_chat_placeholder()
                   }
                   plain={bashMode && !asking}
                   readOnly={questions.busy}
