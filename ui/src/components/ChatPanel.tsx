@@ -5768,7 +5768,7 @@ function SessionRow({
         <ProjectIconTile project={project} size="sm" />
         {editing ? titleInput : (
           <span ref={titleRef} className={`session-title ${runFlag ? "text-ink-amber" : unread ? "text-title-unread" : "text-title-read"}`} onDoubleClick={startEditing}>
-            <span className="inline-block"><TitleReveal key={revealTitle ?? "static"} title={title} animate={revealTitle !== undefined} /></span>
+            <span className="inline-block align-top"><TitleReveal key={revealTitle ?? "static"} title={title} animate={revealTitle !== undefined} /></span>
           </span>
         )}
         {flagMark}
@@ -5793,7 +5793,7 @@ function SessionRow({
           <div className="flex items-center gap-2">
             {editing ? titleInput : (
               <span ref={titleRef} className={`session-title ${runFlag ? "text-ink-amber" : unread || waiting ? "text-title-unread" : "text-title-read"}`} onDoubleClick={startEditing}>
-                <span className="inline-block"><TitleReveal key={revealTitle ?? "static"} title={title} animate={revealTitle !== undefined} /></span>
+                <span className="inline-block align-top"><TitleReveal key={revealTitle ?? "static"} title={title} animate={revealTitle !== undefined} /></span>
               </span>
             )}
             {flagMark}
@@ -5828,7 +5828,7 @@ function SessionRow({
         </div>
       ) : (
         <span ref={titleRef} className={`session-title ${attention ? "text-ink-amber" : ""}`} onDoubleClick={startEditing}>
-          <span className="inline-block">
+          <span className="inline-block align-top">
             <TitleReveal
               key={revealTitle ?? "static"}
               title={title}
