@@ -9103,7 +9103,7 @@ pub struct TurnCtx {
     retry_started_emitted: bool,
     retry_exhausted: bool,
     setup_failure_reason: Option<&'static str>,
-    orx_retry_started: Option<Instant>,
+    pub(crate) orx_retry_started: Option<Instant>,
     orx_retry_count: u32,
     pub(crate) terminal_error: Option<(String, String)>,
     pub session_id: String,

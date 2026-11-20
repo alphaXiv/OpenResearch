@@ -3208,7 +3208,11 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
         }
         None => loop {
             // Outside the retry budget: the check's own timeout bounds it.
+            let settling = std::time::Instant::now();
             ctx.host.claude.settle_auth(&spec).await;
+            if let Some(started) = ctx.orx_retry_started.as_mut() {
+                *started += settling.elapsed();
+            }
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
             let acquire = ctx.host.claude.acquire_turn(spec.clone(), tx);
             let result = match ctx.orx_retry_remaining() {
