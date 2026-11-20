@@ -101,7 +101,7 @@ test("the composer shows why the agent stopped until a reply starts a new turn",
   })
 })
 
-test('Full auto-research keeps the last report while the next turn works', async ({ page, project, agent }) => {
+test('Full-auto keeps the last report while the next turn works', async ({ page, project, agent }) => {
   await project.open(page)
   const question = 'Which seed should the next run use?'
   const result = 'The seed-42 comparison is complete.'

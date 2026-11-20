@@ -135,7 +135,7 @@ SSH and Slurm run directories enter the automatic cleanup queue in the transacti
 - **The payload can speak.** New bytes in `$ORX_NOTIFY_FILE` become rate-limited notices (`src/engine/notify.rs`); hosted providers have no such file. Notice text is data for the agent, never instructions.
 - **Instrumentation rides with other work.** Progress card advice travels with the chat's next prompted turn at any autonomy level. A run ending before admission withdraws its advice.
 
-Full auto-research stages a stop check when an agent completes an ordinary turn without a yield or says `done` with plans left, once work that can wake the chat and unresolved prompts are clear. The check after `done` names the chat's unarchived experiments in the current project that have never had a run. Before admitting the hidden follow-up, the same notice dispatcher rechecks the plans and that the source turn still heads the active branch. User input, flag reminders, and owed run or delegate news take precedence. The follow-up itself cannot stage another stop check.
+Full-auto stages a stop check when an agent completes an ordinary turn without a yield or says `done` with plans left, once work that can wake the chat and unresolved prompts are clear. The check after `done` names the chat's unarchived experiments in the current project that have never had a run. Before admitting the hidden follow-up, the same notice dispatcher rechecks the plans and that the source turn still heads the active branch. User input, flag reminders, and owed run or delegate news take precedence. The follow-up itself cannot stage another stop check.
 
 Agents are taught to end their turn after launching: a blocking wait would die with the agent process, and a queued message survives it.
 
@@ -446,7 +446,7 @@ A flag keeps the token values from the look that raised it. Ordinary watcher sen
 A look that flags raises a flag in the transaction that settles it;
 on a run with a flag still open it is noted under that flag instead, its row a
 sentence that says so and its words a line beside the open flag's evidence. A
-noted flag wakes the agent in a Default or Full auto-research chat as a flag
+noted flag wakes the agent in a Default or Full-auto chat as a flag
 does, naming none to settle. Once someone keeps going after the open flag, a
 look sees what was noted and can flag it again if it still holds.
 
@@ -475,7 +475,7 @@ A run has at most one open flag from a look or a tripwire, so a trouble that
 lasts keeps one flag open; a tripwire condition is raised once a run. Keep going settles
 that run's flag only: a later run of the experiment with the same cause is
 flagged again, since a missed problem costs more than an extra flag. The flag and the wakes for
-each following Default or Full auto-research chat are written in one transaction; a
+each following Default or Full-auto chat are written in one transaction; a
 Collaborative chat is woken only when its user asks. Initial wakes, reminders and Ask are stored in `flag_wakes`. Servers through v0.2.28 drain
 `run_notices` alone. Each table batches and retries its hidden turns independently, and a pending
 result goes before a fresh wake about the same run. A wake says the watcher saw only a digest and

@@ -1,6 +1,7 @@
 import {
   useContext,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -51,7 +52,7 @@ import { cn } from "./ui/cn";
 import { harnessDisplayName, harnessKey, selectionHarness } from "../modelSelection";
 import { defaultOffer, localDay, newLines, VARIANT_EFFORTS, variantOffer } from "../modelLines";
 import { AgentIconTile } from "./AgentIcon";
-import { feedLine, lineLab, lineName, lineSection, ModelList, offerOn, type PickedFrom, type PickerLine } from "./ModelList";
+import { BADGE, feedLine, lineLab, lineName, lineSection, ModelList, offerOn, type PickedFrom, type PickerLine } from "./ModelList";
 import { harnessMark, listedSignedOut, pickerLines, type PickerAgent } from "./pickerAgents";
 import { useAgentSignIn } from "./HarnessSetupDialog";
 
@@ -175,17 +176,29 @@ function PermissionIcon({ id }: { id: string | null | undefined }) {
   return <Icon size={14} aria-hidden="true" className={cn("shrink-0", permission?.tone ?? "text-subtext")} />;
 }
 
-function DescribedRadioItem({ choice, icon, isDefault, className }: { choice: OptionChoice; icon?: ReactNode; isDefault?: boolean; className?: string }) {
+function DescribedRadioItem({ choice, icon, isDefault, beta, className }: { choice: OptionChoice; icon?: ReactNode; isDefault?: boolean; beta?: boolean; className?: string }) {
+  const descriptionId = useId();
+
+  const name = beta ? `${choice.label}, ${m.model_picker_beta()}` : isDefault ? `${choice.label} ${m.model_picker_default()}` : choice.label;
+
   return (
-    <Menu.RadioItem value={choice.id} closeOnClick label={choice.label} className={cn(SETTINGS_ROW, "items-start", className)}>
+    <Menu.RadioItem
+      value={choice.id}
+      closeOnClick
+      label={choice.label}
+      aria-label={name}
+      aria-describedby={choice.description ? descriptionId : undefined}
+      className={cn(SETTINGS_ROW, "items-start py-1", className)}
+    >
       <span className="flex min-w-0 items-start gap-2">
         {icon && <span className="flex h-5 items-center">{icon}</span>}
-        <span className="flex min-w-0 flex-col items-start gap-0.5">
-          <span>
+        <span className="flex min-w-0 flex-col items-start">
+          <span className="flex min-h-5 flex-wrap items-center gap-x-1">
             {choice.label}
-            {isDefault && <span className="text-ink-subtext"> {m.model_picker_default()}</span>}
+            {isDefault && <span className="text-ink-subtext">{m.model_picker_default()}</span>}
+            {beta && <span className={cn(BADGE, "bg-accent-purple-subtle text-ink-purple")}>{m.model_picker_beta()}</span>}
           </span>
-          {choice.description && <span className="text-sm leading-snug text-ink-subtext">{choice.description}</span>}
+          {choice.description && <span id={descriptionId} className="text-xs leading-4 text-ink-subtext">{choice.description}</span>}
         </span>
       </span>
       <Menu.RadioItemIndicator className="flex h-5 shrink-0 items-center">
@@ -572,16 +585,16 @@ export function ModelPicker({
   const speedLabel = (tier: string) => (tier === "fast" ? m.model_picker_fast_mode() : speedName(tier));
   const autonomyChoices: (OptionChoice & { id: Autonomy; icon: ReactNode })[] = [
     {
-      id: "agentic",
-      label: m.model_picker_autonomy_agentic(),
-      description: m.model_picker_autonomy_agentic_description(),
-      icon: <Bot size={14} aria-hidden="true" className="shrink-0 text-accent-purple" />,
-    },
-    {
       id: "copilot",
       label: m.model_picker_autonomy_copilot(),
       description: m.model_picker_autonomy_copilot_description(),
       icon: <Handshake size={14} aria-hidden="true" className="shrink-0 text-accent-green" />,
+    },
+    {
+      id: "agentic",
+      label: m.model_picker_autonomy_agentic(),
+      description: m.model_picker_autonomy_agentic_description(),
+      icon: <Bot size={14} aria-hidden="true" className="shrink-0 text-accent-purple" />,
     },
     {
       id: "autoresearch",
@@ -1004,7 +1017,7 @@ export function ModelPicker({
                         }}
                       >
                         {autonomyChoices.map((choice) => (
-                          <DescribedRadioItem key={choice.id} choice={choice} icon={choice.icon} className={choice.id === "autoresearch" ? "text-ink-purple" : undefined} />
+                          <DescribedRadioItem key={choice.id} choice={choice} icon={choice.icon} beta={choice.id === "autoresearch"} className={choice.id === "autoresearch" ? "text-ink-purple" : undefined} />
                         ))}
                       </Menu.RadioGroup>
                     </Menu.Group>

@@ -421,7 +421,7 @@ struct Seen {
 }
 
 const AGENTIC_RELAUNCH: &str =
-    "In Default or Full auto-research mode you may cancel and relaunch on your own.";
+    "In Default or Full-auto mode you may cancel and relaunch on your own.";
 const COPILOT_RELAUNCH: &str =
     "In Collaborative mode, ask the user before cancelling healthy compute or relaunching.";
 
