@@ -1990,19 +1990,39 @@ async fn fetch_pubmed_articles(pmids: &[String]) -> Result<Vec<PubmedArticle>> {
 }
 
 /// Search PubMed, keeping esearch's relevance order unless a date priority reranks it.
+/// Also returns esearch's query feedback (terms it did not find or ignored), which
+/// does not make the search fail.
 pub async fn discover_pubmed(
     query: &str,
     options: PubmedDiscoveryOptions<'_>,
-) -> Result<Vec<LitHit>> {
+) -> Result<(Vec<LitHit>, Vec<String>)> {
     let base = crate::config::pubmed_api_url();
     let url = pubmed_discovery_url(&base, query, &crate::config::ncbi_email(), options)?;
 
+    #[derive(Deserialize, Default)]
+    struct ErrorList {
+        #[serde(default)]
+        phrasesnotfound: Vec<String>,
+        #[serde(default)]
+        fieldsnotfound: Vec<String>,
+    }
+    #[derive(Deserialize, Default)]
+    struct WarningList {
+        #[serde(default)]
+        quotedphrasesnotfound: Vec<String>,
+        #[serde(default)]
+        phrasesignored: Vec<String>,
+    }
     #[derive(Deserialize)]
     struct SearchResult {
         #[serde(default)]
         idlist: Vec<String>,
         #[serde(rename = "ERROR")]
         error: Option<String>,
+        #[serde(default)]
+        errorlist: ErrorList,
+        #[serde(default)]
+        warninglist: WarningList,
     }
     #[derive(Deserialize)]
     struct SearchResponse {
@@ -2016,18 +2036,34 @@ pub async fn discover_pubmed(
     if let Some(error) = result.error {
         return Err(anyhow!("PubMed search failed: {error}"));
     }
+
+    let feedback = [
+        ("phrases not found", &result.errorlist.phrasesnotfound),
+        ("fields not found", &result.errorlist.fieldsnotfound),
+        (
+            "quoted phrases not found",
+            &result.warninglist.quotedphrasesnotfound,
+        ),
+        ("phrases ignored", &result.warninglist.phrasesignored),
+    ]
+    .into_iter()
+    .filter(|(_, terms)| !terms.is_empty())
+    .map(|(kind, terms)| format!("PubMed {kind}: {}", terms.join(", ")))
+    .collect();
+
     if result.idlist.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), feedback));
     }
 
     // efetch returns records in the order of the requested ids.
     let mut articles = fetch_pubmed_articles(&result.idlist).await?;
     rerank_pubmed_articles(&mut articles, options.prioritize);
-    Ok(articles
+    let hits = articles
         .into_iter()
         .take(options.limit as usize)
         .map(PubmedArticle::into_lit_hit)
-        .collect())
+        .collect();
+    Ok((hits, feedback))
 }
 
 fn rerank_pubmed_articles(articles: &mut [PubmedArticle], prioritize: &str) {
@@ -3066,6 +3102,61 @@ mod tests {
         assert!(requests[0].contains("authorization: bearer k123"));
         assert!(!requests[1].contains("authorization"));
         assert!(!requests[1].contains("mailto"));
+    }
+
+    #[tokio::test]
+    async fn pubmed_discovery_reports_terms_esearch_did_not_find() {
+        if !crate::config::in_test_child(&["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"]) {
+            return;
+        }
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        std::env::set_var(
+            "PUBMED_API_URL",
+            format!("http://{}", listener.local_addr().unwrap()),
+        );
+        tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut buf = [0u8; 4096];
+                let read = stream.read(&mut buf).await.unwrap();
+                let request = String::from_utf8_lossy(&buf[..read]);
+                let (kind, body) = if request.starts_with("GET /esearch") {
+                    (
+                        "json",
+                        r#"{"esearchresult":{"idlist":["111"],"errorlist":{"phrasesnotfound":["zzqqxxyy"],"fieldsnotfound":[]},"warninglist":{"quotedphrasesnotfound":[],"phrasesignored":["the"]}}}"#,
+                    )
+                } else {
+                    ("xml", "<PubmedArticleSet><PubmedArticle><MedlineCitation><PMID>111</PMID><Article><ArticleTitle>T</ArticleTitle></Article></MedlineCitation></PubmedArticle></PubmedArticleSet>")
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/{kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let (hits, feedback) = super::discover_pubmed(
+            "crispr[tiab] OR zzqqxxyy[tiab]",
+            PubmedDiscoveryOptions {
+                limit: 10,
+                published_after: None,
+                published_before: None,
+                prioritize: "popular",
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            feedback,
+            [
+                "PubMed phrases not found: zzqqxxyy",
+                "PubMed phrases ignored: the"
+            ]
+        );
     }
 
     #[tokio::test]
