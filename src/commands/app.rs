@@ -2138,8 +2138,12 @@ mod imp {
                 );
                 break None;
             }
-            eprintln!("openresearch app: the server {pid} exited: {code}");
-            let exit = Some((Some(code as i32), format!("exit code: {code}")));
+            let status = {
+                use std::os::windows::process::ExitStatusExt as _;
+                std::process::ExitStatus::from_raw(code)
+            };
+            eprintln!("openresearch app: the server {pid} exited: {status}");
+            let exit = Some((Some(code as i32), status.to_string()));
             if code != 0 {
                 break exit;
             }
