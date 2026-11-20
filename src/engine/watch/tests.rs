@@ -2513,7 +2513,7 @@ async fn an_overlong_sentence_gets_one_retry_with_the_exact_error() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn a_setup_sentence_expires_on_the_first_stage_count() {
+async fn a_setup_sentence_expires_on_the_first_bare_count() {
     if !crate::config::in_test_child(&[]) {
         return;
     }
@@ -2539,7 +2539,7 @@ async fn a_setup_sentence_expires_on_the_first_stage_count() {
         monitor.summary()["sentence"]["template"],
         "Waiting for data."
     );
-    let log = concat!(r#"::orx:: {"phase":"train","step":1,"of":20}"#, "\n");
+    let log = concat!(r#"::orx:: {"step":10,"of":100}"#, "\n");
     keep_log(&store, &row.id, log);
     let at = crate::store::now_ms() + 1_000;
     let mut snapshot = orx_signals::Snapshot::new(&row.id, "1-7", "g1");

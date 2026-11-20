@@ -181,7 +181,7 @@ the run is done is unknown, though each bar still shows its step of total.
 The same bounded fold runs beside native host logs and over API spools on the
 workspace machine. Its checkpoint commits unfinished frame bytes, byte cursor,
 latest values and bounded history together. It remembers the occurrence of the
-first counted named stage when that stage leaves the retained phase list, so
+first reported count when its stage leaves the retained phase list, so
 Setup stays ended. A restart resumes that checkpoint. A replaced or shortened
 log starts a new generation. A spool cut back to where
 its provider continues is the exception: its checkpoint stands while the bytes
