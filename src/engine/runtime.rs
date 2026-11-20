@@ -242,8 +242,12 @@ impl Runtime {
     pub fn start(self: &Arc<Self>) {
         tokio::spawn(self.clone().supervise());
         tokio::spawn(self.clone().collect_pending());
+        tokio::spawn(self.clone().backfill_prices());
         #[cfg(not(test))]
-        tokio::spawn(crate::local::prices::keep_fresh());
+        {
+            tokio::spawn(crate::local::prices::keep_fresh());
+            tokio::spawn(crate::local::spend::keep_modal_bills(self.data_dir.clone()));
+        }
     }
 
     fn store(&self) -> Result<MutexGuard<'_, Store>> {
@@ -723,6 +727,44 @@ impl Runtime {
                     }
                 }
             });
+        }
+    }
+
+    /// Prices, one at a time and at today's list price, the runs that finished before orx read
+    /// prices; one that fails is tried again when `orx up` next starts.
+    async fn backfill_prices(self: Arc<Self>) {
+        let runs = match self
+            .store()
+            .and_then(|store| store.unpriced_finished(&crate::local::spend::LIST_PRICED))
+        {
+            Ok(runs) => runs,
+            Err(error) => {
+                eprintln!("orx up: could not list the finished runs that have no price: {error:#}");
+                return;
+            }
+        };
+        for run_id in runs {
+            let priced = async {
+                let (run, launch) = {
+                    let store = self.store()?;
+                    (store.get_run(&run_id)?, store.unpriced_launch(&run_id)?)
+                };
+                let (Some(run), Some(launch)) = (run, launch) else {
+                    return Ok(());
+                };
+                let Some(handle) = handle_of(&run) else {
+                    return Ok(());
+                };
+                let backend = self.backend(&run)?;
+                let watched = WatchedRun { id: run.id, handle };
+                if let Some(quote) = backend.quote(&watched, &launch).await? {
+                    self.store()?.record_run_price(&run_id, &quote)?;
+                }
+                Ok::<_, crate::error::Error>(())
+            };
+            if let Err(error) = priced.await {
+                eprintln!("orx up: run {run_id}: could not price it after it finished: {error:#}");
+            }
         }
     }
 
@@ -2186,6 +2228,61 @@ mod tests {
             .unpriced_launch("run")
             .unwrap()
             .is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn runs_that_finished_unpriced_are_priced_at_the_list_price() {
+        let dir = std::env::temp_dir().join(format!("orx-backfill-{}", uuid::Uuid::new_v4()));
+        let runtime = collector(&dir);
+        let account = crate::engine::handle::ApiAccount {
+            target: Some("lab".into()),
+            context: None,
+        };
+        let handle = Handle::Api {
+            provider: "hf_job".into(),
+            account: account.clone(),
+            ids: vec!["job".into()],
+        };
+        for id in ["ran", "never-ran", "running"] {
+            insert_hf_run(&runtime, id);
+        }
+        let conn = rusqlite::Connection::open(dir.join("orx.db")).unwrap();
+        for (id, status, started) in [
+            ("ran", "done", Some(1)),
+            ("never-ran", "failed", None),
+            ("running", "running", Some(1)),
+        ] {
+            conn.execute(
+                "UPDATE runs SET status = ?2, started_at = ?3, backend_json = ?4 WHERE id = ?1",
+                rusqlite::params![
+                    id,
+                    status,
+                    started,
+                    json!({"kind": "engine", "handle": handle}).to_string()
+                ],
+            )
+            .unwrap();
+        }
+        let priced = Arc::new(Priced {
+            reads: Default::default(),
+            failures: 0,
+        });
+        lock(&runtime.backends).insert(
+            Key::Api {
+                provider: "hf_job".into(),
+                account,
+            },
+            priced.clone(),
+        );
+
+        runtime.clone().backfill_prices().await;
+        assert_eq!(priced.reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let store = runtime.store().unwrap();
+        assert!(store.unpriced_launch("ran").unwrap().is_none());
+        assert!(store.unpriced_launch("never-ran").unwrap().is_some());
+        assert!(store.unpriced_launch("running").unwrap().is_some());
+        drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }
 
