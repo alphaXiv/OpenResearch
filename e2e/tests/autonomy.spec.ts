@@ -1,6 +1,9 @@
 import { expect, send, test } from '../src/test.ts'
 
-test('the autonomy picker saves Full auto-research and applies it to the chat', async ({ page, project, agent }, info) => {
+test('the autonomy picker saves Full auto-research and applies it to the chat', async ({ page, agent, launchOrx }, info) => {
+  const orx = await launchOrx()
+  await orx.onboard()
+  const project = await orx.createProject('autonomy')
   await project.open(page)
   const trigger = page.getByRole('button', { name: /Autonomy: Default$/ })
   const menu = page.getByRole('menu', { name: 'Permissions' })
@@ -29,7 +32,7 @@ test('the autonomy picker saves Full auto-research and applies it to the chat', 
   await send(page, 'Investigate the experiment results.')
   await expect(page.getByText('Ready to follow the approved research direction.', { exact: true })).toBeVisible()
   const sessionId = new URL(page.url()).pathname.split('/').at(-1)!
-  const playbook = await page.request.get(`/api/projects/${project.id}/file`, {
+  const playbook = await page.request.get(`${orx.url}/api/projects/${project.id}/file`, {
     params: { sessionId, path: '.openresearch/agent/autoresearch-local.md' },
   })
   expect(playbook.ok()).toBe(true)

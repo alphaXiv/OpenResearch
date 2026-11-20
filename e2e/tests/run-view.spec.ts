@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { expect as baseExpect, send, test } from '../src/test.ts'
 
 // Waits on the run or the agent, which a busy machine slows, get this budget.
@@ -311,7 +312,7 @@ for (let step = 1; step <= 20; step++) {
   })
 })
 
-test('a missing run report wakes the agent once and its live view can be repaired', async ({ page, project, agent, orx }) => {
+test('a missing run report reaches the agent on the next message and its live view can be repaired', async ({ page, project, agent, orx }) => {
   test.slow()
   const dir = path.join(orx.root, `instrumentation-${project.id}`)
   mkdirSync(dir)
@@ -329,7 +330,7 @@ process.stdout.write('::orx:: {"step":3,"m":{"loss":0.5}}\\n')
   writeFileSync(path.join(dir, 'patterns.json'), JSON.stringify([{ regex: '^never (?P<missing>\\d+)$' }]))
   writeFileSync(path.join(dir, 'clear.json'), '[]')
   writeFileSync(path.join(dir, 'plan.json'), JSON.stringify({ plan: [{ phase: 'train', of: 3, unit: 'steps' }] }))
-  const warning = `instrumentation-${project.id}`
+
   agent.script('Launch the reporting smoke test.', [
     { run: [
       'set -e',
@@ -341,7 +342,6 @@ process.stdout.write('::orx:: {"step":3,"m":{"loss":0.5}}\\n')
     { say: 'Reporting smoke test launched.' },
   ])
   agent.script('needs an instrumentation check', [
-    { hold: warning },
     { run: [
       'set -e',
       `read run exp < ${dir}/ids`,
@@ -355,12 +355,26 @@ process.stdout.write('::orx:: {"step":3,"m":{"loss":0.5}}\\n')
   agent.script('finished with status **done**', [{ say: 'Reporting smoke test finished.' }])
   await project.open(page)
   await send(page, 'Launch the reporting smoke test.')
-  await agent.reached(warning)
+  const banner = page.getByRole('region', { name: 'Runs in this chat' })
+  await expect(banner).toContainText(/step [⁦⁨]?2[⁩]?/i)
+  await expect(page.getByText('Reporting smoke test launched.', { exact: true })).toBeVisible()
   const shown = await (await page.request.get(`${orx.url}/api/chat/shown-runs`)).json()
   const run = shown.find((entry: { experimentName: string }) => entry.experimentName === 'Reports').run
   expect(run.status).toBe('running')
   writeFileSync(path.join(dir, 'ids'), `${run.id} ${run.experimentId}\n`)
-  agent.release(warning)
+  // The watcher queues advice asynchronously, with no UI event until a prompt carries it.
+  const db = new DatabaseSync(path.join(orx.root, 'home/.local/share/openresearch/orx.db'), { readOnly: true })
+  try {
+    const pending = db.prepare(`
+      SELECT 1 FROM run_notices
+      WHERE run_id = ? AND kind = 'instrumentation' AND delivered_at IS NULL AND retired_at IS NULL
+    `)
+    await expect.poll(() => pending.get(run.id)).toBeTruthy()
+  } finally {
+    db.close()
+  }
+  await expect(page.getByRole('button', { name: 'Stop', exact: true })).toBeHidden()
+  await send(page, 'Check why the run report is incomplete.')
   await expect(page.getByText('Progress and chart corrected.', { exact: true })).toBeVisible()
   const checked = JSON.parse(readFileSync(path.join(dir, 'check.json'), 'utf8'))
   expect(checked.patterns[0].matched).toBe(0)
@@ -372,7 +386,6 @@ process.stdout.write('::orx:: {"step":3,"m":{"loss":0.5}}\\n')
   expect(before).toContain('never matched in the checked log')
   expect(after).toContain('done=2; of=3')
   expect(after).toContain('names not observed in collected data: none')
-  const banner = page.getByRole('region', { name: 'Runs in this chat' })
   await expect(banner).toContainText('Training loss')
   await expect(banner).toContainText(/step [⁦⁨]?2[⁩]? of [⁦⁨]?3[⁩]?/i)
   await writeFile(gate, 'go\n')

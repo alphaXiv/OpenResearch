@@ -552,7 +552,6 @@ for (let step = 1; step <= 30; step++) {
   process.stdout.write('::orx:: {"step":' + step + ',"t":' + ((performance.now() - started) / 1000) + ',"m":{"loss":' + (2 / step).toFixed(4) + '}}\\n')
   if (step === 24) gate('some')
 }`)
-  agent.script('needs an instrumentation check', [{ say: 'This run deliberately has no total.' }])
   const hold = `open-result-${project.id}`
   agent.script('finished with status **done**', [{ hold }, { say: 'The open run finished.' }])
   const banner = await launch(page, agent, project, 'Open', run.command)
@@ -560,7 +559,7 @@ for (let step = 1; step <= 30; step++) {
   await expect(banner).not.toContainText(said('24 of'))
   await expect(banner).not.toContainText('No estimate')
   await expect(banner.getByRole('progressbar')).not.toHaveAttribute('aria-valuenow')
-  await expect(page.getByText('This run deliberately has no total.', { exact: true })).toBeVisible()
+  await expect(banner).toContainText('elapsed')
   await themes(page, banner, info, 'strip-open')
   await run.open('some')
   await agent.reached(hold)
