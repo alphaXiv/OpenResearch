@@ -365,9 +365,7 @@ exec sleep 120
     };
     let engine = engine(&root);
     let adapter = super::api::Adapter::new(
-        HfAccount {
-            namespace: "org".into(),
-        },
+        HfAccount::new("org".into()),
         Arc::new(TestClock::new()),
         root.join("spools"),
     );
@@ -3094,9 +3092,7 @@ logs) exec sleep 5 ;;
 esac
 "#,
     );
-    let hf = HfAccount {
-        namespace: "org".into(),
-    };
+    let hf = HfAccount::new("org".into());
     let hf_run = WatchedRun {
         id: "hf".into(),
         handle: crate::engine::adapters::api::test_handle(
@@ -3610,9 +3606,7 @@ async fn hf_exit_evidence_requires_the_provider_failure_format() {
     let Some(root) = isolated().await else {
         return;
     };
-    let account = HfAccount {
-        namespace: "org".into(),
-    };
+    let account = HfAccount::new("org".into());
     let run = WatchedRun {
         id: "run".into(),
         handle: super::api::test_handle("hf_job", Some("org"), None, vec!["job".into()]),
@@ -3720,9 +3714,7 @@ class HfApi:
         }),
     };
     let adapter = super::api::Adapter::new(
-        HfAccount {
-            namespace: "org".into(),
-        },
+        HfAccount::new("org".into()),
         Arc::new(TestClock::new()),
         root.join("spools"),
     );
@@ -4049,13 +4041,7 @@ fn hf_backend(root: &Path, clock: Arc<TestClock>) -> super::api::Adapter<HfAccou
         json!({"id":"job", "status":{"stage":"RUNNING"}}).to_string(),
     )
     .unwrap();
-    super::api::Adapter::new(
-        HfAccount {
-            namespace: "org".into(),
-        },
-        clock,
-        root.join("spools"),
-    )
+    super::api::Adapter::new(HfAccount::new("org".into()), clock, root.join("spools"))
 }
 
 fn hf_run() -> WatchedRun {
