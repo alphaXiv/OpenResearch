@@ -79,3 +79,34 @@ test("an experiment run again shows its newest run alone, without a summary over
   assert.ok(container.querySelector('[role="img"][aria-label*="Loss"]'), "a lone run keeps its chart");
   assert.deepEqual(requests.filter((request) => request.endsWith("/monitor")), ["GET /api/runs/r1/monitor"]);
 });
+
+test("an experiment's live run outranks a newer one that has ended", async (t) => {
+  const live = run("r1", { createdAt: now - 120_000 });
+  const ended = run("r2", { experimentId: "e-r1", status: "done", endedAt: now - 1_000, monitor: { ...live.monitor, tone: "done" } });
+  const { container } = await card([{ experiment: experiment("e-r1", "Sweep"), projectName: "p", currentRun: ended }], [live, ended]);
+  t.after(() => container.remove());
+
+  assert.equal(container.querySelectorAll('[role="progressbar"]').length, 1, "the live run's bar");
+});
+
+test("a run whose view could not be read says so and offers a retry", async (t) => {
+  const failing = run("r9");
+  serve((path, init) => {
+    const request = `${init.method ?? "GET"} ${path}`;
+    if (request === "GET /api/compute/hosts") return [];
+    if (request === "GET /api/chat/sessions/s/experiments") return { experiments: [{ experiment: experiment("e-r9", "Sweep"), projectName: "p", currentRun: failing }] };
+    if (request === "GET /api/runs/r9/monitor") return Response.json({ error: "unreadable" }, { status: 500 });
+  });
+  const container = document.body.appendChild(document.createElement("div"));
+  t.after(() => container.remove());
+  await render(createElement(SessionHoverCard, {
+    session: { id: "s", projectId: "p", title: "Sweep", harness: "codex" },
+    runs: [{ sessionId: "s", run: failing, experimentName: null, experimentSlug: "e-r9", runNo: 1, runCount: 1 }],
+    motion: "enter", modelName: null, anchor: new DOMRect(), cardRef: { current: null }, cardId: "card", container,
+    onOpenExperiment: ignore, onReturnToRow: ignore, onContinue: ignore,
+  }));
+  await settle();
+
+  const retry = [...container.querySelectorAll("button")].find((button) => button.textContent.includes(m.app_retry()));
+  assert.ok(retry, "a retry for the failed read");
+});

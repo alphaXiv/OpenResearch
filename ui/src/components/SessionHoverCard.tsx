@@ -1,6 +1,6 @@
 import { useWorkspace } from "../workspace";
 import { useQuery } from "@tanstack/react-query";
-import { FlaskConical, Folder, TriangleAlert } from "lucide-react";
+import { FlaskConical, Folder, RefreshCw, TriangleAlert } from "lucide-react";
 import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 
@@ -27,7 +27,7 @@ import { harnessLabel } from "./ModelPicker";
 import { HarnessLogo } from "./HarnessLogo";
 import { statusLabel, statusStyle } from "./StatusBadge";
 import { useMeasure, usePopoverPosition } from "./tourGeometry";
-import { Badge } from "./ui";
+import { Badge, Button } from "./ui";
 import { cn } from "./ui/cn";
 
 const CARD_WIDTH = 360;
@@ -58,6 +58,15 @@ function RunPeek({ model, monitor, alone }: { model: RunModel; monitor: StripMon
   const { stage } = model.sentence;
   // The stage's words leave the headline out, so it gets a line of its own unless the run's sentence already says it.
   const headline = model.headline?.known && (stage || !model.headline.inSentence) ? model.headline : null;
+  const stale = model.stale && [model.stale.why, model.stale.age].filter(Boolean).join(" · ");
+  const failed = monitor?.status === "error" ? monitor : null;
+  // What the strip says when the run's view is old or could not be read, so the card never passes it off as current.
+  const health = (stale || failed) && (
+    <div className="mt-0.5 flex min-w-0 items-center gap-2 text-ink-subtext">
+      <span className="min-w-0 truncate">{stale || m.run_monitor_load_failed()}</span>
+      {failed && <Button size="small" variant="ghost" className="-my-1" onClick={failed.retry}><RefreshCw size={13} />{m.app_retry()}</Button>}
+    </div>
+  );
   const number = headline && <>
     {autoDir(headline.label)} <span className="font-medium tabular-nums text-text">{headline.value}</span>
     {headline.delta && <> <Delta delta={headline.delta} said={alone} />{alone && !headline.delta.flat && <> {m.run_than_parent()}</>}</>}
@@ -71,6 +80,7 @@ function RunPeek({ model, monitor, alone }: { model: RunModel; monitor: StripMon
           <Sentence text={stage?.count || model.sentence.text} tone={model.tone} />
           {number && <span className="text-ink-subtext"> · {number}</span>}
         </div>
+        {health}
         {model.live && <div className="relative mt-1.5 h-[3px] overflow-hidden rounded-full"><Rail model={model} kind="edge" /></div>}
       </div>
     );
@@ -89,6 +99,7 @@ function RunPeek({ model, monitor, alone }: { model: RunModel; monitor: StripMon
         {model.eta && <span className="shrink-0 tabular-nums text-ink-subtext">{model.eta}</span>}
       </div>
       {number && <div className="mt-0.5 truncate text-ink-subtext">{number}</div>}
+      {health}
       {data && chart && <div className="mt-2">
         {drawn !== autoDir(headline?.label ?? "") && <div className="truncate text-ink-subtext">{drawn}</div>}
         <div className="h-14"><Block monitor={data} block={chart} size="strip" tone={model.tone} live={model.live} /></div>
@@ -172,9 +183,16 @@ export function SessionHoverCard({ session, runs, motion, modelName, harnessLogo
   const { data, isPending, error } = useQuery(getSessionExperimentsQuery(session.id));
   const [focusedId, setFocusedId] = useState<string>();
   const [now, setNow] = useState(Date.now);
-  // An experiment shows its newest run, as its row in the composer's list reads it.
-  const latest = useMemo(() => runs.filter((item) => !runs.some((other) =>
-    other.run.experimentId === item.run.experimentId && other.run.createdAt > item.run.createdAt)), [runs]);
+  // An experiment shows one run: one waiting on a flag, else one still going, else its newest.
+  const latest = useMemo(() => {
+    const rank = (item: ShownRun) => [item.run.monitor?.flag ? 1 : 0, runActive(item.run.status) ? 1 : 0, item.run.createdAt];
+    const outranks = (a: ShownRun, b: ShownRun) => {
+      const [x, y] = [rank(a), rank(b)];
+      const at = x.findIndex((value, index) => value !== y[index]);
+      return at >= 0 && x[at] > y[at];
+    };
+    return runs.filter((item) => !runs.some((other) => other.run.experimentId === item.run.experimentId && outranks(other, item)));
+  }, [runs]);
   const latestRuns = useMemo(() => latest.map((item) => item.run), [latest]);
   const monitors = useRunMonitors(latestRuns, () => true);
   const live = latest.some((item) => runActive(item.run.status));
