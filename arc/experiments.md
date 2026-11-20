@@ -124,7 +124,7 @@ When a run ends, any remaining log collection is recorded in the same transactio
 - A kept range claims end-of-file only if it reached the host's length.
 - A page neither kept nor reachable answers 503, never an empty page.
 
-Remote run directories go later, in bounded batches, once a run has settled and its log is kept (`src/local/remote_cleanup.rs`).
+SSH and Slurm run directories enter the automatic cleanup queue in the transaction that settles the final log or signal collection, whichever finishes second. SQLite records the signal obligation when the writer queues the final log, so a downgrade can keep the log without dropping the outstanding signals. Signals can settle as incomplete once the loss is recorded. Eligible directories are removed in bounded batches after they fall outside their project's three newest SSH or Slurm runs (`src/local/remote_cleanup.rs`).
 
 ### Notices
 
@@ -213,7 +213,8 @@ log the laptop kept, and whether the host can still be asked. Before release
 the host gets one time-bounded request to fold to the end of its log; the
 release then happens once, whatever that did. While the host still has the
 run, its checkpoint is the answer and failures retry with the log debt's
-backoff, telling the chat once on the seventh. Once it cannot be asked
+backoff. The seventh failure queues a chat notice. Later failures retry a
+missed notice, and the chat receives it once. When the host cannot be asked
 (released, deleted or cleaned up), the laptop continues the host's checkpoint
 over the bytes it kept, a pass at a time to a deadline so other runs keep their
 turn, resumed across restarts, then settles: complete, or incomplete with one

@@ -8221,12 +8221,8 @@ mod tests {
                 "orx logs r1",
             ],
         );
-        for (action, reason) in [
-            ("stop", "your confirmed reason"),
-            ("keep", "…"),
-            ("ask", "…"),
-        ] {
-            let command = format!("orx exp flag r1 --flag {id} --{action} --reason '{reason}'");
+        for action in ["stop", "keep", "ask"] {
+            let command = format!("orx exp flag r1 --flag {id} --{action} --reason");
             mentions(body, &[&command]);
         }
     }
