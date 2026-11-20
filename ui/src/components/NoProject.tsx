@@ -1,6 +1,6 @@
 import { useContext, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { FolderPlus, MessageCircleDashed, Plus, X } from "lucide-react";
+import { FolderPlus, X } from "lucide-react";
 
 import type { ChatSession, Project } from "../api";
 import type { DialogContentProps } from "../dialog";
@@ -14,8 +14,8 @@ import { Button, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 
 export type ProjectProposal = { name: string; path: string };
 
-/** What the app calls a project: chats without one read "No project". */
-export const projectLabel = (project: Pick<Project, "name" | "scratch">) => project.scratch ? m.no_project() : project.name;
+/** What the app calls a project: one nobody has named yet is a new project. */
+export const projectLabel = (project: Pick<Project, "name" | "unnamed">) => project.unnamed ? m.projects_home_new_project() : project.name;
 
 /** The project `orx project create --name … [--path …]` proposes, from its argv after `orx`. */
 export function projectProposal(argv: readonly string[] | null): ProjectProposal | null {
@@ -98,7 +98,7 @@ export function useCreateProject() {
     workspace.dialogs.showCustomDialog({
       component: CreateProjectDialog,
       props: {
-        initial,
+        initial: initial ?? (project.scratch && !project.unnamed ? { name: project.name } : undefined),
         title: project.scratch ? m.create_project_title() : m.create_project_move_title(),
         description: project.scratch ? m.create_project_folder_description() : m.create_project_split_description({ project: autoDir(project.name) }),
       },
@@ -148,24 +148,4 @@ export function ProjectProposalCard({ proposal, proposedAt, project, session }: 
           : project && session && <Button size="small" className="shrink-0" onClick={() => createProject(project, session, proposal)}>{m.create_project_review()}</Button>}
     </div>
   );
-}
-
-/** The sidebar's heading over every chat without a project. */
-export function NoProjectGroupHeader({ collapsed, busy, onToggleCollapsed, onNewChat }: {
-  collapsed: boolean;
-  busy: boolean;
-  onToggleCollapsed: () => void;
-  onNewChat: () => void;
-}) {
-  return <>
-    <button type="button" data-sidebar-keyboard-row aria-expanded={!collapsed} onClick={onToggleCollapsed}
-      className="flex h-7 min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-sm py-1 text-start text-sm font-normal text-text focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:outline-offset-2">
-      <MessageCircleDashed size={16} className="shrink-0" /><span className="truncate">{m.no_project()}</span>
-      {busy && <span aria-hidden className="size-[7px] shrink-0 rounded-full bg-accent-teal animate-[or-pulse_1.2s_infinite]" />}
-    </button>
-    <Tooltip interactive content={m.no_project_new_chat()} className="rounded-sm">
-      <IconButton size="small" className="text-text opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
-        aria-label={m.no_project_new_chat()} onClick={onNewChat}><Plus size={16} /></IconButton>
-    </Tooltip>
-  </>;
 }

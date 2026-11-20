@@ -49,9 +49,9 @@ export function ProjectIconTile({ project, icon = project.icon, size = "xs" }: {
   size?: "sm" | "xs" | "md" | "lg";
 }) {
   const { projectFileUrl } = useWorkspace().api;
-  // A chat without a project has nothing to name; its tile says so on hover.
-  if (project.scratch) return (
-    <Tooltip content={m.no_project()} className={`inline-flex shrink-0 items-center justify-center text-muted ${TILE_SIZES[size].box}`}>
+  // Until it has an icon of its own, a project nobody named wears an empty chat bubble; its tile says so on hover.
+  if (project.unnamed && !icon) return (
+    <Tooltip content={m.projects_home_new_project()} className={`inline-flex shrink-0 items-center justify-center text-muted ${TILE_SIZES[size].box}`}>
       <MessageCircleDashed size={TILE_SIZES[size].mark + 2} aria-hidden="true" />
     </Tooltip>
   );
@@ -67,18 +67,19 @@ export function ProjectIconTile({ project, icon = project.icon, size = "xs" }: {
 }
 
 /** The project's tile opening the icon picker; `name` is the one being typed, so the initials follow it. */
-export function ProjectIconButton({ project, name, value, onChange, disabled }: {
+export function ProjectIconButton({ project, name, value, onChange, disabled, compact }: {
   project: Project;
   name: string;
   value: ProjectIcon | undefined;
   onChange: (icon: ProjectIcon) => void;
   disabled?: boolean;
+  compact?: boolean;
 }) {
   const { projectFileUrl } = useWorkspace().api;
   const shown = { ...project, name };
   const icon = value ?? defaultIcon(project);
   return (
-    <IconPickerButton tile={<ProjectIconTile project={shown} icon={icon} size="lg" />} disabled={disabled}>
+    <IconPickerButton tile={<ProjectIconTile project={shown} icon={value} size={compact ? "xs" : "lg"} />} disabled={disabled} compact={compact}>
       <IconPicker
         value={icon}
         brand={initialsMark(name)}

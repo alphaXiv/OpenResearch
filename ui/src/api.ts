@@ -62,8 +62,10 @@ export interface Project {
   path: string;
   githubEnabled: boolean;
   githubUrl?: string | null;
-  /** A chat without a project yet: orx keeps its code until the user makes it a project. */
+  /** Homeless: orx keeps its code until the user gives the project a folder. */
   scratch?: boolean;
+  /** A scratch project with no name yet; it holds one chat and goes with it. */
+  unnamed?: boolean;
   /** Absolute path of the project's artifacts directory, non-canonical to
    *  match paths agents inline into chat. */
   artifactsDir: string;

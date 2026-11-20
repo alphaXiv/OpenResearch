@@ -49,6 +49,7 @@ export function NewProjectDialog({
   preferredAgent,
   initialPaperId,
   initialShared,
+  importing = false,
 }: DialogContentProps<void> & {
   onCreated: (project: Project, githubPublicationError: string | null) => void;
   remote?: boolean;
@@ -56,6 +57,8 @@ export function NewProjectDialog({
   initialPaperId?: string;
   /** A shared project to open instead of creating one. */
   initialShared?: SharedSource;
+  /** Opened from a new project's composer: start from a paper, a folder or an .orx file; a blank project is what it already is. */
+  importing?: boolean;
 }) {
   const { getUiStateQuery } = useWorkspace().queries;
 
@@ -77,7 +80,7 @@ export function NewProjectDialog({
       initialFocus={() => dialogRef.current?.querySelector<HTMLElement>("[data-initial-focus]") ?? true}
       className="max-h-[calc(100vh-2.5rem)] overflow-y-auto">
       <div className="mb-3.5 flex items-center justify-between gap-2">
-        <DialogTitle>{m.projects_home_new_project()}</DialogTitle>
+        <DialogTitle>{importing ? m.new_project_import() : m.projects_home_new_project()}</DialogTitle>
         <Button type="button" variant="ghost" onClick={() => fileRef.current?.click()}><FileArchive size={16} />{m.open_shared_pick()}</Button>
         <input ref={fileRef} type="file" accept=".orx" hidden onChange={(event) => {
           setShared(event.target.files?.[0] ?? null);
@@ -94,6 +97,7 @@ export function NewProjectDialog({
         remote={remote}
         preferredAgent={uiState ? uiState.preferredAgent : preferredAgent}
         initialPaperId={initialPaperId}
+        modes={importing ? ["folder", "paper"] : undefined}
       />
     </DialogContent>;
 }

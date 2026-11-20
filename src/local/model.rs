@@ -44,6 +44,11 @@ impl LocalProject {
         std::path::Path::new(&self.repo_path).starts_with(super::projects::scratch_root())
     }
 
+    /// A scratch project nobody has named: it has no icon or title of its own and goes with its last chat.
+    pub fn is_unnamed_scratch(&self) -> bool {
+        self.is_scratch() && self.name == super::projects::UNNAMED_SCRATCH
+    }
+
     pub fn github_url(&self) -> Option<String> {
         self.has_github_repository().then(|| {
             format!(
