@@ -32,7 +32,7 @@ use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest as _, Sha256};
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 
 use crate::commands::remote_host::{DashboardLock, HostDescriptor, RemoteAuth};
 use crate::commands::up_remote::{self, RemoteSessionStatus};
@@ -238,6 +238,11 @@ pub async fn run(args: UpArgs) -> Result<()> {
         let gate = state.data_dir_gate.clone();
         tokio::task::spawn_blocking(move || local::demo::prewarm(move_in_progress, gate));
     }
+    tokio::spawn(publish_sidebar_rows(
+        state.clone(),
+        state.chat.subscribe(),
+        engine.bus.subscribe(),
+    ));
     tokio::spawn(local::chat::keep_turn_leases(
         state.chat.clone(),
         state.data_dir_move_in_progress.clone(),
@@ -3215,22 +3220,43 @@ async fn set_experiment_archive(
 
 async fn delete_experiment(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
     reject_if_moving(&state)?;
+    let chat = state.chat.clone();
     // Deletion can wait up to RUN_ARTIFACTS_WAIT for the run-artifacts lock.
-    blocking_api(move || {
-        let store = Store::open()?;
-        let experiment = store
-            .get_local_experiment(&id)?
-            .ok_or_else(|| not_found("experiment"))?;
-        let _admission = state
-            .project_lifecycle
-            .admit(&experiment.project_id)
-            .ok_or_else(|| bad_request("project deletion is in progress"))?;
-        let deleted = local::experiments::delete_experiment(&store, &id).map_err(bad_request)?;
-        Ok(Json(
-            json!({ "ok": true, "branchCommit": deleted.branch_commit }),
-        ))
-    })
-    .await
+    let (response, chats) =
+        tokio::task::spawn_blocking(move || -> std::result::Result<_, ApiError> {
+            let store = Store::open()?;
+            let experiment = store
+                .get_local_experiment(&id)?
+                .ok_or_else(|| not_found("experiment"))?;
+            let _admission = state
+                .project_lifecycle
+                .admit(&experiment.project_id)
+                .ok_or_else(|| bad_request("project deletion is in progress"))?;
+            let mut chats = HashSet::new();
+            for run in store.list_runs_by_experiment(&id)? {
+                chats.extend(store.run_subscribers(&run.id)?);
+            }
+            let deleted =
+                local::experiments::delete_experiment(&store, &id).map_err(bad_request)?;
+            Ok((
+                Json(json!({ "ok": true, "branchCommit": deleted.branch_commit })),
+                chats,
+            ))
+        })
+        .await
+        .map_err(|e| ApiError::from(anyhow!("Request worker failed: {e}")))??;
+    // Their sidebar cards showed the deleted runs; the deletion stands either way.
+    for id in chats {
+        match Store::open().and_then(|store| store.get_chat_session(&id)) {
+            Ok(session) => {
+                chat.emit_session(session).await;
+            }
+            Err(error) => eprintln!(
+                "orx up: could not refresh chat {id}'s sidebar card after deleting its runs: {error:#}"
+            ),
+        }
+    }
+    Ok(response)
 }
 
 async fn list_project_runs(Path(id): Path<String>) -> ApiResult {
@@ -9726,6 +9752,200 @@ fn sidebar_session_json(
     Ok(value)
 }
 
+/// A chat's sidebar card: the session, what it is doing, and its newest run.
+fn sidebar_row_json(
+    store: &Store,
+    session: &StoredChatSession,
+    busy: bool,
+    background: Option<&Value>,
+    catalog: &Value,
+) -> Result<Value> {
+    let mut value = sidebar_session_json(store, session, busy, background, catalog)?;
+    value["lastRun"] = last_run_json(store, &session.id)?;
+    Ok(value)
+}
+
+fn sidebar_totals(store: &Store) -> Result<Value> {
+    Ok(json!({
+        "active": store.count_sidebar_chat_sessions(Some(false))?,
+        "archived": store.count_sidebar_chat_sessions(Some(true))?,
+    }))
+}
+
+/// The chat whose sidebar card a chat event may change.
+fn sidebar_change(name: &str, data: &Value) -> Option<String> {
+    let id = match name {
+        "chat.session" => &data["session"]["id"],
+        "chat.session.deleted" | "chat.busy" | "chat.background" | "chat.branch" => {
+            &data["sessionId"]
+        }
+        // A prompt card opening or being answered can change whether the chat waits on the user.
+        "chat.message"
+            if data["message"]["parts"]
+                .as_array()
+                .is_some_and(|parts| parts.iter().any(|part| part["type"] == "prompt")) =>
+        {
+            &data["sessionId"]
+        }
+        _ => return None,
+    };
+    id.as_str().map(str::to_owned)
+}
+
+/// What a burst of events changed: chats by id, and runs whose chat is looked up with the rest.
+#[derive(Default)]
+struct SidebarChanges {
+    chats: HashSet<String>,
+    runs: HashSet<String>,
+    lagged: bool,
+}
+
+impl SidebarChanges {
+    fn is_empty(&self) -> bool {
+        self.chats.is_empty() && self.runs.is_empty() && !self.lagged
+    }
+
+    fn chat_event(
+        &mut self,
+        event: std::result::Result<(&'static str, Value), broadcast::error::RecvError>,
+    ) -> bool {
+        match event {
+            Ok((name, data)) => self.chats.extend(sidebar_change(name, &data)),
+            Err(broadcast::error::RecvError::Lagged(_)) => self.lagged = true,
+            Err(broadcast::error::RecvError::Closed) => return false,
+        }
+        true
+    }
+
+    fn run_event(
+        &mut self,
+        event: std::result::Result<crate::engine::bus::RunEvent, broadcast::error::RecvError>,
+    ) {
+        match event {
+            Ok(crate::engine::bus::RunEvent::Changed { run_id, .. }) => {
+                self.runs.insert(run_id);
+            }
+            Err(broadcast::error::RecvError::Lagged(_)) => self.lagged = true,
+            _ => {}
+        }
+    }
+}
+
+/// Sends each changed chat's sidebar card with the sidebar's counts, so a dashboard updates one
+/// row instead of re-reading its lists. A missed or unreadable change asks dashboards to resync.
+async fn publish_sidebar_rows(
+    state: AppState,
+    mut events: broadcast::Receiver<(&'static str, Value)>,
+    mut runs: broadcast::Receiver<crate::engine::bus::RunEvent>,
+) {
+    loop {
+        let mut changes = SidebarChanges::default();
+        while changes.is_empty() {
+            tokio::select! {
+                event = events.recv() => if !changes.chat_event(event) { return },
+                event = runs.recv() => changes.run_event(event),
+            }
+        }
+        // Coalesces a burst, such as a turn's busy, session and message events, into one read.
+        let window = tokio::time::sleep(crate::config::paced(Duration::from_millis(50)));
+        tokio::pin!(window);
+        loop {
+            tokio::select! {
+                _ = &mut window => break,
+                event = events.recv() => if !changes.chat_event(event) { return },
+                event = runs.recv() => changes.run_event(event),
+            }
+        }
+        // A data-directory move holds the gate until it ends, so cards and resyncs wait for it.
+        let _data_dir_guard = state.data_dir_gate.lock().await;
+        if changes.lagged {
+            state.chat.emit_event("resync.required", json!({}));
+            continue;
+        }
+        let busy = state.chat.busy_sessions().await;
+        let background = match state.chat.waiting_on().await {
+            Ok(background) => background,
+            Err(error) => {
+                eprintln!(
+                    "orx up: could not read chats' background work for the sidebar: {error:#}"
+                );
+                state.chat.emit_event("resync.required", json!({}));
+                continue;
+            }
+        };
+        let catalog = state
+            .harnesses
+            .lock()
+            .await
+            .as_ref()
+            .map(|(_, catalog)| catalog.clone())
+            .unwrap_or(Value::Null);
+        let rows = tokio::task::spawn_blocking(move || -> Result<Vec<Value>> {
+            let store = Store::open()?;
+            let mut chats = changes.chats;
+            for run_id in &changes.runs {
+                chats.extend(store.run_subscribers(run_id)?);
+            }
+            // A delegate's work shows on the cards of the chats above it.
+            let mut climbing: Vec<String> = chats.iter().cloned().collect();
+            while let Some(id) = climbing.pop() {
+                if let Some(parent) = store.delegation(&id)?.parent {
+                    if chats.insert(parent.clone()) {
+                        climbing.push(parent);
+                    }
+                }
+            }
+            let totals = sidebar_totals(&store)?;
+            // The chats a page lists first however old they are, so a card can say where it goes.
+            let live: Vec<&str> = busy
+                .iter()
+                .chain(background.keys())
+                .map(String::as_str)
+                .collect();
+            let at_work: HashSet<String> = store
+                .sidebar_chat_sessions_at_work(None, &live)?
+                .into_iter()
+                .map(|session| session.id)
+                .collect();
+            chats
+                .into_iter()
+                .map(|id| {
+                    let row = store
+                        .get_sidebar_chat_session(&id)?
+                        .map(|session| {
+                            sidebar_row_json(
+                                &store,
+                                &session,
+                                busy.contains(&session.id),
+                                background.get(&session.id),
+                                &catalog,
+                            )
+                        })
+                        .transpose()?;
+                    Ok(json!({
+                        "sessionId": id,
+                        "session": row,
+                        "atWork": at_work.contains(&id),
+                        "totals": totals,
+                    }))
+                })
+                .collect()
+        })
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(|rows| rows);
+        match rows {
+            Ok(rows) => rows
+                .into_iter()
+                .for_each(|row| state.chat.emit_event("chat.sidebar", row)),
+            Err(error) => {
+                eprintln!("orx up: could not read changed sidebar rows: {error:#}");
+                state.chat.emit_event("resync.required", json!({}));
+            }
+        }
+    }
+}
+
 /// The newest run a chat launched, for its sidebar card; a run that cannot be shown costs the card a line, not the page.
 fn last_run_json(store: &Store, session_id: &str) -> Result<Value> {
     let Some(run) = store.latest_chat_run(session_id)? else {
@@ -9890,15 +10110,13 @@ async fn list_chat_sessions(
         let sessions: Vec<Value> = sessions
             .iter()
             .map(|session| {
-                let mut value = sidebar_session_json(
+                sidebar_row_json(
                     &store,
                     session,
                     busy.contains(&session.id),
                     background.get(&session.id),
                     &catalog,
-                )?;
-                value["lastRun"] = last_run_json(&store, &session.id)?;
-                Ok(value)
+                )
             })
             .collect::<Result<_>>()?;
         // A folded section still says how many chats it holds, however many pages they run to.
@@ -9906,6 +10124,7 @@ async fn list_chat_sessions(
             "sessions": sessions,
             "next": next,
             "total": store.count_sidebar_chat_sessions(q.archived)?,
+            "totals": sidebar_totals(&store)?,
         })));
     }
     let sessions = match (q.project_id.as_deref(), q.scope.as_deref()) {
@@ -10624,9 +10843,17 @@ async fn update_chat_session(
             .await?
             .ok_or_else(|| not_found("chat session"))?
     } else if req.notify_parent == Some(false) {
-        let session = local::chat::delegation::release_delegate(&Store::open()?, &id)?
+        let store = Store::open()?;
+        let parent = store.delegation(&id)?.parent;
+        let session = local::chat::delegation::release_delegate(&store, &id)?
             .ok_or_else(|| not_found("chat session"))?;
         state.chat.emit_session(Some(session.clone())).await;
+        // The chat it worked for no longer waits on it.
+        if let Some(parent) = parent {
+            state
+                .chat
+                .emit_event("chat.background", json!({ "sessionId": parent }));
+        }
         session
     } else {
         return Err(bad_request("nothing to update"));
@@ -13532,6 +13759,94 @@ mod tests {
             trackio: Default::default(),
             opencode_signins: Arc::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn sidebar_cards_follow_a_chat_marked_done_and_its_runs() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let state = test_state();
+        let _store = Store::open().unwrap();
+        rusqlite::Connection::open(crate::store::data_dir().join("orx.db"))
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO local_projects (id, name, slug, github_owner, github_repo, repo_path, created_at, updated_at)
+                 VALUES ('p', 'Project', 'p', '', '', '/unused', 1, 1);
+                 INSERT INTO chat_sessions (id, project_id, harness, created_at, updated_at)
+                 VALUES ('finished', 'p', 'codex', 1, 1), ('open', 'p', 'codex', 1, 2), ('helper', 'p', 'codex', 1, 3);
+                 INSERT INTO chat_delegates (session_id, parent_session_id, may_delegate, created_at)
+                 VALUES ('helper', 'open', 0, 1);
+                 INSERT INTO local_experiments (id, project_id, slug, branch_name, run_command, created_at, updated_at)
+                 VALUES ('exp-1', 'p', 'exp-1', 'main', '', 5, 5), ('exp-2', 'p', 'exp-2', 'main', '', 4, 4);
+                 INSERT INTO runs (id, experiment_id, project_id, status, backend_json, created_at, updated_at, chat_session_id)
+                 VALUES ('run-1', 'exp-1', 'p', 'running', '{}', 5, 5, 'open'),
+                        ('run-2', 'exp-2', 'p', 'done', '{}', 6, 6, 'open');",
+            )
+            .unwrap();
+        let (runs, runs_rx) = broadcast::channel(16);
+        let mut events = state.chat.subscribe();
+        tokio::spawn(publish_sidebar_rows(
+            state.clone(),
+            state.chat.subscribe(),
+            runs_rx,
+        ));
+        let mut next_card = async || loop {
+            let (name, data) = events.recv().await.unwrap();
+            if name == "chat.sidebar" {
+                return data;
+            }
+        };
+
+        let page = list_chat_sessions(
+            State(state.clone()),
+            Query(serde_json::from_value(json!({"scope": "sidebar", "archived": false})).unwrap()),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(page["totals"], json!({"active": 2, "archived": 0}));
+
+        let _ = update_chat_session(
+            State(state.clone()),
+            Path("finished".into()),
+            Json(serde_json::from_value(json!({"archived": true})).unwrap()),
+        )
+        .await
+        .unwrap();
+        let card = next_card().await;
+        assert_eq!(card["sessionId"], "finished");
+        assert_eq!(card["session"]["archived"], true);
+        assert_eq!(card["totals"], json!({"active": 1, "archived": 1}));
+
+        // A delegate has no card of its own; its work shows on the card of the chat it works for.
+        state
+            .chat
+            .emit_event("chat.busy", json!({"sessionId": "helper", "busy": false}));
+        let cards = [next_card().await, next_card().await];
+        let card = |id: &str| cards.iter().find(|card| card["sessionId"] == id).unwrap();
+        assert!(card("helper")["session"].is_null());
+        assert_eq!(card("open")["session"]["id"], "open");
+
+        runs.send(crate::engine::bus::RunEvent::Changed {
+            run_id: "run-1".into(),
+            phase: crate::engine::Phase::Running,
+            contact: crate::store::Contact::Live,
+            cancelling: false,
+        })
+        .unwrap();
+        let card = next_card().await;
+        assert_eq!(card["sessionId"], "open");
+        assert_eq!(card["session"]["lastRun"]["id"], "run-2");
+        assert_eq!(card["atWork"], true);
+
+        // Deleting an experiment takes its finished run off the card.
+        let _ = delete_experiment(State(state.clone()), Path("exp-2".into()))
+            .await
+            .unwrap();
+        let card = next_card().await;
+        assert_eq!(card["sessionId"], "open");
+        assert_eq!(card["session"]["lastRun"]["id"], "run-1");
     }
 
     #[tokio::test]

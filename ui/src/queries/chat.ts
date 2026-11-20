@@ -1,11 +1,12 @@
 import type { WorkspaceEvents } from "../workspace";
-import type { Api, ChatSession, ChatSessionPatch, HarnessId, NativeChat, PromptAnswer, SidebarChatPage, TurnOptions } from "../api";
+import type { Api, ChatSession, ChatSessionPatch, HarnessId, NativeChat, PromptAnswer, SidebarChatPage, SidebarChatTotals, TurnOptions } from "../api";
+import type { ChatEvent } from "../events";
 import type { WorkspaceClient } from "./client";
 
 import { readLiveSnapshot, mergeLiveList, markLiveUpdate } from "./live";
 import { mutations } from "./mutations";
 import type { Workspace } from "../workspace";
-import { CancelledError, infiniteQueryOptions, queryOptions, type InfiniteData } from "@tanstack/react-query";
+import { CancelledError, infiniteQueryOptions, queryOptions, type InfiniteData, type QueryClient, type QueryKey } from "@tanstack/react-query";
 import type * as api from "../api";
 import type { ShownRun } from "../runMonitor/types";
 
@@ -117,7 +118,31 @@ export function createChatQueries(
     });
   }
 
-  async function readSidebarChatPage(filter: "active" | "archived" | "all", before: api.SidebarChatCursor | null, signal: AbortSignal) {
+  /** Cards that arrived during a list's fetch, by query; replayed onto the whole list once the fetch lands. */
+  const cardsDuringFetch = new Set<string>();
+
+  async function readSidebarChatPage(filter: SidebarFilter, before: api.SidebarChatCursor | null, signal: AbortSignal) {
+    const queryKey = workspaceKey("listSidebarChatSessions", filter);
+    const query = client.queryClient.getQueryCache().find({ queryKey, exact: true });
+    if (query && !cardsDuringFetch.has(query.queryHash)) {
+      cardsDuringFetch.add(query.queryHash);
+      const cards = new Map<string, SidebarCard>();
+      let totals: SidebarChatTotals | undefined;
+      const offCards = onChatEvent((event) => {
+        if (event.type !== "sidebar") return;
+        cards.set(event.sessionId, event);
+        totals = event.totals;
+      });
+      // The fetch builds the list from the pages it started with, so a card applied meanwhile is put back on top.
+      const offFetch = client.queryClient.getQueryCache().subscribe((event) => {
+        if (event.query !== query || event.type !== "updated" || query.state.fetchStatus !== "idle") return;
+        offCards();
+        offFetch();
+        cardsDuringFetch.delete(query.queryHash);
+        if (event.action.type === "success") replaySidebarCards(client.queryClient, queryKey, [...cards.values()], totals);
+      });
+    }
+
     const indicators = new Map<string, Partial<Pick<api.ChatSession, "busy" | "contextUsage">>>();
     const off = onChatEvent((event) => {
       if (event.type === "busy" || event.type === "usage") {
@@ -133,7 +158,7 @@ export function createChatQueries(
     } finally { off(); }
   }
 
-  const listSidebarChatSessionsQuery = (filter: "active" | "archived" | "all") => infiniteQueryOptions({
+  const listSidebarChatSessionsQuery = (filter: SidebarFilter) => infiniteQueryOptions({
     queryKey: workspaceKey("listSidebarChatSessions", filter),
     queryFn: ({ pageParam, signal }) => readSidebarChatPage(filter, pageParam, signal),
     initialPageParam: null as api.SidebarChatCursor | null,
@@ -215,6 +240,137 @@ function inChatTurn<T>(id: string, ws: Workspace, sessionId: string, write: () =
   return turn!.run(write);
 }
 
+type SidebarFilter = "active" | "archived" | "all";
+type SidebarList = InfiniteData<SidebarChatPage>;
+type SidebarCard = Extract<ChatEvent, { type: "sidebar" }>;
+type PendingWrite = { fields: Partial<ChatSession>; moving: boolean };
+
+/**
+ * Chat writes in flight, by workspace and chat: fields a card read before the write landed must not undo, and
+ * whether the write moves the chat between sections in a way no card has shown yet.
+ */
+const pendingWrites = new Map<unknown, Map<string, PendingWrite[]>>();
+const pendingIn = (identity: unknown) => pendingWrites.get(identity) ?? new Map<string, PendingWrite[]>();
+
+/**
+ * Puts `row` where the server would list it: replaced in place, dropped when the list no longer holds it, or
+ * joined in sort order. One past the loaded pages waits for paging to reach it, unless the server lists it
+ * first because it is at work.
+ */
+function putSidebarRow(data: SidebarList, filter: SidebarFilter, id: string, row: ChatSession | null, atWork = false): SidebarList {
+  const belongs = row !== null && (filter === "all" || row.archived === (filter === "archived"));
+  const listed = data.pages.some((page) => page.sessions.some((session) => session.id === id));
+  if (listed) {
+    return {
+      ...data,
+      pages: data.pages.map((page) => ({
+        ...page,
+        sessions: page.sessions.flatMap((session) => session.id !== id ? [session] : belongs ? [row] : []),
+      })),
+    };
+  }
+  if (row === null || !belongs) return data;
+
+  // A page holds everything down to its cursor, even once the cursor's own row has moved out.
+  let placed = false;
+  const pages = data.pages.map((page, index) => {
+    if (placed) return page;
+    const last = index === data.pages.length - 1;
+    if (page.next && sortsAfter(row, page.next) && !(last && atWork)) return page;
+    placed = true;
+    const at = page.sessions.findIndex((session) => sortsAfter(session, row));
+    const end = at < 0 ? page.sessions.length : at;
+    return { ...page, sessions: [...page.sessions.slice(0, end), row, ...page.sessions.slice(end)] };
+  });
+  return { ...data, pages };
+}
+
+/** Whether `a` lists after `b`, in the server's newest-first order. */
+const sortsAfter = (a: { updatedAt: number; id: string }, b: { updatedAt: number; id: string }) =>
+  a.updatedAt < b.updatedAt || a.updatedAt === b.updatedAt && a.id < b.id;
+
+/** The server's counts with the moves in flight that it has not shown yet. */
+function withPendingMoves(identity: unknown, totals: SidebarChatTotals): SidebarChatTotals {
+  let { active, archived } = totals;
+  for (const writes of pendingIn(identity).values()) {
+    for (const { fields, moving } of writes) {
+      if (!moving) continue;
+      const step = fields.archived ? 1 : -1;
+      active -= step;
+      archived += step;
+    }
+  }
+  return { active, archived };
+}
+
+function withCounts(data: SidebarList, filter: SidebarFilter, totals: SidebarChatTotals): SidebarList {
+  const [first, ...rest] = data.pages;
+  if (!first) return data;
+  const total = filter === "all" ? totals.active + totals.archived : totals[filter];
+  return { ...data, pages: [{ ...first, total, totals }, ...rest] };
+}
+
+/** Moves one chat between the sections' counts; a server without `totals` counts each list on its own. */
+function shiftCounts(data: SidebarList, filter: SidebarFilter, archived: boolean): SidebarList {
+  const [first, ...rest] = data.pages;
+  if (!first) return data;
+  const step = archived ? 1 : -1;
+  if (first.totals) return withCounts(data, filter, { active: first.totals.active - step, archived: first.totals.archived + step });
+  if (first.total === undefined || filter === "all") return data;
+  return { ...data, pages: [{ ...first, total: first.total + (filter === "archived" ? step : -step) }, ...rest] };
+}
+
+/** Edits each loaded sidebar list under `family`; an invalidated one is read again before it shows, and that read sees the change. */
+export function editSidebarLists(client: QueryClient, family: QueryKey, edit: (data: SidebarList, filter: SidebarFilter) => SidebarList) {
+  for (const query of client.getQueryCache().findAll({ queryKey: family })) {
+    const data = query.state.data as SidebarList | undefined;
+    if (!data || query.state.isInvalidated) continue;
+    client.setQueryData(query.queryKey, edit(data, query.queryKey.at(-1) as SidebarFilter));
+  }
+}
+
+function findSidebarRow(client: QueryClient, family: QueryKey, id: string) {
+  return client.getQueriesData<SidebarList>({ queryKey: family })
+    .flatMap(([, data]) => data?.pages.flatMap((page) => page.sessions) ?? [])
+    .find((row) => row.id === id);
+}
+
+function withPending(identity: unknown, row: ChatSession) {
+  return Object.assign({ ...row }, ...(pendingIn(identity).get(row.id) ?? []).map((write) => write.fields));
+}
+
+/** A card that shows a write's move means the server's counts include it. */
+function acknowledge(identity: unknown, { sessionId, session }: SidebarCard) {
+  for (const write of pendingIn(identity).get(sessionId) ?? []) if (session?.archived === write.fields.archived) write.moving = false;
+}
+
+const putCard = (identity: unknown, data: SidebarList, filter: SidebarFilter, card: SidebarCard) =>
+  putSidebarRow(data, filter, card.sessionId, card.session && withPending(identity, card.session), card.atWork);
+
+export function applySidebarRow(client: QueryClient, scope: QueryKey, card: SidebarCard) {
+  const identity = scope[1];
+  acknowledge(identity, card);
+  const counts = withPendingMoves(identity, card.totals);
+  editSidebarLists(client, [...scope, "listSidebarChatSessions"], (data, filter) => withCounts(putCard(identity, data, filter, card), filter, counts));
+}
+
+/** Puts back on a freshly fetched list the cards and writes in flight it may predate. */
+function replaySidebarCards(client: QueryClient, queryKey: QueryKey, cards: SidebarCard[], cardTotals: SidebarChatTotals | undefined) {
+  const identity = queryKey[1];
+  const filter = queryKey.at(-1) as SidebarFilter;
+  cards.forEach((card) => acknowledge(identity, card));
+  client.setQueryData<SidebarList>(queryKey, (data) => {
+    if (!data) return data;
+    let next = cards.reduce((list, card) => putCard(identity, list, filter, card), data);
+    for (const id of pendingIn(identity).keys()) {
+      const row = next.pages.flatMap((page) => page.sessions).find((session) => session.id === id);
+      if (row) next = putSidebarRow(next, filter, id, withPending(identity, row));
+    }
+    const totals = cardTotals ?? next.pages[0]?.totals;
+    return totals ? withCounts(next, filter, withPendingMoves(identity, totals)) : next;
+  });
+}
+
 /** Joins the workspace's chat writes, so a turn sent after a setting starts with it. */
 export const mutPatchChatSession = mutations.define({
   id: "chat/session",
@@ -223,16 +379,46 @@ export const mutPatchChatSession = mutations.define({
       changes === "stop-and-archive" ? ws.api.stopAndArchiveChat(session.id) : ws.api.patchChatSession(session.id, changes)),
   optimistic({ helpers, args: [ws, session, changes], onSuccess, onRestore }) {
     holdChatTurn("chat/session", ws, session.id, onRestore);
+    const cache = helpers(ws.queryClient);
     const options = ws.queries.listChatSessionsQuery(session.projectId);
-    if (changes !== "stop-and-archive") {
-      const { agent: _agent, notifyParent, ...fields } = changes;
-      const shown: Partial<ChatSession> = notifyParent === false ? { ...fields, delegate: null } : fields;
-      helpers(ws.queryClient).arrayUpdate(options, {
-        filter: (row) => row.id === session.id,
-        update: (row) => ({ ...row, ...shown }),
+    const { agent: _agent, notifyParent, ...fields }: ChatSessionPatch = changes === "stop-and-archive" ? { archived: true } : changes;
+    const shown: Partial<ChatSession> = notifyParent === false ? { ...fields, delegate: null } : fields;
+    cache.arrayUpdate(options, {
+      filter: (row) => row.id === session.id,
+      update: (row) => ({ ...row, ...shown }),
+    });
+
+    // Only a chat the sidebar lists has a card to move; a side chat or delegate is in the project's list alone.
+    const family = ws.queries.listSidebarChatSessionsQuery("all").queryKey.slice(0, -1);
+    const known = findSidebarRow(ws.queryClient, family, session.id);
+    const movedTo = known && known.archived !== shown.archived ? shown.archived : undefined;
+    const write: PendingWrite = { fields: shown, moving: movedTo !== undefined };
+    const pending = pendingWrites.get(ws.identity) ?? new Map<string, PendingWrite[]>();
+    pendingWrites.set(ws.identity, pending.set(session.id, [...pending.get(session.id) ?? [], write]));
+    const settle = () => {
+      const rest = pending.get(session.id)?.filter((other) => other !== write) ?? [];
+      if (rest.length) pending.set(session.id, rest);
+      else pending.delete(session.id);
+    };
+    if (known) {
+      editSidebarLists(ws.queryClient, family, (data, filter) => {
+        const placed = putSidebarRow(data, filter, session.id, { ...known, ...shown });
+        return movedTo === undefined ? placed : shiftCounts(placed, filter, movedTo);
+      });
+      onRestore(() => {
+        const unshown = write.moving;
+        editSidebarLists(ws.queryClient, family, (data, filter) => {
+          const placed = putSidebarRow(data, filter, session.id, known);
+          return unshown ? shiftCounts(placed, filter, known.archived) : placed;
+        });
+        // A refused write is rare; reading the lists again settles whatever changed while it was in flight.
+        void ws.queryClient.invalidateQueries({ queryKey: family });
       });
     }
+    onRestore(settle);
+
     onSuccess((saved) => {
+      settle();
       markLiveUpdate(ws.queryClient, options.queryKey, saved.id);
       ws.setScopedQueryData(options.queryKey, (rows) => rows?.map((row) => row.id === saved.id ? saved : row));
     });
@@ -246,16 +432,17 @@ export const mutPatchChatSession = mutations.define({
 export const mutDeleteChatSession = mutations.define({
   id: "chat/session/delete",
   mutate: (ws: Workspace, session: Pick<ChatSession, "id" | "projectId">) => ws.api.deleteChatSession(session.id),
-  optimistic({ helpers, args: [ws, session] }) {
+  optimistic({ helpers, args: [ws, session], onRestore }) {
     const cache = helpers(ws.queryClient);
     cache.arrayRemove(ws.queries.listChatSessionsQuery(session.projectId), (row) => row.id === session.id);
-    for (const filter of ["active", "archived", "all"] as const) {
-      const { queryKey } = ws.queries.listSidebarChatSessionsQuery(filter);
-      cache.updateExisting<InfiniteData<SidebarChatPage>>({ queryKey }, (data) => ({
-        ...data,
-        pages: data.pages.map((page) => ({ ...page, sessions: page.sessions.filter((row) => row.id !== session.id) })),
-      }));
-    }
+    const family = ws.queries.listSidebarChatSessionsQuery("all").queryKey.slice(0, -1);
+    const known = findSidebarRow(ws.queryClient, family, session.id);
+    editSidebarLists(ws.queryClient, family, (data, filter) => putSidebarRow(data, filter, session.id, null));
+    onRestore(() => {
+      if (known) editSidebarLists(ws.queryClient, family, (data, filter) => putSidebarRow(data, filter, session.id, known));
+      // A refused delete is rare; reading the lists again settles whatever changed while it was in flight.
+      void ws.queryClient.invalidateQueries({ queryKey: family });
+    });
   },
   key: ({ args: [ws, session] }) => [ws.identity, session.id],
   describe: "delete the chat",

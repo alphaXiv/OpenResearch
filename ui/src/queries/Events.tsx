@@ -1,13 +1,13 @@
 import { useWorkspace } from "../workspace";
-import type { InfiniteData } from "@tanstack/react-query";
-import type { ChatSession, SidebarChatPage } from "../api";
+import type { ChatSession } from "../api";
 import type { RunMonitor, RunMonitorEvent } from "../runMonitor/types";
 import { markLiveUpdate } from "./live";
 
 import { inputSummaryChanged } from "./chatState";
 import { useEffect, useMemo } from "react";
 
-import { artifactFamilies } from "./invalidation";
+import { artifactFamilies, streamsSidebarRows } from "./invalidation";
+import { applySidebarRow, editSidebarLists } from "./chat";
 
 /** The cached monitor with `event` applied, or null when the event can't be applied to it and the run must be read again. */
 export function applyMonitorEvent(cached: RunMonitor, event: RunMonitorEvent): RunMonitor | null {
@@ -153,10 +153,12 @@ export function QueryEvents() {
     let activityTimer: ReturnType<typeof setTimeout> | undefined;
     let sidebarTimer: ReturnType<typeof setTimeout> | undefined;
     const promptStates = new Map<string, string>();
+    // A server that streams sidebar cards keeps the sidebar's lists current itself.
+    const chatLists = () => streamsSidebarRows(queryClient, scope) ? ["listChatSessions"] : ["listSidebarChatSessions", "listChatSessions"];
     const refreshSidebar = () => {
       sidebarTimer ??= setTimeout(() => {
         sidebarTimer = undefined;
-        invalidateFamilies(["listSidebarChatSessions", "listChatSessions"], scope);
+        invalidateFamilies(chatLists(), scope);
       }, 100);
     };
     const refreshActivity = () => {
@@ -169,9 +171,10 @@ export function QueryEvents() {
     const offMove = onDataDirMove((event) => { if (event.type === "done") invalidateFamilies(["getDataDir"], scope); });
     const offChat = onChatEvent((event) => {
       if (!isCurrentScope(scope)) return;
+      if (event.type === "sidebar") applySidebarRow(queryClient, scope, event);
       if (inputSummaryChanged(event, promptStates)) refreshSidebar();
-      else if (event.type === "busy") invalidateFamilies(["listSidebarChatSessions"], scope);
-      if (event.type === "background") invalidateFamilies(["listSidebarChatSessions", "listChatSessions"], scope);
+      else if (event.type === "busy" && !streamsSidebarRows(queryClient, scope)) invalidateFamilies(["listSidebarChatSessions"], scope);
+      if (event.type === "background") invalidateFamilies(chatLists(), scope);
       if (event.type === "branch" || event.type === "sessionDeleted" || event.type === "busy" && !event.busy) invalidateFamilies(["chatSearch"], scope);
       if (event.type === "session") markLiveUpdate(queryClient, listChatSessionsQuery(event.session.projectId).queryKey, event.session.id);
       else if (event.type === "busy" || event.type === "usage") markLiveUpdate(queryClient, [...scope, "listChatSessions"], event.sessionId);
@@ -199,9 +202,9 @@ export function QueryEvents() {
       } else if (event.type === "busy" || event.type === "usage") {
         const update = (row: ChatSession) => row.id !== event.sessionId ? row : event.type === "busy" ? { ...row, busy: event.busy } : { ...row, contextUsage: event.usage };
         queryClient.setQueriesData<ChatSession[]>({ queryKey: [...scope, "listChatSessions"] }, (rows) => rows?.map(update));
-        queryClient.setQueriesData<InfiniteData<SidebarChatPage>>({ queryKey: [...scope, "listSidebarChatSessions"] }, (data) => data && {
+        editSidebarLists(queryClient, [...scope, "listSidebarChatSessions"], (data) => ({
           ...data, pages: data.pages.map((page) => ({ ...page, sessions: page.sessions.map(update) })),
-        });
+        }));
       }
     });
     const offAuth = onHarnessAuth(({ harness }) => {
