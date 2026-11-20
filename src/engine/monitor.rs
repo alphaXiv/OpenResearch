@@ -8219,14 +8219,12 @@ mod tests {
                 "confirm",
                 "orx exp status exp --run r1",
                 "orx logs r1",
+                "saved rule `eval-zero`",
+                "later launches",
             ],
         );
-        for (action, reason) in [
-            ("stop", "your confirmed reason"),
-            ("keep", "…"),
-            ("ask", "…"),
-        ] {
-            let command = format!("orx exp flag r1 --flag {id} --{action} --reason '{reason}'");
+        for action in ["stop", "keep", "ask"] {
+            let command = format!("orx exp flag r1 --flag {id} --{action} --reason");
             mentions(body, &[&command]);
         }
     }
