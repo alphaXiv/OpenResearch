@@ -33,8 +33,7 @@ with socket.socket() as sock:
     sock.bind(('127.0.0.1', 0))
     port = sock.getsockname()[1]
 origin = f'http://127.0.0.1:{port}'
-# A cold GStreamer registry scan on a loaded arm runner can outlast 20s.
-MEDIA_TIMEOUT = 90
+MEDIA_TIMEOUT = 30
 env.update(SHELL='/bin/sh', ORX_APP_RELAUNCH_PORT=str(port), ORX_NO_UPDATE_CHECK='1', ORX_TELEMETRY_ENV='off', APPIMAGE_EXTRACT_AND_RUN='1', TMPDIR=str(state), GTK_THEME='Adwaita:dark', APPIMAGE_GTK_THEME='Adwaita:light', WEBKIT_SHOW_CONSOLE_MESSAGES='1', XDG_DATA_DIRS='/usr/local/share:/usr/share')
 process = None
 log = None
