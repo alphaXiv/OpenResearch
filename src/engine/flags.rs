@@ -255,7 +255,7 @@ pub(crate) fn carry_cut_flags(
                         && notice.flag_id == id
                         && notice.dedupe == REMIND
                 }) {
-                    remind(&run, id, &chat.id)
+                    remind(&run, flag, &chat.id)
                 } else {
                     wake(&run, flag, false)
                 };
@@ -317,7 +317,7 @@ pub(crate) fn follow_up_flags(store: &Store, now: i64) -> Result<()> {
                 {
                     let ended = run.ended_at.unwrap_or(run.updated_at);
                     let body = if reminded {
-                        remind(&run, id, chat)
+                        remind(&run, flag, chat)
                     } else {
                         wake(&run, flag, false)
                     };
@@ -353,7 +353,7 @@ pub(crate) fn follow_up_flags(store: &Store, now: i64) -> Result<()> {
                     &run_id,
                     latest,
                     REMIND,
-                    &remind(&run, id, chat),
+                    &remind(&run, flag, chat),
                     now,
                 )?;
             }
@@ -366,22 +366,9 @@ pub(crate) fn follow_up_flags(store: &Store, now: i64) -> Result<()> {
 }
 
 /// The frozen text that reminds a chat's agent of a flag its last turn left open.
-fn remind(run: &StoredRun, flag_id: &str, chat: &str) -> String {
+fn remind(run: &StoredRun, flag: &Value, chat: &str) -> String {
     let (id, exp) = (&run.id, &run.experiment_id);
-    let settle = format!("orx exp flag {id} --flag {flag_id}");
-    let choices = if Phase::parse(&run.status).is_some_and(Phase::is_terminal) {
-        format!(
-            "Run {id} has ended ({}), so there is nothing to stop. Settle the flag with your reason:\n\
-             \x20 {settle} --keep --reason '…'\n\
-             If its result does not stand, also fix experiment {exp} and run it again.",
-            run.status
-        )
-    } else {
-        format!(
-            "To keep it going: {settle} --keep --reason '…'\n\
-             To stop it: {settle} --stop --reason 'your confirmed reason'"
-        )
-    };
+    let flag_id = flag["id"].as_str().unwrap_or_default();
     let after = if run.chat_session_id.as_deref() == Some(chat) {
         "\nIf this turn also ends with the flag open, orx keeps the run as it is and records that\n\
          you left the flag unsettled."
@@ -390,9 +377,8 @@ fn remind(run: &StoredRun, flag_id: &str, chat: &str) -> String {
     };
     format!(
         "[orx] Your last turn ended without settling flag {flag_id} on run {id} (experiment {exp}).\n\
-         Read: orx exp status {exp} --run {id}; orx logs {id}\n\
-         {choices}\n\
-         To leave it to the user: {settle} --ask --reason '…'{after}"
+         {}{after}",
+        review_steps(run, flag, false)
     )
 }
 
@@ -424,10 +410,11 @@ fn noted_wake(run: &StoredRun, flag: &Value) -> String {
     format!(
         "[orx] Run {id} (experiment {exp}) was flagged again while its earlier flag is still open.\n\
          Watcher sentence at {at}: {text}\n{}\n{UNTRUSTED}\n\
-         Read: orx exp status {exp} --run {id}; orx logs {id}\n\
-         Weigh this with the open flag `orx exp status` names before you settle that one. If you keep\n\
-         going, a later look flags this again on its own when it still holds.",
+         Verify against the status and relevant log lines using `orx exp status {exp} --run {id}` and `orx logs {id}`.\n\
+         Weigh this with the earlier flag. If it is still open, settle it before ending the turn.\n\
+         If you keep it, give a specific reason for later watcher looks.{}",
         evidence_text(&flag["evidence"]),
+        tuning(run, flag),
     )
 }
 
@@ -486,7 +473,6 @@ fn evidence_text(evidence: &Value) -> String {
 /// The frozen text that wakes a chat's agent with `flag`; `asked` when the user's Ask sends it.
 pub(crate) fn wake(run: &StoredRun, flag: &Value, asked: bool) -> String {
     let (id, exp) = (&run.id, &run.experiment_id);
-    let flag_id = flag["id"].as_str().unwrap_or_default();
     let at = super::monitor::clock_text(flag["at"].as_i64().unwrap_or_default());
     let text = flag["text"]
         .as_str()
@@ -513,24 +499,58 @@ pub(crate) fn wake(run: &StoredRun, flag: &Value, asked: bool) -> String {
             evidence_text(&flag["evidence"]),
         ),
     };
-    let next = if Phase::parse(&run.status).is_some_and(Phase::is_terminal) {
+    format!("{head}\n{said}\n{}", review_steps(run, flag, asked))
+}
+
+fn review_steps(run: &StoredRun, flag: &Value, asked: bool) -> String {
+    let (id, exp) = (&run.id, &run.experiment_id);
+    let flag_id = flag["id"].as_str().unwrap_or_default();
+    let settle = format!("orx exp flag {id} --flag {flag_id}");
+    let instruction = if asked {
+        "Settle the flag with the commands below or hand it back with `--ask` and give your recommendation in the reason."
+    } else {
+        "Settle this review before ending the turn."
+    };
+    let action = if Phase::parse(&run.status).is_some_and(Phase::is_terminal) {
         format!(
-            "Run {id} has ended ({}), so there is nothing to stop; check its result before relying\n\
-             on it, and say what you found. If the result stands:\n\
-             orx exp flag {id} --flag {flag_id} --keep --reason '…'\n\
-             To leave it to the user: orx exp flag {id} --flag {flag_id} --ask --reason '…'\n\
-             If it does not, fix experiment {exp} and run it again.",
+            "Run {id} has ended ({}). Check its result and say what you found. \
+             If it does not stand, fix experiment {exp} and run it again.",
             run.status
         )
     } else {
-        format!(
-            "If confirmed, decide whether to keep going or stop. To stop:\n\
-             orx exp flag {id} --flag {flag_id} --stop --reason 'your confirmed reason'\n\
-             To settle this flag without stopping: orx exp flag {id} --flag {flag_id} --keep --reason '…'\n\
-             To leave the choice to the user: orx exp flag {id} --flag {flag_id} --ask --reason '…'"
-        )
+        format!("To stop a confirmed failure, use `{settle} --stop --reason '…'`.")
     };
-    format!("{head}\n{said}\nRead: orx exp status {exp} --run {id}; orx logs {id}\n{next}")
+    format!(
+        "Verify against the status and relevant log lines using `orx exp status {exp} --run {id}` and `orx logs {id}`.\n\
+         {instruction}\n\
+         {action}\n\
+         To keep, use `{settle} --keep --reason '…'`. Give a specific reason that later watcher looks can use.\n\
+         To hand the choice to the user, use `{settle} --ask --reason '…'`.{}",
+        tuning(run, flag),
+    )
+}
+
+fn tuning(run: &StoredRun, flag: &Value) -> String {
+    let exp = &run.experiment_id;
+    let advice = match flag["source"].as_str() {
+        Some("rule") => {
+            let rule = flag["rule"].as_str().unwrap_or_default();
+            format!("Edits to the saved rule `{rule}` apply to later launches.")
+        }
+        Some("tripwire") if matches!(flag["kind"].as_str(), Some("stall" | "silence")) => {
+            "If long validation was healthy, report real progress on later launches with \
+             `::orx:: {\"phase\":\"eval\",\"step\":1,\"of\":10}` and advancing steps."
+                .into()
+        }
+        Some("look") if !Phase::parse(&run.status).is_some_and(Phase::is_terminal) => format!(
+            "For recurring watcher noise, read `orx exp view get {exp} --json` and use \
+             `orx exp view set {exp} --config PATH` to edit the brief's `noise` or `worth_a_flag`, \
+             or increase `watch.minGapS` to space out change-triggered looks. Changes apply to the \
+             next look built for this run."
+        ),
+        _ => return String::new(),
+    };
+    format!("\n{advice} See `orx skill orx-experiment-runs`.")
 }
 
 /// A batch of notices as one message: the watcher's flags in it say what they share once.

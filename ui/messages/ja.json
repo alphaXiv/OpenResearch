@@ -2331,6 +2331,7 @@
   "run_block_this": "このブロック",
   "run_page_no_signals": "ログにメトリクスがまだ見つかっていません。実行がメトリクスを出力すると、ここに表示されます。",
   "run_page_no_signals_ended": "この実行のログにメトリクスは見つかりませんでした。",
+  "run_page_collection_incomplete": "OpenResearchはこの実行のメトリクスを最後まで読み取れませんでした。読み取り済みのメトリクスは保持されています。",
   "run_page_view_empty": "この実験に設定されたビューには何も表示されません",
   "run_view_how": "このビューの作り方",
   "run_view_default": "実行が最初に報告したシグナルから作成されました。エージェントはビューを設定していません。",

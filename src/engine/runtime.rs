@@ -27,7 +27,9 @@ use super::{
 use crate::commands::up::api_v2::{Commands, KeptRange};
 use crate::error::{anyhow, bail, Result};
 use crate::jobs::ssh::SshTarget;
-use crate::store::{LaunchSpec, Store, StoredRun, SubmittingRun};
+use crate::store::{
+    LaunchSpec, RunNotice, Store, StoredRun, SubmittingRun, INCOMPLETE_SIGNAL_NOTICE,
+};
 use orx_host_proto::LogInfo;
 
 const DEFAULT_ROOT: &str = "~/.orx/engine";
@@ -1175,43 +1177,46 @@ impl Runtime {
             Err(_) if self.signal_progress(&run.id) != before => SignalNext::AskHost,
             Err(_) => bail!("Reading run {}'s signals made no progress in time", run.id),
         };
-        match next {
+        let cause = match next {
             // A pass that made progress is due again at once, after the other runs' turns.
             SignalNext::AskHost | SignalNext::FoldKept => {
                 self.store()?.retry_signal_collections_now(Some(&run.id))?;
                 self.collect_now.notify_one();
+                return Ok(());
             }
-            SignalNext::Settle(None) => {
-                super::adapters::signals::availability(&self.data_dir, &run.id, "cached", None)?;
-                self.store()?.finish_signal_collection(&run.id)?;
-            }
-            SignalNext::Settle(Some(cause)) => {
-                let cause = cause.trim_end_matches(['.', ' ']);
-                super::adapters::signals::settle_incomplete(&self.data_dir, &run.id, cause)?;
-                let kept = if self.held_signals(&run.id).is_ok_and(|s| s.is_some()) {
-                    "The signals read before then are kept."
-                } else {
-                    "No signals were kept."
-                };
-                self.engine.attention(
-                    &run.id,
-                    "signal-collection-incomplete",
-                    &format!(
-                        "[orx] Run `{}`'s signal collection could not finish: {cause}. {kept} Read any saved output with `orx logs {}`.",
-                        run.id, run.id
-                    ),
-                )?;
-                self.store()?.finish_signal_collection(&run.id)?;
-            }
+            SignalNext::Settle(cause) => cause,
             SignalNext::Retry(cause) => bail!("{cause}"),
             SignalNext::Release => {
                 unreachable!("the release precedes settling")
             }
+        };
+        if let Some(cause) = cause {
+            let cause = cause.trim_end_matches(['.', ' ']);
+            super::adapters::signals::settle_incomplete(&self.data_dir, &run.id, cause)?;
+            let status = super::adapters::signals::read_availability(&self.data_dir, &run.id)?;
+            let cause = status
+                .as_ref()
+                .filter(|value| value["state"] == "incomplete")
+                .and_then(|value| value["reason"].as_str())
+                .unwrap_or(cause);
+            let kept = self.held_signals(&run.id).is_ok_and(|s| s.is_some());
+            self.engine.attention(
+                &run.id,
+                INCOMPLETE_SIGNAL_NOTICE,
+                &RunNotice::signal_collection_failed(&run.id, cause, kept),
+            )?;
+        } else {
+            super::adapters::signals::availability(&self.data_dir, &run.id, "cached", None)?;
         }
+        let store = self.store()?;
+        let tx = store.begin_immediate()?;
+        store.finish_signal_collection(&run.id)?;
+        store.queue_finished_remote_cleanup(&run.id)?;
+        tx.commit()?;
         Ok(())
     }
 
-    /// Keeps the signal debt open; like the log debt, its seventh failure tells the chat once.
+    /// Retries the deduplicated notice so a crash after the seventh attempt cannot skip it.
     fn defer_signals(&self, run: &WatchedRun, cause: &str) -> Result<()> {
         if self.store()?.defer_signal_collection(&run.id)? {
             let host = match Key::of_handle(&run.handle) {
@@ -3751,6 +3756,285 @@ mod tests {
         runtime
     }
 
+    fn remote_runs(dir: &Path, handle: &Handle) -> Arc<Runtime> {
+        let runtime = collector(dir);
+        let descriptor = crate::jobs::BackendDescriptor::parse(r#"{"kind":"engine"}"#).unwrap();
+        for (n, id) in [(1, "run"), (2, "newer-1"), (3, "newer-2"), (4, "newer-3")] {
+            let backend_json =
+                super::super::handle::backend_json(id, Some(handle), &descriptor).unwrap();
+            runtime
+                .store()
+                .unwrap()
+                .upsert_run(&StoredRun {
+                    id: id.into(),
+                    backend_json,
+                    experiment_id: "exp".into(),
+                    project_id: "project".into(),
+                    status: "running".into(),
+                    command: "true".into(),
+                    created_at: n,
+                    updated_at: n,
+                    ended_at: None,
+                    exit_code: None,
+                    commit_sha: None,
+                    result_markdown: None,
+                    cancel_requested: false,
+                    cancel_reason: None,
+                    chat_session_id: Some("chat".into()),
+                })
+                .unwrap();
+        }
+        runtime
+    }
+
+    fn ended_remote_run(dir: &Path, handle: &Handle) -> Arc<Runtime> {
+        let runtime = remote_runs(dir, handle);
+        runtime
+            .engine
+            .observe(
+                "run",
+                Observation::Exited {
+                    started_at: None,
+                    finished_at: None,
+                    code: Some(0),
+                    signal: None,
+                },
+            )
+            .unwrap();
+        runtime
+    }
+
+    const RELEASED_CLEANUP_ENQUEUE: &str =
+        include_str!("../../tests/contracts/remote-cleanup-enqueue-v0.2.28.sql");
+
+    fn released_cleanup_due(conn: &rusqlite::Connection) -> Vec<String> {
+        conn.prepare(include_str!(
+            "../../tests/contracts/remote-cleanup-v0.2.28.sql"
+        ))
+        .unwrap()
+        .query_map([i64::MAX, 50], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+    }
+
+    fn released_finish_and_enqueue(conn: &mut rusqlite::Connection) -> usize {
+        conn.execute(
+            "UPDATE log_collections SET collected = 1 WHERE run_id = ?1",
+            ["run"],
+        )
+        .unwrap();
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        tx.execute(
+            "INSERT INTO log_collections (run_id, done) VALUES (?1, 1)
+             ON CONFLICT(run_id) DO UPDATE SET done = 1, last_error = NULL",
+            ["run"],
+        )
+        .unwrap();
+        let queued = tx
+            .execute(RELEASED_CLEANUP_ENQUEUE, rusqlite::params!["run", false, 1])
+            .unwrap();
+        tx.commit().unwrap();
+        queued
+    }
+
+    #[tokio::test]
+    async fn released_writer_cannot_retire_a_run_it_finishes_after_downgrade() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-retire-downgrade").unwrap();
+        let handle = Handle::Slurm {
+            host: "lab".into(),
+            root: "/orx".into(),
+            job: Some("1".into()),
+        };
+        drop(remote_runs(dir.path(), &handle));
+        let mut older = rusqlite::Connection::open(dir.path().join("orx.db")).unwrap();
+        let tx = older
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        tx.execute(
+            "INSERT OR IGNORE INTO log_collections (run_id, next_attempt_at) VALUES (?1, ?2)",
+            rusqlite::params!["run", 1],
+        )
+        .unwrap();
+        assert_eq!(
+            tx.execute(
+                "UPDATE runs SET status = ?3, updated_at = ?4, ended_at = COALESCE(?5, ended_at),
+                             exit_code = COALESCE(?6, exit_code),
+                             started_at = COALESCE(started_at, ?7)
+             WHERE id = ?1 AND status = ?2",
+                rusqlite::params!["run", "running", "done", 3, 3, 0, None::<i64>],
+            )
+            .unwrap(),
+            1
+        );
+        tx.commit().unwrap();
+
+        assert_eq!(released_finish_and_enqueue(&mut older), 0);
+        assert!(released_cleanup_due(&older).is_empty());
+        let runtime = collector(dir.path());
+        {
+            let store = runtime.store().unwrap();
+            assert!(!store.log_collection_pending("run").unwrap());
+            assert!(store.log_output_collected("run").unwrap());
+            assert!(store.signal_collection_pending("run").unwrap());
+        }
+        keep(
+            dir.path(),
+            &[(0, b"::orx:: {\"m\":{\"score\":42}}\n", true)],
+        );
+        let backend = Arc::new(Host::default());
+        backend.gone.store(true, Ordering::SeqCst);
+        lock(&runtime.backends).insert(Key::of_handle(&handle).unwrap(), backend);
+        runtime.collect_finished("run").await.unwrap();
+        assert!(settled(&runtime));
+        let (snapshot, _) = super::super::adapters::signals::cached(dir.path(), "run");
+        assert_eq!(snapshot.unwrap().latest["score"], 42);
+        assert_eq!(released_cleanup_due(&older), ["run"]);
+    }
+
+    #[tokio::test]
+    async fn opening_withdraws_automatic_cleanup_queued_before_the_gate() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-retire-reopen").unwrap();
+        let handle = Handle::Ssh {
+            host: "lab".into(),
+            root: "/orx".into(),
+        };
+        drop(ended_remote_run(dir.path(), &handle));
+        let mut older = rusqlite::Connection::open(dir.path().join("orx.db")).unwrap();
+        older
+            .execute_batch("DROP TRIGGER IF EXISTS protect_remote_cleanup")
+            .unwrap();
+        assert_eq!(released_finish_and_enqueue(&mut older), 1);
+        assert_eq!(released_cleanup_due(&older), ["run"]);
+
+        let runtime = collector(dir.path());
+        assert!(released_cleanup_due(&older).is_empty());
+        assert_eq!(released_finish_and_enqueue(&mut older), 0);
+        let backend = Arc::new(Host::default());
+        lock(&runtime.backends).insert(Key::of_handle(&handle).unwrap(), backend);
+        runtime.collect_finished("run").await.unwrap();
+        assert!(settled(&runtime));
+        assert_eq!(released_cleanup_due(&older), ["run"]);
+    }
+
+    #[tokio::test]
+    async fn remote_retirement_waits_for_final_signals_across_restart() {
+        for incomplete in [false, true] {
+            let dir = crate::local::git::TemporaryDirectory::new("orx-retire-signals").unwrap();
+            let handle = Handle::Ssh {
+                host: "lab".into(),
+                root: "/orx".into(),
+            };
+            let runtime = ended_remote_run(dir.path(), &handle);
+            let key = Key::of_handle(&handle).unwrap();
+            let backend = Arc::new(Host::default());
+            backend.log.log.lock().unwrap().bytes =
+                b"::orx:: {\"step\":1,\"m\":{\"score\":42}}\n".to_vec();
+            backend.fail_signals.store(true, Ordering::SeqCst);
+            lock(&runtime.backends).insert(key.clone(), backend.clone());
+            runtime.collect_finished("run").await.unwrap();
+            {
+                let store = runtime.store().unwrap();
+                assert!(!store.log_collection_pending("run").unwrap());
+                assert!(store.signal_collection_pending("run").unwrap());
+            }
+            drop(runtime);
+
+            let released = rusqlite::Connection::open_with_flags(
+                dir.path().join("orx.db"),
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .unwrap();
+            let released_due = || released_cleanup_due(&released);
+            assert!(
+                released_due().is_empty(),
+                "v0.2.28 can remove the host log while signals are still pending"
+            );
+
+            let runtime = collector(dir.path());
+            if incomplete {
+                std::fs::remove_file(&kept_ranges(dir.path())[0].file).unwrap();
+                backend.gone.store(true, Ordering::SeqCst);
+            }
+            backend.fail_signals.store(false, Ordering::SeqCst);
+            lock(&runtime.backends).insert(key, backend);
+            runtime.collect_finished("run").await.unwrap();
+            assert!(settled(&runtime));
+            let (snapshot, status) = super::super::adapters::signals::cached(dir.path(), "run");
+            if incomplete {
+                assert_eq!(status["state"], "incomplete");
+                assert_eq!(
+                    signal_notices(&runtime, "signal-collection-incomplete").len(),
+                    1
+                );
+            } else {
+                assert_eq!(snapshot.unwrap().latest["score"], 42);
+            }
+            assert_eq!(released_due(), ["run"]);
+            {
+                let store = runtime.store().unwrap();
+                let due = store.due_remote_cleanups(50).unwrap();
+                assert_eq!(due.len(), 1);
+                assert_eq!(due[0].run_id, "run");
+                store
+                    .finish_remote_cleanup(&due[0].run_id, due[0].deleted)
+                    .unwrap();
+            }
+            runtime.collect_finished("run").await.unwrap();
+            assert!(released_due().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_retirement_waits_for_the_log_when_signals_settle_first() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-retire-log").unwrap();
+        let handle = Handle::Slurm {
+            host: "lab".into(),
+            root: "/orx".into(),
+            job: Some("1".into()),
+        };
+        let runtime = ended_remote_run(dir.path(), &handle);
+        let backend = Arc::new(Host::default());
+        let run = WatchedRun {
+            id: "run".into(),
+            handle,
+        };
+        runtime
+            .settle_signals(backend.as_ref(), &run, 1)
+            .await
+            .unwrap();
+        assert!(settled(&runtime));
+        assert!(runtime
+            .store()
+            .unwrap()
+            .log_collection_pending("run")
+            .unwrap());
+        let reader = rusqlite::Connection::open(dir.path().join("orx.db")).unwrap();
+        let queued = || {
+            reader
+                .query_row(
+                    "SELECT count(*) FROM remote_cleanups WHERE run_id = 'run'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(queued(), 0);
+        drop(runtime);
+
+        let runtime = collector(dir.path());
+        lock(&runtime.backends).insert(Key::of_handle(&run.handle).unwrap(), backend);
+        runtime.collect_finished("run").await.unwrap();
+        assert!(!runtime
+            .store()
+            .unwrap()
+            .log_collection_pending("run")
+            .unwrap());
+        assert_eq!(queued(), 1);
+    }
+
     fn launched_signal_run(dir: &Path) -> Arc<Runtime> {
         let runtime = collector(dir);
         let metadata = crate::jobs::BackendDescriptor::parse(r#"{"kind":"local_job"}"#).unwrap();
@@ -4411,6 +4695,28 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn retrying_signals_recovers_a_notice_lost_after_the_seventh_failure() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-signal-notice-retry").unwrap();
+        let runtime = ended_signal_run(dir.path());
+        for _ in 0..7 {
+            runtime
+                .store()
+                .unwrap()
+                .defer_signal_collection("run")
+                .unwrap();
+        }
+        drop(runtime);
+
+        let runtime = collector(dir.path());
+        for _ in 0..2 {
+            runtime
+                .defer_signals(&local_run(), "host unavailable")
+                .unwrap();
+        }
+        assert_eq!(signal_notices(&runtime, "signal-collection").len(), 1);
+    }
+
     #[tokio::test]
     async fn lost_host_folds_kept_ranges_and_keeps_the_cause_in_one_notice() {
         for preserved in [true, false] {
@@ -4481,6 +4787,104 @@ mod tests {
                 1
             );
         }
+    }
+
+    #[tokio::test]
+    async fn collection_failure_wakes_each_chat_only_if_its_result_did_not_include_it() {
+        use super::super::{adapters::signals, monitor};
+
+        let dir = crate::local::git::TemporaryDirectory::new("orx-rental-notices").unwrap();
+        let handle = Handle::OpenResearch {
+            descriptor: Box::new(
+                crate::jobs::BackendDescriptor::parse(
+                    r#"{"kind":"openresearch_job","namespace":"org","jobId":"deleted"}"#,
+                )
+                .unwrap(),
+            ),
+        };
+        let watched = WatchedRun {
+            id: "run".into(),
+            handle: handle.clone(),
+        };
+        let runtime = remote_runs(dir.path(), &handle);
+        let backend = Arc::new(Host::default());
+        backend.gone.store(true, Ordering::SeqCst);
+        let cause = "The rental was deleted before final signal collection finished";
+        {
+            let store = runtime.store().unwrap();
+            store.subscribe_run("run", "early", 1).unwrap();
+            let mut snapshot = orx_signals::Snapshot::new("run", "1-1", "g1");
+            snapshot
+                .feed(b"::orx:: {\"step\":20,\"of\":21}\n", false, 5000, true)
+                .unwrap();
+            let path = runtime.signals_path("run");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            super::super::adapters::local::signals::publish(&path, &snapshot).unwrap();
+        }
+        runtime
+            .engine
+            .observe(
+                "run",
+                Observation::Gone {
+                    reason: "The rental was released before its final outcome was collected."
+                        .into(),
+                },
+            )
+            .unwrap();
+        {
+            let store = runtime.store().unwrap();
+            store.checkpoint_log_collection("run").unwrap();
+            store.finish_log_collection("run").unwrap();
+            for chat in ["early", "chat"] {
+                if chat == "chat" {
+                    signals::host_gone(dir.path(), "run", cause).unwrap();
+                }
+                let batch = store.run_notice_batch(chat).unwrap();
+                assert_eq!(batch.len(), 1);
+                let terminal = &batch[0];
+                let note = monitor::terminal_signal_note(&store, "run")
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(note.contains(cause), chat == "chat");
+                let prefix = crate::store::SIGNAL_AVAILABILITY_PREFIX;
+                let prompt = format!(
+                    "{}\nA chat reference expanded from the log.{prefix}{note}",
+                    terminal.body
+                );
+                assert_eq!(prompt.matches(cause).count(), usize::from(chat == "chat"));
+                let tx = store.begin().unwrap();
+                tx.execute(
+                    "INSERT INTO chat_turns (id, session_id, assistant_message_id, client_turn_id,
+                     request_hash, prepared_input, settings_json, state, delivery_state, created_at, updated_at)
+                     VALUES (?1, ?1, ?2, ?3, 'hash', ?4, '{}', 'completed', 'accepted', 1, 1)",
+                    rusqlite::params![chat, format!("{chat}-assistant"), terminal.client_turn_id, prompt],
+                )
+                .unwrap();
+                tx.commit().unwrap();
+                store
+                    .mark_run_notice_batch_delivered(chat, &terminal.client_turn_id, 1)
+                    .unwrap();
+            }
+        }
+
+        drop(runtime);
+        let runtime = collector(dir.path());
+        runtime
+            .settle_signals(backend.as_ref(), &watched, 1)
+            .await
+            .unwrap();
+        let store = runtime.store().unwrap();
+        let run = store.get_run("run").unwrap().unwrap();
+        let (_, page) = monitor::monitor(&store, &run).unwrap();
+        assert_eq!(page["availability"]["collectionIncomplete"], true);
+        assert_eq!(page["progress"]["done"], 20.0);
+        assert!(store.run_notice_batch("chat").unwrap().is_empty());
+        let late = store.run_notice_batch("early").unwrap();
+        assert_eq!(late.len(), 1);
+        assert_eq!(late[0].dedupe, INCOMPLETE_SIGNAL_NOTICE);
+        assert!(late[0].body.contains(cause));
+        assert!(late[0].body.contains("signals read before then are kept"));
+        assert!(late[0].body.contains("orx logs run"));
     }
 
     /// The host's checkpoint, with the arrival times it observed, outlives a whole kept log.

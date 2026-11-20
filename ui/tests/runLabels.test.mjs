@@ -34,8 +34,8 @@ async function surfaces(value) {
   const card = document.body.appendChild(document.createElement("div"));
   const hover = await shown(createElement(SessionHoverCard, {
     session: { id: "chat", projectId: "project", title: "SSH sandwich", harness: "codex" },
-    modelName: null, anchor: new DOMRect(), cardRef: { current: null }, cardId: "session-hover", container: card,
-    onEnter: ignore, onLeave: ignore, onOpenExperiment: ignore, onReturnToRow: ignore, onContinue: ignore,
+    runs: [], motion: "enter", modelName: null, anchor: new DOMRect(), cardRef: { current: null }, cardId: "session-hover", container: card,
+    onOpenExperiment: ignore, onReturnToRow: ignore, onContinue: ignore,
   }));
   const notice = await shown(createElement(RunContactNotice, { run: value }));
   const text = {

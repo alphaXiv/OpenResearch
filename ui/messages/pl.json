@@ -2331,6 +2331,7 @@
   "run_block_this": "ten blok",
   "run_page_no_signals": "W logu nie znaleziono jeszcze metryk. Pojawią się tutaj, gdy uruchomienie wypisze metrykę.",
   "run_page_no_signals_ended": "W logu tego uruchomienia nie znaleziono metryk.",
+  "run_page_collection_incomplete": "OpenResearch nie dokończył odczytu metryk tego uruchomienia. Odczytane metryki zostały zachowane.",
   "run_page_view_empty": "Widok ustawiony dla tego eksperymentu nic nie pokazuje",
   "run_view_how": "Jak zbudowano ten widok",
   "run_view_default": "Utworzony z pierwszego sygnału zgłoszonego przez uruchomienie. Agent nie ustawił widoku.",

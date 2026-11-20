@@ -53,12 +53,7 @@ impl SearchRequest {
             return Err(anyhow!("Search is limited to 256 characters."));
         }
         // FTS5 folds case itself; lowercasing first breaks letters like `İ` that Rust and FTS5 fold differently.
-        let terms: Vec<_> = self
-            .q
-            .split_whitespace()
-            .take(16)
-            .map(str::to_owned)
-            .collect();
+        let terms: Vec<_> = self.q.split_whitespace().map(str::to_owned).collect();
         let filter = match self.scope {
             SearchScope::Chat => SearchFilter::Chat(
                 self.session_id
@@ -966,8 +961,24 @@ mod tests {
         req = request("warmup", SearchScope::All, "");
         req.cursor = Some("bad-cursor".into());
         assert!(req.prepare().is_err());
-        let selection = request(&"word ".repeat(17), SearchScope::All, "");
-        assert_eq!(selection.prepare().unwrap().terms.len(), 16);
+    }
+
+    #[test]
+    fn every_query_word_must_match() {
+        with_store(|store| {
+            session(&store, "chat", "project");
+            let words: Vec<_> = (0..16).map(|i| format!("word{i:02}")).collect();
+            store
+                .upsert_chat_message(&message("message", "chat", &words.join(" ")))
+                .unwrap();
+            let hits = |q: &str| {
+                let query = request(q, SearchScope::Chat, "chat").prepare().unwrap();
+                store.search_chat_messages(&query).unwrap().hits.len()
+            };
+            assert_eq!(hits(&words.join(" ")), 1);
+            assert_eq!(hits(&format!("{} absent", words.join(" "))), 0);
+            assert_eq!(hits(&format!("{} a", words.join(" "))), 0);
+        });
     }
 
     #[test]

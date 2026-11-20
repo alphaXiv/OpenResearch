@@ -319,7 +319,7 @@ export interface RunMonitor {
   generation: string;
   asOf: number;
   /** Anything but live is old data, said as such. */
-  availability: { state: "live" | "stale" | "rebuilding" | "unavailable"; reason: string | null };
+  availability: { state: "live" | "stale" | "rebuilding" | "unavailable"; reason: string | null; collectionIncomplete?: true };
   view: ViewTree;
   /** Where the view comes from: the experiment that stores it, or drawn from the run's first signal. */
   viewFrom: { experimentId: string; markup: string; isDefault: boolean };

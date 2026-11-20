@@ -55,7 +55,8 @@ export function RunPage({ run, name, chatSessionId, now }: { run: Run; name: str
   const age = model.live && model.sentence.at !== null ? model.sentence.at : null;
   const sentence = model.tone !== "failed" && model.flagDetail ? model.flagDetail : model.sentence.text;
   const blocks = data?.view.blocks.filter((block) => drawsAt(block, "page")) ?? [];
-  const canSayEmpty = !failed && data?.availability.state === "live";
+  const incomplete = data?.availability.collectionIncomplete;
+  const canSayEmpty = !failed && data?.availability.state === "live" && !incomplete;
   const stale = model.stale && [model.stale.why, model.stale.age].filter(Boolean).join(" · ");
   const empty = !canSayEmpty || blocks.length > 0 ? null
     : !data.viewFrom.isDefault ? m.run_page_view_empty()
@@ -75,6 +76,7 @@ export function RunPage({ run, name, chatSessionId, now }: { run: Run; name: str
         </p>
       )}
       {stale && !failed && <p className="m-0 mt-1.5 text-xs text-ink-subtext">{stale}</p>}
+      {incomplete && <p role="status" className="m-0 mt-1.5 text-sm text-ink-subtext">{m.run_page_collection_incomplete()}</p>}
       {model.note && <p className="m-0 mt-1.5 text-sm text-ink-subtext">{model.note}</p>}
       {model.flag?.record && <Issue model={model} flag={model.flag.record} agent={run.chatSessionId ? agent : null} />}
       {failed && (
@@ -90,7 +92,7 @@ export function RunPage({ run, name, chatSessionId, now }: { run: Run; name: str
       </>}
       {!model.notice && runNotice(run) && <RunContactNotice run={run} className="mt-4" />}
       {model.pre && (model.headline || monitor?.status === "loading") && <div className="mt-7"><HeadlineStat model={model} /></div>}
-      {monitor && !model.pre && !model.neverStarted && (
+      {monitor && !model.pre && !model.neverStarted && (!incomplete || blocks.length > 0) && (
         <div className={cn("mt-7 flex flex-col gap-8", !data && "min-h-40")} aria-busy={monitor.status === "loading"}>
           {!data && monitor.status === "loading" && <HeadlineStat model={model} />}
           {data && blocks.map((block, index) => <Block key={index} monitor={data} block={block} size="page" tone={model.tone} live={model.live} />)}

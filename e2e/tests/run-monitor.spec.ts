@@ -476,6 +476,44 @@ console.log('::orx:: {"step":20,"t":100}')
   }
 })
 
+test('a bare step count ends setup on the strip, card and run page', async ({ page, project, agent, orx }, info) => {
+  const run = payload(orx, `bare-count-${project.id}`, ['count', 'finish'], `
+console.log('::orx:: {"of":100}')
+gate('count')
+console.log('::orx:: {"step":10,"of":100,"spend":1}')
+gate('finish')
+`)
+  agent.script('finished with status **done**', [{ say: 'Counting finished.' }])
+  const banner = await launch(page, agent, project, 'Bare-count', run.command)
+  const status = banner.getByRole('button', { name: /Bare-count/ })
+  await expect(status).toContainText('Setup')
+  await run.open('count')
+  try {
+    const count = said('Step 10 of 100')
+    await expect(status).toContainText(count)
+    await expect(status).toContainText('Running')
+    await expect(status).not.toContainText('Setup')
+
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.emulateMedia({ colorScheme: 'dark' })
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark')
+    await status.hover()
+    const card = page.getByRole('dialog', { name: 'Bare-count' })
+    await expect(card.locator('[aria-current="step"]')).toContainText(count)
+    await expect(card).not.toContainText('Setup')
+    const screenshot = info.outputPath('bare-count-card-dark-1440.png')
+    await page.screenshot({ path: screenshot, animations: 'disabled' })
+    await info.attach('bare-count-card-dark-1440', { path: screenshot, contentType: 'image/png' })
+
+    await card.getByRole('link', { name: 'Bare-count' }).click()
+    await expect(latestRun(page)).toContainText(count)
+    await expect(latestRun(page)).not.toContainText('Setup')
+  } finally {
+    await run.open('finish')
+    await expect(page.getByText('Counting finished.', { exact: true })).toBeVisible()
+  }
+})
+
 test('a run with one progress bar and no declared lines shows its bar from the log', async ({ page, project, agent, orx }) => {
   // Two theme passes and the run itself outlast the default budget on a busy machine.
   test.slow()

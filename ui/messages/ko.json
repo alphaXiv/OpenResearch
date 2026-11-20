@@ -2331,6 +2331,7 @@
   "run_block_this": "이 블록",
   "run_page_no_signals": "로그에서 아직 지표를 찾지 못했습니다. 실행이 지표를 출력하면 여기에 표시됩니다.",
   "run_page_no_signals_ended": "이 실행의 로그에서 지표를 찾지 못했습니다.",
+  "run_page_collection_incomplete": "OpenResearch가 이 실행의 지표를 끝까지 읽지 못했습니다. 이미 읽은 지표는 보관됩니다.",
   "run_page_view_empty": "이 실험에 설정된 보기에 표시할 것이 없습니다",
   "run_view_how": "이 보기를 만드는 방법",
   "run_view_default": "실행이 처음 보고한 신호로 만들었습니다. 에이전트가 보기를 설정하지 않았습니다.",
