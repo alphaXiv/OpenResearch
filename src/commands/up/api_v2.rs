@@ -809,12 +809,15 @@ async fn choose(
         crate::store::Chosen::Recorded => {}
     }
     let store = api.store();
-    notices_queued(
-        choices
-            .iter()
-            .flat_map(|choice| choice.wakes.iter().map(|(chat, _)| chat.clone()))
-            .collect(),
-    );
+    let woken: Vec<String> = choices
+        .iter()
+        .flat_map(|choice| choice.wakes.iter().map(|(chat, _)| chat.clone()))
+        .collect();
+    // Asking a chat's agent about a flag resumes a chat the user stopped.
+    for chat in &woken {
+        api.chat.stopped.lock().unwrap().remove(chat);
+    }
+    notices_queued(woken);
     for touched in &touched {
         let Some(touched) = &store.get_run(&touched.id).map_err(failed)? else {
             continue;

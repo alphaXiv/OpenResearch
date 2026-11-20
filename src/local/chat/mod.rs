@@ -3126,6 +3126,9 @@ pub struct ChatHost {
     /// each also has a queued row, held out of `queued` until released.
     pending_steers: std::sync::Mutex<HashMap<String, Vec<SteerMessage>>>,
     queue_dispatch_in_flight: std::sync::Mutex<HashMap<String, String>>,
+    /// Chats a stop left idle. Run notices and chat news wait until the chat's next turn
+    /// starts, so they don't restart work the user just stopped.
+    pub(crate) stopped: std::sync::Mutex<HashSet<String>>,
 }
 
 struct PendingClientTurnGuard {
@@ -3928,7 +3931,8 @@ impl TurnGuard {
         })
     }
 
-    /// Reserve an operation only when no turn or queued user message exists.
+    /// Reserve an operation only when no turn or queued user message exists. A
+    /// `Reserved` claim, the automatic turn of a result or news, also waits out a Stop.
     async fn claim_idle(
         host: &Arc<ChatHost>,
         session_id: &str,
@@ -3944,6 +3948,8 @@ impl TurnGuard {
             || queued
                 .get(session_id)
                 .is_some_and(|messages| !messages.is_empty())
+            || (matches!(reservation, TurnState::Reserved { .. })
+                && host.stopped.lock().unwrap().contains(session_id))
         {
             return None;
         }
@@ -4089,6 +4095,7 @@ impl ChatHost {
             steering: std::sync::Mutex::new(HashMap::new()),
             pending_steers: std::sync::Mutex::new(HashMap::new()),
             queue_dispatch_in_flight: std::sync::Mutex::new(HashMap::new()),
+            stopped: std::sync::Mutex::new(HashSet::new()),
         }
     }
 
@@ -4566,6 +4573,7 @@ impl ChatHost {
         if store.delegation(task_id)?.parent.as_deref() != Some(chat_id) {
             return self.claude.stop_task(chat_id, task_id).await;
         }
+        self.stopped.lock().unwrap().insert(task_id.to_string());
         let interrupted = self.interrupt(task_id).await?;
         if interrupted {
             news::mark_told(&store, chat_id, task_id)?;
@@ -7284,6 +7292,7 @@ impl ChatHost {
                 .await;
             ctx.host.drain_queue(&ctx.session_id).await;
         });
+        self.stopped.lock().unwrap().remove(&sid);
         turns.insert(
             sid.clone(),
             TurnState::Active(ActiveTurn {
@@ -7480,6 +7489,10 @@ impl ChatHost {
         let cancel = matches!(mode, StopMode::Cancel | StopMode::User);
         let active = {
             let mut turns = self.turns.lock().await;
+            // Under `turns`, so a turn starting now cannot clear the hold this Stop sets.
+            if mode == StopMode::User {
+                self.stopped.lock().unwrap().insert(session_id.to_string());
+            }
             if let StopMode::LeaseLost(token) = &mode {
                 if self.durable_turns.lock().unwrap().get(session_id) != Some(token) {
                     return Ok(false);
@@ -7634,6 +7647,7 @@ impl ChatHost {
         let mut parents = vec![id.to_string()];
         while let Some(parent) = parents.pop() {
             for child in store.chat_delegates_of(&parent)? {
+                self.stopped.lock().unwrap().insert(child.clone());
                 let interrupted = self.interrupt(&child).await?;
                 if interrupted {
                     news::mark_told(&store, &parent, &child)?;
@@ -14475,6 +14489,44 @@ for line in sys.stdin:
         .await
         .unwrap();
         restarted.interrupt("other").await.unwrap();
+
+        // After a user Stop, a result waits for the chat's next turn instead of restarting it.
+        restarted.interrupt_by_user("other").await.unwrap();
+        store
+            .insert_run_notice("run_x", "other", "notify", "stopped", "after stop", 1)
+            .unwrap();
+        bus.publish(crate::engine::bus::RunEvent::Notices {
+            chats: vec!["other".into()],
+        });
+        let not_moving = std::sync::atomic::AtomicBool::new(false);
+        process_run_notices(&restarted, Store::open().unwrap(), &not_moving)
+            .await
+            .unwrap();
+        assert_eq!(count_turns(), baseline + 3);
+        assert_eq!(store.pending_run_notice_sessions().unwrap(), ["other"]);
+
+        restarted
+            .send_message(
+                "other",
+                "carry on".into(),
+                TurnOverrides::default(),
+                Vec::new(),
+                Vec::new(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while count_turns() < baseline + 5
+                || !store.pending_run_notice_sessions().unwrap().is_empty()
+                || !restarted.busy_sessions().await.is_empty()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         watcher.abort();
         let _ = watcher.await;
 
@@ -14741,7 +14793,7 @@ for line in sys.stdin:
                 .unwrap()
                 .lines()
                 .count(),
-            8
+            10
         );
         for kind in ["engine", "ssh_job"] {
             let delegate = format!("delegate-{kind}");
@@ -14807,6 +14859,13 @@ for line in sys.stdin:
             assert_eq!(news::chat_news(&store, Some("other")).unwrap().len(), 1);
             assert_eq!(store.pending_run_notice_sessions().unwrap(), ["other"]);
             let before = count_turns();
+            host.stopped.lock().unwrap().insert("other".into());
+            news::deliver_news(&host, Store::open().unwrap(), None)
+                .await
+                .unwrap();
+            assert_eq!(count_turns(), before);
+            assert_eq!(news::chat_news(&store, Some("other")).unwrap().len(), 1);
+            host.stopped.lock().unwrap().remove("other");
             for _ in 0..3 {
                 news::deliver_news(&host, Store::open().unwrap(), None)
                     .await
