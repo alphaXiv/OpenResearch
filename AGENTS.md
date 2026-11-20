@@ -59,6 +59,8 @@ These documents describe how the pieces of OpenResearch work. We try to keep the
 
 ## Running it
 
+Run `pnpm --dir ui gallery` to open the standalone run strip gallery at `/gallery.html`.
+
 `node dev.ts` runs a dev server per worktree, allocating ports for you.
 
 ```sh
