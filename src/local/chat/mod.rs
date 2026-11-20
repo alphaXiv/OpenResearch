@@ -16030,7 +16030,7 @@ done
         assert!(reset_exhausted_queued_message(&message).is_none());
     }
 
-    /// The prompts the quiet agent of [`quiet_agent_chat`] was sent, oldest first.
+    /// The prompts the quiet agent was sent, oldest first.
     fn prompts() -> Vec<String> {
         std::fs::read_to_string(crate::store::data_dir().join("prompts.jsonl"))
             .unwrap_or_default()
@@ -16042,6 +16042,20 @@ done
     /// Chat `owner` at `autonomy` on an agent that ends every turn having done nothing, and a
     /// running run it launched with one flag raised.
     fn quiet_agent_chat(store: &Store, autonomy: Option<&str>) -> StoredRun {
+        quiet_agent(store, autonomy);
+        let run = run("running");
+        store.upsert_run(&run).unwrap();
+        let body = json!({"id": "f1", "source": "tripwire", "kind": "error", "fingerprint": "error:boom",
+            "at": 1, "template": "A new kind of error in the log: **boom**.", "evidence": null, "whole": null});
+        let flag = crate::engine::flags::new_flag(store, &run, body, true).unwrap();
+        assert_eq!(
+            store.raise_flags(&[flag], 1).unwrap(),
+            [crate::store::Raise::Raised]
+        );
+        run
+    }
+
+    fn quiet_agent(store: &Store, autonomy: Option<&str>) {
         let repo = crate::store::data_dir().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         crate::local::git::initialize_own_repository(&repo).unwrap();
@@ -16110,17 +16124,6 @@ for line in sys.stdin:
         )
         .unwrap();
         tx.commit().unwrap();
-
-        let run = run("running");
-        store.upsert_run(&run).unwrap();
-        let body = json!({"id": "f1", "source": "tripwire", "kind": "error", "fingerprint": "error:boom",
-            "at": 1, "template": "A new kind of error in the log: **boom**.", "evidence": null, "whole": null});
-        let flag = crate::engine::flags::new_flag(store, &run, body, true).unwrap();
-        assert_eq!(
-            store.raise_flags(&[flag], 1).unwrap(),
-            [crate::store::Raise::Raised]
-        );
-        run
     }
 
     /// Delivers what the outbox has until the chat goes quiet.
@@ -16145,6 +16148,116 @@ for line in sys.stdin:
             )],
         };
         store.record_flag_choices(&[ask], None, 2).unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agentic_flag_wakes_explain_how_to_review_and_tune_each_source() {
+        if crate::config::in_test_child(&[]) {
+            check_flag_wake_advice(false).await;
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn copilot_flag_asks_explain_how_to_review_and_tune_each_source() {
+        if crate::config::in_test_child(&[]) {
+            check_flag_wake_advice(true).await;
+        }
+    }
+
+    async fn check_flag_wake_advice(copilot: bool) {
+        let store = Store::open().unwrap();
+        quiet_agent(&store, copilot.then_some("copilot"));
+        let host = notice_host();
+        for ended in [false, true] {
+            for (source, details) in [
+                ("look", json!({"text": "Loss spiked during evaluation."})),
+                (
+                    "tripwire",
+                    json!({"kind": "stall", "text": "No progress in eval."}),
+                ),
+                (
+                    "rule",
+                    json!({"rule": "Validation loss", "ruleText": "Check before continuing.", "text": "Loss exceeded the limit."}),
+                ),
+            ] {
+                let mut run = run("running");
+                run.id = format!("run_{source}_{ended}");
+                store.upsert_run(&run).unwrap();
+                let mut body = details;
+                body["id"] = json!("f1");
+                body["source"] = json!(source);
+                let flag = crate::engine::flags::new_flag(&store, &run, body, true).unwrap();
+                assert_eq!(
+                    store.raise_flags(&[flag], 1).unwrap(),
+                    [crate::store::Raise::Raised]
+                );
+
+                let before = prompts().len();
+                if copilot {
+                    settle_all(&host).await;
+                    assert_eq!(prompts().len(), before);
+                    ask_about_flag(&store, &run);
+                }
+                if ended {
+                    run.status = "done".into();
+                    run.ended_at = Some(3);
+                    store.upsert_run(&run).unwrap();
+                }
+                settle_all(&host).await;
+                let sent = prompts();
+                let review = &sent[before..];
+                assert_eq!(review.len(), if copilot { 1 } else { 2 }, "{review:#?}");
+
+                let wake = &review[0];
+                assert_eq!(
+                    wake.contains("The user asked you to look at a flag"),
+                    copilot
+                );
+                for prompt in review {
+                    let choice = format!("orx exp flag {} --flag f1", run.id);
+                    for text in [
+                        format!("orx exp status exp_1 --run {}", run.id),
+                        format!("orx logs {}", run.id),
+                        format!("{choice} --keep --reason"),
+                        format!("{choice} --ask --reason"),
+                    ] {
+                        assert!(prompt.contains(&text), "{text:?} missing from {prompt}");
+                    }
+                    assert_eq!(
+                        prompt.contains(&format!("{choice} --stop --reason")),
+                        !ended
+                    );
+                    assert_eq!(
+                        prompt.contains("orx skill orx-experiment-runs"),
+                        source != "look" || !ended
+                    );
+                    match source {
+                        "look" => {
+                            for text in [
+                                "orx exp view get exp_1 --json",
+                                "orx exp view set exp_1 --config PATH",
+                                "noise",
+                                "worth_a_flag",
+                                "watch.minGapS",
+                            ] {
+                                assert_eq!(prompt.contains(text), !ended, "{text:?} in {prompt}");
+                            }
+                        }
+                        "tripwire" => {
+                            assert!(prompt
+                                .contains("::orx:: {\"phase\":\"eval\",\"step\":1,\"of\":10}"));
+                        }
+                        "rule" => {
+                            assert!(prompt.contains("`Validation loss`"));
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                if source == "look" {
+                    assert!(wake.contains("digest"));
+                }
+            }
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -16617,7 +16730,7 @@ for line in sys.stdin:
             "{}",
             prompts[1]
         );
-        assert!(prompts[1].contains("has ended (done), so there is nothing to stop"));
+        assert!(prompts[1].contains("has ended (done)"));
         assert!(prompts[2].contains("ended without settling flag f1"));
         assert!(!prompts[2].contains("--stop"), "{}", prompts[2]);
         assert_eq!(flag(&store, &run)["state"], "kept");
