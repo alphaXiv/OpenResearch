@@ -2,9 +2,20 @@
 
 ## Before you start
 
-- Check whether the issue already has an open pull request: `gh issue view <number> --json closedByPullRequestsReferences`. If it does, build on that one or review it; if yours would be better, say why there first. A second PR for the same issue wastes someone's work.
+- Check whether the GitHub issue already has an open pull request: `gh issue view <number> --json closedByPullRequestsReferences`. If it does, build on that one or review it; if yours would be better, say why there first. A second PR for the same issue wastes someone's work.
 - Search open pull requests for the area too. A patch to code an open PR replaces gets closed as superseded.
 - Link the issue the change fixes. Without an accepted issue, a patch may be declined on principle. An issue the patch's own author wrote does not count as accepted, and it does not bound the scope.
+
+## Linear
+
+For the OpenResearch team: an agent that can reach the ORX team in Linear, through an MCP server, a CLI or an API key, keeps its issue true as the work moves. Its issues live in Linear, not GitHub, unless the user names GitHub, and one you open for the work counts as accepted. Never ask whether to file, take or move an issue; do it, the way a commit gets its description before the work is done.
+
+- **Search ORX before you start.** An open issue for the same work that someone else is assigned to or has started means they are on it: stop and tell the user who, instead of starting a second copy. Any other match is yours to take.
+- **Work that changes code has an issue.** Take the matching one or create one, assigned to the user, titled in their words with a line on why. Reading code to answer a question needs none; open one when the investigation turns into a change.
+- **One task, one issue, however many follow-ups.** A follow-up within the task stays in its issue. When the scope grows, search again: an open issue the bigger change now fixes joins it, with `Fixes <its url>` in the PR description so Linear links it too, under the same rule about issues others own.
+- **In Progress before the first edit.** Name the issue in the change description and use the issue's branch name, so Linear links the PR when it opens.
+- **In Review when the PR opens.** Check that it and each issue the PR fixes moved there; move any that did not.
+- **Link every issue you mention** to the `url` Linear gives it, like [ORX-806](https://linear.app/alphaxiv/issue/ORX-806/agents-keep-the-teams-linear-issues-current), in chat, commits, PRs and comments; a bare key is a dead end to anyone outside Linear.
 
 ## Commits
 

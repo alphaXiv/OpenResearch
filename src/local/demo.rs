@@ -7,7 +7,7 @@ use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::error::{anyhow, Result};
+use crate::error::{anyhow, Context, Result};
 use crate::store::{now_ms, Store, StoredChatMessage, StoredChatSession, StoredRun};
 
 use super::chat::{WirePart, WireToolState};
@@ -34,33 +34,49 @@ const LR_PROBE_EXPERIMENT_ID: &str = "demo_nanochat_lr_probe_v1";
 const LR_PROBE_BRANCH: &str = "orx/tiny-learning-rate-probe-interactive";
 const VOCAB_PROBE_EXPERIMENT_ID: &str = "demo_nanochat_vocab_probe_v1";
 const VOCAB_PROBE_BRANCH: &str = "orx/vocab-8192-probe";
-// Git Bash venvs keep their scripts in `Scripts/`, not `bin/`.
-const PROBE_UV: &str = "export NANOCHAT_BASE_DIR=\"$PWD/.cache/nanochat\" UV_CACHE_DIR=\"${ORX_CACHE_DIR:-$HOME/.cache/openresearch}/uv\" \
-     && mkdir -p \"$NANOCHAT_BASE_DIR\" \"$UV_CACHE_DIR\" \
-     && { command -v uv >/dev/null || { curl -LsSf https://astral.sh/uv/install.sh | sh && export PATH=\"$HOME/.local/bin:$PATH\"; }; }";
-
-fn probe_setup() -> String {
+// Git Bash: uv has no shell installer there, and venvs may use `Scripts/` not `bin/`.
+fn probe_uv() -> String {
+    let install_uv = if cfg!(windows) {
+        "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm https://astral.sh/uv/install.ps1 | iex\""
+    } else {
+        "curl -LsSf https://astral.sh/uv/install.sh | sh"
+    };
     format!(
-        "{PROBE_UV} && ([ -d .venv ] || uv venv) && uv sync --extra cpu \
+        "printf '::orx:: %s\\n' '{{\"phase\":\"install\",\"step\":0,\"of\":1,\"unit\":\"environments\"}}' \
+         && export NANOCHAT_BASE_DIR=\"$PWD/.cache/nanochat\" UV_CACHE_DIR=\"${{ORX_CACHE_DIR:-$HOME/.cache/openresearch}}/uv\" PYTHONUNBUFFERED=1 \
+         && mkdir -p \"$NANOCHAT_BASE_DIR\" \"$UV_CACHE_DIR\" \
+         && {{ command -v uv >/dev/null || {{ {install_uv} && export PATH=\"$HOME/.local/bin:$PATH\"; }}; }}"
+    )
+}
+
+fn probe_setup(config: &Value) -> String {
+    format!(
+        "printf '::orx:: %s\\n' '{config}' && {} && ([ -d .venv ] || uv venv) && uv sync --extra cpu \
          && {{ . .venv/bin/activate 2>/dev/null || . .venv/Scripts/activate; }} \
-         && python -m nanochat.dataset -n 8"
+         && printf '::orx:: %s\\n' '{{\"step\":1}}' \
+         && python -m nanochat.dataset -n 8",
+        probe_uv()
     )
 }
 
 // --warmdown-ratio=0 keeps the LR schedule identical to the baseline's first 200 steps.
-const PROBE_TRAIN: &str = "python -m scripts.base_train --depth=6 --head-dim=64 --window-pattern=L --max-seq-len=512 --device-batch-size=32 --total-batch-size=16384 --eval-every=50 --eval-tokens=524288 --core-metric-every=-1 --sample-every=-1 --num-iterations=200 --warmdown-ratio=0";
-const PROBE_TOK_TRAIN: &str = "python -m scripts.tok_train --max-chars=2000000000";
+const PROBE_TRAIN: &str = "printf '::orx:: %s\\n' '{\"phase\":\"train\"}' && python -m scripts.base_train --depth=6 --head-dim=64 --window-pattern=L --max-seq-len=512 --device-batch-size=32 --total-batch-size=16384 --eval-every=50 --eval-tokens=524288 --core-metric-every=-1 --sample-every=-1 --num-iterations=200 --warmdown-ratio=0";
+const PROBE_TOK_TRAIN: &str = "printf '::orx:: %s\\n' '{\"phase\":\"tokenizer\",\"step\":0,\"of\":1,\"unit\":\"commands\"}' && python -m scripts.tok_train --max-chars=2000000000";
 const BASELINE_SHA: &str = "96098ad3f3708748f693c28194520ae13afb9c69";
-const EXPERIMENT_SHA: &str = "dae919e9b6f6edd3bdb14a514dd1e451781682f8";
-// Installs seeded before `runs/runcpu.sh` learned Windows keep that tree, since
-// every session worktree they have was cut from it.
-const PREVIOUS_EXPERIMENT_SHA: &str = "b302007b336e47028e321b0d920f030445c4db67";
+const EXPERIMENT_SHA: &str = "5e0c18c03d8cb22cac659e770bfa90dc157e472e";
+// Earlier baseline trees, newest first: before it reported its stages, and before
+// `runs/runcpu.sh` learned Windows. An install seeded at one keeps it, since every session
+// worktree it has was cut from it.
+const EARLIER_EXPERIMENT_SHAS: [&str; 2] = [
+    "dae919e9b6f6edd3bdb14a514dd1e451781682f8",
+    "b302007b336e47028e321b0d920f030445c4db67",
+];
 
 const TURN_CONTEXT: &str = r#"<openresearch-demo-evidence>
 This is a recorded OpenResearch demo run. The project's Artifacts/evidence directory contains real checkpoint metadata, the trained tokenizer, structured training and evaluation metrics, the final inference transcript, and run-manifest.json. To reduce the bundled demo project's download size, the multi-gigabyte model checkpoints, optimizer states, datasets, and environment are intentionally not included; the manifest records their original paths, sizes, hashes, and omission status. Do not search for or claim access to omitted files. Before proposing work that requires model weights, explain that the weights must be regenerated or downloaded. When the user asks you to choose an autonomous follow-up, prefer an analysis supported by the bundled evidence unless they explicitly ask to regenerate or download the weights.
 </openresearch-demo-evidence>"#;
 
-const USER_PROMPT: &str = "Run nanochat's local pipeline end-to-end with bash runs/runcpu.sh (the shrunk-down version for laptops, not speedrun.sh, ~40 min), streaming output and surfacing val_bpb/eval numbers as they appear, fixing any setup errors in place, and when it finishes chat with the model via python -m scripts.chat_cli -p \"What is the capital of France?\" to confirm it works.";
+const USER_PROMPT: &str = "Run nanochat's local pipeline end-to-end with bash runs/runcpu.sh (the shrunk-down version for laptops, not speedrun.sh), streaming output and surfacing val_bpb/eval numbers as they appear, fixing any setup errors in place, and when it finishes chat with the model via python -m scripts.chat_cli -p \"What is the capital of France?\" to confirm it works.";
 
 const FIGURE_USER_PROMPT: &str = "Using nanochat’s recorded base-training and SFT logs, create publication-quality SVG-only figures for base and SFT loss/validation BPB, training throughput, and CORE evaluation results. Use Helvetica Neue, a restrained academic style, exact metric labels, colorblind-safe colors, and no decorative infographics or PNG duplicates.";
 
@@ -84,7 +100,7 @@ const BOOTSTRAP_CONTEXT: &str = r#"You are continuing a live OpenResearch demo s
 
 The user asked you to run nanochat's local runs/runcpu.sh pipeline end to end, surface validation and evaluation metrics, repair setup issues, and confirm the trained model can answer the capital of France.
 
-You inspected the repository and prepared the CPU pipeline before launching it: caches were made checkout-local, SFT conversations longer than a row were excluded, all-masked SFT batches were guarded, periodic ChatCORE was disabled to bound memory pressure, and the chat CLI was made to re-enter the project environment. You created the CPU baseline experiment and completed one successful run.
+You inspected the repository and prepared the CPU pipeline before launching it: each stage reports its progress to OpenResearch, training reports loss, validation BPB and throughput, and the baseline's view charts them; downloaded shards, the tokenizer and uv's cache are shared by runs while checkpoints stay in each run; SFT conversations longer than a row were excluded, all-masked SFT batches were guarded, periodic ChatCORE was disabled to bound memory pressure, and the chat CLI was made to re-enter the project environment. You created the CPU baseline experiment and completed one successful run.
 
 Recorded results: a 6-layer 73.5M-parameter model trained for 5,000 base steps over 81.92M tokens; final training validation BPB 1.165758; base-eval train/validation BPB 1.152185/1.119301; SFT completed 1,500 steps with final validation BPB 0.7389. The final CLI loaded the SFT checkpoint and answered that the capital of France is Paris. The results are saved in cpu-apple-silicon-pipeline-results.md.
 
@@ -110,7 +126,7 @@ This bundled demo records a completed local `runs/runcpu.sh` pipeline on Apple S
 ## Base training and evaluation
 
 - Model: d6, 6 layers, 73.5M parameters, sequence length 512
-- Training: 5,000 steps, 81.92M tokens, 131.55 minutes
+- Training: 5,000 steps, 81.92M tokens
 - Final training-loop validation BPB: 1.165758
 - Base-eval train BPB: 1.152185
 - Base-eval validation BPB: 1.119301
@@ -119,7 +135,7 @@ This bundled demo records a completed local `runs/runcpu.sh` pipeline on Apple S
 ## Supervised fine-tuning
 
 - Started from the validated base checkpoint with a fresh optimizer
-- Training: 1,500 steps, 39.07 minutes
+- Training: 1,500 steps
 - Validation BPB: 1.0174 → 1.0580 → 0.9914 → 0.9513 → 0.9141 → 0.8483 → 0.7950 → 0.7486 → 0.7389
 - Final/minimum validation BPB: 0.7389
 
@@ -133,13 +149,18 @@ The `evidence/` directory contains the real checkpoint metadata, trained tokeniz
 
 ## Portable setup repairs
 
-- Kept nanochat and uv caches inside the checkout.
+- Reported each stage's progress, and training's loss, validation BPB and throughput, to OpenResearch.
+- Shared downloaded shards, the trained tokenizer and uv's cache across runs; checkpoints stay in each run.
 - Excluded conversations longer than the SFT row capacity and guarded all-masked batches.
 - Disabled memory-heavy periodic ChatCORE while retaining validation BPB.
 - Made the chat CLI reuse the project environment and recorded cache location.
 "#;
 
 const RUN_LOG: &str = include_str!("../../demo/nanochat/run-output.txt");
+const BASELINE_VIEW: &str = include_str!("../../demo/nanochat/baseline-view.xml");
+const VOCAB_PROBE_VIEW: &str = include_str!("../../demo/nanochat/vocab-probe-view.xml");
+const VOCAB_PROBE_CONFIG: &str = include_str!("../../demo/nanochat/vocab-probe-config.json");
+const PROBE_VIEW: &str = include_str!("../../demo/nanochat/probe-view.xml");
 /// The leading "n" of nanochat's wordmark, cropped square.
 const PROJECT_ICON: &[u8] = include_bytes!("../../demo/nanochat/icon.png");
 // The log's own timestamps run 10:51:52 -> 14:33:21; the seeded run must span them.
@@ -308,14 +329,14 @@ pub(crate) fn session_start_ref(
 /// The experiment commit the demo branch descends from, not merely one whose object exists.
 fn installed_experiment_sha(repo: &Path) -> &'static str {
     let branch = format!("refs/heads/{BRANCH}");
-    [EXPERIMENT_SHA, PREVIOUS_EXPERIMENT_SHA]
-        .into_iter()
+    std::iter::once(EXPERIMENT_SHA)
+        .chain(EARLIER_EXPERIMENT_SHAS)
         .find(|sha| git(repo, &["merge-base", "--is-ancestor", sha, &branch]).is_ok())
         .unwrap_or(EXPERIMENT_SHA)
 }
 
 fn is_experiment_sha(sha: &str) -> bool {
-    [EXPERIMENT_SHA, PREVIOUS_EXPERIMENT_SHA].contains(&sha)
+    sha == EXPERIMENT_SHA || EARLIER_EXPERIMENT_SHAS.contains(&sha)
 }
 
 /// Repoint the embedded demo's local origin after the data directory moves.
@@ -370,6 +391,10 @@ fn seed_at(
     selection: DemoSelection,
 ) -> Result<DemoCompletion> {
     FOREGROUND_WANTED.store(true, std::sync::atomic::Ordering::Relaxed);
+    let probe_config = || {
+        serde_json::from_str(VOCAB_PROBE_CONFIG)
+            .map_err(|error| anyhow!("Could not read the bundled vocabulary probe plan: {error}"))
+    };
     if let Some(project) = store.get_local_project(PROJECT_ID)? {
         if !same_path(&project.repo_path, repo)
             || project.github_owner != OWNER
@@ -379,6 +404,9 @@ fn seed_at(
             return Err(anyhow!(
                 "The existing demo repository could not be located; its files have been preserved."
             ));
+        }
+        if !store.ui_state()?.onboarding_completed {
+            seed_monitor(store, data_root, &probe_config()?)?;
         }
         let stored = store.get_chat_session(SESSION_ID)?;
         return Ok(DemoCompletion {
@@ -495,13 +523,14 @@ fn seed_at(
                 "Train a real 0.8M-parameter nanochat model for 20 steps per arm on bundled text, comparing AdamW LR 0.001 with 0.002 from identical initialization and batches. Saves training/held-out validation loss, an interactive HTML loss chart, and raw metrics. No dataset download or full tokenizer training. Demonstrates early optimization, not coherent generation; results are separate from the recorded 73.5M baseline. First use prepares Python dependencies."
                     .into(),
             ),
-            run_command: format!("{PROBE_UV} && uv run --script scripts/demo_probe.py"),
+            run_command: format!("{} && uv run --script scripts/demo_probe.py", probe_uv()),
             agent_status: "idle".into(),
             created_at: ago(seeded_at, 8, 0),
             updated_at: ago(seeded_at, 8, 0),
             chat_session_id: None,
             archived: false,
         };
+    let vocab_probe_config = probe_config()?;
     let vocab_probe = LocalExperiment {
             id: VOCAB_PROBE_EXPERIMENT_ID.into(),
             project_id: PROJECT_ID.into(),
@@ -514,8 +543,8 @@ fn seed_at(
                     .into(),
             ),
             run_command: format!(
-                "{} && {PROBE_TOK_TRAIN} --vocab-size=8192 && {PROBE_TRAIN}",
-                probe_setup()
+                "{} && {PROBE_TOK_TRAIN} --vocab-size=8192 && printf '::orx:: %s\\n' '{{\"step\":1}}' && {PROBE_TRAIN}",
+                probe_setup(&vocab_probe_config)
             ),
             agent_status: "idle".into(),
             created_at: ago(seeded_at, 6, 0),
@@ -523,7 +552,6 @@ fn seed_at(
             chat_session_id: None,
             archived: false,
         };
-    // created_at and run_ended_at must stay RUN_LOG_SPAN_MIN apart.
     let run_ended_at = ago(seeded_at, 10, 0);
     let run = StoredRun {
         id: RUN_ID.into(),
@@ -532,7 +560,7 @@ fn seed_at(
         status: "done".into(),
         backend_json: json!({ "kind": "local_job", "jobId": "demo:nanochat" }).to_string(),
         command: project.run_command.clone().unwrap_or_default(),
-        created_at: ago(seeded_at, 234, 0),
+        created_at: run_ended_at - RUN_LOG_SPAN_MIN * 60_000,
         updated_at: run_ended_at,
         ended_at: Some(run_ended_at),
         exit_code: Some(0),
@@ -734,7 +762,118 @@ fn seed_at(
             literature_assistant,
         ],
     )?;
+    seed_monitor(store, data_root, &vocab_probe_config)?;
     validate_snapshot(store, repo, newly_created)
+}
+
+fn draw_run(checkpoint: &Path, ended_at: i64) -> Result<()> {
+    // No host wrote the bundled log, so it has no file identity of its own.
+    let mut snapshot = orx_signals::Snapshot::new(RUN_ID, "0-0", "demo");
+    snapshot
+        .feed(RUN_LOG.as_bytes(), true, ended_at, false)
+        .map_err(|error| anyhow!("the demo run's bundled log could not be folded: {error}"))?;
+    snapshot.reached_end(ended_at);
+    let timestamp = regex::Regex::new(r"^2026-08-04 (\d{2}):(\d{2}):(\d{2}),(\d{3})").unwrap();
+    let mut phase = None;
+    let mut first = std::collections::HashMap::new();
+    let mut last = None;
+    for line in RUN_LOG.lines() {
+        if let Some(record) = line.strip_prefix("::orx:: ") {
+            let record: serde_json::Value = serde_json::from_str(record)?;
+            if let Some(name) = record["phase"].as_str() {
+                phase = Some(name.to_owned());
+            }
+        }
+        if let Some(time) = timestamp.captures(line) {
+            let at = time[1].parse::<i64>()? * 3_600_000
+                + time[2].parse::<i64>()? * 60_000
+                + time[3].parse::<i64>()? * 1_000
+                + time[4].parse::<i64>()?;
+            if let Some(name) = &phase {
+                first.entry(name.clone()).or_insert(at);
+            }
+            last = Some(at);
+        }
+    }
+    if let Some(last) = last {
+        let offset = ended_at - last;
+        for index in 0..snapshot.phases.len() {
+            let start = first.get(&snapshot.phases[index].name).copied();
+            let end = snapshot
+                .phases
+                .get(index + 1)
+                .and_then(|next| first.get(&next.name))
+                .copied();
+            snapshot.phases[index].started_at =
+                start.filter(|_| end.is_some()).map(|at| at + offset);
+            snapshot.phases[index].ended_at = end.map(|at| at + offset);
+        }
+    }
+
+    crate::engine::adapters::local::signals::publish(checkpoint, &snapshot)?;
+    Ok(())
+}
+
+fn seed_monitor(store: &Store, data_root: &Path, vocab_probe_config: &Value) -> Result<()> {
+    use crate::engine::view::{self, Refusal, Source};
+
+    let signals = data_root.join("run-signals");
+    let checkpoint = signals.join(format!("{RUN_ID}.json"));
+    if crate::engine::adapters::local::signals::load(&checkpoint)?.is_none() {
+        store.with_run_artifacts_shared(|| {
+            let run = store
+                .get_run(RUN_ID)?
+                .context("The demo's recorded run is missing")?;
+            let ended_at = run
+                .ended_at
+                .context("The demo's recorded run has no finish time")?;
+            std::fs::create_dir_all(&signals).with_context(|| {
+                format!(
+                    "Could not create the demo checkpoint directory {}",
+                    signals.display()
+                )
+            })?;
+            draw_run(&checkpoint, ended_at)
+        })?;
+    }
+
+    for (experiment, file, markup, config) in [
+        (EXPERIMENT_ID, "baseline-view.xml", BASELINE_VIEW, None),
+        (LR_PROBE_EXPERIMENT_ID, "probe-view.xml", PROBE_VIEW, None),
+        (
+            VOCAB_PROBE_EXPERIMENT_ID,
+            "vocab-probe-view.xml",
+            VOCAB_PROBE_VIEW,
+            Some(vocab_probe_config),
+        ),
+    ] {
+        if store.run_monitor_json(experiment)?.is_some() {
+            continue;
+        }
+        let source = Source {
+            file: Some(file),
+            patterns: None,
+            config: config.map(|_| "vocab-probe-config.json"),
+        };
+        view::set(
+            store,
+            experiment,
+            &view::etag(None),
+            Some(markup),
+            None,
+            config,
+            &source,
+        )
+        .map_err(|refusal| match refusal {
+            Refusal::Missing(why)
+            | Refusal::Invalid(why)
+            | Refusal::Changed(why)
+            | Refusal::Failed(why) => {
+                anyhow!("the demo's view could not be saved on {experiment}: {why}")
+            }
+        })?;
+    }
+    Ok(())
 }
 
 fn ago(seeded_at: i64, minutes: i64, seconds: i64) -> i64 {
@@ -850,8 +989,8 @@ fn validate_snapshot(store: &Store, repo: &Path, newly_created: bool) -> Result<
 
 const BASE_PROGRESS: &[&str] = &[
     "Base training is under way. Initial validation BPB was **3.195800**; by step 100 it had already dropped to **1.940739**, and MPS throughput is steady at roughly 10–11k tokens/s.",
-    "Halfway through base training: **step 2,500 `val_bpb = 1.248040`**. Every one of the 25 validation points so far has improved on the last, and the remaining base ETA is about 67 minutes.",
-    "Base training finished: **final step 5,000 `val_bpb = 1.165758`**, down from 3.195800 at initialization with no regressions across all 50 validation points. The base phase took 131.55 minutes on this Mac and the pipeline is moving into `base_eval`.",
+    "Halfway through base training: **step 2,500 `val_bpb = 1.248040`**. Every one of the 25 validation points so far has improved on the last.",
+    "Base training finished: **final step 5,000 `val_bpb = 1.165758`**, down from 3.195800 at initialization with no regressions across all 50 validation points. The pipeline is moving into `base_eval`.",
 ];
 
 const SFT_PROGRESS: &[&str] = &[
@@ -862,7 +1001,7 @@ const SFT_PROGRESS: &[&str] = &[
 fn assistant_parts(harness: &str) -> Vec<WirePart> {
     let mut parts = vec![WirePart::text(
         "intro",
-        "I’ll keep this attached to one local baseline, inspect the exact local pipeline, make the portability and SFT safeguards part of the experiment before launch, then stay on the streamed output through tokenizer training, base training and evaluation, SFT, and the final chat check.",
+        "I’ll keep this attached to one local baseline, inspect the exact local pipeline, make stage reporting and the portability and SFT safeguards part of the experiment before launch, then stay on the streamed output through tokenizer training, base training and evaluation, SFT, and the final chat check.",
     )];
     if harness == "opencode" {
         parts.push(tool_part(
@@ -886,7 +1025,7 @@ fn assistant_parts(harness: &str) -> Vec<WirePart> {
                 "file_path": "runs/runcpu.sh",
                 "filePath": "runs/runcpu.sh",
                 "old_string": "export NANOCHAT_BASE_DIR=\"$HOME/.cache/nanochat\"\nmkdir -p $NANOCHAT_BASE_DIR",
-                "new_string": "export NANOCHAT_BASE_DIR=\"$PWD/.cache/nanochat\"\nexport UV_CACHE_DIR=\"$PWD/.cache/uv\"\nmkdir -p \"$NANOCHAT_BASE_DIR\" \"$UV_CACHE_DIR\""
+                "new_string": "CACHE=\"${ORX_CACHE_DIR:-$HOME/.cache/openresearch}\"\nDATA=\"$CACHE/nanochat/climbmix-8\"\nexport NANOCHAT_BASE_DIR=\"$PWD/.cache/nanochat\"\nexport UV_CACHE_DIR=\"$CACHE/uv\"\nexport PYTHONUNBUFFERED=1\nmkdir -p \"$NANOCHAT_BASE_DIR\" \"$UV_CACHE_DIR\" \"$DATA\"\nreport '{\"phase\":\"install\"}'"
             }),
             "Bash",
         ),
@@ -903,6 +1042,9 @@ fn assistant_parts(harness: &str) -> Vec<WirePart> {
             "edit",
             json!({ "changes": [
                 { "path": "runs/runcpu.sh", "kind": "update" },
+                { "path": "orx_run.py", "kind": "add" },
+                { "path": "nanochat/dataset.py", "kind": "update" },
+                { "path": "scripts/base_train.py", "kind": "update" },
                 { "path": "scripts/chat_sft.py", "kind": "update" },
                 { "path": "scripts/chat_cli.py", "kind": "update" }
             ]}),
@@ -918,18 +1060,25 @@ fn assistant_parts(harness: &str) -> Vec<WirePart> {
     ));
     parts.push(WirePart::text(
         "inspection-summary",
-        "The project is fresh and the requested command supplies the complete execution recipe. Before spending compute, I’m making the final working safeguards explicit: keep nanochat and uv caches inside the checkout; exclude conversations longer than the 513-token SFT row; discard batches with no supervised targets; start SFT from the clean base weights with fresh optimizer state; disable periodic ChatCORE on unified memory while retaining validation BPB; and make the outer chat command re-enter the uv environment.",
+        "The project is fresh and the requested command supplies the complete execution recipe. Before spending compute, I’m making the final working safeguards explicit: report each stage (install, download, tokenizer, train, eval, SFT, chat) and training’s loss, validation BPB and tokens/s to OpenResearch; share downloaded shards, the tokenizer and uv’s cache between runs so later experiments skip setup, while checkpoints stay in each run; exclude conversations longer than the 513-token SFT row; discard batches with no supervised targets; start SFT from the clean base weights with fresh optimizer state; disable periodic ChatCORE on unified memory while retaining validation BPB; and make the outer chat command re-enter the uv environment.",
     ));
     parts.push(tool_part(
         "portable-fixes",
         edit_name,
         edit_input,
-        Some("Portable CPU/SFT safeguards applied."),
+        Some("Stage reports and portable CPU/SFT safeguards applied."),
         Some("Apply portable safeguards"),
     ));
     parts.push(WirePart::text(
         "experiment-created",
-        "The baseline is now fixed to one end-to-end command: the CPU/MPS pipeline followed immediately by the one-shot France prompt. I created the local end-to-end baseline experiment and I’m launching its single local run now; I’ll keep reading the supervised log and surface every validation checkpoint as it lands.",
+        "The baseline is now fixed to one end-to-end command: the CPU/MPS pipeline followed immediately by the one-shot France prompt. I created the local end-to-end baseline experiment and set its view, so its runs chart validation BPB and loss for training and SFT; I’m launching its single local run now and I’ll keep reading the supervised log and surface every validation checkpoint as it lands.",
+    ));
+    parts.push(tool_part(
+        "view",
+        shell_name,
+        json!({ "command": "orx exp view set demo_nanochat_cpu_v1 --file baseline-view.xml" }),
+        Some("✓ View saved on experiment demo_nanochat_cpu_v1; its runs are drawn with them now.\nNot reported yet: val_bpb, loss, tok_per_sec, sft_val_bpb, sft_loss. Once a run reports, check it with `orx exp view check RUN`."),
+        Some("Set the baseline's view"),
     ));
     parts.push(tool_part(
         "launch",
@@ -968,12 +1117,12 @@ fn assistant_parts(harness: &str) -> Vec<WirePart> {
         "tokenizer-log",
         shell_name,
         json!({ "command": "log=$(orx logs demo_nanochat_run_v1 | head -n 1); log=${log#*: }; tail -n 100 \"$log\"" }),
-        Some("Starting BPE training: 32503 merges to compute\nProgress: 25% (8126/32503 merges)\nProgress: 50% (16251/32503 merges)\nProgress: 75% (24378/32503 merges)\nProgress: 100% (32503/32503 merges)\nFinished training: 32503 merges completed\nTraining time: 42.69s\nclimbmix-val 3024593 bytes 644939 tokens 4.69 bytes/token"),
+        Some("Starting BPE training: 32503 merges to compute\nProgress: 25% (8126/32503 merges)\nProgress: 50% (16251/32503 merges)\nProgress: 75% (24378/32503 merges)\nProgress: 100% (32503/32503 merges)\nFinished training: 32503 merges completed\nclimbmix-val 3024593 bytes 644939 tokens 4.69 bytes/token"),
         Some("Stream tokenizer training"),
     ));
     parts.push(WirePart::text(
         "tokenizer-complete",
-        "Tokenizer training finished in 42.69s. Its validation text compression was 4.69 bytes/token (644,939 tokens over 3,024,593 bytes), about 1.2% better than GPT‑2 and 2.2% behind GPT‑4 on that sample. Base training is now running on MPS: 6 layers, 73.5M parameters, 5,000 iterations, 81.92M tokens. I’m watching every `val_bpb` checkpoint.",
+        "Tokenizer training finished. Its validation text compression was 4.69 bytes/token (644,939 tokens over 3,024,593 bytes), about 1.2% better than GPT‑2 and 2.2% behind GPT‑4 on that sample. Base training is now running on MPS: 6 layers, 73.5M parameters, 5,000 iterations, 81.92M tokens. I’m watching every `val_bpb` checkpoint.",
     ));
     parts.push(tool_part(
         "base-log",
@@ -989,7 +1138,7 @@ fn assistant_parts(harness: &str) -> Vec<WirePart> {
         "base-eval-log",
         shell_name,
         json!({ "command": "log=$(orx logs demo_nanochat_run_v1 | head -n 1); log=${log#*: }; tail -n 100 \"$log\"" }),
-        Some("Total training time: 131.55m\nMinimum validation bpb: 1.165758\n\nBPB Evaluation\ntrain bpb: 1.152185\nval bpb: 1.119301\n\nCORE Evaluation\nbigbench_qa_wikidata accuracy: 0.0000\nopenbook_qa accuracy: 0.2500\nwinogrande accuracy: 0.5625 | centered: 0.1250\nbigbench_operators accuracy: 0.0000"),
+        Some("Minimum validation bpb: 1.165758\n\nBPB Evaluation\ntrain bpb: 1.152185\nval bpb: 1.119301\n\nCORE Evaluation\nbigbench_qa_wikidata accuracy: 0.0000\nopenbook_qa accuracy: 0.2500\nwinogrande accuracy: 0.5625 | centered: 0.1250\nbigbench_operators accuracy: 0.0000"),
         Some("Read base evaluation"),
     ));
     parts.push(WirePart::text(
@@ -1014,7 +1163,7 @@ fn assistant_parts(harness: &str) -> Vec<WirePart> {
         "sft-complete-log",
         shell_name,
         json!({ "command": "log=$(orx logs demo_nanochat_run_v1 | head -n 1); log=${log#*: }; tail -n 100 \"$log\"" }),
-        Some("step 01498 (99.93%) | loss: 2.052968 | total time: 39.04m\nstep 01499 (100.00%) | loss: 2.026530 | total time: 39.07m\nStep 01499 | Validation bpb: 0.7389\nSaved model parameters to: $ORX_RUN_DIR/repo/.cache/nanochat/chatsft_checkpoints/d6/model_001499.pt\nTotal training time: 39.07m\nMinimum validation bpb: 0.7389"),
+        Some("step 01498 (99.93%) | loss: 2.052968\nstep 01499 (100.00%) | loss: 2.026530\nStep 01499 | Validation bpb: 0.7389\nSaved model parameters to: $ORX_RUN_DIR/repo/.cache/nanochat/chatsft_checkpoints/d6/model_001499.pt\nMinimum validation bpb: 0.7389"),
         Some("Read final SFT checkpoint"),
     ));
     parts.push(WirePart::text(
@@ -1055,7 +1204,7 @@ fn assistant_parts(harness: &str) -> Vec<WirePart> {
     ));
     parts.push(WirePart::text(
         "final",
-        "Pipeline completed successfully. Base training finished at **1.1658 BPB**; SFT finished at **0.7389 BPB**. Explore each phase’s validation curve and the CORE benchmark scores below.\n\n![Nanochat pipeline results](artifacts/nanochat-pipeline-results.html)\n\nBase training took **131.55 min** (5,000 steps, 81.92M tokens), followed by **39.07 min** of SFT (1,500 steps). The SFT checkpoint answered **Paris**. These are recorded results from the demo pipeline.\n\n[Full results](artifacts/cpu-apple-silicon-pipeline-results.md) · [Metric data](artifacts/evidence/training-metrics.csv)",
+        "Pipeline completed successfully. Base training finished at **1.1658 BPB**; SFT finished at **0.7389 BPB**. Explore each phase’s validation curve and the CORE benchmark scores below.\n\n![Nanochat pipeline results](artifacts/nanochat-pipeline-results.html)\n\nThe pipeline ran 5,000 base steps (81.92M tokens), base evaluation, and 1,500 SFT steps. The SFT checkpoint answered **Paris**. These are recorded results from the demo pipeline.\n\n[Full results](artifacts/cpu-apple-silicon-pipeline-results.md) · [Metric data](artifacts/evidence/training-metrics.csv)",
     ));
     parts
 }
@@ -1511,6 +1660,10 @@ fn build_worktree(root: &Path) -> Result<()> {
     commit(root, "Import nanochat demo baseline")?;
     git(root, &["checkout", "-b", BRANCH])?;
     write_assets::<ExperimentAssets>(root)?;
+    std::fs::write(
+        root.join("orx_run.py"),
+        include_str!("../../agent-skills/orx-compute/assets/orx_run.py"),
+    )?;
     set_executable(root.join("runs/runcpu.sh"))?;
     git(root, &["add", "-A"])?;
     git(root, &["update-index", "--chmod=+x", "runs/runcpu.sh"])?;
@@ -1895,57 +2048,64 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    /// Sessions seeded before `runcpu.sh` learned Windows must still resolve their start commit.
+    /// Sessions seeded at an earlier baseline tree must still resolve their start commit.
     #[test]
-    fn an_install_seeded_at_the_previous_experiment_keeps_working() {
-        let root = std::env::temp_dir().join(format!("orx-demo-test-{}", uuid::Uuid::new_v4()));
-        let repo = root.join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        build_worktree(&repo).unwrap();
-        git(&repo, &["checkout", "-q", BRANCH]).unwrap();
-        git(&repo, &["reset", "-q", "--soft", "HEAD~1"]).unwrap();
-        std::fs::write(
-            repo.join("runs/runcpu.sh"),
+    fn an_install_seeded_at_an_earlier_experiment_keeps_working() {
+        let earlier = [
+            include_str!("demo_fixtures/runcpu-before-reports.sh"),
             include_str!("demo_fixtures/runcpu-before-windows.sh"),
-        )
-        .unwrap();
-        git(&repo, &["add", "-A"]).unwrap();
-        git(&repo, &["update-index", "--chmod=+x", "runs/runcpu.sh"]).unwrap();
-        commit(&repo, "Make the CPU pipeline portable and memory-safe").unwrap();
-        git(&repo, &["checkout", "-q", "main"]).unwrap();
-        assert_eq!(
-            git(&repo, &["rev-parse", BRANCH]).unwrap(),
-            PREVIOUS_EXPERIMENT_SHA
-        );
-
-        validate_worktree(&repo).unwrap();
-        for session_id in [SESSION_ID, FIGURE_SESSION_ID, LITERATURE_SESSION_ID] {
-            assert_eq!(
-                session_start_ref(&repo, OWNER, REPO, session_id),
-                Some(PREVIOUS_EXPERIMENT_SHA)
-            );
-            let worktree = root.join("worktrees").join(session_id);
-            crate::local::git::ensure_session_worktree_in(
-                &repo, &worktree, OWNER, REPO, "main", session_id,
+        ];
+        for (sha, runcpu) in EARLIER_EXPERIMENT_SHAS.into_iter().zip(earlier) {
+            let root = std::env::temp_dir().join(format!("orx-demo-test-{}", uuid::Uuid::new_v4()));
+            let repo = root.join("repo");
+            std::fs::create_dir_all(&repo).unwrap();
+            build_worktree(&repo).unwrap();
+            git(&repo, &["checkout", "-q", BRANCH]).unwrap();
+            git(&repo, &["reset", "-q", "--soft", "HEAD~1"]).unwrap();
+            git(
+                &repo,
+                &[
+                    "checkout",
+                    "HEAD",
+                    "--",
+                    "scripts/base_train.py",
+                    "nanochat/dataset.py",
+                ],
             )
             .unwrap();
-            assert_eq!(
-                git(&worktree, &["rev-parse", "HEAD"]).unwrap(),
-                PREVIOUS_EXPERIMENT_SHA
-            );
-        }
+            git(&repo, &["rm", "-q", "-f", "orx_run.py"]).unwrap();
+            std::fs::write(repo.join("runs/runcpu.sh"), runcpu).unwrap();
+            std::fs::write(
+                repo.join("scripts/chat_sft.py"),
+                include_str!("demo_fixtures/chat_sft-before-reports.py"),
+            )
+            .unwrap();
+            git(&repo, &["add", "-A"]).unwrap();
+            git(&repo, &["update-index", "--chmod=+x", "runs/runcpu.sh"]).unwrap();
+            commit(&repo, "Make the CPU pipeline portable and memory-safe").unwrap();
+            git(&repo, &["checkout", "-q", "main"]).unwrap();
+            assert_eq!(git(&repo, &["rev-parse", BRANCH]).unwrap(), sha);
 
-        // Cache wiped, origin kept: onboarding restores the old tree, not a sibling.
-        let bare = root.join("origin.git");
-        ensure_follow_up_branches(&repo).unwrap();
-        ensure_local_origin(&repo, &bare).unwrap();
-        std::fs::remove_dir_all(root.join("worktrees")).unwrap();
-        std::fs::remove_dir_all(&repo).unwrap();
-        assert_eq!(
-            install_repository(&repo, &bare).unwrap(),
-            PREVIOUS_EXPERIMENT_SHA
-        );
-        let _ = std::fs::remove_dir_all(root);
+            validate_worktree(&repo).unwrap();
+            for session_id in [SESSION_ID, FIGURE_SESSION_ID, LITERATURE_SESSION_ID] {
+                assert_eq!(session_start_ref(&repo, OWNER, REPO, session_id), Some(sha));
+                let worktree = root.join("worktrees").join(session_id);
+                crate::local::git::ensure_session_worktree_in(
+                    &repo, &worktree, OWNER, REPO, "main", session_id,
+                )
+                .unwrap();
+                assert_eq!(git(&worktree, &["rev-parse", "HEAD"]).unwrap(), sha);
+            }
+
+            // Cache wiped, origin kept: onboarding restores the old tree, not a sibling.
+            let bare = root.join("origin.git");
+            ensure_follow_up_branches(&repo).unwrap();
+            ensure_local_origin(&repo, &bare).unwrap();
+            std::fs::remove_dir_all(root.join("worktrees")).unwrap();
+            std::fs::remove_dir_all(&repo).unwrap();
+            assert_eq!(install_repository(&repo, &bare).unwrap(), sha);
+            let _ = std::fs::remove_dir_all(root);
+        }
     }
 
     /// A foreign kept origin is named as the problem, before any clone is restored from it.
@@ -2018,6 +2178,179 @@ mod tests {
                     .len(),
                 3
             );
+        }
+    }
+
+    #[test]
+    fn retry_onboarding_finishes_the_demo_checkpoint_and_views() {
+        let root = super::super::git::TemporaryDirectory::new("orx-demo-retry").unwrap();
+        let data = root.path().join("data");
+        let repo = root.path().join("cache/repos").join(OWNER).join(REPO);
+        prepare_origin(&demo_bare_path_in(&data));
+        let store = Store::open_at(data.clone()).unwrap();
+        let selection = DemoSelection {
+            profile: None,
+            harness: "codex".into(),
+            model: None,
+            permission_mode: None,
+            reasoning_level: None,
+        };
+
+        let signals = data.join("run-signals");
+        std::fs::write(&signals, "blocks checkpoint creation").unwrap();
+        assert!(seed_at(&store, &data, &repo, selection.clone()).is_err());
+        assert!(store.get_run(RUN_ID).unwrap().is_some());
+        std::fs::remove_file(&signals).unwrap();
+
+        let fault = format!(
+            "CREATE TRIGGER fail_demo_view BEFORE UPDATE OF run_monitor_json ON local_experiments
+             WHEN NEW.id = '{LR_PROBE_EXPERIMENT_ID}' BEGIN SELECT RAISE(ABORT, 'disk full'); END;"
+        );
+        store.conn_execute_for_tests(&fault);
+        assert!(seed_at(&store, &data, &repo, selection.clone()).is_err());
+        assert!(signals.join(format!("{RUN_ID}.json")).is_file());
+        let baseline = store.run_monitor_json(EXPERIMENT_ID).unwrap().unwrap();
+        assert!(store
+            .run_monitor_json(LR_PROBE_EXPERIMENT_ID)
+            .unwrap()
+            .is_none());
+        store.conn_execute_for_tests("DROP TRIGGER fail_demo_view");
+
+        let completion = seed_at(&store, &data, &repo, selection).unwrap();
+        assert_eq!(completion.project.id, PROJECT_ID);
+        assert_eq!(
+            store.run_monitor_json(EXPERIMENT_ID).unwrap().unwrap(),
+            baseline
+        );
+        for experiment in [LR_PROBE_EXPERIMENT_ID, VOCAB_PROBE_EXPERIMENT_ID] {
+            assert!(store.run_monitor_json(experiment).unwrap().is_some());
+        }
+    }
+
+    /// A new user's first run page draws the baseline's view from what the run reported.
+    #[test]
+    fn the_seeded_run_draws_its_stages_and_curves_with_the_baseline_view() {
+        let root = super::super::git::TemporaryDirectory::new("orx-demo-drawn").unwrap();
+        let data = root.path().join("data");
+        let repo = root.path().join("cache/repos").join(OWNER).join(REPO);
+        prepare_origin(&demo_bare_path_in(&data));
+        let store = Store::open_at(data.clone()).unwrap();
+        let selection = DemoSelection {
+            profile: None,
+            harness: "codex".into(),
+            model: None,
+            permission_mode: None,
+            reasoning_level: None,
+        };
+        seed_at(&store, &data, &repo, selection).unwrap();
+
+        let settings = store.run_monitor_json(VOCAB_PROBE_EXPERIMENT_ID).unwrap();
+        let plan = crate::engine::view::stored_plan(VOCAB_PROBE_EXPERIMENT_ID, settings.as_deref())
+            .unwrap();
+        let stages: Vec<_> = plan
+            .iter()
+            .map(|stage| {
+                let total = stage.of.as_ref().and_then(serde_json::Number::as_u64);
+                (stage.phase.as_str(), total, stage.unit.as_deref())
+            })
+            .collect();
+        assert_eq!(
+            stages,
+            [
+                ("install", Some(1), Some("environments")),
+                ("download", Some(9), Some("shards")),
+                ("tokenizer", Some(1), Some("commands")),
+                ("train", Some(200), Some("steps")),
+                ("train-finalize", None, None),
+            ]
+        );
+
+        let run = store.get_run(RUN_ID).unwrap().unwrap();
+        let child = StoredRun {
+            id: "demo-child".into(),
+            experiment_id: VOCAB_PROBE_EXPERIMENT_ID.into(),
+            status: "running".into(),
+            ended_at: None,
+            exit_code: None,
+            ..run.clone()
+        };
+        store.upsert_run(&child).unwrap();
+        let mut snapshot = orx_signals::Snapshot::new(&child.id, "1-1", "child");
+        let reports = concat!(
+            "::orx:: {\"phase\":\"train\",\"step\":0,\"of\":200,\"m\":{\"val_bpb\":3.2}}\n",
+            "::orx:: {\"step\":1,\"m\":{\"loss\":9.0}}\n",
+        );
+        snapshot
+            .feed(reports.as_bytes(), true, now_ms(), false)
+            .unwrap();
+        crate::engine::adapters::local::signals::publish(
+            &data.join("run-signals/demo-child.json"),
+            &snapshot,
+        )
+        .unwrap();
+        let monitor = crate::engine::monitor::offline(&store, &child, now_ms()).unwrap();
+        assert_eq!(monitor["parent"]["runId"], RUN_ID);
+        let train = monitor["phases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|phase| phase["name"] == "train")
+            .unwrap();
+        assert!(train["priorMs"].as_f64().unwrap() > 0.0);
+        assert_eq!(
+            monitor["parent"]["series"]["val_bpb"]
+                .as_array()
+                .unwrap()
+                .len(),
+            51
+        );
+
+        let monitor = crate::engine::monitor::offline(&store, &run, now_ms()).unwrap();
+        assert_eq!(monitor["viewFrom"]["markup"], BASELINE_VIEW);
+        assert_eq!(monitor["viewFrom"]["isDefault"], false);
+        let stages: Vec<_> = monitor["phases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|phase| phase["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            stages,
+            [
+                "install",
+                "download",
+                "tokenizer",
+                "train",
+                "eval",
+                "sft",
+                "chat"
+            ]
+        );
+        for name in ["val_bpb", "loss", "sft_val_bpb", "sft_loss"] {
+            let points = monitor["series"][name].as_array().map_or(0, Vec::len);
+            assert!(points > 1, "{name}: {points} points");
+        }
+        for index in [2, 3, 4, 5] {
+            let phase = &monitor["phases"][index];
+            let start = phase["startedAt"].as_i64().unwrap();
+            let end = phase["endedAt"].as_i64().unwrap();
+            assert!(end > start, "{phase}");
+        }
+        let status = monitor["statusText"].as_str().unwrap();
+        assert!(status.contains("Val bpb 1.166"), "{status}");
+        assert!(!status.contains("diagnostics"), "{status}");
+        for probe in [LR_PROBE_EXPERIMENT_ID, VOCAB_PROBE_EXPERIMENT_ID] {
+            let saved =
+                crate::engine::view::described(&store, probe).unwrap_or_else(|_| panic!("{probe}"));
+            let expected = if probe == LR_PROBE_EXPERIMENT_ID {
+                PROBE_VIEW
+            } else {
+                VOCAB_PROBE_VIEW
+            };
+            assert_eq!(saved["markup"], expected, "{probe}");
+            if probe == VOCAB_PROBE_EXPERIMENT_ID {
+                assert!(!saved["markup"].as_str().unwrap().contains("sft"));
+            }
         }
     }
 
@@ -2202,7 +2535,10 @@ mod tests {
             changed.lines().collect::<Vec<_>>(),
             [
                 ".gitignore",
+                "nanochat/dataset.py",
+                "orx_run.py",
                 "runs/runcpu.sh",
+                "scripts/base_train.py",
                 "scripts/chat_cli.py",
                 "scripts/chat_sft.py"
             ]
@@ -2307,11 +2643,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn seeded_explanations_do_not_mistake_training_clocks_for_stage_durations() {
+        for harness in ["claude-code", "codex", "opencode"] {
+            let transcript = serde_json::to_string(&assistant_parts(harness)).unwrap();
+            for old_duration in ["131.55", "39.07"] {
+                assert!(
+                    !transcript.contains(old_duration),
+                    "{harness}: {old_duration}"
+                );
+                assert!(!REPORT.contains(old_duration));
+            }
+        }
+    }
+
     /// The setup runs under Git Bash on Windows, where uv lays the venv out as
     /// `Scripts/`, and the whole thing is one `&&` chain on a single line.
     #[test]
     fn probe_setup_runs_on_either_venv_layout() {
-        let setup = probe_setup();
+        let config = serde_json::from_str(VOCAB_PROBE_CONFIG).unwrap();
+        let setup = probe_setup(&config);
         assert!(setup.contains(". .venv/bin/activate"), "{setup}");
         assert!(setup.contains(". .venv/Scripts/activate"), "{setup}");
         assert!(!setup.contains('\n'), "{setup}");
@@ -2330,6 +2681,7 @@ mod tests {
         let first_sha = install_repository(&first, &root.join("first.git")).unwrap();
         let second_sha = install_repository(&second, &root.join("second.git")).unwrap();
         assert_eq!(first_sha, second_sha);
+        assert_eq!(first_sha, EXPERIMENT_SHA);
         assert_eq!(
             git(&first, &["rev-parse", "refs/heads/main"]).unwrap(),
             git(&second, &["rev-parse", "refs/heads/main"]).unwrap()

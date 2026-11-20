@@ -23,12 +23,16 @@ export function ResizeHandle({
   measure: () => number;
   onChange: (height: number | null) => void;
 }) {
-  /** What the box measured when the grip last took focus or was reset, for a natural height. */
+  /** The height the box last measured or was resized to, reported to assistive technology. */
   const [measured, setMeasured] = useState<number | null>(null);
   useLayoutEffect(() => {
     if (height === null) setMeasured(measure());
   }, [height]);
-  const resizeBy = (start: number, delta: number) => onChange(Math.round(Math.min(Math.max(start + delta, min), max)));
+  const resizeBy = (start: number, delta: number) => {
+    const next = Math.round(Math.min(Math.max(start + delta, min), max));
+    onChange(next);
+    setMeasured(next);
+  };
 
   return (
     <div
@@ -37,7 +41,7 @@ export function ResizeHandle({
       aria-label={label}
       aria-valuemin={min}
       aria-valuemax={Number.isFinite(max) ? Math.round(max) : undefined}
-      aria-valuenow={Math.round(Math.min(height ?? measured ?? min, max))}
+      aria-valuenow={Math.round(Math.min(measured ?? height ?? min, max))}
       title={m.chat_resize_composer_hint()}
       tabIndex={0}
       className="group/resize absolute inset-x-0 -top-1.5 z-3 flex h-3 cursor-row-resize touch-none items-center justify-center outline-none"
@@ -61,9 +65,7 @@ export function ResizeHandle({
       onKeyDown={(event) => {
         if (event.key === "ArrowUp" || event.key === "ArrowDown") {
           event.preventDefault();
-          const current = measure();
-          const grow = event.key === "ArrowUp";
-          resizeBy(grow || height === null ? current : Math.min(height, current), grow ? KEYBOARD_STEP : -KEYBOARD_STEP);
+          resizeBy(measure(), event.key === "ArrowUp" ? KEYBOARD_STEP : -KEYBOARD_STEP);
         } else if (event.key === "Home") {
           event.preventDefault();
           onChange(null);

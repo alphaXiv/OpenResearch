@@ -1,0 +1,210 @@
+[
+  {
+    "runId": "r1",
+    "generation": "g1",
+    "asOf": 1794444320000,
+    "availability": {
+      "state": "live",
+      "reason": null,
+      "omitted": {}
+    },
+    "viewFrom": {
+      "experimentId": "exp",
+      "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" ghost=\"parent\" />\n</view>\n",
+      "isDefault": true
+    },
+    "source": "declared",
+    "phases": [
+      {
+        "name": "",
+        "of": 400.0,
+        "unit": null,
+        "priorMs": null,
+        "startedAt": 1794444300000,
+        "endedAt": null
+      }
+    ],
+    "stageOrder": {
+      "index": 0,
+      "count": null,
+      "first": 0
+    },
+    "progress": {
+      "phase": 0,
+      "done": 200.0,
+      "segments": [
+        {
+          "weight": 1.0,
+          "fill": 0.5
+        }
+      ],
+      "whole": 0.5,
+      "lastAt": 1794444320000,
+      "stallMs": 0
+    },
+    "x": {
+      "name": "step",
+      "max": 400.0
+    },
+    "latest": {
+      "loss": 0.14285714285714285
+    },
+    "headline": "loss",
+    "logError": null,
+    "pace": null,
+    "versus": {
+      "step": {},
+      "final": {}
+    },
+    "groups": {},
+    "media": {},
+    "counts": {},
+    "estimate": {
+      "loMs": 18997,
+      "midMs": 20000,
+      "hiMs": 21003,
+      "at": 1794444320000,
+      "pending": false,
+      "pastLimitMs": null,
+      "floor": false
+    },
+    "limit": null,
+    "cost": null,
+    "watch": {
+      "state": "none",
+      "model": null,
+      "why": null,
+      "looks": [],
+      "spentUsd": null,
+      "tokens": 0,
+      "floorUntil": null,
+      "error": null,
+      "with": null
+    },
+    "sentence": null,
+    "flagId": null,
+    "flags": [],
+    "setup": null,
+    "disagrees": null,
+    "revising": false,
+    "brief": [],
+    "rules": [],
+    "statusText": "",
+    "rev": 1,
+    "seriesRev": 1,
+    "appendFrom": 0,
+    "append": {},
+    "appendRows": {},
+    "dropRows": {},
+    "reset": true
+  },
+  {
+    "runId": "r1",
+    "generation": "g1",
+    "asOf": 1794444322000,
+    "availability": {
+      "state": "live",
+      "reason": null,
+      "omitted": {}
+    },
+    "viewFrom": {
+      "experimentId": "exp",
+      "markup": "<signal name=\"loss\" />\n<view headline=\"loss\">\n  <chart y=\"loss\" ghost=\"parent\" />\n</view>\n",
+      "isDefault": true
+    },
+    "source": "declared",
+    "phases": [
+      {
+        "name": "",
+        "of": 400.0,
+        "unit": null,
+        "priorMs": null,
+        "startedAt": 1794444300000,
+        "endedAt": null
+      }
+    ],
+    "stageOrder": {
+      "index": 0,
+      "count": null,
+      "first": 0
+    },
+    "progress": {
+      "phase": 0,
+      "done": 220.0,
+      "segments": [
+        {
+          "weight": 1.0,
+          "fill": 0.55
+        }
+      ],
+      "whole": 0.55,
+      "lastAt": 1794444322000,
+      "stallMs": 0
+    },
+    "x": {
+      "name": "step",
+      "max": 400.0
+    },
+    "latest": {
+      "loss": 0.13043478260869565
+    },
+    "headline": "loss",
+    "logError": null,
+    "pace": null,
+    "versus": {
+      "step": {},
+      "final": {}
+    },
+    "groups": {},
+    "media": {},
+    "counts": {},
+    "estimate": {
+      "loMs": 17124,
+      "midMs": 18000,
+      "hiMs": 18876,
+      "at": 1794444322000,
+      "pending": false,
+      "pastLimitMs": null,
+      "floor": false
+    },
+    "limit": null,
+    "cost": null,
+    "watch": {
+      "state": "none",
+      "model": null,
+      "why": null,
+      "looks": [],
+      "spentUsd": null,
+      "tokens": 0,
+      "floorUntil": null,
+      "error": null,
+      "with": null
+    },
+    "sentence": null,
+    "flagId": null,
+    "flags": [],
+    "setup": null,
+    "disagrees": null,
+    "revising": false,
+    "brief": [],
+    "rules": [],
+    "statusText": "",
+    "rev": 2,
+    "seriesRev": 2,
+    "appendFrom": 1,
+    "append": {
+      "loss": [
+        [
+          210.0,
+          0.13636363636363635
+        ],
+        [
+          220.0,
+          0.13043478260869565
+        ]
+      ]
+    },
+    "appendRows": {},
+    "dropRows": {}
+  }
+]

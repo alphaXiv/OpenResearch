@@ -20,9 +20,9 @@ Araştırma ajanları için yerel öncelikli harness ve çalışma alanı.
 <p>İster bir copilot ister bir otomatik araştırma aracı arıyor olun, OpenResearch çalışmanızı hızlandırır. Literatürü inceleyebilen, hipotezler geliştirebilen, deneyler çalıştırabilen ve araştırma çıktıları üretebilen araştırma ajanları başlatın.</p>
 
 <p>
-<a href="https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch.dmg"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/download-macos-dark.svg"><img src=".github/readme-assets/download-macos.svg" alt="OpenResearch'ü macOS için indir" width="220" height="44" /></picture></a>
-<a href="https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch-Setup.exe"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/download-windows-dark.svg"><img src=".github/readme-assets/download-windows.svg" alt="OpenResearch'ü Windows için indir (Beta)" width="220" height="44" /></picture></a>
-<a href="https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch-x86_64.AppImage"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/download-linux-dark.svg"><img src=".github/readme-assets/download-linux.svg" alt="OpenResearch'ü Linux için indir" width="220" height="44" /></picture></a>
+<a href="https://openresearch.sh/dl/macos?src=github"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/download-macos-dark.svg"><img src=".github/readme-assets/download-macos.svg" alt="OpenResearch'ü macOS için indir" width="220" height="44" /></picture></a>
+<a href="https://openresearch.sh/dl/windows?src=github"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/download-windows-dark.svg"><img src=".github/readme-assets/download-windows.svg" alt="OpenResearch'ü Windows için indir (Beta)" width="220" height="44" /></picture></a>
+<a href="https://openresearch.sh/dl/linux_x64?src=github"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/download-linux-dark.svg"><img src=".github/readme-assets/download-linux.svg" alt="OpenResearch'ü Linux için indir" width="220" height="44" /></picture></a>
 </p>
 
 <p>
@@ -41,9 +41,9 @@ Araştırma ajanları için yerel öncelikli harness ve çalışma alanı.
 
 **OpenResearch masaüstü uygulamasını kullanmanızı öneririz.** Platformunuz için indirin:
 
-- [macOS](https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch.dmg)
-- [Windows (Beta)](https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch-Setup.exe)
-- Linux: [x86_64](https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch-x86_64.AppImage) · [ARM64](https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch-aarch64.AppImage)
+- [macOS](https://openresearch.sh/dl/macos?src=github)
+- [Windows (Beta)](https://openresearch.sh/dl/windows?src=github)
+- Linux: [x86_64](https://openresearch.sh/dl/linux_x64?src=github) · [ARM64](https://openresearch.sh/dl/linux_arm64?src=github)
 
 <details>
 <summary>Tek başına CLI'yi mi tercih ediyorsunuz? macOS veya Linux'a kurun</summary>

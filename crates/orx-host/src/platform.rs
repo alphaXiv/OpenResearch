@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 /// How long a process may stay unreadable while it forks, execs or exits on a busy machine.
 const UNREADABLE_SETTLE: Duration = Duration::from_millis(1000);
+const BRIEF_SETTLE: Duration = Duration::from_millis(15);
 
 #[derive(Debug, Clone)]
 pub struct Process {
@@ -278,6 +279,14 @@ impl ProcessTable {
 
 pub fn scan(wrapper: Option<&ProcessIdentity>, tag: &str, subreaper: bool) -> io::Result<Scan> {
     scan_within(wrapper, tag, subreaper, UNREADABLE_SETTLE)
+}
+
+pub(crate) fn scan_brief(
+    wrapper: Option<&ProcessIdentity>,
+    tag: &str,
+    subreaper: bool,
+) -> io::Result<Scan> {
+    scan_within(wrapper, tag, subreaper, BRIEF_SETTLE)
 }
 
 /// `settle` bounds the wait for processes unreadable mid-fork, exec or exit.
@@ -724,6 +733,40 @@ mod tests {
         assert!(scan.unreadable.is_empty(), "{:?}", scan.unreadable);
         let tagged: Vec<_> = scan.processes.iter().map(|process| process.pid).collect();
         assert_eq!(tagged, [pid]);
+    }
+
+    #[test]
+    fn brief_scan_keeps_persistently_unreadable_process_unverified() {
+        let wrapper = identity(std::process::id()).unwrap();
+        let uid = unsafe { libc::getuid() };
+        let pid = u32::MAX;
+        let reads = std::cell::Cell::new(0);
+        let table = ProcessTable::from_pids(
+            vec![pid],
+            Some(wrapper.starttime),
+            BRIEF_SETTLE,
+            |pid| {
+                Ok(Process {
+                    pid,
+                    ppid: 1,
+                    uid,
+                    starttime: wrapper.starttime,
+                    state: "R".into(),
+                })
+            },
+            denied,
+            |pid| {
+                reads.set(reads.get() + 1);
+                denied(pid)
+            },
+        );
+        assert!(reads.get() > 1);
+        assert_eq!(
+            table.select(Some(&wrapper), "tag", true).outcome(true),
+            CancelOutcome::Unverifiable {
+                unreadable: vec![pid]
+            }
+        );
     }
 
     #[test]

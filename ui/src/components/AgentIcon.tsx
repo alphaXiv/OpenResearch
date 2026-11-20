@@ -71,7 +71,7 @@ export type Logo = (size: number) => ReactNode;
 export type FileUrl = (path: string) => string;
 
 function IconMark({ icon, brand, size, fileUrl }: { icon: ProjectIcon; brand: Logo; size: number; fileUrl?: FileUrl }) {
-  if ("emoji" in icon) return <span className="leading-none">{icon.emoji}</span>;
+  if ("emoji" in icon) return <span className="text-tile-emoji leading-none">{icon.emoji}</span>;
   if ("file" in icon) return <img alt="" draggable={false} className="size-full object-cover" src={fileUrl?.(icon.file)} />;
   if ("image" in icon) return <img alt="" draggable={false} className="size-full object-cover" src={`data:${icon.image.type};base64,${icon.image.data}`} />;
   if ("brand" in icon) return brand(size);
@@ -96,7 +96,7 @@ export function AgentIconTile({ icon, brand, size = "md", outline = true, fill =
   const plain = bare ? cn(PLAIN.tile, "border-transparent") : PLAIN.tile;
   const picture = "image" in icon || "file" in icon;
   return (
-    <span aria-hidden="true" className={cn("grid shrink-0 place-items-center overflow-hidden border", TILE_SIZES[size].box, !color ? (fill && picture ? "border-transparent" : plain) : picture ? cn("border-transparent", color.solid) : fill ? cn("border-transparent", color.fill) : color.tile)}>
+    <span aria-hidden="true" className={cn("@container grid shrink-0 place-items-center overflow-hidden border", TILE_SIZES[size].box, !color ? (fill && picture ? "border-transparent" : plain) : picture ? cn("border-transparent", color.solid) : fill ? cn("border-transparent", color.fill) : color.tile)}>
       <IconMark icon={icon} brand={brand} size={TILE_SIZES[size].mark + (bare ? 4 : 0)} fileUrl={fileUrl} />
     </span>
   );
@@ -341,8 +341,8 @@ export function AgentIconButton({ value, brand, logo, onChange, disabled }: { va
   );
 }
 
-/** A large icon tile with a pencil badge that opens `children`, the picker, in a popover. */
-export function IconPickerButton({ tile, disabled, children }: { tile: ReactNode; disabled?: boolean; children: ReactNode }) {
+/** An icon tile that opens `children`, the picker, in a popover. Large ones carry a pencil badge; `compact` ones sit inline and take the hover. */
+export function IconPickerButton({ tile, disabled, compact, children }: { tile: ReactNode; disabled?: boolean; compact?: boolean; children: ReactNode }) {
   const { portalContainer } = useContext(WorkspaceDomContext);
   return (
     <Popover.Root>
@@ -350,10 +350,10 @@ export function IconPickerButton({ tile, disabled, children }: { tile: ReactNode
         type="button"
         disabled={disabled}
         aria-label={m.icon_change()}
-        className="group relative inline-grid shrink-0 rounded-xl outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus disabled:cursor-default"
+        className={cn("group relative inline-grid shrink-0 outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus disabled:cursor-default", compact ? "rounded-md hover:bg-hover-muted" : "rounded-xl")}
       >
         {tile}
-        {!disabled && (
+        {!disabled && !compact && (
           <span className="absolute -end-1 -bottom-1 grid size-4.5 place-items-center rounded-full border border-border bg-background text-subtext shadow-control-subtle group-hover:text-text">
             <Pencil size={10} aria-hidden="true" />
           </span>

@@ -153,12 +153,14 @@
   animation: tool-running-shimmer-icon 1.75s ease-in-out infinite;
 }
 
-.tool-group-summary .tool-group-label {
+.tool-group-summary .tool-group-label,
+.tool-group-summary .tool-kind-icon {
   transition: color 120ms ease;
 }
 
 .tool-group-summary:hover .tool-group-label,
-.tool-group-summary:hover .tool-chevron {
+.tool-group-summary:hover .tool-chevron,
+.tool-group-summary:hover .tool-kind-icon {
   color: var(--text);
 }
 
@@ -518,7 +520,7 @@
   .workspace-body.has-workspace-tools { padding-bottom: calc(var(--workspace-mobile-nav-height) + env(safe-area-inset-bottom)); }
   .workspace-body.has-workspace-tools .workspace-connection-corner { bottom: calc(var(--workspace-mobile-nav-height) + env(safe-area-inset-bottom)); }
   .workspace-body > .chat-pane .chat-header { padding-inline: 8px; }
-  .chat-heading-row { grid-template-columns: 48px minmax(0, 1fr) 0; }
+  .chat-heading-row { grid-template-columns: 92px minmax(0, 1fr) 0; }
   :root:not(.mac-titlebar) .sidebar-toggle > .icon-btn { width: 44px; height: 44px; }
   /* The touch-size toggle's own padding already spaces it from the logo. */
   .rail-brand { column-gap: 0; }
@@ -568,6 +570,12 @@
   .chat-thread, .settings-view-scroll, .home { scrollbar-gutter: auto; }
   .composer-actions { flex-wrap: wrap; }
   input, textarea, select { font-size: 16px; }
+}
+
+/* Lines in the sidebar tint what is under them, so they match over the window material and off it. */
+.session-rail {
+  --border: var(--material-border);
+  --border-variant: var(--material-border-variant);
 }
 
 /* The desktop app's window material shows through the sidebar. */

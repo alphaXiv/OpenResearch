@@ -176,13 +176,10 @@ pub async fn disk_response(
             Body::empty(),
         )?;
         if let Ok(modified) = metadata.modified() {
-            let nanos = modified
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
+            let version = files::artifact_version(size, modified.max(std::time::UNIX_EPOCH));
             result
                 .headers_mut()
-                .insert(header::ETAG, format!("W/\"{size}-{nanos}\"").parse()?);
+                .insert(header::ETAG, format!("W/\"{version}\"").parse()?);
         }
         return Ok(result);
     }

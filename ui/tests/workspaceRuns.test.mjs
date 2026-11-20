@@ -19,3 +19,12 @@ test("active workspace runs stay scoped to an existing chat and retain the run d
   assert.deepEqual(activeWorkspaceRuns(experiments, runs, null), []);
   assert.deepEqual(activeWorkspaceRuns(experiments, runs, "chat").map(({ experiment, run }) => [experiment.id, run.id]), [["mine", "starting"], ["mine", "running"]]);
 });
+
+test("an ended run with an open flag is listed until a newer run of its experiment replaces it", () => {
+  const experiments = [{ id: "mine", chatSessionId: "chat" }];
+  const flag = { id: "f1", state: "waiting", mode: "copilot" };
+  const first = { id: "first", experimentId: "mine", status: "done", createdAt: 1, monitor: { flag } };
+  const rerun = { id: "rerun", experimentId: "mine", status: "done", createdAt: 2, monitor: { flag } };
+  assert.deepEqual(activeWorkspaceRuns(experiments, [first], "chat").map(({ run }) => run.id), ["first"]);
+  assert.deepEqual(activeWorkspaceRuns(experiments, [first, rerun], "chat").map(({ run }) => run.id), ["rerun"]);
+});

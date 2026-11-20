@@ -105,7 +105,7 @@ impl Engine {
             }
             Err(LaunchError::Rejected { reason }) => {
                 self.commit(run_id, |phase, state| {
-                    end_attempt(attempt, phase, state, Some(reason))
+                    end_attempt(attempt, phase, state, Some(reason.clone()))
                 })?;
             }
             Err(LaunchError::Blocked { contact }) => {
@@ -116,7 +116,7 @@ impl Engine {
                         && state.submission_attempt == attempt
                         && state.cancel_accepted_at.is_none()
                     {
-                        Change::contact(contact)
+                        Change::contact(contact.clone())
                     } else {
                         end_attempt(attempt, phase, state, None)
                     }
@@ -135,7 +135,7 @@ impl Engine {
         handle: Handle,
     ) -> Result<()> {
         self.commit(run_id, |phase, state| Change {
-            handle: Some((attempt, handle)),
+            handle: Some((attempt, handle.clone())),
             contact: (!is_tombstone(phase, &state.contact)).then_some(Contact::Live),
             ..Change::default()
         })?;
@@ -231,7 +231,7 @@ impl Engine {
                         if is_tombstone(phase, &state.contact) {
                             Change::default()
                         } else {
-                            Change::contact(contact)
+                            Change::contact(contact.clone())
                         }
                     })
                 }
@@ -261,28 +261,44 @@ impl Engine {
             if is_tombstone(phase, &state.contact) {
                 return Change::default();
             }
-            Change::contact(Contact::Unreconciled { since: now, detail })
+            Change::contact(Contact::Unreconciled {
+                since: now,
+                detail: detail.clone(),
+            })
         })
     }
 
     /// Before the fence cancel is immediate; after it, the backend's stop proof decides the result.
     pub async fn cancel(&self, backend: &dyn Backend, run_id: &str, reason: &str) -> Result<bool> {
-        if !self.accept_cancel(run_id, reason)? {
+        self.stop(backend, run_id, reason, None).await
+    }
+
+    /// [`Self::cancel`], recording who stopped the run.
+    pub async fn stop(
+        &self,
+        backend: &dyn Backend,
+        run_id: &str,
+        reason: &str,
+        stop: Option<&crate::store::StopContext>,
+    ) -> Result<bool> {
+        if !self.accept_stop(run_id, |store| {
+            store.accept_run_stop(run_id, Some(reason), stop)
+        })? {
             return Ok(false);
         }
         self.deliver_cancel(backend, run_id).await?;
         Ok(true)
     }
 
-    /// The half of [`Self::cancel`] that needs no backend: records the intent and ends a run
-    /// that never launched.
-    pub fn accept_cancel(&self, run_id: &str, reason: &str) -> Result<bool> {
-        if !self.own(run_id)?
-            || self
-                .store()
-                .accept_run_cancel(run_id, Some(reason))?
-                .is_none()
-        {
+    /// The half of [`Self::cancel`] that needs no backend: records the intent that `accept`
+    /// gives the store, which returns when the run's cancel was accepted, and ends a run that
+    /// never launched.
+    pub fn accept_stop(
+        &self,
+        run_id: &str,
+        accept: impl FnOnce(&crate::store::Store) -> Result<Option<i64>>,
+    ) -> Result<bool> {
+        if !self.own(run_id)? || accept(&self.store())?.is_none() {
             return Ok(false);
         }
         // Recovery decides a fenced launch with the cancel in hand, so it does not wait out a

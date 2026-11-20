@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::error::Result;
-use crate::local::usage::{AgentSpend, BackendSpend, ChatCompute, UsageReport};
+use crate::local::usage::{AgentSpend, BackendSpend, ChatCompute, PlanUsage, UsageReport};
 use crate::store::{BilledRun, Store};
 
 /// Backends that bill for running time and have a price to read. The user's own machines and
@@ -15,8 +15,9 @@ pub(crate) const BILLED: [&str; 3] = ["openresearch_job", "hf_job", "modal_job"]
 const UNPRICED_CURRENCY: &str = "USD";
 
 /// The seven days up to `now`'s and what was spent in them; the plans and the chat are the
-/// caller's to fill.
-pub fn seven_days(store: &Store, now: i64) -> Result<UsageReport> {
+/// caller's to fill. Agent spend leaves out accounts on one of `plans`, whose cost is only
+/// what the tokens would have cost at API prices, and is empty while `plans` are unknown.
+pub fn seven_days(store: &Store, now: i64, plans: Option<&[PlanUsage]>) -> Result<UsageReport> {
     let mut days = Vec::new();
     let mut midnights = Vec::new();
     for offset in -6..=1 {
@@ -29,7 +30,14 @@ pub fn seven_days(store: &Store, now: i64) -> Result<UsageReport> {
 
     let mut agent_days: BTreeMap<(String, String), [u64; 7]> = BTreeMap::new();
     let mut unpriced_days: BTreeSet<(String, usize)> = BTreeSet::new();
-    for sample in store.spent_samples(from, to)? {
+    let billed = store.spent_samples(from, to)?.into_iter().filter(|sample| {
+        plans.is_some_and(|plans| {
+            !plans
+                .iter()
+                .any(|plan| plan.harness == sample.harness && plan.profile == sample.profile)
+        })
+    });
+    for sample in billed {
         let Some(day) = days.iter().position(|day| *day == sample.day) else {
             continue;
         };
@@ -295,7 +303,7 @@ mod tests {
             ],
         );
 
-        let week = seven_days(&store, NOW).unwrap();
+        let week = seven_days(&store, NOW, Some(&[])).unwrap();
         assert_eq!(
             week.days,
             [
@@ -397,7 +405,7 @@ mod tests {
             ],
         );
 
-        let week = seven_days(&store, NOW).unwrap();
+        let week = seven_days(&store, NOW, Some(&[])).unwrap();
         let backend = |name: &str| {
             let row = week.compute.iter().find(|row| row.backend == name).unwrap();
             (row.day_micros.iter().sum::<u64>(), row.unpriced)
@@ -408,6 +416,110 @@ mod tests {
         assert_eq!(
             (compute.runs, compute.cost_micros, compute.unpriced),
             (4, 1_000_000, 3)
+        );
+        drop((store, conn));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn plan(harness: &str, profile: Option<&str>) -> PlanUsage {
+        PlanUsage {
+            harness: harness.into(),
+            profile: profile.map(str::to_string),
+            plan: None,
+            account: None,
+            windows: Vec::new(),
+            credits: None,
+            extra_usage: None,
+            resets: None,
+            read_at: None,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn agent_spend_leaves_out_accounts_on_a_plan() {
+        let Some((dir, store, conn)) = store_west_of_utc("plans") else {
+            return;
+        };
+        // (chat, its agent and profile now, the turn's execution, the agent that spent, micros)
+        let spent = [
+            ("own", "claude-code", None, "own", "claude-code", 1_000),
+            (
+                "api",
+                "claude-code",
+                Some("claude-api"),
+                "api",
+                "claude-code",
+                20,
+            ),
+            (
+                "switched",
+                "codex",
+                Some("codex-plan"),
+                "switched",
+                "claude-code",
+                300,
+            ),
+            (
+                "late",
+                "codex",
+                Some("codex-plan"),
+                "codex-late:late:child:t",
+                "codex",
+                4_000,
+            ),
+        ];
+        for (chat, harness, profile, execution, spender, micros) in spent {
+            conn.execute(
+                "INSERT INTO chat_sessions (id, project_id, harness, profile_id, created_at, updated_at)
+                 VALUES (?1, 'p', ?2, ?3, 1, 1)",
+                params![chat, harness, profile],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO chat_turns (id, session_id, assistant_message_id, client_turn_id, request_hash,
+                                         prepared_input, settings_json, state, delivery_state, created_at, updated_at)
+                 VALUES (?1, ?1, 'a', 'c', 'h', '', '{}', 'completed', 'delivered', ?2, 1)",
+                params![chat, NOW],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO chat_usage_executions (execution_id, turn_id, harness, report_id, suppressed)
+                 VALUES (?1, ?1, ?2, 'r', 1)",
+                params![execution, spender],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO chat_usage_samples (execution_id, sample_id, harness, usage_json, cost_micros, cost_currency, recorded_at)
+                 VALUES (?1, 's', ?2, '{\"inputTokens\":10,\"outputTokens\":0}', ?3, 'USD', ?4)",
+                params![execution, spender, micros, NOW],
+            )
+            .unwrap();
+        }
+        let total = |plans: Option<&[PlanUsage]>| {
+            let week = seven_days(&store, NOW, plans).unwrap();
+            week.agents
+                .iter()
+                .map(|agent| (agent.harness.clone(), agent.day_micros.iter().sum::<u64>()))
+                .collect::<Vec<_>>()
+        };
+
+        let plans = [plan("claude-code", None), plan("codex", Some("codex-plan"))];
+        assert_eq!(
+            total(Some(&plans)),
+            [("claude-code".to_string(), 20)],
+            "only the API key profile's spend; a switched-away agent was the user's own"
+        );
+        assert_eq!(
+            total(Some(&[])),
+            [
+                ("codex".to_string(), 4_000),
+                ("claude-code".to_string(), 1_320)
+            ]
+        );
+        assert!(
+            total(None).is_empty(),
+            "while the plans are unread, no spend reads as billed"
         );
         drop((store, conn));
         std::fs::remove_dir_all(dir).unwrap();
@@ -434,7 +546,7 @@ mod tests {
         )
         .unwrap();
 
-        let week = seven_days(&store, NOW).unwrap();
+        let week = seven_days(&store, NOW, Some(&[])).unwrap();
         assert_eq!(week.agents.len(), 1);
         assert_eq!(week.agents[0].harness, "codex");
         assert_eq!(week.agents[0].day_micros, [0; 7]);

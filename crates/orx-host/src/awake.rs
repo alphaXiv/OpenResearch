@@ -99,8 +99,7 @@ mod os {
     pub(crate) type Held = ChildStdin;
 
     /// Sleep only, never `handle-lid-switch`: logind's default `LidSwitchIgnoreInhibited=yes`
-    /// still suspends on a closed lid. The inhibitor is orphaned before the wrapper becomes a
-    /// subreaper, so it never counts among the run's children.
+    /// still suspends on a closed lid.
     const INHIBIT: &str = r#"exec 3<&0
 { systemd-inhibit --what=sleep --who=OpenResearch --why="$1" cat <&3 >/dev/null 3<&- ||
   echo "orx-host: could not keep this machine awake for run $2: systemd-inhibit exited with $?" >&2; } &"#;

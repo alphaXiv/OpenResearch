@@ -20,6 +20,7 @@ pub struct UsageReport {
     /// The last seven days in the machine's local time, oldest first, as
     /// `YYYY-MM-DD`; today is last.
     pub days: Vec<String>,
+    /// Spend of accounts not on one of `plans`; empty while `plans` is None.
     pub agents: Vec<AgentSpend>,
     pub compute: Vec<BackendSpend>,
     /// The chat `?chat=` asked about.
@@ -118,7 +119,8 @@ pub enum PlanError {
     },
 }
 
-/// One agent's spend in one currency, agent profiles folded in.
+/// One agent's spend in one currency at API prices, profiles folded in and accounts on a plan
+/// left out.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSpend {
@@ -178,6 +180,8 @@ pub struct Reader {
     pub version: Option<String>,
     pub plan: Option<String>,
     pub email: Option<String>,
+    /// Signed in to a subscription, so a read that finds no limits still finds a plan.
+    pub subscription: bool,
 }
 
 impl Reader {
@@ -222,6 +226,8 @@ impl Reader {
                 .as_str()
                 .map(|plan| provider_plan(harness, plan)),
             email: entry["account"].as_str().map(str::to_string),
+            // A login an environment credential overrides is not `ready`, and the API bills it.
+            subscription: entry["authMethod"] == "oauth" && entry["authState"] == "ready",
         })
     }
 
@@ -243,7 +249,8 @@ impl Reader {
             Err(error) => return Read::Failed(format!("{error:#}")),
         };
         if self.harness == "claude-code" {
-            crate::local::harness::claude::read_plan(self.bin.clone(), home).await
+            crate::local::harness::claude::read_plan(self.bin.clone(), home, self.subscription)
+                .await
         } else {
             let profile = self.profile.as_deref();
             crate::local::harness::codex::read_plan(codex, profile, &self.bin, home.as_deref())
@@ -671,6 +678,7 @@ mod tests {
             version: Some("2.0.9".into()),
             plan: None,
             email: Some("ada@example.com".into()),
+            subscription: true,
         }
     }
 
@@ -712,6 +720,7 @@ mod tests {
         assert_eq!(reader.profile, None);
         assert_eq!(reader.version.as_deref(), Some("2.1.323"));
         assert_eq!(reader.plan.as_deref(), Some("Claude Ultra"));
+        assert!(reader.subscription);
 
         let profile = json!({"id": "codex", "installed": true, "authState": "ready",
             "authMethod": "oauth", "binPath": "/bin/codex", "version": "codex-cli 0.169.0",
@@ -724,7 +733,13 @@ mod tests {
         // A sign-in that couldn't be checked may still be on a plan.
         let unchecked = json!({"id": "claude-code", "installed": true, "authState": "unknown",
             "binPath": "/bin/claude"});
-        assert!(Reader::from_entry(&unchecked).is_some());
+        assert!(!Reader::from_entry(&unchecked).unwrap().subscription);
+        let overridden = json!({"id": "claude-code", "installed": true, "authState": "unknown",
+            "authMethod": "oauth", "needsConfigRepair": true, "binPath": "/bin/claude"});
+        assert!(
+            !Reader::from_entry(&overridden).unwrap().subscription,
+            "billed by the API key"
+        );
 
         for absent in [
             json!({"id": "claude-code", "installed": true, "authState": "ready", "authMethod": "apiKey", "binPath": "/bin/claude"}),

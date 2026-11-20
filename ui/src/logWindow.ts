@@ -69,6 +69,12 @@ export function shouldRecover(unavailable: UnavailablePage | null, hostLive: boo
   return hostLive && unavailable !== null && unavailable.epoch < epoch;
 }
 
+/** A place in a run's log to open at: the window starting at byte `at` of the file named `ident`. */
+export interface LogSeek {
+  at: number;
+  ident: LogIdent;
+}
+
 export interface LogView {
   /** Known log length; null until a page or event reports one. */
   len: number | null;
@@ -79,9 +85,11 @@ export interface LogView {
   loading: boolean;
   unavailable: UnavailablePage | null;
   error: string | null;
+  /** A seek found the log replaced since its position was taken, so the view follows the new file instead. */
+  replaced: boolean;
 }
 
-export const INITIAL_LOG_VIEW: LogView = { len: null, kept: [], span: { start: 0, end: 0 }, following: true, loading: true, unavailable: null, error: null };
+export const INITIAL_LOG_VIEW: LogView = { len: null, kept: [], span: { start: 0, end: 0 }, following: true, loading: true, unavailable: null, error: null, replaced: false };
 
 export interface LogSink {
   reset(): void;
@@ -124,6 +132,8 @@ export function createLogFollower({ fetchPage, sink, publish, epoch, unstableMes
   let syncAgain = false;
   let pendingClear = false;
   let resets = 0;
+  // Set while a seek's first page is pending, so a reset it meets is said rather than silently followed.
+  let seeking = false;
 
   const set = (patch: Partial<LogView>) => {
     view = { ...view, ...patch };
@@ -170,11 +180,14 @@ export function createLogFollower({ fetchPage, sink, publish, epoch, unstableMes
             return null;
           }
           set({ len: page.info?.len ?? null, kept: [] });
+          const sought = seeking;
           void follow();
+          if (sought) set({ replaced: true });
         }
         return null;
       }
       if (page.start !== span.start) return null;
+      seeking = false;
       ident = page.ident;
       const bytes = b64ToBytes(page.data);
       set({ kept: page.kept, unavailable: null, error: null });
@@ -188,10 +201,12 @@ export function createLogFollower({ fetchPage, sink, publish, epoch, unstableMes
     }
   }
 
-  async function goTo(start: number) {
-    const span = windowAt(start, view.len ?? start + LOG_WINDOW);
+  /** Shows the window at `start`, pulled back to fill a window near the end unless `exact` keeps `start` on top. */
+  async function goTo(start: number, exact = false) {
+    const top = Math.max(0, Math.min(start, view.len ?? start));
+    const span = exact ? { start: top, end: top + LOG_WINDOW } : windowAt(start, view.len ?? start + LOG_WINDOW);
     const token = restart(span.start);
-    set({ following: false, loading: true, unavailable: null, error: null });
+    set({ following: false, loading: true, unavailable: null, error: null, replaced: false });
     while (next < span.end) {
       const page = await read({ start: next, end: span.end }, token);
       if (token !== generation) return;
@@ -245,9 +260,10 @@ export function createLogFollower({ fetchPage, sink, publish, epoch, unstableMes
   async function follow() {
     const start = view.len === null ? 0 : lastWindow(view.len).start;
     restart(start);
+    seeking = false;
     syncing = false;
     syncAgain = false;
-    set({ following: true, loading: true, unavailable: null, error: null });
+    set({ following: true, loading: true, unavailable: null, error: null, replaced: false });
     await sync();
   }
 
@@ -261,7 +277,20 @@ export function createLogFollower({ fetchPage, sink, publish, epoch, unstableMes
   return {
     goTo: (start: number) => {
       resets = 0;
+      seeking = false;
       void goTo(start);
+    },
+    /** Opens with the sought position on top, or follows the log, said as `replaced`, when it is no longer that file. */
+    seek: ({ at, ident: sought }: LogSeek) => {
+      resets = 0;
+      if (ident !== null && ident !== sought) {
+        void follow();
+        set({ replaced: true });
+        return;
+      }
+      ident = sought;
+      seeking = true;
+      void goTo(at, true);
     },
     follow: () => {
       resets = 0;
@@ -269,7 +298,7 @@ export function createLogFollower({ fetchPage, sink, publish, epoch, unstableMes
     },
     reload: () => {
       resets = 0;
-      void (view.following ? follow() : goTo(view.span.start));
+      void (view.following ? follow() : goTo(view.span.start, true));
     },
     /** After an event-stream gap, deltas may be missing; a following view catches up. */
     onReconnect: () => {

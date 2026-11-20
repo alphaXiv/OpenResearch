@@ -1,0 +1,9 @@
+{
+  "samples/*.png": {
+    "items": [
+      {"path": "samples/sample.png", "version": "68-123000000000"}
+    ],
+    "skipped": 0,
+    "truncated": false
+  }
+}

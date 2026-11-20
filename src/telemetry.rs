@@ -158,6 +158,9 @@ pub(crate) struct Settings {
     /// Whether the one-time post-publication default prompt has been answered.
     #[serde(default)]
     pub github_default_prompt_seen: Option<bool>,
+    /// Whether the user confirmed Claude full access on this machine while orx runs as root.
+    #[serde(default)]
+    pub claude_root_full_access: Option<bool>,
     /// Literature sources the user turned off (Settings → Literature sources).
     /// Values are `LitSource::as_str()` names; empty = all sources enabled, so a
     /// source added later defaults to enabled. Enforced by discovery and paper reading.
@@ -358,7 +361,17 @@ pub(crate) fn set_github_default_prompt_seen(seen: bool) -> std::io::Result<()> 
     mutate_settings(|settings| settings.github_default_prompt_seen = Some(seen))
 }
 
-fn dashboard_locale() -> Option<String> {
+pub(crate) fn claude_root_full_access() -> bool {
+    load_settings()
+        .and_then(|settings| settings.claude_root_full_access)
+        .unwrap_or(false)
+}
+
+pub(crate) fn set_claude_root_full_access(allowed: bool) -> std::io::Result<()> {
+    mutate_settings(|settings| settings.claude_root_full_access = Some(allowed))
+}
+
+pub(crate) fn dashboard_locale() -> Option<String> {
     load_settings().and_then(|settings| settings.dashboard_locale)
 }
 
@@ -1561,6 +1574,9 @@ mod tests {
             }),
             (&["githubDefaultPromptSeen"], || {
                 set_github_default_prompt_seen(true).unwrap()
+            }),
+            (&["claudeRootFullAccess"], || {
+                set_claude_root_full_access(true).unwrap()
             }),
             (&["autoUpdate"], || set_auto_update_enabled(false).unwrap()),
             (&["updateChannel"], || {

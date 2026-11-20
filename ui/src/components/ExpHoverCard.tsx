@@ -2,18 +2,14 @@ import {
   useContext,
   useCallback,
   useEffect,
-  useMemo,
   useRef,
   useState,
   type RefObject,
 } from "react";
 import { WorkspaceDomContext } from "../WorkspaceDom";
-import { useWorkspace } from "../workspace";
-import { useQuery } from "@tanstack/react-query";
 
 import { m } from "../paraglide/messages.js";
 import { getLocale } from "../paraglide/runtime.js";
-import { ltr } from "../i18n";
 // Floating detail card shown while hovering an experiment node in the tree.
 // Rendered through a portal at a fixed viewport position (never inside the
 // ReactFlow node: the canvas transform would scale it with zoom, and growing
@@ -24,17 +20,15 @@ import { ltr } from "../i18n";
 
 import { createPortal } from "react-dom";
 import { FolderTree, GitBranch, Terminal } from "lucide-react";
-import { parseDiff, type FileData } from "react-diff-view";
 import {
   backendKind,
-  fmtDuration,
   fmtNumber,
-  timeAgo,
   type Experiment,
   type Run,
 } from "../api";
 import { BackendBadge } from "./BackendLogos";
-import { countChanges } from "./GitDiff";
+import { RunDiffStat } from "./RunDiffStat";
+import { RunTiming } from "./RunTiming";
 import { noticeRun, runActive, runDisplay, runNotice, runResult } from "../runDisplay";
 import { StatusBadge } from "./StatusBadge";
 import { useMeasure, usePopoverPosition } from "./tourGeometry";
@@ -112,13 +106,6 @@ export function useHoverIntent(ref: RefObject<HTMLElement | null>, refreshKey: u
   return { rect, onMouseEnter, onMouseLeave, keepOpen };
 }
 
-interface DiffStat {
-  fileCount: number;
-  additions: number;
-  deletions: number;
-  truncated: boolean;
-}
-
 function fmtCreated(ms: number): string {
   const d = new Date(ms);
   const opts: Intl.DateTimeFormatOptions =
@@ -152,7 +139,6 @@ export function ExpHoverCard({
 }) {
   const { portalContainer } = useContext(WorkspaceDomContext);
 
-  const { getRunDiffQuery } = useWorkspace().queries;
 
   const measure = useMeasure();
   // Prefer beside the node; on windows too narrow for either side, go
@@ -171,37 +157,6 @@ export function ExpHoverCard({
     { x: anchor.x, y: anchor.y, width: anchor.width, height: anchor.height, anchor: side, distance: GAP },
     measure,
   );
-  const diffRunId = exp.parentExperimentId && latestRun?.commitSha ? latestRun.id : null;
-  const { data: diff } = useQuery({ ...getRunDiffQuery(diffRunId ?? ""), enabled: Boolean(diffRunId), subscribed: Boolean(diffRunId) });
-  const diffStat = useMemo<DiffStat | null>(() => {
-    if (!diff) return null;
-    const p = diff;
-    let text = p.diff;
-    if (p.truncated) {
-      // The backend byte-caps mid-line, which can crash the parser (a cut
-      // inside an @@ header) — drop the trailing partial file so the
-      // counts stay honest lower bounds.
-      const cut = text.lastIndexOf("\ndiff --git ");
-      text = cut !== -1 ? text.slice(0, cut + 1) : text.slice(0, text.lastIndexOf("\n") + 1);
-    }
-    let files: FileData[] = [];
-    try {
-      files = text.trim() ? parseDiff(text) : [];
-    } catch {
-      return null; // malformed even after trimming — skip the row
-    }
-    // A truncated single-file diff can trim down to a bare header that
-    // parses as one file with no hunks; "≥ +0 −0 · 1+ files" is noise.
-    if (p.truncated && files.every((f) => f.hunks.length === 0)) return null;
-    let additions = 0;
-    let deletions = 0;
-    for (const f of files) {
-      const c = countChanges(f);
-      additions += c.additions;
-      deletions += c.deletions;
-    }
-    return { fileCount: files.length, additions, deletions, truncated: p.truncated };
-  }, [diff]);
 
   const counts = { done: 0, failed: 0, cancelled: 0, notFullyStopped: 0, live: 0 };
   for (const r of runs) {
@@ -211,9 +166,6 @@ export function ExpHoverCard({
     else if (r.status === "cancelled") counts.cancelled += 1;
     else if (runActive(r.status)) counts.live += 1;
   }
-  const duration = latestRun
-    ? fmtDuration((latestRun.endedAt ?? Date.now()) - latestRun.createdAt)
-    : null;
   // Local runs leave resultMarkdown empty on success (the agent freezes its
   // findings into the experiment description instead); on failure it holds a
   // short error worth surfacing — but never in both slots at once.
@@ -304,8 +256,7 @@ export function ExpHoverCard({
           ])}
         </span>
         {latestRun && backendKind(latestRun.backend) && <BackendBadge backend={latestRun.backend} />}
-        {duration && <span>{duration}</span>}
-        {latestRun && <span>{timeAgo(latestRun.createdAt)}</span>}
+        {latestRun && <RunTiming run={latestRun} />}
       </div>
       <div className="hc-git">
         <div className="hc-git-row">
@@ -319,24 +270,7 @@ export function ExpHoverCard({
             </span>
           )}
         </div>
-        {diffStat && diffStat.fileCount > 0 && (
-          <div
-            className="hc-git-row"
-            title={diffStat.truncated
-              ? m.a11y_committed_changes_truncated({ parent: ltr(parentSlug ?? "parent") })
-              : m.a11y_committed_changes({ parent: ltr(parentSlug ?? "parent") })}
-          >
-            <span>
-              {diffStat.truncated && "≥ "}
-              <span className="diff-stat-add text-accent-green">+{diffStat.additions}</span>{" "}
-              <span className="diff-stat-del text-accent-red">−{diffStat.deletions}</span>
-              {" · "}
-              {diffStat.fileCount === 1 && !diffStat.truncated
-                ? m.hover_one_file()
-                : diffStat.truncated ? m.hover_files_at_least({ count: fmtNumber(diffStat.fileCount) }) : m.hover_file_count({ count: fmtNumber(diffStat.fileCount) })}
-            </span>
-          </div>
-        )}
+        <RunDiffStat runId={exp.parentExperimentId && latestRun?.commitSha ? latestRun.id : null} parentSlug={parentSlug} />
       </div>
       <div className="hc-foot">
         <span className="hc-command font-mono">$ {exp.runCommand}</span>

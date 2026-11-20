@@ -1,4 +1,5 @@
-import type { Run, RunContact, RunStatus } from "./api";
+import { fmtDuration, type Run, type RunContact, type RunStatus } from "./api";
+import type { RunMonitor } from "./runMonitor/types";
 
 export type RunDisplayStatus =
   | RunStatus
@@ -9,9 +10,13 @@ export type RunDisplayStatus =
   | "unreachable"
   | "needs_auth"
   | "unconfirmed"
-  | "abandoned";
+  | "abandoned"
+  | "auto_stopped"
+  | "revising"
+  | "flagged"
+  | "flagged_ended";
 
-type RunState = Pick<Run, "status"> & Partial<Pick<Run, "contact" | "cancelling" | "lostReason" | "host" | "cancelUnconfirmed" | "waitingReason" | "cancelError">> & { cancelRequested?: boolean };
+type RunState = Pick<Run, "status"> & Partial<Pick<Run, "contact" | "cancelling" | "lostReason" | "host" | "cancelUnconfirmed" | "waitingReason" | "cancelError" | "monitor" | "outcome">> & { cancelRequested?: boolean };
 
 export interface RunDisplay {
   status: RunDisplayStatus;
@@ -48,6 +53,23 @@ export function runActive(status: RunStatus): status is ActiveRunStatus {
   return status === "submitting" || status === "starting" || status === "running";
 }
 
+export function runNeverStarted(run: Pick<Run, "status" | "startedAt" | "exitCode" | "backend" | "resultMarkdown" | "monitor" | "logCollection">, monitor?: RunMonitor | null): boolean {
+  if (run.status !== "failed" || run.startedAt != null || run.exitCode != null || !run.resultMarkdown?.trim()) return false;
+  if (run.backend?.jobId != null || run.backend?.handle != null || run.logCollection) return false;
+
+  const summary = run.monitor;
+  return summary?.stage == null && summary?.headline?.value == null && !summary?.logError && !summary?.setup?.line
+    && !Object.values(summary?.bindings ?? {}).some((value) => value != null)
+    && monitor?.progress == null && !monitor?.logError && !Object.values(monitor?.latest ?? {}).some((value) => value != null);
+}
+
+export function runDuration(run: Run, now: number): string {
+  if (runNeverStarted(run)) return "—";
+  const start = run.startedAt ?? run.createdAt;
+  const end = run.endedAt ?? (runActive(run.status) ? now : run.updatedAt);
+  return fmtDuration(end - start);
+}
+
 function runCancelling(run: RunState): boolean {
   return run.cancelling ?? (runActive(run.status) && run.cancelRequested === true);
 }
@@ -74,13 +96,16 @@ export function runDisplay(run: RunState): RunDisplay {
     }
   }
   if (!runActive(run.status)) {
-    return { status: runAbandoned(run) ? "abandoned" : run.status, stale: contact !== null, since };
+    const stopped = run.status === "cancelled" && (run.monitor?.tone === "revising" ? "revising" : run.outcome && run.outcome.by !== "user" ? "auto_stopped" : null);
+    // A finished run whose flag no one settled is a result to check before it counts as done.
+    const flagged = run.status === "done" && run.monitor?.flag ? "flagged_ended" : null;
+    return { status: runAbandoned(run) ? "abandoned" : stopped || flagged || run.status, stale: contact !== null, since };
   }
   if (runCancelling(run)) {
     const pending = run.status === "submitting" || Boolean(run.cancelError) || contact?.type === "unreachable" || contact?.type === "needs_auth" || contact?.type === "unreconciled";
     return { status: pending ? "cancellation_pending" : "cancelling", stale: contact !== null, since };
   }
-  if (contact === null) return { status: run.status, ...(run.waitingReason ? { waiting: run.waitingReason } : {}), stale: false, since };
+  if (contact === null) return { status: run.monitor?.flag ? "flagged" : run.status, ...(run.waitingReason ? { waiting: run.waitingReason } : {}), stale: false, since };
 
   if (contact.type === "needs_auth") return { status: "needs_auth", stale: true, since };
   const status = contact.type === "unreconciled" || contact.type === "stopping" ? "unconfirmed" : contact.type;
