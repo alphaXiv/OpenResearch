@@ -1,4 +1,4 @@
-import { useContext, useEffect, useRef, useState } from "react";
+import { Fragment, useContext, useEffect, useRef, useState } from "react";
 import { WorkspaceDomContext } from "../WorkspaceDom";
 import { useWorkspace } from "../workspace";
 import { useQuery } from "@tanstack/react-query";
@@ -63,18 +63,27 @@ type ProjectDraft = {
   pathTouched: boolean;
 };
 
+const MODE_LABELS: Record<Mode, () => string> = {
+  blank: m.new_project_form_blank_project,
+  folder: m.new_project_form_existing_folder,
+  paper: m.new_project_form_from_a_paper,
+};
+
 export function NewProjectForm({
   onCreated,
   onCancel,
   remote = false,
   preferredAgent,
   initialPaperId,
+  modes = ["blank", "folder", "paper"],
 }: {
   onCreated: (project: Project, githubPublicationError: string | null) => void;
   onCancel?: () => void;
   remote?: boolean;
   preferredAgent: AgentSelection | null;
   initialPaperId?: string;
+  /** The ways to start, first one chosen; a single way shows no switcher. */
+  modes?: Mode[];
 }) {
   const { id: elementId } = useContext(WorkspaceDomContext);
 
@@ -98,7 +107,7 @@ export function NewProjectForm({
   const starterModel = starterSelection?.model ?? null;
   const starterProfile = starterSelection?.profile ?? null;
   const starterAgent = starterHarness ? { harness: starterHarness, model: starterModel, profile: starterProfile } : undefined;
-  const [mode, setMode] = useState<Mode>(initialPaperId ? "paper" : "blank");
+  const [mode, setMode] = useState<Mode>(initialPaperId ? "paper" : modes[0]);
   const [name, setName] = useState("");
   const [nameTouched, setNameTouched] = useState(false);
   const [path, setPath] = useState("");
@@ -386,34 +395,19 @@ export function NewProjectForm({
 
   return (
     <form className="form [&_.form-seg]:self-start [&_.form-seg]:mb-0.5 [&_.repo-hint]:font-normal [&_.repo-hint]:text-sm [&_.repo-hint]:text-muted [&_.repo-hint.ok]:text-accent-teal [&_.folder-picker-control]:flex [&_.folder-picker-control]:items-center [&_.folder-picker-control]:gap-2 [&_.folder-picker-control]:w-full [&_.folder-picker-control]:min-w-0 [&_.folder-picker-control]:py-2 [&_.folder-picker-control]:px-2.5 [&_.folder-picker-control]:overflow-hidden [&_.folder-picker-control]:bg-background [&_.folder-picker-control]:border [&_.folder-picker-control]:border-border [&_.folder-picker-control]:rounded-md [&_.folder-picker-control]:cursor-pointer [&_.folder-picker-control]:text-start [&_.folder-picker-control]:transition-[border-color,box-shadow] [&_.folder-picker-control]:duration-120 [&_.folder-picker-control]:ease-standard [&_.folder-picker-control:hover:not(:disabled)]:border-muted [&_.folder-picker-control:hover:not(:disabled)]:shadow-control-subtle [&_.folder-picker-control:focus-visible]:outline-2 [&_.folder-picker-control:focus-visible]:outline-solid [&_.folder-picker-control:focus-visible]:outline-focus [&_.folder-picker-control:focus-visible]:outline-offset-2 [&_.folder-picker-control_span]:flex-1 [&_.folder-picker-control_span]:min-w-0 [&_.folder-picker-control_span]:overflow-hidden [&_.folder-picker-control_span]:text-ellipsis [&_.folder-picker-control_span]:whitespace-nowrap [&_.folder-picker-control_.placeholder]:text-muted [&_.folder-picker-icon]:flex-none [&_.folder-picker-icon]:text-current [&_.folder-picker-chevron]:flex-none [&_.folder-picker-chevron]:text-muted [&_.folder-picker-control:hover:not(:disabled)_.folder-picker-chevron]:text-subtext [&_.folder-picker-hint]:text-subtext [&_.folder-picker-hint]:text-sm [&_.folder-picker-hint]:font-normal [&_.folder-picker-hint]:leading-snug [&_.project-location-field]:flex [&_.project-location-field]:flex-col [&_.project-location-field]:gap-2 [&_.project-location-label]:text-text [&_.project-location-label]:text-base [&_.project-location-label]:font-medium [&_.project-field-label]:text-text [&_.project-field-label]:text-base [&_.project-field-label]:font-medium [&_.folder-picker-control:disabled]:cursor-default [&_.folder-picker-control:disabled]:opacity-65 [&_.paper-destination]:flex [&_.paper-destination]:items-center [&_.paper-destination]:gap-2.5 [&_.paper-destination]:pt-2 [&_.paper-destination]:pe-2 [&_.paper-destination]:pb-2 [&_.paper-destination]:ps-3 [&_.paper-destination]:border [&_.paper-destination]:border-border [&_.paper-destination]:rounded-md [&_.paper-destination]:bg-background [&_.paper-destination_code]:flex-1 [&_.paper-destination_code]:min-w-0 [&_.paper-destination_code]:overflow-hidden [&_.paper-destination_code]:text-text [&_.paper-destination_code]:text-sm [&_.paper-destination_code]:font-normal [&_.paper-destination_code]:text-ellipsis [&_.paper-destination_code]:whitespace-nowrap [&_.paper-destination_.btn]:flex-none [&_.project-path-notice]:py-2 [&_.project-path-notice]:px-3 [&_.project-path-notice]:border [&_.project-path-notice]:border-border-variant [&_.project-path-notice]:rounded-sm [&_.project-path-notice]:bg-surface [&_.project-path-notice]:text-subtext [&_.project-path-notice]:text-sm [&_.project-path-notice]:leading-snug [&_.project-path-notice.error]:border-danger-notice-border [&_.paper-results]:flex [&_.paper-results]:flex-col [&_.paper-results]:border [&_.paper-results]:border-border [&_.paper-results]:rounded-md [&_.paper-results]:max-h-60 [&_.paper-results]:overflow-y-auto [&_.paper-results_button]:flex [&_.paper-results_button]:flex-col [&_.paper-results_button]:items-start [&_.paper-results_button]:gap-0.5 [&_.paper-results_button]:py-2 [&_.paper-results_button]:px-2.5 [&_.paper-results_button]:bg-none [&_.paper-results_button]:bg-transparent [&_.paper-results_button]:border-0 [&_.paper-results_button]:border-b [&_.paper-results_button]:border-b-border-variant [&_.paper-results_button]:text-start [&_.paper-results_button]:[font:inherit] [&_.paper-results_button]:text-text [&_.paper-results_button]:cursor-pointer [&_.paper-results_button:last-child]:border-b-0 [&_.paper-results_button:hover]:bg-surface [&_.paper-results_.title]:text-sm [&_.paper-results_.title]:font-medium [&_.paper-results_.id]:text-xs [&_.paper-results_.id]:text-muted [&_.paper-pick_.id]:text-xs [&_.paper-pick_.id]:text-muted [&_.paper-pick]:flex [&_.paper-pick]:items-center [&_.paper-pick]:justify-between [&_.paper-pick]:gap-2.5 [&_.paper-pick]:py-2.5 [&_.paper-pick]:px-3 [&_.paper-pick]:border [&_.paper-pick]:border-border [&_.paper-pick]:rounded-md [&_.paper-pick]:bg-surface [&_.paper-pick_.meta]:min-w-0 [&_.paper-pick_.title]:text-sm [&_.paper-pick_.title]:font-medium flex flex-col [&_label]:flex [&_label]:flex-col [&_label]:gap-1 [&_label]:text-sm [&_label]:text-text [&_label]:font-medium [&_.row2]:grid [&_.row2]:grid-cols-2 [&_.row2]:gap-2.5 [&_.actions]:flex [&_.actions]:justify-end [&_.actions]:gap-2.5 [&_.actions]:mt-1.5 [&_.new-project-actions]:justify-start [&_.new-project-actions]:mt-2.5 [&_.error]:text-accent-red [&_.error]:text-sm [&_.error]:whitespace-pre-wrap new-project-form gap-4.5 [&_>_label]:gap-2" onSubmit={submit}>
-      <div className={`${SEGMENTED_CLASS_NAME} form-seg`}>
-        <button
-          type="button"
-          className={mode === "blank" ? "active" : ""}
-          aria-pressed={mode === "blank"}
-          onClick={() => chooseMode("blank")}
-        >
-          {m.new_project_form_blank_project()}
-        </button>
-        <span aria-hidden className={`h-6 w-px bg-border${mode === "paper" ? "" : " invisible"}`} />
-        <button
-          type="button"
-          className={mode === "folder" ? "active" : ""}
-          aria-pressed={mode === "folder"}
-          onClick={() => chooseMode("folder")}
-        >
-          {m.new_project_form_existing_folder()}
-        </button>
-        <span aria-hidden className={`h-6 w-px bg-border${mode === "blank" ? "" : " invisible"}`} />
-        <button
-          type="button"
-          className={mode === "paper" ? "active" : ""}
-          aria-pressed={mode === "paper"}
-          onClick={() => chooseMode("paper")}
-        >
-          {m.new_project_form_from_a_paper()}
-        </button>
-      </div>
+      {modes.length > 1 && <div className={`${SEGMENTED_CLASS_NAME} form-seg`}>
+        {modes.map((option, index) => <Fragment key={option}>
+          {index > 0 && <span aria-hidden className={`h-6 w-px bg-border${mode === option || mode === modes[index - 1] ? " invisible" : ""}`} />}
+          <button
+            type="button"
+            className={mode === option ? "active" : ""}
+            aria-pressed={mode === option}
+            onClick={() => chooseMode(option)}
+          >
+            {MODE_LABELS[option]()}
+          </button>
+        </Fragment>)}
+      </div>}
 
       {mode === "paper" && !paper && (
         <label className="!font-normal">

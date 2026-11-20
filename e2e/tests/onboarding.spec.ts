@@ -52,7 +52,7 @@ test('a first run connects an agent, creates a project and streams its first rep
     await expect(page.getByRole('textbox', { name: 'Project location' })).toHaveValue('~/OpenResearch/dropout-sweep')
     await page.getByRole('button', { name: 'Create project' }).click()
     await expect(page.getByRole('heading', { name: 'What should we research?' })).toBeVisible()
-    await expect(composer(page)).toHaveAccessibleName(/^Message ⁦E2E Agent⁩/)
+    await expect(page.getByRole('button', { name: 'Agent and model for this chat: E2E Model' })).toBeVisible()
   })
 
   await test.step('the first message streams in', async () => {

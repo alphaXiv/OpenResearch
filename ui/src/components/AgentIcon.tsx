@@ -341,8 +341,8 @@ export function AgentIconButton({ value, brand, logo, onChange, disabled }: { va
   );
 }
 
-/** A large icon tile with a pencil badge that opens `children`, the picker, in a popover. */
-export function IconPickerButton({ tile, disabled, children }: { tile: ReactNode; disabled?: boolean; children: ReactNode }) {
+/** An icon tile that opens `children`, the picker, in a popover. Large ones carry a pencil badge; `compact` ones sit inline and take the hover. */
+export function IconPickerButton({ tile, disabled, compact, children }: { tile: ReactNode; disabled?: boolean; compact?: boolean; children: ReactNode }) {
   const { portalContainer } = useContext(WorkspaceDomContext);
   return (
     <Popover.Root>
@@ -350,10 +350,10 @@ export function IconPickerButton({ tile, disabled, children }: { tile: ReactNode
         type="button"
         disabled={disabled}
         aria-label={m.icon_change()}
-        className="group relative inline-grid shrink-0 rounded-xl outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus disabled:cursor-default"
+        className={cn("group relative inline-grid shrink-0 outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus disabled:cursor-default", compact ? "rounded-md hover:bg-hover-muted" : "rounded-xl")}
       >
         {tile}
-        {!disabled && (
+        {!disabled && !compact && (
           <span className="absolute -end-1 -bottom-1 grid size-4.5 place-items-center rounded-full border border-border bg-background text-subtext shadow-control-subtle group-hover:text-text">
             <Pencil size={10} aria-hidden="true" />
           </span>

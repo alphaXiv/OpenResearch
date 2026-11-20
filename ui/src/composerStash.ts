@@ -98,8 +98,10 @@ export function createComposerState() {
   return {
     composerStashes: new Map<string, ComposerStash>(),
     mountedComposers: new Map<string, (failed: ComposerStash) => void>(),
+    /** A seed is text only, so the attachments it cites stay behind and their tokens go. */
     seedComposer(projectId: string, prompt: string) {
-      composerSeeds.set(projectId, prompt);
+      const text = prompt.replace(ATTACHMENT_TOKEN, "");
+      if (text.trim()) composerSeeds.set(projectId, text);
     },
     composerSeed(projectId: string) {
       return composerSeeds.get(projectId) ?? null;

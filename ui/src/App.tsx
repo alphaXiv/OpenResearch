@@ -789,12 +789,17 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     if (firstClose) captureUiEvent({ name: "demo_welcome_choice", choice });
     if (choice === "explore_demo") setComposerFocusNonce((n) => n + 1);
   }, []);
-  const openNewProject = () => showCustomDialog({
+  /** `importDraft` marks the form opened from a new project's composer, whose unsent text carries over. */
+  const openNewProject = (importDraft?: string) => showCustomDialog({
     component: NewProjectDialog,
     props: {
       preferredAgent: uiState?.preferredAgent ?? null,
       remote: runtime.kind === "ssh",
-      onCreated: onProjectCreated,
+      importing: importDraft !== undefined,
+      onCreated: (project, publicationError) => {
+        if (importDraft?.trim()) workspace.composers.seedComposer(project.id, importDraft);
+        onProjectCreated(project, publicationError);
+      },
     },
     onConfirm: () => {},
     onCancel: "close",
@@ -2006,7 +2011,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                 if (railTemporarilyHidden) closePanel();
               }
             }}
-            onNewProject={() => { setMobileRailOpen(false); openNewProject(); }}
+            onImportProject={(draft) => { setMobileRailOpen(false); openNewProject(draft); }}
             mainView={mainView}
             onSelectMainView={(view) => { setMobileRailOpen(false); selectMainView(view); }}
             onOpenFile={openChatFile}

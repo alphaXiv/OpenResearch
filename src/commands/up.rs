@@ -1313,6 +1313,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
         )
         .route("/api/harnesses/{id}/snapshot", get(harness_snapshot))
         .route(
+            "/api/harnesses/claude-code/root-full-access",
+            post(allow_claude_root_full_access),
+        )
+        .route(
             "/api/harnesses/{id}/install",
             axum::routing::delete(remove_harness_install),
         )
@@ -2185,6 +2189,7 @@ fn project_json_with_artifacts_dir(p: &local::model::LocalProject, artifacts_dir
         map.insert("path".into(), Value::String(p.repo_path.clone()));
         map.insert("githubEnabled".into(), Value::Bool(p.github_enabled()));
         map.insert("scratch".into(), Value::Bool(p.is_scratch()));
+        map.insert("unnamed".into(), Value::Bool(p.is_unnamed_scratch()));
         map.insert(
             "githubUrl".into(),
             p.github_url().map(Value::String).unwrap_or(Value::Null),
@@ -3432,7 +3437,7 @@ async fn delete_project_inner(state: AppState, id: String, query: DeleteProjectQ
         .get_local_project(&id)?
         .ok_or_else(|| not_found("project"))?;
     if query.only_unused_scratch
-        && (!project.is_scratch() || !store.list_chat_sessions_by_project(&id)?.is_empty())
+        && (!project.is_unnamed_scratch() || !store.list_chat_sessions_by_project(&id)?.is_empty())
     {
         return Ok(Json(json!({ "ok": false })));
     }
@@ -9445,8 +9450,21 @@ async fn list_harnesses(State(state): State<AppState>, Query(q): Query<HarnessQu
         }
         let harness = entry["id"].as_str().unwrap_or_default().to_string();
         local::model_routes::name_models(&harness, &mut entry["models"]);
+        if harness == "claude-code" {
+            entry["fullAccessNeedsRootConsent"] = json!(
+                local::harness::claude::full_access()
+                    == local::harness::claude::FullAccess::NeedsRootConsent
+            );
+        }
     }
     Ok(Json(payload))
+}
+
+async fn allow_claude_root_full_access(State(state): State<AppState>) -> ApiResult {
+    crate::telemetry::set_claude_root_full_access(true)
+        .map_err(|e| anyhow!("could not save the full access confirmation: {e}"))?;
+    state.chat.emit_event("harness.catalog", json!({}));
+    Ok(Json(json!({})))
 }
 
 #[derive(Deserialize)]
@@ -10552,7 +10570,7 @@ async fn create_chat_session(
         .ok_or_else(|| not_found("project"))?;
     // A chat without a project gets one of its own, even when two drafts were
     // opened on the same unused scratch project.
-    let _scratch_guard = if project.is_scratch() {
+    let _scratch_guard = if project.is_unnamed_scratch() {
         let guard = state.project_creation_lock.clone().lock_owned().await;
         if !store.list_chat_sessions_by_project(&project.id)?.is_empty() {
             req.project_id = local::projects::scratch_project(&store)?.id;
@@ -10763,7 +10781,7 @@ async fn delete_chat_session(State(state): State<AppState>, Path(id): Path<Strin
         .map(|session| store.get_local_project(&session.project_id))
         .transpose()?
         .flatten()
-        .filter(|project| project.is_scratch());
+        .filter(|project| project.is_unnamed_scratch());
     drop(store);
     tokio::spawn(async move {
         chat.delete_session(&id).await?;
@@ -11047,6 +11065,17 @@ async fn update_chat_session(
             .await?
             .ok_or_else(|| not_found("chat session"))?
     } else if let Some(permission_mode) = req.permission_mode {
+        let harness = Store::open()?
+            .get_chat_session(&id)?
+            .ok_or_else(|| not_found("chat session"))?
+            .harness;
+        if harness == "claude-code" {
+            local::harness::claude::check_full_access(local::harness::permission_mode_for(
+                &harness,
+                &permission_mode,
+            ))
+            .map_err(bad_request)?;
+        }
         state
             .chat
             .set_permission_mode(&id, &permission_mode)
