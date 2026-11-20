@@ -2498,6 +2498,7 @@
   "sidebar_inbox": "Входящие",
   "chat_inbox_working": "В работе",
   "chat_inbox_done": "Готово",
+  "chat_turn_last_update": "Последнее обновление",
   "chat_turn_close_running": "Ждёт результатов",
   "chat_turn_close_need": "Ждёт вас",
   "chat_turn_close_done": "Готово",

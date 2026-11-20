@@ -2498,6 +2498,7 @@
   "sidebar_inbox": "इनबॉक्स",
   "chat_inbox_working": "चल रहे",
   "chat_inbox_done": "पूरे",
+  "chat_turn_last_update": "पिछला अपडेट",
   "chat_turn_close_running": "नतीजों का इंतज़ार",
   "chat_turn_close_need": "आपकी ज़रूरत",
   "chat_turn_close_done": "पूरा",

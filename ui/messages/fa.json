@@ -2498,6 +2498,7 @@
   "sidebar_inbox": "صندوق ورودی",
   "chat_inbox_working": "در حال کار",
   "chat_inbox_done": "تمام‌شده",
+  "chat_turn_last_update": "آخرین به‌روزرسانی",
   "chat_turn_close_running": "در انتظار نتایج",
   "chat_turn_close_need": "منتظر شما",
   "chat_turn_close_done": "انجام شد",

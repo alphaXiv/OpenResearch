@@ -4098,20 +4098,46 @@ const TURN_CLOSE_KINDS: Partial<Record<string, { Icon: typeof Hourglass; tone: s
   done: { Icon: CircleCheck, tone: "text-accent-green", label: m.chat_turn_close_done },
 };
 
+function ReportTime({ at }: { at: number }) {
+  const [age, setAge] = useState(() => timeAgo(at));
+  useEffect(() => {
+    const tick = () => setAge(timeAgo(at));
+    tick();
+    const timer = window.setInterval(tick, 1000);
+    return () => window.clearInterval(timer);
+  }, [at]);
+
+  return <time aria-live="off" className="shrink-0 text-xs tabular-nums text-ink-subtext" dateTime={new Date(at).toISOString()}>{age}</time>;
+}
+
 /** The line an agent ended its turn with: why it stopped and what restarts the work. */
-function TurnClose({ close, fullAuto, onOpenFile, onOpenRun }: { close: TurnYield; fullAuto: boolean; onOpenFile?: OpenTranscriptFile; onOpenRun?: OpenTranscriptTarget }) {
+function TurnClose({ close, historical, fullAuto, at, onOpenFile, onOpenRun }: {
+  close: TurnYield;
+  historical: boolean;
+  fullAuto: boolean;
+  at?: number | null;
+  onOpenFile?: OpenTranscriptFile;
+  onOpenRun?: OpenTranscriptTarget;
+}) {
   const kind = TURN_CLOSE_KINDS[close.kind];
-  const tone = fullAuto && close.kind === "running" ? "text-accent-purple" : kind?.tone;
+  const Icon = historical ? FileText : kind?.Icon;
+  const label = historical ? m.chat_turn_last_update() : kind?.label();
+  const tone = fullAuto ? "text-accent-purple" : kind?.tone;
   return (
     <div className="mb-2.5 flex items-start gap-2 rounded-lg border border-border bg-surface px-3 py-2 text-sm leading-5 text-text" data-turn-close={close.kind}>
-      {kind && (
+      {Icon && (
         <span className={`inline-flex h-5 shrink-0 items-center ${tone}`}>
-          <kind.Icon size={14} aria-hidden="true" />
+          <Icon size={14} aria-hidden="true" />
         </span>
       )}
       <div className="min-w-0 flex-1">
-        {kind && <div className="font-medium">{kind.label()}</div>}
-        <div dir="auto" className="wrap-anywhere text-subtext [&_.md]:leading-5 [&_.md]:text-subtext">
+        {(label || at != null) && (
+          <div className="flex flex-wrap items-baseline justify-between gap-x-2">
+            <span className="font-medium">{label}</span>
+            {at != null && <ReportTime key={at} at={at} />}
+          </div>
+        )}
+        <div dir="auto" className="wrap-anywhere text-ink-subtext [&_.md]:leading-5 [&_.md]:text-ink-subtext">
           <Md text={close.text} onOpenFile={onOpenFile} onOpenRun={onOpenRun} />
         </div>
       </div>
@@ -7473,7 +7499,14 @@ export function ChatPanel({
   )), [messages, busy]);
   const activeSession = openSession;
   const autonomy = activeSession?.autonomy ?? sideDraftAutonomy ?? preferredAutonomy;
+  const fullAuto = autonomy === "autoresearch";
   const tail = messages.at(-1);
+  const lastReport = useMemo(() => {
+    if (!fullAuto) return;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].turnYield) return messages[i];
+    }
+  }, [fullAuto, messages]);
   let currentClose: TurnYield | undefined;
   if (!busy && tail?.role === "assistant" && !tail.parts.some(isTurnStatusPart)) {
     const summary = activeSession?.activeLeafId === tail.id ? activeSession : undefined;
@@ -8379,6 +8412,8 @@ export function ChatPanel({
   const questions = useQuestions(activeId, pendingQuestions, respond);
   const asking = questions.part !== null;
   const visibleClose = pendingPlan || asking ? undefined : currentClose;
+  const report = visibleClose ?? lastReport?.turnYield;
+  const reportAt = fullAuto ? (visibleClose ? tail?.completedAt : lastReport?.completedAt) : undefined;
   const closingQuestion = visibleClose?.kind === "need" && tail ? { id: tail.id, text: visibleClose.text } : null;
   const showQuestion = questions.show;
   const searchedPartId = focusedMessage?.sessionId === activeId ? focusedMessage.partId : undefined;
@@ -9617,6 +9652,7 @@ export function ChatPanel({
               key={activeId}
               sessionId={activeId}
               agent={assistantLabel}
+              nameSingleRun={fullAuto}
               onOpenRun={onOpenRun}
               onOpenRunPage={onOpenRunPage}
             />
@@ -9749,11 +9785,18 @@ export function ChatPanel({
             />
           )}
           <RemoteConnectionStrip />
-          <div role="status">
+          <div role="status" aria-atomic={false}>
             {closingQuestion && <span className="sr-only">{mentionsAsText(closingQuestion.text)}</span>}
-            {visibleClose && !closingQuestion && (
+            {report && !closingQuestion && (
               <ChatImageScope projectId={projectId} sessionId={activeId}>
-                <TurnClose close={visibleClose} fullAuto={autonomy === "autoresearch"} onOpenFile={openFileInSession} onOpenRun={onOpenRun} />
+                <TurnClose
+                  close={report}
+                  historical={!visibleClose}
+                  fullAuto={fullAuto}
+                  at={reportAt}
+                  onOpenFile={openFileInSession}
+                  onOpenRun={onOpenRun}
+                />
               </ChatImageScope>
             )}
           </div>
@@ -9859,6 +9902,7 @@ export function ChatPanel({
                     key={closingQuestion.id}
                     reply={{
                       id: closingQuestion.id,
+                      time: reportAt != null ? <ReportTime key={reportAt} at={reportAt} /> : undefined,
                       text: <Md text={closingQuestion.text} onOpenFile={openFileInSession} onOpenRun={onOpenRun} />,
                     }}
                   />

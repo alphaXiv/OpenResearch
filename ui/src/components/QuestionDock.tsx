@@ -135,7 +135,7 @@ export function QuestionDock(props: {
   hotkeys: boolean;
   searchTarget: boolean;
   onPick: (label: string) => void;
-} | { reply: { id: string; text: ReactNode } }) {
+} | { reply: { id: string; text: ReactNode; time?: ReactNode } }) {
   const { id: elementId } = useContext(WorkspaceDomContext);
   const root = useRef<HTMLDivElement>(null);
   const questionBox = useRef<HTMLDivElement>(null);
@@ -217,6 +217,7 @@ export function QuestionDock(props: {
         >
           <div className="flex items-center gap-2 px-2.5 text-sm text-subtext">
             <span className="min-w-0 flex-1 truncate">{prompt?.header || m.chat_question()}</span>
+            {reply?.time}
             {choice && choice.total > 1 && (
               <span className="shrink-0 text-xs tabular-nums" aria-label={m.chat_question_progress({ current: choice.index + 1, total: choice.total })}>
                 {choice.index + 1}/{choice.total}

@@ -2498,6 +2498,7 @@
   "sidebar_inbox": "收件箱",
   "chat_inbox_working": "进行中",
   "chat_inbox_done": "已完成",
+  "chat_turn_last_update": "上次更新",
   "chat_turn_close_running": "等待结果",
   "chat_turn_close_need": "待你处理",
   "chat_turn_close_done": "已完成",

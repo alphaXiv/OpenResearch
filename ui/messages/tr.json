@@ -2498,6 +2498,7 @@
   "sidebar_inbox": "Gelen kutusu",
   "chat_inbox_working": "Çalışanlar",
   "chat_inbox_done": "Bitenler",
+  "chat_turn_last_update": "Son güncelleme",
   "chat_turn_close_running": "Sonuç bekliyor",
   "chat_turn_close_need": "Seni bekliyor",
   "chat_turn_close_done": "Bitti",

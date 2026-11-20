@@ -3,6 +3,10 @@ import { composer, expect, send, test } from '../src/test.ts'
 
 type Yield = { kind: 'running' | 'need' | 'done'; text: string }
 
+test.afterEach(async ({ page }) => {
+  await page.unrouteAll({ behavior: 'wait' })
+})
+
 /**
  * Serves the chat's latest turn as closed by `turnYield`, as a host with the yield tool reports it.
  * The fake agent has no orx tools, so the fields ride on its real transcript and session list.
@@ -95,6 +99,54 @@ test("the composer shows why the agent stopped until a reply starts a new turn",
     await expect(page.getByText('The next trial is ready for review.')).toBeVisible()
     await expect(question).toBeHidden()
   })
+})
+
+test('Full auto-research keeps the last report while the next turn works', async ({ page, project, agent }) => {
+  await project.open(page)
+  const question = 'Which seed should the next run use?'
+  const result = 'The seed-42 comparison is complete.'
+  agent.script('Prepare the next comparison.', [{ run: `orx yield need "${question}"` }, { say: 'The comparison is ready to launch.' }])
+  await send(page, 'Prepare the next comparison.')
+
+  const dock = page.getByRole('group', { name: question })
+  await expect(dock).toBeVisible()
+  const url = new URL(page.url())
+  const sessionId = url.pathname.split('/').at(-1)
+  const mode = await page.request.patch(`/api/chat/sessions/${sessionId}`, {
+    data: { autonomy: 'autoresearch' },
+    headers: { origin: url.origin },
+  })
+  expect(mode.ok()).toBe(true)
+  await expect(dock.locator('time')).toBeVisible()
+  const reportedAt = await dock.locator('time').getAttribute('datetime')
+  expect(reportedAt).toBeTruthy()
+
+  agent.script('Use seed 42.', [
+    { hold: 'comparing' },
+    { run: `orx yield done "${result}"` },
+    { say: 'The compared results are ready.' },
+  ])
+  const reply = page.getByRole('textbox', { name: 'Your answer' })
+  await reply.fill('Use seed 42.')
+  await reply.press('Enter')
+  await agent.reached('comparing')
+
+  const status = page.locator('.composer').getByRole('status').filter({ hasText: question })
+  const report = page.locator('.composer [data-turn-close]')
+  await expect(dock).toBeHidden()
+  await expect(status).toContainText('Last update')
+  await expect(report.getByText(question)).toBeVisible()
+  await expect(report.locator('time')).toHaveAttribute('datetime', reportedAt!)
+  await page.reload()
+  await expect(report.getByText(question)).toBeVisible()
+  await expect(report.locator('time')).toHaveAttribute('datetime', reportedAt!)
+
+  const spent = 'No other seed is worth a run.'
+  agent.script('[orx] You said done.', [{ run: `orx yield done "${spent}"` }, { say: spent }])
+  agent.release('comparing')
+  await expect(report.getByText(question)).toBeHidden()
+  await expect(report.locator('time')).not.toHaveAttribute('datetime', reportedAt!)
+  await expect(report.getByText(spent)).toBeVisible()
 })
 
 /** Serves the chat's latest reply as ending on `parts`, the way a host that recorded them reports it. */

@@ -2498,6 +2498,7 @@
   "sidebar_inbox": "Skrzynka",
   "chat_inbox_working": "W toku",
   "chat_inbox_done": "Gotowe",
+  "chat_turn_last_update": "Ostatnia aktualizacja",
   "chat_turn_close_running": "Czeka na wyniki",
   "chat_turn_close_need": "Czeka na Ciebie",
   "chat_turn_close_done": "Gotowe",

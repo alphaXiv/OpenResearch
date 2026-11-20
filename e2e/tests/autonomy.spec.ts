@@ -18,6 +18,7 @@ test('the autonomy picker saves Full auto-research and applies it to the chat', 
   }
 
   await trigger.press('ArrowDown')
+  await expect(menu.getByRole('menuitemradio').first()).toBeFocused()
   await page.keyboard.press('End')
   await expect(fullAutoResearch).toBeFocused()
   await page.keyboard.press('Enter')

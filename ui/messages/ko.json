@@ -2498,6 +2498,7 @@
   "sidebar_inbox": "받은함",
   "chat_inbox_working": "작업 중",
   "chat_inbox_done": "완료",
+  "chat_turn_last_update": "마지막 업데이트",
   "chat_turn_close_running": "결과 대기 중",
   "chat_turn_close_need": "확인 필요",
   "chat_turn_close_done": "완료",

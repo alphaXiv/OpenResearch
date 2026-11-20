@@ -2498,6 +2498,7 @@
   "sidebar_inbox": "Bandeja",
   "chat_inbox_working": "En curso",
   "chat_inbox_done": "Terminados",
+  "chat_turn_last_update": "Última actualización",
   "chat_turn_close_running": "Esperando resultados",
   "chat_turn_close_need": "Te necesita",
   "chat_turn_close_done": "Listo",

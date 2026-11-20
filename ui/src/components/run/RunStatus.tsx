@@ -64,7 +64,7 @@ export function RunStatus({ model, label, descriptionId, onOpenRunPage, expanded
   const sentence = wrapWarning && !stage && model.sentence.watcher
     ? model.flagDetail ?? model.sentence.text
     : model.sentence.text;
-  const status = plainSentence([label, model.lead, sentence].filter(Boolean).join(" · "));
+  const status = plainSentence([label === model.name ? undefined : label, model.lead, sentence].filter(Boolean).join(" · "));
   const cardSentence = model.tone === "failed" ? model.sentence.text : model.sentence.watcher;
 
   // Focus returns before closing so it cannot reopen the focus-triggered popover.

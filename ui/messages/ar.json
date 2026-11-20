@@ -2498,6 +2498,7 @@
   "sidebar_inbox": "صندوق الوارد",
   "chat_inbox_working": "قيد العمل",
   "chat_inbox_done": "منتهية",
+  "chat_turn_last_update": "آخر تحديث",
   "chat_turn_close_running": "بانتظار النتائج",
   "chat_turn_close_need": "بانتظارك",
   "chat_turn_close_done": "تم",

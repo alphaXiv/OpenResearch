@@ -36,13 +36,12 @@ function Headline({ model }: { model: RunModel }) {
   );
 }
 
-/** How a run among several is named: what sets it apart from the others, and its experiment's whole title. */
 export interface RunLabel {
   text: string;
-  title: string;
+  grouped?: true;
 }
 
-/** The collapsed run: one sentence, how it compares, the time left. The bar is its underline. A `label` puts it among several. */
+/** The collapsed run: one sentence, how it compares, the time left. The bar is its underline. */
 export function RunLine({ model, agent, label, onToggle, onOpenRunPage, expanded = false, expandable = true, children }: { expandable?: boolean; expanded?: boolean; children?: ReactNode; model: RunModel; agent: string | null; label?: RunLabel; onToggle: () => void; onOpenRunPage?: (run: Run, intent: TabOpenIntent) => void }) {
   const { requestHostConnect } = useWorkspace().events;
   const host = model.connectHost;
@@ -61,14 +60,14 @@ export function RunLine({ model, agent, label, onToggle, onOpenRunPage, expanded
     : stale ? { text: stale.why, why: "", tip: "" }
     : model.eta ? { text: model.eta, why: model.etaDetail, tip: `${model.eta} · ${model.etaDetail}` }
     : null;
-  const { text, title } = label ?? { text: model.name, title: model.name };
+  const grouped = label?.grouped;
   // Under the sentence, the time starts where the sentence does: past the mark and the gap.
   const under = cn("@max-[30rem]:order-last", model.tone === "flag" ? "@max-[30rem]:ms-[22px]" : "@max-[30rem]:ms-[15px]");
   return (
-    <div data-run-frame={label ? undefined : ""} role="group" aria-label={title} className={label ? cn("relative", model.needsChoice && "bg-accent-amber-subtle") : runFrame(model)}>
+    <div data-run-frame={grouped ? undefined : ""} role="group" aria-label={model.name} className={grouped ? cn("relative", model.needsChoice && "bg-accent-amber-subtle") : runFrame(model)}>
       <div className="flex min-h-9 min-w-0 items-center gap-x-2 py-1 ps-3 pe-1.5 @max-[30rem]:flex-wrap @max-[30rem]:items-start">
         <span className="flex h-7 shrink-0 items-center"><Mark tone={model.tone} live={model.live} label={model.status} /></span>
-        <RunStatus model={model} label={label ? text : undefined} descriptionId={time?.why ? whyId : undefined} onOpenRunPage={onOpenRunPage} expanded={expanded} />
+        <RunStatus model={model} label={label?.text} descriptionId={time?.why ? whyId : undefined} onOpenRunPage={onOpenRunPage} expanded={expanded} />
         {working && <span className={cn("shrink-0 whitespace-nowrap @max-[40rem]:hidden", editing || state === "agent_looking" ? "tool-running-shimmer" : "text-ink-subtext")}>{working}</span>}
         {!expanded && <Headline model={model} />}
         {host && <Button size="small" onClick={() => requestHostConnect(host)}>{m.settings_connect()}</Button>}

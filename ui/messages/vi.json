@@ -2498,6 +2498,7 @@
   "sidebar_inbox": "Hộp thư đến",
   "chat_inbox_working": "Đang làm việc",
   "chat_inbox_done": "Xong",
+  "chat_turn_last_update": "Cập nhật gần nhất",
   "chat_turn_close_running": "Đang chờ kết quả",
   "chat_turn_close_need": "Cần bạn",
   "chat_turn_close_done": "Xong",
