@@ -2350,6 +2350,7 @@
   "run_block_this": "此区块",
   "run_page_no_signals": "日志中暂未找到指标。运行输出指标后会显示在这里。",
   "run_page_no_signals_ended": "在此运行的日志中未找到指标。",
+  "run_page_collection_incomplete": "OpenResearch 未能读取完此次运行的指标。已读取的指标会保留。",
   "run_page_view_empty": "为此实验设置的视图不显示任何内容",
   "run_view_how": "此视图如何构建",
   "run_view_default": "根据运行报告的第一个信号生成。代理尚未设置视图。",

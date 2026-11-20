@@ -3153,6 +3153,9 @@ pub struct ChatHost {
     /// Running turns a previous server left whose kept agent was taken back to resume them,
     /// by session; each resumes once its predecessor's lease is gone.
     resumable: std::sync::Mutex<HashMap<String, adoption::Resumable>>,
+    /// Chats a stop left idle. Run notices and chat news wait until the chat's next turn
+    /// starts, so they don't restart work the user just stopped.
+    pub(crate) stopped: std::sync::Mutex<HashSet<String>>,
 }
 
 struct PendingClientTurnGuard {
@@ -3974,7 +3977,8 @@ impl TurnGuard {
         })
     }
 
-    /// Reserve an operation only when no turn or queued user message exists.
+    /// Reserve an operation only when no turn or queued user message exists. A
+    /// `Reserved` claim, the automatic turn of a result or news, also waits out a Stop.
     async fn claim_idle(
         host: &Arc<ChatHost>,
         session_id: &str,
@@ -3990,6 +3994,8 @@ impl TurnGuard {
             || queued
                 .get(session_id)
                 .is_some_and(|messages| !messages.is_empty())
+            || (matches!(reservation, TurnState::Reserved { .. })
+                && host.stopped.lock().unwrap().contains(session_id))
         {
             return None;
         }
@@ -4136,6 +4142,7 @@ impl ChatHost {
             pending_steers: std::sync::Mutex::new(HashMap::new()),
             queue_dispatch_in_flight: std::sync::Mutex::new(HashMap::new()),
             resumable: std::sync::Mutex::new(HashMap::new()),
+            stopped: std::sync::Mutex::new(HashSet::new()),
         }
     }
 
@@ -4701,7 +4708,7 @@ impl ChatHost {
         if store.delegation(task_id)?.parent.as_deref() != Some(chat_id) {
             return self.claude.stop_task(chat_id, task_id).await;
         }
-        let interrupted = self.interrupt(task_id).await?;
+        let interrupted = self.interrupt_and_hold(task_id).await?;
         if interrupted {
             news::mark_told(&store, chat_id, task_id)?;
         }
@@ -7535,6 +7542,7 @@ impl ChatHost {
                 .await;
             ctx.host.drain_queue(&ctx.session_id).await;
         });
+        self.stopped.lock().unwrap().remove(&sid);
         turns.insert(
             sid.clone(),
             TurnState::Active(ActiveTurn {
@@ -7727,10 +7735,19 @@ impl ChatHost {
         self.stop_turn(session_id, StopMode::Cancel).await
     }
 
+    /// [`Self::interrupt`] for a chat someone stopped, holding its results and news until its next turn.
+    pub async fn interrupt_and_hold(self: &Arc<Self>, session_id: &str) -> Result<bool> {
+        self.stop_turn(session_id, StopMode::Hold).await
+    }
+
     async fn stop_turn(self: &Arc<Self>, session_id: &str, mode: StopMode) -> Result<bool> {
-        let cancel = matches!(mode, StopMode::Cancel | StopMode::User);
+        let cancel = matches!(mode, StopMode::Cancel | StopMode::Hold | StopMode::User);
         let active = {
             let mut turns = self.turns.lock().await;
+            // Under `turns`, so a turn starting now cannot clear the hold this Stop sets.
+            if matches!(mode, StopMode::Hold | StopMode::User) {
+                self.stopped.lock().unwrap().insert(session_id.to_string());
+            }
             if let StopMode::LeaseLost(token) = &mode {
                 if self.durable_turns.lock().unwrap().get(session_id) != Some(token) {
                     return Ok(false);
@@ -7885,7 +7902,7 @@ impl ChatHost {
         let mut parents = vec![id.to_string()];
         while let Some(parent) = parents.pop() {
             for child in store.chat_delegates_of(&parent)? {
-                let interrupted = self.interrupt(&child).await?;
+                let interrupted = self.interrupt_and_hold(&child).await?;
                 if interrupted {
                     news::mark_told(&store, &parent, &child)?;
                 }
@@ -10752,7 +10769,12 @@ fn run_notice_request(
         .iter()
         .map(|notice| {
             let mut body = std::borrow::Cow::Borrowed(notice.body.as_str());
-            if notice.kind == crate::store::TERMINAL {
+            if notice.kind == crate::store::TERMINAL
+                && !notices.iter().any(|other| {
+                    other.run_id == notice.run_id
+                        && other.dedupe == crate::store::INCOMPLETE_SIGNAL_NOTICE
+                })
+            {
                 let availability =
                     crate::engine::monitor::terminal_signal_note(store, &notice.run_id)
                         .unwrap_or_else(|error| {
@@ -10761,8 +10783,9 @@ fn run_notice_request(
                             ))
                         });
                 if let Some(reason) = availability {
-                    body.to_mut()
-                        .push_str(&format!("\n\nSignal availability: {reason}"));
+                    let body = body.to_mut();
+                    body.push_str(crate::store::SIGNAL_AVAILABILITY_PREFIX);
+                    body.push_str(&reason);
                 }
             }
             body
@@ -10821,6 +10844,8 @@ async fn process_run_notices(
         }
         let notices = store.run_notice_batch(&session_id)?;
         if notices.is_empty() {
+            // A covered result can empty the first batch while a later batch still waits.
+            held.push(session_id);
             guard.release().await;
             continue;
         }
@@ -10974,6 +10999,8 @@ pub async fn keep_turn_leases(
 enum StopMode {
     /// Stopped on purpose: the stored turn is recorded as interrupted.
     Cancel,
+    /// Stopped like `Cancel`, holding the chat's results and news until its next turn.
+    Hold,
     /// Stopped by the user like `Cancel`, leaving a marker; the slot passes
     /// straight to the chat's queue, so queued messages run next.
     User,
@@ -14522,6 +14549,46 @@ mod run_wakeup_tests {
         assert!(text()
             .await
             .contains("Signal availability: The host no longer has this log"));
+        assert!(text().await.contains("orx logs run_x"));
+
+        session(&store, "subscriber");
+        store
+            .insert_run_notice(
+                "run_x",
+                "subscriber",
+                crate::store::TERMINAL,
+                "terminal",
+                &body,
+                1,
+            )
+            .unwrap();
+        let incomplete = crate::store::RunNotice::signal_collection_failed(
+            "run_x",
+            "The host no longer has this log",
+            true,
+        );
+        store
+            .insert_run_notice(
+                "run_x",
+                "subscriber",
+                crate::store::ATTENTION,
+                crate::store::INCOMPLETE_SIGNAL_NOTICE,
+                &incomplete,
+                2,
+            )
+            .unwrap();
+        let batch = store.run_notice_batch("subscriber").unwrap();
+        let host = notice_host();
+        let guard =
+            TurnGuard::claim_idle(&host, "subscriber", TurnState::Reserved { turn_id: None })
+                .await
+                .unwrap();
+        let request = run_notice_request(&store, &batch, guard).unwrap();
+        let prompt = &request.messages[0].text;
+        assert!(prompt.contains("finished with status **done**"));
+        assert_eq!(prompt.matches("The host no longer has this log").count(), 1);
+        assert!(prompt.contains("orx logs run_x"));
+        drop(request);
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -15068,6 +15135,44 @@ for line in sys.stdin:
         .await
         .unwrap();
         restarted.interrupt("other").await.unwrap();
+
+        // After a user Stop, a result waits for the chat's next turn instead of restarting it.
+        restarted.interrupt_by_user("other").await.unwrap();
+        store
+            .insert_run_notice("run_x", "other", "notify", "stopped", "after stop", 1)
+            .unwrap();
+        bus.publish(crate::engine::bus::RunEvent::Notices {
+            chats: vec!["other".into()],
+        });
+        let not_moving = std::sync::atomic::AtomicBool::new(false);
+        process_run_notices(&restarted, Store::open().unwrap(), &not_moving)
+            .await
+            .unwrap();
+        assert_eq!(count_turns(), baseline + 3);
+        assert_eq!(store.pending_run_notice_sessions().unwrap(), ["other"]);
+
+        restarted
+            .send_message(
+                "other",
+                "carry on".into(),
+                TurnOverrides::default(),
+                Vec::new(),
+                Vec::new(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while count_turns() < baseline + 5
+                || !store.pending_run_notice_sessions().unwrap().is_empty()
+                || !restarted.busy_sessions().await.is_empty()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         watcher.abort();
         let _ = watcher.await;
 
@@ -15334,7 +15439,7 @@ for line in sys.stdin:
                 .unwrap()
                 .lines()
                 .count(),
-            8
+            10
         );
         for kind in ["engine", "ssh_job"] {
             let delegate = format!("delegate-{kind}");
@@ -15400,6 +15505,13 @@ for line in sys.stdin:
             assert_eq!(news::chat_news(&store, Some("other")).unwrap().len(), 1);
             assert_eq!(store.pending_run_notice_sessions().unwrap(), ["other"]);
             let before = count_turns();
+            host.stopped.lock().unwrap().insert("other".into());
+            news::deliver_news(&host, Store::open().unwrap(), None)
+                .await
+                .unwrap();
+            assert_eq!(count_turns(), before);
+            assert_eq!(news::chat_news(&store, Some("other")).unwrap().len(), 1);
+            host.stopped.lock().unwrap().remove("other");
             for _ in 0..3 {
                 news::deliver_news(&host, Store::open().unwrap(), None)
                     .await
@@ -16728,7 +16840,7 @@ done
         assert!(reset_exhausted_queued_message(&message).is_none());
     }
 
-    /// The prompts the quiet agent of [`quiet_agent_chat`] was sent, oldest first.
+    /// The prompts the quiet agent was sent, oldest first.
     fn prompts() -> Vec<String> {
         std::fs::read_to_string(crate::store::data_dir().join("prompts.jsonl"))
             .unwrap_or_default()
@@ -16740,6 +16852,20 @@ done
     /// Chat `owner` at `autonomy` on an agent that ends every turn having done nothing, and a
     /// running run it launched with one flag raised.
     fn quiet_agent_chat(store: &Store, autonomy: Option<&str>) -> StoredRun {
+        quiet_agent(store, autonomy);
+        let run = run("running");
+        store.upsert_run(&run).unwrap();
+        let body = json!({"id": "f1", "source": "tripwire", "kind": "error", "fingerprint": "error:boom",
+            "at": 1, "template": "A new kind of error in the log: **boom**.", "evidence": null, "whole": null});
+        let flag = crate::engine::flags::new_flag(store, &run, body, true).unwrap();
+        assert_eq!(
+            store.raise_flags(&[flag], 1).unwrap(),
+            [crate::store::Raise::Raised]
+        );
+        run
+    }
+
+    fn quiet_agent(store: &Store, autonomy: Option<&str>) {
         let repo = crate::store::data_dir().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         crate::local::git::initialize_own_repository(&repo).unwrap();
@@ -16808,17 +16934,6 @@ for line in sys.stdin:
         )
         .unwrap();
         tx.commit().unwrap();
-
-        let run = run("running");
-        store.upsert_run(&run).unwrap();
-        let body = json!({"id": "f1", "source": "tripwire", "kind": "error", "fingerprint": "error:boom",
-            "at": 1, "template": "A new kind of error in the log: **boom**.", "evidence": null, "whole": null});
-        let flag = crate::engine::flags::new_flag(store, &run, body, true).unwrap();
-        assert_eq!(
-            store.raise_flags(&[flag], 1).unwrap(),
-            [crate::store::Raise::Raised]
-        );
-        run
     }
 
     /// Delivers what the outbox has until the chat goes quiet.
@@ -16843,6 +16958,116 @@ for line in sys.stdin:
             )],
         };
         store.record_flag_choices(&[ask], None, 2).unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agentic_flag_wakes_explain_how_to_review_and_tune_each_source() {
+        if crate::config::in_test_child(&[]) {
+            check_flag_wake_advice(false).await;
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn copilot_flag_asks_explain_how_to_review_and_tune_each_source() {
+        if crate::config::in_test_child(&[]) {
+            check_flag_wake_advice(true).await;
+        }
+    }
+
+    async fn check_flag_wake_advice(copilot: bool) {
+        let store = Store::open().unwrap();
+        quiet_agent(&store, copilot.then_some("copilot"));
+        let host = notice_host();
+        for ended in [false, true] {
+            for (source, details) in [
+                ("look", json!({"text": "Loss spiked during evaluation."})),
+                (
+                    "tripwire",
+                    json!({"kind": "stall", "text": "No progress in eval."}),
+                ),
+                (
+                    "rule",
+                    json!({"rule": "Validation loss", "ruleText": "Check before continuing.", "text": "Loss exceeded the limit."}),
+                ),
+            ] {
+                let mut run = run("running");
+                run.id = format!("run_{source}_{ended}");
+                store.upsert_run(&run).unwrap();
+                let mut body = details;
+                body["id"] = json!("f1");
+                body["source"] = json!(source);
+                let flag = crate::engine::flags::new_flag(&store, &run, body, true).unwrap();
+                assert_eq!(
+                    store.raise_flags(&[flag], 1).unwrap(),
+                    [crate::store::Raise::Raised]
+                );
+
+                let before = prompts().len();
+                if copilot {
+                    settle_all(&host).await;
+                    assert_eq!(prompts().len(), before);
+                    ask_about_flag(&store, &run);
+                }
+                if ended {
+                    run.status = "done".into();
+                    run.ended_at = Some(3);
+                    store.upsert_run(&run).unwrap();
+                }
+                settle_all(&host).await;
+                let sent = prompts();
+                let review = &sent[before..];
+                assert_eq!(review.len(), if copilot { 1 } else { 2 }, "{review:#?}");
+
+                let wake = &review[0];
+                assert_eq!(
+                    wake.contains("The user asked you to look at a flag"),
+                    copilot
+                );
+                for prompt in review {
+                    let choice = format!("orx exp flag {} --flag f1", run.id);
+                    for text in [
+                        format!("orx exp status exp_1 --run {}", run.id),
+                        format!("orx logs {}", run.id),
+                        format!("{choice} --keep --reason"),
+                        format!("{choice} --ask --reason"),
+                    ] {
+                        assert!(prompt.contains(&text), "{text:?} missing from {prompt}");
+                    }
+                    assert_eq!(
+                        prompt.contains(&format!("{choice} --stop --reason")),
+                        !ended
+                    );
+                    assert_eq!(
+                        prompt.contains("orx skill orx-experiment-runs"),
+                        source != "look" || !ended
+                    );
+                    match source {
+                        "look" => {
+                            for text in [
+                                "orx exp view get exp_1 --json",
+                                "orx exp view set exp_1 --config PATH",
+                                "noise",
+                                "worth_a_flag",
+                                "watch.minGapS",
+                            ] {
+                                assert_eq!(prompt.contains(text), !ended, "{text:?} in {prompt}");
+                            }
+                        }
+                        "tripwire" => {
+                            assert!(prompt
+                                .contains("::orx:: {\"phase\":\"eval\",\"step\":1,\"of\":10}"));
+                        }
+                        "rule" => {
+                            assert!(prompt.contains("`Validation loss`"));
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                if source == "look" {
+                    assert!(wake.contains("digest"));
+                }
+            }
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -17315,7 +17540,7 @@ for line in sys.stdin:
             "{}",
             prompts[1]
         );
-        assert!(prompts[1].contains("has ended (done), so there is nothing to stop"));
+        assert!(prompts[1].contains("has ended (done)"));
         assert!(prompts[2].contains("ended without settling flag f1"));
         assert!(!prompts[2].contains("--stop"), "{}", prompts[2]);
         assert_eq!(flag(&store, &run)["state"], "kept");

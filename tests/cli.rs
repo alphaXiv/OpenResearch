@@ -10,6 +10,8 @@ mod agents_cli;
 mod antigravity_gate_cli;
 #[path = "cli/compute_cli.rs"]
 mod compute_cli;
+#[path = "cli/discover_cli.rs"]
+mod discover_cli;
 #[path = "cli/engine_cli.rs"]
 mod engine_cli;
 #[path = "cli/estimate_cli.rs"]

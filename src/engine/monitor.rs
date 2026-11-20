@@ -393,7 +393,9 @@ fn availability(fold: &Fold, life: &Lifecycle, now: i64) -> (&'static str, Optio
 pub(crate) fn terminal_signal_note(store: &Store, run: &str) -> Result<Option<String>> {
     let status = super::adapters::signals::read_availability(store.data_dir(), run)?;
     if let Some(reason) = status.as_ref().and_then(|value| value["reason"].as_str()) {
-        return Ok(Some(reason.to_owned()));
+        return Ok(Some(crate::store::RunNotice::terminal_signal_details(
+            run, reason,
+        )));
     }
     Ok(store
         .signal_collection_pending(run)?
@@ -625,8 +627,8 @@ fn first_work_stage(snapshot: &Snapshot, names: &[&str], planned: bool) -> Optio
             .phases
             .iter()
             .find(|phase| {
-                phase.done.is_some()
-                    && (!phase.name.is_empty() || !planned && phase.source == "detected")
+                phase.has_reported_count()
+                    || !planned && phase.source == "detected" && phase.done.is_some()
             })
             .map(|phase| phase.occurrence)
     });
@@ -1541,6 +1543,9 @@ fn evaluate(
         "rules": rules.iter().map(super::rules::Rule::shown).collect::<Vec<_>>(),
         "statusText": text,
     });
+    if !life.live() && fold.status["state"] == "incomplete" {
+        body["availability"]["collectionIncomplete"] = json!(true);
+    }
     if !snapshot.is_some_and(|s| s.phases.iter().any(|p| !p.name.is_empty())) {
         if let Some(blocks) = body["view"]["blocks"].as_array_mut() {
             for block in blocks.iter_mut().filter_map(Value::as_object_mut) {
@@ -4690,6 +4695,29 @@ mod tests {
     }
 
     #[test]
+    fn incomplete_collection_is_exposed_only_for_an_ended_run() {
+        for phase in ["running", "lost"] {
+            let f = Fixture::new("orx-monitor-incomplete-collection");
+            let run = f.run(phase, local());
+            f.signals(&folded(&declared(0..=2, 4)));
+            super::super::adapters::signals::settle_incomplete(
+                f.store.data_dir(),
+                &run.id,
+                "The rental was deleted",
+            )
+            .unwrap();
+
+            let (_, page) = monitor(&f.store, &run).unwrap();
+            assert_eq!(page["availability"]["state"], "live");
+            assert_eq!(
+                page["availability"].get("collectionIncomplete"),
+                (phase == "lost").then_some(&Value::Bool(true))
+            );
+            assert_eq!(page["progress"]["done"], 20.0);
+        }
+    }
+
+    #[test]
     fn each_signal_state_has_its_own_words() {
         let mut folding = Snapshot::new("r1", "1-1", "g1");
         folding.latest.insert("loss".into(), json!(2));
@@ -6812,10 +6840,38 @@ mod tests {
     }
 
     #[test]
+    fn a_bare_step_count_ends_setup_before_any_metrics() {
+        let f = Fixture::new("orx-monitor-bare-count");
+        let run = f.run("running", local());
+        let lines = reports(&[r#"{"of":100}"#, r#"{"step":10,"of":100,"spend":1,"t":10}"#]);
+        f.collect(&folded(&lines[..1]));
+        let (waiting, _) = monitor_at(&f, &run, T0);
+        assert!(waiting["setup"].is_object());
+
+        f.collect(&folded(&lines));
+        let (working, _) = monitor_at(&f, &run, T0 + 1_000);
+        let summary = current(&f.store, &run).unwrap().unwrap();
+        assert!(working["latest"].as_object().unwrap().is_empty());
+        assert_eq!(working["setup"], Value::Null);
+        assert_eq!(summary.summary()["setup"], working["setup"]);
+        assert_eq!(working["stageOrder"]["first"], 0);
+        assert_eq!(working["progress"]["done"], 10.0);
+        mentions(
+            working["statusText"]
+                .as_str()
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap(),
+            &["running", "step 10 of 100"],
+        );
+    }
+
+    #[test]
     fn setup_stays_ended_when_the_first_counted_stage_leaves_the_checkpoint() {
         let f = Fixture::new("orx-monitor-omitted-count");
         let run = f.run("running", local());
-        f.collect(&folded(&reports(&[r#"{"phase":"train","step":1}"#])));
+        f.collect(&folded(&reports(&[r#"{"step":10,"of":100}"#])));
         let (before, _) = monitor_at(&f, &run, T0);
         assert_eq!(before["setup"], Value::Null);
 
@@ -8221,12 +8277,8 @@ mod tests {
                 "orx logs r1",
             ],
         );
-        for (action, reason) in [
-            ("stop", "your confirmed reason"),
-            ("keep", "…"),
-            ("ask", "…"),
-        ] {
-            let command = format!("orx exp flag r1 --flag {id} --{action} --reason '{reason}'");
+        for action in ["stop", "keep", "ask"] {
+            let command = format!("orx exp flag r1 --flag {id} --{action} --reason");
             mentions(body, &[&command]);
         }
     }

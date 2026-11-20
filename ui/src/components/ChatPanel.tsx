@@ -35,7 +35,7 @@ import { ProjectInfoCard } from "./ProjectInfoCard";
 import { NoProjectGroupHeader, PendingProjectMove, ProjectProposalCard, projectLabel, projectProposal, useCreateProject, type ProjectProposal } from "./NoProject";
 import { mutCreateScratchProject } from "../queries/projects";
 import { ProjectIconTile } from "./ProjectIcon";
-import { SessionHoverCard } from "./SessionHoverCard";
+import { CARD_FADE_MS, SessionHoverCard } from "./SessionHoverCard";
 import { AgentMessageCard } from "./AgentMessageCard";
 import { DelegateCard } from "./DelegateCard";
 import { EnvRequestCard } from "./EnvRequestCard";
@@ -5364,6 +5364,23 @@ function SidebarViewMenu({
 /** How long the reveal flag stays set: the 700ms sweep plus slack. After this
  * a remount (scrolling the rail, switching sessions) shows a static title. */
 const TITLE_REVEAL_CLEAR_MS = 1000;
+/** How long a session card holds for a pointer that has stopped on its way across the rows beside its own. */
+const CARD_AIM_MS = 150;
+
+type Point = { x: number; y: number };
+
+/** Shared by the sidebar's rows: until when a card opens at once, and the pointer on its way to an open one. */
+interface CardHover {
+  warmUntil: number;
+  aim: { owner: string; until: number; stop: () => void } | null;
+}
+
+/** Whether `p` lies in the triangle `a`, `b`, `c`. */
+function inTriangle(p: Point, a: Point, b: Point, c: Point): boolean {
+  const side = (u: Point, v: Point) => (v.x - u.x) * (p.y - u.y) - (v.y - u.y) * (p.x - u.x);
+  const signs = [side(a, b), side(b, c), side(c, a)];
+  return !(signs.some((sign) => sign < 0) && signs.some((sign) => sign > 0));
+}
 
 /** A session title that fades in behind a left-to-right mask when a
  * harness-generated one replaces the first-line placeholder. `animate` is false
@@ -5448,7 +5465,7 @@ function SessionRow({
   project,
   projectName,
   harnessLogo,
-  cardWarmUntil,
+  cardHover,
 }: {
   session: ChatSession;
   project: Project;
@@ -5480,8 +5497,9 @@ function SessionRow({
   modelName: string | null;
   projectName?: string;
   harnessLogo?: string;
-  cardWarmUntil: React.RefObject<number>;
+  cardHover: React.RefObject<CardHover>;
 }) {
+  const workspace = useWorkspace();
   const ref = useRef<HTMLDivElement>(null);
   const inbox = variant === "inbox";
   const plain = variant === "list";
@@ -5502,6 +5520,9 @@ function SessionRow({
   const cardRef = useRef<HTMLDivElement>(null);
   const cardId = useId();
   const [anchor, setAnchor] = useState<DOMRect | null>(null);
+  /** How the card moves: fading in, appearing at once as the pointer slides over from a neighbour's, or fading out. */
+  const [cardMotion, setCardMotion] = useState<"enter" | "warm" | "leave">("enter");
+  const cardShown = anchor !== null && cardMotion !== "leave";
   const openTimer = useRef<number | undefined>(undefined);
   const closeTimer = useRef<number | undefined>(undefined);
   const pointerInside = useRef(false);
@@ -5524,20 +5545,71 @@ function SessionRow({
     window.clearTimeout(closeTimer.current);
     setAnchor(null);
   }
-  function showCard() {
-    if (!editing && !open && !dismissed.current) setAnchor(ref.current?.getBoundingClientRect() ?? null);
+  function showCard(motion: "enter" | "warm" = "enter") {
+    if (editing || open || dismissed.current) return;
+    window.clearTimeout(closeTimer.current);
+    setCardMotion(motion);
+    setAnchor(ref.current?.getBoundingClientRect() ?? null);
   }
-  function scheduleClose() {
+  function fadeCard() {
+    window.clearTimeout(openTimer.current);
+    window.clearTimeout(closeTimer.current);
+    setCardMotion("leave");
+    closeTimer.current = window.setTimeout(() => setAnchor(null), CARD_FADE_MS);
+  }
+  /** Whether keyboard focus is on the row or in its card, which holds the card open whatever the pointer does. */
+  function keyboardHeld() {
+    const focused = document.activeElement;
+    return Boolean(focused?.matches(":focus-visible") && (focused === ref.current || cardRef.current?.contains(focused)));
+  }
+  /** Fades the card once the pointer has had time to cross onto it, unless the keyboard holds it open. */
+  function scheduleClose(grace = 150) {
     window.clearTimeout(openTimer.current);
     window.clearTimeout(closeTimer.current);
     closeTimer.current = window.setTimeout(() => {
-      const focused = document.activeElement;
-      if (!pointerInside.current && focused !== ref.current && !cardRef.current?.contains(focused)) setAnchor(null);
-    }, 150);
+      if (!pointerInside.current && !keyboardHeld()) fadeCard();
+    }, grace);
+  }
+  /**
+   * Holds the card while the pointer stays in the triangle between where it left the row and the card's near edge,
+   * so a diagonal path over the rows beside this one reaches the card instead of opening theirs.
+   */
+  function aimAt(from: Point, card: DOMRect) {
+    const edge: [Point, Point] = from.x <= card.left ? [{ x: card.left, y: card.top }, { x: card.left, y: card.bottom }]
+      : from.x >= card.right ? [{ x: card.right, y: card.top }, { x: card.right, y: card.bottom }]
+      : from.y <= card.top ? [{ x: card.left, y: card.top }, { x: card.right, y: card.top }]
+      : [{ x: card.left, y: card.bottom }, { x: card.right, y: card.bottom }];
+    const aim = {
+      owner: session.id,
+      until: 0,
+      stop: () => {
+        document.removeEventListener("mousemove", move);
+        if (cardHover.current.aim === aim) cardHover.current.aim = null;
+      },
+    };
+    const hold = () => {
+      aim.until = Date.now() + CARD_AIM_MS;
+      scheduleClose(CARD_AIM_MS);
+    };
+    const move = (event: MouseEvent) => {
+      if (inTriangle({ x: event.clientX, y: event.clientY }, from, ...edge)) return hold();
+      aim.stop();
+      if (keyboardHeld()) return;
+      if (event.target instanceof Element && event.target.closest(".session-row")) closeCard();
+      else fadeCard();
+    };
+    cardHover.current.aim?.stop();
+    cardHover.current.aim = aim;
+    document.addEventListener("mousemove", move);
+    hold();
+  }
+  function stopAim() {
+    if (cardHover.current.aim?.owner === session.id) cardHover.current.aim.stop();
   }
   useEffect(() => () => {
     window.clearTimeout(openTimer.current);
     window.clearTimeout(closeTimer.current);
+    stopAim();
   }, []);
   useEffect(() => {
     if (!anchor) return;
@@ -5618,33 +5690,46 @@ function SessionRow({
       tabIndex={0}
       data-sidebar-keyboard-row
       aria-label={sessionDescription}
-      aria-describedby={anchor ? cardId : undefined}
+      aria-describedby={cardShown ? cardId : undefined}
+      // The card is a portal inside this row, so React reports the pointer entering and leaving the two as one.
       onMouseEnter={() => {
+        stopAim();
         pointerInside.current = true;
         dismissed.current = false;
         window.clearTimeout(closeTimer.current);
         if (!editing && !open) {
-          if (Date.now() < cardWarmUntil.current) showCard();
+          // Read what the card shows while the pointer settles, so it opens whole instead of growing as it loads.
+          const { queryClient, queries } = workspace;
+          void queryClient.prefetchQuery(queries.getSessionExperimentsQuery(session.id));
+          for (const { run } of runs) if (run.monitor) void queryClient.prefetchQuery(queries.getRunMonitorQuery(run.id));
+          // While the pointer crosses this row on its way to another's card, this one waits for it to settle.
+          const settle = () => {
+            const wait = (cardHover.current.aim?.until ?? 0) - Date.now();
+            if (wait > 0) openTimer.current = window.setTimeout(settle, wait);
+            else showCard("warm");
+          };
+          if (cardHover.current.aim) settle();
+          else if (Date.now() < cardHover.current.warmUntil) showCard("warm");
           else openTimer.current = window.setTimeout(showCard, 350);
         }
       }}
       onMouseLeave={(event) => {
-        if (anchor) cardWarmUntil.current = Date.now() + 500;
+        const card = cardShown && cardRef.current?.getBoundingClientRect();
+        if (cardShown) cardHover.current.warmUntil = Date.now() + 500;
         pointerInside.current = false;
         dismissed.current = false;
-        if (event.relatedTarget instanceof Element && event.relatedTarget.closest(".session-row")) closeCard();
+        if (card) aimAt({ x: event.clientX, y: event.clientY }, card);
         else scheduleClose();
       }}
       onFocus={(event) => {
-        if (event.target === event.currentTarget && !editing && !open) {
-          showCard();
-        }
+        // A click focuses the row too; only the keyboard's focus opens the card.
+        if (event.target === event.currentTarget && event.currentTarget.matches(":focus-visible")) showCard();
       }}
       onBlur={(event) => {
         if (!ref.current?.contains(event.relatedTarget) && !cardRef.current?.contains(event.relatedTarget)) dismissed.current = false;
         scheduleClose();
       }}
-      className={`session-row relative flex items-center gap-2 w-full ${inbox ? `inbox ${lead ? "h-17.5" : "h-12.5"}` : variant === "done" ? "h-8" : "h-8.5"} text-start px-2.25 rounded-md text-sm text-text cursor-pointer select-none [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium [&_.session-dot:empty]:hidden [&_.session-dot]:w-4 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title[data-overflow]]:[mask-image:linear-gradient(to_right,black_calc(100%_-_16px),transparent)] [&_.session-title]:whitespace-nowrap [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:size-6 [&_.session-menu-btn]:-mx-1 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-visible_.session-menu-btn]:inline-flex [&_.session-menu-btn:focus-within]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&.card-open_.session-menu-btn]:inline-flex [&:hover_.session-dot]:hidden [&:focus-visible_.session-dot]:hidden [&:has(.session-menu-btn:focus-within)_.session-dot]:hidden [&.menu-open_.session-dot]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-accent-teal [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-accent-blue [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:absolute [&_.session-title-input]:inset-0 [&_.session-title-input]:size-full [&_.session-title-input]:py-0 [&_.session-title-input]:ps-0 [&_.session-title-input]:pe-[9px] [&_.session-title-input]:indent-[9px] [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-focus-border [&_.session-title-input]:rounded-md [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-dot]:hidden [&_.session-done-btn]:hidden [&:hover_.session-done-btn]:inline-flex [&:focus-visible_.session-done-btn]:inline-flex [&_.session-done-btn:focus-visible]:inline-flex [&_.session-done-btn:focus-within]:inline-flex [&:has(.session-done-btn:focus-within)_.session-logo]:hidden [&.card-open_.session-done-btn]:inline-flex [&:has(.session-done-btn):hover_.session-logo]:hidden [&:has(.session-done-btn):focus-visible_.session-logo]:hidden [&:has(.session-done-btn:focus-visible)_.session-logo]:hidden [&.card-open:has(.session-done-btn)_.session-logo]:hidden [&.editing_.session-done-btn]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""} ${anchor ? "card-open" : ""}  ${
+      className={`session-row relative flex items-center gap-2 w-full ${inbox ? `inbox ${lead ? "h-17.5" : "h-12.5"}` : variant === "done" ? "h-8" : "h-8.5"} text-start px-2.25 rounded-md text-sm text-text cursor-pointer select-none [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium [&_.session-dot:empty]:hidden [&_.session-dot]:w-4 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title[data-overflow]]:[mask-image:linear-gradient(to_right,black_calc(100%_-_16px),transparent)] [&_.session-title]:whitespace-nowrap [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:size-6 [&_.session-menu-btn]:-mx-1 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-visible_.session-menu-btn]:inline-flex [&_.session-menu-btn:focus-within]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&.card-open_.session-menu-btn]:inline-flex [&:hover_.session-dot]:hidden [&:focus-visible_.session-dot]:hidden [&:has(.session-menu-btn:focus-within)_.session-dot]:hidden [&.menu-open_.session-dot]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-accent-teal [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-accent-blue [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:absolute [&_.session-title-input]:inset-0 [&_.session-title-input]:size-full [&_.session-title-input]:py-0 [&_.session-title-input]:ps-0 [&_.session-title-input]:pe-[9px] [&_.session-title-input]:indent-[9px] [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-focus-border [&_.session-title-input]:rounded-md [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-dot]:hidden [&_.session-done-btn]:hidden [&:hover_.session-done-btn]:inline-flex [&:focus-visible_.session-done-btn]:inline-flex [&_.session-done-btn:focus-visible]:inline-flex [&_.session-done-btn:focus-within]:inline-flex [&:has(.session-done-btn:focus-within)_.session-logo]:hidden [&.card-open_.session-done-btn]:inline-flex [&:has(.session-done-btn):hover_.session-logo]:hidden [&:has(.session-done-btn):focus-visible_.session-logo]:hidden [&:has(.session-done-btn:focus-visible)_.session-logo]:hidden [&.card-open:has(.session-done-btn)_.session-logo]:hidden [&.editing_.session-done-btn]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""} ${cardShown ? "card-open" : ""}  ${
         editing ? "editing" : ""
         }`}
       onContextMenu={(e) => {
@@ -5666,7 +5751,7 @@ function SessionRow({
         // rename input are descendants, and preventDefault here would cancel
         // their activation.
         if (e.target !== e.currentTarget) return;
-        if (e.key === "Tab" && !e.shiftKey && anchor && cardRef.current) {
+        if (e.key === "Tab" && !e.shiftKey && cardShown && cardRef.current) {
           e.preventDefault();
           cardRef.current.focus();
         } else if (e.key === "Enter" || e.key === " ") {
@@ -5683,7 +5768,7 @@ function SessionRow({
         <ProjectIconTile project={project} size="sm" />
         {editing ? titleInput : (
           <span ref={titleRef} className={`session-title ${runFlag ? "text-ink-amber" : unread ? "text-title-unread" : "text-title-read"}`} onDoubleClick={startEditing}>
-            <span className="inline-block"><TitleReveal key={revealTitle ?? "static"} title={title} animate={revealTitle !== undefined} /></span>
+            <span className="inline-block align-top"><TitleReveal key={revealTitle ?? "static"} title={title} animate={revealTitle !== undefined} /></span>
           </span>
         )}
         {flagMark}
@@ -5708,7 +5793,7 @@ function SessionRow({
           <div className="flex items-center gap-2">
             {editing ? titleInput : (
               <span ref={titleRef} className={`session-title ${runFlag ? "text-ink-amber" : unread || waiting ? "text-title-unread" : "text-title-read"}`} onDoubleClick={startEditing}>
-                <span className="inline-block"><TitleReveal key={revealTitle ?? "static"} title={title} animate={revealTitle !== undefined} /></span>
+                <span className="inline-block align-top"><TitleReveal key={revealTitle ?? "static"} title={title} animate={revealTitle !== undefined} /></span>
               </span>
             )}
             {flagMark}
@@ -5743,7 +5828,7 @@ function SessionRow({
         </div>
       ) : (
         <span ref={titleRef} className={`session-title ${attention ? "text-ink-amber" : ""}`} onDoubleClick={startEditing}>
-          <span className="inline-block">
+          <span className="inline-block align-top">
             <TitleReveal
               key={revealTitle ?? "static"}
               title={title}
@@ -5787,15 +5872,14 @@ function SessionRow({
       {anchor && !open && !editing && (
         <SessionHoverCard
           session={session}
+          runs={runs}
+          motion={cardMotion}
           modelName={modelName}
-          projectName={projectName}
           harnessLogo={harnessLogo}
           anchor={anchor}
           cardId={cardId}
           cardRef={cardRef}
           container={ref.current?.closest(".mobile-rail-dialog") ?? document.body}
-          onEnter={() => { pointerInside.current = true; window.clearTimeout(closeTimer.current); }}
-          onLeave={() => { cardWarmUntil.current = Date.now() + 500; pointerInside.current = false; scheduleClose(); }}
           onOpenExperiment={(projectId, experimentId) => { closeCard(); onOpenExperiment(projectId, experimentId); }}
           onReturnToRow={() => ref.current?.focus()}
           onContinue={() => {
@@ -5822,7 +5906,7 @@ function SessionRow({
           onDelete={onDelete}
         />
       )}
-      <EscapeScope enabled={!!anchor && !editing && !open} exclusive={false} onEscape={() => { dismissed.current = true; if (cardRef.current?.contains(document.activeElement)) ref.current?.focus(); closeCard(); }} />
+      <EscapeScope enabled={cardShown && !editing && !open} exclusive={false} onEscape={() => { dismissed.current = true; if (cardRef.current?.contains(document.activeElement)) ref.current?.focus(); fadeCard(); }} />
     </div>
   );
 }
@@ -6208,7 +6292,7 @@ export function ChatPanel({
   const [sessionFilter, setSessionFilter] = useState<SessionFilter>("active");
   const [sidebarExpandedAll, setSidebarExpandedAll] = useState(false);
   const railBodyRef = useRef<HTMLDivElement>(null);
-  const cardWarmUntil = useRef(0);
+  const cardHover = useRef<CardHover>({ warmUntil: 0, aim: null });
   const [railHeight, setRailHeight] = useState(0);
   const [focusedSidebarRow, setFocusedSidebarRow] = useState<string | null>(null);
   const [chatLimits, setChatLimits] = useState<Record<string, number>>({});
@@ -8945,7 +9029,7 @@ export function ChatPanel({
           actions={sidebarActions}
           project={project}
           session={s}
-          cardWarmUntil={cardWarmUntil}
+          cardHover={cardHover}
           projectName={sidebarGrouping !== "projects" ? projectLabel(project) : undefined}
           harnessLogo={sessionHarness?.logo}
           modelName={modelName(s) ?? (sessionModel ? harnessModelLabel(sessionModel) : s.model)}

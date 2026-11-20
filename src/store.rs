@@ -310,6 +310,10 @@ pub(crate) struct TerminalEvidence {
 
 pub const TERMINAL: &str = "terminal";
 pub const ATTENTION: &str = "attention";
+pub(crate) const INCOMPLETE_SIGNAL_NOTICE: &str = "signal-collection-incomplete";
+pub(crate) const SIGNAL_AVAILABILITY_PREFIX: &str = "\n\nSignal availability: ";
+const SIGNAL_COLLECTION_FAILED: &str = "'s signal collection could not finish: ";
+const READ_SAVED_OUTPUT: &str = ". Read any saved output with `orx logs ";
 pub const RECOVERED: &str = "recovered";
 pub const NOTIFY: &str = "notify";
 const TERMINAL_LOG_BYTES: u64 = 4 * 1024;
@@ -443,6 +447,34 @@ pub struct RunNotice {
 }
 
 impl RunNotice {
+    pub(crate) fn terminal_signal_details(run: &str, reason: &str) -> String {
+        let reason = reason.trim_end_matches(['.', ' ']);
+        format!("{reason}\n\nAny signals already read are kept{READ_SAVED_OUTPUT}{run}`.")
+    }
+
+    pub(crate) fn signal_collection_failed(run: &str, cause: &str, kept: bool) -> String {
+        let kept = if kept {
+            "The signals read before then are kept"
+        } else {
+            "No signals were kept"
+        };
+        format!(
+            "[orx] Run `{run}`{SIGNAL_COLLECTION_FAILED}{cause}. {kept}{READ_SAVED_OUTPUT}{run}`."
+        )
+    }
+
+    fn incomplete_signal_cause(&self) -> Option<&str> {
+        if self.kind != ATTENTION || self.dedupe != INCOMPLETE_SIGNAL_NOTICE {
+            return None;
+        }
+        let prefix = format!("[orx] Run `{}`{SIGNAL_COLLECTION_FAILED}", self.run_id);
+        let (cause_and_kept, _) = self
+            .body
+            .strip_prefix(&prefix)?
+            .rsplit_once(READ_SAVED_OUTPUT)?;
+        cause_and_kept.rsplit_once(". ").map(|(cause, _)| cause)
+    }
+
     pub(crate) fn is_flag_wake(&self) -> bool {
         matches!(
             NoticeOutbox::for_turn(&self.client_turn_id),
@@ -7521,8 +7553,17 @@ impl Store {
             })?;
             rows.collect::<std::result::Result<Vec<_>, _>>()?
         };
+        let mut uncovered = Vec::with_capacity(notices.len());
+        for notice in notices {
+            if let Some(cause) = notice.incomplete_signal_cause() {
+                if self.acknowledge_covered_signal_notice(&notice, cause)? {
+                    continue;
+                }
+            }
+            uncovered.push(notice);
+        }
         tx.commit()?;
-        Ok(notices)
+        Ok(uncovered)
     }
 
     pub fn mark_run_notice_batch_delivered(
@@ -7540,6 +7581,31 @@ impl Store {
             params![chat_session_id, client_turn_id, delivered_at],
         )?;
         Ok(())
+    }
+
+    /// Uses the accepted prompt because the terminal notice can predate collection settling.
+    fn acknowledge_covered_signal_notice(&self, notice: &RunNotice, cause: &str) -> Result<bool> {
+        let details = RunNotice::terminal_signal_details(&notice.run_id, cause);
+        Ok(self.conn.execute(
+            "UPDATE run_notices AS pending SET delivered_at = ?2, next_delivery_at = NULL
+             WHERE pending.id = ?1 AND pending.delivered_at IS NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM chat_turns t WHERE t.session_id = pending.chat_session_id
+                     AND t.client_turn_id = pending.client_turn_id
+               )
+               AND EXISTS (
+                   SELECT 1 FROM run_notices n JOIN chat_turns t
+                     ON t.session_id = n.chat_session_id AND t.client_turn_id = n.client_turn_id
+                   WHERE n.run_id = pending.run_id AND n.chat_session_id = pending.chat_session_id
+                     AND n.dedupe = 'terminal' AND t.delivery_state = 'accepted'
+                     AND instr(t.prepared_input, ?3) > 0
+               )",
+            params![
+                notice.id,
+                now_ms(),
+                format!("{SIGNAL_AVAILABILITY_PREFIX}{details}"),
+            ],
+        )? == 1)
     }
 
     /// Run under the engine lock after legacy delivery stops and before notice production.

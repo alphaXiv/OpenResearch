@@ -128,9 +128,9 @@ SSH and Slurm run directories enter the automatic cleanup queue in the transacti
 
 ### Notices
 
-**Results reach chats as messages.** The chat that launched a run is subscribed implicitly; another subscribes with `orx exp wake`. Every terminal phase and attention event writes one notice per subscribed chat in the reconciler's transaction, and the outbox delivers them as one hidden turn when the chat is idle, never interrupting a turn or a queued message. The one writer outside the engine is `orx exp wake` on a run that already finished, other than cancelled, which queues the terminal notice itself; the dedupe key keeps that to one.
+**Results reach chats as messages.** The chat that launched a run is subscribed implicitly; another subscribes with `orx exp wake`. Every terminal phase and attention event writes one notice per subscribed chat in the reconciler's transaction, and the outbox delivers them as one hidden turn when the chat is idle, never interrupting a turn or a queued message, and never right after a Stop ([agents](agents.md)). The one writer outside the engine is `orx exp wake` on a run that already finished, other than cancelled, which queues the terminal notice itself; the dedupe key keeps that to one.
 
-- **Exactly once.** A batch's membership and turn ID are fixed before sending, so a resend after a crash is recognised as the same turn. The terminal notice adds the current signal collection status when its turn is first admitted.
+- **Exactly once.** A batch's membership and turn ID are fixed before sending, so a resend after a crash is recognised as the same turn. The terminal notice adds the current signal collection status when its turn is first admitted. When collection settles incomplete, a chat gets the cause and the saved-output guidance in the result turn if possible, or in a follow-up if its accepted result lacked the cause.
 - **Never blocking.** Transient failures retry within a bounded window; a permanent one (the chat deleted) retires the batch, and its error shows on the run.
 - **The payload can speak.** New bytes in `$ORX_NOTIFY_FILE` become rate-limited notices (`src/engine/notify.rs`); hosted providers have no such file. Notice text is data for the agent, never instructions.
 
@@ -181,7 +181,7 @@ the run is done is unknown, though each bar still shows its step of total.
 The same bounded fold runs beside native host logs and over API spools on the
 workspace machine. Its checkpoint commits unfinished frame bytes, byte cursor,
 latest values and bounded history together. It remembers the occurrence of the
-first counted named stage when that stage leaves the retained phase list, so
+first reported count when its stage leaves the retained phase list, so
 Setup stays ended. A restart resumes that checkpoint. A replaced or shortened
 log starts a new generation. A spool cut back to where
 its provider continues is the exception: its checkpoint stands while the bytes
@@ -229,7 +229,8 @@ published one stands, incomplete. A checkpoint that cannot be read is unknown, n
 is a kept file that is gone: each settles incomplete, naming the file. A run that
 never launched, has not started or reported no signals has nothing to keep: it
 settles quietly and status prints no signal error for it. Status says which of
-these a run is in.
+these a run is in. The run page marks an ended run's incomplete collection and
+keeps its last readings visible.
 
 Live collection follows lifecycle updates under a shared tick budget; a run the
 budget does not reach keeps its status and goes first on the next tick. A paged

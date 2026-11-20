@@ -2350,6 +2350,7 @@
   "run_block_this": "este bloque",
   "run_page_no_signals": "Aún no se encontraron métricas en el registro. Aparecen aquí cuando la ejecución imprime una.",
   "run_page_no_signals_ended": "No se encontraron métricas en el registro de esta ejecución.",
+  "run_page_collection_incomplete": "OpenResearch no pudo terminar de leer las métricas de esta ejecución. Se conservan las métricas que ya leyó.",
   "run_page_view_empty": "La vista definida para este experimento no muestra nada",
   "run_view_how": "Cómo se construye esta vista",
   "run_view_default": "Generada a partir de la primera señal que informó la ejecución. El agente no ha definido una vista.",

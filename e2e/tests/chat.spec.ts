@@ -100,3 +100,27 @@ test('a drag that starts beside a reply selects from the line it started on', as
   expect(firstLine?.bottom).toBeGreaterThanOrEqual(beside.y)
   expect(firstLine?.left).toBeCloseTo(text.x, 0)
 })
+
+test("a chat's hover card holds for a pointer crossing the rows below on its way, and leaves with it, even from the row a click focused", async ({ page, project, agent }) => {
+  agent.script('Which optimizer should the baseline use?', [{ say: 'Start with AdamW.' }])
+  await project.open(page)
+  await send(page, 'Which optimizer should the baseline use?')
+  await expect(page.getByText('Start with AdamW.')).toBeVisible()
+
+  const row = page.locator('.session-row').first()
+  const card = page.locator('[data-session-hover-card]')
+  await row.click()
+  await page.getByText('Start with AdamW.').hover()
+  await row.hover()
+  await expect(card).toBeVisible()
+
+  const box = (await card.boundingBox())!
+  const title = await card.getAttribute('aria-label')
+  await test.step('a diagonal path over the rows below reaches the card', async () => {
+    await page.mouse.move(box.x + 20, box.y + box.height - 10, { steps: 12 })
+    await expect(card).toHaveAttribute('aria-label', title!)
+  })
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 4 })
+  await page.mouse.move(box.x + box.width + 120, box.y + box.height / 2, { steps: 4 })
+  await expect(card).toBeHidden()
+})

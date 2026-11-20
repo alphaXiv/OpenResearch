@@ -87,6 +87,12 @@ pub struct Phase {
     pub extra: BTreeMap<String, Value>,
 }
 
+impl Phase {
+    pub fn has_reported_count(&self) -> bool {
+        self.done.is_some() && (self.source == "declared" || !self.name.is_empty())
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Timing {
@@ -165,7 +171,7 @@ pub struct Snapshot {
     pub row_order: Vec<String>,
     pub row_columns: BTreeMap<String, Vec<String>>,
     pub phases: Vec<Phase>,
-    /// The first named stage with a count that has aged out of `phases`.
+    /// The first stage with a reported count that has aged out of `phases`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_omitted_counted_stage: Option<usize>,
     pub timing: Timing,
@@ -1223,7 +1229,7 @@ impl Snapshot {
             .map_or(0, |p| p.occurrence.saturating_add(1));
         if self.phases.len() == 64 {
             let removed = self.phases.remove(0);
-            if removed.done.is_some() && !removed.name.is_empty() {
+            if removed.has_reported_count() {
                 self.first_omitted_counted_stage
                     .get_or_insert(removed.occurrence);
             }
