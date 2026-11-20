@@ -117,7 +117,6 @@ type SpecimenOptions = {
   lineage?: "diff" | "error";
   retryHost?: boolean;
   choice?: { sending: "keep" | "stop" | "ask" } | { error: string };
-  finding?: string;
 };
 
 export type Specimen = SpecimenOptions & { label: string; runs: FixtureRun[] };
@@ -285,16 +284,9 @@ export const specimenGroups: { name: string; specimens: Specimen[] }[] = [
     one("Reported rows disagree with the plan", { ...pipeline, disagrees: { stage: "eval", of: 200, unit: "examples", table: "eval", rows: 137 } }),
     one("Reporting slower than the parent", { ...plain, pace: { times: 2.5, than: "parent" } }),
     one("Reporting slower than earlier", { ...plain, pace: { times: 3, than: "earlier" } }),
-    one("Reporting error from the backend", plain, { backend: { kind: "ssh_job", monitoringError: "The run's log directory cannot be read." } }, {
-      finding: "The expanded strip repeats the same reporting error on consecutive lines.",
-    }),
-    one("Unreachable · SSH retry scheduled", plain, { contact: sshUnreachable }, {
-      retryHost: true,
-      finding: "The expanded strip repeats both the unreachable message and the retry time.",
-    }),
-    one("Needs authentication · SSH Connect", plain, { contact: sshAuth }, {
-      finding: "The expanded strip offers Connect in both the header and the notice.",
-    }),
+    one("Reporting error from the backend", plain, { backend: { kind: "ssh_job", monitoringError: "The run's log directory cannot be read." } }),
+    one("Unreachable · SSH retry scheduled", plain, { contact: sshUnreachable }, { retryHost: true }),
+    one("Needs authentication · SSH Connect", plain, { contact: sshAuth }),
     one("Needs authentication · cluster credentials", plain, { contact: sshAuth, backend: { kind: "k8s_job" }, host: null }),
     one("Needs authentication · rented box may still cost money", plain, { contact: sshAuth, backend: { kind: "openresearch_job", flavor: "l40s" }, host: null }),
     one("Unconfirmed launch", silent, { status: "submitting", startedAt: null, contact: unknown }),
@@ -312,9 +304,7 @@ export const specimenGroups: { name: string; specimens: Specimen[] }[] = [
     one("Abandoned · no host", plain, { ...end("lost"), lostReason: "abandoned", contact: unknown, host: null }),
   ] },
   { name: "Numbers and charts", specimens: [
-    one("Known headline · one series", plain, {}, {
-      finding: "The chart crops the first point's marker when the series starts at step zero.",
-    }),
+    one("Known headline · one series"),
     one("Known headline · no chart match", { ...plain, view: { ...plain.view, blocks: [{ chart: ["loss"], phase: "eval" }] } }),
     one("Unknown headline · chart still visible", { ...plain, latest: {} }),
     one("NaN headline · gap in the chart", { ...plain, latest: { loss: "NaN" },
@@ -338,7 +328,7 @@ export const specimenGroups: { name: string; specimens: Specimen[] }[] = [
     }),
     one("Bar chart · repeated categories", { ...sweep,
       view: { ...sweep.view, blocks: [{ chart: ["val_loss"], from: "configs", x: "batch", mark: "bars" }] },
-    }, {}, { finding: "Bars for the same category overlap. The last row covers parts of earlier rows." }),
+    }),
   ] },
   { name: "Several runs", specimens: [
     { label: "2 runs · one leader in a shared label group", runs: batch(2, sweepNames), level: "line" },

@@ -47,7 +47,6 @@ function Specimen({ entry, client, locale }: { entry: Entry; client: QueryClient
           {{ stage: "Pin stage card", eta: "Pin time tooltip", stop: "Pin Stop tooltip" }[entry.pin]}
         </Button>}
       </div>
-      {entry.finding && <p className="gallery-finding"><strong>Finding</strong> · {entry.finding}</p>}
       <div ref={area} lang={locale} dir={locale === "ar" ? "rtl" : "ltr"} data-pin={pinned ? entry.pin : undefined} data-specimen-output>
         <WorkspaceContext.Provider value={workspace}>
           <WorkspaceDomContext.Provider value={{ portalContainer: portalContainer ?? undefined, id: (part) => `${name}-${part}` }}>

@@ -1,7 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { RefreshCw } from "lucide-react";
 import { timeAgo, type Run } from "../../api";
-import { hostForRun } from "../../engineHosts";
 import { m } from "../../paraglide/messages.js";
 import { runActive, runNotice } from "../../runDisplay";
 import { namedStages, runModel, runTone } from "../../runMonitor/model";
@@ -36,13 +35,11 @@ function useChatAgent(run: Run, experimentChat: string | null | undefined): stri
  */
 export function RunPage({ run, name, chatSessionId, now }: { run: Run; name: string; chatSessionId?: string | null; now: number }) {
   const agent = useChatAgent(run, chatSessionId);
-  const hosts = useWorkspace().queries.useEngineHosts();
   const [monitor] = useRunMonitors([run], () => true);
   if (monitor === null && run.status !== "failed") return null;
 
   const data = monitor && monitor.status !== "loading" ? monitor.data : null;
   const failed = monitor?.status === "error";
-  const host = hostForRun(hosts, run);
   const model = runModel({
     item: { sessionId: "", run, experimentName: name },
     monitor: data,
@@ -50,7 +47,7 @@ export function RunPage({ run, name, chatSessionId, now }: { run: Run; name: str
     shown: false,
     agent: agent ?? m.chat_the_agent(),
     now,
-    nextRetryMs: host?.status === "backoff" ? host.nextRetryMs : null,
+    nextRetryMs: null,
   });
   const age = model.live && model.sentence.at !== null ? model.sentence.at : null;
   const sentence = model.tone !== "failed" && model.flagDetail ? model.flagDetail : model.sentence.text;
