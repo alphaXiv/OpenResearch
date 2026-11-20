@@ -9419,6 +9419,7 @@ fn rebase_prepared_attachment_paths(input: &str) -> String {
     };
     input
         .lines()
+        .chain(input.ends_with('\n').then_some(""))
         .map(|line| {
             let Some((label, path)) = line.rsplit_once(" — ") else {
                 return line.to_string();
@@ -15568,7 +15569,7 @@ for line in sys.stdin:
     #[test]
     fn prepared_attachment_paths_rebase_after_data_directory_moves() {
         let input =
-            "<attached-files>\n- paper — /old/data/chat-attachments/file.pdf\n</attached-files>";
+            "<attached-files>\n- paper — /old/data/chat-attachments/file.pdf\n</attached-files>\n\n";
         let rebased = rebase_prepared_attachment_paths(input);
         assert!(rebased.contains(
             &attachments_dir()
@@ -15578,6 +15579,7 @@ for line in sys.stdin:
                 .to_string()
         ));
         assert!(!rebased.contains("/old/data/chat-attachments"));
+        assert!(rebased.ends_with("</attached-files>\n\n"));
     }
 
     #[tokio::test]
@@ -17224,11 +17226,13 @@ for line in sys.stdin:
         let notice = store.run_notice_batch("owner").unwrap().remove(0);
         settle_all(&host).await;
         let received = prompts();
-        assert_eq!(received.len(), 1, "{received:#?}");
+        assert_eq!(received.len(), 2, "{received:#?}");
         assert!(received[0].contains("The run was cancelled."));
         assert!(received[0].contains("You said done, but 2 planned experiments remain"));
         assert!(received[0].contains("Warmup sweep, Batch size control"));
         assert!(!received[0].contains("Watch the cancelled run."));
+        assert!(received[1].contains("use yield to say why you stopped"));
+        assert!(!received[1].contains("You said done"));
         assert!(store.pending_stop_checks().unwrap().is_empty());
         let wake = store
             .get_chat_turn_by_client_id("owner", &notice.client_turn_id)
@@ -17244,9 +17248,9 @@ for line in sys.stdin:
             .unwrap();
         settle_all(&host).await;
         let received = prompts();
-        assert_eq!(received.len(), 2, "{received:#?}");
-        assert!(received[1].contains("run-to-run noise"));
-        assert!(!received[1].contains("planned experiments remain"));
+        assert_eq!(received.len(), 3, "{received:#?}");
+        assert!(received[2].contains("run-to-run noise"));
+        assert!(!received[2].contains("planned experiments remain"));
         assert!(store.pending_stop_checks().unwrap().is_empty());
     }
 
@@ -17343,7 +17347,7 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn done_in_a_stop_check_completes_without_staging_another() {
+    fn confirming_done_completes_without_staging_another_check() {
         if !crate::config::in_test_child(&[]) {
             return;
         }
@@ -17360,6 +17364,14 @@ for line in sys.stdin:
         assert_eq!(turn.state, "completed");
         assert_eq!(turn.turn_yield.unwrap().kind, YieldKind::Done);
         assert!(!store.stop_check_pending(&turn.id).unwrap());
+
+        complete_yield(&store, "run-source", YieldKind::Done);
+        assert!(store.stop_check_pending("run-source").unwrap());
+        store
+            .transfer_stop_check("run-source", "run-notice:result")
+            .unwrap();
+        complete_yield(&store, "run-notice:result", YieldKind::Done);
+        assert!(!store.stop_check_pending("run-notice:result").unwrap());
     }
 
     #[test]
@@ -17993,10 +18005,12 @@ for line in sys.stdin:
         let notice = &batch[0];
         let client_turn = &notice.client_turn_id;
         store.put_chat_turn("owner", client_turn, "running", 2);
+        let old_goal = "Spend at most four GPU hours.";
+        let saved = format!("{LEGACY_GOAL_START}{old_goal}{GOAL_END}{LEGACY_COPILOT_CONTEXT}");
         let tx = store.begin().unwrap();
         tx.execute(
-            "UPDATE chat_turns SET flag_input = ?2 WHERE id = ?1",
-            rusqlite::params![client_turn, notice.body],
+            "UPDATE chat_turns SET flag_input = ?2, prepared_input = ?3 WHERE id = ?1",
+            rusqlite::params![client_turn, notice.body, saved],
         )
         .unwrap();
         tx.commit().unwrap();
@@ -18056,6 +18070,12 @@ for line in sys.stdin:
         let sent = prompts();
         assert_eq!(sent.len(), if copilot { 1 } else { 2 }, "{sent:#?}");
         assert_eq!(sent[0].matches(notice.body.as_str()).count(), 1);
+        assert!(!sent[0].contains(old_goal), "{sent:#?}");
+        assert_eq!(
+            sent[0].matches("<orx-autonomy level=\"copilot\">").count(),
+            usize::from(copilot),
+            "{sent:#?}"
+        );
         let continued = store
             .get_chat_turn("owner", &reply.turn_id)
             .unwrap()

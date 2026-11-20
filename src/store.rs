@@ -5905,7 +5905,8 @@ impl Store {
                     )
                     SELECT 1 FROM request
                     LEFT JOIN chat_turn_wakes w ON w.source_turn_id = request.id
-                    WHERE request.client_turn_id LIKE (:prefix || '%') OR w.retired_at IS NOT NULL
+                    WHERE request.client_turn_id LIKE (:prefix || '%')
+                       OR (t.yield_json IS NOT NULL AND w.retired_at IS NOT NULL)
                   )
                   AND NOT EXISTS (SELECT 1 FROM chat_turns newer WHERE newer.session_id = t.session_id
                                   AND (newer.created_at, newer.rowid) > (head.created_at, head.rowid))
@@ -5964,7 +5965,7 @@ impl Store {
         Ok(())
     }
 
-    /// The carrier's saved prompt now owns delivery, so its follow-up is already accounted for.
+    /// Keep the carried check on the new turn so confirming done leaves it settled.
     pub(crate) fn transfer_stop_check(&self, source: &str, carrier: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE chat_turn_wakes SET source_turn_id = ?2, retired_at = ?3
@@ -6033,8 +6034,11 @@ impl Store {
                 };
                 if stage {
                     self.conn.execute(
-                        "INSERT OR IGNORE INTO chat_turn_wakes (source_turn_id, kind, next_delivery_at)
-                         VALUES (?1, 'stop-check', ?2)",
+                        "INSERT INTO chat_turn_wakes (source_turn_id, kind, next_delivery_at)
+                         VALUES (?1, 'stop-check', ?2)
+                         ON CONFLICT(source_turn_id) DO UPDATE
+                         SET next_delivery_at = excluded.next_delivery_at, delivery_attempts = 0, retired_at = NULL
+                         WHERE chat_turn_wakes.retired_at IS NOT NULL",
                         params![id, now],
                     )?;
                 }
