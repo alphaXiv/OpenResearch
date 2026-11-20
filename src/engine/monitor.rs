@@ -625,8 +625,8 @@ fn first_work_stage(snapshot: &Snapshot, names: &[&str], planned: bool) -> Optio
             .phases
             .iter()
             .find(|phase| {
-                phase.done.is_some()
-                    && (!phase.name.is_empty() || !planned && phase.source == "detected")
+                phase.has_reported_count()
+                    || !planned && phase.source == "detected" && phase.done.is_some()
             })
             .map(|phase| phase.occurrence)
     });
@@ -6812,10 +6812,38 @@ mod tests {
     }
 
     #[test]
+    fn a_bare_step_count_ends_setup_before_any_metrics() {
+        let f = Fixture::new("orx-monitor-bare-count");
+        let run = f.run("running", local());
+        let lines = reports(&[r#"{"of":100}"#, r#"{"step":10,"of":100,"spend":1,"t":10}"#]);
+        f.collect(&folded(&lines[..1]));
+        let (waiting, _) = monitor_at(&f, &run, T0);
+        assert!(waiting["setup"].is_object());
+
+        f.collect(&folded(&lines));
+        let (working, _) = monitor_at(&f, &run, T0 + 1_000);
+        let summary = current(&f.store, &run).unwrap().unwrap();
+        assert!(working["latest"].as_object().unwrap().is_empty());
+        assert_eq!(working["setup"], Value::Null);
+        assert_eq!(summary.summary()["setup"], working["setup"]);
+        assert_eq!(working["stageOrder"]["first"], 0);
+        assert_eq!(working["progress"]["done"], 10.0);
+        mentions(
+            working["statusText"]
+                .as_str()
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap(),
+            &["running", "step 10 of 100"],
+        );
+    }
+
+    #[test]
     fn setup_stays_ended_when_the_first_counted_stage_leaves_the_checkpoint() {
         let f = Fixture::new("orx-monitor-omitted-count");
         let run = f.run("running", local());
-        f.collect(&folded(&reports(&[r#"{"phase":"train","step":1}"#])));
+        f.collect(&folded(&reports(&[r#"{"step":10,"of":100}"#])));
         let (before, _) = monitor_at(&f, &run, T0);
         assert_eq!(before["setup"], Value::Null);
 
