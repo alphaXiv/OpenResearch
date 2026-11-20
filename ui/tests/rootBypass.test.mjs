@@ -44,7 +44,7 @@ test("as root, an approval that bypasses permissions asks first and is remembere
   await click(button(m.chat_panel_allow()));
   assert.equal(dialog()?.textContent.includes(m.chat_root_bypass_title()), true);
   await click(button(m.common_cancel()));
-  await act(async () => new Promise((resolve) => setTimeout(resolve, 300)));
+  await act(async () => new Promise(requestAnimationFrame));
   assert.equal(document.activeElement, button(m.chat_panel_allow()));
   assert.deepEqual(sent(chat, "POST /api/chat/sessions/s/respond"), []);
   assert.deepEqual(sent(chat, "POST /api/harnesses/claude-code/root-full-access"), []);
