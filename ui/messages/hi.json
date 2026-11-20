@@ -2520,5 +2520,8 @@
   "run_eta_untimed": "{stages} का समय अज्ञात",
   "run_summary_first_floor": "पहला कम से कम {duration} में पूरा",
   "run_summary_next_floor": "अगला कम से कम {duration} में पूरा",
-  "run_value_pending": "अभी कोई मान नहीं"
+  "run_value_pending": "अभी कोई मान नहीं",
+  "chat_root_bypass_title": "root के रूप में अनुमतियाँ बायपास करें?",
+  "chat_root_bypass_description": "इस मशीन पर OpenResearch root के रूप में चलता है, इसलिए Claude Code बिना पूछे इस पर कुछ भी बदल सकता है। इसे केवल ऐसी मशीन पर इस्तेमाल करें जिसे आप मिटाकर दोबारा बना सकें, जैसे किराए का GPU सर्वर। OpenResearch इस मशीन के लिए यह याद रखेगा।",
+  "chat_root_bypass_confirm": "इस मशीन पर अनुमति दें"
 }

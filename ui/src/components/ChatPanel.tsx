@@ -3446,15 +3446,16 @@ function PromptCard({
   const { id: elementId } = useContext(WorkspaceDomContext);
   const p = part.prompt;
   const [submitting, setSubmitting] = useState(false);
+  const allowRef = useRef<HTMLButtonElement>(null);
   if (!p) return null;
   // Read-only host (no onRespond): actions disabled or hidden, card visible.
   const done = !onRespond || submitting;
 
   const respond = async (answer: Omit<PromptAnswer, "promptId">) => {
-    if (!onRespond || submitting) return;
+    if (!onRespond || submitting) return false;
     setSubmitting(true);
     try {
-      await onRespond({ promptId: part.id, ...answer });
+      return await onRespond({ promptId: part.id, ...answer });
     } finally {
       setSubmitting(false);
     }
@@ -3626,9 +3627,15 @@ function PromptCard({
                 {m.chat_panel_deny()}
               </Button>
               <Button
+                ref={allowRef}
                 size="small"
                 variant="primary"
-                onClick={() => respond({ approve: true })}
+                // A declined confirmation remounts this button after its dialog let focus go.
+                onClick={() => void respond({ approve: true }).then((delivered) => {
+                  if (!delivered) requestAnimationFrame(() => {
+                    if (document.activeElement === document.body) allowRef.current?.focus();
+                  });
+                })}
               >
                 {m.chat_panel_allow()}
               </Button>
@@ -6970,7 +6977,8 @@ export function ChatPanel({
     if (onStartHarnessDraft) onStartHarnessDraft();
     else onActiveSessionChangeRef.current(null, { projectId });
   }
-  const setPermissionMode = (id: string) => {
+  const setPermissionMode = (id: string) => withFullAccess(id === "bypassPermissions", () => applyPermissionMode(id));
+  const applyPermissionMode = (id: string) => {
     // Plan is session-scoped. Claude exposes it in the permission dropdown,
     // but it must not become the saved default for future sessions.
     if (id === "plan" && activeHarness?.id === "claude-code") {
@@ -7004,6 +7012,25 @@ export function ChatPanel({
         setSettingsError(m.chat_update_permissions_failed());
       });
   };
+  /** Runs `then` once Claude may bypass permissions: as root that first needs the user's confirmation, kept per machine. */
+  const withFullAccess = (bypass: boolean, then: () => void, cancel?: () => void) => {
+    if (!bypass || activeHarness?.id !== "claude-code" || !activeHarness.fullAccessNeedsRootConsent) return then();
+    workspace.dialogs.showConfirmDialog({
+      title: m.chat_root_bypass_title(),
+      description: m.chat_root_bypass_description(),
+      confirmLabel: m.chat_root_bypass_confirm(),
+      destructive: true,
+      onCancel: () => cancel?.(),
+      onConfirm: async () => {
+        await workspace.api.allowClaudeRootFullAccess();
+        setScopedQueryData(getHarnessesQuery().queryKey, (current) =>
+          current?.map((harness) => harness.id === "claude-code" ? { ...harness, fullAccessNeedsRootConsent: false } : harness));
+        then();
+      },
+    });
+  };
+  const withFullAccessRef = useRef(withFullAccess);
+  withFullAccessRef.current = withFullAccess;
   const setReasoningLevel = (id: string) => selectModel({ reasoningLevel: id });
   const setAutonomy = (autonomy: Autonomy) => {
     if (autonomy !== (openSession?.autonomy ?? preferredAutonomy)) invalidatePendingRetry();
@@ -8321,13 +8348,26 @@ export function ChatPanel({
   /** Deliver a card answer; resolves `false` when delivery failed (so a
    * caller can e.g. restore a consumed draft). Stable per session so the
    * memoized Message rows don't re-render on unrelated state changes. */
+  const allMessagesRef = useRef(allMessages);
+  allMessagesRef.current = allMessages;
   const respond = useCallback(
     (answer: PromptAnswer): Promise<boolean> => {
       if (!activeId) return Promise.resolve(false);
-      return mutRespondChat.runAsHeadlessPromise(workspace, { id: activeId, projectId }, answer, {}).then(() => true, (error: unknown) => {
+      const deliver = () => mutRespondChat.runAsHeadlessPromise(workspace, { id: activeId, projectId }, answer, {}).then(() => true, (error: unknown) => {
         showAlert(error instanceof Error ? error.message : String(error), "error");
         return false;
       });
+      // An end-turn Claude approval resumes under bypass permissions.
+      const endTurnApproval = () => {
+        const prompt = allMessagesRef.current
+          .map((message) => findPartById(message.parts, answer.promptId))
+          .find(Boolean)?.prompt;
+        return prompt?.kind === "permission" && !prompt.nativeId;
+      };
+      const bypass = answer.approve === true
+        && (answer.resumeMode === "bypassPermissions" || (!answer.resumeMode && endTurnApproval()));
+      return new Promise((resolve) =>
+        withFullAccessRef.current(bypass, () => void deliver().then(resolve), () => resolve(false)));
     },
     [workspace, activeId, projectId],
   );

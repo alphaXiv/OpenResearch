@@ -2520,5 +2520,8 @@
   "run_eta_untimed": "{stages} not timed",
   "run_summary_first_floor": "first done in at least {duration}",
   "run_summary_next_floor": "next done in at least {duration}",
-  "run_value_pending": "No value yet"
+  "run_value_pending": "No value yet",
+  "chat_root_bypass_title": "Bypass permissions as root?",
+  "chat_root_bypass_description": "OpenResearch runs as root on this machine, so Claude Code could change anything on it without asking. Use this only on a machine you can wipe and rebuild, like a rented GPU server. OpenResearch remembers this for this machine.",
+  "chat_root_bypass_confirm": "Allow on this machine"
 }

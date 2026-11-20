@@ -2520,5 +2520,8 @@
   "run_eta_untimed": "زمان {stages} مشخص نیست",
   "run_summary_first_floor": "اولین پایان پس از حداقل {duration}",
   "run_summary_next_floor": "پایان بعدی پس از حداقل {duration}",
-  "run_value_pending": "هنوز مقداری ثبت نشده"
+  "run_value_pending": "هنوز مقداری ثبت نشده",
+  "chat_root_bypass_title": "دور زدن مجوزها با دسترسی root؟",
+  "chat_root_bypass_description": "OpenResearch روی این دستگاه با دسترسی root اجرا می‌شود، پس Claude Code می‌تواند بدون پرسیدن هر چیزی را روی آن تغییر دهد. این را فقط روی دستگاهی به کار ببرید که می‌توانید پاکش کنید و دوباره بسازید، مثل یک سرور GPU اجاره‌ای. OpenResearch این انتخاب را برای این دستگاه به خاطر می‌سپارد.",
+  "chat_root_bypass_confirm": "اجازه روی این دستگاه"
 }

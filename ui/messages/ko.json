@@ -2520,5 +2520,8 @@
   "run_eta_untimed": "{stages} 소요 시간 미정",
   "run_summary_first_floor": "첫 완료까지 최소 {duration}",
   "run_summary_next_floor": "다음 완료까지 최소 {duration}",
-  "run_value_pending": "아직 값이 없습니다"
+  "run_value_pending": "아직 값이 없습니다",
+  "chat_root_bypass_title": "root로 권한을 우회할까요?",
+  "chat_root_bypass_description": "이 컴퓨터에서 OpenResearch가 root로 실행되므로 Claude Code가 묻지 않고 무엇이든 변경할 수 있습니다. 임대한 GPU 서버처럼 지우고 다시 구성할 수 있는 컴퓨터에서만 사용하세요. OpenResearch는 이 컴퓨터에 대해 이 선택을 기억합니다.",
+  "chat_root_bypass_confirm": "이 컴퓨터에서 허용"
 }

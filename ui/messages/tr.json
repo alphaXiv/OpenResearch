@@ -2520,5 +2520,8 @@
   "run_eta_untimed": "{stages} süresi bilinmiyor",
   "run_summary_first_floor": "ilki en az {duration} sonra biter",
   "run_summary_next_floor": "sıradaki en az {duration} sonra biter",
-  "run_value_pending": "Henüz değer yok"
+  "run_value_pending": "Henüz değer yok",
+  "chat_root_bypass_title": "İzinler root olarak atlansın mı?",
+  "chat_root_bypass_description": "OpenResearch bu makinede root olarak çalışıyor, bu yüzden Claude Code sormadan üzerinde her şeyi değiştirebilir. Bunu yalnızca silip yeniden kurabileceğiniz bir makinede, örneğin kiralık bir GPU sunucusunda kullanın. OpenResearch bu seçimi bu makine için hatırlar.",
+  "chat_root_bypass_confirm": "Bu makinede izin ver"
 }

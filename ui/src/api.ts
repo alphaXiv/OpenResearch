@@ -1452,6 +1452,8 @@ export interface Harness {
    * background — `models` stays empty until `harness.catalog`
    * arrives and a plain re-read swaps in the real list. */
   catalogPending?: boolean;
+  /** Claude Code only: OpenResearch runs as root here and the user has not yet confirmed bypass permissions. */
+  fullAccessNeedsRootConsent?: boolean;
   models: HarnessModel[];
   /** The `models` id a new chat starts on, from the agent's own setting; set only when it's ready and lists a model. */
   defaultModel?: string;
@@ -2963,6 +2965,9 @@ export function createApi(
       ...(githubDefaultPromptSeen === undefined ? {} : { githubDefaultPromptSeen }),
     });
 
+  const allowClaudeRootFullAccess = () =>
+    post<Record<string, never>>("/api/harnesses/claude-code/root-full-access");
+
   const getProjectGitStatus = (projectId: string, signal?: AbortSignal) =>
     get<ProjectGitStatus>(`/api/projects/${projectId}/git`, signal);
 
@@ -3536,6 +3541,7 @@ export function createApi(
     setLitSources,
     getProjectDefaults,
     setProjectDefaults,
+    allowClaudeRootFullAccess,
     getProjectGitStatus,
     initializeProjectGit,
     enableProjectGithub,
