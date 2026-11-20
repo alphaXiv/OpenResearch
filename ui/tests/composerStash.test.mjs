@@ -60,3 +60,11 @@ test("a draft sends the attachments it cites, renumbered in order of mention", (
     { text: "see [PDF #1] then [Image #2], again [PDF #1], and [Image #42]", attachments: [pdf, image] },
   );
 });
+
+test("a seeded composer carries the text without the attachments it cites", () => {
+  const state = createComposerState();
+  state.seedComposer("p", "Compare [Image #1] with the paper");
+  assert.equal(state.composerSeed("p"), "Compare  with the paper");
+  state.seedComposer("q", "[PDF #2]");
+  assert.equal(state.composerSeed("q"), null);
+});

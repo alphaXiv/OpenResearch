@@ -7609,10 +7609,10 @@ export function ChatPanel({
   const historyError = !historyQuery.data ? historyQuery.error : null;
   // A chat without a project has no project to suggest a start from.
   const starterVisible = mainView === "chat" && !embedded && !threadMounted && !contentLoading && !contentError && !historyLoading && !historyError && !currentProject?.scratch;
-  // A new project stays one after the user names it, until they open another; any other empty project is an ordinary one.
+  // A new project stays one after the user names it, until it has a chat or they open another; any other empty project is an ordinary one.
   const newProjectId = useRef<string | undefined>(undefined);
   if (currentProject?.unnamed) newProjectId.current = currentProject.id;
-  else if (newProjectId.current !== currentProject?.id) newProjectId.current = undefined;
+  else if (activeId || newProjectId.current !== currentProject?.id) newProjectId.current = undefined;
   const draftProject = !embedded && !activeId && !launching && currentProject?.scratch && newProjectId.current === currentProject.id && (sessionsLoaded ? sessions.length === 0 : currentProject.unnamed) ? currentProject : undefined;
   const starterQuery = useQuery({
     ...getProjectStarterPromptsQuery(projectId, starterHarness ?? "claude-code", starterModel, getLocale(), composerSelection?.profile ?? null),
@@ -8534,6 +8534,10 @@ export function ChatPanel({
       .sort((a, b) => b.session.updatedAt - a.session.updatedAt)
       .forEach(({ project, session }) => sidebarRows.push({ kind: "chat", project, session }));
     if (unnamedProjects.length > 6) sidebarRows.push({ kind: "more", project: unnamedProjects[0] });
+    shownUnnamed.forEach((project) => {
+      const query = projectSessionsQueries[queriedProjects.indexOf(project)];
+      if (query.error && !projectSessions(project).length) sidebarRows.push({ kind: "status", project, pending: false, error: true, retry: () => void query.refetch() });
+    });
   }
   if (sidebarGrouping === "projects") shownProjects.forEach((project) => {
     const group = sidebarGroup(project);
@@ -9694,9 +9698,8 @@ export function ChatPanel({
               onImport={() => onImportProject(draft)}
               onOpenSettings={(project) => sidebarActions.current.openProjectSettings(project)}
               onSelect={(id) => {
-                if (id === projectId) return;
                 requestNewChatFocus(id);
-                void navigate({ to: "/projects/$projectId/tasks/new", params: { projectId: id } });
+                if (id !== projectId) void navigate({ to: "/projects/$projectId/tasks/new", params: { projectId: id } });
               }}
             />
           )}

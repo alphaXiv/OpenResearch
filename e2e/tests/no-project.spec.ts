@@ -86,6 +86,9 @@ test('naming a new project makes it a project of its own, which outlives its las
   await page.getByRole('dialog').getByRole('button', { name: 'Delete' }).click()
   await expect(chat).toBeHidden()
   expect((await projectsOf(page, orx)).map((candidate) => candidate.name)).toContain('Tokenizer probes')
+  // With its chat gone it is an ordinary empty project, not a new one again.
+  await expect(composer(page)).toHaveAccessibleName(/^Describe what to try next/)
+  await expect(page.getByRole('textbox', { name: 'Project name (optional)' })).toBeHidden()
 })
 
 test('a new project offers a paper, a folder or an .orx file to start from', async ({ page, project }) => {
@@ -135,6 +138,10 @@ test('the project picker searches by name and opens a project\'s settings', asyn
   await expect(picker.getByText('No projects match your search.')).toBeVisible()
   await search.fill(own)
   await expect(picker.getByRole('button', { name: own, exact: true })).toBeVisible()
+  // Enter opens the first match, even the project already open, and lands in the message box.
+  await search.press('Enter')
+  await expect(composer(page)).toBeFocused()
+  await page.getByRole('button', { name: own, exact: true, expanded: false }).click()
   await picker.getByRole('button', { name: `Project settings · ${own}` }).click()
   await expect(page).toHaveURL(new RegExp(`/projects/${project.id}/settings/project`))
 })

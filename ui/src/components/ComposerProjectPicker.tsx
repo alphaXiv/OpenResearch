@@ -98,7 +98,7 @@ export function ComposerProjectPicker({ projects, activity, projectId, projectNa
                 {matches.length === 0 && <div role="status" className="px-2 py-3 text-sm text-muted">{m.project_picker_no_matches()}</div>}
               </div>
               <div className="shrink-0 border-t border-border-variant p-1">
-                <MenuItem data-nav className="justify-start gap-2.5" onClick={() => choose(() => { if (!unnamed) onNewProject(); })}>
+                <MenuItem data-nav className="justify-start gap-2.5" onClick={() => choose(() => unnamed ? onSelect(projectId) : onNewProject())}>
                   <span className="flex size-5 shrink-0 items-center justify-center text-subtext"><MessageCircleDashed size={16} aria-hidden="true" /></span>
                   <span className="min-w-0 flex-1 truncate">{m.projects_home_new_project()}</span>
                   {unnamed && <Check size={14} aria-hidden="true" className="shrink-0 text-subtext" />}
