@@ -151,7 +151,8 @@ test("lost contact speaks in the contact notice's words and freezes the bar", ()
   assert.equal(away.tone, "lost");
   assert.ok(away.text.startsWith(bare(m.run_notice_unreachable({ host: "lab-a40", time: `**${fmtClock(since)}**` }))), away.text);
   assert.ok(away.text.includes(bare(m.run_progress_last_seen({ progress: bare(m.run_progress_steps({ done: "1,240", of: "5,000" })) }))));
-  assert.equal(away.eta, m.run_notice_retry_at({ time: fmtClock(now + 180_000) }));
+  assert.ok(away.text.includes(m.run_notice_retry_at({ time: fmtClock(now + 180_000) })));
+  assert.equal(away.eta, "");
   assert.ok(away.bar.frozen);
   assert.equal(away.cost, m.run_cost_last_seen({ cost: "$1.06" }));
 

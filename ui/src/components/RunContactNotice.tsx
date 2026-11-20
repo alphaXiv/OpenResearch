@@ -17,7 +17,7 @@ import { confirmStop } from "./run/confirmStop";
 type NoticeRun = Parameters<typeof runNotice>[0] & Pick<Run, "id" | "projectId" | "experimentId" | "host">;
 
 const TONES = {
-  warning: "text-accent-amber",
+  warning: "text-ink-amber",
   caution: "text-accent-orange",
   quiet: "text-subtext",
 };
@@ -31,7 +31,7 @@ export function runNoticeCopy(notice: RunNotice, nextRetryMs: number | null, pro
       return { lead: notice.error, detail: null, tone: "warning" };
     case "unreachable": {
       const lead = m.run_notice_unreachable({ host: host(notice.host), time: figure(fmtClock(notice.since)) });
-      const retry = nextRetryMs === null ? "" : ` ${m.run_notice_retry_at({ time: fmtClock(nextRetryMs) })}`;
+      const retry = nextRetryMs === null ? "" : ` ${m.run_notice_retry_at({ time: ltr(fmtClock(nextRetryMs)) })}`;
       return { lead: lead + retry, detail: notice.cause, tone: "warning" };
     }
     case "needs_auth":
@@ -78,7 +78,7 @@ export function runNoticeCopy(notice: RunNotice, nextRetryMs: number | null, pro
 }
 
 /** What a run's status alone can't say: lost contact, a pending cancel, or an abandoned job's pending kill. */
-export function RunContactNotice({ run, className }: { run: NoticeRun; className?: string }) {
+export function RunContactNotice({ run, className, inStrip = false }: { run: NoticeRun; className?: string; inStrip?: boolean }) {
   const workspace = useWorkspace();
   const { showConfirmDialog } = workspace.dialogs;
   const { requestHostConnect } = workspace.events;
@@ -98,9 +98,9 @@ export function RunContactNotice({ run, className }: { run: NoticeRun; className
     && runActive(run.status)
     && (run.contact?.type === "needs_auth" || run.contact?.type === "unreachable");
   const killPending = notice.kind === "not_fully_stopped";
-  const connectHost = runActive(run.status) || killPending
-    ? runConnectHost(run) ?? (killPending && engineHost?.status === "needs_auth" ? run.host : null)
-    : null;
+  const connectHost = killPending
+    ? runConnectHost(run) ?? (engineHost?.status === "needs_auth" ? run.host : null)
+    : !inStrip && runActive(run.status) ? runConnectHost(run) : null;
   const waitsOnUnreachable = notice.kind === "unreachable" || (notice.kind === "cancel_pending" && notice.contact === "unreachable") || (killPending && engineHost?.status === "backoff");
   const retryHost = waitsOnUnreachable && engineHost?.status === "backoff" && engineHost.class === "key" ? engineHost.alias : null;
   const stopAgain = notice.kind === "cancel_unconfirmed";
@@ -127,13 +127,13 @@ export function RunContactNotice({ run, className }: { run: NoticeRun; className
   // Message and actions stack at every width: beside each other, a narrow drawer squeezes the text into a column.
   return (
     <div className={cn("run-contact-notice flex flex-col gap-1.5 text-sm", className)}>
-      <div role="status" className="min-w-0">
-        <p className={cn("m-0 wrap-anywhere", notice.kind !== "monitoring" && "font-medium", TONES[tone])}>{lead}</p>
+      {(!inStrip || rentalBilling || detail || next || error) && <div role="status" className="min-w-0">
+        {!inStrip && <p className={cn("m-0 wrap-anywhere", notice.kind !== "monitoring" && "font-medium", TONES[tone])}>{lead}</p>}
         {rentalBilling && <p className="m-0 mt-0.5 text-xs text-subtext wrap-anywhere">{m.run_notice_rental_billing()}</p>}
         {detail && <p className="m-0 mt-0.5 text-xs text-subtext wrap-anywhere">{detail}</p>}
         {next && <p className="m-0 mt-0.5 text-xs text-subtext wrap-anywhere">{next}</p>}
         {error && <p role="alert" className="m-0 mt-0.5 text-xs text-accent-red wrap-anywhere">{error}</p>}
-      </div>
+      </div>}
       {(connectHost || retryHost || rentalBilling || stopAgain || killPending || abandonable) && (
         <div className="run-contact-actions flex flex-wrap items-center gap-1">
           {connectHost && (

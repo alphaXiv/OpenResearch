@@ -132,7 +132,9 @@ test("elapsed chart axes and readouts say durations for elapsed points and timed
     const monitor = { ...base, x, phases, progress: { ...base.progress, phase: 0 }, series: { loss: [[0, 3.27], [43, 2.1], [300, 1.66]] } };
     const strip = await draw(monitor, block, "strip");
     assert.match(text(strip), new RegExp(`elapsed 0s → ${x.max ? "40m" : "5m"}`, "i"));
-    const pointer = await point(strip, 187 * 43 / (x.max ?? 300) + 1);
+    const path = chartOf(strip).querySelector("path").getAttribute("d");
+    const [, vertex] = path.matchAll(/[ML]([\d.]+) /g);
+    const pointer = await point(strip, Number(vertex[1]));
     assert.match(text(pointer), /^elapsed 43s/i);
     const box = chartOf(strip).parentElement;
     await press("ArrowRight", box);
@@ -273,6 +275,21 @@ test("a narrow bars chart labels all four categories", async () => {
     assert.deepEqual(labels(page).filter((label) => /[a-z]/.test(label)), categories.map(({ category }) => category));
   } finally {
     chartWidth = 800;
+  }
+});
+
+test("repeated categories keep each row's bar and read every value in the group", async () => {
+  const monitor = fixture("sweep");
+  const block = { chart: ["val_loss"], from: "configs", x: "batch", mark: "bars" };
+  for (const size of ["strip", "page"]) {
+    const container = await draw(monitor, block, size);
+    const bars = [...chartOf(container).querySelectorAll("rect")].map((bar) => ({
+      start: Number(bar.getAttribute("x")), end: Number(bar.getAttribute("x")) + Number(bar.getAttribute("width")),
+    })).sort((a, b) => a.start - b.start);
+    assert.equal(bars.length, 13, "each numeric report has a bar");
+    assert.ok(bars.slice(1).every((bar, i) => bar.start >= bars[i].end), "bars do not overlap");
+    const first = await point(container, bars[0].start + 1);
+    assert.match(text(first), /2\.738.*2\.636.*2\.633.*2\.731.*2\.948/);
   }
 });
 
@@ -459,6 +476,16 @@ test("a chart's start and best sit on the reports, and the pointer near either n
     const start = chartOf(page).querySelector('circle[r="3"]');
     assert.match(text(await hover(page, Number(start.getAttribute("cx")) + 5, Number(start.getAttribute("cy")))), /^Starting loss at step 0/);
   }
+});
+
+test("the strip fits the full stroke of its step-zero marker in the plot", async () => {
+  const monitor = lossOver([[0, 3], [1, 2], [2, 4]], { better: "lower" });
+  const strip = await draw(monitor, { chart: ["loss"] }, "strip");
+  const svg = chartOf(strip);
+  const start = svg.querySelector('circle[r="3"]');
+  const radius = Number(start.getAttribute("r")) + Number(start.getAttribute("stroke-width")) / 2;
+  assert.ok(Number(start.getAttribute("cx")) - radius >= 0, "the first marker clears the left edge");
+  assert.ok(Number(start.getAttribute("cx")) + radius <= Number(svg.getAttribute("width")));
 });
 
 test("the pointer snaps to a landmark within reach along both axes, and to the nearest step beyond it", async () => {
