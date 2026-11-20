@@ -56,6 +56,7 @@ These documents describe how the pieces of OpenResearch work. We try to keep the
 - [Remote machines](arc/remote.md): the persistent host, `orx-host` and SSH transport.
 - [The dashboard](arc/dashboard.md): the guard, live state, the React app.
 - [The desktop app and releases](arc/desktop.md): app mode, updates, shipping.
+- [Surviving restarts](arc/restarts.md): keepers, checkpoints, handing work to the next server.
 
 ## Running it
 

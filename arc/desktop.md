@@ -20,12 +20,12 @@ Anything but `app`, `app <openresearch: link>` or `app <file.orx>` is a CLI invo
 
 ## App mode
 
-The main thread owns the window's run loop, as every desktop toolkit requires, while the server runs on the async runtime's workers; a single-threaded runtime would deadlock.
+The main thread owns the window's run loop, as every desktop toolkit requires. The server is a child, `orx up --app-window`, which the window starts and controls over HTTP, so an update can replace the server under a window that stays open ([below](#keeping-the-window-through-an-update)).
 
 - **A fixed port.** The window's local storage is keyed by origin, so the app binds the same port every time, falls back to a free one if something holds it, and keeps its port across an update relaunch.
 - **One server per data directory.** If an `orx up` already owns the data directory, the window opens on it instead of starting a second engine.
 - **One app per user.** macOS enforces this itself; on Windows and Linux a second launch signals the first, which comes forward and takes any link.
-- **The lifecycle lock.** App mode takes it itself, so `orx delete` from a terminal cannot remove the store under a running app ([storage](storage.md)).
+- **The lifecycle lock.** The server takes it, as every `orx up` does, so `orx delete` from a terminal cannot remove the store under a running app ([storage](storage.md)).
 - **The user's shell environment.** On macOS and Linux an app started by launchd or a desktop session sees a bare `PATH` and none of the user's exports, so it would miss shell-installed agents and open a different database than a terminal `orx`. Before touching storage it asks the interactive login shell for a short list of variables (`src/local/shell_env.rs`). A late answer supplies `PATH` alone, because switching directories in use would split state. Every child is built in `src/process.rs`, so it gets those values, and "installed" on the dashboard and "found" at spawn cannot disagree.
 
 ## Closing and quitting
@@ -72,6 +72,23 @@ How an update applies depends on the install (`src/updates.rs`, `src/updates/`, 
 **An update never swaps the binary under a running `orx up`.** Each server holds a shared lock on its install for its whole life, and an updater needs it exclusively, because agents would otherwise get a different `orx` than the server running them. Under a running server a desktop install stages the verified release beside itself and a CLI install only records it. A terminal or headless server relaunches into it once idle; the desktop app's server only when its page asks ([dashboard](dashboard.md)). The page asks before a restart that would stop working agents, and lists them; runs carry on through it, since the engine catches up with them when it starts again ([experiments](experiments.md)).
 
 **Channels.** The desktop apps follow stable releases (`v1.2.3`) or canary builds (`canary-YYYYMMDD.N`). A build moves to a canary, or from a canary to stable, only when the target's history contains its own commit, so a switch never moves an install backward. Switching is refused while an installed update waits for a restart.
+
+## Keeping the window through an update
+
+**An update never closes the window.** The window starts its server as a child and holds a lease on it, the server's stdin, which it never writes:
+
+```
+orx app (stays on its own build until the user quits)
+├── window ── http://127.0.0.1:PORT ─────────────────────────────┐
+└── orx up --app-window --port PORT   stdin: the window's lease   │
+      restart into an update: hand off, then exec the new build   │
+      (Windows: start it, which inherits the lease, then exit)    │
+      the new build on PORT ── update status reports it ──────────┘── page reloads
+```
+
+A restart hands the kept agents and terminals to the new server ([restarts](restarts.md)), and the window stays: the same window, Space, size and Dock or taskbar slot, now in front of a newer server. Both talk across builds, so what one promises the other only grows. A window that goes away without quitting drops the lease, and its server hands its work off and exits for the next launch to adopt; a quit asks the server to stop everything first. A server that stops with nothing to take over, an update that fails to start included, leaves the window open on a notice that says why and offers to start it again or quit. The server shows no alert of its own: the window reads its stderr, and the server's last line before an error exit is the reason, the rest under the error's details. A page restarting into an update reloads only once the next server answers, so an update that fails to start leaves the old page up to say so. Only when no page can answer, at launch or with the window closed to the background, does the window ask in a native alert with the reason and the end of the log; until a server answers again it holds every load, and then opens the page it showed.
+
+The page that restarts the server into an update covers itself with an overlay that hides the page entirely, then reloads under it once the next server answers. WebKit keeps showing the old page until the new document first paints, and the next build's `index.html` draws the same overlay from a record in session storage before that paint, so the swap never shows; the next build's app then takes the overlay down, or says the update did not install and that it will try again later. A dialog drawn by the app's own code would come too late and leave a frame of bare background. [FROZEN.md](../src/commands/app/FROZEN.md) holds what each build must keep doing for the next.
 
 ## The build channel
 

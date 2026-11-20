@@ -32,6 +32,8 @@ Import `test`, `expect`, `send` and `composer` from `src/test.ts`.
 - **One server per worker, one project per test.** The `project` fixture gives the test a
   blank project on the worker's onboarded server; tests share nothing else. A test that needs
   onboarding or a restart takes a server of its own from `launchOrx()`.
+  `launchOrx({ appWindow: true })` starts it as the desktop window does, `orx up --app-window`
+  with the test holding its stdin, so the browser page stands in for the window's.
 - **Script the agent before the prompt.** `agent.script(match, steps)` plays `steps` for the
   next prompt containing `match`: `say`, `think`, `run` (a shell command through orx's terminal),
   `hold` and `exit`. A test fails if a script went unused or a prompt matched none.

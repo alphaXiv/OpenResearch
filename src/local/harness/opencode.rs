@@ -14,6 +14,10 @@
 //! Auto has orx's reviewer resolve them or surfaces them. Questions always need
 //! a human, so they always surface.
 //!
+//! Restarts: the server is kept, so a turn outlives `orx up`. A resumed turn resubscribes to the
+//! event stream and goes on from the server's export and pending requests, without prompting
+//! again.
+//!
 //! Detection: opencode's `auth.json` is `{provider: {type}}`; the signed-in
 //! providers are its account line, and the served API supplies the model list
 //! and each model's reasoning `variants`.
@@ -30,7 +34,7 @@ use super::options::{
     HarnessOptions, OptionChoice, PermissionMode, PlanActivation, REASONING_DEFAULT_ID,
 };
 use super::{
-    CompactCtx, CompactOutcome, Harness, OneShot, ResumeAction, TurnFailure, TurnOutcome,
+    Adoption, CompactCtx, CompactOutcome, Harness, OneShot, ResumeAction, TurnFailure, TurnOutcome,
     TurnResult,
 };
 use crate::error::{anyhow, Result};
@@ -178,7 +182,7 @@ impl Harness for OpenCode {
         Ok(CompactOutcome::Native)
     }
 
-    async fn one_shot(&self, request: OneShot<'_>) -> Result<String> {
+    async fn run_one_shot(&self, request: OneShot<'_>) -> Result<String> {
         let _in_use = super::managed::OPENCODE_IN_USE.read().await;
         let model = selected_generation_model(request.model)?.to_owned();
         let binary = crate::local::opencode::resolve_binary().await?;
@@ -197,6 +201,18 @@ impl Harness for OpenCode {
         let mut info = self.detect_at(true).await?;
         info.found_providers = found_providers([]);
         Some(info)
+    }
+
+    fn supports_resume(&self) -> bool {
+        true
+    }
+
+    async fn adopt(
+        &self,
+        chat: &std::sync::Arc<crate::local::chat::ChatHost>,
+        adoption: Adoption,
+    ) -> Result<()> {
+        chat.opencode.adopt(adoption).await
     }
 
     async fn run_turn(&self, ctx: &mut TurnCtx) -> TurnResult {
@@ -955,10 +971,14 @@ async fn ensure_runtime(
 }
 
 async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
+    let _in_use = super::managed::OPENCODE_IN_USE.read().await;
+    ctx.host.opencode.release_resume(&ctx.session_id).await;
+    if let Some(resume) = ctx.resume.take() {
+        return v2::resume_turn(ctx, resume).await;
+    }
     if let Some(model) = ctx.model.as_deref() {
         crate::commands::up::model_feed::ensure_offered(model)?;
     }
-    let _in_use = super::managed::OPENCODE_IN_USE.read().await;
     // Native permission and question requests die with their turn. Clear any
     // crash/restart leftovers before a new live request can be surfaced.
     ctx.host.resolve_stale_prompts(&ctx.session_id, true)?;
@@ -1030,9 +1050,9 @@ fn opencode_used_tokens(tokens: Option<&Value>) -> Option<u64> {
     (total > 0).then_some(total)
 }
 
-/// Surface a prompt card and flush it so it renders immediately (before the
-/// turn resumes). The card's `native_id` (the reply target) is also its
-/// `WirePart` id, so the user's answer round-trips back to the right request.
+/// Surface a prompt card; the caller commits it so it renders before the turn
+/// resumes. The card's `native_id` (the reply target) is also its `WirePart`
+/// id, so the user's answer round-trips back to the right request.
 fn surface_card(ctx: &mut TurnCtx, card: WirePrompt) {
     // `native_id` is always set by permission_card/question_card (opencode
     // requires the request id); the fallback id only guards a malformed payload.
@@ -1041,7 +1061,6 @@ fn surface_card(ctx: &mut TurnCtx, card: WirePrompt) {
         .clone()
         .unwrap_or_else(|| format!("prompt-{}", ctx.assistant.parts.len()));
     ctx.upsert_part(WirePart::prompt(part_id, card));
-    let _ = ctx.flush();
 }
 
 #[cfg(test)]

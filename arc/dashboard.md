@@ -7,7 +7,7 @@
 `orx up` (`src/commands/up.rs`, `src/commands/up/`) binds `127.0.0.1` on a fixed default port, one server per data directory ([storage](storage.md)). It serves the built app, a JSON API under `/api` and an event stream, and owns the work that needs a resident process:
 
 - the chat host: agents, turns, queues, pending approvals ([agents](agents.md));
-- terminals, each a PTY over a websocket;
+- project terminals, each a shell in a keeper that a reload or restart returns to ([restarts](restarts.md#terminals)), and the short terminals of setup and sign-in flows, each a PTY over a websocket;
 - file serving for the editor, previews and artifacts;
 - the run engine ([experiments](experiments.md));
 - remote workspace gateways ([remote](remote.md));
@@ -85,17 +85,19 @@ The desktop app's window adds what only it can do ([desktop](desktop.md)).
 
 ## Restarting into an update
 
-**A server relaunches into a new binary only when that interrupts nothing** (`src/commands/up.rs`). Without a restart, a long-lived `orx up` keeps launching runs on old code.
+**A server relaunches into a new binary only when that interrupts nothing** (`src/commands/up.rs`). Without a restart, a long-lived `orx up` keeps launching runs on old code. What it keeps alive it hands to the next server ([restarts](restarts.md)), so only work it would cut off holds it back.
 
-A terminal or headless `orx up` with automatic updates tries by itself once a deferred update is due or a newer binary is on disk ([desktop](desktop.md)). The desktop app's server restarts only when the page asks through `POST /api/update/restart`, and a busy server refuses. A persistent remote host does neither.
+A terminal or headless `orx up` with automatic updates tries by itself once a deferred update is due or a newer binary is on disk ([desktop](desktop.md)). The desktop app's server restarts only when the page asks through `POST /api/update/restart`, and a busy server refuses, naming what holds it back. A persistent remote host does neither. `node dev.ts restart` hands off the same way, with `SIGUSR2`, so rebuilding orx keeps its agents and terminals.
 
-Blocking work is any API request whose response is still being sent, open terminal, data-directory move, remote session not disconnected or awaiting an install, and chat turn running, queued or waiting on the user. Event streams and the CLI's `hello` neither count nor wait, because a page holds its stream for as long as it is open.
+Blocking work is any API request whose response is still being sent, a setup or sign-in terminal, a data-directory move, a sign-in waiting on the user, a remote install, and the chat turns, queued messages and approvals of chats whose turn would not resume: a harness that cannot resume, an agent that is not kept, a turn with no checkpoint in its agent's keeper. Event streams and the CLI's `hello` neither count nor wait, because a page holds its stream for as long as it is open. The page asks before restarting only about the chats that would stop (`resumesAfterRestart` in `/api/pending-work`); quitting still lists them all.
 
 1. Stop admitting new requests; they wait.
 2. If blocking work remains, reopen admission and try again later.
 3. Commit. Admission never reopens and no new turn starts, so nothing begins on old code that a new process would have to adopt.
-4. Stop agents and gateways, release the install lock, and install any deferred update. A failed install relaunches on the current version and backs off instead of looping.
-5. Relaunch. The page polls update status until `instance` changes, then reloads.
+4. Hand off: no kept child stops, turns that resume are let go as their last checkpoint left them, the rest stop as for a quit, and leases are released. Gateways close, the install lock is released, and any deferred update installs. A failed install relaunches on the current version and backs off instead of looping.
+5. Announce the relaunch, so the CLI waits for the next server rather than starting one, and relaunch. The page that asked polls update status until `instance` changes, then reloads under the update overlay ([desktop](desktop.md#keeping-the-window-through-an-update)); every other page reloads once update status reports another `build`.
+
+Reopening into another data directory is a restart without a successor for its children: it stops them as a quit does.
 
 ## Runs above the composer
 

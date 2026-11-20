@@ -264,6 +264,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     openSideChat,
     sendChatMessage,
     citedMessage,
+    closeProjectTerminal,
   } = workspace.api;
   const {
     listChatSessionsQuery,
@@ -433,6 +434,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const [filesTabOpen, setFilesTabOpen] = useState(false);
   const [artifactsTabOpen, setArtifactsTabOpen] = useState(false);
   const [terminalTabOpen, setTerminalTabOpen] = useState(false);
+  const [terminalId, setTerminalId] = useState<string | null>(null);
   // Which checkout has a live shell; a restored-but-unselected tab spawns nothing until selected.
   const [terminalStartedFor, setTerminalStartedFor] = useState<string | null>(null);
   // A setup command (e.g. an agent login) from a composer note; shown over the project shell until closed.
@@ -673,6 +675,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     filesTabOpen,
     artifactsTabOpen,
     terminalTabOpen,
+    terminalId,
     expTabs,
     fileTabs,
     planTabs,
@@ -688,7 +691,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     panelOpen,
     panelMax,
     treeViewport,
-  }), [rightTab, tabHistory, experimentsTabOpen, filesTabOpen, artifactsTabOpen, terminalTabOpen, expTabs, fileTabs, planTabs, subagentTabs, sideTabs, codeTabs, contentTabOrder, previewTab, filesView, filesToggled, selectedRunId, scope, panelOpen, panelMax, treeViewport]);
+  }), [rightTab, tabHistory, experimentsTabOpen, filesTabOpen, artifactsTabOpen, terminalTabOpen, terminalId, expTabs, fileTabs, planTabs, subagentTabs, sideTabs, codeTabs, contentTabOrder, previewTab, filesView, filesToggled, selectedRunId, scope, panelOpen, panelMax, treeViewport]);
   currentRightPaneStateRef.current = rightPaneState;
   const getFileScroll = useCallback(() => Object.fromEntries(fileScrollPositionsRef.current), []);
   const scrollSaveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -704,6 +707,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     setFilesTabOpen(state.filesTabOpen);
     setArtifactsTabOpen(state.artifactsTabOpen);
     setTerminalTabOpen(state.terminalTabOpen);
+    setTerminalId(state.terminalId);
     setExpTabs(state.expTabs);
     setFileTabs(state.fileTabs);
     setPlanTabs((current) => current === state.planTabs ? current : state.planTabs.map((tab) => ({ ...tab, plan: current.find((item) => item.sessionId === tab.sessionId && item.promptId === tab.promptId)?.plan ?? "" })));
@@ -927,6 +931,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
 
   const openTerminalTab = useCallback(() => {
     setTerminalTabOpen(true);
+    setTerminalId((current) => current ?? crypto.randomUUID());
     selectRightTab("terminal");
   }, [selectRightTab]);
   const runSetup = useCallback((command: string, path: string) => {
@@ -1529,6 +1534,15 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     selectRightTab("files");
   }, [selectRightTab]);
 
+  const endTerminal = useCallback((id: string) => {
+    closeProjectTerminal(projectId, id).catch((error: unknown) =>
+      showAlert(m.workspace_terminal_close_failed({ error: errorText(error) }), "error"));
+  }, [closeProjectTerminal, projectId]);
+  const restartTerminal = useCallback(() => {
+    if (terminalId) endTerminal(terminalId);
+    setTerminalId(crypto.randomUUID());
+  }, [terminalId, endTerminal]);
+
   const closeHomeTab = useCallback(
     (tab: "experiments" | "files" | "artifacts" | "terminal") => {
       if (tab === "experiments") setExperimentsTabOpen(false);
@@ -1537,11 +1551,13 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
         setTerminalTabOpen(false);
         setTerminalStartedFor(null);
         setSetupRun(null);
+        if (terminalId) endTerminal(terminalId);
+        setTerminalId(null);
       }
       else setArtifactsTabOpen(false);
       forgetRightTab(tab, rightTab === tab);
     },
-    [forgetRightTab, rightTab],
+    [forgetRightTab, rightTab, terminalId, endTerminal],
   );
 
   const focusOpenedTab = (tab: RightTab, open: () => void) => {
@@ -2618,13 +2634,15 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
               </TabBody>
             )}
             {/* Hidden rather than unmounted so the shell survives tab switches within the panel. */}
-            {terminalTabOpen && terminalStartedFor !== null && terminalStartedFor === terminalKey && activeProject && (
+            {terminalTabOpen && terminalId && terminalStartedFor !== null && terminalStartedFor === terminalKey && activeProject && (
               <TabBody className={rightTab === "terminal" && !setupRun ? undefined : "hidden"}>
                 <ProjectTerminal
                   key={terminalKey}
                   projectId={activeProject.id}
                   sessionId={activeSessionId}
+                  terminalId={terminalId}
                   active={rightTab === "terminal" && !setupRun}
+                  onRestart={restartTerminal}
                 />
               </TabBody>
             )}

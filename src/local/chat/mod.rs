@@ -8,12 +8,15 @@
 //! normalized parts into the per-turn assistant message; every flush persists
 //! the message and broadcasts it as a `chat.message` SSE event.
 
+mod adoption;
 pub mod delegation;
 pub mod env_request;
 pub(crate) mod handoff;
 pub mod news;
 pub mod project_move;
 pub(crate) mod subagent;
+
+pub use adoption::{adopt_kept_work, stop_kept};
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -2918,6 +2921,8 @@ struct PendingPermission {
     session_id: String,
     // A save takes the sender before writing and keeps its place until it records the result.
     tx: Option<tokio::sync::oneshot::Sender<PermissionDecision>>,
+    /// Which request holds the card, so a re-posted one takes it over.
+    held: u64,
 }
 
 /// The card-less tier of plan-mode permission policy: `Some(decision)` where
@@ -2966,18 +2971,28 @@ struct PendingGuard {
     host: Arc<ChatHost>,
     session_id: String,
     prompt_id: String,
+    held: u64,
 }
 
 impl Drop for PendingGuard {
     fn drop(&mut self) {
-        let saving = self
-            .host
-            .pending_permissions
-            .lock()
-            .unwrap()
-            .remove(&self.prompt_id)
-            .is_some_and(|pending| pending.tx.is_none());
-        if saving {
+        {
+            let mut pending = self.host.pending_permissions.lock().unwrap();
+            if pending
+                .get(&self.prompt_id)
+                .is_some_and(|entry| entry.held != self.held)
+            {
+                return;
+            }
+            let saving = pending
+                .remove(&self.prompt_id)
+                .is_some_and(|entry| entry.tx.is_none());
+            if saving {
+                return;
+            }
+        }
+        // The next server shows this card again when the agent posts its request again.
+        if crate::keep::handing_off() {
             return;
         }
         if let Ok(Some(msg)) = mark_prompt_resolved(
@@ -2993,6 +3008,15 @@ impl Drop for PendingGuard {
 }
 
 const TURN_ENDED: &str = "the turn this approval belonged to has already ended";
+
+/// How long a bridge request waits for the turn it belongs to while a starting server resumes it.
+const RESUMING_TURN_WAIT: Duration = Duration::from_secs(30);
+
+/// A card for a held tool call, or why the call gets none.
+enum Posted {
+    Held(HeldPermission),
+    Refused(PermissionDecision),
+}
 
 /// A bridge card on screen, waiting for the user.
 struct HeldPermission {
@@ -3126,6 +3150,9 @@ pub struct ChatHost {
     /// each also has a queued row, held out of `queued` until released.
     pending_steers: std::sync::Mutex<HashMap<String, Vec<SteerMessage>>>,
     queue_dispatch_in_flight: std::sync::Mutex<HashMap<String, String>>,
+    /// Running turns a previous server left whose kept agent was taken back to resume them,
+    /// by session; each resumes once its predecessor's lease is gone.
+    resumable: std::sync::Mutex<HashMap<String, adoption::Resumable>>,
     /// Chats a stop left idle. Run notices and chat news wait until the chat's next turn
     /// starts, so they don't restart work the user just stopped.
     pub(crate) stopped: std::sync::Mutex<HashSet<String>>,
@@ -3335,6 +3362,23 @@ impl SteerReceiver {
     }
 }
 
+#[cfg(test)]
+impl SteerReceiver {
+    /// A turn's steering channel without the route a running turn registers.
+    pub(crate) fn for_test(
+        host: Arc<ChatHost>,
+        session_id: &str,
+    ) -> (mpsc::UnboundedSender<SteerMessage>, Self) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let receiver = Self {
+            rx,
+            host,
+            session_id: session_id.into(),
+        };
+        (tx, receiver)
+    }
+}
+
 impl Drop for SteerReceiver {
     fn drop(&mut self) {
         self.rx.close();
@@ -3408,7 +3452,8 @@ impl TurnSettings {
 
 /// A message handed to a turn already in flight: what the transcript shows,
 /// and the expanded text the harness receives.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SteerMessage {
     /// Also the id of its queued row.
     pub id: String,
@@ -3530,7 +3575,8 @@ pub struct SendMessageResult {
     pub existing: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DeliveryState {
     NotSent,
     Rejected,
@@ -4095,6 +4141,7 @@ impl ChatHost {
             steering: std::sync::Mutex::new(HashMap::new()),
             pending_steers: std::sync::Mutex::new(HashMap::new()),
             queue_dispatch_in_flight: std::sync::Mutex::new(HashMap::new()),
+            resumable: std::sync::Mutex::new(HashMap::new()),
             stopped: std::sync::Mutex::new(HashSet::new()),
         }
     }
@@ -4136,6 +4183,24 @@ impl ChatHost {
         token
     }
 
+    /// Reinstates the token of a child a previous server spawned, which its bridge still
+    /// presents.
+    pub fn restore_gate_token(&self, session_id: &str, token: &str, plan_mode: bool, bypass: bool) {
+        self.gate_tokens.lock().unwrap().insert(
+            session_id.to_string(),
+            GateToken {
+                value: token.to_string(),
+                plan_mode,
+                bypass,
+            },
+        );
+    }
+
+    /// Whether this session's running turn surfaced a bridge card, leaving the flag set.
+    pub fn bridge_prompted(&self, session_id: &str) -> bool {
+        self.bridge_prompted.lock().unwrap().contains(session_id)
+    }
+
     /// Whether this session's running turn surfaced a bridge card — and clear
     /// the flag. Consulted by the synthesized-plan-card fallback at turn end.
     pub fn take_bridge_prompted(&self, session_id: &str) -> bool {
@@ -4146,13 +4211,15 @@ impl ChatHost {
     /// blocked tool call from a bridged Claude turn. Plan auto-decides where
     /// the answer is unambiguous; otherwise this surfaces a card and **blocks until
     /// the user answers** (or the timeout denies) — the held HTTP response is
-    /// what pauses the claude turn mid-flight.
+    /// what pauses the claude turn mid-flight. A call posted again with its
+    /// `tool_use_id`, after a restart cut the first, takes over the card it showed.
     pub async fn request_permission(
         self: &Arc<Self>,
         session_id: &str,
         token: &str,
         tool_name: &str,
         tool_input: Value,
+        tool_use_id: Option<&str>,
     ) -> Result<PermissionDecision> {
         // The endpoint grants tool permissions, so unlike the rest of the
         // localhost API it authenticates: the bridge must echo the token its
@@ -4162,10 +4229,8 @@ impl ChatHost {
             _ => return Err(anyhow!("unknown or stale gate token")),
         };
         // A bridge child that outlived its turn has nothing left to approve.
-        if !self.is_busy(session_id).await {
-            return Ok(PermissionDecision::deny(
-                "the turn this approval belonged to has already ended",
-            ));
+        if !self.is_busy(session_id).await && !self.turn_resuming(session_id).await? {
+            return Ok(PermissionDecision::deny(TURN_ENDED));
         }
 
         // Tier 1 — Plan has a small automatic read/deny policy. Manual and
@@ -4194,14 +4259,15 @@ impl ChatHost {
                 // Every card is up before any is answered, so the user can
                 // move between the questions of one batch.
                 let mut cards = Vec::with_capacity(questions.len());
-                for question in questions {
+                for (index, question) in questions.iter().enumerate() {
                     let input = json!({ "questions": [question] });
+                    let prompt_id = tool_use_id.map(|id| format!("perm_{id}_{index}"));
                     match self
-                        .post_permission(session_id, token, tool_name, input)
+                        .post_permission(session_id, token, tool_name, input, prompt_id)
                         .await?
                     {
-                        Some(card) => cards.push(card),
-                        None => return Ok(PermissionDecision::deny(TURN_ENDED)),
+                        Posted::Held(card) => cards.push(card),
+                        Posted::Refused(decision) => return Ok(decision),
                     }
                 }
                 let mut answers = serde_json::Map::new();
@@ -4231,25 +4297,50 @@ impl ChatHost {
                 });
             }
         }
+        let prompt_id = tool_use_id.map(|id| format!("perm_{id}"));
         Ok(
             match self
-                .post_permission(session_id, token, tool_name, tool_input)
+                .post_permission(session_id, token, tool_name, tool_input, prompt_id)
                 .await?
             {
-                Some(card) => card.decision().await,
-                None => PermissionDecision::deny(TURN_ENDED),
+                Posted::Held(card) => card.decision().await,
+                Posted::Refused(decision) => decision,
             },
         )
     }
 
-    /// Shows the card for a held tool call; `None` when its turn has ended.
+    /// Whether the session's turn is one a starting server is about to resume, waiting
+    /// [`RESUMING_TURN_WAIT`] for it to start.
+    async fn turn_resuming(&self, session_id: &str) -> Result<bool> {
+        let deadline = tokio::time::Instant::now() + RESUMING_TURN_WAIT;
+        loop {
+            if self.is_busy(session_id).await {
+                return Ok(true);
+            }
+            let store = Store::open()?;
+            let resumable = match store.latest_chat_turn(session_id)? {
+                Some(turn) if turn.state == "running" => {
+                    store.chat_turn_checkpoint(&turn.id)?.is_some()
+                }
+                _ => false,
+            };
+            if !resumable || tokio::time::Instant::now() >= deadline {
+                return Ok(false);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// Shows the card for a held tool call under `prompt_id`, or takes over the one already
+    /// shown there; a fresh id without one.
     async fn post_permission(
         self: &Arc<Self>,
         session_id: &str,
         token: &str,
         tool_name: &str,
         tool_input: Value,
-    ) -> Result<Option<HeldPermission>> {
+        prompt_id: Option<String>,
+    ) -> Result<Posted> {
         // Revalidate after queued approvals.
         let gate_is_current = self
             .gate_tokens
@@ -4258,10 +4349,13 @@ impl ChatHost {
             .get(session_id)
             .is_some_and(|gate| gate.value == token);
         if !gate_is_current || !self.is_busy(session_id).await {
-            return Ok(None);
+            return Ok(Posted::Refused(PermissionDecision::deny(TURN_ENDED)));
         }
 
-        let prompt_id = format!("perm_{}", uuid::Uuid::new_v4());
+        let prompt_id = prompt_id.unwrap_or_else(|| format!("perm_{}", uuid::Uuid::new_v4()));
+        if let Some(shown) = Store::open()?.get_chat_message(&format!("msg_{prompt_id}"))? {
+            return self.take_over_card(session_id, &prompt_id, shown);
+        }
         let prompt = if tool_name == "ExitPlanMode" {
             WirePrompt {
                 kind: "plan".into(),
@@ -4310,7 +4404,7 @@ impl ChatHost {
                 .unwrap()
                 .insert(session_id.to_string());
         }
-        Ok(Some(held))
+        Ok(Posted::Held(held))
     }
 
     /// Shows a card the caller holds a request open on until the user answers it.
@@ -4344,26 +4438,67 @@ impl ChatHost {
             result_native_message_id: None,
             native_harness: None,
         })?;
+        let held = self.hold_card(session_id, prompt_id);
+        self.emit("chat.message", message_json(&msg, session_id));
+        self.emit_session(Store::open()?.get_chat_session(session_id)?)
+            .await;
+        Ok(held)
+    }
+
+    /// A request posted again finds the card it showed before: still open, it waits on it
+    /// once more; answered, the answer went to the request a restart cut off.
+    fn take_over_card(
+        self: &Arc<Self>,
+        session_id: &str,
+        prompt_id: &str,
+        shown: StoredChatMessage,
+    ) -> Result<Posted> {
+        if shown.session_id != session_id {
+            return Err(anyhow!("approval {prompt_id} belongs to another chat"));
+        }
+        let parts: Vec<WirePart> = serde_json::from_str(&shown.parts_json)?;
+        let Some(prompt) = parts.iter().find_map(|part| part.prompt.as_ref()) else {
+            return Err(anyhow!("message msg_{prompt_id} holds no approval"));
+        };
+        if prompt.resolved {
+            return Ok(Posted::Refused(PermissionDecision::deny(
+                "The user answered this request while orx restarted, and the answer was lost. \
+                 Ask for it again.",
+            )));
+        }
+        if prompt.kind != "question" {
+            self.bridge_prompted
+                .lock()
+                .unwrap()
+                .insert(session_id.to_string());
+        }
+        Ok(Posted::Held(
+            self.hold_card(session_id, prompt_id.to_string()),
+        ))
+    }
+
+    /// Waits on the shown card `prompt_id` for the user's answer.
+    fn hold_card(self: &Arc<Self>, session_id: &str, prompt_id: String) -> HeldPermission {
+        static NEXT_HELD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let held = NEXT_HELD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.pending_permissions.lock().unwrap().insert(
             prompt_id.clone(),
             PendingPermission {
                 session_id: session_id.to_string(),
                 tx: Some(tx),
+                held,
             },
         );
-        let held = HeldPermission {
+        HeldPermission {
             rx,
             _guard: PendingGuard {
                 host: self.clone(),
                 session_id: session_id.to_string(),
                 prompt_id,
+                held,
             },
-        };
-        self.emit("chat.message", message_json(&msg, session_id));
-        self.emit_session(Store::open()?.get_chat_session(session_id)?)
-            .await;
-        Ok(held)
+        }
     }
 
     fn take_pending_permission(
@@ -4614,17 +4749,25 @@ impl ChatHost {
         futures::future::join_all(stops).await;
     }
 
-    /// Resume each turn the last quit stopped, then run the queues waiting behind them.
+    /// Resume each turn the last server left to resume on its own, then run the queues waiting
+    /// behind them.
     pub async fn resume_quit_turns(self: &Arc<Self>) {
         self.resuming_quit_turns
             .store(true, std::sync::atomic::Ordering::SeqCst);
         let turns = match Store::open().and_then(|store| store.chat_turns_to_resume()) {
             Ok(turns) => turns,
             Err(error) => {
-                eprintln!("orx up: could not read the turns the last quit stopped: {error:#}");
+                eprintln!("orx up: could not read the turns the last server stopped: {error:#}");
                 Vec::new()
             }
         };
+        self.resume_turns_on_their_own(turns).await;
+        self.resuming_quit_turns
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        self.resume_persisted_queues();
+    }
+
+    async fn resume_turns_on_their_own(self: &Arc<Self>, turns: Vec<StoredChatTurn>) {
         for turn in turns {
             let Some(action) = turn.recovery_action.as_deref() else {
                 continue;
@@ -4644,9 +4787,6 @@ impl ChatHost {
                 );
             }
         }
-        self.resuming_quit_turns
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-        self.resume_persisted_queues();
     }
 
     pub async fn is_busy(&self, session_id: &str) -> bool {
@@ -4671,16 +4811,74 @@ impl ChatHost {
         f()
     }
 
-    /// Stop admitting turns if none is running, queued, or awaiting an answer. Every
-    /// admission claims under the turn map's lock, so none can slip in after this check.
-    pub async fn stop_admitting_if_idle(&self) -> bool {
+    /// Stop admitting turns for a restart into an update unless it would stop work
+    /// ([`Self::stopped_by_restart`]). Every admission claims under the turn map's lock, so
+    /// none can slip in after this check.
+    pub async fn stop_admitting_unless_restart_stops(&self) -> bool {
         let turns = self.turns.lock().await;
-        let idle =
-            turns.is_empty() && self.queued_count() == 0 && self.pending_permission_count() == 0;
+        let idle = self.restart_stops(&turns).is_empty();
         if idle {
             self.stop_admitting();
         }
         idle
+    }
+
+    /// The chats whose work a restart into an update would cut short.
+    pub async fn stopped_by_restart(&self) -> HashSet<String> {
+        let turns = self.turns.lock().await;
+        self.restart_stops(&turns)
+    }
+
+    /// Chats with a turn, a queued message or an approval, save those whose work the next
+    /// server resumes on their kept agent.
+    fn restart_stops(&self, turns: &HashMap<String, TurnState>) -> HashSet<String> {
+        let mut sessions: HashSet<String> = turns.keys().cloned().collect();
+        sessions.extend(
+            self.queued
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(_, queue)| !queue.is_empty())
+                .map(|(session_id, _)| session_id.clone()),
+        );
+        sessions.extend(
+            self.pending_permissions
+                .lock()
+                .unwrap()
+                .values()
+                .map(|pending| pending.session_id.clone()),
+        );
+        let survivors = adoption::Survivors::now();
+        sessions.retain(|session_id| !survivors.resume(session_id, turns.get(session_id)));
+        sessions
+    }
+
+    /// Leaves the turns that resume to the next server, which goes on from each one's last
+    /// checkpoint, so nothing more is recorded about them; the rest stop as for a shutdown. No
+    /// kept child stops from here on.
+    pub async fn hand_off(self: &Arc<Self>) {
+        crate::keep::hand_off();
+        self.stop_admitting();
+        let stopped = {
+            let mut turns = self.turns.lock().await;
+            let stopped = self.restart_stops(&turns);
+            turns.retain(|session_id, state| {
+                if stopped.contains(session_id) {
+                    return true;
+                }
+                if let TurnState::Active(active) = state {
+                    active.handle.abort();
+                }
+                false
+            });
+            stopped
+        };
+        let stops = stopped.iter().map(|session_id| async move {
+            if let Err(error) = self.stop_turn(session_id, StopMode::Shutdown).await {
+                eprintln!("orx up: failed to stop turn {session_id} for a restart: {error}");
+            }
+        });
+        futures::future::join_all(stops).await;
     }
 
     /// Stop admitting turns, including the next queued message of a turn that ends from here on.
@@ -4951,12 +5149,14 @@ impl ChatHost {
             .collect()
     }
 
-    pub fn reconcile_expired_turn_leases(self: &Arc<Self>) -> Result<()> {
-        let store = Store::open()?;
-        let turns = store.reconcile_expired_unfinished_chat_turns(&self.held_turn_leases())?;
-        for (session_id, message) in materialize_unfinished_turns(&store, turns)? {
-            self.emit("chat.message", message_json(&message, &session_id));
+    /// Resumes or recovers the turns whose server is gone, once their lease expires. A
+    /// handing-off server leaves them to its successor.
+    pub async fn reconcile_expired_turn_leases(self: &Arc<Self>) -> Result<()> {
+        if crate::keep::handing_off() {
+            return Ok(());
         }
+        let turns = adoption::resume_turns(self, false).await?;
+        self.resume_turns_on_their_own(turns).await;
         self.resume_persisted_queues();
         Ok(())
     }
@@ -4988,7 +5188,7 @@ impl ChatHost {
     /// held out of dispatch while it is pending. The agent reading it
     /// ([`Self::forget_steer`]) removes the row; anything else that loses it
     /// ([`Self::release_steer`]) lets it run as an ordinary queued message, as
-    /// does a restart, since the child that held it died with orx.
+    /// does a restart, unless the turn resumes and holds it again ([`Self::hold_steers`]).
     pub(crate) fn queue_steer(
         &self,
         session_id: &str,
@@ -5087,6 +5287,37 @@ impl ChatHost {
             .unwrap()
             .get(session_id)
             .is_some_and(|pending| pending.iter().any(|steer| steer.id == steer_id))
+    }
+
+    /// Holds again the steers a kept agent was handed before a restart, so its reading one
+    /// records it rather than the queue running it. A steer whose row is gone was read.
+    pub(crate) fn hold_steers(
+        &self,
+        session_id: &str,
+        steers: Vec<SteerMessage>,
+    ) -> Result<Vec<SteerMessage>> {
+        let _mutation = self.queue_persistence.lock().unwrap();
+        let store = Store::open()?;
+        let rows: HashSet<String> = store
+            .list_queued_chat_messages_for_session(session_id)?
+            .into_iter()
+            .map(|row| row.id)
+            .collect();
+        let held: Vec<SteerMessage> = steers
+            .into_iter()
+            .filter(|steer| rows.contains(&steer.id) && !self.steer_pending(session_id, &steer.id))
+            .collect();
+        if held.is_empty() {
+            return Ok(held);
+        }
+        self.pending_steers
+            .lock()
+            .unwrap()
+            .entry(session_id.to_string())
+            .or_default()
+            .extend(held.iter().cloned());
+        self.refresh_persisted_queue_locked(session_id, &store)?;
+        Ok(held)
     }
 
     /// The oldest pending steer the agent was sent as `text`.
@@ -7167,9 +7398,25 @@ impl ChatHost {
         let harness = ctx.harness.clone();
         let model = ctx.model.clone();
         let profile = ctx.profile.clone();
-        let (target_path, target_event_offset) = target_event_start(&sid, &ctx.assistant.id);
-        ctx.target_event_path = Some(target_path);
-        ctx.target_event_offset = target_event_offset;
+        // A resumed turn goes on with its execution, attempt and target events from its checkpoint.
+        let resumed = ctx.resume.is_some();
+        if resumed {
+            let path = target_event_path(&sid, &ctx.assistant.id);
+            if let Err(error) = std::fs::write(
+                target_event_pointer(&sid),
+                path.to_string_lossy().as_bytes(),
+            ) {
+                eprintln!(
+                    "orx up: could not point chat {sid}'s tools at {}: {error}",
+                    path.display()
+                );
+            }
+            ctx.target_event_path = Some(path);
+        } else {
+            let (target_path, target_event_offset) = target_event_start(&sid, &ctx.assistant.id);
+            ctx.target_event_path = Some(target_path);
+            ctx.target_event_offset = target_event_offset;
+        }
         let message_id = ctx.assistant.id.clone();
         let active_turn_id = turn_id.clone();
         let steer_route = crate::local::harness::supports_steering(&ctx.harness).then(|| {
@@ -7181,13 +7428,17 @@ impl ChatHost {
             });
             self.register_steering(&sid, tx, TurnSettings::of(&ctx))
         });
-        Store::open()?.begin_usage_execution(
-            &ctx.usage_execution_id,
-            &ctx.turn_id,
-            &ctx.harness,
-        )?;
+        if !resumed {
+            Store::open()?.begin_usage_execution(
+                &ctx.usage_execution_id,
+                &ctx.turn_id,
+                &ctx.harness,
+            )?;
+        }
         let task = tokio::spawn(async move {
-            ctx.attempt_count = 1;
+            if !resumed {
+                ctx.attempt_count = 1;
+            }
             let _ = Store::open().and_then(|store| {
                 store.update_chat_turn_progress(
                     &ctx.turn_id,
@@ -8869,7 +9120,7 @@ pub struct TurnCtx {
     retry_started_emitted: bool,
     retry_exhausted: bool,
     setup_failure_reason: Option<&'static str>,
-    orx_retry_started: Option<Instant>,
+    pub(crate) orx_retry_started: Option<Instant>,
     orx_retry_count: u32,
     pub(crate) terminal_error: Option<(String, String)>,
     pub session_id: String,
@@ -8916,6 +9167,43 @@ pub struct TurnCtx {
     target_event_bindings: HashMap<String, Vec<String>>,
     /// The turn records output the agent produced on its own; there is no prompt to send.
     pub continuation: bool,
+    /// Set when this turn continues one a previous server left running: the harness attaches
+    /// to the kept agent and goes on from the checkpoint, sending nothing it already sent.
+    pub resume: Option<Resume>,
+    /// Whether the store holds a checkpoint that this turn's transcript still matches.
+    checkpointed: bool,
+}
+
+/// Where a harness goes on from in a resumed turn: its kept agent, the output offset its last
+/// checkpoint had applied through, and the state it recorded there.
+#[derive(Debug, Clone)]
+pub struct Resume {
+    pub keep_id: String,
+    pub offset: u64,
+    pub state: Value,
+}
+
+/// The turn's own progress a resumed turn restores; the harness's state rides beside it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub(crate) struct CtxCheckpoint {
+    delivery_state: Option<DeliveryState>,
+    attempt_count: i64,
+    usage_execution_id: String,
+    native_message_models: HashMap<String, crate::store::InvocationIdentity>,
+    native_usage_scopes: HashSet<String>,
+    retry_owner: Option<String>,
+    retry_started_emitted: bool,
+    retry_exhausted: bool,
+    orx_retry_count: u32,
+    terminal_error: Option<(String, String)>,
+    native_session_id: Option<String>,
+    native_message_id: Option<String>,
+    context_usage: Option<ContextUsage>,
+    target_event_offset: u64,
+    pending_target_events: Vec<(String, String, String, String, String)>,
+    target_event_bindings: HashMap<String, Vec<String>>,
+    continuation: bool,
 }
 
 fn turn_ctx_from_stored(
@@ -9007,6 +9295,8 @@ fn turn_ctx_from_stored(
         pending_target_events: Vec::new(),
         target_event_bindings: HashMap::new(),
         continuation: false,
+        resume: None,
+        checkpointed: false,
     })
 }
 
@@ -9429,6 +9719,8 @@ impl TurnCtx {
             pending_target_events: Vec::new(),
             target_event_bindings: HashMap::new(),
             continuation: false,
+            resume: None,
+            checkpointed: false,
         }
     }
 
@@ -9623,6 +9915,12 @@ impl TurnCtx {
             ..WirePart::steer(format!("steer-{}", uuid::Uuid::new_v4()), &steer.display)
         });
         self.read_steers.push(steer.id.clone());
+        // Read from output a checkpoint covers, so it commits with the next one.
+        if self.checkpointed {
+            self.last_flush = Instant::now() - FLUSH_INTERVAL;
+            self.deferred_flush = true;
+            return;
+        }
         if let Err(error) = self.flush() {
             eprintln!(
                 "orx up: could not save a read steer in chat {}: {error}",
@@ -9739,8 +10037,139 @@ impl TurnCtx {
         }
     }
 
+    /// [`Self::maybe_flush`] for a harness that can resume: the flush, when it happens,
+    /// commits a checkpoint at `offset` with `state`, then lets the keeper forget what it
+    /// covers.
+    pub fn maybe_flush_at(
+        &mut self,
+        keeper: &crate::keep::KeptHandle,
+        offset: u64,
+        state: &impl Serialize,
+    ) {
+        let tool_states = tool_state_signature(&self.assistant.parts);
+        let unattempted_state = tool_states != self.last_flushed_tool_states
+            && tool_states != self.last_attempted_tool_states;
+        if unattempted_state || self.last_flush.elapsed() >= FLUSH_INTERVAL {
+            self.last_attempted_tool_states = tool_states;
+            if let Err(error) = self.flush_at(keeper, offset, state) {
+                eprintln!("orx up: could not save turn {}: {error:#}", self.turn_id);
+            }
+        } else {
+            self.deferred_flush = true;
+        }
+    }
+
+    /// [`Self::flush`] with a checkpoint: the transcript and where the harness has applied
+    /// its agent's output through commit together, and only then is that output released.
+    pub fn flush_at(
+        &mut self,
+        keeper: &crate::keep::KeptHandle,
+        offset: u64,
+        state: &impl Serialize,
+    ) -> Result<()> {
+        let state_json = serde_json::to_string(&json!({
+            "ctx": self.ctx_checkpoint(),
+            "harness": state,
+        }))?;
+        self.flush_with(crate::store::TurnCheckpointWrite::Set {
+            turn_id: &self.turn_id.clone(),
+            keep_id: keeper.id(),
+            offset,
+            state_json: &state_json,
+        })?;
+        self.checkpointed = true;
+        keeper.ack(offset);
+        Ok(())
+    }
+
+    fn ctx_checkpoint(&self) -> CtxCheckpoint {
+        CtxCheckpoint {
+            delivery_state: Some(self.delivery_state),
+            attempt_count: self.attempt_count,
+            usage_execution_id: self.usage_execution_id.clone(),
+            native_message_models: self.native_message_models.clone(),
+            native_usage_scopes: self.native_usage_scopes.clone(),
+            retry_owner: self.retry_owner.clone(),
+            retry_started_emitted: self.retry_started_emitted,
+            retry_exhausted: self.retry_exhausted,
+            orx_retry_count: self.orx_retry_count,
+            terminal_error: self.terminal_error.clone(),
+            native_session_id: self.native_session_id.clone(),
+            native_message_id: self.native_message_id.clone(),
+            context_usage: self.context_usage.clone(),
+            target_event_offset: self.target_event_offset,
+            pending_target_events: self.pending_target_events.clone(),
+            target_event_bindings: self.target_event_bindings.clone(),
+            continuation: self.continuation,
+        }
+    }
+
+    /// Restores a checkpoint's turn progress and hands its harness state to the harness as
+    /// [`Self::resume`]. The transcript already matches it: it was committed with it.
+    pub(crate) fn restore_checkpoint(
+        &mut self,
+        checkpoint: &crate::store::StoredTurnCheckpoint,
+    ) -> Result<()> {
+        let mut state: Value = serde_json::from_str(&checkpoint.state_json).map_err(|error| {
+            anyhow!(
+                "turn {} has an unreadable checkpoint: {error}",
+                self.turn_id
+            )
+        })?;
+        let ctx: CtxCheckpoint = serde_json::from_value(state["ctx"].take()).map_err(|error| {
+            anyhow!(
+                "turn {} has an unreadable checkpoint: {error}",
+                self.turn_id
+            )
+        })?;
+        if let Some(delivery_state) = ctx.delivery_state {
+            self.delivery_state = delivery_state;
+        }
+        self.attempt_count = ctx.attempt_count;
+        if !ctx.usage_execution_id.is_empty() {
+            self.usage_execution_id = ctx.usage_execution_id;
+        }
+        self.native_message_models = ctx.native_message_models;
+        self.native_usage_scopes = ctx.native_usage_scopes;
+        self.retry_owner = ctx.retry_owner;
+        self.retry_started_emitted = ctx.retry_started_emitted;
+        self.retry_exhausted = ctx.retry_exhausted;
+        self.orx_retry_count = ctx.orx_retry_count;
+        self.terminal_error = ctx.terminal_error;
+        self.native_session_id = ctx.native_session_id.or(self.native_session_id.take());
+        self.native_message_id = ctx.native_message_id;
+        self.context_usage = ctx.context_usage.or(self.context_usage.take());
+        self.target_event_offset = ctx.target_event_offset;
+        self.pending_target_events = ctx.pending_target_events;
+        self.target_event_bindings = ctx.target_event_bindings;
+        self.continuation = ctx.continuation;
+        self.checkpointed = true;
+        self.resume = Some(Resume {
+            keep_id: checkpoint.keep_id.clone(),
+            offset: checkpoint.offset,
+            state: state["harness"].take(),
+        });
+        Ok(())
+    }
+
     pub fn flush(&mut self) -> Result<()> {
-        self.save()?;
+        // Harness output held back since the last checkpoint would reach the transcript
+        // without one, and a resumed turn would apply it twice. Without any, the checkpoint
+        // still matches and only orx's own parts change.
+        let turn_id = self.turn_id.clone();
+        let stale = self.checkpointed && self.deferred_flush;
+        let checkpoint = if stale {
+            crate::store::TurnCheckpointWrite::Clear { turn_id: &turn_id }
+        } else {
+            crate::store::TurnCheckpointWrite::Keep
+        };
+        self.flush_with(checkpoint)?;
+        self.checkpointed &= !stale;
+        Ok(())
+    }
+
+    fn flush_with(&mut self, checkpoint: crate::store::TurnCheckpointWrite<'_>) -> Result<()> {
+        self.save(checkpoint)?;
         let host = self.host.clone();
         let session_id = self.session_id.clone();
         self.read_steers
@@ -9748,7 +10177,7 @@ impl TurnCtx {
         Ok(())
     }
 
-    fn save(&mut self) -> Result<()> {
+    fn save(&mut self, checkpoint: crate::store::TurnCheckpointWrite<'_>) -> Result<()> {
         self.last_flush = Instant::now();
         self.deferred_flush = false;
         if self
@@ -9758,7 +10187,7 @@ impl TurnCtx {
             self.mark_delivery(self.delivery_state);
         }
         if self.assistant.parts.is_empty() {
-            return Ok(());
+            return Store::open()?.write_chat_turn_checkpoint(checkpoint);
         }
         self.apply_target_events();
         cap_tool_parts(&mut self.assistant.parts);
@@ -9790,12 +10219,14 @@ impl TurnCtx {
                     && stored.result_native_message_id == self.native_message_id
                     && stored.native_harness.as_deref() == Some(self.harness.as_str())
             });
-            if !unchanged {
+            if unchanged {
+                store.write_chat_turn_checkpoint(checkpoint)?;
+            } else {
                 let mut wire_assistant = self.assistant.clone();
                 // Stamp the branch position onto the SSE copy (see the interrupt
                 // marker above for what an unparented broadcast does to a client).
-                wire_assistant.parent_id =
-                    store.upsert_chat_message_on_branch(&StoredChatMessage {
+                wire_assistant.parent_id = store.upsert_chat_message_with_checkpoint(
+                    &StoredChatMessage {
                         id: wire_assistant.id.clone(),
                         session_id: self.session_id.clone(),
                         role: wire_assistant.role.clone(),
@@ -9807,7 +10238,9 @@ impl TurnCtx {
                         result_native_session_id: self.native_session_id.clone(),
                         result_native_message_id: self.native_message_id.clone(),
                         native_harness: Some(self.harness.clone()),
-                    })?;
+                    },
+                    checkpoint,
+                )?;
                 self.host.emit(
                     "chat.message",
                     message_json(&wire_assistant, &self.session_id),
@@ -10141,10 +10574,6 @@ pub fn list_messages(session_id: &str) -> Result<Vec<WireMessage>> {
 
 /// Materialize restart recovery on the assistant message linked to every turn
 /// the store just converted from in-flight to failed. Nothing is replayed.
-pub fn reconcile_unfinished_turns(store: &Store) -> Result<()> {
-    materialize_unfinished_turns(store, store.reconcile_unfinished_chat_turns()?).map(|_| ())
-}
-
 fn materialize_unfinished_turns(
     store: &Store,
     turns: Vec<StoredChatTurn>,
@@ -10594,7 +11023,7 @@ async fn stop_turns_whose_lease_was_lost(chat: &Arc<ChatHost>) {
     if lost.is_empty() {
         return;
     }
-    if let Err(error) = chat.reconcile_expired_turn_leases() {
+    if let Err(error) = chat.reconcile_expired_turn_leases().await {
         eprintln!("orx up: could not reconcile chat turns whose lease was lost: {error}");
     }
 }
@@ -12182,7 +12611,7 @@ mod bridge_tests {
         let session = format!("ses_{}", uuid::Uuid::new_v4());
         let input = || json!({"command": "rm -rf ~"});
         assert!(host
-            .request_permission(&session, "guess", "Bash", input())
+            .request_permission(&session, "guess", "Bash", input(), None)
             .await
             .is_err());
 
@@ -12190,13 +12619,13 @@ mod bridge_tests {
         let live = host.mint_gate_token(&session, false, false);
         for token in ["guess", stale.as_str()] {
             assert!(host
-                .request_permission(&session, token, "Bash", input())
+                .request_permission(&session, token, "Bash", input(), None)
                 .await
                 .is_err());
         }
 
         let ended = host
-            .request_permission(&session, &live, "Bash", input())
+            .request_permission(&session, &live, "Bash", input(), None)
             .await
             .unwrap();
         assert_eq!(serde_json::to_value(ended).unwrap()["behavior"], "deny");
@@ -12217,8 +12646,14 @@ mod bridge_tests {
                 let host = host.clone();
                 let session = session.clone();
                 async move {
-                    host.request_permission(&session, &token, "Bash", json!({"command": "ls"}))
-                        .await
+                    host.request_permission(
+                        &session,
+                        &token,
+                        "Bash",
+                        json!({"command": "ls"}),
+                        None,
+                    )
+                    .await
                 }
             });
             if turn_ends {
@@ -12248,7 +12683,7 @@ mod bridge_tests {
             let session = session.clone();
             let questions = json!({"questions": [question("First?"), question("Second?")]});
             async move {
-                host.request_permission(&session, &token, "AskUserQuestion", questions)
+                host.request_permission(&session, &token, "AskUserQuestion", questions, None)
                     .await
             }
         });
@@ -12285,6 +12720,212 @@ mod bridge_tests {
         assert!(!host.has_pending_permission(&session));
     }
 
+    /// Holds `tool_use`'s approval on `host` until `host` shows its card.
+    async fn post_held(
+        host: &Arc<ChatHost>,
+        session: &str,
+        token: &str,
+        tool_use: &str,
+    ) -> tokio::task::JoinHandle<Result<PermissionDecision>> {
+        let held = tokio::spawn({
+            let (host, session, token, tool_use) = (
+                host.clone(),
+                session.to_string(),
+                token.to_string(),
+                tool_use.to_string(),
+            );
+            async move {
+                host.request_permission(
+                    &session,
+                    &token,
+                    "Bash",
+                    json!({"command": "rm -r build"}),
+                    Some(&tool_use),
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !host.has_pending_permission(session) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the card is shown");
+        held
+    }
+
+    fn cards(session: &str) -> Vec<WirePrompt> {
+        Store::open()
+            .unwrap()
+            .list_chat_messages(session)
+            .unwrap()
+            .into_iter()
+            .flat_map(|message| serde_json::from_str::<Vec<WirePart>>(&message.parts_json).unwrap())
+            .filter_map(|part| part.prompt)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn an_approval_posted_again_after_a_restart_is_answered_on_its_first_card() {
+        let session = format!("ses_{}", uuid::Uuid::new_v4());
+        let tool_use = format!("toolu_{}", uuid::Uuid::new_v4().simple());
+        let before = Arc::new(test_host());
+        let token = before.mint_gate_token(&session, false, false);
+        before
+            .turns
+            .lock()
+            .await
+            .insert(session.clone(), TurnState::Reserved { turn_id: None });
+        // The first server goes away with the request held, as a restart leaves it.
+        let _cut = post_held(&before, &session, &token, &tool_use).await;
+
+        let after = Arc::new(test_host());
+        after.restore_gate_token(&session, &token, false, false);
+        after
+            .turns
+            .lock()
+            .await
+            .insert(session.clone(), TurnState::Reserved { turn_id: None });
+        let reposted = post_held(&after, &session, &token, &tool_use).await;
+        let shown = cards(&session);
+        assert_eq!(shown.len(), 1);
+        assert!(!shown[0].resolved);
+
+        let allowed = json!({"command": "rm -r build"});
+        after
+            .settle_permission(
+                shown[0].native_id.as_deref().unwrap(),
+                PermissionDecision::Allow {
+                    updated_input: Some(allowed.clone()),
+                },
+            )
+            .unwrap();
+        let decision = serde_json::to_value(reposted.await.unwrap().unwrap()).unwrap();
+        assert_eq!(decision["behavior"], "allow");
+        assert_eq!(decision["updatedInput"], allowed);
+    }
+
+    #[tokio::test]
+    async fn an_approval_answered_while_orx_restarted_is_reported_lost() {
+        let session = format!("ses_{}", uuid::Uuid::new_v4());
+        let tool_use = format!("toolu_{}", uuid::Uuid::new_v4().simple());
+        let host = Arc::new(test_host());
+        let token = host.mint_gate_token(&session, false, false);
+        host.turns
+            .lock()
+            .await
+            .insert(session.clone(), TurnState::Reserved { turn_id: None });
+        let first = post_held(&host, &session, &token, &tool_use).await;
+        let prompt_id = format!("perm_{tool_use}");
+        mark_prompt_resolved(
+            &host.msg_write,
+            &session,
+            &prompt_id,
+            Some(&answer(&[], true, None)),
+        )
+        .unwrap();
+        first.abort();
+
+        let decision = host
+            .request_permission(&session, &token, "Bash", json!({}), Some(&tool_use))
+            .await
+            .unwrap();
+        let decision = serde_json::to_value(decision).unwrap();
+        assert_eq!(decision["behavior"], "deny");
+        assert!(decision["message"].as_str().unwrap().contains("restarted"));
+        assert_eq!(cards(&session).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_approval_posted_before_its_turn_resumes_waits_for_it() {
+        let store = Store::open().unwrap();
+        let project = TurnCtx::test_stub().project;
+        let _ = store.create_local_project(&project);
+        let mut session = bare_session();
+        session.id = format!("ses_{}", uuid::Uuid::new_v4());
+        session.project_id = project.id;
+        store.create_chat_session(&session).unwrap();
+        let turn = crate::store::StoredChatTurn {
+            id: format!("turn-{}", session.id),
+            session_id: session.id.clone(),
+            user_message_id: None,
+            assistant_message_id: format!("answer-{}", session.id),
+            client_turn_id: format!("client-{}", session.id),
+            request_hash: "task".into(),
+            prepared_input: "task".into(),
+            flag_input: None,
+            settings_json: "{}".into(),
+            state: "running".into(),
+            delivery_state: "accepted".into(),
+            attempt_count: 1,
+            next_retry_at: None,
+            error_kind: None,
+            error_message: None,
+            recovery_action: None,
+            recovered_by_turn_id: None,
+            created_at: now_ms(),
+            updated_at: now_ms(),
+        };
+        store.admit_chat_turn(None, &turn).unwrap();
+
+        let host = Arc::new(test_host());
+        let token = host.mint_gate_token(&session.id, false, false);
+        let ask = |tool_use: &str| {
+            let (host, session, token, tool_use) = (
+                host.clone(),
+                session.id.clone(),
+                token.clone(),
+                tool_use.to_string(),
+            );
+            tokio::spawn(async move {
+                host.request_permission(
+                    &session,
+                    &token,
+                    "Bash",
+                    json!({"command": "rm x"}),
+                    Some(&tool_use),
+                )
+                .await
+            })
+        };
+        // A running turn with no checkpoint will not resume: its approval ends at once.
+        let decision = ask("toolu_unresumable").await.unwrap().unwrap();
+        assert_eq!(serde_json::to_value(decision).unwrap()["behavior"], "deny");
+
+        store
+            .write_chat_turn_checkpoint(crate::store::TurnCheckpointWrite::Set {
+                turn_id: &turn.id,
+                keep_id: "keeper",
+                offset: 0,
+                state_json: "{}",
+            })
+            .unwrap();
+        let waiting = ask("toolu_resuming");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!waiting.is_finished());
+        host.turns
+            .lock()
+            .await
+            .insert(session.id.clone(), TurnState::Reserved { turn_id: None });
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !host.has_pending_permission(&session.id) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        host.settle_permission(
+            "perm_toolu_resuming",
+            PermissionDecision::Allow {
+                updated_input: None,
+            },
+        )
+        .unwrap();
+        let decision = serde_json::to_value(waiting.await.unwrap().unwrap()).unwrap();
+        assert_eq!(decision["behavior"], "allow");
+    }
+
     #[tokio::test]
     async fn while_idle_refuses_a_running_session_and_runs_otherwise() {
         let host = test_host();
@@ -12311,9 +12952,9 @@ mod bridge_tests {
             .lock()
             .await
             .insert("busy".into(), TurnState::Reserved { turn_id: None });
-        assert!(!host.stop_admitting_if_idle().await);
+        assert!(!host.stop_admitting_unless_restart_stops().await);
         host.turns.lock().await.clear();
-        assert!(host.stop_admitting_if_idle().await);
+        assert!(host.stop_admitting_unless_restart_stops().await);
         assert!(!host.claim_durable_turn("next"));
     }
 
@@ -15293,7 +15934,7 @@ for line in sys.stdin:
             idle().await;
             let (_route, mut rx) = claude.take_continuation("resumes").await.unwrap();
             let mut texts = Vec::new();
-            while let Ok(TurnEvent::Line(line)) = rx.try_recv() {
+            while let Ok(TurnEvent::Line(line, _)) = rx.try_recv() {
                 texts.extend(line["message"]["content"][0]["text"].as_str().map(str::to_string));
             }
             assert_eq!(texts, ["UNSTORED"]);
@@ -15464,6 +16105,8 @@ for line in sys.stdin:
         if !crate::config::in_test_child(&[]) {
             return;
         }
+        // The first kept child builds orx-host, which the turns' timeouts must not count.
+        orx_test_support::host_binaries();
         tokio::runtime::Runtime::new().unwrap().block_on(async {
             let store = Store::open().unwrap();
             let root = crate::store::data_dir();
@@ -15829,6 +16472,61 @@ done
     }
 
     #[test]
+    fn a_hand_off_leaves_a_turn_without_a_checkpoint_for_the_next_start_to_resume() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let store = Store::open().unwrap();
+            let host = Arc::new(ChatHost::new(
+                Arc::new(crate::local::opencode::AgentHost::new(None)),
+                Arc::new(crate::local::codex::CodexHost::new()),
+                Arc::new(crate::local::claude::ClaudeHost::new()),
+            ));
+            let session_id = "handed-off-chat";
+            session(&store, session_id);
+            assert!(host.claim_durable_turn(session_id));
+            let turn = crate::store::StoredChatTurn {
+                id: "turn-unchecked".into(),
+                session_id: session_id.into(),
+                user_message_id: None,
+                assistant_message_id: "answer-unchecked".into(),
+                client_turn_id: "client-unchecked".into(),
+                request_hash: "task".into(),
+                prepared_input: "task".into(),
+                flag_input: None,
+                settings_json: "{}".into(),
+                state: "running".into(),
+                delivery_state: "not_sent".into(),
+                attempt_count: 1,
+                next_retry_at: None,
+                error_kind: None,
+                error_message: None,
+                recovery_action: None,
+                recovered_by_turn_id: None,
+                created_at: now_ms(),
+                updated_at: now_ms(),
+            };
+            store.admit_chat_turn(None, &turn).unwrap();
+            host.turns.lock().await.insert(
+                session_id.into(),
+                TurnState::Active(ActiveTurn {
+                    handle: tokio::spawn(std::future::pending()),
+                    message_id: turn.assistant_message_id.clone(),
+                    turn_id: turn.id.clone(),
+                }),
+            );
+
+            host.hand_off().await;
+
+            let resumable = store.chat_turns_to_resume().unwrap();
+            assert_eq!(resumable.len(), 1, "{resumable:?}");
+            assert_eq!(resumable[0].id, turn.id);
+            assert_eq!(resumable[0].recovery_action.as_deref(), Some("retry"));
+        });
+    }
+
+    #[test]
     fn stop_for_shutdown_stops_active_and_retrying_turns_while_preserving_continue_recovery() {
         if !crate::config::in_test_child(&[]) {
             return;
@@ -15900,7 +16598,7 @@ done
             assert!(!host.is_busy(session_id).await);
             assert!(!store.chat_turn_leased(session_id).unwrap());
 
-            reconcile_unfinished_turns(&store).unwrap();
+            adopt_kept_work(&host, true).await.unwrap();
             let stored = store.get_chat_turn(session_id, &turn.id).unwrap().unwrap();
             assert_eq!(stored.state, "failed");
             assert_eq!(stored.recovery_action.as_deref(), Some("continue"));
@@ -16030,7 +16728,7 @@ done
             assert!(host.renew_turn_leases().is_empty());
 
             stall();
-            host.reconcile_expired_turn_leases().unwrap();
+            host.reconcile_expired_turn_leases().await.unwrap();
             assert!(host.renew_turn_leases().is_empty());
 
             stall();
