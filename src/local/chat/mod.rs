@@ -4573,8 +4573,7 @@ impl ChatHost {
         if store.delegation(task_id)?.parent.as_deref() != Some(chat_id) {
             return self.claude.stop_task(chat_id, task_id).await;
         }
-        self.stopped.lock().unwrap().insert(task_id.to_string());
-        let interrupted = self.interrupt(task_id).await?;
+        let interrupted = self.interrupt_and_hold(task_id).await?;
         if interrupted {
             news::mark_told(&store, chat_id, task_id)?;
         }
@@ -7485,12 +7484,17 @@ impl ChatHost {
         self.stop_turn(session_id, StopMode::Cancel).await
     }
 
+    /// [`Self::interrupt`] for a chat someone stopped, holding its results and news until its next turn.
+    pub async fn interrupt_and_hold(self: &Arc<Self>, session_id: &str) -> Result<bool> {
+        self.stop_turn(session_id, StopMode::Hold).await
+    }
+
     async fn stop_turn(self: &Arc<Self>, session_id: &str, mode: StopMode) -> Result<bool> {
-        let cancel = matches!(mode, StopMode::Cancel | StopMode::User);
+        let cancel = matches!(mode, StopMode::Cancel | StopMode::Hold | StopMode::User);
         let active = {
             let mut turns = self.turns.lock().await;
             // Under `turns`, so a turn starting now cannot clear the hold this Stop sets.
-            if mode == StopMode::User {
+            if matches!(mode, StopMode::Hold | StopMode::User) {
                 self.stopped.lock().unwrap().insert(session_id.to_string());
             }
             if let StopMode::LeaseLost(token) = &mode {
@@ -7647,8 +7651,7 @@ impl ChatHost {
         let mut parents = vec![id.to_string()];
         while let Some(parent) = parents.pop() {
             for child in store.chat_delegates_of(&parent)? {
-                self.stopped.lock().unwrap().insert(child.clone());
-                let interrupted = self.interrupt(&child).await?;
+                let interrupted = self.interrupt_and_hold(&child).await?;
                 if interrupted {
                     news::mark_told(&store, &parent, &child)?;
                 }
@@ -10567,6 +10570,8 @@ pub async fn keep_turn_leases(
 enum StopMode {
     /// Stopped on purpose: the stored turn is recorded as interrupted.
     Cancel,
+    /// Stopped like `Cancel`, holding the chat's results and news until its next turn.
+    Hold,
     /// Stopped by the user like `Cancel`, leaving a marker; the slot passes
     /// straight to the chat's queue, so queued messages run next.
     User,

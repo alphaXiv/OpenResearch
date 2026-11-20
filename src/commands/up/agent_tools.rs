@@ -425,8 +425,7 @@ async fn call(
                 );
             }
             let mut stopped = Vec::new();
-            state.chat.stopped.lock().unwrap().insert(target.id.clone());
-            if state.chat.interrupt(&target.id).await? {
+            if state.chat.interrupt_and_hold(&target.id).await? {
                 stopped.push(target.id.clone());
                 news::mark_told(&store, &caller.id, &target.id)?;
             }
