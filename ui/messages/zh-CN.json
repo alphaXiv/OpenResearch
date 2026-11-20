@@ -2483,6 +2483,7 @@
   "create_project_confirm": "创建项目",
   "create_project_folder_has_files": "此文件夹已有文件。请选择新的位置。",
   "create_project_created": "已创建",
+  "create_project_not_created": "未创建",
   "create_project_review": "查看…",
   "activity_proposed_project": "建议创建项目 {name}",
   "chat_delete_scratch_session_confirm": "删除“{title}”？\n\n此对话不属于任何项目，其聊天记录、侧边聊天和文件都将被永久删除。",

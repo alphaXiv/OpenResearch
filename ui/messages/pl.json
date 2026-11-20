@@ -2483,6 +2483,7 @@
   "create_project_confirm": "Utwórz projekt",
   "create_project_folder_has_files": "Ten folder zawiera już pliki. Wybierz inną lokalizację.",
   "create_project_created": "Utworzono",
+  "create_project_not_created": "Nie utworzono",
   "create_project_review": "Przejrzyj…",
   "activity_proposed_project": "Zaproponowano projekt {name}",
   "chat_delete_scratch_session_confirm": "Usunąć „{title}”?\n\nTen czat nie ma projektu, więc historia rozmowy, czaty poboczne i pliki zostaną trwale usunięte.",

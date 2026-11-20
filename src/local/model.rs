@@ -24,6 +24,10 @@ pub struct LocalProject {
     pub paper_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub icon: Option<serde_json::Value>,
+    /// The tool call id of the agent proposal the user created it from; `""` when
+    /// made without one, `None` when not known, as from an older orx or dashboard.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -83,6 +87,7 @@ impl LocalProject {
                         error.into(),
                     )
                 })?,
+            proposal: row.get(13)?,
         })
     }
 }

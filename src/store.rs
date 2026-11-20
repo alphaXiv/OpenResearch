@@ -1531,6 +1531,10 @@ impl Store {
                 path         TEXT NOT NULL,
                 requested_at INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS project_moves_in_flight (
+                project_id TEXT PRIMARY KEY,
+                state_json TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS chat_turn_leases (
                 chat_session_id TEXT PRIMARY KEY,
                 claim_token     TEXT NOT NULL,
@@ -1693,6 +1697,9 @@ impl Store {
             "ALTER TABLE local_projects ADD COLUMN github_sync_enabled INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE local_projects ADD COLUMN workspace_state_json TEXT",
             "ALTER TABLE local_projects ADD COLUMN icon_json TEXT",
+            "ALTER TABLE local_projects ADD COLUMN proposal_id TEXT",
+            "ALTER TABLE chat_project_moves ADD COLUMN proposal_id TEXT",
+            "ALTER TABLE chat_project_moves ADD COLUMN scratch INTEGER",
             "ALTER TABLE local_experiments ADD COLUMN chat_session_id TEXT",
             "ALTER TABLE local_experiments ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE local_experiments ADD COLUMN run_monitor_json TEXT",
@@ -1854,6 +1861,18 @@ impl Store {
              END;",
         )?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_project_env_vars AFTER DELETE ON local_projects BEGIN DELETE FROM project_env_vars WHERE project_id = OLD.id; END;")?;
+        // Released orx versions write a project's whole row from an earlier read; once a scratch
+        // repository (`scratch/<id>` in any data directory) has moved out, such a write would point
+        // the project back at a folder that is gone.
+        schema.execute_batch(
+            r"CREATE TRIGGER IF NOT EXISTS keep_promoted_repo_path
+             BEFORE UPDATE OF repo_path ON local_projects
+             WHEN substr(NEW.repo_path, -length(NEW.id) - 9) IN ('/scratch/' || NEW.id, '\scratch\' || NEW.id)
+              AND substr(OLD.repo_path, -length(OLD.id) - 9) NOT IN ('/scratch/' || OLD.id, '\scratch\' || OLD.id)
+             BEGIN
+                 SELECT RAISE(ABORT, 'This project moved to its own folder while the change was being made. Run the command again to apply it there.');
+             END;",
+        )?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_log_collection AFTER DELETE ON runs BEGIN DELETE FROM log_collections WHERE run_id = OLD.id; END;")?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_steer_receipts AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_steer_receipts WHERE session_id = OLD.id; END;")?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_project_move AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_project_moves WHERE session_id = OLD.id; END;")?;
@@ -3057,7 +3076,7 @@ impl Store {
     ) -> Result<bool> {
         let tx = self.begin()?;
         let inserted = tx.execute(
-            &format!("INSERT OR IGNORE INTO local_projects ({PROJECT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"),
+            &format!("INSERT OR IGNORE INTO local_projects ({PROJECT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"),
             params![
                 project.id,
                 project.name,
@@ -3072,6 +3091,7 @@ impl Store {
                 project.created_at,
                 project.updated_at,
                 project.icon.as_ref().map(|icon| icon.to_string()),
+                project.proposal,
             ],
         )?;
         if inserted == 0 {
@@ -4175,12 +4195,25 @@ impl Store {
         Ok(())
     }
 
-    /// A chat without a project becomes a project when the user names it.
-    pub fn restamp_local_project_created(&self, id: &str) -> Result<()> {
-        self.conn.execute(
-            "UPDATE local_projects SET created_at = ?2 WHERE id = ?1",
-            params![id, now_ms()],
+    /// A scratch project becomes a project at its new folder, created as of now,
+    /// in one write so a failure leaves the record as it was.
+    pub fn promote_local_project(&self, p: &LocalProject) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE local_projects SET name = ?2, repo_path = ?3, created_at = ?4, updated_at = ?5,
+                    proposal_id = ?6
+             WHERE id = ?1",
+            params![
+                p.id,
+                p.name,
+                p.repo_path,
+                p.created_at,
+                p.updated_at,
+                p.proposal
+            ],
         )?;
+        if changed == 0 {
+            return Err(anyhow!("Project {} was not found.", p.id));
+        }
         Ok(())
     }
 
@@ -4194,29 +4227,60 @@ impl Store {
         Ok(())
     }
 
-    /// Full-row update by id (name / run_command / branch edits).
-    pub fn update_local_project(&self, p: &LocalProject) -> Result<()> {
-        self.conn.execute(
-            "UPDATE local_projects SET name = ?2, slug = ?3, github_owner = ?4, github_repo = ?5,
-                    github_sync_enabled = ?6, baseline_branch = ?7, repo_path = ?8,
-                    run_command = ?9, paper_id = ?10, updated_at = ?11, icon_json = ?12
+    /// The user's edits; `None` leaves a field as it is, `Some(None)` clears it.
+    /// Each writer names only the columns it changes, so one holding an older
+    /// read cannot revert another's write, such as a promotion's new folder.
+    pub fn edit_local_project(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        run_command: Option<Option<&str>>,
+        icon: Option<Option<&serde_json::Value>>,
+    ) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE local_projects SET name = COALESCE(?2, name),
+                    run_command = CASE WHEN ?3 THEN ?4 ELSE run_command END,
+                    icon_json = CASE WHEN ?5 THEN ?6 ELSE icon_json END,
+                    updated_at = ?7
              WHERE id = ?1",
             params![
-                p.id,
-                p.name,
-                p.slug,
-                p.github_owner,
-                p.github_repo,
-                p.github_sync_enabled,
-                p.baseline_branch,
-                p.repo_path,
-                p.run_command,
-                p.paper_id,
+                id,
+                name,
+                run_command.is_some(),
+                run_command.flatten(),
+                icon.is_some(),
+                icon.flatten().map(|icon| icon.to_string()),
                 now_ms(),
-                p.icon.as_ref().map(|icon| icon.to_string()),
             ],
         )?;
-        Ok(())
+        project_found(id, changed)
+    }
+
+    pub fn set_project_baseline_branch(&self, id: &str, branch: &str) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE local_projects SET baseline_branch = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, branch, now_ms()],
+        )?;
+        project_found(id, changed)
+    }
+
+    /// A project gets a new GitHub repository with syncing off until its first push lands.
+    pub fn set_project_github_repository(&self, id: &str, owner: &str, repo: &str) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE local_projects SET github_owner = ?2, github_repo = ?3,
+                    github_sync_enabled = 0, updated_at = ?4
+             WHERE id = ?1",
+            params![id, owner, repo, now_ms()],
+        )?;
+        project_found(id, changed)
+    }
+
+    pub fn set_project_github_sync(&self, id: &str, enabled: bool) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE local_projects SET github_sync_enabled = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, enabled, now_ms()],
+        )?;
+        project_found(id, changed)
     }
 
     // --- local experiments (orx up) ---
@@ -4732,23 +4796,96 @@ impl Store {
         Ok((deleting, retained))
     }
 
-    /// A new project the user asked a chat to move into once it is idle.
-    pub fn set_chat_project_move(&self, session_id: &str, name: &str, path: &str) -> Result<()> {
+    /// Records a move of `project_id`'s files before it touches any, so a start
+    /// after a crash can finish or undo it.
+    /// Returns `false`, recording nothing, when the request was cancelled or replaced.
+    pub fn begin_project_move(
+        &self,
+        project_id: &str,
+        state_json: &str,
+        session_id: &str,
+        requested_at: i64,
+    ) -> Result<bool> {
+        let tx = self.begin_immediate()?;
+        let unfinished: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM project_moves_in_flight WHERE project_id = ?1)",
+            params![project_id],
+            |row| row.get(0),
+        )?;
+        if unfinished {
+            return Err(anyhow!(
+                "An earlier move of this project didn't finish. Restart OpenResearch to finish or undo it, then try again."
+            ));
+        }
+        let taken = tx.execute(
+            "DELETE FROM chat_project_moves WHERE session_id = ?1 AND requested_at = ?2",
+            params![session_id, requested_at],
+        )?;
+        if taken == 0 {
+            return Ok(false);
+        }
+        tx.execute(
+            "INSERT INTO project_moves_in_flight (project_id, state_json) VALUES (?1, ?2)",
+            params![project_id, state_json],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn end_project_move(&self, project_id: &str) -> Result<()> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO chat_project_moves (session_id, name, path, requested_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![session_id, name, path, now_ms()],
+            "DELETE FROM project_moves_in_flight WHERE project_id = ?1",
+            params![project_id],
         )?;
         Ok(())
     }
 
-    pub fn chat_project_move(&self, session_id: &str) -> Result<Option<(String, String)>> {
+    /// Each move still recorded, as its project id and state.
+    pub fn project_moves_in_flight(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT project_id, state_json FROM project_moves_in_flight")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// A new project the user asked a chat to move into once it is idle.
+    pub fn set_chat_project_move(
+        &self,
+        session_id: &str,
+        name: &str,
+        path: &str,
+        proposal: Option<&str>,
+        scratch: Option<bool>,
+    ) -> Result<i64> {
+        // Distinct for every request, even two in one millisecond, so the time names one request.
+        use std::sync::atomic::{AtomicI64, Ordering};
+        static LAST: AtomicI64 = AtomicI64::new(0);
+        let requested_at = loop {
+            let last = LAST.load(Ordering::SeqCst);
+            let next = now_ms().max(last + 1);
+            if LAST
+                .compare_exchange(last, next, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                break next;
+            }
+        };
+        self.conn.execute(
+            "INSERT OR REPLACE INTO chat_project_moves (session_id, name, path, requested_at, proposal_id, scratch)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![session_id, name, path, requested_at, proposal, scratch],
+        )?;
+        Ok(requested_at)
+    }
+
+    pub fn chat_project_move(&self, session_id: &str) -> Result<Option<ChatProjectMove>> {
         Ok(self
             .conn
             .query_row(
-                "SELECT name, path FROM chat_project_moves WHERE session_id = ?1",
+                "SELECT name, path, proposal_id, requested_at, scratch FROM chat_project_moves WHERE session_id = ?1",
                 params![session_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                ChatProjectMove::from_row,
             )
             .optional()?)
     }
@@ -4761,14 +4898,20 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    /// Removes the waiting move, returning it: whoever takes it owns it.
-    pub fn take_chat_project_move(&self, session_id: &str) -> Result<Option<(String, String)>> {
-        let mut stmt = self
-            .conn
-            .prepare("DELETE FROM chat_project_moves WHERE session_id = ?1 RETURNING name, path")?;
+    /// Removes the waiting move, or only the one requested at `requested_at`,
+    /// returning it: whoever takes it owns it.
+    pub fn take_chat_project_move(
+        &self,
+        session_id: &str,
+        requested_at: Option<i64>,
+    ) -> Result<Option<ChatProjectMove>> {
+        let mut stmt = self.conn.prepare(
+            "DELETE FROM chat_project_moves WHERE session_id = ?1 AND (?2 IS NULL OR requested_at = ?2)
+             RETURNING name, path, proposal_id, requested_at, scratch",
+        )?;
         // Stepped to the end, so the delete has committed before the row is returned.
         let rows = stmt
-            .query_map(params![session_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .query_map(params![session_id, requested_at], ChatProjectMove::from_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows.into_iter().next())
     }
@@ -6285,6 +6428,31 @@ pub enum RunDismissal {
     Dismissed,
     NotAssociated,
     Refused(&'static str),
+}
+
+/// A new project a chat waits to move into once its turn ends.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatProjectMove {
+    pub name: String,
+    pub path: String,
+    /// The proposal the user confirmed, as [`LocalProject::proposal`] records it.
+    pub proposal: Option<String>,
+    pub requested_at: i64,
+    /// Whether the chat had no project when asked; older versions leave it out.
+    pub scratch: Option<bool>,
+}
+
+impl ChatProjectMove {
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            name: row.get(0)?,
+            path: row.get(1)?,
+            proposal: row.get(2)?,
+            requested_at: row.get(3)?,
+            scratch: row.get(4)?,
+        })
+    }
 }
 
 pub struct StoredChatShownRun {
@@ -7942,16 +8110,24 @@ fn launched_in(chat: &str, run: &str) -> String {
 }
 
 const PROJECT_COLS: &str = "id, name, slug, github_owner, github_repo, github_sync_enabled, \
-                            baseline_branch, repo_path, run_command, paper_id, created_at, updated_at, icon_json";
+                            baseline_branch, repo_path, run_command, paper_id, created_at, updated_at, icon_json, \
+                            proposal_id";
+
+fn project_found(id: &str, changed: usize) -> Result<()> {
+    if changed == 0 {
+        return Err(anyhow!("Project {id} was not found."));
+    }
+    Ok(())
+}
 
 /// The one insert of a project row, so every column `PROJECT_COLS` names gets its value.
 fn insert_local_project(conn: &rusqlite::Connection, p: &LocalProject) -> Result<()> {
     conn.execute(
-        &format!("INSERT INTO local_projects ({PROJECT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"),
+        &format!("INSERT INTO local_projects ({PROJECT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"),
         params![
             p.id, p.name, p.slug, p.github_owner, p.github_repo,
             p.github_sync_enabled, p.baseline_branch, p.repo_path, p.run_command, p.paper_id,
-            p.created_at, p.updated_at, p.icon.as_ref().map(|icon| icon.to_string()),
+            p.created_at, p.updated_at, p.icon.as_ref().map(|icon| icon.to_string()), p.proposal,
         ],
     )?;
     Ok(())
@@ -11966,6 +12142,7 @@ pub(crate) mod tests {
                     run_command: None,
                     paper_id: None,
                     icon: None,
+                    proposal: None,
                     created_at: 1,
                     updated_at: 2,
                 })
@@ -13271,11 +13448,137 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The whole-row write `orx project edit` and the dashboard ran through v0.2.28.
+    fn write_whole_project_row(store: &Store, p: &LocalProject) -> rusqlite::Result<usize> {
+        store.conn.execute(
+            "UPDATE local_projects SET name = ?2, slug = ?3, github_owner = ?4, github_repo = ?5,
+                    github_sync_enabled = ?6, baseline_branch = ?7, repo_path = ?8,
+                    run_command = ?9, paper_id = ?10, updated_at = ?11, icon_json = ?12
+             WHERE id = ?1",
+            params![
+                p.id,
+                p.name,
+                p.slug,
+                p.github_owner,
+                p.github_repo,
+                p.github_sync_enabled,
+                p.baseline_branch,
+                p.repo_path,
+                p.run_command,
+                p.paper_id,
+                now_ms(),
+                p.icon.as_ref().map(|icon| icon.to_string()),
+            ],
+        )
+    }
+
+    #[test]
+    fn an_older_whole_row_write_cannot_undo_a_promotion() {
+        let dir = std::env::temp_dir().join(format!("orx-store-promoted-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        for (data, folder) in [
+            (
+                dir.to_string_lossy().into_owned(),
+                dir.join("Fib").to_string_lossy().into_owned(),
+            ),
+            (
+                r"C:\Users\r\openresearch".to_string(),
+                r"C:\Users\r\Fib".to_string(),
+            ),
+        ] {
+            let id = uuid::Uuid::new_v4().to_string();
+            let separator = if data.contains('\\') { '\\' } else { '/' };
+            let stale = LocalProject {
+                id: id.clone(),
+                name: "No project".into(),
+                slug: format!("scratch-{}", &id[..8]),
+                github_owner: String::new(),
+                github_repo: String::new(),
+                github_sync_enabled: false,
+                baseline_branch: "main".into(),
+                repo_path: format!("{data}{separator}scratch{separator}{id}"),
+                run_command: None,
+                paper_id: None,
+                icon: None,
+                proposal: None,
+                created_at: 1,
+                updated_at: 1,
+            };
+            store.create_local_project(&stale).unwrap();
+            let promoted = LocalProject {
+                name: "Fibonacci".into(),
+                repo_path: folder.clone(),
+                ..stale.clone()
+            };
+            store.promote_local_project(&promoted).unwrap();
+
+            let edit = LocalProject {
+                run_command: Some("python fib.py".into()),
+                ..stale.clone()
+            };
+            let refused = write_whole_project_row(&store, &edit).unwrap_err();
+            assert!(
+                refused.to_string().contains("Run the command again"),
+                "{refused}"
+            );
+            let read = store.get_local_project(&id).unwrap().unwrap();
+            assert_eq!(
+                (read.name.as_str(), read.repo_path.as_str()),
+                ("Fibonacci", folder.as_str())
+            );
+            assert_eq!(read.run_command, None);
+
+            // Read again after the promotion, the same write goes through.
+            let edit = LocalProject {
+                run_command: Some("python fib.py".into()),
+                ..read
+            };
+            write_whole_project_row(&store, &edit).unwrap();
+            let read = store.get_local_project(&id).unwrap().unwrap();
+            assert_eq!(read.repo_path, folder);
+            assert_eq!(read.run_command.as_deref(), Some("python fib.py"));
+        }
+
+        // Moving the data directory moves scratch repositories from one scratch folder to another.
+        let id = uuid::Uuid::new_v4().to_string();
+        let old = dir.join("scratch").join(&id).to_string_lossy().into_owned();
+        let new = dir
+            .join("moved")
+            .join("scratch")
+            .join(&id)
+            .to_string_lossy()
+            .into_owned();
+        store
+            .create_local_project(&LocalProject {
+                id: id.clone(),
+                name: "No project".into(),
+                slug: format!("scratch-{}", &id[..8]),
+                github_owner: String::new(),
+                github_repo: String::new(),
+                github_sync_enabled: false,
+                baseline_branch: "main".into(),
+                repo_path: old.clone(),
+                run_command: None,
+                paper_id: None,
+                icon: None,
+                proposal: None,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .unwrap();
+        store.relocate_project_paths(&[(old, new.clone())]).unwrap();
+        assert_eq!(
+            store.get_local_project(&id).unwrap().unwrap().repo_path,
+            new
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn project_icon_survives_updates_that_predate_it() {
         let dir = std::env::temp_dir().join(format!("orx-store-icon-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
-        let mut project = LocalProject {
+        let project = LocalProject {
             id: "project".into(),
             name: "Project".into(),
             slug: "project".into(),
@@ -13287,12 +13590,15 @@ pub(crate) mod tests {
             run_command: None,
             paper_id: None,
             icon: None,
+            proposal: None,
             created_at: 1,
             updated_at: 1,
         };
         store.create_local_project(&project).unwrap();
-        project.icon = Some(serde_json::json!({ "file": "assets/logo.png", "color": "teal" }));
-        store.update_local_project(&project).unwrap();
+        let icon = serde_json::json!({ "file": "assets/logo.png", "color": "teal" });
+        store
+            .edit_local_project(&project.id, None, None, Some(Some(&icon)))
+            .unwrap();
 
         // The update an older orx runs names only the columns it knows.
         store
@@ -13304,14 +13610,74 @@ pub(crate) mod tests {
             .unwrap();
         let read = store.get_local_project("project").unwrap().unwrap();
         assert_eq!(read.name, "Renamed");
-        assert_eq!(read.icon, project.icon);
+        assert_eq!(read.icon, Some(icon));
 
-        project.icon = None;
-        store.update_local_project(&project).unwrap();
+        store
+            .edit_local_project(&project.id, None, None, Some(None))
+            .unwrap();
         assert_eq!(
             store.get_local_project("project").unwrap().unwrap().icon,
             None
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn project_proposals_survive_writes_that_predate_them() {
+        let dir = std::env::temp_dir().join(format!("orx-store-proposal-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+
+        // v0.2.28's insert names the columns it knew: the proposal reads as unknown.
+        store
+            .conn
+            .execute(
+                "INSERT INTO local_projects (id, name, slug, github_owner, github_repo, github_sync_enabled,
+                     baseline_branch, repo_path, run_command, paper_id, created_at, updated_at, icon_json)
+                 VALUES ('old', 'Old', 'old', '', '', 0, 'main', '/home/me/old', NULL, NULL, 1, 1, NULL)",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            store.get_local_project("old").unwrap().unwrap().proposal,
+            None
+        );
+
+        let promoted = LocalProject {
+            name: "Probes".into(),
+            repo_path: "/home/me/probes".into(),
+            proposal: Some("toolu_create".into()),
+            ..store.get_local_project("old").unwrap().unwrap()
+        };
+        store.promote_local_project(&promoted).unwrap();
+        let edit = LocalProject {
+            name: "Renamed".into(),
+            ..promoted.clone()
+        };
+        write_whole_project_row(&store, &edit).unwrap();
+        let read = store.get_local_project("old").unwrap().unwrap();
+        assert_eq!(read.name, "Renamed");
+        assert_eq!(read.proposal.as_deref(), Some("toolu_create"));
+
+        // A move v0.2.28 queues is a new request, so it names no proposal.
+        store
+            .set_chat_project_move(
+                "chat",
+                "Probes",
+                "/home/me/probes",
+                Some("toolu_create"),
+                None,
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT OR REPLACE INTO chat_project_moves (session_id, name, path, requested_at)
+                 VALUES ('chat', 'Other', '/home/me/other', 2)",
+                [],
+            )
+            .unwrap();
+        let waiting = store.chat_project_move("chat").unwrap().unwrap();
+        assert_eq!((waiting.name.as_str(), waiting.proposal), ("Other", None));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -13333,6 +13699,7 @@ pub(crate) mod tests {
                 run_command: None,
                 paper_id: None,
                 icon: None,
+                proposal: None,
                 created_at: 1,
                 updated_at: 1,
             })
@@ -14451,6 +14818,7 @@ pub(crate) mod tests {
             run_command: None,
             paper_id: None,
             icon: None,
+            proposal: None,
             created_at: 1,
             updated_at: 1,
         }
@@ -15882,6 +16250,7 @@ pub(crate) mod tests {
                     run_command: None,
                     paper_id: None,
                     icon: None,
+                    proposal: None,
                     created_at: 1,
                     updated_at: 1,
                 })
@@ -16000,6 +16369,7 @@ pub(crate) mod tests {
                 run_command: None,
                 paper_id: None,
                 icon: None,
+                proposal: None,
                 created_at: 1,
                 updated_at: 1,
             })

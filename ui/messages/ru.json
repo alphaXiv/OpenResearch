@@ -2483,6 +2483,7 @@
   "create_project_confirm": "Создать проект",
   "create_project_folder_has_files": "В этой папке уже есть файлы. Выберите другое место.",
   "create_project_created": "Создан",
+  "create_project_not_created": "Не создан",
   "create_project_review": "Проверить…",
   "activity_proposed_project": "Предложен проект {name}",
   "chat_delete_scratch_session_confirm": "Удалить «{title}»?\n\nУ этого чата нет проекта, поэтому стенограмма, боковые чаты и файлы будут удалены безвозвратно.",

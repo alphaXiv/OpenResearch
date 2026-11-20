@@ -2483,6 +2483,7 @@
   "create_project_confirm": "إنشاء المشروع",
   "create_project_folder_has_files": "يحتوي هذا المجلد على ملفات بالفعل. اختر موقعًا جديدًا.",
   "create_project_created": "تم الإنشاء",
+  "create_project_not_created": "لم يُنشأ",
   "create_project_review": "مراجعة…",
   "activity_proposed_project": "اقترح المشروع {name}",
   "chat_delete_scratch_session_confirm": "هل تريد حذف «{title}»؟\n\nلا مشروع لهذه المحادثة، لذا سيُحذف سجلها ومحادثاتها الجانبية وملفاتها نهائيًا.",

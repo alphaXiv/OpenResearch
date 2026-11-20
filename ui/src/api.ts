@@ -75,6 +75,8 @@ export interface Project {
   /** arXiv or alphaXiv paper id the project starts from (versionless). */
   paperId?: string | null;
   icon?: ProjectIcon;
+  /** The tool call id of the agent proposal it was created from; `""` for none, absent when an older orx or dashboard made it. */
+  proposal?: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -1794,7 +1796,7 @@ export interface ChatSession {
   id: string;
   projectId: string;
   /** A project the user asked this chat to move into once its turn ends. */
-  pendingProject?: { name: string; path: string } | null;
+  pendingProject?: { name: string; path: string; proposal?: string | null; requestedAt?: number } | null;
   harness: HarnessId;
   /** The account the chat runs on, when it's one OpenResearch keeps. */
   profile?: string | null;
@@ -2359,11 +2361,13 @@ export function createApi(
     post<{ project: Project }>("/api/projects/scratch", {}).then((r) => r.project);
 
   /** Make a chat a project of its own at `path`, now or, while it runs, once its turn ends. */
-  const moveChatToProject = (sessionId: string, body: { name: string; path: string }) =>
+  /** `scratch` is whether the chat had no project when the user asked, so a move made elsewhere meanwhile refuses it. */
+  const moveChatToProject = (sessionId: string, body: { name: string; path: string; scratch?: boolean; proposal?: string }) =>
     post<{ pending: true } | { pending: false; project: Project }>(`/api/chat/sessions/${sessionId}/project`, body);
 
-  const cancelChatProjectMove = (sessionId: string) =>
-    writeResponse(`/api/chat/sessions/${sessionId}/project`, { method: "DELETE" }).then(async (r) => {
+  /** Cancels the waiting move requested at `requestedAt`, not one that replaced it since. */
+  const cancelChatProjectMove = (sessionId: string, requestedAt?: number) =>
+    writeResponse(`/api/chat/sessions/${sessionId}/project${requestedAt == null ? "" : `?requestedAt=${requestedAt}`}`, { method: "DELETE" }).then(async (r) => {
       if (!r.ok) throw new Error((await r.json().catch(() => null))?.error ?? `cancel failed (${r.status})`);
     });
 

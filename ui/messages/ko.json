@@ -2483,6 +2483,7 @@
   "create_project_confirm": "프로젝트 만들기",
   "create_project_folder_has_files": "이 폴더에 이미 파일이 있습니다. 다른 위치를 선택하세요.",
   "create_project_created": "만들어짐",
+  "create_project_not_created": "만들지 않음",
   "create_project_review": "검토…",
   "activity_proposed_project": "프로젝트 {name} 제안",
   "chat_delete_scratch_session_confirm": "“{title}”을(를) 삭제할까요?\n\n이 채팅은 프로젝트가 없으므로 대화 기록, 사이드 채팅, 파일이 영구적으로 삭제됩니다.",

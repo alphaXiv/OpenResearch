@@ -491,6 +491,7 @@ fn seed_at(
             "type": "image/png",
             "data": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, PROJECT_ICON),
         } })),
+        proposal: None,
         created_at: ago(seeded_at, 250, 0),
         updated_at: ago(seeded_at, 6, 0),
     };
@@ -2606,6 +2607,7 @@ mod tests {
                 run_command: None,
                 paper_id: None,
                 icon: None,
+                proposal: None,
                 created_at: 1,
                 updated_at: 1,
             })
