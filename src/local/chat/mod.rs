@@ -2282,7 +2282,10 @@ impl ChatHost {
             // failed row update must not be reported as a failed compaction.
             if let Ok(store) = Store::open() {
                 let settled = match outcome {
-                    Ok(reseed) => self.apply_compaction(&store, &session_id, reseed).err(),
+                    Ok(reseed) => self
+                        .apply_compaction(&store, &session_id, reseed)
+                        .and_then(|()| store.set_chat_session_archived(&session_id, false))
+                        .err(),
                     Err(error) => Some(error),
                 };
                 let (status, detail) = match &settled {
@@ -2361,8 +2364,6 @@ impl ChatHost {
             store.set_chat_session_native_id(session_id, None)?;
         }
         store.clear_chat_session_context_usage(session_id)?;
-        // Compacting is activity, and activity unarchives as sending does.
-        store.set_chat_session_archived(session_id, false)?;
         Ok(())
     }
 
@@ -2375,6 +2376,9 @@ impl ChatHost {
         let Ok(Some(session)) = store.get_chat_session(session_id) else {
             return;
         };
+        if session.archived {
+            return;
+        }
         let usage = session
             .context_usage_json
             .as_deref()
@@ -3495,6 +3499,11 @@ enum TurnAdmission {
     QueueIfBusy,
     RejectIfBusy,
     Preclaimed(TurnGuard),
+    FlagWake(TurnGuard),
+    Recovery {
+        previous_client_turn_id: String,
+        flag_input: Option<String>,
+    },
 }
 
 /// Replayed files are already on disk, so a fork never re-decodes or duplicates
@@ -6289,7 +6298,10 @@ impl ChatHost {
                             },
                             overrides: settings,
                             images: TurnAttachments::Uploaded(Vec::new()),
-                            admission: TurnAdmission::RejectIfBusy,
+                            admission: TurnAdmission::Recovery {
+                                previous_client_turn_id: turn.client_turn_id,
+                                flag_input: turn.flag_input,
+                            },
                             client_turn_id: Some(format!("recover_{turn_id}")),
                             request_hash: None,
                             continuation: false,
@@ -6630,6 +6642,14 @@ impl ChatHost {
             Some(hash) => hash,
             None => turn_request_hash(&messages, &transcript, &overrides, &images)?,
         };
+        let flag_wake = matches!(&admission, TurnAdmission::FlagWake(_));
+        let (previous_flag_turn, flag_input) = match &admission {
+            TurnAdmission::Recovery {
+                previous_client_turn_id,
+                flag_input: Some(input),
+            } => (Some(previous_client_turn_id.clone()), Some(input.clone())),
+            _ => (None, None),
+        };
         let client_turn_id = requested_client_turn_id
             .filter(|id| !id.trim().is_empty())
             .unwrap_or_else(|| format!("ct_{}", uuid::Uuid::new_v4()));
@@ -6696,8 +6716,8 @@ impl ChatHost {
         // send racing a /respond resume) can't both spawn a turn against the
         // same session. `_guard` releases the reservation on any early error.
         let (mut guard, mut pending_client_turn) = match admission {
-            TurnAdmission::Preclaimed(guard) => (guard, None),
-            TurnAdmission::RejectIfBusy => {
+            TurnAdmission::Preclaimed(guard) | TurnAdmission::FlagWake(guard) => (guard, None),
+            TurnAdmission::RejectIfBusy | TurnAdmission::Recovery { .. } => {
                 match TurnGuard::claim(self, session_id, Some(&mut overrides)).await {
                     Some(guard) => (guard, None),
                     None => return Err(anyhow!("session is busy — interrupt it first")),
@@ -7045,7 +7065,7 @@ impl ChatHost {
         }
         // Activity unarchives (Claude-desktop behavior): a session being talked
         // to shouldn't stay hidden from the default Recents view.
-        if session.archived {
+        if session.archived && !flag_wake {
             store.set_chat_session_archived(&session.id, false)?;
             session.archived = false;
         }
@@ -7205,6 +7225,7 @@ impl ChatHost {
             client_turn_id,
             request_hash,
             prepared_input: turn_text.clone(),
+            flag_input,
             settings_json: serde_json::to_string(&TurnOverrides {
                 model: session.model.clone(),
                 clear_model: reset_codex_model,
@@ -7236,48 +7257,68 @@ impl ChatHost {
         };
         *reserved = Some(turn_id.clone());
 
-        let (ctx, admitted) = {
+        let submission = {
             let tx = store.begin_immediate()?;
-            let flags = if continuation {
-                Vec::new()
+            let mut flags = if flag_wake {
+                store.admit_flag_wakes(session_id, &turn.client_turn_id, now_ms())?
             } else {
-                crate::engine::flags::carry_cut_flags(
-                    &store,
-                    &session,
-                    &turn.client_turn_id,
-                    created_at,
-                )?
+                Vec::new()
             };
-            if !flags.is_empty() {
-                turn.prepared_input.push_str("\n\n");
-                turn.prepared_input
-                    .push_str(&crate::engine::flags::batch_text(
+            if flag_wake && flags.is_empty() {
+                tx.commit()?;
+                None
+            } else {
+                if !continuation && turn.flag_input.is_none() {
+                    if let Some(current) = store.get_chat_session(session_id)? {
+                        flags.extend(crate::engine::flags::carry_cut_flags(
+                            &store,
+                            &current,
+                            &turn.client_turn_id,
+                            created_at,
+                        )?);
+                    }
+                }
+                if !flags.is_empty() {
+                    turn.flag_input = Some(crate::engine::flags::batch_text(
                         flags.iter().map(String::as_str),
                     ));
+                }
+                let mut ctx = turn_ctx_from_stored(
+                    self.clone(),
+                    &store,
+                    &session,
+                    project,
+                    &turn,
+                    WireMessage {
+                        id: assistant_message_id,
+                        role: "assistant".into(),
+                        parts: Vec::new(),
+                        created_at: now_ms(),
+                        completed_at: None,
+                        parent_id: None,
+                    },
+                )?;
+                ctx.delivery_state = delivery;
+                ctx.continuation = continuation;
+                let admitted = Store::append_chat_turn(&tx, stored_user.as_ref(), &turn)?;
+                if matches!(admitted, ChatTurnAdmission::Inserted) {
+                    if let Some(previous) = previous_flag_turn {
+                        Store::reattach_flag_wakes(
+                            &tx,
+                            session_id,
+                            &previous,
+                            &turn.client_turn_id,
+                        )?;
+                    }
+                    tx.commit()?;
+                }
+                Some((ctx, admitted))
             }
-
-            let mut ctx = turn_ctx_from_stored(
-                self.clone(),
-                &store,
-                &session,
-                project,
-                &turn,
-                WireMessage {
-                    id: assistant_message_id,
-                    role: "assistant".into(),
-                    parts: Vec::new(),
-                    created_at: now_ms(),
-                    completed_at: None,
-                    parent_id: None,
-                },
-            )?;
-            ctx.delivery_state = delivery;
-            ctx.continuation = continuation;
-            let admitted = Store::append_chat_turn(&tx, stored_user.as_ref(), &turn)?;
-            if matches!(admitted, ChatTurnAdmission::Inserted) {
-                tx.commit()?;
-            }
-            (ctx, admitted)
+        };
+        let Some((ctx, admitted)) = submission else {
+            drop(turns);
+            guard.release().await;
+            return Ok(TurnSubmission::NotStarted);
         };
         match admitted {
             ChatTurnAdmission::Inserted => {}
@@ -9157,6 +9198,12 @@ fn turn_ctx_from_stored(
     assistant: WireMessage,
 ) -> Result<TurnCtx> {
     let mut text = rebase_prepared_attachment_paths(&turn.prepared_input);
+    if let Some(flags) = &turn.flag_input {
+        if !text.is_empty() {
+            text.push_str("\n\n");
+        }
+        text.push_str(flags);
+    }
     let position = handoff::position_for(store, session)?;
     // A pending fork branches at the branch's resume point, which turns after
     // it, such as an interrupted one, never reached.
@@ -10664,7 +10711,16 @@ fn run_notice_request(
     notices: &[crate::store::RunNotice],
     guard: TurnGuard,
 ) -> Result<SendTurnRequest> {
-    let text = crate::engine::flags::batch_text(notices.iter().map(|notice| notice.body.as_str()));
+    let flag_wake = notices[0].is_flag_wake();
+    let text = if flag_wake {
+        String::new()
+    } else {
+        notices
+            .iter()
+            .map(|notice| notice.body.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    };
     let mut request = SendTurnRequest {
         messages: vec![AnnotatedText {
             text,
@@ -10680,11 +10736,18 @@ fn run_notice_request(
         },
         overrides: TurnOverrides::default(),
         images: TurnAttachments::Uploaded(Vec::new()),
-        admission: TurnAdmission::Preclaimed(guard),
+        admission: if flag_wake {
+            TurnAdmission::FlagWake(guard)
+        } else {
+            TurnAdmission::Preclaimed(guard)
+        },
         client_turn_id: Some(notices[0].client_turn_id.clone()),
         request_hash: None,
         continuation: false,
     };
+    if flag_wake {
+        return Ok(request);
+    }
     let bodies: Vec<_> = notices
         .iter()
         .map(|notice| {
@@ -10715,8 +10778,11 @@ fn run_notice_request(
             &request.overrides,
             &request.images,
         )?);
-        request.messages[0].text =
-            crate::engine::flags::batch_text(bodies.iter().map(|body| body.as_ref()));
+        request.messages[0].text = bodies
+            .iter()
+            .map(|body| body.as_ref())
+            .collect::<Vec<_>>()
+            .join("\n\n");
     }
     Ok(request)
 }
@@ -10732,7 +10798,10 @@ async fn process_run_notices(
         return Ok(held);
     }
     store.expire_run_notice_batches(now_ms())?;
-    store.retire_stale_flag_wakes(now_ms())?;
+    store.retire_unadmitted_flag_wakes(now_ms())?;
+    for run in store.retire_unconfirmed_flag_attachments(None, now_ms())? {
+        crate::commands::up::api_v2::flag_changed(run);
+    }
     if let Err(error) = crate::engine::flags::follow_up_flags(&store, now_ms()) {
         eprintln!("orx up: run notices: following up flags: {error:#}");
     }
@@ -10755,9 +10824,7 @@ async fn process_run_notices(
             guard.release().await;
             continue;
         }
-        let flagged = notices
-            .iter()
-            .any(|notice| notice.kind == crate::store::WATCH_FLAG);
+        let flagged = notices[0].is_flag_wake();
         if flagged
             && store
                 .get_chat_turn_by_client_id(&session_id, &notices[0].client_turn_id)?
@@ -10770,16 +10837,19 @@ async fn process_run_notices(
                 if let Some(turn) =
                     store.get_chat_turn_by_client_id(&session_id, &notices[0].client_turn_id)?
                 {
-                    if turn.delivery_state == "accepted" {
+                    if !flagged && turn.delivery_state == "accepted" {
                         store.mark_run_notice_batch_delivered(
                             &session_id,
                             &notices[0].client_turn_id,
                             now_ms(),
                         )?;
-                    } else if turn.state == "interrupted"
+                    } else if (flagged && turn.delivery_state == "accepted")
+                        || turn.state == "interrupted"
                         || (turn.state == "failed" && turn.delivery_state == "unknown")
                     {
-                        let reason = if turn.state == "interrupted" {
+                        let reason = if flagged && turn.delivery_state == "accepted" {
+                            crate::store::FLAG_DELIVERY_UNCONFIRMED
+                        } else if turn.state == "interrupted" {
                             "Notice delivery was interrupted before confirmation"
                         } else {
                             turn.error_message
@@ -10802,6 +10872,7 @@ async fn process_run_notices(
                     }
                 }
             }
+            Ok(TurnSubmission::NotStarted) if flagged => held.push(session_id),
             Ok(_) => {}
             Err(err) => {
                 let permanent = is_client_turn_conflict(&err)
@@ -11943,8 +12014,8 @@ mod cap_tests {
         assert_eq!(session.native_session_id, None);
         assert_eq!(session.context_usage_json, None);
         assert!(
-            !session.archived,
-            "compacting is activity, which unarchives"
+            session.archived,
+            "applying automatic compaction preserves Done"
         );
         assert!(handoff::context(&store, &session, None, None, None)
             .unwrap()
@@ -12756,6 +12827,7 @@ mod bridge_tests {
             client_turn_id: format!("client-{}", session.id),
             request_hash: "task".into(),
             prepared_input: "task".into(),
+            flag_input: None,
             settings_json: "{}".into(),
             state: "running".into(),
             delivery_state: "accepted".into(),
@@ -13595,6 +13667,7 @@ mod bridge_tests {
                             client_turn_id: "recovery-client".into(),
                             request_hash: "hash".into(),
                             prepared_input: "Replay this request with its attachments.".into(),
+                            flag_input: None,
                             settings_json: "{}".into(),
                             state: "failed".into(),
                             delivery_state: "rejected".into(),
@@ -13788,6 +13861,7 @@ mod bridge_tests {
                             user_message_id: Some(request.id.clone()),
                             assistant_message_id: format!("answer_{action}"),
                             prepared_input: "Original request.".into(),
+                            flag_input: None,
                             settings_json: r#"{"model":"old-model"}"#.into(),
                             state: "preparing".into(),
                             delivery_state: "not_sent".into(),
@@ -14388,11 +14462,8 @@ mod run_wakeup_tests {
         let launch = crate::local::acp::Definition {
             id: "acp:00000000-0000-4000-8000-000000000001".into(),
             name: "Outbox fixture".into(),
-            executable: std::env::current_exe()
-                .unwrap()
-                .to_string_lossy()
-                .into_owned(),
-            arguments: vec!["--list".into()],
+            executable: crate::local::acp::fake_agent_interpreter("python3"),
+            arguments: vec!["-c".into(), "raise SystemExit(1)".into()],
             unknown: Default::default(),
         };
         let tx = store.begin().unwrap();
@@ -14458,38 +14529,47 @@ mod run_wakeup_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn outbox_crash_retry_freezes_batches_and_coalesces_only_when_idle() {
         const CHILD: &str = "ORX_TEST_CHAT_OUTBOX";
-        if std::env::var_os(CHILD).is_none() {
-            let dir =
-                crate::config::test_home().join(format!("orx-outbox-{}", uuid::Uuid::new_v4()));
-            for phase in ["send", "restart"] {
-                let output = crate::process::command(std::env::current_exe().unwrap())
-                    .args([
-                        "--exact",
-                        "local::chat::run_wakeup_tests::outbox_crash_retry_freezes_batches_and_coalesces_only_when_idle",
-                        "--nocapture",
-                    ])
-                    .env(CHILD, phase)
-                    .env("ORX_DATA_DIR", &dir)
-                    .env("ORX_NO_TELEMETRY", "1")
-                    .output()
-                    .unwrap();
-                assert_eq!(
-                    output.status.code(),
-                    Some(if phase == "send" { 73 } else { 0 }),
-                    "{}\n{}",
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr)
-                );
+        let Ok(child) = std::env::var(CHILD) else {
+            for outbox in ["run_notices", "flag_wakes"] {
+                let dir =
+                    crate::config::test_home().join(format!("orx-outbox-{}", uuid::Uuid::new_v4()));
+                for phase in ["send", "restart"] {
+                    let output = crate::process::command(std::env::current_exe().unwrap())
+                        .args([
+                            "--exact",
+                            "local::chat::run_wakeup_tests::outbox_crash_retry_freezes_batches_and_coalesces_only_when_idle",
+                            "--nocapture",
+                        ])
+                        .env(CHILD, format!("{outbox}:{phase}"))
+                        .env("ORX_DATA_DIR", &dir)
+                        .env("ORX_NO_TELEMETRY", "1")
+                        .output()
+                        .unwrap();
+                    assert_eq!(
+                        output.status.code(),
+                        Some(if phase == "send" { 73 } else { 0 }),
+                        "{outbox} {phase}\n{}\n{}",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+                let _ = std::fs::remove_dir_all(dir);
             }
-            let _ = std::fs::remove_dir_all(dir);
             return;
-        }
+        };
+        let (outbox, phase) = child.split_once(':').unwrap();
         let store = Store::open().unwrap();
         let moving = std::sync::atomic::AtomicBool::new(false);
         let insert = |dedupe: &str, body: &str| {
-            store
-                .insert_run_notice("run_x", "owner", "terminal", dedupe, body, 1)
-                .unwrap();
+            if outbox == "flag_wakes" {
+                store
+                    .insert_flag_wake("run_x", "owner", "f1", dedupe, body, 1)
+                    .unwrap();
+            } else {
+                store
+                    .insert_run_notice("run_x", "owner", "terminal", dedupe, body, 1)
+                    .unwrap();
+            }
         };
         let count_turns = || {
             let tx = store.begin().unwrap();
@@ -14499,7 +14579,7 @@ mod run_wakeup_tests {
             .unwrap()
         };
 
-        if std::env::var(CHILD).unwrap() == "send" {
+        if phase == "send" {
             store
                 .create_local_project(&crate::local::model::LocalProject {
                     id: "p1".into(),
@@ -14519,7 +14599,13 @@ mod run_wakeup_tests {
                 .unwrap();
             session(&store, "owner");
             notice_harness(&store);
-            store.upsert_run(&run("done")).unwrap();
+            store
+                .upsert_run(&run(if outbox == "flag_wakes" {
+                    "running"
+                } else {
+                    "done"
+                }))
+                .unwrap();
             let host = notice_host();
             host.turns
                 .lock()
@@ -14537,7 +14623,7 @@ mod run_wakeup_tests {
             let tx = store.begin().unwrap();
             let assigned: i64 = tx
                 .query_row(
-                    "SELECT COUNT(*) FROM run_notices WHERE client_turn_id IS NOT NULL",
+                    &format!("SELECT COUNT(*) FROM {outbox} WHERE client_turn_id IS NOT NULL"),
                     [],
                     |row| row.get(0),
                 )
@@ -14562,9 +14648,6 @@ mod run_wakeup_tests {
                 .unwrap()
                 .unwrap();
             assert!(first.user_message_id.is_none());
-            assert!(first
-                .prepared_input
-                .contains("first completion\n\nsecond completion"));
             assert_eq!(count_turns(), 1);
 
             std::process::exit(73);
@@ -14575,6 +14658,37 @@ mod run_wakeup_tests {
             .get_chat_turn_by_client_id("owner", &frozen[0].client_turn_id)
             .unwrap()
             .unwrap();
+        let bodies = "first completion\n\nsecond completion";
+        let released_input: String = store
+            .begin()
+            .unwrap()
+            .query_row(
+                include_str!("../../../tests/contracts/store-0.2.28-turn-recovery.sql"),
+                rusqlite::params![first.id, "owner"],
+                |row| row.get("prepared_input"),
+            )
+            .unwrap();
+        if outbox == "flag_wakes" {
+            assert!(!released_input.contains("first completion"));
+            assert!(!released_input.contains("second completion"));
+            assert_eq!(first.flag_input.as_deref(), Some(bodies));
+        } else {
+            assert!(released_input.contains(bodies));
+            assert!(first.flag_input.is_none());
+        }
+        let ctx = turn_ctx_from_stored(
+            notice_host(),
+            &store,
+            &store.get_chat_session("owner").unwrap().unwrap(),
+            store.get_local_project("p1").unwrap().unwrap(),
+            &first,
+            TurnCtx::test_stub().assistant,
+        )
+        .unwrap();
+        assert!(
+            ctx.text.contains(bodies),
+            "current recovery loads the frozen payload"
+        );
         let tx = store.begin().unwrap();
         tx.execute("DELETE FROM chat_turn_leases", []).unwrap();
         tx.commit().unwrap();
@@ -14600,11 +14714,12 @@ mod run_wakeup_tests {
         assert_eq!(retried.id, first.id);
         assert_eq!(retried.client_turn_id, first.client_turn_id);
         assert_eq!(retried.prepared_input, first.prepared_input);
+        assert_eq!(retried.flag_input, first.flag_input);
         let (failures, due): (i64, i64) = store
             .begin()
             .unwrap()
             .query_row(
-                "SELECT delivery_failures, next_delivery_at FROM run_notices WHERE id = ?1",
+                &format!("SELECT delivery_failures, next_delivery_at FROM {outbox} WHERE id = ?1"),
                 [frozen[0].id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -14622,7 +14737,7 @@ mod run_wakeup_tests {
         let tx = store.begin().unwrap();
         tx.execute("UPDATE chat_turns SET state = 'failed', delivery_state = 'rejected', recovery_action = 'retry' WHERE id = ?1", [&first.id]).unwrap();
         tx.execute("DELETE FROM chat_turn_leases", []).unwrap();
-        tx.execute("UPDATE run_notices SET next_delivery_at = 0", [])
+        tx.execute(&format!("UPDATE {outbox} SET next_delivery_at = 0"), [])
             .unwrap();
         tx.commit().unwrap();
         let restarted = notice_host();
@@ -14637,27 +14752,41 @@ mod run_wakeup_tests {
             frozen
         );
         restarted.interrupt("owner").await.unwrap();
-        for (state, delivery) in [
-            ("failed", "unknown"),
-            ("interrupted", "not_sent"),
-            ("interrupted", "unknown"),
-            ("interrupted", "rejected"),
-            ("interrupted", "accepted"),
+        for (state, delivery, released) in [
+            ("failed", "unknown", false),
+            ("interrupted", "not_sent", false),
+            ("interrupted", "unknown", false),
+            ("interrupted", "rejected", false),
+            ("interrupted", "accepted", true),
+            ("interrupted", "accepted", false),
         ] {
             let tx = store.begin().unwrap();
             tx.execute(
                 "UPDATE chat_turns SET state = 'running', delivery_state = ?2, error_message = NULL WHERE id = ?1",
-                rusqlite::params![first.id, delivery],
+                rusqlite::params![first.id, if released { "not_sent" } else { delivery }],
             )
             .unwrap();
             tx.execute("DELETE FROM chat_turn_leases", []).unwrap();
             tx.execute(
-                "UPDATE run_notices SET delivered_at = NULL, retired_at = NULL, next_delivery_at = 0,
-                     delivery_error = NULL WHERE client_turn_id = ?1",
+                &format!("UPDATE {outbox} SET delivered_at = NULL, retired_at = NULL, next_delivery_at = 0,
+                     delivery_error = NULL WHERE client_turn_id = ?1"),
                 [&first.client_turn_id],
             )
             .unwrap();
             tx.commit().unwrap();
+            if released {
+                let tx = store.begin().unwrap();
+                tx.execute(
+                    include_str!("../../../tests/contracts/store-0.2.28-turn-progress.sql"),
+                    rusqlite::params![first.id, "running", "accepted", 1, None::<i64>, now_ms()],
+                )
+                .unwrap();
+                tx.commit().unwrap();
+            } else if delivery == "accepted" {
+                store
+                    .update_chat_turn_progress(&first.id, "running", "accepted", 1, None)
+                    .unwrap();
+            }
             if state == "interrupted" {
                 store.interrupt_chat_turn(&first.id).unwrap();
             } else {
@@ -14671,30 +14800,34 @@ mod run_wakeup_tests {
                     )
                     .unwrap();
             }
-            let restarted = notice_host();
-            process_run_notices(&restarted, Store::open().unwrap(), &moving)
-                .await
-                .unwrap();
+            let confirmed = delivery == "accepted" && !released && outbox == "flag_wakes";
+            if !confirmed {
+                let restarted = notice_host();
+                process_run_notices(&restarted, Store::open().unwrap(), &moving)
+                    .await
+                    .unwrap();
+            }
             let (delivered, retired): (Option<i64>, Option<i64>) = store
                 .begin()
                 .unwrap()
                 .query_row(
-                    "SELECT delivered_at, retired_at FROM run_notices WHERE id = ?1",
+                    &format!("SELECT delivered_at, retired_at FROM {outbox} WHERE id = ?1"),
                     [frozen[0].id],
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .unwrap();
+            let received = delivery == "accepted" && !(released && outbox == "flag_wakes");
             assert_eq!(
                 delivered.is_some(),
-                delivery == "accepted",
-                "{state}/{delivery}"
+                received,
+                "{state}/{delivery} released={released}"
             );
             assert_eq!(
                 retired.is_some(),
-                delivery != "accepted",
-                "{state}/{delivery}"
+                !received,
+                "{state}/{delivery} released={released}"
             );
-            if delivery != "accepted" {
+            if !received {
                 assert!(store.run_notice_error("run_x").unwrap().is_some());
             }
             assert_eq!(count_turns(), 1, "{state}/{delivery} must not be replayed");
@@ -15224,6 +15357,7 @@ for line in sys.stdin:
                 client_turn_id: format!("client-{kind}"),
                 request_hash: "task".into(),
                 prepared_input: "task".into(),
+                flag_input: None,
                 settings_json: "{}".into(),
                 state: "preparing".into(),
                 delivery_state: "not_sent".into(),
@@ -16185,6 +16319,7 @@ done
                     client_turn_id: format!("client-{session_id}"),
                     request_hash: "task".into(),
                     prepared_input: "task".into(),
+                    flag_input: None,
                     settings_json: "{}".into(),
                     state: "running".into(),
                     delivery_state: "accepted".into(),
@@ -16247,6 +16382,7 @@ done
                 client_turn_id: "client-unchecked".into(),
                 request_hash: "task".into(),
                 prepared_input: "task".into(),
+                flag_input: None,
                 settings_json: "{}".into(),
                 state: "running".into(),
                 delivery_state: "not_sent".into(),
@@ -16301,6 +16437,7 @@ done
                 client_turn_id: "client-retrying".into(),
                 request_hash: "task".into(),
                 prepared_input: "task".into(),
+                flag_input: None,
                 settings_json: "{}".into(),
                 state: "retrying".into(),
                 delivery_state: "accepted".into(),
@@ -16631,6 +16768,7 @@ done
             "-c".into(),
             r#"
 import json, sys
+sys.stdin.reconfigure(encoding="utf-8")
 for line in sys.stdin:
     request = json.loads(line)
     method = request['method']
@@ -16695,6 +16833,79 @@ for line in sys.stdin:
         crate::engine::flags::read(store, run).unwrap().remove(0)
     }
 
+    fn ask_about_flag(store: &Store, run: &StoredRun) {
+        let ask = crate::store::FlagChoice {
+            run_id: run.id.clone(),
+            body: json!({"flagId": "f1", "c": "ask", "by": "user", "requestId": "first"}),
+            wakes: vec![(
+                "owner".into(),
+                crate::engine::flags::wake(run, &flag(store, run), true),
+            )],
+        };
+        store.record_flag_choices(&[ask], None, 2).unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn marking_done_withdraws_an_ask_about_a_live_run() {
+        if crate::config::in_test_child(&[]) {
+            marking_done_withdraws_ask(false).await;
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn marking_done_withdraws_an_ask_about_an_ended_run() {
+        if crate::config::in_test_child(&[]) {
+            marking_done_withdraws_ask(true).await;
+        }
+    }
+
+    async fn marking_done_withdraws_ask(ended: bool) {
+        let store = Store::open().unwrap();
+        let mut run = quiet_agent_chat(&store, Some("copilot"));
+        if ended {
+            run.status = "done".into();
+            run.ended_at = Some(1);
+            store.upsert_run(&run).unwrap();
+        }
+        ask_about_flag(&store, &run);
+        assert_eq!(flag(&store, &run)["state"], "asking");
+
+        store.set_chat_session_archived("owner", true).unwrap();
+        settle_all(&notice_host()).await;
+
+        assert!(prompts().is_empty());
+        assert!(store.get_chat_session("owner").unwrap().unwrap().archived);
+        assert_eq!(flag(&store, &run)["state"], "waiting");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn marking_done_before_flag_admission_preserves_done_and_withdraws_the_wake() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let store = Store::open().unwrap();
+        let run = quiet_agent_chat(&store, None);
+        let host = notice_host();
+        let guard = TurnGuard::claim_idle(&host, "owner", TurnState::Reserved { turn_id: None })
+            .await
+            .unwrap();
+        let batch = store.run_notice_batch("owner").unwrap();
+        assert_eq!(batch.len(), 1);
+        store.set_chat_session_archived("owner", true).unwrap();
+
+        let submission = host
+            .send_message_showing("owner", run_notice_request(&store, &batch, guard).unwrap())
+            .await
+            .unwrap();
+        assert!(matches!(submission, TurnSubmission::NotStarted));
+        assert!(store.get_chat_session("owner").unwrap().unwrap().archived);
+        assert!(store
+            .get_chat_turn_by_client_id("owner", &batch[0].client_turn_id)
+            .unwrap()
+            .is_none());
+        assert_eq!(flag(&store, &run)["state"], "waiting");
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn an_independent_agent_is_reminded_once_then_its_unsettled_flag_is_kept() {
         if !crate::config::in_test_child(&[]) {
@@ -16716,6 +16927,130 @@ for line in sys.stdin:
             (&json!("agent"), &json!(true))
         );
         assert!(crate::engine::flags::status_line(&flag).contains("the agent left it unsettled"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_continued_independent_flag_review_gets_its_reminder() {
+        if crate::config::in_test_child(&[]) {
+            recover_flag_review("continue", false, false).await;
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_continued_copilot_ask_tracks_the_new_review_turn() {
+        if crate::config::in_test_child(&[]) {
+            recover_flag_review("continue", true, false).await;
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn retrying_a_flag_review_keeps_its_original_turn() {
+        if crate::config::in_test_child(&[]) {
+            recover_flag_review("retry", false, false).await;
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn retrying_a_flag_review_after_switching_agents_tracks_the_new_turn() {
+        if crate::config::in_test_child(&[]) {
+            recover_flag_review("retry", false, true).await;
+        }
+    }
+
+    async fn recover_flag_review(action: &str, copilot: bool, switched: bool) {
+        let store = Store::open().unwrap();
+        let run = quiet_agent_chat(&store, copilot.then_some("copilot"));
+        if copilot {
+            ask_about_flag(&store, &run);
+        }
+        let batch = store.run_notice_batch("owner").unwrap();
+        let notice = &batch[0];
+        let client_turn = &notice.client_turn_id;
+        store.put_chat_turn("owner", client_turn, "running", 2);
+        let tx = store.begin().unwrap();
+        tx.execute(
+            "UPDATE chat_turns SET flag_input = ?2 WHERE id = ?1",
+            rusqlite::params![client_turn, notice.body],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        if switched {
+            store
+                .upsert_chat_message(&StoredChatMessage {
+                    id: client_turn.clone(),
+                    session_id: "owner".into(),
+                    role: "assistant".into(),
+                    parts_json: "[]".into(),
+                    created_at: 2,
+                    completed_at: Some(2),
+                    parent_id: None,
+                    base_native_session_id: None,
+                    result_native_session_id: None,
+                    result_native_message_id: None,
+                    native_harness: Some("claude-code".into()),
+                })
+                .unwrap();
+        }
+        let delivery = if action == "continue" {
+            store
+                .update_chat_turn_progress(client_turn, "running", "accepted", 1, None)
+                .unwrap();
+            "accepted"
+        } else {
+            "not_sent"
+        };
+        store
+            .fail_chat_turn(
+                client_turn,
+                delivery,
+                "fixture",
+                "The review was cut short",
+                Some(action),
+            )
+            .unwrap();
+
+        let host = notice_host();
+        let reply = host
+            .recover_turn("owner", client_turn, action, RecoveryOverrides::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            reply.turn_id == *client_turn,
+            action == "retry" && !switched
+        );
+        if reply.turn_id != *client_turn {
+            assert!(store
+                .flag_notice_runs_for_turn(client_turn)
+                .unwrap()
+                .is_empty());
+            assert!(store.pending_run_notice_sessions().unwrap().is_empty());
+        }
+        settle_all(&host).await;
+
+        let sent = prompts();
+        assert_eq!(sent.len(), if copilot { 1 } else { 2 }, "{sent:#?}");
+        assert_eq!(sent[0].matches(notice.body.as_str()).count(), 1);
+        let continued = store
+            .get_chat_turn("owner", &reply.turn_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(continued.state, "completed");
+        assert_eq!(continued.flag_input.as_deref(), Some(notice.body.as_str()));
+        assert_eq!(
+            store.flag_notice_runs_for_turn(&reply.turn_id).unwrap(),
+            [run.id.as_str()]
+        );
+        if copilot {
+            assert_eq!(flag(&store, &run)["state"], "waiting");
+            assert!(flag(&store, &run)["handback"].is_number());
+            assert_eq!(
+                store.run_flag_notices(&run.id).unwrap()[0].dedupe,
+                "ask:first"
+            );
+        } else {
+            assert!(sent[1].contains("Your last turn ended without settling flag f1"));
+            assert_eq!(flag(&store, &run)["state"], "kept");
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -16814,7 +17149,137 @@ for line in sys.stdin:
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn a_flag_whose_run_ended_first_goes_to_the_independent_agent_with_its_result() {
+    async fn a_released_retry_without_its_cut_flag_leaves_it_available_to_carry_again() {
+        const CRASH: &str = "ORX_TEST_CUT_FLAG_BEFORE_SEND";
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        if std::env::var_os(CRASH).is_some() {
+            let store = Store::open().unwrap();
+            quiet_agent_chat(&store, None);
+            let batch = store.run_notice_batch("owner").unwrap();
+            store
+                .record_run_notice_failure(
+                    "owner",
+                    &batch[0].client_turn_id,
+                    "Review was cut short",
+                    true,
+                    1,
+                )
+                .unwrap();
+            let reply = notice_host()
+                .send_message(
+                    "owner",
+                    "Check the training run.".into(),
+                    TurnOverrides::default(),
+                    Vec::new(),
+                    Vec::new(),
+                    Some("cut-user-turn".into()),
+                    None,
+                )
+                .await
+                .unwrap();
+            let turn = store
+                .get_chat_turn("owner", &reply.turn_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(turn.state, "preparing");
+            assert_eq!(turn.delivery_state, "not_sent");
+            assert!(turn.flag_input.unwrap().contains("was flagged for review"));
+            assert!(prompts().is_empty());
+            std::process::exit(73);
+        }
+        let test = std::thread::current();
+        let output = crate::process::command(std::env::current_exe().unwrap())
+            .args(["--exact", test.name().unwrap(), "--nocapture"])
+            .env(CRASH, "1")
+            .env("ORX_DATA_DIR", crate::store::data_dir())
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(73),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let old = rusqlite::Connection::open(crate::store::data_dir().join("orx.db")).unwrap();
+        old.execute_batch(include_str!(
+            "../../../tests/contracts/store-0.2.28-turn-retry.sql"
+        ))
+        .unwrap();
+        let turn_id: String = old.query_row(
+            "SELECT id FROM chat_turns WHERE client_turn_id = 'cut-user-turn' AND state = 'preparing'",
+            [], |row| row.get(0),
+        ).unwrap();
+        let old_prompt: String = old
+            .query_row(
+                include_str!("../../../tests/contracts/store-0.2.28-turn-recovery.sql"),
+                rusqlite::params![turn_id, "owner"],
+                |row| row.get("prepared_input"),
+            )
+            .unwrap();
+        assert!(old_prompt.contains("Check the training run."));
+        assert!(!old_prompt.contains("was flagged for review"));
+        assert_eq!(
+            old.execute(
+                include_str!("../../../tests/contracts/store-0.2.28-turn-progress.sql"),
+                rusqlite::params![turn_id, "running", "accepted", 1, None::<i64>, 4],
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            old.execute(
+                "UPDATE chat_turns SET state = 'completed', next_retry_at = NULL,
+                 error_kind = NULL, error_message = NULL, recovery_action = NULL,
+                 updated_at = ?2 WHERE id = ?1
+                   AND state IN ('preparing', 'retrying', 'running')",
+                rusqlite::params![turn_id, 5],
+            )
+            .unwrap(),
+            1
+        );
+        drop(old);
+
+        let store = Store::open().unwrap();
+        let run = store.get_run("run_x").unwrap().unwrap();
+        let host = notice_host();
+        let moving = std::sync::atomic::AtomicBool::new(false);
+        process_run_notices(&host, Store::open().unwrap(), &moving)
+            .await
+            .unwrap();
+        assert_eq!(flag(&store, &run)["state"], "waiting");
+        let attached = store.run_flag_notices(&run.id).unwrap().pop().unwrap();
+        assert!(attached.retired && !attached.delivered);
+        assert_eq!(
+            store.run_notice_error(&run.id).unwrap().as_deref(),
+            Some(crate::store::FLAG_DELIVERY_UNCONFIRMED),
+        );
+        assert!(store.pending_run_notice_sessions().unwrap().is_empty());
+        assert!(prompts().is_empty());
+
+        host.send_message(
+            "owner",
+            "Check it again.".into(),
+            TurnOverrides::default(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        settle_all(&host).await;
+        let delivered = prompts();
+        assert!(delivered[0].contains("Check it again."));
+        assert!(delivered[0].contains("was flagged for review"));
+        assert_eq!(flag(&store, &run)["state"], "kept");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_flag_whose_run_ended_first_goes_to_the_independent_agent_after_its_result() {
         if !crate::config::in_test_child(&[]) {
             return;
         }
@@ -16838,19 +17303,21 @@ for line in sys.stdin:
 
         settle_all(&notice_host()).await;
         let prompts = prompts();
-        assert_eq!(prompts.len(), 2, "{prompts:#?}");
+        assert_eq!(prompts.len(), 3, "{prompts:#?}");
         assert!(
             prompts[0].contains("finished with status"),
             "{}",
             prompts[0]
         );
+        assert!(!prompts[0].contains("orx exp flag"), "{}", prompts[0]);
         assert!(
-            prompts[0].contains("was flagged for review"),
+            prompts[1].contains("was flagged for review"),
             "{}",
-            prompts[0]
+            prompts[1]
         );
-        assert!(prompts[0].contains("has ended (done), so there is nothing to stop"));
-        assert!(!prompts[1].contains("--stop"), "{}", prompts[1]);
+        assert!(prompts[1].contains("has ended (done), so there is nothing to stop"));
+        assert!(prompts[2].contains("ended without settling flag f1"));
+        assert!(!prompts[2].contains("--stop"), "{}", prompts[2]);
         assert_eq!(flag(&store, &run)["state"], "kept");
     }
 
@@ -16883,7 +17350,10 @@ for line in sys.stdin:
         let prompts = prompts();
         assert_eq!(prompts.len(), 1, "{prompts:#?}");
         assert!(prompts[0].contains("The user asked you to look at a flag"));
-        assert_eq!(flag(&store, &run)["state"], "waiting");
+        let reviewed = flag(&store, &run);
+        assert_eq!(reviewed["state"], "waiting");
+        let ask = store.run_flag_events(&run.id).unwrap().pop().unwrap();
+        assert_eq!(reviewed["handback"], ask.seq);
     }
 }
 

@@ -71,7 +71,7 @@ export type Logo = (size: number) => ReactNode;
 export type FileUrl = (path: string) => string;
 
 function IconMark({ icon, brand, size, fileUrl }: { icon: ProjectIcon; brand: Logo; size: number; fileUrl?: FileUrl }) {
-  if ("emoji" in icon) return <span className="leading-none">{icon.emoji}</span>;
+  if ("emoji" in icon) return <span className="text-tile-emoji leading-none">{icon.emoji}</span>;
   if ("file" in icon) return <img alt="" draggable={false} className="size-full object-cover" src={fileUrl?.(icon.file)} />;
   if ("image" in icon) return <img alt="" draggable={false} className="size-full object-cover" src={`data:${icon.image.type};base64,${icon.image.data}`} />;
   if ("brand" in icon) return brand(size);
@@ -96,7 +96,7 @@ export function AgentIconTile({ icon, brand, size = "md", outline = true, fill =
   const plain = bare ? cn(PLAIN.tile, "border-transparent") : PLAIN.tile;
   const picture = "image" in icon || "file" in icon;
   return (
-    <span aria-hidden="true" className={cn("grid shrink-0 place-items-center overflow-hidden border", TILE_SIZES[size].box, !color ? (fill && picture ? "border-transparent" : plain) : picture ? cn("border-transparent", color.solid) : fill ? cn("border-transparent", color.fill) : color.tile)}>
+    <span aria-hidden="true" className={cn("@container grid shrink-0 place-items-center overflow-hidden border", TILE_SIZES[size].box, !color ? (fill && picture ? "border-transparent" : plain) : picture ? cn("border-transparent", color.solid) : fill ? cn("border-transparent", color.fill) : color.tile)}>
       <IconMark icon={icon} brand={brand} size={TILE_SIZES[size].mark + (bare ? 4 : 0)} fileUrl={fileUrl} />
     </span>
   );

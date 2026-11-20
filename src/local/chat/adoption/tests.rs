@@ -152,6 +152,7 @@ fn running_turn(store: &Store, session_id: &str) -> StoredChatTurn {
         client_turn_id: format!("client-{session_id}"),
         request_hash: "task".into(),
         prepared_input: "task".into(),
+        flag_input: None,
         settings_json: "{}".into(),
         state: "running".into(),
         delivery_state: "accepted".into(),

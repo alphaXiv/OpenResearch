@@ -3592,7 +3592,7 @@ async fn a_flag_is_settled_once_by_whoever_chooses_first() {
         "a Copilot flag waits for the user"
     );
     assert!(
-        store().run_notices_for_tests("live").is_empty(),
+        store().pending_run_notice_sessions().unwrap().is_empty(),
         "and wakes no one"
     );
 
@@ -3605,14 +3605,6 @@ async fn a_flag_is_settled_once_by_whoever_chooses_first() {
     .unwrap();
     assert_eq!(asked["flag"]["state"], "asking");
     assert_eq!(flag_of("other")["state"], "asking");
-    let notices: Vec<_> = ["live", "other"]
-        .iter()
-        .flat_map(|run| store().run_notices_for_tests(run))
-        .collect();
-    assert_eq!(notices.len(), 2, "{notices:?}");
-    assert!(notices.iter().all(|(chat, kind, body)| chat == "chat-1"
-        && kind == "watch_flag"
-        && body.starts_with("[orx] The user asked you to look at a flag on run ")));
     assert_eq!(
         choose(
             "live",
@@ -3623,6 +3615,19 @@ async fn a_flag_is_settled_once_by_whoever_chooses_first() {
         "asking",
         "a repeated request answers as the first did"
     );
+    let notices = store().run_notice_batch("chat-1").unwrap();
+    let runs: Vec<_> = notices
+        .iter()
+        .map(|notice| notice.run_id.as_str())
+        .collect();
+    assert_eq!(runs, ["live", "other"]);
+    assert!(notices
+        .iter()
+        .all(|notice| notice.chat_session_id == "chat-1"
+            && notice.kind == crate::store::WATCH_FLAG
+            && notice
+                .body
+                .starts_with("[orx] The user asked you to look at a flag on run ")));
 
     // The agent leaves it to the user, then the user keeps it going.
     let handed = choose(
@@ -3632,6 +3637,14 @@ async fn a_flag_is_settled_once_by_whoever_chooses_first() {
     .await
     .unwrap();
     assert_eq!(handed["flag"]["state"], "waiting");
+    let handback = store()
+        .run_flag_events("other")
+        .unwrap()
+        .last()
+        .unwrap()
+        .seq;
+    assert_eq!(handed["flag"]["handback"], handback);
+    assert_eq!(handed["run"]["monitor"]["flag"]["handback"], handback);
     let kept = choose(
         "other",
         json!({"flagId": "f2", "choice": "keep", "requestId": "q2", "reason": "Warm-up noise."}),
@@ -3672,6 +3685,13 @@ async fn a_flag_is_settled_once_by_whoever_chooses_first() {
         refused(choose("done", json!({"flagId": "f4", "choice": "stop"})).await)
             .contains("Run done already ended (done), so there is nothing to stop.")
     );
+    let asked = choose(
+        "done",
+        json!({"flagId": "f4", "choice": "ask", "requestId": "ended"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(asked["flag"]["state"], "asking");
     let kept = choose(
         "done",
         json!({"flagId": "f4", "choice": "keep", "reason": "Expected."}),
@@ -3791,10 +3811,7 @@ async fn a_stop_and_a_keep_that_race_leave_one_winner() {
         store().record_flag_choices(&[ask], None, 2).unwrap(),
         crate::store::Chosen::Settled
     ));
-    assert!(store()
-        .run_notices_for_tests("cancelled")
-        .iter()
-        .all(|(_, kind, _)| kind != "watch_flag"));
+    assert!(store().run_flag_notices("cancelled").unwrap().is_empty());
     assert_eq!(
         store().run_stop("cancelled").unwrap().unwrap().by,
         crate::store::StopBy::Agent,

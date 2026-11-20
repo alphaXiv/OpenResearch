@@ -489,26 +489,22 @@ pub(crate) fn local_binary(root: &Path) -> Result<PathBuf> {
     std::fs::create_dir_all(&cache)?;
     std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o700))?;
     let path = cache.join(format!("orx-host-{}", binary.sha));
-    if !path.try_exists()? {
-        // Executable before it is visible: a concurrent extraction may rename its copy over
-        // this one between another caller's check and its exec.
-        use std::io::Write as _;
-        use std::os::unix::fs::OpenOptionsExt as _;
-        let temporary = path.with_extension(format!("tmp-{}", orx_host::nonce()?));
-        let published = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o700)
-            .open(&temporary)
-            .and_then(|mut file| {
-                file.write_all(&binary.bytes)?;
-                file.sync_all()
-            })
-            .and_then(|()| std::fs::rename(&temporary, &path));
-        let _ = std::fs::remove_file(&temporary);
-        published?;
+    if path.try_exists()? {
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+        return Ok(path);
     }
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+    let temporary = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
+    let installed = (|| -> Result<()> {
+        crate::process::write_executable(&temporary, 0o700, |file| file.write_all(&binary.bytes))?;
+        std::fs::File::open(&temporary)?.sync_all()?;
+        std::fs::rename(&temporary, &path)?;
+        std::fs::File::open(&cache)?.sync_all()?;
+        Ok(())
+    })();
+    if installed.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    installed.with_context(|| format!("Could not install {}", path.display()))?;
     Ok(path)
 }
 

@@ -767,11 +767,10 @@ pub(crate) async fn verify(harness: &str, bin: &Path, version: &semver::Version)
         command
             .arg("--version")
             .env("NO_COLOR", "1")
-            .stdin(std::process::Stdio::null())
-            .kill_on_drop(true);
-        let output = tokio::time::timeout(Duration::from_secs(60), command.output())
+            .stdin(std::process::Stdio::null());
+        let output = super::detect_spawn_output_timed(command, Duration::from_secs(60))
             .await
-            .map_err(|_| anyhow!("The downloaded {harness} did not answer `--version`."))?
+            .ok_or_else(|| anyhow!("The downloaded {harness} did not answer `--version`."))?
             .with_context(|| format!("Could not run the downloaded {harness}"))?;
         if !output.status.success() {
             bail!(

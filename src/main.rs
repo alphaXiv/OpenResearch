@@ -456,25 +456,25 @@ pub struct InstanceCreateArgs {
     pub org_id: String,
     /// Provision a GPU instance with this GPU id, e.g. `H100_SXM` — the exact id
     /// from `orx compute`, not a family name like `H100`.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "cpu")]
     pub gpu: Option<String>,
     /// GPUs per instance (with `--gpu`; default 1).
-    #[arg(long)]
+    #[arg(long, conflicts_with = "cpu")]
     pub count: Option<i64>,
     /// Disk in GB (with `--gpu`; default 100).
-    #[arg(long)]
+    #[arg(long, conflicts_with = "cpu")]
     pub disk: Option<i64>,
     /// Provider to provision from (with `--gpu`), e.g. runpod, vast, lambda.
     /// Omit to pick the cheapest matching offer across providers (like the
     /// dashboard). See `orx compute` for providers; validated server-side.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "cpu")]
     pub provider: Option<String>,
     /// Provision a CPU-only instance with this flavor: cpu5c (compute), cpu5g
     /// (general), or cpu5m (memory-optimized). Mutually exclusive with `--gpu`.
     #[arg(long)]
     pub cpu: Option<String>,
     /// vCPUs for a CPU instance (with `--cpu`): 2, 8, or 32 (default 8).
-    #[arg(long)]
+    #[arg(long, conflicts_with = "gpu")]
     pub vcpus: Option<i64>,
 }
 
