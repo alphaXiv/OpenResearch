@@ -2,7 +2,7 @@ import type { ChatTextAnnotation, TurnOptions } from "./api";
 
 /** Per-chat stash for unsent composer content (draft, attachments, annotations). */
 export interface ComposerAttachment {
-  /** Unique across composers; the draft cites it as `[Image #id]` or `[PDF #id]`. */
+  /** Unique across composers; the draft cites it as `[Image #id]`, `[PDF #id]` or `[File #id]`. */
   id: number;
   dataUrl: string;
   mediaType: string;
@@ -16,11 +16,15 @@ export function nextAttachmentId(): number {
   return ++lastAttachmentId;
 }
 
+/** The image types agents read as pictures; any other file attaches as a file. */
+export const isPictureType = (mediaType: string) => /^image\/(png|jpeg|gif|webp)$/.test(mediaType);
+
 export function attachmentToken(attachment: Pick<ComposerAttachment, "id" | "mediaType">): string {
-  return `[${attachment.mediaType === "application/pdf" ? "PDF" : "Image"} #${attachment.id}]`;
+  const kind = attachment.mediaType === "application/pdf" ? "PDF" : isPictureType(attachment.mediaType) ? "Image" : "File";
+  return `[${kind} #${attachment.id}]`;
 }
 
-export const ATTACHMENT_TOKEN = /\[(?:Image|PDF) #(\d+)\]/g;
+export const ATTACHMENT_TOKEN = /\[(?:Image|PDF|File) #(\d+)\]/g;
 
 /** The attachments a draft cites, in order of first mention, with each token
  * renumbered from 1 so the text and the attachment list agree. Uncited

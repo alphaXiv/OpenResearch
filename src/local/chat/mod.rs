@@ -1068,7 +1068,6 @@ pub struct SavedAttachment {
     pub path: std::path::PathBuf,
     /// Human-readable name shown in the transcript and told to the agent.
     pub display_name: String,
-    pub is_pdf: bool,
 }
 
 pub const ATTACHMENTS_DIR: &str = "chat-attachments";
@@ -1084,15 +1083,28 @@ pub fn attachments_dir() -> Result<std::path::PathBuf> {
     Ok(dir)
 }
 
-fn image_ext(media_type: &str) -> Option<&'static str> {
-    match media_type {
-        "image/png" => Some("png"),
-        "image/jpeg" => Some("jpg"),
-        "image/gif" => Some("gif"),
-        "image/webp" => Some("webp"),
-        "application/pdf" => Some("pdf"),
-        _ => None,
+/// The saved file's extension: canonical for images and PDFs, else the original
+/// name's own when it is plain ASCII, so the agent and the served type see it.
+fn attachment_ext(media_type: &str, original: Option<&str>) -> String {
+    let canonical = match media_type {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "application/pdf" => "pdf",
+        _ => "",
+    };
+    if !canonical.is_empty() {
+        return canonical.into();
     }
+    original
+        .map(|n| n.rsplit(['/', '\\']).next().unwrap_or(n))
+        .and_then(|base| base.rsplit_once('.'))
+        .map(|(_, ext)| ext.to_ascii_lowercase())
+        .filter(|ext| {
+            ext.len() <= 16 && !ext.is_empty() && ext.chars().all(|c| c.is_ascii_alphanumeric())
+        })
+        .unwrap_or_default()
 }
 
 /// Sanitize an original file name into the `<name>.<ext>` form embedded in the
@@ -1120,13 +1132,16 @@ fn safe_attachment_name(original: Option<&str>, ext: &str) -> String {
         .take(60)
         .collect::<String>();
     if safe.is_empty() {
-        safe = if ext == "pdf" {
-            "document".into()
-        } else {
-            "image".into()
+        safe = match ext {
+            "png" | "jpg" | "gif" | "webp" => "image".into(),
+            _ => "document".into(),
         };
     }
-    format!("{safe}.{ext}")
+    if ext.is_empty() {
+        safe
+    } else {
+        format!("{safe}.{ext}")
+    }
 }
 
 /// Matches the `att-<uuid>__<name>.<ext>` names `save_images` mints.
@@ -1136,6 +1151,36 @@ pub(crate) fn is_attachment_name(name: &str) -> bool {
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+}
+
+#[cfg(test)]
+mod attachment_name_tests {
+    use super::{attachment_ext, is_attachment_name, safe_attachment_name};
+
+    fn saved_name(media_type: &str, original: &str) -> String {
+        safe_attachment_name(Some(original), &attachment_ext(media_type, Some(original)))
+    }
+
+    #[test]
+    fn any_file_keeps_its_own_extension() {
+        assert_eq!(saved_name("text/markdown", "notes v2.md"), "notes-v2.md");
+        assert_eq!(saved_name("", "data.CSV"), "data.csv");
+        assert_eq!(saved_name("", "archive.tar.gz"), "archive-tar.gz");
+        assert_eq!(saved_name("", "Makefile"), "Makefile");
+        assert_eq!(saved_name("", ".env"), "document.env");
+        assert_eq!(saved_name("image/jpeg", "photo.JPEG"), "photo.jpg");
+        assert_eq!(saved_name("application/pdf", "paper"), "paper.pdf");
+    }
+
+    #[test]
+    fn unsafe_extensions_are_dropped() {
+        assert_eq!(saved_name("", "evil.m d"), "evil");
+        assert_eq!(saved_name("", "../../x.%2e"), "x");
+        for name in ["notes v2.md", "../../x.%2e", "résumé.pdf", "a.b.c.d"] {
+            let saved = format!("att-00__{}", saved_name("", name));
+            assert!(is_attachment_name(&saved), "{saved}");
+        }
+    }
 }
 
 /// Decode pasted/uploaded attachments to the attachments dir. The original file
@@ -1148,12 +1193,11 @@ fn save_images(images: &[ImageAttachment]) -> Result<Vec<SavedAttachment>> {
     let dir = attachments_dir()?;
     let mut saved = Vec::new();
     for img in images {
-        let ext = image_ext(&img.media_type)
-            .ok_or_else(|| anyhow!("unsupported attachment type: {}", img.media_type))?;
+        let ext = attachment_ext(&img.media_type, img.name.as_deref());
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(img.data_base64.as_bytes())
             .map_err(|e| anyhow!("bad attachment data: {e}"))?;
-        let safe = safe_attachment_name(img.name.as_deref(), ext);
+        let safe = safe_attachment_name(img.name.as_deref(), &ext);
         let file_name = format!("att-{}__{safe}", uuid::Uuid::new_v4());
         let path = dir.join(&file_name);
         std::fs::write(&path, bytes)
@@ -1171,7 +1215,6 @@ fn save_images(images: &[ImageAttachment]) -> Result<Vec<SavedAttachment>> {
             file_name,
             path,
             display_name,
-            is_pdf: ext == "pdf",
         });
     }
     Ok(saved)
@@ -6872,11 +6915,14 @@ impl ChatHost {
                 title.push('…');
             }
             if title.is_empty() && !saved_images.is_empty() {
-                // Name an attachment-only message after the first PDF (the
-                // "upload my paper" flow), falling back to a generic label.
+                // Name an attachment-only message after the first file that
+                // isn't a picture (the "upload my paper" flow), falling back to a generic label.
                 title = saved_images
                     .iter()
-                    .find(|a| a.is_pdf)
+                    .find(|a| {
+                        !crate::local::files::content_type_for_path(&a.file_name)
+                            .starts_with("image/")
+                    })
                     .map(|a| a.display_name.chars().take(64).collect())
                     .unwrap_or_else(|| "Image".into());
             }
@@ -10106,12 +10152,10 @@ fn replayed_attachments(parts: &[WirePart]) -> Result<Vec<SavedAttachment>> {
             .split_once("__")
             .map(|(_, name)| name.to_string())
             .unwrap_or_else(|| file_name.clone());
-        let is_pdf = file_name.ends_with(".pdf");
         saved.push(SavedAttachment {
             file_name,
             path,
             display_name,
-            is_pdf,
         });
     }
     Ok(saved)

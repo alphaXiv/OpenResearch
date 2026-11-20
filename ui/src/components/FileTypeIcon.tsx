@@ -240,3 +240,21 @@ export function FileTypeIcon({ name }: { name: string }) {
     </svg>
   );
 }
+
+/** An attached file as a card: its icon on a tile, the name, and its type and size. */
+export function FileCardContent({ name, size }: { name: string; size?: string }) {
+  const dot = name.lastIndexOf(".");
+  const type = dot > 0 ? name.slice(dot + 1).toUpperCase() : "";
+  const detail = [type, size].filter(Boolean).join(" · ");
+  return (
+    <>
+      <span className="flex size-10 shrink-0 items-center justify-center rounded-md border border-border bg-background [&>svg]:size-6">
+        <FileTypeIcon name={name} />
+      </span>
+      <span className="flex min-w-0 flex-col">
+        <span className="truncate text-sm font-medium text-text">{name}</span>
+        {detail && <span className="truncate text-xs text-subtext">{detail}</span>}
+      </span>
+    </>
+  );
+}

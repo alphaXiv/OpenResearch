@@ -18,7 +18,7 @@ import {
   placeholder as placeholderText,
   type DecorationSet,
 } from "@codemirror/view";
-import { FileText, Folder, MessageSquare } from "lucide-react";
+import { Folder, MessageSquare } from "lucide-react";
 import {
   useContext,
   useEffect,
@@ -37,12 +37,12 @@ import { type CitedMessage, type HarnessId, type SkillInfo } from "../api";
 import { fmtBytes } from "../i18n";
 import { CITED_ID, refLabel } from "../agentMessages";
 import { commandDisplayName } from "../composerCommands";
-import type { ComposerAttachment } from "../composerStash";
+import { isPictureType, type ComposerAttachment } from "../composerStash";
 import { PAPER_LINK, splitMentionPath } from "../fileMentions";
 import { livePreview, pointerSelection, revealChanged, revealedSpan } from "../markdownLivePreview";
 import { m } from "../paraglide/messages.js";
 import { WorkspaceDomContext } from "../WorkspaceDom";
-import { FileTypeIcon } from "./FileTypeIcon";
+import { FileCardContent, FileTypeIcon } from "./FileTypeIcon";
 import { HarnessLogo } from "./HarnessLogo";
 import { LitSourceLogo } from "./LitSourceLogo";
 import { ResizeHandle } from "./ResizeHandle";
@@ -71,7 +71,7 @@ type Chip =
 
 const CHIP_TOKEN = new RegExp(
   [
-    String.raw`\[(?:Image|PDF) #(?<attachment>\d+)\]`,
+    String.raw`\[(?:Image|PDF|File) #(?<attachment>\d+)\]`,
     PAPER_LINK.source,
     `(?<cited>${CITED_ID.source})`,
     String.raw`(?<=^|\s)(?:\/(?<command>[^\s/]+)|@"(?<quotedPath>[^"\n]+)"|@(?<path>\S+))(?=\s|$)`,
@@ -119,6 +119,14 @@ function chipKey(chip: Chip): string {
 const CHIP_CLASS =
   "mx-px mt-[3px] inline-flex h-5 max-w-64 cursor-default items-center gap-1 rounded-md border px-1.5 align-top text-sm leading-4.5 whitespace-nowrap";
 
+const IMAGE_CHIP_CLASS =
+  "group relative mx-px my-1 inline-flex max-w-full cursor-default overflow-hidden rounded-lg border border-border bg-surface align-bottom";
+
+const FILE_CHIP_CLASS =
+  "group relative mx-px my-1 inline-flex h-14 max-w-64 cursor-default items-center gap-2.5 rounded-lg border border-border bg-surface ps-2 pe-3 align-bottom";
+
+const isImageChip = (chip: Chip) => chip.kind === "attachment" && isPictureType(chip.attachment.mediaType);
+
 function ChipContent({ chip }: { chip: Chip }) {
   if (chip.kind === "command") {
     return (
@@ -164,17 +172,7 @@ function ChipContent({ chip }: { chip: Chip }) {
     );
   }
   const { attachment } = chip;
-  return (
-    <>
-      {attachment.mediaType.startsWith("image/") ? (
-        <img src={attachment.dataUrl} alt="" className="size-4 shrink-0 rounded-xs object-cover" />
-      ) : (
-        <FileText size={14} className="shrink-0 text-subtext" aria-hidden="true" />
-      )}
-      <span className="min-w-0 truncate">{attachment.name ?? m.chat_pasted_image()}</span>
-      <span className="shrink-0 text-muted">{fmtBytes(attachment.size)}</span>
-    </>
-  );
+  return <FileCardContent name={attachment.name ?? m.chat_pasted_image()} size={fmtBytes(attachment.size)} />;
 }
 
 const chipRoots = new WeakMap<HTMLElement, Root>();
@@ -195,22 +193,50 @@ class ChipWidget extends WidgetType {
     return this.chip.kind === "command" && this.chip.previewable;
   }
 
-  override toDOM() {
+  override toDOM(view: EditorView) {
     const span = document.createElement("span");
-    span.className = `${CHIP_CLASS} ${
-      this.chip.kind === "command"
-        ? "border-transparent bg-skill-blue-subtle text-skill-blue"
-        : "border-border bg-surface text-text"
-    }`;
+    span.className = isImageChip(this.chip)
+      ? IMAGE_CHIP_CLASS
+      : this.chip.kind === "attachment"
+        ? FILE_CHIP_CLASS
+        : `${CHIP_CLASS} ${
+          this.chip.kind === "command"
+            ? "border-transparent bg-skill-blue-subtle text-skill-blue"
+            : "border-border bg-surface text-text"
+        }`;
     span.dataset.chip = chipKey(this.chip);
     if (this.chip.kind === "file") span.title = this.chip.path;
     if (this.chip.kind === "message") span.title = this.chip.cited.preview;
     if (this.chip.kind === "paper") span.title = this.chip.url;
+    if (this.chip.kind === "attachment" && isImageChip(this.chip)) {
+      span.title = `${this.chip.attachment.name ?? m.chat_pasted_image()} · ${fmtBytes(this.chip.attachment.size)}`;
+    }
     if (this.chip.kind === "command" && this.chip.previewable) {
       // A tab stop, so keyboard users can open the preview that hover shows.
       span.tabIndex = 0;
       span.role = "button";
       span.ariaLabel = m.a11y_preview_skill({ name: this.chip.name });
+    }
+    if (this.chip.kind === "attachment") {
+      const name = this.chip.attachment.name ?? m.chat_pasted_image();
+      let root: Root | undefined;
+      if (isImageChip(this.chip)) {
+        // Built directly rather than through a React root, which would mount a frame after the chip.
+        const img = document.createElement("img");
+        img.src = this.chip.attachment.dataUrl;
+        img.alt = name;
+        img.className = "block h-auto max-h-24 w-auto max-w-60";
+        span.append(img);
+      } else {
+        const card = document.createElement("span");
+        card.className = "contents";
+        span.append(card);
+        root = createRoot(card);
+        root.render(<ChipContent chip={this.chip} />);
+        chipRoots.set(span, root);
+      }
+      span.append(removeButton(view, span, name));
+      return span;
     }
     const root = createRoot(span);
     root.render(<ChipContent chip={this.chip} />);
@@ -224,10 +250,35 @@ class ChipWidget extends WidgetType {
     queueMicrotask(() => root?.unmount());
   }
 
-  /** Pointer events place the caret; keys typed on a focused chip stay with it. */
+  /** Pointer events place the caret, except on the remove button; keys typed on a focused chip stay with it. */
   override ignoreEvent(event: Event) {
-    return event.type.startsWith("key");
+    return event.type.startsWith("key") || (event.target instanceof Element && event.target.closest("[data-chip-remove]") !== null);
   }
+}
+
+const ATTACHMENT_AT = /^\[(?:Image|PDF|File) #\d+\] ?/;
+
+/** The corner X on an attachment chip: deletes its token, and with it the attachment. */
+function removeButton(view: EditorView, chip: HTMLElement, name: string) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.tabIndex = -1;
+  button.dataset.chipRemove = "";
+  button.setAttribute("aria-label", m.chat_remove_attachment({ name }));
+  button.title = m.chat_remove_attachment({ name });
+  button.className =
+    "absolute end-1 top-1 flex size-5 cursor-pointer items-center justify-center rounded-full border border-border bg-background text-subtext opacity-0 shadow-control-subtle group-hover:opacity-100 hover:text-text";
+  button.innerHTML =
+    '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>';
+  // Keeps focus and the caret where they are.
+  button.addEventListener("mousedown", (event) => event.preventDefault());
+  button.addEventListener("click", (event) => {
+    event.preventDefault();
+    const from = view.posAtDOM(chip);
+    const token = ATTACHMENT_AT.exec(view.state.doc.sliceString(from, from + 32));
+    if (token) view.dispatch({ changes: { from, to: from + token[0].length } });
+  });
+  return button;
 }
 
 const refreshChips = StateEffect.define<null>();
@@ -279,8 +330,9 @@ const composerTheme = EditorView.theme({
   // WebKit can retain an empty horizontal scrollbar gutter after the draft shrinks.
   ".cm-scroller::-webkit-scrollbar": { height: "0" },
   // `minWidth` lets WebKit shrink the content below the placeholder's one-line width.
-  ".cm-content": { padding: "0", caretColor: "var(--text)", minWidth: "0" },
-  ".cm-line": { padding: "0 var(--editor-pad-x)" },
+  // Padding on the content, not each line: CodeMirror draws a wrapped selection from the content's padding edge.
+  ".cm-content": { padding: "0 var(--editor-pad-x)", caretColor: "var(--text)", minWidth: "0" },
+  ".cm-line": { padding: "0" },
   // One line however narrow the box, so an empty draft keeps the one-line height.
   ".cm-placeholder": { color: "var(--muted)", maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   "&.cm-plain .cm-content": { fontFamily: "var(--mono)", fontSize: "0.875em" },
@@ -674,7 +726,7 @@ export function ComposerEditor({
           onMouseLeave={scheduleClose}
         />
       )}
-      {hovered && hoveredAttachment?.mediaType.startsWith("image/") && (
+      {hovered && hoveredAttachment && isPictureType(hoveredAttachment.mediaType) && (
         <ImagePreview anchor={hovered} attachment={hoveredAttachment} />
       )}
     </div>
