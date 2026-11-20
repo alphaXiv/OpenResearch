@@ -208,6 +208,7 @@ import {
   queuedRetryLabel,
   recoveryAction as parseRecoveryAction,
   recoveryTurnOptions,
+  usageResetCountdown,
   retryStatusLabel,
 } from "../chatRecovery";
 import {
@@ -2786,6 +2787,7 @@ function TurnStatusRow({
 }) {
   const input = part.state?.input;
   const nextRetryAt = input?.nextRetryAt ?? null;
+  const resetAt = input?.resetAt ?? null;
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
     if (typeof nextRetryAt !== "number") return;
@@ -2798,6 +2800,17 @@ function TurnStatusRow({
     }, 1000);
     return () => window.clearInterval(timer);
   }, [nextRetryAt]);
+  useEffect(() => {
+    if (typeof resetAt !== "number") return;
+    setNow(Date.now());
+    if (resetAt <= Date.now()) return;
+    const timer = window.setInterval(() => {
+      const current = Date.now();
+      setNow(current);
+      if (current >= resetAt) window.clearInterval(timer);
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [resetAt]);
   if (part.id === "turn-retry") {
     const label = retryStatusLabel(input ?? {}, now);
     return (
@@ -2822,9 +2835,13 @@ function TurnStatusRow({
   const quiet = cause === "network" || cause === "overloaded";
   const fixLabel = cause && FIX_LABEL[cause];
   const fix = fixLabel && input && failure?.fix(cause, input);
+  // A usage-limited turn waits out nothing the button enforces: the provider,
+  // not a stored timestamp, decides whether the quota is back, so the wait is
+  // shown beside the button as information and every press re-checks for real.
+  const resetCountdown = cause === "usage_limit" ? usageResetCountdown(resetAt, now) : null;
   // While the agent is signed out, only signing in, here or in the composer, sends the turn again.
   const waitsForSignIn = cause === "sign_in" && agent?.authState === "needsLogin";
-  const recover = onRecover && turnId && (action === "retry" || action === "continue") && cause !== "usage_limit" && !waitsForSignIn
+  const recover = onRecover && turnId && (action === "retry" || action === "continue") && !waitsForSignIn
     ? action
     : undefined;
   return (
@@ -2849,8 +2866,11 @@ function TurnStatusRow({
           )}
           {recover && turnId && (
             <Button type="button" size="small" disabled={busy || recovering} onClick={() => onRecover?.(turnId, recover)}>
-              {recovering ? m.chat_starting() : recover === "retry" ? m.app_retry() : m.chat_continue()}
+              {recovering ? m.chat_starting() : cause === "usage_limit" ? m.chat_try_again() : recover === "retry" ? m.app_retry() : m.chat_continue()}
             </Button>
+          )}
+          {recover && resetCountdown && (
+            <span className="text-sm text-subtext">{m.chat_usage_resets_in({ time: resetCountdown })}</span>
           )}
         </div>
       )}

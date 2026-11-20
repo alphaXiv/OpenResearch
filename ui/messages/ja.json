@@ -1482,6 +1482,8 @@
   "local_models_guide_install_rapid_mlx": "Rapid-MLX をインストールします:",
   "local_models_guide_serve_rapid_mlx": "モデルをダウンロードしてサーバーを起動します。例:",
   "chat_session_limit_reached": "セッションの上限に達しました",
+  "chat_try_again": "再試行",
+  "chat_usage_resets_in": "{time}後にリセット",
   "chat_model_unavailable": "モデルは利用できません",
   "chat_failure_signed_out": "{name} からサインアウトしています。",
   "chat_failure_credits": "このアカウントのクレジットがなくなりました。",

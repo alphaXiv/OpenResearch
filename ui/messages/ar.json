@@ -1481,6 +1481,8 @@
   "local_models_guide_install_rapid_mlx": "ثبّت Rapid-MLX:",
   "local_models_guide_serve_rapid_mlx": "نزّل نموذجًا وشغّل الخادم، مثلًا:",
   "chat_session_limit_reached": "تم بلوغ حد الاستخدام",
+  "chat_try_again": "حاول مجددًا",
+  "chat_usage_resets_in": "يُعاد التعيين بعد {time}",
   "chat_model_unavailable": "النموذج غير متاح",
   "chat_failure_signed_out": "تم تسجيل الخروج من {name}.",
   "chat_failure_credits": "نفد رصيد هذا الحساب.",

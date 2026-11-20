@@ -1513,6 +1513,8 @@
   "local_models_guide_install_rapid_mlx": "Rapid-MLX'i yükleyin:",
   "local_models_guide_serve_rapid_mlx": "Bir model indirip sunucuyu başlatın, örneğin:",
   "chat_session_limit_reached": "Oturum sınırına ulaşıldı",
+  "chat_try_again": "Tekrar dene",
+  "chat_usage_resets_in": "{time} sonra sıfırlanır",
   "chat_model_unavailable": "Model kullanılamıyor",
   "chat_failure_signed_out": "{name} oturumu kapandı.",
   "chat_failure_credits": "Bu hesabın kredisi bitti.",

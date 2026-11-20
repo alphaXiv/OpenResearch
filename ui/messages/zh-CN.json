@@ -1482,6 +1482,8 @@
   "skills_remove_imported_label": "从 OpenResearch 移除 {name}",
   "skills_remove_imported_confirm": "从 OpenResearch 移除“{name}”？源文件将保留在你的编程智能体中。",
   "chat_session_limit_reached": "已达到会话使用限额",
+  "chat_try_again": "再试一次",
+  "chat_usage_resets_in": "{time}后重置",
   "chat_model_unavailable": "模型不可用",
   "chat_failure_signed_out": "{name} 已退出登录。",
   "chat_failure_credits": "此账户的额度已用完。",
