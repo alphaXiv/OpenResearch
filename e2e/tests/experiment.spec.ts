@@ -56,8 +56,8 @@ test('Done offers to stop a chat’s experiment and its cancellation leaves the 
   await expect(page.getByText('The long baseline is running.', { exact: true })).toBeVisible()
 
   const sidebar = page.getByRole('complementary')
-  await sidebar.getByRole('button', { name: 'Filter sessions' }).click()
-  await sidebar.getByRole('button', { name: 'Inbox', exact: true }).click()
+  await sidebar.getByRole('button', { name: 'Customize view' }).click()
+  await sidebar.getByRole('button', { name: 'In one list', exact: true }).click()
   const chat = sidebar.getByRole('button', { name: /Run the long baseline.*E2E Agent/i })
   const done = chat.getByRole('button', { name: 'Mark as done' })
   const dialog = page.getByRole('dialog', { name: 'Stop and mark as done?' })

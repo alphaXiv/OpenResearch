@@ -62,13 +62,17 @@ pub fn wrap(dir: &Path, keep_awake: bool) -> io::Result<()> {
         let identity = platform::identity(std::process::id()).map_err(step("wrapper identity"))?;
         publish(&dir.join("wrapper.json"), &identity).map_err(step("publish wrapper.json"))?;
         crash_point("wrapper_identity");
-        let subreaper = platform::subreaper().map_err(step("subreaper"))?;
         let intent: LaunchIntent =
             read_json(&dir.join("launch.json")).map_err(step("read launch.json"))?;
         // Before rental activation, so a cancelled rental never starts billing.
         if cancelled()? {
             return Ok(None);
         }
+        // Orphan the sleep inhibitor before subreaping so it never joins the payload's descendants.
+        let awake = keep_awake
+            .then(|| crate::awake::hold(&intent.run))
+            .flatten();
+        let subreaper = platform::subreaper().map_err(step("subreaper"))?;
         if intent.source.is_some() && !dir.join("repo").try_exists()? {
             let unpacked = unpack(dir);
             if cancelled()? {
@@ -83,16 +87,13 @@ pub fn wrap(dir: &Path, keep_awake: bool) -> io::Result<()> {
             .open(dir.join("log"))
             .map_err(step("open log"))?;
         let tag = format!("{}:{}", intent.run, nonce()?);
-        Ok(Some((identity, subreaper, intent, log, tag)))
+        Ok(Some((identity, subreaper, intent, log, tag, awake)))
     })();
-    let (identity, subreaper, intent, log, tag) = match prepared {
+    let (identity, subreaper, intent, log, tag, mut awake) = match prepared {
         Ok(Some(prepared)) => prepared,
         Ok(None) => return Ok(()),
         Err(error) => return spawn_failed(error),
     };
-    let mut awake = keep_awake
-        .then(|| crate::awake::hold(&intent.run))
-        .flatten();
     // An unreachable lease API may recover; a rental it never answers is released by the
     // service, and activation is then refused.
     let _rental = loop {

@@ -310,9 +310,8 @@ fn route(store: &Store, run: &StoredRun) -> Result<()> {
     let id = flag["id"].as_str().unwrap_or_default();
     let mut chats = Vec::new();
     for (chat, body) in super::super::flags::wakes(store, run, flag)? {
-        let dedupe = format!("{}:{id}", crate::store::WATCH_FLAG);
         let at = crate::store::now_ms();
-        if store.insert_run_notice(&run.id, &chat, crate::store::WATCH_FLAG, &dedupe, &body, at)? {
+        if store.insert_flag_wake(&run.id, &chat, id, "initial", &body, at)? {
             chats.push(chat);
         }
     }

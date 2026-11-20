@@ -131,6 +131,7 @@ import {
 
 import { releaseNotesUrl, useRestartApp, useUpdateStatus } from "./UpdateBanner";
 import { useColoredMarkdown, useThemePreference, type ThemePreference } from "../theme";
+import { useChatWidth, type ChatWidth } from "../chatWidth";
 import { m } from "../paraglide/messages.js";
 import { autoDir, fmtBytes, fmtClock, ltr } from "../i18n";
 import { setLocale, useLocale } from "../locale";
@@ -3837,6 +3838,12 @@ const THEME_OPTIONS: {
     { value: "dark", label: m.settings_theme_dark, icon: Moon },
   ];
 
+const CHAT_WIDTH_OPTIONS: { value: ChatWidth; label: () => string }[] = [
+  { value: "balanced", label: m.settings_chat_width_balanced },
+  { value: "wide", label: m.settings_chat_width_wide },
+  { value: "full", label: m.settings_chat_width_full },
+];
+
 const LOCALE_CHOICES: { id: Locale; label: string }[] = [
   { id: "en", label: "English" },
   { id: "zh-CN", label: "简体中文" },
@@ -3856,6 +3863,7 @@ function AppearanceTab() {
   const locale = useLocale();
   const [preference, setPreference] = useThemePreference();
   const [coloredMarkdown, setColoredMarkdown] = useColoredMarkdown();
+  const [chatWidth, setChatWidth] = useChatWidth();
 
   // Arrow keys move selection relative to the focused radio, with focus
   // following the new choice (WAI-ARIA radio pattern).
@@ -3902,6 +3910,29 @@ function AppearanceTab() {
                 onClick={() => setPreference(value)}
               >
                 <Icon size={14} />
+                {label()}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className={`${PROJECT_DEFAULT_ROW_CLASS_NAME} flex-wrap gap-y-2`}>
+          <div>
+            <div className="project-default-title text-base font-medium">{m.settings_chat_width_heading()}</div>
+            <p>{m.settings_chat_width_description()}</p>
+          </div>
+          <div
+            className={`${SEGMENTED_CLASS_NAME} flex-none`}
+            role="group"
+            aria-label={m.settings_chat_width_heading()}
+          >
+            {CHAT_WIDTH_OPTIONS.map(({ value, label }) => (
+              <button
+                key={value}
+                type="button"
+                aria-pressed={chatWidth === value}
+                className={chatWidth === value ? "active" : ""}
+                onClick={() => setChatWidth(value)}
+              >
                 {label()}
               </button>
             ))}

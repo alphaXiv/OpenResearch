@@ -1443,10 +1443,16 @@ fn evaluate(
         "signals": view["signals"],
         "estimate": summary_estimate,
         "limitEndsAt": life.ends_at(),
-        "flag": open.map(|flag| json!({
-            "id": flag["id"], "state": flag["state"], "template": flag["template"],
-            "text": super::flags::sentence(flag), "bindings": flag["bindings"],
-        })),
+        "flag": open.map(|flag| {
+            let mut summary = json!({
+                "id": flag["id"], "state": flag["state"], "template": flag["template"],
+                "text": super::flags::sentence(flag), "bindings": flag["bindings"],
+            });
+            if let Some(handback) = flag.get("handback") {
+                summary["handback"] = handback.clone();
+            }
+            summary
+        }),
 
         "setup": setup,
         "generation": generation,
@@ -1989,7 +1995,9 @@ pub(crate) fn current(store: &Store, run: &StoredRun) -> Result<Option<Arc<Proje
             Some("flag") => super::flags::read(store, run).is_ok_and(|flags| {
                 let saved = &published.summary["flag"];
                 super::flags::open(&flags).is_some_and(|flag| {
-                    flag["id"] == saved["id"] && flag["state"] == saved["state"]
+                    flag["id"] == saved["id"]
+                        && flag["state"] == saved["state"]
+                        && flag["handback"] == saved["handback"]
                 })
             }),
             _ => published.summary["tone"] == tone(ended),
@@ -8106,13 +8114,41 @@ mod tests {
             "agent_looking"
         );
 
-        f.store
-            .mark_run_notice_batch_delivered(chat, turn, T0)
-            .unwrap();
         f.store.complete_chat_turn(turn).unwrap();
         watch(&f.store, None, watched, None).unwrap();
         let after = f.store.run_monitor_state(&run.id).unwrap().unwrap();
         assert_eq!(after["published"]["summary"]["flag"]["state"], "waking");
+    }
+
+    #[test]
+    fn a_finished_runs_waiting_summary_updates_after_an_ask_finishes() {
+        let f = Fixture::new("orx-ended-ask-handback");
+        let run = f.run("done", local());
+        let chat = "reviewer";
+        f.store
+            .put_chat_session(chat, "claude-code", Some("copilot"));
+        f.store.subscribe_run(&run.id, chat, T0).unwrap();
+        let body = json!({"id": "f1", "source": "look", "text": "Loss rose."});
+        let flag = super::super::flags::new_flag(&f.store, &run, body.clone(), true).unwrap();
+        f.store.raise_flags(&[flag], T0).unwrap();
+        let before = advance(&f.store, &run, T0).unwrap();
+        assert_eq!(before.summary()["flag"]["state"], "waiting");
+
+        let ask = crate::store::FlagChoice {
+            run_id: run.id.clone(),
+            body: json!({"flagId": "f1", "c": "ask", "by": "user", "requestId": "first"}),
+            wakes: vec![(chat.into(), super::super::flags::wake(&run, &body, true))],
+        };
+        f.store.record_flag_choices(&[ask], None, T0 + 1).unwrap();
+        let batch = f.store.run_notice_batch_at(chat, T0 + 1).unwrap();
+        let turn = &batch[0].client_turn_id;
+        f.store.put_chat_turn(chat, turn, "running", T0 + 1);
+        assert!(f.store.complete_chat_turn(turn).unwrap());
+
+        let after = current(&f.store, &run).unwrap().unwrap();
+        let ask = f.store.run_flag_events(&run.id).unwrap().pop().unwrap();
+        assert_eq!(after.summary()["flag"]["state"], "waiting");
+        assert_eq!(after.summary()["flag"]["handback"], ask.seq);
     }
 
     #[test]
@@ -8143,14 +8179,7 @@ mod tests {
             .unwrap()
             .cancel_accepted_at
             .is_none());
-        let notices = f.store.run_notices_for_tests("r1");
-        assert_eq!(
-            notices.len(),
-            1,
-            "only the Agentic chat is woken: {notices:?}"
-        );
-        let (chat, kind, body) = &notices[0];
-        assert_eq!((chat.as_str(), kind.as_str()), ("chat-1", "watch_flag"));
+        assert_eq!(f.store.pending_run_notice_sessions().unwrap(), ["chat-1"]);
         let run = f.store.get_run("r1").unwrap().unwrap();
         let flags = super::super::flags::read(&f.store, &run).unwrap();
         assert_eq!(flags.len(), 1);
@@ -8159,6 +8188,18 @@ mod tests {
             (flag["source"].as_str(), flag["rule"].as_str()),
             (Some("rule"), Some("eval-zero"))
         );
+        let summary = advance(&f.store, &run, T0 + 3_000)
+            .unwrap()
+            .summary()
+            .clone();
+        assert_eq!(summary["tone"], "flag");
+        assert_eq!(summary["flag"]["id"], id);
+        assert_eq!(summary["flag"]["state"], "raised");
+
+        let notices = f.store.run_notice_batch("chat-1").unwrap();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert_eq!(notices[0].run_id, "r1");
+        let body = &notices[0].body;
         let at = clock_text(flag["at"].as_i64().unwrap());
         mentions(
             body,
@@ -8188,13 +8229,6 @@ mod tests {
             let command = format!("orx exp flag r1 --flag {id} --{action} --reason '{reason}'");
             mentions(body, &[&command]);
         }
-        let summary = advance(&f.store, &run, T0 + 3_000)
-            .unwrap()
-            .summary()
-            .clone();
-        assert_eq!(summary["tone"], "flag");
-        assert_eq!(summary["flag"]["id"], id);
-        assert_eq!(summary["flag"]["state"], "raised");
     }
 
     #[test]

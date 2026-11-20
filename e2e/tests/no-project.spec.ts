@@ -25,7 +25,7 @@ test('a chat without a project becomes the project its agent proposes', async ({
     await send(page, 'Jot down some ideas.')
     await expect(page.getByText('Wrote notes.md.', { exact: true })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Create project' })).toBeVisible()
-    await expect(page.getByRole('complementary').getByRole('button', { name: 'No project' })).toBeVisible()
+    await expect(page.getByRole('complementary').getByRole('img', { name: 'No project' })).toBeVisible()
   })
 
   await test.step("the agent's proposal moves the chat's work into the new project", async () => {
@@ -39,7 +39,7 @@ test('a chat without a project becomes the project its agent proposes', async ({
     await dialog.getByRole('button', { name: 'Create project' }).click()
     await expect(dialog).toBeHidden()
     await expect(page.getByText('Created', { exact: true })).toBeVisible()
-    await expect(page.getByRole('complementary').getByRole('button', { name: 'Tokenizer probes', exact: true })).toBeVisible()
+    await expect(page.getByRole('complementary').getByText('Tokenizer probes', { exact: true })).toBeVisible()
     // The folder gets what the chat committed; its unsaved draft stays with the chat.
     expect(readFileSync(path.join(folder, 'notes.md'), 'utf8')).toBe('ideas\n')
     expect(existsSync(path.join(folder, 'draft.md'))).toBe(false)
@@ -69,6 +69,6 @@ test('a chat in a project moves into a new one once its turn ends', async ({ pag
 
   agent.release('working')
   await expect(page.getByText('Carrying on in the new project.', { exact: true })).toBeVisible()
-  await expect(page.getByRole('complementary').getByRole('button', { name: 'Split off', exact: true })).toBeVisible()
+  await expect(page.getByRole('complementary').getByText('Split off', { exact: true })).toBeVisible()
   expect(readFileSync(path.join(folder, 'probe.txt'), 'utf8')).toBe('probe\n')
 })

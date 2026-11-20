@@ -20,9 +20,9 @@
 <p>コパイロットを探している方にも、自律研究ツールを探している方にも、OpenResearch は作業を加速します。 文献のレビュー、仮説の構築、実験の実行、研究成果の作成を行う研究エージェントを起動しましょう。</p>
 
 <p>
-<a href="https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch.dmg"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/download-macos-dark.svg"><img src=".github/readme-assets/download-macos.svg" alt="Download OpenResearch for macOS" width="220" height="44" /></picture></a>
-<a href="https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch-Setup.exe"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/download-windows-dark.svg"><img src=".github/readme-assets/download-windows.svg" alt="Download OpenResearch for Windows（ベータ版）" width="220" height="44" /></picture></a>
-<a href="https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch-x86_64.AppImage"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/download-linux-dark.svg"><img src=".github/readme-assets/download-linux.svg" alt="Download OpenResearch for Linux" width="220" height="44" /></picture></a>
+<a href="https://openresearch.sh/dl/macos?src=github"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/download-macos-dark.svg"><img src=".github/readme-assets/download-macos.svg" alt="Download OpenResearch for macOS" width="220" height="44" /></picture></a>
+<a href="https://openresearch.sh/dl/windows?src=github"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/download-windows-dark.svg"><img src=".github/readme-assets/download-windows.svg" alt="Download OpenResearch for Windows（ベータ版）" width="220" height="44" /></picture></a>
+<a href="https://openresearch.sh/dl/linux_x64?src=github"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/download-linux-dark.svg"><img src=".github/readme-assets/download-linux.svg" alt="Download OpenResearch for Linux" width="220" height="44" /></picture></a>
 </p>
 
 <p>
@@ -41,9 +41,9 @@
 
 **OpenResearch デスクトップアプリの利用をおすすめします。** お使いのプラットフォーム向けにダウンロードしてください：
 
-- [macOS](https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch.dmg)
-- [Windows（ベータ版）](https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch-Setup.exe)
-- Linux: [x86_64](https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch-x86_64.AppImage) · [ARM64](https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch-aarch64.AppImage)
+- [macOS](https://openresearch.sh/dl/macos?src=github)
+- [Windows（ベータ版）](https://openresearch.sh/dl/windows?src=github)
+- Linux: [x86_64](https://openresearch.sh/dl/linux_x64?src=github) · [ARM64](https://openresearch.sh/dl/linux_arm64?src=github)
 
 <details>
 <summary>スタンドアロンの CLI を使いたい場合：macOS または Linux にインストール</summary>

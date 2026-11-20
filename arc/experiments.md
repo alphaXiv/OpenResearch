@@ -47,7 +47,7 @@ A default flavor applies only to its own backend and never leaks onto an explici
 | --- | --- | --- |
 | Reconciler | Sole writer of run state; a fact and its notices commit in one transaction | `src/engine/reconcile.rs`, `src/engine/submit.rs` |
 | Observers | One loop per host root, API account and rental, and one for this machine | `src/engine/runtime.rs` |
-| Outbox | Delivers notices as hidden chat turns | `src/local/chat/` |
+| Outbox | Delivers run notices and flag wakes as hidden chat turns | `src/local/chat/` |
 | Host link | One `ssh` per (host, root) to `orx-host serve` ([remote](remote.md)) | `src/engine/transport/` |
 
 **The process that runs a job is never the engine.** A wrapper owns its payload and records the outcome in receipts on its machine; hosted services and rentals hold that state themselves. `orx up` may restart, sleep or update; it reconnects, reads what the job left and catches up. A headless `orx up` exits after a sustained idle period: no unfinished run, undelivered notice, active chat turn or client ([desktop](desktop.md) for the window).
@@ -470,30 +470,38 @@ look that raised it groups the flags of runs it saw together.
 A run has at most one open flag from a look or a tripwire, so a trouble that
 lasts keeps one flag open; a tripwire condition is raised once a run. Keep going settles
 that run's flag only: a later run of the experiment with the same cause is
-flagged again, since a missed problem costs more than an extra flag. The flag and the notices that
-wake each following Agentic chat are written in one transaction; a Copilot chat
-is woken only when its user asks. A wake says the watcher saw only a digest and
-none of the chat, cites the lines and how to settle it, and is frozen when it is
-written; a chat past 70% of its context is compacted, in the turn slot the wake
-already holds, before it is sent. A wake not yet claimed when its run ends is
-withdrawn and redelivered with the run's result, since its choice can no longer
-stop the run. A flag raised on an ended run still wakes, to be weighed against
-the result.
+flagged again, since a missed problem costs more than an extra flag. The flag and the wakes for
+each following Agentic chat are written in one transaction; a Copilot chat is woken only when its
+user asks. Initial wakes, reminders and Ask are stored in `flag_wakes`. Servers through v0.2.28 drain
+`run_notices` alone. Each table batches and retries its hidden turns independently, and a pending
+result goes before a fresh wake about the same run. A wake says the watcher saw only a digest and
+none of the chat, cites the lines and how to settle it. A chat past 70% of its
+context is compacted in the wake's reserved turn slot. Admission checks that the
+wake still applies and freezes the payload that will be sent. Marking a chat Done
+withdraws queued Asks and leaves their flags available for a choice.
+When its run ends before admission, the flag is rewritten for delivery after the
+result. A queued Ask keeps its request identity through that rewrite. A flag
+raised on an ended run still wakes, to be weighed against the result.
 
 What became of a flag is read back, never stored: its choices in the run's
 journal and the notice and turn that carried it give its state. An Agentic flag
-is raised, then waking, then the agent is looking. A cut or retired review goes
-with the chat's next turn. A completed review without a choice wakes the agent
+is raised, then waking, then the agent is looking. A cut or retired review can go
+with a later chat turn. Flag-aware recovery loads the saved flag text and tracks
+it on the recovery turn, which records its own delivery receipt.
+If a carrying turn completes without confirming flag delivery, orx records the
+error and leaves the flag available for the user's choice or a later turn.
+A completed review without a choice wakes the agent
 once more. When the owning Independent chat finishes that second review without
 a choice, orx records the flag as kept and says why in the journal. Keep and Stop
 are available in the expanded card during an automatic review. An agent's `--ask`
 and a Copilot flag wait for the user, who sees the available choices in the strip
 and an amber mark on the chat's row.
 `orx exp flag RUN --flag ID --keep|--ask|--stop` and the strip send one choice;
-a repeated request id answers as the first did, and a settled flag, or one on a
-run that ended or whose stop was accepted, is refused. Keep going settles it and
-the run's next looks read what was kept and why. Stop records its choice and
-accepts the run's stop, with whose words it is, in one transaction under the
+a repeated request id answers as the first did. Keep and Ask still apply after
+the run ends. A settled flag or one whose run accepted a stop is refused.
+Keep going settles it and the run's next looks read what was kept and why.
+Stop records its choice and accepts the run's stop, with whose words it is, in
+one transaction under the
 run's cancel lock, then delivers it as `orx exp cancel` does, so of a Stop, a
 Keep and the agent's own cancel exactly one wins. Ask sends
 the flag, and every open flag its look raised beside it, to the chat's agent as

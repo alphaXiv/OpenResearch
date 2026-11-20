@@ -154,8 +154,14 @@
   zoom: calc(1 / var(--desktop-page-zoom, 1));
 }
 
+/* An emoji in a tile, sized to the tile (its container) since the glyph runs wider than its font size. */
+@utility text-tile-emoji {
+  font-size: 54cqi;
+}
+
+/* Both sides hold the sidebar toggle and New chat, so the title stays centred. */
 @utility grid-cols-titlebar-chat {
-  grid-template-columns: var(--spacing-titlebar-sidebar-controls) minmax(0, 1fr) var(--spacing-titlebar-sidebar-controls);
+  grid-template-columns: calc(var(--spacing-titlebar-sidebar-controls) + 2.25rem) minmax(0, 1fr) calc(var(--spacing-titlebar-sidebar-controls) + 2.25rem);
 }
 
 :root {
@@ -258,8 +264,11 @@
   /* Sits above the highlighted text, so a light translucent veil keeps selected syntax readable.
      Literal rgb, not color-mix: macOS 11 WebKit would drop the selection entirely. */
   --editor-selection: rgb(22 22 22 / 12%);
-  /* Shared reading width for chat, markdown, and plan surfaces. */
+  /* Shared reading width for chat, markdown, and plan surfaces; the setting may widen it or drop the cap. */
   --readable-col: 840px;
+  --readable-wide: 1100px;
+  /* The side gap `full` keeps instead of a cap. */
+  --readable-offset: 4rem;
   --border-strong: var(--border);
   --focus: color-mix(in oklab, var(--text) 60%, var(--base));
   --focus-border: color-mix(in oklab, var(--text) 40%, var(--border));
@@ -283,6 +292,42 @@
   --syntax-cyan: #56b6c2;
   --syntax-purple: #a626a4;
   --syntax-blue: #4078f2;
+}
+
+/* `full` trades the cap for a fixed side offset, so a wide pane widens the text and not the margins. */
+:root[data-chat-width="wide"] {
+  --readable-col: var(--readable-wide);
+}
+
+:root[data-chat-width="full"] {
+  --readable-col: calc(100% - var(--readable-offset));
+}
+
+/* The header lives in a grid cell that reserves a rail gutter on each side, so it is measured against the row instead. */
+:root[data-chat-width="wide"] .chat-heading-row,
+:root[data-chat-width="full"] .chat-heading-row {
+  container-type: inline-size;
+}
+
+:root[data-chat-width="wide"] .chat-heading-row > .chat-header {
+  --chat-header-width: min(var(--readable-wide), 100cqi - var(--readable-offset));
+  width: var(--chat-header-width);
+  max-width: none;
+  margin-inline: calc((100% - var(--chat-header-width)) / 2);
+}
+
+:root[data-chat-width="full"] .chat-heading-row > .chat-header {
+  --chat-header-width: calc(100cqi - var(--readable-offset));
+  width: var(--chat-header-width);
+  max-width: none;
+  margin-inline: calc((100% - var(--chat-header-width)) / 2);
+}
+
+/* The header can reach into the rail toggle's gutter, so the toggle must paint above its z-4 background. */
+:root[data-chat-width="wide"] .chat-heading-row > .sidebar-toggle,
+:root[data-chat-width="full"] .chat-heading-row > .sidebar-toggle {
+  position: relative;
+  z-index: 5;
 }
 
 /* Outranks the bare `:root { color-scheme: light dark }` in PDF.js's stylesheet. */

@@ -204,8 +204,10 @@ impl Store {
                 continue;
             }
             let events = self.run_flag_events(&flag.run_id)?;
+            let open =
+                super::flags::open_flag(&events).expect("Raise::Waits requires an open flag");
             let body = serde_json::json!({
-                "flagId": super::flags::open_flag(&events),
+                "flagId": open,
                 "lookId": flag.body["lookId"],
                 "text": flag.body["text"],
                 "evidence": flag.body["evidence"],
@@ -217,8 +219,8 @@ impl Store {
                 params![flag.run_id, now, body.to_string()],
             )?;
             for (chat, wake) in &flag.noted {
-                let dedupe = format!("{WATCH_FLAG}:noted:{id}:{}", flag.run_id);
-                self.insert_run_notice(&flag.run_id, chat, WATCH_FLAG, &dedupe, wake, now)?;
+                let dedupe = format!("noted:{id}");
+                self.insert_flag_wake(&flag.run_id, chat, open, &dedupe, wake, now)?;
             }
             noted.insert(flag.run_id.as_str());
         }

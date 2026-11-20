@@ -1,4 +1,5 @@
 import type { Api } from "../api";
+import { monitorBehind } from "../runMonitor/revision";
 import type { WorkspaceClient } from "./client";
 import type { Workspace } from "../workspace";
 import { readLiveSnapshot, mergeLiveList, markLiveUpdate } from "./live";
@@ -104,7 +105,7 @@ export function createProjectQueries(client: WorkspaceClient, api: Api) {
   const getRunMonitorQuery = (runId: string) => queryOptions({
     queryKey: workspaceKey("getRunMonitor", runId),
     queryFn: ({ signal, client, queryKey }) => readLiveSnapshot(client, queryKey, () => api.getRunMonitor(runId, signal),
-      (incoming, current) => current && current.generation === incoming.generation && current.rev > incoming.rev ? current : incoming),
+      (incoming, current) => current && monitorBehind(current, incoming) ? current : incoming),
     staleTime: Infinity,
   });
 
@@ -322,7 +323,7 @@ export type FlagAnswer = "stop" | "keep" | "ask";
 /** A flag's answer on its way: one at a time per flag, one request id per choice, and why the server refused the last. */
 export interface FlagChoice {
   sending: FlagAnswer | null;
-  requests: Partial<Record<FlagAnswer, { id: string; after?: string }>>;
+  requests: Partial<Record<FlagAnswer, { id: string; after?: number }>>;
   error: string | null;
 }
 
@@ -335,13 +336,21 @@ const mutFlagChoice = mutations.define({
     const monitor = ws.queries.getRunMonitorQuery(run.id);
     const shown = ws.queries.listChatShownRunsQuery();
     onSuccess(({ flag, run: saved }) => {
-      // A newer flag stands: the answer settles only the flag it was for.
+      const summary = saved.monitor;
       ws.setScopedQueryData(monitor.queryKey, (current) => {
-        if (!current || current.flagId !== flag.id) return current;
+        if (!current || current.flagId !== flag.id || !monitorBehind(summary, current)) return current;
         const flags = current.flags.map((record) => record.id === flag.id ? flag : record);
-        return { ...current, flagId: saved.monitor?.flag?.id ?? null, flags };
+        return { ...current, flagId: summary?.flag?.id ?? null, flags };
       });
-      ws.setScopedQueryData(shown.queryKey, (current) => current && { ...current, runs: current.runs.map((item) => item.run.id === saved.id && item.run.updatedAt <= saved.updatedAt ? { ...item, run: saved } : item) });
+      ws.setScopedQueryData(shown.queryKey, (current) => current && {
+        ...current,
+        runs: current.runs.map((item) => {
+          if (item.run.id !== saved.id || item.run.updatedAt > saved.updatedAt) return item;
+          const currentSummary = item.run.monitor;
+          const latestSummary = currentSummary && (!summary || monitorBehind(currentSummary, summary)) ? currentSummary : summary;
+          return { ...item, run: { ...saved, monitor: latestSummary } };
+        }),
+      });
     });
   },
   key: ({ args: [ws, run] }) => [ws.identity, run.id, "flag"],
@@ -351,17 +360,14 @@ const mutFlagChoice = mutations.define({
 });
 
 /** Answers a flag unless an answer is already on its way; `onRefused` hears a failure while the presser is still on screen. */
-export async function chooseFlag(ws: Workspace, run: Pick<api.Run, "id">, flagId: string, choice: FlagAnswer, onRefused?: () => void) {
+export async function chooseFlag(ws: Workspace, run: Pick<api.Run, "id">, flagId: string, choice: FlagAnswer, onRefused?: () => void, handback?: number | null) {
   const options = ws.queries.flagChoiceQuery(run.id, flagId);
   const { queryKey } = options;
   const current = ws.queryClient.getQueryData(queryKey);
   if (current?.sending) return;
 
   const previous = current?.requests[choice];
-  const monitor = ws.queryClient.getQueryData(ws.queries.getRunMonitorQuery(run.id).queryKey);
-  const recorded = monitor?.flags.find((flag) => flag.id === flagId)?.choice;
-  // A recorded choice advances the Ask even when the response and intermediate states were missed.
-  const after = choice === "ask" && recorded ? `${recorded.by}:${recorded.c}:${recorded.at}` : undefined;
+  const after = choice === "ask" ? handback ?? undefined : undefined;
   const requestId = previous && previous.after === after ? previous.id : crypto.randomUUID();
   const requests = { ...current?.requests, [choice]: { id: requestId, after } };
   ws.setScopedQueryData(queryKey, { sending: choice, requests, error: null });

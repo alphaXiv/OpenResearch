@@ -9708,6 +9708,23 @@ fn sidebar_session_json(
     Ok(value)
 }
 
+/// The newest run a chat launched, for its sidebar card; a run that cannot be shown costs the card a line, not the page.
+fn last_run_json(store: &Store, session_id: &str) -> Result<Value> {
+    let Some(run) = store.latest_chat_run(session_id)? else {
+        return Ok(Value::Null);
+    };
+    Ok(match ApiRun::new(store, &run) {
+        Ok(run) => json!(run),
+        Err(error) => {
+            eprintln!(
+                "orx up: could not show run {} on chat {session_id}'s card: {error:#}",
+                run.id
+            );
+            Value::Null
+        }
+    })
+}
+
 fn chat_active_runs_json(store: &Store) -> Result<Value> {
     let mut rows = Vec::new();
     for (session_id, run) in store.chat_active_runs()? {
@@ -9855,16 +9872,23 @@ async fn list_chat_sessions(
         let sessions: Vec<Value> = sessions
             .iter()
             .map(|session| {
-                sidebar_session_json(
+                let mut value = sidebar_session_json(
                     &store,
                     session,
                     busy.contains(&session.id),
                     background.get(&session.id),
                     &catalog,
-                )
+                )?;
+                value["lastRun"] = last_run_json(&store, &session.id)?;
+                Ok(value)
             })
             .collect::<Result<_>>()?;
-        return Ok(Json(json!({ "sessions": sessions, "next": next })));
+        // A folded section still says how many chats it holds, however many pages they run to.
+        return Ok(Json(json!({
+            "sessions": sessions,
+            "next": next,
+            "total": store.count_sidebar_chat_sessions(q.archived)?,
+        })));
     }
     let sessions = match (q.project_id.as_deref(), q.scope.as_deref()) {
         (Some(project_id), _) => store.list_chat_sessions_by_project(project_id)?,
