@@ -212,7 +212,7 @@ test("the page's clock does not redraw the blocks; new data does", async () => {
 
 test("across a rebuilt view the blocks wait for its monitor, which is read again at once", async () => {
   const old = pipeline();
-  const rebuilt = { ...pipeline(), generation: "g9", rev: 1, asOf: now + 1000, rows: { eval: [{ task: "sst2", score: 99.9 }] } };
+  const rebuilt = { ...old, generation: "g9", rev: old.rev + 1, rows: { eval: [{ task: "sst2", score: 99.9 }] } };
   let answer = () => old;
   const view = await overview([run("r2", { monitor: summary(old) })], () => answer());
   const reads = () => view.requests.filter((path) => path === "/api/runs/r2/monitor").length;

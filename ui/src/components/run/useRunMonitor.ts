@@ -1,7 +1,7 @@
 import { useQueries } from "@tanstack/react-query";
 import { useEffect, useRef } from "react";
 import type { Run } from "../../api";
-import { monitorBehind } from "../../runMonitor/model";
+import { monitorBehind } from "../../runMonitor/revision";
 import { useWorkspace } from "../../workspace";
 import type { StripMonitor } from "./RunStrip";
 

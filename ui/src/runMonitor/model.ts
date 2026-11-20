@@ -7,6 +7,7 @@ import { runActive, runApiProvider, runConnectHost, runDisplay, runNeverStarted,
 import { fillSentence, fmtMagnitude, fmtSignal, plainSentence, tokensOf } from "./format";
 import type { Bindings, Flag, FlagState, RunMonitor, RunMonitorSummary, ShownRun, SignalSpec, SignalValue, Signals, Versus, VersusBy } from "./types";
 import { tickText } from "./journal";
+import { monitorBehind } from "./revision";
 import { stagePosition } from "./stages";
 import { capitalized, captionProgress, clockText, costWords, durationText, estimateWords, progressWords, remainingText } from "./words";
 
@@ -76,7 +77,7 @@ export interface RunModel {
   bar: { segments: { weight: number; fill: number | null }[]; whole: number | null; frozen: boolean; label: string };
   ticks: { id: string; at: number; flag: boolean; text: string }[];
   /** The unsettled flag as the newest source states it; `record` is its evidence and words, once a monitor has them. */
-  flag: { id: string; state: FlagState; record: Flag | null } | null;
+  flag: { id: string; state: FlagState; handback?: number | null; record: Flag | null } | null;
   /** What the watcher found, in full, while the flag is unsettled. */
   flagDetail: string | null;
   /** A Copilot flag waits on the user; the strip opens by itself. */
@@ -173,15 +174,6 @@ export function bindingsOf(monitor: RunMonitor, live: boolean): Bindings {
 
 const unsettled = (state: Flag["state"]): state is FlagState => state !== "kept" && state !== "stopped";
 
-/**
- * Whether the run's summary is newer than its full monitor, which then states none of the run's facts. Newer is by
- * `rev` within a generation; generations have no order, so across one the later `asOf` wins.
- */
-export function monitorBehind(summary: RunMonitorSummary | null | undefined, monitor: RunMonitor): boolean {
-  if (!summary) return false;
-  return summary.generation === monitor.generation ? summary.rev > monitor.rev : summary.asOf > monitor.asOf;
-}
-
 /** Whether a run's stages are worth listing: several, each named. Bars a log printed have no names. */
 export const namedStages = (monitor: RunMonitor) => monitor.phases.length > 1 && monitor.phases.every((phase) => phase.name);
 
@@ -189,7 +181,7 @@ export const namedStages = (monitor: RunMonitor) => monitor.phases.length > 1 &&
 export function statedFlag(run: Run, fetched: RunMonitor | null): RunMonitorSummary["flag"] {
   if (!fetched || monitorBehind(run.monitor, fetched)) return run.monitor?.flag ?? null;
   const flag = fetched.flags.find((flag) => flag.id === fetched.flagId);
-  return flag && unsettled(flag.state) ? { id: flag.id, state: flag.state } : null;
+  return flag && unsettled(flag.state) ? { id: flag.id, state: flag.state, handback: flag.handback } : null;
 }
 
 /** A run's tone from its newest source: the full monitor when it is that, else what every `Run` carries. */
@@ -283,7 +275,7 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
 
   const stated = statedFlag(run, fetched);
   // A flag's words and evidence never change, so a lagging monitor still supplies them for the same flag.
-  const flag = stated && { id: stated.id, state: stated.state, record: fetched?.flags.find((flag) => flag.id === stated.id) ?? null };
+  const flag = stated && { id: stated.id, state: stated.state, handback: stated.handback, record: fetched?.flags.find((flag) => flag.id === stated.id) ?? null };
   const needsChoice = flag?.state === "waiting";
   const record = flag?.record;
   const flagSummary = flag && run.monitor?.flag?.id === flag.id ? run.monitor.flag : null;

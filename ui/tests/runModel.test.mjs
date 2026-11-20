@@ -185,7 +185,7 @@ test("a summary newer than the monitor speaks alone, never beside the older revi
   assert.equal(line.progress, "", "progress waits for the monitor of this revision");
   assert.deepEqual([line.bar.whole, line.ticks.length, line.cost], [0.3, 0, ""]);
 
-  const rebuilt = model(run({ monitor: summary({ rev: 1, generation: "g2", asOf: now + 1000, bindings: { loss: 1.5 }, headline: { name: "loss", label: "Loss", value: 1.5 } }) }), { monitor: running });
+  const rebuilt = model(run({ monitor: summary({ rev: running.rev + 1, generation: "g2", asOf: running.asOf, bindings: { loss: 1.5 }, headline: { name: "loss", label: "Loss", value: 1.5 } }) }), { monitor: running });
   assert.equal(rebuilt.text, "Running. Loss **1.50**, falling steadily.", "another generation is never mixed in either");
   assert.equal(bare(rebuilt.headline.value), "1.50");
   assert.equal(rebuilt.progress, "");

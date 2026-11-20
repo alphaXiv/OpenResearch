@@ -17,7 +17,10 @@ mod telemetry;
 mod watch;
 pub(crate) use costs::{BilledRun, Per, Quote};
 pub(crate) use env::ProjectEnvVar;
-pub(crate) use flags::{Chosen, FlagChoice, FlagEvent, FlagNotice, NewFlag, Raise, WATCH_FLAG};
+pub(crate) use flags::{
+    flag_ask_dedupe, Chosen, FlagChoice, FlagEvent, FlagNotice, NewFlag, Raise,
+    FLAG_DELIVERY_UNCONFIRMED, WATCH_FLAG,
+};
 pub(crate) use telemetry::{Cost, InvocationIdentity, SampleCost, TokenUsage};
 pub(crate) use watch::{LookResult, WatchCount, WatchLook, WatchLookRun};
 
@@ -437,6 +440,45 @@ pub struct RunNotice {
     pub body: String,
     pub created_at: i64,
     pub client_turn_id: String,
+}
+
+impl RunNotice {
+    pub(crate) fn is_flag_wake(&self) -> bool {
+        matches!(
+            NoticeOutbox::for_turn(&self.client_turn_id),
+            NoticeOutbox::Flag
+        )
+    }
+}
+
+#[derive(Clone, Copy)]
+enum NoticeOutbox {
+    Run,
+    Flag,
+}
+
+impl NoticeOutbox {
+    fn table(self) -> &'static str {
+        match self {
+            Self::Run => "run_notices",
+            Self::Flag => "flag_wakes",
+        }
+    }
+
+    fn turn_prefix(self) -> &'static str {
+        match self {
+            Self::Run => "run-notice:",
+            Self::Flag => "flag-wake:",
+        }
+    }
+
+    fn for_turn(client_turn_id: &str) -> Self {
+        if client_turn_id.starts_with(Self::Flag.turn_prefix()) {
+            Self::Flag
+        } else {
+            Self::Run
+        }
+    }
 }
 
 /// The descriptor a run shows, without secrets. An engine run reads as the 0.2.x descriptor of
@@ -1214,6 +1256,47 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS idx_run_notices_pending
                 ON run_notices(chat_session_id, client_turn_id, id) WHERE delivered_at IS NULL;
+            CREATE TABLE IF NOT EXISTS flag_wakes (
+                id INTEGER PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                chat_session_id TEXT NOT NULL,
+                flag_id TEXT NOT NULL,
+                dedupe TEXT NOT NULL,
+                body TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                client_turn_id TEXT,
+                delivered_at INTEGER,
+                delivery_failures INTEGER NOT NULL DEFAULT 0,
+                first_failure_at INTEGER,
+                next_delivery_at INTEGER,
+                delivery_error TEXT,
+                retired_at INTEGER,
+                UNIQUE(run_id, chat_session_id, flag_id, dedupe)
+            );
+            CREATE INDEX IF NOT EXISTS idx_flag_wakes_pending
+                ON flag_wakes(chat_session_id, client_turn_id, id)
+                WHERE delivered_at IS NULL AND retired_at IS NULL;
+            CREATE VIEW IF NOT EXISTS pending_chat_run_outbox AS
+                SELECT id, run_id, chat_session_id, kind, dedupe, body, created_at,
+                       client_turn_id, next_delivery_at, 0 AS is_flag
+                FROM run_notices WHERE delivered_at IS NULL AND retired_at IS NULL
+                UNION ALL
+                SELECT id, run_id, chat_session_id, NULL, dedupe, body, created_at,
+                       client_turn_id, next_delivery_at, 1
+                FROM flag_wakes w WHERE delivered_at IS NULL AND retired_at IS NULL
+                  AND w.dedupe NOT GLOB 'resume:*'
+                  AND (w.client_turn_id IS NULL OR w.client_turn_id GLOB 'flag-wake:*')
+                  AND (EXISTS (
+                      SELECT 1 FROM chat_turns t WHERE t.session_id = w.chat_session_id
+                        AND t.client_turn_id = w.client_turn_id
+                  ) OR (NOT EXISTS (
+                      SELECT 1 FROM run_notices n
+                      WHERE n.run_id = w.run_id AND n.chat_session_id = w.chat_session_id
+                        AND n.kind = 'terminal' AND n.delivered_at IS NULL AND n.retired_at IS NULL
+                  ) AND NOT EXISTS (
+                      SELECT 1 FROM legacy_watches l JOIN runs r ON r.id = l.run_id
+                      WHERE l.run_id = w.run_id AND r.status IN ('done', 'failed', 'lost')
+                  )));
             CREATE TABLE IF NOT EXISTS legacy_watches (
                 run_id TEXT PRIMARY KEY,
                 seen_status TEXT,
@@ -1589,6 +1672,7 @@ impl Store {
             "ALTER TABLE chat_sessions ADD COLUMN parent_session_id TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN goal TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN autonomy TEXT",
+            "ALTER TABLE chat_turns ADD COLUMN flag_input TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN side_parent_session_id TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN side_parent_leaf_id TEXT",
             "ALTER TABLE ui_state ADD COLUMN preferred_service_tier TEXT",
@@ -1650,6 +1734,12 @@ impl Store {
              CREATE TRIGGER IF NOT EXISTS delete_chat_outbox AFTER DELETE ON chat_sessions BEGIN
                  DELETE FROM run_notices WHERE chat_session_id = OLD.id;
                  DELETE FROM run_subscriptions WHERE chat_session_id = OLD.id;
+             END;
+             CREATE TRIGGER IF NOT EXISTS delete_run_flag_wakes AFTER DELETE ON runs BEGIN
+                 DELETE FROM flag_wakes WHERE run_id = OLD.id;
+             END;
+             CREATE TRIGGER IF NOT EXISTS delete_chat_flag_wakes AFTER DELETE ON chat_sessions BEGIN
+                 DELETE FROM flag_wakes WHERE chat_session_id = OLD.id;
              END;",
         )?;
         schema.execute_batch(
@@ -2264,8 +2354,10 @@ impl Store {
                              json_extract(r.backend_json, '$.kind')),
                     r.launch_spec IS NOT NULL
                         AND json_extract(r.backend_json, '$.handle.type') IS NOT 'Legacy',
-                    EXISTS(SELECT 1 FROM run_notices n WHERE n.run_id = r.id
+                    (EXISTS(SELECT 1 FROM run_notices n WHERE n.run_id = r.id
                            AND n.delivered_at IS NULL AND n.retired_at IS NULL)
+                     OR EXISTS(SELECT 1 FROM flag_wakes w WHERE w.run_id = r.id
+                               AND w.delivered_at IS NULL AND w.retired_at IS NULL))
              FROM runs r
              LEFT JOIN local_experiments e ON e.id = r.experiment_id
              LEFT JOIN local_projects p ON p.id = r.project_id
@@ -5231,9 +5323,9 @@ impl Store {
              (id, session_id, user_message_id, assistant_message_id, client_turn_id,
               request_hash, prepared_input, settings_json, state, delivery_state,
               attempt_count, next_retry_at, error_kind, error_message, recovery_action,
-              recovered_by_turn_id, created_at, updated_at)
+              recovered_by_turn_id, created_at, updated_at, flag_input)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-                     ?14, ?15, ?16, ?17, ?18)",
+                     ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 turn.id,
                 turn.session_id,
@@ -5253,6 +5345,7 @@ impl Store {
                 turn.recovered_by_turn_id,
                 turn.created_at,
                 turn.updated_at,
+                turn.flag_input,
             ],
         )?;
         Ok(ChatTurnAdmission::Inserted)
@@ -5483,33 +5576,51 @@ impl Store {
         attempt_count: i64,
         next_retry_at: Option<i64>,
     ) -> Result<()> {
+        let tx = self
+            .conn
+            .is_autocommit()
+            .then(|| self.begin_immediate())
+            .transpose()?;
+        let now = now_ms();
         let changed = self.conn.execute(
             "UPDATE chat_turns SET state = ?2, delivery_state = ?3, attempt_count = ?4,
                  next_retry_at = ?5, updated_at = ?6
              WHERE id = ?1 AND state IN ('preparing', 'retrying', 'running')",
-            params![
-                id,
-                state,
-                delivery_state,
-                attempt_count,
-                next_retry_at,
-                now_ms()
-            ],
+            params![id, state, delivery_state, attempt_count, next_retry_at, now],
         )?;
-        if changed != 0 && state == "running" && delivery_state == "accepted" {
+        let accepted = changed != 0 && state == "running" && delivery_state == "accepted";
+        if accepted {
+            self.confirm_flag_wake_delivery(id, now)?;
+        }
+        if let Some(tx) = tx {
+            tx.commit()?;
+        }
+        if accepted {
             crate::commands::up::api_v2::flag_turn_changed(self, id);
         }
         Ok(())
     }
 
     pub fn complete_chat_turn(&self, id: &str) -> Result<bool> {
+        let tx = self
+            .conn
+            .is_autocommit()
+            .then(|| self.begin_immediate())
+            .transpose()?;
+        let now = now_ms();
         let changed = self.conn.execute(
             "UPDATE chat_turns SET state = 'completed', delivery_state = 'accepted', next_retry_at = NULL,
                  error_kind = NULL, error_message = NULL, recovery_action = NULL,
                  updated_at = ?2 WHERE id = ?1
                    AND state IN ('preparing', 'retrying', 'running')",
-            params![id, now_ms()],
+            params![id, now],
         )?;
+        if changed != 0 {
+            self.confirm_flag_wake_delivery(id, now)?;
+        }
+        if let Some(tx) = tx {
+            tx.commit()?;
+        }
         Ok(changed > 0)
     }
 
@@ -6223,6 +6334,8 @@ pub struct StoredChatTurn {
     pub client_turn_id: String,
     pub request_hash: String,
     pub prepared_input: String,
+    #[serde(skip)]
+    pub flag_input: Option<String>,
     pub settings_json: String,
     pub state: String,
     pub delivery_state: String,
@@ -6256,7 +6369,7 @@ pub enum ChatTurnAdmission {
 const CHAT_TURN_COLS: &str = "id, session_id, user_message_id, assistant_message_id, \
     client_turn_id, request_hash, prepared_input, settings_json, state, delivery_state, \
     attempt_count, next_retry_at, error_kind, error_message, recovery_action, \
-    recovered_by_turn_id, created_at, updated_at";
+    recovered_by_turn_id, created_at, updated_at, flag_input";
 
 fn row_to_chat_turn(
     row: &rusqlite::Row<'_>,
@@ -6269,6 +6382,7 @@ fn row_to_chat_turn(
         client_turn_id: row.get(4)?,
         request_hash: row.get(5)?,
         prepared_input: row.get(6)?,
+        flag_input: row.get(18)?,
         settings_json: row.get(7)?,
         state: row.get(8)?,
         delivery_state: row.get(9)?,
@@ -7079,9 +7193,8 @@ impl Store {
 
     pub fn pending_run_notice_sessions(&self) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT chat_session_id FROM run_notices
-             WHERE delivered_at IS NULL AND retired_at IS NULL
-             AND (next_delivery_at IS NULL OR next_delivery_at <= ?1) ORDER BY chat_session_id",
+            "SELECT DISTINCT chat_session_id FROM pending_chat_run_outbox
+             WHERE next_delivery_at IS NULL OR next_delivery_at <= ?1 ORDER BY chat_session_id",
         )?;
         let rows = stmt.query_map([now_ms()], |row| row.get(0))?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -7096,11 +7209,14 @@ impl Store {
         now: i64,
     ) -> Result<Option<i64>> {
         let tx = self.begin_immediate()?;
+        let table = NoticeOutbox::for_turn(client_turn_id).table();
         let prior: Option<(i64, Option<i64>)> = tx
             .query_row(
-                "SELECT delivery_failures, first_failure_at FROM run_notices
+                &format!(
+                    "SELECT delivery_failures, first_failure_at FROM {table}
              WHERE chat_session_id = ?1 AND client_turn_id = ?2
-             AND delivered_at IS NULL AND retired_at IS NULL LIMIT 1",
+             AND delivered_at IS NULL AND retired_at IS NULL LIMIT 1"
+                ),
                 params![chat, client_turn_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -7127,9 +7243,9 @@ impl Store {
             reason.to_string()
         };
         tx.execute(
-            "UPDATE run_notices SET delivery_failures = ?3, first_failure_at = ?4,
+            &format!("UPDATE {table} SET delivery_failures = ?3, first_failure_at = ?4,
              next_delivery_at = ?5, delivery_error = ?6, retired_at = ?7
-             WHERE chat_session_id = ?1 AND client_turn_id = ?2 AND delivered_at IS NULL AND retired_at IS NULL",
+             WHERE chat_session_id = ?1 AND client_turn_id = ?2 AND delivered_at IS NULL AND retired_at IS NULL"),
             params![chat, client_turn_id, failures + 1, first, next, reason, retired],
         )?;
         tx.commit()?;
@@ -7141,23 +7257,31 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                "SELECT delivery_error FROM run_notices WHERE run_id = ?1 AND retired_at IS NOT NULL
+                "SELECT delivery_error FROM (
+                     SELECT delivery_error, retired_at, id FROM run_notices WHERE run_id = ?1
+                     UNION ALL
+                     SELECT delivery_error, retired_at, id FROM flag_wakes WHERE run_id = ?1
+                 ) WHERE retired_at IS NOT NULL AND delivery_error IS NOT NULL
                  ORDER BY retired_at DESC, id DESC LIMIT 1",
                 [run_id],
                 |row| row.get(0),
             )
-            .optional()?
-            .flatten())
+            .optional()?)
     }
 
     pub fn expire_run_notice_batches(&self, now: i64) -> Result<()> {
-        self.conn.execute(
-            "UPDATE run_notices SET retired_at = ?1, next_delivery_at = NULL,
+        for outbox in [NoticeOutbox::Run, NoticeOutbox::Flag] {
+            let table = outbox.table();
+            self.conn.execute(
+                &format!(
+                    "UPDATE {table} SET retired_at = ?1, next_delivery_at = NULL,
              delivery_error = 'Retry window expired after 24 hours: ' || delivery_error
              WHERE delivered_at IS NULL AND retired_at IS NULL
-             AND first_failure_at <= ?1 - ?2",
-            params![now, RUN_NOTICE_RETRY_WINDOW_MS],
-        )?;
+             AND first_failure_at <= ?1 - ?2"
+                ),
+                params![now, RUN_NOTICE_RETRY_WINDOW_MS],
+            )?;
+        }
         Ok(())
     }
 
@@ -7168,44 +7292,67 @@ impl Store {
     pub fn run_notice_batch_at(&self, chat_session_id: &str, now: i64) -> Result<Vec<RunNotice>> {
         let tx = self.begin_immediate()?;
         self.expire_run_notice_batches(now)?;
-        self.retire_stale_flag_wakes(now)?;
-        let assigned: Option<String> = tx
+        self.retire_unadmitted_flag_wakes(now)?;
+        let next: Option<(bool, Option<String>)> = tx
             .query_row(
-                "SELECT client_turn_id FROM run_notices
-             WHERE chat_session_id = ?1 AND delivered_at IS NULL AND client_turn_id IS NOT NULL
-             AND retired_at IS NULL AND (next_delivery_at IS NULL OR next_delivery_at <= ?2)
-             ORDER BY id LIMIT 1",
+                "SELECT is_flag, client_turn_id FROM (
+                     SELECT is_flag, client_turn_id, created_at, id,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY is_flag ORDER BY client_turn_id IS NULL, id
+                            ) AS oldest
+                     FROM pending_chat_run_outbox
+                     WHERE chat_session_id = ?1 AND (next_delivery_at IS NULL OR next_delivery_at <= ?2)
+                 ) WHERE oldest = 1
+                 ORDER BY client_turn_id IS NULL, created_at, id, is_flag LIMIT 1",
                 params![chat_session_id, now],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
+        let Some((is_flag, assigned)) = next else {
+            tx.commit()?;
+            return Ok(Vec::new());
+        };
+        let outbox = if is_flag {
+            NoticeOutbox::Flag
+        } else {
+            NoticeOutbox::Run
+        };
+        let table = outbox.table();
         let client_turn_id = match assigned {
             Some(id) => id,
             None => {
-                let id = format!("run-notice:{}", uuid::Uuid::new_v4());
-                let assigned = tx.execute(
-                    "UPDATE run_notices SET client_turn_id = ?2 WHERE chat_session_id = ?1
-                     AND delivered_at IS NULL AND retired_at IS NULL AND client_turn_id IS NULL",
-                    params![chat_session_id, id],
+                // A released drain can resume a result batch even if it cannot see flag wakes.
+                let id = format!("{}{}", outbox.turn_prefix(), uuid::Uuid::new_v4());
+                tx.execute(
+                    &format!(
+                        "UPDATE {table} SET client_turn_id = ?2 WHERE id IN (
+                         SELECT id FROM pending_chat_run_outbox WHERE chat_session_id = ?1
+                           AND is_flag = ?3 AND client_turn_id IS NULL
+                     )"
+                    ),
+                    params![chat_session_id, id, is_flag],
                 )?;
-                if assigned == 0 {
-                    tx.commit()?;
-                    return Ok(Vec::new());
-                }
                 id
             }
         };
         let notices = {
-            let mut stmt = tx.prepare(
-                "SELECT id, run_id, chat_session_id, kind, dedupe, body, created_at, client_turn_id
-                 FROM run_notices WHERE chat_session_id = ?1 AND client_turn_id = ?2 AND delivered_at IS NULL ORDER BY id",
-            )?;
+            let mut stmt = tx.prepare(match outbox {
+                NoticeOutbox::Run => "SELECT id, run_id, chat_session_id, kind, dedupe, body, created_at, client_turn_id
+                     FROM run_notices WHERE chat_session_id = ?1 AND client_turn_id = ?2 AND delivered_at IS NULL ORDER BY id",
+                NoticeOutbox::Flag => "SELECT id, run_id, chat_session_id, NULL, dedupe, body, created_at, client_turn_id
+                     FROM flag_wakes WHERE chat_session_id = ?1 AND client_turn_id = ?2
+                     AND delivered_at IS NULL AND retired_at IS NULL ORDER BY id",
+            })?;
             let rows = stmt.query_map(params![chat_session_id, client_turn_id], |row| {
                 Ok(RunNotice {
                     id: row.get(0)?,
                     run_id: row.get(1)?,
                     chat_session_id: row.get(2)?,
-                    kind: row.get(3)?,
+                    kind: if is_flag {
+                        WATCH_FLAG.to_owned()
+                    } else {
+                        row.get(3)?
+                    },
                     dedupe: row.get(4)?,
                     body: row.get(5)?,
                     created_at: row.get(6)?,
@@ -7224,9 +7371,12 @@ impl Store {
         client_turn_id: &str,
         delivered_at: i64,
     ) -> Result<()> {
+        let table = NoticeOutbox::for_turn(client_turn_id).table();
         self.conn.execute(
-            "UPDATE run_notices SET delivered_at = ?3, next_delivery_at = NULL WHERE chat_session_id = ?1
-             AND client_turn_id = ?2 AND delivered_at IS NULL",
+            &format!(
+                "UPDATE {table} SET delivered_at = ?3, next_delivery_at = NULL
+             WHERE chat_session_id = ?1 AND client_turn_id = ?2 AND delivered_at IS NULL"
+            ),
             params![chat_session_id, client_turn_id, delivered_at],
         )?;
         Ok(())
@@ -12715,18 +12865,6 @@ pub(crate) mod tests {
     }
 
     impl Store {
-        pub(crate) fn run_notices_for_tests(&self, run_id: &str) -> Vec<(String, String, String)> {
-            let mut statement = self
-                .conn
-                .prepare("SELECT chat_session_id, kind, body FROM run_notices WHERE run_id = ?1 ORDER BY id")
-                .unwrap();
-            statement
-                .query_map([run_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-                .unwrap()
-                .collect::<rusqlite::Result<_>>()
-                .unwrap()
-        }
-
         pub(crate) fn conn_execute_for_tests(&self, sql: &str) {
             self.conn.execute(sql, []).unwrap();
         }
@@ -12760,18 +12898,6 @@ pub(crate) mod tests {
                 updated_at: 1,
             })
             .unwrap();
-        }
-
-        /// A notice the chat's notice loop claimed into turn `turn`, and whether it was delivered.
-        pub(crate) fn claim_run_notices_for_tests(&self, chat: &str, turn: &str, delivered: bool) {
-            self.conn
-                .execute(
-                    "UPDATE run_notices SET client_turn_id = ?2,
-                            delivered_at = CASE WHEN ?3 THEN 1 ELSE NULL END
-                     WHERE chat_session_id = ?1 AND delivered_at IS NULL",
-                    params![chat, turn, delivered],
-                )
-                .unwrap();
         }
 
         /// A turn of `chat` in `state`, as the chat's own writer leaves it.
@@ -13259,6 +13385,7 @@ pub(crate) mod tests {
             client_turn_id: client_turn_id.into(),
             request_hash: "hash-a".into(),
             prepared_input: "prepared".into(),
+            flag_input: None,
             settings_json: "{}".into(),
             state: "preparing".into(),
             delivery_state: "not_sent".into(),
