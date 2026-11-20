@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "gallery": "vite --open /gallery.html",
     "build": "pnpm lint:i18n && paraglide-js compile --silent --emit-ts-declarations && pnpm typecheck && vite build",
     "routes:generate": "tsr generate",
     "typecheck": "pnpm routes:generate && tsc --noEmit",
