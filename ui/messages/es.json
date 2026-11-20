@@ -2523,5 +2523,8 @@
   "run_eta_untimed": "{stages} sin duración estimada",
   "run_summary_first_floor": "primero termina en al menos {duration}",
   "run_summary_next_floor": "siguiente termina en al menos {duration}",
-  "run_value_pending": "Aún no hay valor"
+  "run_value_pending": "Aún no hay valor",
+  "chat_root_bypass_title": "¿Omitir permisos como root?",
+  "chat_root_bypass_description": "OpenResearch se ejecuta como root en esta máquina, así que Claude Code podría cambiar cualquier cosa en ella sin preguntar. Úsalo solo en una máquina que puedas borrar y reconstruir, como un servidor GPU alquilado. OpenResearch recordará esto para esta máquina.",
+  "chat_root_bypass_confirm": "Permitir en esta máquina"
 }

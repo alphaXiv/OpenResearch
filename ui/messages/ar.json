@@ -2523,5 +2523,8 @@
   "run_eta_untimed": "لم تُقدّر مدة {stages}",
   "run_summary_first_floor": "الأول ينتهي بعد {duration} على الأقل",
   "run_summary_next_floor": "التالي ينتهي بعد {duration} على الأقل",
-  "run_value_pending": "لا توجد قيمة بعد"
+  "run_value_pending": "لا توجد قيمة بعد",
+  "chat_root_bypass_title": "تجاوز الأذونات بصلاحيات root؟",
+  "chat_root_bypass_description": "يعمل OpenResearch بصلاحيات root على هذا الجهاز، لذا يمكن لـ Claude Code تغيير أي شيء عليه دون أن يسأل. استخدم هذا فقط على جهاز يمكنك مسحه وإعادة بنائه، مثل خادم GPU مستأجر. سيتذكر OpenResearch هذا الاختيار لهذا الجهاز.",
+  "chat_root_bypass_confirm": "السماح على هذا الجهاز"
 }

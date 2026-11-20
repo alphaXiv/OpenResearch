@@ -2523,5 +2523,8 @@
   "run_eta_untimed": "{stages}: время неизвестно",
   "run_summary_first_floor": "первое завершение не ранее чем через {duration}",
   "run_summary_next_floor": "следующее завершение не ранее чем через {duration}",
-  "run_value_pending": "Значения пока нет"
+  "run_value_pending": "Значения пока нет",
+  "chat_root_bypass_title": "Обходить разрешения от root?",
+  "chat_root_bypass_description": "OpenResearch работает на этой машине от root, поэтому Claude Code сможет менять на ней что угодно без запроса. Используйте это только на машине, которую можно стереть и собрать заново, например на арендованном GPU-сервере. OpenResearch запомнит выбор для этой машины.",
+  "chat_root_bypass_confirm": "Разрешить на этой машине"
 }

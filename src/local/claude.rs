@@ -44,8 +44,8 @@ use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 use crate::error::{anyhow, Result};
 use crate::local::agent_lifecycle::{IdlePolicy, REAPER_INTERVAL};
 use crate::local::harness::claude::{
-    claude_permission_mode, uses_permission_bridge, write_mcp_config, write_settings,
-    CLAUDE_ENTRYPOINT,
+    check_full_access, claude_permission_mode, full_access, uses_permission_bridge,
+    write_mcp_config, write_settings, FullAccess, CLAUDE_ENTRYPOINT,
 };
 use crate::local::harness::{HarnessAuthState, PermissionMode, SetupFailure};
 use crate::local::native_store::NativeStore;
@@ -873,6 +873,9 @@ async fn spawn_client(
             ),
         )
     })?;
+    check_full_access(spec.config.permission_mode)?;
+    let access = full_access();
+
     let mut cmd = crate::process::tokio_command(&bin);
     cmd.args([
         "--print",
@@ -889,7 +892,6 @@ async fn spawn_client(
         // the harness ignores events until the echo arrives.
         "--replay-user-messages",
         "--verbose",
-        "--allow-dangerously-skip-permissions",
         "--permission-mode",
         claude_permission_mode(spec.config.permission_mode),
     ])
@@ -964,7 +966,14 @@ async fn spawn_client(
         cmd.args(["--disallowedTools", "Agent,Task,Workflow"]);
         cmd.args(["--allowedTools", "mcp__orx"]);
     }
+    // Claude exits at launch on this flag as root without `IS_SANDBOX`.
+    if access != FullAccess::NeedsRootConsent {
+        cmd.arg("--allow-dangerously-skip-permissions");
+    }
     crate::local::chat::prepare_env(&mut cmd);
+    if access == FullAccess::RootConsented {
+        cmd.env("IS_SANDBOX", "1");
+    }
     cmd.env("CLAUDE_CODE_ENTRYPOINT", CLAUDE_ENTRYPOINT);
     let delegated = crate::store::Store::open()
         .and_then(|store| store.delegation(&spec.session_id))
@@ -2068,6 +2077,89 @@ done
         }
         host.shutdown().await;
         std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn as_root_bypass_needs_the_users_confirmation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if !crate::config::in_test_child(&["IS_SANDBOX"]) {
+            return;
+        }
+        crate::local::harness::claude::TEST_RUNS_AS_ROOT.store(true, Ordering::Relaxed);
+        let repo = crate::store::data_dir().join("root-bypass");
+        std::fs::create_dir_all(&repo).unwrap();
+        let bin = repo.join("claude");
+        std::fs::write(
+            &bin,
+            r#"#!/bin/sh
+allow=false
+for arg; do [ "$arg" = --allow-dangerously-skip-permissions ] && allow=true; done
+while IFS= read -r input; do
+    printf '{"type":"system","allow":%s,"sandbox":"%s"}\n' "$allow" "$IS_SANDBOX"
+done
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let host = Arc::new(ClaudeHost::new());
+        host.auth.write().unwrap().state = HarnessAuthState::Ready;
+        let chat = Arc::new(crate::local::chat::ChatHost::new(
+            Arc::new(crate::local::opencode::AgentHost::new(None)),
+            Arc::new(crate::local::codex::CodexHost::new()),
+            host.clone(),
+        ));
+        let spawn = |session: &str, mode| {
+            let mut config = cfg(Some(mode), None, None, false);
+            config.bin = Some(bin.clone());
+            let (tx, rx) = mpsc::unbounded_channel();
+            let spec = SpawnSpec {
+                chat: chat.clone(),
+                session_id: session.into(),
+                repo: repo.clone(),
+                playbook: repo.join("playbook"),
+                resume: None,
+                fork_at: None,
+                config,
+            };
+            let host = host.clone();
+            async move { (host.acquire_turn(spec, tx).await, rx) }
+        };
+        let launched = |session: &'static str, mode| {
+            let spawn = spawn(session, mode);
+            async move {
+                let (route, mut rx) = spawn.await;
+                let route = route.unwrap();
+                route.client().send_user_message("hi").await.unwrap();
+                let Some(TurnEvent::Line(event)) =
+                    tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                        .await
+                        .unwrap()
+                else {
+                    panic!("Claude exited before replying")
+                };
+                (event["allow"].clone(), event["sandbox"].clone())
+            }
+        };
+
+        assert_eq!(
+            launched("root-auto", PermissionMode::Auto).await,
+            (json!(false), json!(""))
+        );
+        let refused = spawn("root-bypass", PermissionMode::Bypass).await.0;
+        assert!(refused
+            .err()
+            .unwrap()
+            .downcast_ref::<crate::local::harness::claude::RootBypassUnconfirmed>()
+            .is_some());
+
+        crate::telemetry::set_claude_root_full_access(true).unwrap();
+        assert_eq!(
+            launched("root-bypass-confirmed", PermissionMode::Bypass).await,
+            (json!(true), json!("1"))
+        );
+        host.shutdown().await;
     }
 
     #[cfg(unix)]
