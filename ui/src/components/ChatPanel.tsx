@@ -9173,8 +9173,8 @@ export function ChatPanel({
               ? row.count > 0 && <span className={`tabular-nums text-muted ${row.collapsed ? "hidden group-hover/section:inline group-focus-visible/section:inline" : ""}`}>{fmtNumber(row.count)}</span>
               : row.collapsed && <span className="tabular-nums text-muted">{fmtNumber(row.count)}</span>}
             <ChevronRight size={14} aria-hidden="true"
-              className={`mb-px shrink-0 text-muted transition-transform duration-120 ease-standard motion-reduce:transition-none ${row.collapsed ? "" : "rotate-90"}`} />
-            <span aria-hidden="true" className="mb-2.5 ms-1.5 h-px flex-1 bg-border-variant" />
+              className={`mb-0.5 shrink-0 text-muted transition-transform duration-120 ease-standard motion-reduce:transition-none ${row.collapsed ? "" : "rotate-90"}`} />
+            <span aria-hidden="true" className="mb-2.25 ms-1.5 h-px flex-1 bg-border-variant" />
           </button>
         </div>
       );
