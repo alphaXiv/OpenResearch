@@ -73,6 +73,23 @@ test("a failed copy says so", async (t) => {
 
 const bareImage = () => createElement(ImageMenu, { src: "/a.png", name: "a.png" }, createElement("img", { src: "/a.png", alt: "" }));
 
+test("copy starts the clipboard write inside the click, before the image is encoded", async (t) => {
+  fakeCanvas(t);
+  let decoded;
+  t.mock.method(HTMLImageElement.prototype, "decode", () => new Promise((resolve) => { decoded = resolve; }));
+  const items = [];
+  t.mock.method(navigator.clipboard, "write", (written) => { items.push(...written); return Promise.resolve(); });
+  const { container } = await withToasts(bareImage());
+
+  await openMenu(container.querySelector("img"));
+  await choose(m.image_copy());
+
+  assert.deepEqual(items.map((item) => item.types), [["image/png"]]);
+  const blob = items[0].getType("image/png");
+  await act(async () => decoded());
+  assert.equal((await blob).type, "image/png");
+});
+
 test("an image that didn't load says so instead of copying nothing", async (t) => {
   fakeCanvas(t);
   t.mock.method(HTMLImageElement.prototype, "decode", async () => { throw new DOMException("broken", "EncodingError"); });
