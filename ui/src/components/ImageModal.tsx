@@ -1,14 +1,17 @@
-import { Download, Minus, Plus, X } from "lucide-react";
+import { Copy, Download, Minus, Plus, X } from "lucide-react";
 import { useContext, useEffect, useRef, useState } from "react";
+import { copyImageToClipboard } from "../clipboard";
 import { imageWheelZoom } from "../imageZoom";
 import { m } from "../paraglide/messages.js";
 import { ImageCarouselContext } from "./ImageCarousel";
+import { ImageMenu } from "./ImageMenu";
 import { Button, Dialog, DialogContent, IconButton, IconButtonLink, Tooltip } from "./ui";
 
 export function ImageModal({ src, alt, name, onClose, onError }: {
-  src: string; alt: string; name?: string; onClose: () => void; onError?: () => void;
+  src: string; alt: string; name: string; onClose: () => void; onError?: () => void;
 }) {
   const dialog = useRef<HTMLDivElement>(null);
+  const image = useRef<HTMLImageElement>(null);
   const [viewport, setViewport] = useState<HTMLDivElement | null>(null);
   const [localZoom, setLocalZoom] = useState(1);
   const carousel = useContext(ImageCarouselContext);
@@ -43,12 +46,16 @@ export function ImageModal({ src, alt, name, onClose, onError }: {
       <div ref={setViewport} className="absolute inset-x-4 sm:inset-x-12 top-16 bottom-32 overflow-auto overscroll-contain"
         onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}>
         <div className="flex min-h-full min-w-full w-max pointer-events-none">
-          <img src={src} alt={alt} onError={onError} onLoad={(event) => setSize({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })}
+          <ImageMenu src={src} name={name}><img ref={image} src={src} alt={alt} onError={onError} onLoad={(event) => setSize({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })}
             style={size.width ? { width: size.width * fit * zoom, height: size.height * fit * zoom } : undefined}
-            className={`pointer-events-auto block m-auto shrink-0 max-w-none rounded-lg shadow-modal ${size.width && bounds.width ? "visible" : "invisible"}`} />
+            className={`pointer-events-auto block m-auto shrink-0 max-w-none rounded-lg shadow-modal ${size.width && bounds.width ? "visible" : "invisible"}`} /></ImageMenu>
         </div>
       </div>
       <div className="absolute top-5 right-5 flex gap-2">
+        <Tooltip interactive content={m.image_copy()}>
+          <IconButton shape="circle" disabled={!size.width} onClick={() => { if (image.current) void copyImageToClipboard(image.current); }}
+            aria-label={m.image_copy()} className="bg-background shadow-popover"><Copy size={16} /></IconButton>
+        </Tooltip>
         <Tooltip interactive content={m.media_preview_download()}>
           <IconButtonLink shape="circle" href={src} download={name || true} aria-label={m.media_preview_download()}
             className="bg-background shadow-popover"><Download size={16} /></IconButtonLink>
