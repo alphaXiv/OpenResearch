@@ -1367,6 +1367,7 @@
   "chat_remove_attachment": "{name} öğesini kaldır",
   "chat_attachment_unreadable": "{name} okunamadı. Yeniden eklemeyi deneyin.",
   "chat_attachment_folder": "{name} bir klasör. Bunun yerine içindeki dosyaları ekleyin.",
+  "chat_attachment_empty": "{name} boş, eklenecek bir şey yok.",
   "chat_drop_to_attach": "Eklemek için bırak",
   "chat_attachments_total_too_large": "Ekler {size} toplam sınırını aşıyor — birini kaldırıp yeniden deneyin.",
   "chat_model_no_image_input": "{model} görselleri görüntüleyemiyor. Görseli kaldırın veya görsel destekli bir modele geçin.",

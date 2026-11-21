@@ -6695,6 +6695,11 @@ export function ChatPanel({
     const attachmentStashKey = target?.stashKey ?? stashKey;
     const accepted: File[] = [];
     for (const file of files) {
+      // An empty picture or PDF would fail the agent's read, and can break its session.
+      if (file.size === 0 && (isPictureType(file.type) || file.type === "application/pdf")) {
+        setAttachError(m.chat_attachment_empty({ name: ltr(file.name) }));
+        continue;
+      }
       if (noImageInputError && isPictureType(file.type)) {
         setImageRefusedFor(selectedModel?.id ?? null);
         continue;
@@ -6763,7 +6768,10 @@ export function ChatPanel({
   const dropFiles = useRef<(transfer: DataTransfer) => void>(() => {});
   dropFiles.current = addDropped;
   const acceptsDrops = useRef<() => boolean>(() => false);
-  acceptsDrops.current = () => !asking && composerRef.current !== null;
+  acceptsDrops.current = () =>
+    !asking && connection === null && composerRef.current !== null
+    // A modal's backdrop has no dialog role, so check for an open modal rather than the target.
+    && document.querySelector('[role=dialog][aria-modal="true"], [role=alertdialog]') === null;
   const [draggingFiles, setDraggingFiles] = useState(false);
   // A file dropped in this panel, or for the main chat anywhere outside a side chat or dialog, joins its composer.
   useEffect(() => {
@@ -9843,7 +9851,7 @@ export function ChatPanel({
           <div inert={connection !== null} className={`composer-frame flex flex-col min-h-0 rounded-xl bg-surface${connection ? " opacity-60" : ""}`} data-onboarding="composer">
             <div className={`composer-box relative flex flex-col min-h-0 rounded-xl border ${bashMode && !asking ? "border-accent-amber" : "border-border"} bg-background shadow-control-subtle`}>
               {draggingFiles && !asking && (
-                <div aria-hidden="true" className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center gap-2 rounded-xl border-2 border-dashed border-focus bg-background/85 text-accent-blue-strong">
+                <div aria-hidden="true" className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center gap-2 rounded-xl border-2 border-dashed border-accent-blue-border bg-background/85 text-accent-blue-strong">
                   <Plus size={18} />
                   <span className="text-sm font-medium">{m.chat_drop_to_attach()}</span>
                 </div>

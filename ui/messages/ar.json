@@ -1335,6 +1335,7 @@
   "chat_remove_attachment": "إزالة {name}",
   "chat_attachment_unreadable": "تعذّرت قراءة {name}. حاول إرفاقه مرة أخرى.",
   "chat_attachment_folder": "{name} مجلد. أرفق الملفات الموجودة بداخله بدلًا منه.",
+  "chat_attachment_empty": "{name} فارغ، فلا يوجد ما يُرفق.",
   "chat_drop_to_attach": "أفلت للإرفاق",
   "chat_attachments_total_too_large": "تتجاوز المرفقات الحد الإجمالي {size} — أزِل واحدًا وحاول مجددًا.",
   "chat_model_no_image_input": "لا يستطيع {model} قراءة الصور. أزِل الصورة أو بدّل إلى نموذج يدعم الصور.",

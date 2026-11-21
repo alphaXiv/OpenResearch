@@ -1336,6 +1336,7 @@
   "chat_remove_attachment": "{name} を削除",
   "chat_attachment_unreadable": "{name} を読み込めませんでした。もう一度添付してください。",
   "chat_attachment_folder": "{name} はフォルダです。中のファイルを添付してください。",
+  "chat_attachment_empty": "{name} は空のため、添付できるものがありません。",
   "chat_drop_to_attach": "ドロップして添付",
   "chat_attachments_total_too_large": "添付ファイルの合計が上限の {size} を超えています。1 つ削除して再試行してください。",
   "chat_model_no_image_input": "{model} は画像を読み取れません。画像を削除するか、画像に対応したモデルに切り替えてください。",

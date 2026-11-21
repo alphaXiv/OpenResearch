@@ -1330,6 +1330,7 @@
   "chat_remove_attachment": "حذف {name}",
   "chat_attachment_unreadable": "خواندن {name} ممکن نشد. دوباره پیوستش کنید.",
   "chat_attachment_folder": "{name} یک پوشه است. به‌جای آن، فایل‌های داخلش را پیوست کنید.",
+  "chat_attachment_empty": "{name} خالی است، پس چیزی برای پیوست نیست.",
   "chat_drop_to_attach": "برای پیوست رها کنید",
   "chat_attachments_total_too_large": "حجم پیوست‌ها از سقف {size} بیشتر است — یکی را حذف و دوباره تلاش کنید.",
   "chat_model_no_image_input": "{model} نمی‌تواند تصویر ببیند. تصویر را حذف کنید یا به مدلی با پشتیبانی از تصویر تغییر دهید.",

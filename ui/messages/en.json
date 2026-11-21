@@ -1336,6 +1336,7 @@
   "chat_remove_attachment": "Remove {name}",
   "chat_attachment_unreadable": "Couldn't read {name}. Try attaching it again.",
   "chat_attachment_folder": "{name} is a folder. Attach the files inside it instead.",
+  "chat_attachment_empty": "{name} is empty, so there's nothing to attach.",
   "chat_drop_to_attach": "Drop to attach",
   "chat_attachments_total_too_large": "Attachments exceed the {size} total limit — remove one and try again.",
   "chat_model_no_image_input": "{model} can't view images. Remove the image or switch to a model with image support.",

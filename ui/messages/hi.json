@@ -1336,6 +1336,7 @@
   "chat_remove_attachment": "{name} हटाएँ",
   "chat_attachment_unreadable": "{name} पढ़ा नहीं जा सका। इसे फिर से अटैच करके देखें।",
   "chat_attachment_folder": "{name} एक फ़ोल्डर है। इसके बजाय इसके अंदर की फ़ाइलें अटैच करें।",
+  "chat_attachment_empty": "{name} खाली है, इसलिए अटैच करने के लिए कुछ नहीं है।",
   "chat_drop_to_attach": "अटैच करने के लिए छोड़ें",
   "chat_attachments_total_too_large": "अटैचमेंट {size} की कुल सीमा से ज़्यादा हैं — एक हटाएं और फिर से कोशिश करें।",
   "chat_model_no_image_input": "{model} इमेज नहीं देख सकता। इमेज हटाएं या इमेज सपोर्ट वाले मॉडल पर स्विच करें।",

@@ -1108,6 +1108,13 @@ fn attachment_ext(media_type: &str, original: Option<&str>) -> String {
     canonical.into()
 }
 
+/// A message without the composer's `ATTACHMENT_KINDS` tokens (`[Image #n]`, `[PDF #n]`, `[File #n]`).
+fn without_attachment_tokens(text: &str) -> std::borrow::Cow<'_, str> {
+    static TOKEN: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"\[(?:Image|PDF|File) #\d+\] ?").unwrap());
+    TOKEN.replace_all(text, "")
+}
+
 fn basename(name: &str) -> &str {
     name.rsplit(['/', '\\']).next().unwrap_or(name)
 }
@@ -1170,6 +1177,15 @@ mod attachment_name_tests {
         attachment_ext, is_attachment_name, safe_attachment_name, save_images, ImageAttachment,
     };
     use base64::Engine;
+
+    #[test]
+    fn attachment_tokens_name_nothing() {
+        assert_eq!(
+            super::without_attachment_tokens("[Image #1] [File #2]\nWhat is this?"),
+            "\nWhat is this?"
+        );
+        assert_eq!(super::without_attachment_tokens("[PDF #1]"), "");
+    }
 
     #[test]
     fn any_file_type_saves_where_the_agent_and_the_route_can_read_it() {
@@ -6935,15 +6951,14 @@ impl ChatHost {
         // harness prompt built from its selected slash skills.
         let mut title_seed = None;
         if session.title.is_none() {
+            let titled_text = if saved_images.is_empty() {
+                std::borrow::Cow::Borrowed(display_text)
+            } else {
+                without_attachment_tokens(display_text)
+            };
             // First *non-empty* line: a message that opens with a blank line
             // would otherwise write no placeholder at all, leaving `title` NULL
             // so every later message re-ran the whole first-message path.
-            // The composer cites each attachment as `[Image #n]`, `[PDF #n]` or `[File #n]`; none names the chat.
-            static ATTACHMENT_TOKEN: std::sync::LazyLock<regex::Regex> =
-                std::sync::LazyLock::new(|| {
-                    regex::Regex::new(r"\[(?:Image|PDF|File) #\d+\] ?").unwrap()
-                });
-            let titled_text = ATTACHMENT_TOKEN.replace_all(display_text, "");
             let first_line = titled_text
                 .lines()
                 .find(|l| !l.trim().is_empty())

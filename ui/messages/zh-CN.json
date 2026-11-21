@@ -1330,6 +1330,7 @@
   "chat_remove_attachment": "移除 {name}",
   "chat_attachment_unreadable": "无法读取 {name}。请重新附加。",
   "chat_attachment_folder": "{name} 是文件夹。请改为附加其中的文件。",
+  "chat_attachment_empty": "{name} 是空文件，没有可附加的内容。",
   "chat_drop_to_attach": "松开以添加附件",
   "chat_attachments_total_too_large": "附件总大小超过 {size} 限制 — 请移除一个附件后重试。",
   "chat_model_no_image_input": "{model} 无法查看图片。请移除图片，或切换到支持图片的模型。",

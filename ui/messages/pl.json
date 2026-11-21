@@ -1336,6 +1336,7 @@
   "chat_remove_attachment": "Usuń {name}",
   "chat_attachment_unreadable": "Nie udało się odczytać {name}. Spróbuj dołączyć go ponownie.",
   "chat_attachment_folder": "{name} to folder. Dołącz zawarte w nim pliki.",
+  "chat_attachment_empty": "{name} jest pusty, więc nie ma czego dołączyć.",
   "chat_drop_to_attach": "Upuść, aby dołączyć",
   "chat_attachments_total_too_large": "Załączniki przekraczają łączny limit {size} — usuń jeden z nich i spróbuj ponownie.",
   "chat_model_no_image_input": "Model {model} nie obsługuje obrazów. Usuń obraz lub zmień model na taki, który obsługuje obrazy.",
