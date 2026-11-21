@@ -280,3 +280,38 @@ mod tests {
         .is_err());
     }
 }
+
+#[cfg(test)]
+mod autonomy_tests {
+    use super::*;
+    use crate::local::autonomy::Autonomy;
+
+    #[test]
+    fn a_new_chat_without_autonomy_takes_its_projects_then_the_last_used() {
+        let dir = std::env::temp_dir().join(format!("orx-autonomy-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let mut project = crate::local::agent_text::sample_project();
+        project.id = "p".into();
+        store.create_local_project(&project).unwrap();
+
+        assert_eq!(
+            super::super::project_autonomy(&store, "p").unwrap(),
+            "agentic"
+        );
+        store.set_preferred_autonomy(Autonomy::Copilot).unwrap();
+        assert_eq!(
+            super::super::project_autonomy(&store, "p").unwrap(),
+            "copilot"
+        );
+        store
+            .update_project_settings("p", |settings| settings.autonomy = Some("agentic".into()))
+            .unwrap();
+        assert_eq!(
+            super::super::project_autonomy(&store, "p").unwrap(),
+            "agentic"
+        );
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}

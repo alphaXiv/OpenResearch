@@ -12,7 +12,7 @@ pub mod agent_lifecycle;
 pub mod agent_profiles;
 pub mod agent_skills;
 #[cfg(test)]
-mod agent_text;
+pub(crate) mod agent_text;
 pub mod autonomy;
 pub mod bash;
 pub mod browser_cookies;
