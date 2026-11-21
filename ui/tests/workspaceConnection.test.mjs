@@ -268,6 +268,14 @@ test("a Forget the server refuses keeps the machine open and says why", async ()
   assert.equal(document.querySelector('[role="dialog"] [role="alert"]')?.textContent, "Could not update the saved hosts file.");
 });
 
+test("saved machines that can't be read say why instead of listing none", async () => {
+  await laptop("/projects/p/tasks/new", {
+    "GET /api/remote/hosts": () => Response.json({ error: "Could not read the saved hosts file." }, { status: 500 }),
+  });
+  await click(switcher());
+  assert.equal(find('[role="menu"] [role="alert"]')?.textContent, "Could not read the saved hosts file.");
+});
+
 test("a machine that fails to connect leaves focus on the switcher", async () => {
   await laptop("/projects/p/tasks/new", {
     "POST /api/remote/sessions": () => Response.json({ error: "Add this host in Connect to remote first." }, { status: 400 }),

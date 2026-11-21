@@ -8,6 +8,8 @@ export interface MachineSelection {
   sessions: RemoteSessionInfo[];
   /** Saved remotes, connected or not. */
   hosts: string[];
+  /** Why the saved remotes couldn't be read; `hosts` is then empty, not known to be. */
+  hostsError: string | null;
   canSwitch: boolean;
   selectLocal: () => void;
   /** Starts or resumes the host's session and shows its workspace. */

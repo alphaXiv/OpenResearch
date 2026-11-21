@@ -182,6 +182,9 @@ export function WorkspaceConnection({
                           );
                         })}
                       </Menu.RadioGroup>
+                      {machines.hostsError && (
+                        <p role="alert" className="m-0 px-2 py-1.5 text-xs text-accent-red">{machines.hostsError}</p>
+                      )}
                       <Menu.Item
                         nativeButton
                         render={<MenuItem className={ITEM} />}

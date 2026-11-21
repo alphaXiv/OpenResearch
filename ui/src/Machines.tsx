@@ -308,6 +308,7 @@ function MachineWorkspaces({
         activeId,
         sessions,
         hosts,
+        hostsError: savedHostsQuery.error?.message ?? null,
         canSwitch,
         selectLocal: () => setActiveId("local"),
         connect,
