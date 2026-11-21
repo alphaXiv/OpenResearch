@@ -6,12 +6,14 @@ test('file citations open the artifact they name and never a missing file', asyn
   const { dir } = await listing.json()
   agent.script('Write the results.', [
     { run: [
-      `mkdir -p '${dir}/exp1'`,
+      `mkdir -p '${dir}/exp1' '${dir}/.scratch'`,
+      `printf 'kept\\n' > '${dir}/.scratch/notes.md'`,
       `printf '| lr | loss |\\n| --- | --- |\\n| 0.1 | 0.42 |\\n' > '${dir}/exp1/results_table.md'`,
       `printf '# Summary\\n\\nLoss fell to 0.42.\\n' > '${dir}/report.md'`,
     ].join(' && ') },
     { say: [
       'Results are in <file path="results_table.md" />, summarized in <file path="report.md" />.',
+      'Hidden notes: <file path="artifacts/.scratch/notes.md" />.',
       'The drafts <file path="missing_table.md" /> and <file path="artifacts/missing_plot.png" /> were never written.',
     ].join(' ') },
   ])
@@ -32,6 +34,9 @@ test('file citations open the artifact they name and never a missing file', asyn
   await test.step('a top-level artifact opens directly', async () => {
     await report.click()
     await expect(page.getByText('Loss fell to 0.42.', { exact: true })).toBeVisible()
+  })
+  await test.step('a dotfile artifact the listing skips still opens', async () => {
+    await expect(message.getByRole('button', { name: /notes\.md/ })).toBeVisible()
   })
   await test.step('a nested artifact is offered by its folder', async () => {
     await table.click()

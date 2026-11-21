@@ -121,7 +121,7 @@ export function FileReference({ path, line, exp, optimistic, fallback, onOpenFil
   fallback: ReactNode;
   onOpenFile: OpenFile;
 }) {
-  const { getCodeTreeQuery, getProjectFileQuery, getArtifactsQuery } = useWorkspace().queries;
+  const { getCodeTreeQuery, getProjectFileQuery, getArtifactsQuery, getArtifactFileMetadataQuery } = useWorkspace().queries;
 
   const scope = useContext(FileScopeContext);
   // An experiment's file lives on its own branch, which this listing does not cover.
@@ -145,6 +145,7 @@ export function FileReference({ path, line, exp, optimistic, fallback, onOpenFil
     enabled: checkable && unlisted,
   });
   const onDisk = read.isSuccess && !read.data.notFound;
+  const readSettled = !unlisted || !read.isPending;
   const searchArtifacts = checkable && (citesArtifact || (unlisted && read.isSuccess && read.data.notFound));
   const artifacts = useQuery({
     ...getArtifactsQuery(scope?.projectId ?? ""),
@@ -154,10 +155,18 @@ export function FileReference({ path, line, exp, optimistic, fallback, onOpenFil
   });
   const files = artifacts.data?.files;
   const artifactMatch = useMemo(() => (files ? resolveArtifactReference(files, path) : null), [files, path]);
+  // The listing skips dotfiles without saying so, so a complete listing can't rule out an exact citation.
+  const artifactPath = splitLineSuffix(path).path.replace(ARTIFACTS_PREFIX, "");
+  const hidden = useQuery({
+    ...getArtifactFileMetadataQuery(scope?.projectId ?? "", artifactPath),
+    enabled: citesArtifact && readSettled && !onDisk && artifactMatch?.kind === "none" && artifacts.data?.truncated === false,
+  });
   const chip = <FileChip path={citesArtifact ? path.replace(ARTIFACTS_PREFIX, "artifacts/") : path} line={line} exp={exp} onOpenFile={onOpenFile} />;
 
   if (!checkable || !resolution) return optimistic ? chip : fallback;
+  // The checkout read decides first: it may name a different file than a listed artifact would.
   const match = resolution.kind !== "none" ? resolution
+    : !readSettled ? null
     : citesArtifact && artifactMatch?.kind === "exact" ? artifactMatch
     : onDisk ? null
     : artifactMatch;
@@ -165,9 +174,9 @@ export function FileReference({ path, line, exp, optimistic, fallback, onOpenFil
   if (match?.kind === "choices") {
     return <FileChoices label={path} paths={match.paths} total={match.total} line={match.line ?? line} onOpenFile={onOpenFile} />;
   }
-  if (onDisk) return chip;
+  if (onDisk || hidden.data) return chip;
   // A truncated or failed artifacts listing can't rule the file out.
-  const unsure = (unlisted && read.isPending) ||
+  const unsure = (unlisted && read.isPending) || hidden.isLoading || hidden.isError ||
     (searchArtifacts && (artifacts.isPending || artifacts.isError || artifacts.data?.truncated === true));
   return optimistic && unsure ? chip : fallback;
 }
