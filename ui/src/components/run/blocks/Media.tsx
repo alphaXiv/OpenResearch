@@ -5,6 +5,7 @@ import { m } from "../../../paraglide/messages.js";
 import type { MediaGallery, MediaItem } from "../../../runMonitor/types";
 import { useWorkspace } from "../../../workspace";
 import { backendName } from "../../BackendLogos";
+import { ImageMenu } from "../../ImageMenu";
 import { ImageModal } from "../../ImageModal";
 import { Button } from "../../ui";
 
@@ -28,7 +29,7 @@ function Thumbnail({ item, url }: { item: MediaItem; url: string }) {
 
   return (
     <>
-      <Button
+      <ImageMenu src={url} name={name}><Button
         ref={trigger}
         type="button"
         aria-label={m.run_media_open({ name: ltr(name) })}
@@ -37,7 +38,7 @@ function Thumbnail({ item, url }: { item: MediaItem; url: string }) {
         onClick={() => setExpanded(true)}
       >
         <img src={url} alt={name} loading="lazy" className="size-full object-cover" onError={missing} />
-      </Button>
+      </Button></ImageMenu>
       {expanded && <ImageModal key={url} src={url} alt={name} name={name} onError={missing} onClose={() => {
         setExpanded(false);
         requestAnimationFrame(() => trigger.current?.focus());

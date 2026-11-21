@@ -10,6 +10,8 @@ import { runActive, runDisplay } from "../runDisplay";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { useWorkspace } from "../workspace";
 import { FileScopeContext } from "./FileReference";
+import { ImageMenu } from "./ImageMenu";
+import { fileNameOf } from "../download";
 import { LitSourceLogo, paperUrl, type LitSource } from "./LitSourceLogo";
 import { StatusBadge } from "./StatusBadge";
 
@@ -266,16 +268,15 @@ export function FigureReveal({ figures, src, onOpen, expansionState, expansionKe
         <div className="tool-group-disclosure-inner">
           <div className="mt-1 mb-2 ms-7 grid grid-cols-[repeat(auto-fill,minmax(8rem,1fr))] gap-1.5">
             {open && figures.map((path) => (
-              <button
-                key={path}
+              <ImageMenu key={path} src={src(path)} name={fileNameOf(path)}><button
                 type="button"
                 className="overflow-hidden rounded-md border border-border-variant bg-white enabled:cursor-pointer focus-visible:outline-2 focus-visible:outline-focus"
                 title={path}
                 disabled={!onOpen}
                 {...tabOpenGestureHandlers<HTMLButtonElement>((intent) => onOpen?.(path, intent))}
               >
-                <img className="block aspect-[4/3] w-full object-contain" src={src(path)} alt={path.slice(path.lastIndexOf("/") + 1)} loading="lazy" />
-              </button>
+                <img className="block aspect-[4/3] w-full object-contain" src={src(path)} alt={fileNameOf(path)} loading="lazy" />
+              </button></ImageMenu>
             ))}
           </div>
         </div>
