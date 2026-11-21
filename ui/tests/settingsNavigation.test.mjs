@@ -3,7 +3,7 @@ import test from "node:test";
 import { act } from "react";
 import { autoDir } from "../src/i18n.ts";
 import { m } from "../src/paraglide/messages.js";
-import { find, navigate, renderApp, serveApp, settle, type } from "./render.mjs";
+import { find, navigate, press, renderApp, serveApp, settle, type } from "./render.mjs";
 
 const click = async (element) => {
   await act(async () => element.click());
@@ -63,21 +63,33 @@ test("the Environment tab shows variables for the open project", async () => {
   assert.ok(find("tr", variable.key)?.textContent.includes(variable.maskedValue));
 });
 
-test("the sidebar's chat list can start a chat in the most recently active project", async () => {
+test("the sidebar starts a chat in the most recently active project, grouped either way", async () => {
   serveApp({
     "GET /api/projects": () => ({ projects: [{ id: "p", name: "Project" }, { id: "recent", name: "Recent project" }] }),
     "GET /api/projects/activity": () => ({ activity: [{ projectId: "recent", lastActivityAt: 2 }] }),
   });
   await renderApp("/projects/p/settings/settings");
 
-  try {
-    await click(document.querySelector(`button[aria-label="${m.chat_panel_filter_sessions()}"]`));
-    await click(find("button", m.sidebar_one_list()));
-    await click(document.querySelector(`button[aria-label="${m.chat_panel_new_chat()}"]`));
-    assert.equal(location.pathname, "/projects/recent/tasks/new");
-  } finally {
-    localStorage.removeItem("sidebar-grouping");
+  for (const grouping of [m.sidebar_one_list(), m.projects_home_projects()]) {
+    await click(document.querySelector(`button[aria-label="${m.sidebar_customize_view()}"]`));
+    await click(find("button", grouping));
+    await navigate("/projects/p/settings/settings");
+    await click(find("button", m.chat_panel_new_chat()));
+    assert.equal(location.pathname, "/projects/recent/tasks/new", grouping);
   }
+  localStorage.removeItem("sidebar-grouping");
+});
+
+test("the new chat shortcut stays in the project you are on, though another was active since", async () => {
+  serveApp({
+    "GET /api/projects": () => ({ projects: [{ id: "p", name: "Project" }, { id: "recent", name: "Recent project" }] }),
+    "GET /api/projects/activity": () => ({ activity: [{ projectId: "recent", lastActivityAt: 2 }] }),
+  });
+  await renderApp("/projects/p/settings/settings");
+
+  await press("n", document.body, { ctrlKey: true });
+  await settle();
+  assert.equal(location.pathname, "/projects/p/tasks/new");
 });
 
 test("a project's settings page renames it and has no global settings tabs", async () => {

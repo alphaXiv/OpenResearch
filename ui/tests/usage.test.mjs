@@ -162,6 +162,17 @@ test("the graph's switch appears only when both AI and compute have data; estima
   assert.doesNotMatch(text(panel()), /\$0\.00/);
 });
 
+test("the graph opens on AI spend once the plans are read, though it opened on compute while they were", async () => {
+  let plans = null;
+  await strip(() => report({ plans, agents: plans ? [opencodeSpend] : [], compute: [modalSpend] }), { events: true });
+  await click(usageTrigger());
+  assert.ok(panel().querySelector('[data-spend-graph="compute"]'));
+  plans = [];
+  await act(async () => streams[0].dispatchEvent(new Event("usage.changed")));
+  await settle();
+  assert.ok(panel().querySelector('[data-spend-graph="ai"]'));
+});
+
 test("a backend with priced and unpriced runs says so beside its partial amount", async () => {
   await strip(report({ compute: [{ ...modalSpend, unpriced: 1 }] }));
   await click(usageTrigger());

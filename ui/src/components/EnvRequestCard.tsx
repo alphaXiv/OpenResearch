@@ -26,7 +26,7 @@ export function EnvRequestCard({
 }: {
   part: ChatPart;
   done: boolean;
-  respond: (answer: Omit<PromptAnswer, "promptId">) => Promise<void>;
+  respond: (answer: Omit<PromptAnswer, "promptId">) => Promise<unknown>;
 }) {
   const prompt = part.prompt!;
   const variables = prompt.variables ?? [];
@@ -43,7 +43,7 @@ function EnvRequestForm({
   variables: EnvRequestVar[];
   reason?: string;
   done: boolean;
-  respond: (answer: Omit<PromptAnswer, "promptId">) => Promise<void>;
+  respond: (answer: Omit<PromptAnswer, "promptId">) => Promise<unknown>;
 }) {
   const projectId = useContext(FileScopeContext)?.projectId;
   const { portalContainer } = useContext(WorkspaceDomContext);

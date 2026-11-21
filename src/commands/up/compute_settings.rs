@@ -1016,8 +1016,16 @@ pub(super) async fn add_remote_host(Json(req): Json<AddSshHostReq>) -> ApiResult
     blocking_api(move || add_saved_host(crate::jobs::ssh::hosts::List::Remotes, &req.command)).await
 }
 
-pub(super) async fn remove_remote_host(Path(host): Path<String>) -> ApiResult {
-    blocking_api(move || remove_saved_host(crate::jobs::ssh::hosts::List::Remotes, &host)).await
+pub(super) async fn remove_remote_host(
+    State(state): State<AppState>,
+    Path(host): Path<String>,
+) -> ApiResult {
+    let saved = host.clone();
+    let removed =
+        blocking_api(move || remove_saved_host(crate::jobs::ssh::hosts::List::Remotes, &saved))
+            .await?;
+    state.remote_sessions.forget(&host).await;
+    Ok(removed)
 }
 
 pub(super) async fn require_saved_remote(host: &str) -> Result<(), ApiError> {
@@ -1543,7 +1551,7 @@ pub(super) fn compute_settings_json(ssh: SshReadiness) -> Value {
     };
     // Presence of the credentials file only — whether the token still works is
     // the expanded row's (network) question.
-    let or_logged_in = crate::config::credentials_present();
+    let or_logged_in = crate::config::credentials_present().unwrap_or(false);
 
     // Same spellings as the expanded rows' SOURCE_LABELS/MODAL_TOKEN_LABELS
     // in the UI — the collapsed head stays visible above the open row, so the

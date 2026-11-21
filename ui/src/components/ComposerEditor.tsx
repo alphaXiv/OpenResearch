@@ -392,8 +392,12 @@ export function ComposerEditor({
   const [compartments] = useState(() => ({ mode: new Compartment(), readOnly: new Compartment(), placeholder: new Compartment(), aria: new Compartment() }));
   const [hovered, setHovered] = useState<HTMLElement | null>(null);
   const previewId = useId();
-  /** A height the user dragged to; null keeps the natural height. */
+  /** A height the user dragged to, which the draft can still grow past; null keeps the natural height. */
   const [height, setHeight] = useState(() => storedHeight(resizeKey));
+  /** Whether a drag holds the box at `height` though the draft is taller; the next edit that grows the draft lifts it. */
+  const [capped, setCapped] = useState(false);
+  /** The draft's laid-out height, so an edit can tell whether it grew the draft. */
+  const contentHeight = useRef(0);
   const [heightLimit, setHeightLimit] = useState(Number.POSITIVE_INFINITY);
   const closeTimer = useRef<number | null>(null);
 
@@ -457,6 +461,17 @@ export function ComposerEditor({
         compartments.placeholder.of(placeholderText(latest.current.placeholder)),
         compartments.aria.of(EditorView.contentAttributes.of(ariaAttributes())),
         EditorView.updateListener.of((update) => {
+          if (update.docChanged || update.geometryChanged) {
+            // Measured rather than `view.contentHeight`, which estimates wrapped lines right after an edit.
+            const edited = update.docChanged;
+            update.view.requestMeasure({
+              read: (view) => view.contentDOM.getBoundingClientRect().height,
+              write: (measured) => {
+                if (edited && measured > contentHeight.current) setCapped(false);
+                contentHeight.current = measured;
+              },
+            });
+          }
           if (!update.docChanged && !update.selectionSet) return;
           const typed = update.transactions.some(
             (transaction) => transaction.isUserEvent("input") && !transaction.isUserEvent("input.type.compose"),
@@ -483,6 +498,7 @@ export function ComposerEditor({
     if (!view || (view.state.doc.toString() === value && shownDraftKey.current === draftKey)) return;
     shownDraftKey.current = draftKey;
     view.setState(createState(value));
+    setCapped(false);
     latest.current.onChange(value, value.length, false);
   }, [value, draftKey]);
 
@@ -512,8 +528,8 @@ export function ComposerEditor({
     if (!dom) return;
     const clamped = height === null ? null : Math.min(height, heightLimit);
     dom.style.minHeight = clamped === null ? "" : `${clamped}px`;
-    dom.style.maxHeight = `${clamped ?? heightLimit}px`;
-  }, [height, heightLimit]);
+    dom.style.maxHeight = `${clamped !== null && capped ? clamped : heightLimit}px`;
+  }, [height, heightLimit, capped]);
 
   useEffect(() => {
     try {
@@ -642,7 +658,10 @@ export function ComposerEditor({
         min={MIN_HEIGHT}
         max={heightLimit}
         measure={currentHeight}
-        onChange={setHeight}
+        onChange={(next) => {
+          setHeight(next);
+          setCapped(next !== null);
+        }}
       />
       {hovered && hoveredSkill && (
         <SkillPreviewCard

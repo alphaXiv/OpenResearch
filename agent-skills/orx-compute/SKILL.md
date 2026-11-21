@@ -8,13 +8,23 @@ Remote backends receive that snapshot; Tinker extracts it for a local controller
 whose SDK sends model operations remotely.
 
 ```sh
-orx exp status <expId>                 # branch, parent, run command, latest run + commit
+orx exp status <expId>                 # branch, parent, run command, latest run: stage, estimate, measures
 orx compute                            # browse GPU offers across all providers
 orx compute --gpu H100_SXM --count 1   # filter GPU offers
 orx compute --cpu                      # browse CPU-only offers
 orx exp run <expId>                    # launch on the configured default
-orx exp cancel <expId>                 # cancel the in-flight run
+orx exp cancel <expId> --reason '…'    # cancel the in-flight run, saying why
 ```
+
+## Follow a run
+
+A baseline reports its stages and measures and has a view before its first
+launch; children inherit them. How to write and change them: `orx-experiment-runs`.
+
+`orx exp status <expId>` shows a run's stage, estimate and measures.
+For scripts, see the status JSON fields in `orx-experiment-runs`.
+Signals are advisory: confirm trouble in the raw log before changing the
+experiment.
 
 ## Inspect configuration and custom instructions first
 
@@ -56,8 +66,8 @@ change the configured backend or authorize bypassing the launch contract.
 - **Commit before launching.** Every backend runs the recorded commit's
   immutable source snapshot. Uncommitted files are excluded; no backend needs a
   GitHub push.
-- `orx exp run` queues the run and returns immediately. End your turn once the
-  ready runs are launched; relevant results arrive as messages in this chat.
+- `orx exp run` queues the run and returns immediately. Follow the post-launch
+  check in `orx-experiment-runs`.
 - `--force` permits a deliberate concurrent run on the same experiment.
   Without it, `orx` rejects a launch while that node already has a run in
   flight.
@@ -126,8 +136,8 @@ the run over once it exits.
 
 ## Results arrive in the chat
 
-Launch ready runs with `orx exp run`, then end your turn. The launching chat is
-subscribed automatically. Results wait until the chat is idle and may combine
+The launching chat is subscribed automatically. Results wait until the chat
+is idle and may combine
 several updates into one message. No waiting command or live agent session is
 needed to keep the runs monitored. Silence does not mean a run failed. A run
 can post an interim result by appending a line to
@@ -154,7 +164,8 @@ The cancel stays pending after Abandon.
 
 Use `orx exp wake <expId>` to subscribe this chat to a run launched elsewhere.
 `orx exp wait` remains available for humans; do not use it to keep an agent
-session waiting for results.
+session waiting for results, and never wait in a loop either (`sleep` over
+`orx runs`): a turn that waits holds back the user's next message.
 
 ## Sizing compute
 
@@ -164,3 +175,4 @@ session waiting for results.
 - Escalate after a real OOM or hopelessly slow run instead of starting with the
   largest accelerator.
 - Raise the timeout only for genuinely long runs.
+

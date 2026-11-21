@@ -69,3 +69,58 @@ test('Stop ends the turn and the queued messages run next, in order', async ({ p
   const transcript = page.getByRole('region', { name: 'Train for ten epochs.' })
   await expect(transcript).toContainText(/Epoch 1 of 10\.[\s\S]*Plot the loss\.[\s\S]*Plotted the loss\.[\s\S]*Then save a checkpoint\.[\s\S]*Saved the checkpoint\./)
 })
+
+test('a drag that starts beside a reply selects from the line it started on', async ({ page, project, agent }) => {
+  const reply = 'The stock model handles real whispers and fan noise far better than expected. Its worst problem is writing text on silence and noise. The synthetic whispers are harsher than the real ones, so that suite is miscalibrated and needs a new baseline before the augmented runs can be compared against it.'
+  agent.script('How did the baseline do?', [{ say: reply }])
+  await project.open(page)
+  await send(page, 'How did the baseline do?')
+  const paragraph = page.getByText(reply)
+  await expect(paragraph).toBeVisible()
+
+  const text = await paragraph.boundingBox()
+  const pane = await page.getByRole('region', { name: 'How did the baseline do?' }).boundingBox()
+  if (!text || !pane) throw new Error('The reply or the transcript has no box')
+  const lineHeight = await paragraph.evaluate((element) => Number.parseFloat(getComputedStyle(element).lineHeight))
+  const beside = { x: (pane.x + text.x) / 2, y: text.y + lineHeight * 1.5 }
+
+  // WebKit anchors a press that lands outside every row at the start of the transcript.
+  const pressed = await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.closest('[role=article]')?.textContent ?? '', beside)
+  expect(pressed).toContain(reply)
+
+  await page.mouse.move(beside.x, beside.y)
+  await page.mouse.down()
+  await page.mouse.move(text.x + text.width / 2, text.y + lineHeight * 2.5, { steps: 5 })
+  await page.mouse.up()
+  const firstLine = await page.evaluate(() => {
+    const selection = getSelection()
+    return selection?.rangeCount ? selection.getRangeAt(0).getClientRects()[0]?.toJSON() : undefined
+  })
+  expect(firstLine?.top).toBeLessThanOrEqual(beside.y)
+  expect(firstLine?.bottom).toBeGreaterThanOrEqual(beside.y)
+  expect(firstLine?.left).toBeCloseTo(text.x, 0)
+})
+
+test("a chat's hover card holds for a pointer crossing the rows below on its way, and leaves with it, even from the row a click focused", async ({ page, project, agent }) => {
+  agent.script('Which optimizer should the baseline use?', [{ say: 'Start with AdamW.' }])
+  await project.open(page)
+  await send(page, 'Which optimizer should the baseline use?')
+  await expect(page.getByText('Start with AdamW.')).toBeVisible()
+
+  const row = page.locator('.session-row').first()
+  const card = page.locator('[data-session-hover-card]')
+  await row.click()
+  await page.getByText('Start with AdamW.').hover()
+  await row.hover()
+  await expect(card).toBeVisible()
+
+  const box = (await card.boundingBox())!
+  const title = await card.getAttribute('aria-label')
+  await test.step('a diagonal path over the rows below reaches the card', async () => {
+    await page.mouse.move(box.x + 20, box.y + box.height - 10, { steps: 12 })
+    await expect(card).toHaveAttribute('aria-label', title!)
+  })
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 4 })
+  await page.mouse.move(box.x + box.width + 120, box.y + box.height / 2, { steps: 4 })
+  await expect(card).toBeHidden()
+})

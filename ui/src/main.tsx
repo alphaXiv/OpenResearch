@@ -2,6 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { AppRoot } from "./AppRoot";
 import { getLocale } from "./paraglide/runtime.js";
+import "./chatWidth";
 import "./tailwind.css";
 
 const locale = getLocale();

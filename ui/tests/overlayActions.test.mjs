@@ -25,7 +25,7 @@ test("the project picker prioritizes the current project, then recent activity, 
     onNewProject() {},
   }));
   await click(find("button", "Current"));
-  const choices = [...document.querySelectorAll('[role="menuitemradio"]')];
+  const choices = [...document.querySelectorAll('[role="dialog"] [data-nav]')].slice(0, 3);
   assert.deepEqual(choices.map((choice) => choice.textContent), ["Current", "Older", "Newer"]);
   await click(choices[1]);
   assert.deepEqual(selections, ["older"]);

@@ -23,6 +23,7 @@ The laptop's dashboard opens a remote machine as a workspace, from a host saved 
 
 - **A host is added the way the user already reaches it:** a hostname, an alias, `user@host:port`, or a pasted `ssh …` command, which becomes the `Host` block that makes `ssh <alias>` connect the same way. Options that shape one session (forwards, a remote command) are dropped; options orx can't keep are refused by name.
 - **The alias stays the key.** Engine state, the auth breaker, the route pin and compute settings all name a host by alias, so a saved host is indistinguishable from a configured one. An alias saved in orx means one thing in both lists, so a conflicting second definition is refused; a saved alias overrides the same alias in `~/.ssh/config`, for orx only.
+- **The machine switcher lists the saved remotes,** connected or not. Disconnect ends the session and keeps the entry; Forget removes the entry and its session, and leaves the persistent host running.
 - **Two lists, one file each:** `remotes` for Connect to remote, `compute` for SSH and Slurm compute, which also lists `~/.ssh/config`. A machine for agents and one only for runs are set up in different places, each pointing at the other.
 - **Passwords are saved, one try at a time.** A password or key passphrase that let a login through is kept in the system credential store under the alias; one-time codes and host-key answers never are. Each attempt answers a saved password once and a passphrase twice (a ProxyJump hop decrypts the key again), and a failed login drops the saved answers it used, so the user is asked next time, and the [auth breaker](#transport-and-the-auth-breaker) still opens on failure. On Unix it also logs an interactive host's ended master back in once without a click; on Windows the SSH service holds the login instead. Removing a host forgets its password once no list still names it. Linux needs `secret-tool` and a keyring; without them orx asks every time.
 
@@ -115,3 +116,21 @@ Workspace tunnels and probes take a separate path (`src/jobs/ssh.rs`): batch mod
 **On Windows the SSH service holds the login,** because Win32-OpenSSH cannot multiplex. Connect starts each root's `ssh` inside the detached `orx ssh-service` (`src/jobs/ssh/service/hold.rs`), reached on loopback with the token in its owner-only directory, and `orx up` talks to orx-host through it. A restarted or updated server reattaches with no prompt while the control protocol matches; the older orx-host then serves, and wraps new runs, until the login ends. It ends when the user signs out of Windows, Connect replaces it, its route changes, or no server has attached for 24 hours. Plain `ssh` does not share it, and Connect still logs in the transports existing 0.2.x runs need, so a second MFA prompt may be required.
 
 A seeded chaos tier (`src/engine/runtime/chaos.rs`) holds the engine, transport and `orx-host` to these rules under faults over real SSH; its module comment says how to run and replay it.
+
+## Advisory run signals
+
+Native `serve` scans declared `::orx::` records and detected progress from each
+watched run's log, including Slurm jobs on the shared filesystem. Local runs
+use that scanner directly without a local serve process. The checkpoint lives
+in the host root's `run-signals/` and uses a nonblocking per-run lock: a competing scanner gets WouldBlock.
+A summary with a `signals` field advertises snapshot support for that connection.
+The workspace waits for that advertisement before sending configuration or
+fetching changed revisions in pages of at most 1 MiB under one generation and
+revision, then publishes the verified checkpoint locally. Inspection, change
+feeds and page resets carry the host's clock (`answered_at`), so the workspace
+knows how current the data is and how far apart the two clocks are. An older
+serve without `signals` uses the frozen byte-page log API with a bounded
+replay budget and folds patterns on the workspace's clock. Watchers and stop
+rules run on the workspace.
+
+A terminal checkpoint remains readable after its raw log is gone. Native support with no log and no checkpoint reports unavailable; absent support remains the older-peer fallback. Host cleanup removes the run's signal checkpoint, lock and abandoned generations along with the run directory.

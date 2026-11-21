@@ -1,16 +1,23 @@
 pub mod adapters;
 pub mod bus;
 pub mod clock;
+pub(crate) mod estimate;
+pub(crate) mod flags;
 pub mod handle;
 pub mod legacy;
 pub mod locks;
+pub(crate) mod media;
+pub(crate) mod monitor;
 pub mod notify;
 pub mod process;
 pub mod reconcile;
+pub(crate) mod rules;
 pub mod runtime;
 pub mod ssh_config_cleanup;
 pub mod submit;
 pub mod transport;
+pub(crate) mod view;
+pub(crate) mod watch;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
@@ -94,11 +101,13 @@ pub enum Observation {
         started_at: Option<i64>,
     },
     Exited {
+        started_at: Option<i64>,
         finished_at: Option<i64>,
         code: Option<i32>,
         signal: Option<i32>,
     },
     Cancelled {
+        started_at: Option<i64>,
         finished_at: Option<i64>,
         code: Option<i32>,
         signal: Option<i32>,
@@ -110,6 +119,7 @@ pub enum Observation {
         note: Option<Vec<u32>>,
     },
     Failed {
+        started_at: Option<i64>,
         finished_at: Option<i64>,
         reason: String,
     },
@@ -322,6 +332,25 @@ pub trait Backend: Send + Sync {
     fn forget_logs(&self, _forgotten: &dyn Fn(&str) -> bool) {}
     /// Before a finished run's log is kept: fetch it through its end where reads are cached.
     async fn drain_log(&self, _run: &WatchedRun) -> Result<()> {
+        Ok(())
+    }
+    /// The run's checkpoint as its host folded it, with the `(host, laptop)` clocks of the answer
+    /// that confirmed it; a fold on this machine has none.
+    async fn signals(
+        &self,
+        _run: &WatchedRun,
+        _terminal: bool,
+        _previous: Option<&orx_signals::Snapshot>,
+    ) -> Result<Option<(orx_signals::Snapshot, Option<(i64, i64)>)>> {
+        Ok(None)
+    }
+    /// Has the host fold the run's log with `config` from its next scan; a fold on this machine
+    /// reads the laptop's own copy.
+    async fn configure_signals(
+        &self,
+        _run: &WatchedRun,
+        _config: &orx_signals::Config,
+    ) -> Result<()> {
         Ok(())
     }
     async fn read_log(

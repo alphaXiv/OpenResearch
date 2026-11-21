@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use super::bus::RunEvent;
 use super::{load, phase_of, CancelOutcome, Engine, Handle, Observation, Phase};
-use crate::error::Result;
+use crate::error::{anyhow, Result};
 use crate::store::{Contact, EngineRunState, StoredRun, ATTENTION, RECOVERED, TERMINAL};
 
 const OUTAGE_ATTENTION: Duration = Duration::from_secs(10 * 60);
@@ -149,13 +149,16 @@ fn observed(phase: Phase, contact: &Contact, observation: Observation, now: i64)
         Exited {
             code,
             signal,
+            started_at,
             finished_at,
         }
         | Cancelled {
             code,
             signal,
+            started_at,
             finished_at,
         } => Change {
+            started_at,
             finished_at,
             exit_code: code.map(i64::from),
             ..Change::terminal(
@@ -171,8 +174,10 @@ fn observed(phase: Phase, contact: &Contact, observation: Observation, now: i64)
         },
         Failed {
             reason,
+            started_at,
             finished_at,
         } => Change {
+            started_at,
             finished_at,
             ..Change::terminal(Phase::Failed, Some(reason))
         },
@@ -291,7 +296,15 @@ impl Engine {
                 hook();
             }
         }
-        let hosted = match super::handle_of(&load(&self.store(), run_id)?.0) {
+        let (row, state) = load(&self.store(), run_id)?;
+        if matches!(observation, Observation::Running { .. })
+            && phase_of(&row)? == Phase::Running
+            && state.contact == Contact::Live
+            && state.waiting_reason.is_none()
+        {
+            return Ok(());
+        }
+        let hosted = match super::handle_of(&row) {
             Some(Handle::Api { .. }) => true,
             Some(Handle::Legacy { descriptor }) => {
                 super::adapters::api::provider(&descriptor.kind).is_ok()
@@ -317,8 +330,9 @@ impl Engine {
                     return Change::terminal(Phase::Cancelled, Some(reason.clone()));
                 }
             }
-            let observation = match observation {
+            let observation = match observation.clone() {
                 Observation::Exited {
+                    started_at,
                     finished_at,
                     code,
                     signal,
@@ -328,6 +342,7 @@ impl Engine {
                     && (code.is_some_and(|code| code != 0) || signal.is_some()) =>
                 {
                     Observation::Cancelled {
+                        started_at,
                         finished_at,
                         code,
                         signal,
@@ -335,6 +350,7 @@ impl Engine {
                 }
                 Observation::Gone { .. } if state.cancel_accepted_at.is_some() => {
                     Observation::Cancelled {
+                        started_at: None,
                         finished_at: None,
                         code: None,
                         signal: None,
@@ -365,7 +381,10 @@ impl Engine {
             if phase.is_terminal() {
                 return Change::default();
             }
-            Change::contact(Contact::Unreconciled { since, detail })
+            Change::contact(Contact::Unreconciled {
+                since,
+                detail: detail.clone(),
+            })
         })
     }
 
@@ -399,12 +418,15 @@ impl Engine {
     pub(super) fn apply_cancel(&self, run: &StoredRun, outcome: CancelOutcome) -> Result<()> {
         let now = self.clock.wall_ms();
         let legacy_note = super::legacy::cancel_note(run);
-        self.commit(&run.id, |phase, _| match outcome {
+        self.commit(&run.id, |phase, _| match &outcome {
             CancelOutcome::Verified if phase.is_terminal() => Change::contact(Contact::Live),
-            CancelOutcome::Verified => Change::terminal(Phase::Cancelled, legacy_note),
+            CancelOutcome::Verified => Change::terminal(Phase::Cancelled, legacy_note.clone()),
             CancelOutcome::Survivors { count } => Change {
-                contact: Some(Contact::Stopping { since: now, count }),
-                ..Change::terminal(Phase::Cancelled, legacy_note)
+                contact: Some(Contact::Stopping {
+                    since: now,
+                    count: *count,
+                }),
+                ..Change::terminal(Phase::Cancelled, legacy_note.clone())
             },
             CancelOutcome::Undelivered { .. } | CancelOutcome::Pending => Change::default(),
         })
@@ -433,15 +455,41 @@ impl Engine {
     pub(super) fn commit(
         &self,
         run_id: &str,
-        decide: impl FnOnce(Phase, &EngineRunState) -> Change,
+        decide: impl Fn(Phase, &EngineRunState) -> Change,
     ) -> Result<()> {
         let now = self.clock.wall_ms();
         let (phase, contact, cancelling, chats, changed, lost_contact) = {
             let store = self.store();
-            let tx = store.begin_immediate()?;
-            let (run, state) = load(&store, run_id)?;
-            let old_phase = phase_of(&run)?;
-            let change = decide(old_phase, &state);
+            let mut attempts = 0;
+            let (tx, run, state, old_phase, change, phase, evidence) = loop {
+                let (run, state) = load(&store, run_id)?;
+                let old_phase = phase_of(&run)?;
+                let change = decide(old_phase, &state);
+                let phase = change
+                    .phase
+                    .filter(|to| to.rank() > old_phase.rank())
+                    .filter(|to| old_phase != Phase::Submitting || to.is_terminal())
+                    .unwrap_or(old_phase);
+                let evidence = if phase != old_phase && phase.is_terminal() {
+                    let prospective = StoredRun {
+                        status: phase.as_str().into(),
+                        ..run.clone()
+                    };
+                    Some(store.terminal_evidence(&prospective)?)
+                } else {
+                    None
+                };
+                let tx = store.begin_immediate()?;
+                if load(&store, run_id)? == (run.clone(), state.clone()) {
+                    break (tx, run, state, old_phase, change, phase, evidence);
+                }
+                attempts += 1;
+                if attempts == 3 {
+                    return Err(anyhow!(
+                        "Run {run_id} changed while preparing its next state. Try again."
+                    ));
+                }
+            };
 
             let recorded = match &change.handle {
                 Some((attempt, handle)) => store.record_run_handle(run_id, *attempt, handle)?,
@@ -450,11 +498,7 @@ impl Engine {
             let phase = if recorded && old_phase == Phase::Submitting {
                 Phase::Starting
             } else {
-                change
-                    .phase
-                    .filter(|to| to.rank() > old_phase.rank())
-                    .filter(|to| old_phase != Phase::Submitting || to.is_terminal())
-                    .unwrap_or(old_phase)
+                phase
             };
             let moved = phase != old_phase;
             if moved || (old_phase == Phase::Cancelled && is_tombstone(old_phase, &state.contact)) {
@@ -484,11 +528,10 @@ impl Engine {
                     .max(run.created_at)
             });
             if moved && !recorded {
-                let started_at = change
-                    .started_at
-                    .filter(|_| phase == Phase::Running && super::is_engine_row(&run));
+                let started_at = change.started_at.filter(|_| super::is_engine_row(&run));
                 if phase.is_terminal() && super::handle_of(&run).is_some() {
                     store.queue_log_collection(run_id)?;
+                    store.queue_signal_collection(run_id)?;
                 }
                 store.set_engine_phase(
                     run_id,
@@ -537,10 +580,10 @@ impl Engine {
                 store.set_run_contact(run_id, &contact)?;
             }
 
-            let terminal_body = match moved && phase.is_terminal() {
-                true => Some(store.terminal_notice_body(&load(&store, run_id)?.0)?),
-                false => None,
-            };
+            let terminal_body = evidence
+                .filter(|_| moved && phase.is_terminal())
+                .map(|evidence| store.render_terminal_notice(&load(&store, run_id)?.0, evidence))
+                .transpose()?;
             let mut chats = Vec::new();
             for chat in store.run_subscribers(run_id)? {
                 let notice = if let Some(body) = &terminal_body {
@@ -668,6 +711,7 @@ mod tests {
         for observation in [
             Observation::Running { started_at: None },
             Observation::Cancelled {
+                started_at: None,
                 finished_at: None,
                 code: None,
                 signal: None,

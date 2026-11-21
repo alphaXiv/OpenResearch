@@ -6,7 +6,7 @@ orx has no model of its own. A chat drives a coding agent the user already has, 
 
 ## A chat
 
-A chat belongs to one project and works in its own Git worktree ([storage](storage.md)). A chat started with no project gets a scratch project of its own, shown as "No project"; its playbook tells the agent to propose a project with `orx project create`, which only prints the proposal, and the dashboard draws it as a card the user reviews and confirms. Confirming, or the title bar's Create project, moves the chat's code to the chosen folder; the chat's resident agents stop so the next turn starts with the new project's playbook. Any chat can move into a new project this way. A move requested mid-turn waits for the turn to end, then wakes the agent with an `[orx]` message saying where its files went. Its transcript is a tree of messages: a user message and its answer form a turn, and re-sampling a turn or editing an earlier message adds a sibling fork. A message is a list of parts (text, reasoning, tool calls, prompts, status rows), and parts nest, so a sub-agent's work sits inside the call that started it.
+A chat belongs to one project and works in its own Git worktree ([storage](storage.md)). A chat started with no project gets a scratch project of its own, with no name, icon or folder. The dashboard calls it a new project and lists it as just its chat; beside the composer the user can name it and pick an icon, or import a paper, a folder or an `.orx` file instead, and none of that is required. Once named it is a project in the sidebar. Its playbook tells the agent to propose a project with `orx project create`, which only prints the proposal, and the dashboard draws it as a card the user reviews and confirms. Confirming, or the title bar's Choose folder, moves the chat's code to the chosen folder; the chat's resident agents stop so the next turn starts with the new project's playbook. Any chat can move into a new project this way. A move requested mid-turn waits for the turn to end, then wakes the agent with an `[orx]` message saying where its files went. Its transcript is a tree of messages: a user message and its answer form a turn, and re-sampling a turn or editing an earlier message adds a sibling fork. A message is a list of parts (text, reasoning, tool calls, prompts, status rows), and parts nest, so a sub-agent's work sits inside the call that started it.
 
 **orx's store is the system of record for transcripts; the agent's native session is only context.** Each message records the native session it began from, the one it ended at, and the harness that owns them, so selecting a fork rewinds the agent to that fork's session. Claude Code keeps one session id for a whole chat, so a Claude reply also records the message it ended at, and switching, retrying or editing a fork starts Claude on a new session branched at the end of the turn the fork continues (`--resume-session-at` with `--fork-session`); a fork of the first turn starts fresh. The branch point is the newest reply that recorded its message; the handoff carries any turn after it, such as one interrupted before Claude wrote a message, and a branch with no such reply, or a branch point the CLI rejects, starts a new session that the handoff fills with the branch. Files do not rewind: forks share the worktree, so a fork starts from whatever the previous turn left on disk.
 
@@ -43,7 +43,11 @@ at a time, and announces the result with `usage.changed`; `POST
 /api/usage/refresh` re-reads them all. An account now signed in as someone else
 drops its snapshot. A running chat whose
 agent says its limits moved re-reads its account. A failed read keeps the last
-values beside the reason; an API key or a sign-out has no plan. A Codex reset is spent
+values beside the reason; an API key or a sign-out has no plan, and a subscription
+token whose limits can't be read is a plan without limits. For an account that
+may be on a plan, orx knows only what its tokens would cost at API prices, so the
+dashboard leaves its spend out of the week and the chat, and shows none while the
+plans are unread. A Codex reset is spent
 the same way, through `account/rateLimitResetCredit/consume` with the
 dashboard's key for that click, so a retry never spends two, and then
 re-reads that account.
@@ -203,7 +207,7 @@ Homes (`src/local/native_store.rs`) let an agent behave as the user set it up wh
 | OpenCode | session database | configuration, read in place |
 | Antigravity, ACP agents | nothing | home and session store |
 
-Links are reconciled when an agent starts, and before every Codex turn even on a running process. Claude Code and Codex chats from the user's own CLI can be adopted (`src/local/native_chats.rs`): they keep resolving to the user's native store, and orx's copy of recent history is for display only.
+Links are reconciled when an agent starts, and before every Codex turn even on a running process. A Claude Code or Codex one-shot (a title, a watcher's look) runs in a home of its own under `agents/one-shot` that holds the account's settings alone, reads no project's settings and runs no hooks: the user's memory, instructions, skills and plugins would add thousands of tokens to a request that brings its own context. The sign-in stays in the account's home, never copied or hard-linked: Claude Code reads it there through `CLAUDE_SECURESTORAGE_CONFIG_DIR`, and Codex through a symbolic link, so on Windows, whose links fall back to hard links and copies, a Codex one-shot keeps the account's home. Claude Code and Codex chats from the user's own CLI can be adopted (`src/local/native_chats.rs`): they keep resolving to the user's native store, and orx's copy of recent history is for display only.
 
 Claude Code and Codex profiles keep separate sign-ins in private homes under
 `agents/profiles`, recorded in `agent-profiles.json`. They share the user's
@@ -251,28 +255,30 @@ A completed prompt takes priority over queued approval events, cancelling reques
 
 **OpenCode's modes are what its server is told to ask.** orx's config allows everything, so Full access, the default and what OpenCode always did here, only has its few remaining asks answered for it. Manual makes edits, shell, web and anything outside the worktree ask. Auto makes shell and anything outside the worktree ask, and orx reviews them: a read-only command passes by plan mode's allowlist, and for the rest a model answers SAFE or UNSAFE from the user's message and the action alone. That is the chat's own model unless Settings names an Auto reviewer, which a chat on a local model never uses, and the chat's own model answers when the reviewer fails. The reviewer's call is a separate short request, so it shares no prompt cache with the chat; a smaller reviewer is the saving. Anything but SAFE, and any failure, becomes the ordinary approval card. The mode's rules ride the server's own inline config, since the worktree's config file is shared with side chats and delegates and OpenCode reloads files live, so a switch restarts the server.
 
+**Claude bypasses permissions as root only once the user says the machine is disposable.** Claude Code refuses its skip-permissions flags as root unless `IS_SANDBOX=1` is set. Running as root, orx leaves those flags off and refuses Bypass permissions until the user confirms it in a dialog; the answer is kept in that machine's settings, and from then on orx starts Claude with `IS_SANDBOX=1`. A delegate on such a machine gets Claude's widest other mode.
+
 The bridge endpoint grants permissions, so it takes a per-child token that each respawn replaces. Plan mode puts a small policy in front of the bridge: read-only commands and web lookups pass, file edits are refused, and anything else asks. The read-only check is an allowlist (`src/local/harness/plan_gate.rs`), so a new read-only `orx` verb stays gated until added there.
 
 **A held request never allows by accident.** A request outliving its turn is denied, an interrupted turn denies everything it was waiting on, a transport error denies, and the bridge denies an unanswered request after a long timeout. The no-output watchdog ignores a turn blocked on the user, whose thinking time is unbounded.
 
-Where an agent offers a hook or plugin, it stamps each shell command with the issuing model, so a run records which model launched it (`src/commands/invocation_gate.rs`).
+Claude Code inherits its invoking model through the process environment; a model change resumes a fresh child to refresh that context. OpenCode supplies each shell call's model and provider through its plugin, Codex resolves its running native turn, and Antigravity stamps calls through its hook, so runs record which model launched them.
 
 ## Turns survive restarts
 
 A turn is a row with a state and a **delivery state**: its prompt was never sent, rejected, accepted, or of unknown fate. A running turn holds a per-chat lease with a heartbeat, which keeps one turn per chat and exposes a turn whose process died ([storage](storage.md)).
 
-When a dashboard starts or a lease expires, every turn still marked running has no process behind it, and a turn that finds its own lease gone stops. Each becomes a failed turn with a recovery action chosen by its delivery state:
+When a dashboard quits, starts, or finds a lease expired, every turn still marked running has no process behind it, and a turn that finds its own lease gone stops. Each becomes a failed turn with a recovery action chosen by its delivery state:
 
 | Delivery state | Action | Effect |
 | --- | --- | --- |
 | not sent, rejected | retry | replays the prompt; the agent never saw it |
 | accepted, unknown | continue | asks the agent to carry on; replaying could repeat work |
 
-**Nothing is replayed without the user.** An adapter retries on its own only before the prompt is accepted, within a bounded budget. A continued turn resumes the native session; if that session is gone, the agent gets a bounded snapshot of orx's transcript with instructions not to repeat completed tool actions. An ACP agent's session is gone when the agent says so or no longer lists it.
+**Only a quit resumes on its own.** A dashboard that quits, for the user or an update, marks the turns it stops, and the next start recovers each one before its chat's queue runs. A crash or a lapsed lease may come from the turn itself, so those wait for the user. An adapter retries on its own only before the prompt is accepted, within a bounded budget. A continued turn resumes the native session; if that session is gone, the agent gets a bounded snapshot of orx's transcript with instructions not to repeat completed tool actions. An ACP agent's session is gone when the agent says so or no longer lists it.
 
 **A failed turn says why in the user's terms.** The server classifies the agent's error, including errors saved before the cause field existed. The chat names the cause and keeps the raw error in the details. If a Claude Code sign-out is known before sending, the turn fails immediately. Sign in opens the agent's login and then recovers the turn according to its delivery state.
 
-Queued messages are persisted before they are acknowledged and run in order as each turn ends, so a restart loses none; Stop ends the running turn and the queue runs next, and a queued message leaves only when the user removes it. A quitting dashboard starts no turn, queued ones included, and gives up its leases on the way out, so the next start recovers its turns at once. Adapters that read a child's output interrupt a turn silent past a generous watchdog, which waits while an ACP agent reports a command running; OpenCode's adapters have none.
+Queued messages are persisted before they are acknowledged and run in order as each turn ends, so a restart loses none; Stop ends the running turn and the queue runs next, and a queued message leaves only when the user removes it. A stopped chat and the delegates the stop reached start no turn for run results or chat news until the chat's next turn starts, so a result that lands mid-turn cannot restart the work the user just stopped. A quitting dashboard starts no turn, queued ones included, and gives up its leases on the way out, so the next start recovers its turns at once. Adapters that read a child's output interrupt a turn silent past a generous watchdog, which waits while an ACP agent reports a command running; OpenCode's adapters have none.
 
 ## Sub-agents and new chats
 

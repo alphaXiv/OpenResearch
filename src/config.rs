@@ -255,9 +255,10 @@ pub(crate) const REDIRECT_VARS: [&str; 12] = [
 /// The credentials, endpoints and models agents and backends read, and the
 /// markers of an agent's shell; a test child sees only those its test sets.
 #[cfg(test)]
-pub(crate) const PROVIDER_VARS: [&str; 40] = [
+pub(crate) const PROVIDER_VARS: [&str; 41] = [
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_MODEL",
     "CLAUDE_CODE_PROMPT_CACHE_TTL",
@@ -442,8 +443,8 @@ fn credentials_path() -> PathBuf {
 /// Whether `orx login` credentials exist on disk. A cheap sync fs probe for
 /// summary views — whether the token still *works* is a network question
 /// (`load_credentials` + an API call).
-pub fn credentials_present() -> bool {
-    credentials_path().exists()
+pub fn credentials_present() -> std::io::Result<bool> {
+    credentials_path().try_exists()
 }
 
 /// Reads stored credentials. Returns `Ok(None)` when the file is missing,

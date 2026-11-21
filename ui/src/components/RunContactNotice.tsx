@@ -1,3 +1,4 @@
+import { useQuery } from "@tanstack/react-query";
 import { useWorkspace } from "../workspace";
 import { mutAbandonRun, mutCancelRun, mutCleanupRun } from "../queries/projects";
 import { mutRetryEngineHost } from "../queries/settings";
@@ -11,8 +12,9 @@ import { runAbandonable, runActive, runApiProvider, runConnectHost, runNotice, t
 import { statusLabel } from "./StatusBadge";
 import { Button } from "./ui";
 import { cn } from "./ui/cn";
+import { confirmStop } from "./run/confirmStop";
 
-type NoticeRun = Parameters<typeof runNotice>[0] & Pick<Run, "id" | "projectId" | "host">;
+type NoticeRun = Parameters<typeof runNotice>[0] & Pick<Run, "id" | "projectId" | "experimentId" | "host">;
 
 const TONES = {
   warning: "text-accent-amber",
@@ -20,19 +22,20 @@ const TONES = {
   quiet: "text-subtext",
 };
 
-function copy(notice: RunNotice, nextRetryMs: number | null, provider: string | null): { lead: string; detail: string | null; next?: string; tone: keyof typeof TONES } {
+/** The words for every contact state, wherever a run shows; `figure` marks the one value a line draws in bold. */
+export function runNoticeCopy(notice: RunNotice, nextRetryMs: number | null, provider: string | null, figure = (value: string) => value): { lead: string; detail: string | null; next?: string; tone: keyof typeof TONES } {
   const authLead = provider === "k8s_job" ? m.run_notice_cluster_auth() : provider ? m.run_notice_provider_auth() : null;
   const host = (name: string | null) => ltr(name ?? m.run_notice_the_host());
   switch (notice.kind) {
     case "monitoring":
       return { lead: notice.error, detail: null, tone: "warning" };
     case "unreachable": {
-      const lead = m.run_notice_unreachable({ host: host(notice.host), time: fmtClock(notice.since) });
+      const lead = m.run_notice_unreachable({ host: host(notice.host), time: figure(fmtClock(notice.since)) });
       const retry = nextRetryMs === null ? "" : ` ${m.run_notice_retry_at({ time: fmtClock(nextRetryMs) })}`;
       return { lead: lead + retry, detail: notice.cause, tone: "warning" };
     }
     case "needs_auth":
-      return { lead: authLead ?? m.run_notice_needs_auth({ host: host(notice.host) }), detail: notice.cause, tone: "warning" };
+      return { lead: authLead ?? m.run_notice_needs_auth({ host: figure(host(notice.host)) }), detail: notice.cause, tone: "warning" };
     case "cancelling":
       return { lead: m.status_cancelling(), detail: null, tone: "caution" };
     case "cancel_pending":
@@ -77,11 +80,12 @@ function copy(notice: RunNotice, nextRetryMs: number | null, provider: string | 
 /** What a run's status alone can't say: lost contact, a pending cancel, or an abandoned job's pending kill. */
 export function RunContactNotice({ run, className }: { run: NoticeRun; className?: string }) {
   const workspace = useWorkspace();
-  const { showConfirmDialog } = useWorkspace().dialogs;
-  const { requestHostConnect } = useWorkspace().events;
-  const { useEngineHosts } = workspace.queries;
+  const { showConfirmDialog } = workspace.dialogs;
+  const { requestHostConnect } = workspace.events;
+  const { useEngineHosts, listExperimentsQuery } = workspace.queries;
 
   const hosts = useEngineHosts();
+  const experiment = useQuery(listExperimentsQuery(run.projectId)).data?.find((row) => row.id === run.experimentId);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const notice = runNotice(run);
@@ -89,7 +93,7 @@ export function RunContactNotice({ run, className }: { run: NoticeRun; className
 
   const engineHost = hostForRun(hosts, run);
   const nextRetryMs = engineHost?.status === "backoff" ? engineHost.nextRetryMs : null;
-  const { lead, detail, next, tone } = copy(notice, nextRetryMs, runApiProvider(run));
+  const { lead, detail, next, tone } = runNoticeCopy(notice, nextRetryMs, runApiProvider(run));
   const rentalBilling = run.backend?.kind === "openresearch_job"
     && runActive(run.status)
     && (run.contact?.type === "needs_auth" || run.contact?.type === "unreachable");
@@ -101,6 +105,12 @@ export function RunContactNotice({ run, className }: { run: NoticeRun; className
   const retryHost = waitsOnUnreachable && engineHost?.status === "backoff" && engineHost.class === "key" ? engineHost.alias : null;
   const stopAgain = notice.kind === "cancel_unconfirmed";
   const abandonable = runAbandonable(run);
+
+  const stop = () => confirmStop(
+    workspace.dialogs,
+    experiment?.title || experiment?.slug || run.experimentId,
+    () => mutCancelRun.runAsHeadlessPromise(workspace, run, {}),
+  );
 
   async function act(action: () => Promise<void>) {
     setBusy(true);
@@ -137,12 +147,12 @@ export function RunContactNotice({ run, className }: { run: NoticeRun; className
             </Button>
           )}
           {rentalBilling && (
-            <Button size="small" variant="ghost" disabled={busy} onClick={() => void act(() => mutCancelRun.runAsHeadlessPromise(workspace, run, {}))}>
+            <Button size="small" variant="ghost" disabled={busy} aria-haspopup="dialog" onClick={stop}>
               <CircleStop size={14} />{m.run_stop_box()}
             </Button>
           )}
           {stopAgain && (
-            <Button size="small" variant="ghost" disabled={busy} onClick={() => void act(() => mutCancelRun.runAsHeadlessPromise(workspace, run, {}))}>
+            <Button size="small" variant="ghost" disabled={busy} aria-haspopup="dialog" onClick={stop}>
               <CircleStop size={14} />{m.run_stop_again()}
             </Button>
           )}
@@ -152,7 +162,7 @@ export function RunContactNotice({ run, className }: { run: NoticeRun; className
             </Button>
           )}
           {abandonable && (
-            <Button size="small" variant="ghost" className="text-accent-red" onClick={() => showConfirmDialog({
+            <Button size="small" variant="ghost" className="text-primary" aria-haspopup="dialog" onClick={() => showConfirmDialog({
               title: m.run_abandon_title(),
               description: <>{run.contact?.type === "unreachable" && <>{m.run_abandon_unreachable()} </>}{m.run_abandon_effect()}</>,
               destructive: true,

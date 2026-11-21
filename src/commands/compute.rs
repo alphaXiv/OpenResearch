@@ -212,13 +212,13 @@ pub struct CatalogArgs {
     #[arg(long)]
     pub cpu: bool,
     /// Filter to one GPU id (e.g. `H100_SXM`). Case-insensitive. GPU mode only.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "cpu")]
     pub gpu: Option<String>,
     /// Filter to a specific GPU count per instance. GPU mode only.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "cpu")]
     pub count: Option<i64>,
     /// Filter to one provider (e.g. `runpod`, `vast`, `lambda`). Case-insensitive. GPU mode only.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "cpu")]
     pub provider: Option<String>,
 }
 #[derive(Debug, Subcommand)]

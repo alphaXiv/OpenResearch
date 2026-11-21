@@ -24,42 +24,62 @@ async function midTurn(orx: Orx, page: Page, agent: Agent) {
   await expect(page.getByText('Profiling the loader.')).toBeVisible()
 }
 
-for (const [signal, how, quitting] of [['SIGTERM', 'quits', 'quitting'], ['SIGKILL', 'crashes', 'crashing']] as const) {
-  test(`when orx up ${how} mid-turn, the transcript survives and Continue resumes the turn`, async ({ page, agent, launchOrx }) => {
-    const orx = await launchOrx()
-    await midTurn(orx, page, agent)
+test('when orx up quits mid-turn, the next start resumes the turn on its own', async ({ page, agent, launchOrx }) => {
+  const orx = await launchOrx()
+  await midTurn(orx, page, agent)
 
-    await orx.restart(signal)
-    await page.reload()
-    await expect(page.getByText('The baseline trains in four minutes.')).toBeVisible()
-    await expect(page.getByText('Profiling the loader.')).toBeVisible()
-    await expect(page.getByText('This turn did not finish.')).toBeVisible(leaseExpiry)
-    await expect(page.getByText('Never sent.')).toBeHidden()
+  agent.script('Profile the data loader.', [{ say: 'The loader spends most of its time decoding JPEGs.' }])
+  await orx.restart('SIGTERM')
+  await page.reload()
+  await expect(page.getByText('The baseline trains in four minutes.')).toBeVisible()
+  await expect(page.getByText('Profiling the loader.')).toBeVisible()
+  await expect(page.getByText('The loader spends most of its time decoding JPEGs.')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Continue', exact: true })).toBeHidden()
+  await expect(page.getByText('Never sent.')).toBeHidden()
+})
 
-    agent.script('Profile the data loader.', [{ say: 'The loader spends most of its time decoding JPEGs.' }])
-    await page.getByRole('button', { name: 'Continue', exact: true }).click()
-    await expect(page.getByText('The loader spends most of its time decoding JPEGs.')).toBeVisible()
-    await expect(page.getByText('This turn did not finish.')).toBeHidden()
-  })
+test('when orx up crashes mid-turn, the transcript survives and Continue resumes the turn', async ({ page, agent, launchOrx }) => {
+  const orx = await launchOrx()
+  await midTurn(orx, page, agent)
 
-  test(`a message queued behind a turn survives orx up ${quitting} and runs once the turn is given up`, async ({ page, agent, launchOrx }) => {
+  await orx.restart('SIGKILL')
+  await page.reload()
+  await expect(page.getByText('The baseline trains in four minutes.')).toBeVisible()
+  await expect(page.getByText('Profiling the loader.')).toBeVisible()
+  await expect(page.getByText('OpenResearch restarted before this turn finished.')).toBeVisible(leaseExpiry)
+  await expect(page.getByText('Never sent.')).toBeHidden()
+
+  agent.script('Profile the data loader.', [{ say: 'The loader spends most of its time decoding JPEGs.' }])
+  await page.getByRole('button', { name: 'Continue', exact: true }).click()
+  await expect(page.getByText('The loader spends most of its time decoding JPEGs.')).toBeVisible()
+  await expect(page.getByText('OpenResearch restarted before this turn finished.')).toBeHidden()
+})
+
+for (const [signal, quitting] of [['SIGTERM', 'quitting'], ['SIGKILL', 'crashing']] as const) {
+  test(`a message queued behind a turn survives orx up ${quitting} and runs once the turn ends`, async ({ page, agent, launchOrx }) => {
     const orx = await launchOrx()
     await midTurn(orx, page, agent)
     agent.script('Then try pinned memory.', [{ say: 'Pinned memory saves a second per epoch.' }])
     await send(page, 'Then try pinned memory.')
     await expect(page.getByText('Queued', { exact: true })).toBeVisible()
 
+    if (signal === 'SIGTERM') agent.script('Profile the data loader.', [{ say: 'The loader spends most of its time decoding JPEGs.' }])
     await orx.restart(signal)
     await page.reload()
     await expect(page.getByText('Then try pinned memory.')).toBeVisible()
-    await expect(page.getByText('This turn did not finish.')).toBeVisible(leaseExpiry)
-    await expect(page.getByText('Pinned memory saves a second per epoch.')).toBeVisible()
-    await expect(page.getByText('This turn did not finish.')).toHaveCount(1)
+    if (signal === 'SIGTERM') {
+      await expect(page.getByText('The loader spends most of its time decoding JPEGs.')).toBeVisible()
+    } else {
+      await expect(page.getByText('OpenResearch restarted before this turn finished.')).toBeVisible(leaseExpiry)
+    }
+    await expect(page.getByText('Pinned memory saves a second per epoch.')).toBeVisible(leaseExpiry)
     await expect(page.getByText('Queued', { exact: true })).toBeHidden()
+    // The queued message took the cut-short turn's place.
+    await expect(page.getByRole('button', { name: 'Continue', exact: true })).toBeHidden()
   })
 }
 
-test('restarting into an update asks before stopping a working agent, whose turn can continue afterwards', async ({ page, agent, launchOrx }) => {
+test('restarting into an update asks before stopping a working agent, whose turn resumes afterwards', async ({ page, agent, launchOrx }) => {
   const orx = await launchOrx()
   // The relaunch keeps orx up's arguments, and the first launch asks for any free port.
   await orx.restart()
@@ -78,17 +98,14 @@ test('restarting into an update asks before stopping a working agent, whose turn
   await dialog.getByRole('button', { name: 'Cancel' }).click()
   await expect(dialog).toBeHidden()
   await expect(page.getByText('Profiling the loader.')).toBeVisible()
-  await expect(page.getByText('This turn did not finish.')).toBeHidden()
+  await expect(page.getByText('OpenResearch restarted before this turn finished.')).toBeHidden()
 
+  agent.script('Profile the data loader.', [{ say: 'The loader spends most of its time decoding JPEGs.' }])
   await page.getByRole('button', { name: 'Restart now' }).first().click()
   // The page reloads itself once the relaunched server answers.
   const reloaded = page.waitForEvent('load')
   await dialog.getByRole('button', { name: 'Restart now' }).click()
   await reloaded
-  await expect(page.getByText('This turn did not finish.')).toBeVisible()
-  await expect(page.getByText('Never sent.')).toBeHidden()
-
-  agent.script('Profile the data loader.', [{ say: 'The loader spends most of its time decoding JPEGs.' }])
-  await page.getByRole('button', { name: 'Continue', exact: true }).click()
   await expect(page.getByText('The loader spends most of its time decoding JPEGs.')).toBeVisible()
+  await expect(page.getByText('Never sent.')).toBeHidden()
 })

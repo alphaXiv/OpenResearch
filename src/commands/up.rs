@@ -189,7 +189,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
         remote_sessions: crate::commands::up_remote::RemoteSessionManager::new(),
         remote_instance_id: remote_instance_id.clone(),
         stopping: stopping.clone(),
-        dashboard_lock: Arc::new(std::sync::Mutex::new(Some(dashboard_lock))),
+        dashboard_locks: Arc::new(std::sync::Mutex::new(vec![dashboard_lock])),
         restart: Arc::new(tokio::sync::Notify::new()),
         reopen: Arc::default(),
         trackio: Arc::default(),
@@ -197,7 +197,8 @@ pub async fn run(args: UpArgs) -> Result<()> {
     };
     // Plan-mode turns hand this port to the `orx mcp` permission bridge.
     state.chat.set_up_port(actual_port);
-    state.chat.resume_persisted_queues();
+    // Before any queue, notice or lease sweep can take a quit turn's slot.
+    state.chat.resume_quit_turns().await;
     {
         let chat = state.chat.clone();
         let moving = state.data_dir_move_in_progress.clone();
@@ -359,30 +360,38 @@ pub async fn run(args: UpArgs) -> Result<()> {
     // delivers SIGHUP here as the channel tears down — without handling it the
     // remote server would leak, staying bound to its port after the tunnel dies.
     let restart = state.restart.clone();
+    let (stop_monitoring, stop) = tokio::sync::watch::channel(());
+    let monitor = tokio::spawn(crate::engine::monitor::keep_current(engine, stop.clone()));
+    let watcher = tokio::spawn(crate::engine::watch::keep_watching(stop));
     let mut restarting = false;
-    let explicit_stop = if persistent_host {
-        tokio::select! {
-            r = axum::serve(listener, app) => {
-                r.map_err(|e| anyhow!("orx up: server error: {e}"))?;
-                false
+    let mut explicit_stop = false;
+    let served = tokio::select! {
+        result = axum::serve(listener, app) => result,
+        changed = stop_rx.changed(), if persistent_host => {
+            explicit_stop = changed.is_ok() && *stop_rx.borrow();
+            Ok(())
+        }
+        _ = restart.notified() => { restarting = true; Ok(()) }
+        _ = async {
+            if persistent_host {
+                persistent_shutdown_signal().await;
+            } else {
+                shutdown_signal().await;
+                eprintln!("orx up: shutting down");
             }
-            changed = stop_rx.changed() => changed.is_ok() && *stop_rx.borrow(),
-            _ = restart.notified() => { restarting = true; false }
-            _ = persistent_shutdown_signal() => false,
-        }
-    } else {
-        tokio::select! {
-            r = axum::serve(listener, app) => r.map_err(|e| anyhow!("orx up: server error: {e}"))?,
-            _ = restart.notified() => restarting = true,
-            _ = shutdown_signal() => eprintln!("orx up: shutting down"),
-        }
-        false
+        } => Ok(()),
     };
     if persistent_host {
         stopping.store(true, std::sync::atomic::Ordering::SeqCst);
     }
     // Before agents go down: a turn their shutdown ends must not start the next queued message.
     state.chat.stop_admitting();
+    drop(stop_monitoring);
+    for (name, task) in [("run monitor", monitor), ("watcher", watcher)] {
+        if let Err(error) = task.await {
+            eprintln!("orx up: shutting down the {name}: {error}");
+        }
+    }
     if explicit_stop {
         state.chat.interrupt_all().await;
     } else {
@@ -397,7 +406,8 @@ pub async fn run(args: UpArgs) -> Result<()> {
     if let Some(server) = control_server {
         server.shutdown().await;
     }
-    state.dashboard_lock.lock().unwrap().take();
+    state.dashboard_locks.lock().unwrap().clear();
+    served.map_err(|error| anyhow!("orx up: server error: {error}"))?;
     if restarting {
         drop(backend_lock);
         if let Err(error) = crate::commands::remote_host::ServerDescriptor::withdraw(&data_dir) {
@@ -524,7 +534,8 @@ struct AppState {
     remote_sessions: crate::commands::up_remote::RemoteSessionManager,
     remote_instance_id: Option<String>,
     stopping: Arc<AtomicBool>,
-    dashboard_lock: Arc<std::sync::Mutex<Option<DashboardLock>>>,
+    /// Both directories stay locked through the worker shutdown after a switch.
+    dashboard_locks: Arc<std::sync::Mutex<Vec<DashboardLock>>>,
     /// Fired by `POST /api/update/restart`; the serve loop relaunches on it.
     restart: Arc<tokio::sync::Notify>,
     /// Set with `restart` when the data directory changed: the engine reopens there, and no
@@ -957,6 +968,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
         )
         .route("/api/harnesses/{id}/snapshot", get(harness_snapshot))
         .route(
+            "/api/harnesses/claude-code/root-full-access",
+            post(allow_claude_root_full_access),
+        )
+        .route(
             "/api/harnesses/{id}/install",
             axum::routing::delete(remove_harness_install),
         )
@@ -1059,6 +1074,11 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
             post(compact_chat_session),
         )
         .route("/api/chat/active-runs", get(chat_active_runs))
+        .route("/api/chat/shown-runs", get(chat_shown_runs))
+        .route(
+            "/api/chat/sessions/{id}/shown-runs/{run_id}/dismiss",
+            post(dismiss_shown_run),
+        )
         .route("/api/chat/native-sessions", get(list_native_chats))
         .route("/api/chat/native-sessions/import", post(import_native_chat))
         .route(
@@ -1069,6 +1089,14 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
         .route("/api/chat/sessions/{id}/fork", post(fork_chat_turn))
         .route("/api/chat/sessions/{id}/branch", post(select_chat_branch))
         .route("/api/chat/sessions/{id}/interrupt", post(interrupt_chat))
+        .route(
+            "/api/chat/sessions/{id}/stop-and-archive",
+            post(stop_and_archive_chat),
+        )
+        .route(
+            "/api/chat/sessions/{id}/background/{task}/stop",
+            post(stop_background_task),
+        )
         .route(
             "/api/chat/sessions/{id}/queue/{itemId}",
             axum::routing::delete(cancel_queued_chat).post(retry_queued_chat),
@@ -1233,6 +1261,12 @@ impl IntoResponse for ApiError {
 
 impl From<crate::error::Error> for ApiError {
     fn from(err: crate::error::Error) -> Self {
+        if crate::store::is_db_locked(&err) {
+            return Self(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "OpenResearch's database is busy. Try again in a moment.".into(),
+            );
+        }
         Self(StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
     }
 }
@@ -1281,10 +1315,15 @@ struct ApiRun {
     lost_reason: Option<String>,
     host: Option<String>,
     notice_error: Option<String>,
+    /// The chat that launched the run; absent for a run the CLI started outside a chat.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chat_session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     log_collection: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     log_collection_error: Option<String>,
+    monitor: Option<Value>,
+    outcome: Option<Value>,
 }
 
 pub(crate) fn run_host(store: &Store, run: &StoredRun) -> Result<Option<String>> {
@@ -1321,7 +1360,13 @@ impl ApiRun {
             backend: crate::store::public_backend(&run.backend_json, launch),
             command: Some(run.command.clone()).filter(|c| !c.is_empty()),
             commit_sha: run.commit_sha.clone(),
-            result_markdown: run.result_markdown.clone(),
+            result_markdown: if run.status == "failed" {
+                run.result_markdown
+                    .as_deref()
+                    .map(crate::plane::reason_words)
+            } else {
+                run.result_markdown.clone()
+            },
             created_at: run.created_at,
             updated_at: run.updated_at,
             started_at: state.as_ref().and_then(|state| state.started_at),
@@ -1351,11 +1396,47 @@ impl ApiRun {
                 }),
             host: run_host(store, run)?,
             notice_error: store.run_notice_error(&run.id)?,
+            chat_session_id: run.chat_session_id.clone(),
             log_collection: collection
                 .as_ref()
                 .map(|(failed, _)| if *failed { "failed" } else { "pending" }),
             log_collection_error: collection.and_then(|(_, error)| error),
+            monitor: run_monitor_summary(store, run),
+            outcome: run_outcome(store, run),
         })
+    }
+}
+
+/// Who stopped a cancelled run, when its stop was recorded: `{by, at, reason?, rule?}`.
+pub(crate) fn run_outcome(store: &Store, run: &StoredRun) -> Option<Value> {
+    if run.status != "cancelled" {
+        return None;
+    }
+    let stop = match store.run_stop(&run.id) {
+        Ok(stop) => stop?,
+        Err(error) => {
+            eprintln!("orx up: run {}: {error:#}", run.id);
+            return None;
+        }
+    };
+    let mut outcome = json!({"by": stop.by, "at": stop.at, "reason": stop.reason});
+    if let Some(rule) = stop.rule {
+        outcome["rule"] = match crate::engine::rules::parse_rule(&rule) {
+            Ok(rule) => rule.shown(),
+            Err(_) => rule,
+        };
+    }
+    Some(outcome)
+}
+
+/// A run's monitor summary; a run whose monitor cannot be projected shows its lifecycle alone.
+pub(crate) fn run_monitor_summary(store: &Store, run: &StoredRun) -> Option<Value> {
+    match crate::engine::monitor::current(store, run) {
+        Ok(projection) => projection.map(|projection| projection.summary().clone()),
+        Err(error) => {
+            eprintln!("orx up: run {} monitor: {error:#}", run.id);
+            None
+        }
     }
 }
 
@@ -1753,6 +1834,7 @@ fn project_json_with_artifacts_dir(p: &local::model::LocalProject, artifacts_dir
         map.insert("path".into(), Value::String(p.repo_path.clone()));
         map.insert("githubEnabled".into(), Value::Bool(p.github_enabled()));
         map.insert("scratch".into(), Value::Bool(p.is_scratch()));
+        map.insert("unnamed".into(), Value::Bool(p.is_unnamed_scratch()));
         map.insert(
             "githubUrl".into(),
             p.github_url().map(Value::String).unwrap_or(Value::Null),
@@ -3000,7 +3082,7 @@ async fn delete_project_inner(state: AppState, id: String, query: DeleteProjectQ
         .get_local_project(&id)?
         .ok_or_else(|| not_found("project"))?;
     if query.only_unused_scratch
-        && (!project.is_scratch() || !store.list_chat_sessions_by_project(&id)?.is_empty())
+        && (!project.is_unnamed_scratch() || !store.list_chat_sessions_by_project(&id)?.is_empty())
     {
         return Ok(Json(json!({ "ok": false })));
     }
@@ -3015,6 +3097,7 @@ async fn delete_project_inner(state: AppState, id: String, query: DeleteProjectQ
             if let Err(err) = api_v2::cancel_run(
                 run,
                 "Cancel requested because the project is being deleted.",
+                None,
             )
             .await
             {
@@ -3211,6 +3294,7 @@ impl CreateRunReq {
         let mut flavor = self.flavor;
         local::apply_compute_default(&mut backend, &mut flavor);
         crate::ExpRunArgs {
+            estimate: false,
             invocation_context: self.invocation_context,
             telemetry_suppressed: self.telemetry_suppressed,
             exp_id: self.experiment_id,
@@ -3434,6 +3518,7 @@ async fn list_instances() -> ApiResult {
 #[serde(rename_all = "camelCase")]
 struct CancelRunReq {
     chat_session_id: Option<String>,
+    reason: Option<String>,
 }
 
 async fn cancel_run(
@@ -3448,11 +3533,18 @@ async fn cancel_run(
     if is_terminal(&run.status) {
         return Ok(Json(json!({ "ok": true, "alreadyTerminal": true })));
     }
-    let reason = match req {
-        Some(Json(req)) => crate::commands::exp::exp_cancel_reason(req.chat_session_id.as_deref()),
-        None => "Cancel requested through orx up (dashboard or an older orx CLI).".into(),
+    let (reason, stop) = match req {
+        Some(Json(req)) => crate::commands::exp::exp_cancel_stop(
+            req.chat_session_id.as_deref(),
+            req.reason.as_deref(),
+        )
+        .map_err(bad_request)?,
+        None => (
+            "Cancel requested through orx up (dashboard or an older orx CLI).".into(),
+            crate::store::StopContext::by(crate::store::StopBy::User),
+        ),
     };
-    api_v2::cancel_run(&run, &reason).await?;
+    api_v2::cancel_run(&run, &reason, Some(&stop)).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -3498,14 +3590,14 @@ fn diff_json(d: local::git::DiffPayload) -> Value {
     })
 }
 
-/// Off-worker helper for git-backed handlers.
+/// Runs a synchronous handler on the blocking pool.
 async fn blocking_api<F>(f: F) -> ApiResult
 where
     F: FnOnce() -> std::result::Result<Json<Value>, ApiError> + Send + 'static,
 {
     tokio::task::spawn_blocking(f)
         .await
-        .map_err(|e| ApiError::from(anyhow!("git task failed: {e}")))?
+        .map_err(|e| ApiError::from(anyhow!("Request worker failed: {e}")))?
 }
 
 /// Cumulative diff of a run's commit vs its experiment's parent branch. A root
@@ -6197,7 +6289,7 @@ async fn set_data_dir(State(state): State<AppState>, Json(req): Json<DataDirReq>
     tokio::task::spawn_blocking(move || crate::config::set_settings_data_dir(Some(path)))
         .await
         .map_err(|e| ApiError::from(anyhow!("settings task failed: {e}")))??;
-    *state.dashboard_lock.lock().unwrap() = Some(next_lock);
+    state.dashboard_locks.lock().unwrap().push(next_lock);
     state.chat.shutdown_harnesses().await;
     state.reopen.store(true, Ordering::SeqCst);
     state.restart.notify_one();
@@ -6358,7 +6450,7 @@ async fn move_data_dir(State(state): State<AppState>, Json(req): Json<DataDirReq
     // Spawn the move on a blocking task (it does synchronous FS work); forward
     // throttled progress onto the SSE broadcast, clear the flag when done.
     let flag = state.data_dir_move_in_progress.clone();
-    let dashboard_lock = state.dashboard_lock.clone();
+    let dashboard_locks = state.dashboard_locks.clone();
     let (restart, reopen) = (state.restart.clone(), state.reopen.clone());
     let target = std::path::PathBuf::from(path);
     tokio::spawn(async move {
@@ -6387,7 +6479,7 @@ async fn move_data_dir(State(state): State<AppState>, Json(req): Json<DataDirReq
 
         match result {
             Ok(Ok(outcome)) => {
-                *dashboard_lock.lock().unwrap() = Some(next_lock);
+                dashboard_locks.lock().unwrap().push(next_lock);
                 // Close any child spawned while a cross-filesystem copy ran.
                 chat.shutdown_harnesses().await;
                 chat.emit_event("datadir.move.done", json!(outcome));
@@ -6982,6 +7074,8 @@ struct SetUiStateReq {
     model_section_order: Option<Vec<String>>,
     collapsed_model_sections: Option<Vec<String>>,
     model_sightings: Option<Value>,
+    run_banner: Option<String>,
+    run_watching: Option<bool>,
     seen_nudges: Option<Vec<String>>,
 }
 
@@ -7000,6 +7094,14 @@ async fn set_ui_state(
     State(state): State<AppState>,
     Json(mut req): Json<SetUiStateReq>,
 ) -> ApiResult {
+    let run_banner = req
+        .run_banner
+        .as_deref()
+        .map(|level| {
+            crate::store::RunBannerLevel::parse(level)
+                .ok_or_else(|| bad_request("Choose line or strip for the run banner."))
+        })
+        .transpose()?;
     if let Some(selection) = req.preferred_agent.as_mut() {
         selection.model = selected_chat_model(
             &state,
@@ -7158,6 +7260,12 @@ async fn set_ui_state(
         }
         if let Some(workspace) = req.workspace {
             store.set_global_workspace_state(&workspace)?;
+        }
+        if let Some(level) = run_banner {
+            store.set_run_banner(level)?;
+        }
+        if let Some(on) = req.run_watching {
+            store.set_run_watching(on)?;
         }
         Ok(Json(json!(store.ui_state()?)))
     })
@@ -8882,8 +8990,21 @@ async fn list_harnesses(State(state): State<AppState>, Query(q): Query<HarnessQu
         }
         let harness = entry["id"].as_str().unwrap_or_default().to_string();
         local::model_routes::name_models(&harness, &mut entry["models"]);
+        if harness == "claude-code" {
+            entry["fullAccessNeedsRootConsent"] = json!(
+                local::harness::claude::full_access()
+                    == local::harness::claude::FullAccess::NeedsRootConsent
+            );
+        }
     }
     Ok(Json(payload))
+}
+
+async fn allow_claude_root_full_access(State(state): State<AppState>) -> ApiResult {
+    crate::telemetry::set_claude_root_full_access(true)
+        .map_err(|e| anyhow!("could not save the full access confirmation: {e}"))?;
+    state.chat.emit_event("harness.catalog", json!({}));
+    Ok(Json(json!({})))
 }
 
 #[derive(Deserialize)]
@@ -9605,6 +9726,23 @@ fn sidebar_session_json(
     Ok(value)
 }
 
+/// The newest run a chat launched, for its sidebar card; a run that cannot be shown costs the card a line, not the page.
+fn last_run_json(store: &Store, session_id: &str) -> Result<Value> {
+    let Some(run) = store.latest_chat_run(session_id)? else {
+        return Ok(Value::Null);
+    };
+    Ok(match ApiRun::new(store, &run) {
+        Ok(run) => json!(run),
+        Err(error) => {
+            eprintln!(
+                "orx up: could not show run {} on chat {session_id}'s card: {error:#}",
+                run.id
+            );
+            Value::Null
+        }
+    })
+}
+
 fn chat_active_runs_json(store: &Store) -> Result<Value> {
     let mut rows = Vec::new();
     for (session_id, run) in store.chat_active_runs()? {
@@ -9622,6 +9760,91 @@ fn chat_active_runs_json(store: &Store) -> Result<Value> {
 
 async fn chat_active_runs() -> ApiResult {
     Ok(Json(chat_active_runs_json(&Store::open()?)?))
+}
+
+fn chat_shown_runs_json(store: &Store) -> Result<Value> {
+    let mut failed_sessions = std::collections::BTreeSet::new();
+    let rows = store
+        .chat_shown_runs()?
+        .into_iter()
+        .filter_map(|item| {
+            let run = match ApiRun::new(store, &item.run) {
+                Ok(run) => run,
+                Err(error) => {
+                    eprintln!(
+                        "orx up: could not show run {} above the composer: {error:#}",
+                        item.run.id
+                    );
+                    failed_sessions.insert(item.session_id);
+                    return None;
+                }
+            };
+            Some(json!({
+                "sessionId": item.session_id,
+                "run": run,
+                "experimentName": item.experiment_name,
+                "experimentSlug": item.experiment_slug,
+                "runNo": item.run_no,
+                "runCount": item.run_count,
+            }))
+        })
+        .collect::<Vec<_>>();
+    // The chat's newest look rides on each of its rows: one watcher writes the summary for them all.
+    let mut watched = std::collections::HashMap::new();
+    let mut rows = rows;
+    for row in &mut rows {
+        let Some(chat) = row["sessionId"].as_str().map(str::to_owned) else {
+            continue;
+        };
+        if !watched.contains_key(&chat) {
+            let watch = crate::engine::watch::chat_summary(store, &chat).unwrap_or_else(|error| {
+                eprintln!("orx up: could not read chat {chat}'s watcher summary: {error:#}");
+                Value::Null
+            });
+            watched.insert(chat.clone(), watch);
+        }
+        row["watch"] = watched[&chat].clone();
+    }
+    Ok(json!({ "runs": rows, "failedSessions": failed_sessions }))
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatShownRunsQuery {
+    #[serde(default)]
+    include_failures: bool,
+}
+
+async fn chat_shown_runs(Query(query): Query<ChatShownRunsQuery>) -> ApiResult {
+    blocking_api(move || {
+        let mut projection = chat_shown_runs_json(&Store::open()?)?;
+        Ok(Json(if query.include_failures {
+            projection
+        } else {
+            projection["runs"].take()
+        }))
+    })
+    .await
+}
+
+async fn dismiss_shown_run(Path((session_id, run_id)): Path<(String, String)>) -> ApiResult {
+    blocking_api(move || {
+        let mut store = Store::open()?;
+        if store.get_chat_session(&session_id)?.is_none() {
+            return Err(not_found("chat"));
+        }
+        if store.get_run(&run_id)?.is_none() {
+            return Err(not_found("run"));
+        }
+        match store.dismiss_chat_run(&session_id, &run_id)? {
+            crate::store::RunDismissal::Dismissed => Ok(Json(json!({ "dismissed": true }))),
+            crate::store::RunDismissal::NotAssociated => Err(not_found("run in this chat")),
+            crate::store::RunDismissal::Refused(reason) => {
+                Err(ApiError(StatusCode::CONFLICT, reason.into()))
+            }
+        }
+    })
+    .await
 }
 
 async fn list_chat_sessions(
@@ -9667,16 +9890,23 @@ async fn list_chat_sessions(
         let sessions: Vec<Value> = sessions
             .iter()
             .map(|session| {
-                sidebar_session_json(
+                let mut value = sidebar_session_json(
                     &store,
                     session,
                     busy.contains(&session.id),
                     background.get(&session.id),
                     &catalog,
-                )
+                )?;
+                value["lastRun"] = last_run_json(&store, &session.id)?;
+                Ok(value)
             })
             .collect::<Result<_>>()?;
-        return Ok(Json(json!({ "sessions": sessions, "next": next })));
+        // A folded section still says how many chats it holds, however many pages they run to.
+        return Ok(Json(json!({
+            "sessions": sessions,
+            "next": next,
+            "total": store.count_sidebar_chat_sessions(q.archived)?,
+        })));
     }
     let sessions = match (q.project_id.as_deref(), q.scope.as_deref()) {
         (Some(project_id), _) => store.list_chat_sessions_by_project(project_id)?,
@@ -9880,7 +10110,7 @@ async fn create_chat_session(
         .ok_or_else(|| not_found("project"))?;
     // A chat without a project gets one of its own, even when two drafts were
     // opened on the same unused scratch project.
-    let _scratch_guard = if project.is_scratch() {
+    let _scratch_guard = if project.is_unnamed_scratch() {
         let guard = state.project_creation_lock.clone().lock_owned().await;
         if !store.list_chat_sessions_by_project(&project.id)?.is_empty() {
             req.project_id = local::projects::scratch_project(&store)?.id;
@@ -10087,7 +10317,7 @@ async fn delete_chat_session(State(state): State<AppState>, Path(id): Path<Strin
         .map(|session| store.get_local_project(&session.project_id))
         .transpose()?
         .flatten()
-        .filter(|project| project.is_scratch());
+        .filter(|project| project.is_unnamed_scratch());
     drop(store);
     tokio::spawn(async move {
         chat.delete_session(&id).await?;
@@ -10348,10 +10578,12 @@ async fn update_chat_session(
             .await?
             .ok_or_else(|| not_found("chat session"))?
     } else if let Some(archived) = req.archived {
+        let store = Store::open()?;
+        store.set_chat_session_archived(&id, archived)?;
         state
             .chat
-            .set_archived(&id, archived)
-            .await?
+            .emit_session(store.get_chat_session(&id)?)
+            .await
             .ok_or_else(|| not_found("chat session"))?
     } else if let Some(plan_mode) = req.plan_mode {
         state
@@ -10369,6 +10601,17 @@ async fn update_chat_session(
             .await?
             .ok_or_else(|| not_found("chat session"))?
     } else if let Some(permission_mode) = req.permission_mode {
+        let harness = Store::open()?
+            .get_chat_session(&id)?
+            .ok_or_else(|| not_found("chat session"))?
+            .harness;
+        if harness == "claude-code" {
+            local::harness::claude::check_full_access(local::harness::permission_mode_for(
+                &harness,
+                &permission_mode,
+            ))
+            .map_err(bad_request)?;
+        }
         state
             .chat
             .set_permission_mode(&id, &permission_mode)
@@ -10700,6 +10943,15 @@ async fn recover_chat_turn(
 ) -> ApiResult {
     reject_if_stopping(&state)?;
     reject_if_moving(&state)?;
+    let latest = Store::open()
+        .and_then(|store| store.latest_chat_turn(&id))
+        .map_err(|error| ApiError(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    if latest.is_some_and(|turn| turn.id != turn_id) {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "A later message replaced this turn.".into(),
+        ));
+    }
     let result = state
         .chat
         .recover_turn(
@@ -10837,6 +11089,74 @@ async fn chat_attachment(
 
 async fn interrupt_chat(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
     state.chat.interrupt_by_user(&id).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn stop_and_archive_chat(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    reject_if_moving(&state)?;
+    let chat = state.chat;
+    // A disconnected client must not leave the chat between stopping and archiving.
+    tokio::spawn(async move {
+        let store = Store::open()?;
+        store
+            .get_chat_session(&id)?
+            .ok_or_else(|| not_found("chat session"))?;
+        if !chat.queued_items(&id).is_empty() {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "This chat has queued messages. Remove them, then mark it done.".into(),
+            ));
+        }
+        chat.interrupt(&id).await?;
+        let mut guard = local::chat::TurnGuard::claim(&chat, &id, None)
+            .await
+            .ok_or_else(|| {
+                ApiError(
+                    StatusCode::CONFLICT,
+                    "The chat took on another turn. Try marking it done again.".into(),
+                )
+            })?;
+        chat.claude.interrupt_session(&id).await;
+        chat.stop_delegates(&id).await?;
+
+        let reason = format!("Cancel requested by marking chat {id} done in the dashboard.");
+        for (session, run) in store.chat_active_runs()? {
+            if session == id && run.chat_session_id.as_deref() == Some(id.as_str()) {
+                api_v2::cancel_run(
+                    &run,
+                    &reason,
+                    Some(&crate::store::StopContext::by(crate::store::StopBy::User)),
+                )
+                .await
+                .map_err(|error| anyhow!("Could not stop experiment run {}: {error}", run.id))?;
+                store.dismiss_run_notices(&run.id, &id, now_ms())?;
+            }
+        }
+        store.set_chat_session_archived(&id, true)?;
+        guard.release().await;
+        let session = chat
+            .emit_session(store.get_chat_session(&id)?)
+            .await
+            .ok_or_else(|| not_found("chat session"))?;
+        Ok(Json(
+            chat.session_json(&session, chat.is_busy(&id).await).await,
+        ))
+    })
+    .await
+    .map_err(|error| anyhow!("Could not finish marking the chat done: {error}"))?
+}
+
+async fn stop_background_task(
+    State(state): State<AppState>,
+    Path((id, task)): Path<(String, String)>,
+) -> ApiResult {
+    reject_if_moving(&state)?;
+    if !state.chat.stop_background(&id, &task).await? {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            "That background task has already finished.".into(),
+        ));
+    }
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -11022,7 +11342,7 @@ struct EventCursor {
     followed: HashMap<String, Box<dyn Send>>,
     log_offsets: HashMap<String, u64>,
     log_generations: HashMap<String, String>,
-    chat_active_runs: Option<Value>,
+    chat_shown_runs: Option<Value>,
     /// Last update status sent. Unlike the rest of the cursor this isn't store
     /// state — the updater is a separate process, so its progress reaches the UI
     /// through the same diff the store changes do.
@@ -11040,16 +11360,23 @@ async fn event_loop(
     tx: mpsc::Sender<Event>,
     mut runs: Option<tokio::sync::broadcast::Receiver<crate::engine::bus::RunEvent>>,
 ) {
+    use crate::engine::bus::RunEvent;
     use tokio::sync::broadcast::error::RecvError;
+    let period = Duration::from_millis(500);
+    let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut cursor = EventCursor::default();
     let mut first = true;
+    let mut store = None;
     loop {
-        if !first {
+        let event = if first {
+            None
+        } else {
             // An idle store never sends, so a failed send can't be the only
             // disconnect signal — watch the receiver side too or the loop
             // leaks per closed EventSource.
-            let event = tokio::select! {
-                _ = tokio::time::sleep(Duration::from_millis(500)) => None,
+            tokio::select! {
+                _ = tick.tick() => None,
                 _ = tx.closed() => return,
                 event = async {
                     match runs.as_mut() {
@@ -11057,42 +11384,66 @@ async fn event_loop(
                         None => std::future::pending().await,
                     }
                 } => Some(event),
-            };
-            let batch = match event {
-                None => None,
-                Some(Ok(event)) => Some(
-                    Store::open().and_then(|store| run_events(&store, &mut cursor, Some(event))),
-                ),
-                // Lagged: resynchronize every run from the store.
-                Some(Err(RecvError::Lagged(_))) => {
-                    Some(Store::open().and_then(|store| run_events(&store, &mut cursor, None)))
+            }
+        };
+        match &event {
+            Some(Ok(RunEvent::Monitor { event, .. })) => {
+                // The published monitor must reach the browser even if SQLite cannot supply its summary.
+                if tx.send(json_event("run.monitor", event)).await.is_err() {
+                    return;
                 }
-                Some(Err(RecvError::Closed)) => {
-                    runs = None;
-                    continue;
-                }
-            };
-            if let Some(batch) = batch {
-                for ev in batch.unwrap_or_default() {
-                    if tx.send(ev).await.is_err() {
-                        return;
-                    }
+            }
+            Some(Ok(RunEvent::Grew { run_id, len, .. })) => {
+                let event = json_event(
+                    "run.log",
+                    &json!({"runId": run_id, "dataBase64": "", "offset": len}),
+                );
+                if tx.send(event).await.is_err() {
+                    return;
                 }
                 continue;
             }
+            Some(Ok(RunEvent::Notices { .. } | RunEvent::FlagReview { .. })) => continue,
+            Some(Err(RecvError::Closed)) => {
+                runs = None;
+                continue;
+            }
+            _ => {}
         }
         if tx.is_closed() {
             return;
         }
-        // Store hiccups (locked db) just skip a tick.
-        let mut batch = collect_events(&mut cursor).unwrap_or_default();
-        if first {
-            batch.extend(
-                Store::open()
-                    .and_then(|store| run_events(&store, &mut cursor, None))
-                    .unwrap_or_default(),
-            );
-        }
+        let collected = tokio::task::spawn_blocking(move || {
+            let opening = store.is_none();
+            let connection = match store.map_or_else(Store::open, Ok) {
+                Ok(connection) => connection,
+                Err(error) => {
+                    eprintln!("orx up: could not open the dashboard event store: {error:#}");
+                    return (cursor, None, Vec::new());
+                }
+            };
+            // A failed read is recovered by the next snapshot. A lagged receiver snapshots every run.
+            let mut batch = if opening || event.is_none() {
+                collect_events(&connection, &mut cursor).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            if opening || event.is_some() {
+                let event = event.filter(|_| !opening).and_then(std::result::Result::ok);
+                batch.extend(run_events(&connection, &mut cursor, event).unwrap_or_default());
+            }
+            (cursor, Some(connection), batch)
+        })
+        .await;
+        let (next, connection, batch) = match collected {
+            Ok(collected) => collected,
+            Err(error) => {
+                eprintln!("orx up: could not collect dashboard events: {error}");
+                return;
+            }
+        };
+        cursor = next;
+        store = connection;
         first = false;
         for ev in batch {
             if tx.send(ev).await.is_err() {
@@ -11108,7 +11459,7 @@ fn json_event(name: &str, data: &Value) -> Event {
 
 /// One non-run diff pass. On the first pass everything is "changed", so a fresh
 /// subscriber gets a full snapshot and needs no separate baseline fetches.
-fn collect_events(cursor: &mut EventCursor) -> Result<Vec<Event>> {
+fn collect_events(store: &Store, cursor: &mut EventCursor) -> Result<Vec<Event>> {
     let mut out = Vec::new();
 
     // Sampled far below the 2Hz loop — the updater works on the scale of
@@ -11128,7 +11479,6 @@ fn collect_events(cursor: &mut EventCursor) -> Result<Vec<Event>> {
         out.push(json_event("update.status", &json!(update)));
     }
 
-    let store = Store::open()?;
     for project in store.list_local_projects()? {
         if cursor.projects.get(&project.id) != Some(&project.updated_at) {
             cursor
@@ -11139,7 +11489,7 @@ fn collect_events(cursor: &mut EventCursor) -> Result<Vec<Event>> {
                 &json!({ "project": project_json(&project) }),
             ));
         }
-        push_experiment_events(&store, &project.id, cursor, &mut out)?;
+        push_experiment_events(store, &project.id, cursor, &mut out)?;
         // Artifacts appear live — anything written into the directory (by the
         // agent or the user) pings the UI to refetch the listing.
         let fp = local::files::fingerprint(&project);
@@ -11166,11 +11516,25 @@ fn collect_events(cursor: &mut EventCursor) -> Result<Vec<Event>> {
             cursor.tailed.remove(&run_id);
         }
     }
+    push_chat_run_events(store, cursor, &mut out)?;
     // Committed only now that the batch is certain to be returned.
     if let Some(update) = sampled_update {
         cursor.update = Some(update);
     }
     Ok(out)
+}
+
+fn push_chat_run_events(
+    store: &Store,
+    cursor: &mut EventCursor,
+    out: &mut Vec<Event>,
+) -> Result<()> {
+    let shown_runs = chat_shown_runs_json(store)?;
+    if cursor.chat_shown_runs.as_ref() != Some(&shown_runs) {
+        out.push(json_event("chat.runs", &json!({})));
+        cursor.chat_shown_runs = Some(shown_runs);
+    }
+    Ok(())
 }
 
 /// Run events for one Bus event, or for every recent run when `event` is `None` (the first
@@ -11181,18 +11545,11 @@ fn run_events(
     event: Option<crate::engine::bus::RunEvent>,
 ) -> Result<Vec<Event>> {
     use crate::engine::bus::RunEvent;
-    let first = cursor.chat_active_runs.is_none();
+    let first = event.is_none() && cursor.runs.is_empty();
     let runs = match &event {
         None => store.list_runs(200)?,
         Some(RunEvent::Changed { run_id, .. } | RunEvent::LogCollection { run_id }) => {
             store.get_run(run_id)?.into_iter().collect()
-        }
-        Some(RunEvent::Grew { run_id, len, .. }) => {
-            // A followed engine run's log grew on its host; the client refetches it.
-            return Ok(vec![json_event(
-                "run.log",
-                &json!({"runId": run_id, "dataBase64": "", "offset": len}),
-            )]);
         }
         Some(RunEvent::Host { alias, root, state }) => {
             return Ok(vec![json_event(
@@ -11200,7 +11557,18 @@ fn run_events(
                 &api_v2::host_view(store, alias, root, state)?,
             )])
         }
-        Some(RunEvent::Notices { .. }) => return Ok(Vec::new()),
+        Some(RunEvent::Monitor { run_id, .. }) => {
+            let Some(run) = store.get_run(run_id)? else {
+                return Ok(Vec::new());
+            };
+            return Ok(vec![json_event(
+                "run.updated",
+                &json!({ "run": ApiRun::new(store, &run)? }),
+            )]);
+        }
+        Some(RunEvent::Grew { .. } | RunEvent::Notices { .. } | RunEvent::FlagReview { .. }) => {
+            return Ok(Vec::new())
+        }
     };
     let mut out = Vec::new();
     if event.is_none() {
@@ -11238,11 +11606,7 @@ fn run_events(
             &json!({ "run": ApiRun::new(store, &run)? }),
         ));
     }
-    let active_runs = chat_active_runs_json(store)?;
-    if cursor.chat_active_runs.as_ref() != Some(&active_runs) {
-        out.push(json_event("chat.runs", &json!({})));
-        cursor.chat_active_runs = Some(active_runs);
-    }
+    push_chat_run_events(store, cursor, &mut out)?;
     Ok(out)
 }
 
@@ -11374,6 +11738,31 @@ pub(crate) async fn spa(uri: Uri) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn shown_runs_reports_a_busy_database_without_blocking_the_worker() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let store = Store::open().unwrap();
+        let writer = store.begin_immediate().unwrap();
+        let start = std::time::Instant::now();
+        let request = chat_shown_runs(Query(ChatShownRunsQuery::default()));
+        tokio::pin!(request);
+        assert!(futures::poll!(&mut request).is_pending());
+        let error = request.await.unwrap_err();
+        assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE, "{}", error.1);
+        assert!(error.1.contains("database is busy"), "{}", error.1);
+        assert!(start.elapsed() < crate::store::BUSY_TIMEOUT + Duration::from_secs(1));
+        drop(writer);
+        assert_eq!(
+            chat_shown_runs(Query(ChatShownRunsQuery::default()))
+                .await
+                .unwrap()
+                .0,
+            json!([])
+        );
+    }
 
     #[tokio::test]
     async fn variables_save_for_a_project_or_every_project_with_their_descriptions() {
@@ -11515,6 +11904,80 @@ mod tests {
         assert!(!run_events(&store, &mut cursor, None).unwrap().is_empty());
         drop(store);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_monitor_event_precedes_its_summary_even_when_the_store_is_busy() {
+        use crate::engine::bus::RunEvent;
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let store = Store::open().unwrap();
+        let run = StoredRun {
+            id: "r".into(),
+            experiment_id: "e".into(),
+            project_id: "p".into(),
+            status: "running".into(),
+            backend_json: r#"{"kind":"local_job"}"#.into(),
+            command: "true".into(),
+            created_at: 1,
+            updated_at: 1,
+            ended_at: None,
+            exit_code: None,
+            commit_sha: None,
+            result_markdown: None,
+            cancel_requested: false,
+            cancel_reason: None,
+            chat_session_id: None,
+        };
+        store.upsert_run(&run).unwrap();
+        let bus = crate::engine::bus::Bus::new();
+        let (tx, mut rx) = mpsc::channel(16);
+        let stream = tokio::spawn(event_loop(tx, Some(bus.subscribe())));
+        let _initial = rx.recv().await.expect("initial dashboard snapshot");
+        while rx.try_recv().is_ok() {}
+
+        let flag = crate::engine::flags::new_flag(
+            &store,
+            &run,
+            json!({"id": "f1", "source": "tripwire", "fingerprint": "error", "template": "An error."}),
+            true,
+        )
+        .unwrap();
+        store.raise_flags(&[flag], 5).unwrap();
+        let (projection, monitor) = crate::engine::monitor::monitor(&store, &run).unwrap();
+        let rev = &projection.summary()["rev"];
+        assert_eq!(monitor["flagId"], "f1");
+
+        let writer = store.begin_immediate().unwrap();
+        bus.publish(RunEvent::Monitor {
+            run_id: run.id.clone(),
+            event: Arc::new(monitor),
+        });
+        let event = tokio::time::timeout(Duration::from_millis(100), rx.recv())
+            .await
+            .expect("the monitor needs no database read")
+            .unwrap();
+        drop(writer);
+
+        let updated = rx
+            .recv()
+            .await
+            .expect("run summary after the writer released");
+        drop(rx);
+        stream.await.unwrap();
+        let text = event_text(vec![event, updated]).await;
+        assert!(text.starts_with("event: run.monitor\n"), "{text}");
+        assert!(text.contains("\nevent: run.updated\n"), "{text}");
+        let summary: Value = serde_json::from_str(
+            text.lines()
+                .filter_map(|line| line.strip_prefix("data: "))
+                .nth(1)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(&summary["run"]["monitor"]["rev"], rev);
+        assert_eq!(summary["run"]["monitor"]["flag"]["id"], "f1");
     }
 
     #[tokio::test]
@@ -11663,6 +12126,133 @@ mod tests {
     }
 
     #[test]
+    fn one_unreadable_run_does_not_hide_the_others_above_the_composer() {
+        let dir = std::env::temp_dir().join(format!("orx-shown-bad-row-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        for id in ["readable", "quarantined"] {
+            store
+                .upsert_run(&StoredRun {
+                    id: id.into(),
+                    experiment_id: format!("experiment_{id}"),
+                    project_id: "project".into(),
+                    status: "running".into(),
+                    backend_json: "{}".into(),
+                    command: String::new(),
+                    created_at: 1,
+                    updated_at: 1,
+                    ended_at: None,
+                    exit_code: None,
+                    commit_sha: None,
+                    result_markdown: None,
+                    cancel_requested: false,
+                    cancel_reason: None,
+                    chat_session_id: Some("chat".into()),
+                })
+                .unwrap();
+        }
+        rusqlite::Connection::open(dir.join("orx.db"))
+            .unwrap()
+            .execute(
+                "UPDATE runs SET contact = '{\"type\":\"quarantined\"}' WHERE id = 'quarantined'",
+                [],
+            )
+            .unwrap();
+        let shown = chat_shown_runs_json(&store).unwrap();
+        assert_eq!(shown["failedSessions"], json!(["chat"]));
+        let ids: Vec<_> = shown["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["run"]["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["readable"]);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn shown_run_events_reach_each_client_without_an_engine_event() {
+        let dir = std::env::temp_dir().join(format!("orx-shown-events-{}", uuid::Uuid::new_v4()));
+        let mut store = Store::open_at(dir.clone()).unwrap();
+        let session = StoredChatSession {
+            profile_id: None,
+            id: "chat".into(),
+            project_id: "project".into(),
+            harness: "claude-code".into(),
+            native_session_id: None,
+            native_fork_at: None,
+            title: None,
+            title_source: None,
+            model: None,
+            service_tier: None,
+            permission_mode: None,
+            plan_mode: false,
+            plan_reset_pending: false,
+            reasoning_level: None,
+            archived: false,
+            context_usage_json: None,
+            bootstrap_context: None,
+            goal: None,
+            autonomy: None,
+            active_leaf_id: None,
+            side_parent_session_id: None,
+            side_parent_leaf_id: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        store.create_chat_session(&session).unwrap();
+        let run = StoredRun {
+            id: "ended".into(),
+            experiment_id: "experiment".into(),
+            project_id: "project".into(),
+            status: "done".into(),
+            backend_json: "{}".into(),
+            command: String::new(),
+            created_at: 1,
+            updated_at: 2,
+            ended_at: Some(2),
+            exit_code: Some(0),
+            commit_sha: None,
+            result_markdown: None,
+            cancel_requested: false,
+            cancel_reason: None,
+            chat_session_id: Some(session.id.clone()),
+        };
+        store.upsert_run(&run).unwrap();
+        store
+            .insert_run_notice(
+                &run.id,
+                &session.id,
+                crate::store::TERMINAL,
+                crate::store::TERMINAL,
+                "finished",
+                2,
+            )
+            .unwrap();
+        let mut clients = [EventCursor::default(), EventCursor::default()];
+        for cursor in &mut clients {
+            let mut events = Vec::new();
+            push_chat_run_events(&store, cursor, &mut events).unwrap();
+            assert_eq!(events.len(), 1);
+        }
+        store.dismiss_chat_run(&session.id, &run.id).unwrap();
+        for cursor in &mut clients {
+            let mut events = Vec::new();
+            push_chat_run_events(&store, cursor, &mut events).unwrap();
+            assert_eq!(events.len(), 1);
+            assert_eq!(
+                cursor.chat_shown_runs,
+                Some(json!({ "runs": [], "failedSessions": [] }))
+            );
+            events.clear();
+            push_chat_run_events(&store, cursor, &mut events).unwrap();
+            assert!(events.is_empty());
+        }
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn new_chat_uses_saved_preferences_and_normalizes_model_settings() {
         let preferences = crate::store::StoredUiState {
             onboarding_completed: true,
@@ -11678,6 +12268,8 @@ mod tests {
             model_section_order: Vec::new(),
             collapsed_model_sections: Vec::new(),
             model_sightings: None,
+            run_banner: crate::store::RunBannerLevel::Strip,
+            run_watching: true,
             seen_nudges: Vec::new(),
             created_at: None,
             preferred_agent: Some(StoredAgentSelection {
@@ -11720,6 +12312,8 @@ mod tests {
             model_section_order: Vec::new(),
             collapsed_model_sections: Vec::new(),
             model_sightings: None,
+            run_banner: crate::store::RunBannerLevel::Strip,
+            run_watching: true,
             seen_nudges: Vec::new(),
             created_at: None,
         };
@@ -11778,6 +12372,8 @@ mod tests {
             model_section_order: Vec::new(),
             collapsed_model_sections: Vec::new(),
             model_sightings: None,
+            run_banner: crate::store::RunBannerLevel::Strip,
+            run_watching: true,
             seen_nudges: Vec::new(),
             created_at: None,
         };
@@ -12047,6 +12643,8 @@ mod tests {
                 model_section_order: None,
                 collapsed_model_sections: None,
                 model_sightings: None,
+                run_banner: None,
+                run_watching: None,
                 seen_nudges: None,
             }),
         )
@@ -12547,6 +13145,7 @@ mod tests {
                 commit_sha: None,
                 chat_session_id: None,
                 spec_digest: "digest",
+                monitor_config: None,
                 launch: &launch,
             })
             .unwrap();
@@ -12571,6 +13170,7 @@ mod tests {
         assert!(value["lostReason"].is_null());
         assert_eq!(value["host"], "lab");
         assert!(value["noticeError"].is_null());
+        assert!(value.get("chatSessionId").is_none());
         store
             .insert_run_notice("e", "chat", crate::store::TERMINAL, "terminal", "done", 1)
             .unwrap();
@@ -12587,6 +13187,10 @@ mod tests {
         let value = serde_json::to_value(ApiRun::new(&store, &engine).unwrap()).unwrap();
         assert_eq!(value["noticeError"], "Chat harness is no longer configured");
         let mut engine = engine;
+        engine.chat_session_id = Some("chat-7".into());
+        let value = serde_json::to_value(ApiRun::new(&store, &engine).unwrap()).unwrap();
+        assert_eq!(value["chatSessionId"], "chat-7");
+        engine.chat_session_id = None;
         engine.backend_json = crate::engine::handle::backend_json(
             "e",
             Some(&crate::engine::handle::Handle::Ssh {
@@ -12922,7 +13526,7 @@ mod tests {
             remote_sessions: crate::commands::up_remote::RemoteSessionManager::new(),
             remote_instance_id: None,
             stopping: Default::default(),
-            dashboard_lock: Default::default(),
+            dashboard_locks: Default::default(),
             restart: Default::default(),
             reopen: Default::default(),
             trackio: Default::default(),

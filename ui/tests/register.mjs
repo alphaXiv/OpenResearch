@@ -73,6 +73,13 @@ GlobalRegistrator.register({
 Object.defineProperty(document, "compatMode", { value: "CSS1Compat" });
 // happy-dom has no popover API, which tooltips open on focus.
 HTMLElement.prototype.showPopover = HTMLElement.prototype.hidePopover = () => {};
+// Browsers mark an animation's `finished` promise handled, so cancelling one nobody awaits isn't an unhandled rejection; happy-dom doesn't.
+const { animate } = Element.prototype;
+Element.prototype.animate = function (...args) {
+  const animation = animate.apply(this, args);
+  animation.addEventListener("cancel", () => animation.finished.catch(() => {}));
+  return animation;
+};
 after(() => GlobalRegistrator.unregister());
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;

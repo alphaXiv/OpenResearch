@@ -1,0 +1,9 @@
+{
+  "plan": [
+    {"phase": "install", "of": 1, "unit": "environments"},
+    {"phase": "download", "of": 9, "unit": "shards"},
+    {"phase": "tokenizer", "of": 1, "unit": "commands"},
+    {"phase": "train", "of": 200, "unit": "steps"},
+    {"phase": "train-finalize"}
+  ]
+}

@@ -8,6 +8,7 @@ import type { GlobalWorkspace, ProjectWorkspace } from "./workspaceState";
 import { m } from "./paraglide/messages.js";
 import { getLocale } from "./paraglide/runtime.js";
 import { fmtNumber } from "./i18n";
+import type { ChartEdit, ChatShownRun, Flag, RunMonitor, RunMonitorSummary, RunOutcome } from "./runMonitor/types";
 
 export { fmtNumber } from "./i18n";
 
@@ -61,8 +62,10 @@ export interface Project {
   path: string;
   githubEnabled: boolean;
   githubUrl?: string | null;
-  /** A chat without a project yet: orx keeps its code until the user makes it a project. */
+  /** Homeless: orx keeps its code until the user gives the project a folder. */
   scratch?: boolean;
+  /** A scratch project with no name yet; it holds one chat and goes with it. */
+  unnamed?: boolean;
   /** Absolute path of the project's artifacts directory, non-canonical to
    *  match paths agents inline into chat. */
   artifactsDir: string;
@@ -71,7 +74,6 @@ export interface Project {
   runCommand?: string | null;
   /** arXiv or alphaXiv paper id the project starts from (versionless). */
   paperId?: string | null;
-  /** The user's mark for the project; without one it shows its initials. */
   icon?: ProjectIcon;
   createdAt: number;
   updatedAt: number;
@@ -136,12 +138,24 @@ export interface Run {
   host: string | null;
   /** Why the run's latest notice batch was given up on, never reaching its chat. */
   noticeError?: string | null;
+  /** The chat that launched the run; absent from an older server and for a run started outside a chat. */
+  chatSessionId?: string | null;
   /** Copying a finished run's log to this computer; both are absent once the log is kept. */
   logCollection?: "pending" | "failed";
   logCollectionError?: string;
+  /** Absent from an older server. */
+  monitor?: RunMonitorSummary | null;
+  /** Who stopped a cancelled run, once that is known. */
+  outcome?: RunOutcome | null;
 }
 
 export class RejectedResponseError extends Error {}
+
+export class LookTooSoonError extends RejectedResponseError {
+  constructor(message: string, readonly notBefore: number) {
+    super(message);
+  }
+}
 
 /** Why a model server listed no models: nothing answered, it wants an API key, or it has no models. */
 export class UnlistedError extends RejectedResponseError {
@@ -190,6 +204,8 @@ export interface UiState {
   nestedDelegation: boolean;
   /** Whether OpenCode's free models are offered beside the user's own. */
   opencodeFreeModels: boolean;
+  /** Whether a cheap model looks at runs; absent from an older server, which has no watcher. */
+  runWatching?: boolean;
   /** The `provider/model` that reviews OpenCode's Auto requests; null is the chat's own. */
   opencodeReviewModel: string | null;
   /** The model families the picker lists first. */
@@ -201,6 +217,8 @@ export interface UiState {
   /** The picker's lab sections in the user's order; labs it doesn't name follow in the picker's own. */
   modelSectionOrder: string[];
   collapsedModelSections: string[];
+  /** How much of one run shows above the composer; absent from an older server, which doesn't keep it. */
+  runBanner?: RunBannerLevel;
   /** The model feed nudges the user dismissed, by id. Absent from a server too old to keep them. */
   seenNudges?: string[];
   /** When this copy first opened its store, in ms; null for one older than the field, absent from a server too old to say. */
@@ -228,6 +246,8 @@ export interface ModelNudge {
   /** Hex colors of its gradient, and of its model mark; the text color when `icon` is absent. */
   colors: { from: string; to: string; icon?: string };
 }
+
+export type RunBannerLevel = "line" | "strip";
 
 /** How much of the research the agent owns before checking in. */
 export type Autonomy = "copilot" | "agentic";
@@ -1433,6 +1453,8 @@ export interface Harness {
    * background — `models` stays empty until `harness.catalog`
    * arrives and a plain re-read swaps in the real list. */
   catalogPending?: boolean;
+  /** Claude Code only: OpenResearch runs as root here and the user has not yet confirmed bypass permissions. */
+  fullAccessNeedsRootConsent?: boolean;
   models: HarnessModel[];
   /** The `models` id a new chat starts on, from the agent's own setting; set only when it's ready and lists a model. */
   defaultModel?: string;
@@ -1679,6 +1701,7 @@ export interface UsageReport {
   plans: PlanUsage[] | null;
   /** The last seven days in the machine's local time, oldest first, as `YYYY-MM-DD`; today last. */
   days: string[];
+  /** Spend of accounts not on one of `plans`; empty while `plans` is null. */
   agents: AgentSpend[];
   compute: BackendSpend[];
   /** The chat `?chat=` asked about. */
@@ -1817,7 +1840,12 @@ export interface ChatSession {
   activeLeafId: string | null;
   contextUsage?: ContextUsage;
   /** Tasks the agent left running after its turn, which it resumes to report; in the session lists. */
-  background?: { count: number; since: number } | null;
+  background?: {
+    count: number;
+    since: number;
+    /** Each task, or each delegate chat (`chat`) at work; absent from an older orx up. */
+    tasks?: { id: string; name: string; chat?: boolean }[];
+  } | null;
   /** The chat's most recent turn, in the session lists. */
   lastTurn?: {
     state: string;
@@ -1825,6 +1853,8 @@ export interface ChatSession {
     errorKind: string | null;
     error: string | null;
   } | null;
+  /** The newest run the chat launched, in the sidebar's pages; absent from an older server. */
+  lastRun?: Run | null;
 }
 
 /** Fields `PATCH /api/chat/sessions/<id>` changes; each is optional. */
@@ -1880,7 +1910,8 @@ export interface ChatSearchPage {
   requiresLongerQuery: boolean;
 }
 export interface SidebarChatCursor { updatedAt: number; id: string }
-export interface SidebarChatPage { sessions: ChatSession[]; next: SidebarChatCursor | null }
+/** `total` counts every chat the filter holds, past the loaded pages; a server too old to send it omits it. */
+export interface SidebarChatPage { sessions: ChatSession[]; next: SidebarChatCursor | null; total?: number }
 
 /** Per-session (and per-turn) composer selections beyond the harness itself. */
 export interface TurnOptions {
@@ -1987,8 +2018,8 @@ export function backendDetail(backend: Run["backend"]): string {
   if (!backend) return "";
   if (typeof backend.flavor === "string" && backend.flavor) return backend.flavor;
   if (typeof backend.manifest === "string" && backend.manifest) return backend.manifest;
-  // Ray's namespace is the whole Jobs URL — too long for a badge.
-  if (backendKind(backend) === "ray_job") return "";
+  // Ray's namespace is the whole Jobs URL, too long for a badge; OpenResearch's is the paying organization's id.
+  if (backendKind(backend) === "ray_job" || backendKind(backend) === "openresearch_job") return "";
   if (typeof backend.namespace === "string" && backend.namespace) {
     const container = backend.sshContainer;
     if (container && typeof container === "object" && "reference" in container && typeof container.reference === "string") {
@@ -2141,6 +2172,8 @@ export function createApi(
                 : null;
             throw new FileChangedError(message, currentVersion, parsed.exists);
           }
+          if (res.status === 409 && "notBefore" in parsed && typeof parsed.notBefore === "number")
+            throw new LookTooSoonError(message, parsed.notBefore);
           if (res.status === 400 && "code" in parsed && (parsed.code === "unreachable" || parsed.code === "needsKey" || parsed.code === "noModels"))
             throw new UnlistedError(message, parsed.code);
           if (res.status === 400 && "fields" in parsed && typeof parsed.fields === "object" && parsed.fields !== null)
@@ -2234,6 +2267,9 @@ export function createApi(
       `/api/projects/${projectId}/files/file?path=${encodeURIComponent(path)}`,
     );
 
+  const runImageUrl = (runId: string, path: string, version: string) =>
+    url(`/api/runs/${encodeURIComponent(runId)}/media?path=${encodeURIComponent(path)}&v=${encodeURIComponent(version)}`);
+
   /** Image parts store a server-minted file name; this is where it's served. */
   const chatAttachmentUrl = (name: string) =>
     url(`/api/chat/attachments/${encodeURIComponent(name)}`);
@@ -2270,6 +2306,8 @@ export function createApi(
     hiddenAgents?: string[];
     modelSectionOrder?: string[];
     collapsedModelSections?: string[];
+    runBanner?: RunBannerLevel;
+    runWatching?: boolean;
     seenNudges?: string[];
   }) => post<UiState>("/api/settings/ui-state", body);
 
@@ -2329,7 +2367,7 @@ export function createApi(
       if (!r.ok) throw new Error((await r.json().catch(() => null))?.error ?? `cancel failed (${r.status})`);
     });
 
-  const updateProject = (projectId: string, body: { runCommand?: string; name?: string; icon?: ProjectIcon }) =>
+  const updateProject = (projectId: string, body: { runCommand?: string; name?: string; icon?: ProjectIcon | null }) =>
     patch<{ project: Project }>(`/api/projects/${projectId}`, body).then((r) => r.project);
 
   /** Start generating starter prompts for a project that is about to be created,
@@ -2928,6 +2966,9 @@ export function createApi(
       ...(githubDefaultPromptSeen === undefined ? {} : { githubDefaultPromptSeen }),
     });
 
+  const allowClaudeRootFullAccess = () =>
+    post<Record<string, never>>("/api/harnesses/claude-code/root-full-access");
+
   const getProjectGitStatus = (projectId: string, signal?: AbortSignal) =>
     get<ProjectGitStatus>(`/api/projects/${projectId}/git`, signal);
 
@@ -3268,6 +3309,12 @@ export function createApi(
   const interruptChat = (sessionId: string) =>
     post<{ ok: boolean }>(`/api/chat/sessions/${sessionId}/interrupt`);
 
+  const stopAndArchiveChat = (sessionId: string) =>
+    post<ChatSession>(`/api/chat/sessions/${sessionId}/stop-and-archive`);
+
+  const stopBackgroundTask = (sessionId: string, taskId: string) =>
+    post<{ ok: boolean }>(`/api/chat/sessions/${sessionId}/background/${encodeURIComponent(taskId)}/stop`);
+
   const respondChat = (sessionId: string, answer: PromptAnswer) =>
     post<{ ok: boolean }>(`/api/chat/sessions/${sessionId}/respond`, answer);
   const getLocalModels = (signal?: AbortSignal) => get<LocalModelConnection[]>("/api/local-models", signal);
@@ -3303,6 +3350,41 @@ export function createApi(
   const listChatActiveRuns = (signal?: AbortSignal) =>
     get<ChatActiveRun[]>("/api/chat/active-runs", signal);
 
+  /** Null from an older server, which has only active runs. */
+  const listChatShownRuns = async (signal?: AbortSignal) => {
+    const response = await fetch("/api/chat/shown-runs?includeFailures=true", { signal });
+    if (response.status === 404) return null;
+    const data = await json<ChatShownRun[] | { runs: ChatShownRun[]; failedSessions: string[] }>(response);
+    return Array.isArray(data) ? { runs: data } : data;
+  };
+
+  const getRunMonitor = (runId: string, signal?: AbortSignal) =>
+    get<RunMonitor>(`/api/runs/${encodeURIComponent(runId)}/monitor`, signal);
+
+  const editRunChart = ({ runId, viewFrom }: Pick<RunMonitor, "runId" | "viewFrom">, block: number, edit: ChartEdit) => {
+    const scope = workspaceScope();
+    return patch<unknown>(`/api/runs/${encodeURIComponent(runId)}/view/chart`, {
+      markup: viewFrom.markup, isDefault: viewFrom.isDefault, block, edit,
+    }).finally(() => {
+      if (!isCurrentScope(scope)) return;
+      const { queryClient } = client;
+      for (const [queryKey, data] of queryClient.getQueriesData<RunMonitor>({ queryKey: [...scope, "getRunMonitor"] })) {
+        if (data?.viewFrom.experimentId === viewFrom.experimentId) {
+          void queryClient.invalidateQueries({ queryKey, exact: true });
+        }
+      }
+    });
+  };
+
+  const chooseRunFlag = (runId: string, choice: { flagId: string; choice: "stop" | "keep" | "ask"; requestId: string }) =>
+    post<{ flag: Flag; run: Run }>(`/api/runs/${encodeURIComponent(runId)}/flag`, choice);
+
+  const lookNow = (runId: string) =>
+    post<{ lookId: string; state: string }>(`/api/runs/${encodeURIComponent(runId)}/look`);
+
+  const dismissShownRun = (sessionId: string, runId: string) =>
+    post<{ dismissed: true }>(`/api/chat/sessions/${encodeURIComponent(sessionId)}/shown-runs/${encodeURIComponent(runId)}/dismiss`);
+
   const getSubagentTranscript = (sessionId: string, partId: string, signal?: AbortSignal) =>
     get<ChatPart | null>(`/api/chat/sessions/${sessionId}/subagent?partId=${encodeURIComponent(partId)}`, signal);
 
@@ -3312,6 +3394,7 @@ export function createApi(
     overleafUploadUrl,
     trackioRunUrl,
     artifactUrl,
+    runImageUrl,
     chatAttachmentUrl,
     listProjects,
     listProjectActivity,
@@ -3459,6 +3542,7 @@ export function createApi(
     setLitSources,
     getProjectDefaults,
     setProjectDefaults,
+    allowClaudeRootFullAccess,
     getProjectGitStatus,
     initializeProjectGit,
     enableProjectGithub,
@@ -3515,6 +3599,8 @@ export function createApi(
     forkChatTurn,
     selectChatBranch,
     interruptChat,
+    stopAndArchiveChat,
+    stopBackgroundTask,
     respondChat,
     getLocalModels,
     discoverLocalModels,
@@ -3536,6 +3622,12 @@ export function createApi(
     sendOpenCodeSignInCode,
     cancelOpenCodeSignIn,
     listChatActiveRuns,
+    listChatShownRuns,
+    getRunMonitor,
+    editRunChart,
+    dismissShownRun,
+    lookNow,
+    chooseRunFlag,
     getSubagentTranscript,
   };
 }

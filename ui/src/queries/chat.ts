@@ -7,6 +7,7 @@ import { mutations } from "./mutations";
 import type { Workspace } from "../workspace";
 import { CancelledError, infiniteQueryOptions, queryOptions, type InfiniteData } from "@tanstack/react-query";
 import type * as api from "../api";
+import type { ShownRun } from "../runMonitor/types";
 
 export function createChatQueries(
   client: WorkspaceClient,
@@ -147,9 +148,24 @@ export function createChatQueries(
     retry: false,
   });
 
-  const listChatActiveRunsQuery = () => queryOptions({
-    queryKey: workspaceKey("listChatActiveRuns"),
-    queryFn: ({ signal }) => api.listChatActiveRuns(signal),
+  /** `source` is "active" against an older server: its runs carry no monitor, and none can be fetched. */
+  const listChatShownRunsQuery = () => queryOptions({
+    queryKey: workspaceKey("listChatShownRuns"),
+    queryFn: async ({ signal, client, queryKey }) => {
+      const read = await readLiveSnapshot(client, queryKey, async (): Promise<ShownRuns> => {
+        const shown = await api.listChatShownRuns(signal);
+        return shown ? { source: "shown", ...shown } : { source: "active", runs: await api.listChatActiveRuns(signal) };
+      }, (incoming) => incoming);
+      // The list has no revision of its own, so each run keeps whichever copy is newer, the cache's or the reply's.
+      const cached = new Map(client.getQueryData<ShownRuns>(queryKey)?.runs.map((item) => [item.run.id, item.run]));
+      return {
+        ...read,
+        runs: read.runs.map((item) => {
+          const kept = cached.get(item.run.id);
+          return kept && kept.updatedAt > item.run.updatedAt ? { ...item, run: kept } : item;
+        }),
+      };
+    },
     staleTime: Infinity,
   });
 
@@ -164,9 +180,11 @@ export function createChatQueries(
     refreshChatMessages,
     readSidebarChatPage,
     listSidebarChatSessionsQuery,
-    listChatActiveRunsQuery,
+    listChatShownRunsQuery,
   };
 }
+
+type ShownRuns = { source: "shown" | "active"; runs: ShownRun[]; failedSessions?: string[] };
 
 type ChatTurn = ReturnType<Workspace["chat"]["reserve"]>;
 const heldTurns = new Map<string, ChatTurn[]>();
@@ -200,17 +218,20 @@ function inChatTurn<T>(id: string, ws: Workspace, sessionId: string, write: () =
 /** Joins the workspace's chat writes, so a turn sent after a setting starts with it. */
 export const mutPatchChatSession = mutations.define({
   id: "chat/session",
-  mutate: (ws: Workspace, session: Pick<ChatSession, "id" | "projectId">, changes: ChatSessionPatch) =>
-    inChatTurn("chat/session", ws, session.id, () => ws.api.patchChatSession(session.id, changes)),
+  mutate: (ws: Workspace, session: Pick<ChatSession, "id" | "projectId">, changes: ChatSessionPatch | "stop-and-archive") =>
+    inChatTurn("chat/session", ws, session.id, () =>
+      changes === "stop-and-archive" ? ws.api.stopAndArchiveChat(session.id) : ws.api.patchChatSession(session.id, changes)),
   optimistic({ helpers, args: [ws, session, changes], onSuccess, onRestore }) {
     holdChatTurn("chat/session", ws, session.id, onRestore);
-    const { agent: _agent, notifyParent, ...fields } = changes;
-    const shown: Partial<ChatSession> = notifyParent === false ? { ...fields, delegate: null } : fields;
     const options = ws.queries.listChatSessionsQuery(session.projectId);
-    helpers(ws.queryClient).arrayUpdate(options, {
-      filter: (row) => row.id === session.id,
-      update: (row) => ({ ...row, ...shown }),
-    });
+    if (changes !== "stop-and-archive") {
+      const { agent: _agent, notifyParent, ...fields } = changes;
+      const shown: Partial<ChatSession> = notifyParent === false ? { ...fields, delegate: null } : fields;
+      helpers(ws.queryClient).arrayUpdate(options, {
+        filter: (row) => row.id === session.id,
+        update: (row) => ({ ...row, ...shown }),
+      });
+    }
     onSuccess((saved) => {
       markLiveUpdate(ws.queryClient, options.queryKey, saved.id);
       ws.setScopedQueryData(options.queryKey, (rows) => rows?.map((row) => row.id === saved.id ? saved : row));
@@ -333,6 +354,15 @@ export const mutInterruptChat = mutations.define({
   optimistic: () => {},
   key: ({ args: [ws, sessionId] }) => [ws.identity, sessionId],
   describe: "stop the turn",
+  describeResult: null,
+});
+
+export const mutStopBackgroundTask = mutations.define({
+  id: "chat/background/stop",
+  mutate: (ws: Workspace, sessionId: string, taskId: string) => ws.api.stopBackgroundTask(sessionId, taskId),
+  optimistic: () => {},
+  key: ({ args: [ws, sessionId, taskId] }) => [ws.identity, sessionId, taskId],
+  describe: "stop the background task",
   describeResult: null,
 });
 

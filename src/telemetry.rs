@@ -158,6 +158,9 @@ pub(crate) struct Settings {
     /// Whether the one-time post-publication default prompt has been answered.
     #[serde(default)]
     pub github_default_prompt_seen: Option<bool>,
+    /// Whether the user confirmed Claude full access on this machine while orx runs as root.
+    #[serde(default)]
+    pub claude_root_full_access: Option<bool>,
     /// Literature sources the user turned off (Settings → Literature sources).
     /// Values are `LitSource::as_str()` names; empty = all sources enabled, so a
     /// source added later defaults to enabled. Enforced by discovery and paper reading.
@@ -358,18 +361,29 @@ pub(crate) fn set_github_default_prompt_seen(seen: bool) -> std::io::Result<()> 
     mutate_settings(|settings| settings.github_default_prompt_seen = Some(seen))
 }
 
-/// How this computer is signed in, as a label that names no account.
-fn sign_in() -> &'static str {
-    if crate::alphaxiv::signed_in() {
-        "alphaxiv"
-    } else if crate::config::credentials_present() {
-        "openresearch"
+pub(crate) fn claude_root_full_access() -> bool {
+    load_settings()
+        .and_then(|settings| settings.claude_root_full_access)
+        .unwrap_or(false)
+}
+
+pub(crate) fn set_claude_root_full_access(allowed: bool) -> std::io::Result<()> {
+    mutate_settings(|settings| settings.claude_root_full_access = Some(allowed))
+}
+
+/// How this computer is signed in, as a label that names no account, or
+/// `None` when the credential files cannot be checked.
+fn sign_in() -> Option<&'static str> {
+    if crate::alphaxiv::signed_in_checked().ok()? {
+        Some("alphaxiv")
+    } else if crate::config::credentials_present().ok()? {
+        Some("openresearch")
     } else {
-        "none"
+        Some("none")
     }
 }
 
-fn dashboard_locale() -> Option<String> {
+pub(crate) fn dashboard_locale() -> Option<String> {
     load_settings().and_then(|settings| settings.dashboard_locale)
 }
 
@@ -727,7 +741,6 @@ fn build_payload_with_id(
             "ci": is_ci(),
             // Hosted cloud agents were retired; released CLI installs are human-driven.
             "installKind": "human",
-            "signIn": sign_in(),
         },
         "events": [{
             "eventId": event_id.to_string(),
@@ -736,6 +749,9 @@ fn build_payload_with_id(
             "properties": properties,
         }],
     });
+    if let Some(sign_in) = sign_in() {
+        payload["context"]["signIn"] = json!(sign_in);
+    }
     if let Some(locale) = dashboard_locale() {
         payload["context"]["locale"] = json!(locale);
     }
@@ -1574,6 +1590,9 @@ mod tests {
             }),
             (&["githubDefaultPromptSeen"], || {
                 set_github_default_prompt_seen(true).unwrap()
+            }),
+            (&["claudeRootFullAccess"], || {
+                set_claude_root_full_access(true).unwrap()
             }),
             (&["autoUpdate"], || set_auto_update_enabled(false).unwrap()),
             (&["updateChannel"], || {
@@ -2439,6 +2458,19 @@ mod tests {
         std::fs::remove_file(config.join("alphaxiv-forwarded.json")).unwrap();
         std::fs::write(config.join("alphaxiv.json"), "{}").unwrap();
         assert_eq!(sign_in(), "alphaxiv");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let unsearchable = std::fs::Permissions::from_mode(0o000);
+            std::fs::set_permissions(&config, unsearchable).unwrap();
+            let unknown = sign_in();
+            std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o700)).unwrap();
+            assert!(
+                unknown.is_null(),
+                "unchecked sign-in was reported as {unknown}"
+            );
+        }
     }
 
     #[test]

@@ -336,8 +336,18 @@ fn is_readonly_orx(tokens: &[&str], stage: &str) -> bool {
         // Verbs with a write subcommand: allow only the read-only subcommand(s).
         "project" => matches!(subcommand(&mut rest), Some("view")),
         "exp" => match subcommand(&mut rest) {
+            Some("run") => {
+                use clap::Parser;
+                matches!(crate::Cli::try_parse_from(tokens), Ok(crate::Cli {
+                    command: Some(crate::Command::Exp(crate::ExpArgs {
+                        command: crate::ExpCommand::Run(args),
+                    })), ..
+                }) if args.estimate)
+            }
             // Pure reads.
             Some("status" | "wait") => true,
+            // A view is read and checked against a run freely; saving one changes the node.
+            Some("view") => matches!(subcommand(&mut rest), Some("get" | "show" | "check")),
             // `desc` views the node's notes, but writes them with
             // `--set`/`--stdin`. Allow only the read form.
             Some("desc") => !stage.contains("--set") && !stage.contains("--stdin"),
@@ -485,6 +495,14 @@ mod tests {
     }
 
     #[test]
+    fn estimates_are_reads_but_launches_and_embedded_flags_are_gated() {
+        assert!(allowed("orx exp run child --estimate"));
+        assert!(!allowed("orx exp run child"));
+        assert!(!allowed("orx exp run child --host=--estimate"));
+        assert!(!allowed("orx exp run child --estimate && touch marker"));
+    }
+
+    #[test]
     fn compute_reads_are_allowed_but_setup_and_instruction_writes_are_gated() {
         for command in [
             "orx compute",
@@ -540,6 +558,11 @@ mod tests {
         // The playbook's core orientation reads (view form).
         assert!(allowed("orx exp desc e-1"));
         assert!(allowed("orx exp wait e-1"));
+        assert!(allowed("orx exp view get e-1 --json"));
+        assert!(allowed("orx exp view check r-1 --file view.xml"));
+        assert!(allowed("orx exp view show r-1"));
+        assert!(!allowed("orx exp view set e-1 --file view.xml"));
+        assert!(!allowed("orx exp view e-1"));
     }
 
     #[test]

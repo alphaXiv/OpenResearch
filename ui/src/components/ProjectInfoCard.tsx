@@ -45,6 +45,8 @@ export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleC
   const [menuOpen, setMenuOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
 
+  const FolderMark = collapsed ? Folder : FolderOpen;
+
   function remove() {
     setMenuOpen(false);
     confirmDeleteProject(workspace, project, triggerRef, onRemoved);
@@ -53,8 +55,9 @@ export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleC
   return <>
     <button type="button" data-sidebar-keyboard-row aria-expanded={!collapsed} onClick={onToggleCollapsed}
       className="flex h-7 min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-sm py-1 text-start text-sm font-normal text-text focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:outline-offset-2">
-      {collapsed ? <Folder size={16} className="shrink-0" /> : <FolderOpen size={16} className="shrink-0" />}
-      <ProjectIconTile project={project} size="sm" /><span className="truncate">{project.name}</span>
+      <FolderMark size={16} aria-hidden="true" className="shrink-0" />
+      {project.icon && !("brand" in project.icon) && <ProjectIconTile project={project} size="sm" />}
+      <span className="truncate">{project.name}</span>
       {busy && <span aria-hidden className="size-[7px] shrink-0 rounded-full bg-accent-teal animate-[or-pulse_1.2s_infinite]" />}
     </button>
     <Tooltip interactive content={m.chat_panel_new_chat()} className="rounded-sm">

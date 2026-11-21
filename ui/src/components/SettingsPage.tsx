@@ -1,3 +1,4 @@
+import { localMachineSummary } from "../localMachine";
 import { useMachines } from "../machineSelection";
 import { useSignIn } from "./AccountChip";
 import { confirmOpenResearchSignOut } from "./confirmOpenResearchSignOut";
@@ -113,7 +114,6 @@ import {
   type LocalModelConnection,
   type OpenCodeProvider,
   type K8sSettings,
-  type LocalMachine,
   type VercelPlan,
   type RayPreflight,
   type TrackioPreflight,
@@ -131,8 +131,9 @@ import {
 
 import { releaseNotesUrl, useRestartApp, useUpdateStatus } from "./UpdateBanner";
 import { useColoredMarkdown, useThemePreference, type ThemePreference } from "../theme";
+import { useChatWidth, type ChatWidth } from "../chatWidth";
 import { m } from "../paraglide/messages.js";
-import { autoDir, fmtBytes, fmtClock, fmtMemory, ltr } from "../i18n";
+import { autoDir, fmtBytes, fmtClock, ltr } from "../i18n";
 import { setLocale, useLocale } from "../locale";
 import { isLocale, type Locale } from "../paraglide/runtime.js";
 import { TokenForm } from "./GitTokenForm";
@@ -412,6 +413,7 @@ function AgentsTab({ remote }: { remote: boolean }) {
     <>
       <AgentList remote={remote} />
       <NestedDelegationRow />
+      <RunWatchingRow />
       <AutoReviewerRow />
       <ModelSettings heading={<h3 className={cn(SECTION_CLASS_NAME, "mt-8")}>{m.settings_models()}</h3>} />
     </>
@@ -1217,6 +1219,27 @@ function NestedDelegationRow() {
         checked={uiState.nestedDelegation}
         aria-label={m.settings_nested_subagents()}
         onClick={() => mutUpdateUiState.run(workspace, { nestedDelegation: !uiState.nestedDelegation })}
+      />
+    </div>
+  );
+}
+
+/** Whether a cheap model watches runs; an older server has no watcher, and no row. */
+function RunWatchingRow() {
+  const workspace = useWorkspace();
+  const { data: uiState } = useQuery(workspace.queries.getUiStateQuery());
+  if (uiState?.runWatching === undefined) return null;
+  return (
+    <div className={cn(PROJECT_DEFAULT_ROW_CLASS_NAME, "mt-4")}>
+      <div>
+        <div className="project-default-title text-base font-medium">{m.settings_run_watching()}</div>
+        <p>{m.settings_run_watching_sends()}</p>
+      </div>
+      <Switch
+        type="button"
+        checked={uiState.runWatching}
+        aria-label={m.settings_run_watching()}
+        onClick={() => mutUpdateUiState.run(workspace, { runWatching: !uiState.runWatching })}
       />
     </div>
   );
@@ -2494,17 +2517,6 @@ function PreflightBadge({ test }: { test: "testing" | { reachable: boolean } | n
   if (test === "testing") return <Badge>{m.settings_page_testing()}</Badge>;
   if (test.reachable) return <Badge variant="success">{m.settings_page_reachable()}</Badge>;
   return <Badge variant="error">{m.settings_page_failed()}</Badge>;
-}
-
-// --- compute (local) --------------------------------------------------------------
-
-function localMachineSummary(hw: LocalMachine) {
-  const processor = hw.chip ?? `${hw.os}/${hw.arch}`;
-  const memory = hw.memBytes === null ? null : fmtMemory(hw.memBytes);
-  const gpu = hw.gpus.length === 0 ? null : m.settings_gpu_count({ count: hw.gpus.length });
-  return [processor, hw.cpuCount > 0 ? m.settings_cpu_cores({ count: hw.cpuCount }) : null, memory, gpu]
-    .filter(Boolean)
-    .join(" · ");
 }
 
 // --- compute (openresearch) ---------------------------------------------------------
@@ -3826,6 +3838,12 @@ const THEME_OPTIONS: {
     { value: "dark", label: m.settings_theme_dark, icon: Moon },
   ];
 
+const CHAT_WIDTH_OPTIONS: { value: ChatWidth; label: () => string }[] = [
+  { value: "balanced", label: m.settings_chat_width_balanced },
+  { value: "wide", label: m.settings_chat_width_wide },
+  { value: "full", label: m.settings_chat_width_full },
+];
+
 const LOCALE_CHOICES: { id: Locale; label: string }[] = [
   { id: "en", label: "English" },
   { id: "zh-CN", label: "简体中文" },
@@ -3845,6 +3863,7 @@ function AppearanceTab() {
   const locale = useLocale();
   const [preference, setPreference] = useThemePreference();
   const [coloredMarkdown, setColoredMarkdown] = useColoredMarkdown();
+  const [chatWidth, setChatWidth] = useChatWidth();
 
   // Arrow keys move selection relative to the focused radio, with focus
   // following the new choice (WAI-ARIA radio pattern).
@@ -3891,6 +3910,29 @@ function AppearanceTab() {
                 onClick={() => setPreference(value)}
               >
                 <Icon size={14} />
+                {label()}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className={`${PROJECT_DEFAULT_ROW_CLASS_NAME} flex-wrap gap-y-2`}>
+          <div>
+            <div className="project-default-title text-base font-medium">{m.settings_chat_width_heading()}</div>
+            <p>{m.settings_chat_width_description()}</p>
+          </div>
+          <div
+            className={`${SEGMENTED_CLASS_NAME} flex-none`}
+            role="group"
+            aria-label={m.settings_chat_width_heading()}
+          >
+            {CHAT_WIDTH_OPTIONS.map(({ value, label }) => (
+              <button
+                key={value}
+                type="button"
+                aria-pressed={chatWidth === value}
+                className={chatWidth === value ? "active" : ""}
+                onClick={() => setChatWidth(value)}
+              >
                 {label()}
               </button>
             ))}
@@ -5072,7 +5114,7 @@ function ProjectSettings({ project, onRemoved }: { project: Project; onRemoved: 
       onSettled: () => setSaving(false),
     });
   };
-  const setIcon = (icon: ProjectIcon) => {
+  const setIcon = (icon: ProjectIcon | null) => {
     setError(null);
     mutUpdateProject.runWithOptions(workspace, project.id, { icon }, {
       onError: (err) => setError(err instanceof Error ? err.message : String(err)),
@@ -5091,7 +5133,7 @@ function ProjectSettings({ project, onRemoved }: { project: Project; onRemoved: 
             <form className={`${PROJECT_DEFAULT_ROW_CLASS_NAME} flex-wrap gap-y-2`} onSubmit={(event) => { event.preventDefault(); rename(); }}>
               <label htmlFor={nameId} className="project-default-title text-base font-medium">{m.new_project_form_project_name()}</label>
               <div className="flex min-w-0 flex-1 items-center justify-end gap-2">
-                <ProjectIconButton project={project} name={name} value={project.icon} onChange={setIcon} disabled={saving} />
+                <ProjectIconButton project={project} name={name} onChange={setIcon} disabled={saving} />
                 <Input id={nameId} value={name} disabled={saving} onChange={(event) => setDraft(event.target.value)} className="w-72 min-w-0" />
                 <Button type="submit" disabled={!changed || saving}>{saving && <Spinner />}{m.common_save()}</Button>
               </div>

@@ -1,7 +1,7 @@
-use std::io::{Read as _, SeekFrom};
+use std::io::{Read as _, SeekFrom, Write as _};
 
 use crate::error::Result;
-use crate::plane::resolve_run;
+use crate::local::resolve::resolve_run;
 use crate::store::Store;
 
 const PREVIEW_CHARS: usize = 500;
@@ -68,7 +68,26 @@ pub async fn run(args: crate::LogsArgs) -> Result<()> {
             .logs(&args.run_id, true)
             .await;
     }
-    resolve_run(Store::open_for_reading()?, &args.run_id)?;
+    let chat = {
+        let store = Store::open_for_reading()?;
+        let run = resolve_run(&store, &args.run_id)?;
+        match crate::local::chat::launching_chat_session() {
+            Some(chat)
+                if crate::local::is_terminal(&run.status)
+                    && !store.log_collection_pending(&args.run_id)? =>
+            {
+                Some(chat)
+            }
+            _ => None,
+        }
+    };
+    let acknowledge = || -> Result<()> {
+        if let Some(chat) = chat {
+            std::io::stdout().flush()?;
+            Store::open()?.result_read_by_agent(&args.run_id, &chat, crate::store::now_ms())?;
+        }
+        Ok(())
+    };
     let ranges = crate::commands::up::api_v2::kept_ranges(&crate::store::data_dir(), &args.run_id)?;
     if let Some(tail) = ranges.iter().max_by_key(|range| range.offset) {
         let total = ranges
@@ -93,7 +112,7 @@ pub async fn run(args: crate::LogsArgs) -> Result<()> {
         let bytes = read_preview_suffix(&mut file, tail.len)?;
         println!("Last {PREVIEW_CHARS} characters of the kept tail:");
         println!("{}", trailing_char_preview(&bytes));
-        return Ok(());
+        return acknowledge();
     }
 
     let log_path = crate::store::log_path(&crate::store::data_dir(), &args.run_id);
@@ -117,7 +136,7 @@ pub async fn run(args: crate::LogsArgs) -> Result<()> {
     };
     let bytes = read_preview_suffix(&mut file, total)?;
     print_compact_summary(&path, total, &trailing_char_preview(&bytes));
-    Ok(())
+    acknowledge()
 }
 
 /// A live engine run's log stays on its host until the run finishes.

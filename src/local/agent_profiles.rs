@@ -562,6 +562,14 @@ pub fn remove(id: &str) -> Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e.into()),
     }
+    // Holds a copy of the account's settings file.
+    let one_shot = crate::store::data_dir().join("agents/one-shot").join(id);
+    match std::fs::remove_dir_all(&one_shot) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            return Err(e).with_context(|| format!("Could not remove {}", one_shot.display()));
+        }
+        _ => {}
+    }
     profiles.remove(id);
     save(&profiles)?;
     drop(_guard);
@@ -923,6 +931,70 @@ mod tests {
             .is_err());
             assert_eq!(std::fs::read_to_string(source).unwrap(), "{}");
         }
+    }
+
+    /// On Windows a link may be a hard link, which would leave the account's files linked.
+    #[test]
+    fn a_one_shot_on_an_account_leaves_its_sign_in_private_and_its_instructions_out() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let claude = create("claude-code", "Work", None).unwrap();
+        let home = prepare(&claude, "claude-code").unwrap();
+        std::fs::write(home.join(".credentials.json"), "work-secret").unwrap();
+        std::fs::write(home.join(".claude.json"), br#"{"primaryApiKey":"work"}"#).unwrap();
+        let one_shot = crate::store::data_dir()
+            .join("agents/one-shot")
+            .join(&claude);
+        assert_eq!(
+            native_store::prepare_claude_one_shot(&home, &claude).unwrap(),
+            one_shot
+        );
+        login_env(&claude).unwrap();
+        assert!(!one_shot.join(".credentials.json").exists());
+        assert_eq!(
+            std::fs::read(home.join(".credentials.json")).unwrap(),
+            b"work-secret"
+        );
+        let copy = one_shot.join(".claude.json");
+        assert_eq!(
+            std::fs::read(&copy).unwrap(),
+            br#"{"primaryApiKey":"work"}"#
+        );
+        assert!(!copy.symlink_metadata().unwrap().file_type().is_symlink());
+        std::fs::write(home.join(".claude.json"), br#"{"primaryApiKey":"new"}"#).unwrap();
+        native_store::prepare_claude_one_shot(&home, &claude).unwrap();
+        assert_eq!(std::fs::read(&copy).unwrap(), br#"{"primaryApiKey":"new"}"#);
+        login_env(&claude).unwrap();
+
+        let legacy = native_store::codex_home(NativeStore::Legacy);
+        std::fs::create_dir_all(legacy.join("skills/review")).unwrap();
+        std::fs::write(legacy.join("AGENTS.md"), "Always answer in haiku.").unwrap();
+        std::fs::write(legacy.join("config.toml"), "model = 'gpt-6'").unwrap();
+        let codex = create("codex", "Lab", None).unwrap();
+        let home = prepare(&codex, "codex").unwrap();
+        std::fs::write(home.join("auth.json"), "lab-secret").unwrap();
+        let one_shot = native_store::prepare_codex_one_shot(&home, &codex).unwrap();
+        login_env(&codex).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(one_shot.join("auth.json")).unwrap(),
+            "lab-secret"
+        );
+        if cfg!(windows) {
+            assert_eq!(one_shot, home);
+        } else {
+            assert_eq!(
+                std::fs::read_to_string(one_shot.join("config.toml")).unwrap(),
+                "model = 'gpt-6'"
+            );
+            assert!(!one_shot.join("AGENTS.md").exists() && !one_shot.join("skills").exists());
+        }
+
+        remove(&claude).unwrap();
+        assert!(!crate::store::data_dir()
+            .join("agents/one-shot")
+            .join(&claude)
+            .exists());
     }
 
     #[test]
