@@ -12,6 +12,8 @@ import type {
   EngineHost,
   QueuedMessage,
   Run,
+  SidebarCard,
+  SidebarChatTotals,
   UpdateStatus,
 } from "./api";
 import type { RunMonitorEvent } from "./runMonitor/types";
@@ -31,6 +33,8 @@ export type ChatEvent =
   | { type: "runsChanged" }
   | { type: "session"; session: ChatSession }
   | { type: "sessionDeleted"; sessionId: string }
+  /** The sidebar cards one server read changed, with the counts that read saw. */
+  | { type: "sidebar"; cards: SidebarCard[]; totals: SidebarChatTotals }
   | { type: "message"; sessionId: string; message: ChatMessage }
   | { type: "busy"; sessionId: string; busy: boolean }
   | { type: "background"; sessionId: string }
@@ -395,6 +399,10 @@ export function createEvents(client: WorkspaceClient) {
             emitProjectActivityEvent();
             emitChat({ type: "session", session: d.session });
           }
+        });
+        es.addEventListener("chat.sidebar", (e) => {
+          const d = parse<{ cards: SidebarCard[]; totals: SidebarChatTotals }>(e as MessageEvent);
+          if (Array.isArray(d?.cards) && d.totals) emitChat({ type: "sidebar", cards: d.cards, totals: d.totals });
         });
         es.addEventListener("chat.session.deleted", (e) => {
           const d = parse<{ sessionId: string }>(e as MessageEvent);

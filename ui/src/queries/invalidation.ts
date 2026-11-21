@@ -1,8 +1,14 @@
 import type { WorkspaceClient } from "./client";
-import type { Query, QueryFilters } from "@tanstack/react-query";
-import type { ChatSession, Experiment, Run } from "../api";
+import type { InfiniteData, Query, QueryClient, QueryFilters, QueryKey } from "@tanstack/react-query";
+import type { ChatSession, Experiment, Run, SidebarChatPage } from "../api";
 
 import { markLiveUpdate } from "./live";
+
+/** Whether this workspace's server streams sidebar cards, judged by the `totals` its pages carry. */
+export function streamsSidebarRows(client: QueryClient, scope: QueryKey) {
+  return client.getQueriesData<InfiniteData<SidebarChatPage>>({ queryKey: [...scope, "listSidebarChatSessions"] })
+    .some(([, data]) => data?.pages[0]?.totals !== undefined);
+}
 
 export const isCommit = (ref: unknown) => typeof ref === "string" && /^[0-9a-f]{40}$/i.test(ref);
 
@@ -153,7 +159,7 @@ export function createInvalidation(client: WorkspaceClient) {
       return;
     }
     if (path.startsWith("/api/chat/")) {
-      invalidate(["listSidebarChatSessions"], scope);
+      if (!streamsSidebarRows(queryClient, scope)) invalidate(["listSidebarChatSessions"], scope);
       // An env card's answer saves variables.
       if (path.endsWith("/respond")) invalidate(["getEnvVars"], scope);
       if (path === "/api/chat/sessions") invalidate(["getProjectStarterPrompts", "listProjectActivity"], scope);

@@ -57,6 +57,8 @@ The visible workspace opens one event stream, `/api/events`, which is also the p
 
 **A gap is repaired by refetching.** Reopening a stream, after a drop or a hidden workspace, and `resync.required` refresh the live query families (`ui/src/queries/invalidation.ts`). Overlapping repairs share the current refresh and request one follow-up for gaps reported during it. A query that renders live data belongs in that list.
 
+**The sidebar is pushed, not re-read.** One task in `orx up` turns each chat event that can change a sidebar card (a session, busy or background change, a branch, a deletion, a prompt card, a run's change) into `chat.sidebar`: that chat's card, or null once the sidebar no longer lists it, and both sections' counts. The page places the card in the Inbox and Done lists it holds, and Done loads its chats only when opened or hovered. Sidebar pages from a server without `totals` mean it sends no cards, and the page re-reads the lists on those events instead.
+
 Chat publishers send changed messages and the latest changed usage, not repeated polling snapshots. Background transcript events still patch their cached queries; the visible transcript subscribes only to its own history, while background attention indicators come from session summaries.
 
 ## Serving the app
