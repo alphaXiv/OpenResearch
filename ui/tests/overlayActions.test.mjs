@@ -26,8 +26,7 @@ test("the project picker prioritizes the current project, then recent activity, 
   }));
   await click(find("button", "Current"));
   const choices = [...document.querySelectorAll('[role="dialog"] [data-nav]')].slice(0, 3);
-  // A tile with the project's initials leads each row.
-  assert.deepEqual(choices.map((choice) => choice.textContent.replace(/^[A-Z]{2}/, "")), ["Current", "Older", "Newer"]);
+  assert.deepEqual(choices.map((choice) => choice.textContent), ["Current", "Older", "Newer"]);
   await click(choices[1]);
   assert.deepEqual(selections, ["older"]);
 });
