@@ -141,15 +141,20 @@ impl ChatHost {
                     "Couldn't finish saving the requested variables. Check Environment settings before asking again. {error:#}"
                 )),
             };
-            match mark_prompt_resolved(
-                &host.msg_write,
-                &session.id,
-                &req.prompt_id,
-                result.is_ok().then_some(&req),
-            ) {
-                Ok(Some(msg)) => host.emit("chat.message", message_json(&msg, &session.id)),
-                Ok(None) => {}
-                Err(error) => eprintln!("orx up: env request {} could not be marked resolved: {error:#}", req.prompt_id),
+            let resolved = Store::open().and_then(|store| {
+                if let Some(msg) = mark_prompt_resolved(
+                    &store,
+                    &host.msg_write,
+                    &session.id,
+                    &req.prompt_id,
+                    result.is_ok().then_some(&req),
+                )? {
+                    host.emit("chat.message", message_json(&msg, &session.id, &store));
+                }
+                Ok(())
+            });
+            if let Err(error) = resolved {
+                eprintln!("orx up: env request {} could not be marked resolved: {error:#}", req.prompt_id);
             }
             // The agent can disconnect after the user commits the save.
             let _ = tx.send(decision);

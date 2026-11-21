@@ -8,8 +8,8 @@ use sha2::{Digest as _, Sha256};
 use std::sync::OnceLock;
 
 use super::{
-    attachments_dir, stored_to_wire, MessagePhase, OrxKind, OrxSource, WirePart, WirePrompt,
-    ORX_MESSAGE_PREFIX,
+    attachments_dir, child_autonomy, stored_to_wire, MessagePhase, OrxKind, OrxSource, WirePart,
+    WirePrompt, ORX_MESSAGE_PREFIX,
 };
 use crate::error::{anyhow, Result};
 use crate::local::harness::{self, PermissionMode};
@@ -214,7 +214,7 @@ pub fn delegate_session(
         context_usage_json: None,
         bootstrap_context: None,
         goal: None,
-        autonomy: parent.autonomy.clone(),
+        autonomy: child_autonomy(parent),
         active_leaf_id: None,
         side_parent_session_id: (!own_worktree).then(|| parent.id.clone()),
         side_parent_leaf_id: None,
@@ -254,10 +254,19 @@ pub fn message_text(message: &StoredChatMessage) -> String {
 
 /// The text a turn ended with.
 pub fn answer(store: &Store, assistant_message_id: &str) -> Result<String> {
-    Ok(store
+    let mut answer = store
         .get_chat_message(assistant_message_id)?
         .map(|message| message_text(&message))
-        .unwrap_or_default())
+        .unwrap_or_default();
+    if let Some(closing) = store.chat_message_yield(assistant_message_id)? {
+        if !answer.lines().any(|line| line.trim() == closing.text) {
+            if !answer.is_empty() {
+                answer.push_str("\n\n");
+            }
+            answer.push_str(&closing.text);
+        }
+    }
+    Ok(answer)
 }
 
 /// How many hex digits of a message's random id its ref carries.
@@ -934,6 +943,7 @@ mod tests {
             error_message: None,
             recovery_action: None,
             recovered_by_turn_id: None,
+            turn_yield: None,
             created_at: 1,
             updated_at: 1,
         };

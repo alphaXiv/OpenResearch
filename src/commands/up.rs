@@ -9716,7 +9716,6 @@ fn sidebar_session_json(
     let mut value = local::chat::session_json_with(Some(store), session, busy);
     value["background"] = background.cloned().unwrap_or(Value::Null);
     local::chat::project_model(&mut value, session, catalog);
-    value["awaitingInput"] = json!(store.chat_session_awaiting_input(&session.id, busy)?);
     value["lastTurn"] = json!(store.latest_chat_turn(&session.id)?.map(|turn| json!({
         "state": turn.state,
         "startedAt": turn.created_at,
@@ -9874,7 +9873,7 @@ async fn list_chat_sessions(
             .map(|session| json!({ "updatedAt": session.updated_at, "id": session.id }));
         let busy = state.chat.busy_sessions().await;
         let background = state.chat.waiting_on().await?;
-        // Working shows every chat at work, however far down the list it has fallen.
+        // Working and Needs you include chats beyond the first page.
         if before.is_none() {
             let live: Vec<&str> = busy
                 .iter()
@@ -13531,6 +13530,80 @@ mod tests {
             reopen: Default::default(),
             trackio: Default::default(),
             opencode_signins: Arc::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_tool_router_lists_the_writes_and_rejects_an_idle_caller() {
+        use tower::ServiceExt as _;
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        Store::open()
+            .unwrap()
+            .put_chat_session("idle-agent", "codex", None);
+        let app = router(test_state(), None, up_remote::Reach::Loopback);
+        let token = local::chat::delegation::agent_token("idle-agent");
+        let request = |token: &str, method, params| {
+            axum::http::Request::post("/api/internal/mcp")
+                .header("host", "localhost")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(json!({
+                    "sessionId": "idle-agent", "token": token, "method": method, "params": params
+                }).to_string()))
+                .unwrap()
+        };
+        let response = app
+            .clone()
+            .oneshot(request("wrong", "tools/list", json!({})))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let response = app
+            .clone()
+            .oneshot(request(&token, "tools/list", json!({})))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 32_768)
+            .await
+            .unwrap();
+        let listed: Value = serde_json::from_slice(&body).unwrap();
+        for (name, args, error) in [
+            (
+                "yield",
+                json!({ "kind": "need", "text": "Need input" }),
+                "active turn",
+            ),
+            ("set_goal", json!({ "goal": null }), "active turn"),
+            ("set_goal", json!({ "goal": "  " }), "orx goal clear"),
+        ] {
+            assert!(listed["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["name"] == name));
+            let response = app
+                .clone()
+                .oneshot(request(
+                    &token,
+                    "tools/call",
+                    json!({
+                        "name": name, "arguments": args
+                    }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 32_768)
+                .await
+                .unwrap();
+            let receipt: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(receipt["isError"], true);
+            assert!(receipt["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains(error));
         }
     }
 

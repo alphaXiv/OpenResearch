@@ -1,0 +1,350 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { act } from "react";
+import { chatNeedsYou, chatStatus } from "../src/chatStatus.ts";
+import { groupResponseMessages, hasPendingInput, hideClosedYieldCalls, lastResponseText, transcriptMarkdown } from "../src/chatRendering.ts";
+import { m } from "../src/paraglide/messages.js";
+import { assistantMessage, emit, renderChat, session, userMessage } from "./chat.mjs";
+import { find, press, settle, type } from "./render.mjs";
+import { composer } from "./chat.mjs";
+
+const NEED = { kind: "need", text: "Share the held-out corpus before I compare accuracy." };
+const tool = (name, input = {}, status = "completed") => ({ id: `${name}-${status}`, type: "tool", tool: name, state: { status, input } });
+const answer = (id, text, turnYield, extra = {}) => ({ ...assistantMessage(id, [{ id: `${id}-text`, type: "text", text, phase: "final_answer" }]), turnYield, ...extra });
+const close = () => document.querySelector("[data-turn-close]");
+const question = () => document.querySelector('.composer [role="group"][aria-labelledby]');
+
+test("the yield call hides behind the closing line it produced, under every agent's name and as a lone command", () => {
+  const visible = (part, fields = { turnYield: NEED }) => hideClosedYieldCalls([{ ...assistantMessage("a", [part]), ...fields }])[0].parts.length === 1;
+  for (const name of ["mcp__orx__yield", "orx:yield", "orx_yield", "orx/yield"]) {
+    assert.equal(visible(tool(name, { arguments: NEED })), false, name);
+  }
+  assert.equal(visible(tool("bash", { command: `orx yield need "${NEED.text}"` })), false);
+  assert.equal(visible(tool("bash", { command: `/bin/zsh -lc 'orx yield done "Finished the sweep."'` })), false);
+  assert.equal(visible(tool("bash", { commandArgv: ["/bin/zsh", "-lc", "orx yield running 'Waiting on the sweep.'"] })), false);
+  assert.equal(visible(tool("mcp__orx__yield"), { completedAt: null }), false, "a streaming turn's close is still on its way");
+
+  assert.equal(visible(tool("mcp__orx__yield"), {}), true, "a turn that ended without its close keeps the call");
+  assert.equal(visible(tool("mcp__orx__yield", { arguments: NEED }, "error")), true, "a refused yield stays visible");
+  assert.equal(visible(tool("bash", { command: "git commit -am wip && orx yield done 'ok'" })), true, "a compound command does more than yield");
+  assert.equal(visible(tool("bash", { command: "orx exp run --yield-later" })), true);
+  assert.equal(visible(tool("mcp__orx__delegate")), true);
+});
+
+test("a yield closes its response group and rides along in copy and export", () => {
+  const first = { ...assistantMessage("a1", [tool("mcp__orx__yield")]), turnYield: { kind: "running", text: "Waiting on the sweep." } };
+  const wake = answer("a2", "The sweep finished at 2.4% WER.", { kind: "done", text: "Finished the sweep." });
+  assert.deepEqual(groupResponseMessages([userMessage("u", "go"), first, wake]).map((group) => group.map((row) => row.id)), [["u"], ["a1"], ["a2"]]);
+
+  assert.equal(lastResponseText([first]), "Waiting on the sweep.");
+  assert.equal(lastResponseText([first, wake]), "The sweep finished at 2.4% WER.\n\nFinished the sweep.");
+  assert.equal(
+    transcriptMarkdown("Sweep", [userMessage("u", "go"), first], { user: "You", assistant: "Codex" }),
+    "# Sweep\n\n## You\n\ngo\n\n## Codex\n\nWaiting on the sweep.\n",
+  );
+});
+
+test("an idle chat whose agent needs something is the user's turn, until a turn runs or the need is gone", () => {
+  const chat = session("s", { yieldKind: "need" });
+  assert.equal(chatNeedsYou(chat, false, false), true);
+  assert.equal(chatNeedsYou(chat, true, false), false);
+  assert.equal(chatNeedsYou({ ...chat, yieldKind: "running" }, false, false), false);
+  assert.equal(chatNeedsYou({ ...chat, yieldKind: null }, false, true), true);
+  assert.equal(chatNeedsYou({ ...chat, yieldKind: undefined }, false, false), false);
+  assert.deepEqual(chatStatus(chat, false, chatNeedsYou(chat, false, false), []), { kind: "input" });
+});
+
+test("a plan waiting for approval is the user's turn until it is answered or a newer message passes it", () => {
+  const plan = (fields = {}) => ({ ...assistantMessage("a", [{ id: "plan", type: "prompt", prompt: { kind: "plan", plan: "Compare on the held-out set.", resolved: false, ...fields } }]), parentId: "u" });
+  const ask = userMessage("u", "Plan the comparison.");
+  assert.equal(hasPendingInput([ask, plan()], false), true);
+  assert.equal(hasPendingInput([ask, plan({ synthesized: true })], false), true);
+  assert.equal(hasPendingInput([ask, plan({ resolved: true, approved: true })], false), false);
+  assert.equal(hasPendingInput([ask, plan(), userMessage("u2", "Skip the plan and start.")], false), false, "passed by a newer message");
+  assert.equal(hasPendingInput([ask, plan({ nativeId: "rpc-1" })], false), false, "a held card needs its live turn");
+  assert.equal(hasPendingInput([ask, plan({ nativeId: "rpc-1" })], true), true);
+});
+
+test("a turn that ended without its close keeps the yield call in the activity, saying what it asked", async () => {
+  const call = tool("mcp__orx__yield", { arguments: NEED });
+  const stopped = assistantMessage("a", [{ id: "a-text", type: "text", text: "Reached 3.21% WER.", phase: "final_answer" }, call]);
+  await renderChat("/projects/p/tasks/s", { transcripts: { s: [userMessage("u", "Compare."), stopped] } });
+  assert.equal(close(), null);
+  assert.equal(question(), null);
+  const row = document.querySelector(`[data-part-id="${call.id}"]`);
+  assert.ok(row, "the call is in the activity");
+  assert.equal(row.textContent, m.chat_turn_close_with_status({ status: m.chat_turn_close_need(), text: NEED.text }));
+});
+
+test("the composer asks the closing question from the matching session summary", async () => {
+  const previous = { kind: "running", text: "Waiting on the first comparison." };
+  await renderChat("/projects/p/tasks/s", {
+    sessions: [session("s", { activeLeafId: "a", yieldKind: NEED.kind, yieldText: NEED.text })],
+    transcripts: {
+      s: [
+        userMessage("u", "Compare the fine-tune with the baseline."),
+        answer("first", "The comparison has started.", previous, { parentId: "u" }),
+        answer("a", "The fine-tune reaches 3.21% WER.", undefined, { parentId: "first" }),
+      ],
+    },
+  });
+  const prompt = question();
+  assert.ok(prompt.textContent.includes(m.chat_question()));
+  assert.equal(document.getElementById(prompt.getAttribute("aria-labelledby")).textContent, NEED.text);
+  assert.ok(document.querySelector(`.composer [role="textbox"][aria-label="${m.chat_question_your_answer()}"]`));
+  const feed = document.querySelector('[role="feed"]');
+  assert.ok(feed.textContent.includes("3.21% WER"));
+  assert.ok(!feed.textContent.includes(NEED.text));
+  assert.ok(!document.body.textContent.includes(previous.text));
+});
+
+test("a run cited in a closing line shows as the run's chip everywhere the line is read, never as its tag", async () => {
+  const RUN = "ac7c54f8-23e2-4ff7-a52c-2b740dc788b3";
+  const cited = { kind: "running", text: `The baseline reached 2.237 bpc. <run id="${RUN}" /> The MLP <run id="r2" label="1.80 bpc"/> wakes the next comparison.` };
+  const words = "The baseline reached 2.237 bpc. The MLP 1.80 bpc wakes the next comparison.";
+  const running = { ...assistantMessage("a", [{ id: "a-text", type: "text", text: "Comparing now.", phase: "final_answer" }]), completedAt: null };
+  await renderChat("/projects/p/tasks/s", { transcripts: { s: [userMessage("u", "Compare."), running] } });
+  await emit("chat.message", { sessionId: "s", message: { ...running, completedAt: 3, turnYield: cited } });
+
+  const chips = close().querySelectorAll(".run-chip");
+  assert.equal(chips.length, 2);
+  assert.equal(chips[0].textContent, m.tree_view_logs());
+  assert.equal(chips[1].textContent, "1.80 bpc");
+  assert.ok(chips[0].title.includes(RUN));
+  assert.equal(close().textContent.includes("<run"), false);
+  assert.ok(close().closest('[role="status"]'));
+
+  const call = tool("mcp__orx__yield", { arguments: cited });
+  await emit("chat.message", { sessionId: "s", message: { ...assistantMessage("a", [call]) } });
+  assert.equal(document.querySelector(`[data-part-id="${call.id}"]`).textContent,
+    m.chat_turn_close_with_status({ status: m.chat_turn_close_running(), text: words }));
+});
+
+test("a reply that is only a yield stays visible, and its call shows no second copy", async () => {
+  const yieldOnly = { ...assistantMessage("a", [tool("mcp__orx__yield", { arguments: { kind: "running", text: "Waiting on two runs." } })]), turnYield: { kind: "running", text: "Waiting on two runs." } };
+  await renderChat("/projects/p/tasks/s", { transcripts: { s: [userMessage("u", "Start the sweep."), yieldOnly] } });
+  assert.ok(close()?.textContent.includes("Waiting on two runs."));
+  assert.equal(document.body.textContent.split("Waiting on two runs.").length, 2, "shown once");
+  assert.ok(close().textContent.includes(m.chat_turn_close_running()));
+});
+
+test("a failed turn shows its recovery, never a closing line", async () => {
+  const failed = {
+    ...assistantMessage("a", [
+      { id: "a-text", type: "text", text: "Starting the comparison.", phase: "final_answer" },
+      { id: "turn-recovery", type: "tool", tool: "turn_recovery", state: { status: "error", error: "The agent stopped.", input: { turnId: "t", recoveryAction: "continue" } } },
+    ]),
+    turnYield: NEED,
+  };
+  await renderChat("/projects/p/tasks/s", { transcripts: { s: [userMessage("u", "Compare."), failed] } });
+  assert.equal(close(), null);
+  assert.equal(question(), null);
+});
+
+test("the closing line updates a persistent live region and clears as soon as the next turn starts", async () => {
+  const running = { ...assistantMessage("a", [{ id: "a-text", type: "text", text: "Comparing now.", phase: "final_answer" }]), completedAt: null };
+  await renderChat("/projects/p/tasks/s", { transcripts: { s: [userMessage("u", "Compare."), running] } });
+  const status = document.querySelector('.composer [role="status"]');
+  assert.ok(status);
+  assert.equal(close(), null);
+
+  await emit("chat.message", { sessionId: "s", message: { ...running, completedAt: 3, turnYield: NEED } });
+  assert.ok(status.textContent.includes(NEED.text));
+
+  const spoken = status.firstElementChild;
+  await emit("chat.message", { sessionId: "s", message: { ...running, completedAt: 3, turnYield: NEED, parts: [...running.parts] } });
+  assert.equal(status.firstElementChild, spoken);
+
+  await emit("chat.session", { session: session("s", { activeLeafId: "a", busy: true, yieldKind: NEED.kind, yieldText: NEED.text }) });
+  assert.equal(status.textContent, "");
+  assert.equal(question(), null);
+});
+
+test("chats waiting on the user stay in Inbox while active turns go in Working", async () => {
+  const sessions = [
+    session("need", { yieldKind: "need", updatedAt: 5 }),
+    session("asking", { awaitingInput: true, updatedAt: 4 }),
+    session("busy", { yieldKind: "need", busy: true, updatedAt: 3 }),
+    session("done", { yieldKind: "done", updatedAt: 2 }),
+  ];
+  localStorage.setItem("sidebar-grouping", "inbox");
+  try {
+    await renderChat("/projects/p/tasks/done", {
+      sessions,
+      routes: {
+        "GET /api/chat/sessions": (_, url) => ({
+          sessions: url.includes("scope=sidebar") ? url.includes("archived=true") ? [] : sessions : sessions.filter((row) => url.includes(`projectId=${row.projectId}`)),
+        }),
+      },
+    });
+    const heading = (label) => [...document.querySelectorAll("button[aria-expanded]")].find((button) => button.textContent.startsWith(label));
+    // A row that just left stays drawn, inert, while it fades.
+    const row = (title) => [...document.querySelectorAll(".session-row")].find((element) => !element.closest("[data-rail-ghost]") && element.textContent.includes(title));
+    const order = (a, b) => Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+    const inbox = heading(m.sidebar_inbox());
+    const working = heading(m.chat_inbox_working());
+    assert.ok(inbox && working);
+    assert.ok(order(inbox, row("Chat need")) && order(inbox, row("Chat asking")));
+    assert.ok(order(row("Chat asking"), row("Chat done")) && order(working, inbox), "an open chat stays in Inbox");
+    assert.ok(order(working, row("Chat busy")) && order(row("Chat busy"), inbox), "a running turn is work, whatever the last one asked");
+    assert.ok(row("Chat need").getAttribute("aria-label").includes(m.chat_panel_waiting_for_your_input()));
+
+    await act(async () => inbox.click());
+    await settle();
+    assert.equal(heading(m.sidebar_inbox()).getAttribute("aria-expanded"), "false");
+    assert.ok(heading(m.sidebar_inbox()).textContent.includes("3"));
+    assert.equal(row("Chat need"), undefined);
+    await act(async () => heading(m.sidebar_inbox()).click());
+    await settle();
+
+    sessions[0] = { ...sessions[0], busy: true };
+    await emit("chat.session", { session: sessions[0] });
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 150)));
+    await settle();
+    assert.ok(order(working, row("Chat need")) && order(row("Chat need"), inbox), "a new turn takes the chat to Working");
+  } finally {
+    localStorage.removeItem("sidebar-grouping");
+    localStorage.removeItem("sidebar-inbox-collapsed");
+  }
+});
+
+test("an inbox card gives its middle line to a closing need until a new turn starts", async () => {
+  const text = `Two runs were starved by host load <run id="r1" />, so tell me when the machine is free.`;
+  const words = "Two runs were starved by host load, so tell me when the machine is free.";
+  const lastRun = {
+    id: "r1", experimentId: "e1", projectId: "p", status: "done", createdAt: 1, updatedAt: 1,
+    endedAt: 1, contact: null, cancelling: false, lostReason: null, host: null, backend: null,
+    monitor: { tone: "done", whole: 1, headline: { name: "loss", label: "Loss", value: 2.31 }, sentence: null, bindings: {}, signals: {}, estimate: null, flag: null, rev: 1, generation: "g", asOf: 1 },
+  };
+  const sessions = [session("need", { yieldKind: "need", yieldText: text, lastRun, updatedAt: 2 }), session("old", { yieldKind: "need", updatedAt: 1 })];
+  localStorage.setItem("sidebar-grouping", "inbox");
+  try {
+    await renderChat("/projects/p/tasks/old", {
+      sessions,
+      routes: { "GET /api/chat/sessions": (_, url) => ({ sessions: url.includes("archived=true") ? [] : sessions }) },
+    });
+    const row = (title) => [...document.querySelectorAll(".session-row")].find((element) => !element.closest("[data-rail-ghost]") && element.textContent.includes(title));
+    const line = (title) => row(title).textContent;
+    assert.ok(line("Chat need").includes(words), "the need, its run tag as words");
+    assert.ok(line("Chat need").includes("Project"), "the project stays on the bottom line");
+    assert.doesNotMatch(line("Chat need"), /Loss/);
+    assert.equal(row("Chat need").closest("[data-index]").style.height, "70px");
+    assert.ok(row("Chat need").getAttribute("aria-label").includes(words));
+    assert.ok(line("Chat old").includes(m.chat_turn_close_need()), "an older host can send the kind alone");
+
+    await act(async () => row("Chat need").focus());
+    await settle();
+    assert.ok(document.querySelector('[data-session-hover-card="need"]').textContent.includes(words), "the hover card reads it in full");
+
+    sessions[0] = { ...sessions[0], busy: true, yieldKind: null, yieldText: null };
+    await emit("chat.session", { session: sessions[0] });
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 150)));
+    await settle();
+    assert.ok(line("Chat need").includes("Project"));
+    assert.ok(!line("Chat need").includes(words));
+    assert.match(line("Chat need"), /Loss/);
+  } finally {
+    localStorage.removeItem("sidebar-grouping");
+  }
+});
+
+for (const [answer, approve] of [[m.plan_strip_accept_plan, true], [m.plan_strip_reject, false]]) {
+  test(`a plan in the open chat shows an input status until the user ${approve ? "accepts" : "rejects"} it`, async () => {
+    const current = { ...assistantMessage("a", [{ id: "a-plan", type: "prompt", prompt: { kind: "plan", plan: "Compare on the held-out set.", resolved: false, synthesized: true } }]), parentId: "u" };
+    const sessions = [session("plan", { planMode: true, updatedAt: 2 }), session("other", { updatedAt: 1 })];
+    localStorage.setItem("sidebar-grouping", "inbox");
+    try {
+      await renderChat("/projects/p/tasks/plan", {
+        sessions,
+        transcripts: { plan: [userMessage("u", "Plan the comparison."), current] },
+        routes: {
+          "GET /api/chat/sessions": (_, url) => ({ sessions: url.includes("archived=true") ? [] : sessions }),
+          "POST /api/chat/sessions/plan/respond": (init) => {
+            assert.equal(JSON.parse(init.body).approve, approve);
+            current.parts[0].prompt = { ...current.parts[0].prompt, resolved: true, approved: approve };
+            return { ok: true };
+          },
+        },
+      });
+      const row = () => [...document.querySelectorAll(".session-row")].find((element) => !element.closest("[data-rail-ghost]") && element.textContent.includes("Chat plan"));
+      assert.ok(row().textContent.includes(m.chat_status_input()));
+      assert.ok(row().getAttribute("aria-label").includes(m.chat_panel_waiting_for_your_input()));
+
+      await act(async () => find("button", answer()).click());
+      await settle();
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 150)));
+      await settle();
+      assert.ok(!row().textContent.includes(m.chat_status_input()));
+      assert.equal(row().getAttribute("aria-label").includes(m.chat_panel_waiting_for_your_input()), false);
+    } finally {
+      localStorage.removeItem("sidebar-grouping");
+      localStorage.removeItem("sidebar-inbox-collapsed");
+    }
+  });
+}
+
+test("the Goal chip opens the goal to edit, keeps a draft through a change elsewhere, and returns focus", async () => {
+  let chat = session("s", { goal: "Beat 2.4% WER within four GPU-hours." });
+  const patches = [];
+  const view = await renderChat("/projects/p/tasks/s", {
+    sessions: [chat],
+    routes: {
+      "GET /api/chat/sessions": (_, url) => ({ sessions: url.includes("archived=true") ? [] : [chat] }),
+      "PATCH /api/chat/sessions/s": (init) => {
+        const body = JSON.parse(init.body);
+        patches.push(body);
+        chat = { ...chat, ...body };
+        return { session: chat };
+      },
+    },
+  });
+  const chip = () => [...document.querySelectorAll('button[aria-haspopup="dialog"]')]
+    .find((button) => button.getAttribute("aria-label")?.startsWith(m.chat_panel_edit_goal({ goal: "" })));
+  const dialog = () => document.querySelector('[role="dialog"]');
+  const open = async () => {
+    chip().focus();
+    await act(async () => chip().click());
+    await act(async () => new Promise((resolve) => requestAnimationFrame(resolve)));
+    await settle();
+  };
+
+  await open();
+  assert.ok(dialog(), "a dialog");
+  assert.equal(dialog().querySelector("textarea").value, chat.goal);
+  assert.ok(dialog().querySelector('[role="status"]'), "the change notice's live region is there before it speaks");
+  await press("Escape");
+  await settle();
+  assert.equal(dialog(), null);
+  assert.equal(document.activeElement, chip());
+  assert.deepEqual(patches, []);
+
+  await open();
+  await type(dialog().querySelector("textarea"), "Beat 2.4% WER within six GPU-hours.");
+  await settle();
+  chat = { ...chat, goal: "Beat 2.4% WER within two GPU-hours." };
+  await emit("chat.session", { session: chat });
+  assert.ok(dialog().textContent.includes(m.goal_dialog_changed()));
+  assert.equal(dialog().querySelector("textarea").value, "Beat 2.4% WER within six GPU-hours.", "the draft stays");
+  const load = find("button", m.goal_dialog_load_saved());
+  load.focus();
+  await act(async () => load.click());
+  await settle();
+  assert.equal(dialog().querySelector("textarea").value, "Beat 2.4% WER within two GPU-hours.");
+  assert.equal(document.activeElement, dialog().querySelector("textarea"), "focus moves to the loaded goal");
+  assert.equal(dialog().textContent.includes(m.goal_dialog_changed()), false);
+
+  await type(dialog().querySelector("textarea"), "  Beat 2.4% WER within three GPU-hours.  ");
+  await act(async () => find("button", m.common_save()).click());
+  await settle();
+  assert.deepEqual(patches, [{ goal: "Beat 2.4% WER within three GPU-hours." }]);
+  assert.equal(dialog(), null);
+
+  await open();
+  await act(async () => find("button", m.goal_dialog_clear()).click());
+  await settle();
+  assert.deepEqual(patches.at(-1), { goal: null });
+  assert.equal(dialog(), null);
+  assert.ok(!chip(), "a cleared goal has no chip");
+  assert.ok(composer().field().contains(document.activeElement), "focus returns to the composer");
+  void view;
+});

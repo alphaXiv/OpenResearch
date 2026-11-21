@@ -202,7 +202,6 @@ impl Harness for OpenCode {
     async fn run_turn(&self, ctx: &mut TurnCtx) -> TurnResult {
         run_turn(ctx)
             .await
-            .map(|()| TurnOutcome::Completed)
             .map_err(|error| TurnFailure::adapter(error, ctx.delivery_state()))
     }
 
@@ -954,7 +953,7 @@ async fn ensure_runtime(
     result
 }
 
-async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
+async fn run_turn(ctx: &mut TurnCtx) -> Result<TurnOutcome> {
     if let Some(model) = ctx.model.as_deref() {
         crate::commands::up::model_feed::ensure_offered(model)?;
     }

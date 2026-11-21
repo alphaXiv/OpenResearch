@@ -6,7 +6,15 @@ description: "Explain and compare scientific or technical concepts using origina
 # Literature retrieval
 
 Use this skill for scientific explanations and comparisons, even without a named
-paper. Never delegate retrieval to a sub-agent.
+paper. Before an experiment, scale it to the step: a bug fix or a setting
+already tested needs no search; a new method, dataset or surprising result
+takes the loop below.
+
+A delegate (`orx-agent-delegation`, on a route it allows) may run the discovery
+searches below while you work, returning ranked candidate IDs with the snippets
+that matched. Its summary is a lead, not evidence: read the papers that carry
+your claims yourself, write the synthesis, quotes and citations yourself, and
+keep library tools in this chat.
 
 Use enabled literature connectors appropriate to the topic. General web search
 is a fallback only when relevant connectors provide no useful evidence. Do not
@@ -42,11 +50,13 @@ contain no useful visual or extraction remains blocked; explain that gap.
 One unavailable figure is not a reason to omit other accessible visuals.
 
 Each command performs one search against public endpoints and emits its
-structured JSON result. No login is required:
+structured JSON result. No login is required. Every query, with these commands,
+the alphaXiv tools or any other search, carries only public topic terms: never
+this project's results, numbers, data, code or other private text.
 
 ```sh
 orx discover keyword "<exact keyword query>"
-orx discover embedding "<semantic description in the user's terms>"
+orx discover embedding "<semantic description of the public topic>"
 orx discover openalex "<scholarly search query>"
 orx discover biorxiv "<biology preprint query>"
 orx discover pubmed "<biomedical query>"
@@ -56,8 +66,8 @@ orx discover pubmed "<biomedical query>"
   snippets that explain why each paper was retrieved. Use short exact terms:
   method names, acronyms, benchmarks, authors, or title phrases.
 - `embedding` searches titles and abstracts semantically, then reranks by
-  similarity and the requested priority. Use the user's actual question or a
-  concise description of a genuinely missing facet.
+  similarity and the requested priority. Use the user's question reduced to
+  its public topic, or a concise description of a genuinely missing facet.
 - `openalex` searches the cross-disciplinary OpenAlex scholarly graph. It is
   especially useful for journal/conference papers, citation context, and work
   outside arXiv.
@@ -108,15 +118,16 @@ orx discover pubmed "<query>" --published-after 2020-01-01 --prioritize recency
   foundational work. Use `popular` only when the user asks about votes,
   popularity, or community standing.
 
-## Main-agent retrieval loop
+## Retrieval loop
 
 ### Set up the retrieval query
 
-1. If using keyword retrieval, build focused terms using only wording from the
-   user or prior tool results. Never guess an acronym expansion. General-purpose
-   padding reduces result quality.
+1. If using keyword retrieval, build focused public topic terms using only
+   wording from the user or prior tool results. Never guess an acronym expansion.
+   General-purpose padding reduces result quality.
 2. For semantic or scholarly-graph retrieval, build one short faithful question
-   in the user's terms rather than a padded reformulation.
+   about the public topic, in the user's terms, rather than a padded
+   reformulation.
 3. Estimate retrieval difficulty from 1–10. This controls a budget of complete
    follow-up rounds: difficulty 1–3 gets 0 rounds, 4–7 gets 1, and 8–10 gets 2.
 4. Resolve one publication window and priority for the request. Every initial

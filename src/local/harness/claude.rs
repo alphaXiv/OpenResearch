@@ -1594,7 +1594,6 @@ impl Harness for ClaudeCode {
     async fn run_turn(&self, ctx: &mut TurnCtx) -> TurnResult {
         run_turn(ctx)
             .await
-            .map(|()| TurnOutcome::Completed)
             .map_err(|error| TurnFailure::adapter(error, ctx.delivery_state()))
     }
 
@@ -2362,6 +2361,7 @@ struct TurnState {
     /// spans several segments, each with its own result — this validates the
     /// stream ended shaped like a turn, not that a given result was terminal.
     saw_result: bool,
+    completed: bool,
     /// An interactive card was surfaced this turn (suppresses the synthesized
     /// plan card — see `should_synthesize_plan`).
     saw_prompt: bool,
@@ -2897,7 +2897,7 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
         Some("rate_limit_event") => {
             crate::local::usage::observed(&ctx.host, &ctx.harness, ctx.profile.as_deref());
         }
-        Some("result") => {
+        Some("result") if subagent_parent(event).is_none() => {
             if let Some(scope) = event.get("session_id").and_then(Value::as_str) {
                 let samples = claude_result_usage_samples(event);
                 ctx.record_native_aggregate(
@@ -2929,6 +2929,11 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                 .get("is_error")
                 .and_then(Value::as_bool)
                 .unwrap_or(subtype != "success");
+            state.completed = subtype == "success"
+                && !is_error
+                && event["stop_reason"]
+                    .as_str()
+                    .is_none_or(|reason| reason == "end_turn");
             if is_error {
                 state.turn_errored = true;
                 if !state.auth_failed && !state.usage_limited {
@@ -3362,6 +3367,8 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
                 }
                 if accepted_now && folds_before_echo {
                     // A folded segment's failure was its own; the prompt's result decides this turn.
+                    state.saw_result = false;
+                    state.completed = false;
                     state.turn_errored = false;
                     state.usage_limited = false;
                     state.auth_failed = false;
@@ -3510,7 +3517,7 @@ fn abandon_fork(ctx: &mut TurnCtx, spec: &SpawnSpec, log: &Path) -> crate::error
     }
 }
 
-async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
+async fn run_turn(ctx: &mut TurnCtx) -> Result<TurnOutcome> {
     let project = ctx.project.clone();
     let session_id = ctx.session_id.clone();
     // The modular orx skills land in the harness's session-skills dir, fresh,
@@ -3690,7 +3697,11 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
         ctx.mark_terminal_failure(kind, message);
     }
     let _ = ctx.flush();
-    Ok(())
+    Ok(if state.completed {
+        TurnOutcome::Completed
+    } else {
+        TurnOutcome::Stopped
+    })
 }
 
 #[cfg(test)]

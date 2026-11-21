@@ -188,7 +188,6 @@ impl Harness for Cursor {
     async fn run_turn(&self, ctx: &mut TurnCtx) -> TurnResult {
         run_turn(ctx)
             .await
-            .map(|()| TurnOutcome::Completed)
             .map_err(|error| TurnFailure::adapter(error, ctx.delivery_state()))
     }
 
@@ -751,7 +750,7 @@ fn first_turn_prompt(text: &str) -> String {
     )
 }
 
-async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
+async fn run_turn(ctx: &mut TurnCtx) -> Result<TurnOutcome> {
     let bin = find_cursor().ok_or_else(|| {
         anyhow!("cursor-agent not found on PATH — install Cursor CLI and run `agent login` first")
     })?;
@@ -864,12 +863,12 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
                     continue;
                 };
                 ctx.mark_delivery(DeliveryState::Accepted);
-                let terminal = apply_event(ctx, &mut state, &event);
+                apply_event(ctx, &mut state, &event);
                 if let Some(sid) = state.native_session_id.as_deref() {
                     ctx.set_native_session_id(sid);
                 }
                 ctx.maybe_flush();
-                if terminal {
+                if state.result.is_some() {
                     break;
                 }
             }
@@ -888,9 +887,9 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
 
     let status = child.wait().await?;
     let log_path = crate::store::data_dir().join(format!("agent-{log_name}.log"));
-    if !state.saw_result {
+    let Some(outcome) = state.result else {
         return Err(anyhow!("{}", cursor_exit_detail(status, &log_path)));
-    }
+    };
     if ctx.plan_mode {
         if let Some(card) = plan_card(&ctx.assistant.parts, &ctx.assistant.id, state.turn_errored) {
             ctx.upsert_part(card);
@@ -909,7 +908,11 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
         let _ = std::fs::remove_file(log_path);
     }
     let _ = ctx.flush();
-    Ok(())
+    Ok(if status.success() {
+        outcome
+    } else {
+        TurnOutcome::Stopped
+    })
 }
 
 /// A success ran the init model even without output or usage; an error without usage did not.
@@ -946,10 +949,10 @@ struct TurnState {
     text_seq: usize,
     text_len_before_delta: Option<usize>,
     turn_errored: bool,
-    saw_result: bool,
+    result: Option<TurnOutcome>,
 }
 
-fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool {
+fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) {
     if let Some(sid) = event.get("session_id").and_then(Value::as_str) {
         state.native_session_id = Some(sid.to_string());
     }
@@ -971,7 +974,6 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                 .get("model")
                 .and_then(Value::as_str)
                 .map(str::to_string);
-            false
         }
         Some("thinking") => {
             if event.get("subtype").and_then(Value::as_str) == Some("delta") {
@@ -991,16 +993,13 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
             } else {
                 state.reasoning_part_id = None;
             }
-            false
         }
         Some("assistant") => {
             state.reasoning_part_id = None;
             apply_assistant(ctx, state, event);
-            false
         }
         Some("tool_call") => {
             apply_tool_call(ctx, state, event);
-            false
         }
         Some("retry") => {
             // Cursor flushes its buffered text as a delta immediately before retry.
@@ -1016,10 +1015,8 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                 }
             }
             close_text_segment(state);
-            false
         }
         Some("result") => {
-            state.saw_result = true;
             let is_error = event
                 .get("is_error")
                 .and_then(Value::as_bool)
@@ -1047,9 +1044,19 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                 // Cursor's result concatenates progress and answers across model calls.
                 ctx.mark_final_text_tail();
             }
-            true
+            state.result = Some(
+                if event["subtype"] == "success"
+                    && event.get("is_error").is_none_or(|value| value == false)
+                    && event["result"].is_string()
+                    && event["error"].is_null()
+                {
+                    TurnOutcome::Completed
+                } else {
+                    TurnOutcome::Stopped
+                },
+            );
         }
-        _ => false,
+        _ => {}
     }
 }
 
@@ -1307,6 +1314,63 @@ mod tests {
     use super::*;
     use crate::local::chat::TurnCtx;
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cursor_needs_a_successful_result_and_exit() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let dir = std::env::temp_dir();
+        let cursor = dir.join("cursor-agent");
+        let repo = dir.join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        crate::local::git::initialize_own_repository(&repo).unwrap();
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let path = std::iter::once(dir).chain(std::env::split_paths(&path));
+        std::env::set_var("PATH", std::env::join_paths(path).unwrap());
+
+        let success = r#"{"type":"result","subtype":"success","is_error":false,"result":"Done"}"#;
+        let error =
+            r#"{"type":"result","subtype":"error","is_error":true,"result":"Quota exceeded"}"#;
+        let cancelled = r#"{"type":"result","subtype":"cancelled","result":""}"#;
+        let truncated = r#"{"type":"result","subtype":"success""#;
+        let missing = r#"{"type":"result","subtype":"success"}"#;
+        for (frame, status, expected) in [
+            (Some(success), 0, Some(TurnOutcome::Completed)),
+            (Some(success), 1, Some(TurnOutcome::Stopped)),
+            (Some(error), 0, Some(TurnOutcome::Stopped)),
+            (Some(cancelled), 0, Some(TurnOutcome::Stopped)),
+            (Some(missing), 0, Some(TurnOutcome::Stopped)),
+            (Some(truncated), 0, None),
+            (None, 0, None),
+        ] {
+            let script = match frame {
+                Some(frame) => format!("printf '%s\\n' '{frame}'\nexit {status}\n"),
+                None => {
+                    tokio::time::pause();
+                    "kill -STOP $$\n".into()
+                }
+            };
+            std::fs::write(&cursor, format!("#!/bin/sh\ncat >/dev/null\n{script}")).unwrap();
+            std::fs::set_permissions(&cursor, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+            let mut ctx = TurnCtx::test_stub();
+            ctx.harness = "cursor".into();
+            ctx.project.repo_path = repo.to_string_lossy().into_owned();
+            let result = Cursor.run_turn(&mut ctx).await;
+            assert_eq!(
+                result.as_ref().ok().copied(),
+                expected,
+                "{frame:?}, exit {status}: {result:?}"
+            );
+            if frame.is_none() {
+                assert!(result.unwrap_err().message.contains("went silent"));
+            }
+        }
+    }
+
     #[tokio::test]
     async fn prompt_pipe_preserves_multiline_text_and_closes_for_the_launcher() {
         let root = std::env::temp_dir().join(format!("orx-cursor-stdin-{}", uuid::Uuid::new_v4()));
@@ -1481,7 +1545,7 @@ mod tests {
             state.native_session_id.as_deref(),
             Some("c6b62c6f-7ead-4fd6-9922-e952131177ff")
         );
-        assert!(state.saw_result);
+        assert_eq!(state.result, Some(TurnOutcome::Completed));
         assert_eq!(ctx.assistant.parts[0].kind, "text");
         assert_eq!(
             ctx.assistant.parts[0].text.as_deref(),

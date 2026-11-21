@@ -233,7 +233,16 @@ OpenCode runs local inference over connections to OpenAI-compatible servers (`sr
 - **The `orx` CLI.** The running `orx`'s directory goes first on `PATH`, and on Unix shell hooks keep it first after the user's startup files, so the agent runs the dashboard's version. The environment names the chat, the dashboard's port, the server's bearer and its data directory, which is how `orx exp run` records its chat and every `orx` the agent runs opens the store the dashboard serves.
 - **alphaXiv tools.** `orx alphaxiv-mcp` (`src/commands/alphaxiv_mcp.rs`) passes an allowlist of tools to Claude Code, Codex, OpenCode, Antigravity and ACP agents; Cursor uses `orx alphaxiv library`. Tokens stay in orx ([storage](storage.md)); on an SSH host the attached laptop's sign-in counts ([remote](remote.md)). A sign-in change restarts a resident agent on its next turn with its session resumed. Write tools carry an ask rule, but Antigravity and ACP agents get no per-tool rule and `codex exec` cannot prompt, so there the agent's own policy decides.
 - **Saved variables.** The agent starts with `~/.openresearch/env` and its project's own variables over it, unless the shell that started orx already sets the name. Through `request_env` on `orx mcp` (`src/local/chat/env_request.rs`) it asks the user for more on a held card in its chat; the answer is written where the user chose, and on Unix the chat's shell hooks source what was saved mid-turn, so the agent's next command sees it. A secret's value is never in the transcript or the tool's result.
-- **Turn context.** Autonomy and the goal ride the turn as context blocks, so changing them never restarts the agent.
+- **Turn context.** The goal and any autonomy instructions ride the turn as context blocks. Retry and Continue apply the chat's current goal and autonomy when delivering the saved request.
+
+## Autonomy
+
+- **Default** (`agentic`) uses the playbook's usual research guidance.
+- **Collaborative** (`copilot`) asks before acting, running an experiment or changing direction.
+- **Full-auto** (`autoresearch`) treats approval of a direction as approval to follow through within its scope and budget. The agent is instructed to act on results, delegate when useful, and resume the approved direction after a cutoff or model switch.
+- Side chats and delegates inherit Collaborative or Default. A Full-auto chat starts its side chats and delegates at Default.
+
+An agent can write the current goal with `set_goal` or `orx goal set` and clear it with `{"goal":null}` or `orx goal clear`. The server checks the chat's live turn and compares the saved goal with the goal it delivered or the last goal that turn saved. The user's edit wins a conflict. The same turn can record why it is stopping with `yield` or `orx yield`. A `running` yield needs work that will wake the chat, such as an unfinished run the chat or its delegate follows, a live delegate, or a Claude Code background task. A completed turn exposes its last valid yield. The chat summary carries its kind and text while that turn heads the active branch. Agent switches and automatic wakes give the receiving agent this chat's unrun plans and last successful yield on the active branch.
 
 ## Permissions
 

@@ -1927,13 +1927,10 @@ impl Harness for Codex {
             if result.is_err() && ctx.delivery_state() == DeliveryState::Unknown {
                 ctx.mark_delivery(DeliveryState::NotSent);
             }
-            return result
-                .map(|()| TurnOutcome::Completed)
-                .map_err(|error| TurnFailure::adapter(error, ctx.delivery_state()));
+            return result.map_err(|error| TurnFailure::adapter(error, ctx.delivery_state()));
         }
         run_turn_app_server(ctx)
             .await
-            .map(|()| TurnOutcome::Completed)
             .map_err(|error| TurnFailure::adapter(error, ctx.delivery_state()))
     }
 
@@ -2587,7 +2584,7 @@ fn apply_notification(ctx: &mut TurnCtx, method: &str, params: &Value) -> Option
                 return None;
             }
             return Some(TurnEnd::Done {
-                interrupted: status == "interrupted",
+                interrupted: status != "completed",
             });
         }
         _ => {}
@@ -2690,11 +2687,11 @@ async fn reconcile_turn_items(
 }
 
 pub(crate) fn reconcile_interrupted_items(
+    store: &Store,
     session_id: &str,
     message_id: &str,
     items: &[Value],
 ) -> Option<WireMessage> {
-    let store = Store::open().ok()?;
     let stored = store
         .list_chat_messages(session_id)
         .ok()?
@@ -3094,7 +3091,7 @@ fn item_to_part(item: &Value, completed: bool, prior: &[WirePart]) -> Option<Wir
 /// Thread ids of the sub-agents a `collabAgentToolCall` / `subAgentActivity`
 /// item references. Spawn/send/etc. carry the target(s) in `receiverThreadIds`;
 /// `subAgentActivity` carries the single `agentThreadId`.
-fn subagent_thread_ids(item: &Value) -> Vec<String> {
+pub(crate) fn subagent_thread_ids(item: &Value) -> Vec<String> {
     if let Some(arr) = item.get("receiverThreadIds").and_then(Value::as_array) {
         return arr
             .iter()
@@ -3432,7 +3429,7 @@ fn register_sub_thread(
 
 /// Whether a collab item DRIVES its referenced threads (starts or re-drives an
 /// agent), as opposed to passively referencing them.
-fn item_arms_thread(item: &Value) -> bool {
+pub(crate) fn item_arms_thread(item: &Value) -> bool {
     match item.get("type").and_then(Value::as_str) {
         Some("collabAgentToolCall") => matches!(
             item.get("tool").and_then(Value::as_str),
@@ -3729,7 +3726,7 @@ fn codex_thread_setup(
     Ok(setup)
 }
 
-async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
+async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<TurnOutcome> {
     // Entry sweep: any HELD (native_id) card still unresolved from an earlier
     // turn is a zombie — its JSON-RPC request died with its turn (or child), and
     // worse, codex request ids restart per child, so a click on a stale card
@@ -4013,7 +4010,7 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                     &mut open_requests,
                 )
                 .await;
-                return Ok(());
+                return Ok(TurnOutcome::Completed);
             }
             Waited::Event(Err(_)) => {
                 client.interrupt_active_turn().await;
@@ -4025,7 +4022,7 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                 ctx.push_error(message);
                 settle_running_subagents(&mut ctx.assistant.parts);
                 let _ = ctx.flush();
-                return Ok(());
+                return Ok(TurnOutcome::Stopped);
             }
         };
         let Some(event) = event else {
@@ -4057,7 +4054,7 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                                 &mut open_requests,
                             )
                             .await;
-                            return Ok(());
+                            return Ok(TurnOutcome::Completed);
                         }
                         continue;
                     }
@@ -4083,6 +4080,12 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                 register_sub_threads_from(&thread_id, &method, &params, &mut sub_threads);
                 match apply_notification(ctx, &method, &params) {
                     Some(TurnEnd::Done { interrupted }) => {
+                        let interrupted = interrupted
+                            || turn_id.is_none()
+                            || event_turn_id(&params) != turn_id.as_deref()
+                            || params["threadId"]
+                                .as_str()
+                                .is_some_and(|id| id != thread_id);
                         // Spawned sub-agents outlive the parent turn — codex
                         // holds their reports for the NEXT turn and their
                         // threads keep streaming on this connection. Ending now
@@ -4107,7 +4110,11 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                             &mut open_requests,
                         )
                         .await;
-                        return Ok(());
+                        return Ok(if interrupted {
+                            TurnOutcome::Stopped
+                        } else {
+                            TurnOutcome::Completed
+                        });
                     }
                     Some(TurnEnd::Failed(message)) => {
                         sweep_open_requests(ctx, &client, &mut open_requests).await;
@@ -4120,7 +4127,7 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                         let _ = ctx.flush();
                         // The turn *finished* (with an error the transcript
                         // already shows); an Err here would double-report.
-                        return Ok(());
+                        return Ok(TurnOutcome::Stopped);
                     }
                     None => {}
                 }
@@ -4877,7 +4884,7 @@ fn codex_exec_command(bin: &Path, roots: &[PathBuf], native_id: Option<&str>) ->
     cmd
 }
 
-async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
+async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<TurnOutcome> {
     let bin = find_codex_required()?;
     let project = ctx.project.clone();
     let session_id = ctx.session_id.clone();
@@ -5056,6 +5063,7 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     // Streaming deltas accumulate into one part until the complete event.
     let mut open_text: Option<String> = None;
     let mut open_reasoning: Option<String> = None;
+    let mut completed = false;
 
     loop {
         let line = tokio::select! {
@@ -5088,6 +5096,8 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
         }
 
         match kind {
+            "turn.completed" | "task_complete" => completed = true,
+            "turn_aborted" => completed = false,
             "agent_message_delta" => {
                 let delta = msg.get("delta").and_then(Value::as_str).unwrap_or("");
                 let id = open_text.get_or_insert_with(|| next_id("text")).clone();
@@ -5161,6 +5171,7 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
                 }
             }
             "error" | "stream_error" | "turn.failed" => {
+                completed = false;
                 let detail = msg
                     .get("message")
                     .and_then(Value::as_str)
@@ -5203,7 +5214,11 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
         }
         let _ = ctx.flush();
     }
-    Ok(())
+    Ok(if completed {
+        TurnOutcome::Completed
+    } else {
+        TurnOutcome::Stopped
+    })
 }
 
 async fn codex_native_session(

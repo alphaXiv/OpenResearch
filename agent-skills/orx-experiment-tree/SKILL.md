@@ -1,6 +1,6 @@
 ---
 name: orx-experiment-tree
-description: "Plan and drive the experiment tree: first-launch setup, fixed run contract, frozen nodes, stacked-bush tree shape, branch/launch/reconcile/promote, repair limits, notes, and turn summaries. Use before creating or changing experiments, launching a first run, deciding what to try next, handling a completed run, or reporting experiment progress."
+description: "Plan and drive the experiment tree: first-launch setup, fixed run contract, frozen nodes, stacked-bush tree shape, planned next rounds, branch/launch/reconcile/promote, repair limits, and notes. Use before creating or changing experiments, launching a first run, deciding what to try next, handling a completed run or any other wake, or reporting experiment progress."
 ---
 
 A project is a **tree of experiment nodes**. The root (**baseline**) holds the
@@ -107,8 +107,9 @@ intended flow — do **not** edit a frozen node or rewrite the run command:
    decision (which LR? which schedule? which init?), each a concrete change you can
    make and measure against the others in this round. Don't mix decisions from
    different rounds into one batch — that's what produces the flat fan.
-3. **Create the round as a bush, and pick its parent deliberately.** All of this
-   round's options are **siblings under one parent** — the title is the idea, the
+3. **Create the round as a bush, or use the one planned in step 6, and pick
+   its parent deliberately.** All of this round's options are **siblings under
+   one parent** — the title is the idea, the
    description is the concrete change you'll make on that node's branch. The user
    reads the title beside the run's progress, among its siblings: keep it short,
    the setting that varies first ("Depth 4 at 2e15 FLOPs", "LR 3e-4"). The parent is:
@@ -130,28 +131,52 @@ intended flow — do **not** edit a frozen node or rewrite the run command:
    ```
    The child inherits its parent's run command automatically — you don't set it,
    and you never give siblings different commands or env vars (cardinal rule 2).
-4. **Implement each child's change on its Git branch** — `orx create-experiment`
+4. **Implement each child's change on its Git branch** only once its parent
+   is confirmed: the baseline once it answered, any other node once it beat its
+   siblings and none is still running or waiting to run. `orx create-experiment`
    prints the child's branch (`orx/<slug>`); in your worktree:
    ```sh
-   git checkout orx/<child-slug>
+   git checkout -B orx/<child-slug> <parent-branch>   # first commit only
    #   …edit only the files that idea touches…
    git commit -am "cosine LR + warmup"
    ```
+   An answered parent is frozen, so its branch head is the commit its run
+   measured. `-B` starts the child there even when it was planned under another
+   node and moved. Use plain `git checkout orx/<child-slug>` once the child has
+   commits. Before a child's first launch, check that it descends from its
+   confirmed parent's measured commit, the COMMIT `orx runs <projectId>` shows
+   for the parent's run, even when you committed the child earlier:
+   `git merge-base --is-ancestor <commit> orx/<child-slug>`. If not, rebase the
+   child's commits onto that commit or reapply its change from it.
    **Leave the run command alone.** Before launching, ensure the committed code
    prints its effective configuration, final metrics, and a compact summary to
    stdout. Long runs should also print periodic searchable metrics.
 5. **Launch the round's ready children**: `orx exp run <childId> --backend <b>`
    (or omit `--backend` when a default target is set — see `orx-compute`). Remote
    backends can run siblings in parallel; `--backend local` shares this machine's
-   CPU, RAM, and GPU.
-6. **Launch, then end your turn.** Relevant run results arrive as messages in
-   this chat once it is idle. No waiting process or live agent session is needed.
-   On each message, read `orx runs <projectId>` and reconcile every newly terminal
-   run, including those that finished while you were analyzing another result.
-   Analyze each result and refill its slot as appropriate; other runs can keep
-   going. End your turn again after launching ready children. When every run is
-   terminal and no children remain to launch, the round is complete.
-7. **Analyze each finish as it lands, then iterate.** When a result message
+   CPU, RAM, and GPU. Under a budget, before each paid launch or repair, count
+   what runs in flight have already committed, bound the next run to what
+   remains, and ask the user if you cannot establish that bound, such as when the
+   backend reports no price.
+6. **Plan ahead when the next decision is clear, then end your turn with
+   a `running` `yield`.** Create
+   its options as unrun children, title and description only, under the running
+   node or the sibling you expect to win, and leave their branches alone until
+   that parent is confirmed (step 4). Planned children are the queue the user
+   sees in the tree; never keep a plan in chat or a file. Run results and
+   delegates' answers arrive as messages in this chat once it is idle; no waiting process
+   or live agent session is needed.
+7. **Reconcile on every wake.** A run result, a delegate's answer, a flag, a
+   model switch or a resumed chat all start the same way: read
+   `orx project view <projectId>` and `orx runs <projectId>` (`orx exp status
+   <expId>` shows a node's parent when the view can't tell siblings from planned
+   descendants), and check each
+   delegate named in the chat with the MCP `status` tool (`orx-agent-delegation`
+   says when to relaunch one). Account for every run still going, every delegate
+   still working and every planned child, including runs that finished while you
+   analyzed another. A run the user stopped stays stopped. When every run is
+   terminal and no planned child of this round remains, the round is complete.
+8. **Analyze each finish as it lands, then iterate.** When a result message
    arrives, read its results from the file reported by `orx logs <runId>`
    (see `orx-logs`) and, when it logged to Trackio, its curves with
    `orx metrics <runId> <parentRunId>`, then use `orx-results` to interpret the outcome. To see exactly what a finished node changed, diff its
@@ -160,25 +185,24 @@ intended flow — do **not** edit a frozen node or rewrite the run command:
    completion is a decision point with four moves:
    - **Repair** — the run answered nothing: fix this node's branch and
      re-launch the same node (above).
-   - **Refill** — result is mediocre or inconclusive: launch the next queued child to
-     keep the round moving (step 5).
-   - **Promote** — result is a clear win: this node becomes the **parent for the next
-     round**. The next batch of children branch off *it*, not the baseline, so the win
-     carries forward and the next ideas stack on top of it. This is the move that makes
-     the tree grow deeper; skipping it is what produces a flat, sweep-only tree.
+   - **Refill** — a planned sibling still tests a live hypothesis: launch it
+     (step 5) and choose the winner once the round's results are in. Nothing else will wake the chat to start it.
+   - **Promote** — a clear win (`orx-results`), once confirmed (step 4), becomes
+     the **parent for the next round**. While a sibling still runs, plan the next
+     round under the likely winner and end your turn with a `running` `yield`.
+     If another sibling wins, `orx exp move` the next round's unrun children
+     onto it so the next batch builds on the confirmed gain.
    - **Stop** — goal met, or the branch is exhausted.
 
-   Frozen nodes stay untouched throughout — promotion moves the *focal parent*
-   down the tree, it never rewrites a node that already measured something.
+   After each move, add plans the result suggests and drop superseded plans with
+   `orx exp archive <expId> --only`. Frozen nodes stay untouched throughout —
+   promotion moves the *focal parent* down the tree, it never rewrites a node
+   that already measured something.
 
-Stop when the goal is met, or after ~3 consecutive failed or regressed runs.
-When you stop, write up the tree as a descriptively named project artifact — see
-the `orx-reports` skill for naming and folder guidance.
-
-Close any turn that ran or changed experiments with a short experiment summary:
-one line per relevant node with what it tested, its status, and the headline
-result. Follow the session playbook's evidence-and-links contract. Plain
-questions and turns that launch or change no experiments need no summary.
+Stop when the goal is met, the agreed budget is spent, or after ~3 consecutive
+failed or regressed runs, and write up the tree as a descriptively named project
+artifact — see the `orx-reports` skill for naming and folder guidance.
+Findings live in such artifacts and node notes, never only in chat.
 
 ## Experiment description / notes — `orx exp desc`
 

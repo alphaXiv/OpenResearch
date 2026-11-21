@@ -15,7 +15,7 @@ use crate::local::chat::{
     ORX_MESSAGE_PREFIX,
 };
 use crate::local::model_routes;
-use crate::store::{Store, StoredChatSession};
+use crate::store::{Store, StoredChatSession, TurnYield};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -80,6 +80,23 @@ fn tools(harness: &str) -> Value {
     let chat_ids = json!({ "type": "array", "items": { "type": "string" }, "description": "Chat ids, such as `chat_…`." });
     let request_id = json!({ "type": "string", "description": "Optional key you keep across retries of this call: a retry with the same key returns what the first call did instead of doing it again." });
     json!([
+        {
+            "name": "yield",
+            "description": "Record one line saying why this turn is ending and what will restart the work.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "kind": { "type": "string", "enum": ["running", "need", "done"], "description": "Use running for runs, delegates or background tasks that will wake this chat, need for user input, or done for completed work." },
+                    "text": { "type": "string", "maxLength": 500 },
+                },
+                "required": ["kind", "text"],
+            },
+        },
+        {
+            "name": "set_goal",
+            "description": "Set this chat's research direction and budget while replying to the user's own message. Use null to clear it.",
+            "inputSchema": { "type": "object", "properties": { "goal": { "type": ["string", "null"] } }, "required": ["goal"] },
+        },
         {
             "name": "models",
             "description": "List the versioned models you can delegate to. Each line is a model, the routes that can run it in the order orx prefers, and the effort levels its first route takes.",
@@ -221,6 +238,29 @@ async fn call(
     args: &Value,
 ) -> Result<String> {
     match name {
+        "yield" => {
+            let closing: TurnYield = serde_json::from_value(args.clone())
+                .map_err(|_| anyhow!("Use kind running, need, or done and provide a text line."))?;
+            state.chat.record_yield(&caller.id, closing).await?;
+            Ok("Yield recorded.".into())
+        }
+        "set_goal" => {
+            let goal = match args.get("goal") {
+                Some(Value::Null) => None,
+                Some(Value::String(text)) if !text.trim().is_empty() => Some(text.trim()),
+                Some(Value::String(_)) => {
+                    bail!("Enter a goal. To clear it, pass null to set_goal or run orx goal clear.")
+                }
+                _ => bail!("Provide goal as text or null to clear it."),
+            };
+            state.chat.set_agent_goal(&caller.id, goal).await?;
+            Ok(if goal.is_some() {
+                "Goal saved."
+            } else {
+                "Goal cleared."
+            }
+            .into())
+        }
         "models" => {
             let models = models(state, None).await?;
             if models.is_empty() {

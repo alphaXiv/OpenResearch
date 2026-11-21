@@ -133,6 +133,9 @@ SSH and Slurm run directories enter the automatic cleanup queue in the transacti
 - **Exactly once.** A batch's membership and turn ID are fixed before sending, so a resend after a crash is recognised as the same turn. The terminal notice adds the current signal collection status when its turn is first admitted. When collection settles incomplete, a chat gets the cause and the saved-output guidance in the result turn if possible, or in a follow-up if its accepted result lacked the cause.
 - **Never blocking.** Transient failures retry within a bounded window; a permanent one (the chat deleted) retires the batch, and its error shows on the run.
 - **The payload can speak.** New bytes in `$ORX_NOTIFY_FILE` become rate-limited notices (`src/engine/notify.rs`); hosted providers have no such file. Notice text is data for the agent, never instructions.
+- **Instrumentation rides with other work.** Progress card advice travels with the chat's next prompted turn at any autonomy level. A run ending before admission withdraws its advice.
+
+Full-auto stages a stop check when an agent completes an ordinary turn without a yield or says `done` with plans left, once work that can wake the chat and unresolved prompts are clear. The check after `done` names the chat's unarchived experiments in the current project that have never had a run. Before admitting the hidden follow-up, the same notice dispatcher rechecks the plans and that the source turn still heads the active branch. User input, flag reminders, and owed run or delegate news take precedence. The follow-up itself cannot stage another stop check.
 
 Agents are taught to end their turn after launching: a blocking wait would die with the agent process, and a queued message survives it.
 
@@ -310,10 +313,10 @@ headline, charts, text and outcome blocks against reported names, and observed s
 totals, including totals supplied by the plan. Views and patterns scoped to a
 future stage wait for it. Missing view data waits two minutes from
 the reporting stage's start; an unphased view uses the first stage with metric
-or table data, leaving setup counters out. A run gets at most one instrumentation notice, kept
-in the outbox across restarts and batched with any notice already due to its
-chat. It names the missing reports and how to inspect and fix them; it never
-stops or retries the run. Unavailable or rebuilding evidence waits for collection.
+or table data, leaving setup counters out. A run gets at most one instrumentation notice.
+The outbox retires it quietly if the run ends before its chat turn is admitted.
+Otherwise the notice names the missing reports and how to inspect and fix them.
+Unavailable or rebuilding evidence waits for collection.
 
 A run compares with its parent experiment's latest run that finished with
 signals, else its newest with signals, for each signal whose view declares
@@ -443,9 +446,9 @@ A flag keeps the token values from the look that raised it. Ordinary watcher sen
 A look that flags raises a flag in the transaction that settles it;
 on a run with a flag still open it is noted under that flag instead, its row a
 sentence that says so and its words a line beside the open flag's evidence. A
-noted flag wakes an Agentic chat's agent as a flag does, naming none to settle,
-and once someone keeps going after the open flag, a look comes soon that is shown
-what was noted, with its evidence, to flag again on its own if it still holds.
+noted flag wakes the agent in a Default or Full-auto chat as a flag
+does, naming none to settle. Once someone keeps going after the open flag, a
+look sees what was noted and can flag it again if it still holds.
 
 ### Flags
 
@@ -472,8 +475,8 @@ A run has at most one open flag from a look or a tripwire, so a trouble that
 lasts keeps one flag open; a tripwire condition is raised once a run. Keep going settles
 that run's flag only: a later run of the experiment with the same cause is
 flagged again, since a missed problem costs more than an extra flag. The flag and the wakes for
-each following Agentic chat are written in one transaction; a Copilot chat is woken only when its
-user asks. Initial wakes, reminders and Ask are stored in `flag_wakes`. Servers through v0.2.28 drain
+each following Default or Full-auto chat are written in one transaction; a
+Collaborative chat is woken only when its user asks. Initial wakes, reminders and Ask are stored in `flag_wakes`. Servers through v0.2.28 drain
 `run_notices` alone. Each table batches and retries its hidden turns independently, and a pending
 result goes before a fresh wake about the same run. A wake says the watcher saw only a digest and
 none of the chat, cites the lines and how to settle it. A chat past 70% of its
@@ -482,21 +485,23 @@ wake still applies and freezes the payload that will be sent. Marking a chat Don
 withdraws queued Asks and leaves their flags available for a choice.
 When its run ends before admission, the flag is rewritten for delivery after the
 result. A queued Ask keeps its request identity through that rewrite. A flag
-raised on an ended run still wakes, to be weighed against the result.
+raised on an ended run still wakes the agent to review the result privately and
+surface anything that changes a finding, a next run or a decision. An explicit
+Ask gets an answer.
 
 What became of a flag is read back, never stored: its choices in the run's
-journal and the notice and turn that carried it give its state. An Agentic flag
-is raised, then waking, then the agent is looking. A cut or retired review can go
+journal and the notice and turn that carried it give its state. An automatic
+review moves from raised to waking to agent looking. A cut or retired review can go
 with a later chat turn. Flag-aware recovery loads the saved flag text and tracks
 it on the recovery turn, which records its own delivery receipt.
 If a carrying turn completes without confirming flag delivery, orx records the
 error and leaves the flag available for the user's choice or a later turn.
 A completed review without a choice wakes the agent
-once more. When the owning Independent chat finishes that second review without
+once more. When the owning chat finishes that second automatic review without
 a choice, orx records the flag as kept and says why in the journal. Keep and Stop
 are available in the expanded card during an automatic review. An agent's `--ask`
-and a Copilot flag wait for the user, who sees the available choices in the strip
-and an amber mark on the chat's row.
+and a Collaborative flag wait for the user, who sees the available choices
+in the strip and an amber mark on the chat's row.
 `orx exp flag RUN --flag ID --keep|--ask|--stop` and the strip send one choice;
 a repeated request id answers as the first did. Keep and Ask still apply after
 the run ends. A settled flag or one whose run accepted a stop is refused.

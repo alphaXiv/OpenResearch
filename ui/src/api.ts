@@ -251,7 +251,7 @@ export interface ModelNudge {
 export type RunBannerLevel = "line" | "strip";
 
 /** How much of the research the agent owns before checking in. */
-export type Autonomy = "copilot" | "agentic";
+export type Autonomy = "copilot" | "agentic" | "autoresearch";
 export const DEFAULT_AUTONOMY: Autonomy = "agentic";
 
 export interface ProjectPathStatus {
@@ -1684,6 +1684,16 @@ export interface ChatMessage {
   createdAt: number;
   completedAt?: number | null;
   parentId?: string | null;
+  /** Why the agent ended this turn, on its successful final message; absent from older hosts. */
+  turnYield?: TurnYield;
+}
+
+/** `running` waits on runs or delegates, `need` on something only the user can give, `done` on nothing. */
+export type YieldKind = "running" | "need" | "done";
+
+export interface TurnYield {
+  kind: YieldKind;
+  text: string;
 }
 
 /** How much of the model's context window a session has used, measured off the
@@ -1815,8 +1825,12 @@ export interface ChatSession {
   permissionMode: string | null;
   /** Independent Plan axis for Codex/OpenCode/Cursor. */
   planMode: boolean;
-  /** What `/goal` asked the agent to keep working toward; null when unset. */
+  /** What the user or the agent set the chat to keep working toward; null when unset. */
   goal?: string | null;
+  /** How the current turn on the active branch ended; null when a newer turn has not ended, absent from older hosts. */
+  yieldKind?: YieldKind | null;
+  /** The line that turn ended with, beside `yieldKind`; absent from older hosts. */
+  yieldText?: string | null;
   autonomy: Autonomy;
   reasoningLevel: string | null;
   /** Hidden from the default Recents list, but fully intact and resumable. */

@@ -20,6 +20,7 @@ use crate::local::harness::{
 };
 use crate::store::{
     LookResult, Store, StoredChatSession, StoredRun, WatchCount, WatchLook, WatchLookRun,
+    INSTRUMENTATION,
 };
 
 /// Ceilings on silence after a stage starts, in seconds: a look at least this often while the run
@@ -419,10 +420,10 @@ struct Seen {
     patterns_checked: Option<(String, String, Vec<bool>)>,
 }
 
-const INSTRUMENTATION: &str = "instrumentation";
-const AGENTIC_RELAUNCH: &str = "In Agentic mode you may cancel and relaunch on your own.";
+const AGENTIC_RELAUNCH: &str =
+    "In Default or Full-auto mode you may cancel and relaunch on your own.";
 const COPILOT_RELAUNCH: &str =
-    "In Copilot mode, ask the user before cancelling healthy compute or relaunching.";
+    "In Collaborative mode, ask the user before cancelling healthy compute or relaunching.";
 
 struct Instrumentation {
     chat: String,
@@ -439,7 +440,7 @@ impl Instrumentation {
             return Ok(None);
         };
         let relaunch = match Autonomy::from_stored(chat.autonomy.as_deref()) {
-            Autonomy::Agentic => AGENTIC_RELAUNCH,
+            Autonomy::Agentic | Autonomy::AutoResearch => AGENTIC_RELAUNCH,
             Autonomy::Copilot => COPILOT_RELAUNCH,
         };
         let problems = self
@@ -448,11 +449,14 @@ impl Instrumentation {
         let body = format!(
             "[orx] Run {run} (experiment {experiment}) needs an instrumentation check.\n\
              {problems}\n\
+             This matters only when a run still going, or a planned child that inherits this view, \
+             needs the missing report for a decision. Otherwise change nothing and leave it out of your reply. \
              Inspect `orx exp view show {run}`, `orx exp view check {run}` and `orx logs {run}`. \
              Repair the view, plan or patterns on this run with `orx exp view set {experiment}`. \
-             If the missing report requires a code change, weigh the work already done before relaunching. \
+             If this run needs a code change, restart only when the fix is worth the progress lost. \
              {relaunch} To restart, cancel an active run with \
              `orx exp cancel --run {run} --reason 'Fixing run reports'`, then fix and commit the code before the next launch. \
+             If only a planned child needs the report, or the run has ended, make the fix when implementing that child. \
              This check sends at most one notice per run."
         );
         let queued = store.insert_run_notice(
@@ -903,14 +907,13 @@ async fn pass(state: &mut State) -> Result<()> {
         start.push(chat_id);
     }
     if !updates.is_empty() || !plans.is_empty() {
-        let mut notified = Vec::new();
         let tx = store.begin_immediate()?;
         for (run, experiment, counts, warning) in updates {
             for (before, lines, offset, ident) in counts {
                 store.advance_watch_count(&run, &before, lines, offset, &ident)?;
             }
             if let Some(warning) = warning {
-                notified.extend(warning.queue(&store, &run, &experiment, now)?);
+                warning.queue(&store, &run, &experiment, now)?;
             }
         }
         for (chat, due) in plans {
@@ -928,7 +931,6 @@ async fn pass(state: &mut State) -> Result<()> {
             }
         }
         tx.commit()?;
-        crate::commands::up::api_v2::notices_queued(notified);
     }
     // A look asked for by hand, or left prepared by a restart, in a chat this pass found no run of.
     start.extend(waiting);

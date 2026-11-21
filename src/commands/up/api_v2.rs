@@ -899,7 +899,7 @@ fn plan_choice(
         return Err((
             StatusCode::CONFLICT,
             format!(
-                "Run {id} already ended ({}), so there is nothing to stop. Settle flag {flag_id} with `orx exp flag {id} --flag {flag_id} --keep --reason '…'` when its result stands, or fix experiment {exp} and run it again.",
+                "Run {id} already ended ({}), so there is nothing to stop. Settle flag {flag_id} with `orx exp flag {id} --flag {flag_id} --keep --reason '…'` when its result stands. If a bug or a failure means it does not, repair experiment {exp} and run it again; a result that is only disappointing is frozen, so branch a child instead.",
                 run.status
             ),
         ));

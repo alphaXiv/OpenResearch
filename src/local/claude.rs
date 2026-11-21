@@ -80,6 +80,8 @@ impl LifecycleStopReason {
     }
 }
 
+pub(crate) type BackgroundTasks = HashMap<String, (Vec<(String, String)>, i64)>;
+
 struct TurnSlot {
     sender: Option<mpsc::UnboundedSender<TurnEvent>>,
     idle_since: Instant,
@@ -1574,7 +1576,7 @@ impl ClaudeHost {
 
     /// Each live child's unfinished background tasks as `(task id, description)`,
     /// and since when the first of them has run, by session id.
-    pub async fn background_tasks(&self) -> HashMap<String, (Vec<(String, String)>, i64)> {
+    pub async fn background_tasks(&self) -> BackgroundTasks {
         let live: Vec<_> = self.inner.lock().await.values().cloned().collect();
         live.iter()
             .filter(|client| !client.terminated.load(Ordering::Acquire))

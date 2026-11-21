@@ -204,6 +204,20 @@ function parseMentionHtml(node: MdastNode): MdastNode[] | null {
   return nodes;
 }
 
+/** Text with its `<run>` and `<file>` tags in words, for a surface that can't show a chip:
+ * a run as the result it was cited with, or nothing; a file as its path. */
+export function mentionsAsText(text: string): string {
+  const nodes = parseMentionHtml({ type: "html", value: text });
+  if (!nodes) return text;
+  let out = "";
+  for (const node of nodes) {
+    const attrs = node.data?.hProperties;
+    const words = node.type === "text" ? node.value ?? "" : node.type === "runMention" ? attrs?.label ?? "" : attrs?.path ?? "";
+    out = words || node.type === "text" ? out + words : out.trimEnd();
+  }
+  return out.trim();
+}
+
 function citedIdNode(cited: string, kind: "code" | "text", position?: MdastPosition): MdastNode {
   return { type: "citedId", children: [], position, data: { hName: "cited-id", hProperties: { cited, kind } } };
 }

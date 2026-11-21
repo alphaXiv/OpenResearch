@@ -1,5 +1,5 @@
 import { Check } from "lucide-react";
-import { useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import type { ChatPart, PromptAnswer } from "../api";
 import { m } from "../paraglide/messages.js";
 import { WorkspaceDomContext } from "../WorkspaceDom";
@@ -125,16 +125,7 @@ export function useQuestions(scope: string | null, pending: ChatPart[], respond:
 }
 
 /** The question a chat is waiting on, docked on top of the composer that answers it. */
-export function QuestionDock({
-  part,
-  index,
-  total,
-  picked,
-  disabled,
-  hotkeys,
-  searchTarget,
-  onPick,
-}: {
+export function QuestionDock(props: {
   part: ChatPart;
   index: number;
   total: number;
@@ -144,7 +135,7 @@ export function QuestionDock({
   hotkeys: boolean;
   searchTarget: boolean;
   onPick: (label: string) => void;
-}) {
+} | { reply: { id: string; text: ReactNode; time?: ReactNode } }) {
   const { id: elementId } = useContext(WorkspaceDomContext);
   const root = useRef<HTMLDivElement>(null);
   const questionBox = useRef<HTMLDivElement>(null);
@@ -154,9 +145,11 @@ export function QuestionDock({
   const [heightLimit, setHeightLimit] = useState(Number.POSITIVE_INFINITY);
   /** Until resized, the question takes what is left of 80% of the window once the options and the answer field have theirs. */
   const [questionMax, setQuestionMax] = useState(Number.POSITIVE_INFINITY);
-  const prompt = part.prompt;
+  const choice = "part" in props ? props : null;
+  const reply = "reply" in props ? props.reply : null;
+  const prompt = choice?.part.prompt;
   const options = prompt?.options ?? [];
-  const questionId = elementId(`question-${part.id}`);
+  const questionId = elementId(`question-${choice?.part.id ?? reply?.id}`);
 
   useLayoutEffect(() => {
     const dock = root.current;
@@ -176,10 +169,11 @@ export function QuestionDock({
     return () => observer.disconnect();
   }, []);
 
-  const latest = useRef({ options, onPick });
-  latest.current = { options, onPick };
+  const latest = useRef({ options, onPick: choice?.onPick });
+  latest.current = { options, onPick: choice?.onPick };
+  const hotkeys = choice?.hotkeys && !choice.disabled;
   useEffect(() => {
-    if (!hotkeys || disabled) return;
+    if (!hotkeys) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
       const target = event.target;
@@ -188,11 +182,11 @@ export function QuestionDock({
       const option = /^[1-9]$/.test(event.key) ? latest.current.options[Number(event.key) - 1] : undefined;
       if (!option) return;
       event.preventDefault();
-      latest.current.onPick(option.label);
+      latest.current.onPick?.(option.label);
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [hotkeys, disabled]);
+  }, [hotkeys]);
 
   return (
     <div
@@ -211,8 +205,8 @@ export function QuestionDock({
         className="flex min-h-0 flex-1 flex-col outline-none"
         role="group"
         aria-labelledby={questionId}
-        data-part-id={part.id}
-        data-search-target={searchTarget || undefined}
+        data-part-id={choice?.part.id}
+        data-search-target={choice?.searchTarget || undefined}
         tabIndex={-1}
       >
         <div
@@ -223,29 +217,30 @@ export function QuestionDock({
         >
           <div className="flex items-center gap-2 px-2.5 text-sm text-subtext">
             <span className="min-w-0 flex-1 truncate">{prompt?.header || m.chat_question()}</span>
-            {total > 1 && (
-              <span className="shrink-0 text-xs tabular-nums" aria-label={m.chat_question_progress({ current: index + 1, total })}>
-                {index + 1}/{total}
+            {reply?.time}
+            {choice && choice.total > 1 && (
+              <span className="shrink-0 text-xs tabular-nums" aria-label={m.chat_question_progress({ current: choice.index + 1, total: choice.total })}>
+                {choice.index + 1}/{choice.total}
               </span>
             )}
           </div>
           <div id={questionId} className="mt-1 px-2.5 text-base leading-snug text-text whitespace-pre-line wrap-anywhere">
-            {prompt?.question?.replace(/\n\s*\n/g, "\n")}
+            {reply ? reply.text : prompt?.question?.replace(/\n\s*\n/g, "\n")}
           </div>
           {prompt?.multiSelect && <div className="px-2.5 pt-0.5 text-sm text-subtext">{m.chat_question_choose_any()}</div>}
         </div>
-        {options.length > 0 && (
+        {choice && options.length > 0 && (
           <div className="flex min-h-0 shrink flex-col gap-1 overflow-y-auto px-1.5 pb-1.5">
             {options.map((option, optionIndex) => {
-              const selected = picked.includes(option.label);
+              const selected = choice.picked.includes(option.label);
               return (
                 <button
                   type="button"
                   key={option.label}
                   aria-pressed={selected}
-                  disabled={disabled}
+                  disabled={choice.disabled}
                   className={`flex w-full items-start gap-3 rounded-md px-2.5 py-2 text-start text-text cursor-pointer transition-colors duration-120 ease-standard focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-solid focus-visible:outline-focus disabled:cursor-default ${selected ? "bg-highlight" : "bg-surface enabled:hover:bg-panel"}`}
-                  onClick={() => onPick(option.label)}
+                  onClick={() => choice.onPick(option.label)}
                 >
                   <span className="flex min-w-0 flex-1 flex-col">
                     <span className="text-base font-medium">{option.label}</span>

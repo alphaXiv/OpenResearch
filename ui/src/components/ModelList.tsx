@@ -25,7 +25,7 @@ const ROW = [
 /** The row Enter picks from the search, marked as a focused row is so it never reads as the picked model. */
 const ENTRY = "group-has-[input:focus]/picker:bg-hover-muted group-has-[input:focus]/picker:outline-2 group-has-[input:focus]/picker:outline-solid group-has-[input:focus]/picker:outline-focus group-has-[input:focus]/picker:-outline-offset-2";
 const MAIN = "flex min-w-0 flex-1 items-center gap-2 self-stretch text-start text-sm outline-none";
-const BADGE = "shrink-0 rounded-sm px-1 text-xs leading-4";
+export const BADGE = "shrink-0 rounded-sm px-1 text-xs leading-4";
 
 /** A catalog this long (OpenRouter's) lists only what another agent offers too until a search finds the rest. */
 const CATALOG_LINES = 60;

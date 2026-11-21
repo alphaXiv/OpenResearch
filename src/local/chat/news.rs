@@ -12,7 +12,7 @@ use super::delegation::{
 };
 use super::{
     stored_to_wire, ChatHost, OrxDisplay, OrxKind, OrxSource, TurnGuard, TurnState, TurnSubmission,
-    ORX_MESSAGE_PREFIX,
+    ORX_MESSAGE_PREFIX, STOP_CHECK_PREFIX,
 };
 use crate::error::Result;
 use crate::store::{ReadyChatSubscription, Store, ToldEvent};
@@ -114,11 +114,10 @@ pub fn chat_news(store: &Store, subscriber: Option<&str>) -> Result<Vec<News>> {
             continue;
         }
         if echoes_its_subscriber(store, &ready)? {
-            mark_told(
-                store,
-                &ready.subscriber_session_id,
-                &ready.target_session_id,
-            )?;
+            let item = News::Answer(ready);
+            if let Some(token) = item.claim(store)? {
+                item.settle(store, &token, true)?;
+            }
             continue;
         }
         let asking =
@@ -134,16 +133,26 @@ pub fn chat_news(store: &Store, subscriber: Option<&str>) -> Result<Vec<News>> {
 /// news. That is no news to the subscriber, and telling it would wake two
 /// chats subscribed to each other in turn forever.
 fn echoes_its_subscriber(store: &Store, ready: &ReadyChatSubscription) -> Result<bool> {
-    let Some(turn) = store.get_chat_turn(&ready.target_session_id, &ready.turn_id)? else {
-        return Ok(false);
-    };
-    let Some(message) = turn
-        .user_message_id
-        .map(|id| store.get_chat_message(&id))
-        .transpose()?
-        .flatten()
-    else {
-        return Ok(false);
+    let mut turn_id = ready.turn_id.as_str();
+    let mut source_turn;
+    let message = loop {
+        let Some(turn) = store.get_chat_turn(&ready.target_session_id, turn_id)? else {
+            return Ok(false);
+        };
+        if let Some(id) = turn.user_message_id {
+            let Some(message) = store.get_chat_message(&id)? else {
+                return Ok(false);
+            };
+            break message;
+        }
+        source_turn = turn.client_turn_id;
+        let Some(source) = source_turn
+            .strip_prefix(STOP_CHECK_PREFIX)
+            .or_else(|| source_turn.strip_prefix("recover_"))
+        else {
+            return Ok(false);
+        };
+        turn_id = source;
     };
     let parts = stored_to_wire(&message).parts;
     Ok(!parts.is_empty()

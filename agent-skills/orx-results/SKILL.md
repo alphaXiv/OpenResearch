@@ -18,7 +18,28 @@ how each compares with the parent's run; confirm a number in the log before
 citing it. Load `orx-logs` when supporting output still needs retrieving. Cite the verified
 measurements using the session playbook’s evidence-and-links contract.
 
+## Tell a gain from noise
+
+For a metric that can vary, repeat the baseline once under comparable
+conditions. If a fixed seed masks variation, change only the seed in a child.
+Use the absolute gap as a rough estimate of run-to-run spread. Treat gains under
+about twice that spread as provisional until a candidate repeat confirms the
+gain. For runs that take hours, skip the baseline repeat and repeat only a
+close contender whose result would change your next step. Use its spread.
+
+For a known deterministic metric, judge gains by what matters for the task.
+If you selected a winner on one validation set, check it on held-out data
+before claiming it generalizes.
+
+When gains shrink to noise size or become too small to matter, change
+approach. Check prior work for a different method, add a component, or use
+the data differently.
+
 ## Summarize an experiment
+
+Lead with what the result means for the question and the next run. Leave run
+cards, log patterns and watcher flags out unless one makes a number
+untrustworthy, needs the user's choice, or the user asked about it.
 
 Choose one primary representation for each measured comparison: a graph, a
 table, or prose. Explain the conclusion and limitations in brief prose.

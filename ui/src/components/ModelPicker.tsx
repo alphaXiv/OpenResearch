@@ -1,6 +1,7 @@
 import {
   useContext,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -22,7 +23,7 @@ import { DirectionProvider } from "@base-ui/react/direction-provider";
 
 import { m } from "../paraglide/messages.js";
 import { getLocale } from "../paraglide/runtime.js";
-import { Bot, Brain, Check, ChevronDown, ChevronRight, Handshake, ListChecks, Lock, LockOpen, Minus, Pencil, Plus, Rocket, Ruler, Settings, ShieldCheck, Turtle, Workflow, Zap, type LucideIcon } from "lucide-react";
+import { Bot, Brain, Check, ChevronDown, ChevronRight, Handshake, InfinityIcon, ListChecks, Lock, LockOpen, Minus, Pencil, Plus, Rocket, Ruler, Settings, ShieldCheck, Turtle, Workflow, Zap, type LucideIcon } from "lucide-react";
 import {
   modelLabel,
   reasoningFor,
@@ -51,7 +52,7 @@ import { cn } from "./ui/cn";
 import { harnessDisplayName, harnessKey, selectionHarness } from "../modelSelection";
 import { defaultOffer, localDay, newLines, VARIANT_EFFORTS, variantOffer } from "../modelLines";
 import { AgentIconTile } from "./AgentIcon";
-import { feedLine, lineLab, lineName, lineSection, ModelList, offerOn, type PickedFrom, type PickerLine } from "./ModelList";
+import { BADGE, feedLine, lineLab, lineName, lineSection, ModelList, offerOn, type PickedFrom, type PickerLine } from "./ModelList";
 import { harnessMark, listedSignedOut, pickerLines, type PickerAgent } from "./pickerAgents";
 import { useAgentSignIn } from "./HarnessSetupDialog";
 
@@ -175,17 +176,29 @@ function PermissionIcon({ id }: { id: string | null | undefined }) {
   return <Icon size={14} aria-hidden="true" className={cn("shrink-0", permission?.tone ?? "text-subtext")} />;
 }
 
-function DescribedRadioItem({ choice, icon, isDefault }: { choice: OptionChoice; icon?: ReactNode; isDefault: boolean }) {
+function DescribedRadioItem({ choice, icon, isDefault, beta, className }: { choice: OptionChoice; icon?: ReactNode; isDefault?: boolean; beta?: boolean; className?: string }) {
+  const descriptionId = useId();
+
+  const name = beta ? `${choice.label}, ${m.model_picker_beta()}` : isDefault ? `${choice.label} ${m.model_picker_default()}` : choice.label;
+
   return (
-    <Menu.RadioItem value={choice.id} closeOnClick label={choice.label} className={cn(SETTINGS_ROW, "items-start")}>
+    <Menu.RadioItem
+      value={choice.id}
+      closeOnClick
+      label={choice.label}
+      aria-label={name}
+      aria-describedby={choice.description ? descriptionId : undefined}
+      className={cn(SETTINGS_ROW, "items-start py-1", className)}
+    >
       <span className="flex min-w-0 items-start gap-2">
         {icon && <span className="flex h-5 items-center">{icon}</span>}
-        <span className="flex min-w-0 flex-col items-start gap-0.5">
-          <span>
+        <span className="flex min-w-0 flex-col items-start">
+          <span className="flex min-h-5 flex-wrap items-center gap-x-1">
             {choice.label}
-            {isDefault && <span className="text-muted"> {m.model_picker_default()}</span>}
+            {isDefault && <span className="text-ink-subtext">{m.model_picker_default()}</span>}
+            {beta && <span className={cn(BADGE, "bg-accent-purple-subtle font-normal text-ink-purple")}>{m.model_picker_beta()}</span>}
           </span>
-          {choice.description && <span className="text-sm leading-snug text-muted">{choice.description}</span>}
+          {choice.description && <span id={descriptionId} className="text-xs leading-4 font-normal text-ink-subtext">{choice.description}</span>}
         </span>
       </span>
       <Menu.RadioItemIndicator className="flex h-5 shrink-0 items-center">
@@ -572,22 +585,28 @@ export function ModelPicker({
   const speedLabel = (tier: string) => (tier === "fast" ? m.model_picker_fast_mode() : speedName(tier));
   const autonomyChoices: (OptionChoice & { id: Autonomy; icon: ReactNode })[] = [
     {
-      id: "agentic",
-      label: m.model_picker_autonomy_agentic(),
-      description: m.model_picker_autonomy_agentic_description(),
-      icon: <Bot size={14} aria-hidden="true" className="shrink-0 text-accent-purple" />,
-    },
-    {
       id: "copilot",
       label: m.model_picker_autonomy_copilot(),
       description: m.model_picker_autonomy_copilot_description(),
       icon: <Handshake size={14} aria-hidden="true" className="shrink-0 text-accent-green" />,
     },
+    {
+      id: "agentic",
+      label: m.model_picker_autonomy_agentic(),
+      description: m.model_picker_autonomy_agentic_description(),
+      icon: <Bot size={14} aria-hidden="true" className="shrink-0 text-subtext" />,
+    },
+    {
+      id: "autoresearch",
+      label: m.model_picker_autonomy_autoresearch(),
+      description: m.model_picker_autonomy_autoresearch_description(),
+      icon: <InfinityIcon size={14} aria-hidden="true" className="shrink-0 text-accent-purple" />,
+    },
   ];
-  const autonomyLabel = autonomyChoices.find((choice) => choice.id === autonomy)?.label;
+  const selectedAutonomy = autonomyChoices.find((choice) => choice.id === autonomy);
   const permissionSummary = [
     permissionLabel && `${m.model_picker_permissions()}: ${permissionLabel}`,
-    autonomyLabel && `${m.model_picker_autonomy()}: ${autonomyLabel}`,
+    selectedAutonomy && `${m.model_picker_autonomy()}: ${selectedAutonomy.label}`,
   ].filter(Boolean).join(" · ") || m.model_picker_permissions();
   const moveFocus = (event: React.KeyboardEvent<HTMLDivElement>) => {
     if (event.nativeEvent.isComposing || event.keyCode === 229) return;
@@ -960,6 +979,7 @@ export function ModelPicker({
             <Tooltip interactive content={permissionSummary} className="rounded-md">
               <Menu.Trigger disabled={disabled} className={PILL} aria-label={permissionSummary}>
                 <PermissionIcon id={effectivePermissionId} />
+                {selectedAutonomy?.id === "autoresearch" && selectedAutonomy.icon}
                 <ChevronDown size={14} className="shrink-0 text-muted" />
               </Menu.Trigger>
             </Tooltip>
@@ -997,7 +1017,7 @@ export function ModelPicker({
                         }}
                       >
                         {autonomyChoices.map((choice) => (
-                          <DescribedRadioItem key={choice.id} choice={choice} icon={choice.icon} isDefault={choice.id === DEFAULT_AUTONOMY} />
+                          <DescribedRadioItem key={choice.id} choice={choice} icon={choice.icon} beta={choice.id === "autoresearch"} className={choice.id === "autoresearch" ? "font-semibold text-ink-purple" : undefined} />
                         ))}
                       </Menu.RadioGroup>
                     </Menu.Group>

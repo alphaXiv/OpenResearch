@@ -10,7 +10,7 @@ import { tabOpenGestureHandlers } from "../tabPreview";
 import { ChatLinksContext, CitedWords } from "./ChatLinks";
 import { FileScopeContext } from "./FileReference";
 import { HarnessLogo } from "./HarnessLogo";
-import { Md } from "./Md";
+import { Md, mentionsAsText } from "./Md";
 
 type Props = {
   part: ChatPart & { orx: OrxSource };
@@ -73,7 +73,7 @@ function SentCard({ part, onOpenFile, onOpenRun }: Props) {
     : chat
       ? <HarnessLogo harness={chat.harness} size={16} />
       : <MessagesSquare size={16} aria-hidden="true" className="shrink-0" />;
-  const preview = kind === "monitoring" ? m.agent_message_runs_unmonitored() : firstLine(text);
+  const preview = kind === "monitoring" ? m.agent_message_runs_unmonitored() : firstLine(mentionsAsText(text));
   const senderClass = "flex min-w-0 max-w-[45%] shrink-0 items-center gap-2 py-1.5 ps-3 pe-1 text-subtext [&_svg]:text-subtext";
   return (
     <div className="agent-message me-auto flex w-fit min-w-0 max-w-[88%] flex-col items-start gap-1.5">

@@ -71,6 +71,34 @@ impl GateEnv {
     }
 }
 
+pub async fn call_agent_tool(name: &str, arguments: Value) -> Result<()> {
+    let env = GateEnv::from_env().map_err(|error| {
+        anyhow!("Run this command from an active OpenResearch agent chat: {error}")
+    })?;
+    let body = env
+        .agent_request("tools/call", json!({ "name": name, "arguments": arguments }))
+        .ok_or_else(|| anyhow!("This shell has no OpenResearch agent token. Run the command from the chat's agent shell."))?;
+    let http = crate::net::loopback_client()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+    let url = format!("http://127.0.0.1:{}/api/internal/mcp", env.up_port);
+    let reply = relay(&http, &url, body).await?;
+    let message = reply
+        .pointer("/content/0/text")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("OpenResearch did not return a receipt for {name}."))?;
+    if reply["isError"] == true {
+        if message.starts_with("Unknown tool ") {
+            return Err(anyhow!(
+                "{message} Update OpenResearch on the chat's host to use this command."
+            ));
+        }
+        return Err(anyhow!("{message}"));
+    }
+    println!("{message}");
+    Ok(())
+}
+
 pub async fn run() -> Result<()> {
     let env = GateEnv::from_env()?;
     // The long-poll deliberately blocks for as long as the user thinks; only

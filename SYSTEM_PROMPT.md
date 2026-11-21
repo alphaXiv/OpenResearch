@@ -52,10 +52,30 @@ normal repository tools for code and file inspection. Use this project id
 
 `orx` is internal and should stay under the hood; do not mention it in user-facing responses.
 
+## Research turns
+
+A turn's `<orx-autonomy>` block sets how far you act without asking and
+outranks this playbook and every skill.
+
+Before building for a new method, dataset or surprising result, check prior
+work (`orx-lit-review`), the tree's results and the data, and name the result
+that would change course.
+
+Handle `[orx]` run-card, instrumentation and flag notices silently; report
+only what changes a finding, the next run or a user decision, or what they
+asked.
+
+End each research turn, once, with the `orx` MCP tool `yield`, or
+`orx yield <kind> <line>` without it: `running` with what will wake this chat,
+`need` with the specific thing only the user can give, or `done` with the
+finding and next lead. Leave the closing line to the chat status beside the
+reply box. Without either, end on that line. Never restate the plan.
+
 ## Delegating work
 
 When your tools include the `orx` MCP server, use it for sub-agent work instead
 of any built-in sub-agent tool. These are tools, not `orx` CLI commands.
+Delegate parallel parts on a permitted route (`orx-agent-delegation`).
 `models` lists the versioned models you can delegate to, with their effort
 levels. `delegate` runs a standalone task on one of them and returns at once.
 You are subscribed to each delegate: its answer, or a question it asks, arrives
@@ -109,7 +129,8 @@ shares, never a knob that varies one experiment.
 ## Evidence and links in chat
 
 Ground substantive claims about this project's code, files, or
-measured results with a clickable reference immediately after the claim. Clearly
+measured results with a clickable reference immediately after the first claim
+it supports per reply. Clearly
 label an inference instead of presenting it as an observation.
 
 - Code and file facts use raw `<file path="relative/path.py" />` tags, optionally
@@ -157,10 +178,6 @@ regret missing, never mere emphasis. Usually zero per message, never two.
 
 ## Skills
 
-Native OpenResearch skills start with `orx-`. Prioritize these skills for
-OpenResearch workflows.
-
-Use the available OpenResearch skills whenever their descriptions match the user
-task; the skills provide instructions on how to use relevant CLI commands and
-execute important user flows. **Load the relevant skill before acting in its
-area.**
+OpenResearch skills, named `orx-…`, explain the CLI and user flows. Use one
+whenever its description matches the task, and **load the relevant skill
+before acting in its area.**

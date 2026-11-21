@@ -1,5 +1,5 @@
 //! Flags: a run that may be going wrong, raised by a look, a tripwire or a rule that asks. A flag
-//! never stops a run. An Agentic chat's agent is woken with it to settle it; a Copilot chat
+//! never stops a run. An autonomous chat's agent is woken with it to settle it; a Copilot chat
 //! waits for the user. What became of a flag is its journal's choices and the notices that carried
 //! it, read back.
 
@@ -48,8 +48,8 @@ fn home(store: &Store, run: &StoredRun) -> Result<Option<StoredChatSession>> {
     Ok(None)
 }
 
-fn agentic(chat: &StoredChatSession) -> bool {
-    !chat.archived && Autonomy::from_stored(chat.autonomy.as_deref()) == Autonomy::Agentic
+fn autonomous(chat: &StoredChatSession) -> bool {
+    !chat.archived && Autonomy::from_stored(chat.autonomy.as_deref()) != Autonomy::Copilot
 }
 
 fn settles(event: &FlagEvent) -> bool {
@@ -82,6 +82,8 @@ fn carried(notice: &FlagNotice, asked: bool) -> &'static str {
 
 const REMIND: &str = "remind";
 const AFTER_RESULT: &str = "result";
+const PRIVATE_REVIEW: &str = "Review the result privately. Tell the user only what changes a finding, the next run or a decision they need to make.";
+const UNSOUND: &str = "If a bug or a failure means the result does not stand, repair the experiment and run it again. A result that is only disappointing is an answer: its node is frozen, so branch a child instead.";
 
 fn own(notice: &FlagNotice, flag: &str) -> bool {
     notice.flag_id == flag
@@ -124,7 +126,7 @@ pub(crate) fn read(store: &Store, run: &StoredRun) -> Result<Vec<Value>> {
     } else {
         None
     };
-    let autonomous = home.as_ref().is_some_and(agentic);
+    let autonomous = home.as_ref().is_some_and(autonomous);
     let at_home = |notice: &&FlagNotice| {
         home.as_ref()
             .is_some_and(|chat| chat.id == notice.chat_session_id)
@@ -227,7 +229,7 @@ pub(crate) fn carry_cut_flags(
     client_turn_id: &str,
     now: i64,
 ) -> Result<Vec<String>> {
-    if !agentic(chat) {
+    if !autonomous(chat) {
         return Ok(Vec::new());
     }
     store.retire_unconfirmed_flag_attachments(Some(&chat.id), now)?;
@@ -277,7 +279,7 @@ fn unrouted(events: &[FlagEvent]) -> impl Iterator<Item = (&str, &Value)> {
     })
 }
 
-/// A completed review gets one reminder. Only the owning Independent chat can keep by default.
+/// A completed review gets one reminder. Only the owning autonomous chat can keep by default.
 pub(crate) fn follow_up_flags(store: &Store, now: i64) -> Result<()> {
     for run_id in store.flag_follow_up_runs(None)? {
         let Some(run) = store.get_run(&run_id)? else {
@@ -301,7 +303,7 @@ pub(crate) fn follow_up_flags(store: &Store, now: i64) -> Result<()> {
                 };
                 if !store
                     .get_chat_session(chat)?
-                    .is_some_and(|chat| agentic(&chat))
+                    .is_some_and(|chat| autonomous(&chat))
                 {
                     continue;
                 }
@@ -387,13 +389,13 @@ pub(crate) fn open(flags: &[Value]) -> Option<&Value> {
     flags.iter().rev().find(|flag| !settled(flag))
 }
 
-/// The notices that wake each Agentic chat that follows the run with `flag`.
+/// The notices that wake each autonomous chat that follows the run with `flag`.
 pub(crate) fn wakes(store: &Store, run: &StoredRun, flag: &Value) -> Result<Vec<(String, String)>> {
     let mut wakes = Vec::new();
     for id in store.run_subscribers(&run.id)? {
         if store
             .get_chat_session(&id)?
-            .is_some_and(|chat| agentic(&chat))
+            .is_some_and(|chat| autonomous(&chat))
         {
             wakes.push((id, wake(run, flag, false)));
         }
@@ -418,7 +420,7 @@ fn noted_wake(run: &StoredRun, flag: &Value) -> String {
     )
 }
 
-/// A flag to raise, with the notices that wake the run's Agentic chats with it.
+/// A flag to raise, with the notices that wake the run's autonomous chats with it.
 pub(crate) fn new_flag(
     store: &Store,
     run: &StoredRun,
@@ -512,11 +514,12 @@ fn review_steps(run: &StoredRun, flag: &Value, asked: bool) -> String {
         "Settle this review before ending the turn."
     };
     let action = if Phase::parse(&run.status).is_some_and(Phase::is_terminal) {
-        format!(
-            "Run {id} has ended ({}). Check its result and say what you found. \
-             If it does not stand, fix experiment {exp} and run it again.",
-            run.status
-        )
+        let report = if asked {
+            "Review the result and answer the user's request."
+        } else {
+            PRIVATE_REVIEW
+        };
+        format!("Run {id} has ended ({}). {report} {UNSOUND}", run.status)
     } else {
         format!("To stop a confirmed failure, use `{settle} --stop --reason '…'`.")
     };

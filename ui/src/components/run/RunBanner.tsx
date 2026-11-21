@@ -67,9 +67,10 @@ function useAnnouncement(models: RunModel[], names: string[] | null): string {
   return announcement;
 }
 
-export function RunBanner({ sessionId, agent, onOpenRun, onOpenRunPage }: {
+export function RunBanner({ sessionId, agent, nameSingleRun, onOpenRun, onOpenRunPage }: {
   sessionId: string;
   agent: string;
+  nameSingleRun: boolean;
   onOpenRun?: OpenRun;
   onOpenRunPage?: (run: Run, intent: TabOpenIntent) => void;
 }) {
@@ -151,7 +152,7 @@ export function RunBanner({ sessionId, agent, onOpenRun, onOpenRunPage }: {
       nextRetryMs: retryAt(item),
     });
   });
-  const titles = runs.map((item) => item.experimentName ?? item.experimentSlug ?? item.run.experimentId);
+  const titles = models.map((model) => model.name);
   const named = shortLabels(titles);
   const { labels, context } = named;
   const announcement = useAnnouncement(models, single ? null : titles);
@@ -245,17 +246,16 @@ export function RunBanner({ sessionId, agent, onOpenRun, onOpenRunPage }: {
         </div>
       )}
       {runs.length === 0 ? null : single ? (
-        strip(models[0], 0)
+        strip(models[0], 0, nameSingleRun ? { text: models[0].name } : undefined)
       ) : (
         <div data-run-frame="" className="@container relative mb-2.5 overflow-hidden rounded-lg border border-border bg-surface text-sm text-text">
           <RunSummary models={models} context={context} {...summarize(models, named, runs[0].watch, now, rows)} open={rows} onToggle={toggleRows} />
           {rows && (
             <ul role="list" className="m-0 max-h-[35vh] list-none overflow-y-auto overscroll-y-contain p-0">
               {models.map((model, index) => {
-                const label = { text: labels[index], title: titles[index] };
                 return (
                   <li key={model.run.id} data-run={model.run.id} className="border-t border-border-variant">
-                    {strip(model, index, label)}
+                    {strip(model, index, { text: labels[index], grouped: true })}
                   </li>
                 );
               })}

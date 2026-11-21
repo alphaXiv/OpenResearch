@@ -41,6 +41,7 @@ import { DelegateCard } from "./DelegateCard";
 import { EnvRequestCard } from "./EnvRequestCard";
 import { delegateAncestors, delegateModelLabel, delegateStatus, delegatesOf, type DelegateStatus } from "../delegates";
 import { taskLocation } from "../workspaceState";
+import { GoalDialog } from "./GoalDialog";
 import { DONE_PREVIEW_HEIGHT, UNNAMED_GROUP, fitSidebarRows, sidebarGroup, sidebarRowHeight, type RailSection, type SidebarRow } from "../sidebarLayout";
 import { useVirtualizer, defaultRangeExtractor, elementScroll, measureElement as measureVirtualElement, type Range as VirtualRange } from "@tanstack/react-virtual";
 import { markLiveUpdate } from "../queries/live";
@@ -69,7 +70,7 @@ import { useAgentSignIn } from "./HarnessSetupDialog";
 
 import { RemoteConnectionStrip, useRemoteConnection } from "../RemoteRuntime";
 
-import { LOCAL_ERROR_PART_ID, LOCAL_PREFIX, SHELL_TOOL, optimisticUserMessage } from "../queries/chatState";
+import { LOCAL_ERROR_PART_ID, LOCAL_PREFIX, optimisticUserMessage } from "../queries/chatState";
 import { CancelledError, useInfiniteQuery, useQueries, useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 
@@ -137,7 +138,7 @@ import {
 } from "lucide-react";
 
 import { BrandMark } from "./Wordmark";
-import { chatStatus, chatStatusWorking, type ChatStatus } from "../chatStatus";
+import { chatNeedsYou, chatStatus, chatStatusWorking, type ChatStatus } from "../chatStatus";
 import {
   type ChatSessionPatch,
   DEMO_FIGURE_SESSION_ID,
@@ -159,6 +160,7 @@ import {
   type ChatImageAttachment,
   type ArtifactEntry,
   type ChatMessage,
+  type TurnYield,
   type AlphaXivFolder,
   type ChatPart,
   type ChatToolState,
@@ -187,6 +189,8 @@ import {
   parentUpdateText,
   splitResponseParts,
   isUsageLimitPart,
+  yieldCallClose,
+  hideClosedYieldCalls,
   isModelAccessLimitPart,
   unreadAfterBusyChange,
   isTurnStatusPart,
@@ -195,6 +199,8 @@ import {
   questionReplies,
   type QuestionReplies,
   hasPendingInput,
+  pendingPlanPart,
+  shellExchangePart,
   partsTailToolId,
   streamTailIsText,
   streamTailTool,
@@ -236,7 +242,7 @@ import { FileScopeContext } from "./FileReference";
 import { FigureReveal, PaperShelf, pluralMessage, ReportCard, RunCard, SourceStrip, type ShelfPaper } from "./ResearchCards";
 import { discoveredPapers, linkedPapers, paperKey, type CitedPaper, type PaperMeta } from "../researchActivity";
 import { LitSourcesList } from "./LitSourcesPicker";
-import { ChatImageScope, Md } from "./Md";
+import { ChatImageScope, Md, mentionsAsText } from "./Md";
 import { ChatLinksContext, type ChatLinks } from "./ChatLinks";
 import { CITED_ID, messageRef } from "../agentMessages";
 import { PlanStrip } from "./PlanStrip";
@@ -1662,6 +1668,13 @@ function computeToolActivity(part: ChatPart): ToolActivity {
   const filePath = inputString(normalizedInput, "filePath", "file_path", "notebookPath", "notebook_path", "path");
   const description = inputString(normalizedInput, "description");
   if (part.state?.title === "subagent") return { kind: "agent", label: description ?? m.activity_ran_subagent() };
+  // Shown only when the turn ended without the close this call asked for.
+  const close = yieldCallClose(part);
+  if (close?.text) {
+    const status = close.kind === "need" ? m.chat_turn_close_need() : close.kind ? TURN_CLOSE_KINDS[close.kind]?.label() : undefined;
+    const text = mentionsAsText(close.text);
+    return { kind: "command", label: status ? m.chat_turn_close_with_status({ status, text }) : text };
+  }
   const alphaxivTool = [tool, part.state?.title]
     .map((name) => name?.match(ALPHAXIV_TOOL)?.[1])
     .find((name) => name != null);
@@ -4017,7 +4030,9 @@ export const Message = memo(function Message({
   const turns = responseTurns.map((turn) => turn.message);
   const response = splitResponseParts(turns, predictTextTail, replies);
   const predictingAnswer = predictTextTail && response.answerMessageId === message.id;
-  const copyText = predictingAnswer && !message.completedAt ? "" : responseText({ ...message, parts: response.answer });
+  // A yield closes its group, so only the last message can carry one; a failed turn shows its recovery instead.
+  const close = responseTurns.at(-1)?.turnStatus ? undefined : sent.at(-1)?.turnYield;
+  const copyText = predictingAnswer && !message.completedAt ? "" : responseText({ ...message, parts: response.answer, turnYield: close });
   const answerRef = messageRef(response.answerMessageId ?? message.id);
   return (
     <div className="msg-assistant group/turn text-base leading-relaxed text-text min-w-0">
@@ -4083,6 +4098,65 @@ export const Message = memo(function Message({
     </div>
   );
 });
+
+/** How each reason a turn ended is drawn and named; a kind from a newer host has no entry. */
+const TURN_CLOSE_KINDS: Partial<Record<string, { Icon: typeof Hourglass; tone: string; label: () => string }>> = {
+  running: { Icon: Hourglass, tone: "text-accent-blue", label: m.chat_turn_close_running },
+  done: { Icon: CircleCheck, tone: "text-accent-green", label: m.chat_turn_close_done },
+};
+
+function ReportTime({ at }: { at: number }) {
+  const [age, setAge] = useState(() => timeAgo(at));
+  useEffect(() => {
+    const tick = () => setAge(timeAgo(at));
+    tick();
+    const timer = window.setInterval(tick, 1000);
+    return () => window.clearInterval(timer);
+  }, [at]);
+
+  return <time aria-live="off" className="shrink-0 text-xs tabular-nums text-ink-subtext" dateTime={new Date(at).toISOString()}>{age}</time>;
+}
+
+/** The line an agent ended its turn with: why it stopped and what restarts the work. */
+function TurnClose({ close, historical, fullAuto, at, onOpenFile, onOpenRun }: {
+  close: TurnYield;
+  historical: boolean;
+  fullAuto: boolean;
+  at?: number | null;
+  onOpenFile?: OpenTranscriptFile;
+  onOpenRun?: OpenTranscriptTarget;
+}) {
+  const kind = TURN_CLOSE_KINDS[close.kind];
+  const Icon = historical ? FileText : kind?.Icon;
+  const label = historical ? m.chat_turn_last_update() : kind?.label();
+  const tone = fullAuto ? "text-accent-purple" : kind?.tone;
+  return (
+    <div
+      role="group"
+      aria-label={label}
+      tabIndex={0}
+      className="mb-2.5 flex min-h-0 max-h-[min(8rem,20vh)] items-start gap-2 overflow-y-auto rounded-lg border border-border bg-surface px-3 py-2 text-sm leading-5 text-text focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:-outline-offset-2"
+      data-turn-close={close.kind}
+    >
+      {Icon && (
+        <span className={`inline-flex h-5 shrink-0 items-center ${tone}`}>
+          <Icon size={14} aria-hidden="true" />
+        </span>
+      )}
+      <div className="min-w-0 flex-1">
+        {(label || at != null) && (
+          <div className="flex flex-wrap items-baseline justify-between gap-x-2">
+            <span className="font-medium">{label}</span>
+            {at != null && <ReportTime key={at} at={at} />}
+          </div>
+        )}
+        <div dir="auto" className="wrap-anywhere text-ink-subtext [&_.md]:leading-5 [&_.md]:text-ink-subtext">
+          <Md text={close.text} onOpenFile={onOpenFile} onOpenRun={onOpenRun} />
+        </div>
+      </div>
+    </div>
+  );
+}
 
 interface ReceiptItem {
   icon: React.ReactNode;
@@ -4273,11 +4347,6 @@ function startsTurn(message: ChatMessage) {
   if (message.role === "user") return !shellExchangePart(message);
   return !message.parts.every((part) => (part.tool && TURN_MARKER_TOOLS.has(part.tool))
     || (part.type === "prompt" && part.prompt?.kind === "permission"));
-}
-
-function shellExchangePart(message: ChatMessage): ChatPart | null {
-  const part = message.parts.length === 1 ? message.parts[0] : undefined;
-  return message.role === "user" && part?.type === "tool" && part.tool === SHELL_TOOL ? part : null;
 }
 
 /** A composer `!` command and what it printed: the user's own shell run, shown
@@ -4681,7 +4750,7 @@ function latestToolStates(messages: ChatMessage[]): { messageId: string; states:
   const visit = (parts: ChatPart[], parent: string) => {
     for (const part of parts) {
       const path = `${parent}/${part.id}`;
-      if (part.type === "tool" && part.state?.status) {
+      if (part.type === "tool" && part.state?.status && !yieldCallClose(part)) {
         states.set(path, { status: part.state.status, part });
       }
       if (part.children?.length) visit(part.children, path);
@@ -5457,7 +5526,7 @@ function SessionRow({
   busy,
   waiting,
   runs,
-  leadRun = null,
+  inboxDetail,
   variant,
   revealTitle,
   onOpen,
@@ -5483,8 +5552,7 @@ function SessionRow({
   waiting: boolean;
   /** The chat's runs above its composer: live, flagged, or ended and not yet answered. */
   runs: readonly ShownRun[];
-  /** The run an inbox card gives its middle line to. */
-  leadRun?: ShownRun | null;
+  inboxDetail: Extract<SidebarRow, { kind: "inbox" }>["detail"];
   /** `inbox`: title and agent, then project and what the chat is doing. `done`: one line, restored from its hover button. */
   variant: "list" | "inbox" | "done";
   /** Nonce set while this row's freshly auto-generated title should play its
@@ -5515,10 +5583,12 @@ function SessionRow({
   const open = menuAt !== null;
   const runMark = sessionRunMark(runs, session.id);
   const runFlag = runMark === "waiting" || runMark === "flagged";
-  const lead = inbox && leadRun && runModel({ item: leadRun, monitor: null, shown: false, agent: m.chat_the_agent(), now: Date.now(), nextRetryMs: null });
+  const needsInput = inboxDetail === "need";
+  const lead = inboxDetail && !needsInput && runModel({ item: inboxDetail, monitor: null, shown: false, agent: m.chat_the_agent(), now: Date.now(), nextRetryMs: null });
   const title = session.title?.trim() || m.chat_untitled();
   const attention = runMark === "waiting" ? m.chat_run_needs_attention() : runMark === "flagged" ? m.chat_run_flagged() : waiting ? m.chat_panel_waiting_for_your_input() : null;
-  const sessionDescription = `${title} · ${harnessLabel(session.harness, session.harnessName)}${modelName ? ` · ${modelName}` : ""}${attention ? ` · ${attention}` : ""}`;
+  const need = needsInput && session.yieldText ? mentionsAsText(session.yieldText) : null;
+  const sessionDescription = `${title} · ${harnessLabel(session.harness, session.harnessName)}${modelName ? ` · ${modelName}` : ""}${attention ? ` · ${attention}` : ""}${need ? ` · ${need}` : ""}`;
   const [editing, setEditing] = useState(false);
   // Seeded by startEditing() before the input mounts; "" is just a placeholder.
   const [draft, setDraft] = useState("");
@@ -5736,7 +5806,7 @@ function SessionRow({
         if (!ref.current?.contains(event.relatedTarget) && !cardRef.current?.contains(event.relatedTarget)) dismissed.current = false;
         scheduleClose();
       }}
-      className={`session-row relative flex items-center gap-2 w-full ${inbox ? `inbox ${lead ? "h-17.5" : "h-12.5"}` : variant === "done" ? "h-8" : "h-8.5"} text-start px-2.25 rounded-md text-sm text-text cursor-pointer select-none [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium [&_.session-dot:empty]:hidden [&_.session-dot]:w-4 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title[data-overflow]]:[mask-image:linear-gradient(to_right,black_calc(100%_-_16px),transparent)] [&_.session-title]:whitespace-nowrap [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:size-6 [&_.session-menu-btn]:-mx-1 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-visible_.session-menu-btn]:inline-flex [&_.session-menu-btn:focus-within]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&.card-open_.session-menu-btn]:inline-flex [&:hover_.session-dot]:hidden [&:focus-visible_.session-dot]:hidden [&:has(.session-menu-btn:focus-within)_.session-dot]:hidden [&.menu-open_.session-dot]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-accent-teal [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-accent-blue [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:absolute [&_.session-title-input]:inset-0 [&_.session-title-input]:size-full [&_.session-title-input]:py-0 [&_.session-title-input]:ps-0 [&_.session-title-input]:pe-[9px] [&_.session-title-input]:indent-[9px] [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-focus-border [&_.session-title-input]:rounded-md [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-dot]:hidden [&_.session-done-btn]:hidden [&:hover_.session-done-btn]:inline-flex [&:focus-visible_.session-done-btn]:inline-flex [&_.session-done-btn:focus-visible]:inline-flex [&_.session-done-btn:focus-within]:inline-flex [&:has(.session-done-btn:focus-within)_.session-logo]:hidden [&.card-open_.session-done-btn]:inline-flex [&:has(.session-done-btn):hover_.session-logo]:hidden [&:has(.session-done-btn):focus-visible_.session-logo]:hidden [&:has(.session-done-btn:focus-visible)_.session-logo]:hidden [&.card-open:has(.session-done-btn)_.session-logo]:hidden [&.editing_.session-done-btn]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""} ${cardShown ? "card-open" : ""}  ${
+      className={`session-row relative flex items-center gap-2 w-full ${inbox ? `inbox ${inboxDetail ? "h-17.5" : "h-12.5"}` : variant === "done" ? "h-8" : "h-8.5"} text-start px-2.25 rounded-md text-sm text-text cursor-pointer select-none [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium [&_.session-dot:empty]:hidden [&_.session-dot]:w-4 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title[data-overflow]]:[mask-image:linear-gradient(to_right,black_calc(100%_-_16px),transparent)] [&_.session-title]:whitespace-nowrap [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:size-6 [&_.session-menu-btn]:-mx-1 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-visible_.session-menu-btn]:inline-flex [&_.session-menu-btn:focus-within]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&.card-open_.session-menu-btn]:inline-flex [&:hover_.session-dot]:hidden [&:focus-visible_.session-dot]:hidden [&:has(.session-menu-btn:focus-within)_.session-dot]:hidden [&.menu-open_.session-dot]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-accent-teal [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-accent-blue [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:absolute [&_.session-title-input]:inset-0 [&_.session-title-input]:size-full [&_.session-title-input]:py-0 [&_.session-title-input]:ps-0 [&_.session-title-input]:pe-[9px] [&_.session-title-input]:indent-[9px] [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-focus-border [&_.session-title-input]:rounded-md [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-dot]:hidden [&_.session-done-btn]:hidden [&:hover_.session-done-btn]:inline-flex [&:focus-visible_.session-done-btn]:inline-flex [&_.session-done-btn:focus-visible]:inline-flex [&_.session-done-btn:focus-within]:inline-flex [&:has(.session-done-btn:focus-within)_.session-logo]:hidden [&.card-open_.session-done-btn]:inline-flex [&:has(.session-done-btn):hover_.session-logo]:hidden [&:has(.session-done-btn):focus-visible_.session-logo]:hidden [&:has(.session-done-btn:focus-visible)_.session-logo]:hidden [&.card-open:has(.session-done-btn)_.session-logo]:hidden [&.editing_.session-done-btn]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""} ${cardShown ? "card-open" : ""}  ${
         editing ? "editing" : ""
         }`}
       onContextMenu={(e) => {
@@ -5819,18 +5889,23 @@ function SessionRow({
               </button>
             )}
           </div>
-          {lead && (
+          {needsInput ? (
+            <div className="flex h-4 min-w-0 items-center gap-1.5 text-xs text-ink-purple">
+              <span className="flex w-4 shrink-0 justify-center"><HelpCircle size={12} aria-hidden="true" /></span>
+              <span dir="auto" className="truncate">{need || m.chat_turn_close_need()}</span>
+            </div>
+          ) : lead && (
             <div className={`flex h-4 min-w-0 items-center gap-1.5 text-xs ${lead.tone === "flag" ? "text-ink-amber" : "text-ink-subtext"}`}>
               {lead.tone !== "flag" && <span className="flex w-4 shrink-0 justify-center"><Mark tone={lead.tone} live={lead.live} label={lead.status} /></span>}
               <span dir="auto" className="truncate"><Sentence text={cardSentence(lead)} tone={lead.tone} /></span>
             </div>
           )}
-          <div className={`${lead ? "mt-0.5" : ""} flex items-center gap-2 text-xs text-subtext`}>
+          <div className={`${inboxDetail ? "mt-0.5" : ""} flex items-center gap-2 text-xs text-subtext`}>
             <span className="flex min-w-0 flex-1 items-center gap-1.5">
               <ProjectIconTile project={project} size="sm" />
               {!project.unnamed && <span className="truncate">{projectName}</span>}
             </span>
-            <InboxStatus status={chatStatus(session, busy, waiting, runs)} unread={unread} />
+            {!needsInput && <InboxStatus status={chatStatus(session, busy, waiting, runs)} unread={unread} />}
           </div>
         </div>
       ) : <>
@@ -5882,6 +5957,7 @@ function SessionRow({
           session={session}
           runs={runs}
           motion={cardMotion}
+          need={need}
           modelName={modelName}
           harnessLogo={harnessLogo}
           anchor={anchor}
@@ -7383,7 +7459,7 @@ export function ChatPanel({
   const allMessages = activeId ? (state.messagesBySession[activeId] ?? NO_MESSAGES) : NO_MESSAGES;
   const activeLeafId = activeId ? (state.activeLeafBySession[activeId] ?? null) : null;
   activeLeafRef.current = activeLeafId;
-  const messages = useMemo(() => activePath(allMessages, activeLeafId), [allMessages, activeLeafId]);
+  const messages = useMemo(() => hideClosedYieldCalls(activePath(allMessages, activeLeafId)), [allMessages, activeLeafId]);
   const previousBusySessions = useRef({ projectId, ids: state.busySessions });
   useEffect(() => {
     const previous = previousBusySessions.current;
@@ -7451,6 +7527,27 @@ export function ChatPanel({
     part.type === "prompt" && part.prompt?.kind === "question" && !part.prompt.resolved && (!part.prompt.nativeId || busy),
   )), [messages, busy]);
   const activeSession = openSession;
+  const autonomy = activeSession?.autonomy ?? sideDraftAutonomy ?? preferredAutonomy;
+  const fullAuto = autonomy === "autoresearch";
+  let tailIndex = messages.length - 1;
+  while (tailIndex >= 0 && shellExchangePart(messages[tailIndex])) tailIndex--;
+  const tail = messages[tailIndex];
+  const lastReport = useMemo(() => {
+    if (!fullAuto) return;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].turnYield) return messages[i];
+    }
+  }, [fullAuto, messages]);
+  let currentClose: TurnYield | undefined;
+  if (!busy && tail?.role === "assistant" && !tail.parts.some(isTurnStatusPart)) {
+    const summary = activeSession?.activeLeafId === tail.id ? activeSession : undefined;
+    if (summary?.yieldKind && summary.yieldText) {
+      currentClose = { kind: summary.yieldKind, text: summary.yieldText };
+    } else if (summary?.yieldKind !== null) {
+      currentClose = tail.turnYield;
+    }
+  }
+
   const ancestors = embedded || !onOpenDelegate ? [] : delegateAncestors(sessions, activeSession);
   // Once the user writes in a delegate, whether it still reports to its parent is theirs to decide.
   const steeringDelegate = Boolean(activeSession?.delegate?.notifies) && (draft.trim() !== ""
@@ -7459,21 +7556,9 @@ export function ChatPanel({
   // Nonce while the open session's title is mid-reveal; undefined = static.
   const activeTitleReveal = activeSession ? titleReveals.get(activeSession.id) : undefined;
 
-  // Shell exchanges don't start a new agent turn or resolve its pending plan.
   const pendingPlan = useMemo(() => {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].role === "user" && !shellExchangePart(messages[i])) break;
-      for (const part of messages[i].parts) {
-        if (part.type === "prompt" && part.prompt?.kind === "plan" && !part.prompt.resolved) {
-          return {
-            promptId: part.id,
-            plan: part.prompt.plan ?? "",
-            synthesized: !!part.prompt.synthesized,
-          };
-        }
-      }
-    }
-    return null;
+    const part = pendingPlanPart(messages);
+    return part && { promptId: part.id, plan: part.prompt?.plan ?? "", synthesized: !!part.prompt?.synthesized };
   }, [messages]);
 
   const knownCommand = (name: string) => {
@@ -8375,6 +8460,10 @@ export function ChatPanel({
 
   const questions = useQuestions(activeId, pendingQuestions, respond);
   const asking = questions.part !== null;
+  const visibleClose = pendingPlan || asking ? undefined : currentClose;
+  const closingQuestion = visibleClose?.kind === "need" && tail ? { id: tail.id, text: visibleClose.text } : null;
+  const report = closingQuestion ? undefined : visibleClose ?? lastReport?.turnYield;
+  const reportAt = fullAuto ? (visibleClose ? tail?.completedAt : lastReport?.completedAt) : undefined;
   const showQuestion = questions.show;
   const searchedPartId = focusedMessage?.sessionId === activeId ? focusedMessage.partId : undefined;
   useEffect(() => {
@@ -8562,9 +8651,9 @@ export function ChatPanel({
   useHotkey(appHotkeys["chat.find"], openFind, { enabled: mainView === "chat" && !contentInert && (embedded ? searchRegion === "right" : searchRegion !== "right"), requireReset: true, ignoreInputs: false, capture: true, conflictBehavior: "allow" });
   useHotkey("Mod+Shift+Enter", newTask, { enabled: !embedded, requireReset: true, conflictBehavior: "allow" });
 
-  const sessionWaiting = (session: ChatSession) => session.id === activeId && historyQuery.data
-    ? hasPendingInput(messages, busy) : session.awaitingInput === true;
   const sessionBusy = (project: Project, session: ChatSession) => project.id === projectId ? state.busySessions.has(session.id) : session.busy;
+  const sessionWaiting = (project: Project, session: ChatSession) => chatNeedsYou(session, sessionBusy(project, session),
+    session.id === activeId && historyQuery.data ? hasPendingInput(messages, busy) : session.awaitingInput === true);
   const sidebarRows: SidebarRow[] = [];
   const projectSessions = (project: Project) => project.id === projectId ? sessions : projectSessionsQueries[queriedProjects.indexOf(project)].data ?? EMPTY_SESSIONS;
   if (sidebarGrouping === "projects") {
@@ -8590,14 +8679,14 @@ export function ChatPanel({
     const selected = matching.find((session) => session.id === activeId);
     if (selected && !visible.some((session) => session.id === activeId)) visible = [...visible.slice(0, chatLimit - 1), selected];
     const collapsed = collapsedProjects.includes(group);
-    sidebarRows.push({ kind: "project", project, collapsed, busy: collapsed && matching.some((session) => sessionBusy(project, session) && !sessionWaiting(session)) });
+    sidebarRows.push({ kind: "project", project, collapsed, busy: collapsed && matching.some((session) => sessionBusy(project, session) && !sessionWaiting(project, session)) });
     if (collapsed) return;
     visible.forEach((session) => sidebarRows.push({ kind: "chat", project, session }));
     if (matching.length > 6) sidebarRows.push({ kind: "more", project });
     if (!visible.length) sidebarRows.push({ kind: "status", project, pending: query.isPending, error: Boolean(query.error), retry: () => void query.refetch() });
   });
   const atWork = ({ project, session }: { project: Project; session: ChatSession }) =>
-    chatStatusWorking(chatStatus(session, sessionBusy(project, session), sessionWaiting(session), runsBySession.get(session.id) ?? EMPTY_RUNS));
+    chatStatusWorking(chatStatus(session, sessionBusy(project, session), sessionWaiting(project, session), runsBySession.get(session.id) ?? EMPTY_RUNS));
   /** Every open chat not at work, read whole from the server in the inbox's order; throws when a page can't be read. */
   const inboxChats = async () => {
     const read: ChatSession[] = [];
@@ -8678,7 +8767,12 @@ export function ChatPanel({
     const pushSection = (section: "inbox" | "working", chats: typeof open, count = chats.length) => {
       const collapsed = collapsedInbox.includes(section);
       sidebarRows.push({ kind: "section", section, collapsed, count });
-      if (!collapsed) chats.forEach(({ project, session }) => sidebarRows.push({ kind: "inbox", section, project, session, run: sessionLeadRun(runsBySession.get(session.id) ?? EMPTY_RUNS, session.id, session.lastRun) }));
+      if (!collapsed) chats.forEach(({ project, session }) => {
+        const detail = chatNeedsYou(session, sessionBusy(project, session), false)
+          ? "need"
+          : sessionLeadRun(runsBySession.get(session.id) ?? EMPTY_RUNS, session.id, session.lastRun);
+        sidebarRows.push({ kind: "inbox", section, project, session, detail });
+      });
       return collapsed;
     };
     const pushWorking = () => { if (working.length) pushSection("working", working); };
@@ -9072,7 +9166,7 @@ export function ChatPanel({
         </div>
       );
     }
-    const sessionRow = (project: Project, s: ChatSession, variant: "list" | "inbox" | "done", leadRun: ShownRun | null, markBelowDone: boolean) => {
+    const sessionRow = (project: Project, s: ChatSession, variant: "list" | "inbox" | "done", inboxDetail: React.ComponentProps<typeof SessionRow>["inboxDetail"], markBelowDone: boolean) => {
       const sessionHarness = sessionAcpHarness(s, selectionHarness(harnesses, s));
       const sessionModel = sessionHarness?.models.find((model) => model.id === s.model);
       return (
@@ -9088,9 +9182,9 @@ export function ChatPanel({
           active={s.id === activeId && mainView === "chat"}
           unread={unreadSessionIds.has(s.id)}
           busy={sessionBusy(project, s)}
-          waiting={sessionWaiting(s)}
+          waiting={sessionWaiting(project, s)}
           runs={runsBySession.get(s.id) ?? EMPTY_RUNS}
-          leadRun={leadRun}
+          inboxDetail={inboxDetail}
           markBelowDone={markBelowDone}
           variant={variant}
           revealTitle={titleReveals.get(s.id)}
@@ -9123,7 +9217,7 @@ export function ChatPanel({
           </div>
         ) : s ? (
           <div className={sidebarGrouping === "projects" && !project.unnamed ? "ms-5.5" : undefined}>
-            {sessionRow(project, s, row.kind === "inbox" ? "inbox" : row.kind === "done" ? "done" : "list", row.kind === "inbox" ? row.run : null, row.kind === "inbox" && row.section === "inbox")}
+            {sessionRow(project, s, row.kind === "inbox" ? "inbox" : row.kind === "done" ? "done" : "list", row.kind === "inbox" ? row.detail : null, row.kind === "inbox" && row.section === "inbox")}
           </div>
         ) : row.kind === "more" ? (
           <Button variant="ghost" size="small" className="ms-5.5 font-normal text-subtext" aria-expanded={sidebarGroup(project) in chatLimits} onClick={() => {
@@ -9479,7 +9573,7 @@ export function ChatPanel({
           </div>
         ) : (
           <div
-            className="chat-thread flex-1 min-h-0 overflow-y-auto [overflow-anchor:none] [scrollbar-gutter:stable_both-edges]"
+            className={`chat-thread flex-1 ${report ? "min-h-6" : "min-h-0"} overflow-y-auto [overflow-anchor:none] [scrollbar-gutter:stable_both-edges]`}
             ref={threadRef}
             tabIndex={0}
             role="region"
@@ -9587,7 +9681,7 @@ export function ChatPanel({
 
         {/* Docked while a plan awaits a decision, so the approval controls never
           scroll away. Actions mirror the (now compact) inline card's wire. */}
-        <div inert={contentLoading || Boolean(contentError) || historyLoading} className={`composer flex flex-col px-3 pb-3 ${questions.part ? "min-h-0" : "shrink-0"} relative z-4 bg-background w-full max-w-readable my-0 mx-auto`}>
+        <div inert={contentLoading || Boolean(contentError) || historyLoading} className={`composer flex flex-col px-3 pb-3 ${asking || closingQuestion || report ? "min-h-0" : "shrink-0"} relative z-4 bg-background w-full max-w-readable my-0 mx-auto`}>
           {threadMounted && (
             <Tooltip interactive content={m.chat_scroll_to_bottom()} className={`absolute bottom-full left-1/2 z-5 mb-6 -translate-x-1/2 transition-opacity duration-150 ease-standard ${transcriptAtBottom ? "pointer-events-none opacity-0" : "opacity-100"}`}>
               <IconButton
@@ -9609,6 +9703,7 @@ export function ChatPanel({
               key={activeId}
               sessionId={activeId}
               agent={assistantLabel}
+              nameSingleRun={fullAuto}
               onOpenRun={onOpenRun}
               onOpenRunPage={onOpenRunPage}
             />
@@ -9744,7 +9839,22 @@ export function ChatPanel({
             />
           )}
           <RemoteConnectionStrip />
-          <div inert={connection !== null} className={`composer-frame flex flex-col min-h-0 rounded-xl bg-surface${connection ? " opacity-60" : ""}`} data-onboarding="composer">
+          <div role="status" aria-atomic={false} className={report ? "flex min-h-0 flex-col overflow-hidden" : undefined}>
+            {closingQuestion && <span className="sr-only">{mentionsAsText(closingQuestion.text)}</span>}
+            {report && (
+              <ChatImageScope projectId={projectId} sessionId={activeId}>
+                <TurnClose
+                  close={report}
+                  historical={!visibleClose}
+                  fullAuto={fullAuto}
+                  at={reportAt}
+                  onOpenFile={openFileInSession}
+                  onOpenRun={onOpenRun}
+                />
+              </ChatImageScope>
+            )}
+          </div>
+          <div inert={connection !== null} className={`composer-frame flex flex-col min-h-0 rounded-xl bg-surface${report && !asking ? " shrink-0" : ""}${connection ? " opacity-60" : ""}`} data-onboarding="composer">
             <div className={`composer-box relative flex flex-col min-h-0 rounded-xl border ${bashMode && !asking ? "border-accent-amber" : "border-border"} bg-background shadow-control-subtle`}>
               {unconfirmedSend !== null && (
                 <div id={unconfirmedSendId} role="alert" className="flex items-start gap-2 pt-2 px-3 text-sm text-text">
@@ -9827,7 +9937,7 @@ export function ChatPanel({
                   {settingsError}
                 </div>
               )}
-              {questions.part && (
+              {questions.part ? (
                 <QuestionDock
                   key={questions.part.id}
                   part={questions.part}
@@ -9840,9 +9950,20 @@ export function ChatPanel({
                   searchTarget={focusedMessage?.partId === questions.part.id}
                   onPick={questions.pick}
                 />
+              ) : closingQuestion && (
+                <ChatImageScope projectId={projectId} sessionId={activeId}>
+                  <QuestionDock
+                    key={closingQuestion.id}
+                    reply={{
+                      id: closingQuestion.id,
+                      time: reportAt != null ? <ReportTime key={reportAt} at={reportAt} /> : undefined,
+                      text: <Md text={closingQuestion.text} onOpenFile={openFileInSession} onOpenRun={onOpenRun} />,
+                    }}
+                  />
+                </ChatImageScope>
               )}
               {/* The answer lines up with the question's text above it. */}
-              <div className={`composer-input flex min-w-0 items-end ${asking ? "relative [--composer-pad-x:1rem]" : ""}`}>
+              <div className={`composer-input flex min-w-0 items-end ${asking || closingQuestion ? "relative [--composer-pad-x:1rem]" : ""}`}>
                 <ComposerEditor
                   ref={composerRef}
                   value={questions.part ? questions.answer.note : draft}
@@ -9854,15 +9975,17 @@ export function ChatPanel({
                         : questions.part?.prompt?.options?.length
                           ? m.chat_question_custom_response()
                           : m.chat_question_your_answer()
-                      : composerSelection && !activeHarness?.agentReady
-                        ? composerSignIn
-                          ? m.add_agent_sign_in_title({ name: autoDir(agentName ?? activeHarness?.name ?? "") })
-                          : m.chat_harness_unavailable({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
-                        : draftProject
-                          ? m.chat_new_project_placeholder()
-                          : activeId
-                            ? m.chat_followup_placeholder()
-                            : m.chat_new_chat_placeholder()
+                      : closingQuestion && !bashMode
+                        ? m.chat_question_your_answer()
+                        : composerSelection && !activeHarness?.agentReady
+                          ? composerSignIn
+                            ? m.add_agent_sign_in_title({ name: autoDir(agentName ?? activeHarness?.name ?? "") })
+                            : m.chat_harness_unavailable({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
+                          : draftProject
+                            ? m.chat_new_project_placeholder()
+                            : activeId
+                              ? m.chat_followup_placeholder()
+                              : m.chat_new_chat_placeholder()
                   }
                   plain={bashMode && !asking}
                   readOnly={questions.busy}
@@ -10071,24 +10194,42 @@ export function ChatPanel({
                   </IconButton>
                 </Tooltip>
               )}
-              {(sessionGoal || goalArmed) && (
-                <Tooltip interactive content={goalArmed ? m.goal_command_description() : m.chat_panel_clear_goal({ goal: autoDir(sessionGoal) })}>
+              {goalArmed ? (
+                <Tooltip interactive content={m.goal_command_description()}>
                   <Button
                     type="button"
                     size="small"
                     variant="purple"
                     active
                     className="group max-w-60"
-                    aria-label={goalArmed ? m.chat_panel_goal() : m.chat_panel_clear_goal({ goal: autoDir(sessionGoal) })}
-                    onClick={() => {
-                      setGoalScope(null);
-                      if (sessionGoal) void setGoal("clear");
-                    }}
+                    aria-label={m.chat_panel_goal()}
+                    onClick={() => setGoalScope(null)}
                   >
                     <span className="relative size-4" aria-hidden="true">
                       <Goal className="absolute inset-0 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0" size={16} strokeWidth={1.5} />
                       <X className="absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" size={16} strokeWidth={1.5} />
                     </span>
+                    <span className="truncate">{m.chat_panel_goal()}</span>
+                  </Button>
+                </Tooltip>
+              ) : sessionGoal && openSession && (
+                <Tooltip interactive content={m.chat_panel_edit_goal({ goal: autoDir(sessionGoal) })}>
+                  <Button
+                    type="button"
+                    size="small"
+                    variant="purple"
+                    active
+                    className="max-w-60"
+                    aria-label={m.chat_panel_edit_goal({ goal: autoDir(sessionGoal) })}
+                    aria-haspopup="dialog"
+                    onClick={() => showCustomDialog({
+                      component: GoalDialog,
+                      props: { sessionId: openSession.id, projectId: openSession.projectId, initialGoal: sessionGoal, focusComposer: () => composerRef.current?.focus() },
+                      onConfirm: async (goal) => { await patchSession(openSession, { goal }); },
+                      onCancel: "close",
+                    })}
+                  >
+                    <Goal size={16} strokeWidth={1.5} aria-hidden="true" />
                     <span className="truncate">{m.chat_panel_goal()}</span>
                   </Button>
                 </Tooltip>
@@ -10145,7 +10286,7 @@ export function ChatPanel({
                   reasoningChoices={activeHarness?.agentReady ? reasoning.choices : []}
                   defaultReasoningId={reasoning.defaultId}
                   onSelectReasoning={setReasoningLevel}
-                  autonomy={openSession?.autonomy ?? sideDraftAutonomy ?? preferredAutonomy}
+                  autonomy={autonomy}
                   onSelectAutonomy={setAutonomy}
                   disabled={switchingAgent}
                   lockHarness={busy || switchingAgent || (!openSession && !!sideParentSessionId)}
