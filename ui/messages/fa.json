@@ -2493,6 +2493,7 @@
   "create_project_confirm": "ساخت پروژه",
   "create_project_folder_has_files": "این پوشه از قبل فایل دارد. مکان دیگری انتخاب کنید.",
   "create_project_created": "ساخته شد",
+  "create_project_not_created": "ساخته نشد",
   "create_project_review": "بازبینی…",
   "activity_proposed_project": "پروژهٔ {name} را پیشنهاد داد",
   "chat_delete_scratch_session_confirm": "«{title}» حذف شود؟\n\nاین گفتگو پروژه ندارد، پس متن گفتگو، گفتگوهای جانبی و فایل‌هایش برای همیشه حذف خواهند شد.",

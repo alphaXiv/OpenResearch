@@ -1474,7 +1474,14 @@ pub fn session_json_with(store: Option<&Store>, s: &StoredChatSession, busy: boo
         .filter(|models| models.as_array().is_some_and(|models| !models.is_empty()));
     let pending_project = store
         .and_then(|store| store.chat_project_move(&s.id).ok().flatten())
-        .map(|(name, path)| json!({ "name": name, "path": path }));
+        .map(|waiting| {
+            json!({
+                "name": waiting.name,
+                "path": waiting.path,
+                "proposal": waiting.proposal,
+                "requestedAt": waiting.requested_at,
+            })
+        });
     json!({
         "id": s.id,
         "projectId": s.project_id,
@@ -3214,6 +3221,9 @@ pub struct ChatHost {
     queue_dispatch_suppressed: std::sync::Mutex<HashSet<String>>,
     /// Whether a project move may be waiting, so most turn ends skip the store.
     project_moves_waiting: std::sync::atomic::AtomicBool,
+    /// Holds a project against every other change to it, and against a
+    /// data-directory move, until dropped; refuses while either is under way.
+    project_change: std::sync::OnceLock<project_move::ProjectChangeGuard>,
     queue_dispatch_cancelled: std::sync::Mutex<HashSet<String>>,
     /// Sink for mid-turn steering text, present only while a capable harness is running.
     steering: std::sync::Mutex<HashMap<String, SteerSink>>,
@@ -3850,6 +3860,7 @@ mod slash_skill_tests {
             run_command: None,
             paper_id: None,
             icon: None,
+            proposal: None,
             created_at: 0,
             updated_at: 0,
         }
@@ -4186,6 +4197,7 @@ impl ChatHost {
             queue_dispatch_suppressed: std::sync::Mutex::new(HashSet::new()),
             // Until the first pass reads the store, a move from before a restart may wait.
             project_moves_waiting: std::sync::atomic::AtomicBool::new(true),
+            project_change: std::sync::OnceLock::new(),
             queue_dispatch_cancelled: std::sync::Mutex::new(HashSet::new()),
             steering: std::sync::Mutex::new(HashMap::new()),
             pending_steers: std::sync::Mutex::new(HashMap::new()),
@@ -4201,6 +4213,11 @@ impl ChatHost {
         self.opencode.set_up_port(port);
         self.codex.set_up_port(port);
         self.acp.set_up_port(port);
+    }
+
+    /// Record how `orx up` holds a project while a chat becomes a project of its own.
+    pub fn set_project_change_guard(&self, guard: project_move::ProjectChangeGuard) {
+        let _ = self.project_change.set(guard);
     }
 
     /// The bound `orx up` port, if this host runs under a server (None in
@@ -6647,7 +6664,7 @@ impl ChatHost {
                     .is_some_and(|queue| !queue.is_empty());
                 if turns.contains_key(session_id) || has_queued {
                     if matches!(turns.get(session_id), Some(TurnState::Switching)) {
-                        return Err(anyhow!("Agent is switching. Send again once it finishes."));
+                        return Err(anyhow!("This chat is switching its agent or moving to a new project. Send again once it finishes."));
                     }
                     if matches!(turns.get(session_id), Some(TurnState::Cancelling)) {
                         return Err(anyhow!("session is stopping — send again once it is idle"));
@@ -9506,6 +9523,7 @@ impl TurnCtx {
                 run_command: None,
                 paper_id: None,
                 icon: None,
+                proposal: None,
                 created_at: 0,
                 updated_at: 0,
             },
@@ -11582,6 +11600,7 @@ mod cap_tests {
                 run_command: None,
                 paper_id: None,
                 icon: None,
+                proposal: None,
                 created_at: 1,
                 updated_at: 1,
             })
@@ -14118,6 +14137,7 @@ mod run_wakeup_tests {
                     run_command: None,
                     paper_id: None,
                     icon: None,
+                    proposal: None,
                     created_at: 1,
                     updated_at: 1,
                 })
@@ -14431,6 +14451,7 @@ mod run_wakeup_tests {
                 run_command: None,
                 paper_id: None,
                 icon: None,
+                proposal: None,
                 created_at: 1,
                 updated_at: 1,
             })
@@ -15285,6 +15306,7 @@ for line in sys.stdin:
                     run_command: None,
                     paper_id: None,
                     icon: None,
+                    proposal: None,
                     created_at: 1,
                     updated_at: 1,
                 })
@@ -15430,6 +15452,7 @@ for line in sys.stdin:
                     run_command: None,
                     paper_id: None,
                     icon: None,
+                    proposal: None,
                     created_at: 1,
                     updated_at: 1,
                 })
@@ -15583,6 +15606,7 @@ for line in sys.stdin:
                     run_command: None,
                     paper_id: None,
                     icon: None,
+                    proposal: None,
                     created_at: 1,
                     updated_at: 1,
                 })
@@ -16283,6 +16307,7 @@ done
                 run_command: None,
                 paper_id: None,
                 icon: None,
+                proposal: None,
                 created_at: 1,
                 updated_at: 1,
             })

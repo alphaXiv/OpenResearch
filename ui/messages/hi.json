@@ -2493,6 +2493,7 @@
   "create_project_confirm": "प्रोजेक्ट बनाएँ",
   "create_project_folder_has_files": "इस फ़ोल्डर में पहले से फ़ाइलें हैं। कोई नई जगह चुनें।",
   "create_project_created": "बनाया गया",
+  "create_project_not_created": "नहीं बनाया गया",
   "create_project_review": "समीक्षा करें…",
   "activity_proposed_project": "प्रोजेक्ट {name} प्रस्तावित किया",
   "chat_delete_scratch_session_confirm": "“{title}” हटाएँ?\n\nइस चैट का कोई प्रोजेक्ट नहीं है, इसलिए इसका वार्तालाप, साइड चैट और फ़ाइलें स्थायी रूप से हटा दी जाएँगी।",

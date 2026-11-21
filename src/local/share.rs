@@ -788,15 +788,16 @@ fn import_staged(
 
     // Rows go in one short transaction; files are moved once they are committed.
     let tx = store.begin_immediate()?;
-    let mut project = super::projects::create_project(
+    let project = super::projects::create_project(
         store,
         &manifest.project.name,
         &target.to_string_lossy(),
-        super::projects::CreateProjectOptions::default(),
+        super::projects::CreateProjectOptions {
+            run_command: manifest.project.run_command.clone(),
+            paper_id: manifest.project.paper_id.clone(),
+            ..Default::default()
+        },
     )?;
-    project.run_command = manifest.project.run_command.clone();
-    project.paper_id = manifest.project.paper_id.clone();
-    store.update_local_project(&project)?;
     let artifacts = artifacts_root.join(&project.slug);
     let artifact_links = manifest
         .project
@@ -1245,6 +1246,7 @@ mod tests {
             run_command: None,
             paper_id: None,
             icon: None,
+            proposal: None,
             created_at: 0,
             updated_at: 0,
         };

@@ -1689,7 +1689,7 @@ impl ClaudeHost {
                 "Claude is still finishing a background task. Wait for its reply, or ask Claude to stop the task."
             ));
         }
-        self.kill_session_for(session_id, "fork-switched", false)
+        self.kill_session_for(session_id, "stopped-idle", false)
             .await;
         Ok(())
     }
