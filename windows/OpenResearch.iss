@@ -76,6 +76,7 @@ Filename: "{app}\OpenResearch.exe"; Description: "{cm:LaunchProgram,OpenResearch
 Type: filesandordirs; Name: "{app}\orx.exe.WebView2"
 Type: files; Name: "{app}\orx.exe.*.old"
 Type: filesandordirs; Name: "{app}\.orx-update-*"
+Type: files; Name: "{app}\download-click"
 
 [Code]
 const
@@ -104,11 +105,48 @@ begin
     'and then start OpenResearch.', mbError, MB_OK, IDOK);
 end;
 
+// The browser records the page a download started from in the installer's
+// Zone.Identifier stream; installer_click_id in src/telemetry.rs reads the id saved here.
+procedure SaveDownloadClick;
+var
+  Zone: AnsiString;
+  Query: String;
+  At: Integer;
+begin
+  try
+    if not LoadStringFromFile(ExpandConstant('{srcexe}') + ':Zone.Identifier', Zone) then
+      Exit;
+    Query := String(Zone);
+    At := Pos('ReferrerUrl=https://openresearch.sh/download?', Query);
+    if At = 0 then
+      Exit;
+    Delete(Query, 1, At + Length('ReferrerUrl=https://openresearch.sh/download'));
+    At := Pos(#13, Query);
+    if At = 0 then
+      At := Pos(#10, Query);
+    if At > 0 then
+      Query := Copy(Query, 1, At - 1);
+    Query := '&' + Query;
+    At := Pos('&c=', Query);
+    if At = 0 then
+      Exit;
+    Delete(Query, 1, At + 2);
+    At := Pos('&', Query);
+    if At > 0 then
+      Query := Copy(Query, 1, At - 1);
+    SaveStringToFile(ExpandConstant('{app}\download-click'), Query, False);
+  except
+  end;
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ResultCode: Integer;
 begin
-  if (CurStep <> ssPostInstall) or WebView2Installed then
+  if CurStep <> ssPostInstall then
+    Exit;
+  SaveDownloadClick;
+  if WebView2Installed then
     Exit;
   // The bootstrapper runs hidden and can take minutes.
   WizardForm.StatusLabel.Caption := 'Installing the Microsoft Edge WebView2 Runtime...';
