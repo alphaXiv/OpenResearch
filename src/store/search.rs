@@ -106,16 +106,16 @@ impl SearchRequest {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SearchPage {
-    hits: Vec<SearchHit>,
+    pub(crate) hits: Vec<SearchHit>,
     cursor: Option<String>,
-    indexing: bool,
-    requires_longer_query: bool,
+    pub(crate) indexing: bool,
+    pub(crate) requires_longer_query: bool,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SearchHit {
-    session_id: String,
+pub(crate) struct SearchHit {
+    pub(crate) session_id: String,
     project_id: String,
     message_id: String,
     part_id: Option<String>,
@@ -125,7 +125,7 @@ struct SearchHit {
     chat_title: Option<String>,
     archived: bool,
     on_active_branch: bool,
-    snippet: String,
+    pub(crate) snippet: String,
 }
 
 impl Store {

@@ -4766,6 +4766,19 @@ impl ChatHost {
         self.turns.lock().await.contains_key(session_id)
     }
 
+    /// Holds `session_id` busy with a turn that never ends.
+    #[cfg(test)]
+    pub(crate) async fn hold_turn(&self, session_id: &str) {
+        self.turns.lock().await.insert(
+            session_id.into(),
+            TurnState::Active(ActiveTurn {
+                handle: tokio::spawn(std::future::pending()),
+                message_id: format!("{session_id}_answer"),
+                turn_id: format!("{session_id}_turn"),
+            }),
+        );
+    }
+
     /// Run `f` only if none of `session_ids` has a turn, holding the turn map so none can start
     /// until it returns.
     pub async fn while_idle<T>(
@@ -5200,6 +5213,15 @@ impl ChatHost {
             .unwrap()
             .get(session_id)
             .is_some_and(|pending| pending.iter().any(|steer| steer.id == steer_id))
+    }
+
+    /// Whether a steer sent at or after `since` (ms) still waits for the agent to read it.
+    pub fn steered_since(&self, session_id: &str, since: i64) -> bool {
+        self.pending_steers
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .is_some_and(|pending| pending.iter().any(|steer| steer.sent_at >= since))
     }
 
     /// The oldest pending steer the agent was sent as `text`.

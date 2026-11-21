@@ -2,6 +2,8 @@
 //! is given relays `tools/list` and `tools/call` here, authenticated as the
 //! chat that harness runs.
 
+use std::collections::{HashMap, HashSet};
+
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
@@ -15,6 +17,7 @@ use crate::local::chat::{
     ORX_MESSAGE_PREFIX,
 };
 use crate::local::model_routes;
+use crate::store::search::SearchRequest;
 use crate::store::{Store, StoredChatSession};
 
 #[derive(Deserialize)]
@@ -145,6 +148,20 @@ fn tools(harness: &str) -> Value {
             },
         },
         {
+            "name": "chats",
+            "description": "Find chats around this one, one line each: id, title, project, model and what it is doing. Give one of: `view` for the top of the user's sidebar, `query` to search every chat's messages, Done ones included, or `relation` for the chats linked to `of` in the tree of chats that started one another. Walk the tree by passing a listed chat as `of`. `status` and `read` tell more about one chat.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "view": { "type": "string", "enum": ["inbox", "working"], "description": "`inbox`: chats not at work, such as those waiting on the user or finished, newest first. `working`: chats whose agent, delegates or experiments are at work." },
+                    "query": { "type": "string", "description": "Words to find in chats' messages, at least one of 3 or more characters." },
+                    "relation": { "type": "string", "enum": ["parent", "children", "siblings", "tree"], "description": "`parent`: the chat that started `of`. `children`: the chats `of` started. `siblings`: the other chats its parent started. `tree`: every chat descended from the chat the user started, indented." },
+                    "of": { "type": "string", "description": "The chat `relation` starts from, such as `chat_…`. Default this chat." },
+                    "limit": { "type": "integer", "description": "How many chats. Default 20, at most 50." },
+                },
+            },
+        },
+        {
             "name": "send",
             "description": "Send a message to any chat, such as one you delegated to, the chat that delegated to you, or a side chat's parent. It runs as that chat's next turn, or joins its running turn when its agent accepts steering. Refs such as `msg_3fa9c1d2` in the message expand to the messages they cite.",
             "inputSchema": {
@@ -258,6 +275,7 @@ async fn call(
             Ok(format!("Unsubscribed from {}.", ids.join(", ")))
         }
         "wait" => wait(state, caller, args).await,
+        "chats" => chats(state, caller, args).await,
         "status" => {
             let store = Store::open()?;
             let target = chat(&store, text(args, "chatId")?)?;
@@ -337,6 +355,15 @@ async fn call(
                 .await?;
             Ok(match sent {
                 None => format!("Sent into chat `{}`'s running turn.", target.id),
+                Some(result)
+                    if result.queued
+                        && !crate::local::harness::supports_steering(&target.harness) =>
+                {
+                    format!(
+                        "Queued for chat `{}`'s next turn: its agent takes no messages mid-turn.",
+                        target.id
+                    )
+                }
                 Some(result) if result.queued => {
                     format!("Queued for chat `{}`'s next turn.", target.id)
                 }
@@ -589,6 +616,7 @@ async fn wait(state: &AppState, caller: &StoredChatSession, args: &Value) -> Res
         .unwrap_or(WAIT_DEFAULT_SECONDS)
         .clamp(1, longest_wait(&caller.harness));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout);
+    let started = crate::store::now_ms();
     let named = args
         .get("chatIds")
         .is_some()
@@ -663,7 +691,9 @@ async fn wait(state: &AppState, caller: &StoredChatSession, args: &Value) -> Res
         } else {
             !collected.is_empty()
         };
-        if asked || done || waiting.is_empty() || std::time::Instant::now() >= deadline {
+        // The agent reads a message steered into this turn only once this call returns.
+        let steered = state.chat.steered_since(&caller.id, started);
+        if asked || done || steered || waiting.is_empty() || std::time::Instant::now() >= deadline {
             let mut told = Vec::new();
             for item in collected {
                 if let Some(token) = item.claim(&store)? {
@@ -671,7 +701,9 @@ async fn wait(state: &AppState, caller: &StoredChatSession, args: &Value) -> Res
                     told.push(item);
                 }
             }
-            let mut text = if told.is_empty() {
+            let mut text = if told.is_empty() && steered {
+                "A message for this chat arrived; it follows this result.".to_string()
+            } else if told.is_empty() {
                 format!("No news after {timeout} seconds.")
             } else {
                 news::messages(&store, &told)?
@@ -709,6 +741,310 @@ async fn wait(state: &AppState, caller: &StoredChatSession, args: &Value) -> Res
         drop(store);
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
+}
+
+async fn chats(state: &AppState, caller: &StoredChatSession, args: &Value) -> Result<String> {
+    let view = optional_text(args, "view");
+    let query = optional_text(args, "query");
+    let relation = optional_text(args, "relation");
+    if [view, query, relation].iter().flatten().count() != 1 {
+        bail!("Give one of `view`, `query` or `relation`.");
+    }
+    if relation.is_none() && optional_text(args, "of").is_some() {
+        bail!("`of` goes with `relation`.");
+    }
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(20)
+        .clamp(1, 50) as usize;
+
+    let activity = Activity::read(state).await?;
+    let store = Store::open()?;
+    let listing = Listing {
+        activity,
+        projects: store
+            .list_local_projects()?
+            .into_iter()
+            .map(|project| (project.id, project.name))
+            .collect(),
+        caller: &caller.id,
+        store: &store,
+    };
+
+    let mut lines = Vec::new();
+    let heading = match (view, query, relation.unwrap_or_default()) {
+        (Some("inbox"), _, _) => {
+            let mut before: Option<(i64, String)> = None;
+            'pages: loop {
+                let page = store.list_sidebar_chat_sessions(
+                    Some(false),
+                    before.as_ref().map(|(at, id)| (*at, id.as_str())),
+                )?;
+                let more = page.len() > 50;
+                for session in page.into_iter().take(50) {
+                    before = Some((session.updated_at, session.id.clone()));
+                    let (line, working) = listing.line(&session, None)?;
+                    if !working {
+                        lines.push(line);
+                    }
+                    if lines.len() > limit {
+                        break 'pages;
+                    }
+                }
+                if !more {
+                    break;
+                }
+            }
+            "The inbox, newest first:".to_string()
+        }
+        (Some("working"), _, _) => {
+            let live: Vec<&str> = listing.activity.live().collect();
+            let mut sessions = store.sidebar_chat_sessions_at_work(Some(false), &live)?;
+            // Newest first by creation, as the sidebar holds Working still while chats stream.
+            sessions.sort_by_key(|session| std::cmp::Reverse(session.created_at));
+            for session in &sessions {
+                let (line, working) = listing.line(session, None)?;
+                if working {
+                    lines.push(line);
+                }
+            }
+            "At work, newest first:".to_string()
+        }
+        (Some(other), _, _) => bail!("`view` is `inbox` or `working`, not `{other}`."),
+        (_, Some(query), _) => {
+            let request: SearchRequest =
+                serde_json::from_value(json!({ "q": query, "scope": "all", "limit": 100 }))?;
+            let page = store.search_chat_messages(&request.prepare()?)?;
+            if page.requires_longer_query {
+                bail!("Search with at least one word of 3 or more characters.");
+            }
+            let mut seen = HashSet::new();
+            for hit in page.hits {
+                if !seen.insert(hit.session_id.clone()) {
+                    continue;
+                }
+                let Some(session) = store.get_chat_session(&hit.session_id)? else {
+                    continue;
+                };
+                let snippet = hit.snippet.split_whitespace().collect::<Vec<_>>().join(" ");
+                let (line, _) = listing.line(&session, None)?;
+                lines.push(format!("{line}\n  > {snippet}"));
+            }
+            if page.indexing {
+                "Chats matching, newest first. Older chats are still being indexed, so some may be missing:".to_string()
+            } else {
+                "Chats matching, newest first:".to_string()
+            }
+        }
+        (None, None, relation) => {
+            let of = chat(&store, optional_text(args, "of").unwrap_or(&caller.id))?;
+            match relation {
+                "parent" => match parent(&store, &of.id)? {
+                    Some((id, kind)) => {
+                        let (line, _) = listing.line(&chat(&store, &id)?, None)?;
+                        lines.push(line);
+                        format!("Chat `{}` is a {kind} of:", of.id)
+                    }
+                    None => format!(
+                        "Chat `{}` was started by the user; it has no parent.",
+                        of.id
+                    ),
+                },
+                "children" => {
+                    for (id, kind) in children(&store, &of.id)? {
+                        if let Some(child) = store.get_chat_session(&id)? {
+                            lines.push(listing.line(&child, Some(kind))?.0);
+                        }
+                    }
+                    format!("Chats `{}` started:", of.id)
+                }
+                "siblings" => {
+                    let Some((parent, _)) = parent(&store, &of.id)? else {
+                        return Ok(format!(
+                            "Chat `{}` was started by the user; it has no siblings.",
+                            of.id
+                        ));
+                    };
+                    for (id, kind) in children(&store, &parent)? {
+                        if id == of.id {
+                            continue;
+                        }
+                        if let Some(sibling) = store.get_chat_session(&id)? {
+                            lines.push(listing.line(&sibling, Some(kind))?.0);
+                        }
+                    }
+                    format!("Other chats `{parent}` started:")
+                }
+                "tree" => {
+                    let mut root = of.id.clone();
+                    let mut seen = HashSet::from([root.clone()]);
+                    while let Some((id, _)) = parent(&store, &root)? {
+                        if !seen.insert(id.clone()) {
+                            break;
+                        }
+                        root = id;
+                    }
+                    let mut stack = vec![(root, 0, None)];
+                    let mut seen = HashSet::new();
+                    while let Some((id, depth, kind)) = stack.pop() {
+                        if !seen.insert(id.clone()) {
+                            continue;
+                        }
+                        let Some(session) = store.get_chat_session(&id)? else {
+                            continue;
+                        };
+                        let (line, _) = listing.line(&session, kind)?;
+                        lines.push(format!("{}{line}", "  ".repeat(depth)));
+                        let below = children(&store, &id)?;
+                        stack.extend(
+                            below
+                                .into_iter()
+                                .rev()
+                                .map(|(child, kind)| (child, depth + 1, Some(kind))),
+                        );
+                    }
+                    format!("The tree of chats `{}` belongs to:", of.id)
+                }
+                other => bail!(
+                    "`relation` is `parent`, `children`, `siblings` or `tree`, not `{other}`."
+                ),
+            }
+        }
+    };
+
+    if lines.is_empty() {
+        return Ok(format!("{heading}\n\nNone."));
+    }
+    let more = lines.len() > limit;
+    lines.truncate(limit);
+    let mut text = format!("{heading}\n\n{}", lines.join("\n"));
+    if more {
+        text.push_str("\n\nMore chats follow; raise `limit` to see them.");
+    }
+    Ok(text)
+}
+
+/// What the sidebar knows of every chat's work, read once per listing.
+struct Activity {
+    busy: HashSet<String>,
+    background: HashSet<String>,
+    runs: HashSet<String>,
+}
+
+impl Activity {
+    async fn read(state: &AppState) -> Result<Self> {
+        Ok(Self {
+            busy: state.chat.busy_sessions().await.into_iter().collect(),
+            background: state.chat.waiting_on().await?.into_keys().collect(),
+            runs: Store::open()?
+                .chat_active_runs()?
+                .into_iter()
+                .map(|(chat, _)| chat)
+                .collect(),
+        })
+    }
+
+    /// Chats whose agent or delegates are at work; experiments the store finds itself.
+    fn live(&self) -> impl Iterator<Item = &str> {
+        self.busy.union(&self.background).map(String::as_str)
+    }
+
+    /// What `session` is doing, and whether that puts it in the sidebar's
+    /// Working section: a chat waiting on the user stays in the inbox.
+    fn state(&self, store: &Store, session: &StoredChatSession) -> Result<(String, bool)> {
+        if let Some(pending) = delegation::pending_prompt(store, &session.id)? {
+            let text = if pending.kind() == "question" {
+                format!("asks a question, prompt `{}`", pending.id)
+            } else {
+                format!("waits for the user to {}", pending.awaits())
+            };
+            return Ok((text, false));
+        }
+        let at_work = if self.runs.contains(&session.id) {
+            Some("running an experiment")
+        } else if self.busy.contains(&session.id) {
+            Some("working")
+        } else if self.background.contains(&session.id) {
+            Some("waiting on background work or its delegates")
+        } else {
+            None
+        };
+        if let Some(text) = at_work {
+            return Ok((text.to_string(), true));
+        }
+        let text = match store.latest_chat_turn(&session.id)? {
+            _ if session.archived => "done",
+            Some(turn) if turn.state == "failed" => "failed",
+            Some(_) => "idle",
+            None => "not started",
+        };
+        Ok((text.to_string(), false))
+    }
+}
+
+struct Listing<'a> {
+    activity: Activity,
+    projects: HashMap<String, String>,
+    caller: &'a str,
+    store: &'a Store,
+}
+
+impl Listing<'_> {
+    /// One chat's line, and whether it is at work.
+    fn line(&self, session: &StoredChatSession, kind: Option<&str>) -> Result<(String, bool)> {
+        let (state, working) = self.activity.state(self.store, session)?;
+        let title = session
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map_or_else(|| "untitled".to_string(), |title| format!("\"{title}\""));
+        let kind = kind.map(|kind| format!(" ({kind})")).unwrap_or_default();
+        let project = self
+            .projects
+            .get(&session.project_id)
+            .map_or(session.project_id.as_str(), String::as_str);
+        let model = session.model.as_deref().unwrap_or(&session.harness);
+        let you = if session.id == self.caller {
+            " (you)"
+        } else {
+            ""
+        };
+        Ok((
+            format!(
+                "- `{}` {title}{kind} in {project}, {model}: {state}{you}",
+                session.id
+            ),
+            working,
+        ))
+    }
+}
+
+/// The chat that started `id`, and whether `id` is its delegate or its side chat.
+fn parent(store: &Store, id: &str) -> Result<Option<(String, &'static str)>> {
+    if let Some(parent) = store.delegation(id)?.parent {
+        return Ok(Some((parent, "delegate")));
+    }
+    Ok(store
+        .get_chat_session(id)?
+        .and_then(|session| session.side_parent_session_id)
+        .map(|parent| (parent, "side chat")))
+}
+
+/// The chats `id` started; a delegate sharing its worktree counts as a delegate.
+fn children(store: &Store, id: &str) -> Result<Vec<(String, &'static str)>> {
+    let delegates = store.chat_delegates_of(id)?;
+    let sides: Vec<String> = store
+        .side_chats_of(id)?
+        .into_iter()
+        .filter(|side| !delegates.contains(side))
+        .collect();
+    Ok(delegates
+        .into_iter()
+        .map(|id| (id, "delegate"))
+        .chain(sides.into_iter().map(|id| (id, "side chat")))
+        .collect())
 }
 
 async fn models(state: &AppState, requested: Option<&str>) -> Result<Vec<model_routes::Model>> {
@@ -755,4 +1091,232 @@ fn chat(store: &Store, id: &str) -> Result<StoredChatSession> {
     store
         .get_chat_session(id)?
         .ok_or_else(|| anyhow!("No chat `{id}` exists."))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::local::chat::SteerMessage;
+    use crate::store::StoredChatMessage;
+
+    fn add_chat(store: &Store, id: &str, title: &str, side_parent: Option<&str>, archived: bool) {
+        store
+            .create_chat_session(&StoredChatSession {
+                profile_id: None,
+                id: id.into(),
+                project_id: "proj_tree".into(),
+                harness: "codex".into(),
+                native_session_id: None,
+                native_fork_at: None,
+                title: Some(title.into()),
+                title_source: Some("user".into()),
+                model: Some("gpt-test".into()),
+                service_tier: None,
+                permission_mode: None,
+                plan_mode: false,
+                plan_reset_pending: false,
+                reasoning_level: None,
+                archived,
+                context_usage_json: None,
+                bootstrap_context: None,
+                goal: None,
+                autonomy: None,
+                active_leaf_id: None,
+                side_parent_session_id: side_parent.map(str::to_string),
+                side_parent_leaf_id: None,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .unwrap();
+    }
+
+    /// `root` started `a` (a delegate in its worktree), `b` (a delegate in its own) and
+    /// `side` (a side chat); `a` started `leaf`.
+    fn tree(store: &Store) {
+        store
+            .create_local_project(&crate::store::tests::local_project_fixture("proj_tree"))
+            .unwrap();
+        add_chat(store, "root", "Root", None, false);
+        add_chat(store, "a", "Delegate A", Some("root"), false);
+        add_chat(store, "b", "Delegate B", None, false);
+        add_chat(store, "side", "Side", Some("root"), false);
+        add_chat(store, "leaf", "Leaf", Some("a"), false);
+        store.record_chat_delegate("a", "root", true).unwrap();
+        store.record_chat_delegate("b", "root", true).unwrap();
+        store.record_chat_delegate("leaf", "a", false).unwrap();
+    }
+
+    async fn list(state: &AppState, caller: &str, args: Value) -> Result<String> {
+        let caller = Store::open()
+            .unwrap()
+            .get_chat_session(caller)
+            .unwrap()
+            .unwrap();
+        call(state, &caller, "chats", &args).await
+    }
+
+    fn ids(text: &str) -> Vec<&str> {
+        text.lines()
+            .filter_map(|line| line.trim_start().strip_prefix("- `"))
+            .filter_map(|line| line.split('`').next())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn relations_walk_the_tree_of_chats_that_started_one_another() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let state = super::super::tests::test_state();
+        tree(&Store::open().unwrap());
+
+        let parent = list(&state, "leaf", json!({ "relation": "parent" }))
+            .await
+            .unwrap();
+        assert_eq!(ids(&parent), ["a"]);
+        assert!(parent.contains("delegate of"), "{parent}");
+
+        let children = list(
+            &state,
+            "leaf",
+            json!({ "relation": "children", "of": "root" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ids(&children), ["a", "b", "side"]);
+        assert!(
+            children.contains("`side` \"Side\" (side chat)"),
+            "{children}"
+        );
+
+        let siblings = list(&state, "leaf", json!({ "relation": "siblings", "of": "a" }))
+            .await
+            .unwrap();
+        assert_eq!(ids(&siblings), ["b", "side"]);
+
+        let tree = list(&state, "leaf", json!({ "relation": "tree" }))
+            .await
+            .unwrap();
+        assert_eq!(ids(&tree), ["root", "a", "leaf", "b", "side"]);
+        let leaf = tree.lines().find(|line| line.contains("- `leaf`")).unwrap();
+        assert!(
+            leaf.starts_with("    - ") && leaf.ends_with("(you)"),
+            "{tree}"
+        );
+
+        let orphan = list(&state, "root", json!({ "relation": "siblings" }))
+            .await
+            .unwrap();
+        assert!(
+            ids(&orphan).is_empty() && orphan.contains("started by the user"),
+            "{orphan}"
+        );
+    }
+
+    #[tokio::test]
+    async fn views_split_open_chats_into_inbox_and_working_and_search_reaches_done() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let state = super::super::tests::test_state();
+        let store = Store::open().unwrap();
+        tree(&store);
+        add_chat(&store, "idle", "Idle", None, false);
+        add_chat(&store, "busy", "Busy", None, false);
+        add_chat(&store, "done", "Finished work", None, true);
+        state.chat.hold_turn("busy").await;
+        store
+            .upsert_chat_message(&StoredChatMessage {
+                id: "msg_done".into(),
+                session_id: "done".into(),
+                role: "user".into(),
+                parts_json:
+                    json!([{ "id": "p", "type": "text", "text": "tune the flamingo scheduler" }])
+                        .to_string(),
+                created_at: 1,
+                completed_at: Some(1),
+                parent_id: None,
+                base_native_session_id: None,
+                result_native_session_id: None,
+                native_harness: None,
+                result_native_message_id: None,
+            })
+            .unwrap();
+
+        let inbox = list(&state, "root", json!({ "view": "inbox" }))
+            .await
+            .unwrap();
+        let listed = ids(&inbox);
+        assert!(
+            listed.contains(&"idle") && listed.contains(&"root"),
+            "{inbox}"
+        );
+        assert!(
+            !listed
+                .iter()
+                .any(|id| ["busy", "done", "a", "leaf"].contains(id)),
+            "{inbox}"
+        );
+
+        let working = list(&state, "root", json!({ "view": "working" }))
+            .await
+            .unwrap();
+        assert_eq!(ids(&working), ["busy"]);
+        assert!(working.contains(": working"), "{working}");
+
+        let found = list(&state, "root", json!({ "query": "flamingo" }))
+            .await
+            .unwrap();
+        assert_eq!(ids(&found), ["done"]);
+        assert!(
+            found.contains(": done") && found.contains("flamingo scheduler"),
+            "{found}"
+        );
+
+        let error = list(&state, "root", json!({ "view": "inbox", "query": "x" }))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("one of"), "{error}");
+        let error = list(&state, "root", json!({ "query": "ab" }))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("3 or more"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn wait_returns_when_a_message_is_steered_into_the_waiting_turn() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let state = super::super::tests::test_state();
+        let store = Store::open().unwrap();
+        tree(&store);
+        store.subscribe_chat("root", "a", None).unwrap();
+        state.chat.hold_turn("root").await;
+        state.chat.hold_turn("a").await;
+
+        let caller = store.get_chat_session("root").unwrap().unwrap();
+        let waiting = tokio::spawn({
+            let state = state.clone();
+            async move { wait(&state, &caller, &json!({ "timeoutSeconds": 30 })).await }
+        });
+        tokio::task::yield_now().await;
+        let steer = SteerMessage {
+            id: "steer_1".into(),
+            display: "stop".into(),
+            text: "stop".into(),
+            client_turn_id: None,
+            orx: None,
+            sent_at: crate::store::now_ms() + 1,
+        };
+        state.chat.queue_steer("root", &steer, &store).unwrap();
+
+        let text = tokio::time::timeout(std::time::Duration::from_secs(10), waiting)
+            .await
+            .expect("wait should return once the steer is pending")
+            .unwrap()
+            .unwrap();
+        assert!(text.contains("A message for this chat arrived"), "{text}");
+        assert!(text.contains("Still working: `a`"), "{text}");
+    }
 }

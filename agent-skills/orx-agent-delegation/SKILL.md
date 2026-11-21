@@ -1,6 +1,6 @@
 ---
 name: orx-agent-delegation
-description: "Delegate tasks to other models and chats with the orx MCP server's `delegate`, `wait`, `subscribe` and `answer` tools. Covers standalone briefs, worktrees, compute authorization, nesting and questions. Use before delegating or opening another chat."
+description: "Delegate tasks to other models and chats with the orx MCP server's `delegate`, `wait`, `subscribe`, `answer` and `chats` tools. Covers standalone briefs, worktrees, compute authorization, nesting, questions and finding other chats. Use before delegating, opening another chat or coordinating with chats around you."
 ---
 
 # Delegate to another chat
@@ -33,5 +33,15 @@ ref (`msg_3fa9c1d2`) in the task instead of retyping it.
   decides it; otherwise ask the user. Approvals are the user's.
 - **Effort.** Pass `effort` from `models` only when the task needs more or less
   reasoning than the route's default.
+- **Finding chats.** `chats` lists the chats around you: `view: "inbox"` or
+  `"working"` for the top of the user's sidebar, `query` to search every chat,
+  Done ones included, or `relation` (`parent`, `children`, `siblings`,
+  `tree`) to walk the chats that started one another; pass a listed chat as
+  `of` to step through the tree. Before you edit shared files as a delegate,
+  check your `siblings` for one already on them. Before you ask the user
+  something your parent's brief might settle, `send` your parent.
+- **Steering.** `send` joins a chat's running turn when its agent takes
+  messages mid-turn and queues for its next turn otherwise; it never
+  interrupts. A message sent to you ends your `wait` so you can read it.
 - **Retries.** Give `delegate` and `send` a `clientRequestId` when you may
   retry, so a retry does not start the work twice.
