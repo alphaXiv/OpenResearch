@@ -6,10 +6,11 @@ import { useQuery } from "@tanstack/react-query";
 import { ChevronDown, FileCode } from "lucide-react";
 import { createContext, useContext, useMemo, type ReactNode } from "react";
 import { ltr } from "../i18n";
-import { GLOB_CHARS, resolveFileReference } from "../fileReferences";
+import { ARTIFACTS_PREFIX, artifactFiles, GLOB_CHARS, resolveArtifactReference, resolveFileReference, type FileResolution } from "../fileReferences";
 import { splitMentionPath } from "../fileMentions";
 import { isWindowsDrivePath, splitLineSuffix } from "../markdownTarget";
 import { m } from "../paraglide/messages.js";
+import type { ProjectArtifacts } from "../api";
 
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { MenuItem } from "./ui";
@@ -94,15 +95,21 @@ function FileChoices({ label, paths, total, line, onOpenFile }: {
   );
 }
 
-const isRepoRelative = (path: string) =>
-  !path.startsWith("/") && !path.startsWith("~") && !path.startsWith("artifacts/") && !isWindowsDrivePath(path);
+const isProjectRelative = (path: string) =>
+  !path.startsWith("/") && !path.startsWith("~") && !isWindowsDrivePath(path);
+
+const NO_MATCH: FileResolution = { kind: "none" };
+
+const artifactListing = (data: ProjectArtifacts) => ({ files: artifactFiles(data.entries), truncated: data.truncated });
 
 /**
- * A reference to a repo file, checked against the chat's checkout so it never
- * looks clickable and fails: an exact path opens, a fuzzy or glob match asks
- * which file, and a path that names nothing renders as `fallback`.
- * The listing omits gitignored files and caps out on huge repos, so a path it
- * lacks is read directly before it is written off.
+ * A reference to a project file, checked against the chat's checkout and the
+ * project's artifacts so it never looks clickable and fails: an exact path
+ * opens, a fuzzy or glob match asks which file, and a path that names nothing
+ * renders as `fallback`.
+ * The checkout listing omits gitignored files and caps out on huge repos, so a
+ * path it lacks is read directly before the artifacts are searched; an
+ * `artifacts/` citation skips that listing and prefers an exact artifact.
  * An `optimistic` citation (a `<file>` tag or link) shows as a chip until
  * verification says otherwise; inferred ones (code spans) stay `fallback` until verified.
  */
@@ -114,31 +121,53 @@ export function FileReference({ path, line, exp, optimistic, fallback, onOpenFil
   fallback: ReactNode;
   onOpenFile: OpenFile;
 }) {
-  const { getCodeTreeQuery, getProjectFileQuery } = useWorkspace().queries;
+  const { getCodeTreeQuery, getProjectFileQuery, getArtifactsQuery } = useWorkspace().queries;
 
   const scope = useContext(FileScopeContext);
   // An experiment's file lives on its own branch, which this listing does not cover.
-  const checkable = scope != null && exp == null && isRepoRelative(path);
+  const checkable = scope != null && exp == null && isProjectRelative(path);
+  const citesArtifact = ARTIFACTS_PREFIX.test(path);
   const tree = useQuery({
     ...getCodeTreeQuery(scope?.projectId ?? "", scope?.sessionId ? { sessionId: scope.sessionId } : {}),
     // The agent cites files it just wrote; a long-cached listing would miss them.
     staleTime: 5_000,
-    enabled: checkable,
+    enabled: checkable && !citesArtifact,
   });
   const entries = tree.data?.entries;
-  const resolution = useMemo(() => (entries ? resolveFileReference(entries, path) : null), [entries, path]);
+  const resolution = useMemo(
+    () => (citesArtifact ? NO_MATCH : entries ? resolveFileReference(entries, path) : null),
+    [citesArtifact, entries, path],
+  );
   const unlisted = resolution?.kind === "none" && !GLOB_CHARS.test(path);
+  // An `artifacts/` citation may name a checkout folder of that name, which the viewer also opens.
   const read = useQuery({
     ...getProjectFileQuery(scope?.projectId ?? "", splitLineSuffix(path).path, scope?.sessionId ? { sessionId: scope.sessionId } : {}),
-    enabled: unlisted,
+    enabled: checkable && unlisted,
   });
-  const chip = <FileChip path={path} line={line} exp={exp} onOpenFile={onOpenFile} />;
+  const onDisk = read.isSuccess && !read.data.notFound;
+  const searchArtifacts = checkable && (citesArtifact || (unlisted && read.isSuccess && read.data.notFound));
+  const artifacts = useQuery({
+    ...getArtifactsQuery(scope?.projectId ?? ""),
+    staleTime: 5_000,
+    select: artifactListing,
+    enabled: searchArtifacts,
+  });
+  const files = artifacts.data?.files;
+  const artifactMatch = useMemo(() => (files ? resolveArtifactReference(files, path) : null), [files, path]);
+  const chip = <FileChip path={citesArtifact ? path.replace(ARTIFACTS_PREFIX, "artifacts/") : path} line={line} exp={exp} onOpenFile={onOpenFile} />;
 
   if (!checkable || !resolution) return optimistic ? chip : fallback;
-  if (resolution.kind === "exact") return <FileChip path={resolution.path} line={resolution.line ?? line} exp={exp} onOpenFile={onOpenFile} />;
-  if (resolution.kind === "choices") {
-    return <FileChoices label={path} paths={resolution.paths} total={resolution.total} line={resolution.line ?? line} onOpenFile={onOpenFile} />;
+  const match = resolution.kind !== "none" ? resolution
+    : citesArtifact && artifactMatch?.kind === "exact" ? artifactMatch
+    : onDisk ? null
+    : artifactMatch;
+  if (match?.kind === "exact") return <FileChip path={match.path} line={match.line ?? line} exp={exp} onOpenFile={onOpenFile} />;
+  if (match?.kind === "choices") {
+    return <FileChoices label={path} paths={match.paths} total={match.total} line={match.line ?? line} onOpenFile={onOpenFile} />;
   }
-  if (read.isSuccess) return chip;
-  return optimistic && unlisted && read.isPending ? chip : fallback;
+  if (onDisk) return chip;
+  // A truncated or failed artifacts listing can't rule the file out.
+  const unsure = (unlisted && read.isPending) ||
+    (searchArtifacts && (artifacts.isPending || artifacts.isError || artifacts.data?.truncated === true));
+  return optimistic && unsure ? chip : fallback;
 }
