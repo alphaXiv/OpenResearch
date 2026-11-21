@@ -241,6 +241,9 @@ export function FileTypeIcon({ name }: { name: string }) {
   );
 }
 
+/** The card's box, shared by the composer chip and the sent message. */
+export const FILE_CARD_CLASS = "inline-flex h-14 max-w-64 items-center gap-2.5 rounded-lg border border-border bg-surface ps-2 pe-3";
+
 /** An attached file as a card: its icon on a tile, the name, and its type and size. */
 export function FileCardContent({ name, size }: { name: string; size?: string }) {
   const dot = name.lastIndexOf(".");

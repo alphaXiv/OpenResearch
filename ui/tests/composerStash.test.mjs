@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { citedAttachments, composerStashContent, EMPTY_COMPOSER_STASH, createComposerState } from "../src/composerStash.ts";
+import { attachmentToken, citedAttachments, composerStashContent, EMPTY_COMPOSER_STASH, createComposerState, withoutAttachmentTokens } from "../src/composerStash.ts";
 
 test("an empty composer leaves nothing behind", () => {
   const live = { ...EMPTY_COMPOSER_STASH };
@@ -59,6 +59,22 @@ test("a draft sends the attachments it cites, renumbered in order of mention", (
     citedAttachments("see [PDF #3] then [Image #7], again [PDF #3], and [Image #42]", [image, pdf, deleted]),
     { text: "see [PDF #1] then [Image #2], again [PDF #1], and [Image #42]", attachments: [pdf, image] },
   );
+});
+
+test("any other file is cited as a file and renumbered with the rest", () => {
+  const svg = { id: 4, dataUrl: "data:,d", mediaType: "image/svg+xml", size: 1 };
+  const notes = { id: 5, dataUrl: "data:,e", mediaType: "application/octet-stream", size: 1 };
+  assert.equal(attachmentToken(svg), "[File #4]");
+  assert.deepEqual(
+    citedAttachments("[File #5] and [File #4]", [svg, notes]),
+    { text: "[File #1] and [File #2]", attachments: [notes, svg] },
+  );
+});
+
+test("a sent message hides its attachment tokens but keeps the user's spacing", () => {
+  assert.equal(withoutAttachmentTokens("[Image #1] [File #2] What does this show?"), "What does this show?");
+  assert.equal(withoutAttachmentTokens("see [Image #1] here"), "see here");
+  assert.equal(withoutAttachmentTokens("[PDF #1]\n```\ndef f():\n    return  1\n```"), "```\ndef f():\n    return  1\n```");
 });
 
 test("a seeded composer carries the text without the attachments it cites", () => {

@@ -34,15 +34,15 @@ import { createPortal } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 
 import { type CitedMessage, type HarnessId, type SkillInfo } from "../api";
-import { fmtBytes } from "../i18n";
+import { fmtBytes, ltr } from "../i18n";
 import { CITED_ID, refLabel } from "../agentMessages";
 import { commandDisplayName } from "../composerCommands";
-import { isPictureType, type ComposerAttachment } from "../composerStash";
+import { ATTACHMENT_KINDS, isPictureType, type ComposerAttachment } from "../composerStash";
 import { PAPER_LINK, splitMentionPath } from "../fileMentions";
 import { livePreview, pointerSelection, revealChanged, revealedSpan } from "../markdownLivePreview";
 import { m } from "../paraglide/messages.js";
 import { WorkspaceDomContext } from "../WorkspaceDom";
-import { FileCardContent, FileTypeIcon } from "./FileTypeIcon";
+import { FILE_CARD_CLASS, FileCardContent, FileTypeIcon } from "./FileTypeIcon";
 import { HarnessLogo } from "./HarnessLogo";
 import { LitSourceLogo } from "./LitSourceLogo";
 import { ResizeHandle } from "./ResizeHandle";
@@ -71,7 +71,7 @@ type Chip =
 
 const CHIP_TOKEN = new RegExp(
   [
-    String.raw`\[(?:Image|PDF|File) #(?<attachment>\d+)\]`,
+    String.raw`\[(?:${ATTACHMENT_KINDS}) #(?<attachment>\d+)\]`,
     PAPER_LINK.source,
     `(?<cited>${CITED_ID.source})`,
     String.raw`(?<=^|\s)(?:\/(?<command>[^\s/]+)|@"(?<quotedPath>[^"\n]+)"|@(?<path>\S+))(?=\s|$)`,
@@ -122,8 +122,7 @@ const CHIP_CLASS =
 const IMAGE_CHIP_CLASS =
   "group relative mx-px my-1 inline-flex max-w-full cursor-default overflow-hidden rounded-lg border border-border bg-surface align-bottom";
 
-const FILE_CHIP_CLASS =
-  "group relative mx-px my-1 inline-flex h-14 max-w-64 cursor-default items-center gap-2.5 rounded-lg border border-border bg-surface ps-2 pe-3 align-bottom";
+const FILE_CHIP_CLASS = `group relative mx-px my-1 cursor-default align-bottom ${FILE_CARD_CLASS}`;
 
 const isImageChip = (chip: Chip) => chip.kind === "attachment" && isPictureType(chip.attachment.mediaType);
 
@@ -208,9 +207,6 @@ class ChipWidget extends WidgetType {
     if (this.chip.kind === "file") span.title = this.chip.path;
     if (this.chip.kind === "message") span.title = this.chip.cited.preview;
     if (this.chip.kind === "paper") span.title = this.chip.url;
-    if (this.chip.kind === "attachment" && isImageChip(this.chip)) {
-      span.title = `${this.chip.attachment.name ?? m.chat_pasted_image()} · ${fmtBytes(this.chip.attachment.size)}`;
-    }
     if (this.chip.kind === "command" && this.chip.previewable) {
       // A tab stop, so keyboard users can open the preview that hover shows.
       span.tabIndex = 0;
@@ -256,7 +252,7 @@ class ChipWidget extends WidgetType {
   }
 }
 
-const ATTACHMENT_AT = /^\[(?:Image|PDF|File) #\d+\] ?/;
+const ATTACHMENT_AT = new RegExp(String.raw`^\[(?:${ATTACHMENT_KINDS}) #\d+\] ?`);
 
 /** The corner X on an attachment chip: deletes its token, and with it the attachment. */
 function removeButton(view: EditorView, chip: HTMLElement, name: string) {
@@ -264,12 +260,14 @@ function removeButton(view: EditorView, chip: HTMLElement, name: string) {
   button.type = "button";
   button.tabIndex = -1;
   button.dataset.chipRemove = "";
-  button.setAttribute("aria-label", m.chat_remove_attachment({ name }));
-  button.title = m.chat_remove_attachment({ name });
+  const label = m.chat_remove_attachment({ name: ltr(name) });
+  button.setAttribute("aria-label", label);
+  button.title = label;
   button.className =
-    "absolute end-1 top-1 flex size-5 cursor-pointer items-center justify-center rounded-full border border-border bg-background text-subtext opacity-0 shadow-control-subtle group-hover:opacity-100 hover:text-text";
+    "absolute end-1 top-1 flex size-6 cursor-pointer items-center justify-center rounded-full border border-border bg-background text-subtext opacity-0 shadow-control-subtle group-hover:opacity-100 hover:text-text motion-safe:transition-opacity motion-safe:duration-120 motion-safe:ease-standard";
+  // Lucide's X, inlined: an image chip has no React root to render one into.
   button.innerHTML =
-    '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>';
+    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';
   // Keeps focus and the caret where they are.
   button.addEventListener("mousedown", (event) => event.preventDefault());
   button.addEventListener("click", (event) => {
@@ -421,7 +419,7 @@ export function ComposerEditor({
   /** Enter without Shift, outside a code block. */
   onSubmit: (event: KeyboardEvent) => void;
   /** Dropped files. */
-  onFiles: (files: File[]) => void;
+  onFiles: (transfer: DataTransfer) => void;
   /** Runs before the editor's own paste; call `preventDefault` to claim it. */
   onPaste: (event: ClipboardEvent) => void;
   placeholder: string;
@@ -482,12 +480,12 @@ export function ComposerEditor({
             return true;
           },
           drop(event, view) {
-            const files = Array.from(event.dataTransfer?.files ?? []);
-            if (files.length === 0) return false;
+            const transfer = event.dataTransfer;
+            if (!transfer?.types.includes("Files")) return false;
             event.preventDefault();
             const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
             if (pos !== null) view.dispatch({ selection: { anchor: pos } });
-            latest.current.onFiles(files);
+            latest.current.onFiles(transfer);
             return true;
           },
         })),

@@ -1092,28 +1092,38 @@ fn attachment_ext(media_type: &str, original: Option<&str>) -> String {
         "image/gif" => "gif",
         "image/webp" => "webp",
         "application/pdf" => "pdf",
-        _ => "",
+        _ => {
+            return original
+                .map(basename)
+                .and_then(|base| base.rsplit_once('.'))
+                .map(|(_, ext)| ext.to_ascii_lowercase())
+                .filter(|ext| {
+                    ext.len() <= 16
+                        && !ext.is_empty()
+                        && ext.chars().all(|c| c.is_ascii_alphanumeric())
+                })
+                .unwrap_or_default()
+        }
     };
-    if !canonical.is_empty() {
-        return canonical.into();
-    }
-    original
-        .map(|n| n.rsplit(['/', '\\']).next().unwrap_or(n))
-        .and_then(|base| base.rsplit_once('.'))
-        .map(|(_, ext)| ext.to_ascii_lowercase())
-        .filter(|ext| {
-            ext.len() <= 16 && !ext.is_empty() && ext.chars().all(|c| c.is_ascii_alphanumeric())
-        })
-        .unwrap_or_default()
+    canonical.into()
 }
 
-/// Sanitize an original file name into the `<name>.<ext>` form embedded in the
+fn basename(name: &str) -> &str {
+    name.rsplit(['/', '\\']).next().unwrap_or(name)
+}
+
+/// The extensions agents read as pictures, matching the composer's `isPictureType`.
+fn is_picture_ext(ext: &str) -> bool {
+    matches!(ext, "png" | "jpg" | "gif" | "webp")
+}
+
+/// Sanitize an original file name into the `<name>[.<ext>]` form embedded in the
 /// server-minted attachment file name — ASCII alnum / `-` / `_` only (the set
-/// the attachment route allows), canonical extension, no dots in the stem so
-/// the result can never contain a `..` traversal sequence.
+/// the attachment route allows), no dots in the stem so the result can never
+/// contain a `..` traversal sequence.
 fn safe_attachment_name(original: Option<&str>, ext: &str) -> String {
     let base = original
-        .map(|n| n.rsplit(['/', '\\']).next().unwrap_or(n))
+        .map(basename)
         .and_then(|b| b.rsplit_once('.').map(|(stem, _)| stem).or(Some(b)))
         .unwrap_or("");
     let cleaned: String = base
@@ -1132,9 +1142,10 @@ fn safe_attachment_name(original: Option<&str>, ext: &str) -> String {
         .take(60)
         .collect::<String>();
     if safe.is_empty() {
-        safe = match ext {
-            "png" | "jpg" | "gif" | "webp" => "image".into(),
-            _ => "document".into(),
+        safe = if is_picture_ext(ext) {
+            "image".into()
+        } else {
+            "document".into()
         };
     }
     if ext.is_empty() {
@@ -1144,7 +1155,7 @@ fn safe_attachment_name(original: Option<&str>, ext: &str) -> String {
     }
 }
 
-/// Matches the `att-<uuid>__<name>.<ext>` names `save_images` mints.
+/// Matches the `att-<uuid>__<name>[.<ext>]` names `save_images` mints.
 pub(crate) fn is_attachment_name(name: &str) -> bool {
     name.starts_with("att-")
         && !name.contains("..")
@@ -1155,7 +1166,32 @@ pub(crate) fn is_attachment_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod attachment_name_tests {
-    use super::{attachment_ext, is_attachment_name, safe_attachment_name};
+    use super::{
+        attachment_ext, is_attachment_name, safe_attachment_name, save_images, ImageAttachment,
+    };
+    use base64::Engine;
+
+    #[test]
+    fn any_file_type_saves_where_the_agent_and_the_route_can_read_it() {
+        let upload = |media_type: &str, name: &str| ImageAttachment {
+            media_type: media_type.into(),
+            data_base64: base64::engine::general_purpose::STANDARD.encode(b"# Notes\n"),
+            name: Some(name.into()),
+        };
+        let saved = save_images(&[upload("text/markdown", "notes.md"), upload("", "Makefile")])
+            .expect("non-image uploads save");
+        assert_eq!(saved.len(), 2);
+        for (attachment, shown) in saved.iter().zip(["notes.md", "Makefile"]) {
+            assert_eq!(attachment.display_name, shown);
+            assert!(
+                is_attachment_name(&attachment.file_name),
+                "{}",
+                attachment.file_name
+            );
+            assert_eq!(std::fs::read(&attachment.path).unwrap(), b"# Notes\n");
+        }
+        assert!(saved[0].file_name.ends_with("__notes.md"));
+    }
 
     fn saved_name(media_type: &str, original: &str) -> String {
         safe_attachment_name(Some(original), &attachment_ext(media_type, Some(original)))
@@ -1207,7 +1243,7 @@ fn save_images(images: &[ImageAttachment]) -> Result<Vec<SavedAttachment>> {
         let display_name = img
             .name
             .as_deref()
-            .map(|n| n.rsplit(['/', '\\']).next().unwrap_or(n))
+            .map(basename)
             .map(|n| n.chars().filter(|c| !c.is_control()).collect::<String>())
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| safe.clone());
@@ -6915,13 +6951,11 @@ impl ChatHost {
                 title.push('…');
             }
             if title.is_empty() && !saved_images.is_empty() {
-                // Name an attachment-only message after the first file that
-                // isn't a picture (the "upload my paper" flow), falling back to a generic label.
+                // Title an attachment-only message after its first non-picture file (the "upload my paper" flow).
                 title = saved_images
                     .iter()
                     .find(|a| {
-                        !crate::local::files::content_type_for_path(&a.file_name)
-                            .starts_with("image/")
+                        !is_picture_ext(a.file_name.rsplit_once('.').map_or("", |(_, ext)| ext))
                     })
                     .map(|a| a.display_name.chars().take(64).collect())
                     .unwrap_or_else(|| "Image".into());
@@ -7006,7 +7040,7 @@ impl ChatHost {
                 .collect();
             turn_text.push_str(&format!(
                 "\n\n<attached-files>\nThe user attached {} file(s) to this message, saved on disk at:\n{list}\
-                 Open each with your file-reading tool (Read) before responding — it can read PDFs and images.\n</attached-files>",
+                 Open each before responding — your file-reading tool (Read) handles text, PDFs and images.\n</attached-files>",
                 saved_images.len()
             ));
         }

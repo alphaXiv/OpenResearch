@@ -212,9 +212,10 @@ import {
   retryStatusLabel,
 } from "../chatRecovery";
 import {
-  ATTACHMENT_TOKEN,
   attachmentToken,
   isPictureType,
+  PICTURE_FILE,
+  withoutAttachmentTokens,
   citedAttachments,
   composerStashContent,
   mergeFailedComposer,
@@ -236,7 +237,7 @@ import {
 } from "../orxCommand";
 import { LitSourceLogo, parseOrxLit, paperUrl } from "./LitSourceLogo";
 import { FileScopeContext } from "./FileReference";
-import { FileCardContent } from "./FileTypeIcon";
+import { FILE_CARD_CLASS, FileCardContent } from "./FileTypeIcon";
 import { FigureReveal, PaperShelf, pluralMessage, ReportCard, RunCard, SourceStrip, type ShelfPaper } from "./ResearchCards";
 import { discoveredPapers, linkedPapers, paperKey, type CitedPaper, type PaperMeta } from "../researchActivity";
 import { LitSourcesList } from "./LitSourcesPicker";
@@ -3670,6 +3671,24 @@ function messageHasVisibleContent(m: ChatMessage, activePermissionId?: string | 
  * in ChatPanel). `Transcript` below adds a second boundary for the other hot
  * path — composer keystrokes re-render ChatPanel itself, and the transcript
  * memo stops those from touching the rows at all. */
+/** A file as a data URL; a picture is also decoded, so its chip shows at full size the moment it mounts. */
+function readAttachment(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const { result } = reader;
+      if (typeof result !== "string") return reject(new Error(`unexpected read result for ${file.name}`));
+      if (!isPictureType(file.type)) return resolve(result);
+      const preview = new Image();
+      preview.src = result;
+      // A failed decode still attaches; the chip shows whatever the browser can.
+      preview.decode().catch(() => {}).finally(() => resolve(result));
+    };
+    reader.onerror = () => reject(reader.error ?? new Error(`could not read ${file.name}`));
+    reader.readAsDataURL(file);
+  });
+}
+
 /** Resolve an `image` (attachment) part into what the transcript renders: a
  * source URL, whether it's an image (inline image vs file chip), and a name. */
 function attachmentPartView(p: ChatPart, chatAttachmentUrl: (name: string) => string): { src: string; isImage: boolean; name: string } {
@@ -3684,8 +3703,8 @@ function attachmentPartView(p: ChatPart, chatAttachmentUrl: (name: string) => st
       : raw;
   const name = p.name || derived || "attachment";
   const isImage = raw.startsWith("data:")
-    ? raw.startsWith("data:image/")
-    : /\.(png|jpe?g|gif|webp)$/i.test(raw);
+    ? isPictureType(raw.slice("data:".length, raw.indexOf(";")))
+    : PICTURE_FILE.test(raw);
   return { src, isImage, name };
 }
 
@@ -3905,7 +3924,7 @@ export const Message = memo(function Message({
       .filter((p) => p.type === "image" && p.text)
       .map((part) => attachmentPartView(part, chatAttachmentUrl));
     // The agent reads where each attachment sits; the bubble shows the attachments themselves instead.
-    const shownText = attachments.length > 0 ? text.replace(ATTACHMENT_TOKEN, "").replace(/ {2,}/g, " ").trim() : text;
+    const shownText = attachments.length > 0 ? withoutAttachmentTokens(text) : text;
     const images = attachments.filter((a) => a.isImage);
     const files = attachments.filter((a) => !a.isImage);
     const annotations: ComposerAnnotation[] = message.parts
@@ -3978,7 +3997,7 @@ export const Message = memo(function Message({
             <div className="msg-images flex flex-wrap gap-1.5 mt-2 first:mt-0 [&_img]:max-w-55 [&_img]:max-h-40 [&_img]:border [&_img]:border-border-variant [&_img]:rounded-xs [&_img]:block">
               {images.map((a, i) => (
                 <a key={i} href={a.src} target="_blank" rel="noreferrer">
-                  <img src={a.src} alt={m.chat_attachment_alt()} />
+                  <img src={a.src} alt={a.name} />
                 </a>
               ))}
             </div>
@@ -3986,7 +4005,7 @@ export const Message = memo(function Message({
           {files.length > 0 && (
             <div className="msg-files flex flex-wrap gap-1.5 mt-2 first:mt-0">
               {files.map((a, i) => (
-                <a key={i} className="msg-file inline-flex h-14 max-w-64 items-center gap-2.5 rounded-lg border border-border bg-surface ps-2 pe-3 no-underline [&:hover]:border-border-hover-strong" href={a.src} target="_blank" rel="noreferrer">
+                <a key={i} className={`msg-file no-underline [&:hover]:border-border-hover-strong ${FILE_CARD_CLASS}`} href={a.src} target="_blank" rel="noreferrer">
                   <FileCardContent name={a.name} />
                 </a>
               ))}
@@ -6657,8 +6676,7 @@ export function ChatPanel({
   }
 
   /** Queue files (upload button, clipboard paste, or drag-drop) as composer
-   * attachments — images and PDFs, which the harness reads off disk by path —
-   * cited in the draft at the caret. */
+   * attachments, which the harness reads off disk by path, cited in the draft at the caret. */
   function addFiles(
     files: File[],
     target?: { scope: typeof composerScopeRef.current; stashKey: string },
@@ -6673,6 +6691,7 @@ export function ChatPanel({
     let total = cited.attachments.reduce((n, a) => n + a.size, 0);
     const scope = target?.scope ?? composerScopeRef.current;
     const attachmentStashKey = target?.stashKey ?? stashKey;
+    const accepted: File[] = [];
     for (const file of files) {
       if (noImageInputError && isPictureType(file.type)) {
         setImageRefusedFor(selectedModel?.id ?? null);
@@ -6687,23 +6706,25 @@ export function ChatPanel({
         continue;
       }
       total += file.size;
-      const reader = new FileReader();
-      reader.onload = async () => {
-        if (isPictureType(file.type)) {
-          const preview = new Image();
-          preview.src = reader.result as string;
-          // Decoded before the chip mounts, so its thumbnail appears at full size at once; a failed decode still attaches.
-          await preview.decode().catch(() => {});
+      accepted.push(file);
+    }
+    // Read together, inserted in drop order once all are ready, so decoding images can't reorder them.
+    void Promise.allSettled(accepted.map(readAttachment)).then((results) => {
+      if (!isCurrentScope(sessionsOptions.queryKey)) return;
+      results.forEach((result, index) => {
+        const file = accepted[index];
+        if (result.status === "rejected") {
+          setAttachError(m.chat_attachment_unreadable({ name: ltr(file.name) }));
+          return;
         }
-        if (!isCurrentScope(sessionsOptions.queryKey)) return;
         const attachment = {
           id: nextAttachmentId(),
-          dataUrl: reader.result as string,
+          dataUrl: result.value,
           mediaType: file.type || "application/octet-stream",
           name: file.name,
           size: file.size,
         };
-        // The decode is async — if the composer moved on, the file belongs to
+        // The read is async — if the composer moved on, the file belongs to
         // the scope it was pasted into, not whatever chat is now showing.
         if (composerMountedRef.current && composerScopeRef.current.projectId === scope.projectId && composerScopeRef.current.activeId === scope.activeId && composerScopeRef.current.mainView === scope.mainView) {
           setAttachments((cur) => [...cur, attachment]);
@@ -6716,25 +6737,42 @@ export function ChatPanel({
           draft: [stash.draft, attachmentToken(attachment)].filter(Boolean).join(" "),
           attachments: [...stash.attachments, attachment],
         });
-      };
-      reader.onerror = () => setAttachError(m.chat_attachment_unreadable({ name: ltr(file.name) }));
-      reader.readAsDataURL(file);
-    }
+      });
+    });
   }
 
-  const dropFiles = useRef<(files: File[]) => void>(() => {});
-  dropFiles.current = (files) => {
-    if (!asking) addFiles(files);
-  };
+  /** Attach a drop's files; a folder can't be read as one, so it gets its own message. */
+  function addDropped(transfer: DataTransfer) {
+    const files: File[] = [];
+    const folders: string[] = [];
+    for (const item of Array.from(transfer.items)) {
+      if (item.kind !== "file") continue;
+      const entry = item.webkitGetAsEntry();
+      const file = item.getAsFile();
+      if (entry?.isDirectory) folders.push(entry.name);
+      else if (file) files.push(file);
+    }
+    addFiles(files);
+    if (folders.length > 0) setAttachError(m.chat_attachment_folder({ name: ltr(folders[0]) }));
+  }
+
+  const dropFiles = useRef<(transfer: DataTransfer) => void>(() => {});
+  dropFiles.current = addDropped;
+  const acceptsDrops = useRef<() => boolean>(() => false);
+  acceptsDrops.current = () => !asking && composerRef.current !== null;
   const [draggingFiles, setDraggingFiles] = useState(false);
-  // A file dropped anywhere in the window joins the composer.
+  // A file dropped in this panel, or for the main chat anywhere outside a side chat or dialog, joins its composer.
   useEffect(() => {
     let depth = 0;
     const carriesFiles = (e: DragEvent) => Boolean(e.dataTransfer?.types.includes("Files"));
+    const claims = (e: DragEvent) => {
+      if (!carriesFiles(e) || !acceptsDrops.current()) return false;
+      const target = e.target instanceof Element ? e.target : null;
+      if (target?.closest("[role=dialog], [role=alertdialog]")) return false;
+      return (target?.closest("[data-side-chat]") != null) === embedded;
+    };
     const dragenter = (e: DragEvent) => {
-      if (!carriesFiles(e)) return;
-      depth += 1;
-      setDraggingFiles(true);
+      if (carriesFiles(e)) depth += 1;
     };
     const dragleave = (e: DragEvent) => {
       if (!carriesFiles(e)) return;
@@ -6742,18 +6780,18 @@ export function ChatPanel({
       if (depth === 0) setDraggingFiles(false);
     };
     const dragover = (e: DragEvent) => {
-      if (!e.dataTransfer || !carriesFiles(e)) return;
+      const claimed = claims(e);
+      setDraggingFiles(claimed);
+      if (!claimed || !e.dataTransfer) return;
       e.preventDefault();
       e.dataTransfer.dropEffect = "copy";
     };
     const drop = (e: DragEvent) => {
       depth = 0;
       setDraggingFiles(false);
-      const files = Array.from(e.dataTransfer?.files ?? []);
-      if (files.length === 0) return;
-      const handled = e.defaultPrevented;
+      if (!e.dataTransfer || e.defaultPrevented || !claims(e)) return;
       e.preventDefault();
-      if (!handled) dropFiles.current(files);
+      dropFiles.current(e.dataTransfer);
     };
     window.addEventListener("dragenter", dragenter);
     window.addEventListener("dragleave", dragleave);
@@ -6766,17 +6804,13 @@ export function ChatPanel({
       document.removeEventListener("dragover", dragover);
       document.removeEventListener("drop", drop);
     };
-  }, []);
+  }, [embedded]);
 
   function onComposerPaste(e: ClipboardEvent) {
     const data = e.clipboardData;
     if (!data) return;
     const files = Array.from(data.items)
-      .filter(
-        (item) =>
-          item.kind === "file" &&
-          (item.type.startsWith("image/") || item.type === "application/pdf"),
-      )
+      .filter((item) => item.kind === "file")
       .map((item) => item.getAsFile())
       .filter((f): f is File => f !== null);
     const usable = files.filter((file) => file.size > 0);
@@ -9934,7 +9968,7 @@ export function ChatPanel({
                   projectId={projectId}
                   draftKey={questions.part ? `question:${questions.part.id}` : stashKey}
                   resizeKey={embedded ? "orx:composer-height:side" : "orx:composer-height"}
-                  onFiles={asking ? () => {} : addFiles}
+                  onFiles={asking ? () => {} : addDropped}
                   onPaste={asking ? () => {} : onComposerPaste}
                   onChange={(v, cursor, typed) => {
                     if (asking) {
@@ -10025,7 +10059,6 @@ export function ChatPanel({
                   <input
                     ref={fileInputRef}
                     type="file"
-                    accept="application/pdf,image/png,image/jpeg,image/gif,image/webp"
                     multiple
                     hidden
                     onChange={(e) => {

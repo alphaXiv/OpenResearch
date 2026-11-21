@@ -25,23 +25,24 @@ async function composer(value) {
   const field = view.container.querySelector(".cm-content");
   return {
     editor: EditorView.findFromDOM(field),
-    chips: () => [...field.querySelectorAll("[data-chip]")].map((chip) => chip.dataset.chip),
-    remove: (name) => act(async () => field.querySelector(`[aria-label$="${name}"]`).click()),
+    // What each chip shows: an image's alt text, or a file card's name.
+    chips: () => [...field.querySelectorAll("[data-chip]")].map((chip) => chip.querySelector("img")?.alt ?? chip.querySelector(".truncate")?.textContent),
+    remove: (name) => act(async () => field.querySelector(`[aria-label*="${name}"]`).click()),
     changes,
   };
 }
 
-test("adjacent attachments stay shown wherever the caret goes", async () => {
+test("adjacent attachment tokens aren't hidden as a reference link when the caret leaves", async () => {
   const chat = await composer("[Image #1][File #2]\nsecond line");
   await act(async () => chat.editor.dispatch({ selection: { anchor: chat.editor.state.doc.length } }));
-  assert.deepEqual(chat.chips(), ["#1", "#2"]);
+  assert.deepEqual(chat.chips(), ["chart.png", "notes.md"]);
   await act(async () => chat.editor.dispatch({ selection: { anchor: 0 } }));
-  assert.deepEqual(chat.chips(), ["#1", "#2"]);
+  assert.deepEqual(chat.chips(), ["chart.png", "notes.md"]);
 });
 
 test("an attachment's remove button takes only its own token out of the draft", async () => {
   const chat = await composer("look [Image #1] and [File #2] here");
   await chat.remove("chart.png");
   assert.equal(chat.editor.state.doc.toString(), "look and [File #2] here");
-  assert.deepEqual(chat.chips(), ["#2"]);
+  assert.deepEqual(chat.chips(), ["notes.md"]);
 });

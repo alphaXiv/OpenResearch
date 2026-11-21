@@ -19,12 +19,23 @@ export function nextAttachmentId(): number {
 /** The image types agents read as pictures; any other file attaches as a file. */
 export const isPictureType = (mediaType: string) => /^image\/(png|jpeg|gif|webp)$/.test(mediaType);
 
+/** A saved attachment's file name, by the extensions the server gives pictures. */
+export const PICTURE_FILE = /\.(png|jpe?g|gif|webp)$/i;
+
 export function attachmentToken(attachment: Pick<ComposerAttachment, "id" | "mediaType">): string {
   const kind = attachment.mediaType === "application/pdf" ? "PDF" : isPictureType(attachment.mediaType) ? "Image" : "File";
   return `[${kind} #${attachment.id}]`;
 }
 
-export const ATTACHMENT_TOKEN = /\[(?:Image|PDF|File) #(\d+)\]/g;
+export const ATTACHMENT_KINDS = "Image|PDF|File";
+
+export const ATTACHMENT_TOKEN = new RegExp(String.raw`\[(?:${ATTACHMENT_KINDS}) #(\d+)\]`, "g");
+
+/** A message as its bubble shows it beside the attachments: each token goes, with one space beside it. */
+export function withoutAttachmentTokens(text: string): string {
+  const token = ATTACHMENT_TOKEN.source;
+  return text.replace(new RegExp(`${token} ?| ?${token}`, "g"), "").trim();
+}
 
 /** The attachments a draft cites, in order of first mention, with each token
  * renumbered from 1 so the text and the attachment list agree. Uncited
