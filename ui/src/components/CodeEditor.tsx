@@ -63,6 +63,23 @@ export function CodeEditor({
     const ta = taRef.current;
     if (ta && overlayRef.current) overlayRef.current.scrollTop = ta.scrollTop;
   };
+
+  // The overlay stops where the textarea's scrollbar starts, so both wrap at the
+  // same column. WebKit ignores `scrollbar-gutter` on the overflow-hidden overlay.
+  useLayoutEffect(() => {
+    const ta = taRef.current;
+    const overlay = overlayRef.current;
+    if (!ta || !overlay) return;
+    const measure = () => {
+      overlay.style.insetInlineEnd = `${ta.offsetWidth - ta.clientWidth}px`;
+      overlay.scrollTop = ta.scrollTop;
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(ta);
+    return () => observer.disconnect();
+  }, []);
+
   const initialScroll = useRef(scrollPosition);
   useLayoutEffect(() => {
     const ta = taRef.current;
@@ -113,9 +130,7 @@ export function CodeEditor({
     }
   };
 
-  // Both layers must reserve the scrollbar, or the textarea is narrower than the
-  // overlay on classic-scrollbar platforms and the two wrap at different columns.
-  const layerClassName = `absolute inset-0 m-0 py-3.5 pe-4 ${CODE_TEXT_CLASS_NAME} ${CODE_WRAP_CLASS_NAME} [scrollbar-gutter:stable]`;
+  const layerClassName = `absolute inset-0 m-0 py-3.5 pe-4 ${CODE_TEXT_CLASS_NAME} ${CODE_WRAP_CLASS_NAME}`;
 
   return (
     <div className={`file-view-editwrap relative h-full min-h-0 ${CODE_TEXT_CLASS_NAME}`}>
@@ -151,7 +166,7 @@ export function CodeEditor({
       <textarea
         ref={taRef}
         aria-label={path}
-        className={`file-view-editarea ${layerClassName} overflow-y-auto overflow-x-hidden resize-none border-0 bg-transparent text-transparent caret-text outline-none`}
+        className={`file-view-editarea ${layerClassName} [scrollbar-gutter:stable] overflow-y-auto overflow-x-hidden resize-none border-0 bg-transparent text-transparent caret-text outline-none`}
         style={{ paddingInlineStart: `${codeCh}ch` }}
         value={value}
         onChange={(e) => {
