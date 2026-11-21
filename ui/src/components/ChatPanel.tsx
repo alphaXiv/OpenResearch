@@ -109,6 +109,7 @@ import {
   FileText,
   FlaskConical,
   FolderPlus,
+  Plus,
   SquarePen,
   CircleCheck,
   Globe,
@@ -213,6 +214,9 @@ import {
 } from "../chatRecovery";
 import {
   attachmentToken,
+  isPictureType,
+  PICTURE_FILE,
+  withoutAttachmentTokens,
   citedAttachments,
   composerStashContent,
   mergeFailedComposer,
@@ -234,6 +238,7 @@ import {
 } from "../orxCommand";
 import { LitSourceLogo, parseOrxLit, paperUrl } from "./LitSourceLogo";
 import { FileScopeContext } from "./FileReference";
+import { FILE_CARD_CLASS, FileCardContent } from "./FileTypeIcon";
 import { FigureReveal, PaperShelf, pluralMessage, ReportCard, RunCard, SourceStrip, type ShelfPaper } from "./ResearchCards";
 import { discoveredPapers, linkedPapers, paperKey, type CitedPaper, type PaperMeta } from "../researchActivity";
 import { ChatLitSources, useChatLitSources } from "./LitSourcesPicker";
@@ -3669,8 +3674,8 @@ function messageHasVisibleContent(m: ChatMessage, activePermissionId?: string | 
  * path — composer keystrokes re-render ChatPanel itself, and the transcript
  * memo stops those from touching the rows at all. */
 /** Resolve an `image` (attachment) part into what the transcript renders: a
- * source URL, whether it's a PDF (file chip vs inline image), and a name. */
-function attachmentPartView(p: ChatPart, chatAttachmentUrl: (name: string) => string): { src: string; isPdf: boolean; name: string } {
+ * source URL, whether it's an image (inline image vs file chip), and a name. */
+function attachmentPartView(p: ChatPart, chatAttachmentUrl: (name: string) => string): { src: string; isImage: boolean; name: string } {
   const raw = p.text ?? "";
   const src = raw.startsWith("data:") ? raw : chatAttachmentUrl(raw);
   // Server file names embed the original after a `__` marker; optimistic parts
@@ -3681,9 +3686,10 @@ function attachmentPartView(p: ChatPart, chatAttachmentUrl: (name: string) => st
       ? raw.slice(raw.indexOf("__") + 2)
       : raw;
   const name = p.name || derived || "attachment";
-  const isPdf =
-    raw.startsWith("data:application/pdf") || /\.pdf$/i.test(name) || /\.pdf$/i.test(raw);
-  return { src, isPdf, name };
+  const isImage = raw.startsWith("data:")
+    ? isPictureType(raw.slice("data:".length, raw.indexOf(";")))
+    : PICTURE_FILE.test(raw);
+  return { src, isImage, name };
 }
 
 /** Where a chat moved to another agent, its model named as the picker names it. */
@@ -3901,8 +3907,10 @@ export const Message = memo(function Message({
     const attachments = message.parts
       .filter((p) => p.type === "image" && p.text)
       .map((part) => attachmentPartView(part, chatAttachmentUrl));
-    const images = attachments.filter((a) => !a.isPdf);
-    const files = attachments.filter((a) => a.isPdf);
+    // The agent reads where each attachment sits; the bubble shows the attachments themselves instead.
+    const shownText = attachments.length > 0 ? withoutAttachmentTokens(text) : text;
+    const images = attachments.filter((a) => a.isImage);
+    const files = attachments.filter((a) => !a.isImage);
     const annotations: ComposerAnnotation[] = message.parts
       .filter((part) => part.type === "annotation" && part.text)
       .map((part) => ({
@@ -3968,22 +3976,21 @@ export const Message = memo(function Message({
         )}
         <div dir="auto" className={`msg-user max-w-full ${USER_MESSAGE_BUBBLE_CLASS_NAME} [&_.skill-chip]:align-baseline [&_.context-pill]:border-border [&_.context-pill]:bg-highlight [&_.context-pill:hover]:bg-border`}>
           {replies?.questionById.has(message.id) && <div className="mb-1 truncate text-subtext">{replies.questionById.get(message.id)}</div>}
-          <MessageWithChips text={text} isCommand={isCommand} />
+          {shownText && <MessageWithChips text={shownText} isCommand={isCommand} />}
           {images.length > 0 && (
-            <div className="msg-images flex flex-wrap gap-1.5 mt-2 [&_img]:max-w-55 [&_img]:max-h-40 [&_img]:border [&_img]:border-border-variant [&_img]:rounded-xs [&_img]:block">
+            <div className="msg-images flex flex-wrap gap-1.5 mt-2 first:mt-0 [&_img]:max-w-55 [&_img]:max-h-40 [&_img]:border [&_img]:border-border-variant [&_img]:rounded-xs [&_img]:block">
               {images.map((a, i) => (
                 <a key={i} href={a.src} target="_blank" rel="noreferrer">
-                  <img src={a.src} alt={m.chat_attachment_alt()} />
+                  <img src={a.src} alt={a.name} />
                 </a>
               ))}
             </div>
           )}
           {files.length > 0 && (
-            <div className="msg-files flex flex-wrap gap-1.5 mt-2">
+            <div className="msg-files flex flex-wrap gap-1.5 mt-2 first:mt-0">
               {files.map((a, i) => (
-                <a key={i} className="msg-file inline-flex items-center gap-1.5 max-w-60 py-1.5 px-2.5 border border-border-variant rounded-sm text-text no-underline [&:hover]:border-border-hover-strong [&_span]:overflow-hidden [&_span]:text-ellipsis [&_span]:whitespace-nowrap" href={a.src} target="_blank" rel="noreferrer">
-                  <FileText size={16} />
-                  <span>{a.name}</span>
+                <a key={i} className={`msg-file no-underline [&:hover]:border-border-hover-strong ${FILE_CARD_CLASS}`} title={a.name} href={a.src} target="_blank" rel="noreferrer">
+                  <FileCardContent name={a.name} />
                 </a>
               ))}
             </div>
@@ -6085,6 +6092,29 @@ const STARTER_TONES = [
 const STARTER_GRID_CLASS =
   "mt-7 grid w-full max-w-readable grid-cols-1 gap-3 sm:grid-cols-2";
 
+/** An empty picture or PDF would fail the agent's read, and can break its session. */
+const isEmptyMedia = (file: File) => file.size === 0 && (isPictureType(file.type) || file.type === "application/pdf");
+
+/** A file as a data URL; a picture is also decoded, so its chip shows at full size the moment it mounts. */
+function readAttachment(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const { result } = reader;
+      if (typeof result !== "string") return reject(new Error(`unexpected read result for ${file.name}`));
+      // An empty file reads as a bare `data:`; the send path needs the comma before its (empty) base64.
+      if (!result.includes(",")) return resolve(`data:${file.type || "application/octet-stream"};base64,`);
+      if (!isPictureType(file.type)) return resolve(result);
+      const preview = new Image();
+      preview.src = result;
+      // A failed decode still attaches; the chip shows whatever the browser can.
+      preview.decode().catch(() => {}).finally(() => resolve(result));
+    };
+    reader.onerror = () => reject(reader.error ?? new Error(`could not read ${file.name}`));
+    reader.readAsDataURL(file);
+  });
+}
+
 export function ChatPanel({
   projectId,
   projectName,
@@ -6660,8 +6690,7 @@ export function ChatPanel({
   }
 
   /** Queue files (upload button, clipboard paste, or drag-drop) as composer
-   * attachments — images and PDFs, which the harness reads off disk by path —
-   * cited in the draft at the caret. */
+   * attachments, which the harness reads off disk by path, cited in the draft at the caret. */
   function addFiles(
     files: File[],
     target?: { scope: typeof composerScopeRef.current; stashKey: string },
@@ -6676,9 +6705,13 @@ export function ChatPanel({
     let total = cited.attachments.reduce((n, a) => n + a.size, 0);
     const scope = target?.scope ?? composerScopeRef.current;
     const attachmentStashKey = target?.stashKey ?? stashKey;
+    const accepted: File[] = [];
     for (const file of files) {
-      if (!/^(image\/(png|jpeg|gif|webp)|application\/pdf)$/.test(file.type)) continue;
-      if (noImageInputError && file.type.startsWith("image/")) {
+      if (isEmptyMedia(file)) {
+        setAttachError(m.chat_attachment_empty({ name: ltr(file.name) }));
+        continue;
+      }
+      if (noImageInputError && isPictureType(file.type)) {
         setImageRefusedFor(selectedModel?.id ?? null);
         continue;
       }
@@ -6691,17 +6724,25 @@ export function ChatPanel({
         continue;
       }
       total += file.size;
-      const reader = new FileReader();
-      reader.onload = () => {
-        if (!isCurrentScope(sessionsOptions.queryKey)) return;
+      accepted.push(file);
+    }
+    // Read together, inserted in drop order once all are ready, so decoding images can't reorder them.
+    void Promise.allSettled(accepted.map(readAttachment)).then((results) => {
+      if (!isCurrentScope(sessionsOptions.queryKey)) return;
+      results.forEach((result, index) => {
+        const file = accepted[index];
+        if (result.status === "rejected") {
+          setAttachError(m.chat_attachment_unreadable({ name: ltr(file.name) }));
+          return;
+        }
         const attachment = {
           id: nextAttachmentId(),
-          dataUrl: reader.result as string,
-          mediaType: file.type,
+          dataUrl: result.value,
+          mediaType: file.type || "application/octet-stream",
           name: file.name,
           size: file.size,
         };
-        // The decode is async — if the composer moved on, the file belongs to
+        // The read is async — if the composer moved on, the file belongs to
         // the scope it was pasted into, not whatever chat is now showing.
         if (composerMountedRef.current && composerScopeRef.current.projectId === scope.projectId && composerScopeRef.current.activeId === scope.activeId && composerScopeRef.current.mainView === scope.mainView) {
           setAttachments((cur) => [...cur, attachment]);
@@ -6714,23 +6755,89 @@ export function ChatPanel({
           draft: [stash.draft, attachmentToken(attachment)].filter(Boolean).join(" "),
           attachments: [...stash.attachments, attachment],
         });
-      };
-      reader.readAsDataURL(file);
-    }
+      });
+    });
   }
+
+  /** Attach a drop's files; a folder can't be read as one, so it gets its own message. */
+  function addDropped(transfer: DataTransfer) {
+    const files: File[] = [];
+    const folders: string[] = [];
+    for (const item of Array.from(transfer.items)) {
+      if (item.kind !== "file") continue;
+      // Not every webview implements entries; without one, a folder fails its read and says so.
+      const entry = typeof item.webkitGetAsEntry === "function" ? item.webkitGetAsEntry() : null;
+      const file = item.getAsFile();
+      if (entry?.isDirectory) folders.push(entry.name);
+      else if (file) files.push(file);
+    }
+    addFiles(files);
+    // After addFiles, so a size refusal from the same drop isn't hidden behind it.
+    if (folders.length > 0) setAttachError((current) => current ?? m.chat_attachment_folder({ name: ltr(folders[0]) }));
+  }
+
+  const dropFiles = useRef<(transfer: DataTransfer) => void>(() => {});
+  dropFiles.current = addDropped;
+  const acceptsDrops = useRef<() => boolean>(() => false);
+  acceptsDrops.current = () =>
+    !asking && connection === null && !contentInert && composerRef.current !== null
+    // A modal's backdrop has no dialog role, so check for an open modal rather than the target.
+    && document.querySelector('[role=dialog][aria-modal="true"], [role=alertdialog]') === null;
+  const [draggingFiles, setDraggingFiles] = useState(false);
+  // A file dropped in this panel, or for the main chat anywhere outside a side chat or dialog, joins its composer.
+  useEffect(() => {
+    let depth = 0;
+    const carriesFiles = (e: DragEvent) => Boolean(e.dataTransfer?.types.includes("Files"));
+    const claims = (e: DragEvent) => {
+      if (!carriesFiles(e) || !acceptsDrops.current()) return false;
+      const target = e.target instanceof Element ? e.target : null;
+      if (target?.closest("[role=dialog], [role=alertdialog]")) return false;
+      return (target?.closest("[data-side-chat]") != null) === embedded;
+    };
+    const dragenter = (e: DragEvent) => {
+      if (carriesFiles(e)) depth += 1;
+    };
+    const dragleave = (e: DragEvent) => {
+      if (!carriesFiles(e)) return;
+      depth = Math.max(0, depth - 1);
+      if (depth === 0) setDraggingFiles(false);
+    };
+    const dragover = (e: DragEvent) => {
+      const claimed = claims(e);
+      setDraggingFiles(claimed);
+      if (!claimed || !e.dataTransfer) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+    };
+    const drop = (e: DragEvent) => {
+      depth = 0;
+      setDraggingFiles(false);
+      if (!e.dataTransfer || e.defaultPrevented || !claims(e)) return;
+      e.preventDefault();
+      dropFiles.current(e.dataTransfer);
+    };
+    window.addEventListener("dragenter", dragenter);
+    window.addEventListener("dragleave", dragleave);
+    // On the document, so these run before the window-wide guard in main.tsx.
+    document.addEventListener("dragover", dragover);
+    document.addEventListener("drop", drop);
+    return () => {
+      window.removeEventListener("dragenter", dragenter);
+      window.removeEventListener("dragleave", dragleave);
+      document.removeEventListener("dragover", dragover);
+      document.removeEventListener("drop", drop);
+    };
+  }, [embedded]);
 
   function onComposerPaste(e: ClipboardEvent) {
     const data = e.clipboardData;
     if (!data) return;
     const files = Array.from(data.items)
-      .filter(
-        (item) =>
-          item.kind === "file" &&
-          (item.type.startsWith("image/") || item.type === "application/pdf"),
-      )
+      .filter((item) => item.kind === "file")
       .map((item) => item.getAsFile())
       .filter((f): f is File => f !== null);
-    const usable = files.filter((file) => file.size > 0);
+    // An empty picture or PDF is the clipboard's placeholder for one `readClipboardImage` can fetch.
+    const usable = files.filter((file) => !isEmptyMedia(file));
     if (usable.length > 0) {
       e.preventDefault();
       addFiles(usable);
@@ -6891,7 +6998,7 @@ export function ChatPanel({
     ? m.chat_model_no_image_input({ model: ltr(harnessModelLabel(selectedModel)) })
     : null;
   const imageInputBlocked =
-    !!noImageInputError && cited.attachments.some((a) => a.mediaType.startsWith("image/"));
+    !!noImageInputError && cited.attachments.some((a) => isPictureType(a.mediaType));
   const imageRefused = !!selectedModel && imageRefusedFor === selectedModel.id;
   const imageInputError = imageInputBlocked || imageRefused ? noImageInputError : null;
   useEffect(() => setImageRefusedFor(null), [selectedModel?.id]);
@@ -9082,8 +9189,8 @@ export function ChatPanel({
               ? row.count > 0 && <span className={`tabular-nums text-muted ${row.collapsed ? "hidden group-hover/section:inline group-focus-visible/section:inline" : ""}`}>{fmtNumber(row.count)}</span>
               : row.collapsed && <span className="tabular-nums text-muted">{fmtNumber(row.count)}</span>}
             <ChevronRight size={14} aria-hidden="true"
-              className={`mb-px shrink-0 text-muted transition-transform duration-120 ease-standard motion-reduce:transition-none ${row.collapsed ? "" : "rotate-90"}`} />
-            <span aria-hidden="true" className="mb-2.5 ms-1.5 h-px flex-1 bg-border-variant" />
+              className={`mb-0.5 shrink-0 text-muted transition-transform duration-120 ease-standard motion-reduce:transition-none ${row.collapsed ? "" : "rotate-90"}`} />
+            <span aria-hidden="true" className="mb-2.25 ms-1.5 h-px flex-1 bg-border-variant" />
           </button>
         </div>
       );
@@ -9762,6 +9869,12 @@ export function ChatPanel({
           <RemoteConnectionStrip />
           <div inert={connection !== null} className={`composer-frame flex flex-col min-h-0 rounded-xl bg-surface${connection ? " opacity-60" : ""}`} data-onboarding="composer">
             <div className={`composer-box relative flex flex-col min-h-0 rounded-xl border ${bashMode && !asking ? "border-accent-amber" : "border-border"} bg-background shadow-control-subtle`}>
+              {draggingFiles && !asking && (
+                <div aria-hidden="true" className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center gap-2 rounded-xl border-2 border-dashed border-accent-blue-border bg-background/85 text-accent-blue-strong">
+                  <Plus size={18} />
+                  <span className="text-sm font-medium">{m.chat_drop_to_attach()}</span>
+                </div>
+              )}
               {unconfirmedSend !== null && (
                 <div id={unconfirmedSendId} role="alert" className="flex items-start gap-2 pt-2 px-3 text-sm text-text">
                   <span className="flex-1" dir="auto">{m.chat_send_unconfirmed({ error: ltr(unconfirmedSend) })}</span>
@@ -9886,7 +9999,7 @@ export function ChatPanel({
                   projectId={projectId}
                   draftKey={questions.part ? `question:${questions.part.id}` : stashKey}
                   resizeKey={embedded ? "orx:composer-height:side" : "orx:composer-height"}
-                  onFiles={asking ? () => {} : addFiles}
+                  onFiles={asking ? () => {} : addDropped}
                   onPaste={asking ? () => {} : onComposerPaste}
                   onChange={(v, cursor, typed) => {
                     if (asking) {
@@ -9977,7 +10090,6 @@ export function ChatPanel({
                   <input
                     ref={fileInputRef}
                     type="file"
-                    accept="application/pdf,image/png,image/jpeg,image/gif,image/webp"
                     multiple
                     hidden
                     onChange={(e) => {
@@ -9986,11 +10098,11 @@ export function ChatPanel({
                     }}
                   />
                   {!asking && (
-                    <Tooltip interactive content={m.chat_panel_attach_a_pdf_or_image()}>
+                    <Tooltip interactive content={m.chat_panel_attach_files()}>
                       <IconButton
                         type="button"
                         className="composer-attach"
-                        aria-label={m.chat_panel_attach_a_pdf_or_image()}
+                        aria-label={m.chat_panel_attach_files()}
                         onClick={() => fileInputRef.current?.click()}
                       >
                         <Paperclip size={16} />

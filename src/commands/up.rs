@@ -11105,13 +11105,13 @@ async fn select_chat_branch(
     Ok(Json(json!({ "ok": true })))
 }
 
-/// Raw bytes of a chat attachment (image or PDF), by bare file name.
+/// Raw bytes of a chat attachment, by bare file name.
 async fn chat_attachment(
     Path(name): Path<String>,
     method: Method,
     headers: HeaderMap,
 ) -> std::result::Result<Response, ApiError> {
-    // Names are server-minted (att-<uuid>__<name>.<ext>); anything else is rejected.
+    // Names are server-minted (att-<uuid>__<name>[.<ext>]); anything else is rejected.
     if !name
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))

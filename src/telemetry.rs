@@ -371,6 +371,18 @@ pub(crate) fn set_claude_root_full_access(allowed: bool) -> std::io::Result<()> 
     mutate_settings(|settings| settings.claude_root_full_access = Some(allowed))
 }
 
+/// How this computer is signed in, as a label that names no account, or
+/// `None` when the credential files cannot be checked.
+fn sign_in() -> Option<&'static str> {
+    if crate::alphaxiv::signed_in_checked().ok()? {
+        Some("alphaxiv")
+    } else if crate::config::credentials_present().ok()? {
+        Some("openresearch")
+    } else {
+        Some("none")
+    }
+}
+
 pub(crate) fn dashboard_locale() -> Option<String> {
     load_settings().and_then(|settings| settings.dashboard_locale)
 }
@@ -737,6 +749,9 @@ fn build_payload_with_id(
             "properties": properties,
         }],
     });
+    if let Some(sign_in) = sign_in() {
+        payload["context"]["signIn"] = json!(sign_in);
+    }
     if let Some(locale) = dashboard_locale() {
         payload["context"]["locale"] = json!(locale);
     }
@@ -1064,6 +1079,7 @@ fn consent_payload(agreed: bool, distinct_id: &str, event_id: uuid::Uuid) -> ser
     if !agreed {
         if let Some(context) = payload["context"].as_object_mut() {
             context.remove("locale");
+            context.remove("signIn");
         }
     }
     payload
@@ -2385,7 +2401,17 @@ mod tests {
             payload["context"]["locale"] = json!("zh-CN");
             payload
         });
-        for payload in payloads.into_iter().chain(launch_payloads).chain(localized) {
+        let signed_in = ["alphaxiv", "openresearch", "none"].map(|state| {
+            let mut payload = build_payload("app_started", "cli-release-contract-test", json!({}));
+            payload["context"]["signIn"] = json!(state);
+            payload
+        });
+        for payload in payloads
+            .into_iter()
+            .chain(launch_payloads)
+            .chain(localized)
+            .chain(signed_in)
+        {
             assert_eq!(post_payload(&payload).await, DeliveryOutcome::Acknowledged);
         }
     }
@@ -2416,6 +2442,38 @@ mod tests {
     }
 
     #[test]
+    fn payload_context_reports_how_this_computer_is_signed_in() {
+        if !crate::config::in_test_child(TELEMETRY_ENV) {
+            return;
+        }
+        let sign_in =
+            || build_payload("app_started", "did", json!({}))["context"]["signIn"].clone();
+        assert_eq!(sign_in(), "none");
+        let config = crate::config::config_dir();
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(config.join("credentials.json"), "{}").unwrap();
+        assert_eq!(sign_in(), "openresearch");
+        std::fs::write(config.join("alphaxiv-forwarded.json"), "{}").unwrap();
+        assert_eq!(sign_in(), "alphaxiv");
+        std::fs::remove_file(config.join("alphaxiv-forwarded.json")).unwrap();
+        std::fs::write(config.join("alphaxiv.json"), "{}").unwrap();
+        assert_eq!(sign_in(), "alphaxiv");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let unsearchable = std::fs::Permissions::from_mode(0o000);
+            std::fs::set_permissions(&config, unsearchable).unwrap();
+            let unknown = sign_in();
+            std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o700)).unwrap();
+            assert!(
+                unknown.is_null(),
+                "unchecked sign-in was reported as {unknown}"
+            );
+        }
+    }
+
+    #[test]
     fn consent_payload_carries_agreed_flag() {
         if !crate::config::in_test_child(TELEMETRY_ENV) {
             return;
@@ -2426,6 +2484,7 @@ mod tests {
             assert_eq!(p["events"][0]["name"], "cli_telemetry_consent");
             assert_eq!(p["events"][0]["properties"]["agreed"], agreed);
             assert_eq!(p["context"].get("locale").is_some(), agreed);
+            assert_eq!(p["context"].get("signIn").is_some(), agreed);
         }
     }
 

@@ -1,4 +1,5 @@
 import picomatch from "picomatch/posix.js";
+import type { ArtifactEntry } from "./api.ts";
 import { splitLineSuffix } from "./markdownTarget.ts";
 
 export type FileResolution =
@@ -6,6 +7,11 @@ export type FileResolution =
   /** Fuzzy or glob matches: none is certain, so the reader picks. `total` counts matches beyond the listed `paths`. */
   | { kind: "choices"; paths: string[]; total: number; line?: number }
   | { kind: "none" };
+
+/** The file paths in an artifacts listing, relative to the artifacts directory. */
+export function artifactFiles(entries: readonly ArtifactEntry[]): string[] {
+  return entries.flatMap((entry) => entry.isDir ? artifactFiles(entry.children ?? []) : [entry.path]);
+}
 
 const MAX_CHOICES = 200;
 
@@ -50,4 +56,14 @@ export function resolveFileReference(entries: readonly string[], text: string): 
     const entryLower = entry.toLowerCase();
     return entryLower === lower || entryLower.endsWith(`/${lower}`);
   }), line);
+}
+
+export const ARTIFACTS_PREFIX = /^(?:\.\/)*artifacts\//i;
+
+/** Like `resolveFileReference` over the artifacts directory's `files`, for a path cited with or without its `artifacts/` prefix. */
+export function resolveArtifactReference(files: readonly string[], text: string): FileResolution {
+  const resolution = resolveFileReference(files, text.replace(ARTIFACTS_PREFIX, ""));
+  if (resolution.kind === "exact") return { ...resolution, path: `artifacts/${resolution.path}` };
+  if (resolution.kind === "choices") return { ...resolution, paths: resolution.paths.map((path) => `artifacts/${path}`) };
+  return resolution;
 }
