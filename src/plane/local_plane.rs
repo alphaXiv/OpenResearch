@@ -21,7 +21,7 @@ pub struct LocalPlane {
 impl LocalPlane {
     /// The resolved project row, or an error when called on a plane built by a
     /// different keyed resolver.
-    fn project(&self) -> Result<&LocalProject> {
+    pub(crate) fn project(&self) -> Result<&LocalProject> {
         self.project
             .as_ref()
             .ok_or_else(|| anyhow!("internal: local plane missing its project row"))
@@ -369,10 +369,15 @@ impl LocalPlane {
     pub async fn launch(&self, mut args: ExpRunArgs) -> Result<()> {
         // Resolved before validation so e.g. `--host box1` with a default of `ssh` is valid,
         // and before telemetry records the backend.
-        crate::local::apply_compute_default(&mut args.backend, &mut args.flavor);
+        let experiment = self.experiment()?;
+        crate::local::apply_compute_default(
+            &self.store,
+            &experiment.project_id,
+            &mut args.backend,
+            &mut args.flavor,
+        )?;
         let backend = args.backend.get_or_insert_with(|| "local".into()).clone();
         crate::compute::validate_run_args(&args)?;
-        let experiment = self.experiment()?;
         warn_unreachable_trackio(&self.store, &experiment.project_id, &backend)?;
         if let Some(warning) = self
             .store

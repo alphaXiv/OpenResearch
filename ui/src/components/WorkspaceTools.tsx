@@ -53,7 +53,7 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
 
   const experimentRows = activeWorkspaceRuns(experiments, runs, sessionId);
   const compute = useQuery({ ...getComputeSettingsQuery(projectId), enabled: expanded });
-  const defaultBackend = compute.data?.configuredDefaultBackend ?? compute.data?.defaultBackend;
+  const defaultBackend = compute.data?.projectDefault?.backend ?? compute.data?.configuredDefaultBackend ?? compute.data?.defaultBackend;
   const computeLabel = defaultBackend ? TARGET_LABELS[defaultBackend]() : compute.isPending ? "…" : compute.isError ? m.model_picker_unavailable() : m.settings_not_set();
   const items = [
     { id: "search", label: m.chat_search_title(), Icon: Search, onClick: onFind, shortcut: appHotkeys["chat.find"].hotkey },

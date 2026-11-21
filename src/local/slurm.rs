@@ -53,7 +53,11 @@ pub fn launch_spec(args: &crate::ExpRunArgs, command: &str) -> Result<LaunchSpec
         }
     }
 
-    let settings = slurm::load_settings()?.unwrap_or_default();
+    let mut settings = slurm::load_settings()?.unwrap_or_default();
+    let own = crate::local::experiment_project_settings(&args.exp_id)?.slurm;
+    settings.account = own.account.or(settings.account);
+    settings.partition = own.partition.or(settings.partition);
+    settings.qos = own.qos.or(settings.qos);
     if let Some(root) = &settings.remote_root {
         crate::jobs::ssh::validate_remote_root(root)?;
     }
@@ -253,12 +257,18 @@ fn cpu_flavor_requests_no_gpu_over_a_gpu_default_flavor() {
         return;
     }
     crate::config::set_compute_default(Some("slurm".into()), Some("gpu".into())).unwrap();
+    let store = crate::store::Store::open().unwrap();
     let launch = |flavor: Option<&str>| {
         let mut args = crate::compute::tests::tinker_args();
         args.backend = None;
         args.host = Some("login".into());
         args.flavor = flavor.map(Into::into);
-        crate::local::apply_compute_default(&mut args.backend, &mut args.flavor);
+        crate::local::apply_compute_default(
+            &store,
+            "project",
+            &mut args.backend,
+            &mut args.flavor,
+        )?;
         crate::compute::validate_run_args(&args)?;
         launch_spec(&args, "true")
     };
@@ -383,4 +393,61 @@ fn sbatch_args_follow_saved_then_per_run_and_never_fight_orx() {
     let (written, extra) = directives(&args, settings(None, Some(false))).unwrap();
     assert!(!written.contains_key("ntasks"));
     assert_eq!(extra.last().unwrap(), "--ntasks=4");
+}
+
+#[cfg(test)]
+#[test]
+fn a_project_bills_its_own_account_and_keeps_the_machine_partition() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    slurm::save_settings(&slurm::SlurmSettings {
+        host: Some("login".into()),
+        partition: Some("gpu".into()),
+        account: Some("lab".into()),
+        qos: Some("normal".into()),
+        ..Default::default()
+    })
+    .unwrap();
+    let store = crate::store::Store::open().unwrap();
+    let mut project = crate::local::agent_text::sample_project();
+    project.id = "p".into();
+    store.create_local_project(&project).unwrap();
+    let experiment = crate::local::model::LocalExperiment {
+        id: "exp".into(),
+        project_id: "p".into(),
+        parent_experiment_id: None,
+        slug: "exp".into(),
+        branch_name: "orx/exp".into(),
+        title: None,
+        description: None,
+        run_command: "true".into(),
+        agent_status: "idle".into(),
+        created_at: 0,
+        updated_at: 0,
+        chat_session_id: None,
+        archived: false,
+    };
+    store.create_local_experiment(&experiment).unwrap();
+    store
+        .update_project_settings("p", |settings| {
+            settings.slurm.account = Some("grant42".into());
+            settings.slurm.qos = Some("long".into());
+        })
+        .unwrap();
+
+    let mut args = crate::compute::tests::tinker_args();
+    args.exp_id = "exp".into();
+    args.backend = Some("slurm".into());
+    args.flavor = None;
+    let directives = launch_spec(&args, "true").unwrap().options["directives"].clone();
+    assert_eq!(directives["account"], "grant42");
+    assert_eq!(directives["qos"], "long");
+    assert_eq!(directives["partition"], "gpu");
+
+    args.qos = Some("debug".into());
+    assert_eq!(
+        launch_spec(&args, "true").unwrap().options["directives"]["qos"],
+        "debug"
+    );
 }

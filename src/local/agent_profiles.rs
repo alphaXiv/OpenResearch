@@ -117,7 +117,7 @@ pub struct Edit {
     logo: Option<Option<String>>,
 }
 
-fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+pub(crate) fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
     deserializer: D,
 ) -> std::result::Result<Option<T>, D::Error> {
     T::deserialize(deserializer).map(Some)

@@ -655,7 +655,7 @@ async fn wait(
                     let store = Store::open_for_reading_within(
                         crate::plane::local_plane::busy_timeout_left(deadline),
                     )?;
-                    resolve_project(store, &project_id)
+                    resolve_project(store, Some(&project_id))
                 },
                 interval,
                 deadline,

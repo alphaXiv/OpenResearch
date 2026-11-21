@@ -7,7 +7,7 @@ use super::agent_skills::{self, SkillSet};
 use super::model::LocalProject;
 use super::opencode::{playbook_md, ProjectState};
 
-pub(super) fn sample_project() -> LocalProject {
+pub(crate) fn sample_project() -> LocalProject {
     LocalProject {
         id: "proj_test".into(),
         name: "Test Project".into(),

@@ -502,8 +502,8 @@ backend_adapter!(
     false,
     "kubectl cp",
     false,
-    preflight | _args | {
-        let settings = crate::jobs::kubernetes::load_settings()?.unwrap_or_default();
+    preflight | args | {
+        let settings = crate::local::k8s::settings_for(args)?;
         let check =
             crate::jobs::kubernetes::preflight(settings.context.as_deref(), &settings.namespace)
                 .await;

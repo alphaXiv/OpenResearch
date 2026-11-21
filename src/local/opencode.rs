@@ -152,6 +152,7 @@ pub(super) struct ProjectState {
     experiments: usize,
     runs: usize,
     active_runs: usize,
+    compute: Option<super::ComputeTarget>,
 }
 
 impl ProjectState {
@@ -167,6 +168,7 @@ impl ProjectState {
             experiments,
             runs: runs.len(),
             active_runs,
+            compute: super::compute_default(&store, project_id)?,
         })
     }
 }
@@ -243,23 +245,17 @@ pub(super) fn playbook_md(project: &LocalProject, state: &ProjectState) -> Strin
              its report\n"
         )
     });
-    // The default compute target is read fresh on every
-    // playbook rewrite, but how soon a rewrite reaches a live agent varies:
-    // claude reads it at child spawn, so a rewrite reaches the agent on the next
-    // respawn (config change / interrupt / crash), not every turn; codex only on
-    // thread start/resume; a live opencode server keeps its playbook until
-    // respawn (`AgentHost::ensure` early-returns for a running child). Launch-time
-    // resolution in `exp run` stays authoritative either way: the agent is
-    // told to OMIT `--backend`, never to echo the default back, so even a
-    // stale prompt launches on the current default.
-    let configured_compute_default = crate::config::compute_default();
-    let compute_default = configured_compute_default
-        .clone()
-        .unwrap_or_else(|| ("local".to_string(), None));
-    let compute_default_source = if configured_compute_default.is_some() {
-        "the user's configured default"
-    } else {
-        "the default `local` backend"
+    // Read fresh on every playbook rewrite, which reaches a live agent only on its
+    // next respawn or thread start. `exp run` resolves the default at launch, and
+    // the agent is told to omit `--backend`, so a stale prompt still launches there.
+    let compute_default = state
+        .compute
+        .as_ref()
+        .map_or(("local".to_string(), None), |target| target.value.clone());
+    let compute_default_source = match &state.compute {
+        Some(target) if target.project => "this project's default",
+        Some(_) => "the machine's default, which this project follows",
+        None => "the default `local` backend",
     };
     let (compute_backend, compute_flavor) = &compute_default;
     let flavor_part = compute_flavor
@@ -1663,6 +1659,7 @@ mod tests {
             experiments: 12,
             runs: 18,
             active_runs: 1,
+            compute: None,
         };
         let existing = project_state_md(&project, &state);
         assert!(existing.contains("**12 experiments**"));

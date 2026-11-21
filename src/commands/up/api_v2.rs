@@ -108,7 +108,12 @@ impl Api {
             .project_id;
         let admission = (self.admit)(&project)?;
         args.forwarded = true;
-        crate::local::apply_compute_default(&mut args.backend, &mut args.flavor);
+        crate::local::apply_compute_default(
+            &self.store(),
+            &project,
+            &mut args.backend,
+            &mut args.flavor,
+        )?;
         args.backend.get_or_insert_with(|| "local".into());
         super::require_caller_settings(&args, &super::absolute_config_dir()).await?;
         self.commands.run(args, admission).await

@@ -163,6 +163,10 @@ export function createInvalidation(client: WorkspaceClient) {
     if (project) {
       const [, projectId, action] = project;
       if (action.startsWith("/file")) { invalidateProjectFiles(projectId, scope, true); return; }
+      if (action === "/settings") {
+        invalidate(["getProjectSettings", "getComputeSettings"], scope, (query) => query.queryKey[3] === projectId);
+        return;
+      }
       invalidate(["listProjects", "listProjectActivity", "listSidebarChatSessions"], scope);
       invalidate(["getProjectGitStatus", "getCodeTree", "getProjectStarterPrompts"], scope, (query) => query.queryKey[3] === projectId);
       return;

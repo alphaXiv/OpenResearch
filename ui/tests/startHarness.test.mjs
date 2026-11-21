@@ -101,3 +101,28 @@ test("a new workspace starts with empty composers, and late panel cleanups canno
   await chat.navigate(`/projects/p/tasks/s${sideTab("side")}`);
   assert.deepEqual([composer(0).draft, composer(1).draft], ["main", "side"]);
 });
+
+const pinnedCodex = { "GET /api/projects/p/settings": () => ({ agent: { harness: "codex", model: "gpt-6-astra", permissionMode: null, reasoningLevel: null } }) };
+const opus = m.model_picker_model_on({ model: "Opus 5.5", agent: "Claude Code" });
+const mainModel = () => document.querySelectorAll('[data-onboarding="composer"]')[0].querySelector('[data-onboarding="model-picker"] button').getAttribute("aria-label");
+
+test("a new chat opened with another agent keeps it over the project's agent", async () => {
+  await renderChat("/projects/p/tasks/s", { sessions: [session("s", { busy: true })], harnesses: [codex, claude], routes: pinnedCodex });
+  await act(async () => document.querySelector('[data-onboarding="model-picker"] button').click());
+  await act(async () => document.querySelector(`button[aria-label="${opus}"]`).click());
+  await settle();
+  assert.equal(location.pathname, "/projects/p/tasks/new");
+  assert.match(mainModel(), /Opus 5\.5/);
+});
+
+test("a new chat opened with another agent from a busy side chat keeps it over the project's agent", async () => {
+  const chat = await renderChat(`/projects/p/tasks/s${sideTab("side")}`, {
+    sessions: [session("s"), session("side", { sideParentSessionId: "s", busy: true })],
+    harnesses: [codex, claude],
+    routes: pinnedCodex,
+  });
+  await composer(1).pick("Opus 5.5", "Claude Code");
+  assert.deepEqual(chat.requests.filter(({ request }) => request.startsWith("PATCH")), []);
+  assert.equal(location.pathname, "/projects/p/tasks/new");
+  assert.match(mainModel(), /Opus 5\.5/);
+});

@@ -9,6 +9,8 @@ import { m } from "./paraglide/messages.js";
 import { getLocale } from "./paraglide/runtime.js";
 import { fmtNumber } from "./i18n";
 import type { ChartEdit, ChatShownRun, Flag, RunMonitor, RunMonitorSummary, RunOutcome } from "./runMonitor/types";
+import type { LitSource } from "./orxCommand";
+export type { LitSource };
 
 export { fmtNumber } from "./i18n";
 
@@ -970,7 +972,36 @@ export interface ComputeSettings {
   targets: ComputeTargetSummary[];
   configuredDefaultBackend?: ComputeTargetId | null;
   configuredDefaultFlavor?: string | null;
+  /** The project's own default, when the request named a project; absent means it follows the machine's. */
+  projectDefault?: ComputeDefault | null;
 }
+
+export interface ComputeDefault {
+  backend: ComputeTargetId;
+  flavor?: string | null;
+}
+
+/** What a project sets for itself; each absent setting follows the machine's. */
+export interface ProjectSettings {
+  compute?: ComputeDefault;
+  /** The agent new chats in the project start with. */
+  agent?: AgentSelection;
+  disabledLitSources?: LitSource[];
+  /** The autonomy new chats in the project start with. */
+  autonomy?: Autonomy;
+  /** `#SBATCH` defaults over the machine's Slurm settings; each absent one follows them. */
+  slurm?: SlurmDefaults;
+  k8sNamespace?: string;
+}
+
+export interface SlurmDefaults {
+  account?: string;
+  partition?: string;
+  qos?: string;
+}
+
+/** `null` returns a setting to the machine's; `slurm` replaces all three, and `{}` returns them. */
+export type ProjectSettingsEdit = { [Key in Exclude<keyof ProjectSettings, "slurm">]?: ProjectSettings[Key] | null } & { slurm?: SlurmDefaults };
 
 export interface LocalGpu {
   name: string;
@@ -1086,6 +1117,10 @@ export interface GitSettings {
 }
 
 /** Which literature sources discovery and paper reading may use (settings.json). */
+export interface ChatLitSources {
+  disabledLitSources: LitSource[] | null;
+}
+
 export interface LitSourcesSettings {
   alphaxiv: boolean;
   openalex: boolean;
@@ -2855,13 +2890,18 @@ export function createApi(
       signal,
     );
 
-  /** Set (or clear, with backend: null) the default compute target. Responds
+  /** Set (or clear, with backend: null) the machine's default compute target. Responds
    * with the full compute payload so the caller reconciles in one shot. */
   const setComputeDefault = (body: {
     backend: ComputeTargetId | null;
     flavor?: string | null;
-    projectId?: string;
   }) => post<ComputeSettings>("/api/settings/compute/default", body);
+
+  const getProjectSettings = (projectId: string, signal?: AbortSignal) =>
+    get<ProjectSettings>(`/api/projects/${encodeURIComponent(projectId)}/settings`, signal);
+
+  const updateProjectSettings = (projectId: string, edit: ProjectSettingsEdit) =>
+    patch<ProjectSettings>(`/api/projects/${encodeURIComponent(projectId)}/settings`, edit);
 
   const getPublicNetwork = (signal?: AbortSignal) => get<PublicNetwork>("/api/settings/network", signal);
 
@@ -2957,6 +2997,13 @@ export function createApi(
 
   const setLitSources = (body: LitSourcesSettings) =>
     post<LitSourcesSettings>("/api/settings/lit-sources", body);
+
+  /** `null` sources follow the chat's project. */
+  const getChatLitSources = (sessionId: string, signal?: AbortSignal) =>
+    get<ChatLitSources>(`/api/chat/sessions/${encodeURIComponent(sessionId)}/lit-sources`, signal);
+
+  const setChatLitSources = (sessionId: string, disabledLitSources: LitSource[] | null) =>
+    put<ChatLitSources>(`/api/chat/sessions/${encodeURIComponent(sessionId)}/lit-sources`, { disabledLitSources });
 
   const getProjectDefaults = (signal?: AbortSignal) =>
     get<ProjectDefaultsSettings>("/api/settings/projects", signal);
@@ -3200,7 +3247,7 @@ export function createApi(
   const createChatSession = (
     projectId: string,
     harness: HarnessId,
-    opts: TurnOptions & { autonomy?: Autonomy; profile?: string | null } = {},
+    opts: TurnOptions & { autonomy?: Autonomy; profile?: string | null; disabledLitSources?: LitSource[] } = {},
   ) =>
     post<{ session: ChatSession }>("/api/chat/sessions", { projectId, harness, ...opts }).then(
       (r) => r.session,
@@ -3525,6 +3572,8 @@ export function createApi(
     trackioPreflight,
     getComputeSettings,
     setComputeDefault,
+    getProjectSettings,
+    updateProjectSettings,
     getLocalMachine,
     getPublicNetwork,
     getOpenResearchSettings,
@@ -3544,6 +3593,8 @@ export function createApi(
     saveGitSettings,
     getLitSources,
     setLitSources,
+    getChatLitSources,
+    setChatLitSources,
     getProjectDefaults,
     setProjectDefaults,
     allowClaudeRootFullAccess,

@@ -14,6 +14,8 @@ orx keeps a researcher's work on their own machine. Projects, experiments, runs,
 
 **The config directory never moves**, because the setting that points at the data directory lives there and a lock inside the data directory could not guard a move of it. `settings.json` has one writer, the locked read-modify-write in `src/telemetry.rs`, and every save keeps the fields a newer orx wrote; a second writer would clobber them.
 
+**A project's settings override the machine's, one by one, and a chat's literature sources override its project's.** `settings.json` holds the machine's choice (default compute, literature sources); a project's own choices sit in its store row (`settings_json`), a chat's sources in its own (`lit_sources_json`), and neither travels with a share. A setting the project leaves unset follows the machine's, so resetting one deletes it rather than copying the machine's value. `orx` commands act on the project of the chat that runs them, else the one whose folder holds the working directory (`src/local/resolve.rs`).
+
 OpenCode provider records (`opencode-providers.json`, including API keys) stay in config. Custom endpoint records, names and icons live in the data directory's `local-models.json`; OpenCode OAuth credentials live in its isolated database.
 
 Saved SSH passwords and key passphrases sit in the system's credential store (Keychain, Credential Manager, the Secret Service), one item per host alias, never in a file ([remote](remote.md#saved-hosts)).

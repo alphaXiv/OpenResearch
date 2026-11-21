@@ -47,8 +47,10 @@ launch and inspection steps, including the check after every launch. Use
 `orx exp status <expId>` for a run's live stage and numbers.
 
 Use `orx` as the source of truth for the experiment tree, runs, and logs. Use
-normal repository tools for code and file inspection. Use this project id
-(`{id}`) for every `orx` command that takes one.
+normal repository tools for code and file inspection. Project commands act on
+this project when you leave out its id, and `orx compute default set` changes
+this project's default target; add `--machine` only when the user asks for
+every project.
 
 `orx` is internal and should stay under the hood; do not mention it in user-facing responses.
 
