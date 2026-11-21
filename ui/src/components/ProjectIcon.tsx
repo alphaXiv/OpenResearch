@@ -1,13 +1,12 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { MessageCircleDashed, Search } from "lucide-react";
-import type { AgentIconColor, Project, ProjectIcon } from "../api";
+import { Folder, MessageCircleDashed, Search } from "lucide-react";
+import type { Project, ProjectIcon } from "../api";
 import { m } from "../paraglide/messages.js";
 import { useWorkspace } from "../workspace";
 import { AgentIconTile, IconPicker, IconPickerButton, TILE_SIZES, type Logo } from "./AgentIcon";
 import { Button, Input, Spinner, Tooltip } from "./ui";
 
-const INITIALS_COLORS: AgentIconColor[] = ["red", "orange", "amber", "green", "teal", "blue", "indigo", "purple", "pink"];
 const IMAGE_FILE = /\.(png|jpe?g|gif|webp|svg|ico)$/i;
 const LIKELY_ICON = /(^|[/_.-])(logo|icon|favicon|brand|mark|avatar)/i;
 const PROJECT_TABS = ["icons", "emoji", "image", "repo"] as const;
@@ -17,13 +16,6 @@ export function projectInitials(name: string) {
   const words = name.replace(/(\p{Ll})(\p{Lu})/gu, "$1 $2").split(/[^\p{L}\p{N}]+/u).filter(Boolean);
   const letters = words.length > 1 ? words.slice(0, 2).map((word) => [...word][0]) : [...(words[0] ?? "?")].slice(0, 2);
   return letters.join("").toUpperCase();
-}
-
-/** Without an icon of its own, a project wears its initials on a colour its id picks, so neighbours differ. */
-function defaultIcon(project: Project): ProjectIcon {
-  let hash = 0;
-  for (const char of project.id) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
-  return { brand: true, color: INITIALS_COLORS[hash % INITIALS_COLORS.length] };
 }
 
 const initialsMark = (name: string): Logo => (size) => <Initials text={projectInitials(name)} size={size} />;
@@ -42,22 +34,26 @@ function Initials({ text, size }: { text: string; size: number }) {
   return <span ref={ref} className="whitespace-nowrap font-bold leading-none" style={{ fontSize: size * 0.8 * scale }}>{text}</span>;
 }
 
-export function ProjectIconTile({ project, icon = project.icon, size = "xs" }: {
+export function ProjectIconTile({ project, size = "xs" }: {
   project: Project;
-  /** An unsaved pick to show in place of the stored one. */
-  icon?: ProjectIcon;
   size?: "sm" | "xs" | "md" | "lg";
 }) {
   const { projectFileUrl } = useWorkspace().api;
+  const { icon } = project;
   // Until it has an icon of its own, a project nobody named wears an empty chat bubble; its tile says so on hover.
   if (project.unnamed && !icon) return (
     <Tooltip content={m.projects_home_new_project()} className={`inline-flex shrink-0 items-center justify-center text-muted ${TILE_SIZES[size].box}`}>
       <MessageCircleDashed size={TILE_SIZES[size].mark + 2} aria-hidden="true" />
     </Tooltip>
   );
+  if (!icon) return (
+    <span aria-hidden="true" className={`inline-flex shrink-0 items-center justify-center ${TILE_SIZES[size].box}`}>
+      <Folder size={TILE_SIZES[size].mark + 5} />
+    </span>
+  );
   return (
     <AgentIconTile
-      icon={icon ?? defaultIcon(project)}
+      icon={icon}
       brand={initialsMark(project.name)}
       size={size}
       fill
@@ -67,27 +63,27 @@ export function ProjectIconTile({ project, icon = project.icon, size = "xs" }: {
 }
 
 /** The project's tile opening the icon picker; `name` is the one being typed, so the initials follow it. */
-export function ProjectIconButton({ project, name, value, onChange, disabled, compact }: {
+export function ProjectIconButton({ project, name, onChange, disabled, compact }: {
   project: Project;
   name: string;
-  value: ProjectIcon | undefined;
-  onChange: (icon: ProjectIcon) => void;
+  onChange: (icon: ProjectIcon | null) => void;
   disabled?: boolean;
   compact?: boolean;
 }) {
   const { projectFileUrl } = useWorkspace().api;
   const shown = { ...project, name };
-  const icon = value ?? defaultIcon(project);
+  const { icon } = project;
   return (
-    <IconPickerButton tile={<ProjectIconTile project={shown} icon={value} size={compact ? "xs" : "lg"} />} disabled={disabled} compact={compact}>
+    <IconPickerButton tile={<ProjectIconTile project={shown} size={compact ? "xs" : "lg"} />} disabled={disabled} compact={compact}>
       <IconPicker
         value={icon}
         brand={initialsMark(name)}
         brandLabel={m.icon_project_initials()}
         tabs={PROJECT_TABS}
         fileUrl={(path) => projectFileUrl(project.id, path)}
-        repo={(pick) => <RepoImages projectId={project.id} selected={"file" in icon ? icon.file : null} onPick={pick} />}
+        repo={(pick) => <RepoImages projectId={project.id} selected={icon && "file" in icon ? icon.file : null} onPick={pick} />}
         onChange={onChange}
+        onReset={() => onChange(null)}
       />
     </IconPickerButton>
   );

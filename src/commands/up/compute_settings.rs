@@ -1016,8 +1016,16 @@ pub(super) async fn add_remote_host(Json(req): Json<AddSshHostReq>) -> ApiResult
     blocking_api(move || add_saved_host(crate::jobs::ssh::hosts::List::Remotes, &req.command)).await
 }
 
-pub(super) async fn remove_remote_host(Path(host): Path<String>) -> ApiResult {
-    blocking_api(move || remove_saved_host(crate::jobs::ssh::hosts::List::Remotes, &host)).await
+pub(super) async fn remove_remote_host(
+    State(state): State<AppState>,
+    Path(host): Path<String>,
+) -> ApiResult {
+    let saved = host.clone();
+    let removed =
+        blocking_api(move || remove_saved_host(crate::jobs::ssh::hosts::List::Remotes, &saved))
+            .await?;
+    state.remote_sessions.forget(&host).await;
+    Ok(removed)
 }
 
 pub(super) async fn require_saved_remote(host: &str) -> Result<(), ApiError> {

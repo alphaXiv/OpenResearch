@@ -317,17 +317,35 @@ impl RemoteSessionManager {
         Ok(info)
     }
 
+    /// Closes the host's session, if any, and drops it from the list.
+    pub(crate) async fn forget(&self, host: &str) {
+        let session = {
+            let mut registry = self.registry.lock().await;
+            let Some(id) = registry.by_host.remove(host) else {
+                return;
+            };
+            registry.by_id.remove(&id)
+        };
+        if let Some(session) = session {
+            close_session(&session).await;
+        }
+    }
+
     pub(crate) async fn shutdown(&self) {
         let sessions = {
             let registry = self.registry.lock().await;
             registry.by_id.values().cloned().collect::<Vec<_>>()
         };
         for session in sessions {
-            disconnect_session(&session).await;
-            if let Some(task) = session.gateway_task.lock().await.take() {
-                task.abort();
-            }
+            close_session(&session).await;
         }
+    }
+}
+
+async fn close_session(session: &Arc<RemoteSession>) {
+    disconnect_session(session).await;
+    if let Some(task) = session.gateway_task.lock().await.take() {
+        task.abort();
     }
 }
 
@@ -3125,6 +3143,33 @@ mod tests {
         assert_eq!(next(&mut received).await.2, "access-b");
         assert!(!forwarding.is_finished());
         forwarding.abort();
+    }
+
+    #[tokio::test]
+    async fn forgetting_a_host_closes_its_session_and_drops_it_from_the_list() {
+        let manager = RemoteSessionManager::new();
+        let session = Arc::new(sample_session());
+        let gateway = tokio::spawn(std::future::pending::<()>());
+        let gateway_ended = gateway.abort_handle();
+        *session.gateway_task.lock().await = Some(gateway);
+        {
+            let mut registry = manager.registry.lock().await;
+            registry.by_host.insert("example".into(), "session".into());
+            registry.by_id.insert("session".into(), session.clone());
+        }
+
+        manager.forget("other").await;
+        assert_eq!(manager.list().await.len(), 1);
+
+        manager.forget("example").await;
+        assert!(manager.list().await.is_empty());
+        assert!(manager.get("session").await.is_none());
+        assert!(matches!(
+            session.info.read().await.status,
+            RemoteSessionStatus::Disconnected
+        ));
+        tokio::task::yield_now().await;
+        assert!(gateway_ended.is_finished());
     }
 
     #[test]

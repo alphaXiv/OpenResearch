@@ -10,7 +10,7 @@ import type { AgentIcon, AgentIconColor, ProjectIcon } from "../api";
 import { m } from "../paraglide/messages.js";
 import { WorkspaceDomContext } from "../WorkspaceDom";
 import { LOGOS, logoMark } from "./HarnessLogo";
-import { Button, Input, SEGMENTED_CLASS_NAME } from "./ui";
+import { Button, Input, SEGMENTED_CLASS_NAME, Tooltip } from "./ui";
 import { cn } from "./ui/cn";
 
 /** The plain outline a mark sits in without a colour, its logo in its own colours. */
@@ -64,7 +64,7 @@ export const TILE_SIZES = {
   lg: { box: "size-11 rounded-xl text-2xl", mark: 24 },
 } as const;
 
-/** A mark the picker offers first: the provider's own logo, drawn at the size asked. */
+/** Draws the provider logo or project initials at the requested size. */
 export type Logo = (size: number) => ReactNode;
 
 /** Resolves a project icon's repository image to a URL; agents have none. */
@@ -114,9 +114,8 @@ const TAB_LABELS: Record<PickerTab, () => string> = {
   icons: m.icon_tab_icons, logos: m.icon_tab_logos, emoji: m.icon_tab_emoji, image: m.icon_tab_image, repo: m.icon_tab_repo,
 };
 
-/** Icons with the `brand` mark first, then the other `tabs`, over a colour row; `repo` draws the Repo tab. */
-export function IconPicker({ value, brand, brandLabel, logo, tabs, repo, fileUrl, onChange }: {
-  value: ProjectIcon;
+export function IconPicker({ value, brand, brandLabel, logo, tabs, repo, fileUrl, onChange, onReset }: {
+  value: ProjectIcon | undefined;
   brand: Logo;
   brandLabel: string;
   logo?: string;
@@ -124,13 +123,20 @@ export function IconPicker({ value, brand, brandLabel, logo, tabs, repo, fileUrl
   repo?: (pick: (file: string) => void) => ReactNode;
   fileUrl?: FileUrl;
   onChange: (icon: ProjectIcon, logo?: string | null) => void;
+  onReset?: () => void;
 }) {
-  const [tab, setTab] = useState<PickerTab>(() => "emoji" in value ? "emoji" : "image" in value ? "image" : "file" in value ? "repo" : logo ? "logos" : "icons");
+  const [tab, setTab] = useState<PickerTab>(() => {
+    if (value && "emoji" in value) return "emoji";
+    if (value && "image" in value) return "image";
+    if (value && "file" in value) return "repo";
+    return logo ? "logos" : "icons";
+  });
   const [imageError, setImageError] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
-  const color = value.color;
+  const color = value?.color;
   const cell = cn(CELL, (color && COLORS[color] || PLAIN).cell);
   const tint = (next?: AgentIconColor) => {
+    if (!value) return;
     const { color: _, ...mark } = value;
     onChange(next ? { ...mark, color: next } : mark);
   };
@@ -144,7 +150,7 @@ export function IconPicker({ value, brand, brandLabel, logo, tabs, repo, fileUrl
           </button>
         ))}
       </div>
-      <div role="radiogroup" aria-label={m.icon_color_label()} className="flex justify-between">
+      <fieldset disabled={!value} role="radiogroup" aria-label={m.icon_color_label()} className="m-0 flex min-w-0 justify-between border-0 p-0 disabled:opacity-50">
         <button
           type="button"
           role="radio"
@@ -168,33 +174,40 @@ export function IconPicker({ value, brand, brandLabel, logo, tabs, repo, fileUrl
             {entry === color && <Check size={13} strokeWidth={3} aria-hidden="true" />}
           </button>
         ))}
-      </div>
+      </fieldset>
       {tab === "icons" ? (
         <div role="radiogroup" aria-label={m.icon_tab_icons()} className={GRID}>
-          <button type="button" role="radio" aria-checked={"brand" in value} aria-label={brandLabel} className={cell} onClick={() => onChange({ brand: true, color })}>
+          {onReset && (
+            <Tooltip interactive content={m.settings_page_default_808d7dc()}>
+              <button type="button" role="radio" aria-checked={!value} aria-label={m.settings_page_default_808d7dc()} className={cn(CELL, PLAIN.cell, "w-full")} onClick={onReset}>
+                <RotateCcw size={18} aria-hidden="true" />
+              </button>
+            </Tooltip>
+          )}
+          <button type="button" role="radio" aria-checked={!!value && "brand" in value} aria-label={brandLabel} className={cell} onClick={() => onChange({ brand: true, color })}>
             {brand(18)}
           </button>
           {GLYPHS.map(([id, label, Glyph]) => (
-            <button key={id} type="button" role="radio" aria-checked={"glyph" in value && value.glyph === id} aria-label={label()} className={cell} onClick={() => onChange({ glyph: id, color })}>
+            <button key={id} type="button" role="radio" aria-checked={!!value && "glyph" in value && value.glyph === id} aria-label={label()} className={cell} onClick={() => onChange({ glyph: id, color })}>
               <Glyph size={18} aria-hidden="true" />
             </button>
           ))}
         </div>
       ) : tab === "logos" ? (
-        <LogoPicker pinned={"brand" in value ? logo : undefined} cell={cell} onPick={(slug) => onChange({ brand: true, color }, slug)} />
+        <LogoPicker pinned={value && "brand" in value ? logo : undefined} cell={cell} onPick={(slug) => onChange({ brand: true, color }, slug)} />
       ) : tab === "emoji" ? (
-        <EmojiPicker value={"emoji" in value ? value.emoji : null} cell={cell} onPick={(emoji) => onChange({ emoji, color })} />
+        <EmojiPicker value={value && "emoji" in value ? value.emoji : null} cell={cell} onPick={(emoji) => onChange({ emoji, color })} />
       ) : tab === "repo" ? (
         repo?.((file) => onChange({ file }))
       ) : (
         <div className="flex items-center gap-3.5">
-          {"image" in value ? (
+          {value && "image" in value ? (
             <AgentIconTile icon={value} brand={brand} size="lg" fileUrl={fileUrl} />
           ) : (
             <span aria-hidden="true" className="grid size-11 place-items-center rounded-xl border border-dashed border-border text-muted"><Plus size={20} /></span>
           )}
           <div className="grid justify-items-start gap-1.5">
-            <Button size="small" onClick={() => fileInput.current?.click()}>{"image" in value ? m.icon_image_replace() : m.icon_image_upload()}</Button>
+            <Button size="small" onClick={() => fileInput.current?.click()}>{value && "image" in value ? m.icon_image_replace() : m.icon_image_upload()}</Button>
             <span role={imageError ? "alert" : undefined} className={cn("text-xs", imageError ? "text-accent-red" : "text-subtext")}>
               {imageError ? m.icon_image_error() : m.icon_image_hint()}
             </span>

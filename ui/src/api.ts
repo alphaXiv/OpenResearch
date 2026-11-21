@@ -74,7 +74,6 @@ export interface Project {
   runCommand?: string | null;
   /** arXiv or alphaXiv paper id the project starts from (versionless). */
   paperId?: string | null;
-  /** The user's mark for the project; without one it shows its initials. */
   icon?: ProjectIcon;
   createdAt: number;
   updatedAt: number;
@@ -2368,7 +2367,7 @@ export function createApi(
       if (!r.ok) throw new Error((await r.json().catch(() => null))?.error ?? `cancel failed (${r.status})`);
     });
 
-  const updateProject = (projectId: string, body: { runCommand?: string; name?: string; icon?: ProjectIcon }) =>
+  const updateProject = (projectId: string, body: { runCommand?: string; name?: string; icon?: ProjectIcon | null }) =>
     patch<{ project: Project }>(`/api/projects/${projectId}`, body).then((r) => r.project);
 
   /** Start generating starter prompts for a project that is about to be created,
