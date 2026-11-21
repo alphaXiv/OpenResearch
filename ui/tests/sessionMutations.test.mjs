@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applySidebarRow, mutDeleteChatSession, mutPatchChatSession } from "../src/queries/chat.ts";
+import { applySidebarCards, mutDeleteChatSession, mutPatchChatSession } from "../src/queries/chat.ts";
 import { createWorkspace } from "../src/workspace.tsx";
 import { serve } from "./render.mjs";
 
@@ -137,7 +137,7 @@ test("a move in flight on one machine leaves another machine's counts alone", as
   const otherList = sidebar(other, []);
   const saved = mutPatchChatSession.runAsHeadlessPromise(workspace, row("s", "Old"), { archived: true }, {});
   const scope = other.queries.listSidebarChatSessionsQuery("active").queryKey.slice(0, -2);
-  applySidebarRow(other.queryClient, scope, { type: "sidebar", sessionId: "t", session: row("t", "Other"), atWork: false, totals: { active: 2, archived: 0 } });
+  applySidebarCards(other.queryClient, scope, { type: "sidebar", cards: [{ sessionId: "t", session: row("t", "Other"), atWork: false }], totals: { active: 2, archived: 0 } });
   assert.deepEqual(otherList("archived").total, 0);
   reply.resolve({ session: { ...row("s", "Old"), archived: true } });
   await saved;

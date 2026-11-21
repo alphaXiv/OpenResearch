@@ -55,7 +55,7 @@ const send = (name, data) => act(async () => streams[0].dispatchEvent(new Messag
 async function markedDoneElsewhere(row, totals) {
   row.archived = true;
   await send("chat.session", { session: row });
-  await send("chat.sidebar", { sessionId: row.id, session: row, totals: totals() });
+  await send("chat.sidebar", { cards: [{ sessionId: row.id, session: row, atWork: false }], totals: totals() });
   await settle();
 }
 
@@ -120,7 +120,7 @@ test("a card read before a Done click lands does not put the chat back in the in
     await settle();
     assert.ok(!rail().includes("a"));
 
-    await send("chat.sidebar", { sessionId: "a", session: stale, totals: totals() });
+    await send("chat.sidebar", { cards: [{ sessionId: "a", session: stale, atWork: false }], totals: totals() });
     await settle();
     assert.ok(!rail().includes("a"), "the card from before the click keeps it in Done");
     assert.ok(doneHeader().textContent.includes("1"));
@@ -180,12 +180,12 @@ test("Done counts a move in flight until a card shows it", { timeout: 20_000 }, 
     await openInbox();
     const before = totals();
     await act(async () => document.querySelector(`.session-rail [data-rail-key="a"] .session-done-btn`).click());
-    await send("chat.sidebar", { sessionId: "b", session: { ...chats[1], title: "Renamed" }, totals: before });
+    await send("chat.sidebar", { cards: [{ sessionId: "b", session: { ...chats[1], title: "Renamed" }, atWork: false }], totals: before });
     await settle();
     assert.ok(doneHeader().textContent.includes("1"), "a card read before the move still counts it");
 
     chats[0].archived = true;
-    await send("chat.sidebar", { sessionId: "a", session: chats[0], totals: totals() });
+    await send("chat.sidebar", { cards: [{ sessionId: "a", session: chats[0], atWork: false }], totals: totals() });
     await settle();
     assert.ok(doneHeader().textContent.includes("1"), "the move's own card is not counted twice");
     await act(async () => land());
@@ -238,7 +238,7 @@ test("a chat past the loaded pages joins Working once it starts work", { timeout
   try {
     await openInbox();
     assert.ok(!rail().includes("old"));
-    await send("chat.sidebar", { sessionId: "old", session: { ...chats[2], busy: true }, atWork: true, totals: { active: 3, archived: 0 } });
+    await send("chat.sidebar", { cards: [{ sessionId: "old", session: { ...chats[2], busy: true }, atWork: true }], totals: { active: 3, archived: 0 } });
     await settle();
     assert.ok(rail().includes("old"));
   } finally {
@@ -254,7 +254,7 @@ test("a refused Done keeps a newer card's changes to that chat", { timeout: 20_0
     await openInbox();
     await act(async () => document.querySelector(`.session-rail [data-rail-key="a"] .session-done-btn`).click());
     chats[0].title = "Renamed";
-    await send("chat.sidebar", { sessionId: "a", session: chats[0], totals: totals() });
+    await send("chat.sidebar", { cards: [{ sessionId: "a", session: chats[0], atWork: false }], totals: totals() });
     await act(async () => refuse());
     await settle();
     assert.ok(document.querySelector(`.session-rail [data-rail-key="a"]`)?.textContent.includes("Renamed"));
@@ -312,9 +312,35 @@ test("a chat restored into the loaded range shows after the row that ended the p
     await openInbox();
     await markedDoneElsewhere(chats[1], totals);
     chats[3].archived = false;
-    await send("chat.sidebar", { sessionId: "r", session: chats[3], atWork: false, totals: totals() });
+    await send("chat.sidebar", { cards: [{ sessionId: "r", session: chats[3], atWork: false }], totals: totals() });
     await settle();
     assert.deepEqual(rail().filter((key) => !key.startsWith("section:")).slice(0, 2), ["a", "r"]);
+  } finally {
+    localStorage.clear();
+  }
+});
+
+test("two moves in flight shown in one card batch are counted once", { timeout: 20_000 }, async () => {
+  const chats = [chat("a", 3), chat("b", 2), chat("c", 1)];
+  const lands = [];
+  const { totals } = serve(chats, { patch: (row, body) => new Promise((resolve) => { lands.push(() => resolve({ session: Object.assign(row, body) })); }) });
+  try {
+    await openInbox();
+    const done = (id) => act(async () => document.querySelector(`.session-rail [data-rail-key="${id}"] .session-done-btn`).click());
+    await done("a");
+    await settle();
+    await done("b");
+    await settle();
+    assert.ok(doneHeader().textContent.includes("2"));
+
+    chats[0].archived = true;
+    chats[1].archived = true;
+    await send("chat.sidebar", { cards: chats.slice(0, 2).map((row) => ({ sessionId: row.id, session: row, atWork: false })), totals: totals() });
+    await settle();
+    assert.ok(doneHeader().textContent.includes("2") && !doneHeader().textContent.includes("3"));
+    for (const land of lands) await act(async () => land());
+    await settle();
+    assert.ok(doneHeader().textContent.includes("2") && !doneHeader().textContent.includes("3"));
   } finally {
     localStorage.clear();
   }

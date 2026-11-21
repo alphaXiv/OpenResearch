@@ -9831,8 +9831,8 @@ impl SidebarChanges {
     }
 }
 
-/// Sends each changed chat's sidebar card with the sidebar's counts, so a dashboard updates one
-/// row instead of re-reading its lists. A missed or unreadable change asks dashboards to resync.
+/// Sends the sidebar cards of the chats a burst of events changed, with the sidebar's counts, so a
+/// dashboard updates those rows instead of re-reading its lists. A missed or unreadable change asks dashboards to resync.
 async fn publish_sidebar_rows(
     state: AppState,
     mut events: broadcast::Receiver<(&'static str, Value)>,
@@ -9880,7 +9880,7 @@ async fn publish_sidebar_rows(
             .as_ref()
             .map(|(_, catalog)| catalog.clone())
             .unwrap_or(Value::Null);
-        let rows = tokio::task::spawn_blocking(move || -> Result<Vec<Value>> {
+        let batch = tokio::task::spawn_blocking(move || -> Result<Value> {
             let store = Store::open()?;
             let mut chats = changes.chats;
             for run_id in &changes.runs {
@@ -9907,7 +9907,7 @@ async fn publish_sidebar_rows(
                 .into_iter()
                 .map(|session| session.id)
                 .collect();
-            chats
+            let cards = chats
                 .into_iter()
                 .map(|id| {
                     let row = store
@@ -9926,18 +9926,17 @@ async fn publish_sidebar_rows(
                         "sessionId": id,
                         "session": row,
                         "atWork": at_work.contains(&id),
-                        "totals": totals,
                     }))
                 })
-                .collect()
+                .collect::<Result<Vec<_>>>()?;
+            // One event per read, so the counts arrive with every card they include.
+            Ok(json!({ "cards": cards, "totals": totals }))
         })
         .await
         .map_err(anyhow::Error::from)
-        .and_then(|rows| rows);
-        match rows {
-            Ok(rows) => rows
-                .into_iter()
-                .for_each(|row| state.chat.emit_event("chat.sidebar", row)),
+        .and_then(|batch| batch);
+        match batch {
+            Ok(batch) => state.chat.emit_event("chat.sidebar", batch),
             Err(error) => {
                 eprintln!("orx up: could not read changed sidebar rows: {error:#}");
                 state.chat.emit_event("resync.required", json!({}));
@@ -13791,11 +13790,20 @@ mod tests {
             state.chat.subscribe(),
             runs_rx,
         ));
-        let mut next_card = async || loop {
+        let mut next_batch = async || loop {
             let (name, data) = events.recv().await.unwrap();
             if name == "chat.sidebar" {
                 return data;
             }
+        };
+        let card = |batch: &Value, id: &str| {
+            batch["cards"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|card| card["sessionId"] == id)
+                .cloned()
+                .unwrap()
         };
 
         let page = list_chat_sessions(
@@ -13814,19 +13822,17 @@ mod tests {
         )
         .await
         .unwrap();
-        let card = next_card().await;
-        assert_eq!(card["sessionId"], "finished");
-        assert_eq!(card["session"]["archived"], true);
-        assert_eq!(card["totals"], json!({"active": 1, "archived": 1}));
+        let batch = next_batch().await;
+        assert_eq!(card(&batch, "finished")["session"]["archived"], true);
+        assert_eq!(batch["totals"], json!({"active": 1, "archived": 1}));
 
         // A delegate has no card of its own; its work shows on the card of the chat it works for.
         state
             .chat
             .emit_event("chat.busy", json!({"sessionId": "helper", "busy": false}));
-        let cards = [next_card().await, next_card().await];
-        let card = |id: &str| cards.iter().find(|card| card["sessionId"] == id).unwrap();
-        assert!(card("helper")["session"].is_null());
-        assert_eq!(card("open")["session"]["id"], "open");
+        let batch = next_batch().await;
+        assert!(card(&batch, "helper")["session"].is_null());
+        assert_eq!(card(&batch, "open")["session"]["id"], "open");
 
         runs.send(crate::engine::bus::RunEvent::Changed {
             run_id: "run-1".into(),
@@ -13835,18 +13841,16 @@ mod tests {
             cancelling: false,
         })
         .unwrap();
-        let card = next_card().await;
-        assert_eq!(card["sessionId"], "open");
-        assert_eq!(card["session"]["lastRun"]["id"], "run-2");
-        assert_eq!(card["atWork"], true);
+        let batch = next_batch().await;
+        assert_eq!(card(&batch, "open")["session"]["lastRun"]["id"], "run-2");
+        assert_eq!(card(&batch, "open")["atWork"], true);
 
         // Deleting an experiment takes its finished run off the card.
         let _ = delete_experiment(State(state.clone()), Path("exp-2".into()))
             .await
             .unwrap();
-        let card = next_card().await;
-        assert_eq!(card["sessionId"], "open");
-        assert_eq!(card["session"]["lastRun"]["id"], "run-1");
+        let batch = next_batch().await;
+        assert_eq!(card(&batch, "open")["session"]["lastRun"]["id"], "run-1");
     }
 
     #[tokio::test]

@@ -1,5 +1,5 @@
 import type { WorkspaceEvents } from "../workspace";
-import type { Api, ChatSession, ChatSessionPatch, HarnessId, NativeChat, PromptAnswer, SidebarChatPage, SidebarChatTotals, TurnOptions } from "../api";
+import type { Api, ChatSession, ChatSessionPatch, HarnessId, NativeChat, PromptAnswer, SidebarCard, SidebarChatPage, SidebarChatTotals, TurnOptions } from "../api";
 import type { ChatEvent } from "../events";
 import type { WorkspaceClient } from "./client";
 
@@ -130,7 +130,7 @@ export function createChatQueries(
       let totals: SidebarChatTotals | undefined;
       const offCards = onChatEvent((event) => {
         if (event.type !== "sidebar") return;
-        cards.set(event.sessionId, event);
+        for (const card of event.cards) cards.set(card.sessionId, card);
         totals = event.totals;
       });
       // The fetch builds the list from the pages it started with, so a card applied meanwhile is put back on top.
@@ -242,7 +242,6 @@ function inChatTurn<T>(id: string, ws: Workspace, sessionId: string, write: () =
 
 type SidebarFilter = "active" | "archived" | "all";
 type SidebarList = InfiniteData<SidebarChatPage>;
-type SidebarCard = Extract<ChatEvent, { type: "sidebar" }>;
 type PendingWrite = { fields: Partial<ChatSession>; moving: boolean };
 
 /**
@@ -320,12 +319,14 @@ function shiftCounts(data: SidebarList, filter: SidebarFilter, archived: boolean
   return { ...data, pages: [{ ...first, total: first.total + (filter === "archived" ? step : -step) }, ...rest] };
 }
 
-/** Edits each loaded sidebar list under `family`; an invalidated one is read again before it shows, and that read sees the change. */
+/** Edits each loaded sidebar list under `family`, keeping one a resync invalidated due for its read. */
 export function editSidebarLists(client: QueryClient, family: QueryKey, edit: (data: SidebarList, filter: SidebarFilter) => SidebarList) {
   for (const query of client.getQueryCache().findAll({ queryKey: family })) {
     const data = query.state.data as SidebarList | undefined;
-    if (!data || query.state.isInvalidated) continue;
+    if (!data) continue;
+    const invalidated = query.state.isInvalidated;
     client.setQueryData(query.queryKey, edit(data, query.queryKey.at(-1) as SidebarFilter));
+    if (invalidated) query.invalidate();
   }
 }
 
@@ -347,11 +348,13 @@ function acknowledge(identity: unknown, { sessionId, session }: SidebarCard) {
 const putCard = (identity: unknown, data: SidebarList, filter: SidebarFilter, card: SidebarCard) =>
   putSidebarRow(data, filter, card.sessionId, card.session && withPending(identity, card.session), card.atWork);
 
-export function applySidebarRow(client: QueryClient, scope: QueryKey, card: SidebarCard) {
+export function applySidebarCards(client: QueryClient, scope: QueryKey, { cards, totals }: Extract<ChatEvent, { type: "sidebar" }>) {
   const identity = scope[1];
-  acknowledge(identity, card);
-  const counts = withPendingMoves(identity, card.totals);
-  editSidebarLists(client, [...scope, "listSidebarChatSessions"], (data, filter) => withCounts(putCard(identity, data, filter, card), filter, counts));
+  // Every card of the read first: its counts already include each move these cards show.
+  cards.forEach((card) => acknowledge(identity, card));
+  const counts = withPendingMoves(identity, totals);
+  editSidebarLists(client, [...scope, "listSidebarChatSessions"], (data, filter) =>
+    withCounts(cards.reduce((list, card) => putCard(identity, list, filter, card), data), filter, counts));
 }
 
 /** Puts back on a freshly fetched list the cards and writes in flight it may predate. */

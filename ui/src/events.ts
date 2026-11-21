@@ -12,6 +12,7 @@ import type {
   EngineHost,
   QueuedMessage,
   Run,
+  SidebarCard,
   SidebarChatTotals,
   UpdateStatus,
 } from "./api";
@@ -32,11 +33,8 @@ export type ChatEvent =
   | { type: "runsChanged" }
   | { type: "session"; session: ChatSession }
   | { type: "sessionDeleted"; sessionId: string }
-  /**
-   * A chat's sidebar card as the server now reads it; `session` is null once the sidebar no longer lists it,
-   * and `atWork` lists it first however old it is.
-   */
-  | { type: "sidebar"; sessionId: string; session: ChatSession | null; atWork: boolean; totals: SidebarChatTotals }
+  /** The sidebar cards one server read changed, with the counts that read saw. */
+  | { type: "sidebar"; cards: SidebarCard[]; totals: SidebarChatTotals }
   | { type: "message"; sessionId: string; message: ChatMessage }
   | { type: "busy"; sessionId: string; busy: boolean }
   | { type: "background"; sessionId: string }
@@ -403,8 +401,8 @@ export function createEvents(client: WorkspaceClient) {
           }
         });
         es.addEventListener("chat.sidebar", (e) => {
-          const d = parse<{ sessionId: string; session: ChatSession | null; atWork: boolean; totals: SidebarChatTotals }>(e as MessageEvent);
-          if (d?.sessionId && d.totals) emitChat({ type: "sidebar", sessionId: d.sessionId, session: d.session, atWork: d.atWork === true, totals: d.totals });
+          const d = parse<{ cards: SidebarCard[]; totals: SidebarChatTotals }>(e as MessageEvent);
+          if (Array.isArray(d?.cards) && d.totals) emitChat({ type: "sidebar", cards: d.cards, totals: d.totals });
         });
         es.addEventListener("chat.session.deleted", (e) => {
           const d = parse<{ sessionId: string }>(e as MessageEvent);

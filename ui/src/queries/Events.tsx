@@ -7,7 +7,7 @@ import { inputSummaryChanged } from "./chatState";
 import { useEffect, useMemo } from "react";
 
 import { artifactFamilies, streamsSidebarRows } from "./invalidation";
-import { applySidebarRow, editSidebarLists } from "./chat";
+import { applySidebarCards, editSidebarLists } from "./chat";
 
 /** The cached monitor with `event` applied, or null when the event can't be applied to it and the run must be read again. */
 export function applyMonitorEvent(cached: RunMonitor, event: RunMonitorEvent): RunMonitor | null {
@@ -171,7 +171,7 @@ export function QueryEvents() {
     const offMove = onDataDirMove((event) => { if (event.type === "done") invalidateFamilies(["getDataDir"], scope); });
     const offChat = onChatEvent((event) => {
       if (!isCurrentScope(scope)) return;
-      if (event.type === "sidebar") applySidebarRow(queryClient, scope, event);
+      if (event.type === "sidebar") applySidebarCards(queryClient, scope, event);
       if (inputSummaryChanged(event, promptStates)) refreshSidebar();
       else if (event.type === "busy" && !streamsSidebarRows(queryClient, scope)) invalidateFamilies(["listSidebarChatSessions"], scope);
       if (event.type === "background") invalidateFamilies(chatLists(), scope);
