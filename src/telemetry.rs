@@ -114,6 +114,9 @@ pub(crate) struct Settings {
     /// Random anonymous id (uuid v4), generated once on first enabled run.
     #[serde(default)]
     pub install_id: Option<String>,
+    /// The download page's click id, looked up once when the install id is created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_click_id: Option<String>,
     /// Set by `orx telemetry off`. `Some(true)` = user opted out persistently.
     #[serde(default)]
     pub telemetry_disabled: Option<bool>,
@@ -371,6 +374,18 @@ pub(crate) fn set_claude_root_full_access(allowed: bool) -> std::io::Result<()> 
     mutate_settings(|settings| settings.claude_root_full_access = Some(allowed))
 }
 
+/// How this computer is signed in, as a label that names no account, or
+/// `None` when the credential files cannot be checked.
+fn sign_in() -> Option<&'static str> {
+    if crate::alphaxiv::signed_in_checked().ok()? {
+        Some("alphaxiv")
+    } else if crate::config::credentials_present().ok()? {
+        Some("openresearch")
+    } else {
+        Some("none")
+    }
+}
+
 pub(crate) fn dashboard_locale() -> Option<String> {
     load_settings().and_then(|settings| settings.dashboard_locale)
 }
@@ -559,21 +574,118 @@ pub(crate) fn mutate_settings<F: FnOnce(&mut Settings)>(f: F) -> std::io::Result
 /// (so a run that couldn't write never invents a throwaway id that would inflate
 /// install counts on every invocation).
 pub(crate) fn install_id() -> Option<String> {
+    install_id_or_create(installer_click_id)
+}
+
+/// `click_id` runs only for an install without an id, and before the settings lock.
+fn install_id_or_create(click_id: impl FnOnce() -> Option<String>) -> Option<String> {
     // Fast path: already generated.
     if let Some(id) = load_settings().and_then(|s| s.install_id) {
         return Some(id);
     }
+    let click_id = click_id();
     // Generate + persist under the lock, re-checking inside in case a
     // concurrent caller won the race and already wrote one.
     let mut result = None;
     mutate_settings(|s| {
         if s.install_id.is_none() {
             s.install_id = Some(uuid::Uuid::new_v4().to_string());
+            s.download_click_id = click_id;
         }
         result = s.install_id.clone();
     })
     .ok()?;
     result
+}
+
+/// A click id as openresearch.sh issues and accepts it: a UUIDv7.
+fn valid_click_id(text: &str) -> Option<uuid::Uuid> {
+    uuid::Uuid::try_parse(text.trim())
+        .ok()
+        .filter(|id| id.get_version_num() == 7 && id.get_variant() == uuid::Variant::RFC4122)
+}
+
+/// The latest click id among the `openresearch.sh/download?c=<id>` URLs quoted in `text`.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn latest_click_id(text: &str) -> Option<uuid::Uuid> {
+    text.split('"')
+        .filter_map(|quoted| url::Url::parse(quoted).ok())
+        .filter(|url| {
+            url.scheme() == "https"
+                && matches!(
+                    url.host_str(),
+                    Some("openresearch.sh" | "www.openresearch.sh")
+                )
+                && url.path() == "/download"
+        })
+        .filter_map(|url| {
+            url.query_pairs()
+                .filter(|(key, _)| key == "c")
+                .find_map(|(_, value)| valid_click_id(&value))
+        })
+        .max()
+}
+
+/// The pages Spotlight recorded downloads as coming from, read from its index so
+/// the Downloads folder is never opened.
+#[cfg(target_os = "macos")]
+fn spotlight_download_pages() -> Option<String> {
+    use std::io::Read;
+    use std::process::Stdio;
+
+    let mut child = crate::process::command("/usr/bin/mdfind")
+        .args([
+            "-attr",
+            "kMDItemWhereFroms",
+            r#"kMDItemWhereFroms == "*openresearch.sh/download?*"c"#,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stdout.read_to_end(&mut bytes);
+        let _ = sender.send(bytes);
+    });
+    // The first launch waits on this, so a stalled Spotlight costs it at most this long.
+    let bytes = receiver.recv_timeout(Duration::from_secs(2)).ok();
+    let _ = child.kill();
+    let _ = child.wait();
+    Some(String::from_utf8_lossy(&bytes?).into_owned())
+}
+
+/// The click id of the download page this desktop app's installer came from.
+#[cfg(target_os = "macos")]
+fn installer_click_id() -> Option<String> {
+    let crate::updates::InstallChannel::AppBundle(_) = crate::updates::current_channel().ok()?
+    else {
+        return None;
+    };
+    latest_click_id(&spotlight_download_pages()?).map(|id| id.to_string())
+}
+
+/// windows/OpenResearch.iss saves the click id beside the desktop app.
+#[cfg(windows)]
+fn installer_click_id() -> Option<String> {
+    let crate::updates::InstallChannel::Portable(dir) = crate::updates::current_channel().ok()?
+    else {
+        return None;
+    };
+    if !dir.join("OpenResearch.exe").is_file() {
+        return None;
+    }
+    let saved = std::fs::read_to_string(dir.join("download-click")).ok()?;
+    valid_click_id(&saved).map(|id| id.to_string())
+}
+
+// Linux browsers don't reliably record the page a download started from.
+#[cfg(not(any(target_os = "macos", windows)))]
+fn installer_click_id() -> Option<String> {
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -737,8 +849,20 @@ fn build_payload_with_id(
             "properties": properties,
         }],
     });
-    if let Some(locale) = dashboard_locale() {
+    if let Some(sign_in) = sign_in() {
+        payload["context"]["signIn"] = json!(sign_in);
+    }
+    let settings = load_settings();
+    let settings = settings.as_ref();
+    if let Some(locale) = settings.and_then(|s| s.dashboard_locale.as_deref()) {
         payload["context"]["locale"] = json!(locale);
+    }
+    // The API rejects the whole batch for a malformed id.
+    if let Some(id) = settings
+        .and_then(|s| s.download_click_id.as_deref())
+        .and_then(valid_click_id)
+    {
+        payload["context"]["downloadClickId"] = json!(id.to_string());
     }
     payload
 }
@@ -1064,6 +1188,8 @@ fn consent_payload(agreed: bool, distinct_id: &str, event_id: uuid::Uuid) -> ser
     if !agreed {
         if let Some(context) = payload["context"].as_object_mut() {
             context.remove("locale");
+            context.remove("downloadClickId");
+            context.remove("signIn");
         }
     }
     payload
@@ -1822,11 +1948,48 @@ mod tests {
             return;
         }
 
-        let first = install_id().expect("id generated");
-        let second = install_id().expect("id persisted");
+        let first = install_id_or_create(|| Some(CLICK.into())).expect("id generated");
+        let second = install_id_or_create(|| panic!("an existing install looked its click up"))
+            .expect("id persisted");
         assert_eq!(first, second, "install id must be stable across calls");
         // A valid uuid.
         assert!(uuid::Uuid::parse_str(&first).is_ok());
+        let click = load_settings().and_then(|s| s.download_click_id);
+        assert_eq!(click.as_deref(), Some(CLICK));
+    }
+
+    const CLICK: &str = "0193a1b2-c3d4-7e5f-8a6b-0123456789ab";
+    const LATER_CLICK: &str = "0193a1b2-c3d5-7e5f-8a6b-0123456789ab";
+
+    #[test]
+    fn latest_click_id_comes_from_the_newest_download_page() {
+        let hit = |page: &str| {
+            format!(
+                "/Users/me/Downloads/OpenResearch.dmg   kMDItemWhereFroms = (\n    \
+                 \"https://release-assets.githubusercontent.com/asset?c={LATER_CLICK}&sig=x\",\n    \
+                 \"{page}\"\n)\n"
+            )
+        };
+        let page =
+            |host: &str, click: &str| hit(&format!("https://{host}/download?start=mac&c={click}"));
+        let latest = |text: String| latest_click_id(&text).map(|id| id.to_string());
+
+        let both = page("openresearch.sh", CLICK) + &page("www.openresearch.sh", LATER_CLICK);
+        assert_eq!(latest(both).as_deref(), Some(LATER_CLICK));
+        assert_eq!(
+            latest(page("openresearch.sh", CLICK)).as_deref(),
+            Some(CLICK)
+        );
+        for ignored in [
+            String::new(),
+            hit("https://openresearch.sh/"),
+            page("openresearch.sh.example.com", CLICK),
+            hit(&format!("https://openresearch.sh/pricing?c={CLICK}")),
+            page("openresearch.sh", "not-a-uuid"),
+            page("openresearch.sh", "ffffffff-ffff-ffff-ffff-ffffffffffff"),
+        ] {
+            assert_eq!(latest(ignored.clone()), None, "{ignored}");
+        }
     }
 
     #[test]
@@ -2385,7 +2548,17 @@ mod tests {
             payload["context"]["locale"] = json!("zh-CN");
             payload
         });
-        for payload in payloads.into_iter().chain(launch_payloads).chain(localized) {
+        let signed_in = ["alphaxiv", "openresearch", "none"].map(|state| {
+            let mut payload = build_payload("app_started", "cli-release-contract-test", json!({}));
+            payload["context"]["signIn"] = json!(state);
+            payload
+        });
+        for payload in payloads
+            .into_iter()
+            .chain(launch_payloads)
+            .chain(localized)
+            .chain(signed_in)
+        {
             assert_eq!(post_payload(&payload).await, DeliveryOutcome::Acknowledged);
         }
     }
@@ -2416,16 +2589,65 @@ mod tests {
     }
 
     #[test]
+    fn payload_context_carries_only_a_valid_download_click_id() {
+        if !crate::config::in_test_child(TELEMETRY_ENV) {
+            return;
+        }
+        let click_id = |stored: Option<&str>| {
+            mutate_settings(|s| s.download_click_id = stored.map(str::to_string)).unwrap();
+            build_payload("app_started", "did", json!({}))["context"]["downloadClickId"].clone()
+        };
+        assert!(click_id(None).is_null());
+        assert!(click_id(Some("not-a-uuid")).is_null());
+        assert_eq!(click_id(Some(CLICK)), CLICK);
+    }
+
+    #[test]
+    fn payload_context_reports_how_this_computer_is_signed_in() {
+        if !crate::config::in_test_child(TELEMETRY_ENV) {
+            return;
+        }
+        let sign_in =
+            || build_payload("app_started", "did", json!({}))["context"]["signIn"].clone();
+        assert_eq!(sign_in(), "none");
+        let config = crate::config::config_dir();
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(config.join("credentials.json"), "{}").unwrap();
+        assert_eq!(sign_in(), "openresearch");
+        std::fs::write(config.join("alphaxiv-forwarded.json"), "{}").unwrap();
+        assert_eq!(sign_in(), "alphaxiv");
+        std::fs::remove_file(config.join("alphaxiv-forwarded.json")).unwrap();
+        std::fs::write(config.join("alphaxiv.json"), "{}").unwrap();
+        assert_eq!(sign_in(), "alphaxiv");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let unsearchable = std::fs::Permissions::from_mode(0o000);
+            std::fs::set_permissions(&config, unsearchable).unwrap();
+            let unknown = sign_in();
+            std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o700)).unwrap();
+            assert!(
+                unknown.is_null(),
+                "unchecked sign-in was reported as {unknown}"
+            );
+        }
+    }
+
+    #[test]
     fn consent_payload_carries_agreed_flag() {
         if !crate::config::in_test_child(TELEMETRY_ENV) {
             return;
         }
         set_dashboard_locale("es").unwrap();
+        mutate_settings(|s| s.download_click_id = Some(CLICK.into())).unwrap();
         for agreed in [true, false] {
             let p = consent_payload(agreed, "did", uuid::Uuid::new_v4());
             assert_eq!(p["events"][0]["name"], "cli_telemetry_consent");
             assert_eq!(p["events"][0]["properties"]["agreed"], agreed);
             assert_eq!(p["context"].get("locale").is_some(), agreed);
+            assert_eq!(p["context"].get("downloadClickId").is_some(), agreed);
+            assert_eq!(p["context"].get("signIn").is_some(), agreed);
         }
     }
 

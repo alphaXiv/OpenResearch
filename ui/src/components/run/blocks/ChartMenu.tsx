@@ -1,13 +1,13 @@
 import { ContextMenu } from "@base-ui/react/context-menu";
 import { Check } from "lucide-react";
-import { useContext, useId, useRef, useState, type KeyboardEvent, type ReactElement, type RefObject } from "react";
+import { useContext, useId, useRef, useState, type ReactElement, type RefObject } from "react";
 import { autoDir, fmtNumber } from "../../../i18n";
 import { m } from "../../../paraglide/messages.js";
 import type { ChartBlock, ChartEdit, RunMonitor, ViewBlock } from "../../../runMonitor/types";
 import { useWorkspace } from "../../../workspace";
 import { WorkspaceDomContext } from "../../../WorkspaceDom";
 import { cn } from "../../ui/cn";
-import { MenuItem, MENU_LABEL, MENU_POPUP, MENU_SEPARATOR } from "../../ui/MenuItem";
+import { MenuItem, MENU_LABEL, MENU_POPUP, MENU_SEPARATOR, openContextMenuFromKeyboard } from "../../ui/MenuItem";
 import { showAlert } from "../../ui/Toast";
 import type { ChartData } from "./series";
 
@@ -87,16 +87,6 @@ export function ChartMenu({ monitor, block, limits, trigger, anchor, onOpen }: {
     }
   }
 
-  function keyboardMenu(event: KeyboardEvent<HTMLDivElement>) {
-    if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
-    event.preventDefault();
-    event.stopPropagation();
-    const { left, top, height } = event.currentTarget.getBoundingClientRect();
-    event.currentTarget.dispatchEvent(new MouseEvent("contextmenu", {
-      bubbles: true, cancelable: true, button: 2, clientX: left + 8, clientY: top + height / 2,
-    }));
-  }
-
   const smoothable = block.from === undefined && (block.mark === undefined || block.mark === "line");
   const levels = [
     { value: 0, label: m.run_chart_smoothing_off() },
@@ -112,7 +102,7 @@ export function ChartMenu({ monitor, block, limits, trigger, anchor, onOpen }: {
       <ContextMenu.Trigger
         render={trigger}
         ref={anchor}
-        onKeyDown={keyboardMenu}
+        onKeyDown={openContextMenuFromKeyboard}
         aria-haspopup="menu"
         aria-keyshortcuts="Shift+F10 ContextMenu"
       />
