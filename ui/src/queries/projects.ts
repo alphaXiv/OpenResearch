@@ -195,7 +195,7 @@ export const mutUpdateProject = mutations.define({
     const options = ws.queries.listProjectsQuery();
     helpers(ws.queryClient).arrayUpdate(options, {
       filter: (row) => row.id === projectId,
-      update: (row) => ({ ...row, ...changes }),
+      update: (row) => ({ ...row, ...changes, icon: changes.icon === null ? undefined : changes.icon ?? row.icon }),
     });
     onSuccess((saved) => {
       markLiveUpdate(ws.queryClient, options.queryKey, saved.id);
