@@ -124,7 +124,7 @@ function ProjectIdentity({ project }: { project: Project }) {
   const saved = project.unnamed ? "" : project.name;
   const [name, setName] = useState(saved);
 
-  const update = (changes: { name?: string; icon?: ProjectIcon }) =>
+  const update = (changes: { name?: string; icon?: ProjectIcon | null }) =>
     mutUpdateProject.runAsHeadlessPromise(workspace, project.id, changes, {}).catch((error: unknown) => {
       setName(saved);
       showAlert(error instanceof Error ? error.message : String(error), "error");
@@ -138,7 +138,7 @@ function ProjectIdentity({ project }: { project: Project }) {
 
   return (
     <div className="flex h-8 min-w-0 items-center gap-1.5 rounded-md border border-border bg-background ps-1.5 pe-2.5 focus-within:border-muted">
-      <ProjectIconButton compact project={project} name={name} value={project.icon} onChange={(icon) => void update({ icon })} />
+      <ProjectIconButton compact project={project} name={name} onChange={(icon) => void update({ icon })} />
       <input
         value={name}
         aria-label={m.new_project_name_placeholder()}

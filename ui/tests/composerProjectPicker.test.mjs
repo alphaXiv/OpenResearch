@@ -7,7 +7,7 @@ import { find, press, render, serve, settle, type } from "./render.mjs";
 
 const project = (id, name, extra = {}) => ({ id, name, updatedAt: 1, ...extra });
 const sweeps = project("p1", "Tokenizer sweeps", { scratch: true });
-const nanochat = project("p2", "nanochat (demo)", { updatedAt: 2 });
+const nanochat = project("p2", "nanochat (demo)", { updatedAt: 2, icon: { glyph: "flask-conical" } });
 const blank = project("p3", "No project", { scratch: true, unnamed: true });
 
 async function pick(overrides = {}) {
@@ -38,12 +38,14 @@ async function pick(overrides = {}) {
 test("the picker lists projects with their own icon and searches them by name", async () => {
   const picker = await pick();
   await picker.open();
-  // Each row leads with the project's tile, which says its initials until it has an icon.
-  assert.deepEqual(picker.rows(), ["NDnanochat (demo)", "TSTokenizer sweeps", m.projects_home_new_project()]);
+  const [nanochatRow, sweepsRow] = picker.popup().querySelectorAll("[data-nav]");
+  assert.ok(nanochatRow.querySelector(".lucide-flask-conical"));
+  assert.ok(sweepsRow.querySelector(".lucide-folder"));
+  assert.deepEqual(picker.rows(), ["nanochat (demo)", "Tokenizer sweeps", m.projects_home_new_project()]);
   assert.equal(document.activeElement, picker.search());
 
   await type(picker.search(), "TOKEN");
-  assert.deepEqual(picker.rows(), ["TSTokenizer sweeps", m.projects_home_new_project()]);
+  assert.deepEqual(picker.rows(), ["Tokenizer sweeps", m.projects_home_new_project()]);
 
   await type(picker.search(), "zzz");
   assert.deepEqual(picker.rows(), [m.projects_home_new_project()]);
@@ -85,7 +87,7 @@ test("a new project is named in a field of its own beside Import, and any other 
 
 test("an empty named project is an ordinary project in the picker", async () => {
   await pick({ projectId: sweeps.id, projectName: sweeps.name });
-  assert.equal(document.querySelector('button[aria-haspopup="dialog"]').textContent, `TS${sweeps.name}`);
+  assert.equal(document.querySelector('button[aria-haspopup="dialog"]').textContent, sweeps.name);
   assert.equal(document.querySelector(`input[aria-label="${m.new_project_name_placeholder()}"]`), null);
   assert.equal(find("button", m.new_project_import()), null);
 });

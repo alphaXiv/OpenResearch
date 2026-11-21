@@ -5114,7 +5114,7 @@ function ProjectSettings({ project, onRemoved }: { project: Project; onRemoved: 
       onSettled: () => setSaving(false),
     });
   };
-  const setIcon = (icon: ProjectIcon) => {
+  const setIcon = (icon: ProjectIcon | null) => {
     setError(null);
     mutUpdateProject.runWithOptions(workspace, project.id, { icon }, {
       onError: (err) => setError(err instanceof Error ? err.message : String(err)),
@@ -5133,7 +5133,7 @@ function ProjectSettings({ project, onRemoved }: { project: Project; onRemoved: 
             <form className={`${PROJECT_DEFAULT_ROW_CLASS_NAME} flex-wrap gap-y-2`} onSubmit={(event) => { event.preventDefault(); rename(); }}>
               <label htmlFor={nameId} className="project-default-title text-base font-medium">{m.new_project_form_project_name()}</label>
               <div className="flex min-w-0 flex-1 items-center justify-end gap-2">
-                <ProjectIconButton project={project} name={name} value={project.icon} onChange={setIcon} disabled={saving} />
+                <ProjectIconButton project={project} name={name} onChange={setIcon} disabled={saving} />
                 <Input id={nameId} value={name} disabled={saving} onChange={(event) => setDraft(event.target.value)} className="w-72 min-w-0" />
                 <Button type="submit" disabled={!changed || saving}>{saving && <Spinner />}{m.common_save()}</Button>
               </div>
