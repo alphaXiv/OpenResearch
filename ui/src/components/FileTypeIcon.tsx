@@ -240,3 +240,24 @@ export function FileTypeIcon({ name }: { name: string }) {
     </svg>
   );
 }
+
+/** The card's box, shared by the composer chip and the sent message. */
+export const FILE_CARD_CLASS = "inline-flex h-14 max-w-64 items-center gap-2.5 rounded-lg border border-border bg-surface ps-2 pe-3";
+
+/** An attached file as a card: its icon on a tile, the name, and its type and size. */
+export function FileCardContent({ name, size }: { name: string; size?: string }) {
+  const dot = name.lastIndexOf(".");
+  const type = dot > 0 ? name.slice(dot + 1).toUpperCase() : "";
+  const detail = [type, size].filter(Boolean).join(" · ");
+  return (
+    <>
+      <span className="flex size-10 shrink-0 items-center justify-center rounded-md border border-border bg-background [&>svg]:size-6">
+        <FileTypeIcon name={name} />
+      </span>
+      <span className="flex min-w-0 flex-col">
+        <span className="truncate text-sm font-medium text-text">{name}</span>
+        {detail && <span className="truncate text-xs text-subtext">{detail}</span>}
+      </span>
+    </>
+  );
+}
