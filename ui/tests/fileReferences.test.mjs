@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { looksLikeFilePath, resolveFileReference } from "../src/fileReferences.ts";
+import { artifactFiles, looksLikeFilePath, resolveArtifactReference, resolveFileReference } from "../src/fileReferences.ts";
 
 const entries = ["README.md", "src/train.py", "src/data/loader.py", "scripts/train.py", "ui/src/[id].tsx", "configs/base.yaml"];
 
@@ -46,4 +46,20 @@ test("text that names no file resolves to nothing", () => {
 
 test("bracketed names match literally", () => {
   assert.equal(resolveFileReference(entries, "ui/src/[id].tsx").kind, "exact");
+});
+
+test("an artifact cited with or without its prefix resolves in the artifacts directory", () => {
+  const files = artifactFiles([
+    { name: "report.md", path: "report.md", isDir: false, size: 1, modifiedAt: 0 },
+    { name: "exp1", path: "exp1", isDir: true, size: 0, modifiedAt: 0, children: [
+      { name: "results_table.md", path: "exp1/results_table.md", isDir: false, size: 1, modifiedAt: 0 },
+    ] },
+  ]);
+  assert.deepEqual(files, ["report.md", "exp1/results_table.md"]);
+  assert.deepEqual(resolveArtifactReference(files, "report.md"), { kind: "exact", path: "artifacts/report.md", line: undefined });
+  assert.deepEqual(resolveArtifactReference(files, "artifacts/report.md:4"), { kind: "exact", path: "artifacts/report.md", line: 4 });
+  assert.deepEqual(resolveArtifactReference(files, "results_table.md").paths, ["artifacts/exp1/results_table.md"]);
+  assert.deepEqual(resolveArtifactReference(files, "artifacts/results_table.md").paths, ["artifacts/exp1/results_table.md"]);
+  assert.equal(resolveArtifactReference(files, "artifacts/missing.md").kind, "none");
+  assert.equal(resolveArtifactReference(files, "./Artifacts/report.md").path, "artifacts/report.md");
 });
