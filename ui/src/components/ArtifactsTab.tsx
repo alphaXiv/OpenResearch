@@ -34,6 +34,8 @@ import { normalizeMarkdownForRendering } from "../markdownNormalization";
 import { isExternalMarkdownTarget, rehypeNetworkImages, resolveMarkdownTarget } from "../markdownTarget";
 import { useFileVersion } from "../useFileVersion";
 import { mdCodeComponents, remarkMathOptions } from "./Md";
+import { ImageMenu } from "./ImageMenu";
+import { fileNameOf } from "../download";
 import { filterArtifactEntries, sortArtifactEntries, type ArtifactOrder } from "./artifactTreeModel";
 import { OptionPicker } from "./ModelPicker";
 import {
@@ -147,10 +149,12 @@ export function ArtifactMarkdown({
         const url = resolve(src);
         if (!url) return null;
         return (
-          <a href={url} target="_blank" rel="noopener noreferrer" className="artifact-img">
-            <img src={url} alt={alt ?? ""} loading="lazy" />
-            {alt && <span className="artifact-img-caption">{alt}</span>}
-          </a>
+          <ImageMenu src={url} name={fileNameOf(src)}>
+            <a href={url} target="_blank" rel="noopener noreferrer" className="artifact-img">
+              <img src={url} alt={alt ?? ""} loading="lazy" />
+              {alt && <span className="artifact-img-caption">{alt}</span>}
+            </a>
+          </ImageMenu>
         );
       },
       ...mdCodeComponents,
