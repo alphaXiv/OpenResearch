@@ -23,7 +23,7 @@ import { DirectionProvider } from "@base-ui/react/direction-provider";
 
 import { m } from "../paraglide/messages.js";
 import { getLocale } from "../paraglide/runtime.js";
-import { Bot, Brain, Check, ChevronDown, ChevronRight, Handshake, ListChecks, Lock, LockOpen, Minus, Pencil, Plus, Rocket, Ruler, Settings, ShieldCheck, Turtle, Workflow, Zap, type LucideIcon } from "lucide-react";
+import { Bot, Brain, Check, ChevronDown, ChevronRight, Handshake, InfinityIcon, ListChecks, Lock, LockOpen, Minus, Pencil, Plus, Rocket, Ruler, Settings, ShieldCheck, Turtle, Workflow, Zap, type LucideIcon } from "lucide-react";
 import {
   modelLabel,
   reasoningFor,
@@ -600,7 +600,7 @@ export function ModelPicker({
       id: "autoresearch",
       label: m.model_picker_autonomy_autoresearch(),
       description: m.model_picker_autonomy_autoresearch_description(),
-      icon: <Workflow size={14} aria-hidden="true" className="shrink-0 text-accent-purple" />,
+      icon: <InfinityIcon size={14} aria-hidden="true" className="shrink-0 text-accent-purple" />,
     },
   ];
   const selectedAutonomy = autonomyChoices.find((choice) => choice.id === autonomy);
