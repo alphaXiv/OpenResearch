@@ -6090,6 +6090,9 @@ const STARTER_TONES = [
 const STARTER_GRID_CLASS =
   "mt-7 grid w-full max-w-readable grid-cols-1 gap-3 sm:grid-cols-2";
 
+/** An empty picture or PDF would fail the agent's read, and can break its session. */
+const isEmptyMedia = (file: File) => file.size === 0 && (isPictureType(file.type) || file.type === "application/pdf");
+
 /** A file as a data URL; a picture is also decoded, so its chip shows at full size the moment it mounts. */
 function readAttachment(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -6695,8 +6698,7 @@ export function ChatPanel({
     const attachmentStashKey = target?.stashKey ?? stashKey;
     const accepted: File[] = [];
     for (const file of files) {
-      // An empty picture or PDF would fail the agent's read, and can break its session.
-      if (file.size === 0 && (isPictureType(file.type) || file.type === "application/pdf")) {
+      if (isEmptyMedia(file)) {
         setAttachError(m.chat_attachment_empty({ name: ltr(file.name) }));
         continue;
       }
@@ -6769,7 +6771,7 @@ export function ChatPanel({
   dropFiles.current = addDropped;
   const acceptsDrops = useRef<() => boolean>(() => false);
   acceptsDrops.current = () =>
-    !asking && connection === null && composerRef.current !== null
+    !asking && connection === null && !contentInert && composerRef.current !== null
     // A modal's backdrop has no dialog role, so check for an open modal rather than the target.
     && document.querySelector('[role=dialog][aria-modal="true"], [role=alertdialog]') === null;
   const [draggingFiles, setDraggingFiles] = useState(false);
@@ -6825,7 +6827,8 @@ export function ChatPanel({
       .filter((item) => item.kind === "file")
       .map((item) => item.getAsFile())
       .filter((f): f is File => f !== null);
-    const usable = files.filter((file) => file.size > 0);
+    // An empty picture or PDF is the clipboard's placeholder for one `readClipboardImage` can fetch.
+    const usable = files.filter((file) => !isEmptyMedia(file));
     if (usable.length > 0) {
       e.preventDefault();
       addFiles(usable);
