@@ -38,10 +38,18 @@ pub fn current_project(store: &Store) -> Result<Option<LocalProject>> {
     }
     let cwd = std::env::current_dir()?;
     let cwd = cwd.canonicalize().unwrap_or(cwd);
-    Ok(store.list_local_projects()?.into_iter().find(|project| {
-        let root = std::path::Path::new(&project.repo_path);
-        cwd.starts_with(root.canonicalize().as_deref().unwrap_or(root))
-    }))
+    // The deepest folder wins, so a project nested inside another is the one named.
+    Ok(store
+        .list_local_projects()?
+        .into_iter()
+        .filter_map(|project| {
+            let root = std::path::Path::new(&project.repo_path);
+            let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+            cwd.starts_with(&root)
+                .then(|| (root.components().count(), project))
+        })
+        .max_by_key(|(depth, _)| *depth)
+        .map(|(_, project)| project))
 }
 
 pub fn resolve_experiment(store: &Store, exp_id: &str) -> Result<LocalExperiment> {

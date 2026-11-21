@@ -680,6 +680,28 @@ fn the_default_target_belongs_to_the_project_the_command_runs_in() {
         "{}",
         String::from_utf8_lossy(&runs.stderr)
     );
+    // A project nested in another's folder is the one its folder names, however recently the outer one changed.
+    let nested = repo.join("src/vision");
+    std::fs::create_dir_all(&nested).unwrap();
+    db.execute(
+        "INSERT INTO local_projects (id, name, slug, github_owner, github_repo, github_sync_enabled, baseline_branch, repo_path, created_at, updated_at) VALUES ('nested', 'Vision', 'vision', '', '', 0, 'main', ?1, 0, 0)",
+        [nested.to_str().unwrap()],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE local_projects SET updated_at = 9999999999999 WHERE id = 'project'",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        json_in(&nested, &["compute", "status", "--json"])["project"]["name"],
+        "Vision"
+    );
+    assert_eq!(
+        json_in(&inside, &["compute", "status", "--json"])["project"]["name"],
+        "Research"
+    );
+
     // A cloud box's chat id is not in this store; the folder still names the project.
     let foreign = sandbox
         .command()

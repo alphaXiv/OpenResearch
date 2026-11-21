@@ -6209,7 +6209,8 @@ export function ChatPanel({
   onActiveSessionChange: (sessionId: string | null, options?: { replace?: boolean; projectId?: string }) => void;
   /** Database-backed selection used to seed new chat sessions. */
   preferredAgent: ModelSelection | null;
-  onStartHarnessDraft?: () => void;
+  /** Opens the main draft to start `agent`, which it starts with over the project's. */
+  onStartHarnessDraft?: (agent: ModelSelection) => void;
   onPreferredAgentChange: (selection: ModelSelection) => Promise<void>;
   preferredAutonomy: Autonomy;
   onPreferredAutonomyChange: (autonomy: Autonomy) => void;
@@ -6525,13 +6526,8 @@ export function ChatPanel({
   const modelName = useModelName();
   const [selection, setSelection] = useState<ModelSelection | null>(preferredAgent);
   useEffect(() => setSelection(preferredAgent), [preferredAgent]);
-  // A new draft starts from the project's agent, whatever an open chat was switched to,
-  // unless it was opened to start a chosen agent.
-  const explicitDraftAgent = useRef(false);
-  useEffect(() => {
-    if (activeId === null && !explicitDraftAgent.current) setSelection(preferredAgent);
-    explicitDraftAgent.current = false;
-  }, [activeId]);
+  // A new draft starts from the agent it was given, whatever an open chat was switched to.
+  useEffect(() => { if (activeId === null) setSelection(preferredAgent); }, [activeId]);
   // Unsent composer tweaks (model/mode/reasoning) for the *open* session — the
   // session's harness is fixed, so these override only its mutable settings and
   // are applied (and persisted server-side) on the next send. Cleared when the
@@ -6982,9 +6978,8 @@ export function ChatPanel({
       reasoningLevel: reconcileReasoning(harness.catalogPending ? undefined : harness, model, null),
     };
     setSelection(next);
-    explicitDraftAgent.current = activeId !== null;
     void onPreferredAgentChange(next).catch(() => {});
-    if (onStartHarnessDraft) onStartHarnessDraft();
+    if (onStartHarnessDraft) onStartHarnessDraft(next);
     else onActiveSessionChangeRef.current(null, { projectId });
   }
   const setPermissionMode = (id: string) => withFullAccess(id === "bypassPermissions", () => applyPermissionMode(id));
@@ -8141,7 +8136,8 @@ export function ChatPanel({
         permissionMode: selection.permissionMode,
         planMode,
         reasoningLevel: selection.reasoningLevel,
-        autonomy: draftAutonomy ?? preferredAutonomy,
+        // Unset, the server takes the project's autonomy, which may not have loaded here yet.
+        autonomy: draftAutonomy ?? undefined,
         disabledLitSources: draftLitSources ?? undefined,
       }, {});
     setLitDraft({ projectId, disabled: null });

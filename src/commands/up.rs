@@ -9960,6 +9960,17 @@ struct CreateChatSessionReq {
     disabled_lit_sources: Option<Vec<String>>,
 }
 
+/// The autonomy a new chat gets when its request names none: its project's, else the last one used.
+fn project_autonomy(store: &Store, project_id: &str) -> Result<String> {
+    let own = store.project_settings(project_id)?.autonomy;
+    let autonomy = own
+        .as_deref()
+        .and_then(Autonomy::from_id)
+        .or(store.ui_state()?.preferred_autonomy)
+        .unwrap_or_default();
+    Ok(autonomy.id().to_string())
+}
+
 async fn selected_chat_model(
     state: &AppState,
     harness: &str,
@@ -10207,6 +10218,7 @@ async fn create_chat_session(
         .map(project_settings::lit_sources)
         .transpose()
         .map_err(bad_request)?;
+    let session_project = req.project_id.clone();
     let session = StoredChatSession {
         profile_id: req.profile,
         id: format!("chat_{}", uuid::Uuid::new_v4()),
@@ -10226,7 +10238,10 @@ async fn create_chat_session(
         context_usage_json: None,
         bootstrap_context: None,
         goal: None,
-        autonomy: req.autonomy.map(|autonomy| autonomy.id().to_string()),
+        autonomy: Some(match req.autonomy {
+            Some(autonomy) => autonomy.id().to_string(),
+            None => project_autonomy(&store, &session_project)?,
+        }),
         active_leaf_id: None,
         side_parent_session_id: None,
         side_parent_leaf_id: None,
