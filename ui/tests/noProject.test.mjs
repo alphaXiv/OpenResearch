@@ -46,7 +46,7 @@ test("creating the proposed project moves the chat into it", async () => {
   await settle();
   await act(async () => find('[role="dialog"] button', m.create_project_confirm()).click());
   await settle();
-  assert.deepEqual(promoted, [{ name: "Fib sandbox", path: "/home/me/fib", scratch: true, proposal: "toolu_fib" }]);
+  assert.deepEqual(promoted, [{ name: "Fib sandbox", path: "/home/me/fib", project: "p1", scratch: true, proposal: "toolu_fib" }]);
   assert.equal(document.querySelector('[role="dialog"]'), null);
 
   await view.rerender(createElement(ProjectProposalCard, { id: "toolu_fib", proposal: { name: "Fib sandbox", path: "~/OpenResearch/fib-sandbox" }, proposedAt: 10, project, session: { id: "chat_1" } }));
@@ -106,7 +106,7 @@ test("creating a project without a proposal says so", async () => {
   await settle();
   await act(async () => find('[role="dialog"] button', m.create_project_confirm()).click());
   await settle();
-  assert.deepEqual(requests, [{ name: "By hand", path: "~/OpenResearch/by-hand", scratch: true, proposal: "" }]);
+  assert.deepEqual(requests, [{ name: "By hand", path: "~/OpenResearch/by-hand", project: "p8", scratch: true, proposal: "" }]);
 });
 
 /** Two proposals in one chat, as the transcript draws them. */

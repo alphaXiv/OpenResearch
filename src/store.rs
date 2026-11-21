@@ -3206,11 +3206,32 @@ impl Store {
         insert_local_project(&self.conn, p)
     }
 
+    /// Whether `table` has `column`: a store an older orx last wrote, opened
+    /// read-only, lacks the columns added since.
+    fn has_column(&self, table: &str, column: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2)",
+            params![table, column],
+            |row| row.get(0),
+        )?)
+    }
+
+    fn project_cols(&self) -> Result<String> {
+        Ok(if self.has_column("local_projects", "proposal_id")? {
+            PROJECT_COLS.to_string()
+        } else {
+            PROJECT_COLS.replace("proposal_id", "NULL AS proposal_id")
+        })
+    }
+
     pub fn get_local_project(&self, id: &str) -> Result<Option<LocalProject>> {
         let p = self
             .conn
             .query_row(
-                &format!("SELECT {PROJECT_COLS} FROM local_projects WHERE id = ?1"),
+                &format!(
+                    "SELECT {} FROM local_projects WHERE id = ?1",
+                    self.project_cols()?
+                ),
                 params![id],
                 LocalProject::from_row,
             )
@@ -3223,7 +3244,10 @@ impl Store {
         let p = self
             .conn
             .query_row(
-                &format!("SELECT {PROJECT_COLS} FROM local_projects WHERE slug = ?1"),
+                &format!(
+                    "SELECT {} FROM local_projects WHERE slug = ?1",
+                    self.project_cols()?
+                ),
                 params![slug],
                 LocalProject::from_row,
             )
@@ -3233,7 +3257,8 @@ impl Store {
 
     pub fn list_local_projects(&self) -> Result<Vec<LocalProject>> {
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT {PROJECT_COLS} FROM local_projects ORDER BY updated_at DESC"
+            "SELECT {} FROM local_projects ORDER BY updated_at DESC",
+            self.project_cols()?
         ))?;
         let rows = stmt.query_map([], LocalProject::from_row)?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -4883,11 +4908,22 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                "SELECT name, path, proposal_id, requested_at, scratch FROM chat_project_moves WHERE session_id = ?1",
+                &format!(
+                    "SELECT name, path, {} FROM chat_project_moves WHERE session_id = ?1",
+                    self.project_move_cols()?
+                ),
                 params![session_id],
                 ChatProjectMove::from_row,
             )
             .optional()?)
+    }
+
+    fn project_move_cols(&self) -> Result<&'static str> {
+        Ok(if self.has_column("chat_project_moves", "scratch")? {
+            "proposal_id, requested_at, scratch"
+        } else {
+            "NULL, requested_at, NULL"
+        })
     }
 
     pub fn chat_project_move_sessions(&self) -> Result<Vec<String>> {
@@ -13470,6 +13506,50 @@ pub(crate) mod tests {
                 p.icon.as_ref().map(|icon| icon.to_string()),
             ],
         )
+    }
+
+    #[test]
+    fn a_store_from_before_proposals_still_reads_its_projects_and_moves() {
+        let dir = std::env::temp_dir().join(format!("orx-store-old-cols-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let project = LocalProject {
+            id: "old".into(),
+            name: "Old".into(),
+            slug: "old".into(),
+            github_owner: String::new(),
+            github_repo: String::new(),
+            github_sync_enabled: false,
+            baseline_branch: "main".into(),
+            repo_path: "/home/me/old".into(),
+            run_command: None,
+            paper_id: None,
+            icon: None,
+            proposal: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        store.create_local_project(&project).unwrap();
+        store
+            .set_chat_project_move("chat", "Probes", "/home/me/probes", None, None)
+            .unwrap();
+        // The shape v0.2.28 left, which a read-only open cannot upgrade.
+        for sql in [
+            "ALTER TABLE local_projects DROP COLUMN proposal_id",
+            "ALTER TABLE chat_project_moves DROP COLUMN proposal_id",
+            "ALTER TABLE chat_project_moves DROP COLUMN scratch",
+        ] {
+            store.conn_execute_for_tests(sql);
+        }
+
+        let read = store.get_local_project("old").unwrap().unwrap();
+        assert_eq!((read.name.as_str(), read.proposal), ("Old", None));
+        assert_eq!(store.list_local_projects().unwrap().len(), 1);
+        let waiting = store.chat_project_move("chat").unwrap().unwrap();
+        assert_eq!(
+            (waiting.name.as_str(), waiting.proposal, waiting.scratch),
+            ("Probes", None, None)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

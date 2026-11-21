@@ -2360,9 +2360,9 @@ export function createApi(
   const createScratchProject = () =>
     post<{ project: Project }>("/api/projects/scratch", {}).then((r) => r.project);
 
-  /** Make a chat a project of its own at `path`, now or, while it runs, once its turn ends. */
-  /** `scratch` is whether the chat had no project when the user asked, so a move made elsewhere meanwhile refuses it. */
-  const moveChatToProject = (sessionId: string, body: { name: string; path: string; scratch?: boolean; proposal?: string }) =>
+  /** Make a chat a project of its own at `path`, now or, while it runs, once its turn ends.
+   * `project` and `scratch` are what the user saw, so a move made elsewhere meanwhile refuses it. */
+  const moveChatToProject = (sessionId: string, body: { name: string; path: string; project?: string; scratch?: boolean; proposal?: string }) =>
     post<{ pending: true } | { pending: false; project: Project }>(`/api/chat/sessions/${sessionId}/project`, body);
 
   /** Cancels the waiting move requested at `requestedAt`, not one that replaced it since. */

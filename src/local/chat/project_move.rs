@@ -49,21 +49,22 @@ fn scope(store: &Store, session_id: &str) -> Result<(LocalProject, String, Vec<S
 impl ChatHost {
     /// Makes `session_id`'s chat a project named `name` at `path` now if its
     /// chats are idle, else once its turn ends, returning `None` meanwhile.
-    /// `scratch`, when given, is whether the asker saw a chat without a project;
-    /// a move made meanwhile elsewhere refuses the request instead of doing another kind.
-    /// `proposal` is the agent proposal the user confirmed, kept on the project.
+    /// `seen`, when given, is the project the asker saw and whether it was a chat
+    /// without a project; a move made meanwhile elsewhere refuses the request
+    /// instead of moving the chat again. `proposal` is the agent proposal the
+    /// user confirmed, kept on the project.
     pub async fn move_to_new_project(
         self: &Arc<Self>,
         session_id: &str,
         name: &str,
         path: &str,
-        scratch: Option<bool>,
+        seen: Option<(&str, bool)>,
         proposal: Option<&str>,
     ) -> Result<Option<LocalProject>> {
         let (name, _) = projects::new_project_place(name, path)?;
         let store = Store::open()?;
         let (project, _, sessions) = scope(&store, session_id)?;
-        if scratch.is_some_and(|scratch| scratch != project.is_scratch()) {
+        if seen.is_some_and(|seen| seen != (project.id.as_str(), project.is_scratch())) {
             return Err(anyhow!(CHANGED));
         }
         // A second move of the same files would act on whatever the first left.
@@ -415,7 +416,7 @@ mod tests {
         let path = target.to_str().unwrap();
 
         let waiting = host
-            .move_to_new_project(session, "Probes", path, Some(true), None)
+            .move_to_new_project(session, "Probes", path, Some((&scratch.id, true)), None)
             .await
             .unwrap();
 
@@ -434,7 +435,7 @@ mod tests {
 
         busy.store(false, Ordering::SeqCst);
         let created = host
-            .move_to_new_project(session, "Probes", path, Some(true), None)
+            .move_to_new_project(session, "Probes", path, Some((&scratch.id, true)), None)
             .await
             .unwrap()
             .unwrap();
@@ -457,15 +458,33 @@ mod tests {
 
         // A dialog opened before the chat became a project asks for the other kind of move.
         let stale = host
-            .move_to_new_project(&sessions[0], "Probes", path, Some(false), None)
+            .move_to_new_project(
+                &sessions[0],
+                "Probes",
+                path,
+                Some((&scratch.id, false)),
+                None,
+            )
             .await
             .err()
             .unwrap();
         assert_eq!(stale.to_string(), CHANGED);
-
-        host.move_to_new_project(&sessions[0], "Probes", path, Some(true), None)
+        let elsewhere = host
+            .move_to_new_project(&sessions[0], "Probes", path, Some(("other", true)), None)
             .await
+            .err()
             .unwrap();
+        assert_eq!(elsewhere.to_string(), CHANGED);
+
+        host.move_to_new_project(
+            &sessions[0],
+            "Probes",
+            path,
+            Some((&scratch.id, true)),
+            None,
+        )
+        .await
+        .unwrap();
         let requested_at = store
             .chat_project_move(&sessions[0])
             .unwrap()
@@ -474,7 +493,7 @@ mod tests {
 
         // The files already wait to move with the first chat.
         let second = host
-            .move_to_new_project(&sessions[1], "Other", path, Some(true), None)
+            .move_to_new_project(&sessions[1], "Other", path, Some((&scratch.id, true)), None)
             .await
             .err()
             .unwrap()
@@ -525,9 +544,15 @@ mod tests {
         let target = target();
         let path = target.to_str().unwrap();
 
-        host.move_to_new_project(session, "Probes", path, Some(true), Some("toolu_create"))
-            .await
-            .unwrap();
+        host.move_to_new_project(
+            session,
+            "Probes",
+            path,
+            Some((&scratch.id, true)),
+            Some("toolu_create"),
+        )
+        .await
+        .unwrap();
 
         let waiting = store.chat_project_move(session).unwrap().unwrap();
         assert_eq!(waiting.proposal.as_deref(), Some("toolu_create"));

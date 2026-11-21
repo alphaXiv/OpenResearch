@@ -104,7 +104,7 @@ export function useCreateProject() {
         description: project.scratch ? m.create_project_folder_description() : m.create_project_split_description({ project: autoDir(project.name) }),
       },
       onConfirm: async ({ name, path }) => {
-        await mutMoveChatToProject.runAsHeadlessPromise(workspace, session.id, { name, path, scratch: project.scratch, proposal: proposal?.id ?? "" }, {});
+        await mutMoveChatToProject.runAsHeadlessPromise(workspace, session.id, { name, path, project: project.id, scratch: project.scratch, proposal: proposal?.id ?? "" }, {});
       },
       onCancel: "close",
     });

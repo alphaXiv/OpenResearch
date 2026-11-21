@@ -2161,7 +2161,9 @@ async fn create_scratch_project(State(state): State<AppState>) -> ApiResult {
 struct ChatProjectReq {
     name: String,
     path: String,
-    /// Whether the asker saw a chat without a project; older dashboards leave it out.
+    /// The project the asker saw and whether it was a chat without a project;
+    /// older dashboards leave both out.
+    project: Option<String>,
     scratch: Option<bool>,
     /// The tool call id of the agent proposal confirmed, `""` for none; older dashboards leave it out.
     proposal: Option<String>,
@@ -2180,7 +2182,7 @@ async fn move_chat_to_project(
             &id,
             &req.name,
             &req.path,
-            req.scratch,
+            req.project.as_deref().zip(req.scratch),
             req.proposal.as_deref(),
         )
         .await
