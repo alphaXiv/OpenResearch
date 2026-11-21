@@ -813,12 +813,16 @@ export const mutAddRemoteHost = mutations.define({
 
 export const mutRemoveRemoteHost = mutations.define({
   id: "remote/host-remove",
-  mutate: (ws: Workspace, host: string) => ws.api.removeRemoteHost(host),
+  async mutate(ws: Workspace, host: string) {
+    await ws.api.removeRemoteHost(host);
+    // Dropping the session closes its workspace, so it waits for the server.
+    await ws.queryClient.invalidateQueries(ws.queries.listRemoteSessionsQuery());
+  },
   optimistic({ helpers, args: [ws, host] }) {
     helpers(ws.queryClient).arrayRemove(ws.queries.listRemoteHostsQuery(), (entry) => entry.host === host);
   },
   key: ({ args: [ws, host] }) => [ws.identity, "remote-host", host],
-  describe: "remove the remote",
+  describe: "forget the machine",
   describeResult: null,
   refetchOnSuccess: false,
 });

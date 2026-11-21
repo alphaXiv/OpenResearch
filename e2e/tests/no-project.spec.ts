@@ -146,6 +146,43 @@ test('the project picker searches by name and opens a project\'s settings', asyn
   await expect(page).toHaveURL(new RegExp(`/projects/${project.id}/settings/project`))
 })
 
+test('project folders show a custom symbol, and Default clears it', async ({ page, project, orx }) => {
+  await page.addInitScript(() => localStorage.setItem('sidebar-grouping', 'projects'))
+  await project.open(page)
+  const name = await nameOf(page, orx, project)
+  const row = page.getByRole('complementary').getByRole('button', { name, exact: true })
+  await page.getByRole('button', { name: `Project details · ${name}` }).click()
+  await page.getByRole('menuitem', { name: 'Project settings' }).click()
+  const changeIcon = page.getByRole('button', { name: 'Change icon' })
+  await changeIcon.click()
+
+  const icons = page.getByRole('radiogroup', { name: 'Icons' })
+  const first = icons.getByRole('radio').first()
+  await expect(first).toHaveAccessibleName('Default')
+  await expect(first).toBeChecked()
+  await icons.getByRole('radio', { name: 'Rocket' }).click()
+  await expect(row.locator('svg.lucide-folder-open')).toBeVisible()
+  await expect(row.locator('svg.lucide-rocket')).toBeVisible()
+  await page.keyboard.press('Escape')
+  await row.click()
+  await expect(row.locator('svg.lucide-folder')).toBeVisible()
+  await expect(row.locator('svg.lucide-rocket')).toBeVisible()
+
+  await changeIcon.click()
+  await icons.getByRole('radio', { name: 'Initials' }).click()
+  await expect(icons.getByRole('radio', { name: 'Initials' })).toBeChecked()
+  await expect(row).toHaveText(name)
+  await expect(row.locator('svg.lucide-rocket')).toHaveCount(0)
+
+  const saved = page.waitForResponse((response) => response.url().endsWith(`/api/projects/${project.id}`) && response.request().postDataJSON()?.icon === null)
+  await first.click()
+  expect((await saved).ok()).toBe(true)
+  await page.reload()
+  await expect(changeIcon.locator('svg.lucide-folder')).toBeVisible()
+  await changeIcon.click()
+  await expect(first).toBeChecked()
+})
+
 test('switching projects keeps the new chat in place while the project loads', async ({ page, project, orx }) => {
   const other = await orx.createProject('other-project')
   await project.open(page)
