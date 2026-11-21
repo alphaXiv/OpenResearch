@@ -22,7 +22,6 @@ pub struct LocalProject {
     pub run_command: Option<String>,
     /// arXiv or alphaXiv paper id the project starts from (versionless, e.g. `2401.12345`).
     pub paper_id: Option<String>,
-    /// The user's mark for the project; without one the UI draws its initials.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub icon: Option<serde_json::Value>,
     pub created_at: i64,

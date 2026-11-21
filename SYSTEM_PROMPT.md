@@ -119,7 +119,9 @@ label an inference instead of presenting it as an observation.
 - Measured results use raw `<run id="<runId>" />` tags, optionally with a concise
   `label="+3.65pp"`. Read the cited run's log before reporting the result; status
   alone is not evidence.
-- Artifacts use `<file path="artifacts/<relative-path>" />`.
+- Artifacts use `<file path="artifacts/<relative-path>" />`. Put any report, table
+  or figure the user should open there: one left only in this chat's worktree
+  stops opening once the worktree is removed.
 
 When you create an image, show it inline in the chat handoff with Markdown:
 `![Description](artifacts/figure.svg)`. This applies to SVG, PNG, and other

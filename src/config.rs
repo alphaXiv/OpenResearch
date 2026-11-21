@@ -443,8 +443,8 @@ fn credentials_path() -> PathBuf {
 /// Whether `orx login` credentials exist on disk. A cheap sync fs probe for
 /// summary views — whether the token still *works* is a network question
 /// (`load_credentials` + an API call).
-pub fn credentials_present() -> bool {
-    credentials_path().exists()
+pub fn credentials_present() -> std::io::Result<bool> {
+    credentials_path().try_exists()
 }
 
 /// Reads stored credentials. Returns `Ok(None)` when the file is missing,

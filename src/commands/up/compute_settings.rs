@@ -1551,7 +1551,7 @@ pub(super) fn compute_settings_json(ssh: SshReadiness) -> Value {
     };
     // Presence of the credentials file only — whether the token still works is
     // the expanded row's (network) question.
-    let or_logged_in = crate::config::credentials_present();
+    let or_logged_in = crate::config::credentials_present().unwrap_or(false);
 
     // Same spellings as the expanded rows' SOURCE_LABELS/MODAL_TOKEN_LABELS
     // in the UI — the collapsed head stays visible above the open row, so the
